@@ -3,6 +3,8 @@
 # code through the R front end that `ry` itself answers.
 
 requires ry-runtime
+# The release is all the user has: an `R_HOME` naming a GNU R would make ry emulate that R's base.
+hide gnu-r
 
 file sum.R
 | cat(sum(1:10), "\n")

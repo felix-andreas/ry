@@ -9,15 +9,20 @@ it, and then publishes the GitHub release and the VS Code extension. The workflo
 `.github/workflows/release.yml`, and there is no other release path.
 
 A run started by hand has two more inputs. `platforms` set to `linux` builds and releases only the
-Linux archive, and unticking `vscode` leaves the VS Code extension out of the release and the
-Marketplace. A tag push always releases every platform and the extension.
+Linux archive, and set to `unix` the Linux and macOS archives. Unticking `vscode` leaves the VS Code
+extension out of the release and the Marketplace. A tag push always releases every platform and the
+extension.
 
 ## Platform tiers
 
 Linux x86_64 is tier 1: its archive must pass the smoke test before a release is cut. macOS on Apple
-silicon and Windows x86_64 are best effort. When either fails, start the workflow by hand with
-`platforms` set to `linux`; the release then has Linux binaries only, its notes say so, and macOS and
-Windows users stay on the last release that has their archive until a later release fixes the build.
+silicon and Windows x86_64 are best effort. When Windows fails, start the workflow by hand with
+`platforms` set to `unix`, and when macOS fails, with `linux`. The release then lacks those archives,
+its notes say so, and their users stay on the last release that has their archive until a later
+release fixes the build. The universal `ry.vsix` (no binary) is built and published only when every
+platform has its archive and package. With one missing, VS Code on that platform would install the
+universal package, find no `ry` and fail, so a release with a missing platform ships no `ry.vsix` and
+the Marketplace lists no extension for that platform.
 
 Every step of the workflow past runner setup is a `just` recipe (or `tools/smoke-test.sh`), so each
 one runs locally as well:
@@ -34,9 +39,18 @@ without one it publishes with `--oidc`, which works only inside GitHub Actions.
 
 ## The workflows
 
-`.github/workflows/` holds four workflows: `release.yml`, `nightly.yml` (below), `docs.yml` (the docs deploy below) and
-`ci.yml`. CI runs only when started by hand (from the Actions tab, on any ref), not on pushes or pull
-requests. The orchestrating agent starts it on main at its hourly check when main has new commits.
+`.github/workflows/` holds `release.yml`, `nightly.yml` (below), `docs.yml` (the docs deploy below),
+`cachix.yml` (fills the nix binary cache at each release) and `ci.yml`. `ci.yml` is the full gate
+against GNU R. It runs only when started by hand (from the Actions tab, on any ref), not on pushes
+or pull requests: the orchestrating agent starts it on main at its hourly check when main has new
+commits.
+
+`.github/pending/` holds two staged files that run nothing until a maintainer accepts them with the
+command below. `test.yml` runs the fixture suites, the tests of the crates that need no R and a
+bounded fuzz pass ([Testing](/development/testing#running-one-case)). Like `ci.yml`, it starts only
+by hand, not on pushes or pull requests. The staged `release.yml` adds a `tests` job that calls
+`test.yml`, and `publish` needs it, so a release is the one event that runs these tests without a
+hand start. A nightly build is not gated on the tests.
 
 Agents cannot write to `.github/workflows/`, so an agent that changes a workflow stages the new file
 under the same name in `.github/pending/`. A maintainer then moves it into place, commits and
@@ -150,8 +164,13 @@ with the profile. Any profile-mismatch warning, or more than 1% of functions wit
 record, fails the build, because a stale profile optimizes hot code as cold
 (`decisions.md`, "The Linux release build is profile-guided"). The training needs testthat, purrr,
 stringr, lubridate, data.table, xts and zoo in GNU R's library, the instrumented fat-LTO link of
-`ry` takes about 14 GB of memory, and the pipeline takes about 30 minutes on 4 cores plus the
-base R build. The
+`ry` takes about 14 GB of memory, which outgrows a GitHub-hosted runner's 16 GB of memory and 4 GB
+of swap (the runner is killed mid-link), so under GitHub Actions the script first adds 16 GB of
+swap at `/mnt/ry-swap`. The pipeline takes about 30 minutes on 4 cores plus the
+base R build. BOLT's `-use-gnu-stack` replaces
+libR's `PT_GNU_STACK` header, which glibc 2.41 and later require, so the script restores it
+(`tools/layout/gnu_stack.py`), and `just package` fails if `libR.so` or `ry` lacks a
+non-executable one. The
 binaries land in `target/x86_64-unknown-linux-gnu/release`, apart from the plain
 `cargo build --release` output in `target/release` that `just bench` and the other bench
 recipes time, so benchmarks of interpreter changes keep measuring the plain layout. On first use `ry` extracts the runtime into
@@ -178,7 +197,7 @@ The Windows archive is built for `x86_64-pc-windows-gnullvm` with MSYS2's clang6
 jsonlite and calls the installation's `Rblas.dll` and `Rlapack.dll`, is the first run on Windows.
 
 The VS Code extension is published once per platform, each copy bundling that platform's `ry`,
-plus one copy without a binary (`ry.vsix`) for every other platform. Every copy carries a
+plus, when all of them are present, one copy without a binary (`ry.vsix`) for every other platform. Every copy carries a
 `LICENSE` that combines the extension's MIT licence with ry's `LICENSE`, and
 `THIRD_PARTY_NOTICES`. The Zed extension ships no binary: it downloads the matching archive from the newest
 full GitHub release (`pre_release: false` in `editors/zed/src/lib.rs`, which matches full releases
@@ -200,14 +219,15 @@ version that differs from any of the three.
    a scratch directory, smoke-tests it (`tools/smoke-test.sh`), packages the VS Code extension and
    builds the nix package.
 2. Run `just try` and read every step's output. `crates/oracle/known_failures.toml` must be
-   empty, intermittent entries included ([Testing](/development/testing#known-oracle-failures)).
+   empty ([Testing](/development/testing#known-oracle-failures)).
 3. Write the release's entry on the [news page](/news).
 4. Run `just bump-version X.Y.Z-beta` (it commits), and push.
 5. Dry-run the workflow: in the Actions tab, open **Release**, select **Run workflow**, enter the
    version, untick **publish**, and run it. It builds and smoke-tests every archive without
-   publishing anything.
+   publishing anything. With the staged `release.yml` accepted, the run also executes `test.yml`.
 6. Push the tag (`git tag X.Y.Z-beta && git push origin X.Y.Z-beta`), or run the workflow again
-   with **publish** ticked.
+   with **publish** ticked. With the staged `release.yml` accepted, nothing is published unless
+   the `tests` job passes.
 7. Check the release page: one archive per platform and the `.vsix` files. Install one archive by
    hand and run `ry --version`, and check the extension's version on the Marketplace.
 8. Update [Installation](/installation) to name the new release and its archives. For the first

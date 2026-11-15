@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installs a release archive into a scratch directory and checks that what a user runs first works:
 # the version, `ry check`, `ry fmt`, the language server's handshake, `ry run` on ry's runtime with
-# its built-in base R, and, where GNU R is installed, `ry R`. With RY_SMOKE_PACKAGES set, it also
+# its built-in base R and the images of its own build, and, where GNU R is installed, `ry R`. With RY_SMOKE_PACKAGES set, it also
 # builds a compiled package with `ry install` and loads one that GNU R installed from CRAN.
 #
 #   tools/smoke-test.sh release/0.4.0-beta/ry-x86_64-unknown-linux-gnu.tar.gz
@@ -90,9 +90,17 @@ if grep -q '"capabilities"' lsp.out; then pass "ry server answers initialize"; e
 # ry's runtime runs on the base R built into `ry`, so these steps hide any GNU R: no R_HOME, and
 # nothing on PATH that ry could ask.
 run_ry() { env -u R_HOME "$ry" "$@"; }
-printf 'cat(sum(1:10), "\\n")\n' >sum.R
-output=$(run_ry run sum.R 2>&1 | tr -d '\r') || true
-if [ "$output" = "55 " ]; then pass "ry run on ry's runtime"; else fail "ry run: $output"; fi
+printf 'cat(sum(1:10), "\\n")\ninvisible(stats::median(c(3, 1, 2)))\n' >sum.R
+output=$(RY_IMAGE_LOG=1 run_ry run sum.R 2>images.log | tr -d '\r') || true
+if [ "$output" = "55 " ]; then pass "ry run on ry's runtime"; else fail "ry run: $output $(cat images.log)"; fi
+# A release carries the start-up and code images of its own build (crates/repl/build.rs), so its
+# first start loads them. RY_IMAGE_LOG names any image it had to write or could not use, and the
+# probe calls into stats so a code image is opened too.
+if grep -q '^ry: image' images.log; then
+	fail "ry's first start did not use the images it ships: $(grep '^ry: image' images.log | tr '\n' ' ')"
+else
+	pass "ry's first start loads the start-up and code images it ships"
+fi
 if ls "$scratch/cache/ry/runtime/"*/*R.* >/dev/null 2>&1; then
 	pass "ry extracted its runtime into the cache"
 else

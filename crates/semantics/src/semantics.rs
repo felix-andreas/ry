@@ -1,13 +1,16 @@
 pub mod annotations;
 pub mod check;
+pub mod dense;
 pub mod diagnostics;
 pub mod exhaustiveness;
 pub mod hir;
 pub mod infer;
+mod intern;
 pub mod lints;
 pub mod load_index;
 pub mod metadata;
 pub mod naming;
+pub mod native;
 pub mod session;
 pub mod sorted;
 pub mod stubs;
@@ -17,20 +20,28 @@ pub mod types;
 
 use {
     crate::{
-        check::Empty,
+        check::CheckedType,
         hir::{ExpressionKind, Symbol},
+        infer::InferenceTable,
         naming::RefClassKey,
         sorted::{SortedMap, SortedSet},
+        types::{Ty, TyKind},
     },
     rustc_hash::{FxHashMap, FxHashSet},
     salsa::plumbing::AsId,
+    smallvec::SmallVec,
     std::{
-        cell::{OnceCell, RefCell},
+        cell::RefCell,
         collections::{BTreeMap, BTreeSet},
-        sync::{Arc, Mutex},
+        num::NonZero,
+        sync::{
+            Arc, Condvar, Mutex, MutexGuard,
+            atomic::{AtomicU64, AtomicUsize, Ordering},
+        },
     },
     syntax::{
         NodeOrToken, NodeRef, Parse, SyntaxKind, SyntaxNode, TextRange, TextSize, Tree,
+        annotation::{AnnotationTarget, formals, statement_annotations},
         ast::{is_expression_kind, name_text},
         matching_nodes, node_text, paired_comment_definition,
     },
@@ -43,23 +54,15 @@ pub const ANALYSIS_STACK_SIZE: usize = 64 * 1024 * 1024;
 
 #[salsa::db]
 pub trait Db: salsa::Database {
-    /// Acceleration only: a spliced parse is byte- and error-identical to a fresh one.
-    fn splice_cache(&self) -> &SpliceCache;
-
-    /// Whether the host analyses once and never edits, such as `ry check`. Such a host needs no
-    /// firewall between an edit and the queries it would invalidate, so the queries that exist
-    /// only to narrow dependencies read the project-wide facts directly instead. Every read
-    /// still goes through salsa, so the answers are the same either way.
-    fn one_shot(&self) -> bool {
-        false
-    }
+    /// The one home of the host's syntax trees ([`parse`]).
+    fn trees(&self) -> &TreeStore;
 
     /// Whether an item's check keeps the per-expression facts that only editor features and
     /// rewrites read (expression and pattern types, chosen overloads, callee targets). A host
     /// that only reports diagnostics leaves them out, because resolving every recorded type is a
     /// large share of a check's cost.
     fn editor_facts(&self) -> bool {
-        !self.one_shot()
+        true
     }
 }
 
@@ -67,32 +70,23 @@ pub trait Db: salsa::Database {
 #[derive(Clone, Default)]
 pub struct RootDatabase {
     storage: salsa::Storage<Self>,
-    /// Shared across storage-handle clones so fresh handles keep the warm entries.
-    splice_cache: Arc<SpliceCache>,
-    one_shot: bool,
-    editor_facts: bool,
+    /// Shared across storage-handle clones, so every handle reads and fills the same trees.
+    trees: Arc<TreeStore>,
+    without_editor_facts: bool,
 }
 
 impl RootDatabase {
-    /// For a single cold pass, such as `ry check`. No file is parsed twice from an edit, so
-    /// splice caching would only hold a second copy of every text and of recent trees, and no
-    /// query needs a firewall ([`Db::one_shot`]).
-    /// It reports diagnostics only, so it leaves out the editor facts ([`Db::editor_facts`]).
-    pub fn one_shot() -> RootDatabase {
+    /// For a command that analyses a project once and exits, such as `ry check`. It reads each
+    /// file's tree in one pass, which holds the tree, and afterwards mostly what was derived
+    /// from it, so it keeps a few trees per core rather than one per file. `editor_facts` is
+    /// [`Db::editor_facts`].
+    pub fn for_command(editor_facts: bool) -> RootDatabase {
         RootDatabase {
             storage: salsa::Storage::default(),
-            splice_cache: Arc::new(SpliceCache::disabled()),
-            one_shot: true,
-            editor_facts: false,
-        }
-    }
-
-    /// A one-shot database for a command that reads editor facts, such as `ry migrate`, whose
-    /// rewrites read expression types.
-    pub fn one_shot_with_editor_facts() -> RootDatabase {
-        RootDatabase {
-            editor_facts: true,
-            ..RootDatabase::one_shot()
+            trees: Arc::new(TreeStore::bounded(
+                std::thread::available_parallelism().map_or(1, NonZero::get) * 4,
+            )),
+            without_editor_facts: !editor_facts,
         }
     }
 }
@@ -102,16 +96,12 @@ impl salsa::Database for RootDatabase {}
 
 #[salsa::db]
 impl Db for RootDatabase {
-    fn splice_cache(&self) -> &SpliceCache {
-        &self.splice_cache
-    }
-
-    fn one_shot(&self) -> bool {
-        self.one_shot
+    fn trees(&self) -> &TreeStore {
+        &self.trees
     }
 
     fn editor_facts(&self) -> bool {
-        self.editor_facts || !self.one_shot
+        !self.without_editor_facts
     }
 }
 
@@ -150,117 +140,321 @@ pub struct SourceFile {
     pub command: Option<u32>,
 }
 
+/// The file's syntax tree, from the host's [`TreeStore`]. No query memoizes a tree: a query that
+/// reads one records the read of the file's text, and keeps only what it derives.
 pub fn parse(db: &dyn Db, file: SourceFile) -> Parse {
-    if db.one_shot()
-        && let Some(parse) = HELD_TREE.with_borrow(|held| {
-            held.as_ref()
-                .filter(|held| held.file == file)
-                .map(|held| held.parse.clone())
-        })
-    {
-        // The read the memo would have recorded.
-        file.text(db);
-        return parse;
-    }
-    parse_memo(db, file)
+    parse_stamped(db, file).0
 }
 
-/// Runs `work` with `file`'s tree held by this thread, so on the one-shot path every read of it
-/// inside `work` shares one tree that no memo keeps: the tree is freed when `work` returns,
-/// unless something derived from it holds a window onto it. A one-shot host derives everything
-/// its later passes read from a file's tree inside one call, which bounds the live trees by the
-/// number of threads rather than the number of files. A one-shot read outside any held tree
-/// falls back to the memo, which then keeps that tree for the rest of the run.
+/// The file's tree with the stamp of each child node of its root, in source order.
+fn parse_stamped(db: &dyn Db, file: SourceFile) -> (Parse, Arc<[SyntaxStamp]>) {
+    db.trees()
+        .parse(file, file.text(db), salsa::plumbing::current_revision(db))
+}
+
+/// Names the syntax of one top-level node. A node keeps its stamp across the edits that leave
+/// its subtree equal, wherever it moves in its file, and no two different subtrees ever share
+/// one. So a query that depends on an item's stamp alone ([`item_stamp`]) is valid for as long
+/// as the item's syntax is, and an edit lowers only the items it changed.
+pub type SyntaxStamp = u64;
+
+/// The stamp of an item that has no node.
+const NO_STAMP: SyntaxStamp = 0;
+
+/// The syntax trees a host holds, one per file at most. Trees live here rather than in query
+/// memos for two reasons. An edit reparses by splicing the file's previous tree, which a memo
+/// has already dropped by the time the query runs again. And how long a tree stays is the
+/// host's choice, not the analysis's: an editor session keeps every tree, because position
+/// requests read them at any time, while a command that checks once keeps the tree of each file
+/// a worker holds ([`TreeStore::hold`]) and a few more, which bounds its memory by its thread
+/// count instead of the project.
 ///
-/// The slot is keyed by file only, so code inside `work` must not parse through a second
-/// one-shot database, whose file ids could coincide with this one's.
-pub fn with_held_tree<T>(db: &dyn Db, file: SourceFile, work: impl FnOnce() -> T) -> T {
-    if !db.one_shot() {
-        return work();
-    }
-    let parse = db.splice_cache().parse(file, file.text(db));
-    let previous = HELD_TREE.replace(Some(HeldTree {
-        file,
-        parse,
-        items: FxHashMap::default(),
-    }));
-    let result = work();
-    HELD_TREE.set(previous);
-    result
+/// A dropped tree is parsed again on the next read, so capacity changes time and memory only:
+/// a spliced or repeated parse is byte- and error-identical to a fresh one.
+///
+/// Files are spread over shards with a lock each, so workers reading different files rarely
+/// meet, and a parse runs outside every lock. A worker that asks for a file another worker is
+/// parsing waits for that tree instead of parsing a second one.
+pub struct TreeStore {
+    shards: [Shard; SHARD_COUNT],
+    capacity: usize,
+    stored: AtomicUsize,
+    /// Counts reads, so the tree with the smallest reading is the least recently read.
+    clock: AtomicU64,
+    parses: AtomicU64,
+    next_stamp: AtomicU64,
 }
 
-/// A held file's tree, and the subtrees of its items read so far: every per-item pass reads an
-/// item's syntax, and finding it in the file's tree costs several lookups and an allocation.
-struct HeldTree {
-    file: SourceFile,
+const SHARD_COUNT: usize = 16;
+
+#[derive(Default)]
+struct Shard {
+    trees: Mutex<ShardTrees>,
+    /// Signalled when a parse of one of the shard's files ends.
+    parsed: Condvar,
+}
+
+#[derive(Default)]
+struct ShardTrees {
+    entries: FxHashMap<SourceFile, StoredTree>,
+    /// How many [`TreeHold`]s are open on a file. A held file's tree is never dropped.
+    holds: FxHashMap<SourceFile, u32>,
+    /// The files a worker is parsing.
+    parsing: SmallVec<[SourceFile; 2]>,
+}
+
+struct StoredTree {
     parse: Parse,
-    items: FxHashMap<salsa::Id, Option<ItemSyntax>>,
+    stamps: Stamps,
+    /// The revision at which the tree was last compared with the file's text. A text cannot
+    /// change within a revision, so a read at the same revision skips the comparison.
+    confirmed: salsa::Revision,
+    last_read: u64,
 }
 
-thread_local! {
-    static HELD_TREE: RefCell<Option<HeldTree>> = const { RefCell::new(None) };
+/// The stamps of one tree's top-level nodes.
+#[derive(Clone)]
+struct Stamps {
+    /// One stamp per child node of the root, in file order.
+    in_order: Arc<[SyntaxStamp]>,
+    /// Each stamp beside its node's position among the tree's elements, sorted by stamp. An
+    /// edit leaves the stamps of a file out of order, and every item of a file asks for its
+    /// node by stamp, so without this each of them would walk the root's children.
+    positions: Arc<[(SyntaxStamp, u32)]>,
 }
 
-#[salsa::tracked(returns(clone))]
-fn parse_memo(db: &dyn Db, file: SourceFile) -> Parse {
-    db.splice_cache().parse(file, file.text(db))
+/// Keeps one file's tree in a bounded store until dropped. A worker that derives everything it
+/// needs from a file in one pass holds the file for that pass, so the pass parses once however
+/// many trees other workers read meanwhile.
+pub struct TreeHold<'a> {
+    store: &'a TreeStore,
+    file: SourceFile,
 }
 
-/// The previous `(text, parse)` per file. At capacity, inserting an unknown file
-/// clears the map wholesale: a cold pass then costs one clear, while an editing
-/// session's open set stays resident.
-pub struct SpliceCache {
-    entries: Mutex<FxHashMap<SourceFile, (Arc<str>, Parse)>>,
-    enabled: bool,
-}
-
-impl Default for SpliceCache {
-    fn default() -> SpliceCache {
-        SpliceCache {
-            entries: Mutex::default(),
-            enabled: true,
+impl Drop for TreeHold<'_> {
+    fn drop(&mut self) {
+        let mut trees = self.store.shard(self.file).lock();
+        if let Some(count) = trees.holds.get_mut(&self.file) {
+            *count -= 1;
+            if *count == 0 {
+                trees.holds.remove(&self.file);
+            }
         }
     }
 }
 
-impl SpliceCache {
-    pub fn disabled() -> SpliceCache {
-        SpliceCache {
-            entries: Mutex::default(),
-            enabled: false,
-        }
+/// Marks a file as being parsed until dropped, which a panic in the parser does too, so a
+/// worker waiting for the tree parses it itself instead of waiting forever.
+struct Parsing<'a> {
+    shard: &'a Shard,
+    file: SourceFile,
+}
+
+impl Drop for Parsing<'_> {
+    fn drop(&mut self) {
+        self.shard.lock().parsing.retain(|file| *file != self.file);
+        self.shard.parsed.notify_all();
     }
 }
 
-const SPLICE_CACHE_CAPACITY: usize = 64;
+impl Shard {
+    fn lock(&self) -> MutexGuard<'_, ShardTrees> {
+        // A worker panics under this lock only between two complete changes, so the trees of a
+        // poisoned shard are coherent.
+        self.trees
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
 
-impl SpliceCache {
-    fn parse(&self, file: SourceFile, new_text: &str) -> Parse {
-        if !self.enabled {
-            return syntax::parse(new_text);
+impl Default for TreeStore {
+    /// A store that keeps every tree.
+    fn default() -> TreeStore {
+        TreeStore::bounded(usize::MAX)
+    }
+}
+
+impl TreeStore {
+    /// A store for a host that reads each file's tree in one pass per worker. It keeps every
+    /// held tree and, up to `capacity` in total, the most recently read others, which serve
+    /// the reads a pass makes of a file it does not hold without a parse for each.
+    pub fn bounded(capacity: usize) -> TreeStore {
+        TreeStore {
+            shards: Default::default(),
+            capacity,
+            stored: AtomicUsize::new(0),
+            clock: AtomicU64::new(0),
+            parses: AtomicU64::new(0),
+            next_stamp: AtomicU64::new(NO_STAMP + 1),
         }
-        // Parse unlocked so parallel workers never serialize on the parse itself.
-        let previous = {
-            let entries = self.entries.lock().expect("splice cache lock");
-            entries.get(&file).cloned()
+    }
+
+    /// Keeps `file`'s tree until the hold is dropped.
+    pub fn hold(&self, file: SourceFile) -> TreeHold<'_> {
+        *self.shard(file).lock().holds.entry(file).or_default() += 1;
+        TreeHold { store: self, file }
+    }
+
+    /// How many trees the store holds.
+    pub fn stored(&self) -> usize {
+        self.stored.load(Ordering::Relaxed)
+    }
+
+    /// How many texts the store has parsed, which pins that an edit parses one file.
+    pub fn parses(&self) -> u64 {
+        self.parses.load(Ordering::Relaxed)
+    }
+
+    fn shard(&self, file: SourceFile) -> &Shard {
+        &self.shards[file.as_id().index() as usize % SHARD_COUNT]
+    }
+
+    fn parse(
+        &self,
+        file: SourceFile,
+        text: &str,
+        revision: salsa::Revision,
+    ) -> (Parse, Arc<[SyntaxStamp]>) {
+        let shard = self.shard(file);
+        let mut trees = shard.lock();
+        let previous = loop {
+            if let Some(stored) = trees.entries.get_mut(&file)
+                && (stored.confirmed == revision || stored.parse.text() == text)
+            {
+                stored.confirmed = revision;
+                stored.last_read = self.clock.fetch_add(1, Ordering::Relaxed);
+                return (stored.parse.clone(), stored.stamps.in_order.clone());
+            }
+            if !trees.parsing.contains(&file) {
+                break trees
+                    .entries
+                    .get(&file)
+                    .map(|stored| (stored.parse.clone(), stored.stamps.clone()));
+            }
+            trees = shard
+                .parsed
+                .wait(trees)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
         };
+        trees.parsing.push(file);
+        drop(trees);
+        let parsing = Parsing { shard, file };
         let parse = match &previous {
-            Some((old_text, old_parse)) => {
-                if **old_text == *new_text {
-                    old_parse.clone()
-                } else {
-                    let (deleted, inserted) = derived_edit(old_text, new_text);
-                    syntax::reparse(old_parse, new_text, deleted, inserted)
+            Some((old, _)) => {
+                let (deleted, inserted) = derived_edit(old.text(), text);
+                syntax::reparse(old, text, deleted, inserted)
+            }
+            None => syntax::parse(text),
+        };
+        let stamps = self.stamps(previous.as_ref(), &parse);
+        let in_order = stamps.in_order.clone();
+        self.parses.fetch_add(1, Ordering::Relaxed);
+        let stored = StoredTree {
+            parse: parse.clone(),
+            stamps,
+            confirmed: revision,
+            last_read: self.clock.fetch_add(1, Ordering::Relaxed),
+        };
+        if shard.lock().entries.insert(file, stored).is_none() {
+            self.stored.fetch_add(1, Ordering::Relaxed);
+        }
+        drop(parsing);
+        while self.stored.load(Ordering::Relaxed) > self.capacity {
+            if !self.drop_least_recently_read(file) {
+                break;
+            }
+        }
+        (parse, in_order)
+    }
+
+    /// One stamp per child node of `parse`'s root. A node at the start or the end of the file
+    /// whose subtree equals its counterpart's in `previous` keeps that stamp, which covers
+    /// every node outside the one region an edit changes. Every other node gets a stamp no
+    /// node has had.
+    fn stamps(&self, previous: Option<&(Parse, Stamps)>, parse: &Parse) -> Stamps {
+        let tree = parse.tree();
+        let nodes: SmallVec<[NodeRef<'_>; 64]> = tree.root().child_nodes().collect();
+        let mut stamps = vec![NO_STAMP; nodes.len()];
+        if let Some((old, old_stamps)) = previous {
+            let old_stamps = &old_stamps.in_order;
+            let old_tree = old.tree();
+            let old_nodes: SmallVec<[NodeRef<'_>; 64]> = old_tree.root().child_nodes().collect();
+            let same = |(old_node, node): &(&NodeRef<'_>, &NodeRef<'_>)| {
+                old_tree.subtree(**old_node) == tree.subtree(**node)
+            };
+            let prefix = old_nodes.iter().zip(&nodes).take_while(same).count();
+            let suffix = old_nodes[prefix..]
+                .iter()
+                .rev()
+                .zip(nodes[prefix..].iter().rev())
+                .take_while(same)
+                .count();
+            stamps[..prefix].copy_from_slice(&old_stamps[..prefix]);
+            stamps[nodes.len() - suffix..].copy_from_slice(&old_stamps[old_nodes.len() - suffix..]);
+        }
+        let fresh = stamps.iter().filter(|&&stamp| stamp == NO_STAMP).count() as u64;
+        let first = self.next_stamp.fetch_add(fresh, Ordering::Relaxed);
+        for (stamp, fresh) in stamps
+            .iter_mut()
+            .filter(|stamp| **stamp == NO_STAMP)
+            .zip(first..)
+        {
+            *stamp = fresh;
+        }
+        let mut positions: Vec<(SyntaxStamp, u32)> = stamps
+            .iter()
+            .zip(&nodes)
+            .map(|(&stamp, node)| (stamp, node.position()))
+            .collect();
+        positions.sort_unstable();
+        Stamps {
+            in_order: stamps.into(),
+            positions: positions.into(),
+        }
+    }
+
+    /// The subtree of the top-level node of `file` that carries `stamp`, when the store holds
+    /// the tree the stamp was read from. A bounded store may have dropped that tree, and a
+    /// tree parsed in its place has stamps of its own.
+    fn stamped(&self, file: SourceFile, stamp: SyntaxStamp) -> Option<Tree> {
+        let (parse, positions) = {
+            let mut trees = self.shard(file).lock();
+            let stored = trees.entries.get_mut(&file)?;
+            stored.last_read = self.clock.fetch_add(1, Ordering::Relaxed);
+            (stored.parse.clone(), stored.stamps.positions.clone())
+        };
+        let found = positions
+            .binary_search_by_key(&stamp, |&(held, _)| held)
+            .ok()?;
+        let tree = parse.tree();
+        Some(tree.subtree(tree.node_at(positions[found].1)?))
+    }
+
+    /// Drops the tree read longest ago that no worker holds, never `keep`'s. Whether there was
+    /// one to consider.
+    fn drop_least_recently_read(&self, keep: SourceFile) -> bool {
+        let mut oldest: Option<(u64, SourceFile)> = None;
+        for shard in &self.shards {
+            let trees = shard.lock();
+            for (&file, stored) in &trees.entries {
+                if file != keep
+                    && !trees.holds.contains_key(&file)
+                    && oldest.is_none_or(|(read, _)| stored.last_read < read)
+                {
+                    oldest = Some((stored.last_read, file));
                 }
             }
-            None => syntax::parse(new_text),
-        };
-        let mut entries = self.entries.lock().expect("splice cache lock");
-        if entries.len() >= SPLICE_CACHE_CAPACITY && !entries.contains_key(&file) {
-            entries.clear();
         }
-        entries.insert(file, (Arc::from(new_text), parse.clone()));
-        parse
+        let Some((_, file)) = oldest else {
+            return false;
+        };
+        let mut trees = self.shard(file).lock();
+        // Another worker may have taken a hold since the scan, and then the next scan passes
+        // the file over.
+        if !trees.holds.contains_key(&file) && trees.entries.remove(&file).is_some() {
+            self.stored.fetch_sub(1, Ordering::Relaxed);
+        }
+        true
     }
 }
 
@@ -303,8 +497,8 @@ fn derived_edit(old: &str, new: &str) -> (TextRange, TextSize) {
 pub struct Item<'db> {
     pub file: SourceFile,
     pub kind: ItemKind,
-    #[returns(ref)]
-    pub name: Option<String>,
+    #[returns(copy)]
+    pub name: Option<Symbol>,
     pub parent: Option<Item<'db>>,
     pub disambiguator: u32,
 }
@@ -325,40 +519,44 @@ pub fn item_tree<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Item<'db>> {
     item_spans(db, file).iter().map(|span| span.item).collect()
 }
 
-/// Width-only, so position-independent: an edit elsewhere in the file cuts off
-/// here. Item innards must be read through this (never `parse`), and spans derived
-/// from it stay item-relative until the rendering edge.
+/// The item's subtree with offsets counted from its start, so what is derived from it is the
+/// same wherever the item sits in its file. Item innards must be read through this (never
+/// `parse`), and spans derived from it stay item-relative until the rendering edge.
+///
+/// The only dependency it records is the item's [`item_stamp`]. A query that reads an item
+/// through this therefore runs again when that item's syntax changes, and not when another
+/// item of the file does. A bounded store may have dropped the tree the stamp names, and then
+/// the read parses the file again and depends on its text like any other read of the tree.
 pub fn item_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
-    // A one-shot run never edits, so the firewall buys nothing there, and a memo per item would
-    // keep its file's tree alive after the file's syntax pass ([`with_held_tree`]).
-    if db.one_shot() {
-        let file = *item.file(db);
-        let key = item.as_id();
-        let build = || item_node(db, item).map(|node| ItemSyntax(Arc::new(node.subtree())));
-        let held = HELD_TREE.with_borrow(|held| {
-            held.as_ref()
-                .filter(|held| held.file == file)
-                .map(|held| held.items.get(&key).cloned())
-        });
-        match held {
-            Some(Some(syntax)) => return syntax,
-            Some(None) => {}
-            None => return build(),
-        }
-        let syntax = build();
-        HELD_TREE.with_borrow_mut(|held| {
-            if let Some(held) = held.as_mut() {
-                held.items.insert(key, syntax.clone());
-            }
-        });
-        return syntax;
+    let stamp = item_stamp(db, item);
+    if stamp == NO_STAMP {
+        return None;
     }
-    item_syntax_memo(db, item)
+    let tree = match db.trees().stamped(*item.file(db), stamp) {
+        Some(tree) => tree,
+        None => item_node(db, item)?.subtree(),
+    };
+    Some(ItemSyntax(Arc::new(tree)))
 }
 
-#[salsa::tracked(returns(clone))]
-fn item_syntax_memo<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
-    item_node(db, item).map(|node| ItemSyntax(Arc::new(node.subtree())))
+/// The stamp of the item's syntax, [`NO_STAMP`] for an item without a node. It runs again for
+/// every item of an edited file, and for every item the edit left alone it comes out equal,
+/// so nothing derived from those items' syntax runs again.
+#[salsa::tracked(returns(copy))]
+fn item_stamp<'db>(db: &'db dyn Db, item: Item<'db>) -> SyntaxStamp {
+    let Some(span) = item_span(db, item) else {
+        return NO_STAMP;
+    };
+    let file = *item.file(db);
+    if syntax::testing::invariants_enabled()
+        && let Some(stamped) = db.trees().stamped(file, span.stamp)
+    {
+        assert!(
+            span_node(db, file, span).is_some_and(|node| node.subtree() == stamped),
+            "the stamp of an item names another node's syntax"
+        );
+    }
+    span.stamp
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::SalsaValue)]
@@ -367,29 +565,30 @@ pub struct ItemSpan<'db> {
     pub range: TextRange,
     /// The defined name's range, read with the item's identity from the same walk.
     pub name_range: Option<TextRange>,
+    stamp: SyntaxStamp,
 }
 
 /// One memoized walk; a per-item lookup would re-classify the file per item.
 #[salsa::tracked(returns(ref))]
 pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> {
-    let parse = parse(db, file);
+    let (parse, stamps) = parse_stamped(db, file);
     let root = parse.syntax_node();
-    let mut counts: FxHashMap<(ItemKind, Option<String>), u32> = FxHashMap::default();
+    let mut counts: FxHashMap<(ItemKind, Option<Symbol>), u32> = FxHashMap::default();
     let mut spans = Vec::new();
-    for node in root.children() {
+    for (node, &stamp) in root.children().zip(stamps.iter()) {
         if !is_expression_kind(node.kind()) && node.kind() != SyntaxKind::ERROR {
             continue;
         }
         let (kind, name, name_range) = match top_level_definition(&node) {
             Some(definition) => (
                 definition.kind,
-                Some(definition.name),
+                Some(Symbol::new(&definition.name)),
                 Some(definition.name_range),
             ),
             None => (ItemKind::Statement, None, None),
         };
         let disambiguator = {
-            let counter = counts.entry((kind, name.clone())).or_insert(0);
+            let counter = counts.entry((kind, name)).or_insert(0);
             let current = *counter;
             *counter += 1;
             current
@@ -398,6 +597,7 @@ pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> 
             item: Item::new(db, file, kind, name, None, disambiguator),
             range: node.text_range(),
             name_range,
+            stamp,
         });
     }
     spans
@@ -605,33 +805,32 @@ pub fn is_ry_syntax(kind: SyntaxKind) -> bool {
 /// Absolute offsets, for the rendering edge and position-addressed IDE features
 /// only; derived per-item values must use `item_syntax` to keep cutting off.
 pub fn item_node<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<SyntaxNode> {
+    span_node(db, *item.file(db), item_span(db, item)?)
+}
+
+fn item_span<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<&'db ItemSpan<'db>> {
     let file = *item.file(db);
-    let index = *item_span_positions(db, file).get(&item)?;
-    let range = item_spans(db, file).get(index)?.range;
-    let parse = parse(db, file);
+    let index = *item_tree_positions(db, file).get(&item.as_id())?;
+    item_spans(db, file).get(index as usize)
+}
+
+fn span_node(db: &dyn Db, file: SourceFile, span: &ItemSpan<'_>) -> Option<SyntaxNode> {
     // Descend by range: a linear child walk per item is quadratic in statements.
-    parse
+    parse(db, file)
         .syntax_node()
-        .child_or_token_at_range(range)
+        .child_or_token_at_range(span.range)
         .and_then(|element| element.into_node())
-        .filter(|node| node.text_range() == range)
+        .filter(|node| node.text_range() == span.range)
 }
 
+/// Where each item stands in its file's [`item_tree`], which is also its place in
+/// [`item_spans`], keyed by the item's id. It reads the tree, so an edit inside a body
+/// leaves it standing.
 #[salsa::tracked(returns(ref))]
-fn item_tree_positions<'db>(db: &'db dyn Db, file: SourceFile) -> FxHashMap<Item<'db>, usize> {
-    item_tree(db, file)
-        .iter()
-        .enumerate()
-        .map(|(index, &item)| (item, index))
-        .collect()
-}
-
-#[salsa::tracked(returns(ref))]
-fn item_span_positions<'db>(db: &'db dyn Db, file: SourceFile) -> FxHashMap<Item<'db>, usize> {
-    item_spans(db, file)
-        .iter()
-        .enumerate()
-        .map(|(index, span)| (span.item, index))
+fn item_tree_positions(db: &dyn Db, file: SourceFile) -> SortedMap<salsa::Id, u32> {
+    (0_u32..)
+        .zip(item_tree(db, file))
+        .map(|(index, item)| (item.as_id(), index))
         .collect()
 }
 
@@ -645,8 +844,8 @@ impl ItemSyntax {
     }
 }
 
-/// Derived from the item's subtree only, so it cuts off across edits
-/// elsewhere in the file.
+/// Derived from the item's subtree only. An edit elsewhere in the file lowers the item again,
+/// the module comes out equal, and everything downstream of it cuts off.
 #[salsa::tracked(returns(ref))]
 pub fn item_hir<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<hir::Module> {
     let syntax = item_syntax(db, item)?;
@@ -656,7 +855,7 @@ pub fn item_hir<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<hir::Module> {
 #[salsa::tracked(returns(ref))]
 pub fn item_naming<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<naming::ItemNaming> {
     let module = item_hir(db, item).as_ref()?;
-    let no_masked_verbs = FxHashMap::default();
+    let no_masked_verbs = stubs::SymbolMap::default();
     let masked_verbs = stubs::stubs(db).map_or(&no_masked_verbs, |library| &library.masked);
     let file = *item.file(db);
     let files = ProjectFiles::try_get(db);
@@ -845,7 +1044,8 @@ const BUILTIN_GLOBAL_NAMES: &[&str] = &["c", "list", "switch", "return", "stop"]
 /// Includes stub declarations and checker builtins, not just package definitions.
 pub fn package_scheme_exists(db: &dyn Db, name: &str) -> bool {
     let files = ProjectFiles::try_get(db);
-    package_scheme_exists_in(db, stubs::stubs(db), name, |name| {
+    let symbol = Symbol::new(name);
+    package_scheme_exists_in(db, stubs::stubs(db), symbol, |name| {
         files.is_some_and(|files| package_binds(db, files, name))
     })
 }
@@ -855,10 +1055,10 @@ pub fn package_scheme_exists(db: &dyn Db, name: &str) -> bool {
 pub fn package_scheme_exists_in(
     db: &dyn Db,
     library: Option<&stubs::StubLibrary<'_>>,
-    name: &str,
+    name: Symbol,
     package_binds: impl FnOnce(&str) -> bool,
 ) -> bool {
-    if BUILTIN_GLOBAL_NAMES.contains(&name) || package_binds(name) {
+    if BUILTIN_GLOBAL_NAMES.contains(&name.as_str()) || package_binds(name.as_str()) {
         return true;
     }
     library.is_some_and(|library| {
@@ -868,69 +1068,11 @@ pub fn package_scheme_exists_in(
     })
 }
 
-/// An annotation applies only to the expression starting on the very next line;
-/// a blank line, a plain comment, or the end of the sequence breaks the association.
-pub enum AnnotationTarget {
-    Attached(SyntaxNode),
-    BlankLineSeparated,
-    Dangling,
-}
-
-/// The single source of the annotation association rule for a statement sequence.
-pub fn statement_annotations(parent: &SyntaxNode) -> Vec<(SyntaxNode, AnnotationTarget)> {
-    let mut associations = Vec::new();
-    let mut pending: Option<(SyntaxNode, usize)> = None;
-    for child in parent.children_with_tokens() {
-        let kind = child.kind();
-        if kind == SyntaxKind::WHITESPACE {
-            continue;
-        }
-        if kind == SyntaxKind::NEWLINE {
-            if let Some((_, newlines)) = pending.as_mut() {
-                *newlines += 1;
-            }
-            continue;
-        }
-        if let Some((annotation, newlines)) = pending.take() {
-            let target = if child.as_token().is_some() && kind != SyntaxKind::COMMENT {
-                AnnotationTarget::Dangling
-            } else if newlines >= 2 {
-                AnnotationTarget::BlankLineSeparated
-            } else if let Some(node) = child.as_node()
-                && (is_expression_kind(kind) || kind == SyntaxKind::ERROR)
-            {
-                AnnotationTarget::Attached(node.clone())
-            } else {
-                AnnotationTarget::Dangling
-            };
-            associations.push((annotation, target));
-        }
-        if let NodeOrToken::Node(node) = child
-            && kind == SyntaxKind::ANNOTATION
-        {
-            pending = Some((node, 0));
-        }
-    }
-    if let Some((annotation, _)) = pending {
-        associations.push((annotation, AnnotationTarget::Dangling));
-    }
-    associations
-}
-
 /// Annotations are siblings of the item in the file tree, so they attach here, not in
-/// `item_syntax`. A per-item firewall over one file-wide walk: untouched items'
-/// annotation subtrees compare equal and cut off.
+/// `item_syntax`. One walk per file attaches them all. An edit to the file repeats the walk,
+/// and it comes out equal while no `#:` block changed, so a reader of an item's annotations
+/// runs again only when some block of its file did.
 pub fn item_annotation_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
-    if db.one_shot() {
-        return file_item_annotations(db, *item.file(db))
-            .get(&item)
-            .cloned();
-    }
-    item_annotation_syntax_memo(db, item)
-}
-
-#[salsa::tracked(returns(clone))]
-fn item_annotation_syntax_memo<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
     file_item_annotations(db, *item.file(db))
         .get(&item)
         .cloned()
@@ -1002,17 +1144,23 @@ fn written_root_annotation<'db>(
     db: &'db dyn Db,
     item: Item<'db>,
 ) -> Option<annotations::Annotation<'db>> {
-    let comment = item_annotation_syntax(db, item)
-        .map(|syntax| annotations::lower_annotation(db, &syntax.syntax_node()));
+    let block = item_annotation_syntax(db, item).map(|syntax| syntax.syntax_node());
+    let comment = block
+        .as_ref()
+        .map(|block| annotations::lower_annotation(db, block));
     let root = item_syntax(db, item)?.syntax_node();
-    let Some(site) = annotations::statement_inline_site(&root) else {
-        return comment;
-    };
-    if !inline_annotations_enabled(db) {
-        return comment;
-    }
-    let inline = annotations::lower_inline_annotation(db, &site);
-    annotations::merge_annotations(db, comment, Some(inline), Some(&site))
+    let site = annotations::statement_inline_site(&root);
+    let inline_enabled = site.is_some() && inline_annotations_enabled(db);
+    let mut annotation = match site.filter(|_| inline_enabled) {
+        Some(site) => {
+            let inline = annotations::lower_inline_annotation(db, &site);
+            annotations::merge_annotations(db, comment, Some(inline), Some(&site))
+        }
+        None => comment,
+    }?;
+    annotation.written_signature =
+        annotations::has_written_signature(&root, block.as_ref(), inline_enabled);
+    Some(annotation)
 }
 
 /// R calls a package file's `.onLoad` and `.onAttach` with two character arguments, and
@@ -1026,7 +1174,7 @@ fn package_hook_signature<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<types
     {
         return None;
     }
-    let passed = match item.name(db).as_deref()? {
+    let passed = match item.name(db)?.as_str() {
         ".onLoad" | ".onAttach" => 2,
         ".onUnload" | ".onDetach" | ".Last.lib" => 1,
         _ => return None,
@@ -1037,7 +1185,7 @@ fn package_hook_signature<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<types
         .find(|node| node.kind() == SyntaxKind::FUNCTION_DEF)?;
     let mut parameters = Vec::new();
     let mut takes_rest = false;
-    for (position, formal) in annotations::formals(&function).iter().enumerate() {
+    for (position, formal) in formals(&function).iter().enumerate() {
         if formal.name == "..." {
             parameters.push("...: Any".to_owned());
             takes_rest = true;
@@ -1147,15 +1295,18 @@ fn expression_annotations<'db>(
         let Some(index) = module.ranges().position(|candidate| candidate == range) else {
             continue;
         };
+        let written_signature =
+            annotations::has_written_signature(&statement, comment.as_ref(), inline_enabled);
         let comment = comment.map(|comment| annotations::lower_annotation(db, &comment));
         let site = annotations::statement_inline_site(&statement).filter(|_| inline_enabled);
         let inline = site
             .as_ref()
             .map(|site| annotations::lower_inline_annotation(db, site));
-        let Some(lowered) = annotations::merge_annotations(db, comment, inline, site.as_ref())
+        let Some(mut lowered) = annotations::merge_annotations(db, comment, inline, site.as_ref())
         else {
             continue;
         };
+        lowered.written_signature = written_signature;
         if lowered.declared.is_none() && lowered.new_nominal.is_none() && !lowered.trusted {
             continue;
         }
@@ -1189,15 +1340,22 @@ pub fn inline_annotations_enabled(db: &dyn Db) -> bool {
     AnalysisSettings::try_get(db).is_none_or(|settings| *settings.inline_annotations(db))
 }
 
-/// A file's `# typing:` directive wins over `[check] strict`. Unset settings count as strict,
-/// so a host that installs none still sees every origin [`diagnostics::strict_diagnostics`]
-/// reports.
-pub fn file_is_strict(db: &dyn Db, file: SourceFile) -> bool {
+/// Whether `file` is strict. Its `# typing:` directive decides, and a file without one takes
+/// `default`, which is where the readers differ: the analysis takes `[check] strict`, and a
+/// package load takes the package's setting.
+pub fn file_follows_strict(db: &dyn Db, file: SourceFile, default: impl FnOnce() -> bool) -> bool {
     match file_typing_mode(db, file) {
-        Some(TypingMode::Strict) => true,
-        Some(TypingMode::On | TypingMode::Off) => false,
-        None => AnalysisSettings::try_get(db).is_none_or(|settings| *settings.strict(db)),
+        Some(mode) => *mode == TypingMode::Strict,
+        None => default(),
     }
+}
+
+/// [`file_follows_strict`] under `[check] strict`. Unset settings count as strict, so a host
+/// that installs none still sees every origin [`diagnostics::strict_diagnostics`] reports.
+pub fn file_is_strict(db: &dyn Db, file: SourceFile) -> bool {
+    file_follows_strict(db, file, || {
+        AnalysisSettings::try_get(db).is_none_or(|settings| *settings.strict(db))
+    })
 }
 
 /// Whether a literal bound outside any function in `file` is a ry value: the file is strict,
@@ -1206,10 +1364,9 @@ pub fn file_is_strict(db: &dyn Db, file: SourceFile) -> bool {
 pub fn file_holds_ry_values(db: &dyn Db, file: SourceFile) -> bool {
     // Unlike `file_is_strict`, a host with no settings does not count as strict here, because
     // this changes types rather than only reporting origins.
-    let strict = match file_typing_mode(db, file) {
-        Some(mode) => *mode == TypingMode::Strict,
-        None => AnalysisSettings::try_get(db).is_some_and(|settings| *settings.strict(db)),
-    };
+    let strict = file_follows_strict(db, file, || {
+        AnalysisSettings::try_get(db).is_some_and(|settings| *settings.strict(db))
+    });
     if strict {
         return true;
     }
@@ -1222,27 +1379,26 @@ pub fn file_holds_ry_values(db: &dyn Db, file: SourceFile) -> bool {
 
 /// One rewrite the code ry's runtime runs needs, because R would read the text with a type other
 /// than the one the checker gave it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Elaboration {
     /// An unsuffixed number literal the checker typed as `I64`, which R reads as a `double`.
     I64Literal(TextRange),
-    /// A list expression the runtime may build empty, whose item storage only the checker
-    /// knows (`ItemCheck::typed_empties`), or a dictionary built from no entries.
-    TypedEmpty(TextRange, Empty),
+    /// An expression whose type only the checker knows and the runtime needs
+    /// (`ItemCheck::checked_types`): a list the runtime may build empty, a dictionary built from
+    /// no entries, or a `Num.from_r`.
+    CheckedType(TextRange, CheckedType),
+    /// A one-line type in a function's signature, spelled as the checker reads it: with every
+    /// alias expanded and a nominal type replaced by its representation, so that the runtime
+    /// reads it without the type definitions ([`canonical_annotation`]).
+    Annotation(TextRange, Box<str>),
 }
 
 impl Elaboration {
-    pub fn range(self) -> TextRange {
+    pub fn range(&self) -> TextRange {
         match self {
-            Elaboration::I64Literal(range) | Elaboration::TypedEmpty(range, _) => range,
-        }
-    }
-
-    /// The same rewrite at `range`.
-    pub fn at(self, range: TextRange) -> Elaboration {
-        match self {
-            Elaboration::I64Literal(_) => Elaboration::I64Literal(range),
-            Elaboration::TypedEmpty(_, items) => Elaboration::TypedEmpty(range, items),
+            Elaboration::I64Literal(range)
+            | Elaboration::CheckedType(range, _)
+            | Elaboration::Annotation(range, _) => *range,
         }
     }
 }
@@ -1255,7 +1411,7 @@ pub fn file_elaborations(db: &dyn Db, file: SourceFile) -> Vec<Elaboration> {
         let Some(check) = item_check(db, span.item) else {
             continue;
         };
-        if check.i64_literals.is_empty() && check.typed_empties.is_empty() {
+        if check.i64_literals.is_empty() && check.checked_types.is_empty() {
             continue;
         }
         let Some(module) = item_hir(db, span.item) else {
@@ -1270,16 +1426,157 @@ pub fn file_elaborations(db: &dyn Db, file: SourceFile) -> Vec<Elaboration> {
         );
         elaborations.extend(
             check
-                .typed_empties
+                .checked_types
                 .iter()
-                .map(|&(id, items)| Elaboration::TypedEmpty(module.range(id) + offset, items)),
+                .map(|&(id, ty)| Elaboration::CheckedType(module.range(id) + offset, ty)),
         );
     }
+    elaborations.extend(signature_elaborations(db, file));
     elaborations.sort_unstable_by_key(|elaboration| {
         let range = elaboration.range();
         (range.start(), std::cmp::Reverse(range.end()))
     });
     elaborations
+}
+
+/// The canonical spelling of each type the signatures in `file` write where the runtime reads
+/// it ([`syntax::annotation::signature`]) and spell differently. A type is left as written when
+/// it has no canonical spelling ([`canonical_annotation`]), or when it spans lines, because a
+/// rewrite must keep every line where it is.
+fn signature_elaborations(db: &dyn Db, file: SourceFile) -> Vec<Elaboration> {
+    let inline = inline_annotations_enabled(db);
+    let definitions = TypeDefinitions::of(db, file);
+    let root = parse(db, file).syntax_node();
+    let mut written = Vec::new();
+    for function in root
+        .descendants()
+        .filter(|node| node.kind() == SyntaxKind::FUNCTION_DEF)
+    {
+        let signature = syntax::annotation::signature(&function, inline);
+        written.extend(signature.formals.into_iter().flatten().chain(signature.ret));
+    }
+    written.sort_unstable_by_key(|node| node.text_range().start());
+    written.dedup_by_key(|node| node.text_range());
+    written
+        .into_iter()
+        .filter(|node| !node.text().contains('\n'))
+        .filter_map(|node| {
+            let text = canonical_annotation(db, definitions, &node)?;
+            (text != node.text()).then(|| Elaboration::Annotation(node.text_range(), text.into()))
+        })
+        .collect()
+}
+
+/// The canonical spelling of the written type `node`: the type the checker reads, with every
+/// alias expanded and every nominal type of the project replaced by its representation,
+/// printed by [`diagnostics::TypeRenderer`]. `None` when that type is not closed (it holds a
+/// type parameter, an `Unknown` or a name with no definition), when its spelling would be
+/// unreasonably long, or when reading the printed text back as a parameter's or a result's
+/// type gives another type, so that a rewrite never changes what the checker declared.
+pub fn canonical_annotation<'db>(
+    db: &'db dyn Db,
+    definitions: TypeDefinitions<'db>,
+    node: &SyntaxNode,
+) -> Option<String> {
+    let ty = canonical_type(db, definitions, annotations::lower_written_type(db, node)?)?;
+    let text = diagnostics::TypeRenderer::default().render(db, ty);
+    for (program, result) in [
+        (format!("function(x: {text}) NULL"), false),
+        (format!("function() -> {text} NULL"), true),
+    ] {
+        let reread = syntax::parse(&program);
+        if !reread.errors().is_empty() {
+            return None;
+        }
+        let function = reread
+            .syntax_node()
+            .descendants()
+            .find(|node| node.kind() == SyntaxKind::FUNCTION_DEF)?;
+        let signature = syntax::annotation::signature(&function, true);
+        let written = if result {
+            signature.ret
+        } else {
+            signature.formals.into_iter().next().flatten()
+        }
+        .filter(|written| written.text() == text)?;
+        // The text names a recursive type inside its own representation, so it is read back
+        // as written rather than unfolded again.
+        let mut table = InferenceTable::default();
+        table.definitions = Some(definitions);
+        if table.resolve(db, annotations::lower_written_type(db, &written)?) != ty {
+            return None;
+        }
+    }
+    Some(text)
+}
+
+/// How many types [`canonical_type`] visits before it gives up: unfolding definitions that
+/// each name another twice doubles the spelling at every step.
+const UNFOLD_BUDGET: usize = 4096;
+
+/// `ty` with its aliases expanded and every nominal type the project defines unfolded to its
+/// representation, or `None` when it is not closed or too large to spell. A nominal type of
+/// the stubs, such as `List<T>`, is spelled by its name, which the runtime reads, and so is a
+/// recursive one inside its own representation, which only a tag's payload can hold.
+fn canonical_type<'db>(
+    db: &'db dyn Db,
+    definitions: TypeDefinitions<'db>,
+    ty: Ty<'db>,
+) -> Option<Ty<'db>> {
+    let mut table = InferenceTable::default();
+    table.definitions = Some(definitions);
+    let mut budget = UNFOLD_BUDGET;
+    let ty = unfold_nominal(db, definitions, &mut table, ty, &mut Vec::new(), &mut budget);
+    (budget > 0 && is_closed(db, definitions, ty)).then_some(ty)
+}
+
+fn unfold_nominal<'db>(
+    db: &'db dyn Db,
+    definitions: TypeDefinitions<'db>,
+    table: &mut InferenceTable<'db>,
+    ty: Ty<'db>,
+    unfolding: &mut Vec<types::Name<'db>>,
+    budget: &mut usize,
+) -> Ty<'db> {
+    let ty = table.resolve(db, ty);
+    if *budget == 0 {
+        return ty;
+    }
+    *budget -= 1;
+    if let TyKind::Named(name, arguments) = ty.kind(db)
+        && !unfolding.contains(name)
+        && let Some(definition) = definitions.get(db, *name)
+        && !definition.alias
+        && !matches!(definition.body.kind(db), TyKind::Unknown)
+        && !definitions.library().is_some_and(|library| {
+            library
+                .type_definitions
+                .get(name)
+                .is_some_and(|stub| std::ptr::eq(stub, definition))
+        })
+    {
+        unfolding.push(*name);
+        let representation = infer::apply_definition(db, definition, arguments);
+        let unfolded = unfold_nominal(db, definitions, table, representation, unfolding, budget);
+        unfolding.pop();
+        return unfolded;
+    }
+    types::map_child_types(db, ty, &mut |child| {
+        unfold_nominal(db, definitions, table, child, unfolding, budget)
+    })
+}
+
+fn is_closed<'db>(db: &'db dyn Db, definitions: TypeDefinitions<'db>, ty: Ty<'db>) -> bool {
+    let own = match ty.kind(db) {
+        TyKind::Unknown | TyKind::Var(_) | TyKind::Rigid(_) => false,
+        TyKind::Named(name, _) => definitions.get(db, *name).is_some(),
+        _ => true,
+    };
+    let mut children = own;
+    types::for_each_child_type(db, ty, &mut |child| {
+        children &= children && is_closed(db, definitions, child);
+    });
+    children
 }
 
 /// Package files first, in path order; the order decides last-writer-wins winners.
@@ -1683,9 +1980,7 @@ pub fn file_conditional_writers<'db>(
 fn item_side_names<'db>(db: &'db dyn Db, item: Item<'db>) -> Vec<Symbol> {
     let own_name = item.name(db);
     item_top_level_names(db, item)
-        .iter()
-        .copied()
-        .filter(|name| own_name.as_deref() != Some(name.as_str()))
+        .filter(|name| own_name != Some(*name))
         .collect()
 }
 
@@ -1712,101 +2007,47 @@ pub fn package_name<'db>(db: &'db dyn Db, name: types::QueryName<'db>) -> Packag
     }
 }
 
-/// One namespace layer's binding of a name, borrowed from wherever it was looked up.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct NameLayer<'db> {
-    pub winner: Option<Item<'db>>,
-    pub conditional_writers: &'db [Item<'db>],
+/// The project's files, one bit per file id. It reads the file list alone, so a reader does not
+/// depend on what any file binds.
+#[salsa::tracked(returns(ref))]
+fn project_file_set(db: &dyn Db, files: ProjectFiles) -> Box<[u64]> {
+    let mut members: Vec<u64> = Vec::new();
+    for &file in files.files(db) {
+        set_bit(&mut members, file.as_id().index() as usize);
+    }
+    members.into_boxed_slice()
 }
 
-impl<'db> NameLayer<'db> {
+fn bit(words: &[u64], index: usize) -> bool {
+    words
+        .get(index / 64)
+        .is_some_and(|word| word & (1 << (index % 64)) != 0)
+}
+
+fn set_bit(words: &mut Vec<u64>, index: usize) {
+    if index / 64 >= words.len() {
+        words.resize(index / 64 + 1, 0);
+    }
+    words[index / 64] |= 1 << (index % 64);
+}
+
+/// One namespace layer's binding of a name, borrowed from wherever it was looked up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NameLayer<'a, 'db> {
+    pub winner: Option<Item<'db>>,
+    pub conditional_writers: &'a [Item<'db>],
+}
+
+impl NameLayer<'_, '_> {
     pub fn binds(self) -> bool {
         self.winner.is_some() || !self.conditional_writers.is_empty()
     }
 }
 
-/// The package namespace's binding of `name`, or with `test` set, the helper files'. A caller
-/// that looks up many names builds one [`NameLookup`] instead.
-pub fn name_layer<'db>(
-    db: &'db dyn Db,
-    files: ProjectFiles,
-    name: Symbol,
-    test: bool,
-) -> NameLayer<'db> {
-    NameLookup::new(db, files, test).layer(db, name)
-}
-
-/// How one namespace layer's bindings are looked up. An incremental host reads them through
-/// the per-name projection, so a check depends only on the names it reads. A one-shot host
-/// never edits, so it reads the project-wide maps, once per lookup rather than once per name:
-/// every salsa read records a dependency edge, and an item looks up dozens of names.
-#[derive(Clone, Copy)]
-pub enum NameLookup<'db> {
-    Project {
-        winners: &'db FxHashMap<Symbol, Item<'db>>,
-        writers: &'db FxHashMap<Symbol, Vec<Item<'db>>>,
-        test: bool,
-    },
-    Projected {
-        test: bool,
-    },
-}
-
-impl<'db> NameLookup<'db> {
-    pub fn new(db: &'db dyn Db, files: ProjectFiles, test: bool) -> NameLookup<'db> {
-        if !db.one_shot() {
-            return NameLookup::Projected { test };
-        }
-        let (winners, writers) = match test {
-            true => (
-                test_definitions(db, files),
-                test_conditional_slot_items(db, files),
-            ),
-            false => (
-                package_definitions(db, files),
-                conditional_slot_items(db, files),
-            ),
-        };
-        NameLookup::Project {
-            winners,
-            writers,
-            test,
-        }
-    }
-
-    pub fn layer(self, db: &'db dyn Db, name: Symbol) -> NameLayer<'db> {
-        match self {
-            NameLookup::Project {
-                winners,
-                writers,
-                test,
-            } => {
-                let layer = NameLayer {
-                    winner: winners.get(&name).copied(),
-                    conditional_writers: writers.get(&name).map_or(&[], Vec::as_slice),
-                };
-                if syntax::testing::invariants_enabled() {
-                    assert_eq!(
-                        layer,
-                        projected_name_layer(db, name, test),
-                        "the one-shot lookup of `{name}` disagrees with its projection"
-                    );
-                }
-                layer
-            }
-            NameLookup::Projected { test } => projected_name_layer(db, name, test),
-        }
-    }
-}
-
-/// [`name_layer`] for a caller that may run without a project, where nothing binds the name.
-pub fn package_layer<'db>(db: &'db dyn Db, name: Symbol, test: bool) -> NameLayer<'db> {
-    ProjectFiles::try_get(db).map_or_else(NameLayer::default, |files| {
-        name_layer(db, files, name, test)
-    })
-}
-
-fn projected_name_layer<'db>(db: &'db dyn Db, name: Symbol, test: bool) -> NameLayer<'db> {
+/// The package namespace's binding of `name`, or with `test` set, the helper files', through
+/// the name's own projection, so a reader depends on that one name. Nothing binds a name when
+/// there is no project. A check reads the names its item spells from [`item_links`] instead.
+pub fn name_layer<'db>(db: &'db dyn Db, name: Symbol, test: bool) -> NameLayer<'db, 'db> {
     let name = types::QueryName::new(db, types::Name::new(db, name));
     let projection = match test {
         true => test_name(db, name),
@@ -1945,7 +2186,7 @@ pub fn file_definitions<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<(Symbol, 
     item_tree(db, file)
         .iter()
         .filter(|item| matches!(*item.kind(db), ItemKind::Function | ItemKind::Value))
-        .filter_map(|&item| Some((Symbol::new(item.name(db).as_deref()?), item)))
+        .filter_map(|&item| Some((item.name(db)?, item)))
         .collect()
 }
 
@@ -1986,10 +2227,10 @@ pub fn s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
 pub(crate) fn file_s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
     let mut generics = FxHashSet::default();
     for &item in item_tree(db, file) {
-        if let Some(name) = item.name(db).clone()
+        if let Some(name) = item.name(db)
             && *reads_use_method(db, item)
         {
-            generics.insert(name);
+            generics.insert(name.as_str().to_owned());
         }
     }
     generics
@@ -2001,136 +2242,6 @@ fn reads_use_method<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
     item_naming(db, item)
         .as_ref()
         .is_some_and(|naming| naming.non_locals.values().any(|name| *name == "UseMethod"))
-}
-
-/// Where an item's check can read another item's exports, resolved as far as the item's own
-/// file decides. The rest depends on the project's winners, which [`item_interface_edges`]
-/// looks up.
-#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
-pub struct InterfaceReads<'db> {
-    /// Binders in the item's own file that a read reaches.
-    pub frame: ThinVec<Item<'db>>,
-    /// Names whose read may continue past the file into the project's layers, sorted and
-    /// unique.
-    pub layered: ThinVec<Symbol>,
-    /// Names whose read continues past the file to a definition only (`earlier_binding`),
-    /// sorted and unique.
-    pub earlier: ThinVec<Symbol>,
-}
-
-/// A firewall: whole-project walks depend on this rather than the full naming, so a body edit
-/// that only shifts ranges backdates here. Every read `SalsaGlobals` can make for a name the
-/// item spells is here, so a cycle through them never closes inside salsa.
-#[salsa::tracked(returns(ref))]
-pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceReads<'db> {
-    let Some(naming) = item_naming(db, item) else {
-        return InterfaceReads::default();
-    };
-    // Gathered in vectors and copied out exactly sized, since every item keeps its reads.
-    let mut frame_reads: Vec<Item<'db>> = Vec::new();
-    let mut layered: Vec<Symbol> = Vec::new();
-    let mut earlier: Vec<Symbol> = Vec::new();
-    let package = *item.file(db).kind(db) == DocumentKind::Package;
-    // `(name, deferred)` reads through the item's frame first, the rest straight from the
-    // layers (`enclosing_scheme`, and `namespace_scheme` outside a package file).
-    // Gathered unsorted and deduplicated once: names compare by spelling, which makes an ordered
-    // set's per-insert comparisons the cost of this query.
-    let mut lookups: Vec<(Symbol, bool)> = Vec::new();
-    for (id, &name) in naming.non_locals.iter() {
-        lookups.push((name, naming.deferred_non_locals.contains(id)));
-        if !package {
-            layered.push(name);
-        }
-    }
-    for (id, &name) in naming.quiet_reads.iter() {
-        lookups.push((name, naming.extras().deferred_quiet_reads.contains(id)));
-    }
-    for name in naming.namespace_reads.values().filter_map(|read| read.name) {
-        match package {
-            true => lookups.push((name, false)),
-            false => layered.push(name),
-        };
-    }
-    let top_level = |slot: &naming::BindingId| {
-        naming
-            .bindings
-            .get(slot)
-            .is_some_and(|binding| binding.kind == naming::BindingKind::TopLevel)
-    };
-    for (callee, fallback) in naming.callee_fallbacks.iter() {
-        let Some(slot) = naming.resolutions.get(callee) else {
-            continue;
-        };
-        let Some(binding) = naming.bindings.get(slot) else {
-            continue;
-        };
-        if top_level(slot) || fallback.outer.iter().any(top_level) {
-            if !package {
-                layered.push(binding.name);
-            }
-        } else {
-            lookups.push((binding.name, fallback.deferred));
-        }
-    }
-    // A top-level slot read before the item writes it reads the binding that stood before
-    // the item.
-    lookups.extend(
-        naming
-            .used_top_level_names
-            .iter()
-            .map(|&name| (name, false)),
-    );
-    // The same lookup as `SalsaGlobals::frame_definition`, keyed by symbol: going through it
-    // would intern a query name per read only to turn it back into a symbol.
-    // A one-shot host reads the file's binders directly rather than keeping a memo per item
-    // that nothing will ever revalidate.
-    let frame_binders = (!db.one_shot()).then(|| item_frame_binders(db, item));
-    let frame = OnceCell::new();
-    let frame_definition = |name: Symbol, deferred: bool| {
-        if deferred && package {
-            return None;
-        }
-        match frame_binders.and_then(|binders| binders.get(&name)) {
-            Some(&(immediate, later)) => match deferred {
-                true => later,
-                false => immediate,
-            },
-            None => unlisted_frame_binder(db, item, &frame, name, deferred),
-        }
-    };
-    // A side binding a branch or loop may leave unwritten reads the earlier binding.
-    for name in item_side_names(db, item) {
-        match frame_definition(name, false) {
-            Some(binder) => push_unique(&mut frame_reads, binder),
-            None => {
-                earlier.push(name);
-            }
-        }
-    }
-    lookups.sort_unstable();
-    lookups.dedup();
-    for (name, deferred) in lookups {
-        let binder = frame_definition(name, deferred);
-        match binder.map(|binder| binder_source(db, binder, name.as_str())) {
-            Some(Source::Definition(binder)) => push_unique(&mut frame_reads, binder),
-            Some(Source::Statement(binder)) => {
-                push_unique(&mut frame_reads, binder);
-                layered.push(name);
-            }
-            Some(Source::Conditional(_)) | None => {
-                layered.push(name);
-            }
-        }
-    }
-    for names in [&mut layered, &mut earlier] {
-        names.sort_unstable();
-        names.dedup();
-    }
-    InterfaceReads {
-        frame: ThinVec::from(frame_reads),
-        layered: ThinVec::from(layered),
-        earlier: ThinVec::from(earlier),
-    }
 }
 
 fn push_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
@@ -2152,7 +2263,7 @@ enum Source<'a, 'db> {
 }
 
 fn binder_source<'a, 'db>(db: &'db dyn Db, binder: Item<'db>, name: &str) -> Source<'a, 'db> {
-    match binder.name(db).as_deref() == Some(name) {
+    match binder.name(db).is_some_and(|own| own.as_str() == name) {
         true => Source::Definition(binder),
         false => Source::Statement(binder),
     }
@@ -2170,16 +2281,20 @@ fn layer_source<'a, 'db>(
     }
 }
 
+/// The names an item binds at top level, each once and in no promised order. Most items bind
+/// only their own name, which the item carries, so only the others keep a set.
+pub fn item_top_level_names<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+) -> impl Iterator<Item = Symbol> + 'db {
+    let own_only = item_binds_only_own_name(db, item);
+    let own = own_only.then(|| item.name(db)).flatten();
+    let bound = (!own_only).then(|| item_bound_names(db, item));
+    own.into_iter().chain(bound.into_iter().flatten().copied())
+}
+
 #[salsa::tracked(returns(ref))]
-pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> SortedSet<Symbol> {
-    if item_binds_only_own_name(db, item) {
-        return item
-            .name(db)
-            .as_deref()
-            .map(Symbol::new)
-            .into_iter()
-            .collect();
-    }
+fn item_bound_names<'db>(db: &'db dyn Db, item: Item<'db>) -> SortedSet<Symbol> {
     let Some(naming) = item_naming(db, item) else {
         return SortedSet::default();
     };
@@ -2194,69 +2309,416 @@ pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> SortedSet<
         .collect()
 }
 
-/// The items an item's check can read exports from: its frame binders, and the project's
-/// winners and conditional writers for the names it reads past its file, layer by layer in the
-/// order `SalsaGlobals` resolves them. Memoized per item so the reachability walks of every
-/// item share one edge list each.
-#[salsa::tracked(returns(ref))]
-pub fn item_interface_edges<'db>(db: &'db dyn Db, item: Item<'db>) -> ThinVec<Item<'db>> {
-    let test = matches!(
-        *item.file(db).kind(db),
-        DocumentKind::Test | DocumentKind::TestHelper
-    );
-    // An incremental host serves `name_layer` from per-name projections: a new top-level name
-    // anywhere changes the project-wide maps, and reading them would re-run every item's edges.
-    let reads = item_interface_reads(db, item);
-    let mut targets: Vec<Item<'db>> = reads.frame.to_vec();
-    let Some(files) = ProjectFiles::try_get(db) else {
-        return ThinVec::from(targets);
-    };
-    let test_lookup = test.then(|| NameLookup::new(db, files, true));
-    let package_lookup = NameLookup::new(db, files, false);
-    let layers = |name: Symbol| {
-        let test_layer = test_lookup.map(|lookup| lookup.layer(db, name));
-        (test_layer, package_lookup.layer(db, name))
-    };
-    for &name in &reads.layered {
-        let (test_layer, package_layer) = layers(name);
-        let source = |layer: NameLayer<'db>| layer_source(layer.winner, layer.conditional_writers);
-        for source in test_layer
-            .and_then(source)
-            .into_iter()
-            .chain(source(package_layer))
+/// The items an item's check can read exports from: the binders in its own file, and for the
+/// names it reads past its file, the sourced definition and the helper and package layers in
+/// the order `SalsaGlobals` resolves them. Every read `SalsaGlobals` can make for a name the
+/// item spells is here, so a cycle through them never closes inside salsa. They are part of the
+/// item's [`item_links`], which a body edit that only shifts ranges backdates, so the walks
+/// that find cyclic groups do not re-run for it.
+pub fn item_interface_edges<'db>(db: &'db dyn Db, item: Item<'db>) -> &'db [Item<'db>] {
+    item_links(db, item).edges()
+}
+
+fn interface_edges<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+    naming: &naming::ItemNaming,
+    links: &ItemLinks<'db>,
+    names: &[Symbol],
+) -> Vec<Item<'db>> {
+    let package = *item.file(db).kind(db) == DocumentKind::Package;
+    // How the item reads each listed name, as bits at the name's position in its links: through
+    // its file's frame first (immediately or deferred), straight from the layers
+    // (`enclosing_scheme`, and `namespace_scheme` outside a package file), or as a side binding.
+    const IMMEDIATE: u8 = 1;
+    const DEFERRED: u8 = 2;
+    const LAYERS: u8 = 4;
+    const SIDE: u8 = 8;
+    let through_frame = |deferred: bool| if deferred { DEFERRED } else { IMMEDIATE };
+    let past_file = if package { 0 } else { LAYERS };
+    let mut reads = vec![0_u8; names.len()];
+    let mut mark = |name: Symbol, how: u8| {
+        if let Some(read) = links
+            .position(name)
+            .and_then(|position| reads.get_mut(position))
         {
-            match source {
-                Source::Definition(item) | Source::Statement(item) => {
-                    push_unique(&mut targets, item);
-                    if matches!(source, Source::Definition(_)) {
+            *read |= how;
+        }
+    };
+    for (id, &name) in naming.non_locals.iter() {
+        mark(
+            name,
+            through_frame(naming.deferred_non_locals.contains(id)) | past_file,
+        );
+    }
+    for (id, &name) in naming.quiet_reads.iter() {
+        mark(
+            name,
+            through_frame(naming.extras().deferred_quiet_reads.contains(id)),
+        );
+    }
+    for name in naming.namespace_reads.values().filter_map(|read| read.name) {
+        mark(name, if package { IMMEDIATE } else { LAYERS });
+    }
+    let top_level = |slot: &naming::BindingId| {
+        naming
+            .bindings
+            .get(slot)
+            .is_some_and(|binding| binding.kind == naming::BindingKind::TopLevel)
+    };
+    for (callee, fallback) in naming.callee_fallbacks.iter() {
+        let Some(slot) = naming.resolutions.get(callee) else {
+            continue;
+        };
+        let Some(binding) = naming.bindings.get(slot) else {
+            continue;
+        };
+        match top_level(slot) || fallback.outer.iter().any(top_level) {
+            true => mark(binding.name, past_file),
+            false => mark(binding.name, through_frame(fallback.deferred)),
+        }
+    }
+    // A top-level slot read before the item writes it reads the binding that stood before
+    // the item.
+    for &name in naming.used_top_level_names.iter() {
+        mark(name, IMMEDIATE);
+    }
+    for name in item_side_names(db, item) {
+        mark(name, SIDE);
+    }
+    let mut targets: Vec<Item<'db>> = Vec::new();
+    for (position, (&name, &how)) in names.iter().zip(&reads).enumerate() {
+        if how == 0 {
+            continue;
+        }
+        let mut layered = how & LAYERS != 0;
+        let mut earlier = false;
+        // A side binding a branch or loop may leave unwritten reads the earlier binding.
+        if how & SIDE != 0 {
+            match links.bindings(position, false).frame {
+                Some(binder) => push_unique(&mut targets, binder),
+                None => earlier = true,
+            }
+        }
+        for deferred in [false, true] {
+            if how & through_frame(deferred) == 0 {
+                continue;
+            }
+            let binder = links.bindings(position, deferred).frame;
+            match binder.map(|binder| binder_source(db, binder, name.as_str())) {
+                Some(Source::Definition(binder)) => push_unique(&mut targets, binder),
+                Some(Source::Statement(binder)) => {
+                    push_unique(&mut targets, binder);
+                    layered = true;
+                }
+                Some(Source::Conditional(_)) | None => layered = true,
+            }
+        }
+        let bindings = links.bindings(position, false);
+        if layered {
+            for layer in bindings.layers() {
+                match layer_source(layer.winner, layer.conditional_writers) {
+                    Some(Source::Definition(item) | Source::Statement(item)) => {
+                        push_unique(&mut targets, item);
                         break;
                     }
+                    Some(Source::Conditional(writers))
+                        if writers.len() > CONDITIONAL_SLOT_JOIN_CAP =>
+                    {
+                        break;
+                    }
+                    Some(Source::Conditional(writers)) => {
+                        for &writer in writers {
+                            push_unique(&mut targets, writer);
+                        }
+                    }
+                    None => {}
                 }
-                Source::Conditional(writers) if writers.len() > CONDITIONAL_SLOT_JOIN_CAP => {
-                    break;
-                }
-                Source::Conditional(writers) => {
-                    for &writer in writers {
-                        push_unique(&mut targets, writer);
+            }
+        }
+        if earlier && let Some(winner) = bindings.layers().find_map(|layer| layer.winner) {
+            push_unique(&mut targets, winner);
+        }
+    }
+    // The walk above follows the names in the order they were interned, which parallel
+    // workers change from run to run, and so does an item's id. An item's file, spelling,
+    // kind and disambiguator do not, and together they identify it.
+    targets.sort_unstable_by_key(|target| {
+        (
+            target.file(db).as_id().index(),
+            target.name(db),
+            *target.kind(db) as u8,
+            *target.disambiguator(db),
+        )
+    });
+    targets
+}
+
+/// Where the project binds each name an item's naming lists, outside the item's own scopes:
+/// the binders in the item's file, a sourced file's definition, and the helper and package
+/// namespaces. One query per item resolves them all, so a check reads its globals from one
+/// array. It is the item's projection of the project-wide name maps: a new top-level name
+/// anywhere re-runs it, and it backdates unless one of the item's own names moved, so the
+/// item's check and edges depend on exactly the names the item reads.
+///
+/// The layout is one word per name and one word and one item per binding. Every item keeps
+/// its links for the whole run, most names have one binding or none, and a row of five
+/// optional items per name would cost four times the memory. Two thin vectors hold it all, so
+/// the memo is two pointers wide and an item without links allocates nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
+pub struct ItemLinks<'db> {
+    /// A header, the listed names, then the bindings. The header is the number of names
+    /// above [`FILE_IN_PROJECT`]. A name is its symbol's index, and the names are sorted. A
+    /// binding is the position of its name above its [`LinkKind`], and the bindings are
+    /// sorted, so a name's bindings are adjacent and so are the conditional writers of one
+    /// layer. Symbols are numbered in the order they were interned, which differs between
+    /// runs, so the names are only ever searched, never walked for a result.
+    words: ThinVec<u32>,
+    /// Per binding, the item it names, then [`item_interface_edges`] in an order that is the
+    /// same on every run.
+    items: ThinVec<Item<'db>>,
+}
+
+/// The header bit that says the item's file is one of the project's, so that the package
+/// layer holds every top-level name a package file binds, and the helper layer every one a
+/// helper file binds.
+const FILE_IN_PROJECT: u32 = 1;
+const LINK_KIND_BITS: u32 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkKind {
+    /// The binder in the item's file an immediate read sees ([`FrameBinders::binder`]).
+    Immediate,
+    /// The binder in the item's file a deferred read sees.
+    Deferred,
+    /// The definition in a file the item's file sources.
+    Sourced,
+    TestWinner,
+    TestWriter,
+    PackageWinner,
+    PackageWriter,
+}
+
+/// What a read of one name sees outside the reading item, nearest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct NameBindings<'a, 'db> {
+    /// The binder in the reader's own file.
+    frame: Option<Item<'db>>,
+    sourced: Option<Item<'db>>,
+    test: NameLayer<'a, 'db>,
+    package: NameLayer<'a, 'db>,
+}
+
+#[salsa::tracked(returns(ref))]
+fn item_links<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemLinks<'db> {
+    let Some(naming) = item_naming(db, item) else {
+        return ItemLinks::default();
+    };
+    let mut names: Vec<Symbol> = naming
+        .non_locals
+        .values()
+        .chain(naming.quiet_reads.values())
+        .chain(naming.extras().quiet_operator_reads.iter())
+        .chain(naming.used_top_level_names.iter())
+        .copied()
+        .chain(naming.namespace_reads.values().filter_map(|read| read.name))
+        .chain(naming.callee_fallbacks.iter().filter_map(|(callee, _)| {
+            let slot = naming.resolutions.get(callee)?;
+            Some(naming.bindings.get(slot)?.name)
+        }))
+        .chain(item_side_names(db, item))
+        .collect();
+    names.sort_unstable_by_key(|name| name.index());
+    names.dedup();
+    let file = *item.file(db);
+    let kind = *file.kind(db);
+    let frame = FrameBinders::of(db, item);
+    let sources_files = !sourced_files(db, file).is_empty();
+    let project = ProjectFiles::try_get(db);
+    let test = project
+        .filter(|_| matches!(kind, DocumentKind::Test | DocumentKind::TestHelper))
+        .map(|files| {
+            (
+                test_definitions(db, files),
+                test_conditional_slot_items(db, files),
+            )
+        });
+    let package = project.map(|files| {
+        (
+            package_definitions(db, files),
+            conditional_slot_items(db, files),
+        )
+    });
+    let Ok(name_count) = u32::try_from(names.len()) else {
+        panic!("item_links: an item lists more than u32::MAX names");
+    };
+    assert!(
+        name_count < 1 << (u32::BITS - LINK_KIND_BITS),
+        "item_links: an item lists more names than a binding can address"
+    );
+    let file_in_project = project
+        .is_some_and(|files| bit(project_file_set(db, files), file.as_id().index() as usize));
+    let mut words: Vec<u32> = Vec::with_capacity(1 + 2 * names.len());
+    words.push(name_count << 1 | if file_in_project { FILE_IN_PROJECT } else { 0 });
+    words.extend(names.iter().map(|name| name.index()));
+    let mut items: Vec<Item<'db>> = Vec::with_capacity(names.len());
+    for (position, &name) in (0_u32..).zip(&names) {
+        let mut link = |kind: LinkKind, item: Item<'db>| {
+            words.push(position << LINK_KIND_BITS | kind as u32);
+            items.push(item);
+        };
+        if let Some(binder) = frame.binder(name, false) {
+            link(LinkKind::Immediate, binder);
+        }
+        // A deferred read in a package file sees the project-wide winner, never the file's.
+        if kind != DocumentKind::Package
+            && let Some(binder) = frame.binder(name, true)
+        {
+            link(LinkKind::Deferred, binder);
+        }
+        if sources_files && let Some(definition) = *sourced_name_definition(db, file, name) {
+            link(LinkKind::Sourced, definition);
+        }
+        for (layer, winner_kind, writer_kind) in [
+            (test, LinkKind::TestWinner, LinkKind::TestWriter),
+            (package, LinkKind::PackageWinner, LinkKind::PackageWriter),
+        ] {
+            let Some((winners, writers)) = layer else {
+                continue;
+            };
+            // The writers serve a name only when no definition wins it, and past the join cap
+            // only their count is read, so a run keeps at most one more than the cap.
+            match winners.get(&name) {
+                Some(&winner) => link(winner_kind, winner),
+                None => {
+                    for &writer in writers
+                        .get(&name)
+                        .into_iter()
+                        .flatten()
+                        .take(CONDITIONAL_SLOT_JOIN_CAP + 1)
+                    {
+                        link(writer_kind, writer);
                     }
                 }
             }
         }
     }
-    for &name in &reads.earlier {
-        let (test_layer, package_layer) = layers(name);
-        if let Some(winner) = test_layer
-            .and_then(|layer| layer.winner)
-            .or(package_layer.winner)
-        {
-            push_unique(&mut targets, winner);
-        }
-    }
-    ThinVec::from(targets)
+    let mut links = ItemLinks {
+        words: ThinVec::from(words),
+        items: ThinVec::from(items),
+    };
+    let edges = interface_edges(db, item, naming, &links, &names);
+    // The edges go behind the bindings in a vector sized for both: growing it in place would
+    // round the allocation up to the next doubling.
+    let mut items = ThinVec::with_capacity(links.items.len() + edges.len());
+    items.extend(links.items.iter().copied().chain(edges));
+    links.items = items;
+    links
 }
 
-/// Facts read off an item's own syntax that passes need after a one-shot check has released
-/// the item's tree. They share one memo because each is a `bool` that rarely changes, and a
+impl<'db> ItemLinks<'db> {
+    fn name_count(&self) -> usize {
+        self.words
+            .first()
+            .map_or(0, |&header| (header >> 1) as usize)
+    }
+
+    fn file_in_project(&self) -> bool {
+        self.words
+            .first()
+            .is_some_and(|&header| header & FILE_IN_PROJECT != 0)
+    }
+
+    /// The bindings' words, which follow the header and the names.
+    fn binding_words(&self) -> &[u32] {
+        self.words.get(1 + self.name_count()..).unwrap_or_default()
+    }
+
+    fn edges(&self) -> &[Item<'db>] {
+        self.items
+            .get(self.binding_words().len()..)
+            .unwrap_or_default()
+    }
+
+    fn position(&self, name: Symbol) -> Option<usize> {
+        self.words
+            .get(1..1 + self.name_count())?
+            .binary_search(&name.index())
+            .ok()
+    }
+
+    /// What a read of the name at `position` sees, immediately or deferred.
+    fn bindings(&self, position: usize, deferred: bool) -> NameBindings<'_, 'db> {
+        let words = self.binding_words();
+        let of_name = |word: u32| (word >> LINK_KIND_BITS) as usize;
+        let mut bindings = NameBindings::default();
+        let mut index = words.partition_point(|&word| of_name(word) < position);
+        while let Some(&word) = words.get(index)
+            && of_name(word) == position
+        {
+            // The writers of one layer share a word, so a run of equal words is one list.
+            let run = words[index..]
+                .iter()
+                .take_while(|&&other| other == word)
+                .count();
+            let items = self.items.get(index..index + run).unwrap_or_default();
+            let first = items.first().copied();
+            match word & ((1 << LINK_KIND_BITS) - 1) {
+                kind if kind == LinkKind::Immediate as u32 => {
+                    if !deferred {
+                        bindings.frame = first;
+                    }
+                }
+                kind if kind == LinkKind::Deferred as u32 => {
+                    if deferred {
+                        bindings.frame = first;
+                    }
+                }
+                kind if kind == LinkKind::Sourced as u32 => bindings.sourced = first,
+                kind if kind == LinkKind::TestWinner as u32 => bindings.test.winner = first,
+                kind if kind == LinkKind::TestWriter as u32 => {
+                    bindings.test.conditional_writers = items;
+                }
+                kind if kind == LinkKind::PackageWinner as u32 => bindings.package.winner = first,
+                _ => bindings.package.conditional_writers = items,
+            }
+            index += run;
+        }
+        bindings
+    }
+}
+
+impl<'a, 'db> NameBindings<'a, 'db> {
+    /// The namespaces a read searches past the reader's own file, nearest first: a sourced
+    /// file's definition, then the helpers' bindings, which a test or helper file sees before
+    /// the package namespace.
+    fn layers(self) -> impl Iterator<Item = NameLayer<'a, 'db>> {
+        let sourced = NameLayer {
+            winner: self.sourced,
+            conditional_writers: &[],
+        };
+        [sourced, self.test, self.package].into_iter()
+    }
+
+    /// Whether every read resolves the same through both: a layer's writers count only when
+    /// it has no winner, and past the join cap only as that many.
+    fn reads_like(self, other: NameBindings<'_, 'db>) -> bool {
+        fn source<'a, 'db>(layer: NameLayer<'a, 'db>) -> (Option<Item<'db>>, &'a [Item<'db>]) {
+            match layer.winner {
+                Some(winner) => (Some(winner), &[]),
+                None => {
+                    let writers = layer.conditional_writers;
+                    let kept = writers.len().min(CONDITIONAL_SLOT_JOIN_CAP + 1);
+                    (None, &writers[..kept])
+                }
+            }
+        }
+        self.frame == other.frame && self.layers().map(source).eq(other.layers().map(source))
+    }
+}
+
+/// Facts read off an item's own syntax that passes need after a diagnostics-only host has
+/// dropped the file's tree. They share one memo because each is a `bool` that rarely changes, and a
 /// memo per fact costs more to keep than the fact costs to compute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, salsa::SalsaValue)]
 pub struct ItemSyntaxFlags {
@@ -2373,80 +2835,106 @@ pub fn file_dependency_files(db: &dyn Db, file: SourceFile) -> Vec<SourceFile> {
 /// item order), or `None` when no read cycle runs through the item. A group must resolve
 /// through one canonical fixpoint, since iterating from whichever member was queried first
 /// would make the round-cap pins depend on query order.
-///
-/// An incremental host walks only what the item can read, transitively, because a strongly
-/// connected component lies inside the reachable set of each of its members: one file's check
-/// then names only the items it can reach, and an edit re-walks only the items that reach it.
-/// A one-shot host checks every item anyway, so it finds every group in one walk of the
-/// whole project instead of one walk per item.
 pub fn item_group<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
     item: Item<'db>,
 ) -> Option<&'db [Item<'db>]> {
-    if !db.one_shot() {
-        return interface_group(db, files, item).as_deref();
-    }
-    let groups = project_interface_groups(db, files);
-    let group = groups
-        .group_of
-        .get(&item)
-        .and_then(|&index| groups.members.get(index as usize))
-        .map(|members| &**members);
+    let group = file_group(db, files, item);
     if syntax::testing::invariants_enabled() {
         assert_eq!(
-            group,
-            interface_group(db, files, item).as_deref(),
-            "the project-wide cyclic groups disagree with the item's own walk"
+            group.map(|members| members.iter().copied().collect::<FxHashSet<_>>()),
+            item_group_from_scratch(db, item),
+            "the file's cyclic groups disagree with the item's own reachability"
         );
     }
     group
 }
 
-#[salsa::tracked(returns(ref))]
-pub fn interface_group<'db>(
+fn file_group<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
     item: Item<'db>,
-) -> Option<Box<[Item<'db>]>> {
-    let mut group = None;
-    strongly_connected(db, [item], |members| {
-        if members.contains(&item) {
-            group =
-                cyclic(db, members).then(|| canonical_order(db, &file_order(db, files), members));
-        }
-    });
-    group
-}
-
-/// Every cyclic group of the project, for a one-shot host ([`item_group`]).
-#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
-pub struct InterfaceGroups<'db> {
-    pub members: Vec<Box<[Item<'db>]>>,
-    pub group_of: FxHashMap<Item<'db>, u32>,
-}
-
-#[salsa::tracked(returns(ref))]
-pub fn project_interface_groups<'db>(db: &'db dyn Db, files: ProjectFiles) -> InterfaceGroups<'db> {
-    let order = file_order(db, files);
-    let roots = files
-        .files(db)
+) -> Option<&'db [Item<'db>]> {
+    file_interface_groups(db, files, *item.file(db))
+        .members
         .iter()
-        .flat_map(|&file| item_tree(db, file).iter().copied());
-    let mut groups = InterfaceGroups::default();
-    strongly_connected(db, roots, |members| {
-        if !cyclic(db, members) {
+        .find(|members| members.contains(&item))
+        .map(|members| &**members)
+}
+
+/// The members of the item's cyclic group from reachability alone: every item the item reaches
+/// that reaches it back. It shares only the edges with [`file_interface_groups`], so it checks
+/// the component walk as well as the per-file bookkeeping.
+fn item_group_from_scratch<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<FxHashSet<Item<'db>>> {
+    let mut reached: FxHashSet<Item<'db>> = FxHashSet::default();
+    let mut readers: FxHashMap<Item<'db>, Vec<Item<'db>>> = FxHashMap::default();
+    let mut expanded: FxHashSet<Item<'db>> = FxHashSet::from_iter([item]);
+    let mut stack = vec![item];
+    while let Some(reader) = stack.pop() {
+        for &target in item_interface_edges(db, reader) {
+            readers.entry(target).or_default().push(reader);
+            reached.insert(target);
+            if expanded.insert(target) {
+                stack.push(target);
+            }
+        }
+    }
+    if !reached.contains(&item) {
+        return None;
+    }
+    // Every reader recorded above is reachable from the item, so walking the reversed edges
+    // from the item collects exactly the items on a cycle through it.
+    let mut members: FxHashSet<Item<'db>> = FxHashSet::from_iter([item]);
+    let mut stack = vec![item];
+    while let Some(target) = stack.pop() {
+        for &reader in readers.get(&target).into_iter().flatten() {
+            if members.insert(reader) {
+                stack.push(reader);
+            }
+        }
+    }
+    Some(members)
+}
+
+/// The cyclic groups the items of one file belong to, in the canonical order of their first
+/// members. Most files have none. The value names items and no positions, so a check that reads
+/// it is unaffected by an edit that moves the file's items without changing a cycle.
+#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
+pub struct FileGroups<'db> {
+    members: Vec<Box<[Item<'db>]>>,
+}
+
+/// One walk per file finds the groups of all its items. It visits only what the file's items
+/// can read, transitively, because a strongly connected component lies inside the reachable
+/// set of each of its members. A check therefore depends on the edges its file can reach
+/// rather than on every item in the project, and an edit re-walks only the files that reach
+/// an edge it changed.
+#[salsa::tracked(returns(ref))]
+pub fn file_interface_groups<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    file: SourceFile,
+) -> FileGroups<'db> {
+    let mut order: Option<FxHashMap<SourceFile, usize>> = None;
+    let mut keyed: Vec<(CanonicalPosition, Box<[Item<'db>]>)> = Vec::new();
+    strongly_connected(db, item_tree(db, file).iter().copied(), |members| {
+        if !members.iter().any(|member| *member.file(db) == file) || !cyclic(db, members) {
             return;
         }
-        let Ok(index) = u32::try_from(groups.members.len()) else {
-            panic!("project_interface_groups: more than u32::MAX cyclic groups");
-        };
-        groups
-            .group_of
-            .extend(members.iter().map(|&member| (member, index)));
-        groups.members.push(canonical_order(db, &order, members));
+        let order = order.get_or_insert_with(|| file_order(db, files));
+        let group = canonical_order(db, order, members);
+        let first = group
+            .first()
+            .map(|&member| canonical_position(db, order, member));
+        keyed.push((first.unwrap_or_default(), group));
     });
-    groups
+    // Components arrive in discovery order, which a new item elsewhere in the file can change,
+    // and sorting keeps the value equal across such an edit.
+    keyed.sort_by_key(|&(first, _)| first);
+    FileGroups {
+        members: keyed.into_iter().map(|(_, group)| group).collect(),
+    }
 }
 
 /// Tarjan's algorithm over the interface edges reachable from `roots`, reporting each strongly
@@ -2459,8 +2947,9 @@ fn strongly_connected<'db>(
 ) {
     let mut nodes: Vec<Item<'db>> = Vec::new();
     let mut index_of: FxHashMap<Item<'db>, usize> = FxHashMap::default();
+    // A node's low link, or `OFF_STACK` once its component is reported.
+    const OFF_STACK: usize = usize::MAX;
     let mut low: Vec<usize> = Vec::new();
-    let mut on_stack: Vec<bool> = Vec::new();
     let mut stack: Vec<usize> = Vec::new();
     let mut work: Vec<(usize, &'db [Item<'db>], usize)> = Vec::new();
     let mut members: Vec<Item<'db>> = Vec::new();
@@ -2475,7 +2964,6 @@ fn strongly_connected<'db>(
                 nodes.push(target);
                 index_of.insert(target, target_index);
                 low.push(target_index);
-                on_stack.push(true);
                 stack.push(target_index);
                 work.push((target_index, item_interface_edges(db, target), 0));
             }
@@ -2486,7 +2974,7 @@ fn strongly_connected<'db>(
                 *edge_cursor += 1;
                 match index_of.get(&target) {
                     Some(&target_index) => {
-                        if on_stack[target_index] {
+                        if low[target_index] != OFF_STACK {
                             low[node] = low[node].min(target_index);
                         }
                     }
@@ -2495,15 +2983,16 @@ fn strongly_connected<'db>(
                 continue;
             }
             work.pop();
+            let node_low = low[node];
             if let Some(&(parent, _, _)) = work.last() {
-                low[parent] = low[parent].min(low[node]);
+                low[parent] = low[parent].min(node_low);
             }
             // Discovery order doubles as the Tarjan index, so a root is a node whose low link
             // is its own position.
-            if low[node] == node {
+            if node_low == node {
                 members.clear();
                 while let Some(member) = stack.pop() {
-                    on_stack[member] = false;
+                    low[member] = OFF_STACK;
                     members.push(nodes[member]);
                     if member == node {
                         break;
@@ -2537,14 +3026,23 @@ fn canonical_order<'db>(
     members: &[Item<'db>],
 ) -> Box<[Item<'db>]> {
     let mut group = members.to_vec();
-    group.sort_by_cached_key(|&member| {
-        let file = *member.file(db);
-        let item_order = item_tree(db, file)
-            .iter()
-            .position(|&candidate| candidate == member);
-        (file_order.get(&file).copied(), item_order)
-    });
+    group.sort_by_cached_key(|&member| canonical_position(db, file_order, member));
     group.into_boxed_slice()
+}
+
+/// Project file order, then item order, with an item outside the project first.
+type CanonicalPosition = (Option<usize>, Option<usize>);
+
+fn canonical_position<'db>(
+    db: &'db dyn Db,
+    file_order: &FxHashMap<SourceFile, usize>,
+    member: Item<'db>,
+) -> CanonicalPosition {
+    let file = *member.file(db);
+    let item_order = item_tree(db, file)
+        .iter()
+        .position(|&candidate| candidate == member);
+    (file_order.get(&file).copied(), item_order)
 }
 
 /// What a cyclic-group member exports to its readers: the scheme `global_scheme` serves and
@@ -2622,8 +3120,7 @@ fn unknown_group_exports<'db>(
                 .iter()
                 .map(|&item| {
                     let top_level_bindings = item_top_level_names(db, item)
-                        .iter()
-                        .map(|&name| (name, unknown.clone()))
+                        .map(|name| (name, unknown.clone()))
                         .collect();
                     let exports = MemberExports {
                         scheme: unknown.clone(),
@@ -2758,12 +3255,12 @@ fn check_item<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<check::ItemCheck<
                 && types::contains_unknown(db, exports.scheme.body)
                 && let Some(module) = item_hir(db, item)
                 && let Some(root) = module.root
-                && let Some(name) = item.name(db).clone()
+                && let Some(name) = item.name(db)
             {
                 check.strict_origins.push(check::StrictOrigin {
                     expression: root,
                     range: module.range(root),
-                    kind: check::StrictOriginKind::RecursiveUnknown(name),
+                    kind: check::StrictOriginKind::RecursiveUnknown(name.as_str().to_owned()),
                 });
             }
         }
@@ -2816,7 +3313,9 @@ fn refuse_check<'db>(db: &'db dyn Db, check: check::ItemCheck<'db>) -> check::It
     }
 }
 
-/// Every lookup goes through a per-name query, so a check depends on exactly the names it reads.
+/// The globals one item's check reads. The names the item spells resolve through its
+/// [`item_links`], and a name the check constructs (a synthesized S3 method's, say) through a
+/// per-name query, so the check depends on exactly the names it reads.
 struct SalsaGlobals<'db, 'a> {
     db: &'db dyn Db,
     item: Item<'db>,
@@ -2829,19 +3328,14 @@ struct SalsaGlobals<'db, 'a> {
     // memo records a dependency edge.
     kind: DocumentKind,
     command: Option<u32>,
-    sources_files: OnceCell<bool>,
+    sources_files: bool,
     definitions: TypeDefinitions<'db>,
     library: Option<&'db stubs::StubLibrary<'db>>,
-    // A body reads the same few globals many times, and each salsa read pays for interning
-    // its key and verifying the memo, so a check looks each one up once.
-    schemes: RefCell<FxHashMap<(types::Name<'db>, bool), Option<types::TypeScheme<'db>>>>,
-    item_frame_binders: OnceCell<&'db ItemFrameBinders<'db>>,
-    frame_binders: RefCell<FxHashMap<(types::Name<'db>, bool), Option<Item<'db>>>>,
-    frame: OnceCell<FrameBinders<'db>>,
-    package_layers: RefCell<FxHashMap<types::Name<'db>, NameLayer<'db>>>,
-    test_layers: RefCell<FxHashMap<types::Name<'db>, NameLayer<'db>>>,
-    package_lookup: OnceCell<NameLookup<'db>>,
-    test_lookup: OnceCell<NameLookup<'db>>,
+    links: &'db ItemLinks<'db>,
+    /// The scheme each linked name resolved to in this check, at twice the name's position
+    /// plus one for a deferred read. A body reads the same few globals many times, and
+    /// resolving one reads the binder's check through salsa and copies its scheme.
+    schemes: RefCell<Vec<Option<Option<types::TypeScheme<'db>>>>>,
 }
 
 /// The type definitions a file sees, looked up one name at a time: a script's own
@@ -2922,14 +3416,50 @@ fn project_type_definition<'db>(
     project_type_definitions(db, files).get(&name).cloned()
 }
 
-#[salsa::tracked(returns(ref))]
-fn visible_arithmetic_classes(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
-    let mut classes = stub_arithmetic_classes(db);
-    if let Some(files) = ProjectFiles::try_get(db) {
-        classes.extend(project_arithmetic_classes(db, files).iter().cloned());
+/// The classes with arithmetic methods a file sees: the stubs', the package's and the file's
+/// own. A question asks each layer in turn, so no file holds a merged copy of the others.
+#[derive(Debug, Clone, Copy)]
+pub struct ArithmeticClasses<'db> {
+    layers: [Option<&'db stubs::SymbolSet>; 3],
+}
+
+impl<'db> ArithmeticClasses<'db> {
+    pub fn contains(self, class: impl stubs::SymbolKey) -> bool {
+        class.symbol().is_some_and(|class| {
+            self.layers
+                .iter()
+                .flatten()
+                .any(|layer| layer.contains(class))
+        })
     }
-    classes.extend(file_arithmetic_classes(db, file).iter().cloned());
-    classes
+
+    /// Each class once, in no particular order.
+    pub fn iter(self) -> impl Iterator<Item = Symbol> + 'db {
+        let layers = self.layers;
+        layers
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, layer)| Some((index, layer?)))
+            .flat_map(move |(index, layer)| {
+                layer.iter().filter(move |&class| {
+                    !layers
+                        .iter()
+                        .take(index)
+                        .flatten()
+                        .any(|earlier| earlier.contains(class))
+                })
+            })
+    }
+}
+
+fn visible_arithmetic_classes(db: &dyn Db, file: SourceFile) -> ArithmeticClasses<'_> {
+    ArithmeticClasses {
+        layers: [
+            Some(stub_arithmetic_classes(db)),
+            ProjectFiles::try_get(db).map(|files| project_arithmetic_classes(db, files)),
+            Some(file_arithmetic_classes(db, file)),
+        ],
+    }
 }
 
 /// A project's `+.string` method dispatches on a class attribute that `class(x) <- "string"`
@@ -2937,16 +3467,11 @@ fn visible_arithmetic_classes(db: &dyn Db, file: SourceFile) -> FxHashSet<String
 #[salsa::tracked]
 fn has_untracked_arithmetic_class(db: &dyn Db, file: SourceFile) -> bool {
     let definitions = TypeDefinitions::of(db, file);
-    let tracked = |class: &String| {
-        definitions
-            .get(db, types::Name::new(db, class.as_str()))
-            .is_some()
-    };
-    let project_classes = ProjectFiles::try_get(db)
+    let tracked = |class: Symbol| definitions.get(db, types::Name::new(db, class)).is_some();
+    ProjectFiles::try_get(db)
         .map(|files| project_arithmetic_classes(db, files))
-        .unwrap_or_default();
-    project_classes
-        .iter()
+        .into_iter()
+        .flat_map(stubs::SymbolSet::iter)
         .chain(file_arithmetic_classes(db, file).iter())
         .any(|class| !tracked(class))
 }
@@ -2965,11 +3490,11 @@ fn file_binders<'db>(db: &'db dyn Db, file: SourceFile) -> ThinVec<(Symbol, u32,
     let mut binders = Vec::new();
     for (index, &item) in item_tree(db, file).iter().enumerate() {
         let index = u32::try_from(index).expect("a file holds fewer than u32::MAX items");
-        let own_name = item.name(db).as_deref().map(Symbol::new);
+        let own_name = item.name(db);
         if let Some(name) = own_name {
             binders.push((name, index, item));
         }
-        for &name in item_top_level_names(db, item) {
+        for name in item_top_level_names(db, item) {
             if own_name != Some(name) {
                 binders.push((name, index, item));
             }
@@ -2994,54 +3519,6 @@ fn frame_binder<'db>(
     FrameBinders::of(db, item).binder(name.symbol(), deferred)
 }
 
-/// [`frame_binder`] for a name [`item_frame_binders`] does not list. An incremental host goes
-/// through the per-name query, so the reader depends only on that name's binder; a one-shot
-/// host never edits, so it reads the file's binders once per reader instead of keeping a memo
-/// per item and name.
-fn unlisted_frame_binder<'db>(
-    db: &'db dyn Db,
-    item: Item<'db>,
-    frame: &OnceCell<FrameBinders<'db>>,
-    name: Symbol,
-    deferred: bool,
-) -> Option<Item<'db>> {
-    if db.one_shot() {
-        return frame
-            .get_or_init(|| FrameBinders::of(db, item))
-            .binder(name, deferred);
-    }
-    frame_binder(db, item, types::Name::new(db, name), deferred)
-}
-
-/// Each symbol an item reads from its frame, with its immediate and deferred binders.
-type ItemFrameBinders<'db> = SortedMap<Symbol, (Option<Item<'db>>, Option<Item<'db>>)>;
-
-/// [`frame_binder`] for every name the item's naming reads from outside its own frame, as
-/// `(immediate, deferred)`. One query per item replaces a query per item and name, each of
-/// which interned a key and kept a memo, and its value still changes only when a binder of
-/// one of the item's own names does. The value is an exactly sized sorted array rather than a
-/// hash table, because every item keeps one for the whole run.
-#[salsa::tracked(returns(ref))]
-fn item_frame_binders<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemFrameBinders<'db> {
-    let Some(naming) = item_naming(db, item) else {
-        return SortedMap::default();
-    };
-    let frame = FrameBinders::of(db, item);
-    let mut names: Vec<Symbol> = naming
-        .non_locals
-        .values()
-        .chain(naming.quiet_reads.values())
-        .chain(naming.extras().quiet_operator_reads.iter())
-        .copied()
-        .collect();
-    names.sort_unstable();
-    names.dedup();
-    names
-        .into_iter()
-        .map(|name| (name, (frame.binder(name, false), frame.binder(name, true))))
-        .collect()
-}
-
 /// What every binder lookup of one item reads, fetched once: each salsa read records a
 /// dependency edge, and an item looks up dozens of names.
 struct FrameBinders<'db> {
@@ -3063,9 +3540,8 @@ impl<'db> FrameBinders<'db> {
                 DocumentKind::Test | DocumentKind::TestHelper
             ),
             position: item_tree_positions(db, file)
-                .get(&item)
-                .copied()
-                .unwrap_or_else(|| item_tree(db, file).len()),
+                .get(&item.as_id())
+                .map_or_else(|| item_tree(db, file).len(), |&position| position as usize),
         }
     }
 
@@ -3095,25 +3571,89 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
         item: Item<'db>,
         group: Option<&'a FxHashMap<Item<'db>, MemberExports<'db>>>,
     ) -> SalsaGlobals<'db, 'a> {
+        let file = *item.file(db);
         SalsaGlobals {
             db,
             item,
             group,
             files: ProjectFiles::try_get(db),
-            file: *item.file(db),
-            kind: *item.file(db).kind(db),
-            command: *item.file(db).command(db),
-            sources_files: OnceCell::new(),
-            definitions: TypeDefinitions::of(db, *item.file(db)),
+            file,
+            kind: *file.kind(db),
+            command: *file.command(db),
+            sources_files: !sourced_files(db, file).is_empty(),
+            definitions: TypeDefinitions::of(db, file),
             library: stubs::stubs(db),
+            links: item_links(db, item),
             schemes: RefCell::default(),
-            item_frame_binders: OnceCell::new(),
-            frame_binders: RefCell::default(),
-            frame: OnceCell::new(),
-            package_layers: RefCell::default(),
-            test_layers: RefCell::default(),
-            package_lookup: OnceCell::new(),
-            test_lookup: OnceCell::new(),
+        }
+    }
+
+    /// What a read of `name` sees outside the item.
+    fn bindings(&self, name: Symbol, deferred: bool) -> NameBindings<'db, 'db> {
+        let Some(position) = self.links.position(name) else {
+            return self.unlinked_bindings(name, deferred);
+        };
+        let bindings = self.links.bindings(position, deferred);
+        if syntax::testing::invariants_enabled() {
+            assert!(
+                bindings.reads_like(self.unlinked_bindings(name, deferred)),
+                "the link of `{name}` disagrees with its per-name projections"
+            );
+        }
+        bindings
+    }
+
+    /// [`ItemLinks::bindings`] for a name the item's naming does not list, each binding
+    /// through its own per-name query.
+    fn unlinked_bindings(&self, name: Symbol, deferred: bool) -> NameBindings<'db, 'db> {
+        let layer = |test: bool| match self.files {
+            Some(_) => name_layer(self.db, name, test),
+            None => NameLayer::default(),
+        };
+        let frame_binder = || {
+            frame_binder(
+                self.db,
+                self.item,
+                types::Name::new(self.db, name),
+                deferred,
+            )
+        };
+        let package = layer(false);
+        let test = match self.kind {
+            DocumentKind::Test | DocumentKind::TestHelper => layer(true),
+            _ => NameLayer::default(),
+        };
+        // A name a check constructs for itself (the S3 method `Ops.Date` of an operand's
+        // class) is bound almost nowhere, and an item asks for dozens of them, so a
+        // `frame_binder` memo for each would outnumber every other memo. A package file
+        // needs none: each top-level name it binds is a definition or a conditional write of
+        // the package layer, so a name that layer does not bind has no binder in the file.
+        // The helper files' layer holds a helper file's names the same way. A test file or a
+        // script has no layer over its own names and asks.
+        let unbound = self.links.file_in_project()
+            && match self.kind {
+                DocumentKind::Package => !package.binds(),
+                DocumentKind::TestHelper => !test.binds(),
+                _ => false,
+            };
+        if unbound && syntax::testing::invariants_enabled() {
+            assert_eq!(
+                frame_binder(),
+                None,
+                "the layer of the item's file does not bind `{name}`, yet the file does"
+            );
+        }
+        NameBindings {
+            frame: match unbound || (deferred && self.kind == DocumentKind::Package) {
+                true => None,
+                false => frame_binder(),
+            },
+            sourced: match self.sources_files {
+                true => *sourced_name_definition(self.db, self.file, name),
+                false => None,
+            },
+            test,
+            package,
         }
     }
 
@@ -3124,26 +3664,21 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
         }
     }
 
-    fn statement_scheme(
-        &self,
-        item: Item<'db>,
-        name: types::Name<'db>,
-    ) -> Option<types::TypeScheme<'db>> {
+    fn statement_scheme(&self, item: Item<'db>, name: Symbol) -> Option<types::TypeScheme<'db>> {
         let Some(exports) = self.group.and_then(|group| group.get(&item)) else {
-            return statement_binding_scheme(self.db, item, name);
+            return statement_binding_scheme(self.db, item, types::Name::new(self.db, name));
         };
-        let name = name.text(self.db);
         exports
             .top_level_bindings
             .iter()
-            .find(|(binding, _)| binding == name)
+            .find(|(binding, _)| *binding == name)
             .map(|(_, scheme)| scheme.clone())
     }
 
     fn source_scheme(
         &self,
         source: Source<'_, 'db>,
-        name: types::Name<'db>,
+        name: Symbol,
     ) -> Option<types::TypeScheme<'db>> {
         match source {
             Source::Definition(item) => Some(self.item_scheme(item)),
@@ -3160,7 +3695,7 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
                     0 => None,
                     1 => schemes.pop(),
                     _ => {
-                        let bodies: Vec<types::Ty<'db>> =
+                        let bodies: Vec<Ty<'db>> =
                             schemes.into_iter().map(|scheme| scheme.body).collect();
                         Some(types::TypeScheme::monomorphic(types::union_of(
                             self.db, bodies,
@@ -3173,111 +3708,39 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
 
     fn layer_scheme(
         &self,
-        layer: NameLayer<'db>,
-        name: types::Name<'db>,
+        layer: NameLayer<'_, 'db>,
+        name: Symbol,
     ) -> Option<types::TypeScheme<'db>> {
         self.source_scheme(layer_source(layer.winner, layer.conditional_writers)?, name)
     }
 
-    fn frame_definition(&self, name: types::Name<'db>, deferred: bool) -> Option<Item<'db>> {
-        let own = self.own_frame_definition(name, deferred);
-        match self.command {
-            Some(command) => session::binder(self.db, command, name.symbol(), deferred, own),
-            None => own,
-        }
-    }
-
-    fn own_frame_definition(&self, name: types::Name<'db>, deferred: bool) -> Option<Item<'db>> {
-        if deferred && self.kind == DocumentKind::Package {
-            return None;
-        }
-        if !self.db.one_shot()
-            && let Some(&(immediate, later)) = self
-                .item_frame_binders
-                .get_or_init(|| item_frame_binders(self.db, self.item))
-                .get(&name.symbol())
-        {
-            return if deferred { later } else { immediate };
-        }
-        *self
-            .frame_binders
-            .borrow_mut()
-            .entry((name, deferred))
-            .or_insert_with(|| {
-                unlisted_frame_binder(self.db, self.item, &self.frame, name.symbol(), deferred)
-            })
-    }
-
-    /// The namespaces a read of `name` searches past the item's own frame, nearest first: a
-    /// test or helper file sees the helpers' bindings before the package namespace.
-    fn layers(&self, name: types::Name<'db>) -> impl Iterator<Item = NameLayer<'db>> {
-        let test = self
-            .files
-            .filter(|_| matches!(self.kind, DocumentKind::Test | DocumentKind::TestHelper))
-            .map(|files| self.layer(&self.test_layers, &self.test_lookup, files, name, true));
-        let sourced = (*self
-            .sources_files
-            .get_or_init(|| !sourced_files(self.db, self.file).is_empty()))
-        .then(|| *sourced_name_definition(self.db, self.file, name.symbol()))
-        .flatten()
-        .map(|winner| NameLayer {
-            winner: Some(winner),
-            conditional_writers: &[],
-        });
-        sourced
-            .into_iter()
-            .chain(test)
-            .chain(self.package_layer(name))
-    }
-
-    fn package_layer(&self, name: types::Name<'db>) -> Option<NameLayer<'db>> {
-        let files = self.files?;
-        Some(self.layer(
-            &self.package_layers,
-            &self.package_lookup,
-            files,
-            name,
-            false,
-        ))
-    }
-
-    fn layer(
+    /// The binder in the item's own file, or for a console command, in the session before it.
+    fn frame_definition(
         &self,
-        layers: &RefCell<FxHashMap<types::Name<'db>, NameLayer<'db>>>,
-        lookup: &OnceCell<NameLookup<'db>>,
-        files: ProjectFiles,
-        name: types::Name<'db>,
-        test: bool,
-    ) -> NameLayer<'db> {
-        *layers.borrow_mut().entry(name).or_insert_with(|| {
-            lookup
-                .get_or_init(|| NameLookup::new(self.db, files, test))
-                .layer(self.db, name.symbol())
-        })
-    }
-
-    fn binder_scheme(
-        &self,
-        item: Item<'db>,
-        name: types::Name<'db>,
-    ) -> Option<types::TypeScheme<'db>> {
-        self.source_scheme(binder_source(self.db, item, name.text(self.db)), name)
-    }
-
-    fn lookup_scheme(
-        &self,
-        name: &str,
-        interned: types::Name<'db>,
+        name: Symbol,
         deferred: bool,
-    ) -> Option<types::TypeScheme<'db>> {
-        if let Some(item) = self.frame_definition(interned, deferred)
-            && let Some(scheme) = self.binder_scheme(item, interned)
+        bindings: NameBindings<'_, 'db>,
+    ) -> Option<Item<'db>> {
+        match self.command {
+            Some(command) => session::binder(self.db, command, name, deferred, bindings.frame),
+            None => bindings.frame,
+        }
+    }
+
+    fn binder_scheme(&self, item: Item<'db>, name: Symbol) -> Option<types::TypeScheme<'db>> {
+        self.source_scheme(binder_source(self.db, item, name.as_str()), name)
+    }
+
+    fn lookup_scheme(&self, name: Symbol, deferred: bool) -> Option<types::TypeScheme<'db>> {
+        let bindings = self.bindings(name, deferred);
+        if let Some(item) = self.frame_definition(name, deferred, bindings)
+            && let Some(scheme) = self.binder_scheme(item, name)
         {
             return Some(scheme);
         }
-        if let Some(scheme) = self
-            .layers(interned)
-            .find_map(|layer| self.layer_scheme(layer, interned))
+        if let Some(scheme) = bindings
+            .layers()
+            .find_map(|layer| self.layer_scheme(layer, name))
         {
             return Some(scheme);
         }
@@ -3288,70 +3751,73 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
 
     /// The shipped declarations a bare `name` reaches, which leave out the standard library's
     /// when `[check] prelude` is off.
-    fn bare_library_candidates(&self, name: &str) -> Option<&'db [types::TypeScheme<'db>]> {
+    fn bare_library_candidates(&self, name: Symbol) -> Option<&'db [types::TypeScheme<'db>]> {
         let library = self.library?;
         if stubs::outside_prelude(self.db, library, name) {
             return None;
         }
         library.schemes.get(name).map(Vec::as_slice)
     }
-
-    fn winner(&self, name: types::Name<'db>) -> Option<Item<'db>> {
-        self.layers(name).find_map(|layer| layer.winner)
-    }
 }
 
 impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
     fn scheme(&self, name: Symbol, deferred: bool) -> Option<types::TypeScheme<'db>> {
-        let interned = types::Name::new(self.db, name);
-        if let Some(scheme) = self.schemes.borrow().get(&(interned, deferred)) {
+        let slot = self
+            .links
+            .position(name)
+            .map(|position| 2 * position + usize::from(deferred));
+        if let Some(slot) = slot
+            && let Some(Some(scheme)) = self.schemes.borrow().get(slot)
+        {
             return scheme.clone();
         }
-        let scheme = self.lookup_scheme(name.as_str(), interned, deferred);
-        self.schemes
-            .borrow_mut()
-            .insert((interned, deferred), scheme.clone());
+        let scheme = self.lookup_scheme(name, deferred);
+        if let Some(slot) = slot {
+            let mut schemes = self.schemes.borrow_mut();
+            if schemes.is_empty() {
+                schemes.resize(2 * self.links.name_count(), None);
+            }
+            if let Some(resolved) = schemes.get_mut(slot) {
+                *resolved = Some(scheme.clone());
+            }
+        }
         scheme
     }
 
     fn defined_in_project(&self, name: Symbol, deferred: bool) -> bool {
-        let interned = types::Name::new(self.db, name);
-        self.frame_definition(interned, deferred).is_some()
-            || self.layers(interned).any(NameLayer::binds)
+        let bindings = self.bindings(name, deferred);
+        self.frame_definition(name, deferred, bindings).is_some()
+            || bindings.layers().any(NameLayer::binds)
     }
 
     fn earlier_binding(&self, name: Symbol) -> Option<types::TypeScheme<'db>> {
-        let interned = types::Name::new(self.db, name);
-        if let Some(item) = self.frame_definition(interned, false) {
-            return self.binder_scheme(item, interned);
+        let bindings = self.bindings(name, false);
+        if let Some(item) = self.frame_definition(name, false, bindings) {
+            return self.binder_scheme(item, name);
         }
-        Some(self.item_scheme(self.winner(interned)?))
+        Some(self.item_scheme(bindings.layers().find_map(|layer| layer.winner)?))
     }
 
     fn namespace_scheme(&self, name: Symbol) -> Option<types::TypeScheme<'db>> {
         if self.kind == DocumentKind::Package {
             return self.scheme(name, false);
         }
-        let interned = types::Name::new(self.db, name);
-        if let Some(scheme) = self
-            .package_layer(interned)
-            .and_then(|layer| self.layer_scheme(layer, interned))
-        {
+        if let Some(scheme) = self.layer_scheme(self.bindings(name, false).package, name) {
             return Some(scheme);
         }
-        self.library?.schemes.get(name.as_str())?.last().cloned()
+        self.library?.schemes.get(name)?.last().cloned()
     }
 
     fn enclosing_scheme(&self, name: Symbol) -> Option<types::TypeScheme<'db>> {
         if self.kind == DocumentKind::Package {
             return None;
         }
-        let interned = types::Name::new(self.db, name);
-        self.layers(interned)
-            .find_map(|layer| self.layer_scheme(layer, interned))
+        self.bindings(name, false)
+            .layers()
+            .find_map(|layer| self.layer_scheme(layer, name))
     }
 
-    fn library_candidates(&self, name: &str) -> Option<&'db [types::TypeScheme<'db>]> {
+    fn library_candidates(&self, name: Symbol) -> Option<&'db [types::TypeScheme<'db>]> {
         let library = self.library?;
         if stubs::outside_prelude(self.db, library, name) {
             return None;
@@ -3363,13 +3829,15 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
     }
 
     fn overloads(&self, name: Symbol, deferred: bool) -> Option<&'db [types::TypeScheme<'db>]> {
-        let candidates = self.bare_library_candidates(name.as_str())?;
+        let candidates = self.bare_library_candidates(name)?;
         if candidates.len() < 2 {
             return None;
         }
         // A project definition shadows the stub set, disabling per-call overload selection.
-        let interned = types::Name::new(self.db, name);
-        if self.frame_definition(interned, deferred).is_some() || self.winner(interned).is_some() {
+        let bindings = self.bindings(name, deferred);
+        if self.frame_definition(name, deferred, bindings).is_some()
+            || bindings.layers().any(|layer| layer.winner.is_some())
+        {
             return None;
         }
         Some(candidates)
@@ -3379,7 +3847,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
         self.definitions
     }
 
-    fn arithmetic_classes(&self) -> &'db FxHashSet<String> {
+    fn arithmetic_classes(&self) -> ArithmeticClasses<'db> {
         visible_arithmetic_classes(self.db, self.file)
     }
 
@@ -3394,22 +3862,22 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
     }
 }
 
-#[salsa::tracked(returns(clone))]
-fn stub_arithmetic_classes(db: &dyn Db) -> FxHashSet<String> {
+#[salsa::tracked(returns(ref))]
+fn stub_arithmetic_classes(db: &dyn Db) -> stubs::SymbolSet {
     let Some(library) = stubs::stubs(db) else {
-        return FxHashSet::default();
+        return stubs::SymbolSet::default();
     };
-    arithmetic_classes_among(library.schemes.keys().map(String::as_str))
+    arithmetic_classes_among(library.schemes.keys())
 }
 
 /// A union of the per-file sets, which are almost always empty, rather than a scan of every
 /// project name: a new top-level name then costs one file's scan.
-#[salsa::tracked(returns(clone))]
-fn project_arithmetic_classes(db: &dyn Db, files: ProjectFiles) -> FxHashSet<String> {
-    let mut classes = FxHashSet::default();
+#[salsa::tracked(returns(ref))]
+fn project_arithmetic_classes(db: &dyn Db, files: ProjectFiles) -> stubs::SymbolSet {
+    let mut classes = stubs::SymbolSet::default();
     for &file in files.files(db) {
         if *file.kind(db) == DocumentKind::Package {
-            classes.extend(file_arithmetic_classes(db, file).iter().cloned());
+            classes.extend(file_arithmetic_classes(db, file).iter());
         }
     }
     classes
@@ -3432,23 +3900,19 @@ fn file_defines_dollar_method(db: &dyn Db, file: SourceFile) -> bool {
 }
 
 #[salsa::tracked(returns(ref))]
-fn file_arithmetic_classes(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
-    arithmetic_classes_among(
-        file_definitions(db, file)
-            .iter()
-            .map(|(name, _)| name.as_str()),
-    )
+fn file_arithmetic_classes(db: &dyn Db, file: SourceFile) -> stubs::SymbolSet {
+    arithmetic_classes_among(file_definitions(db, file).iter().map(|(name, _)| *name))
 }
 
-fn arithmetic_classes_among<'a>(names: impl Iterator<Item = &'a str>) -> FxHashSet<String> {
+fn arithmetic_classes_among(names: impl Iterator<Item = Symbol>) -> stubs::SymbolSet {
     let prefixes: Vec<String> = check::arithmetic_method_prefixes().collect();
-    let mut classes = FxHashSet::default();
+    let mut classes = stubs::SymbolSet::default();
     for name in names {
         for prefix in &prefixes {
-            if let Some(class) = name.strip_prefix(prefix.as_str())
+            if let Some(class) = name.as_str().strip_prefix(prefix.as_str())
                 && !class.is_empty()
             {
-                classes.insert(class.to_owned());
+                classes.insert(Symbol::new(class));
             }
         }
     }
@@ -3456,13 +3920,12 @@ fn arithmetic_classes_among<'a>(names: impl Iterator<Item = &'a str>) -> FxHashS
 }
 
 /// File-absolute (edge-only, like [`item_node`]): the assignment target or the
-/// `setGeneric` name string, recorded by [`item_spans`]. Memoized so that a check reading
-/// it from another file depends on this one range, not on every span of that file.
-#[salsa::tracked(returns(copy))]
+/// `setGeneric` name string, recorded by [`item_spans`]. A query that reads it depends on
+/// every span of the item's file, so only the file's own queries and editor requests do.
 pub fn item_name_range<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<TextRange> {
     let file = *item.file(db);
-    let index = *item_span_positions(db, file).get(&item)?;
-    item_spans(db, file).get(index)?.name_range
+    let index = *item_tree_positions(db, file).get(&item.as_id())?;
+    item_spans(db, file).get(index as usize)?.name_range
 }
 
 /// The single reading of a statement's shape for both item identity and name range.
@@ -3614,7 +4077,14 @@ mod tests {
     use {super::*, salsa::Setter as _};
 
     fn function_item<'db>(db: &'db RootDatabase, file: SourceFile, name: &str) -> Item<'db> {
-        Item::new(db, file, ItemKind::Function, Some(name.to_owned()), None, 0)
+        Item::new(
+            db,
+            file,
+            ItemKind::Function,
+            Some(Symbol::new(name)),
+            None,
+            0,
+        )
     }
 
     #[test]
@@ -3625,12 +4095,13 @@ mod tests {
             editor: None,
             errors: ThinVec::new(),
             strict_origins: ThinVec::new(),
+            native_blockers: ThinVec::new(),
             scheme: Some(types::TypeScheme::monomorphic(integer)),
             masked_reads: Default::default(),
             column_misses: Default::default(),
             match_findings: ThinVec::new(),
             i64_literals: ThinVec::new(),
-            typed_empties: ThinVec::new(),
+            checked_types: ThinVec::new(),
             top_level_bindings: vec![(
                 hir::Symbol::new("value"),
                 types::TypeScheme::monomorphic(integer),
@@ -3776,7 +4247,7 @@ mod tests {
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         let scheme = global_scheme(&db, even);
         assert!(
-            matches!(scheme.body.kind(&db), types::TyKind::Function(_)),
+            matches!(scheme.body.kind(&db), TyKind::Function(_)),
             "mutual recursion must converge to a function scheme, got {:?}",
             scheme.body.kind(&db)
         );

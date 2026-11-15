@@ -76,6 +76,50 @@ label <- function(x: integer) -> character x
 label: fn(x: integer) -> character
 43..44 error[type-mismatch] expected `character`, found `integer`
 
+#---- compatible_return_is_quiet
+label <- function(x: integer) -> character format(x)
+label(1L)
+#++++
+label: fn(x: integer) -> character
+character
+
+#---- null_return_is_checked
+log_count <- function(x: integer) -> NULL x
+#++++
+log_count: fn(x: integer) -> NULL
+42..43 error[type-mismatch] expected `NULL`, found `integer`
+
+#---- side_effect_body_fits_a_null_return
+log_count <- function(x: integer) -> NULL {
+  cat(x)
+  invisible(NULL)
+}
+#++++
+log_count: fn(x: integer) -> NULL
+
+#---- assignment_tail_is_not_null
+log_count <- function(x: integer) -> NULL {
+  last <- x
+}
+#++++
+log_count: fn(x: integer) -> NULL
+46..55 error[type-mismatch] expected `NULL`, found `integer`
+
+#---- each_early_return_is_checked
+label <- function(x: integer) -> character {
+  if (x < 0L) return(x)
+  "non-negative"
+}
+#++++
+label: fn(x: integer) -> character
+66..67 error[type-mismatch] expected `character`, found `integer`
+
+#---- invisible_result_is_checked
+label <- function(x: integer) -> character invisible(x)
+#++++
+label: fn(x: integer) -> character
+43..55 error[type-mismatch] expected `character`, found `integer`
+
 #---- calls_are_checked_against_the_signature
 add <- function(x: integer, y: integer = 1L) -> integer x + y
 add("a")

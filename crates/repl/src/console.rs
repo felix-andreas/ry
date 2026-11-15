@@ -182,7 +182,12 @@ fn install(options: RunOptions, ry_runtime: bool, banner: Option<String>) -> Res
     }
     let mut filter = options.filter;
     if let Some(script) = script {
-        let script = normalize_line_endings(&script);
+        let mut script = normalize_line_endings(&script);
+        // A `#:` block on a file's last line annotates nothing, and at a prompt it would wait
+        // for its statement. The line break tells the filter that nothing follows it.
+        if !script.ends_with('\n') {
+            script.push('\n');
+        }
         // A script whose filter refuses it does not run at all, and an unfinished one is R's
         // to report, so the filter forgets it rather than prepend it to the first command.
         let script = match filter
@@ -948,7 +953,9 @@ pub fn input_is_complete(text: &str) -> bool {
     // unless the code before the quote is already an error. The syntax crate's lexer cuts such
     // a quote at its line break instead, which suits an editor but not this question.
     let Some(start) = open_quote_start(text) else {
-        return !input_is_unfinished(text);
+        // The editor asks before the last line has its line break, and the rule that waits for
+        // the line a `#:` block annotates needs the break to see a blank line end the wait.
+        return !input_is_unfinished(&format!("{text}\n"));
     };
     let code = &text[..start];
     let has_error = parse(code)

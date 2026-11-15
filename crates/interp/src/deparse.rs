@@ -1025,6 +1025,7 @@ impl Deparser {
     /// The calls ry's own syntax lowers to, printed back in that syntax.
     unsafe fn ry_call(&mut self, form: RyForm, arguments: Sexp) {
         match form {
+            RyForm::Elaborated | RyForm::Replayed => self.deparse(arguments.car()),
             RyForm::Record | RyForm::Tuple => {
                 self.print("(");
                 self.in_list += 1;
@@ -1261,24 +1262,21 @@ impl Deparser {
 
     unsafe fn list(&mut self, list: Sexp, opener: &str) {
         let count = length(list);
-        let names = get_attr(list, symbols().names);
+        let names = values::names(list);
         let nice = self.opts & options::NICE_NAMES != 0 && nice_names_ok(list, self.opts);
         self.print(opener);
         let mut broken = false;
         for index in 0..count {
-            // GNU R's vector deparse breaks a line that is past the cutoff before the next element
-            // (and before the closing parenthesis), without indenting the continuation.
-            if index > 0 && self.length > self.cutoff {
-                self.write_line();
+            if index > 0 {
+                self.print(", ");
             }
+            // GNU R's `vec2buff` checks the cutoff before every element, the first included, so
+            // `list(` past the cutoff ends its line and the elements continue indented.
+            self.line_break(&mut broken);
             if nice {
                 self.name_prefix(names, index);
             }
             self.deparse(list.element(index));
-            if index + 1 < count {
-                self.print(", ");
-                self.line_break(&mut broken);
-            }
         }
         if broken {
             self.indent -= 1;
@@ -1327,7 +1325,7 @@ impl Deparser {
             });
             return;
         }
-        let names = get_attr(vector, symbols().names);
+        let names = values::names(vector);
         let nice = self.opts & options::NICE_NAMES != 0 && nice_names_ok(vector, self.opts);
         let keep_integer = self.opts & options::KEEP_INTEGER != 0;
         let keep_na = self.opts & options::KEEP_NA != 0;
@@ -1544,13 +1542,15 @@ pub unsafe fn source_lines(srcref: Sexp) -> Option<Vec<String>> {
     )
 }
 
-/// Whether names can be written inline (`c(a = 1)`) rather than as an attribute.
+/// Whether names can be written inline (`c(a = 1)`) rather than as an attribute. A
+/// one-dimensional array's names are its dimnames, so GNU R writes them inline as well and keeps
+/// the `dimnames` attribute beside them.
 unsafe fn nice_names_ok(object: Sexp, opts: u32) -> bool {
-    let names = get_attr(object, symbols().names);
-    if names.kind() != SexpType::String {
+    if !object.kind().is_vector() {
         return false;
     }
-    if !object.kind().is_vector() || length(names) != length(object) {
+    let names = values::names(object);
+    if names.kind() != SexpType::String || length(names) != length(object) {
         return false;
     }
     // All-empty names need the attribute form, and so does an `NA` name when attributes are
@@ -1701,6 +1701,14 @@ enum RyForm {
     Tuple,
     Tag,
     Match,
+    /// `.ry_items(x, "F64")`, which the preflight writes around an expression whose type only
+    /// the checker knows (`preflight::elaborate` in the `ry` crate): it prints as the `x` the
+    /// code's author wrote.
+    Elaborated,
+    /// `.ry_replay(x, call)`, which a typed call running again in the interpreter evaluates in
+    /// place of an R call its native code made (`crate::replay`): it prints as the `x` the code's
+    /// author wrote.
+    Replayed,
 }
 
 /// Which ry form a call of `name` with `arguments` is, when its arguments have that form's
@@ -1712,6 +1720,14 @@ unsafe fn ry_form(name: &[u8], arguments: Sexp) -> Option<RyForm> {
         b".ry_record" if !items.is_empty() && named == items.len() => Some(RyForm::Record),
         b".ry_tuple" if named == 0 => Some(RyForm::Tuple),
         b".ry_array" if named == 0 => Some(RyForm::Array),
+        b".ry_items"
+            if named == 0
+                && matches!(items[..], [_, (_, hint)]
+                    if hint.kind() == SexpType::String && length(hint) == 1) =>
+        {
+            Some(RyForm::Elaborated)
+        }
+        b".ry_replay" if named == 0 && items.len() == 2 => Some(RyForm::Replayed),
         b".ry_tag" => {
             let (first_tag, first) = items.first()?;
             (*first_tag == nil() && first.kind() == SexpType::String && length(*first) == 1)

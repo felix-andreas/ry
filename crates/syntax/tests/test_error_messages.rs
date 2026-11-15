@@ -57,6 +57,11 @@ fn a_console_reads_on_only_when_the_input_ended_too_early() {
         "x <-\n",
         "x +\n",
         "if (TRUE) {\n  1\n",
+        // A `#:` block annotates the line after it, so the console waits for that line.
+        "#: fn(x: I64) -> I64\n",
+        "#: fn(x: I64) -> I64",
+        "x <- 1\n#: @param x {I64}\n#: @return {I64}\n",
+        "#: @trust fn(x: I64) -> I64\n",
     ];
     let finished = [
         "x <- 1\n",
@@ -65,6 +70,13 @@ fn a_console_reads_on_only_when_the_input_ended_too_early() {
         "{ f(1))\n",
         "#: fn(x: \nx <- 1\n",
         "",
+        // A blank line detaches the block, a broken block is only a comment, a block that
+        // declares a type stands alone, and a block trailing code belongs to no later line.
+        "#: fn(x: I64) -> I64\n\n",
+        "#: fn(x: \n",
+        "#: @alias Id {I64}\n",
+        "x <- 1 #: I64\n",
+        "#: fn(x: I64) -> I64\nf <- function(x) x\n",
         // A complete construct that breaks one of ry's own rules is an error to report now.
         "(1L, y = 2)\n",
         "(a = 1, a = 2)\n",

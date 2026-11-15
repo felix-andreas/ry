@@ -44,11 +44,12 @@
   ".onAttach", ".onUnload", ".conflicts.OK", ".noGenerics", ".__ry_loader__."
 )
 
-load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE, quiet = FALSE) {
-  .ry_load(path, export_all, attach, full, quiet, report_noop = TRUE)
+load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE, quiet = FALSE,
+                     helpers = TRUE) {
+  .ry_load(path, export_all, attach, full, quiet, report_noop = TRUE, helpers = helpers)
 }
 
-.ry_load <- function(path, export_all, attach, full, quiet, report_noop) {
+.ry_load <- function(path, export_all, attach, full, quiet, report_noop, helpers = TRUE) {
   root <- .ry_find_root(path)
   state <- .ry_packages[[root]]
   current <- !is.null(state) && isNamespaceLoaded(state$name) &&
@@ -81,7 +82,8 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   # exports everything onto the search path, its helpers sourced there.
   testthat <- .ry_uses_testthat(root)
   attached <- isTRUE(attach) && (plan$full || !is.null(state$package_env))
-  helpers <- .ry_helpers(state, root, isTRUE(export_all) && attached && testthat,
+  helpers <- .ry_helpers(state, root,
+                         isTRUE(helpers) && isTRUE(export_all) && attached && testthat,
                          plan$full || !plan$noop)
   # Switching `export_all` changes what is exported even when no file changed.
   resync <- !identical(state$export_all, export_all)

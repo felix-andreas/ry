@@ -1,0 +1,31 @@
+[stdout]
+| List of 3
+|  $ : int 30
+|  $ : int 2
+|  $ :List of 3
+|   ..$ a: num 31
+|   ..$ b: chr "y"
+|   ..$ d: logi TRUE
+|   ..- attr(*, "tag")= chr "t"
+| List of 5
+|  $ :List of 3
+|   ..$ name : chr "anything"
+|   ..$ local: int 30
+|   ..$ fn   : logi TRUE
+|  $ : int 300
+|  $ : num 2
+|  $ : chr [1:2] "p" "q"
+|  $ : logi TRUE
+| [1] "101"        "wrapped 30"
+| List of 3
+|  $ : chr "+"
+|  $ : num 60
+|  $ : 'nothing_here' num 30
+| [1] 42
+| [1] 60 31
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| c(60, 31)

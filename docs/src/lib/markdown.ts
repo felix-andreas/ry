@@ -63,6 +63,7 @@ function bodyToMarkdown(body: string): string {
   let fence: { marker: string; length: number } | undefined;
   let headingLevel = 1;
   let inComment = false;
+  let inUnmeasuredSection = false;
 
   for (const line of body.split('\n')) {
     const fenceMatch = /^\s*(`{3,}|~{3,})/.exec(line);
@@ -86,6 +87,25 @@ function bodyToMarkdown(body: string): string {
       inComment = !line.includes('-->');
       continue;
     }
+
+    // A `<BenchmarkSection>` is a whole section of the page about one suite. It has the suite's
+    // name as its heading, and it is left off the page while the suite has no results.
+    if (inUnmeasuredSection) {
+      inUnmeasuredSection = !line.startsWith('</BenchmarkSection>');
+      continue;
+    }
+    const section = /^<BenchmarkSection\b[^>]*\bsuite="([a-z_]+)"/.exec(line);
+    if (section) {
+      const found = suite(section[1]);
+      if (found?.results === undefined) {
+        inUnmeasuredSection = true;
+      } else {
+        headingLevel = 2;
+        push(`## ${found.name}`, false);
+      }
+      continue;
+    }
+    if (line.startsWith('</BenchmarkSection>')) continue;
 
     const heading = /^(#{1,6})\s/.exec(line);
     if (heading) headingLevel = heading[1].length;

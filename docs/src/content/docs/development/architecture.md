@@ -42,9 +42,9 @@ illegal dependency unrepresentable.
   that, it can never come to depend on an analysis result.
 - **`loader`** is the package-development loader. It reads a package into the analysis, diffs the
   load index against what a session has loaded, and produces a backend-neutral plan. Its GNU R
-  backend hands the plan to R code as an RDS file, and its backend for ry's own runtime (behind the
-  `runtime` feature, which links `heap` and `interp`) builds the plan on the heap and binds each lazy
-  definition as a promise over the analysis's own syntax tree.
+  backend hands the plan to R code as an RDS file. The backend for ry's own runtime lives in `libr`
+  (`loader_backend.rs`), so `loader` links no runtime crate: it builds the plan on the heap and
+  binds each lazy definition as a promise over the analysis's own syntax tree.
 - **`oracle`** is the differential test harness for the R runtime: it runs one R file under GNU R
   and under another engine and compares the observable results. It also generates the programs for
   differential fuzzing and runs the corpus packages' own tests and installs. It depends only on
@@ -57,15 +57,33 @@ illegal dependency unrepresentable.
   `CHARSXP` interning, symbols, environment frames and the `R_alloc` arena. It depends on nothing else in the workspace.
 - **`libr`** is R's C API, built as the shared library `libR.so` that compiled packages link
   against, with the C half of the native boundary and an R 4.6-compatible header set. It depends on
-  `heap`, `interp`, `jit`, `table` and `loader`. Its design is the draft at
+  `heap`, `interp`, the interpreter's leaf crates (`stats`, `graphics`, `frames`, `services`),
+  `jit`, `table`, `loader`, `rcmd`, `semantics` and `syntax`, and it is the host that installs the
+  runtime crates. Its design is the draft at
   [`development/design/r-runtime.md`](/development/design/r-runtime/). Evaluation belongs to the
   interpreter, which plugs into it through the `Evaluator` hook in `eval.rs`.
 - **`interp`** is the R interpreter: the evaluator, the tier-0 bytecode, conditions, S3 and S4
   dispatch, and base R's primitives and internals in Rust, plus the check of
   [inline annotations](/guide#inline-annotations) at function boundaries. It depends on
-  `heap`, `syntax` and `table`, and `libr` installs it through the `Evaluator` hook, so it knows
-  nothing about C. The values that are ry's own live here too: records and tags, `List`,
-  `DataFrame` and the standard library.
+  `heap`, `numeric`, `rcmd` and `syntax`, and `libr` installs it through the `Evaluator` hook, so it knows
+  nothing about C. The values that are ry's own live here too: records and tags, `List` and the
+  standard library. A `for`, `while` or `repeat` loop in the global
+  environment compiles to tier 0 before its first iteration, as GNU R's JIT compiles it, because
+  compiled code binds the base functions it inlines at that moment
+  ([`design/top-level-loops.md`](/development/design/top-level-loops/)).
+- **`numeric`** holds the numeric kernels that take and return plain numbers: R's nmath library,
+  extended-precision sums, the vectorized elementary functions, the FFT, LINPACK and C's number
+  formats. It sits below `interp`, so an edit to the interpreter recompiles none of it.
+- **`stats`**, **`graphics`**, **`frames`** and **`services`** are the interpreter's leaf crates:
+  the stats package's native routines, R's graphics engine with its devices and renderer, the
+  `DataFrame` binding over `table`, and the HTTP client. Each depends on `interp`, and nothing
+  but the host depends on them, so the interpreter builds without Polars, a rasterizer or an HTTP
+  stack, and an edit to one of them rebuilds only that crate and the host. A leaf's `install()`
+  registers its builtins and native routine tables with the interpreter and fills the
+  interpreter's function-pointer table (`extensions.rs`) for the calls that go the other way,
+  such as tracing the graphics devices' objects during a collection. A host that installs no
+  leaf runs with the table's defaults: no device is open, no object is a table, and a transfer
+  fails as an unsupported protocol.
 - **`jit`** is the runtime's optimizing tier: it compiles hot tier-0 bytecode to machine code with
   Cranelift. Tier 0 calls it through the `Tier` hooks in `interp`'s `bytecode.rs` when a body has
   been entered often or a loop has jumped back often, and the compiled code runs on tier 0's own
@@ -83,14 +101,19 @@ illegal dependency unrepresentable.
   interpreter unchanged. Typed code calls an R function from native code when the call is a
   statement or the argument of a `*.from_r` conversion; the arguments arrive as forced promises
   of the code written in the call, and the conversion's result type comes from the type the
-  interpreter saw it give, so the first call of such a function runs interpreted. Code that has
-  called R cannot run again, so giving up after an R call is an error. It depends on `heap` and
-  `interp`. `RY_TYPED_LOG=1` prints each compilation and refusal, and each typed call that runs in the
-  interpreter with the reason the native path declined it, and
-  `RY_TYPED_DUMP=1` prints the Cranelift IR.
+  interpreter saw it give, so the first call of such a function runs interpreted. Code that
+  gives up after calling R is run again by the interpreter, which takes the value of each R
+  call the code already made from a record instead of calling R a second time
+  (`interp::replay`). It depends on `heap` and
+  `interp`. `RY_TYPED_LOG=1` prints each compilation with the time it took
+  (`typed: compiled for [F64] -> F64 in 412 us`, the time of that function alone), each refused
+  compilation with its time (`typed: refused [Str] after 85 us`), so the lines of a run add up to
+  its whole compile time, and each typed call that runs in the interpreter with the reason the
+  native path declined it. `RY_TYPED_DUMP=1` prints each compiled function
+  twice: the typed core's own instructions after its passes, then the Cranelift IR built from them.
 - **`table`** is ry's built-in typed table: an engine over Polars with a query IR that lowers
   `tbl[i, j, by]` and the `DataFrame` verbs to a lazy plan, plus the readers, writers and
-  data.table helpers around it. `interp` owns the `DataFrame` value and calls the engine, and `libr`
+  data.table helpers around it. `frames` owns the `DataFrame` value and calls the engine, and `libr`
   exposes a column to native code as an ALTREP vector, so the table holds only Arrow data.
 - **`sniff`** reads the layout of a delimited text file: separator, header and each column's R type.
   The table engine's reader and the checker both use it, so the checker types a literal
@@ -161,14 +184,19 @@ reparse is compared with a parse from scratch.
 
 ### Parsing, and why it is not where incrementality happens
 
-`parse(file)` is a per-file query with a splice cache beside it. The cache remembers the file's
-previous text and tree (shared across clones of the storage handle), works out the current edit as
-the longest common prefix and suffix, and lets `syntax::reparse` reparse only the statements the
-edit touched and copying the untouched top-level runs of the old tree around them.
+`parse(file)` is not a query. It returns the file's tree from the host's `TreeStore`
+(`Db::trees`), the one home of syntax trees, which holds at most one tree per file. The store is
+split into 16 shards by file, each behind its own lock, and a parse runs outside every lock. A
+second reader of a file that is being parsed waits for that parse and takes its tree. When the file's
+text differs from the stored tree's, the store works out the edit as the longest common prefix and
+suffix, and `syntax::reparse` reparses only the statements the edit touched and copies the
+untouched top-level runs of the old tree around them. A query that reads a tree records its read of
+the file's text and keeps only what it derives, so no memo holds a file's tree. The one syntax a
+memo keeps is the detached copy of an annotation's subtree, described below.
 
 The spliced tree is byte-identical and error-identical to a parse from scratch. The edit-stream
 fuzzer pins that equivalence, and the splice refuses and falls back to a full parse whenever the
-equivalence is not provable, so the cache is invisible to every query downstream. Invalidation below
+equivalence is not provable, so the store is invisible to every query downstream. Invalidation below
 the level of a whole file stays out of salsa on purpose.
 
 The real incrementality happens one level down, in the item tree. An item's identity interns its
@@ -176,24 +204,49 @@ kind, its name, its parent, and a disambiguator, which makes it stable when othe
 inserted around it. An edit inside one item therefore leaves the derived values of its siblings
 equal, and salsa's early cutoff prunes all the work downstream of them.
 
-### Syntax trees stay resident in the server, and `ry check` holds one at a time
+### The host decides how long a tree stays
 
-The server keeps every syntax tree, because an edit reparses one file and every other tree stays
-valid. `ry check` reads each tree in its first pass only, so it does not memoize them. Each worker of
-the syntax pass wraps a file's work in `semantics::with_held_tree`, which parses the file once and
-parks the tree in a thread-local slot that `parse` serves for the rest of that file's work; the
-tree is freed when the worker moves on. In a one-shot database `item_syntax` and
-`item_annotation_syntax` skip their per-item memos as well, because a memo would keep its file's
-tree alive past the syntax pass and buys nothing in a run that never edits. A tree read outside a held
-tree still works: it goes through the `parse_memo` query, which then keeps that file's tree for the
-rest of the run. A full cold check never does this, but a partial cached run, the cache planner's
-surface comparison and `--annotate` read some trees that way. Annotation memos (`file_item_annotations`) store
-detached copies of their subtrees (`syntax::SyntaxNode::detached_subtree`), so on any host an
-annotation never keeps the whole file's tree alive.
+Every host runs the same queries, and the only thing it chooses about trees is the store's
+capacity. The server's store keeps every tree (`TreeStore::default`), because an edit reparses one
+file by splicing its previous tree and a position request can read any tree at any time.
+
+A command that checks once and exits (`RootDatabase::for_command`, which `ry check` uses) reads
+each tree in its first pass and afterwards mostly what was derived from it. Its store is bounded
+(`TreeStore::bounded`) at four trees per core. The worker that runs a file's first pass holds the
+file (`TreeStore::hold`), and a held tree is never dropped, so the pass parses the file once
+however many trees the other workers read meanwhile. The rest of the capacity keeps the most
+recently read trees, which serves a pass that reads an item of a file it does not hold without a
+parse per read. A tree read after it was dropped is parsed again, which costs time and changes no
+result. `test_incremental.rs` pins that a cold check parses each file once on a store of two
+trees, and that it reports what a store that keeps every tree reports.
+
+`item_syntax` is a plain function that returns the item's window of the stored tree, so an item's
+syntax has no memo of its own to keep the file's tree alive. What it records is a read of the
+item's stamp (`item_stamp`), a number that names the syntax of one top-level node. The store keeps
+one stamp per top-level node of each file. When it parses a file again, a node at the start or the
+end of the file whose subtree equals its counterpart in the previous tree keeps its stamp, and
+every other node gets a stamp that no node has carried before. Two nodes with one stamp therefore
+have equal subtrees, by comparison and not by a hash.
+
+After an edit, `item_stamp` runs again for every item of the edited file, which costs a lookup per
+item, and comes out equal for every item outside the edited region. Salsa backdates those, so
+lowering, annotations and naming run again only for the items whose syntax changed, wherever the
+others moved in the file. Two edits at both ends of a file between two reads leave one changed
+region that spans it: the items between them lower again, and `item_hir` comes out equal and cuts
+off everything downstream. A bounded store may have dropped the tree a stamp names. `item_syntax`
+then parses the file again, and its reader depends on the file's text like any other reader of
+the tree. Under `enable_invariants()` every read of a stamp compares the subtree it names with the
+item's node in the file as it stands.
+
+A `#:` block is a sibling of its item in the file's tree, not part of the item's node. One query
+per file (`file_item_annotations`) attaches the blocks to their items and stores detached copies
+of their subtrees (`syntax::SyntaxNode::detached_subtree`), so an annotation never keeps the whole
+file's tree alive either. It runs again after every edit to the file and comes out equal while no
+block changed, because a detached subtree compares by content and not by position.
 
 Every query that reads a tree is a memoized query whose result is small: the item HIR and
 annotations, `parse_stage_diagnostics`, `file_error_ranges`, the annotation references and
-agreement candidates in `diagnostics.rs`, `item_name_range`, `item_syntax_flags` (whether
+agreement candidates in `diagnostics.rs`, `item_syntax_flags` (whether
 an item binds only its own name, and whether it is declared pure), and `lints::file_syntax_lints`. So a check never walks another file's tree, and revalidating an
 untouched file after an edit elsewhere never walks its own. A finding that also needs naming or
 the project's declarations is split in two: the syntax-only half is memoized, and a cheap step
@@ -201,14 +254,14 @@ joins it with the rest (a bare `setClass` call is reported only when the file do
 `setClass` itself, and two annotations disagree only when their types differ once aliases
 expand).
 
-The CLI's cold check runs three passes over the files, largest first, spread over the cores.
-The first computes every tree-derived fact (`diagnostics::derive_from_syntax`), including each
-file's share of the project-wide maps (`warm_project_folds`), so that no later check derives
-another file's facts on its own thread. The second names every item, so that two threads
-checking files that reach the same item do not block on one claim, and the third assembles the
-diagnostics. `RootDatabase::one_shot` turns off the splice cache, which would otherwise keep the
-previous tree of every file. `test_incremental.rs` pins that a cold check parses each file once
-and that a one-shot cold check memoizes no tree.
+The CLI's cold check runs its passes over the files, largest first, spread over the cores. The
+first computes every tree-derived fact (`diagnostics::derive_from_syntax`), including each file's
+share of the project-wide maps (`warm_project_folds`), so that no later check derives another
+file's facts on its own thread. The second names every item, so that two threads checking files
+that reach the same item do not block on one claim. The project-wide name maps are then built once
+per layer, each on a handle of its own, and the next two passes resolve every item's links and
+every file's cyclic groups (see "Keeping project-wide work cheap"). The last pass assembles the
+diagnostics.
 
 Most tree readers look for a handful of node kinds in a large file, so they walk borrowed cursors
 (`syntax::NodeRef`), which touch no reference count: `syntax::matching_nodes` takes a predicate
@@ -224,19 +277,27 @@ The cold check is CPU-bound and scales about 3 times on 4 cores, so per-file con
 wall time. Several of them are worth knowing:
 
 - Every salsa read of a tracked function with several arguments interns its key and verifies a
-  memo. So in the server one item check resolves all its frame binders in one query
-  (`item_frame_binders`), and every item check caches the package names and schemes it looks up
-  in `SalsaGlobals`. `package_name` and
-  `test_name` take only the name and read `ProjectFiles` themselves.
-- `Ty` and `Name` are not salsa structs. A `Ty` is a pointer to a hash-consed entry in a global,
-  64-way sharded table (`crates/semantics/src/types.rs`), so equality and hashing are a pointer
-  compare and reading the kind is a field load. A direct-mapped per-thread cache sits in front of
-  the shards, because checkers intern the same few types over and over and those land on the same
-  shard mutexes. The entry stores the type's size, which the
-  inference-size cap reads without a walk. A `Name` is a `Symbol`. Neither is ever freed: a
-  one-shot check loses nothing, and the server's table grows only with distinct types, which repeat
-  heavily because types are structural. A query keyed by one name takes a `QueryName`, the one
-  salsa-interned wrapper left. `Symbol::new` checks a thread-local table before the shared one.
+  memo. So an item check resolves every name its naming lists through one query (`item_links`)
+  and reads the answers from that query's arrays. `package_name` and `test_name` take only the
+  name and read `ProjectFiles` themselves.
+- `Ty` and `Name` are not salsa structs. A `Ty` is a four-byte id into one process-wide store
+  (`crates/semantics/src/types.rs`), so equality and hashing compare the id. The store is two
+  parallel append-only columns indexed by the id's low 27 bits: the kind, and the facts derived
+  when the type is built (its size, which the inference-size cap reads without a walk, and the
+  type names it applies). A kind is `Copy`, and its children are slices in an arena that is never
+  reset. The id's upper bits say whether the type is an inference variable, and whether a
+  variable, a named type, a rigid parameter or `Unknown` occurs anywhere in it, so a walk that
+  rewrites only one of those returns on a bit test without reading the store. The leaf kinds and
+  the first 4,081 inference variables have constant ids, so building one is arithmetic. Finding
+  a type that exists probes a table that takes no lock (`crates/semantics/src/intern.rs`), and
+  only storing a new type takes one. A `Name` is a `Symbol`, an id into a store of the same
+  build that also keeps each spelling's hash, first eight bytes and length. Neither store ever
+  frees an entry: a command that exits loses nothing, and the server's stores grow only with
+  distinct types and spellings, which repeat heavily because types are structural. The type
+  store holds at most 2^24 types. A type that contains an inference variable lives in the same
+  store as every other type, because such types leave the item that made them in diagnostics
+  and editor facts. A query keyed by one name takes a `QueryName`, the one salsa-interned
+  wrapper left.
 - The checker matches call arguments in a `bumpalo` arena that lives for one item check, and it
   borrows the item's checks and the stub schemes instead of cloning them.
 - A `NAMESPACE` over 64 KiB parses in chunks on all cores (`metadata::parse_namespace`). Chunks split
@@ -247,8 +308,8 @@ wall time. Several of them are worth knowing:
 - Every item keeps its HIR, naming and check memos for the whole run, so each 8-byte field on
   those values costs about half a megabyte across a 300K-line bench. `ItemNaming::extras` and
   `ItemCheck::editor` keep the rarely populated and the editor-only fields behind one optional
-  box, and a one-shot check skips the per-item binder memo (`item_frame_binders`) and reads the
-  file's binders, a sorted array searched by name, directly.
+  box, and an item's links keep one row per name and one per binding in parallel arrays, with the
+  item's interface edges in the same memo.
 - mimalloc's `realloc` keeps the old block when the new size is at least half of it, so a `Vec`
   shrunk with `into_boxed_slice` or `shrink_to_fit` can still hold twice its length. A buffer that
   stays memoized is allocated at its exact size up front instead.
@@ -312,7 +373,11 @@ run and panics on any difference. The seeded edit simulation in `cli.rs`
 An item's subtree lowers to HIR, with spans relative to the item. Its annotations lower
 separately: a `#:` block and an inline annotation go through the same type lowering into the same
 `Annotation`, and a statement annotated both ways gets one merged annotation
-(`annotations::merge_annotations`), so the checker never knows which spelling it was given. Names
+(`annotations::merge_annotations`), so the checker never knows which spelling it was given. The
+rules that need no types live in `syntax::annotation`: which `#:` block attaches to a statement,
+how a declared parameter pairs with a formal, and which form wins a slot. The runtime calls the
+same module when it registers a function's signature, so the checker and the runtime cannot
+disagree about what a function declares. Names
 in HIR and naming are interned `Symbol`s (a 4-byte `Copy` id). Literal text is not interned,
 because the interner never frees and an edit inside a string literal would otherwise keep every
 spelling it passed through; it lives in the module's own text buffer, addressed by a `Copy`
@@ -351,13 +416,14 @@ When definitions refer to each other in a cycle, the package interface resolves 
 through one canonical fixpoint, so the result never depends on which member happened to be queried
 first:
 
-1. `interface_group` finds the cyclic group an item belongs to. `item_interface_edges` gives each
+1. `item_group` finds the cyclic group an item belongs to. `item_interface_edges` gives each
    item, definition or top-level statement alike, the items its reads resolve to, following
    exactly the resolution a check performs: the frame binder in the item's own file, then the
    test and package layers, and every conditional writer of a name that has no unconditional
-   winner. An iterative Tarjan walk from the item visits only what it reaches, which is enough,
-   because a cycle through the item lies inside that reachable set. Members come back in
-   canonical project order, and the first one keys the group.
+   winner. One iterative Tarjan walk per file (`file_interface_groups`) starts from the file's
+   items and visits only what they reach, which is enough, because a cycle through an item lies
+   inside that item's reachable set. Members come back in canonical project order, and an item
+   finds its group by its position in the file's item tree.
 2. `scc_exports` starts every member at `Unknown` and runs Jacobi rounds until the table of
    exports (each member's scheme and the schemes of the top-level names it binds) stops changing.
    If the round cap is reached, every member is pinned.
@@ -381,9 +447,9 @@ the obvious one.
 
 ### Keeping project-wide work cheap
 
-A check never names the whole project. The interface graph is walked per item, from the items a
-check reaches, and `item_interface_reads`, the set of items and names an item's reads resolve to, is
-a tiny tracked query whose value survives an edit that only shifts ranges.
+A check never names the whole project. The interface graph is walked per file, from that file's
+items, and the walk reads each item's edges from `item_links`, whose value survives an edit that
+only shifts ranges.
 
 The one map that does cover every package item is the set of conditional writers, the items that
 write a top-level name other than their own, which a read with no unconditional winner joins.
@@ -401,27 +467,43 @@ Read per file, that is about 500 memos on a 300,000-line project, and every one 
 file passes on durability alone (see "The language server"). Read per item, it was about 56,000
 memos, which cost every editor request about 35 ms right after a keystroke.
 
-A check never reads a project-wide map either. Each lookup it makes across items goes through a
-firewall keyed by one name or one item: `package_name` gives a name's winner and its conditional
-writers, `interface_group` gives an item's cyclic group, and `frame_binder` gives the file-local
-binder that an immediate or script read sees. The interface edges an item contributes to the group
-walk (`item_interface_edges`) go through `package_name` too. A structural edit re-runs each firewall
-that a check read, and an unchanged answer is backdated, so a new definition re-checks only the
-items that read its name. `crates/semantics/tests/test_incremental.rs` pins these contracts.
+A check never reads a project-wide map either. It reaches other items through three projections,
+and every host uses the same three:
 
-`ry check --no-cache` never edits, so it has no use for those firewalls, and recording them costs a
-cold check hundreds of thousands of salsa dependency edges it never replays. It runs on
-`RootDatabase::one_shot`, whose `Db::one_shot` answer switches three lookups to a coarser shape.
-A `NameLookup` reads the project-wide winner and conditional-writer maps once per reader and then
-answers each name with a hash probe, instead of interning a name and going through `package_name`
-or `test_name`. A frame binder comes from the file's binders, read once per reader, instead of
-the per-item `item_frame_binders` memo and a `frame_binder` memo per name it does not list. And
-`item_group` finds every cyclic group in one walk over the project (`project_interface_groups`)
-instead of one `interface_group` walk per item; `ry check` runs that walk on a cloned handle
-beside the parallel edge pass. Every read still goes through salsa, so the answers are the same
-facts; only the granularity of the recorded dependencies changes. Under
-`syntax::testing::enable_invariants()` each one-shot lookup is compared against the per-name and
-per-item answer. Every `ry check` run is one-shot, cached or not; only the language server keeps the firewalls. A one-shot host also answers `Db::editor_facts` with false, so its item checks leave out expression and pattern types, literal expectations, loop variables, selected overloads and callee targets, which only editor features and rewrites read. `ry migrate` reads expression types for its rewrites, so it analyses on `RootDatabase::one_shot_with_editor_facts`.
+| Projection | Keyed by | Answers |
+|---|---|---|
+| `item_links` | item | where the project binds each name the item's naming lists (the binders in its file, a sourced file's definition, the test and package winners and conditional writers), and the item's interface edges |
+| `package_name`, `test_name`, `frame_binder` | name, or item and name | the same bindings for a name the check constructs itself, such as an S3 method's (`Ops.Date`), which no naming lists |
+| `file_interface_groups` | file | the cyclic groups of the file's items |
+
+`item_links` is the item's own projection of the project-wide name maps. A new top-level name
+anywhere re-runs it for every item, and it backdates unless one of the item's own names moved, so a
+new definition re-checks only the items that read its name. Folding the edges into the same memo
+costs one memo per item instead of two.
+
+A constructed name is usually bound nowhere, and a per-item `frame_binder` memo for each such
+lookup comes to about 100,000 memos (about 18 MB) on the finance bench. An item of a package file
+needs none of them. Every top-level name a package file binds is a definition or a conditional
+write of the package layer, so when `package_name` finds neither, the item's file has no binder for
+the name, and the lookup stops there without a query. The helper files' layer (`test_name`) holds
+a helper file's names the same way. An item of a test file or a script has no layer over its
+file's names and asks `frame_binder`, which reads the binders of that one file.
+
+No lookup folds the binders of every file. A file's binders come from naming each item that writes
+a name besides its own, so such a fold would lower those items in every file of the project, test
+files included, before the first file's check could finish.
+
+`crates/semantics/tests/test_incremental.rs` pins these contracts: the queries an edit re-runs, the
+ones a new definition re-runs, that a check resolves the names it spells through its links
+without a `frame_binder` query, and that a package file's check reads the binders of its own file
+alone. Under
+`syntax::testing::enable_invariants()` every linked lookup is compared with the per-name answer,
+every unbound verdict with `frame_binder`, and every item's group with a walk from that item alone.
+
+A host that only reports diagnostics, such as `ry check`, answers `Db::editor_facts` with false,
+so its item checks leave out expression and pattern types, literal expectations, loop variables,
+selected overloads and callee targets, which only editor features and rewrites read. `ry migrate`
+reads expression types for its rewrites, so it analyses on `RootDatabase::for_command(true)`.
 
 A name being typed is a new top-level definition on every keystroke, so the folds that a new name
 changes are kept to one pass: `package_definition_index` folds each package file's definitions
@@ -430,9 +512,11 @@ those through `duplicate_binding_map`, a copy that is empty in a healthy project
 Names in these maps are interned `Symbol`s whose hash was computed once at interning, so a fold
 hashes four bytes per name and never rereads the spelling.
 
-Types are hash-consed, so type equality is pointer equality and nothing is ever deep-cloned. Deep resolution
-over the interned type graph is memoized per binding epoch and cuts any cycle to `Unknown`; the
-decision log records that design.
+Types are hash-consed, so type equality is an id comparison and nothing is ever deep-cloned. Deep
+resolution cuts any cycle to `Unknown`. It returns at once for a type whose id says it holds no
+variable and applies no alias. A walk that has taken 64 steps starts a table of the subtrees it
+finishes, which lives for that one call, so a subtree shared through variables or aliases
+resolves once. The decision log records that design.
 
 ### The package-load index
 
@@ -611,13 +695,15 @@ describes for users. `crates/heap/src/image.rs` writes and loads the heap part,
 `crates/interp/src/image.rs` saves the interpreter state outside the heap and decides when an
 image applies, and `crates/interp/src/session.rs` either loads the image or starts the slow way.
 
-- **Build output, read-only.** `ry-rcmd build-base` writes the image as its last step, into the
-  base tree at `library/base/R/ry-start.image`, by running `ry-rcmd write-start-image` with an
-  emptied environment. A release embeds the tree, image included. A session never writes an
-  image, and nothing keys it on the run-time environment. `ry-rcmd start-image BASE --libr FILE`
-  (`just start-image`) writes it again over a built tree, and so does assembling an R home
-  (`ry-rcmd assemble`) when the given `libR` cannot load the base tree's image: the home links
-  that image, so a stale one would make every start in the home slow. `libR` exports
+- **Build output, keyed by build.** `ry-rcmd build-base` writes the image as its last step, into
+  the base tree at `library/base/R/ry-start.<build>.image`, by running `ry-rcmd write-start-image`
+  with an emptied environment. `<build>` is the runtime's identity (`RY_RUNTIME_ID`), and
+  `crates/rcmd/src/images.rs` owns the naming. A release embeds the tree with its own build's
+  images only. A session never writes an image, and nothing keys it on the run-time environment.
+  `ry-rcmd start-image BASE --libr FILE` (`just start-image`) writes a build's images over a built
+  tree, and so does assembling or reusing an R home (`ry-rcmd assemble`) when the tree holds no
+  current image of the given `libR`'s build: the home links that image, so a missing one would
+  make every start in the home slow. `libR` exports
   `ry_start_image_current`, which applies the loader's own format and identity checks. A current
   image is only read, so a home assembles over a read-only base tree. A stale one is rewritten
   under a lock file in the base tree (`.start-image.lock`), so homes assembled at once take
@@ -625,14 +711,33 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
 - **Base code images.** Right after the start image, the same step starts a session from it,
   fetches every record of every lazy-load database of the base-priority packages by its key
   (start-up has already forced some bindings, so forcing bindings would miss their records), and
-  writes the images (`R/<package>.ryc`, `R/sysdata.ryc`) with the uncompressed records alone, so those fetches read them in place
-  instead of inflating them. They hold no compiled or machine code: for untrained base code,
-  decoding it and mapping a native section cost more than compiling the closures a session
-  calls. They are written for the same build as the start image.
-- **One build.** The header carries the runtime's identity (`RY_RUNTIME_ID`, a hash of the
-  runtime's sources), and an image of another build is skipped silently, so a development
-  checkout starts the slow way after a runtime edit until `just start-image` runs or a home is
-  assembled over the tree.
+  writes the images (`R/<package>.<build>.ryc`, `R/sysdata.<build>.ryc`) with the uncompressed
+  records alone, so those fetches read them in place instead of inflating them. They hold no
+  compiled code: for untrained base code, decoding it costs more than compiling the closures a
+  session calls. Every other package in the tree (the
+  recommended packages, such as MASS and Matrix) then gets the image an install writes, untrained,
+  so a build that did not install them still loads them from an image. All of them are written for
+  the same build as the start image.
+- **Several builds per tree.** Builds never overwrite or remove each other's images while they
+  are in use, so two builds compared on one tree both start fast. After writing its images, a
+  build prunes the tree under the lock to the images of `images::KEPT_BUILDS` (4) builds: its own
+  and the three others that wrote theirs most recently, a build's images being removed whole. The
+  order comes from a ledger in the tree (`library/base/R/ry-builds`, one build per line, oldest
+  first), never from file times, and a build the ledger does not name counts as the oldest, in
+  name order. A running session holds a shared lock on its build's start-up image, and the pruner
+  removes a build only while it holds that file's exclusive lock, so a build in use is kept
+  however old it is. The ledger is rewritten through a temporary file and a rename, and the writes
+  and the prune all happen under `.start-image.lock`, so two builds starting at once take turns.
+  Unkeyed images (`ry-start.image`, `<package>.ryc`) belong to runtimes that predate the keying
+  and are left alone. One build's images take about 54 MiB in `target/base-r` (a 16 MiB start-up
+  image and 38 MiB of code images).
+- **One build per image.** The header carries the runtime's identity too (`RY_RUNTIME_ID`, a hash
+  of the runtime's sources), and a loader skips an image whose header names another build, which
+  `RY_IMAGE_LOG=1` reports. After a runtime edit, the new build's first start in a development
+  checkout writes its images beside the old build's, which `RY_IMAGE_LOG=1` reports as
+  `ry: image written:`. Installed packages are not rebuilt: when a session finds a package whose
+  code image only another build wrote, it notes once per library and session which packages of
+  that library to reinstall (`note_foreign` in `crates/interp/src/code_image.rs`).
 - **The environment is read again on every start.** After the load, the start clears the options
   and runs the steps that read the process environment: the C-level options, `.Machine`,
   `.Platform` and the device variables, base R's profile, and the `.onLoad` hooks of utils,
@@ -652,7 +757,10 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
   large section (`fill_from` in `crates/interp/src/image.rs`; Windows reads them instead): nothing
   is decoded or patched per object, a page start-up never writes stays shared through the page
   cache by every process that loads the image, and a page is copied when it is first written.
-  The objects carry their tenured bits, so no minor or intermediate collection traces them and a
+  The file stores only the pages that hold an object, back to back. An empty page between them
+  (left where compaction emptied a page below an environment or symbol that cannot move) is
+  untouched zeroed memory in the loader, so it costs neither file bytes nor memory until an
+  allocation claims it. The objects carry their tenured bits, so no minor or intermediate collection traces them and a
   major collection's marking leaves their headers alone.
 - **Base R's closures arrive compiled.** Just before writing, the writer compiles afresh every
   closure bound in base's namespace and the six default namespaces

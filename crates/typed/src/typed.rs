@@ -23,34 +23,50 @@
     clippy::unnecessary_cast
 )]
 
+pub mod ahead;
 pub mod backend;
+pub mod file;
 pub mod fusion;
 pub mod ir;
+pub mod loops;
 pub mod lower;
 pub mod ownership;
+pub mod ranges;
 pub mod shapes;
+pub mod unbox;
 pub mod values;
 
 use {
     crate::{
-        backend::{Callee, Code, Trampoline},
+        backend::{Callee, Code, Entry, Trampoline},
         ir::{Item, Type},
-        lower::{Callees, RCall, Speculation},
+        lower::{Callees, Lowered, RCall, RResult, Speculation},
+        shapes::Shapes,
         values::{Boxed, List, Str},
     },
     heap::{
+        Collection,
         object::{INTEGER_PREFIX, LOGICAL_PREFIX, Sexp, SexpType, Slot, gp},
         records::NativeKind,
         strings::Encoding,
     },
     interp::{
-        annotations::decline, builtins::Arg, bytecode::TypedCall, unwind::Unwind, values as rvalues,
+        annotations::decline,
+        arrays::{Items, checked_conversion},
+        builtins::Arg,
+        bytecode::TypedCall,
+        records::NativeValues,
+        replay,
+        unwind::Unwind,
+        values as rvalues,
     },
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::SmallVec,
     std::{
         borrow::Cow,
         cell::{Cell, RefCell},
+        mem::MaybeUninit,
+        time::{Duration, Instant},
     },
 };
 
@@ -82,6 +98,11 @@ pub struct Compiled {
     pub epoch: Option<u64>,
     /// Whether the code, or a function it calls, calls an R function.
     pub calls_r: bool,
+    /// The [`interp::numbers::conversion_epoch`] at which this code, or a function it calls,
+    /// took the type of a conversion from what the interpreter saw it give
+    /// ([`lower::Conversion::guessed`]). The code is stale once a conversion has given another
+    /// type.
+    pub guessed: Option<u64>,
 }
 
 type Key = (Sexp, SmallVec<[Type; 4]>);
@@ -95,12 +116,21 @@ thread_local! {
     /// The refusals that wait on the interpreter, with what each waits for: the closure compiles
     /// again once the interpreter has done it.
     static AWAITING: RefCell<FxHashMap<Key, lower::Awaited>> = RefCell::new(FxHashMap::default());
+    /// The live native objects at which [`from_box`] next runs a collection.
+    static NATIVE_COLLECTION_AT: Cell<i64> = const { Cell::new(NATIVE_COLLECTION_FLOOR) };
+    /// How long the compilations nested in the one under way took, measured only for the log.
+    static NESTED_COMPILE: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     /// How many R calls compiled code has made, which tells [`call`] whether code that gave up
     /// did anything visible first.
     static R_CALLS: Cell<u64> = const { Cell::new(0) };
+    /// Calls whose native code stopped for the interpreter to run them again.
+    static STOPS: Cell<u64> = const { Cell::new(0) };
     /// The error an R call from compiled code raised, which [`call`] raises once the code has
     /// given up.
     static PARKED: RefCell<Option<Unwind>> = const { RefCell::new(None) };
+    /// The conversion whose value had a type its compiled code was not compiled for, with that
+    /// type, which made the code give up.
+    static FAILED_GUESS: Cell<Option<(Sexp, SexpType)>> = const { Cell::new(None) };
     /// The interpreter's call whose compiled code is running, which an R call the code makes
     /// runs in a frame of. A typed callee that compiled code calls directly has no call of its
     /// own, so its R calls see its caller's.
@@ -118,7 +148,8 @@ struct Running {
     sys_parent: Sexp,
 }
 
-/// How many closures a session compiles at most, since each keeps its closure alive.
+/// How many closures a session compiles at most, since each keeps its closure alive. The
+/// functions compiled before a script starts are not counted ([`ahead::compiled_ahead`]).
 const MAX_COMPILED: usize = 4096;
 
 /// How many refusals the table keeps before it forgets them. A refusal is keyed by a closure
@@ -220,6 +251,7 @@ pub unsafe fn call(
     let mut out = [0u64; 2];
     let trampoline: Trampoline = std::mem::transmute(compiled.code.trampoline);
     let r_calls = R_CALLS.get();
+    let segment = replay::open();
     let outer = RUNNING.replace(Some(Running {
         call: typed.call,
         function,
@@ -231,26 +263,57 @@ pub unsafe fn call(
     RUNNING.set(outer);
     if status != 0 {
         arguments.release();
+        let unwind = PARKED.take();
+        let guess = FAILED_GUESS.take();
+        if unwind.is_some() || R_CALLS.get() == r_calls {
+            replay::close(segment);
+            heap.release_handles(mark);
+            if let Some(unwind) = unwind {
+                return Some(Err(unwind));
+            }
+            STOPS.set(STOPS.get() + 1);
+            decline(|| format!("{}, and the interpreter ran the call again", stop_reason(guess)));
+            return None;
+        }
+        // The code called R before it stopped, so the interpreter runs the call again with
+        // what those calls returned, which their records keep alive.
+        STOPS.set(STOPS.get() + 1);
+        let replayed = replay::replay(
+            segment,
+            typed.call,
+            function,
+            typed.args,
+            typed.sys_parent,
+        );
+        let Some(result) = replayed else {
+            heap.release_handles(mark);
+            return Some(Err(interp::unwind::error(format!(
+                "{}, after it had called R more than {} times or kept more than {} MiB of what \
+                 those calls returned, so the interpreter cannot run the call again without \
+                 calling R a second time: make fewer R calls in one typed call",
+                stop_reason(guess),
+                replay::MAX_RECORDED,
+                replay::MAX_RECORDED_MIB,
+            ))));
+        };
+        if interp::annotations::typed_logging() {
+            // Deparsing the call for the log may collect, and nothing else holds the result.
+            if let Ok(value) = &result {
+                heap.root(*value);
+            }
+            interp::annotations::log_interpreted_because(
+                typed.call,
+                &format!(
+                    "{}, and the interpreter ran the call again with the values its R calls had \
+                     returned",
+                    stop_reason(guess)
+                ),
+            );
+        }
         heap.release_handles(mark);
-        if let Some(unwind) = PARKED.take() {
-            return Some(Err(unwind));
-        }
-        if R_CALLS.get() != r_calls {
-            return Some(Err(interp::unwind::error(
-                "a typed function stopped at an operation only the interpreter finishes after it \
-                 had called R, so it cannot run again in the interpreter: the operation is one \
-                 that raises an error or a warning, or a value that leaves the range its type \
-                 holds",
-            )));
-        }
-        decline(|| {
-            String::from(
-                "its native code stopped at an operation only the interpreter finishes, such as \
-                 one that raises an error or a warning, and the interpreter ran the call again",
-            )
-        });
-        return None;
+        return Some(result);
     }
+    replay::close(segment);
     let value = to_r(compiled.result, out);
     drop_words(compiled.result, out);
     arguments.release();
@@ -284,7 +347,10 @@ unsafe fn compiled_or_refusal(
         // misses shapes confirmed since: compile it again.
         Some(Some(compiled))
             if !still_resolves(compiled)
-                || compiled.epoch.is_some_and(|epoch| epoch != shapes::epoch()) => {}
+                || compiled.epoch.is_some_and(|epoch| epoch != shapes::epoch())
+                || compiled
+                    .guessed
+                    .is_some_and(|epoch| epoch != interp::numbers::conversion_epoch()) => {}
         Some(Some(compiled)) => return Ok(compiled),
         Some(None) => {
             let refusal = COMPILED.with_borrow(|compiled| match compiled.get(&key) {
@@ -296,8 +362,13 @@ unsafe fn compiled_or_refusal(
         }
         None => {}
     }
-    if COMPILED.with_borrow(|compiled| compiled.values().filter(|entry| entry.is_ok()).count())
-        >= MAX_COMPILED
+    // An installed package's typed code file may hold the code already.
+    if let Some(compiled) = file::attach(function, params) {
+        return Ok(compiled);
+    }
+    if !ahead::compiling_ahead()
+        && COMPILED.with_borrow(|compiled| compiled.values().filter(|entry| entry.is_ok()).count())
+            >= MAX_COMPILED + ahead::compiled_ahead() + file::attached()
     {
         decline(|| format!("the session compiled its limit of {MAX_COMPILED} typed functions"));
         return Err(Refusal::new(
@@ -310,17 +381,31 @@ unsafe fn compiled_or_refusal(
             "it is called while its own code is being compiled",
         ));
     }
+    // The clock is read only for the log. A function's time leaves out the callees compiled
+    // while it was lowered, which log their own, and a refused compilation logs its time too, so
+    // the logged times add up to the time the session spent compiling.
+    let started = interp::annotations::typed_logging().then(Instant::now);
+    let outer = NESTED_COMPILE.replace(Duration::ZERO);
     let result = compile(function, params);
+    let total = started.map_or(Duration::ZERO, |started| started.elapsed());
+    let own = total.saturating_sub(NESTED_COMPILE.replace(outer + total));
     COMPILING.with_borrow_mut(|compiling| compiling.remove(&key));
     let compiled = match result {
         Ok(compiled) => {
             interp::heap().add_global_root(function);
-            if interp::annotations::typed_logging() {
-                eprintln!("typed: compiled for {params:?} -> {:?}", compiled.result);
+            if started.is_some() {
+                eprintln!(
+                    "typed: compiled for {params:?} -> {:?} in {} us",
+                    compiled.result,
+                    own.as_micros()
+                );
             }
             Ok(&*Box::leak(Box::new(compiled)))
         }
         Err(refusal) => {
+            if started.is_some() {
+                eprintln!("typed: refused {params:?} after {} us", own.as_micros());
+            }
             decline(|| format!("no code for {params:?}: {}", refusal.0));
             Err(refusal)
         }
@@ -346,6 +431,26 @@ unsafe fn compiled_or_refusal(
     found
 }
 
+/// How many calls on this thread stopped in native code and ran again in the interpreter.
+pub fn native_stops() -> u64 {
+    STOPS.get()
+}
+
+/// Why compiled code stopped partway: the conversion that gave a type the code was not compiled
+/// for when that is why.
+unsafe fn stop_reason(guess: Option<(Sexp, SexpType)>) -> String {
+    match guess {
+        Some((conversion, kind)) => format!(
+            "`{}` gave {}, which its native code was not compiled for",
+            interp::deparse::deparse_first_line(conversion),
+            lower::observed_name(&rvalues::symbol_name(conversion.car()), kind)
+        ),
+        None => "its native code stopped at an operation only the interpreter finishes, such as \
+                 one that raises an error or a warning"
+            .to_owned(),
+    }
+}
+
 /// Whether `function` has compiled code for some argument types.
 pub fn has_compiled(function: Sexp) -> bool {
     COMPILED.with_borrow(|compiled| {
@@ -355,75 +460,122 @@ pub fn has_compiled(function: Sexp) -> bool {
     })
 }
 
-/// Whether every function lookup `compiled` assumes still finds the same function.
+/// Whether every function lookup `compiled` assumes still finds the same function. A lookup
+/// that found a definition its script had not run yet assumed no binding, only the function
+/// ([`ahead::defined_later`]).
 unsafe fn still_resolves(compiled: &Compiled) -> bool {
+    let functions = if ahead::compiling_ahead() {
+        lower::find_function
+    } else {
+        lower::resolve_function
+    };
     compiled.speculations.iter().all(|assumed| {
         let resolve = if interp::values::is_function(assumed.function) {
-            lower::resolve_function
+            functions
         } else {
             lower::resolve_value
         };
-        resolve(assumed.symbol, assumed.env)
-            .is_some_and(|now| now.cell == assumed.cell && now.function == assumed.function)
+        resolve(assumed.symbol, assumed.env).is_some_and(|now| {
+            (assumed.cell == rvalues::nil() || now.cell == assumed.cell)
+                && now.function == assumed.function
+        })
     })
 }
 
-/// Compiles `function` for `params` until the code is current. Compiled code confirms the tag
-/// shapes it constructs, and a `match` over any tag compiled before them, in this code or in a
-/// function it calls, would not test for them.
+/// Compiles `function` for `params`. Compiled code confirms the tag shapes it constructs, and a
+/// `match` over any tag lowered before them, in this code or in a function it calls, would not
+/// test for them. So the shapes a lowering constructs are confirmed before any machine code is
+/// generated, and the function is lowered again until its matches saw every confirmed shape.
+/// Only lowering repeats, which is a small part of a compilation.
 unsafe fn compile(function: Sexp, params: &[Type]) -> Result<Compiled, Refusal> {
     for _ in 0..MAX_SHAPE_ROUNDS {
-        let compiled = compile_once(function, params)?;
-        if compiled.epoch.is_none_or(|epoch| epoch == shapes::epoch()) {
-            return Ok(compiled);
+        let (lowered, linker) = lower_settled(function, params)?;
+        let arguments: SmallVec<[Option<(SexpType, bool)>; 4]> =
+            params.iter().map(|&ty| storage(ty)).collect();
+        let result = storage(lowered.function.result);
+        if !interp::annotations::admits_storage(function, &arguments, result) {
+            return Err(Refusal::new("the types fail the closure's annotations"));
+        }
+        for &shape in &lowered.constructed {
+            shapes::confirm(shape);
+        }
+        let epoch = earliest(lowered.any_tag.as_ref().map(|any| any.epoch), linker.epoch);
+        if epoch.is_none_or(|epoch| epoch == shapes::epoch()) {
+            return generate(params, lowered, linker);
         }
     }
     Err(Refusal::new("the shapes a `match` tests for keep growing"))
 }
 
-/// How many times [`compile`] tries before the shapes settle.
+/// How many times [`compile`] lowers before the shapes settle.
 const MAX_SHAPE_ROUNDS: usize = 4;
 
-unsafe fn compile_once(function: Sexp, params: &[Type]) -> Result<Compiled, Refusal> {
+/// Lowers `function` with a result type that its recursive calls agree with.
+unsafe fn lower_settled(function: Sexp, params: &[Type]) -> Result<(Lowered, Linker), Refusal> {
     let declared = declared_result(function);
     let guesses: SmallVec<[Type; 5]> = declared.into_iter().chain(GUESSES).collect();
     let mut refusal = Refusal::new("the result type depends on the recursion");
-    let mut found = None;
-    'guesses: for &first in &guesses {
+    for &first in &guesses {
         let mut guess = first;
         for _ in 0..=MAX_REVISIONS {
             let mut linker = Linker::default();
-            let lowered = match lower::lower(function, params, guess, declared, &mut linker) {
+            let mut returned = None;
+            let lowered = match lower::lower(
+                function,
+                params,
+                guess,
+                declared,
+                &mut linker,
+                &mut returned,
+            ) {
                 Ok(lowered) => lowered,
-                Err(why) => {
-                    refusal = why;
-                    continue 'guesses;
-                }
+                // A recursive call's guessed result the body cannot use, as a number where
+                // the body reads a record's field, is revised to what a `return` before the
+                // refusal gave.
+                Err(why) => match returned {
+                    Some(ty) if ty != guess => {
+                        refusal = why;
+                        guess = ty;
+                        continue;
+                    }
+                    _ => {
+                        refusal = why;
+                        break;
+                    }
+                },
             };
             let result = lowered.function.result;
             if result == guess || !calls_itself(&lowered.function) {
-                found = Some((lowered, linker));
-                break 'guesses;
+                return Ok((lowered, linker));
             }
             guess = result;
         }
     }
-    let (lowered, linker) = found.ok_or(refusal)?;
+    Err(refusal)
+}
+
+/// Machine code for a lowered function whose shapes are confirmed.
+unsafe fn generate(params: &[Type], lowered: Lowered, linker: Linker) -> Result<Compiled, Refusal> {
     let mut ir = lowered.function;
-    let arguments: SmallVec<[Option<(SexpType, bool)>; 4]> =
-        params.iter().map(|&ty| storage(ty)).collect();
-    if !interp::annotations::admits_storage(function, &arguments, storage(ir.result)) {
-        return Err(Refusal::new("the types fail the closure's annotations"));
-    }
-    fusion::fuse(&mut ir);
-    ownership::insert(&mut ir);
+    optimize(&mut ir);
     let sites: Vec<usize> = lowered
         .r_calls
         .iter()
         .map(|site| site as *const RCall as usize)
         .collect();
     let code = backend::compile(&ir, &linker.callees, &sites)?;
-    let calls_r = linker.calls_r || lowered.r_calls.iter().any(|site| !site.diverges);
+    let calls_r = linker.calls_r
+        || lowered
+            .r_calls
+            .iter()
+            .any(|site| !site.diverges && !site.effect_free);
+    let guesses = lowered.r_calls.iter().any(|site| {
+        matches!(site.result, RResult::Converted(conversion, _) if conversion.guessed())
+    });
+    let guessed = earliest(
+        guesses.then(interp::numbers::conversion_epoch),
+        linker.guessed,
+    );
     // The code calls each function and conversion it was compiled against, and keeps every site
     // for as long as it lives, which is the whole session.
     let heap = interp::heap();
@@ -437,17 +589,14 @@ unsafe fn compile_once(function: Sexp, params: &[Type]) -> Result<Compiled, Refu
         {
             heap.add_global_root(conversion.function);
         }
-        if let Some((conversion, _)) = site.result {
+        if let RResult::Converted(conversion, _) = site.result {
             heap.add_global_root(conversion.function);
         }
     }
     std::mem::forget(lowered.r_calls);
     let mut speculations = lowered.speculations;
     speculations.extend(linker.speculations);
-    for &shape in &lowered.constructed {
-        shapes::confirm(shape);
-    }
-    let epoch = earliest(lowered.epoch, linker.epoch);
+    let epoch = earliest(lowered.any_tag.as_ref().map(|any| any.epoch), linker.epoch);
     Ok(Compiled {
         code,
         params: SmallVec::from_slice(params),
@@ -455,7 +604,21 @@ unsafe fn compile_once(function: Sexp, params: &[Type]) -> Result<Compiled, Refu
         speculations,
         epoch,
         calls_r,
+        guessed,
     })
+}
+
+/// The passes between lowering and machine code.
+fn optimize(ir: &mut ir::Function) {
+    unbox::replace_split_lists(ir);
+    loops::fuse_loops(ir);
+    unbox::unbox(ir);
+    unbox::remove_unread(ir);
+    fusion::fuse(ir);
+    ownership::insert(ir);
+    if std::env::var_os("RY_TYPED_DUMP").is_some() {
+        eprintln!("{ir}");
+    }
 }
 
 fn earliest(a: Option<u64>, b: Option<u64>) -> Option<u64> {
@@ -479,9 +642,12 @@ fn calls_itself(function: &ir::Function) -> bool {
 #[derive(Default)]
 struct Linker {
     callees: Vec<Callee>,
+    /// The closure and argument types of each callee, which a typed code file names it by.
+    called: Vec<Key>,
     speculations: Vec<Speculation>,
     epoch: Option<u64>,
     calls_r: bool,
+    guessed: Option<u64>,
 }
 
 impl Callees for Linker {
@@ -502,8 +668,10 @@ impl Callees for Linker {
         // lookups hold.
         self.speculations.extend_from_slice(&compiled.speculations);
         self.epoch = earliest(self.epoch, compiled.epoch);
+        self.guessed = earliest(self.guessed, compiled.guessed);
+        self.called.push((function, SmallVec::from_slice(params)));
         self.callees.push(Callee {
-            address: compiled.code.address,
+            entry: Entry::Address(compiled.code.address),
             params: SmallVec::from_slice(params),
             result: compiled.result,
         });
@@ -542,7 +710,7 @@ fn declared_type(declared: interp::annotations::Declared) -> Option<Type> {
 }
 
 /// The R storage type of a value of `ty` once it crosses back, and whether it is an `Array`.
-fn storage(ty: Type) -> Option<(SexpType, bool)> {
+pub(crate) fn storage(ty: Type) -> Option<(SexpType, bool)> {
     Some(match ty {
         Type::Int => (SexpType::Integer, false),
         Type::Dbl => (SexpType::Real, false),
@@ -553,6 +721,7 @@ fn storage(ty: Type) -> Option<(SexpType, bool)> {
         Type::Vector { item, array } => (item_storage(item), array),
         Type::List(_) => (SexpType::List, false),
         Type::Record(_) | Type::Tag(_) => (SexpType::Record, false),
+        Type::Table => (SexpType::ExternalPtr, false),
         Type::Set(_) | Type::Dict { .. } => return None,
     })
 }
@@ -582,9 +751,13 @@ fn item_kind(item: Item) -> u32 {
 
 /// The typed core's type for an R value, or `None` when it has none: a length-one plain vector
 /// is a scalar, a longer or empty one a vector, an `Array` an array, a plain list of length-one
-/// strings, numbers or logicals of one storage type a list of them, and a plain tag any tag.
+/// strings, numbers or logicals of one storage type a list of them, a plain tag any tag, and a
+/// value of the table API a table.
 /// A record or tuple has none, because a typed closure takes one only from typed code.
 unsafe fn type_of(value: Sexp) -> Option<Type> {
+    if (interp::interp().extensions.tables.is_table_value)(value) {
+        return Some(Type::Table);
+    }
     if value.is_altrep() || value.attrib() != rvalues::nil() {
         return None;
     }
@@ -652,11 +825,12 @@ unsafe fn list_type(value: Sexp, length: usize) -> Option<Type> {
     item.map(Type::List)
 }
 
-/// Whether a `CHARSXP` is a string the typed core can hold: not `NA`, and UTF-8.
+/// Whether a `CHARSXP` is a string the typed core can hold: not `NA`, and UTF-8. An interned
+/// string had its bytes checked when it was interned, so only another string is read here.
 unsafe fn usable_string(charsxp: Sexp) -> bool {
     charsxp != interp::heap().known().na_string
         && !charsxp.has_gp(gp::LATIN1 | gp::BYTES)
-        && std::str::from_utf8(charsxp.bytes()).is_ok()
+        && (charsxp.is_valid_utf8() || std::str::from_utf8(charsxp.bytes()).is_ok())
 }
 
 /// The arguments of one call as machine words, with what converting them allocated.
@@ -746,6 +920,8 @@ impl Arguments {
                 self.lists.push(boxed as *mut List);
                 self.words.push(boxed);
             }
+            // The caller keeps its argument alive for the call.
+            Type::Table => self.words.push(value.as_ptr() as u64),
             Type::Bool | Type::Null | Type::Set(_) | Type::Dict { .. } | Type::Record(_) => {
                 return Err(UNTYPED);
             }
@@ -807,7 +983,22 @@ const MIXED_LIST: &str = "it holds a list whose items have different types";
 /// ry list in its fields, with its item type, or why it does not convert. Every shape the
 /// conversion meets is confirmed, since a value of it now exists.
 unsafe fn to_box(value: Sexp) -> Result<(u64, Item), &'static str> {
-    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROWTH, || to_box_inner(value))
+    shapes::with(|shapes| to_box_in(shapes, value, 0))
+}
+
+/// [`to_box`] with the shape table borrowed, at `depth` levels below the value converted.
+unsafe fn to_box_in(
+    shapes: &mut Shapes,
+    value: Sexp,
+    depth: u32,
+) -> Result<(u64, Item), &'static str> {
+    if depth.is_multiple_of(STACK_CHECK_LEVELS) {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROWTH, || {
+            to_box_inner(shapes, value, depth)
+        })
+    } else {
+        to_box_inner(shapes, value, depth)
+    }
 }
 
 /// Stack space a conversion leaves before it grows the stack, and how much it adds, since a
@@ -815,95 +1006,142 @@ unsafe fn to_box(value: Sexp) -> Result<(u64, Item), &'static str> {
 const STACK_RED_ZONE: usize = 64 * 1024;
 const STACK_GROWTH: usize = 1024 * 1024;
 
-unsafe fn to_box_inner(value: Sexp) -> Result<(u64, Item), &'static str> {
+/// How many levels of a tree a conversion descends between two checks of the stack. Asking
+/// how much stack is left costs a thread-local lookup, a sizable part of converting one small
+/// record, and this many levels take far less than the red zone.
+const STACK_CHECK_LEVELS: u32 = 8;
+
+unsafe fn to_box_inner(
+    shapes: &mut Shapes,
+    value: Sexp,
+    depth: u32,
+) -> Result<(u64, Item), &'static str> {
     if value.kind() != SexpType::Record {
         return Err(FIELD);
     }
     if value.is_object() || value.attrib() != rvalues::nil() {
         return Err(CLASSED);
     }
-    let layout = value.record_layout();
     let kind = interp::records::native_kind(value);
+    // A record typed code made and R never filled shares its box, so passing it back is free.
+    if value.is_lazy_record() {
+        let boxed = value.lazy_record_value();
+        values::ry_list_dup(boxed as *mut List);
+        let shape = (*(boxed as *const Boxed)).shape;
+        let item = if kind == NativeKind::Tag {
+            Item::Tag(shapes::ANY)
+        } else {
+            Item::Record(shape)
+        };
+        return Ok((boxed, item));
+    }
+    let layout = value.record_layout();
     if matches!(kind, NativeKind::Dict | NativeKind::Set) {
         return Err(COLLECTION);
     }
     let tagged = kind == NativeKind::Tag;
-    let mut items: SmallVec<[Item; 4]> = SmallVec::new();
-    let mut words: SmallVec<[[u64; 2]; 4]> = SmallVec::new();
-    let release = |items: &[Item], words: &[[u64; 2]]| {
-        for (&item, word) in items.iter().zip(words) {
-            match item {
-                Item::Str => values::ry_str_drop(word[0], word[1]),
-                Item::Record(_) | Item::Tag(_) | Item::Array(_) => {
-                    values::ry_list_drop(word[0] as *mut List)
-                }
-                _ => {}
-            }
-        }
-    };
-    for index in 0..value.record_slot_count() {
+    let count = value.record_slot_count();
+    // Every field takes at least one word, so a record with more fields never fits in a box.
+    if count > MAX_WORDS {
+        return Err(TOO_LARGE);
+    }
+    // The fields convert into buffers on the stack, laid out as the box lays them out, and the
+    // box is allocated once their shape is known.
+    let mut items = [const { MaybeUninit::<Item>::uninit() }; MAX_WORDS];
+    let mut words = [const { MaybeUninit::<u64>::uninit() }; MAX_WORDS];
+    let mut used = 0;
+    for index in 0..count {
         let (item, word) = match value.record_slot(index) {
             Slot::Real(number) => (Item::Dbl, [number.to_bits(), 0]),
             Slot::Integer(number) => (Item::Int, [number as u32 as u64, 0]),
             Slot::Logical(number) => (Item::Lgl, [number as u32 as u64, 0]),
-            Slot::Handle(field) => match field_word(field) {
+            Slot::Handle(field) => match field_word(shapes, field, depth + 1) {
                 Ok(found) => found,
                 Err(reason) => {
-                    release(&items, &words);
+                    release_fields(&items[..index], &words[..used]);
                     return Err(reason);
                 }
             },
         };
-        items.push(item);
-        words.push(word);
+        let size = shapes::item_words(item) as usize;
+        if used + size > MAX_WORDS {
+            drop_field(item, word);
+            release_fields(&items[..index], &words[..used]);
+            return Err(TOO_LARGE);
+        }
+        items[index].write(item);
+        words[used].write(word[0]);
+        if size == 2 {
+            words[used + 1].write(word[1]);
+        }
+        used += size;
     }
-    let Some(shape) = shapes::intern(layout, &items) else {
-        release(&items, &words);
+    let fields = std::slice::from_raw_parts(items.as_ptr() as *const Item, count);
+    let Some(shape) = shapes.converted(layout, fields, tagged) else {
+        release_fields(&items[..count], &words[..used]);
         return Err(TOO_LARGE);
     };
-    if tagged {
-        shapes::confirm(shape);
-    }
     let item = if tagged {
         Item::Tag(shapes::ANY)
     } else {
-        Item::Record(shape)
+        Item::Record(shape.id)
     };
-    let description = shapes::shape(shape);
-    if description.words == 0 {
-        return Ok((shapes::constant(shape), item));
+    if shape.words == 0 {
+        return Ok((shape.constant, item));
     }
-    let boxed = values::ry_box_new(
-        shape,
-        description.objects,
-        description.strings,
-        description.words,
+    let boxed = values::ry_box_new(shape.id, shape.objects, shape.strings, shape.words);
+    std::ptr::copy_nonoverlapping(
+        words.as_ptr() as *const u64,
+        boxed.add(values::BOX_FIELDS) as *mut u64,
+        used,
     );
-    for ((&field, word), &offset) in description
-        .fields
-        .iter()
-        .zip(&words)
-        .zip(&description.offsets)
-    {
-        let at = boxed.add(values::BOX_FIELDS + 8 * offset as usize) as *mut u64;
-        *at = word[0];
-        if field == Item::Str {
-            *at.add(1) = word[1];
-        }
-    }
     Ok((boxed as u64, item))
+}
+
+/// The most words, and so the most fields, a box holds.
+const MAX_WORDS: usize = values::MAX_BOX_WORDS as usize;
+
+/// Drops the converted fields `items`, whose words are `words` in box order, when a conversion
+/// fails partway.
+unsafe fn release_fields(items: &[MaybeUninit<Item>], words: &[MaybeUninit<u64>]) {
+    let mut at = 0;
+    for item in items {
+        let item = item.assume_init();
+        let second = if item == Item::Str {
+            words[at + 1].assume_init()
+        } else {
+            0
+        };
+        drop_field(item, [words[at].assume_init(), second]);
+        at += shapes::item_words(item) as usize;
+    }
+}
+
+/// Drops one converted field.
+unsafe fn drop_field(item: Item, word: [u64; 2]) {
+    match item {
+        Item::Str => values::ry_str_drop(word[0], word[1]),
+        Item::Record(_) | Item::Tag(_) | Item::Array(_) => {
+            values::ry_list_drop(word[0] as *mut List)
+        }
+        Item::Int | Item::Dbl | Item::Lgl | Item::I64 => {}
+    }
 }
 
 /// A record field that is a handle as a box field: a plain scalar, a usable string, an `I64`,
 /// a ry list, or a record, tuple or tag, converted deeply.
-unsafe fn field_word(field: Sexp) -> Result<(Item, [u64; 2]), &'static str> {
+unsafe fn field_word(
+    shapes: &mut Shapes,
+    field: Sexp,
+    depth: u32,
+) -> Result<(Item, [u64; 2]), &'static str> {
     if field.kind() == SexpType::Record {
-        let (boxed, item) = to_box_inner(field)?;
+        let (boxed, item) = to_box_in(shapes, field, depth)?;
         return Ok((item, [boxed, 0]));
     }
     if field.is_array() && !field.is_altrep() && field.attrib() == rvalues::nil() {
-        let (list, item) = list_of_array(field)?;
-        return Ok((Item::Array(shapes::array_of(item)), [list as u64, 0]));
+        let (list, item) = list_of_array(shapes, field, depth)?;
+        return Ok((Item::Array(shapes.array_of(item)), [list as u64, 0]));
     }
     match type_of(field).ok_or(FIELD)? {
         Type::Int => Ok((Item::Int, [rvalues::ints(field)[0] as u32 as u64, 0])),
@@ -924,7 +1162,11 @@ unsafe fn field_word(field: Sexp) -> Result<(Item, [u64; 2]), &'static str> {
 ///
 /// The type comes from the value, not the declaration, which is safe: compiled code that meets
 /// a shape whose field type it cannot use declines, and the interpreter makes the call.
-unsafe fn list_of_array(array: Sexp) -> Result<(*mut List, Item), &'static str> {
+unsafe fn list_of_array(
+    shapes: &mut Shapes,
+    array: Sexp,
+    depth: u32,
+) -> Result<(*mut List, Item), &'static str> {
     let length = rvalues::length(array);
     let item = match array.kind() {
         SexpType::Integer => Item::Int,
@@ -937,7 +1179,7 @@ unsafe fn list_of_array(array: Sexp) -> Result<(*mut List, Item), &'static str> 
             }
             Item::Str
         }
-        SexpType::List => return list_of_objects(array, length),
+        SexpType::List => return list_of_objects(shapes, array, length, depth),
         _ => return Err(FIELD),
     };
     // A bare `[]` is a logical `Array` whatever list it stands for, while one the checker typed
@@ -963,7 +1205,12 @@ unsafe fn list_of_array(array: Sexp) -> Result<(*mut List, Item), &'static str> 
 }
 
 /// [`list_of_array`] for an `Array` of records, tags or lists, whose items must share one type.
-unsafe fn list_of_objects(array: Sexp, length: usize) -> Result<(*mut List, Item), &'static str> {
+unsafe fn list_of_objects(
+    shapes: &mut Shapes,
+    array: Sexp,
+    length: usize,
+    depth: u32,
+) -> Result<(*mut List, Item), &'static str> {
     if length == 0 {
         return Err(EMPTY_LIST);
     }
@@ -975,7 +1222,7 @@ unsafe fn list_of_objects(array: Sexp, length: usize) -> Result<(*mut List, Item
     // before a failure, and the rest are null.
     let mut common = None;
     for index in 0..length {
-        let (found, [word, _]) = match field_word(array.element(index)) {
+        let (found, [word, _]) = match field_word(shapes, array.element(index), depth + 1) {
             Ok(converted @ (Item::Record(_) | Item::Tag(_) | Item::Array(_), _)) => converted,
             Ok((item, word)) => {
                 // A scalar never sits in a list of objects, but a stray one must not leak.
@@ -1000,17 +1247,52 @@ unsafe fn list_of_objects(array: Sexp, length: usize) -> Result<(*mut List, Item
     common.map(|item| (list, item)).ok_or(EMPTY_LIST)
 }
 
-/// The R value of the box `boxed`, deeply: a record, tuple or tag of the box's layout.
+/// The R value of the box `boxed`, which stays owned by the caller: a lazy record of the box's
+/// layout that shares the box, so a value R only passes back to typed code is never converted.
+/// R fills it one level at a time as it reads fields ([`settle`]).
 unsafe fn from_box(boxed: u64) -> Result<Sexp, Unwind> {
-    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROWTH, || from_box_inner(boxed))
+    let (layout, fields) = shapes::fields((*(boxed as *const Boxed)).shape);
+    if fields.is_empty() {
+        let heap = interp::heap();
+        let record = heap.alloc_record_slots(layout, &[])?;
+        heap.root(record);
+        return Ok(record);
+    }
+    // A lazy record keeps its whole native tree alive while the R heap sees one small record,
+    // so trees R drops would never make the collector run. Native objects past a limit run a
+    // minor collection, and the limit doubles past what survives, so values typed code holds
+    // itself cost collections only geometrically often.
+    if values::ry_live_objects() > NATIVE_COLLECTION_AT.get() {
+        interp::heap().collect(Collection::Minor);
+        NATIVE_COLLECTION_AT.set((values::ry_live_objects() * 2).max(NATIVE_COLLECTION_FLOOR));
+    }
+    values::ry_list_dup(boxed as *mut List);
+    interp::records::alloc_lazy(layout, fields.len(), boxed, NATIVE_VALUES)
+        .inspect_err(|_| values::ry_list_drop(boxed as *mut List))
 }
 
-unsafe fn from_box_inner(boxed: u64) -> Result<Sexp, Unwind> {
-    let pointer = boxed as *const u8;
-    let shape = shapes::shape((*(pointer as *const Boxed)).shape);
+/// The fewest live native objects at which [`from_box`] runs a collection.
+const NATIVE_COLLECTION_FLOOR: i64 = 1 << 20;
+
+/// How R fills the lazy records [`from_box`] makes and releases their boxes.
+const NATIVE_VALUES: NativeValues = NativeValues {
+    settle,
+    release: release_box,
+};
+
+/// Fills the lazy record `record` from its box. Scalars and strings become slots, and a record,
+/// tuple or tag field becomes a lazy record of its own, so reading one field of a deep tree
+/// converts one level.
+unsafe fn settle(record: Sexp) -> Result<(), Unwind> {
+    // Filling allocates, and a reader such as compiled code may hold `record` only in a
+    // register. Were it collected mid-fill, the collection would release the box this loop
+    // still reads.
+    interp::heap().root(record);
+    let pointer = record.lazy_record_value() as *const u8;
+    let (_, fields) = shapes::fields((*(pointer as *const Boxed)).shape);
     let mut slots: SmallVec<[Slot; 4]> = SmallVec::new();
-    for (&item, &offset) in shape.fields.iter().zip(&shape.offsets) {
-        let at = pointer.add(values::BOX_FIELDS + 8 * offset as usize) as *const u64;
+    let mut at = pointer.add(values::BOX_FIELDS) as *const u64;
+    for item in fields {
         let word = *at;
         slots.push(match item {
             Item::Int => Slot::Integer(word as u32 as i32),
@@ -1029,14 +1311,18 @@ unsafe fn from_box_inner(boxed: u64) -> Result<Sexp, Unwind> {
                 lo: word,
                 hi: *at.add(1),
             })?),
-            Item::Record(_) | Item::Tag(_) => Slot::Handle(from_box_inner(word)?),
+            Item::Record(_) | Item::Tag(_) => Slot::Handle(from_box(word)?),
             Item::Array(_) => Slot::Handle(to_r(Type::of_item(item), [word, 0])?),
         });
+        at = at.add(shapes::item_words(item) as usize);
     }
-    let heap = interp::heap();
-    let record = heap.alloc_record_slots(shape.layout, &slots)?;
-    heap.root(record);
-    Ok(record)
+    interp::heap().settle_record(record, &slots);
+    Ok(())
+}
+
+/// Drops the reference a lazy record held to its box.
+unsafe fn release_box(boxed: u64) {
+    values::ry_list_drop(boxed as *mut List)
 }
 
 /// A rooted character vector holding `string`.
@@ -1060,6 +1346,8 @@ unsafe fn to_r(ty: Type, out: [u64; 2]) -> Result<Sexp, Unwind> {
             hi: out[1],
         }),
         Type::Record(_) | Type::Tag(_) => from_box(word),
+        Type::Table => Sexp::from_raw(word as *mut _)
+            .ok_or_else(|| interp::unwind::error("a typed function read a table it never set")),
         Type::Vector { item, array } => {
             let list = word as *mut List;
             let length = (*list).length as usize;
@@ -1129,15 +1417,27 @@ unsafe fn to_r(ty: Type, out: [u64; 2]) -> Result<Sexp, Unwind> {
 }
 
 /// Makes the R call `site` for compiled code, with the argument words at `words`, and writes the
-/// words of its converted value to `out`. 0 when the call returned, 1 when it raised an error,
-/// which [`call`] raises once the code has given up.
+/// words of its converted value to `out`. 0 when the call returned; 1 when it raised an error,
+/// which [`call`] raises once the code has given up, or when a conversion the code guessed the
+/// type of gave another type ([`FAILED_GUESS`]), after which [`call`] runs the call again in
+/// the interpreter.
+///
+/// A call that may have done something visible is recorded ([`replay::record`]), so that the
+/// interpreter does not make it a second time if the code gives up later. While the interpreter
+/// runs such a call again, a call the code makes that was recorded gives its recorded value.
 ///
 /// # Safety
 ///
 /// `site` is a site the code was compiled with, `words` holds the words of its arguments, and
 /// `out` has room for the words of its result.
 pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *mut u64) -> i32 {
-    R_CALLS.set(R_CALLS.get() + 1);
+    let site = &*site;
+    let replayed = replay::replayed(site.call);
+    // An effect-free call changes nothing a second run would see unless it warns, so only then
+    // does it count as a call the code cannot make again. A replayed call counts, since running
+    // the code again must give it the same value.
+    let effect_free = site.effect_free && replayed.is_none();
+    let warnings = interp::conditions::warnings_raised();
     let heap = interp::heap();
     let mark = heap.handle_mark();
     let outcome = match RUNNING.get() {
@@ -1148,13 +1448,36 @@ pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *
                 args: std::slice::from_raw_parts(running.args, running.count),
                 sys_parent: running.sys_parent,
             };
-            interp::eval::run_in_frame(&typed, |env| call_r(&*site, words, out, env))
+            let mut made = None;
+            interp::eval::run_in_frame(&typed, |env| {
+                made = Some(call_r(site, words, out, env, replayed)?);
+                Ok(())
+            })
+            .and_then(|()| {
+                made.ok_or_else(|| interp::unwind::error("a typed function's R call made nothing"))
+            })
         }
-        None => call_r(&*site, words, out, (*site).env),
+        None => call_r(site, words, out, site.env, replayed),
     };
-    interp::heap().release_handles(mark);
+    heap.release_handles(mark);
+    let made = outcome.as_ref().ok().copied();
+    if !effect_free || interp::conditions::warnings_raised() != warnings {
+        R_CALLS.set(R_CALLS.get() + 1);
+        if let Some(made) = made {
+            replay::record(site.call, made.value);
+        }
+    }
+    // Compiled code holds a table as a bare word, which the collector does not see, so the table
+    // stays rooted until the call that entered typed code releases its handles.
+    if matches!(site.result, RResult::Table)
+        && made.is_some()
+        && let Some(value) = Sexp::from_raw(*out as *mut _)
+    {
+        heap.root(value);
+    }
     match outcome {
-        Ok(()) => 0,
+        Ok(Made { fits: true, .. }) => 0,
+        Ok(Made { fits: false, .. }) => 1,
         Err(unwind) => {
             PARKED.set(Some(unwind));
             1
@@ -1162,12 +1485,56 @@ pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *
     }
 }
 
+/// What an R call compiled code made gave: the value the R function returned, `NULL` when the
+/// code does not use it, and whether its conversion gave the type the code was compiled for.
+#[derive(Clone, Copy)]
+struct Made {
+    value: Sexp,
+    fits: bool,
+}
+
 unsafe fn call_r(
     site: &RCall,
-    mut words: *const u64,
+    words: *const u64,
     out: *mut u64,
     env: Sexp,
-) -> Result<(), Unwind> {
+    replayed: Option<Sexp>,
+) -> Result<Made, Unwind> {
+    let heap = interp::heap();
+    let value = match replayed {
+        Some(value) => value,
+        None => apply_r(site, words, env)?,
+    };
+    let (conversion, ty) = match site.result {
+        RResult::Unused => {
+            return Ok(Made {
+                value: rvalues::nil(),
+                fits: true,
+            });
+        }
+        RResult::Converted(conversion, ty) => (conversion, ty),
+        RResult::Table => {
+            if !(interp::interp().extensions.tables.is_table_value)(value) {
+                return Err(interp::unwind::error(format!(
+                    "`{}` gave a value of type `{}` where the typed function was compiled for a \
+                     table value",
+                    interp::deparse::deparse_first_line(site.call.car()),
+                    value.kind().name()
+                )));
+            }
+            *out = value.as_ptr() as u64;
+            return Ok(Made { value, fits: true });
+        }
+    };
+    heap.root(value);
+    let converted = convert(conversion, site.call, value, site.env)?;
+    heap.root(converted);
+    let fits = write_converted(conversion, ty, converted, out)?;
+    Ok(Made { value, fits })
+}
+
+/// Calls the R function of `site` with the argument words at `words` in `env`.
+unsafe fn apply_r(site: &RCall, mut words: *const u64, env: Sexp) -> Result<Sexp, Unwind> {
     let heap = interp::heap();
     let mut args: SmallVec<[Arg; 4]> = SmallVec::new();
     for argument in &site.arguments {
@@ -1189,14 +1556,7 @@ unsafe fn call_r(
             value: promise,
         });
     }
-    let value = interp::eval::apply(site.call, site.function, &args, env)?;
-    let Some((conversion, ty)) = site.result else {
-        return Ok(());
-    };
-    heap.root(value);
-    let converted = convert(conversion, site.call, value, site.env)?;
-    heap.root(converted);
-    write_converted(conversion, ty, converted, out)
+    interp::eval::apply(site.call, site.function, &args, env)
 }
 
 /// Applies the conversion `conversion` to `value`, the value of the code `code`, as the
@@ -1217,20 +1577,47 @@ unsafe fn convert(
 }
 
 /// Writes the words of `value`, which the conversion `conversion` gave, as a native value of
-/// `ty`, the type it gave when the code compiled.
+/// `ty`, the type it gave when the code compiled. `false` when a conversion whose type the code
+/// guessed gave a value of another type ([`FAILED_GUESS`]), which writes nothing.
 unsafe fn write_converted(
     conversion: lower::Conversion,
     ty: Type,
     value: Sexp,
     out: *mut u64,
-) -> Result<(), Unwind> {
+) -> Result<bool, Unwind> {
+    let value = match conversion.checked {
+        Some(item) if rvalues::symbol_name(conversion.call.car()) == "Num.from_r" => {
+            let expected = match item {
+                Item::I64 => Items::I64,
+                _ => Items::Double,
+            };
+            let number = interp::numbers::checked_number(conversion.call, value, expected)?;
+            interp::heap().root(number);
+            number
+        }
+        Some(item) if value.is_array() => {
+            let expected = match item {
+                Item::I64 => Items::I64,
+                Item::Dbl => Items::Double,
+                _ => Items::Character,
+            };
+            let list = checked_conversion(conversion.call, value, expected)?;
+            interp::heap().root(list);
+            list
+        }
+        _ => value,
+    };
     let expected = storage(ty).map(|(kind, _)| kind);
     if expected != Some(value.kind())
         || rvalues::length(value) != 1 && !matches!(ty, Type::Vector { .. })
     {
+        if conversion.guessed() {
+            FAILED_GUESS.set(Some((conversion.call, value.kind())));
+            return Ok(false);
+        }
         return Err(interp::unwind::error(format!(
-            "`{}` gave a value of type `{}`, and the typed function was compiled for the type it \
-             gave before, {ty:?}: convert the value to one type in R first",
+            "`{}` gave a value of type `{}`, and the typed function was compiled for the type \
+             it gave before: convert the value to one type in R first",
             interp::deparse::deparse_first_line(conversion.call),
             value.kind().name()
         )));
@@ -1276,7 +1663,7 @@ unsafe fn write_converted(
             ));
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 unsafe fn charsxp_of(string: Str) -> Result<Sexp, Unwind> {

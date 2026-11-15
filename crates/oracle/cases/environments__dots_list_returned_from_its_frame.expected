@@ -1,0 +1,11 @@
+[stdout]
+| [1] "list(2, \"a\")"
+| [1] "list(6, b = \"c\")"
+| [1] "list(10L, \"later\")"
+| [1] "list(10L, 20L)"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "list(10L, 20L)"

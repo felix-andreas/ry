@@ -3,11 +3,38 @@
 #include <R_ext/Altrep.h>
 #include <R_ext/GraphicsEngine.h>
 #include <R_ext/Rdynload.h>
-#include <R_ext/PrtUtil.h>
 #include <R_ext/RS.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+
+/* GNU R stops installing R_ext/PrtUtil.h in 4.6 but still exports its functions, so a package
+   built against those headers declares the ones it calls. */
+#if __has_include(<R_ext/PrtUtil.h>)
+#include <R_ext/PrtUtil.h>
+#else
+void Rf_formatReal(const double *x, R_xlen_t n, int *w, int *d, int *e, int nsmall);
+const char *Rf_EncodeReal0(double x, int w, int d, int e, const char *dec);
+const char *Rf_EncodeInteger(int x, int w);
+const char *Rf_EncodeLogical(int x, int w);
+#define formatReal Rf_formatReal
+#define EncodeReal0 Rf_EncodeReal0
+#define EncodeInteger Rf_EncodeInteger
+#define EncodeLogical Rf_EncodeLogical
+#endif
+
+/* Non-API entry points that GNU R 4.6 exports, or hides, without declaring them. Packages
+   written for older R call them and declare them themselves, and their binaries must run in ry;
+   the parentheses keep a function-like macro of the same name out of the declaration. */
+SEXP (ATTRIB)(SEXP x);
+SEXP (CLOENV)(SEXP x);
+SEXP (ENCLOS)(SEXP x);
+SEXP (FRAME)(SEXP x);
+int (OBJECT)(SEXP x);
+void *(DATAPTR)(SEXP x);
+SEXP *(STRING_PTR)(SEXP x);
+SEXP Rf_findVar(SEXP symbol, SEXP rho);
+SEXP Rf_findVarInFrame(SEXP rho, SEXP symbol);
 
 /* Values and vectors. */
 
@@ -604,6 +631,31 @@ SEXP rytest_environment(void)
     return out;
 }
 
+/* R_getVarEx() hands back its last argument for an unbound name, and Rcpp passes a C NULL
+   there to ask whether a binding exists. */
+SEXP rytest_get_var(void)
+{
+    SEXP env = PROTECT(R_NewEnv(R_EmptyEnv, TRUE, 0));
+    SEXP bound = install("rytest.bound"), unbound = install("rytest.unbound");
+    defineVar(bound, ScalarInteger(7), env);
+    SEXP child = PROTECT(R_NewEnv(env, TRUE, 0));
+    SEXP out = PROTECT(allocVector(INTSXP, 7));
+    INTEGER(out)[0] = R_getVarEx(unbound, env, FALSE, NULL) == NULL;
+    INTEGER(out)[1] = R_getVarEx(unbound, child, TRUE, NULL) == NULL;
+    INTEGER(out)[2] = R_getVarEx(unbound, env, FALSE, R_UnboundValue) == R_UnboundValue;
+    INTEGER(out)[3] = R_getVarEx(unbound, env, FALSE, R_NilValue) == R_NilValue;
+    INTEGER(out)[4] = asInteger(R_getVarEx(bound, env, FALSE, NULL));
+    INTEGER(out)[5] = R_getVarEx(bound, child, FALSE, NULL) == NULL;
+    INTEGER(out)[6] = asInteger(R_getVar(bound, child, TRUE));
+    UNPROTECT(3);
+    return out;
+}
+
+SEXP rytest_get_var_unbound(void)
+{
+    return R_getVar(install("rytest.unbound"), R_EmptyEnv, TRUE);
+}
+
 SEXP rytest_duplicate(SEXP x)
 {
     SEXP copy = PROTECT(duplicate(x));
@@ -654,7 +706,7 @@ static R_hashtab_type maphash_table;
 static int maphash_visits;
 static int maphash_corrupt;
 
-static void maphash_visit(SEXP key, SEXP value, void *data)
+static SEXP maphash_visit(SEXP key, SEXP value, void *data)
 {
     (void) data;
     if (maphash_visits++ == 0) {
@@ -665,11 +717,12 @@ static void maphash_visit(SEXP key, SEXP value, void *data)
         R_gc();
         for (int i = 0; i < 2000; i++)
             INTEGER(allocVector(INTSXP, 4))[0] = -777;
-        return;
+        return NULL;
     }
     if (TYPEOF(key) != INTSXP || TYPEOF(value) != STRSXP ||
         strncmp(CHAR(STRING_ELT(value, 0)), "v", 1) != 0)
         maphash_corrupt++;
+    return NULL;
 }
 
 /* The table is filled in one call and walked in another, because everything a call allocates
@@ -973,6 +1026,25 @@ SEXP rytest_run_callback(void)
     SEXP value = Rf_eval(call, R_GlobalEnv);
     UNPROTECT(1);
     return value;
+}
+
+/* A promise native state takes from a variable of `env` and keeps past the call whose frame
+   that environment stands for, then forces. */
+static SEXP kept_promise = NULL;
+
+SEXP rytest_keep_promise(SEXP env, SEXP name)
+{
+    SEXP value = Rf_findVarInFrame(env, Rf_installChar(STRING_ELT(name, 0)));
+    if (kept_promise != NULL)
+        R_ReleaseObject(kept_promise);
+    R_PreserveObject(value);
+    kept_promise = value;
+    return Rf_ScalarInteger(TYPEOF(value));
+}
+
+SEXP rytest_force_promise(void)
+{
+    return kept_promise == NULL ? R_NilValue : Rf_eval(kept_promise, R_GlobalEnv);
 }
 
 /* The hot API entry points, one per operation code, for the fuzz that runs each of them on its
@@ -1388,6 +1460,13 @@ BENCH bench_duplicate_call(int count)
 SEXP rytest_api_bench(SEXP count, SEXP env)
 {
     int n = INTEGER(count)[0];
+    /* A first install of a name can grow the symbol table, a one-time cost of hundreds of
+       thousands of instructions that would land in whichever loop installs first. Installing
+       the loops' names here keeps it out of every measured loop. */
+    install("rytest.tag");
+    install("rytest.symbol");
+    install("rytest.f");
+    install("rytest.variable");
     /* A collection before each loop keeps one from landing inside a measured loop. */
     R_gc();
     bench_set_attrib_symbol(n);
@@ -1444,6 +1523,47 @@ SEXP rytest_api_bench(SEXP count, SEXP env)
     return R_NilValue;
 }
 
+/* Stores a newly allocated element at x[index]: an integer scalar holding `value` in a list, or
+ * a string spelling it in a character vector. The element is young and only x holds it. */
+SEXP rytest_set_young(SEXP x, SEXP index, SEXP value)
+{
+    int number = asInteger(value);
+    if (TYPEOF(x) == STRSXP) {
+        char text[32];
+        snprintf(text, sizeof text, "young %d", number);
+        SET_STRING_ELT(x, asInteger(index), mkChar(text));
+    } else {
+        SET_VECTOR_ELT(x, asInteger(index), ScalarInteger(number));
+    }
+    return R_NilValue;
+}
+
+/* Reverses the elements of the list or character vector x in place, through the element pointer
+ * accessor `via` names, the way data.table's setcolorder permutes a table's columns: memcpy
+ * through a pointer that may be declared read-only. No element is stored through
+ * SET_VECTOR_ELT or SET_STRING_ELT. */
+SEXP rytest_reverse_handles(SEXP x, SEXP via)
+{
+    int string = TYPEOF(x) == STRSXP;
+    SEXP *elements;
+    switch (asInteger(via)) {
+    case 0: elements = (SEXP *) DATAPTR_RO(x); break;
+    case 1: elements = (SEXP *) (DATAPTR_RO)(x); break;
+    case 2: elements = (SEXP *) (string ? STRING_PTR_RO(x) : VECTOR_PTR_RO(x)); break;
+    case 3: elements = (SEXP *) DATAPTR_OR_NULL(x); break;
+    case 4: elements = (SEXP *) DATAPTR(x); break;
+    default: elements = string ? STRING_PTR(x) : (SEXP *) VECTOR_PTR(x); break;
+    }
+    if (elements == NULL)
+        error("no element pointer");
+    R_xlen_t n = XLENGTH(x);
+    SEXP *reversed = (SEXP *) R_alloc(n, sizeof(SEXP));
+    for (R_xlen_t i = 0; i < n; i++)
+        reversed[i] = elements[n - 1 - i];
+    memcpy(elements, reversed, n * sizeof(SEXP));
+    return R_NilValue;
+}
+
 SEXP rytest_cpp_unwind(SEXP call);
 SEXP rytest_destructor_count(void);
 
@@ -1485,6 +1605,8 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_matrix", (DL_FUNC) &rytest_matrix, 2},
     {"rytest_extents", (DL_FUNC) &rytest_extents, 1},
     {"rytest_environment", (DL_FUNC) &rytest_environment, 0},
+    {"rytest_get_var", (DL_FUNC) &rytest_get_var, 0},
+    {"rytest_get_var_unbound", (DL_FUNC) &rytest_get_var_unbound, 0},
     {"rytest_duplicate", (DL_FUNC) &rytest_duplicate, 1},
     {"rytest_identical", (DL_FUNC) &rytest_identical, 2},
     {"rytest_unif", (DL_FUNC) &rytest_unif, 1},
@@ -1501,6 +1623,8 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_destructor_count", (DL_FUNC) &rytest_destructor_count, 0},
     {"rytest_api_extras", (DL_FUNC) &rytest_api_extras, 0},
     {"rytest_accessor_agreement", (DL_FUNC) &rytest_accessor_agreement, 1},
+    {"rytest_reverse_handles", (DL_FUNC) &rytest_reverse_handles, 2},
+    {"rytest_set_young", (DL_FUNC) &rytest_set_young, 3},
     {"rytest_frame_lifetime", (DL_FUNC) &rytest_frame_lifetime, 1},
     {"rytest_interrupt", (DL_FUNC) &rytest_interrupt, 0},
     {"rytest_suspended_interrupt", (DL_FUNC) &rytest_suspended_interrupt, 0},
@@ -1509,6 +1633,8 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_closure_lookup", (DL_FUNC) &rytest_closure_lookup, 2},
     {"rytest_keep_callback", (DL_FUNC) &rytest_keep_callback, 1},
     {"rytest_run_callback", (DL_FUNC) &rytest_run_callback, 0},
+    {"rytest_keep_promise", (DL_FUNC) &rytest_keep_promise, 2},
+    {"rytest_force_promise", (DL_FUNC) &rytest_force_promise, 0},
     {"rytest_api_op", (DL_FUNC) &rytest_api_op, 4},
     {"rytest_api_bench", (DL_FUNC) &rytest_api_bench, 2},
     {NULL, NULL, 0}

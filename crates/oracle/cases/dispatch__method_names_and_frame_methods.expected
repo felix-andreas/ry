@@ -1,0 +1,25 @@
+[stdout]
+| List of 3
+|  $ : chr [1:2] "default" "arrow"
+|  $ : chr [1:2] "default" "assign"
+|  $ : chr [1:2] "default" "eval"
+| [1]  1 99
+| [1] "measure.data.frame"   "measure.data.frame"   "measure.default"     
+| [4] "measure.data.default"
+|  [1] "k1"      "default" "k3"      "default" "k5"      "default" "k7"     
+|  [8] "default" "k9"      "default" "k11"     "default" "k13"     "default"
+| [15] "k15"     "default" "k17"     "default" "k19"     "default" "k21"    
+| [22] "default" "k23"     "default" "k25"     "default" "k27"     "default"
+| [29] "k29"     "default" "k31"     "default" "k33"     "default" "k35"    
+| [36] "default" "k37"     "default" "k39"     "default"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("k1", "default", "k3", "default", "k5", "default", "k7", "default", 
+| "k9", "default", "k11", "default", "k13", "default", "k15", "default", 
+| "k17", "default", "k19", "default", "k21", "default", "k23", 
+| "default", "k25", "default", "k27", "default", "k29", "default", 
+| "k31", "default", "k33", "default", "k35", "default", "k37", 
+| "default", "k39", "default")

@@ -1,0 +1,38 @@
+# A benchmark marks the parts it measures: each region gets one JSON line with its wall time,
+# its samples by activity and its event counts, and a region started again adds to its totals.
+
+requires ry-runtime
+
+file bench.R
+| step <- function(i) i * 2 + 1
+| work <- function(n) { total <- 0; for (i in seq_len(n)) total <- total + step(i); total }
+| .ry_bench_region("small")
+| a <- work(2000)
+| .ry_bench_region("large")
+| b <- work(20000)
+| .ry_bench_region("")
+| ignored <- work(1000)
+| .ry_bench_region("small")
+| a <- work(2000)
+| .ry_bench_region("")
+| cat("done\n")
+
+env RY_PROFILE_REGIONS regions.jsonl
+env RY_PROFILE_INTERVAL_US 200
+run ry run bench.R
+expect exit 0
+expect stdout "done"
+expect file regions.jsonl "{\"region\":\"small\",\"seconds\":"
+expect file regions.jsonl "{\"region\":\"large\",\"seconds\":"
+expect file regions.jsonl "\"activities\":{\"other\":"
+expect file regions.jsonl "\"counters\":{\"closure_calls\":"
+
+unset RY_PROFILE_REGIONS
+unset RY_PROFILE_INTERVAL_US
+file check.R
+| lines <- readLines("regions.jsonl")
+| stopifnot(length(lines) == 2L, startsWith(lines[1], "{\"region\":\"small\""))
+| cat("regions:", length(lines), "\n")
+run ry run check.R
+expect exit 0
+expect stdout "regions: 2"

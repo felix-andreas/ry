@@ -1,0 +1,60 @@
+[stdout]
+|     alpha      beta 
+| "alpha 1"  "beta b" 
+| NULL
+| error: subscript out of bounds 
+| x[[i]]
+| error: missing subscript 
+| x[[i]]
+| error: missing subscript 
+| x[[i]]
+| error: subscript out of bounds 
+| x[[i]]
+| [1] "b"
+| [1] 1 2 3
+| [1] 1 2 3
+| [1] "alpha" "beta" 
+| error: missing subscript 
+| x[[i]]
+| error: missing subscript 
+| x[[i]]
+| [1] 2
+| $beta
+| [1] "b"
+| 
+| [1] 1
+| [1] 1
+| [1] 1
+| method sees i 
+| [1] "counted 1"
+| method sees i 
+| [1] "counted 1"
+| method sees i 
+| [1] "counted 1"
+| [1] 1
+| before
+| index forced
+| after
+| before
+| after
+| [1] 2 2
+| [1] "ignored the index"
+| [.lazy sees i FALSE 
+| $b
+| [1] 2
+| 
+| [.lazy sees i TRUE 
+| [1] "argument \"j\" is missing, with no default"
+| [1] "default for settings"
+| [1] 2
+| [1] 1
+| [1] 3
+| [1] "matrix method"
+| [1] "local alpha"
+| [1] 1
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 1

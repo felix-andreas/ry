@@ -1,8 +1,10 @@
 # Typed code counts a logical list built from list comparisons and `&`, `|` and `!` in one pass,
 # without building the intermediate lists. The counts agree with the unfused path when an input
 # is reassigned between the comparison and the count, when the mask is also returned, when the
-# count sits in a branch, and when a scalar takes part. Lists of different lengths stop the native
-# code, and the interpreter reports the error.
+# count sits in a branch, when a scalar takes part, and when the mask is one `!` or `&` of logical
+# lists. Lists of different lengths stop the native code, and the interpreter reports the error. A
+# comparison predicate whose annotation rejects the item is refused, and the interpreter reports
+# that error too.
 
 requires ry-runtime
 
@@ -25,6 +27,8 @@ file masks.R
 |   m <- xs == 2
 |   if (go) List.count_if(m, \(b) b) else 0
 | }
+| inverted <- function(flags: List<Bool>) -> I64 List.count_if(!flags, \(b) b)
+| both <- function(event: List<Bool>, treated: List<Bool>) -> I64 List.count_if(event & treated, \(b) b)
 | scalar <- function(xs: List<I64>, flag: Bool) -> I64 List.count_if(xs > 1 & flag, \(b) b)
 | undefined <- function(xs: List<F64>) -> I64 List.count_if(xs > 0f64, \(b) b)
 | mismatch <- function(xs: List<I64>, ys: List<I64>) -> I64 List.count_if(xs > 1 & ys > 1, \(b) b)
@@ -35,7 +39,10 @@ file masks.R
 | print(shared(five))
 | print(branchy(three, TRUE))
 | print(scalar(five, TRUE)); print(scalar(five, FALSE))
+| print(inverted([TRUE, TRUE])); print(inverted(flags)); print(both(flags, [TRUE, FALSE, TRUE]))
 | print(tryCatch(mismatch(first, two), error = function(e) conditionMessage(e)))
+| wrong <- function(xs: List<F64>) -> I64 List.count_if(xs, function(v: character) -> Bool v > 1)
+| print(tryCatch(wrong(doubles), error = function(e) conditionMessage(e)))
 | over <- function(xs: List<F64>) -> List<Bool> !(xs > 1f64)
 | names <- function(xs: List<Str>) -> List<Bool> xs == "a"
 | d <- [0.5f64, 2f64]; s <- ["a", "b"]
@@ -44,6 +51,7 @@ file masks.R
 env RY_TYPED_LOG 1
 run ry run --runtime ry masks.R
 expect exit 0
-expect stdout "8i64\n2i64\n[FALSE, FALSE, TRUE, TRUE, TRUE]\n2i64\n4i64\n0i64\n[1] \"`&` needs lists of the same length, but they have 3 and 2 items; a list is never recycled\"\n[TRUE, FALSE]\n[TRUE, FALSE]"
+expect stdout "8i64\n2i64\n[FALSE, FALSE, TRUE, TRUE, TRUE]\n2i64\n4i64\n0i64\n0i64\n2i64\n1i64\n[1] \"`&` needs lists of the same length, but they have 3 and 2 items; a list is never recycled\"\n[1] \"argument `v` must be `character`, not `double`\"\n[TRUE, FALSE]\n[TRUE, FALSE]"
 expect stderr "typed: compiled for [Vector { item: Dbl, array: true }, Vector { item: Lgl, array: true }] -> I64"
 expect stderr "typed: `mismatch` runs in the interpreter"
+expect stderr "typed: `wrong` runs in the interpreter: no code for [Vector { item: Dbl, array: true }]: a local function whose annotations reject its types"

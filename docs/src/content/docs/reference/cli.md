@@ -12,7 +12,7 @@ ry R [FILE]                    # the same on GNU R
 ry load [PATH]                 # load an R package from source, run code against it, and exit
 ry test [PATH]                 # run a package's testthat tests against the loaded package
 ry document [PATH]             # write a package's Rd files and NAMESPACE with roxygen2
-ry build [PATH]                # build a package's source tarball
+ry build [PATH]                # build a package's source tarball; with --aot, install it compiled
 ry install [PATH]              # build and install a package
 ry debug-adapter               # a debugger for editors, over stdio
 ry server                      # the language server, over stdio; your editor starts it
@@ -151,7 +151,7 @@ warnings, and in [strict mode](/guide#strict-mode) they print every error and re
 that has one.
 
 The runtimes differ in what they do with the annotations. ry's runtime turns them into [checks at
-function boundaries](/reference/type-system#inline-annotations-at-run-time), and GNU R runs the
+function boundaries](/reference/type-system#annotations-at-run-time), and GNU R runs the
 script with them erased. ry's runtime is under construction: a script that calls something it
 lacks stops with an error naming it, such as a missing `.Internal` or a native routine of a default
 package. Base graphics, grid and device packages such as ragg draw as they do on GNU R. The
@@ -181,6 +181,74 @@ strict-mode refusal exits 1.
 With standard input piped (`echo '1 + 1' | ry run`), the console skips the editor, the prompt and
 the banner, evaluates each line, prints the result, and exits 0 at the end of input. It behaves
 like `R --no-echo`, except that it keeps going after an error.
+
+### Compiling ahead of time
+
+`ry run --aot script.R` compiles the script's typed functions before the script starts, so no
+function compiles in the middle of the run. Without the flag, each typed function compiles at its
+first call. The script prints the same either way, and its warnings and errors arrive at the same
+points.
+
+```r
+total <- function(n: I64) -> I64 {
+  sum <- 0
+  for (i in List.range(1, n)) sum <- sum + square(i)
+  sum
+}
+square <- function(x: I64) -> I64 x * x
+cat("started\n", file = stderr())
+print(total(10))
+```
+
+`RY_TYPED_LOG=1` prints each compilation on standard error. With `--aot`, both functions are
+compiled before the script writes `started`:
+
+```console
+$ RY_TYPED_LOG=1 ry run totals.R
+started
+typed: compiled for [I64] -> I64 in 733 us
+385i64
+$ RY_TYPED_LOG=1 ry run --aot totals.R
+typed: compiled for [I64] -> I64 in 1044 us
+typed: compiled for [I64] -> I64 in 319 us
+typed: compiled 2 functions ahead of time in 1419 us
+started
+385i64
+```
+
+A function compiles ahead when it is defined at the top level of the script as
+`name <- function(...)` and each parameter's annotation says which values arrive from R: a number,
+`Bool`, `Str`, a `List` of those, a tag union or a table such as `DataFrame` or
+`DataFrame{price: double[]}`. The typed functions it calls compile with it, whatever their
+parameters. A file the script sources into the global environment, as `source("helpers.R")` does,
+compiles the same way when `source()` has read it, before any of it runs. These compile at their
+first call instead:
+
+- a function defined inside a block or another function, or in a file sourced any other way,
+  such as by `sys.source()` or by `source(local = TRUE)` inside a function;
+- a function of a package, unless the package's [typed code file](#build-and-install) holds it,
+  in which case it runs code compiled at install. Under `--aot`, a package whose typed code file
+  another build of ry wrote compiles its typed functions as it loads instead, and prints
+  `ry: another build of ry installed rates, so its typed functions compiled as it loaded; reinstall it to compile them at install`;
+- a function defined after the script set `options(keep.source = TRUE)`, or in a statement that
+  holds a literal R warns about, such as `1.5L`;
+- a top-level function with a record, tuple, `Dict`, `Set` or function parameter that no typed
+  function compiled ahead calls;
+- a function that calls a name the script binds to something else later. It was compiled for the
+  first definition of the name, and compiles again at its next call after the rebinding;
+- a function that converts an R value with `Num.from_r`, or with a `List.from_r` whose item type
+  the checker does not know, such as `List.from_r(get("prices"))`. Its first call runs in the
+  interpreter to see the type;
+- a function that calls into a namespace R has not loaded yet, such as `tools::file_ext`. Loading
+  a namespace runs its code, so the first call runs in the interpreter, which loads it.
+
+[Typed code at run time](/reference/type-system#annotations-at-run-time) describes both waits.
+
+Untyped R code is not compiled ahead of time. It runs in the interpreter and its hot functions
+compile while the script runs, with or without the flag.
+
+`--aot` needs a script and ry's runtime: `ry run --aot` without a file, `--aot` beside `-i`,
+`--keybindings` or `--no-load`, and `--aot --runtime gnu-r` are usage errors.
 
 ### Profile summary
 
@@ -224,12 +292,21 @@ your code and no data. It lists:
   signalled, JIT compilations and deoptimizations, collections and the peak memory in use;
 - calls to closures of package namespaces other than base, and how many of them skipped the
   generic call protocol: the call ran natively or in a slot frame that never made its
-  environment, and no argument was a promise.
+  environment, and no argument was a promise;
+- slot frames turned into environments, by what asked for the environment.
 
 The time split comes from sampling what the runtime is doing once a millisecond, so a share below
 about 1% of a short run is noise. Collecting it slows a run by up to about 7% (1% on the fastest
 of three runs of the `timeseries` application workload, 7% on the median). Without the
 option, the hooks cost one predictable branch each.
+
+Setting `RY_PROFILE_STACKS=FILE` as well writes every sampled call stack to FILE, one line per
+distinct stack and activity: the sample count, the activity (such as `builtin:c` or
+`native:data.table`) and the closures from outermost to innermost as `owner::function`, joined
+by `;`, where the owner is a namespace, `R_GlobalEnv` or `other`. Unlike the summary, these lines name your functions. `tools/bench/compare_profiles.py`
+reads them beside a GNU R `Rprof()` file of the same run (the benchmark driver writes one when
+`RY_BENCH_RPROF=FILE` is set) and compares the two engines closure by closure;
+`development/design/codebase-gap.md` shows what it reports.
 
 `ry repl` still works. It is the earlier name of `ry R`'s console (`ry run`'s with `--runtime ry`),
 and it keeps its `-f FILE`, which is `ry R -i FILE`.
@@ -264,9 +341,13 @@ A value outside a variable's range is ignored, as on GNU R.
 ### Start-up image
 
 ry's base R tree ships an image of the session as it stands once base R and the default packages
-have loaded (`library/base/R/ry-start.image`), and a start loads it instead of running base R's
-start-up code. On Linux an empty `ry run` script takes about 30 ms from the image and about 90 ms
-without it (`RY_IMAGE=0`). The image is written when ry is built and never at run time.
+have loaded (`library/base/R/ry-start.<build>.image`, where `<build>` identifies the ry build),
+and a start loads it instead of running base R's start-up code. On Linux an empty `ry run` script
+takes about 30 ms from the image and about 90 ms without it (`RY_IMAGE=0`). The image is written
+when ry is built, or when a ry build first starts over a base R tree that has none of its own, and
+never by a running session. Several ry builds can share one base R tree: each keeps its own images
+in it, and the tree keeps those of the four builds that wrote theirs most recently, plus any build
+a running session uses.
 
 Each start still runs the steps that read the environment: the C-level options, base R's profile,
 and the `.onLoad` hooks of utils, grDevices and stats. So `EDITOR`, `R_LIBS`, `_R_RNG_VERSION_`
@@ -280,6 +361,7 @@ or `RY_METHODS_NATIVE`.
 | Variable | Effect |
 | --- | --- |
 | `RY_IMAGE` | `0` turns the image off: every start runs the slow way. |
+| `RY_IMAGE_LOG` | `1` prints `ry: image unused: <reason>` for each image a start or load could not use, and `ry: image written: ...` when a start writes its build's images. |
 
 ## load and server
 
@@ -304,12 +386,40 @@ output is testthat's own reporter's, and the command exits with `1` when a test 
   The pattern matches the name without a leading `test-` or `test_` and without the extension, so
   `--filter '^parse$'` selects `test-parse.R` and `test_parse.R`.
 - `--reporter NAME` picks a testthat reporter, such as `summary`, `progress` or `check`.
+- `--jobs N` (or `-j N`) runs the test files in `N` worker processes, one file at a time in each,
+  and `--jobs 1` runs them in the `ry test` process. See [Parallel tests](#parallel-tests).
 - `--watch` keeps running: after every edit under `R/`, `src/`, `data/`, `inst/`, `tests/`,
   `DESCRIPTION` or `NAMESPACE` it reloads only what changed (rebuilding compiled code after a
   `src/` edit), runs first the test files the edit can affect, and then the rest. It learns of
   edits from the operating system's file notifications, so it costs nothing while you type. A file is affected
   when you edited it, or when it mentions a function whose definition reaches a changed one. An
   edit to a helper or setup file, or a reload that has to run top-level code, reruns everything.
+
+### Parallel tests
+
+Workers are testthat's own parallel runner, so a package set up for it needs no change:
+`Config/testthat/start-first` in `DESCRIPTION` orders the files, `testthat::is_parallel()` is
+`TRUE` in a worker, and each worker runs `tests/testthat/setup*.R` and the helpers once. Each
+worker is a separate R process, so test files must not depend on state another file leaves behind.
+
+| You write | Files run in |
+| --- | --- |
+| `ry test --jobs 4` | 4 workers |
+| `ry test --jobs 1` | the `ry test` process |
+| `ry test`, and `DESCRIPTION` has `Config/testthat/parallel: true` and `Config/testthat/edition: 3` | one worker per core |
+| `ry test` otherwise | the `ry test` process |
+
+A run never starts more workers than it has test files, and one test file runs without workers.
+Without `--jobs`, testthat's own switches apply as they do under `devtools::test()`: the
+`TESTTHAT_PARALLEL` environment variable overrides `DESCRIPTION`, and `TESTTHAT_CPUS` or
+`options(Ncpus =)` sets the worker count in place of the core count.
+
+A worker loads the package the way `ry test` itself does, lazily and under the project's
+`ry.toml`, so it needs neither pkgload nor every package in `Imports` installed. With
+`--runtime gnu-r`, workers load the package with `pkgload::load_all()`, as under testthat alone.
+
+`--profile-summary` measures one process, so it runs the files without workers, and combining it
+with more than one job is an error.
 
 ## document
 
@@ -346,7 +456,7 @@ ry build -o dist          # write it into dist/ instead
 ry install                # install into the first library on .libPaths()
 ry install -l ~/rlib      # install into ~/rlib
 ry install --train tests  # train the package's code image on its tests
-ry install --explain      # also report what the install compiled to machine code
+ry build --aot -l ~/rlib  # install, as ry install does
 ```
 
 `ry build` writes the source tarball of the package at `PATH` (default: the one containing the
@@ -363,49 +473,83 @@ Both run R's own `build` and `INSTALL` scripts on ry's runtime, from ry's R home
 built against ry's libR, as `ry run` loads it. `--runtime gnu-r` (or `RY_RUNTIME=gnu-r`) uses GNU R
 instead.
 
+On ry's runtime, both check a typed package (one with `strict = true` under `[check]` in its
+`ry.toml`, or with a file that holds ry syntax or a `# typing: strict` line) before they build it.
+A strict-mode error stops the build, and the command prints the errors and exits with status 1:
+
+```
+  x strict mode found 1 error, so this code does not run
+  x /home/you/bad was not built
+```
+
+The tarball then holds the package's sources as `ry run` would run them: a number literal carries
+the type the checker gave it, an empty `List` or `Dict` carries its item type, and each parameter
+and return annotation that fits on one line is written as the type it stands for, with aliases
+expanded and the package's own `type` definitions unfolded (`p: Point` becomes
+`p: Record{x: F64, y: F64}`). A type with no such spelling, such as the open record
+`Record{a: I64, ..}`, stays as written. Only the tarball changes, never the package directory, and a
+package that declares `Encoding: latin1` gets its rewritten files in latin1.
+
 ry's `R CMD INSTALL` and `R CMD SHLIB` run `make` with one job per processor unless `MAKEFLAGS`
 is set to a value. A package
 whose `Makevars` builds correctly only with one job fails in parallel, so a failed parallel build
 runs again with one job, reusing the objects already built.
 
-An install on ry's runtime also writes the package's code image, `R/<package>.ryc` beside its
-lazy-load database: the compiled code of every closure, which a later session takes instead of
+Compiled code built by ry's `R CMD INSTALL` reads ry's object layout through the headers' inline
+accessors, so it runs only under a ry whose headers have the same binary interface. The install
+records that interface's version as `RyAbi:` in the package's `DESCRIPTION`, beside `RyBuilt:`
+(ry's version). Loading a package that has `RyBuilt:` and whose `RyAbi:` is missing or differs
+fails at its shared library:
+
+```
+Error: package or namespace load failed for ‘tally’:
+ unable to load shared object '/home/me/library/tally/libs/tally.so':
+  package 'tally' was compiled by ry 0.4.5 against older C headers, and its compiled code is unsafe to run under this ry. Reinstall it with this ry: install.packages("tally"), or R CMD INSTALL on its source (ry install for a package you develop).
+```
+
+A package GNU R installed has neither field and loads under ry as it is.
+
+A build in place, by `ry load` or by an install from a directory, leaves its objects in `src/` with
+a stamp file, `src/.ry-abi`, that names the same version. When the stamp is missing or differs, the
+next build first deletes the objects and shared libraries under `src/` (static libraries stay), so
+make cannot reuse objects that other headers compiled.
+
+An install on ry's runtime compiles the package's typed functions and writes their machine code to
+its typed code file, `R/<package>.<build>.ryt`. A later session maps that file and runs the first
+call of each typed function on the code compiled at install, instead of compiling it, and processes
+that use the same package share that code. The install log counts what the file holds:
+
+```
+** typed code: closures=2 written=2
+```
+
+A function the file leaves out, such as one with a `match` over any tag, is counted by reason after
+`left out:` and compiles at its first call. With `--train`, the file also holds the versions the training run
+compiled that an install cannot compile on its own, such as one for the type a `Num.from_r` gave in
+that run. A session in which that conversion gives another type runs the call in the interpreter
+instead; `RY_TYPED_LOG=1` names each function that attaches and
+each one that compiles. `ry build --aot` on a package does what `ry install` does (`-l DIR` names
+the library), and on a script it is a usage error that points at `ry run --aot`.
+`R CMD INSTALL --ry-no-typed-code` writes no typed code file. A typed code file another build of ry
+wrote is ignored. [The typed code file](/development/typed-code-file/) is the design.
+
+An install on ry's runtime also writes the package's code image, `R/<package>.<build>.ryc`
+beside its lazy-load database: the compiled code of every closure, which a later session takes instead of
 compiling the closure itself, and the package's lazy-load records uncompressed, which a later
 session reads in place instead of inflating them. `--train tests`, `--train examples` or `--train SCRIPT` (`R CMD
 INSTALL --ry-train=...`) first runs the package's tests, its help-page examples or a script, and
 the image then keeps the profile of that run, so a function that ran hot there is handed to the
 optimizing tier as soon as a new session compiles it. `R CMD INSTALL --ry-no-code-image` writes no
-image, and `RY_CODE_IMAGE=0` makes a session ignore images. An image written by another ry build,
-or for other package sources, is ignored, and a damaged one warns once and is ignored; reinstall
-the package to write a fresh one. The base packages (base, stats, utils, methods and the rest)
-carry images that ry's own build writes, holding their uncompressed records but no code.
+image, and `RY_CODE_IMAGE=0` makes a session ignore images. An image for other package sources
+is ignored, and a damaged one warns once and is ignored; reinstall the package to write a fresh
+one. A package installed by another ry build, such as the version you upgraded from, runs without
+its image, and the first such package a session loads from a library prints one note naming every
+package in that library to reinstall:
 
-The image also holds machine code for the package's numeric functions, compiled at install for
-the argument types they are likely to get: the types their annotations or constant defaults
-declare, and otherwise double, integer and logical scalars and vectors. A call whose arguments
-have one of those types runs the machine code, without the JIT and without warming up; any other
-call runs in the interpreter. Calls between the package's functions are direct calls in the
-machine code. The functions it calls by name, such as `+` or a sibling, are checked when it first
-runs, and checked again after any binding is unlocked (`unlockBinding`, `assignInNamespace`), so a
-replaced function is always the one that runs. Machine code is written for x86-64 Linux, and
-other systems ignore it.
-
-`--explain` (`R CMD INSTALL --ry-explain`) prints what the install compiled. The functions left
-in the interpreter come first, largest first, each with what kept it there; then every
-specialization of a native function with its argument types, which it tests when called, and the
-names it looks up once (excerpt):
-
-```text
-machine code: 4 of 5 functions, by size (calls and operators in the body)
-  interpreter     1  label: an expression that is not a scalar computation
-  native          5  total(double[]) -> double: tests 1 argument on entry; looks up {, <-, for, + once
-  native          5  total(integer[]) -> double: tests 1 argument on entry; looks up {, <-, for, + once
-  ...
-  native          4  hypot(double, double) -> double: tests 2 arguments on entry; looks up sqrt, +, square, * once
 ```
-
-An argument that is a call, such as `f(-1)` or `f(c(1, 2))`, reaches the function unevaluated, and
-such a call runs in the interpreter; an argument that is a constant or a variable does not.
+ry: another build of ry installed these packages in library, so their functions compile as they run, which is slower, until you reinstall them: one, two
+``` The base packages (base, stats, utils, methods and the rest)
+carry images that ry's own build writes, holding their uncompressed records but no code.
 
 ## debug-adapter
 
@@ -427,6 +571,35 @@ a workspace and reports where time and memory go, and `ry debug erase FILE...` r
 place as the plain R that `ry R` runs, with every inline annotation removed. All three are developer
 aids for working on ry itself.
 
+## Crash reports
+
+A process that dies from SIGSEGV, SIGBUS or SIGABRT prints a report on standard error first, then dies by the same signal, so exit statuses (139 for SIGSEGV in a shell) and core dumps are unchanged. This script calls a package's compiled code, which writes through a null pointer:
+
+```text
+*** ry caught SIGSEGV (segmentation fault) ***
+ry 0.4.4
+address 0x0, cause 'memory not mapped' (si_code 1)
+
+R call stack, innermost call first:
+ 1: .Call(...)
+ 2: write_through_null(...)
+ 3: caller(...)
+
+Native stack, innermost first, starting in the crash handler (module(symbol+offset) [address]):
+/usr/local/bin/ry(+0x1d68262)[0x558889e1a262]
+/usr/local/bin/ry(+0x1d6882f)[0x558889e1a82f]
+/lib/x86_64-linux-gnu/libc.so.6(+0x45330)[0x7f864da45330]
+/home/user/library/crashpkg/libs/crashpkg.so(write_c+0x4)[0x7f864dc3c124]
+/usr/local/bin/libR.so(+0x4cbc8ae)[0x7f2e2a3b08ae]
+...
+```
+
+- **Header.** The version, the signal, and for a fault the address and its cause: `memory not mapped`, `invalid permissions`, or a bus error's cause. A signal sent with `kill` or `abort` says so instead.
+- **R call stack.** The function of each call in progress, innermost first, as `traceback()` numbers them, with `.Call` and its relatives between the closures that made them. It lists at most 50 calls and then counts the rest (`... 73 more`). A frame whose memory cannot be read prints as `<unreadable frame>` instead of causing a second crash.
+- **Native stack.** The addresses with their module and offset. A release `ry` is stripped, so its frames show `module(+offset)` and no symbol; keep the matching binary to look an offset up with `addr2line -e BINARY OFFSET`. The first frames belong to the handler.
+
+The report is written without allocating, on a signal stack of its own, so a stack overflow is reported too. A handler that was installed before it still runs afterwards, which is how Rust's `thread has overflowed its stack` line still appears. It covers every command that starts ry's runtime (`run`, `R`, `repl`, `test` and its workers, `load`, `document`, `build`, `install`) and `check`, `fmt` and `server`; with `--runtime gnu-r`, GNU R prints its own report. Windows prints no report.
+
 ## Exit codes
 
 - **0**: nothing found, or nothing to reformat.
@@ -447,10 +620,10 @@ a `2`.
 `ry check`, `ry fmt` and `ry server` run no R. The other commands except `ry R` run on ry's runtime,
 which needs base R (the R code of the base and default packages):
 
-- **Built in.** The 0.4.3-beta Linux release and a build from source carry base R 4.6.2 inside `ry` and extracts it into
-  `~/.cache/ry/base/` on first use, once per release. `R.version`, `getRversion()` and `R.home()`
-  then describe that copy. The 0.4.1-beta release does not have it and needs `R_HOME` or a GNU R on
-  `PATH`.
+- **Built in.** Linux releases from 0.4.3-beta, macOS releases from 0.4.4 and a build from source
+  carry base R 4.6.2 inside `ry`, which extracts it into `~/.cache/ry/base/` on first use, once per
+  release. `R.version`, `getRversion()` and `R.home()` then describe that copy. The 0.4.1-beta
+  release does not have it and needs `R_HOME` or a GNU R on `PATH`.
 - **`R_HOME`.** When set to a GNU R installation (4.3 or newer, built as a shared library), ry's
   runtime loads base R from it and behaves like that release where R changed between releases.
   An `R_HOME` that holds no base R is an error, not a fallback.

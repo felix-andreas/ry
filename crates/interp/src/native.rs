@@ -12,7 +12,7 @@ use {
     crate::{
         TaskCallbackRoutine, builtin_libraries,
         builtins::{Arg, BuiltinDef, Call, builtin, internal},
-        conditions, graphics_engine, interp, linalg,
+        conditions, interp, linalg,
         unwind::{R, Unwind, error},
         values::{self, nil, scalar_bool, string_vector, symbols},
     },
@@ -35,16 +35,6 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     builtin(".Fortran", -1, |call| unsafe {
         foreign_context(call.call, || foreign_call(call, Some(Interface::Fortran)))
-    }),
-    builtin(".Call.graphics", -1, |call| unsafe {
-        foreign_context(call.call, || {
-            graphics_engine::graphics_call(call, || foreign_call(call, None))
-        })
-    }),
-    builtin(".External.graphics", -1, |call| unsafe {
-        foreign_context(call.call, || {
-            graphics_engine::graphics_call(call, || foreign_call(call, None))
-        })
     }),
     internal("dyn.load", 4, |call| unsafe {
         let path = values::require_str(call.arg(0), "x")?;
@@ -299,7 +289,7 @@ pub unsafe fn foreign_context(call: Sexp, body: impl FnOnce() -> R<Sexp>) -> R<S
     result
 }
 
-unsafe fn foreign_call(call: &Call<'_>, interface: Option<Interface>) -> R<Sexp> {
+pub unsafe fn foreign_call(call: &Call<'_>, interface: Option<Interface>) -> R<Sexp> {
     if let Some(interface) = interface
         && let Some(result) = call_base_routine(call, interface)?
     {

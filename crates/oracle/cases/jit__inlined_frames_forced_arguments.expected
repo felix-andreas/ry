@@ -1,0 +1,35 @@
+[stdout]
+| [1] 2
+| [1] 2
+| [1] 2
+| [1] 3
+| [1] 99
+| [1] 99
+| [1] 3
+| [1] 3
+| [1] 99
+| [1] 99
+| [1] 3
+| [1] 99
+| [1] 99
+| [1] 4
+| [1] 20
+| [1] 4
+| [1] 20
+| [1] 4464
+| [1] "caller done" "caller done" "caller done" "caller done" "caller done"
+| [6] "left 91"     "left 92"     "left 93"     "caller done"
+| [1] 7
+| $amount
+| [1] 7
+| 
+| [1] 8
+| [1] 0
+| [1] 16 16  1  1
+| [1] 16 16  1  1
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| c(16, 16, 1, 1)

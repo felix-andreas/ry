@@ -1,0 +1,54 @@
+# The recorder writes times as integer nanoseconds. A call it cannot inspect is uncapturable for
+# a reason of its own and the program carries on. A call the reservoir selects but cannot store
+# empties its slot instead of keeping an earlier sample, so the samples stay a uniform draw.
+
+requires ry-runtime
+
+file workload.R
+| odd <- call("trimws", paste0("{", strrep("a", 20000), "}"))
+| run <- function(...) eval(...)
+| n <- nchar(run(odd))
+| small <- 1:3
+| big <- rep(1.5, 1000)
+| v <- small
+| first <- mean(v)
+| v <- big
+| for (i in 1:20) last <- mean(v)
+| cat("results:", n, first, last, "\n")
+
+env RY_CAPTURE_PACKAGE R_GlobalEnv
+env RY_CAPTURE_DIR capture
+env RY_CAPTURE_SAMPLES 1
+env RY_CAPTURE_MAX_BYTES 4096
+run ry run workload.R
+expect exit 0
+expect stdout "results: 20002 2 1.5"
+expect file capture/entries.tsv "package	name	calls	nanoseconds	samples	uncapturable_calls	uncapturable_nanoseconds	"
+expect file capture/samples.tsv "file	package	name	nanoseconds	threw	bytes"
+expect file capture/summary.tsv "total_nanoseconds"
+
+unset RY_CAPTURE_PACKAGE
+unset RY_CAPTURE_DIR
+unset RY_CAPTURE_SAMPLES
+unset RY_CAPTURE_MAX_BYTES
+file check.R
+| entries <- read.delim("capture/entries.tsv", stringsAsFactors = FALSE)
+| entry <- function(name) {
+|   row <- entries[entries$name == name, ]
+|   stopifnot(nrow(row) == 1)
+|   row
+| }
+| samples <- read.delim("capture/samples.tsv", stringsAsFactors = FALSE)
+| summary <- read.delim("capture/summary.tsv", stringsAsFactors = FALSE)
+| whole <- function(x) all(x >= 0 & x == floor(x))
+| stopifnot(
+|   whole(entries$nanoseconds), whole(entries$uncapturable_nanoseconds), whole(summary$value),
+|   entry("eval")$dots == 1,
+|   entry("trimws")$uncapturable_calls == 1, entry("trimws")$uninspectable == 1,
+|   entry("mean")$calls == 21, entry("mean")$samples == 0, entry("mean")$oversize >= 1,
+|   !any(samples$name == "mean")
+| )
+| cat("checked\n")
+run ry run check.R
+expect exit 0
+expect stdout "checked"

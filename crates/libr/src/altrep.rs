@@ -23,7 +23,7 @@ use {
         memory, runtime,
         vectors::{self, sexp_type},
     },
-    heap::object::{Header, NA_INTEGER, Rcomplex, Sexp, SexpType},
+    heap::object::{Header, NA_INTEGER, Rcomplex, Sexp, SexpType, gp},
     interp::{
         builtins::{BuiltinDef, Call, internal},
         dispatch::top_env,
@@ -488,24 +488,26 @@ pub unsafe fn dataptr(object: Sexp, writable: bool) -> ApiResult<*mut u8> {
             ));
         }
     };
-    if writable
-        && matches!(
+    escape_storage(object, pointer, writable);
+    Ok(pointer)
+}
+
+/// An element pointer into a handle vector lets native code store without the write barrier,
+/// read-only or not (`vectors::handle_data`). Classes conventionally keep their materialized
+/// storage in data1 or data2, so the vector the pointer points into is found there and rescanned
+/// from then on.
+unsafe fn escape_storage(object: Sexp, pointer: *const u8, writable: bool) {
+    if pointer.is_null()
+        || !matches!(
             object.kind(),
             SexpType::String | SexpType::List | SexpType::Expression
         )
     {
-        escape_storage(object, pointer);
+        return;
     }
-    Ok(pointer)
-}
-
-/// A writable element pointer into a handle vector lets native code store without the write
-/// barrier. Classes conventionally keep their materialized storage in data1 or data2, so the
-/// vector the pointer points into is found there and rescanned from then on.
-unsafe fn escape_storage(object: Sexp, pointer: *mut u8) {
     for slot in [object.car(), object.cdr()] {
-        if slot.kind().is_vector() && !slot.is_altrep() && slot.data() == pointer {
-            runtime().heap.escape(slot);
+        if slot.kind().is_vector() && !slot.is_altrep() && slot.data().cast_const() == pointer {
+            runtime().heap.escape(slot, writable);
         }
     }
 }
@@ -520,13 +522,15 @@ pub unsafe fn readable_dataptr(object: Sexp) -> ApiResult<Option<*const u8>> {
 }
 
 pub unsafe fn dataptr_or_null(object: Sexp) -> ApiResult<*const c_void> {
-    match methods(object).dataptr_or_null {
+    let pointer = match methods(object).dataptr_or_null {
         Method::Native(method) => native(std::ptr::null(), |result| {
             ry_altrep_dataptr_or_null(method, object, result)
-        }),
-        Method::Builtin(method) => method(object),
-        Method::Default => Ok(std::ptr::null()),
-    }
+        })?,
+        Method::Builtin(method) => method(object)?,
+        Method::Default => std::ptr::null(),
+    };
+    escape_storage(object, pointer.cast(), false);
+    Ok(pointer)
 }
 
 pub unsafe fn int_elt(object: Sexp, index: R_xlen_t) -> ApiResult<i32> {
@@ -1313,6 +1317,7 @@ struct Builtins {
     wrap_complex: AltrepClass,
     wrap_raw: AltrepClass,
     wrap_string: AltrepClass,
+    wrap_list: AltrepClass,
 }
 
 unsafe fn builtins() -> ApiResult<Builtins> {
@@ -1409,8 +1414,14 @@ unsafe fn builtins() -> ApiResult<Builtins> {
         wrap_complex: wrapper(b"wrap_complex", SexpType::Complex)?,
         wrap_raw: wrapper(b"wrap_raw", SexpType::Raw)?,
         wrap_string: wrapper(b"wrap_string", SexpType::String)?,
+        wrap_list: wrapper(b"wrap_list", SexpType::List)?,
     };
     BUILTINS.set(Some(builtins));
+    interp::interp().compact_sequence_classes = [
+        builtins.compact_intseq.pointer,
+        builtins.compact_realseq.pointer,
+    ];
+    interp::interp().deferred_string_class = builtins.deferred_string.pointer;
     Ok(builtins)
 }
 
@@ -1477,27 +1488,22 @@ unsafe fn new_sequence(
     first: f64,
     increment: f64,
 ) -> ApiResult<Sexp> {
+    // Nothing is rooted: the interpreter builds a sequence for every `a:b` it evaluates, and
+    // a handle per sequence would pin each one until the enclosing call returns. The altrep
+    // allocation keeps `info` alive itself, and a native caller roots the result on its way
+    // out of `enter`.
     let info = runtime().heap.alloc_vector(SexpType::Real, 3)?;
-    runtime().heap.root(info);
     info.slice_mut::<f64>()
         .copy_from_slice(&[length as f64, first, increment]);
     let nil = runtime().nil();
-    new_altrep(class, info, nil)
-}
-
-/// The first element and the increment of a compact sequence, expanded or not, or `None` for
-/// any other value.
-pub unsafe fn compact_sequence_steps(object: Sexp) -> Option<(f64, f64)> {
-    if !object.is_altrep() {
-        return None;
-    }
-    let builtins = BUILTINS.get()?;
-    let class = object.tag();
-    if class != builtins.compact_intseq.pointer && class != builtins.compact_realseq.pointer {
-        return None;
-    }
-    let (_, first, increment) = sequence_info(object);
-    Some((first, increment))
+    let kind = class_methods(class).kind;
+    let sequence = runtime()
+        .heap
+        .alloc_altrep(kind, class.pointer, info, nil)?;
+    // As in GNU R, a compact sequence is never modified in place, so its expanded data always
+    // agrees with its info and it serializes compactly even after expanding.
+    sequence.mark_not_mutable();
+    Ok(sequence)
 }
 
 unsafe fn sequence_info(object: Sexp) -> (R_xlen_t, f64, f64) {
@@ -1536,10 +1542,16 @@ unsafe fn expand_sequence(object: Sexp, kind: SexpType) -> ApiResult<Sexp> {
     }
     let (length, first, increment) = sequence_info(object);
     runtime().heap.root(object);
-    let data = runtime().heap.alloc_vector(kind, length)?;
+    // Every element is written below before anything reads the vector.
+    let data = runtime().heap.alloc_vector_uninit(kind, length as usize)?;
     if kind == SexpType::Integer {
-        for (index, slot) in data.slice_mut::<i32>().iter_mut().enumerate() {
-            *slot = (first + increment * index as f64) as i32;
+        // An integer sequence's first element and increment are integers and its last element
+        // fits, so stepping in integers gives the same elements as the double formula.
+        let (first, increment) = (first as i32, increment as i32);
+        let mut value = first;
+        for slot in data.slice_mut::<i32>() {
+            *slot = value;
+            value = value.wrapping_add(increment);
         }
     } else {
         for (index, slot) in data.slice_mut::<f64>().iter_mut().enumerate() {
@@ -1697,9 +1709,8 @@ unsafe fn print_sequence(object: Sexp, range: String) {
     write_console(format!(" {range} ({state})\n").as_bytes(), false);
 }
 
-/// An expanded sequence may have been written to, so it serializes as an ordinary vector.
 unsafe fn sequence_state(object: Sexp) -> ApiResult<Option<Sexp>> {
-    Ok(expanded(object).is_none().then(|| object.car()))
+    Ok(Some(object.car()))
 }
 
 unsafe fn intseq_unserialize(_class: Sexp, state: Sexp) -> ApiResult<Sexp> {
@@ -1838,11 +1849,8 @@ unsafe fn deferred_expand(object: Sexp) -> ApiResult<Sexp> {
     Ok(object.cdr())
 }
 
-unsafe fn deferred_dataptr(object: Sexp, writable: bool) -> ApiResult<*mut u8> {
+unsafe fn deferred_dataptr(object: Sexp, _writable: bool) -> ApiResult<*mut u8> {
     let converted = deferred_expand(object)?;
-    if writable {
-        runtime().heap.escape(converted);
-    }
     Ok(converted.data())
 }
 
@@ -1915,6 +1923,7 @@ pub unsafe fn wrap(object: Sexp, sorted: c_int, no_na: c_int) -> ApiResult<Sexp>
         SexpType::Complex => builtins.wrap_complex,
         SexpType::Raw => builtins.wrap_raw,
         SexpType::String => builtins.wrap_string,
+        SexpType::List => builtins.wrap_list,
         _ => return Ok(object),
     };
     let metadata = runtime().heap.alloc_vector(SexpType::Integer, 2)?;
@@ -1925,6 +1934,65 @@ pub unsafe fn wrap(object: Sexp, sorted: c_int, no_na: c_int) -> ApiResult<Sexp>
     let wrapper = new_altrep(class, object, metadata)?;
     memory::copy_attributes(wrapper, object, false)?;
     Ok(wrapper)
+}
+
+/// GNU R's `R_tryWrap`: `x` under a wrapper with unknown metadata, which defers copying its
+/// data until something writes, or `x` itself when its type has no wrapper class. A wrapper
+/// is not wrapped again but copied, as GNU R avoids wrappers of wrappers.
+pub unsafe fn try_wrap(object: Sexp) -> ApiResult<Sexp> {
+    if is_wrapper(object) {
+        return memory::duplicate(object, false);
+    }
+    wrap(object, UNKNOWN_SORTEDNESS, 0)
+}
+
+/// GNU R's `R_tryUnwrap`: the data under a wrapper that vouches for nothing and that only the
+/// caller holds, with the wrapper's attributes moved onto it, or `object` itself otherwise.
+/// The wrapper is emptied, so that it no longer counts as a reference to the data, and must
+/// not be read again.
+pub unsafe fn try_unwrap(object: Sexp) -> Sexp {
+    if object.refcount() > 1
+        || !is_wrapper(object)
+        || wrapper_metadata(object) != (UNKNOWN_SORTEDNESS, 0)
+    {
+        return object;
+    }
+    let data = object.car();
+    if data.refcount() > 1 {
+        return object;
+    }
+    let heap = &mut runtime().heap;
+    let attributes = object.attrib();
+    let nil = heap.nil();
+    heap.set_attrib(data, attributes);
+    data.set_object(object.is_object());
+    data.set_gp_bits(gp::S4_OBJECT, object.has_gp(gp::S4_OBJECT));
+    heap.set_attrib(object, nil);
+    heap.set_car(object, nil);
+    heap.set_cdr(object, nil);
+    object.set_object(false);
+    data
+}
+
+unsafe fn is_wrapper(object: Sexp) -> bool {
+    if !object.is_altrep() {
+        return false;
+    }
+    let Some(builtins) = BUILTINS.get() else {
+        return false;
+    };
+    let class = object.tag();
+    [
+        builtins.wrap_integer,
+        builtins.wrap_logical,
+        builtins.wrap_real,
+        builtins.wrap_complex,
+        builtins.wrap_raw,
+        builtins.wrap_string,
+        builtins.wrap_list,
+    ]
+    .iter()
+    .any(|wrapper| wrapper.pointer == class)
 }
 
 /// The interpreter builtins that need the ALTREP classes.
@@ -2047,7 +2115,13 @@ unsafe fn wrapper_no_na(object: Sexp) -> ApiResult<c_int> {
 
 unsafe fn wrapper_duplicate(object: Sexp, deep: bool) -> ApiResult<Option<Sexp>> {
     runtime().heap.root(object);
-    let copy = memory::duplicate(object.car(), deep)?;
+    // As in GNU R, a shallow copy shares the data: a write through either wrapper's data
+    // pointer copies the shared data first, so the two never observe each other's writes.
+    let copy = if deep {
+        memory::duplicate(object.car(), true)?
+    } else {
+        object.car()
+    };
     runtime().heap.root(copy);
     let (sorted, no_na) = wrapper_metadata(object);
     let metadata = runtime().heap.alloc_vector(SexpType::Integer, 2)?;
@@ -2070,7 +2144,9 @@ unsafe fn wrapper_inspect(
 ) -> ApiResult<bool> {
     let (sorted, no_na) = wrapper_metadata(object);
     write_console(
-        format!(" wrapper [srt={sorted},no_na={no_na}]\n").as_bytes(),
+        // GNU R locks a wrapper's data once it hands out a writable data pointer; ry copies
+        // shared data at that point instead and keeps no lock, so `lck` is always 0.
+        format!(" wrapper [srt={sorted},no_na={no_na},lck=0]\n").as_bytes(),
         false,
     );
     subtree(object.car(), pre, deep, pvec);
@@ -2088,8 +2164,26 @@ unsafe fn wrapper_unserialize(class: Sexp, state: Sexp) -> ApiResult<Sexp> {
     new_altrep(AltrepClass { pointer: class }, state.car(), state.cdr())
 }
 
-/// A regular vector with an ALTREP object's elements and no attributes.
+/// A regular vector with an ALTREP object's elements and attributes, which is the same R value.
 pub unsafe fn materialize(object: Sexp) -> ApiResult<Sexp> {
+    let contents = materialize_contents(object)?;
+    if crate::attributes::visible_attributes(object) == runtime().nil() && !object.is_object() {
+        return Ok(contents);
+    }
+    // The contents may be storage the object keeps, which must not take on its attributes.
+    let vector = if contents.refcount() > 0 {
+        runtime().heap.root(contents);
+        memory::duplicate(contents, false)?
+    } else {
+        contents
+    };
+    runtime().heap.root(vector);
+    memory::copy_attributes(vector, object, false)?;
+    Ok(vector)
+}
+
+/// A regular vector with an ALTREP object's elements and no attributes.
+unsafe fn materialize_contents(object: Sexp) -> ApiResult<Sexp> {
     runtime().heap.root(object);
     // A deferred string keeps its converted elements in an ordinary vector, so that vector is
     // the materialized form, and reading the strings again costs no further copy.
@@ -2110,8 +2204,11 @@ pub unsafe fn materialize(object: Sexp) -> ApiResult<Sexp> {
     if let Method::Builtin(dataptr) = methods(object).dataptr {
         let pointer = dataptr(object, false)?.cast_const();
         for slot in [object.car(), object.cdr()] {
+            // A wrapper's data keeps the attributes it had when it was wrapped, which are not
+            // the wrapper's, so only a slot without attributes can stand for the object.
             if slot.kind() == kind
                 && !slot.is_altrep()
+                && slot.attrib() == runtime().nil()
                 && slot.length() == count as isize
                 && slot.data().cast_const() == pointer
             {

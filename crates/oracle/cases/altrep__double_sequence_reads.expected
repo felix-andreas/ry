@@ -1,0 +1,16 @@
+[stdout]
+| [1] "14 REALSXP g0c0 [REF(65535)]  1 : 2000 (compact)"
+| [1] 2001000
+| [1] "14 REALSXP g0c0 [REF(65535)]  1 : 2000 (compact)"
+| [1] 1275
+| [1] NA
+| [1] 2001000
+| [1] "double"
+| [1] 3e+09
+| [1] 2000
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 2000L

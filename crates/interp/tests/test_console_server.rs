@@ -16,13 +16,12 @@
 #![cfg(unix)]
 
 use {
+    frames::viewer,
     interp::{
         console_server,
         envir::env_symbols,
-        eval, heap, interp, lower,
-        testing::with_interpreter,
+        eval, heap, interp, lower, testing,
         values::{global_env, length},
-        viewer,
     },
     serde_json::{Value, json},
     std::{
@@ -39,6 +38,16 @@ use {
     },
     syntax::testing::{SplitMix64, for_each_seed},
 };
+
+/// Runs `body` with the interpreter and the data viewer, which the `frames` crate installs.
+fn with_interpreter<T>(body: impl FnOnce() -> T) -> T {
+    static VIEWER: std::sync::Once = std::sync::Once::new();
+    testing::with_interpreter(|| {
+        // SAFETY: the interpreter is installed and this thread holds it.
+        VIEWER.call_once(|| unsafe { frames::install() });
+        body()
+    })
+}
 
 /// The prompt line that tells the console loop to forget the last seed's globals and views and
 /// report whether a debugger is still attached.

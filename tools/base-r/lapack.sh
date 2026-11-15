@@ -15,9 +15,19 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 source=$(cd "$1" && pwd)
 libr=$2
-# macOS uses Accelerate, and Windows GNU R's Rblas.dll and Rlapack.dll.
-[ "$(uname -s)" = Linux ] || exit 0
 output=$(cd "$(dirname "$libr")" && pwd)
+case "$(uname -s)" in
+Linux) ;;
+# Windows takes GNU R's own Rblas.dll and Rlapack.dll from the R on PATH, which ry's base R then
+# keeps in bin/x64 (`install_runtime_links` in crates/rcmd/src/base.rs).
+MINGW* | MSYS* | CYGWIN*)
+	gnu=$(R RHOME | tr -d '\r')
+	cp "$gnu/bin/x64/Rblas.dll" "$gnu/bin/x64/Rlapack.dll" "$output/"
+	exit 0
+	;;
+# macOS uses Accelerate.
+*) exit 0 ;;
+esac
 build=$(mktemp -d)
 trap 'rm -rf "$build"' EXIT
 fc=${FC:-gfortran}

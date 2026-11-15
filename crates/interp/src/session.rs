@@ -42,6 +42,7 @@ pub struct StartOptions {
 /// Starts the session. Errors here are fatal: base R did not load.
 pub unsafe fn start(options: StartOptions) -> R<()> {
     crate::profile_summary::start_from_environment();
+    crate::capture::start_from_environment();
     interp().command_args = options.command_args;
     interp().interactive = options.interactive;
     interp().code_image.build = options.build;
@@ -56,17 +57,18 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
         )
     {
         match crate::image::load(host, &home) {
-            Ok(true) => {
+            Ok(()) => {
                 let started = start_from_image(&home);
                 crate::image::touch::finish_start_up();
                 return started;
             }
-            Ok(false) => {}
+            Err(crate::image::LoadError::Absent(reason)) => crate::image::report_unused(&reason),
             Err(crate::image::LoadError::Untouched(message)) => {
                 write_console(
                     format!("ry: starting without the start-up image: {message}\n").as_bytes(),
                     true,
                 );
+                crate::image::report_unused(&message);
             }
             Err(crate::image::LoadError::Partial(message)) => {
                 return Err(error(format!(
@@ -141,6 +143,7 @@ unsafe fn start_from_image(home: &str) -> R<()> {
     )?;
     remove_library_site()?;
     crate::profile_summary::mark_ready();
+    crate::capture::mark_ready();
     conditions::print_warnings()
 }
 
@@ -152,7 +155,7 @@ unsafe fn define_process_variables() -> R<()> {
     eval::define(values::install(".Machine")?, machine, base_env())?;
     let platform = crate::system::platform()?;
     eval::define(values::install(".Platform")?, platform, base_env())?;
-    crate::graphics::define_device_variables()
+    (interp().extensions.graphics.define_device_variables)()
 }
 
 /// The base profile binds `.Library.site` in the global environment too, so that a site profile
@@ -237,10 +240,11 @@ unsafe fn start_slowly(
     }
     eval_text(".First.sys()", global_env())?;
     install_os_version()?;
-    crate::frame::attach_package()?;
+    crate::standard_library::attach_package()?;
     let warned = !interp().warnings.is_empty();
     conditions::print_warnings()?;
     crate::profile_summary::mark_ready();
+    crate::capture::mark_ready();
     Ok(warned)
 }
 
@@ -684,6 +688,7 @@ pub unsafe fn run_text(text: &str, source_name: &str) -> Outcome {
         }))
     });
     let outcome = run_script(&text, source_name);
+    crate::ahead::finish();
     SCRIPT_INPUT.with(|input| input.replace(previous));
     outcome
 }
@@ -737,7 +742,21 @@ unsafe fn run_script(text: &str, source_name: &str) -> Outcome {
     'parse: loop {
         let rest = &text[start..];
         let (script, failure) = crate::lower::parse_script_prefix(rest);
-        for node in &script.expressions {
+        // Only the script as first parsed compiles ahead: text parsed again after an expression
+        // read some of it as data is run as a console would run it.
+        let prepared = if start == 0 && interp().ahead.enabled {
+            match crate::ahead::prepare(&script, keep_source()) {
+                Ok(prepared) => Some(prepared),
+                Err(unwind) => {
+                    report_toplevel(unwind);
+                    write_console(b"Execution halted\n", true);
+                    return Outcome::Failed;
+                }
+            }
+        } else {
+            None
+        };
+        for (index, node) in script.expressions.iter().enumerate() {
             let end = usize::from(node.text_range().end()).min(rest.len());
             let next_line = rest[end..]
                 .find('\n')
@@ -749,14 +768,21 @@ unsafe fn run_script(text: &str, source_name: &str) -> Outcome {
                 }
             });
             let mark = crate::heap().handle_mark();
-            let succeeded =
-                match crate::lower::lower_script_expression(&script, node, keep_source()) {
-                    Ok(expression) => run_toplevel(expression),
-                    Err(unwind) => {
-                        report_toplevel(unwind);
-                        false
-                    }
-                };
+            let keep_source = keep_source();
+            let lowered = match prepared
+                .as_ref()
+                .and_then(|prepared| crate::ahead::lowered(prepared, index, keep_source))
+            {
+                Some(expression) => Ok(expression),
+                None => crate::lower::lower_script_expression(&script, node, keep_source),
+            };
+            let succeeded = match lowered {
+                Ok(expression) => run_toplevel(expression),
+                Err(unwind) => {
+                    report_toplevel(unwind);
+                    false
+                }
+            };
             crate::heap().release_handles(mark);
             // A script stops at its first error unless `options(error =)` holds a handler, which
             // GNU R runs and then carries on with the next expression.
@@ -877,13 +903,16 @@ pub unsafe fn run_console(
 /// the files they were drawing, stops the profilers, runs the exit finalizers and removes the
 /// temporary directory. The directory goes last because a finalizer may still write there.
 pub unsafe fn finish() {
-    if let Err(unwind) = crate::graphics_engine::kill_all_devices() {
+    if let Err(unwind) = (interp().extensions.graphics.kill_all_devices)() {
         report_toplevel(unwind);
     }
     if let Err(unwind) = crate::utils::stop_profiler() {
         report_toplevel(unwind);
     }
     if let Err(unwind) = crate::utils::stop_memory_profiler() {
+        report_toplevel(unwind);
+    }
+    if let Err(unwind) = crate::capture::finish() {
         report_toplevel(unwind);
     }
     if let Err(unwind) = crate::profile_summary::finish() {

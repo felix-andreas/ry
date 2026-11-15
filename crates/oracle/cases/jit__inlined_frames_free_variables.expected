@@ -1,0 +1,28 @@
+[stdout]
+| forced at 40 
+| [1] 4625
+| forced at 40 
+| [1] "non-numeric argument to binary operator"
+| [1] 156
+| [1] 785
+| [1] 20615
+| [1] 36890
+| [1] 39415
+| [1] 63065
+| frame forced
+| [1] 84050
+| [1] 6344
+| [1] 29636
+| [1] 11094
+| argument forced
+| [1] 18
+| [1] 290
+| [1] "argument \"amount\" is missing, with no default"
+| [1] 3344
+| [1] 2515
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 2515

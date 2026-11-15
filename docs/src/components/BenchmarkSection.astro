@@ -1,0 +1,21 @@
+---
+// A section of the benchmarks page about one suite: the suite's name as a heading, then the
+// section's content. It renders nothing while the suite has no results file, because a suite
+// without a measurement has no section on the page.
+import { sectionAnchor, suite as findSuite } from '../lib/benchmarks';
+
+interface Props {
+	suite: string;
+}
+
+const suite = findSuite(Astro.props.suite);
+---
+
+{
+	suite?.results !== undefined && (
+		<>
+			<h2 id={sectionAnchor(suite)}>{suite.name}</h2>
+			<slot />
+		</>
+	)
+}

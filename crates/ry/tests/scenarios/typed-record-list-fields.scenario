@@ -1,6 +1,7 @@
 # A record field or a list item can itself be a list, and typed code builds and updates such
 # values natively. Updating a field copies the list only while another record still holds it,
-# so `original` keeps its empty list while `column` grows.
+# so `original` keeps its empty list while `column` grows. `grow` is small, so it is compiled
+# into `total` and no code for it alone appears in the log.
 
 requires ry-runtime
 
@@ -27,5 +28,6 @@ env RY_TYPED_LOG 1
 run ry run --runtime ry fields.R
 expect exit 0
 expect stdout "5050i64\n[[7i64], [7i64, 7i64], [0i64, 0i64]]\n(name = \"b\", values = [1i64, 2i64])\n"
-expect stderr "typed: compiled for [Record(0), I64] -> Record(0)"
+expect stderr "typed: compiled for [I64] -> I64"
+expect stderr lacks "runs in the interpreter"
 expect stderr "typed: compiled for [I64] -> Vector { item: Array(0), array: true }"

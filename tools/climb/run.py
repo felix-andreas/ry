@@ -2,10 +2,12 @@
 """The fitness function of typed ry's hill climb (docs/src/content/docs/development/design/language-climb.md).
 It scores three things and prints one summary table:
 
-- speed: each benchmark program with a typed version in tools/bench/kernels and
-  tools/bench/applications, typed in strict mode on ry, against its Rust
-  reference in rust/, and the untyped twin on ry against GNU R. The score is the geometric mean of
-  typed ry's time over Rust's, so lower is better and 1 is Rust's speed.
+- speed: one round of the `typed` benchmark suite (tools/bench/typed), which times each typed
+  program in strict mode on ry against its Rust twin, and beside it the untyped program on ry
+  against GNU R. tools/bench/bench.py runs and reads every program, so a time here is the
+  statistic the published suite reports, the median warm run. The score is the geometric mean of
+  typed ry's time over Rust's, so lower is better and 1 is Rust's speed. A program whose checksum
+  differs from its twin's scores nothing.
 - friendliness: the cases in friendly/, each a small program whose first line says what ry should
   do with it (`# expect: ok`, or `# expect: CODE` for the diagnostic it must report). An `ok` case
   must pass strict mode and, on ry's runtime, print exactly its `#>` lines. Also the suffix burden:
@@ -17,7 +19,7 @@ Usage: tools/climb/run.py [--ry PATH] [--only speed,friendly,sound] [--seed N] [
                           [--filter NAME] [--log NOTE]
 `--log` appends the scores and NOTE as one line to log.tsv, the climb's step log.
 """
-import argparse, datetime, json, math, os, pathlib, random, re, shutil, subprocess, sys, tempfile
+import argparse, datetime, importlib.util, json, os, pathlib, random, re, shutil, subprocess, sys, tempfile
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent
@@ -274,69 +276,53 @@ def soundness(ry, environment, seed, programs):
 
 def speed(ry, environment, name_filter):
     print("## Speed")
-    rustc = shutil.which("rustc")
+    spec = importlib.util.spec_from_file_location("bench", bench / "bench.py")
+    runner_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner_module)
+    suite = runner_module.RUST_SUITE
+    programs = [program for program in runner_module.load_suite(suite)["programs"] if name_filter in program["id"]]
+    untyped_programs = {program["id"]: program for owner in ("kernels", "applications")
+                        for program in runner_module.load_suite(owner)["programs"]}
+    command = [ry, "run", "--runtime", "ry"]
+    rust_engine = runner_module.Engine("rust", "Rust", None, environment)
+    typed_engine = runner_module.Engine("ry_typed", "ry typed", command, environment, typed=True)
+    untyped_engine = runner_module.Engine("ry", "ry", command, environment)
+    gnu_r_engine = None
+    if shutil.which("Rscript"):
+        gnu_r_engine = runner_module.Engine("gnu_r", "GNU R", ["Rscript", "--vanilla"], environment)
+    runner = runner_module.RustRunner(suite, None)
     ratios_rust, ratios_r = [], []
     print("| program | typed ry | Rust | typed ry / Rust | untyped ry | GNU R |\n| --- | --- | --- | --- | --- | --- |")
-    for path in sorted((here / "rust").glob("*.rs")):
-        name = path.stem
-        if name_filter not in name:
-            continue
-        binary = scratch_root / f"rust-{name}"
-        if rustc and (not binary.exists() or binary.stat().st_mtime < path.stat().st_mtime):
-            subprocess.run([rustc, "-O", "--edition", "2024", "-o", str(binary), str(path)], check=True)
-        rust = timed([str(binary)], environment)
-        typed = timed_r([ry, "run", "--runtime", "ry"], "typed", name, environment)
-        untyped = timed_r([ry, "run", "--runtime", "ry"], "untyped", name, environment)
-        gnu_r = timed_r(["Rscript"], "untyped", name, environment) if shutil.which("Rscript") else None
-        if typed and rust:
-            ratios_rust.append(typed / rust)
-        if untyped and gnu_r:
-            ratios_r.append(untyped / gnu_r)
-        ratio = f"{typed / rust:.1f}" if typed and rust else "-"
-        print(f"| {name} | {seconds(typed)} | {seconds(rust)} | {ratio} | {seconds(untyped)} | {seconds(gnu_r)} |")
+    try:
+        for program in programs:
+            untyped_program = untyped_programs[program["id"]]
+            rust = runner.run(program, rust_engine)
+            typed = runner.run(program, typed_engine)
+            untyped = runner.run(untyped_program, untyped_engine)
+            gnu_r = runner.run(untyped_program, gnu_r_engine) if gnu_r_engine else {"seconds": None}
+            ratio = "-"
+            if typed["seconds"] and rust["seconds"]:
+                if runner_module.same_checksum(typed["checksum"], rust["checksum"]):
+                    ratios_rust.append(typed["seconds"] / rust["seconds"])
+                    ratio = f"{ratios_rust[-1]:.1f}"
+                else:
+                    ratio = f"checksum {typed['checksum']}, Rust printed {rust['checksum']}"
+            if untyped["seconds"] and gnu_r["seconds"]:
+                ratios_r.append(untyped["seconds"] / gnu_r["seconds"])
+            cells = [time_cell(runner_module, result) for result in (typed, rust, untyped, gnu_r)]
+            print(f"| {program['id']} | {cells[0]} | {cells[1]} | {ratio} | {cells[2]} | {cells[3]} |", flush=True)
+    finally:
+        runner.close()
     return {
-        "typed ry / Rust (geomean)": geomean(ratios_rust),
-        "untyped ry / GNU R (geomean)": geomean(ratios_r),
+        "typed ry / Rust (geomean)": f"{runner_module.geomean(ratios_rust):.2f}" if ratios_rust else "-",
+        "untyped ry / GNU R (geomean)": f"{runner_module.geomean(ratios_r):.2f}" if ratios_r else "-",
     }
 
 
-def timed(command, environment):
-    """The best warm time a program prints as `name checksum best cold`, or None."""
-    result = subprocess.run(command, capture_output=True, text=True, env=environment)
-    lines = [line for line in result.stdout.splitlines() if line.strip()]
-    if result.returncode != 0 or not lines:
-        return None
-    return float(lines[-1].split()[2])
-
-
-def timed_r(command, variant, name, environment):
-    typed = variant == "typed"
-    suffix = ".typed.R" if typed else ".R"
-    source = next((path for suite in ("kernels", "applications") if (path := bench / suite / f"{name}{suffix}").exists()), None)
-    if source is None:
-        return None
-    directory = scratch_root / f"speed-{variant}"
-    directory.mkdir(exist_ok=True)
-    config = directory / "ry.toml"
-    if typed:
-        config.write_text("[check]\ntyping = true\nstrict = true\n")
-    elif config.exists():
-        config.unlink()
-    harness = bench / ("harness.typed.R" if typed else "harness.R")
-    (directory / "main.R").write_text(harness.read_text() + "\n" + source.read_text())
-    result = subprocess.run(command + ["main.R"], cwd=directory, capture_output=True, text=True, env=dict(environment, R_DEFAULT_PACKAGES="stats"))
-    lines = [line for line in result.stdout.splitlines() if line.strip()]
-    if result.returncode != 0 or not lines:
-        return None
-    return float(lines[-1].split()[3])
-
-
-def seconds(value):
-    return "-" if value is None else f"{value:.4f}"
-
-
-def geomean(values):
-    return f"{math.exp(sum(math.log(max(value, 1e-9)) for value in values) / len(values)):.2f}" if values else "-"
+def time_cell(runner_module, result):
+    if result["seconds"] is None:
+        return f"fails: {result['reason'][:80]}" if "reason" in result else "-"
+    return runner_module.duration(result["seconds"])
 
 
 if __name__ == "__main__":

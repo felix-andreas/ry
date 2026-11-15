@@ -12,6 +12,7 @@ path = "src/repl.rs"
 [dependencies]
 # Pinned to reedline's own crossterm so the console and the editor share one terminal reader.
 # The workspace patches it (`patches/crossterm`) so the reader drains a paste in one go.
+crash = { path = "../crash" }
 crossterm = "0.28"
 dirs = "6"
 libloading = "0.8"

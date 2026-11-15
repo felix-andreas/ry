@@ -9,7 +9,7 @@
 //! value must be shared and a `Drop` where a local dies, and lists what a failing instruction
 //! must drop before it gives up.
 
-use smallvec::SmallVec;
+use {smallvec::SmallVec, std::fmt};
 
 /// A local's index into [`Function::locals`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
@@ -72,6 +72,11 @@ pub enum Type {
     Record(u32),
     /// A boxed tag whose shape is one of a union's ([`crate::shapes::ANY`] for any shape).
     Tag(u32),
+    /// A value of ry's table API: a `DataFrame`, a `LazyFrame`, a `GroupBy` or an expression.
+    /// Typed code holds the R object itself and never looks inside it, so only the API's own
+    /// functions make one or take one apart. The collector owns the object, which the call that
+    /// entered typed code keeps alive, so it is not counted.
+    Table,
 }
 
 impl Type {
@@ -176,6 +181,30 @@ impl Function {
     }
 }
 
+/// One instruction per line, as `RY_TYPED_DUMP` prints a function before its machine code.
+impl fmt::Display for Function {
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(formatter, "typed function {}", self.name)?;
+        for (number, block) in self.blocks.iter().enumerate() {
+            writeln!(formatter, "block {number}:")?;
+            for inst in &block.insts {
+                let assigned = inst.assigned();
+                for local in &assigned {
+                    write!(formatter, "  {}: {:?}", local.0, self.ty(*local))?;
+                }
+                let moves = if inst.moves == 0 {
+                    String::new()
+                } else {
+                    format!(" moves {:#b}", inst.moves)
+                };
+                writeln!(formatter, "  = {:?}{moves}", inst.op)?;
+            }
+            writeln!(formatter, "  {:?}", block.terminator)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Block {
     pub insts: Vec<Inst>,
@@ -184,6 +213,10 @@ pub struct Block {
 
 #[derive(Clone, Debug)]
 pub struct Inst {
+    /// The local the instruction assigns. An [`Op::CountTrue`] has none and assigns the locals
+    /// of its counts, an [`Op::Parse`] also assigns whether the string parsed, and an
+    /// [`Op::SplitBounds`] also assigns where each piece lies, so read [`Inst::assigned`] for
+    /// what an instruction writes.
     pub dest: Option<Local>,
     pub op: Op,
     /// The operands this instruction takes ownership of, by position in [`Op::operands`]. The
@@ -206,6 +239,19 @@ impl Inst {
 
     pub fn moves(&self, position: usize) -> bool {
         self.moves & (1 << position) != 0
+    }
+
+    /// The locals the instruction assigns.
+    pub fn assigned(&self) -> SmallVec<[Local; 4]> {
+        match &self.op {
+            Op::CountTrue { counts, .. } => counts.iter().map(|&(_, local)| local).collect(),
+            Op::Parse { parsed, .. } => self.dest.into_iter().chain([*parsed]).collect(),
+            Op::SplitBounds { bounds, .. } => {
+                let bounds = bounds.iter().flat_map(|&(_, start, end)| [start, end]);
+                self.dest.into_iter().chain(bounds).collect()
+            }
+            _ => self.dest.into_iter().collect(),
+        }
     }
 }
 
@@ -243,8 +289,12 @@ pub enum Constant {
     Str(u64, u64),
     I64(i64),
     Null,
-    /// A static object, such as a tag without a payload, whose count never changes.
-    Object(u64),
+    /// The static object of a shape with no fields, such as a tag without a payload, whose
+    /// count never changes.
+    Object(u32),
+    /// The id of a shape, as an `Int`. Shape ids are numbered per process, so a code file
+    /// reads it from its offset table.
+    Shape(u32),
 }
 
 /// Arithmetic on two scalars or vectors.
@@ -312,7 +362,10 @@ pub enum Bits {
 /// A reduction of a vector to a scalar.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reduce {
+    /// R's `sum`, which accumulates doubles in extended precision.
     Sum,
+    /// `List.sum` of an `F64` list: the items added in order in double precision.
+    ListSum,
     Prod,
     Max,
     Min,
@@ -373,6 +426,9 @@ pub enum Op {
     RangeI64(Local, Local),
     /// Item `index` (1-based) of a vector or list. Fails out of range.
     Get(Local, Local),
+    /// Item `position` (1-based) of a list, for a position a loop counts from 1 to the length of
+    /// a list it holds, which is why the read carries no range check.
+    ItemAt(Local, Local),
     /// The vector or list with item `index` (1-based) replaced: `x[[i]] <- value`. Fails out of
     /// range.
     Set(Local, Local, Local),
@@ -444,14 +500,17 @@ pub enum Op {
         program: SmallVec<[u32; 8]>,
         inputs: SmallVec<[Local; 4]>,
     },
-    /// How many items of a logical ry list are true, as an `I64`, failing for an `NA` item.
-    /// With an empty `program` the list is input 0; otherwise the list is the last step of
-    /// `program`, which `values::ry_count_true` encodes: comparisons of numeric lists and
-    /// scalars, and `&`, `|` and `!` of their results, fused into one pass with borrowed inputs
-    /// and no list for any step ([`crate::fusion`] builds it).
+    /// How many items of logical ry lists are true, failing for an `NA` item. Each entry of
+    /// `counts` is a list, as its operand number in `program`, and the `I64` local that receives
+    /// its count; the instruction has no other destination. The operands are numbered inputs
+    /// first and the steps of `program` after them, which `values::ry_count_true` encodes:
+    /// comparisons of numeric lists and scalars, and `&`, `|` and `!` of their results, in one
+    /// pass with borrowed inputs and no list for any step ([`crate::fusion`] builds the steps
+    /// and merges the counts of one stretch of code into one pass).
     CountTrue {
         program: SmallVec<[u32; 8]>,
         inputs: SmallVec<[Local; 4]>,
+        counts: SmallVec<[(u32, Local); 4]>,
     },
     /// A call of a compiled typed function with borrowed arguments.
     CallTyped(usize, SmallVec<[Local; 4]>),
@@ -475,17 +534,50 @@ pub enum Op {
     RepeatStr(Local, Local),
     /// `Str.split_on(string, separator)`, a list of strings.
     Split(Local, Local),
-    /// A string parsed as the destination's type (`I64` or `Dbl`), with Rust's number syntax,
-    /// failing when it does not parse. [`Op::Parses`] tests first.
-    Parse(Local),
-    /// Whether a string parses as an `I64` (`true`) or as a double that is not `NaN`.
-    Parses(bool, Local),
+    /// `Str.replace_each(string, pattern, replacement)`, failing for a result longer than R's
+    /// limit on a string.
+    ReplaceEach(Local, Local, Local),
+    /// Where the leading pieces of `Str.split_on(string, separator)` lie in the string, for a
+    /// split whose list nothing needs ([`crate::unbox::replace_split_lists`]). Each entry of
+    /// `bounds` is a piece's 1-based number and the `I64` locals that receive the byte offsets
+    /// of its start and its end. The destination receives how many pieces the string has, as
+    /// an `I64` that stops counting at the largest number in `bounds`. The locals of a piece
+    /// the string lacks hold no meaningful value.
+    SplitBounds {
+        string: Local,
+        separator: Local,
+        bounds: SmallVec<[(u32, Local, Local); 4]>,
+    },
+    /// Piece `index` (1-based) of a string, given the offsets and the count an
+    /// [`Op::SplitBounds`] of the same string gave. Fails when the string has fewer pieces, as
+    /// the read of the list would.
+    Piece {
+        string: Local,
+        start: Local,
+        end: Local,
+        count: Local,
+        index: u32,
+    },
+    /// A string parsed as the destination's type (`I64` or `Dbl`) with Rust's number syntax, and
+    /// into `parsed` whether it parses, which a double that is `NaN` does not. The destination
+    /// is zero when it does not parse.
+    Parse {
+        string: Local,
+        parsed: Local,
+    },
     /// An empty dictionary of the destination's type.
     DictNew,
     /// Whether the dictionary holds the key.
     DictContains(Local, Local),
-    /// The value of a key the dictionary holds, failing otherwise.
-    DictGet(Local, Local),
+    /// The column position of the key's entry as an `I64`, or -1 when the dictionary lacks the
+    /// key. A position holds for the same dictionary value until it is inserted into or removed
+    /// from.
+    DictFind(Local, Local),
+    /// The value at a position [`Op::DictFind`] gave for the same dictionary.
+    DictAt(Local, Local),
+    /// The dictionary with the key mapped to the value, given the position [`Op::DictFind`] gave
+    /// for the key in the same dictionary, so a key that is present is not hashed again.
+    DictPut(Local, Local, Local, Local),
     /// The dictionary with the key mapped to the value.
     DictInsert(Local, Local, Local),
     /// The dictionary without the key.
@@ -545,8 +637,7 @@ impl Op {
             | DictLen(a)
             | DictKeys(a)
             | DictValues(a)
-            | Parse(a)
-            | Parses(_, a) => SmallVec::from_slice(&[*a]),
+            | Parse { string: a, .. } => SmallVec::from_slice(&[*a]),
             Arith(_, _, a, b)
             | Bits(_, a, b)
             | Compare(_, _, a, b)
@@ -554,6 +645,7 @@ impl Op {
             | Or(a, b)
             | RoundDigits(a, b)
             | Get(a, b)
+            | ItemAt(a, b)
             | Range(a, b)
             | RangeI64(a, b)
             | Same(a, b)
@@ -569,14 +661,30 @@ impl Op {
             | VectorAffix(_, a, b)
             | RepeatStr(a, b)
             | Split(a, b)
+            | SplitBounds {
+                string: a,
+                separator: b,
+                ..
+            }
             | DictContains(a, b)
-            | DictGet(a, b)
+            | DictFind(a, b)
+            | DictAt(a, b)
             | DictRemove(a, b)
             | Push(a, b)
             | Extend(a, b) => SmallVec::from_slice(&[*a, *b]),
-            Set(a, b, c) | DictInsert(a, b, c) | Swap(a, b, c) | Slice(a, b, c) => {
-                SmallVec::from_slice(&[*a, *b, *c])
-            }
+            Set(a, b, c)
+            | DictInsert(a, b, c)
+            | Swap(a, b, c)
+            | Slice(a, b, c)
+            | ReplaceEach(a, b, c) => SmallVec::from_slice(&[*a, *b, *c]),
+            Piece {
+                string,
+                start,
+                end,
+                count,
+                ..
+            } => SmallVec::from_slice(&[*string, *start, *end, *count]),
+            DictPut(a, b, c, d) => SmallVec::from_slice(&[*a, *b, *c, *d]),
             Concat(parts, separator) | PasteVectors(parts, separator) => {
                 let mut operands = parts.clone();
                 operands.push(*separator);
@@ -605,6 +713,7 @@ impl Op {
             VectorRound(..) => position == 0,
             // The list, and the new item, which the list then owns.
             Set(..) | DictInsert(..) => position != 1,
+            DictPut(..) => position == 0 || position == 3,
             DictRemove(..) | Swap(..) | Slice(..) => position == 0,
             Extend(..) => position < 2,
             Push(..) => true,
@@ -618,12 +727,48 @@ impl Op {
     pub fn can_fail(&self) -> bool {
         use Op::*;
         match self {
-            Const(_) | Copy(_) | Compare(..) | Not(_) | And(..) | Or(..) | ToDbl(_)
-            | LglToInt(_) | Length(_) | Relabel(..) | Dup(_) | Drop(_) | Concat(..) | Join(..)
-            | Text(..) | Affix(..) | VectorText(..) | VectorAffix(..) | RoundDigits(..)
-            | Same(..) | Step(..) | Construct(..) | Field(..) | ShapeOf(_) | ByteCount(_)
-            | Split(..) | Parses(..) | DictContains(..) | DictRemove(..) | Push(..) | Unique(_)
-            | Swap(..) | ToUtf8(_) | DictLen(_) | DictKeys(_) | DictValues(_) => false,
+            Const(_)
+            | Copy(_)
+            | Compare(..)
+            | Not(_)
+            | And(..)
+            | Or(..)
+            | ToDbl(_)
+            | LglToInt(_)
+            | Length(_)
+            | Relabel(..)
+            | Dup(_)
+            | Drop(_)
+            | Concat(..)
+            | Join(..)
+            | Text(..)
+            | Affix(..)
+            | VectorText(..)
+            | VectorAffix(..)
+            | RoundDigits(..)
+            | Same(..)
+            | Step(..)
+            | ItemAt(..)
+            | Construct(..)
+            | Field(..)
+            | ShapeOf(_)
+            | ByteCount(_)
+            | Split(..)
+            | SplitBounds { .. }
+            | Parse { .. }
+            | DictContains(..)
+            | DictRemove(..)
+            | DictFind(..)
+            | DictAt(..)
+            | Push(..)
+            | Unique(_)
+            | Swap(..)
+            | ToUtf8(_)
+            | DictLen(_)
+            | DictKeys(_)
+            | DictValues(_) => false,
+            // A split string has at least one piece, so only a later piece can be missing.
+            Piece { index, .. } => *index != 1,
             // Integer arithmetic overflows, a double `%%` loses all accuracy, and a math function
             // warns about NaNs.
             Arith(op, item, ..) => *item != Item::Dbl || *op == self::Arith::Mod,

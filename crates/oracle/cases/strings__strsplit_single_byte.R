@@ -1,0 +1,17 @@
+# strsplit on a one-byte separator: fixed, a literal pattern, and the
+# regex metacharacters that must not take the literal path.
+texts <- c("", "_", "a__b", "_a", "a_", "a.b", NA, "é_ü_", "__")
+str(strsplit(texts, "_", fixed = TRUE))
+str(strsplit(texts, "_"))
+str(strsplit(texts, "_", useBytes = TRUE))
+str(strsplit(texts, "_", perl = TRUE))
+str(strsplit("a.b|c", "|"))
+str(strsplit("a.b", "."))
+str(strsplit("a.b", ".", fixed = TRUE))
+str(strsplit("a+b+", "+", fixed = TRUE))
+str(strsplit("aXbxc", "x"))
+str(strsplit(c("a,b;c", "d;e,f"), c(",", ";")))
+str(strsplit(c(x = "a b", y = "c  d"), " "))
+str(strsplit("a\tb\nc", "\t"))
+str(strsplit("éaé", "a"))
+str(strsplit(c("a-b", "c-d-e"), "-")[[2]][3])

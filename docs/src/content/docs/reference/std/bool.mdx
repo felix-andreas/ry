@@ -36,7 +36,7 @@ Bool.true
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1743)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1751)
 
 ## `Bool.false`
 
@@ -52,7 +52,7 @@ Bool.false
 #> FALSE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1751)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1759)
 
 ## `Bool.from_r`
 
@@ -76,7 +76,7 @@ Bool.from_r <- function(value)
 
 Converts an R `logical` into a `Bool`, refusing `NA` and a length other than one.
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1754)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1762)
 
 ## `Bool.and`
 
@@ -105,7 +105,7 @@ Bool.and(TRUE, FALSE)
 #> FALSE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1762)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1770)
 
 ## `Bool.or`
 
@@ -134,7 +134,7 @@ Bool.or(TRUE, FALSE)
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1770)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1778)
 
 ## `Bool.not`
 
@@ -163,7 +163,7 @@ List.keep_if([1, 2, 3], function(x) Bool.not(Num.is_even(x)))
 #> [1i64, 3i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1778)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1786)
 
 ## `Bool.is_eq`
 
@@ -194,7 +194,7 @@ Bool.is_eq(Set.from_list([1, 2]), Set.from_list([2, 1]))
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1788)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1796)
 
 ## `Bool.is_not_eq`
 
@@ -223,4 +223,4 @@ Bool.is_not_eq([1], [2])
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1796)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1804)

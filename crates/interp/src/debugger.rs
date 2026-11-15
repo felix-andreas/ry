@@ -156,7 +156,7 @@ pub unsafe fn browser() -> R<()> {
     let state = interp();
     if state.debugger.is_none() && crate::console_server::interactive() {
         let terminal = Box::new(crate::console_server::Browse::default());
-        state.debugger = Some(Box::new(Adapter::for_console(terminal)));
+        state.debugger.set(Some(Box::new(Adapter::for_console(terminal))));
     }
     with_adapter(|adapter| adapter.at_statement(Some("breakpoint")))
 }
@@ -197,7 +197,7 @@ unsafe fn with_adapter(body: impl FnOnce(&mut Adapter)) -> R<()> {
         // An editor that attached while this adapter was out, during a `Browse>` stop's
         // expression, keeps its own adapter; the finished stop's adapter goes.
         false if interp().debugger.is_some() => drop(adapter),
-        false => interp().debugger = Some(adapter),
+        false => interp().debugger.set(Some(adapter)),
     }
     match terminating {
         true => Err(Unwind::Jump(Jump::TopLevel)),
@@ -293,7 +293,7 @@ impl Adapter {
         let status = match std::fs::read_to_string(&launch.program) {
             Ok(text) => {
                 let path = canonical_or_given(&launch.program);
-                interp().debugger = Some(self);
+                interp().debugger.set(Some(self));
                 let status = run_program(&text, &path, launch);
                 match interp().debugger.take() {
                     Some(adapter) => {
@@ -1159,7 +1159,7 @@ fn variable_text(name: &str, value: &str, kind: &str) -> Value {
 
 /// One line that shows a value. A long vector is shown by its type and length, because
 /// deparsing a million elements to show sixty characters of them would stall the client.
-pub(crate) unsafe fn summary(value: Sexp) -> String {
+pub unsafe fn summary(value: Sexp) -> String {
     const LONGEST: usize = 200;
     match value.kind() {
         SexpType::Environment => {
@@ -1239,14 +1239,14 @@ unsafe fn view_in_frame(arguments: &Value, stopped: &mut Stopped) -> Result<Valu
         .get("expression")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    crate::viewer::open(value, title)
+    (crate::interp().extensions.viewer.open)(value, title)
 }
 
 /// Answers `ryTable` and `ryRelease`, which page through an open view whether or not the program
 /// is stopped.
 fn data_request(request: &Request) -> Result<Value, String> {
     // SAFETY: requests are answered on the interpreter's thread.
-    unsafe { crate::viewer::request(&request.command, &request.arguments) }
+    unsafe { (crate::interp().extensions.viewer.request)(&request.command, &request.arguments) }
 }
 
 /// The value of the request's `expression` in its `frameId`, or at the top level. The value is

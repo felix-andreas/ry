@@ -3,7 +3,13 @@
 //! exactly as the model does. Each seed of [`for_each_seed`] is one random run.
 
 use {
-    heap::{Heap, object::Sexp},
+    heap::{
+        Heap, PendingAccess,
+        env::layout::filter_bit,
+        object::{Sexp, SexpType, gp},
+        set_pending_resolver,
+    },
+    std::sync::atomic::{AtomicUsize, Ordering},
     syntax::testing::{SplitMix64, for_each_seed},
 };
 
@@ -218,6 +224,55 @@ fn run_indexed(seed: u64) {
 #[test]
 fn fuzz_indexed_lookups_match_the_bindings() {
     for_each_seed(40, run_indexed);
+}
+
+/// The lookups of single names that reached the interpreter's resolver for a slot frame's
+/// environment, in [`slot_frame_environment_asks_only_for_slot_names`].
+static ASKED: AtomicUsize = AtomicUsize::new(0);
+
+unsafe fn count_asks(_env: Sexp, access: PendingAccess) {
+    if let PendingAccess::Symbol(_) = access {
+        ASKED.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// A slot frame's environment asks the interpreter only for the names its frame keeps in
+/// slots. Another name whose filter bit is a slot name's passes the environment without
+/// asking, however often it is looked up, where the filter alone would ask on every lookup.
+#[test]
+fn slot_frame_environment_asks_only_for_slot_names() {
+    set_pending_resolver(count_asks);
+    let mut heap = Heap::new();
+    unsafe {
+        let nil = heap.nil();
+        let slot = heap.install(b"slot").expect("install");
+        let colliding = (0..)
+            .map(|index| {
+                heap.install(format!("c{index}").as_bytes())
+                    .expect("install")
+            })
+            .find(|&symbol| filter_bit(symbol) == filter_bit(slot))
+            .expect("some name shares the slot name's filter bit");
+        let names = heap.alloc_vector(SexpType::List, 1).expect("names");
+        heap.root(names);
+        heap.set_element(names, 0, slot);
+        let env = heap.alloc_environment(nil).expect("environment");
+        heap.root(env);
+        env.set_gp_bits(gp::FUNCTION_FRAME | gp::PENDING_FRAME, true);
+        heap.set_slot_owner(env, Some((0, names)));
+
+        // The filter alone cannot tell the two names apart.
+        assert!(heap.may_bind(env, colliding));
+        for _ in 0..3 {
+            assert_eq!(heap.frame_cell(env, colliding), None);
+        }
+        assert_eq!(ASKED.load(Ordering::Relaxed), 0);
+        assert_eq!(heap.frame_cell(env, slot), None);
+        assert_eq!(ASKED.load(Ordering::Relaxed), 1);
+
+        heap.set_slot_owner(env, None);
+        env.set_gp_bits(gp::SLOT_FRAME, false);
+    }
 }
 
 #[test]

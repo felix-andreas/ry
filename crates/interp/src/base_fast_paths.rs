@@ -49,7 +49,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryWarning", 0, do_warning).prologue(),
     internal("rySignalCondition", 0, do_signal_condition).prologue(),
     internal("ryTryCatch", 0, do_try_catch).prologue(),
+    internal("ryWithCallingHandlers", 0, do_with_calling_handlers).prologue(),
     internal("ryTryCatchList", 0, do_try_catch_list).prologue(),
+    internal("ryTryCatchOne", 0, do_try_catch_one).prologue(),
     internal("ryDoTryCatch", 0, do_do_try_catch).prologue(),
     internal("ryWithRestarts", 0, do_with_restarts).prologue(),
     internal("ryWithOneRestart", 0, do_with_one_restart).prologue(),
@@ -69,6 +71,9 @@ const FAST_PATHS: &[(&str, &str, u64)] = &[
     ("structure", "ryStructure", 0xe1de236049200229),
     ("Sys.getenv", "rySysGetenv", 0xe91342790fcd5c16),
     ("Sys.setenv", "rySysSetenv", 0xb3ad8ec3b2915ce0),
+    // Windows base R has its own `Sys.which` (`base/R/windows/system.R`), and the fast path
+    // implements the Unix one.
+    #[cfg(unix)]
     ("Sys.which", "rySysWhich", 0x17980645114e720c),
     ("format.default", "ryFormatDefault", 0x5eb64c51109fbc94),
     ("formatC", "ryFormatC", 0x85c5e0cf394a6e6d),
@@ -80,6 +85,11 @@ const FAST_PATHS: &[(&str, &str, u64)] = &[
     ("warning", "ryWarning", 0x919c2fc8a0bd927b),
     ("signalCondition", "rySignalCondition", 0xfb659fdee977c35c),
     ("tryCatch", "ryTryCatch", 0xd94c74ab7d1c9df2),
+    (
+        "withCallingHandlers",
+        "ryWithCallingHandlers",
+        0x0c246a7f0b9c191b,
+    ),
     ("withRestarts", "ryWithRestarts", 0xcebb374dbd62409d),
     ("tryInvokeRestart", "ryTryInvokeRestart", 0xe95eb95ec8453f49),
     ("invokeRestart", "ryInvokeRestart", 0x76da20c2e48ae6a6),
@@ -100,6 +110,12 @@ const NESTED_FAST_PATHS: &[(&str, &str, &str, u64)] = &[
         "tryCatchList",
         "ryTryCatchList",
         0x2e065bb04214d605,
+    ),
+    (
+        "tryCatch",
+        "tryCatchOne",
+        "ryTryCatchOne",
+        0x3a4260755fd37942,
     ),
     ("tryCatch", "doTryCatch", "ryDoTryCatch", 0xacf47eb5e4bfc044),
     (
@@ -168,7 +184,9 @@ pub unsafe fn prologue_needs_environment(body: Sexp) -> bool {
             "ryTraceBack",
             "rySignalCondition",
             "ryTryCatch",
+            "ryWithCallingHandlers",
             "ryTryCatchList",
+            "ryTryCatchOne",
             "ryDoTryCatch",
             "ryWithRestarts",
             "ryWithOneRestart",
@@ -693,7 +711,10 @@ pub unsafe fn register_routine_entries() -> R<()> {
 /// ([`eval::settled_without_code`]), so nothing runs that could see the missing frame
 /// (`sys.calls()`, a handler, a traceback). A closure being debugged or traced runs as usual.
 pub unsafe fn native_entry(function: Sexp, args: &[Arg]) -> R<Option<Sexp>> {
-    if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE) {
+    // The boundary-call recorder sees closure calls only where their frames start.
+    if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE)
+        || activity::hooks() & activity::CAPTURE != 0
+    {
         return Ok(None);
     }
     enter(function, registered(function), args)
@@ -717,18 +738,7 @@ unsafe fn enter(function: Sexp, entry: Option<Entry>, args: &[Arg]) -> R<Option<
             interp().visible = true;
             code(&matched)?
         }
-        None if tagged => return Ok(None),
-        None => {
-            // A closure with install-time machine code carries the same mark.
-            let value = match crate::code_image::native_hooks() {
-                Some(hooks) => (hooks.call)(function, args).transpose()?,
-                None => None,
-            };
-            if value.is_some() && activity::enabled() {
-                crate::eval::count_package_call(function, None, args);
-            }
-            return Ok(value);
-        }
+        None => return Ok(None),
     };
     if value.is_some() {
         activity::count(Counter::NativeEntries);
@@ -756,7 +766,10 @@ pub unsafe fn native_entry_by_value(
     compiled: bool,
     lookup: impl Fn(Sexp) -> Option<Sexp>,
 ) -> R<Option<Sexp>> {
-    if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE) {
+    // The boundary-call recorder sees closure calls only where their frames start.
+    if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE)
+        || activity::hooks() & activity::CAPTURE != 0
+    {
         return Ok(None);
     }
     let mut tagged = false;
@@ -1414,6 +1427,56 @@ pub(crate) unsafe fn argument(frame: ClosureFrame, symbol: Sexp) -> R<Option<Sex
     Ok(Some(value))
 }
 
+/// A formal as a prologue finds it before forcing anything.
+#[derive(Clone, Copy)]
+enum Formal {
+    /// Left out by the call, so it holds its own default (as [`is_default`] decides): the
+    /// binding's value, a default promise or no value at all. The fast paths run only for base's
+    /// own closures, so a default that is a constant is known without forcing it, and forcing
+    /// it would have no effect the caller could see.
+    Default(Sexp),
+    /// Given by the call: the binding's value, usually a promise.
+    Given(Sexp),
+}
+
+/// The formals `symbols` of `frame`, unforced, which must be listed in the order the closure
+/// declares them; `None` when one is not a formal there. A slot frame's formals are read in one
+/// walk, where reading each with [`argument`] would walk them once per formal.
+unsafe fn formals<const N: usize>(frame: ClosureFrame, symbols: [Sexp; N]) -> Option<[Formal; N]> {
+    let classify = |value: Sexp, missing: bool| {
+        if missing || value == missing_arg() || value == values::unbound() {
+            Formal::Default(value)
+        } else {
+            Formal::Given(value)
+        }
+    };
+    match frame.resolve() {
+        Ok(index) => {
+            let found = eval::slot_formals(index, symbols)?;
+            Some(found.map(|(value, missing)| classify(value, missing)))
+        }
+        Err(env) => {
+            let mut found = [Formal::Default(values::unbound()); N];
+            for (formal, symbol) in found.iter_mut().zip(symbols) {
+                let cell = crate::heap().frame_cell(env, symbol)?;
+                *formal = classify(cell.cdr(), cell.has_gp(gp::BINDING_MISSING));
+            }
+            Some(found)
+        }
+    }
+}
+
+/// The value of a formal the call gave, forced as evaluating its name would.
+unsafe fn force_given(value: Sexp) -> R<Sexp> {
+    let value = if value.kind() == SexpType::Promise {
+        eval::force_promise(value)?
+    } else {
+        value
+    };
+    crate::heap().root(value);
+    Ok(value)
+}
+
 /// Whether the formal `name` holds its own default, untouched: no value at all, or the default
 /// the call bound because the argument was left out. An argument the caller passed on from its
 /// own missing formal is not a default, because forcing it raises an error.
@@ -1515,12 +1578,12 @@ unsafe fn is_ascii(text: Sexp) -> bool {
 /// choices themselves. With `choices` missing it evaluates the caller's default for `arg` in
 /// the caller's frame, as the R body does through `sys.function(sys.parent())`.
 unsafe fn do_match_arg(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env()?;
-    if !is_default(ClosureFrame::Env(frame), symbols().several_ok)? {
+    let frame = ClosureFrame::of(call);
+    if !is_default(frame, symbols().several_ok)? {
         return decline();
     }
     // The R body evaluates a missing `choices` before it forces `arg`, and a supplied one after.
-    let defaulted = if is_supplied(ClosureFrame::Env(frame), symbols().choices)? {
+    let defaulted = if is_supplied(frame, symbols().choices)? {
         None
     } else {
         let Some(choices) = default_choices(frame)? else {
@@ -1528,7 +1591,7 @@ unsafe fn do_match_arg(call: &Call<'_>) -> R<Sexp> {
         };
         Some(choices)
     };
-    let Some(arg) = argument(ClosureFrame::Env(frame), symbols().arg)? else {
+    let Some(arg) = argument(frame, symbols().arg)? else {
         return decline();
     };
     if arg.kind() != SexpType::String || arg.attrib() != nil() {
@@ -1536,7 +1599,7 @@ unsafe fn do_match_arg(call: &Call<'_>) -> R<Sexp> {
     }
     let choices = match defaulted {
         Some(choices) => choices,
-        None => match argument(ClosureFrame::Env(frame), symbols().choices)? {
+        None => match argument(frame, symbols().choices)? {
             Some(choices) => choices,
             None => return decline(),
         },
@@ -1547,7 +1610,7 @@ unsafe fn do_match_arg(call: &Call<'_>) -> R<Sexp> {
     let result = values::alloc(SexpType::String, 1)?;
     if length(arg) >= 1 && sort::identical(arg, choices, &IdenticalFlags::default()) {
         crate::heap().set_element(result, 0, arg.element(0));
-        return finish(ClosureFrame::Env(frame), result, true);
+        return finish(frame, result, true);
     }
     if length(arg) != 1 {
         return decline();
@@ -1579,24 +1642,39 @@ unsafe fn do_match_arg(call: &Call<'_>) -> R<Sexp> {
         return decline();
     };
     crate::heap().set_element(result, 0, choices.element(index));
-    finish(ClosureFrame::Env(frame), result, true)
+    finish(frame, result, true)
 }
 
-/// The default of the caller's formal that `arg` names, evaluated in the caller's frame, when
-/// that default is a character constant or a `c()` of character constants. It binds `choices`
-/// in the frame as the R body does, so a declined fast path does not evaluate it a second time.
-unsafe fn default_choices(frame: Sexp) -> R<Option<Sexp>> {
-    let Some(cell) = crate::heap().frame_cell(frame, symbols().arg) else {
-        return Ok(None);
+/// The default of the caller's formal that `arg` names, when that default is a character
+/// constant or a `c()` of character constants and `c` is base's in the caller's frame. Neither
+/// frame needs an environment for it: the constant is built as evaluating it would build it,
+/// and a declined fast path lets the R body evaluate it again, which is safe for a constant.
+unsafe fn default_choices(frame: ClosureFrame) -> R<Option<Sexp>> {
+    let (own, promise) = match frame.resolve() {
+        Ok(index) => match eval::slot_formal(index, symbols().arg) {
+            Some((value, _)) => (index, value),
+            None => return Ok(None),
+        },
+        Err(env) => {
+            let (Some(index), Some(cell)) = (
+                crate::envir::frame_of(env),
+                crate::heap().frame_cell(env, symbols().arg),
+            ) else {
+                return Ok(None);
+            };
+            (index, cell.cdr())
+        }
     };
-    let promise = cell.cdr();
     if promise.kind() != SexpType::Promise || promise.cdr().kind() != SexpType::Symbol {
         return Ok(None);
     }
     let name = promise.cdr();
-    let Some((function, caller)) = crate::envir::sys_parent_of(frame)? else {
+    let parent = crate::envir::sys_parent_number(1, Some(own));
+    if parent == 0 {
         return Ok(None);
-    };
+    }
+    let caller = parent as usize - 1;
+    let function = interp().frames[caller].function;
     if function.kind() != SexpType::Closure {
         return Ok(None);
     }
@@ -1609,23 +1687,71 @@ unsafe fn default_choices(frame: Sexp) -> R<Option<Sexp>> {
     }
     let default = formal.car();
     let is_text = |value: Sexp| value.kind() == SexpType::String && value.attrib() == nil();
-    let constant = is_text(default)
-        || (default.kind() == SexpType::Language && default.car() == symbols().c && {
-            let mut item = default.cdr();
-            let mut all = true;
-            while item.kind() == SexpType::Pairlist {
-                all &= item.tag() == nil() && is_text(item.car());
-                item = item.cdr();
-            }
-            all
-        });
-    if !constant {
+    if is_text(default) {
+        return Ok(Some(default));
+    }
+    if default.kind() != SexpType::Language || default.car() != symbols().c {
         return Ok(None);
     }
-    let choices = eval::eval(default, caller)?;
+    let mut count = 0;
+    let mut item = default.cdr();
+    while item.kind() == SexpType::Pairlist {
+        if item.tag() != nil() || !is_text(item.car()) {
+            return Ok(None);
+        }
+        count += length(item.car());
+        item = item.cdr();
+    }
+    if !calls_base_c(caller)? {
+        return Ok(None);
+    }
+    let choices = values::alloc(SexpType::String, count)?;
     crate::heap().root(choices);
-    eval::define(symbols().choices, choices, frame)?;
+    let mut position = 0;
+    let mut item = default.cdr();
+    while item.kind() == SexpType::Pairlist {
+        let text = item.car();
+        for index in 0..length(text) {
+            crate::heap().set_element(choices, position, text.element(index));
+            position += 1;
+        }
+        item = item.cdr();
+    }
     Ok(Some(choices))
+}
+
+/// Whether `c` names base's `c` in the frame at `index`, found without making the frame's
+/// environment. A slot frame that has any local `c` declines, whatever the binding holds.
+unsafe fn calls_base_c(index: usize) -> R<bool> {
+    let heap = crate::heap();
+    let symbol = symbols().c;
+    let frame = &interp().frames[index];
+    let scope = if frame.env != nil() || frame.slots == crate::NO_SLOTS {
+        frame.env
+    } else {
+        let names = frame
+            .function
+            .cdr()
+            .cdr()
+            .element(crate::bytecode::SLOTS)
+            .element(1);
+        let header = frame.slots as usize;
+        for slot in 0..length(names) {
+            if names.element(slot) == symbol
+                && *crate::bytecode::register_address(header + 1 + slot) != values::unbound()
+            {
+                return Ok(false);
+            }
+        }
+        frame.function.tag()
+    };
+    if scope == nil() {
+        return Ok(false);
+    }
+    let Some(base) = heap.frame_cell(heap.known().base_env, symbol) else {
+        return Ok(false);
+    };
+    Ok(eval::find_fun(symbol, scope)? == base.cdr())
 }
 
 /// `stopifnot(...)` when every expression is all `TRUE`. The first that is not leaves the R body
@@ -2213,7 +2339,8 @@ unsafe fn do_structure(call: &Call<'_>) -> R<Sexp> {
         before_dim |= cell.tag() != symbols.names;
         cell = cell.cdr();
     }
-    let result = crate::subset::modifiable(data)?;
+    // The R body's `attributes(.Data) <- ...` copies a shared `.Data` under a wrapper.
+    let result = crate::subset::modifiable_attributes(data)?;
     crate::heap().root(result);
     // The R body reinstalls `dimnames` through `attributes<-`, and GNU R's `dimnamesgets` copies
     // a list that something else references, so the result always owns its dimnames list. C
@@ -2312,17 +2439,56 @@ unsafe fn do_format_default(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
     let frame = ClosureFrame::of(call);
     let symbols = symbols();
-    let Some(x) = argument(frame, symbols.x)? else {
+    let Some(
+        [
+            x,
+            digits,
+            width,
+            format,
+            flag,
+            mode,
+            big_mark,
+            big_interval,
+            small_mark,
+            decimal_mark,
+            preserve_width,
+            zero_print,
+            drop0trailing,
+        ],
+    ) = formals(
+        frame,
+        [
+            symbols.x,
+            symbols.digits,
+            symbols.width,
+            symbols.format,
+            symbols.flag,
+            symbols.mode,
+            symbols.big_mark,
+            symbols.big_interval,
+            symbols.small_mark,
+            symbols.decimal_mark,
+            symbols.preserve_width,
+            symbols.zero_print,
+            symbols.drop0trailing,
+        ],
+    )
+    else {
         return decline();
     };
+    let Formal::Given(x) = x else {
+        return decline();
+    };
+    let x = force_given(x)?;
     if !matches!(x.kind(), SexpType::Integer | SexpType::Real) || x.attrib() != nil() {
         return decline();
     }
-    let Some(flag) = argument(frame, symbols.flag)? else {
-        return decline();
-    };
-    let Some(flag_text) = string_scalar(flag) else {
-        return decline();
+    let flag_text = match flag {
+        Formal::Default(_) => Cow::Borrowed(""),
+        Formal::Given(flag) => match string_scalar(force_given(flag)?) {
+            Some(text) => text,
+            None => return decline(),
+        },
     };
     if !flag_text.bytes().all(|byte| b"0+- #'I".contains(&byte)) {
         return decline();
@@ -2331,16 +2497,17 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
     if count == 0 {
         return finish(frame, values::alloc(SexpType::String, 0)?, true);
     }
-    if argument(frame, symbols.mode)? != Some(nil()) {
+    if let Formal::Given(mode) = mode
+        && force_given(mode)? != nil()
+    {
         return decline();
     }
-    let format = if is_supplied(frame, symbols.format)? {
-        let Some(format) = argument(frame, symbols.format)? else {
-            return decline();
-        };
-        format
-    } else {
-        nil()
+    // A format passed on from the caller's own missing formal makes the body's `is.null(format)`
+    // fail, and the error is the body's to raise.
+    let format = match format {
+        Formal::Default(_) => nil(),
+        Formal::Given(format) if eval::value_is_missing(format)? => return decline(),
+        Formal::Given(format) => force_given(format)?,
     };
     let format = if format == nil() {
         if x.kind() == SexpType::Integer {
@@ -2365,16 +2532,10 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
         return decline();
     };
     let FiniteCopy { vector, specials } = vector;
-    let Some(width) = argument(frame, symbols.width)? else {
+    let Some(width) = optional_whole_number(given_or(width, nil())?) else {
         return decline();
     };
-    let Some(width) = optional_whole_number(width) else {
-        return decline();
-    };
-    let Some(digits) = argument(frame, symbols.digits)? else {
-        return decline();
-    };
-    let Some(digits) = optional_whole_number(digits) else {
+    let Some(digits) = optional_whole_number(given_or(digits, nil())?) else {
         return decline();
     };
     let width = if width.is_none() && digits.is_none() {
@@ -2425,22 +2586,23 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
             values::set_mkchar(result, index, &text)?;
         }
     }
-    let Some(big_mark) = argument(frame, symbols.big_mark)? else {
-        return decline();
+    let big_mark = match big_mark {
+        Formal::Default(_) => Cow::Borrowed(""),
+        Formal::Given(mark) => match string_scalar(force_given(mark)?) {
+            Some(mark) => mark,
+            None => return decline(),
+        },
     };
-    let Some(big_mark) = string_scalar(big_mark) else {
-        return decline();
-    };
+    let is_empty = |value: Sexp| unsafe { string_scalar(value).as_deref() == Some("") };
+    let is_null = |value: Sexp| value == nil();
+    let is_off = |value: Sexp| unsafe { is_false(value) };
     if big_mark.is_empty() {
         // The body's `nzchar(big.mark) || nzchar(small.mark) || decimal.mark != "." ||
         // !is.null(zero.print) || drop0trailing`, forced in that order.
-        if !argument_is(frame, symbols.small_mark, |value| {
-            string_scalar(value).as_deref() == Some("")
-        })? || !decimal_mark_is_point(frame)?
-            || !argument_is(frame, symbols.zero_print, |value| value == nil())?
-            || !argument_is(frame, symbols.drop0trailing, |value| unsafe {
-                is_false(value)
-            })?
+        if !given_is(small_mark, is_empty)?
+            || !decimal_mark_is_point(decimal_mark)?
+            || !given_is(zero_print, is_null)?
+            || !given_is(drop0trailing, is_off)?
         {
             return decline();
         }
@@ -2450,32 +2612,28 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
     // `drop0trailing`, `preserve.width`, `big.interval` and `small.mark`, in that order.
     if !big_mark.is_ascii()
         || big_mark == "."
-        || !decimal_mark_is_point(frame)?
-        || !argument_is(frame, symbols.zero_print, |value| value == nil())?
-        || !argument_is(frame, symbols.drop0trailing, |value| unsafe {
-            is_false(value)
-        })?
+        || !decimal_mark_is_point(decimal_mark)?
+        || !given_is(zero_print, is_null)?
+        || !given_is(drop0trailing, is_off)?
     {
         return decline();
     }
-    let Some(preserve_width) = argument(frame, symbols.preserve_width)? else {
-        return decline();
+    let keep_width = match preserve_width {
+        Formal::Default(_) => true,
+        Formal::Given(value) => match string_scalar(force_given(value)?).as_deref() {
+            Some("individual") => true,
+            Some("none") => false,
+            _ => return decline(),
+        },
     };
-    let keep_width = match string_scalar(preserve_width).as_deref() {
-        Some("individual") => true,
-        Some("none") => false,
-        _ => return decline(),
+    let interval = match big_interval {
+        Formal::Default(_) => 3,
+        Formal::Given(value) => match optional_whole_number(force_given(value)?) {
+            Some(Some(interval)) if (1..=1000).contains(&interval) => interval as usize,
+            _ => return decline(),
+        },
     };
-    let Some(interval) = argument(frame, symbols.big_interval)? else {
-        return decline();
-    };
-    let interval = match optional_whole_number(interval) {
-        Some(Some(interval)) if (1..=1000).contains(&interval) => interval as usize,
-        _ => return decline(),
-    };
-    if !argument_is(frame, symbols.small_mark, |value| {
-        string_scalar(value).as_deref() == Some("")
-    })? {
+    if !given_is(small_mark, is_empty)? {
         return decline();
     }
     let marked = values::alloc(SexpType::String, count)?;
@@ -2676,44 +2834,40 @@ unsafe fn is_false(value: Sexp) -> bool {
         && values::ints(value)[0] == 0
 }
 
-/// Forces the formal `symbol` and tests its value; false when it has none.
-unsafe fn argument_is(
-    frame: ClosureFrame,
-    symbol: Sexp,
-    test: impl FnOnce(Sexp) -> bool,
-) -> R<bool> {
-    Ok(argument(frame, symbol)?.is_some_and(test))
+/// The value of `formal`, forced when the call gave it, or `default` when it holds its own
+/// default, which must be a constant.
+unsafe fn given_or(formal: Formal, default: Sexp) -> R<Sexp> {
+    match formal {
+        Formal::Default(_) => Ok(default),
+        Formal::Given(value) => force_given(value),
+    }
+}
+
+/// Whether `formal` passes `test`: forced when the call gave it, and true when it holds its own
+/// default, for a test its constant default passes.
+unsafe fn given_is(formal: Formal, test: impl FnOnce(Sexp) -> bool) -> R<bool> {
+    match formal {
+        Formal::Default(_) => Ok(true),
+        Formal::Given(value) => Ok(test(force_given(value)?)),
+    }
 }
 
 /// Whether `formatC()`'s `decimal.mark` is `"."`. While it holds its own default promise,
 /// unforced, the answer is the `OutDec` option, read as `getOption("OutDec")` reads it, so the
 /// promise and the `getOption()` call it would make are skipped; that call has no side effect,
 /// and the fast path returns before the body could force the promise.
-unsafe fn decimal_mark_is_point(frame: ClosureFrame) -> R<bool> {
-    let symbol = symbols().decimal_mark;
-    if is_default(frame, symbol)? && default_is_unforced(frame, symbol) {
-        let mark = crate::envir::option_value(symbols().out_dec.car());
-        return Ok(string_scalar(mark).as_deref() == Some("."));
-    }
-    argument_is(frame, symbol, |value| {
-        string_scalar(value).as_deref() == Some(".")
-    })
-}
-
-/// Whether the formal `symbol` holds a default promise that has not been forced. The fast paths
-/// run only for base's own closures, so the promise's code is the formal's original default.
-unsafe fn default_is_unforced(frame: ClosureFrame, symbol: Sexp) -> bool {
-    let value = match frame.resolve() {
-        Ok(index) => match eval::slot_formal(index, symbol) {
-            Some((value, _)) => value,
-            None => return false,
-        },
-        Err(env) => match crate::heap().frame_cell(env, symbol) {
-            Some(cell) => cell.cdr(),
-            None => return false,
-        },
+unsafe fn decimal_mark_is_point(formal: Formal) -> R<bool> {
+    let value = match formal {
+        Formal::Default(value)
+            if value.kind() == SexpType::Promise && value.car() == values::unbound() =>
+        {
+            crate::envir::option_value(symbols().out_dec.car())
+        }
+        Formal::Default(value) if value.kind() == SexpType::Promise => value.car(),
+        Formal::Default(_) => return Ok(false),
+        Formal::Given(value) => force_given(value)?,
     };
-    value.kind() == SexpType::Promise && value.car() == values::unbound()
+    Ok(string_scalar(value).as_deref() == Some("."))
 }
 
 /// `pmax(..., na.rm)` when every argument is `NULL` or an atomic vector that is no object, and
@@ -3270,6 +3424,7 @@ unsafe fn nth(list: Sexp, position: usize) -> Sexp {
 unsafe fn tagged_list(items: &[(Sexp, Sexp)]) -> R<Sexp> {
     let heap = crate::heap();
     let list = values::alloc(SexpType::List, items.len())?;
+    heap.root(list);
     for (position, &(_, value)) in items.iter().enumerate() {
         heap.set_element(list, position, value);
     }
@@ -3324,13 +3479,55 @@ unsafe fn do_try_catch(call: &Call<'_>) -> R<Sexp> {
     eval::define(names.classes, classes, frame)?;
     eval::define(
         names.parentenv,
-        eval::frame_sys_parent_pending(index)?,
+        eval::frame_sys_parent(index, eval::Reify::Site("parent.frame"))?,
         frame,
     )?;
     if length(classes) != forced.len() {
         eval::eval(nth(statements, 6), frame)?;
     }
     let value = eval::eval(nth(statements, 7), frame)?;
+    finish(ClosureFrame::Env(frame), value, interp().visible)
+}
+
+/// `withCallingHandlers(expr, ...)`. The prologue runs the R body's statements before `expr`:
+/// it forces the handlers in order as `list(...)` does, binds `handlers`, `classes` and
+/// `parentenv` in the frame, and establishes the handlers. Then it evaluates `expr` in the
+/// frame, as the R body's last statement does, so the frame and its contents read as in GNU R.
+unsafe fn do_with_calling_handlers(call: &Call<'_>) -> R<Sexp> {
+    if !fast_paths_enabled() {
+        return decline();
+    }
+    let Some(index) = call.frame_index() else {
+        return decline();
+    };
+    let frame = call.env()?;
+    let Some(items) = dots(ClosureFrame::Env(frame))? else {
+        return decline();
+    };
+    let names = symbols();
+    let mut forced: SmallVec<[(Sexp, Sexp); 8]> = SmallVec::new();
+    for &(tag, item) in &items {
+        let value = eval::value_of(item)?;
+        crate::heap().root(value);
+        forced.push((tag, value));
+    }
+    let handlers = tagged_list(&forced)?;
+    let classes = values::get_attr(handlers, names.names);
+    eval::define(names.handlers, handlers, frame)?;
+    eval::define(names.classes, classes, frame)?;
+    let parent_env = eval::frame_sys_parent(index, eval::Reify::Site("parent.frame"))?;
+    eval::define(names.parentenv, parent_env, frame)?;
+    if length(classes) != forced.len() {
+        // `stop("condition handlers must be specified with a condition class")`
+        eval::eval(nth(original_statements(index), 3), frame)?;
+    }
+    let calling = values::scalar_logical(1)?;
+    kernel(
+        crate::conditions::do_add_cond_hands,
+        &[classes, handlers, parent_env, nil(), calling],
+        ClosureFrame::Env(frame),
+    )?;
+    let value = eval::eval(names.expr, frame)?;
     finish(ClosureFrame::Env(frame), value, interp().visible)
 }
 
@@ -3350,12 +3547,89 @@ unsafe fn do_try_catch_list(call: &Call<'_>) -> R<Sexp> {
     if classes.is_object() || length(classes) != 1 {
         return decline();
     }
-    eval::define(symbols().nh, values::scalar_integer(1)?, frame)?;
+    let names = symbols();
+    eval::define(names.nh, values::scalar_integer(1)?, frame)?;
     // `if (nh > 1L) ... else if (nh == 1L) tryCatchOne(...) else expr`
     let branches = nth(original_statements(index), 1);
     let one = nth(nth(branches, 3), 2);
-    let value = eval::eval(one, frame)?;
+    let (Some(parent_env), Some(handlers)) = (
+        argument(ClosureFrame::Env(frame), names.parentenv)?,
+        argument(ClosureFrame::Env(frame), names.handlers)?,
+    ) else {
+        return decline_eval(one, frame);
+    };
+    let try_catch_one = eval::find_fun(names.try_catch_one, frame)?;
+    if handlers.kind() != SexpType::List
+        || handlers.is_object()
+        || length(handlers) != 1
+        || try_catch_one.kind() != SexpType::Closure
+    {
+        return decline_eval(one, frame);
+    }
+    // `tryCatchOne(expr, names, parentenv, handlers[[1L]])`, applied without evaluating the
+    // call: the arguments other than `expr` are values already, so their promises are made
+    // forced, and the frame and its call read as in GNU R.
+    let mut args = [Arg {
+        tag: nil(),
+        value: eval::make_promise(names.expr, frame)?,
+    }; 4];
+    crate::heap().root(args[0].value);
+    for (arg, (symbol, value)) in args[1..].iter_mut().zip([
+        (names.names, classes),
+        (names.parentenv, parent_env),
+        (nth(one, 4), handlers.element(0)),
+    ]) {
+        arg.value = eval::forced_promise(symbol, value)?;
+        crate::heap().root(arg.value);
+    }
+    let value = eval::apply_closure(one, try_catch_one, &args, frame, None)?;
     finish(ClosureFrame::Env(frame), value, interp().visible)
+}
+
+/// Evaluates the R body's `call` in `frame` and finishes the call with its value, for a fast
+/// path that has done everything before that call exactly as the R body would.
+unsafe fn decline_eval(call: Sexp, frame: Sexp) -> R<Sexp> {
+    let value = eval::eval(call, frame)?;
+    finish(ClosureFrame::Env(frame), value, interp().visible)
+}
+
+/// `tryCatchOne(expr, name, parentenv, handler)`: defines `doTryCatch` and applies it as the
+/// R body's `doTryCatch(return(expr), name, parentenv, handler)` does, with the arguments other
+/// than `return(expr)` passed as forced promises. That `return(expr)` returns from this frame
+/// unless a handler catches a condition, and then the rest of the R body runs as written.
+unsafe fn do_try_catch_one(call: &Call<'_>) -> R<Sexp> {
+    if !fast_paths_enabled() {
+        return decline();
+    }
+    let Some(index) = call.frame_index() else {
+        return decline();
+    };
+    let frame = call.env()?;
+    let names = symbols();
+    let statements = original_statements(index);
+    define_inner_closure(index, nth(statements, 0), frame)?;
+    // `value <- doTryCatch(return(expr), name, parentenv, handler)`
+    let assignment = nth(statements, 1);
+    let do_call = nth(assignment, 2);
+    let do_try_catch = eval::find_fun(names.do_try_catch, frame)?;
+    let mut args: [Arg; 4] = [Arg {
+        tag: nil(),
+        value: eval::make_promise(nth(do_call, 1), frame)?,
+    }; 4];
+    crate::heap().root(args[0].value);
+    // In the order `doTryCatch`'s `.addCondHands(name, list(handler), parentenv, ...)` forces
+    // them.
+    for (position, symbol) in [(1, names.name), (3, names.handler), (2, names.parentenv)] {
+        let Some(value) = argument(ClosureFrame::Env(frame), symbol)? else {
+            return decline_after(statements, 1, frame);
+        };
+        args[position].value = eval::forced_promise(symbol, value)?;
+        crate::heap().root(args[position].value);
+    }
+    let value = eval::apply_closure(do_call, do_try_catch, &args, frame, None)?;
+    crate::heap().root(value);
+    eval::define(nth(assignment, 1), value, frame)?;
+    decline_after(statements, 2, frame)
 }
 
 /// `doTryCatch(expr, name, parentenv, handler)`: establishes the exiting handler with the
@@ -3378,6 +3652,7 @@ unsafe fn do_do_try_catch(call: &Call<'_>) -> R<Sexp> {
     }
     let [name, handler, parent_env] = values;
     let handlers = values::list_vector(&[handler])?;
+    crate::heap().root(handlers);
     let calling = values::scalar_logical(0)?;
     kernel(
         crate::conditions::do_add_cond_hands,

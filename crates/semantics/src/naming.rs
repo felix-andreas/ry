@@ -4,12 +4,14 @@
 
 use {
     crate::{
+        dense::DenseId,
         hir::{
             Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind,
             MatchArm, Module, NameSite, PatId, PatternKind, Symbol, UnaryOperator,
             destructure_leaves,
         },
         sorted::{SortedMap, SortedSet},
+        stubs::{SymbolKey, SymbolMap},
     },
     rustc_hash::{FxHashMap, FxHashSet},
     std::{
@@ -23,6 +25,16 @@ use {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BindingId(pub u32);
+
+impl DenseId for BindingId {
+    fn from_index(index: usize) -> BindingId {
+        BindingId(u32::try_from(index).expect("an item holds fewer than u32::MAX bindings"))
+    }
+
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindingInfo {
@@ -225,7 +237,7 @@ pub struct InvalidAssignmentTarget {
 /// before the defining namespace when a method body runs.
 pub fn resolve_item(
     module: &Module,
-    masked_verbs: &FxHashMap<String, Vec<String>>,
+    masked_verbs: &SymbolMap<Vec<String>>,
     is_member: &dyn Fn(RefClassKey, Symbol) -> bool,
 ) -> ItemNaming {
     let mut context = Context {
@@ -309,7 +321,7 @@ struct AssignmentWrite {
 
 struct Context<'a> {
     module: &'a Module,
-    masked_verbs: &'a FxHashMap<String, Vec<String>>,
+    masked_verbs: &'a SymbolMap<Vec<String>>,
     is_member: &'a dyn Fn(RefClassKey, Symbol) -> bool,
     /// Function literals a Reference Class definition installs as methods.
     method_classes: FxHashMap<ExprId, RefClassKey>,
@@ -759,7 +771,7 @@ impl Context<'_> {
                 // matching the data formals resolve normally.
                 let masking_family = match (module.kind(*callee), builtin_callee) {
                     (_, Some(name)) => base_masking_family(name)
-                        .or_else(|| declared_masked_verb(self.masked_verbs, name)),
+                        .or_else(|| declared_masked_verb(self.masked_verbs, callee_symbol?)),
                     // Only `base::` names the base family; another package's `with` is its own.
                     (
                         ExpressionKind::Namespace {
@@ -923,14 +935,14 @@ impl Context<'_> {
                     self.current_scope().slots.insert(variable, slot);
                     self.record_write(slot, Reach::Implicit);
                 }
-                self.loop_body(*body, true);
+                self.loop_body(*body, None, true);
             }
             ExpressionKind::While { condition, body } => {
                 self.resolve(*condition);
-                self.loop_body(*body, true);
+                self.loop_body(*body, Some(*condition), true);
             }
             ExpressionKind::Repeat { body } => {
-                self.loop_body(*body, false);
+                self.loop_body(*body, None, false);
             }
             ExpressionKind::Local { body } => {
                 let scope_id = self.stable_scope_id(id);
@@ -1184,8 +1196,9 @@ impl Context<'_> {
     }
 
     /// Re-walks to a fixed point (the reach lattice is finite and joins only grow), then
-    /// records effects on one final pass. `may_skip` joins the never-entered path back in.
-    fn loop_body(&mut self, body: ExprId, may_skip: bool) {
+    /// records effects on one final pass. A `while` loop's `condition` runs again after each
+    /// pass, so it reads what the body wrote. `may_skip` joins the never-entered path back in.
+    fn loop_body(&mut self, body: ExprId, condition: Option<ExprId>, may_skip: bool) {
         let entry = self.flow.clone();
         let saved_emit = self.emit;
         let enclosing_exits = mem::take(&mut self.loop_exits);
@@ -1193,6 +1206,9 @@ impl Context<'_> {
         loop {
             let before = self.flow.clone();
             self.resolve(body);
+            if let Some(condition) = condition {
+                self.resolve(condition);
+            }
             join_flow(&mut self.flow, &before);
             if self.flow == before {
                 break;
@@ -1202,6 +1218,13 @@ impl Context<'_> {
         // Only the final pass's `break` states describe the converged loop.
         self.loop_exits.clear();
         self.resolve(body);
+        if let Some(condition) = condition {
+            // The condition's own effects were recorded before the loop; this read only marks
+            // the body's writes it sees as used.
+            self.emit = false;
+            self.resolve(condition);
+            self.emit = saved_emit;
+        }
         let breaks = mem::replace(&mut self.loop_exits, enclosing_exits);
 
         for exit in &breaks {
@@ -1885,12 +1908,13 @@ fn declared_names(module: &Module, value: ExprId) -> Vec<Symbol> {
 /// local definition shadows the callee. Pre-minting runs before resolution, so it uses this.
 fn syntactic_masking_family<'a>(
     module: &Module,
-    masked_verbs: &'a FxHashMap<String, Vec<String>>,
+    masked_verbs: &'a SymbolMap<Vec<String>>,
     callee: ExprId,
 ) -> Option<Vec<&'a str>> {
     match module.kind(callee) {
-        ExpressionKind::NameRef(name) => base_masking_family(name.as_str())
-            .or_else(|| declared_masked_verb(masked_verbs, name.as_str())),
+        ExpressionKind::NameRef(name) => {
+            base_masking_family(name.as_str()).or_else(|| declared_masked_verb(masked_verbs, name))
+        }
         ExpressionKind::Namespace {
             package,
             name: Some(name),
@@ -1902,10 +1926,10 @@ fn syntactic_masking_family<'a>(
     }
 }
 
-fn declared_masked_verb<'a>(
-    masked_verbs: &'a FxHashMap<String, Vec<String>>,
-    name: &str,
-) -> Option<Vec<&'a str>> {
+fn declared_masked_verb(
+    masked_verbs: &SymbolMap<Vec<String>>,
+    name: impl SymbolKey,
+) -> Option<Vec<&str>> {
     masked_verbs
         .get(name)
         .map(|leading| leading.iter().map(String::as_str).collect())
@@ -2302,7 +2326,7 @@ mod tests {
         let root = parse.syntax_node();
         let item = root.children().next().expect("one top-level item");
         let module = lower_item(&item);
-        resolve_item(&module, &FxHashMap::default(), &|_, _| false)
+        resolve_item(&module, &SymbolMap::default(), &|_, _| false)
     }
 
     #[test]

@@ -81,6 +81,16 @@ f: <T: numeric> fn(n: T) -> NULL
 42..43 warning[unused] `y` is assigned but never used.
 47..48 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing.
 
+#---- a_while_condition_reads_the_body_s_last_write
+f <- function() {
+  searching <- TRUE
+  while (searching) {
+    searching <- FALSE
+  }
+}
+#++++
+f: fn() -> NULL
+
 #---- conditional_write_never_read_is_reported
 f <- function(flag) {
   if (flag) {

@@ -5,6 +5,7 @@ description: How fast R runs on ry against GNU R, on public compiler benchmarks,
 
 import BenchmarkMethod from '../../components/BenchmarkMethod.astro';
 import BenchmarkPrograms from '../../components/BenchmarkPrograms.astro';
+import BenchmarkSection from '../../components/BenchmarkSection.astro';
 import BenchmarkSummary from '../../components/BenchmarkSummary.astro';
 import BenchmarkTable from '../../components/BenchmarkTable.astro';
 import SpeedChart from '../../components/SpeedChart.astro';
@@ -12,18 +13,26 @@ import SpeedChart from '../../components/SpeedChart.astro';
 Four suites compare ry's runtime with GNU R. Two run code that others wrote: the programs that
 R compiler research measures itself on, and the test suites of CRAN packages. The other two run
 code we wrote: small numeric kernels, each also written in typed ry, and programs in the shape of
-package and business code. Each suite's geometric mean of ry's speed-ups over GNU R:
+package and business code. A fifth section times the three benchmark code bases, outside this
+summary. Each suite's geometric mean of ry's speed-ups over GNU R:
 
 <BenchmarkSummary />
 
 Every number on this page is rendered from the results files in `tools/bench/`, and each chart names
-the date, the GNU R version, the machine and the ry commit of its measurement.
+the date, the version of the engine ry is compared with, the machine and the ry commit of its
+measurement.
 
 ## Public R JIT benchmarks
 
-These are the programs that the Ř (rir) and rcp R compilers are measured on, from the suite of
-Kocourek, Křikava and Vitek, "Copy-and-Patch Just-in-Time Compiler for R" (VMIL 2025): all 57 but
-three that cannot be sized to a few seconds. They are vendored unchanged with their MIT licence, and
+These are the programs that the [Ř](https://github.com/reactorlabs/rir) (rir) and rcp R compilers
+are measured on. They come from the benchmark directory of the
+[r-compile-server](https://github.com/PRL-PRG/r-compile-server/tree/b2b13a3150bddcc2d6dae8c37ecbbf1007170940/client/rsh/inst/benchmarks)
+repository, the suite of Kocourek, Křikava and Vitek,
+"[Copy-and-Patch Just-in-Time Compiler for R](https://ch-rigid.github.io/publications/kocourek_copyandpatch_2025.pdf)"
+(VMIL 2025): all 57 but three that cannot be sized to a few seconds. The suite combines ports of
+[Are We Fast Yet](https://github.com/smarr/are-we-fast-yet), ports of the
+[Benchmarks Game](https://benchmarksgame-team.pages.debian.net/benchmarksgame/) and the rcp
+micro-benchmarks. They are vendored unchanged with their MIT licence, and
 each file ends with a driver that runs the program once at a fixed size and prints a checksum and
 its time. The sizes make GNU R 4.6 take about half a second to two seconds per program. Every run
 is a fresh process, so the time includes GNU R's byte compilation and ry's JIT tier-up, though not
@@ -75,6 +84,36 @@ engine is marked as failing there and has no speed-up.
 </details>
 
 <BenchmarkPrograms suite="packages" />
+
+## Benchmark code bases
+
+These are the three [synthetic code bases](/development/corpus-and-oracle#the-benchmark-generator)
+(finance, data science and biostatistics) of about 300,000 lines in 500 files each, the size of the
+code ry is built to run. A program here is one whole code base: ry loads the package with `ry load`,
+GNU R loads it the same way, and each of the code base's `test_that()` blocks, about 10,000 per code
+base, runs on its own. A code base's time is the sum of its blocks' own times, so loading the package
+and testthat's per-file garbage collection are outside it. The result is checked by the number of
+blocks that pass, which must agree between the engines.
+
+The suite measures ry with the JIT on and with it off. It is not part of the summary above: the code
+bases are generated, they depend on the packages of the corpus library, and one round takes about 22
+minutes, so the suite runs its 10 rounds without extra rounds for wide intervals.
+
+<SpeedChart suite="codebases" />
+
+<details>
+<summary>The numbers: seconds, speed-ups and the speed-up per test</summary>
+
+<BenchmarkTable suite="codebases" />
+
+</details>
+
+The Per test table gives the geometric mean over the test blocks, so a code base counts every test
+alike, and the note under it names the slowest code base against the mean.
+
+The corpus library lacks polars, Rblpapi and esgtoolkit, so the code bases run without them.
+
+<BenchmarkPrograms suite="codebases" />
 
 ## Numeric kernels (ours)
 
@@ -131,6 +170,78 @@ the interpreter, and the flag under the bar names what was refused.
 
 <BenchmarkPrograms suite="applications" />
 
+<BenchmarkSection suite="hot">
+
+The suites above are programs somebody chose. This one is derived from a measurement of the three
+[benchmark code bases](/development/corpus-and-oracle#the-benchmark-generator), 300,000 lines each for finance, data
+science and biostatistics. A recorder in the runtime ran their tests and measured how much time
+they spend in each package function their own code calls, such as `stats::lm`, `zoo::rollapply` or
+`testthat::expect_equal`. The suite is the 100 functions that hold the most of that time, each
+with up to three of the calls the code bases made to it, captured with their arguments. A program
+replays those calls in a loop, on both engines, with every package the code bases import loaded.
+
+<SpeedChart suite="hot" />
+
+The suite exists to steer performance work: a round takes about half a minute where the code
+bases take minutes, and weighting each program by its share of a code base's time predicts that
+code base's speed-up. [The hot suite](/development/testing#the-hot-suite-a-runtime-change-measured-in-seconds)
+describes how the programs are selected, weighted and checked against the code bases. One process
+per engine runs every program: one warm-up batch of its calls, then five timed batches, and a
+program's time is the median batch.
+
+<details>
+<summary>The numbers: milliseconds per batch of calls</summary>
+
+<BenchmarkTable suite="hot" />
+
+</details>
+
+</BenchmarkSection>
+
+<BenchmarkSection suite="typed">
+
+This suite asks how close typed ry comes to Rust. It takes the typed version of every numeric
+kernel and application workload above and times it against the same program written in Rust: the
+same algorithm on the same sizes, in the data model a Rust programmer would pick, such as a
+`Vec<f64>` for a `List<F64>`, a struct for a record and an enum for a tagged union. Rust is the
+baseline here, so a ratio is typed ry's time over Rust's: 1x is Rust's speed, and lower is faster.
+
+<SpeedChart suite="typed" />
+
+Each Rust program is one file compiled with `rustc -O`. That is optimization level 3, the level of
+cargo's release profile, and no flag names a target CPU, so the program is built the way a released
+Rust program is. The two engines are timed alike: a process runs the program once cold and five
+times warm and reports the median warm run, through a harness in each language that takes the same
+samples (`tools/bench/harness.typed.R` and `tools/bench/typed/harness.rs`). A Rust program passes
+its inputs through `black_box`, which keeps the compiler from computing the result ahead of the
+run. Both must print the same checksum.
+
+Start-up is outside these times, so the suite can time much shorter runs than the suites above. A
+program counts as too short only when Rust finishes it in under 0.1 ms. The suite has no memory
+table, because the runner cannot read a peak below its own memory use, and a Rust program needs
+less than that; the two suites above give the memory of the typed programs. Reproducing the suite
+needs `rustc` and no GNU R.
+
+Compile time is outside every timed run too, and the suite reports it in a table of its own,
+because typed ry compiles a function the first time it is called and has to stay fast at it. The
+Rust column is one `rustc` process per program. The typed column is the time the typed core spent
+compiling the program's functions, summed from the `compiled for ... in N us` and
+`refused ... after N us` lines that `RY_TYPED_LOG=1` prints.
+
+<details>
+<summary>The numbers: milliseconds</summary>
+
+<BenchmarkTable suite="typed" />
+
+</details>
+
+**The programs.** Each program as typed ry and as Rust. The number beside the name is typed ry's
+time over Rust's.
+
+<BenchmarkPrograms suite="typed" />
+
+</BenchmarkSection>
+
 ## How it was measured
 
 The published numbers measure the build you download: the official Linux x86_64 archive of a
@@ -179,7 +290,8 @@ The runner, not this page, judges the data:
 
 To reproduce a suite, run its command from the table on a machine with GNU R; the packages suite
 first needs `just bench-packages install`. Without `--release`, a run measures the local release
-build in `target/release`, which is how to compare two builds of your own (`--baseline`). With
+build in `target/release`, which is how to compare two builds of your own (`--baseline`), and
+`--ry PATH` measures the release build at another path. With
 `--write`, the runner stores `tools/bench/<suite>/results.json` with the release tag, the archive's
 file name and sha256, and the commit the tag names, and `just readme` rewrites the README summary
 from it. `--write` refuses a nightly archive, a local build, and a working tree with a change to a

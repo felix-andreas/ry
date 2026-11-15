@@ -22,15 +22,14 @@ use {
         strings::Encoding,
     },
     interp::{
-        TaskCallbackRoutine, builtin_libraries,
+        AltrepSummary, TaskCallbackRoutine, builtin_libraries,
         builtins::{Arg, BuiltinDef, Call, builtin, internal},
-        graphics_engine,
         native::{Interface, foreign_context},
         unwind::park,
     },
     std::{
         ffi::{c_char, c_int, c_void},
-        path::PathBuf,
+        path::{Path, PathBuf},
     },
 };
 
@@ -90,7 +89,6 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
                 crate::altrep::compact_realseq(length, first, increment)?
             }))
         },
-        compact_sequence_steps: |object| unsafe { crate::altrep::compact_sequence_steps(object) },
         altrep_dataptr: |object| unsafe { crate::altrep::readable_dataptr(object) },
         altrep_int_elt: |object, index| unsafe {
             crate::altrep::int_elt(object, index as crate::R_xlen_t)
@@ -98,7 +96,19 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
         altrep_real_elt: |object, index| unsafe {
             crate::altrep::real_elt(object, index as crate::R_xlen_t)
         },
+        altrep_string_elt: |object, index| unsafe {
+            crate::altrep::sexp_elt(object, index as crate::R_xlen_t)
+        },
         defer_strings: |object| unsafe { Ok(Some(crate::altrep::deferred_string(object)?)) },
+        altrep_wrap: |object| unsafe { crate::altrep::try_wrap(object) },
+        altrep_unwrap: |object| unsafe { crate::altrep::try_unwrap(object) },
+        altrep_summary: |object, method, remove_na| unsafe {
+            Ok(match method {
+                AltrepSummary::Sum => crate::altrep::sum(object, remove_na)?,
+                AltrepSummary::Min => crate::altrep::min(object, remove_na)?,
+                AltrepSummary::Max => crate::altrep::max(object, remove_na)?,
+            })
+        },
         run_finalizers: || unsafe { crate::boundary::run_pending_finalizers() },
         run_exit_finalizers: || unsafe {
             crate::boundary::run_pending_finalizers();
@@ -113,16 +123,29 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
         guard_native: |body| unsafe { guard_native(body) },
         connection_vfprintf: Some(crate::connections::default_vfprintf()),
         find_native_symbol: |name| unsafe { crate::dynload::find_symbol(name, "") },
+        serialize: |object| unsafe {
+            crate::serialize::serialize_to_bytes(
+                object,
+                crate::serialize::Format::Xdr,
+                3,
+                interp::values::nil(),
+            )
+        },
     };
     interp::install(&mut runtime.heap, hooks);
     heap::object::install_altrep_elements(heap::object::AltrepElements {
         read: read_altrep_element,
         write: write_altrep_element,
     });
+    stats::install();
+    ::graphics::install();
+    frames::install();
+    services::install();
     jit::install();
+    interp::register_builtins(typed::file::BUILTINS);
     interp::register_builtins(NATIVE_BUILTINS);
     interp::register_builtins(BOOTSTRAP_BUILTINS);
-    interp::register_builtins(loader::ry_runtime::BUILTINS);
+    interp::register_builtins(crate::loader_backend::BUILTINS);
     interp::register_builtins(crate::serialize::BUILTINS);
     interp::register_builtins(crate::inspect::BUILTINS);
     interp::register_builtins(crate::altrep::INTERNALS);
@@ -469,7 +492,10 @@ pub unsafe fn make_condition(unwind: &Unwind) -> ApiResult<Sexp> {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_eval(expression: Sexp, env: Sexp) -> Sexp {
-    enter(|| eval(expression, env))
+    enter(|| {
+        let _recorded = interp::capture::evaluating(|| env);
+        eval(expression, env)
+    })
 }
 
 /// `R_tryEval` runs in a top-level context of its own: handlers established outside it do not
@@ -479,9 +505,13 @@ unsafe fn try_eval(expression: Sexp, env: Sexp, failed: *mut c_int, silent: bool
         let state = interp::interp();
         let handlers = state.handlers.take();
         let restarts = state.restarts.take();
+        let saved = interp::conditions::set_aside(handlers.clone(), restarts.clone());
         let show = std::mem::replace(&mut state.show_error_messages, !silent);
         let frames = state.frames.len();
+        let recorded = interp::capture::evaluating(|| env);
         let result = eval(expression, env);
+        drop(recorded);
+        drop(saved);
         let state = interp::interp();
         state.handlers = handlers;
         state.restarts = restarts;
@@ -587,14 +617,6 @@ pub unsafe extern "C" fn R_ShowMessage(message: *const c_char) {
     crate::boundary::write_console(&text, true);
 }
 
-impl crate::boundary::Handout for Option<Sexp> {
-    fn hand_out(self, runtime: &mut crate::Runtime) {
-        if let Some(value) = self {
-            value.hand_out(runtime);
-        }
-    }
-}
-
 // The builtins the interpreter calls native code through.
 
 const NATIVE_BUILTINS: &[BuiltinDef] = &[
@@ -613,12 +635,12 @@ const NATIVE_BUILTINS: &[BuiltinDef] = &[
     .keep_visibility(),
     builtin(".Call.graphics", -1, |call| unsafe {
         foreign_context(call.call, || {
-            graphics_engine::graphics_call(call, || dot_call(call, RoutineKind::Call))
+            ::graphics::engine::graphics_call(call, || dot_call(call, RoutineKind::Call))
         })
     }),
     builtin(".External.graphics", -1, |call| unsafe {
         foreign_context(call.call, || {
-            graphics_engine::graphics_call(call, || dot_call(call, RoutineKind::External))
+            ::graphics::engine::graphics_call(call, || dot_call(call, RoutineKind::External))
         })
     }),
     builtin(".C", -1, |call| unsafe {
@@ -916,7 +938,7 @@ unsafe fn c_call(
             SexpType::List if kind == RoutineKind::C => {
                 let copy = crate::memory::duplicate(value, false)?;
                 runtime.heap.root(copy);
-                runtime.heap.escape(copy);
+                runtime.heap.escape(copy, true);
                 pointers.push(copy.data() as *mut std::ffi::c_void);
                 CArgument::Vector(copy)
             }
@@ -1014,6 +1036,11 @@ unsafe fn do_dyn_load(call: &Call<'_>) -> ApiResult<Sexp> {
     }
     if let Some(reason) = builtin_libraries::refused_library(&path) {
         return Err(error(reason));
+    }
+    if let Some(reason) = rcmd::stale_native_build(Path::new(&path)) {
+        return Err(error(format!(
+            "unable to load shared object '{path}':\n  {reason}"
+        )));
     }
     let local = call.arg(1) == runtime().nil() || crate::vectors::as_logical(call.arg(1))? != 0;
     let dll = crate::dynload::load_library(&path, local)?;
@@ -1252,6 +1279,19 @@ pub extern "C" fn ry_runtime_id() -> *const c_char {
     concat!(env!("RY_RUNTIME_ID"), "\0").as_ptr().cast()
 }
 
+/// Prints the R call stack for the executable's crash report (`crates/crash`), which calls it
+/// from a signal handler and passes the writer and the memory probe it wants used.
+///
+/// # Safety
+/// Both functions are async-signal-safe, as the crash handler's are.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ry_crash_traceback(
+    emit: interp::crash::Emit,
+    readable: interp::crash::Readable,
+) {
+    unsafe { interp::crash::write_traceback(emit, readable) }
+}
+
 /// Whether the start-up image at the NUL-terminated `path` is one this library loads: 1 when it
 /// is, 0 when it is missing, of another format, or written by another build.
 ///
@@ -1261,7 +1301,7 @@ pub extern "C" fn ry_runtime_id() -> *const c_char {
 pub unsafe extern "C" fn ry_start_image_current(path: *const c_char) -> c_int {
     let path = unsafe { std::ffi::CStr::from_ptr(path) }.to_string_lossy();
     c_int::from(interp::image::is_current(
-        std::path::Path::new(&*path),
+        Path::new(&*path),
         env!("RY_RUNTIME_ID"),
     ))
 }
@@ -1373,14 +1413,15 @@ pub unsafe extern "C" fn ry_run(
 const IMAGE_HOST: interp::image::ImageHost = interp::image::ImageHost {
     identity: env!("RY_RUNTIME_ID"),
     fixed_objects: crate::altrep::image_objects,
-    environment: loader::ry_runtime::build,
+    environment: crate::loader_backend::build,
 };
 
 /// Writes the start-up image of the R home `R_HOME` names to the NUL-terminated `path`: starts a
 /// session the slow way in this process's environment and saves it. `layout`, when not null,
 /// names the directory of the touch profile that lays the image out (`interp::image::write`).
-/// Returns 0 once written, and 1 after reporting why it was not. The base tree's build calls
-/// this through `ry-rcmd write-start-image`; nothing else writes an image.
+/// Returns 0 once written, and 1 after reporting why it was not. `ry-rcmd write-start-image`
+/// calls this when a base tree is built, and when a home is assembled over a tree with no image
+/// of this build; nothing else writes an image.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ry_write_start_image(path: *const c_char, layout: *const c_char) -> c_int {
     runtime();
@@ -1430,7 +1471,9 @@ unsafe fn start_script_session(command_args: Vec<String>, flags: c_int) -> bool 
         crate::boundary::write_console(b"ry: base R did not load\n", true);
         return false;
     }
-    if let Err(unwind) = loader::ry_runtime::attach() {
+    // Attaching the loader runs R code at top level, which the boundary-call recorder would
+    // otherwise take for the user's.
+    if let Err(unwind) = interp::capture::without_recording(|| crate::loader_backend::attach()) {
         interp::session::report_toplevel(unwind);
         crate::boundary::write_console(b"ry: the package loader did not load\n", true);
         return false;
@@ -1602,20 +1645,26 @@ pub const RUN_FLAG_USER_PROFILE: c_int = 1 << 4;
 /// every host that predates the setting keep the library in scope.
 pub const RUN_FLAG_NO_PRELUDE: c_int = 1 << 5;
 
+/// `ry_run` flag: compile the script's definitions before its first expression runs
+/// (`ry run --aot`), instead of each at its first call.
+pub const RUN_FLAG_AHEAD: c_int = 1 << 6;
+
 /// Every flag `ry_run` and `ry_repl` understand.
 pub const RUN_FLAGS: c_int = RUN_FLAG_ANNOTATION_CHECKS
     | RUN_FLAG_OBJECT_SYSTEMS
     | RUN_FLAG_STRICT
     | RUN_FLAG_SITE_PROFILE
     | RUN_FLAG_USER_PROFILE
-    | RUN_FLAG_NO_PRELUDE;
+    | RUN_FLAG_NO_PRELUDE
+    | RUN_FLAG_AHEAD;
 
 unsafe fn apply_flags(flags: c_int) {
     runtime();
     interp::interp().annotations.enabled = flags & RUN_FLAG_ANNOTATION_CHECKS != 0;
-    interp::interp().object_systems = flags & RUN_FLAG_OBJECT_SYSTEMS != 0;
+    interp::set_object_systems(flags & RUN_FLAG_OBJECT_SYSTEMS != 0);
     interp::interp().prelude = flags & RUN_FLAG_NO_PRELUDE == 0;
-    loader::ry_runtime::set_strict(flags & RUN_FLAG_STRICT != 0);
+    interp::interp().ahead.enabled = flags & RUN_FLAG_AHEAD != 0;
+    crate::loader_backend::set_strict(flags & RUN_FLAG_STRICT != 0);
 }
 
 /// Reads one chunk of console input after showing `prompt`: writes at most `length - 1` bytes
@@ -1649,7 +1698,9 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
         crate::boundary::write_console(b"ry: base R did not load\n", true);
         return 2;
     }
-    if let Err(unwind) = loader::ry_runtime::attach() {
+    // Attaching the loader runs R code at top level, which the boundary-call recorder would
+    // otherwise take for the user's.
+    if let Err(unwind) = interp::capture::without_recording(|| crate::loader_backend::attach()) {
         interp::session::report_toplevel(unwind);
         crate::boundary::write_console(b"ry: the package loader did not load\n", true);
         return 2;
@@ -1696,7 +1747,7 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
     if let Some(startup) = &startup {
         // `run_text` reports an error itself, and a failed startup load still leaves a console
         // the user can fix the package from.
-        interp::session::run_text(startup, "<startup>");
+        interp::capture::without_recording(|| interp::session::run_text(startup, "<startup>"));
     }
     interp::session::run_console(
         // SAFETY: the console reads on the interpreter's thread, at its top level.
@@ -1718,33 +1769,33 @@ pub unsafe extern "C" fn ry_loader_prepare(path: *const c_char, flags: c_int) {
         return;
     }
     let path = String::from_utf8_lossy(crate::strings::c_bytes(path)).into_owned();
-    loader::ry_runtime::prepare(PathBuf::from(path), flags & RUN_FLAG_STRICT != 0);
+    crate::loader_backend::prepare(PathBuf::from(path), flags & RUN_FLAG_STRICT != 0);
 }
 
 /// Makes the package loader wait for `verdict` before the parts of a load that may have
 /// effects, so the host can check the package while the definitions bind (see
-/// `loader::ry_runtime::set_verdict`). `ry load` calls it once, before [`ry_run`].
+/// `crate::loader_backend::set_verdict`). `ry load` calls it once, before [`ry_run`].
 #[unsafe(no_mangle)]
-pub extern "C" fn ry_loader_set_verdict(verdict: loader::ry_runtime::Verdict) {
-    loader::ry_runtime::set_verdict(verdict);
+pub extern "C" fn ry_loader_set_verdict(verdict: crate::loader_backend::Verdict) {
+    crate::loader_backend::set_verdict(verdict);
 }
 
 /// Makes the package loader ask `check` before a load of a strict package runs anything (see
-/// `loader::ry_runtime::set_check`). Every command that runs ry's runtime calls it once, before
+/// `crate::loader_backend::set_check`). Every command that runs ry's runtime calls it once, before
 /// [`ry_run`].
 #[unsafe(no_mangle)]
 pub extern "C" fn ry_loader_set_check(
-    strict_config: loader::ry_runtime::Check,
-    check: loader::ry_runtime::Check,
+    strict_config: crate::loader_backend::Check,
+    check: crate::loader_backend::Check,
 ) {
-    loader::ry_runtime::set_check(strict_config, check);
+    crate::loader_backend::set_check(strict_config, check);
 }
 
 /// Returns 1 when a package loaded in this session changed on disk since it was loaded, and 0
 /// otherwise. ry's console asks before each command and reloads with `.ry_autoreload()`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ry_loader_changed() -> c_int {
-    c_int::from(loader::ry_runtime::changed())
+    c_int::from(crate::loader_backend::changed())
 }
 
 /// SIGINT requests a user interrupt, which the evaluator delivers at its next interrupt check. At
@@ -1829,6 +1880,7 @@ pub unsafe extern "C" fn R_ParseEvalString(text: *const c_char, env: Sexp) -> Se
     enter(|| {
         let expression = parse_one(text)?;
         runtime().heap.root(expression);
+        let _recorded = interp::capture::evaluating(|| env);
         eval(expression, env)
     })
 }

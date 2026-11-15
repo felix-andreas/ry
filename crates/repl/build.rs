@@ -31,16 +31,18 @@ fn main() {
     let out_dir =
         PathBuf::from(env::var("OUT_DIR").unwrap_or_else(|error| panic!("OUT_DIR: {error}")));
     embed_runtime(&out_dir);
-    embed_base(&out_dir);
+    embed_base(&out_dir, &identity.hash);
 }
 
 /// Writes `embedded_base.rs`, which defines `EMBEDDED_BASE`: `None`, or the base R tree that
 /// `RY_EMBED_BASE` names as an archive `repl::extract_base` reads. The archive is a sequence of
 /// entries in path order, each a kind byte (0 for a directory, 1 for a file, 2 for an executable
 /// file), the path's length as a little-endian `u32`, the path with `/` separators, and for a file
-/// its length as a little-endian `u64` and its bytes. It is compressed as a whole, which shrinks
+/// its modification time in nanoseconds since the epoch as a little-endian `u64`, its length as a
+/// little-endian `u64` and its bytes. A code image is valid only for the lazy-load database
+/// whose modification time it recorded, so extraction must restore the times. It is compressed as a whole, which shrinks
 /// the many similar help and lazy-load files far better than compressing each.
-fn embed_base(out_dir: &Path) {
+fn embed_base(out_dir: &Path, build: &str) {
     println!("cargo:rerun-if-env-changed=RY_EMBED_BASE");
     let source = match env::var_os("RY_EMBED_BASE").filter(|path| !path.is_empty()) {
         None => "pub const EMBEDDED_BASE: Option<EmbeddedBase> = None;\n".to_owned(),
@@ -54,13 +56,13 @@ fn embed_base(out_dir: &Path) {
                 );
             }
             println!("cargo:rerun-if-changed={}", manifest.display());
-            // `ry-rcmd start-image` rewrites the start-up image without touching the manifest.
+            // `ry-rcmd start-image` adds a build's start-up image without touching the manifest.
             println!(
                 "cargo:rerun-if-changed={}",
-                root.join("library/base/R/ry-start.image").display()
+                root.join("library/base/R").display()
             );
             let mut archive = Vec::new();
-            append_tree(&root, "", &mut archive);
+            append_tree(&root, "", build, &mut archive);
             let level = if env::var("PROFILE").is_ok_and(|profile| profile == "release") {
                 19
             } else {
@@ -85,7 +87,7 @@ fn embed_base(out_dir: &Path) {
     fs::write(&path, source).unwrap_or_else(|error| panic!("writing {}: {error}", path.display()));
 }
 
-fn append_tree(directory: &Path, prefix: &str, archive: &mut Vec<u8>) {
+fn append_tree(directory: &Path, prefix: &str, build: &str, archive: &mut Vec<u8>) {
     let mut entries: Vec<_> = fs::read_dir(directory)
         .unwrap_or_else(|error| panic!("reading {}: {error}", directory.display()))
         .map(|entry| {
@@ -100,6 +102,13 @@ fn append_tree(directory: &Path, prefix: &str, archive: &mut Vec<u8>) {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or_else(|| panic!("{} has a name that is not UTF-8", path.display()));
+        // A tree shared by several builds holds each one's start-up and code images
+        // (`rcmd::images`), and only this build's load into the runtime it ships with.
+        let image =
+            name.ends_with(".ryc") || (name.starts_with("ry-start.") && name.ends_with(".image"));
+        if image && !name.contains(&format!(".{build}.")) {
+            continue;
+        }
         let relative = format!("{prefix}{name}");
         let metadata = fs::symlink_metadata(&path)
             .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
@@ -112,7 +121,7 @@ fn append_tree(directory: &Path, prefix: &str, archive: &mut Vec<u8>) {
         };
         if metadata.is_dir() {
             push_path(archive, 0);
-            append_tree(&path, &format!("{relative}/"), archive);
+            append_tree(&path, &format!("{relative}/"), build, archive);
         } else if metadata.is_file() {
             #[cfg(unix)]
             let executable = {
@@ -122,6 +131,13 @@ fn append_tree(directory: &Path, prefix: &str, archive: &mut Vec<u8>) {
             #[cfg(not(unix))]
             let executable = false;
             push_path(archive, if executable { 2 } else { 1 });
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .and_then(|since| u64::try_from(since.as_nanos()).ok())
+                .unwrap_or(0);
+            archive.extend_from_slice(&modified.to_le_bytes());
             let bytes = fs::read(&path)
                 .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
             archive.extend_from_slice(&(bytes.len() as u64).to_le_bytes());

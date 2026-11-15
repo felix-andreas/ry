@@ -93,6 +93,14 @@ impl Tree {
         }
     }
 
+    /// The node at `position` among this tree's elements ([`NodeRef::position`]).
+    pub fn node_at(&self, position: u32) -> Option<NodeRef<'_>> {
+        (position < self.len && self.is_node(position)).then_some(NodeRef {
+            tree: self,
+            index: position,
+        })
+    }
+
     /// The subtree at `node` as a tree of its own, with offsets counted from its start. It
     /// shares this tree's columns, and two equal subtrees anywhere in any file compare equal.
     pub fn subtree(&self, node: NodeRef<'_>) -> Tree {
@@ -1393,6 +1401,12 @@ fn element_ref(tree: &Tree, index: u32) -> ElementRef<'_> {
 impl<'a> NodeRef<'a> {
     pub fn tree(self) -> &'a Tree {
         self.tree
+    }
+
+    /// Where the node sits among its tree's elements in preorder, which [`Tree::node_at`]
+    /// turns back into the node without a walk.
+    pub fn position(self) -> u32 {
+        self.index
     }
 
     pub fn kind(self) -> SyntaxKind {

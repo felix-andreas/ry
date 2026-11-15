@@ -380,7 +380,7 @@ total <- List.walk([1.5, 2.5], total, \(acc, v) acc + v)
 #++++
 total: I64
 total: Unknown
-49..66 error[type-mismatch] this function is passed `I64`, but its parameter `acc` is used as an `F64`
+59..66 error[type-mismatch] `+` is not defined between `I64` and `F64`. Number types are never converted into each other: convert one side, as in `Num.to_i64(x)`
 
 #---- a_literal_past_the_i64_range_is_an_f64
 w <- [1]
@@ -398,3 +398,30 @@ z: Bool
 b: Bool
 y: I64
 items: List<F64>
+
+#---- a_settled_ry_accumulator_types_the_walk_body
+column_sums <- function(rows: List<List<F64>>) -> List<F64>
+  List.walk(rows, List.repeat(0f64, 2), \(sums, row) sums + row)
+#++++
+column_sums: fn(rows: List<List<F64>>) -> List<F64>
+
+#---- an_empty_list_grows_into_a_list_of_a_nominal_type
+type Tree = :Leaf(I64) | :Node(List<Tree>)
+grow <- function(leaf: Tree) -> Tree {
+  children <- []
+  children <- List.append(children, leaf)
+  @Tree(:Node(children))
+}
+#++++
+grow: fn(leaf: Tree) -> Tree
+
+#---- a_tuple_literal_is_decided_by_a_later_use
+replace_all <- function(text: Str) -> Str {
+  pairs <- [("B", "(c|g|t)"), ("D", "(a|g|t)")]
+  for (pair in pairs) text <- Str.replace_each(text, pair[[1]], pair[[2]])
+  text
+}
+point <- (x = 1, y = 2.5)
+#++++
+replace_all: fn(text: Str) -> Str
+point: Record{x: double, y: double}

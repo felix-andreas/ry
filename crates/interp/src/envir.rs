@@ -231,25 +231,6 @@ pub unsafe fn call_with_srcref(frame: &crate::Frame) -> R<Sexp> {
     Ok(call)
 }
 
-/// The function and frame of the caller of the closure whose frame is `env`, as that closure
-/// sees them through `sys.function(sys.parent())` and `sys.frame(sys.parent())`; `None` when it
-/// was called from the top level.
-pub(crate) unsafe fn sys_parent_of(env: Sexp) -> R<Option<(Sexp, Sexp)>> {
-    let Some(own) = interp().frames.iter().rposition(|frame| frame.owns(env)) else {
-        return Ok(None);
-    };
-    let context = Some(own);
-    let parent = sys_parent_number(1, context);
-    if parent == 0 {
-        return Ok(None);
-    }
-    let parent = parent as i32;
-    Ok(Some((
-        sys_call_at(parent, context, true)?,
-        sys_frame_at(parent, context)?,
-    )))
-}
-
 /// `R_sysparent`: the frame number of the parent of frame `n` counted back from `context`.
 pub(crate) unsafe fn sys_parent_number(mut n: i64, context: Option<usize>) -> i64 {
     let frames = &interp().frames;
@@ -394,7 +375,7 @@ unsafe fn do_parent_frame(call: &Call<'_>) -> R<Sexp> {
             return Ok(global_env());
         };
         if n == 1 {
-            return crate::eval::frame_sys_parent_pending(caller);
+            return crate::eval::frame_sys_parent(caller, crate::eval::Reify::Site("parent.frame"));
         }
         n -= 1;
         index = caller;
@@ -474,7 +455,19 @@ unsafe fn do_new_env(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_parent_env(call: &Call<'_>) -> R<Sexp> {
-    let env = environment_arg(call.arg(0), "env")?;
+    // GNU R takes an environment or an S4 object extending one, never a search position as
+    // `as.environment` does.
+    let value = call.arg(0);
+    let env = match value.kind() {
+        SexpType::Environment => value,
+        SexpType::Object if value.has_gp(gp::S4_OBJECT) => {
+            get_attr(value, symbols().dot_xdata)
+        }
+        _ => nil(),
+    };
+    if env.kind() != SexpType::Environment {
+        return Err(error("argument is not an environment"));
+    }
     if env == empty_env() {
         return Err(call.error("the empty environment has no parent"));
     }
@@ -947,7 +940,6 @@ unsafe fn do_lock_binding(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_unlock_binding(call: &Call<'_>) -> R<Sexp> {
     binding_cell(call)?.set_gp_bits(gp::BINDING_LOCKED, false);
-    crate::code_image::invalidate_checks();
     Ok(nil())
 }
 
@@ -1919,9 +1911,9 @@ impl ElementCalls {
             && !list.is_object()
             && !list.is_array()
             && !matches!(list.kind(), SexpType::I64 | SexpType::Record)
-            // `vector_element` would materialize a numeric ALTREP vector, such as a compact
-            // `1:n`, which `X[[i]]` reads one element at a time.
-            && (!list.is_altrep() || matches!(list.kind(), SexpType::String | SexpType::List))
+            // `vector_element` would materialize a complex or raw ALTREP vector, which `X[[i]]`
+            // reads one element at a time. Every other kind reads through its `Elt` method.
+            && (!list.is_altrep() || !matches!(list.kind(), SexpType::Complex | SexpType::Raw))
         {
             Some(list)
         } else {

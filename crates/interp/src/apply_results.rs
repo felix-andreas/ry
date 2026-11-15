@@ -42,14 +42,11 @@ impl VapplyResults {
         let width = length(template);
         let dims = get_attr(template, symbols().dim);
         let array_dims = (dims.kind() == SexpType::Integer && length(dims) >= 1).then_some(dims);
-        let row_names = get_attr(
-            template,
-            if array_dims.is_some() {
-                symbols().dimnames
-            } else {
-                symbols().names
-            },
-        );
+        let row_names = if array_dims.is_some() {
+            get_attr(template, symbols().dimnames)
+        } else {
+            values::names(template)
+        };
         Ok(VapplyResults {
             result: alloc(kind, count * width)?,
             kind,
@@ -90,14 +87,12 @@ impl VapplyResults {
             )));
         }
         if index == 0 && self.use_names && self.row_names == nil() {
-            self.row_names = get_attr(
-                value,
-                if self.array_dims.is_some() {
-                    symbols().dimnames
-                } else {
-                    symbols().names
-                },
-            );
+            // A one-dimensional array, such as a table, names its elements through its dimnames.
+            self.row_names = if self.array_dims.is_some() {
+                get_attr(value, symbols().dimnames)
+            } else {
+                values::names(value)
+            };
         }
         let value = values::materialize(value)?;
         let start = index * self.width;
@@ -174,6 +169,11 @@ impl VapplyResults {
                 values::set_attr(self.result, symbols.names, names)?;
             }
             return Ok(self.result);
+        }
+        // Setting dimnames stores a component without elements as NULL, which is what the names
+        // of a zero-length character input are.
+        if names != nil() && length(names) == 0 {
+            names = nil();
         }
         if names == nil() && self.row_names == nil() {
             return Ok(self.result);

@@ -21,6 +21,7 @@ const TOKENS: &[&str] = &[
     "ry",
     "gnu-r",
     "--no-load",
+    "--aot",
     "-f",
     "--file",
     "--",
@@ -69,6 +70,7 @@ fn everything_after_the_script_reaches_it_verbatim() {
                     mode: Mode::Script {
                         file: PathBuf::from("script.R"),
                         arguments: trailing.clone(),
+                        ahead: false,
                     },
                 }),
                 "{arguments:?}"
@@ -84,6 +86,7 @@ struct Options {
     keybindings: Option<Keybindings>,
     runtime: Option<Runtime>,
     no_load: bool,
+    ahead: bool,
     file: bool,
 }
 
@@ -95,7 +98,7 @@ fn options_before_the_script_resolve_as_documented() {
         let mut options = Options::default();
         let mut arguments = vec![command.to_owned()];
         for _ in 0..random.below(4) {
-            match random.below(4) {
+            match random.below(5) {
                 0 if command != "repl" && !options.interactive => {
                     options.interactive = true;
                     arguments.push(["-i", "--interactive"][random.below(2)].to_owned());
@@ -131,6 +134,10 @@ fn options_before_the_script_resolve_as_documented() {
                     options.no_load = true;
                     arguments.push("--no-load".to_owned());
                 }
+                4 if command == "run" && !options.ahead => {
+                    options.ahead = true;
+                    arguments.push("--aot".to_owned());
+                }
                 _ => {}
             }
         }
@@ -145,7 +152,9 @@ fn options_before_the_script_resolve_as_documented() {
         }
         // A console option beside a script would be ignored, so it is a usage error.
         let script = options.file && command != "repl" && !options.interactive;
-        if script && (options.keybindings.is_some() || options.no_load) {
+        // So would compiling ahead without a script to compile.
+        if script && (options.keybindings.is_some() || options.no_load) || options.ahead && !script
+        {
             assert!(
                 session(&arguments).is_err(),
                 "{arguments:?} must be refused"
@@ -170,6 +179,7 @@ fn options_before_the_script_resolve_as_documented() {
             Some(file) if command != "repl" && !options.interactive => Mode::Script {
                 file,
                 arguments: Vec::new(),
+                ahead: options.ahead,
             },
             file => Mode::Console {
                 file,
@@ -224,6 +234,7 @@ fn arbitrary_argument_vectors_never_panic_and_keep_the_session_invariants() {
             Mode::Script {
                 file,
                 arguments: trailing,
+                ..
             } => {
                 assert_ne!(command.as_deref(), Some("repl"), "{arguments:?}");
                 // An option's value can repeat the script's text, so the script is found from

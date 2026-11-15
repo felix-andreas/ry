@@ -1,0 +1,16 @@
+[package]
+name = "stats"
+description = "The stats package's native routines for ry's R interpreter: models, optimizers, smoothers and tests"
+edition = "2024"
+version.workspace = true
+license = "GPL-2.0-or-later"
+publish = false
+
+[lib]
+path = "src/stats.rs"
+
+[dependencies]
+heap = { path = "../heap" }
+interp = { path = "../interp" }
+numeric = { path = "../numeric" }
+libc = "0.2"

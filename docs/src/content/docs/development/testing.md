@@ -49,9 +49,35 @@ But a filter that matches no case in *any* suite fails: that is almost certainly
 zero cases would otherwise report a pass.
 
 While iterating, `cargo test -p semantics` is the default command, since it covers analysis
-behavior. `just gate` runs every test plus clippy and a formatting check. CI runs the same recipes,
-but only when started by hand: the orchestrating agent starts it on main at its hourly check when
-main has new commits, so a push or a pull request gets no CI run of its own.
+behavior. `just gate` runs every test plus clippy and a formatting check.
+
+Tests run locally, with `just gate` for everything and the two recipes below for the part that
+needs no GNU R. CI runs tests only when a maintainer starts a workflow by hand or tags a release,
+never on a push or a pull request. The workflow for the part without GNU R, `test.yml`, is staged
+in `.github/pending/` and runs nothing until a maintainer accepts it
+([Releasing](/development/releasing#the-workflows)). It has two jobs:
+
+| Job | Recipe | What it runs |
+| --- | --- | --- |
+| `tests` | `just test-fast` | Every test of the crates that build without the interpreter, libR and Polars (`syntax`, `format`, `semantics`, `ide`, `sniff`, `loader`, `heap`, `numeric`, `ssa`, `rdb`, `crash`, `oracle`, `rcmd`, `repl` and `ry-lang`): every fixture suite, the property fuzzers' bounded passes, the simulator and the scenarios. A test that compares with GNU R or runs ry's runtime skips, because the runner has neither |
+| `fuzz` | `just fuzz-all 60 runtime` | Every libFuzzer target that builds without Polars (15 of 17, all but `csv` and `unserialize`) for 60 seconds of wall clock each. Every target runs, and the job fails if any finds a failure. A failing input is uploaded with the run |
+
+The staged `release.yml` calls `test.yml`, and its `publish` job needs it, so once both files are
+accepted a release with a failing test publishes nothing.
+
+The full gate is `ci.yml`. It runs `just ci`, which
+builds base R and runs rustfmt, clippy and the tests with the CI runner's variables, inside the
+flake's `ci` dev shell. That shell pins everything the tests touch (the Rust toolchain, GNU R 4.6.2
+built as the oracle recorded it, GCC 13.3, glibc and the oracle's locales), so this command
+reproduces a CI run on any machine with nix:
+
+```sh
+nix develop .#ci -c just ci
+```
+
+To change what a workflow runs, edit its recipe or the shell in `flake.nix`; the workflow files only
+call them. The full gate runs only when started by hand: the orchestrating agent starts it on main
+at its hourly check when main has new commits. A pull request gets no run of its own.
 
 ### Blessing expectations
 
@@ -354,13 +380,16 @@ meant to fail. Behavior that needs base R, such as a warning handler watching a 
 goes in the oracle case `bytecode__hot_loops.R`. `crates/interp/tests/test_linalg.rs` pins base R's linear
 algebra to GNU R's results bit for bit. The matrix products are ry's own kernels, so their bits hold
 on every machine; the LAPACK cases hold only on the reference libraries, so on another BLAS (such as
-CI's OpenBLAS) the test compares them with a GNU R on the same libraries, and skips them without one. `crates/table/tests/test_table.rs` checks the table engine
+OpenBLAS) the test compares them with a GNU R on the same libraries, and skips them without one. `crates/table/tests/test_table.rs` checks the table engine
 against values read from data.table, `test_lazy.rs` there checks the Polars-style verbs, and
 `crates/libr/tests/test_frame_altrep.rs` checks the columns as ALTREP vectors. `crates/interp/tests/test_records.rs`, `test_arrays.rs` and `test_standard_library.rs` cover ry's
 own values at run time, the last one also holding the runtime's function table against the
 declarations in `types/std.Rtypes`. `crates/libr/tests/test_rmath.rs`, `test_numerics.rs` and
 `test_linpack.rs` compare the C API's numerics with answers recorded from GNU R, so they run
-without R, and `test_fuzz_rmath.rs` checks properties of the distribution functions on random and
+without R. The optimizer cases `test_numerics.rs` holds bit for bit are skipped, with a message,
+where they cannot match: against a fresh GNU R that does not call the reference BLAS, and, for the
+trust-region case, where the C library's `hypot` rounds differently from the recording's (its
+`hypot` case fingerprints it). `test_fuzz_rmath.rs` checks properties of the distribution functions on random and
 extreme arguments. `crates/heap/tests/test_gc.rs` builds random
 object graphs (vectors, lists, interned strings, environments), drops roots, stores young objects
 into old ones and collects at random points, with and without collection stress, and after every
@@ -370,8 +399,8 @@ cells are not traced, and a minor collection that keeps dead strings in the tabl
 
 Tests that load base R take it from the GNU R installation `R_HOME` names, and the runtime then
 behaves as that version; without `R_HOME` they use ry's own base R (`just base-r`), and the
-scenarios skip when it is not built. The oracle's expectations are GNU R 4.6.2 output, so CI sets
-`R_HOME` to 4.6.2.
+scenarios skip when it is not built. The oracle's expectations are GNU R 4.6.2 output, so `just ci`
+sets `R_HOME` to 4.6.2.
 Run them once per supported version, for example `R_HOME=/opt/R/4.6.1/lib/R cargo test -p
 interp`, and the oracle the same way with `ORACLE_R` ([Corpus and oracle](/development/corpus-and-oracle)).
 
@@ -413,9 +442,9 @@ but not yet confirmed on main itself.
 ```toml
 [[failure]]
 case = "base__match_arg_native"
-engine = "ry-jit-gctorture"
+engine = "ry-jit"
 area = "jit"
-reason = "aborts: after a deopt exit, the collector reaches a freed object through a live one (jit_deopt_exit, jit_flush)"
+reason = "the compiled body warns twice where GNU R warns once"
 ```
 
 `oracle compare` and `ORACLE_ENGINE=<engine> cargo test -p oracle` sort every failure against the
@@ -425,24 +454,15 @@ only for a failure main already has, never for one your own change introduces. A
 listed failure as `known` without its diff and ends with one line per engine:
 
 ```
-ry-jit-gctorture: 409 passed, 16 failed (16 known, 0 new), 0 skipped
+ry-jit: 409 passed, 16 failed (16 known, 0 new), 0 skipped
 ```
 
-A crash under a gctorture engine (`ry-gctorture`, `ry-gctorture-young` or `ry-jit-gctorture`) can
-depend on the host or on timing, because it depends on where the collector happens to run. For
-such an entry, `intermittent = true` makes a passing case not fail the run. The case prints as
-`ok ... (listed as intermittent)`, counts as passed, and is tallied on its own line:
-
-```
-ok      cases/print__deparse_undefined_s4_class.R [ry-jit-gctorture] (listed as intermittent)
-known   cases/base__match_arg_native.R [ry-jit-gctorture]: aborts: after a deopt exit, ... (area jit)
-ry-jit-gctorture: 1 passed, 1 failed (1 known, 0 new), 0 skipped
-ry-jit-gctorture: intermittent, passed here: 1
-```
-
-A run where it fails reports it as known. The oracle refuses `intermittent` under any other
-engine, because a failure there reproduces on every host. A beta release requires the file to be
-empty, intermittent entries included.
+A crash is never a known failure. When an engine is killed by a signal, the run prints the case
+as `CRASHED` and counts it as new even if the file lists it, because a crash is a memory-safety
+bug and blocks until it is fixed. Where it shows can depend on the host, since it depends on
+where the collector happens to run, which is why the gctorture engines (`ry-gctorture`,
+`ry-gctorture-young` and `ry-jit-gctorture`) exist. The file has no mark that lets a case pass on
+some runs and fail on others. A beta release requires the file to be empty.
 
 A count is only trustworthy if it covers every case, so `oracle compare` also refuses to start when
 a case needs a package that is not installed or a locale that is not generated. A case names them
@@ -462,8 +482,9 @@ PARTIAL ry: 2 passed, 0 failed (0 known, 0 new), 2 skipped (2 missing a package 
 PARTIAL: --allow-skips left out 2 cases, so these counts do not cover the suite
 ```
 
-The oracle refuses a file whose entry names an unknown engine, a missing case, the same case and
-engine twice, or `intermittent` outside the gctorture engines, and `known_failures_are_valid` in `test_cases.rs` checks the file without running R.
+The oracle refuses a file whose entry names an unknown engine, a missing case, an unknown key, or
+the same case and engine twice. `known_failures_are_valid` in `test_cases.rs` checks the file
+without running R.
 
 ### The table engine
 
@@ -474,9 +495,11 @@ tables and queries and checks the native kernels against the Polars plans
 iteration count; run it in release, as `FUZZ_ITERS=3000 cargo test-release -p table fuzz`. The
 fuzz tables are small, so the kernels' parallel paths get large-table tests of their own.
 
-`just bench-table <dir> [--rows 5e7 --groupby-only]` runs the db-benchmark questions under
+`just bench-table <dir> [--rows 1e8 --groupby-only]` runs the db-benchmark questions under
 data.table, as R code under `ry run` and on the engine from Rust, fails if any checksum differs from
 data.table's, and rewrites the matching results table in `development/design/r-runtime.md`.
+`--groupby-only`, `--joins-only` and `--updates-only` limit a run to the group-by questions, the
+join questions, or the two `:=` loops that write existing columns.
 
 `just bench-base [--rows 1e5,1e6 --only REGEX --memory]` times base R's own kernels (sorting,
 string formatting and regex, grouping, `merge`, `match`, matrix margins, cumulative sums, xts and
@@ -506,7 +529,11 @@ anonymous and image RSS. That change's extra resident pages held code the worklo
 analysis core, polars, graphics): they were mapped because they sit next to hot code. Judge the
 size of `libR.so`'s `.text` section instead (`size -A`), which is deterministic, and expect it to
 grow only by about what the change adds. Resident text is checked on the shipped layout
-(`tools/layout/optimize.sh`) when a release is cut.
+(`tools/layout/optimize.sh`) when a release is cut. `tools/bench/bench.py` prints each program's
+peak in those parts (whole process, anonymous, start image and `libR.so` resident, sampled from
+`/proc/<pid>/smaps` every 20 ms) and the `.text` size of each build's `libR.so`. With
+`--baseline`, it also prints the paired ratio baseline / ry for each program and its geometric mean
+with a 95% interval, so a value above 1 means the build under test is faster.
 
 A change that allocates less can still raise anonymous peak RSS, because fewer collections change which heap pages fill before the next one. Such a rise is exempt only when all three of these hold, and the change's description shows each:
 
@@ -546,17 +573,20 @@ that judge a change therefore stay plain release builds, and the control is the 
 effect. The published suites measure the shipped layout itself: they are recorded on the release
 archive (`bench.py --release`, see [Benchmarks](/benchmarks/#how-it-was-measured)).
 
-Time a build only with images it wrote itself. A start-up image or a package's `.ryc` code image
-loads only into the runtime build that wrote it, and any other build silently ignores it, so that
-build starts on the slow path and runs the package without its compiled code. A start rewrites a
-stale start-up image and the base packages' images, but nothing rewrites the recommended packages'
-images except `just base-r`, or a package library's except reinstalling the package. Two builds
-that share one base R tree rewrite each other's start-up image on every start. `tools/bench/bench.py`
-therefore refuses to start when a binary under test would load a code image another build wrote, or
-when two binaries share a base R tree, and names each stale file. Give an A/B build its own copy of
-`base-r` with `ry-rcmd start-image BASE --libr LIBR` and point `RY_BASE_R` at it. A release archive
-under `--release` extracts its runtime and base R into a cache directory of its own, so it loads
-the images it shipped, and any image in a package library that another build wrote stops the run.
+Two builds can share `target/base-r` in a comparison, because each loads only images its own
+name carries (`ry-start.<build>.image`, `<package>.<build>.ryc`, see
+[the architecture page](/development/architecture#the-start-up-image)). A build's first start
+writes its images into the base R tree, so `tools/bench/bench.py` starts each build once before
+timing anything. A package library gets code images only when a package is installed, so bench.py
+stops when a package in the corpus library or `R_LIBS` has only another build's code image, and
+names the packages to reinstall. `RY_IMAGE_LOG=1` makes ry print `ry: image unused: <image> was
+written by another build of the runtime` (or why else it skipped an image) on standard error, and
+`ry: image written: ...` when it writes a build's images. `bench.py` sets it on every timed process
+and fails one that prints either, because that process timed a slow start. It refuses a runtime
+that predates the flag. Under `--release`, the archive extracts its runtime and base R into a
+cache directory of its own, so it loads the images it shipped, and bench.py reads its runtime from
+the R home it reports. `two_builds_alternate_starts_without_displacing_each_others_images` in
+`crates/ry/tests/test_perf.rs` pins both halves.
 
 `just bench-stdlib [filter] [n]` times every `List`, `Str`, `Dict` and `Result` function at
 n = 1e6 by default against its fastest GNU R equivalent, and prints one row per function with
@@ -587,20 +617,62 @@ thin wrapper around a battery its crate exports, which the crate's in-tree harne
 | `lsp` | the language-server simulator, `run_session`, reading its choices from the input |
 | `load_index`, `reload` | `loader::testing::check_load_index_input`, `check_random_reload` |
 | `sniff` | `sniff::check_sniff_invariants` |
-| `csv` | `table::io::check_csv_input` |
+| `csv` | `table::io::check_csv_bytes` |
 | `interp_lower`, `interp_unserialize`, `bytecode` | `interp::testing::check_lowering_input`, `check_unserialize_input`, `check_bytecode_agreement` |
+| `interp_code_image`, `interp_code_image_file` | `interp::testing::check_code_image_round_trip`, `check_code_image_file` |
 | `unserialize` | `R::serialize::check_unserialize_input` |
 
 The `semantics` target derives its document kind and an incremental edit from the input bytes, so a
-single byte stream drives the full battery, the splice cache included. The generator-driven targets
+single byte stream drives the full battery, the spliced reparse of the edit included. The generator-driven targets
 (`lsp`, `reload`, `bytecode`) read the generator's choices from the input through
-`syntax::testing::ByteStream`, so a byte mutation is a mutation of the program or session. The
-runtime targets link polars, so `cargo fuzz build --no-default-features` builds only the analysis
-targets on a machine with little memory.
+`syntax::testing::ByteStream`, so a byte mutation is a mutation of the program or session.
+
+Two features of `fuzz/Cargo.toml` select the targets. `runtime` adds the interpreter's targets, and
+`polars` adds `csv` and `unserialize`, whose crates link Polars. Building Polars with coverage
+instrumentation needs more memory than everything else in the workspace: in a 15 GB container
+with four build jobs, the compiler is killed while it builds `polars-core`. On such a machine,
+`cargo fuzz build --no-default-features --features runtime` builds the other 15 targets, and
+`--no-default-features` alone builds the analysis targets.
+
+A target that links the runtime's heap runs without leak detection. LeakSanitizer does not scan
+mapped memory, which is where the heap keeps its objects, so memory that a live object owns would
+be reported as leaked. The `heap` crate turns the check off for a fuzz build
+(`__lsan_default_options` in `crates/heap/src/space.rs`); the analysis targets keep it, except
+`reload` and `load_index`. The loader parses ahead on a detached thread, and a leak check that runs
+while that thread exits reports the thread's own bookkeeping, so those two targets turn the check
+off themselves.
+
+`interp_unserialize` runs with a ceiling of 16 MB on one allocation
+(`Heap::set_allocation_ceiling`, set by `check_unserialize_input`). A valid stream can name more
+memory than it holds, because a compact sequence is three numbers and reads as a vector of any
+length. Under the ceiling such a stream fails with the error for a vector that does not fit, so
+the target's memory is bounded by the size of its input.
+
+The reader treats its input as hostile, because `unserialize()` and `readRDS()` take any file. It
+refuses a length that the rest of the input cannot hold, a byte-code reference outside its table,
+and an item of the wrong kind in a position that implies one: a symbol's name, a string's element,
+an attribute list or an attribute's name, an environment, the name of a binding, of an argument or
+of a formal argument. Every such stream is pinned in `crates/interp/tests/test_fuzz.rs`, where one
+test asserts that each is refused and that every stream GNU R wrote for libR's conformance cases
+still reads. That test runs under collection stress, since the damage a wrong kind did showed only
+at a later collection.
 
 It needs nightly, which the repository's pinned toolchain already is. Run `cargo install
-cargo-fuzz`, then `just fuzz-run format` runs one target, and `just fuzz-all 120` runs every target
-for two minutes each after seeding the corpora. Without `just`, from `fuzz/`:
+cargo-fuzz`, then `just fuzz-run format` runs one target, and `just fuzz-all 120` seeds the
+corpora, builds every target and runs each for two minutes. A second argument names the features, so
+`just fuzz-all 60 runtime` leaves out the two Polars targets, and that is what the staged `test.yml`
+runs ([Running one case](#running-one-case)).
+
+The two minutes are wall clock, enforced by `timeout`, and a target that is interrupted at the
+bound has passed. libFuzzer's own `-max_total_time` cannot bound the pass, because it starts
+counting only after the target has replayed its whole corpus, and seven targets are seeded with
+every fixture source in the repository (about 5,300 files). `ide` runs four to seven inputs a
+second, so its replay alone takes about 15 minutes. `fuzz-all` replays the seeds in random order
+(`-prefer_small=0`), so a target that cannot finish its corpus inside the bound reads a different
+sample on each run. For a run that mutates beyond the seeds on a slow target, use `just fuzz-run`
+with a long `-max_total_time`.
+
+Without `just`, from `fuzz/`:
 
 ```sh
 cargo -Zscript ../scripts/seed-fuzz-corpus.rs   # seed from all fixture case sources
@@ -824,6 +896,17 @@ disk and buffers. `crates/ry/tests/test_scenarios.rs` runs the scripted user jou
 `crates/ry/tests/scenarios/`. [Robustness](/development/robustness/) documents both, including the
 scenario format and the replay variables.
 
+`native_diagnostics_agree_with_the_typed_core` in the same file holds the strict-mode
+[native function](/reference/type-system#native-functions) findings to what the native compiler
+does. It checks each program of a corpus in strict mode, runs it with `RY_TYPED_LOG=1`, and fails
+when a function without a `native` or `interpreted` finding runs in the interpreter. The corpus is
+the typed benchmark programs, the friendly climb programs, and `crates/ry/tests/native/*.R`, where a
+program's header states what it shows: `# blocked: f, g` names the functions that must get a
+finding, and `# boundary: h` the ones with an R type in their signature. Add a program there for a
+construct the compiler gains or the checker starts to report. The test also fails when no natively
+running function of the corpus calls a standard library function that
+`semantics::native::COMPILED_STD` lists as compiled.
+
 ## Incrementality
 
 A fixture checks what an edit produces, but not how much work it took to get there.
@@ -837,11 +920,16 @@ pin these contracts:
 - An inserted statement re-checks only the reads it intercepts.
 - A body edit re-derives one item's load facts and its own file's index layer, a `NAMESPACE` edit
   re-derives no item, and a statement that only moved keeps its load facts.
-- A one-shot check (`ProbeDatabase::one_shot`) runs no `package_name`, `test_name` or
-  `interface_group` and one `project_interface_groups`, reports exactly what the incremental check
-  reports, and agrees with the per-name and per-item answers under invariants (checked in a child
-  process, because invariants are process-wide and would perturb the counting tests). The
-  incremental database still goes through the per-name and per-item firewalls.
+- An edit parses one file. A cold check parses each file once, also on a diagnostics-only host
+  whose store keeps two trees (`ProbeDatabase::diagnostics_only`), and that host reports exactly
+  what an editor host reports.
+- A statement added beside a recursive function checks only itself, and a name a script adds
+  resolves no package item's names again.
+- A check resolves the names it spells through `item_links` without a `frame_binder` query, and
+  finds its cyclic groups with one `file_interface_groups` walk per file.
+- Under invariants, the links agree with the per-name answers, and each file's groups agree with
+  plain reachability from the item, which shares only the edges with the component walk (checked in a child process, because invariants are process-wide and would
+  perturb the counting tests).
 
 The same file checks that a chain of re-exports resolves to its base, that a cycle of them pins to
 `Unknown`, and that a chain of 4,096 links resolves without overflowing the analysis thread's stack.
@@ -889,6 +977,325 @@ cargo test-release -p ry-lang --test test_perf -- --ignored --nocapture
 ```
 
 `just perf` runs both suites.
+
+### The hot suite: a runtime change measured in seconds
+
+The three benchmark code bases take 60 to 135 s each, too long to run after every change to the
+runtime. The hot suite (`tools/bench/hot/`) replays the package calls that hold most of their time
+and one round of it, on both engines, takes about 35 s:
+
+```sh
+just bench hot --rounds 3 --extra-rounds 0             # every program, both engines
+just bench hot --rounds 3 --extra-rounds 0 --filter rank
+```
+
+```
+| program | GNU R | ry | GNU R / ry | flags |
+| --- | ---: | ---: | ---: | --- |
+| testthat::expect_equal | 20.369 ms | 14.012 ms | 1.68x (1.45 to 1.84) | wide_interval (ry) |
+| base::rank | 14.323 ms | 22.401 ms | 0.64x (0.64 to 0.71) | wide_interval (ry) |
+...
+Geometric mean of GNU R / ry over 100 programs: 1.43x (95% interval 1.39 to 1.49)
+Predicted GNU R / ry for finbench: 1.27x (95% interval 1.20 to 1.38; 83 programs carrying 100% of its weight)
+Predicted GNU R / ry for dsbench: 1.39x (95% interval 1.29 to 1.46; 78 programs carrying 100% of its weight)
+Predicted GNU R / ry for biobench: 1.56x (95% interval 1.37 to 1.63; 77 programs carrying 100% of its weight)
+```
+
+A **program** is one package entry: a function that the code bases' own code calls in a package,
+such as `stats::lm` or `zoo::rollapply`, together with up to three of the calls they made to it.
+Each call was captured with its arguments while the code bases' tests ran, and the harness
+(`harness.R` after `replay.R`) replays it as `eval(call, env)` in a loop. One process per engine
+runs every program, so the packages load once. A program's batch holds about 20 ms of GNU R time,
+and its time is the median of five batches after one warm-up batch.
+
+The number to watch is the **predicted speed-up** of each code base, not the geometric mean. Each
+program carries a weight per code base, its share of the code base's GNU R time among the suite's
+programs, and the prediction is the weighted harmonic mean of the programs' speed-ups, which is
+what the code base's own speed-up would be if it ran only these calls.
+
+#### How the suite is generated
+
+`just bench-hot-capture DIR` regenerates `suite.toml` and `samples/` from the code bases that
+`tools/bench/tooling/generate.py` wrote to DIR. It runs the three steps of
+`tools/bench/tooling/hot.py`:
+
+| Step | Runs | Writes |
+| --- | --- | --- |
+| `capture` | each code base's tests on ry with the recorder on and the JIT off | per code base, the time in every package entry (`entries.tsv`, `summary.tsv`), up to eight calls of each with their arguments (`samples.tsv`, `samples/N.rds`), and the packages the code base imports (`session.txt`) |
+| `validate` | every sample under GNU R (`validate.R`) | the samples that replay with the result they had and no side effect outside their temporary directory, with GNU R's seconds per call and whether each call needs a fresh copy of the arguments (`validated.tsv`) |
+| `select` | nothing | the 100 entries that hold the most time, the three most typical valid samples of each, and their weights |
+
+The recorder is part of the runtime (`crates/interp/src/capture.rs`) and is off unless
+`RY_CAPTURE_PACKAGE` names the user's code:
+
+| Variable | Meaning |
+| --- | --- |
+| `RY_CAPTURE_PACKAGE` | comma-separated namespaces that count as the user's code, or `R_GlobalEnv` |
+| `RY_CAPTURE_DIR` | the directory the recorder writes to |
+| `RY_CAPTURE_SAMPLES` | calls kept per entry (default 8), drawn uniformly from all of the entry's calls |
+| `RY_CAPTURE_MAX_BYTES` | the largest serialized argument set or result kept (default 65536) |
+
+It splits the run's time between the user's code and the package entries it calls. Code is the
+user's when it is a closure of the user's namespace, and also when it evaluates in an environment
+whose top-level environment is the user's, however it got there: a promise for an argument, a
+block passed to `test_that()` or `withr::with_tempdir()`, an `eval()` from a package, or an
+evaluation from C. A package entry therefore owns the time of the package code under it but not
+the time of a user block it runs, and the calls that block makes are entries of their own. The
+capture of the finance code base reads:
+
+```
+finbench: 9592 tests, 9592 passing in 152.7 s of test blocks
+  147.5 s on ry: 3% in the code base's own code, 83% in package entries it captured, 13% in entries it could not capture, 1% outside both; 355234 calls into 198 entries
+```
+
+A call cannot be captured when a replay could not rebuild it: it passes its caller's `...`, an
+argument names a user function or a local closure, the call reads its caller's frame, or the
+recorder failed to inspect it (the reason `uninspectable`, for example when forcing a lazily bound
+package definition throws). The recorder counts its own failure as this reason and the program
+carries on.
+Such a call's time counts for its entry all the same, in the `uncapturable_*` columns.
+
+The samples of an entry are a reservoir of `RY_CAPTURE_SAMPLES` slots drawn uniformly from all of
+its capturable calls. The recorder serializes only the calls the draw selects. A selected call
+whose arguments serialize to more than `RY_CAPTURE_MAX_BYTES` empties its slot rather than leave
+the earlier sample there, because keeping it would bias the draw toward small calls, and the
+`oversize` column counts these calls. A slot a later draw refills holds a sample again, so
+`samples` counts the slots holding one at the end. A result over the limit is dropped and its
+sample is kept, so validation checks that sample only against GNU R's own two replays.
+
+The recorder writes every time as an integer number of nanoseconds, with the unit in the column
+name: `nanoseconds` and `uncapturable_nanoseconds` in `entries.tsv`, `nanoseconds` in
+`samples.tsv`, and `total_nanoseconds`, `user_nanoseconds`, `covered_nanoseconds`,
+`uncapturable_nanoseconds` and `outside_nanoseconds` in `summary.tsv`. Its own work (inspecting a
+call, serializing a sample, writing a file) is left out of every record's time and of the total.
+
+The validator then drops the samples that depend on the world outside the call (a file the capture
+read, a git repository, external pointers, options, a graphics device) or that print. `select`
+reports what the suite loses to both:
+
+```
+finbench: the programs hold 79.6% of the run's time on ry (74.4% in calls the recorder could capture) and 82.6% of the package time
+  lost, with no valid sample: NlcOptim::solnl (2.41%), openxlsx::saveWorkbook (2.20%), R_GlobalEnv::test_that (1.61%), ...
+```
+
+A program's weight comes from a ratio estimate, because the capture measures ry's time and the
+weight needs GNU R's. The time a code base spent in an entry is scaled by GNU R's seconds over the
+capture's seconds for the same sampled calls. The samples are a uniform draw of the entry's calls,
+so what the switched-off JIT adds to the entry's time cancels in that ratio.
+
+#### What a replay controls
+
+- **The session.** Every replay first loads every package the code bases import (`session` in
+  `suite.toml`) and sets testthat's third edition, because loading a package changes what other
+  calls do: `zoo::rollapply` on an xts series pads with `NA` once xts is loaded, and ompr finds a
+  solver only after `ROI.plugin.highs` is. A package that is not installed is skipped and named in
+  the output.
+- **Conditions.** A call runs under handlers that continue a testthat expectation and muffle
+  messages and warnings, so an expectation replays outside a `test_that()` block.
+- **Random numbers.** A sample that draws random numbers gets its seed restored before each call.
+- **Temporary paths.** A path the capture made under its session's temporary directory
+  (`/tmp/RtmpXXXXXX/...`) is rewritten to lie under the replay's own `tempdir()` by `replay.R`'s
+  `relocate`, which the validator and the harness both call, and the parent directory of each
+  such path in the call's arguments is created. The calls run in a directory under `tempdir()`,
+  so a relative path lands there too. A sample may create files only under its temporary
+  directory, and a second call must leave the same set of paths as the first; the validator drops
+  any other sample with its reason, and drops a sample that opens a graphics device.
+- **Fresh arguments.** The validator replays each sample once with the JIT off and compares its
+  variables before and after. A sample whose call changed them is marked `fresh`: data.table's
+  `:=` modifies its table in place, an R6 setter such as lgr's `$set_appenders` its object,
+  `foreach(i = ...) %do%` assigns `i` in the calling environment, and httr2's `resp_body_json`
+  fills the response's cache. The harness rebuilds a fresh sample's environment from a
+  serialized copy for every call. It builds them before each batch, outside the timing and
+  outside the program's region, so a batch times only the calls.
+- **Checksums.** Each engine prints a checksum of every sample's last result, and the run fails
+  when ry's differs from GNU R's. The checksum is `<kind>:<length>:<hash>:<magnitude>:<balance>`.
+  The hash covers what must match exactly: every type and length, the attributes (all but
+  data.table's `.internal.selfref`, at any depth), the text, the logical values, and how many NA,
+  NaN, Inf and -Inf each numeric vector holds. Every numeric vector at any depth adds the
+  logarithm of its weighted size, and a sum under a second set of weights over that size, to the
+  last two fields, which must agree to an absolute 1e-10 (or a relative 1e-13). A root that
+  `uniroot` finds one part in 1e13 away therefore agrees, and a change that moves a vector's sums
+  by one part in 1e10 does not, so one wrong element of a long vector shows only when it is that
+  large a part of the whole. A sample whose result
+  differs on every call under GNU R (a temporary file name, a timestamp) is recorded as `varies`
+  and not compared. A result of another type fails even when its values agree. An engine whose
+  `seq.int(1, 18, by = 1)` is a double vector, where GNU R's is an integer vector, prints:
+
+  ```
+  FAILED hot/base-seq on ry: checksum dbl:18:32x252214378:2.131601681765849e+01:1.626932262278126e+00,...,
+    GNU R printed int:18:33x270404436:2.131601681765849e+01:1.626932262278126e+00,...
+  ```
+
+#### Where a program's time goes
+
+Two passes run on ry alone after the timed rounds, and `--rounds 0` runs them by themselves. Both
+rely on `.ry_bench_region(name)`, a builtin that ends the open benchmark region and starts the
+next, which the harness calls around each program's batches.
+
+`--breakdown` attributes the runtime's profiler samples to the region they fall in and prints, per
+program and weighted per code base, the share of ry's time in each activity:
+
+```
+| program | samples | interpreter | builtin | call_setup | native | evaluator | s3_dispatch | compiled | jit_compile | ...
+| testthat::expect_equal | 429 | 48% | 29% | 12% | 2% | 4% | 2% | 0% | 0% | ...
+| base::mean | 575 | 20% | 19% | 10% | 0% | 9% | 12% | 4% | 25% | ...
+| finbench, weighted by GNU R time | | 41% | 32% | 10% | 8% | 2% | 4% | 0% | 0% | ...
+| dsbench, weighted by GNU R time | | 41% | 27% | 11% | 14% | 3% | 2% | 0% | 1% | ...
+| biobench, weighted by GNU R time | | 37% | 32% | 11% | 9% | 4% | 4% | 0% | 1% | ...
+```
+
+After timed rounds each program weighs by its share of the code base's ry time. A run that times
+nothing (`--rounds 0`, as here) has no speed-ups to derive that share from, so it weighs by the
+GNU R weight and the row says so.
+
+`interpreter` is the bytecode interpreter, `builtin` base R's builtins, `call_setup` a closure
+call's argument matching, promises and frame, `native` code reached through `.Call`, `.External`
+or `.C`, `compiled` machine code the JIT produced and `jit_compile` the JIT compiling it. A
+program with a large `interpreter` share gains from the JIT, and one with a large `builtin` share
+gains only from a faster builtin, so the breakdown bounds what an optimization of one activity
+can give. A compilation that falls inside a program's batches counts in full, as it does in the
+instruction counts, which is why a short program such as `base::mean` shows a quarter of its
+samples there.
+
+`--instructions` runs one batch of each program under callgrind, with instrumentation on only
+inside the program's region, and prints each program's instruction count per call. Callgrind
+writes a dump each time a region ends, and the dumps of one region are summed.
+
+```
+| program | calls | ry, batch | per call |
+| testthat::expect_equal | 20 | 45,452,106 | 2,272,605 |
+| openxlsx::write.xlsx | 3 | 85,865,843 | 28,621,948 |
+...
+Weighted, finbench, ry: 3,292,951,540 instructions per second of GNU R work
+Weighted, dsbench, ry: 2,572,317,861 instructions per second of GNU R work
+Weighted, biobench, ry: 2,613,663,739 instructions per second of GNU R work
+```
+
+The weighted total of a code base is the number to compare between two builds. It is the
+instructions ry spends per second of GNU R time in that code base's programs: each program's
+instructions per call, over GNU R's seconds per call, weighted like the predicted speed-up.
+
+The pass deals the programs over four harness processes that run side by side, and the whole suite
+takes about 80 s. The split is by position in the suite and not by the machine's core count, so a
+program shares its process with the same programs on every machine. Each process runs on one
+OpenMP thread, because callgrind counts the instructions idle worker threads spend spinning, which
+vary from run to run: a grouped data.table assignment counted 80 to 96 million instructions on
+four threads and 45.8 million on one.
+
+Three options build on the counts:
+
+- `--save-instructions FILE` keeps them, and a later run with `--baseline-instructions FILE`
+  prints each program's change and its effect on each code base's weighted total, largest effect
+  first.
+- `--jit-off` counts ry with `RY_JIT=off` as well and prints the same comparison between the two,
+  which shows what the JIT costs or saves each program.
+- `--functions N` adds the N functions of the runtime and of the packages' compiled code that
+  hold the most of each code base's weighted instructions. It needs a build with symbols
+  (`cargo build --profile profiling`, passed with `--ry PATH --any-build`).
+- `--save-dumps DIR` keeps each program's callgrind dumps as `DIR/<program>.<n>.callgrind`, for
+  a question the function ranking does not answer, such as who calls a function or how often.
+
+#### What one mechanism costs
+
+`just bench-mechanisms` prices the mechanisms the suite's programs are made of. Each of about
+seventy operations is one expression (a closure call with a default argument, a `UseMethod`
+dispatch, a `tryCatch` that catches nothing, `plain$b`) that a compiled loop evaluates. The tool
+runs the loop under callgrind for 20,000 and for 40,000 iterations and reports the difference per
+iteration, less the empty loop's, so start-up and warm-up cancel and the count repeats exactly.
+The tier-1 JIT is off unless `--jit` is given, because package code runs in tier 0 almost all of
+the time.
+
+```sh
+just bench-mechanisms --ry target/release/ry --filter dispatch
+```
+
+```
+| operation | expression | instructions |
+| --- | --- | ---: |
+| dispatch: `UseMethod`, class method | `describe(object)` | 6,437 |
+| dispatch: `UseMethod`, default method | `describe(i)` | 7,067 |
+| dispatch: `UseMethod` then `NextMethod` | `describe(child)` | 14,104 |
+| dispatch: builtin to a method (`length`) | `length(object)` | 3,768 |
+...
+```
+
+The whole table takes about five minutes on four cores, and one filtered group well under a
+minute. `--save FILE` keeps the counts and `--baseline FILE` prints the change against them,
+which is how a change to the call path or to dispatch is checked before the suite is run.
+`--profile NAME` prints the functions that hold one operation's instructions, on a build with
+symbols.
+
+#### How well the suite predicts the code bases
+
+`just bench-hot-track DIR NAME=RY[,VARIABLE=VALUE...]...` measures it. It times the suite and the
+code bases' tests on several ry configurations (other builds, or one build with a feature off) and
+compares the change the suite predicts with the change the code bases show, each against the
+first configuration:
+
+```sh
+just bench-hot-track .bench/codebases head=target/release/ry nojit=target/release/ry,RY_JIT=off r043=/tmp/ry-0.4.3/ry
+```
+
+```
+dsbench (time over GNU R's; change against head; ...)
+| configuration | predicted | measured | predicted change | measured change | weight | tests |
+| head | 0.717 | 0.596 | +0.0% | +0.0% | 100% | 9416 tests, 9416 passing |
+| nojit | 0.693 | 0.553 | -3.3% | -7.2% | 100% | 9416 tests, 9416 passing |
+| r043 | 1.180 | 0.945 | +64.7% | +58.4% | 100% | 9416 tests, 9416 passing |
+...
+dsbench: r = 0.986 between the predicted and the measured log changes of 11 configurations; a predicted change shows up 0.85 times in the measurement
+```
+
+A study of twelve configurations gave these correlations. The configurations were the build the
+suite was generated on, that build with the JIT off, with the builtin fast paths off and with
+native methods off, the same build a second time, the build before the recorder, and six releases
+back to 0.4.0-beta, whose predicted times range from 13% under the first configuration's to 124%
+over it.
+
+| Code base | r | A predicted change shows up |
+| --- | ---: | ---: |
+| finbench | 0.987 | 0.78 times |
+| dsbench | 0.986 | 0.85 times |
+| biobench | 0.987 | 0.90 times |
+| all three | 0.976 | 0.85 times |
+
+The three code bases share the configurations, so the last row pools 33 pairs that come from
+eleven changes.
+
+The suite therefore ranks builds the way the code bases do, with three limits.
+
+- **A predicted change is larger than the measured one**, because the programs hold 77 to 80% of
+  a run's time on ry and the rest of the run changes less.
+- **The predicted level is pessimistic.** The suite predicted 1.34x, 1.39x and 1.47x for the
+  first configuration where the code bases measured 1.62x, 1.68x and 1.62x. What makes the difference is not
+  established, so compare predictions with each other and not with a code base's time.
+- **Wall time on a shared machine cannot show a small change.** The study ran the same build
+  twice, 100 minutes apart, and the second run was 14 to 16% slower on the code bases and 21 to
+  27% slower in the suite, because the machine's speed drifted. Within one run, one program's
+  median batch time varies by about 20% between identical runs on either engine. Time two builds
+  in the same rounds (`--baseline PATH`) and read the predicted speed-ups, not a single program's
+  ratio. For a change under about 10%, compare instruction counts.
+
+#### How much to trust an instruction count
+
+Two instruction passes over the same build agree to 0.01% on each code base's weighted total
+(finbench 3,294,004,993 and 3,293,995,120). The median program differs by 0.013% and the worst,
+`brio::write_lines`, by 0.41%, so a change of 1% in one program is visible.
+
+A change in the suite's count shows up in a code base's count with the same sign. The whole test
+run of dsbench under callgrind, which takes about 65 minutes, cost 318.11 billion instructions,
+317.45 billion with the JIT off and 322.91 billion with the builtin fast paths off:
+
+| Change | Suite's total at dsbench's weights | dsbench's tests under callgrind |
+| --- | ---: | ---: |
+| JIT off | -0.27% | -0.21% |
+| Builtin fast paths off | +2.95% | +1.51% |
+
+The code base's count covers the whole process, with start-up and package loading, and each
+configuration ran once, so how closely two runs of one build agree is not measured.
+
+By default the runner adds ten rounds when any program's interval is wider than 10% either way,
+which on a shared machine is every time, so pass `--extra-rounds 0` for a quick look.
 
 ### Comparing two builds on testthat
 

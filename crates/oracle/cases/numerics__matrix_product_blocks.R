@@ -1,3 +1,4 @@
+# oracle: library-dependent
 # Matrix products with every remainder of four result columns, and non-finite entries.
 set.seed(42)
 for (cols in 1:9) {

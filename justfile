@@ -61,9 +61,31 @@ test *args:
 # The pre-landing check: tests, clippy at -D warnings, fmt, and the licence notices.
 gate: battery clippy fmt-check (notices "--check") (readme "--check")
 
+# CI's test job, step for step: .github/workflows/ci.yml runs `nix develop .#ci -c just ci`. Run it
+# in that shell, whose GNU R, compiler, glibc and locales are the ones CI has. The variables are
+# the CI runner's: `R_HOME` makes the runtime's suites load base R from the reference GNU R.
+ci:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export TZ=UTC NOT_CRAN=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0
+    R_HOME=$(R RHOME)
+    export R_HOME
+    bash tools/oracle-locales.sh
+    just base-r dev
+    just fmt-check
+    just clippy
+    just battery
+
 # Workspace tests; `zed_ry` needs a wasm toolchain, so it is excluded.
 battery *args:
     cargo test --workspace --exclude zed_ry {{ args }}
+
+# The tests that need no GNU R (test.yml, job `tests`): every test of the crates that build
+# without the interpreter, libR and Polars. A test that compares with GNU R or runs ry's runtime skips when
+# there is no `R` on the PATH and no built base R, so the recipe needs neither. `table` and the
+# runtime crates are left to `just battery`: their builds link Polars or the interpreter.
+test-fast:
+    cargo test --no-fail-fast -p syntax -p format -p semantics -p ide -p sniff -p loader -p heap -p numeric -p ssa -p rdb -p crash -p oracle -p rcmd -p repl -p ry-lang
 
 clippy:
     cargo clippy --workspace --exclude zed_ry --all-targets -- -D warnings
@@ -102,16 +124,44 @@ fuzz-deep minutes="120" base="1000000" depth="10" *args:
 fuzz-run target="semantics" *args:
     cargo fuzz run {{ target }} {{ args }}
 
-# Every libFuzzer target for `seconds` each, after seeding the corpora. The lockfile is seeded
-# from the workspace's, because a fresh resolution can pick a salsa-macro-rules that does not
-# match the pinned salsa. Stops at the first target that finds a failure.
-fuzz-all seconds="120":
+# Every libFuzzer target for `seconds` of wall clock each, after seeding the corpora and building
+# the targets. `features` picks the targets by the features of fuzz/Cargo.toml: `just fuzz-all 60
+# runtime` leaves out the two whose build links Polars. The bound is `timeout`, not libFuzzer's
+# `-max_total_time`, because libFuzzer replays a target's whole corpus before its own limit counts
+# and the slowest target needs about 15 minutes for that. A target that is interrupted at the bound
+# has passed. Seeds are replayed in random order (`-prefer_small=0`), so a target that cannot get
+# through its corpus in time reads a different sample on each run. Every target runs, and the
+# recipe fails at the end if any found a failure. The lockfile is seeded from the workspace's,
+# because a fresh resolution can pick a salsa-macro-rules that does not match the pinned salsa.
+fuzz-all seconds="120" features="runtime,polars":
+    #!/usr/bin/env bash
+    set -euo pipefail
     cp Cargo.lock fuzz/Cargo.lock
     cargo -Zscript scripts/seed-fuzz-corpus.rs
-    for target in $(cargo fuzz list); do \
-        echo "== $target"; \
-        cargo fuzz run -O "$target" -- -max_total_time={{ seconds }} -timeout=30 -rss_limit_mb=4096 || exit 1; \
+    cargo fuzz build -O --no-default-features --features "{{ features }}"
+    targets=$(cargo metadata --manifest-path fuzz/Cargo.toml --no-deps --format-version 1 | python3 -I -c '
+    import json, sys
+    enabled = set(sys.argv[1].split(","))
+    for target in json.load(sys.stdin)["packages"][0]["targets"]:
+        if set(target.get("required-features", [])) <= enabled:
+            print(target["name"])
+    ' "{{ features }}")
+    failed=""
+    for target in $targets; do
+        echo "== $target"
+        status=0
+        timeout --signal=INT --kill-after=60 {{ seconds }} \
+            cargo fuzz run -O --no-default-features --features "{{ features }}" "$target" -- \
+            -prefer_small=0 -timeout=30 -rss_limit_mb=4096 || status=$?
+        if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
+            echo "== $target FAILED (exit status $status)"
+            failed="$failed $target"
+        fi
     done
+    if [ -n "$failed" ]; then
+        echo "fuzz targets that found a failure:$failed"
+        exit 1
+    fi
 
 # Phase timings, memory and typing bursts for a workspace.
 stats path=".":
@@ -122,24 +172,47 @@ perf:
     cargo test -p semantics --profile iterate --test test_perf -- --ignored --nocapture
     cargo test -p ry-lang --profile iterate --test test_perf -- --ignored --nocapture
 
-# Times one published benchmark suite (public, packages, kernels, applications, or all) on GNU R, ry and,
-# where a program has a typed version, ry typed in strict mode, in paired shuffled rounds with a checksum gate
-# against GNU R, e.g. `just bench kernels --rounds 3 --filter fib` on target/release, or
+# Times one published benchmark suite (public, packages, kernels, applications, codebases, hot, typed, or all). All but
+# `typed` run on GNU R, ry and, where a program has a typed version, ry typed in strict mode; `typed` runs every typed
+# program against its Rust twin and needs rustc, not GNU R. `hot` exists once `just bench-hot-capture` generated it. Rounds are paired and shuffled, with a checksum
+# gate against the suite's baseline, e.g. `just bench kernels --rounds 3 --filter fib` on target/release,
+# `just bench typed --ry target/iterate/ry --any-build` for a look at another build, or
 # `just bench all --release ry-x86_64-unknown-linux-gnu.tar.gz --write` on a tagged release archive (10+ rounds,
 # stores each suite's results.json, which the READMEs and the benchmarks page render).
 bench suite *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    # A release archive brings its own build; anything else measures target/release.
-    case " {{ args }} " in *" --release "*) ;; *) cargo build --release -p ry-lang -p libr -p rcmd ;; esac
+    # A release archive or a named binary brings its own build; anything else measures target/release.
+    case " {{ args }} " in *" --release "*|*" --ry "*) ;; *) cargo build --release -p ry-lang -p libr -p rcmd ;; esac
     python3 -I tools/bench/bench.py {{ suite }} {{ args }}
+
+# Generates the hot suite (tools/bench/hot/suite.toml and samples/) from the code bases that tooling/generate.py wrote
+# to DIR: captures their package calls on ry, validates and calibrates the samples under GNU R, then selects and weighs
+# the programs, e.g. `just bench-hot-capture /tmp/codebases`. CAPTURES keeps the raw capture for another selection.
+bench-hot-capture dir captures="target/hot-captures":
+    cargo build --release -p ry-lang -p libr -p rcmd -p oracle
+    python3 -I tools/bench/tooling/hot.py capture --codebases {{ dir }} --out {{ captures }}
+    python3 -I tools/bench/tooling/hot.py validate --captures {{ captures }}
+    python3 -I tools/bench/tooling/hot.py select --captures {{ captures }}
+
+# Checks that the hot suite predicts the code bases in DIR: times both on each ry configuration (`NAME=RY[,VARIABLE=VALUE...]`,
+# the first being the reference) and on GNU R, and prints the predicted against the measured change with their correlation, e.g.
+# `just bench-hot-track /tmp/codebases head=target/release/ry nojit=target/release/ry,RY_JIT=off old=/tmp/ry-0.4.3/ry`.
+bench-hot-track dir +configurations:
+    cargo build --release -p oracle
+    python3 -I tools/bench/tooling/hot.py track --codebases {{ dir }} --out target/hot-track.json {{ configurations }}
+
+# Prints what each R-level mechanism costs on ry in instructions (a closure call, an S3 dispatch, a `tryCatch`, a builtin call),
+# counted under callgrind, e.g. `just bench-mechanisms --ry target/profiling/ry --filter dispatch`.
+bench-mechanisms *args:
+    python3 -I tools/bench/tooling/mechanisms.py {{ args }}
 
 # Generates the three 300K-line benchmark code bases and prints cold-check and language-server latency.
 bench-check *args:
     cargo build --release -p ry-lang
     python3 -I tools/bench/tooling/check.py {{ args }}
 
-# Scores typed ry's hill climb: speed against Rust, friendliness cases, and seeded soundness fuzzing, e.g.
+# Scores typed ry's hill climb: speed against Rust (one round of the `typed` benchmark suite), friendliness cases, and seeded soundness fuzzing, e.g.
 # `just climb`, `just climb --only friendly`, or `just climb --log "adapt literal arithmetic"` to append a step to tools/climb/log.tsv.
 climb *args:
     cargo build --release -p ry-lang -p libr
@@ -174,8 +247,9 @@ bench-stdlib filter="" n="1e6" *args:
     python3 -I tools/bench/internal/stdlib/run.py --only "{{ filter }}" --n {{ n }} {{ args }}
 
 # Runs the table benchmark against data.table and rewrites its table in r-runtime.md, e.g.
-# `just bench-table .bench/table` (1e7 rows) or `just bench-table .bench/table5e7 --rows 5e7 --groupby-only`
-# (`--joins-only` runs the join questions alone).
+# `just bench-table .bench/table` (1e7 rows) or `just bench-table .bench/table1e8 --rows 1e8 --groupby-only`
+# (`--joins-only` runs the join questions alone, `--updates-only` the two `:=` loops that write
+# existing columns). A limited run needs its markers on the page first.
 bench-table dir *args:
     cargo build --release -p ry-lang -p libr -p rcmd
     python3 -I tools/bench/internal/table/report.py {{ dir }} --write {{ args }}
@@ -354,6 +428,10 @@ package version target="":
     	base="$(cd "${CARGO_TARGET_DIR:-target}/$target/base-r" && pwd)"
     	RY_EMBED_RUNTIME="$(cd "$build" && pwd)/$library" RY_EMBED_BASE="$base" cargo build --release --locked --target "$target" -p ry-lang
     fi
+    # Without PT_GNU_STACK glibc 2.41 and later refuse to load libR (BOLT drops the header).
+    case "$target" in
+    	*linux*) python3 -I tools/layout/gnu_stack.py check "$build/$library" "$build/$executable" ;;
+    esac
     case "$target" in
     	*windows*)
     		# The archive carries no toolchain runtime, so the binaries may import only Windows and
@@ -442,8 +520,10 @@ release-check version:
 
 # Unpack the archives in release/VERSION and package the VS Code extension from them: one `.vsix`
 # per platform, bundling that archive's binaries, plus `ry.vsix` without a binary for every other
-# platform. A platform whose archive is missing is skipped with a note, so this runs locally on one
-# machine's archive; the release workflow always has all three.
+# platform. A platform whose archive is missing is skipped with a note, and then `ry.vsix` is not
+# built either: VS Code on that platform would install it, find no binary and fail, whereas with
+# no package at all it reports the extension as unavailable there. This runs locally on one
+# machine's archive and in a release workflow started with `platforms` set to `unix` or `linux`.
 release-assets version:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -451,10 +531,20 @@ release-assets version:
     dir="release/$version"
     kind=$(just release-kind "$version")
     (cd editors/code && bun install --frozen-lockfile)
+    platforms=(x86_64-unknown-linux-gnu:linux-x64 aarch64-apple-darwin:darwin-arm64 x86_64-pc-windows-gnullvm:win32-x64)
+    complete=1
+    for platform in "${platforms[@]}"; do
+    	target=${platform%%:*}
+    	if [ ! -f "$dir/ry-$target.tar.gz" ] && [ ! -f "$dir/ry-$target.zip" ]; then complete=0; fi
+    done
     # The universal extension goes first, before build-platform-vsix fills editors/code/bin.
-    rm -rf editors/code/bin
-    just build-extension "$kind" --out "../../$dir/ry.vsix"
-    for platform in x86_64-unknown-linux-gnu:linux-x64 aarch64-apple-darwin:darwin-arm64 x86_64-pc-windows-gnullvm:win32-x64; do
+    rm -rf editors/code/bin "$dir/ry.vsix"
+    if [ "$complete" = 1 ]; then
+    	just build-extension "$kind" --out "../../$dir/ry.vsix"
+    else
+    	echo "note: an archive is missing, so the universal ry.vsix was not packaged" >&2
+    fi
+    for platform in "${platforms[@]}"; do
     	target=${platform%%:*}
     	unpacked="$dir/ry-$target"
     	if [ -f "$unpacked.tar.gz" ]; then
@@ -485,9 +575,11 @@ release-publish version:
     if gh release view "$version" >/dev/null 2>&1; then
     	gh release upload "$version" --clobber "${assets[@]}"
     else
-    	prerelease=""
-    	if [ "$kind" = pre-release ]; then prerelease="--prerelease"; fi
-    	gh release create "$version" $prerelease --target "${GITHUB_SHA:-$(git rev-parse HEAD)}" --title "ry $version" \
+    	# A full release claims "latest" explicitly, because GitHub's automatic choice compares
+    	# semantic versions and an older nightly published as a normal release has a non-semver tag.
+    	flag="--latest"
+    	if [ "$kind" = pre-release ]; then flag="--prerelease"; fi
+    	gh release create "$version" "$flag" --target "${GITHUB_SHA:-$(git rev-parse HEAD)}" --title "ry $version" \
     		--notes "See the [news page](https://ry-lang.org/news/) for what changed." "${assets[@]}"
     fi
     # Without a VSCE_PAT, vsce publishes with trusted publishing (`--oidc`), which needs vsce 4.1 and
@@ -622,12 +714,14 @@ fuzz-differential seed="0" count="200" engines="ry-tier0,ry-jit":
 
 # Every oracle case under collection stress (`RY_GC_STRESS`), compared with ry unstressed;
 # `just gc-torture young` keeps survivors collectable (`RY_GC_STRESS=young`), which finds an
-# object only a Rust local holds. `ORACLE_ENGINE=ry-gctorture cargo test -p oracle` compares
-# the cases with GNU R instead.
+# object only a Rust local holds, and `just gc-torture seeded` collects at random gaps with the
+# write barrier checked (`RY_GC_STRESS=seed:N`, `RY_GC_VERIFY`), which finds a store that skipped
+# the barrier; `FUZZ_SEED` picks its gaps. `ORACLE_ENGINE=ry-gctorture cargo test -p oracle`
+# compares the cases with GNU R instead.
 gc-torture mode="plain":
     cargo build -q -p ry-lang -p libr -p rcmd
     FUZZ_ITERS=1000000 cargo test -p oracle --test test_cases \
-        {{ if mode == "young" { "cases_survive_young_gc_torture" } else { "cases_survive_gc_torture" } }} \
+        {{ if mode == "young" { "cases_survive_young_gc_torture" } else if mode == "seeded" { "native_cases_keep_the_write_barrier_under_seeded_gc_torture" } else { "cases_survive_gc_torture" } }} \
         -- --exact --nocapture
 
 # The language-server simulator over many seeds: `just simulate 1000 120` runs seeds 0 to 999 with

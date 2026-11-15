@@ -1,0 +1,11 @@
+[stdout]
+| t(1)                       q 6290269
+| cauchy(0,1)                q 6290269
+| cauchy(1,0.01)             q 7290459
+| cauchy(-5,100)             q 6568368
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

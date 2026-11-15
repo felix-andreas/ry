@@ -1,0 +1,47 @@
+[stdout]
+| [1] 40
+| [1] 3
+| [1] 3
+| [1] -3
+| [1] 3
+| [1] -5
+| [1] 2
+| [1] -3
+| [1] 3109
+| [1] 2
+| [1] 100
+| [1] 2 2 2
+| [1] 0
+| [1] 3
+| [1] 3
+| [1] 3
+| [1] -2 -2
+| [1] 4 4
+| [1] 3 3
+| [1] 3 3 3 3
+| [1] 3
+| [1] 3 3
+| a b 
+| 1 2 
+| [1] "a" "b"
+| [1] "report"
+| [1] 10
+| [1]  3  3 -3 -3  3
+| [1] -3 -3  3  3
+[messages]
+- The following object is masked from package:base:\n\n    +\n
+- The following object is masked from package:base:\n\n    +\n
+- The following object is masked from package:base:\n\n    +\n
+- The following object is masked from package:base:\n\n    +\n
+- The following object is masked from package:base:\n\n    sqrt\n
+- The following object is masked from package:base:\n\n    sqrt\n
+- The following object is masked from package:base:\n\n    +\n
+- The following object is masked from package:base:\n\n    +\n
+- The following object is masked from package:base:\n\n    +\n
+- The following object is masked from package:base:\n\n    +\n
+- The following object is masked from package:base:\n\n    +\n
+[warnings]
+[errors]
+[value]
+double
+| c(-3, -3, 3, 3)

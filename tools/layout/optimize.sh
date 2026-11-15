@@ -75,6 +75,17 @@ base_r() {
 	fi
 }
 
+# A GitHub-hosted Linux runner has 16 GB of memory and 4 GB of swap, which the instrumented
+# fat-LTO link of `ry` outgrows: the runner is then killed mid-link, and the job ends with "The
+# runner has received a shutdown signal". Its temporary disk at /mnt has room for more swap.
+if [ "${GITHUB_ACTIONS:-}" = true ] && [ "$(uname -s)" = Linux ] && [ -d /mnt ] && [ ! -e /mnt/ry-swap ]; then
+	sudo fallocate -l 16G /mnt/ry-swap
+	sudo chmod 600 /mnt/ry-swap
+	sudo mkswap /mnt/ry-swap > /dev/null
+	sudo swapon /mnt/ry-swap
+	free -h >&2
+fi
+
 rm -rf "$work/pgo-raw" "$work/bolt-raw" "$work/runtime" "$work/bolt-instrumented" "$work/build.log"
 mkdir -p "$work/pgo-raw" "$work/bolt-raw" "$work/runtime"
 
@@ -206,7 +217,11 @@ if [ -n "$bolt" ]; then
 	"$bolt" "$optimized/$library" -o "$runtime" -data="$work/libR.fdata" \
 		-reorder-blocks=ext-tsp -reorder-functions=cdsort -split-functions -split-all-cold \
 		-split-eh -icf=safe -use-gnu-stack -dyno-stats
+	# `-use-gnu-stack` turns the PT_GNU_STACK entry into the PT_LOAD of the moved code. Without
+	# the header glibc 2.41 and later refuse to load libR, so it goes back over the PT_NOTE entry.
+	python3 -I tools/layout/gnu_stack.py restore "$runtime"
 fi
+python3 -I tools/layout/gnu_stack.py check "$runtime"
 # `--emit-relocs` leaves static relocation sections, which keep the symbol table alive through a
 # plain strip and double the file. Only those go: the dynamic relocations stay.
 objcopy --remove-relocations='*' "$runtime"

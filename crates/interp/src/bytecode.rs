@@ -2,10 +2,10 @@
 //!
 //! A closure body compiles to bytecode on its second call, or takes its code from its package's
 //! code image then; the closures of the namespaces the start-up image holds arrive compiled. The
-//! code replaces the body as a
-//! `BCODESXP`, as GNU R stores compiled closures, so it lives and dies with the closure and
-//! everything that reads a body as source (`body()`, `deparse`, `identical`, serialization)
-//! goes through [`closure_body`], which returns the expression.
+//! code replaces the body as a `BCODESXP`, as GNU R stores compiled closures, and everything that
+//! reads a body as source (`body()`, `deparse`, `identical`, serialization) goes through
+//! [`closure_body`], which returns the expression. Closures over one body expression share its
+//! code (see [`Bodies`]), which lives as long as the expression does.
 //!
 //! The machine has registers instead of an operand stack: each instruction names the registers
 //! it reads and writes, and the register file is a stack the collector traces. Every construct
@@ -25,8 +25,7 @@
 //!   [`profile`]) the seventh the optimizing tier's compiled code, `NULL` until it exists, the eighth the
 //!   slot hints (an integer vector, one per lookup site), the ninth the stored half of the
 //!   effect-free fact (see [`crate::effects`]), the tenth the last argument-match plan of a
-//!   closure body (see `eval::match_args_cached`), and the eleventh the baseline tier's machine
-//!   code (an external pointer whose address is a [`BaselineCode`]), `NULL` until it exists.
+//!   closure body (see `eval::match_args_cached`), and the eleventh the slot table (see [`SLOTS`]).
 //! - `tag`: the inline caches, a list with two slots per cache: the enclosure the lookup started
 //!   from and the binding cell it found. The list holds them weakly, because closures that share
 //!   a body share its code, and a strong cache would keep the last caller's environment alive.
@@ -45,7 +44,7 @@
 
 use {
     crate::{
-        Interp,
+        Frame, Interp,
         arith::{MATHS, math_index},
         builtins::{Arg, BuiltinDef, Call, Generic, internal},
         conditions, dispatch, effects, element_access,
@@ -64,7 +63,12 @@ use {
     },
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::{SmallVec, smallvec},
-    std::ops::Range,
+    std::{
+        hash::{Hash, Hasher},
+        ops::Range,
+        rc::Rc,
+    },
+    thin_vec::ThinVec,
 };
 
 /// The internals behind GNU R's `compiler` package. Its code buffer is assembled in R, and
@@ -76,22 +80,34 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     internal("mkCode", 2, do_mk_code),
     internal("bcClose", 3, |call| unsafe {
-        let closure = eval::make_closure(call.arg(0), call.arg(1), nil(), call.arg(2))?;
-        crate::heap().root(closure);
-        // `cmpfun` compiles at once, as GNU R's does, rather than on the second call: compiled
-        // code passes constant arguments as values, which native code such as rlang observes.
-        if worth_compiling(closure.cdr()) {
-            let code = compile(closure.cdr(), closure)?;
-            crate::heap().set_cdr(closure, code);
-        }
-        Ok(closure)
+        close_compiled(call.arg(0), call.arg(1), call.arg(2))
     }),
     internal("growconst", 1, do_grow_constants),
     internal("putconst", 3, do_put_constant),
     internal("getconst", 2, do_get_constants),
-    internal("enableJIT", 1, |_| unsafe { values::scalar_integer(0) }),
+    internal("enableJIT", 1, |call| unsafe {
+        let previous = interp().bytecode.jit_level;
+        let level = values::as_integer_scalar(call.arg(0));
+        if level >= 0 && level != NA_INTEGER {
+            interp().bytecode.jit_level = level.min(3);
+        }
+        values::scalar_integer(previous)
+    }),
     internal("compilePKGS", 1, |_| unsafe { values::scalar_logical(0) }),
 ];
+
+/// A closure over `formals`, `body` and `env` whose body is compiled at once, as `cmpfun`
+/// compiles in GNU R, rather than on the second call: compiled code passes constant arguments
+/// as values, which native code such as rlang observes.
+pub(crate) unsafe fn close_compiled(formals: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
+    let closure = eval::make_closure(formals, body, nil(), env)?;
+    crate::heap().root(closure);
+    if worth_compiling(closure.cdr()) {
+        let code = compile(closure.cdr(), closure, true)?;
+        crate::heap().set_cdr(closure, code);
+    }
+    Ok(closure)
+}
 
 /// The byte-code version GNU R 4.3 writes, which `compiler` stamps into every code buffer.
 const GNU_R_BYTECODE_VERSION: i32 = 12;
@@ -102,29 +118,34 @@ pub struct State {
     /// Allocated once at [`REGISTER_FILE_CAPACITY`] and never grown past it, so a register
     /// window's address is stable for as long as the window exists.
     pub(crate) registers: Vec<Sexp>,
-    /// Each expression body a closure has run: its calls until it compiles, then its code.
-    /// The closures one `function` expression makes each time the AST evaluator runs it share
-    /// that body, and finding the code here gives each the same code object, profile and
-    /// tier-1 compilation instead of compiling the body again.
-    ///
-    /// The key is the body's address because a body is any language object (a constant of the
-    /// enclosing code, the value of `body<-` or `as.function`), which has no spare field for a
-    /// dense index, and an attribute would show in `attributes(body(f))`. Compiled code is found
-    /// through the closure's own body slot, so only an uncompiled body reaches this map. The
-    /// collector drops the entry of every body that died before it frees anything
-    /// ([`State::clear_dead`]), so a new body at a dead one's address never finds its entry.
-    bodies: FxHashMap<Sexp, Body>,
+    /// The tier of every closure body that has run, shared by all closures over the body.
+    bodies: Bodies,
     tier: Option<Tier>,
     pub(crate) call_plans: CallPlans,
+    /// What the dispatch loop resumes as each callee it entered in place returns, innermost
+    /// last ([`Resume`]).
+    resumes: Vec<Resume>,
+    /// The `for` loop states of the bodies entered in place. Allocated once at
+    /// [`LOOP_STATE_CAPACITY`] and never grown past it, so a running body's states stay where
+    /// they are while deeper calls take and return theirs.
+    loop_states: Vec<LoopState>,
+    /// GNU R's JIT level (`compiler::enableJIT`), 3 by default. It decides only what compiled
+    /// code binds at compile time, since ry compiles at every level: at 0 GNU R compiles no
+    /// closure, and below 3 no top-level loop, so such code guards its base functions as GNU R's
+    /// evaluator would look them up.
+    jit_level: i32,
 }
 
 impl Default for State {
     fn default() -> State {
         State {
             registers: Vec::with_capacity(REGISTER_FILE_CAPACITY),
-            bodies: FxHashMap::default(),
+            bodies: Bodies::default(),
             tier: None,
             call_plans: CallPlans::default(),
+            resumes: Vec::new(),
+            loop_states: Vec::with_capacity(LOOP_STATE_CAPACITY),
+            jit_level: 3,
         }
     }
 }
@@ -134,48 +155,305 @@ impl State {
         for &register in &self.registers {
             marker.mark(register);
         }
-        for body in self.bodies.values() {
-            if let Body::Code {
-                pair,
-                formals,
-                srcref,
-            } = *body
-            {
-                marker.mark(pair);
-                marker.mark(formals);
-                marker.mark(srcref);
-            }
-        }
         self.call_plans.trace(marker);
     }
 
     pub(crate) unsafe fn clear_dead(&mut self, liveness: &Liveness<'_>) {
         self.call_plans.clear_dead(liveness);
-        // The weak pair's key is already cleared when its body died, so the entry's own key is
-        // what says whether the body survives.
-        self.bodies
-            .retain(|&body, _| unsafe { liveness.is_live(body) });
+        self.bodies.clear_dead(liveness);
     }
 }
 
-#[derive(Clone, Copy)]
-enum Body {
-    Calls(u32),
-    /// `pair` is a weak reference from the body to its code, which keeps the code while the
-    /// body lives although no closure runs it, as between two runs of a test block, and does
-    /// not keep the body alive through the code's reference to its source. Compiling reads the
-    /// formals and the srcref, so a closure over the same body with other formals (from
-    /// `as.function`, say) compiles its own code.
-    Code {
-        pair: Sexp,
-        formals: Sexp,
-        srcref: Sexp,
-    },
+/// The tier of each closure body, keyed by the body expression, which every closure made from
+/// one `function` expression shares, and so does every copy `environment<-` makes, as R6 does
+/// for each object's methods. Code compiled for one closure serves every other closure over the
+/// body whose formals and srcref are the same objects. Guarded code reads nothing else of the
+/// closure, since the enclosure only resolves names the code looks up at run time. Code that
+/// binds its base functions also depends on which names the enclosure binds when it compiles, so
+/// it serves a closure only under GNU R's `jit_env_match`: the closure's top environment is the
+/// one the code compiled under, and every name its formals and its local frames up to that top
+/// environment bind was bound when the code compiled. A closure that masks a base function
+/// locally therefore never runs code that bound it; it compiles its own, guarded, as GNU R runs
+/// such a closure uncompiled. A body counts
+/// its calls across all its closures until it compiles, and then holds its code while any
+/// closure runs it, so a closure made meanwhile runs the code from its first call instead of
+/// compiling again.
+///
+/// GNU R shares compiled bodies the same way, through a cache keyed by a hash of the body's
+/// structure. As there, a body changed in place since it compiled (through the C API) does not
+/// give its old code to a new closure, while closures that already run the code keep it.
+#[derive(Default)]
+struct Bodies {
+    /// Below [`COMPILED`], the calls the body has seen; with that bit set, the index of its
+    /// compiled entry in the columns below.
+    states: FxHashMap<Sexp, u32>,
+    /// The compiled entries, as columns indexed by entry. `keys` holds the body, or `NULL` for
+    /// a free entry. None of the columns is traced: an entry holds its objects weakly and goes
+    /// once any of them dies, so the code lives exactly as long as a closure that runs it.
+    keys: Vec<Sexp>,
+    codes: Vec<Sexp>,
+    formals: Vec<Sexp>,
+    srcrefs: Vec<Sexp>,
+    /// The [`shape`] of the body, formals and srcref when the code compiled.
+    shapes: Vec<u64>,
+    /// For code that binds its base functions, the top environment of the closure it compiled
+    /// for, and `NULL` for guarded code. Namespaces and the global environment never die, but
+    /// an environment that only binds `.packageName` can, so the entry goes with it.
+    tops: Vec<Sexp>,
+    /// For code that binds, the names the closure's formals and local frames bound when it
+    /// compiled, sorted by address. Symbols are never collected, so the snapshot holds them
+    /// without tracing them.
+    locals: Vec<Box<[Sexp]>>,
+    free: Vec<u32>,
+}
+
+/// The bit of a [`Bodies`] state that marks an entry index rather than a call count.
+const COMPILED: u32 = 1 << 31;
+
+/// What a closure over a body that has not compiled in it does at a call.
+enum BodyTier {
+    /// Runs the body's code, compiled for another closure over it.
+    Shared(Sexp),
+    /// Compiles now, binding its base functions when the flag is set: the body compiled for a
+    /// closure this one cannot share code with.
+    Compile(bool),
+    /// Runs on the AST evaluator, after this many earlier calls.
+    Counting(u32),
+}
+
+impl Bodies {
+    /// The tier of `function`, a closure over `body`, installing shared code as its body.
+    unsafe fn tier(&self, function: Sexp, body: Sexp) -> BodyTier {
+        let Some(&state) = self.states.get(&body) else {
+            return BodyTier::Counting(0);
+        };
+        if state & COMPILED == 0 {
+            return BodyTier::Counting(state);
+        }
+        let entry = (state & !COMPILED) as usize;
+        let formals = function.car();
+        let srcref = values::get_attr(function, symbols().srcref);
+        if formals != self.formals[entry]
+            || srcref != self.srcrefs[entry]
+            || shape(body, formals, srcref) != self.shapes[entry]
+        {
+            return BodyTier::Compile(binds_at_compile(function, body));
+        }
+        let binds = binds_at_compile(function, body);
+        let top = self.tops[entry];
+        let shares = if top == nil() {
+            !binds
+        } else {
+            binds && binds_like(function, top, &self.locals[entry])
+        };
+        if !shares {
+            // A closure that would bind but whose names differ runs guarded code, as GNU R's
+            // JIT marks it never to compile.
+            return BodyTier::Compile(binds && top == nil());
+        }
+        let code = self.codes[entry];
+        crate::heap().set_cdr(function, code);
+        BodyTier::Shared(code)
+    }
+
+    /// Counts a call of `body` on the AST evaluator.
+    fn count(&mut self, body: Sexp, calls: u32) {
+        if self.states.len() > MAX_TRACKED_BODIES {
+            self.states.retain(|_, state| *state & COMPILED != 0);
+        }
+        self.states.insert(body, calls);
+    }
+
+    /// Records `code`, just compiled for `function`, as `body`'s code for closures to share. A
+    /// body that already has an entry keeps it: the code there serves the closures it was
+    /// compiled for, and replacing it would only make two kinds of closure take turns.
+    unsafe fn share(&mut self, function: Sexp, body: Sexp, code: Sexp) {
+        if self
+            .states
+            .get(&body)
+            .is_some_and(|state| state & COMPILED != 0)
+        {
+            return;
+        }
+        let formals = function.car();
+        let srcref = values::get_attr(function, symbols().srcref);
+        let shape = shape(body, formals, srcref);
+        let (top, locals) = if code.has_gp(gp::BINDING_CODE) {
+            compile_environment(function)
+        } else {
+            (nil(), Box::default())
+        };
+        let entry = match self.free.pop() {
+            Some(entry) => {
+                let index = entry as usize;
+                self.keys[index] = body;
+                self.codes[index] = code;
+                self.formals[index] = formals;
+                self.srcrefs[index] = srcref;
+                self.shapes[index] = shape;
+                self.tops[index] = top;
+                self.locals[index] = locals;
+                entry
+            }
+            None => {
+                self.keys.push(body);
+                self.codes.push(code);
+                self.formals.push(formals);
+                self.srcrefs.push(srcref);
+                self.shapes.push(shape);
+                self.tops.push(top);
+                self.locals.push(locals);
+                (self.keys.len() - 1) as u32
+            }
+        };
+        self.states.insert(body, entry | COMPILED);
+    }
+
+    /// Frees every entry that holds an object the collection found dead. The body may outlive
+    /// its code, as a quoted `function` expression does, and it then counts its calls afresh.
+    /// A dead body's call count goes too, before anything is freed, so a new body the allocator
+    /// places at its address starts from zero.
+    unsafe fn clear_dead(&mut self, liveness: &Liveness<'_>) {
+        self.states
+            .retain(|&body, state| *state & COMPILED != 0 || liveness.is_live(body));
+        let live = |object: Sexp| object == nil() || liveness.is_live(object);
+        for entry in 0..self.keys.len() {
+            let body = self.keys[entry];
+            if body == nil() {
+                continue;
+            }
+            if !live(body)
+                || !live(self.codes[entry])
+                || !live(self.formals[entry])
+                || !live(self.srcrefs[entry])
+                || !live(self.tops[entry])
+            {
+                self.states.remove(&body);
+                self.keys[entry] = nil();
+                self.codes[entry] = nil();
+                self.formals[entry] = nil();
+                self.srcrefs[entry] = nil();
+                self.tops[entry] = nil();
+                self.locals[entry] = Box::default();
+                self.free.push(entry as u32);
+            }
+        }
+    }
+}
+
+/// The top environment of `function`'s enclosure and the names its formals and the frames from
+/// the enclosure up to that top environment bind, sorted, which is what code that binds its base
+/// functions depends on besides the body (GNU R's `make_cached_cmpenv`).
+unsafe fn compile_environment(function: Sexp) -> (Sexp, Box<[Sexp]>) {
+    let heap = crate::heap();
+    let top = crate::dispatch::top_env(function.tag());
+    let mut names = Vec::new();
+    let mut formal = function.car();
+    while formal != nil() {
+        names.push(formal.tag());
+        formal = formal.cdr();
+    }
+    let mut env = function.tag();
+    while env != top && env != values::empty_env() {
+        names.extend(heap.frame_symbols(env));
+        env = env.enclosure();
+    }
+    names.sort_unstable_by_key(|name| name.as_ptr());
+    names.dedup();
+    (top, names.into_boxed_slice())
+}
+
+/// Whether code compiled under `top` with the local names `locals` serves `function`: its top
+/// environment is `top`, and its formals and local frames bind only names in `locals` (GNU R's
+/// `jit_env_match`). Compiling depends on which names are bound, never on their values.
+unsafe fn binds_like(function: Sexp, top: Sexp, locals: &[Sexp]) -> bool {
+    let env = function.tag();
+    if crate::dispatch::top_env(env) != top {
+        return false;
+    }
+    let mut formal = function.car();
+    while formal != nil() {
+        if !binds_name(locals, formal.tag()) {
+            return false;
+        }
+        formal = formal.cdr();
+    }
+    let mut frame = env;
+    while frame != top && frame != values::empty_env() {
+        let bound = crate::heap().frame_symbols(frame);
+        if bound.iter().any(|&name| !binds_name(locals, name)) {
+            return false;
+        }
+        frame = frame.enclosure();
+    }
+    true
+}
+
+/// Whether the sorted snapshot `locals` holds `name`.
+fn binds_name(locals: &[Sexp], name: Sexp) -> bool {
+    locals
+        .binary_search_by_key(&name.as_ptr(), |local| local.as_ptr())
+        .is_ok()
+}
+
+/// A hash of what compiled code depends on: the structure of `body` and `formals`, and
+/// `srcref`. Symbols, strings and lists hash by identity, and so does any constant longer than
+/// one element; scalars hash by value, which is what an in-place change of a call reaches.
+// Out of line so a profile shows what the reuse check costs.
+#[inline(never)]
+unsafe fn shape(body: Sexp, formals: Sexp, srcref: Sexp) -> u64 {
+    let mut hasher = rustc_hash::FxHasher::default();
+    hash_shape(body, &mut hasher);
+    hash_shape(formals, &mut hasher);
+    srcref.hash(&mut hasher);
+    if srcref.kind() == SexpType::Integer {
+        values::ints(srcref).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Walks each call's arguments in a loop and keeps only nested calls on an explicit stack,
+/// because a long left-nested chain such as `a + b + c + ...` nests calls in the car as deep as
+/// it is long.
+unsafe fn hash_shape(expression: Sexp, hasher: &mut rustc_hash::FxHasher) {
+    let mut pending: SmallVec<[Sexp; 16]> = smallvec![expression];
+    while let Some(mut node) = pending.pop() {
+        while matches!(node.kind(), SexpType::Language | SexpType::Pairlist) {
+            (node.kind() as u8).hash(hasher);
+            node.tag().hash(hasher);
+            let head = node.car();
+            if matches!(head.kind(), SexpType::Language | SexpType::Pairlist) {
+                pending.push(head);
+            } else {
+                hash_leaf(head, hasher);
+            }
+            node = node.cdr();
+        }
+        hash_leaf(node, hasher);
+    }
+}
+
+unsafe fn hash_leaf(node: Sexp, hasher: &mut rustc_hash::FxHasher) {
+    match node.kind() {
+        // Reading an ALTREP vector can run R code, so one hashes by identity.
+        _ if node.is_altrep() => node.hash(hasher),
+        SexpType::Integer | SexpType::Logical if length(node) == 1 => {
+            values::ints(node).hash(hasher);
+        }
+        SexpType::Real if length(node) == 1 => {
+            values::reals(node)[0].to_bits().hash(hasher);
+        }
+        _ => node.hash(hasher),
+    }
 }
 
 /// The register file holds this many registers across all active frames. Deep recursion runs
 /// out of C stack or `expressions` long before it runs out of registers.
 const REGISTER_FILE_CAPACITY: usize = 1 << 21;
+
+/// How many `for` loop states the bodies entered in place hold between them. A call whose body
+/// would need more runs through [`run_at`], which keeps its states on the Rust stack.
+const LOOP_STATE_CAPACITY: usize = 1 << 14;
 
 /// A threshold no counter is compared against. Counters saturate at `i32::MAX`, so a
 /// threshold of that value would otherwise fire once a counter saturates.
@@ -199,15 +477,13 @@ pub struct Tier {
     /// [`Tier::back_edge_threshold`]. Returns `None` to keep interpreting at `target`.
     pub back_edge: unsafe fn(&mut Machine<'_>, target: usize) -> Option<TierExit>,
     pub back_edge_threshold: i32,
-    /// Called once a body without baseline code reaches [`Tier::baseline_threshold`] entries or
-    /// backward jumps. It stores the body's [`BaselineCode`] in its `BASELINE` constant, or
-    /// leaves the constant `NULL` when the body does not compile.
-    pub baseline: unsafe fn(&Machine<'_>),
-    pub baseline_threshold: i32,
     /// Called before a typed closure gets a frame, with its arguments matched by position or by
     /// exact name. Returns `None` to let the call proceed as usual, or the value a native
     /// function computed without a frame, promises or annotation checks.
     pub call: unsafe fn(&TypedCall<'_>) -> Option<R<Sexp>>,
+    /// Called before a script runs, when the session compiles ahead of time, with what the
+    /// script defines at its top level, to compile what can compile before a call.
+    pub ahead: unsafe fn(&crate::ahead::Program<'_>),
 }
 
 /// A call of a typed closure that [`Tier::call`] may run natively. Native code has no frame, so
@@ -396,6 +672,18 @@ pub fn reserve_registers(length: usize) -> R<()> {
     grow_registers(length)
 }
 
+/// How many registers the file holds, which is where the next window starts.
+#[inline]
+pub fn register_top() -> usize {
+    interp().bytecode.registers.len()
+}
+
+/// Gives the registers from `length` up back to the file.
+#[inline]
+pub fn release_registers(length: usize) {
+    interp().bytecode.registers.truncate(length);
+}
+
 #[inline(never)]
 fn grow_registers(length: usize) -> R<()> {
     let registers = &mut interp().bytecode.registers;
@@ -409,7 +697,11 @@ fn grow_registers(length: usize) -> R<()> {
         // Every call grows the file past the registers the last call released, so this runs
         // once per call: `fill` stores the `NULL`s as wide writes, where `resize` cloned them
         // one at a time. Clearing is what lets a collection inside the new window free what a
-        // returned call left in these words, as GNU R does.
+        // returned call left in these words, as GNU R does. The collector marks the whole file
+        // up to its length, not each window up to the registers it wrote, so a word left
+        // uncleared would keep a returned call's temporary alive until the new window writes
+        // it, and a finalizer GNU R runs in that collection would run late
+        // (`gc__register_window_frees_returned_temporaries`).
         // SAFETY: the capacity covers `length`, and `Sexp` is a plain pointer the next line
         // initializes before anything reads it.
         unsafe { registers.set_len(length) };
@@ -424,7 +716,8 @@ pub unsafe fn execute(code: Sexp, env: Sexp) -> R<Sexp> {
     eval::eval(source_of(code), env)
 }
 
-/// Runs a closure's body, compiling it on its second call.
+/// Runs a closure's body, compiling it when [`schedule`] says to, or running the code another
+/// closure over the same body compiled.
 pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
     if body.kind() == SexpType::Bytecode {
         return run(function, body, env);
@@ -432,69 +725,85 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
     if !worth_compiling(body) {
         return eval::eval(body, env);
     }
-    let state = &mut interp().bytecode;
-    let calls = match state.bodies.entry(body).or_insert(Body::Calls(0)) {
-        Body::Calls(calls) => {
-            *calls += 1;
-            *calls
-        }
-        Body::Code { .. } => COMPILE_AFTER_CALLS,
+    let bodies = &mut interp().bytecode.bodies;
+    let binds = match bodies.tier(function, body) {
+        BodyTier::Shared(code) => return run(function, code, env),
+        BodyTier::Compile(binds) => binds,
+        BodyTier::Counting(calls) => match schedule(function, body, calls, true) {
+            Some(binds) => binds,
+            None => {
+                bodies.count(body, calls + 1);
+                return eval::eval(body, env);
+            }
+        },
     };
-    // A body with a loop pays for compiling within its first call, as GNU R's JIT assumes, and
-    // so does a typed one, whose signature lets the JIT compile it at that call too.
-    if calls < COMPILE_AFTER_CALLS
-        && !contains_loop(body, LOOP_SEARCH_DEPTH)
-        && !crate::annotations::is_typed(function)
-    {
-        if state.bodies.len() > MAX_TRACKED_BODIES {
-            state
-                .bodies
-                .retain(|_, body| matches!(body, Body::Code { .. }));
-        }
-        return eval::eval(body, env);
-    }
-    let code = install_code(function, body)?;
+    let code = compile_for(function, body, binds)?;
     run(function, code, env)
 }
 
-/// Gives `function`, whose body `body` is an expression, its compiled code: the code its
-/// package's image holds, else a fresh compile.
-unsafe fn install_code(function: Sexp, body: Sexp) -> R<Sexp> {
-    let heap = crate::heap();
-    let formals = function.car();
-    let srcref = values::get_attr(function, symbols().srcref);
-    if let Some(&Body::Code {
-        pair,
-        formals: compiled_formals,
-        srcref: compiled_srcref,
-    }) = interp().bytecode.bodies.get(&body)
-        && compiled_formals == formals
-        && compiled_srcref == srcref
-    {
-        let code = pair.weak_value();
-        heap.set_cdr(function, code);
-        return Ok(code);
+/// Whether `function`'s body `body`, after `calls` earlier calls on the AST evaluator, compiles
+/// at this call, and if so whether the code binds its base functions at compile time (see
+/// [`Compiler::binding`]). Where GNU R's JIT would compile (`R_CheckJIT`), the code binds, at the
+/// call where GNU R compiles: a closure over the global environment at its first call when its
+/// `JIT_score` reaches [`MIN_JIT_SCORE`] and at its second otherwise, and any other closure at its
+/// second call when its score reaches the minimum. A namespace's closure binds too, since GNU R
+/// installs packages compiled, and compiles at its first call when hot and its second otherwise.
+/// Every other closure, which GNU R never compiles, compiles on its [`COMPILE_AFTER_CALLS`]th
+/// call with guarded base functions, so it looks each name up as it runs as GNU R's AST evaluator
+/// does, and a typed one compiles guarded at its first call. `mark` sets the closure's
+/// `MAYBE_JIT` and `NO_JIT` bits as GNU R's check does; without it this only reports what the
+/// call would do.
+unsafe fn schedule(function: Sexp, body: Sexp, calls: u32, mark: bool) -> Option<bool> {
+    let due = calls + 1 >= COMPILE_AFTER_CALLS;
+    if crate::annotations::is_typed(function) {
+        return Some(false);
     }
-    // A package's code image replaces compiling, at the same call, rather than running code from
-    // the first call: decoding costs about as much as compiling, and many closures run only once.
-    let code = match crate::code_image::take_pending(function, body)? {
-        Some(code) => code,
-        None => {
-            let code = compile(body, function)?;
-            heap.set_cdr(function, code);
-            code
+    if function.has_gp(gp::CLOSURE_NO_JIT) || interp().bytecode.jit_level == 0 {
+        return due.then_some(false);
+    }
+    if function.has_gp(gp::CLOSURE_MAYBE_JIT) {
+        if mark {
+            function.set_gp_bits(gp::CLOSURE_MAYBE_JIT, false);
         }
-    };
-    let pair = heap.alloc_weak_ref(body, code, values::nil(), 0, false)?;
-    interp().bytecode.bodies.insert(
-        body,
-        Body::Code {
-            pair,
-            formals,
-            srcref,
-        },
-    );
-    Ok(code)
+        return Some(true);
+    }
+    let enclosure = function.tag();
+    let global = enclosure == crate::heap().known().global_env;
+    let hot = jit_score(body) >= MIN_JIT_SCORE;
+    if !global && crate::envir::is_namespace(crate::dispatch::top_env(enclosure)) {
+        return (hot || due).then_some(true);
+    }
+    if global && hot {
+        return Some(true);
+    }
+    if global || hot {
+        if mark {
+            function.set_gp_bits(gp::CLOSURE_MAYBE_JIT, true);
+        }
+        return None;
+    }
+    if mark {
+        function.set_gp_bits(gp::CLOSURE_NO_JIT, true);
+    }
+    due.then_some(false)
+}
+
+/// Whether code compiled for `function` binds its base functions, which is whether GNU R would
+/// compile the closure at all. [`schedule`] decides when it compiles; this reads only the
+/// closure's bits and its body's score, never a call count, so a closure that has not reached
+/// its compiling call can still take code another closure compiled.
+unsafe fn binds_at_compile(function: Sexp, body: Sexp) -> bool {
+    if crate::annotations::is_typed(function)
+        || function.has_gp(gp::CLOSURE_NO_JIT)
+        || interp().bytecode.jit_level == 0
+    {
+        return false;
+    }
+    let enclosure = function.tag();
+    function.has_gp(gp::CLOSURE_MAYBE_JIT)
+        || enclosure == crate::heap().known().global_env
+        || crate::envir::is_namespace(crate::dispatch::top_env(enclosure))
+        || jit_score(body) >= MIN_JIT_SCORE
 }
 
 /// Why a closure body runs on the AST evaluator rather than as compiled code. It is a property
@@ -507,6 +816,79 @@ pub enum Uncompilable {
     NotACall,
 }
 
+/// Runs `call`, a `for`, `while` or `repeat` loop the tree walker was about to evaluate in `env`,
+/// as compiled code, or returns `None` when the loop stays with the tree walker. The loop compiles
+/// before its first iteration, as GNU R's JIT compiles every top-level loop when it starts, and
+/// only in the global environment, as GNU R's does, which is where they are not inside a function
+/// whose frame semantics (`on.exit`, `missing`, `sys.function`) the compiled loop would have
+/// to reproduce. `sequence` is a `for` loop's evaluated sequence, which the compiled loop steps
+/// through instead of evaluating the expression again.
+///
+/// The code compiles for this one evaluation and is dropped after it, as in GNU R, which also
+/// retries a loop it could not compile at each evaluation. It runs on `env`'s bindings, so code
+/// called from the loop sees every assignment at once, and in an activation with no call frame,
+/// so `parent.frame()`, `sys.call()` and the calls conditions report are those of the tree
+/// walker.
+pub unsafe fn run_loop(call: Sexp, sequence: Option<Sexp>, env: Sexp) -> R<Option<Sexp>> {
+    let heap = crate::heap();
+    // A `return` would end the compiled activation as if it were a function, where the tree
+    // walker raises "no function to return from".
+    if env != heap.known().global_env || interp().debugger.is_some() || calls_return(call) {
+        return Ok(None);
+    }
+    let body = match sequence {
+        Some(sequence) => {
+            let arguments = call.cdr();
+            let rest = values::cons(sequence, arguments.cdr().cdr())?;
+            values::lcons(call.car(), values::cons(arguments.car(), rest)?)?
+        }
+        None => call,
+    };
+    let function = values::triple(SexpType::Closure, nil(), body, env)?;
+    // GNU R compiles a top-level loop when it starts, binding the base functions the global
+    // environment finds in base then, except those the loop itself assigns (`compile` adds the
+    // expression's `findLocals` as a frame).
+    let binding = if interp().bytecode.jit_level >= 3 {
+        Some(vec![Rc::new(compiler_locals(nil(), body, env)?)])
+    } else {
+        None
+    };
+    let code = compile_with_locals(body, function, None, binding)?;
+    heap.set_cdr(function, code);
+    let profile = values::ints_mut(code.cdr().element(PROFILE));
+    profile[profile::TIER_STATE] = profile::TIER_OFF;
+    profile[profile::NEXT] = i32::MAX;
+    // A closure's frame restores the source reference on leaving, and this activation has none.
+    let srcref = interp().srcref;
+    let result = run(function, code, env);
+    interp().srcref = srcref;
+    result?;
+    interp().visible = false;
+    Ok(Some(nil()))
+}
+
+/// Whether `expression` calls `return` outside the functions it defines.
+unsafe fn calls_return(expression: Sexp) -> bool {
+    if expression.kind() != SexpType::Language {
+        return false;
+    }
+    let head = expression.car();
+    if head == symbols().function {
+        return false;
+    }
+    if head.kind() == SexpType::Symbol && &*symbol_name(head) == "return" {
+        return true;
+    }
+    let mut cell = expression;
+    while matches!(cell.kind(), SexpType::Language | SexpType::Pairlist) {
+        if calls_return(cell.car()) {
+            return true;
+        }
+        cell = cell.cdr();
+    }
+    false
+}
+
 /// `function`'s body, compiled first when [`run_body`] would compile it at this call. Binding the
 /// arguments calls this, so that such a call runs in a slot frame rather than in the environment
 /// the uncompiled body needs: the first call of a body with a loop, which compiles at once, is
@@ -517,15 +899,32 @@ pub unsafe fn compile_before_call(function: Sexp) -> R<Sexp> {
     if !worth_compiling(body) {
         return Ok(body);
     }
-    let calls = match interp().bytecode.bodies.get(&body) {
-        Some(Body::Calls(calls)) => *calls,
-        Some(Body::Code { .. }) => COMPILE_AFTER_CALLS,
-        None => 0,
+    let binds = match interp().bytecode.bodies.tier(function, body) {
+        BodyTier::Shared(code) => return Ok(code),
+        BodyTier::Compile(binds) => binds,
+        BodyTier::Counting(calls) => match schedule(function, body, calls, false) {
+            Some(binds) => binds,
+            None => return Ok(body),
+        },
     };
-    if calls + 1 < COMPILE_AFTER_CALLS && !contains_loop(body, LOOP_SEARCH_DEPTH) {
-        return Ok(body);
-    }
-    let code = install_code(function, body)?;
+    compile_for(function, body, binds)
+}
+
+/// Compiles `body` as `function`'s, binding its base functions when `binds`, or takes its code
+/// from the package's code image, installs the code as the closure's body and records it for
+/// other closures over the body.
+unsafe fn compile_for(function: Sexp, body: Sexp, binds: bool) -> R<Sexp> {
+    // A package's code image replaces compiling, at the same call, rather than running code from
+    // the first call: decoding costs about as much as compiling, and many closures run only once.
+    let code = match crate::code_image::take_pending(function, body)? {
+        Some(code) => code,
+        None => {
+            let code = compile(body, function, binds)?;
+            crate::heap().set_cdr(function, code);
+            code
+        }
+    };
+    interp().bytecode.bodies.share(function, body, code);
     Ok(code)
 }
 
@@ -559,7 +958,12 @@ pub(crate) unsafe fn inner_closure(
     let closure = eval::make_closure(formals, shared, srcref, env)?;
     if shared.kind() != SexpType::Bytecode && worth_compiling(shared) {
         heap.root(closure);
-        let code = compile(shared, closure)?;
+        // Code that binds its base functions compiled its nested functions with it, so this
+        // outer code guards them, and binding here would miss its locals; a namespace's code
+        // binds anyway, as its package installs compiled.
+        let binds = crate::envir::is_namespace(crate::dispatch::top_env(env))
+            && env != heap.known().global_env;
+        let code = compile(shared, closure, binds)?;
         heap.set_element(constants, position, code);
         heap.set_cdr(closure, code);
     }
@@ -585,16 +989,28 @@ pub unsafe fn compiled_body(function: Sexp) -> R<Result<Sexp, Uncompilable>> {
     if !worth_compiling(body) {
         return Ok(Err(Uncompilable::NotACall));
     }
-    install_code(function, body).map(Ok)
+    let binds = match interp().bytecode.bodies.tier(function, body) {
+        BodyTier::Shared(code) => return Ok(Ok(code)),
+        BodyTier::Compile(binds) => binds,
+        BodyTier::Counting(calls) => schedule(function, body, calls, false).unwrap_or(false),
+    };
+    compile_for(function, body, binds).map(Ok)
 }
 
-/// The body a copy of the closure `function` gets: its compiled code, compiled now if it has
-/// none yet, so that the original and all its copies share one code object, one profile and
-/// one tier-1 compilation however many copies run it. R6 copies every method into each object
-/// it creates, and a replacement call such as `environment(f) <- env` duplicates `f` first. A
-/// body that stays an expression is copied as one.
+/// The body a copy of the closure `function` gets: the code `function` runs, or the code
+/// closures over its body share, so that the original and its copies run one code object, with
+/// one profile and one tier-1 compilation. R6 copies every method into each object it creates,
+/// and a replacement call such as `environment(f) <- env` duplicates `f` first. A body that has
+/// not compiled is copied as the expression, and the copies count their calls together.
 pub unsafe fn body_to_copy(function: Sexp) -> R<Sexp> {
-    Ok(compiled_body(function)?.unwrap_or(function.cdr()))
+    let body = function.cdr();
+    if body.kind() == SexpType::Bytecode || !worth_compiling(body) {
+        return Ok(body);
+    }
+    match interp().bytecode.bodies.tier(function, body) {
+        BodyTier::Shared(code) => Ok(code),
+        BodyTier::Compile(_) | BodyTier::Counting(_) => Ok(body),
+    }
 }
 
 /// Compiles every closure bound in a loaded namespace afresh, for the start-up image, and returns
@@ -642,7 +1058,7 @@ pub unsafe fn compile_namespaces_for_image() -> R<Vec<Sexp>> {
         }
         // An error is the compiler's way of rejecting a body (a `break` outside a loop, say), so
         // such a body keeps running on the AST evaluator, as in `run_body`.
-        if let Ok(code) = compile(body, function) {
+        if let Ok(code) = compile(body, function, true) {
             heap.set_cdr(function, code);
             fresh.push(code);
         }
@@ -684,7 +1100,9 @@ pub unsafe fn compile_nested_functions(code: Sexp, env: Sexp) -> R<()> {
                     env,
                 )?;
                 crate::heap().root(closure);
-                let compiled = compile(source, closure)?;
+                // A nested function the outer code had not compiled with it guards its base
+                // functions, since `env` does not hold the outer function's locals.
+                let compiled = compile(source, closure, false)?;
                 crate::heap().set_element(constants, body, compiled);
                 Some(compiled)
             } else {
@@ -722,12 +1140,11 @@ pub const TIER1: usize = 6;
 pub const HINTS: usize = 7;
 pub const SUMMARY: usize = 8;
 pub const MATCHES: usize = 9;
-pub const BASELINE: usize = 10;
 /// `NULL`, or for a closure body whose call frames keep their variables in slots, a list of the
 /// slot table (per inline cache, the slot of the symbol a `GetVar`, `SetVar` or `GetFun` with
 /// that cache reads, or -1) and the slots' symbols, the formals first in order.
-pub const SLOTS: usize = 11;
-pub const FIRST_CONSTANT: usize = 12;
+pub const SLOTS: usize = 10;
+pub const FIRST_CONSTANT: usize = 11;
 
 /// The most formals a slot frame takes: [`crate::Frame::missing`] has a bit per formal.
 pub const MAX_SLOT_FORMALS: usize = 64;
@@ -738,8 +1155,13 @@ pub mod profile {
     pub const ENTRIES: usize = 0;
     /// Backward jumps taken since the counter was last reset.
     pub const BACK_EDGES: usize = 1;
-    /// The optimizing tier's state for this code, which only that tier interprets.
+    /// The optimizing tier's state for this code, which only that tier interprets, apart from
+    /// [`TIER_OFF`].
     pub const TIER_STATE: usize = 2;
+    /// The [`TIER_STATE`] of a loop compiled for the tree walker ([`super::run_loop`]), which no
+    /// tier compiles or records feedback for: it runs without a call frame, and the tiers' frames
+    /// and their resume points assume one. Negative, so the optimizing tier treats it as refused.
+    pub const TIER_OFF: i32 = i32::MIN;
     /// Nonzero while tier 0 records type feedback for this code, which only happens with the
     /// optimizing tier installed and while the code has no optimized code: during the first
     /// activation of a body with a loop, over the last eighth of the entry threshold
@@ -757,7 +1179,7 @@ pub mod profile {
     pub const RECORDING: usize = 3;
     /// The entry count at which the next entry of this code asks [`super::entry_event`] what to
     /// do, or `i32::MIN` to ask at the very next entry. Every tier decision at entry (recording,
-    /// the first-call compile, the entry-threshold compile, baseline code, running optimized
+    /// the first-call compile, the entry-threshold compile, running optimized
     /// code) happens at a known count, so one comparison per call stands in for testing each
     /// of them, which cost about 30 instructions per call of every body. Whatever changes a
     /// count or a state those decisions read outside an entry sets this to `i32::MIN`.
@@ -795,28 +1217,359 @@ pub unsafe fn source_of(code: Sexp) -> Sexp {
 
 const LOOP_SEARCH_DEPTH: u32 = 32;
 
-unsafe fn contains_loop(expression: Sexp, depth: u32) -> bool {
-    if depth == 0 || expression.kind() != SexpType::Language {
+/// The site a call records where it emits no guard, because the code binds the base function
+/// the guard would have checked.
+const UNGUARDED: u32 = u32::MAX;
+
+/// GNU R's `JIT_score` of `expression`, capped at [`MIN_JIT_SCORE`]: a loop scores the minimum,
+/// any other call one plus its arguments' scores, and an `if` the larger of its condition's and
+/// its consequent's, which leaves out the alternative exactly as GNU R does.
+unsafe fn jit_score(expression: Sexp) -> u32 {
+    if expression.kind() != SexpType::Language {
+        return 1;
+    }
+    let head = expression.car();
+    if head.kind() == SexpType::Symbol {
+        match &*symbol_name(head) {
+            "if" => {
+                let arguments = expression.cdr();
+                let condition = jit_score(arguments.car());
+                let consequent = jit_score(arguments.cdr().car());
+                return condition.max(consequent);
+            }
+            "for" | "while" | "repeat" => return MIN_JIT_SCORE,
+            _ => {}
+        }
+    }
+    let mut score = 1;
+    let mut cell = expression.cdr();
+    while matches!(cell.kind(), SexpType::Pairlist | SexpType::Language) && score < MIN_JIT_SCORE {
+        score += jit_score(cell.car());
+        cell = cell.cdr();
+    }
+    score.min(MIN_JIT_SCORE)
+}
+
+/// GNU R's `MIN_JIT_SCORE`, which is also the score of a loop.
+const MIN_JIT_SCORE: u32 = 50;
+
+/// Where GNU R's compiler finds a name's binding, by its `frameTypes`: a frame below the code's
+/// top environment, a namespace frame (the namespace, its imports and the base namespace), or
+/// the global environment and what is attached to it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FrameKind {
+    Local,
+    Namespace,
+    Global,
+}
+
+/// The frame that binds `symbol` first, looking outward from `enclosure`, and its kind. Any
+/// binding counts, a variable as much as a function, as for GNU R's `exists`.
+unsafe fn compile_time_frame(symbol: Sexp, enclosure: Sexp) -> Option<(Sexp, FrameKind)> {
+    let heap = crate::heap();
+    let top = crate::dispatch::top_env(enclosure);
+    let in_namespace = crate::envir::is_namespace(top);
+    let mut kind = FrameKind::Local;
+    let mut env = enclosure;
+    while env != heap.known().empty_env {
+        if env == top {
+            kind = if in_namespace {
+                FrameKind::Namespace
+            } else {
+                FrameKind::Global
+            };
+        }
+        if env == heap.known().global_env {
+            kind = FrameKind::Global;
+        }
+        if heap.frame_cell(env, symbol).is_some() {
+            return Some((env, kind));
+        }
+        env = env.enclosure();
+    }
+    None
+}
+
+/// The base function GNU R's compiler binds `symbol` to when it compiles code that closes over
+/// `enclosure`, or `None` when it compiles a call of `symbol` that looks the function up as the
+/// code runs (`getInlineInfo` with no run-time guard). Outside a namespace that is a name of
+/// [`LANGUAGE_FUNCTIONS`] whose first binding is base's; inside one, any name with an inline
+/// handler that the namespace's frames find in base, which the namespace cannot rebind.
+unsafe fn base_binding_at_compile(symbol: Sexp, enclosure: Sexp) -> Option<Sexp> {
+    let heap = crate::heap();
+    let name = symbol_name(symbol);
+    if INLINE_HANDLERS.binary_search(&&*name).is_err() || &*name == "standardGeneric" {
+        return None;
+    }
+    let (frame, kind) = compile_time_frame(symbol, enclosure)?;
+    let in_base = frame == heap.known().base_env || frame == heap.known().base_namespace;
+    let bound = match kind {
+        FrameKind::Local => false,
+        FrameKind::Namespace => in_base,
+        FrameKind::Global => {
+            frame == heap.known().base_env && LANGUAGE_FUNCTIONS.binary_search(&&*name).is_ok()
+        }
+    };
+    if !bound {
+        return None;
+    }
+    let value = forced_value(heap.frame_cell(frame, symbol)?.cdr());
+    values::is_function(value).then_some(value)
+}
+
+/// The names GNU R's compiler takes as a function's locals (`funEnv`): its formals, and every
+/// variable that its formals' defaults and its body assign with `<-` or `=`, bind with `for`, or
+/// name as a literal string in a two-argument `assign` or `delayedAssign`. The search skips
+/// nested functions and formulas, and skips `local`, `quote` and `expression` calls unless the
+/// function rebinds those names or they are not base's (`findLocalsList`), which outside a
+/// namespace holds for `quote` and `expression` always.
+unsafe fn compiler_locals(formals: Sexp, body: Sexp, enclosure: Sexp) -> R<FxHashSet<Sexp>> {
+    let quoting = ["expression", "local", "quote"];
+    let mut symbols_of: SmallVec<[Sexp; 3]> = SmallVec::new();
+    for name in quoting {
+        symbols_of.push(values::install(name)?);
+    }
+    let unbound: SmallVec<[&str; 3]> = quoting
+        .into_iter()
+        .zip(symbols_of.iter())
+        .filter(|(_, symbol)| !is_base_variable(**symbol, enclosure))
+        .map(|(name, _)| name)
+        .collect();
+    let mut shadowed: SmallVec<[&str; 3]> = quoting.into_iter().collect();
+    loop {
+        let mut quoted = false;
+        let found = assigned_names(formals, body, &shadowed, &mut quoted)?;
+        let previous = shadowed.len();
+        shadowed = quoting
+            .into_iter()
+            .zip(symbols_of.iter())
+            .filter(|(name, symbol)| {
+                unbound.contains(name) || (shadowed.contains(name) && found.contains(*symbol))
+            })
+            .map(|(name, _)| name)
+            .collect();
+        // GNU R stops when the count of shadowed names repeats, not the names themselves.
+        // Without a `local`, `quote` or `expression` call the next pass would find the same.
+        if shadowed.len() == previous || !quoted {
+            let mut locals = found;
+            let mut formal = formals;
+            while formal.kind() == SexpType::Pairlist {
+                locals.insert(formal.tag());
+                formal = formal.cdr();
+            }
+            return Ok(locals);
+        }
+    }
+}
+
+/// GNU R's `isBaseVar`: whether the compiler finds `symbol`'s binding in base and may inline it.
+unsafe fn is_base_variable(symbol: Sexp, enclosure: Sexp) -> bool {
+    let heap = crate::heap();
+    let name = symbol_name(symbol);
+    match compile_time_frame(symbol, enclosure) {
+        Some((frame, FrameKind::Namespace)) => {
+            frame == heap.known().base_env || frame == heap.known().base_namespace
+        }
+        Some((frame, FrameKind::Global)) => {
+            frame == heap.known().base_env && LANGUAGE_FUNCTIONS.binary_search(&&*name).is_ok()
+        }
+        _ => false,
+    }
+}
+
+/// One pass of GNU R's `findLocalsList1` over a function's formals' defaults and body, with the
+/// names in `shadowed` searched inside. Sets `quoting` when it meets a call of one of those
+/// names, without which the result does not depend on `shadowed`.
+unsafe fn assigned_names(
+    formals: Sexp,
+    body: Sexp,
+    shadowed: &[&str],
+    quoting: &mut bool,
+) -> R<FxHashSet<Sexp>> {
+    let mut found = FxHashSet::default();
+    let mut todo: Vec<Sexp> = Vec::new();
+    let mut formal = formals;
+    while formal.kind() == SexpType::Pairlist {
+        todo.push(formal.car());
+        formal = formal.cdr();
+    }
+    todo.push(body);
+    while let Some(expression) = todo.pop() {
+        if expression.kind() != SexpType::Language {
+            continue;
+        }
+        let head = expression.car();
+        let arguments = expression.cdr();
+        let name = match head.kind() {
+            SexpType::Symbol => Some(symbol_name(head)),
+            SexpType::String if values::length(head) >= 1 => values::first_string(head),
+            _ => None,
+        };
+        let Some(name) = name else {
+            todo.push(head);
+            push_items(arguments, &mut todo);
+            continue;
+        };
+        match &*name {
+            "=" | "<-" => {
+                if let Some(symbol) = assigned_variable(arguments.car()) {
+                    found.insert(symbol);
+                }
+                push_items(arguments, &mut todo);
+            }
+            "for" => {
+                if arguments.car().kind() == SexpType::Symbol {
+                    found.insert(arguments.car());
+                }
+                push_items(arguments.cdr(), &mut todo);
+            }
+            "assign" | "delayedAssign" => {
+                let target = arguments.car();
+                if values::pairlist_length(arguments) == 2
+                    && target.kind() == SexpType::String
+                    && values::length(target) == 1
+                    && let Some(text) = values::first_string(target)
+                {
+                    found.insert(values::install(&text)?);
+                    todo.push(arguments.cdr().car());
+                }
+            }
+            "function" | "~" => {}
+            "local" => {
+                *quoting = true;
+                if shadowed.contains(&"local") || values::pairlist_length(arguments) != 1 {
+                    push_items(arguments, &mut todo);
+                }
+            }
+            "expression" | "quote" => {
+                *quoting = true;
+                if shadowed.contains(&&*name) {
+                    push_items(arguments, &mut todo);
+                }
+            }
+            _ => push_items(arguments, &mut todo),
+        }
+    }
+    Ok(found)
+}
+
+unsafe fn push_items(mut cell: Sexp, todo: &mut Vec<Sexp>) {
+    while matches!(cell.kind(), SexpType::Pairlist | SexpType::Language) {
+        todo.push(cell.car());
+        cell = cell.cdr();
+    }
+}
+
+/// GNU R's `getAssignedVar`: the variable an assignment to `target` binds, the innermost first
+/// argument of a replacement such as `names(x)[2]`.
+unsafe fn assigned_variable(mut target: Sexp) -> Option<Sexp> {
+    while target.kind() == SexpType::Language {
+        target = target.cdr().car();
+    }
+    match target.kind() {
+        SexpType::Symbol if target != missing_arg() => Some(target),
+        SexpType::String if values::length(target) >= 1 => {
+            values::install(&values::first_string(target)?).ok()
+        }
+        _ => None,
+    }
+}
+
+/// Whether GNU R's compiler, having found `name` bound in base, compiles `call` with its inline
+/// handler rather than as a call that looks the function up when it runs. Every handler for the
+/// names [`LANGUAGE_FUNCTIONS`] lists accepts its call, or falls back to calling base's
+/// function directly, except these.
+unsafe fn handler_binds(name: &str, call: Sexp, enclosure: Sexp) -> bool {
+    match name {
+        // `cmpMultiColon` compiles a call that finds `::` when it runs.
+        "::" | ":::" => false,
+        "local" => values::pairlist_length(call.cdr()) == 1,
+        "function" => !may_call_browser(call.cdr().cdr().car(), enclosure),
+        _ => true,
+    }
+}
+
+/// GNU R's `mayCallBrowser`: whether `expression` calls `browser`, outside the functions it
+/// defines.
+pub(crate) unsafe fn may_call_browser(expression: Sexp, enclosure: Sexp) -> bool {
+    if expression.kind() != SexpType::Language {
         return false;
     }
     let head = expression.car();
     if head.kind() == SexpType::Symbol {
-        if matches!(&*symbol_name(head), "for" | "while" | "repeat") {
+        let name = symbol_name(head);
+        if &*name == "browser" {
             return true;
         }
-        // A nested function's loops run when it is called, not when this body runs.
-        if &*symbol_name(head) == "function" {
+        if &*name == "function" && is_base_variable(head, enclosure) {
             return false;
         }
+    } else if may_call_browser(head, enclosure) {
+        return true;
     }
     let mut cell = expression.cdr();
-    while cell.kind() == SexpType::Pairlist {
-        if contains_loop(cell.car(), depth - 1) {
+    while matches!(cell.kind(), SexpType::Pairlist | SexpType::Language) {
+        if may_call_browser(cell.car(), enclosure) {
             return true;
         }
         cell = cell.cdr();
     }
     false
+}
+
+/// The base functions GNU R's compiler has an inline handler for, in byte order.
+#[rustfmt::skip]
+const INLINE_HANDLERS: [&str; 233] = [
+    "!", "!=", "$", "$<-", "%%", "%*%", "%/%", "&", "&&", "(", "*", "+", "-", "...elt",
+    "...length", "...names", ".C", ".Call", ".Call.graphics", ".External", ".External.graphics",
+    ".External2", ".Fortran", ".Internal", ".Primitive", ".cache_class", ".class2",
+    ".isMethodsDispatchOn", ".primTrace", ".primUntrace", ".subset", ".subset2", "/", ":", "::",
+    ":::", "<", "<-", "<<-", "<=", "=", "==", ">", ">=", "@", "@<-", "Arg", "Conj", "Exec", "Im",
+    "Mod", "Re", "Tailcall", "UseMethod", "[", "[<-", "[[", "[[<-", "^", "abs", "acos", "acosh",
+    "all", "any", "anyNA", "as.call", "as.character", "as.complex", "as.double", "as.environment",
+    "as.integer", "as.logical", "as.numeric", "as.raw", "asin", "asinh", "atan", "atan2", "atanh",
+    "attr", "attr<-", "attributes", "attributes<-", "baseenv", "besselY", "beta", "break",
+    "browser", "c", "call", "ceiling", "choose", "class", "class<-", "cos", "cosh", "cospi",
+    "crossprod", "cummax", "cummin", "cumprod", "cumsum", "declare", "digamma", "dim", "dim<-",
+    "dimnames", "dimnames<-", "drop", "emptyenv", "enc2native", "enc2utf8", "environment<-", "exp",
+    "expm1", "expression", "floor", "for", "forceAndCall", "function", "gamma", "gc.time",
+    "globalenv", "identical", "if", "inherits", "interactive", "invisible", "is.array",
+    "is.atomic", "is.call", "is.character", "is.complex", "is.double", "is.environment",
+    "is.expression", "is.finite", "is.function", "is.infinite", "is.integer", "is.language",
+    "is.list", "is.loaded", "is.logical", "is.matrix", "is.na", "is.name", "is.nan", "is.null",
+    "is.numeric", "is.object", "is.pairlist", "is.raw", "is.recursive", "is.single", "is.symbol",
+    "is.vector", "isS4", "lazyLoadDBfetch", "lbeta", "lchoose", "length", "length<-", "levels<-",
+    "lgamma", "list", "local", "log", "log10", "log1p", "log2", "match", "max", "min", "missing",
+    "names", "names<-", "nargs", "nchar", "next", "nzchar", "oldClass", "oldClass<-", "on.exit",
+    "polyroot", "pos.to.env", "proc.time", "prod", "quote", "range", "rep", "rep.int", "rep_len",
+    "repeat", "require", "retracemem", "return", "round", "seq.int", "seq_along", "seq_len",
+    "sign", "signif", "sin", "sinh", "sinpi", "sqrt", "standardGeneric", "storage.mode<-",
+    "substitute", "sum", "switch", "tan", "tanh", "tanpi", "tcrossprod", "tracemem", "trigamma",
+    "trunc", "typeof", "unCfillPOSIXlt", "unclass", "untracemem", "vector", "which.max",
+    "which.min", "while", "with", "xtfrm", "{", "|", "||", "~",
+];
+
+/// GNU R's `languageFuns`, in byte order: the inline handlers its compiler applies, at the
+/// default optimization level, to code outside a namespace without a run-time check.
+#[rustfmt::skip]
+const LANGUAGE_FUNCTIONS: [&str; 46] = [
+    "!", "!=", "$", "$<-", "%%", "%*%", "%/%", "&", "&&", "(", "*", "+", "-", "/", ":", "::",
+    ":::", "<", "<-", "<<-", "<=", "=", "==", ">", ">=", "@", "@<-", "[", "[<-", "[[", "[[<-", "^",
+    "break", "for", "function", "if", "local", "next", "repeat", "return", "switch", "while", "{",
+    "|", "||", "~",
+];
+
+/// The compile-time frames of promise code made for `function`'s code ([`Compiler::binding`]):
+/// none when that code guards its base functions, and otherwise the function's locals. Promise
+/// code compiles when its call site first runs rather than with the function, so it binds what
+/// the names find then.
+unsafe fn promise_binding(function: Sexp) -> R<Option<Vec<Rc<FxHashSet<Sexp>>>>> {
+    let code = function.cdr();
+    if code.kind() != SexpType::Bytecode || !code.has_gp(gp::BINDING_CODE) {
+        return Ok(None);
+    }
+    let locals = compiler_locals(function.car(), source_of(code), function.tag())?;
+    Ok(Some(vec![Rc::new(locals)]))
 }
 
 /// The arguments a closure called from `function`'s code makes its promises from: each one
@@ -861,10 +1614,13 @@ unsafe fn compile_promise_arguments(function: Sexp, arguments: Sexp) -> R<Sexp> 
         sites: None,
         hoisted: Vec::new(),
         preguarded: Vec::new(),
+        binding: None,
+        deferred_binding: function,
     };
+    let items = values::pairlist_items(arguments);
     let heap = crate::heap();
     let mut list = nil();
-    for (tag, value) in values::pairlist_items(arguments).iter().rev() {
+    for (tag, value) in items.iter().rev() {
         let value = if compiles_as_promise(*value) {
             compiler.code.clear();
             compiler.constants.clear();
@@ -1048,8 +1804,10 @@ pub enum Op {
     /// source references; `statement` is 1 when a statement starts there, which an attached
     /// debugger may stop on, and 0 when a block's end restores the outer srcref.
     SetSrcref,
-    /// `function expected target`: jumps unless the function is the primitive `expected`.
-    BranchUnlessPrimitive,
+    /// `src expected target`: jumps unless the value in `src` is the constant `expected` itself,
+    /// compared by identity. A call of a base function tests that the name still finds the
+    /// primitive `expected`, and a compiled `switch` tests the arm [`Op::SwitchArm`] chose.
+    BranchUnlessSame,
     /// `src target`: jumps when the value in `src` is an object (it has a class).
     BranchIfObject,
     /// `dst function call subject`: calls a dispatch-or-eval special such as `[` whose first
@@ -1105,7 +1863,8 @@ pub enum Op {
     MatchCondition,
     /// `dst src table`: the arm of a compiled `switch` that the selector in `src` chooses, as
     /// the integer scalar `table` holds for it, or the scalar 0 when no arm runs (see
-    /// [`switch_table`]). The arms follow as a chain of [`Op::MatchLiteral`] tests.
+    /// [`switch_table`]). The arms follow as a chain of [`Op::BranchUnlessSame`] tests, which
+    /// compare that scalar by identity, so choosing an arm costs one pointer compare per arm.
     SwitchArm,
     /// `dst variable row column value call`: `variable[row, column] <- value` or
     /// `variable[[row, column]] <- value`, as `call` says, with the subscripts' values in
@@ -1138,7 +1897,7 @@ pub enum Op {
     /// `dst program target`: an [`Op::Fused`] site that gave up, which does nothing. The
     /// compiler emits it when the ordinary code did not take the expected shape, and a fused
     /// site rewrites its own opcode to it after [`fusion::GIVE_UP`] declines in a row, so a site
-    /// that never fuses costs one dispatch in tier 0 and no code at all in baseline code.
+    /// that never fuses costs one dispatch in tier 0.
     Unfused,
     /// `symbol src`: `symbol <<- src`, which assigns in the first enclosing frame that binds
     /// `symbol`, or in the global environment.
@@ -1152,6 +1911,11 @@ pub enum Op {
     /// internal's arguments, evaluated in the caller, are in registers `first..first + count`,
     /// and the builtin `internal` runs on them with `call` as the call its errors name.
     Internal,
+    /// `dst symbol cache`: a formal as an argument of a subset primitive (`i` in `x[i]`), which
+    /// passes on a missing argument instead of reporting it. `dst` gets the empty argument when
+    /// the formal is missing, as when the caller passed on its own missing formal, and what
+    /// [`Op::GetVar`] reads otherwise.
+    Argument,
 }
 
 /// Which replacement an [`Op::SubAssign`] does, stored as its sixth operand.
@@ -1166,7 +1930,7 @@ pub enum ElementKind {
     Dollar = 2,
 }
 
-pub const OPS: [Op; 52] = [
+pub const OPS: [Op; 53] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -1191,7 +1955,7 @@ pub const OPS: [Op; 52] = [
     Op::Closure,
     Op::SubAssign,
     Op::SetSrcref,
-    Op::BranchUnlessPrimitive,
+    Op::BranchUnlessSame,
     Op::BranchIfObject,
     Op::DispatchSubject,
     Op::EndStatement,
@@ -1219,6 +1983,7 @@ pub const OPS: [Op; 52] = [
     Op::SuperAssign,
     Op::Prologue,
     Op::Internal,
+    Op::Argument,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1258,38 +2023,62 @@ pub const ARITHS: [(Arith, &str); 13] = [
 /// Type feedback: the kinds of value an instruction produced, one bit per kind. A scalar is a
 /// length-one vector and a plain vector is any other; both have no attributes and are not
 /// ALTREP. An Array of logical, integer or double items is its own kind at every length, because
-/// it promises what a plain vector does not (no NA, no attributes) and its operators differ.
+/// it promises what a plain vector does not (no NA, no attributes) and its operators differ. A
+/// compact integer or double sequence (`1:n`, `as.double(1:n)`) is its own kind too, because
+/// compiled code computes its elements instead of loading them.
 pub mod feedback {
-    pub const INTEGER_SCALAR: u16 = 1 << 0;
-    pub const DOUBLE_SCALAR: u16 = 1 << 1;
-    pub const LOGICAL_SCALAR: u16 = 1 << 2;
-    pub const INTEGER_VECTOR: u16 = 1 << 3;
-    pub const DOUBLE_VECTOR: u16 = 1 << 4;
-    pub const LOGICAL_VECTOR: u16 = 1 << 5;
-    pub const LIST: u16 = 1 << 6;
-    pub const OTHER: u16 = 1 << 7;
-    pub const INTEGER_ARRAY: u16 = 1 << 8;
-    pub const DOUBLE_ARRAY: u16 = 1 << 9;
-    pub const LOGICAL_ARRAY: u16 = 1 << 10;
+    pub const INTEGER_SCALAR: u32 = 1 << 0;
+    pub const DOUBLE_SCALAR: u32 = 1 << 1;
+    pub const LOGICAL_SCALAR: u32 = 1 << 2;
+    pub const INTEGER_VECTOR: u32 = 1 << 3;
+    pub const DOUBLE_VECTOR: u32 = 1 << 4;
+    pub const LOGICAL_VECTOR: u32 = 1 << 5;
+    pub const LIST: u32 = 1 << 6;
+    pub const OTHER: u32 = 1 << 7;
+    pub const INTEGER_ARRAY: u32 = 1 << 8;
+    pub const DOUBLE_ARRAY: u32 = 1 << 9;
+    pub const LOGICAL_ARRAY: u32 = 1 << 10;
     /// A `JumpUnless` jumped: its condition was `FALSE`.
-    pub const BRANCH_TAKEN: u16 = 1 << 11;
+    pub const BRANCH_TAKEN: u32 = 1 << 11;
     /// A `JumpUnless` fell through: its condition was `TRUE`.
-    pub const BRANCH_NOT_TAKEN: u16 = 1 << 12;
+    pub const BRANCH_NOT_TAKEN: u32 = 1 << 12;
+    /// A `GetVar` read an active binding, so every read there must call the binding again.
+    /// Compiled code records it, and the bit says nothing about the value's type.
+    pub const ACTIVE_BINDING: u32 = 1 << 13;
+    /// An `Argument` read a missing formal, so its value may be the empty argument, which no
+    /// compiled load yields.
+    pub const MISSING: u32 = 1 << 14;
+    /// An attribute-free compact integer sequence.
+    pub const INTEGER_SEQUENCE: u32 = 1 << 15;
+    /// An attribute-free compact double sequence, such as `as.double(1:n)`.
+    pub const DOUBLE_SEQUENCE: u32 = 1 << 16;
 }
 
 /// The feedback tier 0 recorded at `pc` of the byte code `code`: the [`feedback`] kinds of the
 /// values a value-producing instruction made, or the branch bits of a `JumpUnless`. Tier 0 only
 /// adds bits, so what it reports never shrinks until the optimizing tier clears the record.
-pub unsafe fn feedback_bits(code: Sexp, pc: usize) -> u16 {
+pub unsafe fn feedback_bits(code: Sexp, pc: usize) -> u32 {
     values::ints(code.cdr().element(FEEDBACK))
         .get(pc)
-        .map_or(0, |&bits| bits as u16)
+        .map_or(0, |&bits| bits as u32)
 }
 
 /// The [`feedback`] bit for `value`.
-pub unsafe fn value_kind(value: Sexp) -> u16 {
+pub unsafe fn value_kind(value: Sexp) -> u32 {
     if value.is_altrep() {
-        return feedback::OTHER;
+        let Some([integer, double]) = crate::compact_sequence_classes() else {
+            return feedback::OTHER;
+        };
+        let class = value.tag();
+        return if values::has_attributes(value) {
+            feedback::OTHER
+        } else if class == integer {
+            feedback::INTEGER_SEQUENCE
+        } else if class == double {
+            feedback::DOUBLE_SEQUENCE
+        } else {
+            feedback::OTHER
+        };
     }
     if value.is_array() {
         return match value.kind() {
@@ -1382,6 +2171,16 @@ struct Compiler {
     /// The calls of base operators whose name [`Compiler::fused_call`] checked before
     /// evaluating a hoisted operand, each with the function the name was checked to find.
     preguarded: Vec<(Sexp, Sexp)>,
+    /// When the code compiles at a time GNU R's JIT would compile it: GNU R's compile-time
+    /// frames above the enclosure, the function's locals ([`compiler_locals`]) first and then
+    /// each enclosing function's. The code then binds base functions as GNU R's does
+    /// ([`Compiler::bound_base`]) and compiles its nested functions at once. `None` keeps a
+    /// guard on every base function, which looks the name up as the code runs.
+    binding: Option<Vec<Rc<FxHashSet<Sexp>>>>,
+    /// For promise code, the function whose frame it runs in, until [`Compiler::force_binding`]
+    /// fills `binding` from that function's locals, and `NULL` otherwise. Finding the locals
+    /// walks the function's whole body, so it waits for a call that could bind.
+    deferred_binding: Sexp,
 }
 
 /// A guard fallback compiled out of line: the guards that fail to it, its instruction, and where
@@ -1486,14 +2285,40 @@ mod fusion {
 
 /// Compiles a closure body, or reports that it is better left to the AST evaluator. The
 /// compiler's vectors are not allocations the R code asked for, so `Rprofmem` does not see them.
-unsafe fn compile(body: Sexp, function: Sexp) -> R<Sexp> {
+unsafe fn compile(body: Sexp, function: Sexp, binds: bool) -> R<Sexp> {
+    let binding = if binds {
+        Some(vec![Rc::new(compiler_locals(
+            function.car(),
+            body,
+            function.tag(),
+        )?)])
+    } else {
+        None
+    };
+    compile_with_locals(body, function, local_symbols(body, function.car()), binding)
+}
+
+/// [`compile`] with the symbols the frame can bind given, or `None` for code that reads and
+/// writes an environment's bindings, such as a loop in the global environment.
+unsafe fn compile_with_locals(
+    body: Sexp,
+    function: Sexp,
+    locals: Option<FxHashSet<Sexp>>,
+    binding: Option<Vec<Rc<FxHashSet<Sexp>>>>,
+) -> R<Sexp> {
     let threshold = crate::heap().swap_report_threshold(usize::MAX);
-    let compiled = compile_unreported(body, function);
+    let compiled = compile_unreported(body, function, locals, binding);
     crate::heap().swap_report_threshold(threshold);
     compiled
 }
 
-unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Sexp> {
+unsafe fn compile_unreported(
+    body: Sexp,
+    function: Sexp,
+    locals: Option<FxHashSet<Sexp>>,
+    binding: Option<Vec<Rc<FxHashSet<Sexp>>>>,
+) -> R<Sexp> {
+    let binds = binding.is_some();
     let mut formal_symbols = FxHashSet::default();
     let mut formal = function.car();
     while formal.kind() == SexpType::Pairlist {
@@ -1501,7 +2326,7 @@ unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Sexp> {
         formal = formal.cdr();
     }
     let mut compiler = Compiler {
-        local_symbols: local_symbols(body, function.car()),
+        local_symbols: locals,
         formals: formal_symbols,
         code: Vec::new(),
         constants: Vec::new(),
@@ -1525,6 +2350,8 @@ unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Sexp> {
         sites: None,
         hoisted: Vec::new(),
         preguarded: Vec::new(),
+        binding,
+        deferred_binding: nil(),
     };
     if compiler.local_symbols.is_some() {
         let mut formals = Vec::new();
@@ -1542,7 +2369,11 @@ unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Sexp> {
     let slot = compiler.cache();
     compiler.summary =
         effects::summarize(function.car(), body, compiler.local_symbols.as_ref(), slot)?;
-    compiler.assemble(body)
+    let code = compiler.assemble(body)?;
+    if binds {
+        code.set_gp_bits(gp::BINDING_CODE, true);
+    }
+    Ok(code)
 }
 
 /// The symbols a call frame of a closure with `formals` and `body` can bind, or `None` when the
@@ -1755,7 +2586,10 @@ const SWITCH_NAME_ARMS: usize = 1;
 /// error) and then, for each position, the arm a numeric selector runs (-1 for an empty
 /// alternative, which is an error).
 const SWITCH_POSITION_ARMS: usize = 2;
-/// Where it keeps the integer scalars 0, 1, 2, ..., one per arm, that [`Op::SwitchArm`] returns.
+/// Where it keeps, for arms 0, 1, 2, ..., the constant pool index of the integer scalar
+/// [`Op::SwitchArm`] returns for that arm. The arm tests compare those scalars by identity, and a
+/// code image keeps each pool entry as one object but does not keep an object shared between two
+/// constants, so the table names the scalars by pool index rather than holding them.
 const SWITCH_NUMBERS: usize = 3;
 /// Where it keeps the `switch` call, which its errors name.
 const SWITCH_CALL: usize = 4;
@@ -1801,27 +2635,26 @@ unsafe fn switch_table(call: Sexp, alternatives: &[(Sexp, Sexp)]) -> R<(Sexp, Ve
     }
     let name_arms = values::integer_vector(&name_arms)?;
     let position_arms = values::integer_vector(&position_arms)?;
-    let mut numbers = Vec::with_capacity(arms.len() + 1);
-    for number in 0..=arms.len() {
-        numbers.push(values::scalar_integer(number as i32)?);
-    }
-    let numbers = values::list_vector(&numbers)?;
+    let numbers = values::integer_vector(&vec![0; arms.len() + 1])?;
     let table = values::list_vector(&[name_vector, name_arms, position_arms, numbers, call])?;
     Ok((table, arms))
 }
 
 /// The arm number a `switch` runs for `selector`, from the table [`switch_table`] built, with
 /// the special's errors.
-unsafe fn switch_arm(selector: Sexp, table: Sexp) -> R<Sexp> {
-    let numbers = table.element(SWITCH_NUMBERS);
+unsafe fn switch_arm(selector: Sexp, table: Sexp) -> R<usize> {
     let position_arms = values::ints(table.element(SWITCH_POSITION_ARMS));
     let arm = match eval::switch_selector(selector, table.element(SWITCH_CALL))? {
         SwitchSelector::Name(text) => {
             let names = table.element(SWITCH_NAMES);
-            let matched = (0..length(names)).find(|&index| {
-                let name = names.element(index);
-                name == text || name.bytes() == text.bytes()
-            });
+            let count = length(names);
+            // Names and selectors are interned, so identity finds the name in the common case,
+            // and only a missing selector or one in another encoding needs its text compared.
+            let matched = (0..count)
+                .find(|&index| names.element(index) == text)
+                .or_else(|| {
+                    (0..count).find(|&index| eval::switch_name_matches(names.element(index), text))
+                });
             match matched {
                 Some(index) => values::ints(table.element(SWITCH_NAME_ARMS))[index],
                 None if position_arms[0] < 0 => return Err(error(eval::SWITCH_EMPTY_DEFAULT)),
@@ -1838,7 +2671,7 @@ unsafe fn switch_arm(selector: Sexp, table: Sexp) -> R<Sexp> {
             _ => 0,
         },
     };
-    Ok(numbers.element(arm as usize))
+    Ok(arm as usize)
 }
 
 /// Whether bytecode can run this `.ry_match` call's arms: every arm is `pattern => value` or
@@ -2324,7 +3157,6 @@ impl Compiler {
         values::ints_mut(profile)[profile::NEXT] = i32::MIN;
         heap.set_element(constants, PROFILE, profile);
         heap.set_element(constants, TIER1, nil());
-        heap.set_element(constants, BASELINE, nil());
         heap.set_element(constants, SUMMARY, compiler.summary);
         heap.set_element(constants, SLOTS, compiler.slot_table()?);
         let loops = values::alloc(SexpType::Integer, compiler.loops.len() * 4)?;
@@ -2364,7 +3196,9 @@ impl Compiler {
             let op =
                 op_of(self.code[pc]).ok_or_else(|| error("compiled an invalid instruction"))?;
             let symbol_and_cache = match op {
-                Op::GetVar | Op::GetFun => Some((self.code[pc + 2], Some(self.code[pc + 3]))),
+                Op::GetVar | Op::GetFun | Op::Argument => {
+                    Some((self.code[pc + 2], Some(self.code[pc + 3])))
+                }
                 Op::SetVar => Some((self.code[pc + 1], Some(self.code[pc + 3]))),
                 // A loop variable the body never reads still needs a slot, or the first step
                 // would give the frame an environment.
@@ -2487,7 +3321,19 @@ impl Compiler {
         {
             sites.push(self.code.len() as u32);
         }
-        self.code.push(op_word(op));
+        let word = if op == Op::CallBuiltin
+            && let [_, _, call, _, count] = *operands
+            && let Some(&call) = (call as usize)
+                .checked_sub(FIRST_CONSTANT)
+                .and_then(|index| self.constants.get(index))
+            // SAFETY: the compiler roots every constant it holds, and a call is a pairlist.
+            && unsafe { positional_call(call, count as usize) }
+        {
+            POSITIONAL_CALL_BUILTIN_WORD
+        } else {
+            op_word(op)
+        };
+        self.code.push(word);
         self.code.extend_from_slice(operands);
     }
 
@@ -2569,11 +3415,70 @@ impl Compiler {
         Ok(())
     }
 
+    /// A guard that `head` still finds `expected`, the base function the call is compiled for,
+    /// with the fallback for when it does not; or no guard when GNU R's compiler binds the name
+    /// to that function here (see [`Compiler::bound_base`]), so the call is compiled for it
+    /// whatever the name finds when the code runs.
+    unsafe fn guard(&mut self, call: Sexp, head: Sexp, expected: Sexp) -> R<Option<usize>> {
+        if self.bound_base(call, head)? == Some(expected) {
+            if let Some(sites) = &mut self.sites {
+                sites.push(UNGUARDED);
+            }
+            return Ok(None);
+        }
+        let symbol = self.constant(head);
+        let expected = self.constant(expected);
+        let cache = self.cache();
+        let probe = self.frame_may_bind(head) as u32;
+        Ok(Some(self.emit_patchable(
+            Op::Guard,
+            &[symbol, expected, cache, probe, 0],
+        )))
+    }
+
+    /// The base function GNU R's compiler binds `head` to in `call`, or `None` when the code
+    /// looks the name up as it runs: always for code compiled at a time GNU R would not have
+    /// compiled it, and otherwise when the name is one of the function's locals or of an
+    /// enclosing function's, or [`base_binding_at_compile`] or [`handler_binds`] says so.
+    unsafe fn bound_base(&mut self, call: Sexp, head: Sexp) -> R<Option<Sexp>> {
+        if head.kind() != SexpType::Symbol
+            || (self.binding.is_none() && self.deferred_binding == nil())
+        {
+            return Ok(None);
+        }
+        let Some(value) = base_binding_at_compile(head, self.enclosure) else {
+            return Ok(None);
+        };
+        if !handler_binds(&symbol_name(head), call, self.enclosure) {
+            return Ok(None);
+        }
+        self.force_binding()?;
+        let Some(frames) = &self.binding else {
+            return Ok(None);
+        };
+        Ok((!frames.iter().any(|frame| frame.contains(&head))).then_some(value))
+    }
+
+    /// Fills `binding` for promise code from its function's locals, the first time a call
+    /// could bind (see `deferred_binding`).
+    unsafe fn force_binding(&mut self) -> R<()> {
+        if self.deferred_binding != nil() {
+            let function = self.deferred_binding;
+            self.deferred_binding = nil();
+            self.binding = promise_binding(function)?;
+        }
+        Ok(())
+    }
+
     /// Compiles what runs when one of `guards` fails: the general evaluation of `call` into
     /// `dst`, after which execution continues here. The fallback goes out of line, so the inline
     /// path runs straight on instead of jumping over it: after the body's `Return`, or inside a
     /// loop after the loop's back edge (see [`Compiler::back_edge`]).
     unsafe fn cold_fallback(&mut self, guards: &[usize], call: Sexp, dst: u32) -> R<()> {
+        // Code that binds its base functions has no guard to fail, so nothing reaches a fallback.
+        if guards.is_empty() {
+            return Ok(());
+        }
         let resume = self.here();
         self.fallback(call, dst)?;
         let words = self.code.drain(resume as usize..).collect();
@@ -2632,15 +3537,10 @@ impl Compiler {
         let mut preguard_sites = Vec::new();
         for step in &plan.steps[..ahead_end] {
             if let FusionStep::Head(operation, symbol, expected) = *step {
-                preguard_sites.push(self.here());
-                let symbol_constant = self.constant(symbol);
-                let expected_constant = self.constant(expected);
-                let cache = self.cache();
-                let probe = self.frame_may_bind(symbol) as u32;
-                guards.push(self.emit_patchable(
-                    Op::Guard,
-                    &[symbol_constant, expected_constant, cache, probe, 0],
-                ));
+                let site = self.here();
+                let guard = self.guard(operation, symbol, expected)?;
+                preguard_sites.push(if guard.is_some() { site } else { UNGUARDED });
+                guards.extend(guard);
                 self.preguarded.push((operation, expected));
             }
         }
@@ -2891,6 +3791,12 @@ impl Compiler {
                     continue;
                 }
                 _ => {}
+            }
+            if site == UNGUARDED {
+                if matches!(step, FusionStep::Head(..)) {
+                    continue;
+                }
+                return None;
             }
             let position = site as usize;
             let op = op_of(*self.code.get(position)?)?;
@@ -3281,11 +4187,7 @@ impl Compiler {
         args: &[(Sexp, Sexp)],
     ) -> R<()> {
         let target = args[0].1;
-        let probe = self.frame_may_bind(head) as u32;
-        let symbol = self.constant(head);
-        let expected = self.constant(primitive);
-        let cache = self.cache();
-        let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]);
+        let guard = self.guard(call, head, primitive)?;
         let rest = values::pairlist_items(target.cdr().cdr());
         let count = rest.len() as u32 + 2;
         let mark = self.next_register;
@@ -3334,7 +4236,7 @@ impl Compiler {
             ],
         );
         self.release_to(mark);
-        self.cold_fallback(&[guard], call, dst)?;
+        self.cold_fallback(guard.as_slice(), call, dst)?;
         Ok(())
     }
 
@@ -3466,11 +4368,7 @@ impl Compiler {
         })?;
         let mut guards = Vec::new();
         for (symbol, expected) in [(head, primitive), (replacement_symbol, replacement)] {
-            let probe = self.frame_may_bind(symbol) as u32;
-            let symbol = self.constant(symbol);
-            let expected = self.constant(expected);
-            let cache = self.cache();
-            guards.push(self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]));
+            guards.extend(self.guard(call, symbol, expected)?);
         }
         let mark = self.next_register;
         let value = self.allocate();
@@ -3806,11 +4704,7 @@ impl Compiler {
         inline: InlinedInternal,
         dst: u32,
     ) -> R<()> {
-        let symbol = self.constant(head);
-        let expected = self.constant(inline.function);
-        let cache = self.cache();
-        let probe = self.frame_may_bind(head) as u32;
-        let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]);
+        let guard = self.guard(call, head, inline.function)?;
         let mark = self.next_register;
         let first = self.next_register;
         for _ in &inline.arguments {
@@ -3875,7 +4769,7 @@ impl Compiler {
             ],
         );
         self.release_to(mark);
-        self.cold_fallback(&[guard], call, dst)
+        self.cold_fallback(guard.as_slice(), call, dst)
     }
 
     /// The standard library builtin `symbol` names from the closure's enclosure, such as
@@ -3906,14 +4800,11 @@ impl Compiler {
         dst: u32,
         args: &[(Sexp, Sexp)],
     ) -> R<()> {
-        let symbol = self.constant(head);
-        let expected = self.constant(function);
-        let cache = self.cache();
-        let probe = self.frame_may_bind(head) as u32;
-        let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]);
+        let guard = self.guard(call, head, function)?;
         let call_constant = self.constant(call);
         let mark = self.next_register;
         let function_register = self.allocate();
+        let expected = self.constant(function);
         self.emit(Op::Constant, &[function_register, expected]);
         if self.tail_updates.0.contains(&call) {
             let target = self.constant(self.tail_updates.1);
@@ -3922,7 +4813,7 @@ impl Compiler {
                 &[dst, function_register, call_constant, target],
             );
             self.release_to(mark);
-            self.cold_fallback(&[guard], call, dst)?;
+            self.cold_fallback(guard.as_slice(), call, dst)?;
             return Ok(());
         }
         let rebinding = match self.rebinding {
@@ -3953,7 +4844,7 @@ impl Compiler {
             ),
         };
         self.release_to(mark);
-        self.cold_fallback(&[guard], call, dst)?;
+        self.cold_fallback(guard.as_slice(), call, dst)?;
         Ok(())
     }
 
@@ -3975,13 +4866,9 @@ impl Compiler {
         {
             self.inline(call, primitive, dst, name, args)?;
         } else {
-            let symbol = self.constant(head);
-            let expected = self.constant(primitive);
-            let cache = self.cache();
-            let probe = self.frame_may_bind(head) as u32;
-            let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]);
+            let guard = self.guard(call, head, primitive)?;
             self.inline(call, primitive, dst, name, args)?;
-            self.cold_fallback(&[guard], call, dst)?;
+            self.cold_fallback(guard.as_slice(), call, dst)?;
         }
         if ARITHS.iter().any(|(_, operator)| *operator == name) {
             self.temporary = Some((dst, self.here()));
@@ -3999,14 +4886,10 @@ impl Compiler {
         dst: u32,
         symbol: Sexp,
     ) -> R<()> {
-        let name = self.constant(head);
-        let expected = self.constant(primitive);
-        let cache = self.cache();
-        let probe = self.frame_may_bind(head) as u32;
-        let guard = self.emit_patchable(Op::Guard, &[name, expected, cache, probe, 0]);
+        let guard = self.guard(call, head, primitive)?;
         let symbol = self.constant(symbol);
         self.emit(Op::Missing, &[dst, symbol]);
-        self.cold_fallback(&[guard], call, dst)
+        self.cold_fallback(guard.as_slice(), call, dst)
     }
 
     /// `package::symbol` or `package:::symbol`, guarded by the operator: [`Op::Namespace`].
@@ -4021,11 +4904,7 @@ impl Compiler {
         symbol: Sexp,
         exported: bool,
     ) -> R<()> {
-        let name = self.constant(head);
-        let expected = self.constant(primitive);
-        let cache = self.cache();
-        let probe = self.frame_may_bind(head) as u32;
-        let guard = self.emit_patchable(Op::Guard, &[name, expected, cache, probe, 0]);
+        let guard = self.guard(call, head, primitive)?;
         let package = self.constant(package);
         let symbol = self.constant(symbol);
         let lookup = self.cache();
@@ -4033,7 +4912,7 @@ impl Compiler {
             Op::Namespace,
             &[dst, package, symbol, u32::from(exported), lookup],
         );
-        self.cold_fallback(&[guard], call, dst)
+        self.cold_fallback(guard.as_slice(), call, dst)
     }
 
     /// `quote(quoted)`, guarded by `quote`: the quoted expression as a constant.
@@ -4045,15 +4924,11 @@ impl Compiler {
         dst: u32,
         quoted: Sexp,
     ) -> R<()> {
-        let name = self.constant(head);
-        let expected = self.constant(primitive);
-        let cache = self.cache();
-        let probe = self.frame_may_bind(head) as u32;
-        let guard = self.emit_patchable(Op::Guard, &[name, expected, cache, probe, 0]);
+        let guard = self.guard(call, head, primitive)?;
         let constant = self.constant(quoted);
         self.emit(Op::Constant, &[dst, constant]);
         self.emit(Op::Visible, &[]);
-        self.cold_fallback(&[guard], call, dst)
+        self.cold_fallback(guard.as_slice(), call, dst)
     }
 
     unsafe fn inline(
@@ -4162,13 +5037,24 @@ impl Compiler {
             "switch" => {
                 self.expression(args[0].1, dst)?;
                 let (table, arms) = switch_table(call, &args[1..])?;
-                let numbers = table.element(SWITCH_NUMBERS);
+                let mut numbers = Vec::with_capacity(arms.len() + 1);
+                for arm in 0..=arms.len() {
+                    numbers.push(self.constant(values::scalar_integer(arm as i32)?));
+                }
+                for (slot, &number) in table
+                    .element(SWITCH_NUMBERS)
+                    .slice_mut::<i32>()
+                    .iter_mut()
+                    .zip(&numbers)
+                {
+                    *slot = number as i32;
+                }
                 let table = self.constant(table);
                 self.emit(Op::SwitchArm, &[dst, dst, table]);
                 let mut done = Vec::with_capacity(arms.len());
                 for (index, body) in arms.iter().enumerate() {
-                    let number = self.constant(numbers.element(index + 1));
-                    let skip = self.emit_patchable(Op::MatchLiteral, &[dst, number, 0]);
+                    let number = numbers[index + 1];
+                    let skip = self.emit_patchable(Op::BranchUnlessSame, &[dst, number, 0]);
                     self.expression(*body, dst)?;
                     done.push(self.emit_patchable(Op::Jump, &[0]));
                     self.patch(skip);
@@ -4284,8 +5170,8 @@ impl Compiler {
                 let immediate_call = values::lcons(function_call, nil())?;
                 let mark = self.next_register;
                 let function = self.allocate();
+                let body = self.nested_body(nil(), expression, nil())?;
                 let formals = self.constant(nil());
-                let body = self.constant(expression);
                 let srcref = self.constant(nil());
                 self.emit(Op::Closure, &[function, formals, body, srcref]);
                 let call_constant = self.call_site(immediate_call)?;
@@ -4293,9 +5179,10 @@ impl Compiler {
                 self.release_to(mark);
             }
             "function" => {
+                let srcref = args.get(2).map_or(nil(), |(_, srcref)| *srcref);
+                let body = self.nested_body(args[0].1, args[1].1, srcref)?;
                 let formals = self.constant(args[0].1);
-                let body = self.constant(args[1].1);
-                let srcref = self.constant(args.get(2).map_or(nil(), |(_, srcref)| *srcref));
+                let srcref = self.constant(srcref);
                 self.emit(Op::Closure, &[dst, formals, body, srcref]);
             }
             operator => {
@@ -4398,7 +5285,9 @@ impl Compiler {
         let (start, step) = (entry.start as usize, entry.step);
         let mut position = start;
         while position < exit as usize {
-            let op = OPS[(self.code[position] & OP_MASK) as usize];
+            let Some(op) = op_of(self.code[position]) else {
+                panic!("the compiler emitted an invalid code word at {position}");
+            };
             let width = operand_count(op);
             if op == Op::Jump {
                 let operand = self.code[position + 1];
@@ -4421,11 +5310,8 @@ impl Compiler {
         self.emit(Op::Invisible, &[]);
     }
 
-    /// Whether a call of `primitive` with `args` can evaluate its subject first and, when the
-    /// subject is not an object, its other arguments as values, which is what a dispatch-or-eval
-    /// special such as `[` does. A formal among the other arguments may be missing, which the
-    /// special passes on as an empty argument but a register cannot hold, so it takes the
-    /// generic path.
+    /// Whether a call of `primitive` with `args` can evaluate its subject first, which is what a
+    /// dispatch-or-eval special such as `[` does.
     unsafe fn eager_subject(&self, primitive: Sexp, args: &[(Sexp, Sexp)]) -> R<bool> {
         if primitive.kind() != SexpType::Special
             || !eval::builtin_def(primitive)?.is_dispatch_or_eval()
@@ -4440,7 +5326,7 @@ impl Compiler {
                 && !may_modify_in_place(value)
                 && (value.kind() != SexpType::Symbol
                     || value == missing_arg()
-                    || (!self.formals.contains(&value) && eval::dot_dot_index(value).is_none()))
+                    || eval::dot_dot_index(value).is_none())
         };
         Ok(*subject != missing_arg()
             && *subject != symbols().dots
@@ -4450,6 +5336,11 @@ impl Compiler {
     /// A dispatch-or-eval special call: the subject evaluates first, an object dispatches with
     /// the other arguments as promises, and any other subject calls the special on values, the
     /// path the optimizing tier compiles.
+    ///
+    /// A formal among the other arguments may be missing, deeply so when it holds the caller's
+    /// promise of a missing argument, and the special then passes on an empty argument, which a
+    /// register cannot hold. Such a call evaluates only its subject here and leaves the rest to
+    /// [`Op::DispatchSubject`] for every subject, which reads the formal's slot.
     unsafe fn subject_call(
         &mut self,
         call: Sexp,
@@ -4466,7 +5357,7 @@ impl Compiler {
         let mark = self.next_register;
         let function = self.allocate();
         self.emit(Op::GetFun, &[function, symbol, cache, call_constant]);
-        let generic = self.emit_patchable(Op::BranchUnlessPrimitive, &[function, expected, 0]);
+        let generic = self.emit_patchable(Op::BranchUnlessSame, &[function, expected, 0]);
         let base = self.next_register;
         for _ in args {
             self.allocate();
@@ -4486,11 +5377,23 @@ impl Compiler {
         };
         let object = self.emit_patchable(Op::BranchIfObject, &[base, 0]);
         for (index, (_, value)) in args.iter().enumerate().skip(1) {
+            let register = base + index as u32;
             if *value == missing_arg() {
                 let constant = self.constant(missing_arg());
-                self.emit(Op::Constant, &[base + index as u32, constant]);
+                self.emit(Op::Constant, &[register, constant]);
+            } else if self.formals.contains(value)
+                && self
+                    .bound
+                    .as_ref()
+                    .is_none_or(|bound| !bound.names.contains(value))
+            {
+                // A formal may itself be missing, which the primitive takes as an empty
+                // argument (`i` in `g <- function(i) f(x, i); g()`).
+                let constant = self.constant(*value);
+                let cache = self.cache();
+                self.emit(Op::Argument, &[register, constant, cache]);
             } else {
-                self.expression(*value, base + index as u32)?;
+                self.expression(*value, register)?;
             }
         }
         self.emit(
@@ -4533,11 +5436,7 @@ impl Compiler {
         layout: u32,
         slots: &[usize],
     ) -> R<()> {
-        let symbol = self.constant(head);
-        let expected = self.constant(primitive);
-        let cache = self.cache();
-        let probe = self.frame_may_bind(head) as u32;
-        let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]);
+        let guard = self.guard(call, head, primitive)?;
         if items.is_empty() {
             let value = crate::records::construct(layout, &[])?;
             let constant = self.constant(value);
@@ -4554,7 +5453,7 @@ impl Compiler {
             self.emit(Op::Construct, &[dst, layout, base, items.len() as u32]);
             self.release_to(mark);
         }
-        self.cold_fallback(&[guard], call, dst)?;
+        self.cold_fallback(guard.as_slice(), call, dst)?;
         Ok(())
     }
 
@@ -4570,11 +5469,7 @@ impl Compiler {
         dst: u32,
         args: &[(Sexp, Sexp)],
     ) -> R<()> {
-        let symbol = self.constant(head);
-        let expected = self.constant(primitive);
-        let cache = self.cache();
-        let probe = self.frame_may_bind(head) as u32;
-        let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]);
+        let guard = self.guard(call, head, primitive)?;
         let call_constant = self.constant(call);
         let mark = self.next_register;
         let value = self.allocate();
@@ -4633,7 +5528,7 @@ impl Compiler {
             self.patch(position);
         }
         self.release_to(mark);
-        self.cold_fallback(&[guard], call, dst)?;
+        self.cold_fallback(guard.as_slice(), call, dst)?;
         Ok(())
     }
 
@@ -4714,7 +5609,7 @@ impl Compiler {
         let mark = self.next_register;
         let function = self.allocate();
         self.emit(Op::GetFun, &[function, symbol, cache, call_constant]);
-        let generic = self.emit_patchable(Op::BranchUnlessPrimitive, &[function, expected, 0]);
+        let generic = self.emit_patchable(Op::BranchUnlessSame, &[function, expected, 0]);
         let object = self.allocate();
         self.expression(subject, object)?;
         self.emit(
@@ -4727,6 +5622,28 @@ impl Compiler {
         self.patch(done);
         self.release_to(mark);
         Ok(())
+    }
+
+    /// The constant [`Op::Closure`] makes a nested function's closures from: the body, or in
+    /// code that binds its base functions, the body compiled now against this function's
+    /// compile-time frames, as GNU R's compiler compiles a function's nested functions with it.
+    unsafe fn nested_body(&mut self, formals: Sexp, body: Sexp, srcref: Sexp) -> R<u32> {
+        self.force_binding()?;
+        let Some(frames) = &self.binding else {
+            return Ok(self.constant(body));
+        };
+        if !worth_compiling(body) {
+            return Ok(self.constant(body));
+        }
+        let heap = crate::heap();
+        let closure = eval::make_closure(formals, body, srcref, self.enclosure)?;
+        heap.root(closure);
+        let mut nested = Vec::with_capacity(frames.len() + 1);
+        nested.push(Rc::new(compiler_locals(formals, body, self.enclosure)?));
+        nested.extend(frames.iter().cloned());
+        let code = compile_with_locals(body, closure, local_symbols(body, formals), Some(nested))?;
+        heap.root(code);
+        Ok(self.constant(code))
     }
 
     unsafe fn general_call(&mut self, call: Sexp, head: Sexp, dst: u32) -> R<()> {
@@ -4754,7 +5671,16 @@ impl Compiler {
                 let expected = self.constant(expected);
                 self.emit(Op::Constant, &[function, expected]);
             }
-            None => self.emit(Op::GetFun, &[function, symbol, cache, call_constant]),
+            None => match self.bound_base(call, head)? {
+                Some(bound) => {
+                    if let Some(sites) = &mut self.sites {
+                        sites.push(UNGUARDED);
+                    }
+                    let bound = self.constant(bound);
+                    self.emit(Op::Constant, &[function, bound]);
+                }
+                None => self.emit(Op::GetFun, &[function, symbol, cache, call_constant]),
+            },
         }
         let args = values::pairlist_items(call.cdr());
         // A register holds an argument's value without counting as a reference, so a later
@@ -4838,7 +5764,7 @@ const MARKER_MASK: u32 = BREAK_MARKER | NEXT_MARKER;
 pub const fn operand_count(op: Op) -> usize {
     match op {
         Op::Constant => 2,
-        Op::GetVar => 3,
+        Op::GetVar | Op::Argument => 3,
         Op::GetFun => 4,
         Op::SetVar => 3,
         Op::BranchUnlessBuiltin => 2,
@@ -4873,7 +5799,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::Replace => 8,
         Op::SetSrcref => 2,
         Op::EndStatement => 3,
-        Op::BranchUnlessPrimitive => 3,
+        Op::BranchUnlessSame => 3,
         Op::BranchIfObject => 2,
         Op::DispatchSubject => 4,
         Op::Fused | Op::Unfused => 3,
@@ -4896,6 +5822,7 @@ pub fn op_of(word: u32) -> Option<Op> {
     let index = (word & OP_MASK) as usize;
     let op = match OPS.get(index) {
         Some(&op) => op,
+        None if index == POSITIONAL_CALL_BUILTIN => Op::CallBuiltin,
         None if index < HANDLER_COUNT => Op::Arithmetic,
         None => return None,
     };
@@ -4998,8 +5925,20 @@ const QUICK_ARITHMETIC: [(Arith, bool); 19] = [
     (Arith::GreaterEqual, true),
 ];
 
+/// Tier 0's form of [`Op::CallBuiltin`] for a site whose argument cells are all untagged and
+/// none empty ([`positional_call`]), which is a fact of the call. The compiler emits it, so no
+/// code page is written at run time, which keeps the start-up image's privately mapped code
+/// shared between processes. Its handler fills the arguments straight from the registers,
+/// skipping the walk over the call's cells. Like the arithmetic forms, [`op_of`] reports it as
+/// the generic instruction.
+const POSITIONAL_CALL_BUILTIN: usize = OPS.len() + QUICK_ARITHMETIC.len();
+
+/// The code word of [`POSITIONAL_CALL_BUILTIN`].
+const POSITIONAL_CALL_BUILTIN_WORD: u32 =
+    (op_word(Op::CallBuiltin) & !OP_MASK) | POSITIONAL_CALL_BUILTIN as u32;
+
 /// The size of tier 0's handler tables: every generic and specialized opcode.
-const HANDLER_COUNT: usize = OPS.len() + QUICK_ARITHMETIC.len();
+const HANDLER_COUNT: usize = POSITIONAL_CALL_BUILTIN + 1;
 
 // The interpreter turns a code word's low byte back into an `Op` by its discriminant.
 const _: () = {
@@ -5056,7 +5995,7 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
     use Operand::*;
     Some(match op {
         Op::Constant | Op::Ast => &[Register, Constant],
-        Op::GetVar => &[Register, Symbol, Cache],
+        Op::GetVar | Op::Argument => &[Register, Symbol, Cache],
         Op::SetVar => &[Symbol, Register, Cache],
         Op::GetFun => &[Register, Symbol, Cache, Call],
         Op::BranchUnlessBuiltin | Op::BranchIfObject => &[Register, Target],
@@ -5101,7 +6040,7 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
         ],
         Op::SetSrcref => &[Constant, Immediate],
         Op::EndStatement => &[Register, Base, Base],
-        Op::BranchUnlessPrimitive => &[Register, Constant, Target],
+        Op::BranchUnlessSame => &[Register, Constant, Target],
         Op::DispatchSubject => &[Register, Register, Call, Register],
         Op::Fused | Op::Unfused => &[Register, Fusion, Target],
         Op::Internal => &[Register, Call, Constant, Base, Count],
@@ -5196,7 +6135,9 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
     while pc < words.len() {
         let op = op_of(words[pc] as u32).ok_or("an invalid instruction")?;
         // Specialized forms trust what tier 0 saw when it wrote them, which a file cannot show.
-        if words[pc] as u32 != op_word(op) {
+        // The positional builtin call is the exception: its call constant shows it, and the
+        // operand pass below checks that.
+        if words[pc] as u32 != op_word(op) && words[pc] as u32 != POSITIONAL_CALL_BUILTIN_WORD {
             return Err("a specialized instruction".to_owned());
         }
         operands(op).ok_or("a record instruction")?;
@@ -5273,7 +6214,7 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
                         && (0..length(names))
                             .all(|name| names.element(name).kind() == SexpType::Symbol)
                 }
-                Switch => valid_switch_table(constant(value)?),
+                Switch => valid_switch_table(constant(value)?, constant),
                 Cache => value < caches,
                 Target => is_start(value),
                 Loop => value < loops,
@@ -5293,6 +6234,13 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
         }
         if op == Op::EndStatement && operand(1) > operand(2) {
             return Err(format!("an invalid register range at {pc}"));
+        }
+        if words[pc] as u32 == POSITIONAL_CALL_BUILTIN_WORD
+            && !positional_call(constant(operand(2))?, operand(4))
+        {
+            return Err(format!(
+                "a positional builtin call with other arguments at {pc}"
+            ));
         }
         pc += 1 + operand_count(op);
     }
@@ -5378,7 +6326,10 @@ unsafe fn valid_fusion_program(
 }
 
 /// Whether `table` has the shape [`switch_table`] gives it, which [`switch_arm`] reads unchecked.
-unsafe fn valid_switch_table(table: Sexp) -> bool {
+unsafe fn valid_switch_table<'a>(
+    table: Sexp,
+    constant: impl Fn(usize) -> Result<Sexp, &'a str>,
+) -> bool {
     if table.kind() != SexpType::List || length(table) != SWITCH_CALL + 1 {
         return false;
     }
@@ -5391,7 +6342,7 @@ unsafe fn valid_switch_table(table: Sexp) -> bool {
         || length(name_arms) != length(names)
         || position_arms.kind() != SexpType::Integer
         || length(position_arms) == 0
-        || numbers.kind() != SexpType::List
+        || numbers.kind() != SexpType::Integer
         || table.element(SWITCH_CALL).kind() != SexpType::Language
     {
         return false;
@@ -5399,7 +6350,12 @@ unsafe fn valid_switch_table(table: Sexp) -> bool {
     let arms = length(numbers) as i64;
     // A name's arm indexes the numbers directly, while a negative position arm is an error
     // `switch_arm` raises before indexing.
-    values::ints(name_arms)
+    values::ints(numbers).iter().all(|&index| {
+        usize::try_from(index)
+            .ok()
+            .and_then(|index| constant(index).ok())
+            .is_some_and(|number| number.kind() == SexpType::Integer && length(number) == 1)
+    }) && values::ints(name_arms)
         .iter()
         .all(|&arm| (0..arms).contains(&i64::from(arm)))
         && values::ints(position_arms)
@@ -5577,11 +6533,21 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
 }
 
 /// Runs the body of `function`, compiled to `code`, in the slot frame whose header register is
-/// `header` and whose slots follow it. The caller truncates the register file to the header.
-pub unsafe fn run_slots(function: Sexp, header: usize) -> R<Sexp> {
-    let code = function.cdr();
-    let slots = length(code.cdr().element(SLOTS).element(1));
-    run_at(function, code, header, header + 1 + slots)
+/// `header` and whose `slots` slots follow it. The caller truncates the register file to the header.
+pub unsafe fn run_slots(function: Sexp, header: usize, slots: usize) -> R<Sexp> {
+    run_at(function, function.cdr(), header, header + 1 + slots)
+}
+
+/// How many slots the frame of `code`, compiled with a slot table, has.
+pub unsafe fn slot_count(code: Sexp) -> usize {
+    length(code.cdr().element(SLOTS).element(1))
+}
+
+/// The names of the slots of the frame of `function`, whose body is compiled with a slot
+/// table, formals first. The compiler makes the list, so it is read as the plain vector it is.
+#[inline(always)]
+pub unsafe fn frame_slot_names<'a>(function: Sexp) -> &'a [Sexp] {
+    function.cdr().cdr().element(SLOTS).element(1).slice()
 }
 
 /// Runs `code` in the activation whose header register is `header` and whose own registers
@@ -5635,6 +6601,46 @@ unsafe fn run_at(function: Sexp, code: Sexp, header: usize, base: usize) -> R<Se
     }
 }
 
+/// Continues the body of `function` at `pc` in the slot frame whose header register is
+/// `header`, whose frame [`eval::enter`] pushed and whose slots and registers the caller wrote:
+/// how the optimizing tier hands over a call it ran without a frame once that call has to leave
+/// compiled code. A `pending` unwind is what the instruction at `pc` raised. The entry is not
+/// counted and no tier runs it, because the activation is already under way.
+pub unsafe fn resume_slots(
+    function: Sexp,
+    header: usize,
+    pc: usize,
+    pending: Option<Unwind>,
+) -> R<Sexp> {
+    let heap = crate::heap();
+    let code = function.cdr();
+    heap.root(code);
+    let mark = heap.handle_mark();
+    let base = header + 1 + slot_count(code);
+    reserve_registers(base + *pool_ints(code.cdr(), REGISTERS) as usize)?;
+    let mut loops: SmallVec<[LoopState; 4]> = SmallVec::new();
+    loops.extend(std::iter::repeat_n(LoopState::default(), loop_count(code)));
+    let mut machine = Machine {
+        function,
+        code,
+        header,
+        base,
+        mark,
+        loops: &mut loops,
+    };
+    let result = eval::on_large_stack(|| match pending {
+        Some(unwind) => {
+            continue_after(&mut machine, pc, unwind).and_then(|pc| execute_code(&mut machine, pc))
+        }
+        None => execute_code(&mut machine, pc),
+    });
+    interp().bytecode.registers.truncate(base);
+    match result {
+        Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
+        other => other,
+    }
+}
+
 /// Runs an activation whose entry the tiers' schedule picked: the optimizing tier may run it,
 /// or hand it back to resume at a pc.
 #[inline(never)]
@@ -5673,7 +6679,16 @@ unsafe fn entry_event(machine: &mut Machine<'_>, entries: i32) -> Option<TierExi
     };
     let profile = values::ints_mut(constants.element(PROFILE));
     let optimized = constants.element(TIER1) != nil();
-    if !optimized {
+    if optimized {
+        // A body with optimized code asks at every entry, and goes on asking for as long as
+        // it has the code, so only an entry that lost the code reschedules.
+        let entered = (tier.enter)(machine);
+        if constants.element(TIER1) != nil() {
+            return entered;
+        }
+        return reschedule(tier, constants, entered);
+    }
+    {
         if entries == recording_start(tier.entry_threshold) && profile[profile::TIER_STATE] >= 0 {
             let worth = (tier.worth_recording)(machine);
             values::ints_mut(constants.element(PROFILE))[profile::RECORDING] = i32::from(worth);
@@ -5683,46 +6698,39 @@ unsafe fn entry_event(machine: &mut Machine<'_>, entries: i32) -> Option<TierExi
     }
     // Most bodies never compile, and asking the tier about every call of every body cost more
     // than the compiled code saved on a test suite.
-    let entered = if optimized
-        || ((entries == 1 || entries >= tier.entry_threshold) && profile[profile::TIER_STATE] >= 0)
-    {
-        (tier.enter)(machine)
-    } else {
-        None
-    };
-    if entered.is_none()
-        && entries == tier.baseline_threshold
-        && tier.baseline_threshold != NEVER
-        && constants.element(BASELINE) == nil()
-    {
-        (tier.baseline)(machine);
-    }
-    // The tier may have compiled, refused, or moved the counters, so the schedule is derived
-    // from what they hold now.
+    let entered =
+        if (entries == 1 || entries >= tier.entry_threshold) && profile[profile::TIER_STATE] >= 0 {
+            (tier.enter)(machine)
+        } else {
+            None
+        };
+    reschedule(tier, constants, entered)
+}
+
+/// Sets the entry at which the tiers next look at the body with `constants`, after the tier
+/// may have compiled, refused, or moved the counters: the schedule is derived from what they
+/// hold now. Passes `entered` through.
+unsafe fn reschedule(tier: &Tier, constants: Sexp, entered: Option<TierExit>) -> Option<TierExit> {
     let profile = values::ints_mut(constants.element(PROFILE));
     let entries = profile[profile::ENTRIES];
     let state = profile[profile::TIER_STATE];
-    profile[profile::NEXT] = if constants.element(TIER1) != nil()
-        || (state >= 0 && entries >= tier.entry_threshold)
-    {
-        i32::MIN
-    } else {
-        let start = recording_start(tier.entry_threshold);
-        let baseline = (tier.baseline_threshold != NEVER && constants.element(BASELINE) == nil())
-            .then_some(tier.baseline_threshold);
-        [
-            (state >= 0).then_some(1),
-            (2 < start).then_some(2),
-            (state >= 0).then_some(start),
-            (state >= 0).then_some(tier.entry_threshold),
-            baseline,
-        ]
-        .into_iter()
-        .flatten()
-        .filter(|&count| count > entries)
-        .min()
-        .unwrap_or(NEVER)
-    };
+    profile[profile::NEXT] =
+        if constants.element(TIER1) != nil() || (state >= 0 && entries >= tier.entry_threshold) {
+            i32::MIN
+        } else {
+            let start = recording_start(tier.entry_threshold);
+            [
+                (state >= 0).then_some(1),
+                (2 < start).then_some(2),
+                (state >= 0).then_some(start),
+                (state >= 0).then_some(tier.entry_threshold),
+            ]
+            .into_iter()
+            .flatten()
+            .filter(|&count| count > entries)
+            .min()
+            .unwrap_or(NEVER)
+        };
     entered
 }
 
@@ -5739,9 +6747,14 @@ unsafe fn continue_after(machine: &mut Machine<'_>, pc: usize, unwind: Unwind) -
         return Err(unwind);
     };
     let loops = machine.code.cdr().element(LOOPS);
+    // A jump raised by name names the environment that stands for a frame still in its slots.
+    let env = match machine.env() {
+        env if env == nil() => eval::pending_env_of(machine.header),
+        env => env,
+    };
     let target = match jump {
-        Jump::Break { env: target } if target == machine.env() => loop_target(loops, pc, true),
-        Jump::Next { env: target } if target == machine.env() => loop_target(loops, pc, false),
+        Jump::Break { env: target } if target == env => loop_target(loops, pc, true),
+        Jump::Next { env: target } if target == env => loop_target(loops, pc, false),
         _ => None,
     };
     match target {
@@ -5771,8 +6784,30 @@ unsafe fn loop_target(loops: Sexp, pc: usize, is_break: bool) -> Option<usize> {
 /// does not specialize. It must not be a jump, a branch, `Return` or a loop instruction. Answers
 /// the value the activation returns when the instruction returns from it, as a finished
 /// [`Op::Prologue`] does.
+///
+/// A closure call that [`call_fast`] takes enters its callee in place: the dispatch loop runs
+/// the body here and stops when it returns to the stepped call ([`Activation::stepping`]), so
+/// a call out of compiled code costs what a call between two interpreted bodies costs.
 pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<Option<Sexp>> {
-    match interpret::<true>(machine, pc) {
+    let mut state = activation(machine, true);
+    if op_of(*state.code.add(pc) as u32) == Some(Op::CallGeneric) {
+        state.resume_base = (*state.interp).bytecode.resumes.len();
+        state.stepping = true;
+        match call_fast(&mut state, pc) {
+            Some(STOP) => {}
+            Some(next) => {
+                (*RUN_HANDLERS.as_ptr().add(op_index(state.code, next)))(&mut state, next)
+            }
+            None => {
+                state.resume_base = NO_RESUMES;
+                state.stepping = false;
+                (*STEP_HANDLERS.as_ptr().add(op_index(state.code, pc)))(&mut state, pc);
+            }
+        }
+    } else {
+        (*STEP_HANDLERS.as_ptr().add(op_index(state.code, pc)))(&mut state, pc);
+    }
+    match (state.exit, state.stepped) {
         (Ok(value), STOP) => Ok(Some(value)),
         (result, _) => result.map(|_| None),
     }
@@ -5885,7 +6920,29 @@ pub unsafe fn record_value(code: Sexp, pc: usize, value: Sexp) {
     record_feedback(code.cdr(), pc, value);
 }
 
+/// Marks the `GetVar` at `pc` as one that called an active binding.
+pub unsafe fn record_active_binding(code: Sexp, pc: usize) {
+    if let Some(bits) = values::ints_mut(code.cdr().element(FEEDBACK)).get_mut(pc) {
+        *bits |= feedback::ACTIVE_BINDING as i32;
+    }
+}
+
 /// What `GetVar` at `pc` reads, and whether the binding is in the activation's own frame.
+/// Whether the instruction at `pc` is an [`Op::Argument`] whose formal is missing, which the
+/// optimizing tier leaves to tier 0: no compiled load yields the empty argument.
+pub unsafe fn passes_missing_argument(machine: &mut Machine<'_>, pc: usize) -> R<bool> {
+    let word = values::ints(machine.code.car()).get(pc).copied();
+    if word.and_then(|word| op_of(word as u32)) != Some(Op::Argument) {
+        return Ok(false);
+    }
+    let state = activation(machine, true);
+    let missing = argument_missing(&state, pc)?;
+    if missing {
+        state.record_kind(pc, feedback::MISSING);
+    }
+    Ok(missing)
+}
+
 pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)> {
     let code = machine.code;
     let words = values::ints(code.car());
@@ -5893,7 +6950,18 @@ pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)>
     let symbol = constants.element(words[pc + 2] as usize);
     let cache = words[pc + 3] as usize;
     let in_slots = machine.env() == nil();
-    let (value, local) = match machine.slot_of(symbol) {
+    // The slot table numbers each lookup cache whose symbol the frame can bind, which finds
+    // the slot without searching the table's names.
+    let slots = constants.element(SLOTS);
+    let slot = if in_slots && slots != nil() {
+        values::ints(slots.element(0))
+            .get(cache)
+            .and_then(|&position| usize::try_from(position).ok())
+            .map(|position| register_address(machine.header + 1 + position))
+    } else {
+        None
+    };
+    let (value, local) = match slot {
         None if in_slots => {
             let start = machine.function.tag();
             (
@@ -5982,6 +7050,14 @@ struct Activation<'m, 'a> {
     exit: R<Sexp>,
     /// Where a single-stepped instruction continues, or [`STOP`] once the activation finished.
     stepped: usize,
+    /// How many [`Resume`] records [`State::resumes`] held when this dispatch loop started:
+    /// the records above it are the callers of bodies this loop entered in place.
+    /// [`NO_RESUMES`] for an activation that runs single instructions, whose calls nest.
+    resume_base: usize,
+    /// Whether the activation the loop started with runs one call instruction for the
+    /// optimizing tier, with the callee entered in place: the loop then stops when the callee
+    /// returns to it, where an interpreted caller would go on.
+    stepping: bool,
 }
 
 impl Activation<'_, '_> {
@@ -6019,14 +7095,14 @@ impl Activation<'_, '_> {
     #[inline(always)]
     unsafe fn record(&self, pc: usize, value: Sexp) {
         if !self.feedback.is_null() {
-            *self.feedback.add(pc) |= i32::from(value_kind(value));
+            *self.feedback.add(pc) |= value_kind(value) as i32;
         }
     }
 
     #[inline(always)]
-    unsafe fn record_kind(&self, pc: usize, kind: u16) {
+    unsafe fn record_kind(&self, pc: usize, kind: u32) {
         if !self.feedback.is_null() {
-            *self.feedback.add(pc) |= i32::from(kind);
+            *self.feedback.add(pc) |= kind as i32;
         }
     }
 }
@@ -6095,11 +7171,8 @@ unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) ->
         &RUN_HANDLERS
     };
     if !SINGLE {
+        state.resume_base = (*state.interp).bytecode.resumes.len();
         release(&state);
-        if let Some(baseline) = baseline_code(state.constants) {
-            run_baseline(&mut state, baseline, pc);
-            return (state.exit, STOP);
-        }
     }
     (*handlers.as_ptr().add(op_index(state.code, pc)))(&mut state, pc);
     (state.exit, state.stepped)
@@ -6182,106 +7255,267 @@ unsafe fn activation<'m, 'a>(machine: &'m mut Machine<'a>, single: bool) -> Acti
         registers,
         exit: Ok(nil()),
         stepped: STOP,
+        resume_base: NO_RESUMES,
+        stepping: false,
         machine,
     }
 }
 
-/// The machine code the baseline tier compiled for these constants' code, if any.
+/// Points `state` at the activation its machine now describes, after the dispatch loop entered
+/// a callee in place or returned from one.
 #[inline(always)]
-unsafe fn baseline_code(constants: Sexp) -> Option<BaselineCode> {
-    let holder = pool_entry(constants, BASELINE);
-    if holder.kind() != SexpType::ExternalPtr {
-        return None;
-    }
-    let address = holder.external_address();
-    // SAFETY: the baseline tier stores only addresses of functions with this signature.
-    (!address.is_null())
-        .then(|| std::mem::transmute::<*mut std::ffi::c_void, BaselineCode>(address))
-}
-
-/// Runs baseline machine code for the activation from `pc` until the activation returns. A
-/// panic inside an instruction is parked while the machine code returns (unwinding through it
-/// is undefined) and resumed here.
-#[inline(never)]
-unsafe fn run_baseline(state: &mut Activation<'_, '_>, baseline: BaselineCode, pc: usize) {
-    baseline((state as *mut Activation<'_, '_>).cast(), pc);
-    if let Some(payload) = PARKED_PANIC.take() {
-        std::panic::resume_unwind(payload);
-    }
-}
-
-thread_local! {
-    /// A panic raised inside a baseline step, carried past the machine code that called it.
-    static PARKED_PANIC: std::cell::Cell<Option<Box<dyn std::any::Any + Send>>> =
-        const { std::cell::Cell::new(None) };
-}
-
-/// The baseline tier's machine code for one body: called with the activation and the pc to
-/// start at, it runs instructions until one answers [`STOP`], leaving the result where the
-/// interpreter's handler chain leaves it.
-pub type BaselineCode = unsafe extern "C" fn(*mut std::ffi::c_void, usize);
-
-/// One instruction run for baseline machine code: it takes the activation and the
-/// instruction's pc and answers where to continue, encoded by [`baseline_answer`].
-pub type BaselineStep = unsafe extern "C" fn(*mut std::ffi::c_void, usize) -> usize;
-
-/// What a [`BaselineStep`] answers when the activation is done.
-pub const BASELINE_STOP: usize = STOP;
-
-/// Encodes the pc a step continues at for baseline code: 0 for the next instruction, the pc
-/// plus one for any other, and [`STOP`] as itself. Almost every instruction falls through, and
-/// a zero answer lets the code after each call be one test and one branch instead of a compare
-/// against the next pc, which keeps the per-instruction code short.
-#[inline(always)]
-pub fn baseline_answer(pc: usize, next: usize) -> usize {
-    if pc == next {
-        0
-    } else if pc == STOP {
-        STOP
+unsafe fn reload(state: &mut Activation<'_, '_>) {
+    let machine = &*state.machine;
+    let constants = machine.code.cdr();
+    state.feedback = if *pool_ints(constants, PROFILE).add(profile::RECORDING) != 0 {
+        pool_ints(constants, FEEDBACK)
     } else {
-        pc + 1
+        std::ptr::null_mut()
+    };
+    state.code = machine.code.car().data().cast::<i32>().cast_const();
+    state.registers = register_address(machine.base);
+    let slots = pool_entry(constants, SLOTS);
+    state.slot_map = if slots == nil() {
+        std::ptr::null()
+    } else {
+        pool_ints(slots, 0).cast_const()
+    };
+    state.constants = constants;
+    state.cache = LookupCache::of(machine.code);
+    state.header = register_address(machine.header);
+    state.mark = machine.mark;
+}
+
+/// Forgets the callers of bodies entered in place, for an unwind to top level that skipped
+/// their returns.
+pub fn forget_resumes(state: &mut State) {
+    state.resumes.clear();
+    state.loop_states.clear();
+}
+
+/// [`Activation::resume_base`] of an activation that enters no callee in place.
+const NO_RESUMES: usize = usize::MAX;
+
+/// The caller of a body the dispatch loop entered in place: what [`Machine`] held for it, and
+/// what its call instruction still has to do once the callee returns.
+struct Resume {
+    function: Sexp,
+    code: Sexp,
+    header: usize,
+    base: usize,
+    mark: usize,
+    loops: *mut [LoopState],
+    /// Where the caller's call instruction is in its code.
+    call_at: usize,
+    /// The callee's frame, which [`eval::leave`] pops.
+    depth: u32,
+    /// [`Interp::references_used`] before the call collected its arguments.
+    references: u32,
+    /// How many [`State::loop_states`] were in use before the callee took its own.
+    loop_mark: u32,
+}
+
+/// Continues the dispatch loop in the body of the call [`eval::enter`] set up as `entered`,
+/// for the call instruction at `call_at`, and answers where: the callee's first instruction,
+/// or wherever the loop goes on when the optimizing tier ran the body whole.
+unsafe fn enter_in_place(
+    state: &mut Activation<'_, '_>,
+    call_at: usize,
+    function: Sexp,
+    entered: eval::Entered,
+    slots: usize,
+    references: u32,
+) -> usize {
+    switch_to_callee(
+        state,
+        call_at,
+        function,
+        entered.header as usize,
+        slots,
+        entered.depth,
+        references,
+        loop_count(entered.value),
+    );
+    let register_count = *pool_ints(state.constants, REGISTERS) as usize;
+    if let Err(unwind) = reserve_registers(state.machine.base + register_count) {
+        return finished(state, Err(unwind));
+    }
+    count_entry(state)
+}
+
+/// Makes the body of `function` the activation the dispatch loop runs, on the slot frame at
+/// `header` whose call frame is at `depth`, and records what the caller's call instruction at
+/// `call_at` still has to do once the body returns ([`Resume`]). The caller has checked that
+/// the body's `loops` loop states fit ([`in_place`]).
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+unsafe fn switch_to_callee(
+    state: &mut Activation<'_, '_>,
+    call_at: usize,
+    function: Sexp,
+    header: usize,
+    slots: usize,
+    depth: u32,
+    references: u32,
+    loops: usize,
+) {
+    let code = function.cdr();
+    let bytecode = &mut (*state.interp).bytecode;
+    let loop_mark = bytecode.loop_states.len();
+    if loops != 0 {
+        bytecode
+            .loop_states
+            .extend(std::iter::repeat_n(LoopState::default(), loops));
+    }
+    let loops: *mut [LoopState] = bytecode.loop_states.get_unchecked_mut(loop_mark..);
+    let machine = &mut *state.machine;
+    bytecode.resumes.push(Resume {
+        function: machine.function,
+        code: machine.code,
+        header: machine.header,
+        base: machine.base,
+        mark: machine.mark,
+        loops: std::ptr::from_mut(std::mem::replace(&mut machine.loops, &mut *loops)),
+        call_at,
+        depth,
+        references,
+        loop_mark: loop_mark as u32,
+    });
+    machine.function = function;
+    machine.code = code;
+    machine.header = header;
+    machine.base = header + 1 + slots;
+    (*state.heap).root(code);
+    machine.mark = (*state.heap).handle_mark();
+    reload(state);
+}
+
+/// Counts an entry of the body the dispatch loop just switched to, and answers where the loop
+/// goes on: the body's first instruction, unless the tiers' schedule picked this entry.
+#[inline(always)]
+unsafe fn count_entry(state: &mut Activation<'_, '_>) -> usize {
+    let profile = pool_ints(state.constants, PROFILE);
+    let entries = (*profile.add(profile::ENTRIES)).saturating_add(1);
+    *profile.add(profile::ENTRIES) = entries;
+    if entries < *profile.add(profile::NEXT) {
+        return 0;
+    }
+    scheduled_entry_in_place(state, entries)
+}
+
+/// [`run_scheduled_entry`] for a body entered in place.
+#[inline(never)]
+unsafe fn scheduled_entry_in_place(state: &mut Activation<'_, '_>, entries: i32) -> usize {
+    // Compiled code runs on the native stack, and a call it hands to this loop may enter the
+    // next compiled body in place, so a deep recursion nests here without passing through a
+    // closure call's own stack check.
+    let event = eval::on_large_stack(|| entry_event(state.machine, entries));
+    // The tier may have started or stopped the body's recording.
+    reload(state);
+    match event {
+        Some(TierExit::Finished(result)) => finished(state, result),
+        Some(TierExit::Resume { pc, pending }) => match pending {
+            Some(unwind) => failed::<false>(state, pc, unwind),
+            None => pc,
+        },
+        None => 0,
     }
 }
 
-/// Where baseline machine code finds what it reads directly instead of calling a step.
-pub mod baseline_layout {
-    use super::Activation;
-    /// The activation's register window pointer.
-    pub const REGISTERS: usize = std::mem::offset_of!(Activation<'static, 'static>, registers);
-    /// The activation's `Interp` pointer.
-    pub const INTERP: usize = std::mem::offset_of!(Activation<'static, 'static>, interp);
-    /// The pointer to the activation's header register, which holds its environment.
-    pub const HEADER: usize = std::mem::offset_of!(Activation<'static, 'static>, header);
-    /// The pointer to the code's slot map, one `i32` frame slot (or -1) per lookup slot; null
-    /// when the code has no slot table.
-    pub const SLOT_MAP: usize = std::mem::offset_of!(Activation<'static, 'static>, slot_map);
-    /// The pointer to the code's frame-slot hints, one `u32` per lookup slot.
-    pub const HINTS: usize = std::mem::offset_of!(Activation<'static, 'static>, cache)
-        + std::mem::offset_of!(super::LookupCache, hints);
-    /// The feedback pointer, null while nothing records type feedback.
-    pub const FEEDBACK: usize = std::mem::offset_of!(Activation<'static, 'static>, feedback);
+/// Where the dispatch loop goes on once the running activation has ended with `result`: in the
+/// caller that entered it in place, after its call instruction or at a loop target the unwind
+/// names there, or nowhere ([`STOP`]) when the activation is the one the loop started with or
+/// no caller takes the unwind. An in-place callee leaves through here on every way out, as it
+/// would leave [`run_at`] and [`eval::leave`] were the call a Rust call.
+unsafe fn finished(state: &mut Activation<'_, '_>, result: R<Sexp>) -> usize {
+    // Most activations were entered from Rust and have no caller to resume. Testing for that
+    // here keeps their exit free of the frame the resuming path needs.
+    if (*state.interp).bytecode.resumes.len() <= state.resume_base {
+        state.exit = result;
+        return STOP;
+    }
+    resume_caller(state, result)
+}
+
+/// [`finished`] for an activation a call instruction entered in place: pops its resume record
+/// and goes on in the caller, or in the first caller further out that takes the unwind.
+#[inline(never)]
+unsafe fn resume_caller(state: &mut Activation<'_, '_>, mut result: R<Sexp>) -> usize {
+    loop {
+        let bytecode = &mut (*state.interp).bytecode;
+        if bytecode.resumes.len() <= state.resume_base {
+            state.exit = result;
+            return STOP;
+        }
+        let Some(resume) = bytecode.resumes.pop() else {
+            unreachable!("the dispatch loop's resume records are above its base");
+        };
+        bytecode.registers.truncate(state.machine.base);
+        let env = *state.header;
+        if env != nil() {
+            env.set_gp_bits(gp::COMPILED_FRAME, false);
+        }
+        if let Err(Unwind::Error(failure)) = result {
+            result = Err(conditions::signal_error(failure));
+        }
+        let returned = eval::leave(resume.depth as usize, result);
+        let interp = &mut *state.interp;
+        interp
+            .bytecode
+            .loop_states
+            .truncate(resume.loop_mark as usize);
+        let machine = &mut *state.machine;
+        machine.function = resume.function;
+        machine.code = resume.code;
+        machine.header = resume.header;
+        machine.base = resume.base;
+        machine.mark = resume.mark;
+        machine.loops = &mut *resume.loops;
+        reload(state);
+        if interp.references_used != resume.references {
+            eval::release_references(resume.references);
+        }
+        let at = resume.call_at;
+        if state.stepping && interp.bytecode.resumes.len() == state.resume_base {
+            // The stepped call's result is what a failed speculation on it saw, so it is
+            // recorded whether or not the body is recording, as every stepped instruction's is.
+            state.feedback = pool_ints(state.constants, FEEDBACK);
+            match returned {
+                Ok(value) => {
+                    state.record(at, value);
+                    *state.registers.add(*state.code.add(at + 1) as usize) = value;
+                    release(state);
+                    state.exit = Ok(nil());
+                    state.stepped = after_instruction(state.code, at);
+                }
+                Err(unwind) => {
+                    state.exit = Err(unwind);
+                    state.stepped = at;
+                }
+            }
+            return STOP;
+        }
+        match returned {
+            Ok(value) => {
+                state.record(at, value);
+                *state.registers.add(*state.code.add(at + 1) as usize) = value;
+                release(state);
+                return after_instruction(state.code, at);
+            }
+            Err(unwind) => match continue_after(state.machine, at, unwind) {
+                Ok(pc) => return pc,
+                Err(unwind) => result = Err(unwind),
+            },
+        }
+    }
+}
+
+/// Where tier-1 code finds the interpreter state it writes directly.
+pub mod interp_layout {
     /// The visibility flag inside `Interp`.
     pub const VISIBLE: usize = std::mem::offset_of!(crate::Interp, visible);
     /// The current srcref inside `Interp`.
     pub const SRCREF: usize = std::mem::offset_of!(crate::Interp, srcref);
-}
-
-/// Runs one step for baseline code, parking a panic instead of unwinding into machine code.
-#[inline(always)]
-unsafe fn guarded(
-    state: *mut std::ffi::c_void,
-    at: usize,
-    step: impl FnOnce(&mut Activation<'_, '_>, usize) -> usize,
-) -> usize {
-    let state = &mut *state.cast::<Activation<'_, '_>>();
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| step(&mut *state, at))) {
-        Ok(pc) => pc,
-        Err(payload) => {
-            PARKED_PANIC.set(Some(payload));
-            state.exit = Ok(nil());
-            STOP
-        }
-    }
 }
 
 /// The handler table position of the instruction at `pc`.
@@ -6314,30 +7548,7 @@ const STOP: usize = usize::MAX;
 /// activation's result in [`Activation::exit`], so that few values stay live across the calls
 /// an instruction makes. A failure goes to [`failed`].
 macro_rules! handlers {
-    ($($name:ident, $step:ident: $op:ident, $roots:literal, $body:ident;)*) => {
-        $(
-            unsafe extern "C" fn $step(state: *mut std::ffi::c_void, at: usize) -> usize {
-                guarded(state, at, |state, at| {
-                    let instruction =
-                        Instruction { code: state.code, at, registers: state.registers };
-                    let flow = $body(state, instruction);
-                    let next = at + 1 + operand_count(Op::$op);
-                    let pc = advance::<false>(state, at, next, flow);
-                    if $roots && pc != STOP {
-                        release(state);
-                    }
-                    baseline_answer(pc, next)
-                })
-            }
-        )*
-
-        /// The step each op runs as in baseline machine code, indexed like [`OPS`].
-        pub static BASELINE_STEPS: [BaselineStep; OPS.len()] = {
-            let mut table: [BaselineStep; OPS.len()] = [step_jump; OPS.len()];
-            $(table[Op::$op as usize] = $step;)*
-            table
-        };
-
+    ($($name:ident: $op:ident, $roots:literal, $body:ident;)*) => {
         // Never inlined: a fast handler tail-calls these on its slow path, and inlining one
         // would bring its frame setup back onto the fast path.
         $(
@@ -6366,10 +7577,11 @@ macro_rules! handlers {
             let mut table: [Handler; HANDLER_COUNT] = [jump::<SINGLE>; HANDLER_COUNT];
             $(table[Op::$op as usize] = $name::<SINGLE>;)*
             let mut index = 0;
-            while OPS.len() + index < HANDLER_COUNT {
+            while index < QUICK_ARITHMETIC.len() {
                 table[OPS.len() + index] = table[Op::Arithmetic as usize];
                 index += 1;
             }
+            table[POSITIONAL_CALL_BUILTIN] = table[Op::CallBuiltin as usize];
             table
         }
     };
@@ -6385,10 +7597,7 @@ unsafe fn advance<const SINGLE: bool>(
     match flow {
         Ok(Flow::Next) => next,
         Ok(Flow::Goto(pc)) => pc,
-        Ok(Flow::Done(value)) => {
-            state.exit = Ok(value);
-            STOP
-        }
+        Ok(Flow::Done(value)) => finished(state, Ok(value)),
         Err(unwind) => failed::<SINGLE>(state, at, unwind),
     }
 }
@@ -6402,17 +7611,18 @@ unsafe fn failed<const SINGLE: bool>(
     at: usize,
     unwind: Unwind,
 ) -> usize {
-    let resumed = if SINGLE {
+    // A stepped call that fails before its callee is entered fails as any stepped instruction
+    // does: the optimizing tier finds the loop target itself.
+    let stepped =
+        SINGLE || (state.stepping && (*state.interp).bytecode.resumes.len() == state.resume_base);
+    let resumed = if stepped {
         Err(unwind)
     } else {
         continue_after(state.machine, at, unwind)
     };
     match resumed {
         Ok(pc) => pc,
-        Err(unwind) => {
-            state.exit = Err(unwind);
-            STOP
-        }
+        Err(unwind) => finished(state, Err(unwind)),
     }
 }
 
@@ -6421,57 +7631,58 @@ static RUN_HANDLERS: [Handler; HANDLER_COUNT] =
 static STEP_HANDLERS: [Handler; HANDLER_COUNT] = handler_table::<true>();
 
 handlers! {
-    run_constant, step_constant: Constant, false, op_constant;
-    run_get_var, step_get_var: GetVar, true, op_get_var;
-    run_set_var, step_set_var: SetVar, true, op_set_var;
-    run_get_fun, step_get_fun: GetFun, true, op_get_fun;
-    run_branch_unless_builtin, step_branch_unless_builtin: BranchUnlessBuiltin, false, op_branch_unless_builtin;
-    run_call_builtin, step_call_builtin: CallBuiltin, true, op_call_builtin;
-    run_call_builtin_rebinding, step_call_builtin_rebinding: CallBuiltinRebinding, true, op_call_builtin_rebinding;
-    run_call_generic, step_call_generic: CallGeneric, true, op_call_generic;
-    run_call_rebinding, step_call_rebinding: CallRebinding, true, op_call_rebinding;
-    run_call_tail_update, step_call_tail_update: CallTailUpdate, true, op_call_tail_update;
-    run_field, step_field: Field, true, op_field;
-    run_item, step_item: Item, true, op_item;
-    run_match_shape, step_match_shape: MatchShape, false, op_match_shape;
-    run_match_tag, step_match_tag: MatchTag, false, op_match_tag;
-    run_match_literal, step_match_literal: MatchLiteral, true, op_match_literal;
-    run_slot, step_slot: Slot, true, op_slot;
-    run_match_fail, step_match_fail: MatchFail, true, op_match_fail;
-    run_construct, step_construct: Construct, true, op_construct;
-    run_move, step_move: Move, false, op_move;
-    run_switch_arm, step_switch_arm: SwitchArm, true, op_switch_arm;
-    run_bound_eval, step_bound_eval: BoundEval, true, op_bound_eval;
-    run_match_condition, step_match_condition: MatchCondition, true, op_match_condition;
-    run_branch_unless_primitive, step_branch_unless_primitive: BranchUnlessPrimitive, false, op_branch_unless_primitive;
-    run_branch_if_object, step_branch_if_object: BranchIfObject, false, op_branch_if_object;
-    run_dispatch_subject, step_dispatch_subject: DispatchSubject, true, op_dispatch_subject;
-    run_ast, step_ast: Ast, true, op_ast;
-    run_guard, step_guard: Guard, true, op_guard;
-    run_resume, step_resume: Resume, false, op_resume;
-    run_jump_unless, step_jump_unless: JumpUnless, true, op_jump_unless;
-    run_arithmetic, step_arithmetic: Arithmetic, true, op_arithmetic;
-    run_return, step_return: Return, false, op_return;
-    run_for_init, step_for_init: ForInit, true, op_for_init;
-    run_for_step, step_for_step: ForStep, true, op_for_step;
-    run_for_end, step_for_end: ForEnd, false, op_for_end;
-    run_invisible, step_invisible: Invisible, false, op_invisible;
-    run_visible, step_visible: Visible, false, op_visible;
-    run_set_srcref, step_set_srcref: SetSrcref, true, op_set_srcref;
-    run_end_statement, step_end_statement: EndStatement, false, op_end_statement;
-    run_logic_left, step_logic_left: LogicLeft, true, op_logic_left;
-    run_logic_right, step_logic_right: LogicRight, true, op_logic_right;
-    run_closure, step_closure: Closure, true, op_closure;
-    run_prologue, step_prologue: Prologue, true, op_prologue;
-    run_sub_assign, step_sub_assign: SubAssign, true, op_sub_assign;
-    run_sub_assign_matrix, step_sub_assign_matrix: SubAssignMatrix, true, op_sub_assign_matrix;
-    run_replace, step_replace: Replace, true, op_replace;
-    run_missing, step_missing: Missing, true, op_missing;
-    run_namespace, step_namespace: Namespace, true, op_namespace;
-    run_fused, step_fused: Fused, true, op_fused;
-    run_unfused, step_unfused: Unfused, false, op_unfused;
-    run_super_assign, step_super_assign: SuperAssign, true, op_super_assign;
-    run_internal, step_internal: Internal, true, op_internal;
+    run_constant: Constant, false, op_constant;
+    run_get_var: GetVar, true, op_get_var;
+    run_set_var: SetVar, true, op_set_var;
+    run_get_fun: GetFun, true, op_get_fun;
+    run_branch_unless_builtin: BranchUnlessBuiltin, false, op_branch_unless_builtin;
+    run_call_builtin: CallBuiltin, true, op_call_builtin;
+    run_call_builtin_rebinding: CallBuiltinRebinding, true, op_call_builtin_rebinding;
+    run_call_generic: CallGeneric, true, op_call_generic;
+    run_call_rebinding: CallRebinding, true, op_call_rebinding;
+    run_call_tail_update: CallTailUpdate, true, op_call_tail_update;
+    run_field: Field, true, op_field;
+    run_item: Item, true, op_item;
+    run_match_shape: MatchShape, false, op_match_shape;
+    run_match_tag: MatchTag, false, op_match_tag;
+    run_match_literal: MatchLiteral, true, op_match_literal;
+    run_slot: Slot, true, op_slot;
+    run_match_fail: MatchFail, true, op_match_fail;
+    run_construct: Construct, true, op_construct;
+    run_move: Move, false, op_move;
+    run_switch_arm: SwitchArm, true, op_switch_arm;
+    run_bound_eval: BoundEval, true, op_bound_eval;
+    run_match_condition: MatchCondition, true, op_match_condition;
+    run_branch_unless_same: BranchUnlessSame, false, op_branch_unless_same;
+    run_branch_if_object: BranchIfObject, false, op_branch_if_object;
+    run_dispatch_subject: DispatchSubject, true, op_dispatch_subject;
+    run_ast: Ast, true, op_ast;
+    run_guard: Guard, true, op_guard;
+    run_resume: Resume, false, op_resume;
+    run_jump_unless: JumpUnless, true, op_jump_unless;
+    run_arithmetic: Arithmetic, true, op_arithmetic;
+    run_return: Return, false, op_return;
+    run_for_init: ForInit, true, op_for_init;
+    run_for_step: ForStep, true, op_for_step;
+    run_for_end: ForEnd, false, op_for_end;
+    run_invisible: Invisible, false, op_invisible;
+    run_visible: Visible, false, op_visible;
+    run_set_srcref: SetSrcref, true, op_set_srcref;
+    run_end_statement: EndStatement, false, op_end_statement;
+    run_logic_left: LogicLeft, true, op_logic_left;
+    run_logic_right: LogicRight, true, op_logic_right;
+    run_closure: Closure, true, op_closure;
+    run_prologue: Prologue, true, op_prologue;
+    run_sub_assign: SubAssign, true, op_sub_assign;
+    run_sub_assign_matrix: SubAssignMatrix, true, op_sub_assign_matrix;
+    run_replace: Replace, true, op_replace;
+    run_missing: Missing, true, op_missing;
+    run_namespace: Namespace, true, op_namespace;
+    run_fused: Fused, true, op_fused;
+    run_unfused: Unfused, false, op_unfused;
+    run_super_assign: SuperAssign, true, op_super_assign;
+    run_internal: Internal, true, op_internal;
+    run_argument: Argument, true, op_argument;
 }
 
 /// `Jump`, the one instruction whose failure resumes somewhere other than after itself: the
@@ -6489,10 +7700,7 @@ unsafe fn jump<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
         {
             match back_edge(state, tier, pc) {
                 BackEdge::Continue(resume) => pc = resume,
-                BackEdge::Finished(result) => {
-                    state.exit = result;
-                    return;
-                }
+                BackEdge::Finished(result) => pc = finished(state, result),
                 BackEdge::Unwound { pc: resume, unwind } => {
                     pc = failed::<SINGLE>(state, resume, unwind);
                 }
@@ -6507,46 +7715,7 @@ unsafe fn jump<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
         return;
     }
     release(state);
-    // A body whose baseline code appeared while this activation looped in tier 0 moves over
-    // at the back edge, so its loop does not finish in the slower tier.
-    if target < at
-        && let Some(baseline) = baseline_code(state.constants)
-    {
-        run_baseline(state, baseline, pc);
-        return;
-    }
     become (*RUN_HANDLERS.as_ptr().add(op_index(state.code, pc)))(state, pc)
-}
-
-/// `Jump` for baseline code, which jumps forward by itself and calls this only for a backward
-/// jump: it polls for an interrupt and counts the back edge for the optimizing tier.
-unsafe extern "C" fn step_jump(state: *mut std::ffi::c_void, at: usize) -> usize {
-    guarded(state, at, |state, at| {
-        let target = *state.code.add(at + 1) as usize;
-        let mut pc = target;
-        if target < at {
-            if let Err(unwind) = crate::unwind::poll_interrupt() {
-                pc = failed::<false>(state, at, unwind);
-            } else if let Some(tier) = &(*state.interp).bytecode.tier
-                && back_edge_due(state, tier)
-            {
-                match back_edge(state, tier, pc) {
-                    BackEdge::Continue(resume) => pc = resume,
-                    BackEdge::Finished(result) => {
-                        state.exit = result;
-                        return STOP;
-                    }
-                    BackEdge::Unwound { pc: resume, unwind } => {
-                        pc = failed::<false>(state, resume, unwind);
-                    }
-                }
-            }
-        }
-        if pc != STOP {
-            release(state);
-        }
-        baseline_answer(pc, at + 1 + operand_count(Op::Jump))
-    })
 }
 
 // Fast paths and specialized forms.
@@ -6582,6 +7751,7 @@ macro_rules! fast_paths {
 
         const fn fast_path_table(mut table: [Handler; HANDLER_COUNT]) -> [Handler; HANDLER_COUNT] {
             $(table[Op::$op as usize] = $name;)*
+            table[Op::CallGeneric as usize] = fast_call_generic;
             table
         }
     };
@@ -6589,6 +7759,7 @@ macro_rules! fast_paths {
 
 fast_paths! {
     fast_get_var: GetVar, get_var_fast;
+    fast_argument: Argument, get_var_fast;
     fast_get_fun: GetFun, get_fun_fast;
     fast_set_var: SetVar, set_var_fast;
     fast_guard: Guard, guard_fast;
@@ -6597,11 +7768,386 @@ fast_paths! {
     fast_jump: Jump, jump_fast;
     fast_constant: Constant, constant_fast;
     fast_end_statement: EndStatement, end_statement_fast;
-    fast_branch_unless_primitive: BranchUnlessPrimitive, branch_unless_primitive_fast;
+    fast_branch_unless_same: BranchUnlessSame, branch_unless_same_fast;
     fast_branch_if_object: BranchIfObject, branch_if_object_fast;
     fast_call_builtin: CallBuiltin, call_builtin_fast;
     fast_sub_assign: SubAssign, sub_assign_fast;
     fast_field: Field, field_fast;
+    fast_return: Return, return_fast;
+}
+
+/// The fast handler of `CallGeneric`. Unlike the other fast paths, [`call_fast`] can end the
+/// activation the loop started with: an error the callee's entry raised, or the optimizing
+/// tier running the body whole and finishing it, answers [`STOP`].
+unsafe fn fast_call_generic(state: &mut Activation<'_, '_>, at: usize) {
+    if let Some(next) = call_fast(state, at) {
+        if next == STOP {
+            return;
+        }
+        dispatch!(state, next);
+    }
+    become GENERIC_HANDLERS[Op::CallGeneric as usize](state, at)
+}
+
+/// `CallGeneric` of a closure whose site has a prepared plan ([`prepare_plan`]), from a slot
+/// frame, while nothing observes calls: the arguments are written once, onto the frame
+/// argument stack, the slots are filled from them by the plan's sources, the call's frame is
+/// pushed, and the dispatch loop goes on in the callee's body. Nothing is matched, no Rust
+/// frame is entered, and nothing is allocated unless the argument reference pool grows or the
+/// callee collects arguments in `...`.
+///
+/// It does what [`op_call_generic`] does for the same call through [`slot_promises_into`],
+/// [`eval::bind_plan`], [`eval::enter`] and [`enter_in_place`], and leaves every call that
+/// needs anything else to them: a debugger, a profile, a tracked move or a refused object
+/// system ([`activity::hooks`]), a closure flagged for debugging or with a native entry, the
+/// namespace loader, `do.call`, a frame stack or register file that is full.
+#[inline(always)]
+unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let interp = &mut *state.interp;
+    let heap = state.heap;
+    let known = (*heap).known();
+    let (nil, unbound, missing_value) = (known.nil, known.unbound, known.missing_arg);
+    let code = state.code;
+    let feedback = pool_entry(state.constants, FEEDBACK);
+    if at + 1 >= feedback.length() as usize
+        || state.resume_base == NO_RESUMES
+        || *state.header != nil
+        || activity::hooks() != 0
+    {
+        return None;
+    }
+    let word = *feedback.data().cast::<i32>().add(at + 1);
+    let function = *state.registers.add(*code.add(at + 2) as usize);
+    let plans = &mut interp.bytecode.call_plans;
+    if word <= 0 || word as usize > plans.rows.len() || function.kind() != SexpType::Closure {
+        return None;
+    }
+    debug_assert_eq!(
+        crate::observer_bits(),
+        0,
+        "the observer word is clear while something observes calls"
+    );
+    let row: *mut PlanRow = plans.rows.as_mut_ptr().add(word as usize - 1);
+    let body = function.cdr();
+    if (*row).owner != state.constants
+        || (*row).site as usize != at
+        || (*row).formals != function.car()
+        || (*row).body != body
+        || (*row).flags & PLAN_FAST == 0
+        || function
+            .has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE | gp::NATIVE_ENTRY)
+        || function == interp.namespace_loader
+        || function == interp.do_call
+    {
+        return None;
+    }
+    let shape = (*row).shape;
+    let (slots, loops) = (shape.slots as usize, (*row).loops as usize);
+    let depth = interp.frames.len();
+    let header = interp.bytecode.registers.len();
+    let end = header + 1 + slots + shape.registers as usize;
+    if depth as u32 >= interp.max_depth
+        || end > interp.bytecode.registers.capacity()
+        || (loops != 0
+            && interp.bytecode.loop_states.len() + loops > interp.bytecode.loop_states.capacity())
+    {
+        return None;
+    }
+    let call_index = *code.add(at + 3) as usize;
+    let references = interp.references_used;
+    // The same test as the generic path's, with the callee's answer kept in the plan's row.
+    let eager = pool_constant(state, call_index + 2) != nil
+        && !conditions::calling_established(&interp.handlers)
+        && if (*row).effects_env == function.tag()
+            && (*row).effects_epoch == (*heap).binding_epoch()
+        {
+            (*row).flags & PLAN_EFFECT_FREE != 0
+        } else {
+            match site_effect_free(row, function) {
+                Ok(holds) => holds,
+                Err(unwind) => return Some(failed::<false>(state, at, unwind)),
+            }
+        };
+    let count = (*row).arguments as usize;
+    let pool = interp.bytecode.call_plans.pool.as_ptr();
+    let sources = pool.add((*row).sources_at as usize);
+    let sources_len = (*row).sources_len as usize;
+    let kinds = sources.add(sources_len);
+    let args_start = interp.frame_args.len();
+    interp.frame_args.reserve(count);
+    // Written past the stack's length, which moves once every argument is there. Until then
+    // each value is held by what it was read from: the caller's slots, the code's constants,
+    // the reference pool.
+    let args = interp.frame_args.as_mut_ptr().add(args_start);
+    let owner = interp.slot_owner as usize;
+    let compiled = pool_constant(state, call_index + 1);
+    let call = pool_constant(state, call_index);
+    let mut cell = if compiled == nil {
+        call.cdr()
+    } else {
+        compiled
+    };
+    for index in 0..count {
+        let expression = cell.car();
+        let kind = *kinds.add(index);
+        let value = if kind == ARGUMENT_VALUE {
+            expression
+        } else {
+            let eager_value = if !eager || kind == ARGUMENT_CODE {
+                None
+            } else if kind >= 0 {
+                let value = *state.header.add(1 + kind as usize);
+                if value == missing_value {
+                    None
+                } else if value == unbound {
+                    effects::eager_argument(expression, state.machine.function.tag())
+                } else if value.kind() == SexpType::Promise && value.car() != unbound {
+                    Some(value.car())
+                } else {
+                    Some(value)
+                }
+            } else {
+                effects::eager_argument(expression, state.machine.function.tag())
+            };
+            match eager_value {
+                Some(value) => value,
+                None => {
+                    let reference = if kind == ARGUMENT_CODE {
+                        eval::code_reference(owner, expression)
+                    } else {
+                        let slot = if kind >= 0 {
+                            kind as u32
+                        } else {
+                            eval::NO_REFERENCE_SLOT
+                        };
+                        eval::argument_reference(owner, slot, expression)
+                    };
+                    match reference {
+                        Ok(reference) => reference,
+                        Err(unwind) => {
+                            return Some(call_fast_left(state, at, references, Err(unwind)));
+                        }
+                    }
+                }
+            }
+        };
+        args.add(index).write(Arg {
+            tag: cell.tag(),
+            value,
+        });
+        cell = cell.cdr();
+    }
+    interp.frame_args.set_len(args_start + count);
+    let formals = (shape.formals as usize).min(sources_len);
+    let mut dots = missing_value;
+    for index in (formals..sources_len).rev() {
+        let arg = *args.add(*sources.add(index) as usize);
+        let rest = if dots == missing_value { nil } else { dots };
+        dots = match values::triple(SexpType::Dots, arg.value, rest, arg.tag) {
+            Ok(dots) => dots,
+            Err(unwind) => {
+                interp.frame_args.truncate(args_start);
+                return Some(call_fast_left(state, at, references, Err(unwind)));
+            }
+        };
+    }
+    // The capacity was checked above, and every register of the window is written here
+    // before anything can read it. The body's own registers start as `NULL` so that a
+    // collection frees what a returned call left in those words ([`grow_registers`]).
+    interp.bytecode.registers.set_len(end);
+    let window = interp.bytecode.registers.as_mut_ptr().add(header);
+    window.write(nil);
+    let (mut missing, mut promised) = (0u64, 0u64);
+    let (mut formal, mut formal_index) = (function.car(), 0);
+    for index in 0..formals {
+        let source = *sources.add(index);
+        let value = if source >= 0 {
+            (*args.add(source as usize)).value
+        } else if source == eval::DOTS_SOURCE {
+            dots
+        } else if source <= eval::LITERAL_DEFAULT {
+            while formal_index < index {
+                formal = formal.cdr();
+                formal_index += 1;
+            }
+            missing |= 1 << index;
+            if source == eval::PROMISED_DEFAULT {
+                promised |= 1 << index;
+            }
+            formal.car()
+        } else {
+            missing_value
+        };
+        value.increment_refcount();
+        window.add(1 + index).write(value);
+    }
+    for index in formals..slots {
+        window.add(1 + index).write(unbound);
+    }
+    for index in 1 + slots..end - header {
+        window.add(index).write(nil);
+    }
+    interp.calls_ever = interp.calls_ever.wrapping_add(1);
+    let caller = interp.slot_owner;
+    let frame = Frame {
+        call,
+        function,
+        env: nil,
+        sys_parent: nil,
+        args: args_start as u32,
+        on_exit: ThinVec::new(),
+        handlers: interp.handlers.clone(),
+        restarts: interp.restarts.clone(),
+        srcref: interp.srcref,
+        method_vars: interp.method_vars.len() as u32,
+        closures: interp.frame_closures.len() as u32,
+        slots: header as u32,
+        missing,
+        caller,
+        pending: nil,
+        inlined: false,
+        reified_by: crate::NOT_REIFIED,
+        handle_mark: (*heap).handle_mark() as u32,
+        previous_owner: caller,
+        references: interp.references_used,
+    };
+    interp.frames.push_with(|| frame);
+    interp.srcref = if function.attrib() == nil {
+        nil
+    } else {
+        values::get_attr(function, symbols().srcref)
+    };
+    if promised != 0
+        && let Err(unwind) = eval::default_promises(depth, function, header, promised)
+    {
+        let result = eval::leave(depth + 1, Err(unwind));
+        return Some(call_fast_left(state, at, references, result));
+    }
+    interp.slot_owner = depth as u32;
+    switch_to_callee(
+        state,
+        at,
+        function,
+        header,
+        slots,
+        depth as u32 + 1,
+        references,
+        loops,
+    );
+    Some(count_entry(state))
+}
+
+/// [`effects::effect_free`] for a call of `function` at the site of `row`, which keeps the
+/// answer for the next call of the same closure ([`PlanRow::effects_env`]).
+#[cold]
+#[inline(never)]
+unsafe fn site_effect_free(row: *mut PlanRow, function: Sexp) -> R<bool> {
+    let (holds, keeps) = effects::effect_free_for_epoch(function)?;
+    // Answering can collect, which frees a plan whose keys died, but not this one: its keys
+    // are the running code and the closure being called.
+    (*row).effects_env = if keeps { function.tag() } else { nil() };
+    (*row).effects_epoch = crate::heap().binding_epoch();
+    (*row).flags = ((*row).flags & !PLAN_EFFECT_FREE) | if holds { PLAN_EFFECT_FREE } else { 0 };
+    Ok(holds)
+}
+
+/// Where the dispatch loop goes on when [`call_fast`] could not enter its callee and the call
+/// ended with `result` instead: after the call instruction with its value, or wherever the
+/// failure is taken.
+#[cold]
+#[inline(never)]
+unsafe fn call_fast_left(
+    state: &mut Activation<'_, '_>,
+    at: usize,
+    references: u32,
+    result: R<Sexp>,
+) -> usize {
+    if (*state.interp).references_used != references {
+        eval::release_references(references);
+    }
+    match result {
+        Ok(value) => {
+            state.record(at, value);
+            *state.registers.add(*state.code.add(at + 1) as usize) = value;
+            release(state);
+            after_instruction(state.code, at)
+        }
+        Err(unwind) => failed::<false>(state, at, unwind),
+    }
+}
+
+/// `Return` from a body the dispatch loop entered in place, when the frame has nothing to run
+/// or keep on the way out: no environment, no pending environment, no `on.exit`, and nothing
+/// observing calls. It does what [`finished`] does through [`eval::leave`] for such a frame
+/// and goes on after the caller's call instruction.
+///
+/// The value needs no root between the callee's registers and the caller's: giving up the
+/// slots' references frees nothing by itself, and nothing here allocates.
+#[inline(always)]
+unsafe fn return_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let interp = &mut *state.interp;
+    let heap = &mut *state.heap;
+    let nil = heap.known().nil;
+    let count = interp.bytecode.resumes.len();
+    // A stepped call's callee returns to the optimizing tier, not to the caller's code.
+    if count <= state.resume_base + usize::from(state.stepping)
+        || *state.header != nil
+        || activity::hooks() != 0
+    {
+        return None;
+    }
+    let depth = interp.bytecode.resumes.get_unchecked(count - 1).depth as usize;
+    if depth != interp.frames.len() || crate::annotations::checks_pending() {
+        return None;
+    }
+    // A frame that made closures over its environment has that environment, so the frames
+    // that return here have none to check.
+    let frame = &interp.frames[depth - 1];
+    if frame.pending != nil || !frame.on_exit.is_empty() {
+        return None;
+    }
+    debug_assert!(frame.env == nil && frame.slots as usize == state.machine.header);
+    let value = *state.registers.add(*state.code.add(at + 1) as usize);
+    let (args, method_vars, closures) = (frame.args, frame.method_vars, frame.closures);
+    heap.release_handles(frame.handle_mark as usize);
+    interp.slot_owner = frame.previous_owner;
+    interp.srcref = frame.srcref;
+    let Some((handlers, restarts)) = interp.frames.pop() else {
+        unreachable!("the returning call's frame is on the stack");
+    };
+    conditions::restore_handlers(handlers);
+    interp.restarts = restarts;
+    interp.frame_args.truncate(args as usize);
+    interp.method_vars.truncate(method_vars as usize);
+    interp.frame_closures.truncate(closures as usize);
+    let header = state.machine.header;
+    let registers = &mut interp.bytecode.registers;
+    registers.truncate(state.machine.base);
+    heap.release_slots(registers.get_unchecked_mut(header + 1..));
+    registers.truncate(header);
+    let Some(resume) = interp.bytecode.resumes.pop() else {
+        unreachable!("the dispatch loop's resume records are above its base");
+    };
+    interp
+        .bytecode
+        .loop_states
+        .truncate(resume.loop_mark as usize);
+    let machine = &mut *state.machine;
+    machine.function = resume.function;
+    machine.code = resume.code;
+    machine.header = resume.header;
+    machine.base = resume.base;
+    machine.mark = resume.mark;
+    machine.loops = &mut *resume.loops;
+    reload(state);
+    if interp.references_used != resume.references {
+        eval::release_references(resume.references);
+    }
+    let call_at = resume.call_at;
+    state.record(call_at, value);
+    *state.registers.add(*state.code.add(call_at + 1) as usize) = value;
+    release(state);
+    Some(after_instruction(state.code, call_at))
 }
 
 /// The constant `index` of the activation's constant pool, read without the ALTREP check of
@@ -6824,14 +8370,14 @@ unsafe fn end_statement_fast(state: &mut Activation<'_, '_>, at: usize) -> Optio
 }
 
 #[inline(always)]
-unsafe fn branch_unless_primitive_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+unsafe fn branch_unless_same_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
     let code = state.code;
     if *state.registers.add(*code.add(at + 1) as usize)
         != pool_constant(state, *code.add(at + 2) as usize)
     {
         return Some(*code.add(at + 3) as usize);
     }
-    Some(at + 1 + operand_count(Op::BranchUnlessPrimitive))
+    Some(at + 1 + operand_count(Op::BranchUnlessSame))
 }
 
 #[inline(always)]
@@ -6911,8 +8457,10 @@ unsafe fn read_element_call<const STRING: bool>(
     ) else {
         // A tail call, and the subject's kind is tested only out of line: tested here, it joins
         // the kind dispatch above, which then compiles to a jump table that the numeric read pays
-        // for.
-        return if STRING {
+        // for. The ALTREP test is a header bit, not a kind, so it stays out of that dispatch.
+        return if subject.is_altrep() {
+            read_altrep_element_call(state, at)
+        } else if STRING {
             None
         } else {
             read_string_element_call(state, at, double)
@@ -6925,12 +8473,90 @@ unsafe fn read_element_call<const STRING: bool>(
         || second.tag() != known.nil
         || arguments.car() == known.missing_arg
         || second.car() == known.missing_arg
-        || activity::enabled()
-        || crate::utils::PROFILE_TICK.load(std::sync::atomic::Ordering::Relaxed)
+        || activity::hooks() != 0
     {
         return None;
     }
     let value = element_access::element_value::<STRING>(heap, subject, position)?;
+    state.record(at, value);
+    *registers.add(*code.add(at + 1) as usize) = value;
+    (*state.interp).visible = true;
+    Some(at + 1 + operand_count(Op::CallBuiltin))
+}
+
+/// The ALTREP branch of [`read_element_call`]: `x[i]` or `x[[i]]` for a plain numeric scalar
+/// within bounds and, without attributes, a compact integer or double sequence, computed from
+/// its first element and increment without expanding it, or a deferred string, converting only
+/// that element. Any other ALTREP vector declines to the builtin, whose `Elt` read may run a
+/// package's R code.
+#[cold]
+#[inline(never)]
+unsafe fn read_altrep_element_call(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let code = state.code;
+    let registers = state.registers;
+    let heap = &mut *state.heap;
+    let first = *code.add(at + 4) as usize;
+    let subject = *registers.add(first);
+    let index = *registers.add(first + 1);
+    let kind = subject.kind();
+    if subject.attrib() != heap.known().nil
+        || index.is_altrep()
+        || index.attrib() != heap.known().nil
+        || index.length() != 1
+    {
+        return None;
+    }
+    let sequence = values::compact_sequence(subject);
+    let count = match sequence {
+        Some((count, _, _)) => count,
+        None if kind == SexpType::String
+            && subject.tag() == (*state.interp).deferred_string_class =>
+        {
+            subject.length() as usize
+        }
+        None => return None,
+    };
+    let position = match index.kind() {
+        SexpType::Integer => f64::from(index.slice::<i32>()[0]),
+        SexpType::Real => index.slice::<f64>()[0],
+        _ => return None,
+    };
+    // NA_integer_ and NaN fail the lower bound, and `x[2.7]` truncates to the second element.
+    if !(position >= 1.0 && position < count as f64 + 1.0) {
+        return None;
+    }
+    let known = *heap.known();
+    let arguments = pool_constant(state, *code.add(at + 3) as usize).cdr();
+    let second = arguments.cdr();
+    if arguments.tag() != known.nil
+        || second.tag() != known.nil
+        || arguments.car() == known.missing_arg
+        || second.car() == known.missing_arg
+        || activity::enabled()
+    {
+        return None;
+    }
+    let offset = position as usize - 1;
+    let value = match sequence {
+        Some((_, start, step)) => {
+            let element = start + step * offset as f64;
+            let bits = if kind == SexpType::Integer {
+                element as i32 as u32 as u64
+            } else {
+                element.to_bits()
+            };
+            heap.try_alloc_scalar(kind, [bits, 0])?
+        }
+        None => {
+            // An error converting the element (only running out of memory) declines, and the
+            // builtin then converts it again and raises that error.
+            let element = values::altrep_string_elt(subject, offset).ok()?;
+            let scalar = heap.try_alloc_scalar(kind, [element.as_ptr() as u64, 0])?;
+            // The store `Heap::set_element` would count into a fresh vector.
+            element.increment_refcount();
+            scalar
+        }
+    };
     state.record(at, value);
     *registers.add(*code.add(at + 1) as usize) = value;
     (*state.interp).visible = true;
@@ -7070,7 +8696,40 @@ const fn specialized_table(mut table: [Handler; HANDLER_COUNT]) -> [Handler; HAN
     forms!(
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
     );
+    table[POSITIONAL_CALL_BUILTIN] = positional_call_builtin;
     table
+}
+
+/// The handler of [`POSITIONAL_CALL_BUILTIN`]: the element read of `[` and `[[` first, as for the
+/// generic instruction, then [`op_call_builtin_positional`].
+unsafe fn positional_call_builtin(state: &mut Activation<'_, '_>, at: usize) {
+    if let Some(next) = call_builtin_fast(state, at) {
+        dispatch!(state, next);
+    }
+    let instruction = Instruction {
+        code: state.code,
+        at,
+        registers: state.registers,
+    };
+    let flow = op_call_builtin_positional(state, instruction);
+    let pc = advance::<false>(state, at, at + 1 + operand_count(Op::CallBuiltin), flow);
+    if pc == STOP {
+        return;
+    }
+    release(state);
+    dispatch!(state, pc)
+}
+
+/// Whether `count` untagged, non-empty cells make up `call`'s arguments, which lets its
+/// `CallBuiltin` take [`POSITIONAL_CALL_BUILTIN_WORD`].
+unsafe fn positional_call(call: Sexp, count: usize) -> bool {
+    let mut cell = call.cdr();
+    let mut cells = 0;
+    while cell != nil() && cell.tag() == nil() && cell.car() != missing_arg() {
+        cell = cell.cdr();
+        cells += 1;
+    }
+    cell == nil() && cells == count
 }
 
 /// The opcode of the specialized form of `operator` on two integers or on doubles, if there is
@@ -7264,6 +8923,31 @@ unsafe fn op_get_var(state: &mut Activation<'_, '_>, instruction: Instruction) -
     Ok(Flow::Next)
 }
 
+/// [`Op::Argument`]: the empty argument for a missing formal, and the variable's value
+/// otherwise. The question is GNU R's `R_isMissing` for an argument of a subset primitive, so a
+/// formal that took its default is not missing.
+unsafe fn op_argument(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    if argument_missing(state, instruction.at)? {
+        state.record_kind(instruction.at, feedback::MISSING);
+        (*state.interp).visible = true;
+        instruction.output(0, missing_arg());
+        return Ok(Flow::Next);
+    }
+    op_get_var(state, instruction)
+}
+
+/// Whether the formal the [`Op::Argument`] at `pc` reads is missing.
+unsafe fn argument_missing(state: &Activation<'_, '_>, pc: usize) -> R<bool> {
+    if state.in_slots() {
+        return match state.slot(*state.code.add(pc + 3) as usize) {
+            Some(slot) => eval::value_is_missing(*slot),
+            None => Ok(false),
+        };
+    }
+    let symbol = pool_constant(state, *state.code.add(pc + 2) as usize);
+    eval::argument_is_missing(symbol, *state.header)
+}
+
 #[inline(always)]
 unsafe fn op_set_var(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     let symbol = state.constant(instruction, 0);
@@ -7405,6 +9089,11 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
     let call = state.constant(instruction, 2);
     let first = instruction.operand(3);
     let count = instruction.operand(4);
+    // The step table, which the optimizing tier runs single instructions through, sends a
+    // positional site here too.
+    if *instruction.code.add(instruction.at) as u32 == POSITIONAL_CALL_BUILTIN_WORD {
+        return op_call_builtin_positional(state, instruction);
+    }
     let definition = eval::builtin_def(function)?;
     if count == 1
         && let Some(unary) = definition.unary
@@ -7444,6 +9133,70 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
         cell = cell.cdr();
     }
     let value = call_builtin(definition, call, function, &args, *state.header)?;
+    state.record(instruction.at, value);
+    instruction.output(0, value);
+    Ok(Flow::Next)
+}
+
+/// [`op_call_builtin`] at a [`POSITIONAL_CALL_BUILTIN`] site, whose arguments need neither their
+/// tags read nor an empty one rejected.
+#[inline(always)]
+unsafe fn op_call_builtin_positional(
+    state: &mut Activation<'_, '_>,
+    instruction: Instruction,
+) -> R<Flow> {
+    let function = instruction.input(1);
+    let call = state.constant(instruction, 2);
+    let values = std::slice::from_raw_parts(
+        instruction.registers.add(instruction.operand(3)),
+        instruction.operand(4),
+    );
+    let definition = eval::builtin_def(function)?;
+    if let [value] = values
+        && let Some(unary) = definition.unary
+        && let Some(value) = unary(*value)?
+    {
+        (*state.interp).visible = true;
+        state.record(instruction.at, value);
+        instruction.output(0, value);
+        return Ok(Flow::Next);
+    }
+    if definition.direct.is_some()
+        && !definition.checks.replacement
+        && let Some(value) = eval::call_direct(definition, call, values)?
+    {
+        state.record(instruction.at, value);
+        instruction.output(0, value);
+        return Ok(Flow::Next);
+    }
+    // The arguments copy the registers `first..first + count`, which keep the same values,
+    // rooted, until this instruction writes its result: a nested call's registers start above
+    // this frame's, and growing the register file carries them over. So they need no root of
+    // their own.
+    let env = *state.header;
+    // Every dispatch needs an object (or an S4 value, for `c`) among the arguments, except the
+    // matrix products' argument count error.
+    let dispatches = definition.generic != Generic::None
+        && (definition.generic == Generic::MatrixOps
+            || values
+                .iter()
+                .any(|value| value.is_object() || value.has_gp(gp::S4_OBJECT)));
+    let value = eval::with_positional_args(
+        values.len(),
+        |index| {
+            values
+                .get(index)
+                .copied()
+                .ok_or_else(|| error("a register is out of range"))
+        },
+        |args| {
+            if dispatches {
+                call_builtin(definition, call, function, args, env)
+            } else {
+                eval::call_builtin_positional(definition, call, function, args, env)
+            }
+        },
+    )?;
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
@@ -7519,28 +9272,52 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             && !effects::calling_handler_established()
             && effects::effect_free(function)?;
         let plan = direct_plan(state, instruction, function, call)?;
-        // Copied out of the table, which a nested call may grow.
-        let sources: SmallVec<[i32; 8]> = plan
-            .map(|id| SmallVec::from_slice((*state.interp).bytecode.call_plans.sources(id)))
-            .unwrap_or_default();
-        let per_call = plan.is_some() && sources.as_slice() == [eval::MATCH_PER_CALL];
+        let plans = &(*state.interp).bytecode.call_plans;
+        let generation = plans.generation;
+        let per_call = plan.is_some_and(|id| plans.sources(id) == [eval::MATCH_PER_CALL]);
         if let Some(id) = plan
             && !per_call
-            && let Some(value) = match call_do_call(state, function, call, &sources)? {
+            && (function == (*state.interp).do_call || plans.pins[id as usize] != nil())
+        {
+            // Copied out of the table, which the call may grow.
+            let sources: SmallVec<[i32; 8]> = SmallVec::from_slice(plans.sources(id));
+            if let Some(value) = match call_do_call(state, function, call, &sources)? {
                 Some(value) => Some(value),
                 None => call_wrapper(state, function, call, id, &sources)?,
+            } {
+                state.record(instruction.at, value);
+                instruction.output(0, value);
+                return Ok(Flow::Next);
             }
+        }
+        if let Some(id) = plan
+            && !per_call
+            && state.in_slots()
+            && function != (*state.interp).do_call
         {
-            state.record(instruction.at, value);
-            instruction.output(0, value);
-            return Ok(Flow::Next);
+            let plans = &(*state.interp).bytecode.call_plans;
+            // The site's compiled arguments are settled once it has run on a slot frame.
+            if plans.rows[id as usize].flags & PLAN_PREPARED == 0
+                && plans.pins[id as usize] == nil()
+                && state.constants.element(instruction.operand(2) + 1) != unbound()
+            {
+                prepare_plan(state, id, arguments);
+            }
+        }
+        if syntax::testing::invariants_enabled() {
+            let observers = activity::DEBUGGER | activity::MOVES | activity::NO_OBJECT_SYSTEMS;
+            assert_eq!(
+                activity::hooks() & observers,
+                crate::observer_bits(),
+                "the observer word that a call's fast path tests is out of step with the \
+                 interpreter's state"
+            );
         }
         let references = (*state.interp).references_used;
         // From a slot frame, a call whose arguments need no promise over the frame leaves it
         // without an environment, and the callee finds its caller as the frame below its own.
         let sys_parent = if state.in_slots()
-            && (slot_args_into(state, arguments, eager, &mut args)?
-                || slot_promises_into(state, arguments, eager, plan.is_some(), &mut args)?)
+            && slot_promises_into(state, arguments, eager, plan.is_some(), &mut args)?
         {
             nil()
         } else {
@@ -7557,7 +9334,72 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         };
         let result = match plan {
             Some(_) if per_call => eval::call_matching(call, function, &args, sys_parent),
-            Some(_) => eval::call_with_plan(call, function, &sources, &args, sys_parent),
+            // The sources are read from the table only once the arguments are collected, and
+            // binding them grows no table.
+            Some(id) => match (*state.interp).bytecode.call_plans.current(
+                id,
+                generation,
+                state.constants,
+                instruction.at,
+                function,
+            ) {
+                Some((shape, sources)) => {
+                    if in_place(state, function) {
+                        return Ok(Flow::Goto(
+                            match eval::bind_plan(call, function, shape, sources, &args, sys_parent)
+                            {
+                                Ok(entered) if entered.header == crate::NO_SLOTS => {
+                                    after_call(state, instruction, references, entered.value)
+                                }
+                                Ok(entered) => enter_in_place(
+                                    state,
+                                    instruction.at,
+                                    function,
+                                    entered,
+                                    shape.slots as usize,
+                                    references,
+                                ),
+                                Err(unwind) => {
+                                    if (*state.interp).references_used != references {
+                                        eval::release_references(references);
+                                    }
+                                    return Err(unwind);
+                                }
+                            },
+                        ));
+                    }
+                    eval::call_with_plan(call, function, shape, sources, &args, sys_parent)
+                }
+                None => match eval::direct_sources(function, call)? {
+                    Some((shape, sources)) if sources[..] != [eval::MATCH_PER_CALL] => {
+                        eval::call_with_plan(call, function, shape, &sources, &args, sys_parent)
+                    }
+                    _ => eval::call_matching(call, function, &args, sys_parent),
+                },
+            },
+            None if function.cdr().kind() == SexpType::Bytecode && in_place(state, function) => {
+                return Ok(Flow::Goto(
+                    match eval::apply_closure_entering(call, function, &args, sys_parent, None) {
+                        Ok(entered) if entered.header == crate::NO_SLOTS => {
+                            after_call(state, instruction, references, entered.value)
+                        }
+                        Ok(entered) => enter_in_place(
+                            state,
+                            instruction.at,
+                            function,
+                            entered,
+                            slot_count(function.cdr()),
+                            references,
+                        ),
+                        Err(unwind) => {
+                            if (*state.interp).references_used != references {
+                                eval::release_references(references);
+                            }
+                            return Err(unwind);
+                        }
+                    },
+                ));
+            }
             None => eval::apply_closure_owning(call, function, &args, sys_parent, None),
         };
         if (*state.interp).references_used != references {
@@ -7596,6 +9438,42 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
+}
+
+/// Whether the dispatch loop may run the body of `function`, which a call instruction is about
+/// to call through its plan, in place of calling it: the loop runs whole activations, and the
+/// body's loop states fit [`State::loop_states`].
+#[inline(always)]
+unsafe fn in_place(state: &Activation<'_, '_>, function: Sexp) -> bool {
+    let loops = &(*state.interp).bytecode.loop_states;
+    state.resume_base != NO_RESUMES && loops.len() + loop_count(function.cdr()) <= loops.capacity()
+}
+
+/// What a `CallGeneric` instruction does with the value of a call that ran whole: the pc it
+/// goes on at.
+#[inline(always)]
+unsafe fn after_call(
+    state: &mut Activation<'_, '_>,
+    instruction: Instruction,
+    references: u32,
+    value: Sexp,
+) -> usize {
+    if (*state.interp).references_used != references {
+        eval::release_references(references);
+    }
+    state.record(instruction.at, value);
+    instruction.output(0, value);
+    after_instruction(instruction.code, instruction.at)
+}
+
+/// The pc after the instruction at `at`. A call instruction of another opcode makes its call
+/// as `CallGeneric` does, so the pc after a call is read from the code.
+#[inline(always)]
+unsafe fn after_instruction(code: *const i32, at: usize) -> usize {
+    let Some(op) = op_of(*code.add(at) as u32) else {
+        unreachable!("a call instruction has an opcode");
+    };
+    at + 1 + operand_count(op)
 }
 
 /// The arguments of the closure call `call` at `instruction`, each compiled to run as a promise
@@ -7656,7 +9534,7 @@ unsafe fn direct_plan(
         .then(|| plans.owned(word as u32 - 1, owner, instruction.at))
         .flatten();
     let misses = match existing {
-        Some(id) if plans.formals[id] == formals && plans.bodies[id] == body => {
+        Some(id) if plans.rows[id].formals == formals && plans.rows[id].body == body => {
             return Ok(Some(id as u32));
         }
         Some(id) => i32::from(plans.misses[id]),
@@ -7670,16 +9548,29 @@ unsafe fn direct_plan(
         return Ok(None);
     }
     // A closure without formals has nothing to plan.
-    let sources = eval::direct_sources(function, call)?.filter(|sources| !sources.is_empty());
+    let plan = eval::direct_sources(function, call)?.filter(|(_, sources)| !sources.is_empty());
     let plans = &mut (*state.interp).bytecode.call_plans;
     // Matching allocates, and a collection frees a plan whose closure died.
     let existing = existing.and_then(|id| plans.owned(id as u32, owner, instruction.at));
     // Replacing a plan made for another closure counts as a miss, as does a closure the site
     // cannot plan for.
-    let misses = misses + i32::from(existing.is_some() || sources.is_none());
-    let word = match (sources, existing) {
-        (Some(sources), _) => {
-            let id = plans.store(existing, owner, instruction.at, formals, body, &sources);
+    let misses = misses + i32::from(existing.is_some() || plan.is_none());
+    let word = match (plan, existing) {
+        (Some(plan), _) => {
+            let arguments = if plan.1[..] == [eval::MATCH_PER_CALL] {
+                0
+            } else {
+                length(call.cdr())
+            };
+            let id = plans.store(
+                existing,
+                owner,
+                instruction.at,
+                formals,
+                body,
+                arguments,
+                &plan,
+            );
             plans.misses[id] = misses as u8;
             values::ints_mut(owner.element(FEEDBACK))[word_at] = id as i32 + 1;
             return Ok(Some(id as u32));
@@ -7694,33 +9585,75 @@ unsafe fn direct_plan(
     Ok(None)
 }
 
-/// The direct-call plans of the session's call sites ([`direct_plan`]), as columns indexed by
-/// plan id. A site with no plan has no entry. The table holds its keys weakly: the code of the
-/// site, and the formals and body of the closures the plan is for. A collection that finds one
-/// of them dead frees the plan before the address can be reused, so no site matches a plan
-/// made for an object that has since died.
+/// The direct-call plans of the session's call sites ([`direct_plan`]), indexed by plan id: a
+/// row of what every call of the site reads ([`PlanRow`]), and columns for the rest. A site
+/// with no plan has no entry. The table holds its keys weakly: the code of the site, and the
+/// formals and body of the closures the plan is for. A collection that finds one of them dead
+/// frees the plan before the address can be reused, so no site matches a plan made for an
+/// object that has since died.
 #[derive(Default)]
 pub struct CallPlans {
-    /// The constants of the code holding the site, or `NULL` for a free id.
-    owners: Vec<Sexp>,
-    /// The position of the site's call instruction in that code.
-    sites: Vec<u32>,
-    formals: Vec<Sexp>,
-    bodies: Vec<Sexp>,
+    rows: Vec<PlanRow>,
     /// How many times the site failed to plan ([`PLAN_MISSES`]).
     misses: Vec<u8>,
-    /// Where the plan's sources start in [`CallPlans::pool`], how many there are, and how many
-    /// the range can hold, so a site that plans again reuses it.
-    sources_at: Vec<u32>,
-    sources_len: Vec<u32>,
-    sources_capacity: Vec<u32>,
+    /// How many words of [`CallPlans::pool`] the plan's range holds, so a site that plans again
+    /// reuses it.
+    capacities: Vec<u32>,
     /// The site's pin of a wrapper's lookups ([`WrapperPin`]): unbound until the site calls the
     /// wrapper, `NULL` for a closure that is not one. The one heap object a plan refers to
     /// strongly.
     pins: Vec<Sexp>,
     pool: Vec<i32>,
     free: Vec<u32>,
+    /// Moves whenever a plan is stored or freed, so a site that read its plan before running
+    /// its arguments knows the plan is unchanged after without checking its keys.
+    generation: u32,
 }
+
+/// What a call reads of its site's plan, in one cache line.
+#[derive(Clone, Copy)]
+struct PlanRow {
+    /// The constants of the code holding the site, or `NULL` for a free id.
+    owner: Sexp,
+    formals: Sexp,
+    body: Sexp,
+    /// The enclosure of the closure [`effects::effect_free`] last answered for at this site,
+    /// with the binding epoch it answered at ([`PlanRow::effects_epoch`]) and the answer
+    /// ([`PLAN_EFFECT_FREE`]): a closure with the same enclosure called again under the same
+    /// epoch gets the same answer without reading the proof
+    /// ([`effects::effect_free_for_epoch`]). `NULL` when no answer is kept. Any collection
+    /// drops it, because the row does not keep the enclosure alive and its address can be
+    /// reused.
+    effects_env: Sexp,
+    effects_epoch: u64,
+    /// The position of the site's call instruction in that code.
+    site: u32,
+    /// Where the plan's sources start in [`CallPlans::pool`]. The kinds of the site's
+    /// arguments ([`prepare_plan`]) follow them.
+    sources_at: u32,
+    sources_len: u32,
+    /// How many arguments the site writes.
+    arguments: u16,
+    shape: eval::CallShape,
+    /// How many `for` loops the body has.
+    loops: u16,
+    flags: u8,
+}
+
+/// The [`PlanRow::flags`] bit set once the kinds of the site's arguments are worked out.
+const PLAN_PREPARED: u8 = 1;
+/// The [`PlanRow::flags`] bit set when [`call_fast`] may take the site's calls.
+const PLAN_FAST: u8 = 2;
+/// The [`PlanRow::flags`] bit holding the answer [`PlanRow::effects_env`] is kept for.
+const PLAN_EFFECT_FREE: u8 = 4;
+
+/// The kind of an argument a site passes as it is written: a constant, or the empty argument.
+const ARGUMENT_VALUE: i32 = -1;
+/// The kind of an argument that names a variable the calling frame keeps in no slot. A
+/// variable in a slot has the slot's index as its kind.
+const ARGUMENT_OUTSIDE: i32 = -2;
+/// The kind of an argument that is code compiled to run on the calling frame's slots.
+const ARGUMENT_CODE: i32 = -3;
 
 impl CallPlans {
     /// The plan `id` when it belongs to the site at `at` in the code whose constants are
@@ -7728,55 +9661,106 @@ impl CallPlans {
     /// that saved the code.
     fn owned(&self, id: u32, owner: Sexp, at: usize) -> Option<usize> {
         let id = id as usize;
-        (self.owners.get(id) == Some(&owner) && self.sites[id] as usize == at).then_some(id)
+        self.rows
+            .get(id)
+            .is_some_and(|row| row.owner == owner && row.site as usize == at)
+            .then_some(id)
     }
 
     pub fn sources(&self, id: u32) -> &[i32] {
-        let id = id as usize;
-        let at = self.sources_at[id] as usize;
-        &self.pool[at..at + self.sources_len[id] as usize]
+        let row = &self.rows[id as usize];
+        let at = row.sources_at as usize;
+        &self.pool[at..at + row.sources_len as usize]
     }
 
-    /// Stores a plan for the site, in `existing`'s place when it has one.
-    fn store(
+    /// The plan `id` with its shape and sources, when it is still the site's plan for closures
+    /// with `function`'s formals and body, as it was when the table's generation was
+    /// `generation`. Running the arguments can run R code that replans the site, or frees the
+    /// plan and reuses its id.
+    #[inline]
+    unsafe fn current(
+        &self,
+        id: u32,
+        generation: u32,
+        owner: Sexp,
+        at: usize,
+        function: Sexp,
+    ) -> Option<(eval::CallShape, &[i32])> {
+        let id = if generation == self.generation {
+            id as usize
+        } else {
+            let id = self.owned(id, owner, at)?;
+            if self.rows[id].formals != function.car() || self.rows[id].body != function.cdr() {
+                return None;
+            }
+            id
+        };
+        Some((self.rows[id].shape, self.sources(id as u32)))
+    }
+
+    /// Stores a plan for the site, which writes `arguments` arguments, in `existing`'s place
+    /// when it has one.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn store(
         &mut self,
         existing: Option<usize>,
         owner: Sexp,
         at: usize,
         formals: Sexp,
         body: Sexp,
-        sources: &[i32],
+        arguments: usize,
+        (shape, sources): &eval::CallPlan,
     ) -> usize {
+        self.generation = self.generation.wrapping_add(1);
         let id = match existing.or_else(|| self.free.pop().map(|id| id as usize)) {
             Some(id) => id,
             None => {
-                self.owners.push(nil());
-                self.sites.push(0);
-                self.formals.push(nil());
-                self.bodies.push(nil());
+                self.rows.push(PlanRow {
+                    owner: nil(),
+                    formals: nil(),
+                    body: nil(),
+                    effects_env: nil(),
+                    effects_epoch: 0,
+                    site: 0,
+                    sources_at: 0,
+                    sources_len: 0,
+                    arguments: 0,
+                    shape: eval::CallShape::default(),
+                    loops: 0,
+                    flags: 0,
+                });
                 self.misses.push(0);
-                self.sources_at.push(0);
-                self.sources_len.push(0);
-                self.sources_capacity.push(0);
+                self.capacities.push(0);
                 self.pins.push(nil());
-                self.owners.len() - 1
+                self.rows.len() - 1
             }
         };
-        self.owners[id] = owner;
-        self.sites[id] = at as u32;
-        self.formals[id] = formals;
-        self.bodies[id] = body;
         self.pins[id] = unbound();
-        let length = sources.len() as u32;
-        if length > self.sources_capacity[id] {
-            self.sources_at[id] = self.pool.len() as u32;
-            self.sources_capacity[id] = length;
-            self.pool.extend_from_slice(sources);
-        } else {
-            let start = self.sources_at[id] as usize;
-            self.pool[start..start + sources.len()].copy_from_slice(sources);
+        let length = sources.len() + arguments;
+        let mut sources_at = self.rows[id].sources_at;
+        if length > self.capacities[id] as usize {
+            sources_at = self.pool.len() as u32;
+            self.capacities[id] = length as u32;
+            self.pool.resize(self.pool.len() + length, 0);
         }
-        self.sources_len[id] = length;
+        let start = sources_at as usize;
+        self.pool[start..start + sources.len()].copy_from_slice(sources);
+        self.rows[id] = PlanRow {
+            owner,
+            formals,
+            body,
+            effects_env: nil(),
+            effects_epoch: 0,
+            site: at as u32,
+            sources_at,
+            sources_len: sources.len() as u32,
+            // A site with more arguments, or a body with more loops, than the row counts never
+            // prepares ([`prepare_plan`]).
+            arguments: u16::try_from(arguments).unwrap_or(u16::MAX),
+            shape: *shape,
+            loops: u16::try_from(loop_count(body)).unwrap_or(u16::MAX),
+            flags: 0,
+        };
         id
     }
 
@@ -7788,24 +9772,72 @@ impl CallPlans {
 
     /// Frees every plan with a dead key. A major collection also drops every pin: a pin holds
     /// the closure's environment, which can reach the very code and body that key the plan,
-    /// and would otherwise keep the plan alive forever.
+    /// and would otherwise keep the plan alive forever. A site whose pin is dropped decides
+    /// again whether its callee is a wrapper, so its calls leave the fast path until it has.
     pub unsafe fn clear_dead(&mut self, liveness: &Liveness<'_>) {
         let live = |object: Sexp| object == nil() || liveness.is_live(object);
-        for id in 0..self.owners.len() {
-            if self.owners[id] == nil() {
+        for id in 0..self.rows.len() {
+            let row = &mut self.rows[id];
+            if row.owner == nil() {
                 continue;
             }
-            if !live(self.owners[id]) || !live(self.formals[id]) || !live(self.bodies[id]) {
-                self.owners[id] = nil();
-                self.formals[id] = nil();
-                self.bodies[id] = nil();
+            row.effects_env = nil();
+            if !live(row.owner) || !live(row.formals) || !live(row.body) {
+                row.owner = nil();
+                row.formals = nil();
+                row.body = nil();
+                row.flags = 0;
                 self.pins[id] = nil();
                 self.free.push(id as u32);
+                self.generation = self.generation.wrapping_add(1);
             } else if liveness.is_major() {
+                row.flags = 0;
                 self.pins[id] = unbound();
             }
         }
     }
+}
+
+/// Works out, once the site at `at` knows its callee is no wrapper, how each of the site's
+/// `arguments` binds ([`ARGUMENT_VALUE`] and the kinds beside it), and whether [`call_fast`]
+/// may take the site's calls: every argument is a constant, the empty argument, a variable or
+/// code compiled against the calling frame's slots. `...`, `..N` and code that needs the
+/// frame's environment leave the site to the generic path.
+unsafe fn prepare_plan(state: &Activation<'_, '_>, id: u32, arguments: Sexp) {
+    let mut kinds: SmallVec<[i32; 8]> = SmallVec::new();
+    let mut fast = true;
+    let mut cell = arguments;
+    while cell.kind() == SexpType::Pairlist {
+        let expression = cell.car();
+        kinds.push(match expression.kind() {
+            _ if expression == missing_arg() => ARGUMENT_VALUE,
+            SexpType::Symbol
+                if expression == symbols().dots || eval::dot_dot_index(expression).is_some() =>
+            {
+                fast = false;
+                break;
+            }
+            SexpType::Symbol => {
+                slot_index(state, expression).map_or(ARGUMENT_OUTSIDE, |slot| slot as i32)
+            }
+            SexpType::Bytecode if expression.cdr().element(SLOTS) != nil() => ARGUMENT_CODE,
+            SexpType::Bytecode | SexpType::Language | SexpType::Promise => {
+                fast = false;
+                break;
+            }
+            _ => ARGUMENT_VALUE,
+        });
+        cell = cell.cdr();
+    }
+    let plans = &mut (*state.interp).bytecode.call_plans;
+    let row = &mut plans.rows[id as usize];
+    row.flags |= PLAN_PREPARED;
+    if !fast || kinds.len() != row.arguments as usize || row.loops == u16::MAX {
+        return;
+    }
+    let start = (row.sources_at + row.sources_len) as usize;
+    row.flags |= PLAN_FAST;
+    plans.pool[start..start + kinds.len()].copy_from_slice(&kinds);
 }
 
 /// Runs a planned call of `function` with [`eval::run_wrapper`] when the closure is a wrapper,
@@ -8868,7 +10900,7 @@ unsafe fn assign_slot_element(
         target
     } else {
         let was_array = target.is_array();
-        let copy = values::shallow_duplicate(target)?;
+        let copy = values::shallow_duplicate_attr(target)?;
         copy.set_array(was_array);
         heap.root(copy);
         copy
@@ -8886,6 +10918,7 @@ unsafe fn assign_slot_element(
     };
     interp().assignment_call = outer;
     let result = result?;
+    let result = values::unwrap_assigned(result, current == result);
     // A warning's calling handler may have looked at the frame, which then holds the variable
     // in its environment instead of the slot.
     if *state.header != nil() {
@@ -9012,50 +11045,10 @@ unsafe fn slot_builtin_args(
     Ok(())
 }
 
-/// The arguments of a closure call made from a slot frame that has no environment: constants as
-/// themselves and, for an `eager` call (see [`eval::eager_args_into`]), variables as their
-/// values. `false` when an argument needs a promise over the frame, and with it the frame's
-/// environment.
-unsafe fn slot_args_into(
-    state: &Activation<'_, '_>,
-    arguments: Sexp,
-    eager: bool,
-    args: &mut eval::Args,
-) -> R<bool> {
-    let missing = missing_arg();
-    let mut cell = arguments;
-    while cell.kind() == SexpType::Pairlist {
-        let expression = cell.car();
-        let value = match expression.kind() {
-            _ if expression == missing => expression,
-            SexpType::Symbol if expression == symbols().dots => {
-                if !slot_dots_into(state, false, args)? {
-                    return Ok(false);
-                }
-                cell = cell.cdr();
-                continue;
-            }
-            SexpType::Symbol if eager => match slot_eager_argument(state, expression) {
-                Some(value) => value,
-                None => return Ok(false),
-            },
-            SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode => {
-                return Ok(false);
-            }
-            _ => expression,
-        };
-        args.push(Arg {
-            tag: cell.tag(),
-            value,
-        });
-        cell = cell.cdr();
-    }
-    Ok(true)
-}
-
-/// [`slot_args_into`] for a call whose arguments need promises: a name or compiled code
-/// becomes a promise over the frame's slots ([`eval::slot_promise`]), and `...` passes on what
-/// it collected. With `references`, for a callee that takes its arguments straight into slots,
+/// The arguments of a closure call made from a slot frame that has no environment: a constant
+/// as itself, for an `eager` call (see [`eval::eager_args_into`]) a variable as its value, a
+/// name or compiled code as a promise over the frame's slots ([`eval::slot_promise`]), and
+/// `...` as what it collected. With `references`, for a callee that takes its arguments straight into slots,
 /// a name becomes an argument reference ([`eval::argument_reference`]) and compiled code a code
 /// reference ([`eval::code_reference`]) instead, which need no allocation and no environment.
 /// `false`, with `args` cleared, when an argument needs the frame's environment itself: `..N`, code that was not compiled, or code that uses a local the frame keeps in no
@@ -9070,12 +11063,9 @@ unsafe fn slot_promises_into(
     args.clear();
     let owner = (*state.interp).slot_owner as usize;
     let mark = (*state.interp).references_used;
-    let unforced = (&(*state.interp).frames)[owner].unforced;
     let missing = missing_arg();
     // One pass builds the arguments and gives up at the first one that needs the frame's
-    // environment, which is rare, undoing what it made: references go back to the pool, and
-    // the frame's count of unforced promises returns to what it was, since a promise made
-    // over a pending environment counts itself and one made over a reified one does not.
+    // environment, which is rare, undoing what it made: references go back to the pool.
     let mut cell = arguments;
     while cell.kind() == SexpType::Pairlist {
         let expression = cell.car();
@@ -9109,7 +11099,6 @@ unsafe fn slot_promises_into(
             _ => Some(expression),
         };
         let Some(value) = value else {
-            (&mut (*state.interp).frames)[owner].unforced = unforced;
             if (*state.interp).references_used != mark {
                 eval::release_references(mark);
             }
@@ -9477,8 +11466,10 @@ unsafe fn op_move(_state: &mut Activation<'_, '_>, instruction: Instruction) -> 
 
 #[inline(always)]
 unsafe fn op_switch_arm(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
-    let value = switch_arm(instruction.input(1), state.constant(instruction, 2))?;
-    instruction.output(0, value);
+    let table = state.constant(instruction, 2);
+    let arm = switch_arm(instruction.input(1), table)?;
+    let number = values::ints(table.element(SWITCH_NUMBERS))[arm] as usize;
+    instruction.output(0, pool_constant(state, number));
     Ok(Flow::Next)
 }
 
@@ -9511,7 +11502,7 @@ unsafe fn op_match_condition(state: &mut Activation<'_, '_>, instruction: Instru
 }
 
 #[inline(always)]
-unsafe fn op_branch_unless_primitive(
+unsafe fn op_branch_unless_same(
     state: &mut Activation<'_, '_>,
     instruction: Instruction,
 ) -> R<Flow> {
@@ -9537,22 +11528,148 @@ unsafe fn op_dispatch_subject(state: &mut Activation<'_, '_>, instruction: Instr
     let function = instruction.input(1);
     let call = state.constant(instruction, 2);
     let definition = eval::builtin_def(function)?;
-    let mut args = eval::Args::new();
-    let value = match dispatch::dispatch_evaluated_subject(
-        definition,
-        call,
-        function,
-        call.cdr(),
-        instruction.input(3),
-        state.env(Reify::Site("dispatch subject"))?,
-        &mut args,
-    )? {
+    let subject = instruction.input(3);
+    let value = match slot_subject_call(state, definition, call, function, subject)? {
         Some(value) => value,
-        None => call_builtin(definition, call, function, &args, *state.header)?,
+        None => {
+            let mut args = eval::Args::new();
+            match dispatch::dispatch_evaluated_subject(
+                definition,
+                call,
+                function,
+                call.cdr(),
+                subject,
+                state.env(Reify::Site("dispatch subject"))?,
+                &mut args,
+            )? {
+                Some(value) => value,
+                None => eval::call_builtin(definition, call, function, &args, *state.header)?,
+            }
+        }
     };
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
+}
+
+/// A dispatch-or-eval special called from a slot frame once its subject evaluated to
+/// `subject`, when the slots answer every other argument: an empty argument, a constant, or a
+/// local holding a value or a promise. The order is GNU R's `DispatchOrEval`: an object subject
+/// looks for its method first, and only without one do the other arguments evaluate, a missing
+/// one passing on as an empty argument (`i` in `g <- function(i) f(x, i); g()`). The method
+/// lookup starts at the enclosure, which answers as the frame would because no local is named
+/// like a method of the generic, so the frame gets an environment only for a method to run in.
+///
+/// Dispatch is decided once the lookup finds no method, so the primitive runs without the second
+/// lookup [`call_builtin`] would make, as GNU R's subset primitives call their default code.
+///
+/// `None` sends the call to the environment's path: an argument the slots do not answer, an S4
+/// or frame subject, a local that could bind a method or make the frame a top environment, and
+/// forcing an argument that gave the frame its environment (the promises it forced stay forced,
+/// so nothing runs twice).
+unsafe fn slot_subject_call(
+    state: &Activation<'_, '_>,
+    definition: &'static BuiltinDef,
+    call: Sexp,
+    function: Sexp,
+    subject: Sexp,
+) -> R<Option<Sexp>> {
+    if !state.in_slots() {
+        return Ok(None);
+    }
+    let missing = missing_arg();
+    let arguments = call.cdr();
+    let mut cell = arguments.cdr();
+    while cell.kind() == SexpType::Pairlist {
+        let expression = cell.car();
+        let fits = match expression.kind() {
+            _ if expression == missing => true,
+            SexpType::Symbol => {
+                expression != symbols().dots
+                    && eval::dot_dot_index(expression).is_none()
+                    && slot_named(state, expression).is_some_and(|slot| *slot != unbound())
+            }
+            SexpType::Language | SexpType::Promise | SexpType::Bytecode | SexpType::Dots => false,
+            _ => true,
+        };
+        if !fits {
+            return Ok(None);
+        }
+        cell = cell.cdr();
+    }
+    if subject.is_object() {
+        if subject.has_gp(gp::S4_OBJECT)
+            || (definition.name == "[" && (interp().extensions.tables.is_frame)(subject))
+        {
+            return Ok(None);
+        }
+        let generic = definition.name.as_bytes();
+        let names = state.constants.element(SLOTS).element(1);
+        let shadows = names.slice::<Sexp>().iter().any(|&name| {
+            let name = name.car().bytes();
+            name == b".packageName"
+                || (name.len() > generic.len()
+                    && name.starts_with(generic)
+                    && name[generic.len()] == b'.')
+        });
+        if shadows {
+            return Ok(None);
+        }
+        if let Some(method) =
+            dispatch::subject_method(definition, subject, state.machine.enclosure())?
+        {
+            let env = state.env(Reify::Site("dispatch subject: method"))?;
+            return dispatch::apply_subject_method(call, method, subject, env).map(Some);
+        }
+    }
+    let heap = crate::heap();
+    let mut args = eval::Args::new();
+    heap.root(subject);
+    subject.increment_refcount();
+    args.push(Arg {
+        tag: arguments.tag(),
+        value: subject,
+    });
+    let mut collect = |args: &mut eval::Args| -> R<bool> {
+        let mut cell = arguments.cdr();
+        while cell.kind() == SexpType::Pairlist {
+            let expression = cell.car();
+            let value = if expression == missing {
+                missing
+            } else if expression.kind() == SexpType::Symbol {
+                let Some(slot) = slot_named(state, expression) else {
+                    panic!("a slot frame lost a slot it was checked to have");
+                };
+                let content = *slot;
+                if eval::value_is_missing(content)? {
+                    missing
+                } else {
+                    eval::value_of(content)?
+                }
+            } else {
+                expression
+            };
+            heap.root(value);
+            value.increment_refcount();
+            args.push(Arg {
+                tag: cell.tag(),
+                value,
+            });
+            if !state.in_slots() {
+                return Ok(false);
+            }
+            cell = cell.cdr();
+        }
+        Ok(true)
+    };
+    let collected = collect(&mut args);
+    for arg in &args {
+        arg.value.decrement_refcount();
+    }
+    if !collected? {
+        return Ok(None);
+    }
+    eval::call_builtin(definition, call, function, &args, nil()).map(Some)
 }
 
 #[inline(always)]
@@ -9908,7 +12025,8 @@ unsafe fn fused_pass(
                 let (cell, local) = match local_cell {
                     Some(cell) => (cell, true),
                     None => match outside_function_frames(constant, enclosure, hint) {
-                        Err(cell) => (cell, false),
+                        Err(FrameBinding::Cell(cell)) => (cell, false),
+                        Err(FrameBinding::Slot(_)) => return Ok(None),
                         Ok(enclosure) => match cached_cell(constant, enclosure, cache, slot) {
                             Some(cell) => (cell, false),
                             None => return Ok(None),
@@ -10033,7 +12151,7 @@ unsafe fn fused_pass(
                 (Element::Integer, false) => feedback::INTEGER_VECTOR,
                 (Element::Double, false) => feedback::DOUBLE_VECTOR,
             };
-            *state.feedback.add(node[4] as usize) |= i32::from(kind);
+            *state.feedback.add(node[4] as usize) |= kind as i32;
         }
         if reduction.is_some() {
             state.record(words[fusion::REDUCTION_SITE] as usize, fused.value);
@@ -10076,11 +12194,7 @@ unsafe fn op_for_init(state: &mut Activation<'_, '_>, instruction: Instruction) 
     }
     // A compact sequence is stepped through by its first element and increment; expanding
     // `1:n` would allocate all n elements the loop reads one at a time.
-    let steps = if sequence.is_altrep() {
-        (interp().hooks.compact_sequence_steps)(sequence)
-    } else {
-        None
-    };
+    let steps = values::compact_sequence(sequence).map(|(_, first, step)| (first, step));
     let (first, step) = steps.unwrap_or((0.0, 0.0));
     let sequence = match steps {
         Some(_) => sequence,
@@ -10301,10 +12415,13 @@ unsafe fn op_closure(state: &mut Activation<'_, '_>, instruction: Instruction) -
     // every other call. The code depends on the formals and body only: its inline caches and the
     // optimizing tier both check the enclosure they were filled for.
     if body.kind() != SexpType::Bytecode && worth_compiling(body) {
-        let code = compile(body, closure)?;
+        let code = compile(body, closure, false)?;
         (*state.heap).set_element(state.constants, instruction.operand(2), code);
         (*state.heap).set_cdr(closure, code);
     }
+    // A site that has run is one the optimizing tier does not inline without a frame, since a
+    // closure captures the environment of the call that creates it.
+    record_feedback(state.constants, instruction.at, closure);
     instruction.output(0, closure);
     (*state.interp).visible = true;
     Ok(Flow::Next)
@@ -10445,16 +12562,14 @@ enum BackEdge {
 }
 
 /// Counts a backward jump and answers whether it reaches a count [`back_edge`] acts on. Every
-/// backward jump of every loop pays this, so it is one increment and three comparisons, inlined
+/// backward jump of every loop pays this, so it is one increment and two comparisons, inlined
 /// into the jump; the rest waits in [`back_edge`] for the counts that need it.
 #[inline(always)]
 unsafe fn back_edge_due(state: &mut Activation<'_, '_>, tier: &Tier) -> bool {
     let profile = values::ints_mut(state.constants.element(PROFILE));
     let count = profile[profile::BACK_EDGES].saturating_add(1);
     profile[profile::BACK_EDGES] = count;
-    count >= tier.back_edge_threshold
-        || count == tier.back_edge_threshold / 2
-        || count == tier.baseline_threshold
+    count >= tier.back_edge_threshold || count == tier.back_edge_threshold / 2
 }
 
 #[inline(never)]
@@ -10462,19 +12577,20 @@ unsafe fn back_edge_due(state: &mut Activation<'_, '_>, tier: &Tier) -> bool {
 unsafe fn back_edge(state: &mut Activation<'_, '_>, tier: &Tier, pc: usize) -> BackEdge {
     let machine = &mut *state.machine;
     let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
+    // A negative state is final: the body is off the tiers or refused for good. Its loops then
+    // count up from a value that reaches no threshold, because a recording window opened here
+    // would stay open with no compile to close it, and every instruction of the loop would
+    // record its types for nothing.
+    if profile[profile::TIER_STATE] < 0 {
+        profile[profile::BACK_EDGES] = i32::MIN;
+        return BackEdge::Continue(pc);
+    }
     if profile[profile::BACK_EDGES] == tier.back_edge_threshold / 2
         && machine.code.cdr().element(TIER1) == nil()
     {
         profile[profile::RECORDING] = 1;
         state.feedback = values::ints_mut(machine.code.cdr().element(FEEDBACK)).as_mut_ptr();
     }
-    if profile[profile::BACK_EDGES] == tier.baseline_threshold
-        && tier.baseline_threshold != NEVER
-        && machine.code.cdr().element(BASELINE) == nil()
-    {
-        (tier.baseline)(machine);
-    }
-    let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
     if profile[profile::BACK_EDGES] < tier.back_edge_threshold {
         return BackEdge::Continue(pc);
     }
@@ -10849,7 +12965,7 @@ unsafe fn replace_variable(
     };
     if shared || args[1..].contains(&target) {
         let was_array = target.is_array();
-        target = values::shallow_duplicate(target)?;
+        target = values::shallow_duplicate_attr(target)?;
         target.set_array(was_array);
     }
     heap.root(target);
@@ -10902,6 +13018,11 @@ unsafe fn replace_variable(
         interp().tmp_values.pop();
     }
     let result = result?;
+    let bound = match home {
+        Home::Cell(cell) => cell.cdr() == result,
+        Home::Slot(slot) => *slot == result,
+    };
+    let result = values::unwrap_assigned(result, bound);
     match home {
         Home::Cell(cell) => eval::assign_local(variable, result, env, Some(cell))?,
         // A warning's calling handler may have looked at the frame, which then holds the
@@ -11078,7 +13199,7 @@ pub(crate) unsafe fn call_builtin(
 
 unsafe fn record_feedback(constants: Sexp, pc: usize, value: Sexp) {
     let feedback = constants.element(FEEDBACK);
-    values::ints_mut(feedback)[pc] |= i32::from(value_kind(value));
+    values::ints_mut(feedback)[pc] |= value_kind(value) as i32;
 }
 
 /// Arithmetic and comparison on two attribute-free scalar doubles or integers. `None` sends the
@@ -11184,11 +13305,22 @@ unsafe fn lookup_variable(
 ) -> R<Sexp> {
     let heap = crate::heap();
     let hint = &mut *cache.hints.add(slot);
-    if let Some(cell) = heap.frame_cell_hinted(env, symbol, hint) {
+    // The frame's own code reads by name once its environment binds something, and a variable
+    // still in its slot is read there, where it stays.
+    let local = if env.has_gp(gp::SLOT_FRAME)
+        && let Some(value) = eval::slot_binding(env, symbol, true)
+    {
+        Some(value)
+    } else if let Some(cell) = heap.frame_cell_hinted(env, symbol, hint) {
         let value = cell.cdr();
         if cell.has_gp(gp::ACTIVE_BINDING) || value == missing_arg() || value == unbound() {
             return holding(held, || eval::eval_symbol(symbol, env));
         }
+        Some(value)
+    } else {
+        None
+    };
+    if let Some(value) = local {
         if value.kind() == SexpType::Promise {
             // An argument: force it here rather than repeat the frame search `eval_symbol` does.
             if value.car() != unbound() {
@@ -11257,7 +13389,18 @@ unsafe fn lookup_outside(
     let env = start;
     let enclosure = match outside_function_frames(symbol, start, hint) {
         Ok(enclosure) => enclosure,
-        Err(cell) => {
+        Err(FrameBinding::Slot(value)) => {
+            if value.kind() != SexpType::Promise {
+                return Ok(value);
+            }
+            if value.car() != unbound() {
+                return Ok(value.car());
+            }
+            return holding(held, || {
+                eval::eval_symbol_reporting(symbol, env, || lexical.call())
+            });
+        }
+        Err(FrameBinding::Cell(cell)) => {
             let value = cell.cdr();
             if value.kind() == SexpType::Promise && value.car() != unbound() {
                 return Ok(value.car());
@@ -11334,7 +13477,9 @@ unsafe fn lookup_function(
 ) -> R<Sexp> {
     let heap = crate::heap();
     let hint = &mut *cache.hints.add(slot);
-    if heap.frame_cell_hinted(env, symbol, hint).is_some() {
+    if (env.has_gp(gp::SLOT_FRAME) && eval::slot_binding(env, symbol, true).is_some())
+        || heap.frame_cell_hinted(env, symbol, hint).is_some()
+    {
         return eval::find_called_fun(symbol, env, call);
     }
     let Ok(enclosure) = outside_function_frames(symbol, env.enclosure(), hint) else {
@@ -11410,8 +13555,18 @@ unsafe fn lookup_enclosing_function(
     }
 }
 
-/// The first environment from `env` outward that is not a function frame, or the cell of the
-/// function frame before it that binds `symbol`. A function frame gains and loses bindings
+/// Where a function frame binds a symbol ([`outside_function_frames`]).
+enum FrameBinding {
+    Cell(Sexp),
+    /// The content of the variable's slot in a live slot frame, a value or a promise
+    /// ([`eval::slot_binding`]).
+    Slot(Sexp),
+}
+
+/// The first environment from `env` outward that is not a function frame, or the binding of the
+/// function frame before it that binds `symbol`: its cell, or its slot when the frame is a live
+/// slot frame that still keeps the variable there, so a closure reading its enclosing frame's
+/// variable leaves that frame on its slots. A function frame gains and loses bindings
 /// without moving the symbol's lookup epoch, so the lookup cache cannot cover it and it is
 /// probed on every lookup; for a frame that does not bind the symbol, which is the usual case,
 /// the frame's symbol filter answers with one load. A closure created inside a call, such as
@@ -11419,7 +13574,11 @@ unsafe fn lookup_enclosing_function(
 /// from the first environment that is not a function frame is what lets its lookups of base
 /// functions hit the cache at all.
 #[inline(always)]
-unsafe fn outside_function_frames(symbol: Sexp, env: Sexp, hint: &mut u32) -> Result<Sexp, Sexp> {
+unsafe fn outside_function_frames(
+    symbol: Sexp,
+    env: Sexp,
+    hint: &mut u32,
+) -> Result<Sexp, FrameBinding> {
     if !env.has_gp(gp::FUNCTION_FRAME) {
         return Ok(env);
     }
@@ -11427,11 +13586,20 @@ unsafe fn outside_function_frames(symbol: Sexp, env: Sexp, hint: &mut u32) -> Re
 }
 
 #[inline(never)]
-unsafe fn walk_function_frames(symbol: Sexp, mut env: Sexp, hint: &mut u32) -> Result<Sexp, Sexp> {
+unsafe fn walk_function_frames(
+    symbol: Sexp,
+    mut env: Sexp,
+    hint: &mut u32,
+) -> Result<Sexp, FrameBinding> {
     let heap = crate::heap();
     while env.has_gp(gp::FUNCTION_FRAME) {
+        if env.has_gp(gp::SLOT_FRAME)
+            && let Some(value) = eval::slot_binding(env, symbol, true)
+        {
+            return Err(FrameBinding::Slot(value));
+        }
         if let Some(cell) = heap.frame_cell_hinted(env, symbol, hint) {
-            return Err(cell);
+            return Err(FrameBinding::Cell(cell));
         }
         env = env.enclosure();
     }

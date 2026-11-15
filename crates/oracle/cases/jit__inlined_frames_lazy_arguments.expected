@@ -1,0 +1,36 @@
+[stdout]
+| [1] 4120
+| [1] 101
+| [1] 2
+| [1] "a forced"
+| [1] "inner(x, c)"
+| [1] "argument \"a\" is missing, with no default"
+| [1] "middle(a, c)"
+| [1] 472
+| [1] 56440
+| [1] 54
+|  [1] "local"               "eval.parent"         "eval"               
+|  [4] "eval"                "eval"                "eval"               
+|  [7] "withCallingHandlers" "tryCatch"            "tryCatchList"       
+| [10] "tryCatchOne"         "doTryCatch"          "withVisible"        
+| [13] "eval"                "eval"                "print"              
+| [16] "name_of"             "named"               "callers"            
+| [1] "nobody"
+| [1] "eval(expression, globalenv())"
+| [1] "scaled(x = 1, k = 2)"
+| [1] 9680   40
+| [1] 1890
+| List of 3
+|  $ : logi FALSE
+|  $ : symbol u
+|  $ : int 2
+| List of 3
+|  $ : logi TRUE
+|  $ : symbol u
+|  $ : int 2
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

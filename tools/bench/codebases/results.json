@@ -1,0 +1,176 @@
+{
+  "schema": 1,
+  "suite": "codebases",
+  "name": "Benchmark code bases",
+  "meta": {
+    "date": "2026-11-15",
+    "ry_commit": null,
+    "release": {
+      "tag": "0.4.5",
+      "archive": "ry-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "bb64321298f71a887abb468bac3dd285402d1e1088cce9917373b0cf588b66bb"
+    },
+    "libr_text_bytes": {},
+    "machine": {
+      "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+      "cores": 4,
+      "kernel": "Linux 6.18.44-fc-v470"
+    },
+    "command": "tools/bench/bench.py codebases --release /tmp/claude-0/rel/ry-x86_64-unknown-linux-gnu.tar.gz --rscript /opt/R/4.6.2/bin/Rscript --extra-rounds 0 --write",
+    "gnu_r": {
+      "version": "4.6.2",
+      "blas": "/opt/R/4.6.2/lib/R/lib/libRblas.so"
+    },
+    "too_short_seconds": 0.1,
+    "rounds": 10,
+    "extra_rounds": 0,
+    "seed": 1
+  },
+  "engines": {
+    "gnu_r": "GNU R",
+    "ry": "ry",
+    "ry_nojit": "ry, JIT off"
+  },
+  "baseline": "gnu_r",
+  "ratio_kind": "speedup",
+  "programs": [
+    {
+      "id": "finbench",
+      "display": "Finance",
+      "seconds": {
+        "gnu_r": 197.175,
+        "ry": 96.451,
+        "ry_nojit": 96.119
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.9903,
+          "low": 1.9571,
+          "high": 2.0572
+        },
+        "ry_nojit": {
+          "median": 1.9977,
+          "low": 1.9801,
+          "high": 2.0405
+        }
+      },
+      "flags": [],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {},
+      "per_block": {
+        "ry": {
+          "blocks": 9592,
+          "of": 9592,
+          "geomean": 1.8713
+        },
+        "ry_nojit": {
+          "blocks": 9592,
+          "of": 9592,
+          "geomean": 1.8713
+        }
+      }
+    },
+    {
+      "id": "dsbench",
+      "display": "Data science",
+      "seconds": {
+        "gnu_r": 91.87,
+        "ry": 49.594,
+        "ry_nojit": 48.8455
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.8722,
+          "low": 1.8014,
+          "high": 1.9181
+        },
+        "ry_nojit": {
+          "median": 1.8589,
+          "low": 1.8182,
+          "high": 1.9206
+        }
+      },
+      "flags": [],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {},
+      "per_block": {
+        "ry": {
+          "blocks": 9416,
+          "of": 9416,
+          "geomean": 1.8668
+        },
+        "ry_nojit": {
+          "blocks": 9416,
+          "of": 9416,
+          "geomean": 1.8819
+        }
+      }
+    },
+    {
+      "id": "biobench",
+      "display": "Biostatistics",
+      "seconds": {
+        "gnu_r": 108.353,
+        "ry": 56.9685,
+        "ry_nojit": 56.062
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.8521,
+          "low": 1.7575,
+          "high": 1.9717
+        },
+        "ry_nojit": {
+          "median": 1.9047,
+          "low": 1.8458,
+          "high": 1.9352
+        }
+      },
+      "flags": [],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {},
+      "per_block": {
+        "ry": {
+          "blocks": 8927,
+          "of": 8927,
+          "geomean": 1.8346
+        },
+        "ry_nojit": {
+          "blocks": 8927,
+          "of": 8927,
+          "geomean": 1.87
+        }
+      }
+    }
+  ],
+  "geomean": {
+    "ry": {
+      "median": 1.9039,
+      "low": 1.8601,
+      "high": 1.9514,
+      "programs": 3
+    },
+    "ry_nojit": {
+      "median": 1.9195,
+      "low": 1.8923,
+      "high": 1.9452,
+      "programs": 3
+    }
+  },
+  "worst": {
+    "ry": {
+      "id": "biobench",
+      "ratio": 1.8521
+    },
+    "ry_nojit": {
+      "id": "dsbench",
+      "ratio": 1.8589
+    }
+  }
+}

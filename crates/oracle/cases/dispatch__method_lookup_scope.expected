@@ -1,0 +1,41 @@
+[stdout]
+| [1] "default"
+| [1] "frame lkB"
+| [1] "global lkB"
+| [1] "table lkA"
+| [1] "frame lkA"
+| [1] "table lkA"
+| [1] "argument lkC"
+| [1] "default"
+| [1] 3
+| [1] 99
+| [1] 3
+| [1] "2"                 "shadowed in frame"
+| [1] "global shadow"     "shadowed in frame"
+| [1] "global shadow again"
+| [1] "2"
+| [1] "default" "default" "default" "default" "default" "default"
+| [1] "matrix"   "array"    "integer"  "numeric"  "function" "function"
+| [1] "array"    "array"    "numeric"  "numeric"  "function" "function"
+| [1] "one probe lkOne/lkTwo/lkThree probe.lkOne"
+| [2] "default"                                  
+| [1] "one probe lkOne/lkTwo/lkThree probe.lkOne"
+| [2] "three lkThree"                            
+| [3] "default"                                  
+| [1] "one probe lkOne/lkTwo/lkThree probe.lkOne"
+| [2] "two probe.lkTwo"                          
+| [3] "three lkThree"                            
+| [4] "default"                                  
+| [1] "lkZero" "lkTwo" 
+| [1] "detached table"
+| [1] "could not find function \"probe\""
+| [1] "held"
+| [1] "default"     "default"     "loop method" "loop method" "default"    
+| [6] "default"    
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("default", "default", "loop method", "loop method", "default", 
+| "default")

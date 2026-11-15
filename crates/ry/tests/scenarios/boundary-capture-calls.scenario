@@ -1,0 +1,62 @@
+# The boundary-call recorder records each call as the user wrote it, so a replay can redo it:
+# a method entered by dispatch is recorded as a call of its generic, a replacement call reads
+# the value `*tmp*` stands for, and a string's braced names are read as glue would read them. A
+# call whose arguments ask for the caller's frame cannot be replayed.
+
+requires ry-runtime
+
+file workload.R
+| df <- data.frame(a = 1:3, b = 4:6)
+| row <- df[2, ]
+| f <- factor(c("x", "y", "x"))
+| g <- f[2:3]
+| df$c <- df$a * 2
+| m <- matrix(1:4, 2)
+| colnames(m) <- c("p", "q")
+| rename <- function(m) {
+|   colnames(m) <- c("r", "s")
+|   m
+| }
+| m2 <- rename(m)
+| val <- 3
+| get_in <- function(name) vapply(name, get, numeric(1), envir = parent.frame())
+| v <- get_in("val")
+| n_found <- 4
+| msg <- paste0("{n_found} found")
+| cat("done\n")
+
+env RY_CAPTURE_PACKAGE R_GlobalEnv
+env RY_CAPTURE_DIR capture
+run ry run workload.R
+expect exit 0
+expect stdout "done"
+expect file capture/entries.tsv "base	[.data.frame	1	"
+expect file capture/entries.tsv "base	[.factor	1	"
+
+unset RY_CAPTURE_PACKAGE
+unset RY_CAPTURE_DIR
+file replay.R
+| entries <- read.delim("capture/entries.tsv", stringsAsFactors = FALSE)
+| entry <- function(name) entries[entries$name == name, ]
+| stopifnot(entry("vapply")$caller_frame == 1, entry("vapply")$samples == 0)
+| samples <- read.delim("capture/samples.tsv", stringsAsFactors = FALSE)
+| for (file in samples$file) {
+|   sample <- readRDS(file.path("capture", file))
+|   env <- list2env(sample$variables, parent = globalenv())
+|   for (name in names(sample$imports)) {
+|     assign(name, get(name, envir = asNamespace(sample$imports[[name]])), envir = env)
+|   }
+|   replayed <- tryCatch(list(value = eval(sample$call, env)), error = conditionMessage)
+|   if (!identical(replayed$value, sample$value)) {
+|     stop("replaying ", deparse(sample$call), " gave ", deparse(replayed))
+|   }
+|   cat(sample$name, ": ", deparse(sample$call), " reads [",
+|       paste(sort(names(sample$variables)), collapse = ","), "]\n", sep = "")
+| }
+run ry run replay.R
+expect exit 0
+expect stdout "[.data.frame: df[2, ] reads [df]"
+expect stdout "[.factor: f[2:3] reads [f]"
+expect stdout "$<-.data.frame: `$<-`(`*tmp*`, c, value = c(2, 4, 6)) reads [*tmp*]"
+expect stdout "colnames<-: `colnames<-`(`*tmp*`, value = c(\"p\", \"q\")) reads [*tmp*]"
+expect stdout "paste0: paste0(\"{n_found} found\") reads [n_found]"

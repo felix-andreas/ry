@@ -10,6 +10,7 @@ use {
         types::{Name, Ty, TyKind, TypeScheme, for_each_child_type},
     },
     rustc_hash::{FxHashMap, FxHashSet},
+    std::{collections::hash_map::Entry, sync::LazyLock},
     syntax::{SyntaxKind, TextRange},
 };
 
@@ -25,28 +26,28 @@ pub struct StubSources {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
 pub struct StubLibrary<'db> {
-    pub schemes: FxHashMap<String, Vec<TypeScheme<'db>>>,
-    pub nominals: FxHashSet<String>,
+    pub schemes: SymbolMap<Vec<TypeScheme<'db>>>,
+    pub nominals: SymbolSet,
     /// `@alias` and generic `@type` declarations, which the checker resolves exactly like a
     /// project's own; a project definition of the same name shadows one.
     pub type_definitions: FxHashMap<Name<'db>, NamedDefinition<'db>>,
     /// Data-masking variadics, mapped to the formals before `...` (which resolve normally). An
     /// empty list masks every argument.
-    pub masked: FxHashMap<String, Vec<String>>,
+    pub masked: SymbolMap<Vec<String>>,
     /// `@pure` names per declaring namespace. A bare call takes its purity from the namespace
     /// of the name's winning declaration (`declarations`), the same one its type comes from.
-    pub pure_by_namespace: FxHashMap<String, FxHashSet<String>>,
+    pub pure_by_namespace: SymbolMap<SymbolSet>,
     /// Declaration-level: a later source overriding a name's type does not un-export it from the
     /// namespace that declared it.
-    pub exports_by_namespace: FxHashMap<String, FxHashSet<String>>,
+    pub exports_by_namespace: SymbolMap<SymbolSet>,
     /// The winning declaration site per name; for an overload set, the first candidate.
-    pub declarations: FxHashMap<String, StubDeclaration>,
+    pub declarations: SymbolMap<StubDeclaration>,
     /// Manifest-listed exports of the active namespaces; these always resolve, untyped ones as
     /// `Unknown`.
-    pub known_exports: FxHashSet<String>,
+    pub known_exports: SymbolSet,
     /// The `#'` lines written directly above a declaration, joined as Markdown, which hover and
     /// completion show beside its type.
-    pub documentation: FxHashMap<String, String>,
+    pub documentation: SymbolMap<String>,
 }
 
 /// `source_index` indexes the `StubSources` order the host fed in.
@@ -54,6 +55,136 @@ pub struct StubLibrary<'db> {
 pub struct StubDeclaration {
     pub source_index: usize,
     pub range: TextRange,
+}
+
+/// A map keyed by interned identifiers. A probe by spelling looks the symbol up without
+/// interning it, so asking about a name nothing has interned misses without growing the
+/// process-wide symbol table.
+#[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
+pub struct SymbolMap<V>(FxHashMap<Symbol, V>);
+
+/// A set of interned identifiers, probed like a [`SymbolMap`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
+pub struct SymbolSet(FxHashSet<Symbol>);
+
+/// A name to probe a [`SymbolMap`] or [`SymbolSet`] with: a symbol as it is, a spelling through
+/// [`Symbol::lookup`].
+pub trait SymbolKey {
+    fn symbol(self) -> Option<Symbol>;
+}
+
+impl SymbolKey for Symbol {
+    fn symbol(self) -> Option<Symbol> {
+        Some(self)
+    }
+}
+
+impl SymbolKey for &Symbol {
+    fn symbol(self) -> Option<Symbol> {
+        Some(*self)
+    }
+}
+
+impl SymbolKey for &str {
+    fn symbol(self) -> Option<Symbol> {
+        Symbol::lookup(self)
+    }
+}
+
+impl SymbolKey for &String {
+    fn symbol(self) -> Option<Symbol> {
+        Symbol::lookup(self)
+    }
+}
+
+impl<V> Default for SymbolMap<V> {
+    fn default() -> SymbolMap<V> {
+        SymbolMap(FxHashMap::default())
+    }
+}
+
+impl<V> SymbolMap<V> {
+    pub fn get(&self, name: impl SymbolKey) -> Option<&V> {
+        self.0.get(&name.symbol()?)
+    }
+
+    pub fn get_mut(&mut self, name: impl SymbolKey) -> Option<&mut V> {
+        self.0.get_mut(&name.symbol()?)
+    }
+
+    pub fn contains_key(&self, name: impl SymbolKey) -> bool {
+        name.symbol().is_some_and(|name| self.0.contains_key(&name))
+    }
+
+    pub fn insert(&mut self, name: Symbol, value: V) -> Option<V> {
+        self.0.insert(name, value)
+    }
+
+    pub fn remove(&mut self, name: impl SymbolKey) -> Option<V> {
+        self.0.remove(&name.symbol()?)
+    }
+
+    pub fn entry(&mut self, name: Symbol) -> Entry<'_, Symbol, V> {
+        self.0.entry(name)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (Symbol, &V)> {
+        self.0.iter().map(|(&name, value)| (name, value))
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = Symbol> {
+        self.0.keys().copied()
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &V> {
+        self.0.values()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl SymbolSet {
+    pub fn contains(&self, name: impl SymbolKey) -> bool {
+        name.symbol().is_some_and(|name| self.0.contains(&name))
+    }
+
+    pub fn insert(&mut self, name: Symbol) -> bool {
+        self.0.insert(name)
+    }
+
+    pub fn remove(&mut self, name: impl SymbolKey) -> bool {
+        name.symbol().is_some_and(|name| self.0.remove(&name))
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = Symbol> {
+        self.0.iter().copied()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl FromIterator<Symbol> for SymbolSet {
+    fn from_iter<I: IntoIterator<Item = Symbol>>(names: I) -> SymbolSet {
+        SymbolSet(names.into_iter().collect())
+    }
+}
+
+impl Extend<Symbol> for SymbolSet {
+    fn extend<I: IntoIterator<Item = Symbol>>(&mut self, names: I) {
+        self.0.extend(names);
+    }
 }
 
 pub fn stub_declaration<'db>(db: &'db dyn Db, name: &str) -> Option<&'db StubDeclaration> {
@@ -70,7 +201,7 @@ impl StubLibrary<'_> {
         self.exports_by_namespace.contains_key(package)
     }
 
-    pub fn exports(&self, package: &str, name: &str) -> bool {
+    pub fn exports(&self, package: impl SymbolKey, name: impl SymbolKey) -> bool {
         self.exports_by_namespace
             .get(package)
             .is_some_and(|names| names.contains(name))
@@ -108,21 +239,17 @@ pub fn dormant_namespace_exports(db: &dyn Db, package: &str, name: &str) -> Opti
 /// Every name a shipped namespace's manifest lists or its stubs declare, read without
 /// activating it. Stub sources change only with the stub files, so this is computed once.
 #[salsa::tracked(returns(ref))]
-fn dormant_exports(
-    db: &dyn Db,
-    sources: StubSources,
-    package: Symbol,
-) -> Option<FxHashSet<String>> {
+fn dormant_exports(db: &dyn Db, sources: StubSources, package: Symbol) -> Option<SymbolSet> {
     let package = package.as_str();
     let (_, manifest) = sources
         .manifests(db)
         .iter()
         .find(|(namespace, _)| namespace == package)?;
-    let mut names: FxHashSet<String> = manifest
+    let mut names: SymbolSet = manifest
         .lines()
         .map(|line| strip_comment(line).trim())
         .filter(|name| !name.is_empty())
-        .map(str::to_owned)
+        .map(Symbol::new)
         .collect();
     for (_, text) in sources
         .sources(db)
@@ -135,13 +262,13 @@ fn dormant_exports(
             }
             let content = strip_comment(line).trim();
             if let Some(definition) = type_definition_line(db, content) {
-                names.insert(definition.name.text(db).to_owned());
+                names.insert(Symbol::new(definition.name.text(db)));
             } else if let Some(rest) = content.strip_prefix("@type") {
-                names.insert(rest.trim().to_owned());
+                names.insert(Symbol::new(rest.trim()));
             } else if let Some(separator) = top_level_colon(content) {
                 let name = content[..separator].trim();
                 if is_stub_name(name) {
-                    names.insert(name.to_owned());
+                    names.insert(Symbol::new(name));
                 }
             }
         }
@@ -162,8 +289,10 @@ pub fn is_native_function(name: &str) -> bool {
 /// Whether `[check] prelude` keeps the bare `name` out of scope: the standard library exports it
 /// and the prelude is off. The setting is read only for a standard library name, so turning the
 /// prelude off rechecks only the code that uses one.
-pub fn outside_prelude(db: &dyn Db, library: &StubLibrary<'_>, name: &str) -> bool {
-    library.exports(STANDARD_LIBRARY, name) && !crate::prelude_enabled(db)
+pub fn outside_prelude(db: &dyn Db, library: &StubLibrary<'_>, name: impl SymbolKey) -> bool {
+    static STANDARD_LIBRARY_NAME: LazyLock<Symbol> =
+        LazyLock::new(|| Symbol::new(STANDARD_LIBRARY));
+    library.exports(*STANDARD_LIBRARY_NAME, name) && !crate::prelude_enabled(db)
 }
 
 /// Whether `name` is a type ry itself declares, rather than one a project or package spells the
@@ -241,13 +370,14 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
         {
             continue;
         }
+        let namespace_symbol = Symbol::new(namespace);
         let namespace_exports = library
             .exports_by_namespace
-            .entry(namespace.clone())
+            .entry(namespace_symbol)
             .or_default();
         // A name repeated within this source appends candidates; its first occurrence here
         // replaces any earlier source's set.
-        let mut seen_here: FxHashSet<&str> = FxHashSet::default();
+        let mut seen_here: FxHashSet<Symbol> = FxHashSet::default();
         let mut line_start = 0usize;
         let mut pending_documentation: Vec<&str> = Vec::new();
         for raw_segment in text.split_inclusive('\n') {
@@ -271,9 +401,9 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
                 })
             };
             if let Some(definition) = type_definition_line(db, content) {
-                let name = definition.name.text(db).to_owned();
-                library.nominals.insert(name.clone());
-                namespace_exports.insert(name.clone());
+                let name = Symbol::new(definition.name.text(db));
+                library.nominals.insert(name);
+                namespace_exports.insert(name);
                 if let Some(range) = name_range(&name) {
                     library.declarations.insert(
                         name,
@@ -289,11 +419,12 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
             if let Some(rest) = content.strip_prefix("@type") {
                 let name = rest.trim();
                 if is_nominal_name(name) {
-                    library.nominals.insert(name.to_owned());
-                    namespace_exports.insert(name.to_owned());
-                    if let Some(range) = name_range(name) {
+                    let name = Symbol::new(name);
+                    library.nominals.insert(name);
+                    namespace_exports.insert(name);
+                    if let Some(range) = name_range(&name) {
                         library.declarations.insert(
-                            name.to_owned(),
+                            name,
                             StubDeclaration {
                                 source_index,
                                 range,
@@ -306,9 +437,9 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
             let Some(separator) = top_level_colon(content) else {
                 continue;
             };
-            let name = content[..separator].trim();
+            let spelling = content[..separator].trim();
             let mut type_text = content[separator + 1..].trim();
-            if name.is_empty() || !is_stub_name(name) {
+            if spelling.is_empty() || !is_stub_name(spelling) {
                 continue;
             }
             let markers = declaration_markers(type_text);
@@ -316,38 +447,37 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
             let Some(scheme) = lower_type_text(db, type_text) else {
                 continue;
             };
+            let name = Symbol::new(spelling);
             if markers.masked
                 && let Some(leading) = masked_leading_formals(db, &scheme)
             {
-                library.masked.insert(name.to_owned(), leading);
+                library.masked.insert(name, leading);
             }
-            namespace_exports.insert(name.to_owned());
+            namespace_exports.insert(name);
             let first_here = seen_here.insert(name);
             // Purity belongs to the name within its namespace: any candidate's marker marks it,
             // and a later source that redeclares the name decides afresh, so an override stub
             // can take the marker away.
             let pure = library
                 .pure_by_namespace
-                .entry(namespace.clone())
+                .entry(namespace_symbol)
                 .or_default();
             if first_here {
                 pure.remove(name);
             }
             if markers.pure {
-                pure.insert(name.to_owned());
+                pure.insert(name);
             }
             if first_here {
                 if documentation.is_empty() {
                     library.documentation.remove(name);
                 } else {
-                    library
-                        .documentation
-                        .insert(name.to_owned(), documentation.join("\n"));
+                    library.documentation.insert(name, documentation.join("\n"));
                 }
-                library.schemes.insert(name.to_owned(), vec![scheme]);
-                if let Some(range) = name_range(name) {
+                library.schemes.insert(name, vec![scheme]);
+                if let Some(range) = name_range(spelling) {
                     library.declarations.insert(
-                        name.to_owned(),
+                        name,
                         StubDeclaration {
                             source_index,
                             range,
@@ -370,7 +500,7 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
         let bare_visible = !QUALIFIED_ONLY_NAMESPACES.contains(&namespace.as_str()) || active;
         let namespace_exports = library
             .exports_by_namespace
-            .entry(namespace.clone())
+            .entry(Symbol::new(namespace))
             .or_default();
         for line in text.lines() {
             let name = strip_comment(line).trim();
@@ -382,9 +512,10 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
             if name.is_empty() || CONTROL_KEYWORDS.contains(&name) {
                 continue;
             }
-            namespace_exports.insert(name.to_owned());
+            let name = Symbol::new(name);
+            namespace_exports.insert(name);
             if bare_visible {
-                library.known_exports.insert(name.to_owned());
+                library.known_exports.insert(name);
             }
         }
     }
@@ -480,22 +611,25 @@ pub struct StubProblem {
 /// The vocabulary includes this source's own `@type` declarations: it may be an unsaved buffer
 /// that is not installed yet.
 pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
-    let mut known_nominals: FxHashSet<String> = stubs(db)
-        .map(|library| library.nominals.iter().cloned().collect())
-        .unwrap_or_default();
+    let library_nominals = stubs(db).map(|library| &library.nominals);
+    let mut own_nominals: FxHashSet<&str> = FxHashSet::default();
     for raw_line in text.lines() {
         let content = strip_comment(raw_line).trim();
         if let Some(name) = definition_line_name(content) {
             if type_definition_line(db, content).is_some() {
-                known_nominals.insert(name.to_owned());
+                own_nominals.insert(name);
             }
         } else if let Some(rest) = content.strip_prefix("@type") {
             let name = rest.trim();
             if is_nominal_name(name) {
-                known_nominals.insert(name.to_owned());
+                own_nominals.insert(name);
             }
         }
     }
+    let is_known = |name: &str| {
+        own_nominals.contains(name)
+            || library_nominals.is_some_and(|nominals| nominals.contains(name))
+    };
 
     let mut problems = Vec::new();
     for (line, raw_line) in text.lines().enumerate() {
@@ -507,7 +641,7 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
             match type_definition_line(db, content) {
                 Some(definition) => {
                     let mut unknown = Vec::new();
-                    collect_unknown_nominals(db, definition.body, &known_nominals, &mut unknown);
+                    collect_unknown_nominals(db, definition.body, &is_known, &mut unknown);
                     for unknown_name in unknown {
                         if !definition
                             .parameters
@@ -600,7 +734,7 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
             continue;
         }
         let mut unknown = Vec::new();
-        collect_unknown_nominals(db, scheme.body, &known_nominals, &mut unknown);
+        collect_unknown_nominals(db, scheme.body, &is_known, &mut unknown);
         for unknown_name in unknown {
             problems.push(StubProblem {
                 line,
@@ -616,17 +750,17 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
 fn collect_unknown_nominals<'db>(
     db: &'db dyn Db,
     ty: Ty<'db>,
-    known: &FxHashSet<String>,
+    is_known: &impl Fn(&str) -> bool,
     out: &mut Vec<String>,
 ) {
     if let TyKind::Named(name, _) = ty.kind(db) {
         let text = name.text(db);
-        if !known.contains(text) && !out.iter().any(|seen| seen == text) {
+        if !is_known(text) && !out.iter().any(|seen| seen == text) {
             out.push(text.to_owned());
         }
     }
     for_each_child_type(db, ty, &mut |child| {
-        collect_unknown_nominals(db, child, known, out)
+        collect_unknown_nominals(db, child, is_known, out)
     });
 }
 
@@ -785,11 +919,11 @@ mod tests {
         );
         assert!(library.nominals.contains("data.frame"));
         assert_eq!(
-            library.schemes["sum"].len(),
-            5,
+            library.schemes.get("sum").map(Vec::len),
+            Some(5),
             "sum keeps its ordered overload candidates"
         );
-        assert_eq!(library.schemes["length"].len(), 1);
+        assert_eq!(library.schemes.get("length").map(Vec::len), Some(1));
     }
 
     #[test]
@@ -879,17 +1013,17 @@ mod tests {
         let empty = FxHashSet::default();
         let base_manifest = manifests.get("base").unwrap_or(&empty);
         let mut misplaced = Vec::new();
-        for (namespace, declared) in &library.exports_by_namespace {
-            let Some(manifest) = manifests.get(namespace) else {
+        for (namespace, declared) in library.exports_by_namespace.iter() {
+            let Some(manifest) = manifests.get(namespace.as_str()) else {
                 continue;
             };
-            for name in declared {
+            for name in declared.iter() {
                 if library.nominals.contains(name) || manifest.contains(name.as_str()) {
                     continue;
                 }
                 // R registers operator methods like `Compare.Date` without exporting them, and a
                 // `class$member` declaration types a member of an object, not a binding.
-                if is_operator_method_name(name) || name.contains('$') {
+                if is_operator_method_name(&name) || name.contains('$') {
                     continue;
                 }
                 if CONDITIONAL_NAMESPACES.contains(&namespace.as_str())
@@ -992,12 +1126,18 @@ mod tests {
         let db = RootDatabase::default();
         let sources = install_shipped_stubs(&db);
         let library = stub_library(&db, sources);
-        let declaration = &library.declarations["print"];
+        let declaration = library
+            .declarations
+            .get("print")
+            .expect("base declares print");
         let (namespace, text) = &sources.sources(&db)[declaration.source_index];
         assert_eq!(namespace, "base");
         let range = usize::from(declaration.range.start())..usize::from(declaration.range.end());
         assert_eq!(&text[range], "print");
-        let nominal = &library.declarations["data.frame"];
+        let nominal = library
+            .declarations
+            .get("data.frame")
+            .expect("base declares data.frame");
         let (_, nominal_text) = &sources.sources(&db)[nominal.source_index];
         let range = usize::from(nominal.range.start())..usize::from(nominal.range.end());
         assert_eq!(&nominal_text[range], "data.frame");
@@ -1339,7 +1479,7 @@ mod tests {
             Vec::new(),
         );
         let library = stub_library(&db, sources);
-        let candidates = &library.schemes["f"];
+        let candidates = library.schemes.get("f").expect("the stub declares f");
         assert_eq!(candidates.len(), 1, "a later source replaces the whole set");
     }
 }

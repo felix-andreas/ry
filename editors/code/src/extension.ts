@@ -4,6 +4,7 @@ import * as path from "path"
 import {
   commands,
   debug,
+  env,
   languages,
   window,
   workspace,
@@ -147,8 +148,39 @@ async function restartClient(): Promise<void> {
     client = newClient
     setServerStatus({ health: "started" })
   } catch (reason) {
-    void window.showWarningMessage("Failed to start ry language server.")
+    logger.error("failed to start the server:", String(reason))
+    if (!executableExists(ryExecutable())) {
+      void showMissingServer()
+    } else {
+      void window.showWarningMessage("Failed to start ry language server.")
+    }
     setServerStatus({ health: "stopped" })
+  }
+}
+
+// A command with a directory part must exist as given; a bare name is searched on PATH like a shell does.
+function executableExists(command: string): boolean {
+  if (path.dirname(command) !== ".") {
+    return fs.existsSync(command)
+  }
+  const extensions = process.platform === "win32"
+    ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";").concat("")
+    : [""]
+  return (process.env.PATH ?? "").split(path.delimiter).some((directory) =>
+    directory !== "" && extensions.some((extension) => fs.existsSync(path.join(directory, command + extension))),
+  )
+}
+
+async function showMissingServer(): Promise<void> {
+  const choice = await window.showErrorMessage(
+    "ry could not find the ry executable: this extension has none bundled for your platform, `ry.path` is not set, and `ry` is not on your PATH. Install ry or set `ry.path` to its location.",
+    "Open installation page",
+    "Open settings",
+  )
+  if (choice === "Open installation page") {
+    await env.openExternal(Uri.parse("https://ry-lang.org/installation"))
+  } else if (choice === "Open settings") {
+    await commands.executeCommand("workbench.action.openSettings", "ry.path")
   }
 }
 

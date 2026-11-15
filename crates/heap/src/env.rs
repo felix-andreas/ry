@@ -16,11 +16,14 @@
 //! themselves, so a lookup of a base function is one load from the interned symbol.
 
 use {
-    crate::object::{Sexp, gp},
+    crate::{
+        Probe,
+        object::{Sexp, gp},
+    },
     rustc_hash::FxHashSet,
     std::{
         alloc::{Layout, alloc, alloc_zeroed, dealloc, handle_alloc_error},
-        mem::MaybeUninit,
+        mem::{ManuallyDrop, MaybeUninit},
         ops::{Deref, DerefMut},
         ptr::NonNull,
     },
@@ -55,6 +58,10 @@ const REMOVED: Sexp = Sexp::dangling();
 /// with the wrong cell.
 const SHADOWED: u32 = 1 << 31;
 
+/// Marks [`Frame::removed`] as holding the position of a slot frame instead of a count
+/// ([`Frame::slot_owner`]).
+const SLOT_OWNER: u32 = 1 << 31;
+
 /// GNU R's default and minimum hash table size (`HASHMINSIZE`).
 const HASH_MINIMUM_SIZE: u32 = 29;
 
@@ -66,23 +73,35 @@ pub struct Frame {
     /// Inline, because most frames are a call's few arguments and locals, and a closure call
     /// should not pay for a second allocation beside the frame's own.
     bindings: Bindings,
-    /// One pointer wide, because only large frames have one and anything wider would push
-    /// every environment into a larger size class.
-    index: Option<SlotIndex>,
     /// GNU R's chained table for a hashed frame, which only decides the listing order: lookups
-    /// go through `index`. Boxed, for the same reason as the index.
+    /// go through the slots' index ([`Spilled::index`]). Boxed, because only hashed frames have
+    /// one and anything wider would push every environment into a larger size class.
     table: Option<Box<HashTable>>,
     /// How many leading slots are a closure's formals, which GNU R lists after the locals and
     /// in their own order.
     /// The top bit is [`SHADOWED`], kept here because a field of its own would push the
     /// environment object out of its size class.
     formals: u32,
-    /// How many slots hold [`REMOVED`].
+    /// How many slots hold [`REMOVED`]. The environment of a live slot frame keeps the
+    /// position of that frame on the interpreter's frame stack here instead, under
+    /// [`SLOT_OWNER`], so a lookup through the environment reaches the frame without searching
+    /// the stack. Such an environment removes nothing: it takes all of its frame's variables
+    /// and gives the position up before a binding is removed. The position shares the field
+    /// because a field of its own would push the environment object out of its size class.
     removed: u32,
     /// One bit per symbol ever bound here, at [`filter_bit`]. Most lookups probe frames that do
     /// not bind the symbol (a call to `length` from a function body asks the function's frame
     /// first), and a clear bit answers those without scanning. Removal leaves the bit set.
+    /// A live slot frame's environment also sets the bits of the names its frame keeps in
+    /// slots ([`Frame::expect`]).
     filter: u64,
+    /// The names a live slot frame keeps in slots, for its environment: a list of symbols that
+    /// the frame's function holds, and so keeps alive for as long as the frame runs. A lookup
+    /// that passes the filter but finds no cell asks the interpreter to move the variable out of
+    /// its slot only when the name is in this list or is a dispatch variable
+    /// ([`gp::DISPATCH_VARIABLE`]). The filter alone would ask again on every lookup of a name
+    /// whose bit it shares with a slot name, and nothing would ever move.
+    expected: Option<Sexp>,
 }
 
 /// The [`Frame::filter`] bit for `symbol`: a multiplicative hash of its address, since a
@@ -108,8 +127,8 @@ fn mark_bound_elsewhere(symbol: Sexp) {
     }
 }
 
-/// Where machine code finds a frame's fields: the baseline tier probes a lookup site's hinted
-/// slot inline (`crates/jit/src/baseline.rs`), so these offsets are part of its contract.
+/// Where machine code finds a frame's fields: tier 1 reads frame slots inline
+/// (`crates/jit/src/codegen.rs`), so these offsets are part of its contract.
 pub mod layout {
     use super::{Binding, Bindings, Frame};
     /// The `u64` symbol filter ([`super::filter_bit`]).
@@ -129,6 +148,7 @@ pub mod layout {
     pub const INLINE: u32 = super::INLINE_BINDINGS as u32;
     /// A slot is a symbol and its cell, each a pointer.
     pub const SLOT: usize = size_of::<Binding>();
+    pub const SLOT_SYMBOL: usize = std::mem::offset_of!(Binding, symbol);
     pub const SLOT_CELL: usize = std::mem::offset_of!(Binding, cell);
 
     /// The [`FILTER`] bit of `symbol`.
@@ -147,12 +167,11 @@ struct Bindings {
 
 union Storage {
     inline: [MaybeUninit<Binding>; INLINE_BINDINGS],
-    heap: Spilled,
+    heap: ManuallyDrop<Spilled>,
 }
 
 /// A spilled frame's slots, and the bookkeeping that only a large frame needs, kept in the inline
 /// buffer it no longer uses so that it costs the environment object nothing.
-#[derive(Clone, Copy)]
 #[repr(C)]
 struct Spilled {
     /// First, because machine code loads it from [`layout::STORAGE`].
@@ -162,6 +181,10 @@ struct Spilled {
     /// it, and a minor collection rescans only the tail. Compaction moves cells down and resets
     /// it to 0.
     scanned: u32,
+    /// The lookup index, which a frame builds once it holds more than [`INDEX_THRESHOLD`]
+    /// bindings and so has spilled. A spilled frame never moves back inline, so the index always
+    /// has this place.
+    index: Option<SlotIndex>,
 }
 
 impl Bindings {
@@ -229,22 +252,64 @@ impl Bindings {
             }
             std::ptr::copy_nonoverlapping(self.data(), data, self.length as usize);
             let scanned = self.scanned() as u32;
+            let index = self.index_mut().and_then(Option::take);
             self.release();
-            self.storage.heap = Spilled {
+            self.storage.heap = ManuallyDrop::new(Spilled {
                 slots: data,
                 scanned,
-            };
+                index,
+            });
         }
         self.capacity = capacity;
     }
 
-    /// Frees the heap slots, if any.
+    /// Frees the heap slots and the index, if any.
     fn release(&mut self) {
         if self.spilled() {
             let layout = Layout::array::<Binding>(self.capacity as usize)
                 .expect("a frame's layout was valid when it grew");
-            // SAFETY: the slots were allocated with this layout in `grow`.
-            unsafe { dealloc(self.storage.heap.slots.cast(), layout) };
+            // SAFETY: the slots were allocated with this layout in `grow`, and the capacity says
+            // the spilled field is live. Neither is read again before `grow` rewrites it or the
+            // frame drops.
+            unsafe {
+                dealloc(self.storage.heap.slots.cast(), layout);
+                ManuallyDrop::drop(&mut self.storage.heap);
+            }
+        }
+    }
+
+    /// The lookup index ([`Spilled::index`]).
+    #[inline(always)]
+    fn index(&self) -> Option<&SlotIndex> {
+        // SAFETY: the capacity says which union field is live.
+        unsafe {
+            if self.spilled() {
+                self.storage.heap.index.as_ref()
+            } else {
+                None
+            }
+        }
+    }
+
+    /// The place of the lookup index, which only a spilled frame has.
+    fn index_mut(&mut self) -> Option<&mut Option<SlotIndex>> {
+        // SAFETY: as in `index`.
+        unsafe { self.spilled().then(|| &mut (*self.storage.heap).index) }
+    }
+
+    /// Runs `update` on the lookup index and the slots it indexes, if the frame has an index.
+    fn with_index<T>(&mut self, update: impl FnOnce(&mut SlotIndex, &[Binding]) -> T) -> Option<T> {
+        let mut index = self.index_mut()?.take()?;
+        let result = update(&mut index, self);
+        *self.index_mut()? = Some(index);
+        Some(result)
+    }
+
+    /// Builds the lookup index afresh from the slots, if the frame has one.
+    fn reindex(&mut self) {
+        if self.index().is_some() {
+            let index = SlotIndex::of(self);
+            *self.index_mut().expect("an indexed frame has spilled") = Some(index);
         }
     }
 
@@ -262,7 +327,8 @@ impl Bindings {
 
     fn set_scanned(&mut self, scanned: u32) {
         if self.spilled() {
-            self.storage.heap.scanned = scanned;
+            // SAFETY: the capacity says the spilled field is live.
+            unsafe { (*self.storage.heap).scanned = scanned };
         }
     }
 
@@ -325,11 +391,11 @@ impl Frame {
     pub unsafe fn write_empty(frame: *mut Frame, bindings: usize) {
         use std::ptr::{addr_of_mut, write};
         write(addr_of_mut!((*frame).bindings), Bindings::new());
-        write(addr_of_mut!((*frame).index), None);
         write(addr_of_mut!((*frame).table), None);
         write(addr_of_mut!((*frame).formals), 0);
         write(addr_of_mut!((*frame).removed), 0);
         write(addr_of_mut!((*frame).filter), 0);
+        write(addr_of_mut!((*frame).expected), None);
         if bindings > INLINE_BINDINGS {
             (*frame).bindings.reserve_exact(bindings);
         }
@@ -385,7 +451,60 @@ impl Frame {
     }
 
     pub fn len(&self) -> usize {
-        self.bindings.len() - self.removed as usize
+        self.bindings.len() - self.removed() as usize
+    }
+
+    fn removed(&self) -> u32 {
+        if self.removed & SLOT_OWNER == 0 {
+            self.removed
+        } else {
+            0
+        }
+    }
+
+    /// The position on the interpreter's frame stack of the live slot frame this environment
+    /// stands for, or `None` for any other environment.
+    #[inline(always)]
+    pub fn slot_owner(&self) -> Option<usize> {
+        (self.removed & SLOT_OWNER != 0).then_some((self.removed & !SLOT_OWNER) as usize)
+    }
+
+    /// Records the slot frame this environment stands for and the list of names it keeps in
+    /// slots ([`Frame::expected`]), or with `None` that it stands for none any more. The frame
+    /// must hold no removed slot.
+    pub fn set_slot_owner(&mut self, owner: Option<(usize, Sexp)>) {
+        debug_assert_eq!(self.removed(), 0);
+        match owner {
+            Some((owner, names)) => {
+                assert!(owner < SLOT_OWNER as usize, "the frame stack is too deep");
+                self.removed = owner as u32 | SLOT_OWNER;
+                self.expected = Some(names);
+                // SAFETY: the caller hands over a list of symbols.
+                for &name in unsafe { names.slice::<Sexp>() } {
+                    self.expect(name);
+                }
+            }
+            None => {
+                self.removed = 0;
+                self.expected = None;
+            }
+        }
+    }
+
+    /// Whether a lookup of `symbol` that finds no cell here may move a variable out of the live
+    /// slot frame this environment stands for: the frame keeps a slot of that name, or the
+    /// name is a dispatch variable, which a method's frame binds on first use.
+    #[inline]
+    pub(crate) fn expects(&self, symbol: Sexp) -> bool {
+        // SAFETY: a frame holds only interned symbols, and the list is alive while the frame
+        // runs ([`Frame::expected`]).
+        self.may_bind(symbol)
+            && unsafe {
+                symbol.has_gp(gp::DISPATCH_VARIABLE)
+                    || self
+                        .expected
+                        .is_some_and(|names| names.slice::<Sexp>().contains(&symbol))
+            }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -427,12 +546,23 @@ impl Frame {
         self.bindings.get(position).map(|binding| binding.cell)
     }
 
+    /// [`crate::Heap::probe`] for this frame.
+    pub fn probe(&self, symbol: Sexp) -> Probe {
+        if self.filter & filter_bit(symbol) == 0 {
+            return Probe::Absent;
+        }
+        match self.find_position(symbol) {
+            Some(position) if self.formals & SHADOWED == 0 => Probe::Slot(position as u32),
+            _ => Probe::Unknown,
+        }
+    }
+
     #[inline]
     fn find_position(&self, symbol: Sexp) -> Option<usize> {
         if self.filter & filter_bit(symbol) == 0 {
             return None;
         }
-        match &self.index {
+        match self.bindings.index() {
             Some(index) => index.find(symbol, &self.bindings),
             None => self
                 .bindings
@@ -463,6 +593,50 @@ impl Frame {
     /// Marks every cell bound so far as a closure formal.
     pub fn mark_formals(&mut self) {
         self.formals = self.formals & SHADOWED | self.bindings.len() as u32;
+    }
+
+    /// Whether the frame may bind `symbol`: `false` only when it certainly does not.
+    #[inline(always)]
+    pub(crate) fn may_bind(&self, symbol: Sexp) -> bool {
+        self.filter & filter_bit(symbol) != 0
+    }
+
+    /// Makes [`Frame::may_bind`] answer `true` for `symbol` before the frame binds it. A slot
+    /// frame's environment expects the names its frame keeps in slots and a method's dispatch
+    /// variables, so a lookup of any other name passes it without asking the interpreter.
+    pub(crate) fn expect(&mut self, symbol: Sexp) {
+        self.filter |= filter_bit(symbol);
+    }
+
+    /// Puts the bindings in the order a closure call binds them: ascending `rank`, with the
+    /// first `formals` ranks being the closure's formals, and the symbols `rank` leaves out
+    /// after them in the order they were bound. A hashed frame lists by its table and keeps
+    /// its order.
+    pub(crate) fn order_by(&mut self, rank: impl Fn(Sexp) -> Option<u32>, formals: u32) {
+        if self.table.is_some() {
+            return;
+        }
+        if self.removed() > 0 {
+            self.compact();
+        }
+        let position = |binding: &Binding| rank(binding.symbol).unwrap_or(u32::MAX);
+        let mut leading = 0;
+        let mut last = 0;
+        let mut ordered = true;
+        for binding in self.bindings.iter() {
+            let next = position(binding);
+            ordered &= next >= last;
+            last = next;
+            leading += u32::from(next < formals);
+        }
+        self.formals = self.formals & SHADOWED | leading;
+        // A frame that bound its variables in one step already lists them this way.
+        if ordered {
+            return;
+        }
+        self.bindings.sort_by_cached_key(position);
+        self.bindings.set_scanned(0);
+        self.bindings.reindex();
     }
 
     /// The cells in the order GNU R lists the frame in.
@@ -533,12 +707,17 @@ impl Frame {
             table.push(symbol);
             table.insert(position as usize);
         }
-        match &mut self.index {
-            Some(index) => index.insert(symbol, position, &self.bindings),
-            None if self.bindings.len() > INDEX_THRESHOLD => {
-                self.index = Some(SlotIndex::of(&self.bindings));
-            }
-            None => {}
+        if self
+            .bindings
+            .with_index(|index, bindings| index.insert(symbol, position, bindings))
+            .is_none()
+            && self.bindings.len() > INDEX_THRESHOLD
+        {
+            let index = SlotIndex::of(&self.bindings);
+            *self
+                .bindings
+                .index_mut()
+                .expect("a frame past the index threshold has spilled") = Some(index);
         }
     }
 
@@ -553,7 +732,7 @@ impl Frame {
         symbols: impl Iterator<Item = Sexp>,
         attached: bool,
     ) {
-        if self.index.is_some()
+        if self.bindings.index().is_some()
             || self.table.is_some()
             || self.bindings.len() + cells.len() > INDEX_THRESHOLD
         {
@@ -602,13 +781,20 @@ impl Frame {
         if self.filter & filter_bit(symbol) == 0 {
             return None;
         }
-        let position = match &mut self.index {
-            Some(index) => index.remove(symbol, &self.bindings)?,
+        let position = match self
+            .bindings
+            .with_index(|index, bindings| index.remove(symbol, bindings))
+        {
+            Some(position) => position?,
             None => self
                 .bindings
                 .iter()
                 .position(|binding| binding.symbol == symbol)?,
         };
+        assert!(
+            self.removed & SLOT_OWNER == 0,
+            "a live slot frame's environment removed a binding"
+        );
         let binding = self.bindings.get_mut(position)?;
         let cell = binding.cell;
         binding.symbol = REMOVED;
@@ -617,11 +803,12 @@ impl Frame {
             table.remove(position);
         }
         // Only formals repeat a symbol, and a duplicate behind the removed one now answers for it.
-        if let Some(index) = &mut self.index
+        if self.bindings.index().is_some()
             && let Some(duplicate) = (position + 1..(self.formals & !SHADOWED) as usize)
                 .find(|&later| self.bindings[later].symbol == symbol)
         {
-            index.insert(symbol, duplicate as u32, &self.bindings);
+            self.bindings
+                .with_index(|index, bindings| index.insert(symbol, duplicate as u32, bindings));
         }
         if self.removed as usize * 2 > self.bindings.len() {
             self.compact();
@@ -642,9 +829,7 @@ impl Frame {
         self.bindings.retain(|binding| binding.symbol != REMOVED);
         self.formals = self.formals & SHADOWED | formals as u32;
         self.removed = 0;
-        if self.index.is_some() {
-            self.index = Some(SlotIndex::of(&self.bindings));
-        }
+        self.bindings.reindex();
     }
 }
 
@@ -671,7 +856,7 @@ impl Frame {
     /// never reads a dead call frame that fits its inline slots. An image cannot carry those
     /// addresses either, so it stores such a frame's contents and the loader builds it again.
     pub(crate) fn owns_memory(&self) -> bool {
-        self.bindings.spilled() || self.index.is_some() || self.table.is_some()
+        self.bindings.spilled() || self.table.is_some()
     }
 
     pub(crate) fn image(&self) -> FrameImage {
@@ -684,7 +869,7 @@ impl Frame {
                 })
                 .collect(),
             formals: self.formals & !SHADOWED,
-            removed: self.removed,
+            removed: self.removed(),
             table: self.table.as_ref().map(|table| TableImage {
                 heads: table.heads.clone(),
                 next: table.next.clone(),
@@ -717,10 +902,14 @@ impl Frame {
             filter |= filter_bit(binding.symbol);
             shadowed |= !seen.insert(binding.symbol);
         }
-        let index = (bindings.len() > INDEX_THRESHOLD).then(|| SlotIndex::of(&bindings));
+        if bindings.len() > INDEX_THRESHOLD {
+            let index = SlotIndex::of(&bindings);
+            *bindings
+                .index_mut()
+                .expect("a frame past the index threshold has spilled") = Some(index);
+        }
         Frame {
             bindings,
-            index,
             table: image.table.map(|table| {
                 Box::new(HashTable {
                     heads: table.heads,
@@ -736,6 +925,7 @@ impl Frame {
             },
             removed: image.removed,
             filter,
+            expected: None,
         }
     }
 }

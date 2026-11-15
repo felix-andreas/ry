@@ -63,7 +63,7 @@ unsafe fn do_inspect(call: &Call<'_>) -> ApiResult<Sexp> {
 
 /// The subtree callback an ALTREP class's inspect method prints its parts through.
 unsafe extern "C" fn subtree(object: Sexp, pre: c_int, deep: c_int, pvec: c_int) {
-    unsafe { enter(|| tree(pre, object, deep, pvec)) }
+    unsafe { enter(|| tree(pre + 2, object, deep - 1, pvec)) }
 }
 
 unsafe fn tree(pre: c_int, object: Sexp, deep: c_int, pvec: c_int) -> ApiResult<()> {

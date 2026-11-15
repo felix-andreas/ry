@@ -1,7 +1,14 @@
 //! ry's one mid-level SSA IR. The optimizing tier lowers its plan of tier-0 bytecode into it, and
 //! the typed core lowers its typed IR into it, and one lowering turns it into machine code. Typed
-//! facts enter as plain instructions; an untyped speculation enters as a [`Ins::guard`], whose
-//! exit block is a deoptimization path that hands the frame back to the interpreter.
+//! facts enter as plain instructions; an untyped speculation enters as a [`Ins::guard`] that
+//! branches to the exit block of a [`FrameState`].
+//!
+//! A frame state names the cells the interpreter needs to rebuild one frame at one point where
+//! execution can leave the function, and its parent is the state of the caller the frame was
+//! inlined into. The front end only declares the states. [`Builder::emit_exits`] writes every
+//! exit: it saves the leaving frame's cells and then each ancestor's into one buffer, and ends
+//! in one block that hands the buffer and the state's number to the runtime, which rebuilds the
+//! frames from them.
 //!
 //! The front ends build a function with [`Builder`], which reads like a small assembler: blocks,
 //! block parameters, instructions, and mutable variables. Variables are a construction aid, not
@@ -11,9 +18,8 @@
 //! SSA with block arguments.
 
 mod lower;
-pub mod section;
 
-pub use lower::{Allocator, Error, FuncId, Module, ObjectModule, with_module};
+pub use lower::{Allocator, Error, FuncId, Module, Object, Relocatable, Target, with_module};
 use {
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
@@ -63,6 +69,10 @@ macro_rules! entities {
                 Self(index)
             }
 
+            pub fn as_u32(self) -> u32 {
+                self.0
+            }
+
             fn index(self) -> usize {
                 self.0 as usize
             }
@@ -85,9 +95,18 @@ entities! {
     SigRef,
     /// A function the body calls directly.
     FuncRef,
-    /// A named address the code takes from its link table, which the loader fills when it maps
-    /// code written ahead of time (see [`section`]).
-    SymbolRef,
+    /// How to rebuild one interpreter frame where execution can leave the function, and through
+    /// its parent the frames of the callers this function inlined it into.
+    FrameState,
+}
+
+/// Where a [`FrameState`] finds one cell of what it saves.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Source {
+    /// The variable's value where execution leaves.
+    Variable(Variable),
+    /// A cell of a stack slot, read where execution leaves.
+    Stack(StackSlot, i32, Type),
 }
 
 /// An integer comparison.
@@ -165,11 +184,15 @@ impl From<f64> for Ieee64 {
 
 /// How a function receives its arguments. `Host` is the platform's C convention, which every
 /// entry point the runtime calls uses; `Tail` is the convention compiled code calls itself with,
-/// which allows tail calls.
+/// which allows tail calls. A `Preserving` function saves every register it writes and returns
+/// nothing, so a call of it costs its caller no register: a value that is live across the call
+/// stays where it is. Rarely taken paths call the runtime through one, because the allocator
+/// otherwise keeps a value that is live across any call in memory, hot path included.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum CallConv {
     Host,
     Tail,
+    Preserving,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -232,10 +255,28 @@ pub struct Function {
     slots: Vec<StackSlotData>,
     signatures: Vec<Signature>,
     functions: Vec<(FuncId, Signature)>,
-    symbols: Vec<Box<str>>,
     entry: Option<Block>,
     /// The arguments a branch passes for its target's variable parameters, by branch and target.
     variable_args: FxHashMap<(Inst, u8), SmallVec<[Value; 4]>>,
+    frame_states: Vec<FrameStateData>,
+    /// The cells every frame state saves, each state's as one run.
+    sources: Vec<Source>,
+}
+
+#[derive(Clone, Copy)]
+struct FrameStateData {
+    /// The state of the caller at the call this frame was inlined at.
+    parent: Option<FrameState>,
+    sources: List,
+    /// How many cells the ancestors save, which come before this state's own in the buffer.
+    base: u32,
+    /// The block a branch leaves through, made for the first branch that asks for it: the state
+    /// of a caller at an inlined call is only ever a parent, and gets none.
+    exit: Option<Block>,
+    /// The block an inlined frame's exit continues in once it has saved its own cells. It takes
+    /// the leaving state's number and saves this state's cells. Made for the first inlined
+    /// frame that needs it.
+    chain: Option<Block>,
 }
 
 #[derive(Clone, Copy)]
@@ -246,8 +287,10 @@ struct ValueData {
 
 #[derive(Clone, Copy)]
 enum Definition {
-    /// An instruction's result or a block parameter.
-    Own,
+    /// A block parameter.
+    Param,
+    /// A result of this instruction.
+    Result(Inst),
     /// A trivial parameter that SSA construction replaced by the value it always receives.
     Alias(Value),
 }
@@ -290,8 +333,8 @@ enum Op {
     /// A store of the value's low 16 bits when the flag is set.
     Store(bool, MemFlagsData, Value, Value, i32),
     StackAddr(Type, StackSlot, i32),
-    /// The address the link table holds for a symbol.
-    SymbolAddr(SymbolRef),
+    /// The word in slot `n` of the offset table a relocatable object's code is mapped above.
+    TableWord(u32),
     StackLoad(Type, StackSlot, i32),
     StackStore(Value, StackSlot, i32),
     Convert(Convert, Type, Value),
@@ -387,9 +430,10 @@ impl Function {
             slots: Vec::new(),
             signatures: Vec::new(),
             functions: Vec::new(),
-            symbols: Vec::new(),
             entry: None,
             variable_args: FxHashMap::default(),
+            frame_states: Vec::new(),
+            sources: Vec::new(),
         }
     }
 
@@ -537,7 +581,7 @@ impl Builder {
     }
 
     pub fn append_block_param(&mut self, block: Block, ty: Type) -> Value {
-        let value = self.new_value(ty, Definition::Own);
+        let value = self.new_value(ty, Definition::Param);
         if let Some(data) = self.function.blocks.get_mut(block.index()) {
             data.params.push(value);
         }
@@ -607,22 +651,166 @@ impl Builder {
         reference
     }
 
-    /// Names an address the code takes from its link table, once per name.
-    pub fn import_symbol(&mut self, name: &str) -> SymbolRef {
-        if let Some(index) = self
-            .function
-            .symbols
-            .iter()
-            .position(|symbol| &**symbol == name)
-        {
-            return SymbolRef(index as u32);
-        }
-        self.function.symbols.push(name.into());
-        SymbolRef(self.function.symbols.len() as u32 - 1)
-    }
-
     pub fn inst_results(&self, inst: Inst) -> &[Value] {
         self.function.results(inst)
+    }
+
+    /// Declares a point where execution can leave the function for the interpreter. `sources`
+    /// are the cells the interpreter needs to rebuild the frame, and `parent` is the caller's
+    /// state when the frame is one this function inlined. A branch leaves through
+    /// [`Builder::exit_block`], and [`Builder::emit_exits`] gives those blocks their code.
+    pub fn frame_state(&mut self, parent: Option<FrameState>, sources: &[Source]) -> FrameState {
+        let state = FrameState(self.function.frame_states.len() as u32);
+        let start = self.function.sources.len() as u32;
+        self.function.sources.extend_from_slice(sources);
+        let base = parent
+            .and_then(|parent| self.function.frame_states.get(parent.index()))
+            .map_or(0, |parent| parent.base + parent.sources.len);
+        self.function.frame_states.push(FrameStateData {
+            parent,
+            sources: List {
+                start,
+                len: sources.len() as u32,
+            },
+            base,
+            exit: None,
+            chain: None,
+        });
+        state
+    }
+
+    /// The block a branch takes to leave at `state`.
+    pub fn exit_block(&mut self, state: FrameState) -> Block {
+        if let Some(exit) = self
+            .function
+            .frame_states
+            .get(state.index())
+            .and_then(|data| data.exit)
+        {
+            return exit;
+        }
+        let exit = self.create_block();
+        self.set_cold_block(exit);
+        if let Some(data) = self.function.frame_states.get_mut(state.index()) {
+            data.exit = Some(exit);
+        }
+        exit
+    }
+
+    /// Where `state`'s own cells start in the buffer the exits fill: after its ancestors'.
+    pub fn frame_state_base(&self, state: FrameState) -> usize {
+        self.function
+            .frame_states
+            .get(state.index())
+            .map_or(0, |data| data.base as usize)
+    }
+
+    /// Gives every frame state's exit its code, and answers the one block they all end in with
+    /// the buffer they filled, or `None` when the function has no frame state. That block takes
+    /// the number of the state execution left at, and the caller fills it in.
+    ///
+    /// An exit saves each of its sources into the buffer, eight bytes a cell, then continues
+    /// with its parent's cells, so the buffer holds the outermost frame first. Call it after
+    /// the last instruction of the body and before [`Builder::seal_all_blocks`], which resolves
+    /// the variables the exits read.
+    pub fn emit_exits(&mut self) -> Option<(Block, StackSlot)> {
+        if self.function.frame_states.is_empty() {
+            return None;
+        }
+        let cells = self
+            .function
+            .frame_states
+            .iter()
+            .map(|data| data.base + data.sources.len)
+            .max()
+            .unwrap_or(0)
+            .max(1);
+        let buffer = self.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            8 * cells,
+            3,
+        ));
+        let shared = self.create_block();
+        self.append_block_param(shared, Type::I64);
+        self.set_cold_block(shared);
+        let mut chains: Vec<FrameState> = Vec::new();
+        for index in 0..self.function.frame_states.len() {
+            let state = FrameState(index as u32);
+            let Some(&data) = self.function.frame_states.get(index) else {
+                continue;
+            };
+            let Some(exit) = data.exit else {
+                continue;
+            };
+            self.switch_to_block(exit);
+            self.save_sources(data, buffer);
+            let number = self.ins().iconst(Type::I64, state.0 as i64);
+            let next = self.chain_block(data.parent, shared, &mut chains);
+            self.ins().jump(next, &[number]);
+        }
+        while let Some(state) = chains.pop() {
+            let Some(&data) = self.function.frame_states.get(state.index()) else {
+                continue;
+            };
+            let Some(chain) = data.chain else {
+                continue;
+            };
+            self.switch_to_block(chain);
+            self.save_sources(data, buffer);
+            let number = self.block_params(chain).first().copied();
+            let next = self.chain_block(data.parent, shared, &mut chains);
+            self.ins().jump(next, number.as_slice());
+        }
+        Some((shared, buffer))
+    }
+
+    /// The block that saves the cells of `parent` and its ancestors for an exit that has saved
+    /// its own, or `shared` when the exit's frame is the outermost.
+    fn chain_block(
+        &mut self,
+        parent: Option<FrameState>,
+        shared: Block,
+        chains: &mut Vec<FrameState>,
+    ) -> Block {
+        let Some(parent) = parent else {
+            return shared;
+        };
+        if let Some(chain) = self
+            .function
+            .frame_states
+            .get(parent.index())
+            .and_then(|data| data.chain)
+        {
+            return chain;
+        }
+        let chain = self.create_block();
+        self.append_block_param(chain, Type::I64);
+        self.set_cold_block(chain);
+        if let Some(data) = self.function.frame_states.get_mut(parent.index()) {
+            data.chain = Some(chain);
+        }
+        chains.push(parent);
+        chain
+    }
+
+    fn save_sources(&mut self, data: FrameStateData, buffer: StackSlot) {
+        for index in 0..data.sources.len {
+            let Some(&source) = self
+                .function
+                .sources
+                .get((data.sources.start + index) as usize)
+            else {
+                continue;
+            };
+            let value = match source {
+                Source::Variable(variable) => self.use_var(variable),
+                Source::Stack(slot, offset, ty) => {
+                    self.ins().stack_load(Type::I64, ty, slot, offset)
+                }
+            };
+            self.ins()
+                .stack_store(Type::I64, value, buffer, 8 * (data.base + index) as i32);
+        }
     }
 
     pub fn ins(&mut self) -> Ins<'_> {
@@ -772,7 +960,7 @@ impl Builder {
         block: Block,
         pending: &mut Vec<(Block, usize)>,
     ) -> Value {
-        let value = self.new_value(ty, Definition::Own);
+        let value = self.new_value(ty, Definition::Param);
         if let Some(data) = self.function.blocks.get_mut(block.index()) {
             pending.push((block, data.variable_params.len()));
             data.variable_params.push(VariableParam {
@@ -943,7 +1131,7 @@ impl Builder {
         self.function.owners.push(block);
         let values: SmallVec<[Value; 4]> = results
             .iter()
-            .map(|&ty| self.new_value(ty, Definition::Own))
+            .map(|&ty| self.new_value(ty, Definition::Result(inst)))
             .collect();
         let list = self.list(&values);
         self.function.result_lists.push(list);
@@ -963,6 +1151,19 @@ impl Builder {
             .values
             .get(value.index())
             .map_or(Type::I64, |data| data.ty)
+    }
+
+    /// The integer `value` is when an `iconst` defined it, so a front end can emit the shorter
+    /// code a constant operand allows. A variable read in another block than its definition
+    /// is a parameter until the blocks are sealed, and gives `None`.
+    pub fn constant(&self, value: Value) -> Option<i64> {
+        match self.function.values.get(value.index())?.definition {
+            Definition::Result(inst) => match self.function.ops.get(inst.index())? {
+                &Op::Iconst(_, constant) => Some(constant),
+                _ => None,
+            },
+            Definition::Param | Definition::Alias(_) => None,
+        }
     }
 }
 
@@ -1057,11 +1258,6 @@ impl Ins<'_> {
         self.single(Op::Iconst(ty, value), ty)
     }
 
-    /// The address the link table holds for `symbol`, a 64-bit value.
-    pub fn symbol_addr(self, symbol: SymbolRef) -> Value {
-        self.single(Op::SymbolAddr(symbol), Type::I64)
-    }
-
     pub fn f64const(self, value: impl Into<Ieee64>) -> Value {
         self.single(Op::F64const(value.into().0), Type::F64)
     }
@@ -1099,6 +1295,12 @@ impl Ins<'_> {
 
     pub fn stack_addr(self, ty: Type, slot: StackSlot, offset: i32) -> Value {
         self.single(Op::StackAddr(ty, slot, offset), ty)
+    }
+
+    /// The word in slot `slot` of the table that relocatable code loads every process address
+    /// from. Only [`Relocatable`] lowers it; the JIT module refuses it.
+    pub fn table_word(self, slot: u32) -> Value {
+        self.single(Op::TableWord(slot), Type::I64)
     }
 
     pub fn stack_load(self, _pointer: Type, ty: Type, slot: StackSlot, offset: i32) -> Value {
@@ -1240,6 +1442,27 @@ impl Display for Function {
                 }
                 writeln!(f, "    {line}")?;
             }
+        }
+        for (index, data) in self.frame_states.iter().enumerate() {
+            write!(f, "state{index}")?;
+            if let Some(parent) = data.parent {
+                write!(f, " in state{}", parent.0)?;
+            }
+            if let Some(exit) = data.exit {
+                write!(f, " leaves through block{}", exit.0)?;
+            }
+            write!(f, " saves")?;
+            let sources = self
+                .sources
+                .get(data.sources.start as usize..(data.sources.start + data.sources.len) as usize)
+                .unwrap_or(&[]);
+            for source in sources {
+                match source {
+                    Source::Variable(variable) => write!(f, " var{}", variable.0)?,
+                    Source::Stack(slot, offset, _) => write!(f, " stack{}+{offset}", slot.0)?,
+                }
+            }
+            writeln!(f)?;
         }
         writeln!(f, "}}")
     }

@@ -5,9 +5,209 @@ description: Release announcements and project news
 
 ## Unreleased
 
+### An installed typed package runs like a script
+
+`ry install` and `ry build` on ry's runtime check a typed package before they build it, and an
+error in a strict file stops the build. The tarball holds the sources as `ry run` runs them:
+literals carry the types the checker gave them, and every one-line parameter and return annotation
+is written as the type it stands for, with aliases expanded. So a typed function of an installed
+package that converts an R vector with `List.from_r`, or that reads a parameter typed by an alias,
+compiles at its first call instead of running that call in the interpreter, and a parameter typed by
+a record alias is checked at run time
+(``argument `p` must be `Record{x: F64, y: F64}`, not `list` ``). See [the CLI reference](/reference/cli#build-and-install).
+
+The same rewrite applies to typed code that `ry run --runtime ry` and the console run, strict or
+not, so a parameter typed by an alias of a checkable type is checked at run time there too:
+`half("a")`, where `half <- function(x: Meters)` and `alias Meters = F64`, stops with
+``argument `x` must be `F64`, not `character` `` instead of failing inside the body.
+
+An `I64` or a `List<I64>` inside a function, a list or a package's namespace serializes, as ry's
+own type code that only ry reads back, so a typed package can bind `limit <- 10` where the checker
+types `10` as `I64`. `saveRDS(5i64, file)` is refused, and records, tuples, tags, dictionaries and
+sets do not serialize.
+
+### An installed typed package carries its machine code
+
+`ry install` on ry's runtime compiles a package's typed functions and writes their machine code
+beside the package's lazy-load database, as `R/<package>.<build>.ryt`. A new session maps that file
+and runs a typed function's first call on the code compiled at install instead of compiling it: 50
+typed functions of one package took 1.43 ms for their first calls against 18.5 ms compiled in the
+session, and 2.2 MiB of peak memory against 5.0 MiB (iterate build). Processes that use the same
+package share its code pages. `ry build --aot` on a package installs it the same way, and
+`R CMD INSTALL --ry-no-typed-code` skips the file. Under `ry run --aot`, a package installed by
+another build of ry compiles its typed functions as it loads and says to reinstall it. See
+[the CLI reference](/reference/cli#build-and-install) and
+[the typed code file](/development/typed-code-file/).
+
+### Reinstall packages that ry 0.4.5 or earlier compiled
+
+A package that writes into a list or character vector through a read-only pointer, as data.table's
+`setcolorder` does, could lose an element to the garbage collector, so a data.table program that
+added columns with `:=` and then reordered them failed with "malformed data.table" or crashed. The
+collector now rescans every list or character vector that native code took a pointer into, read-only
+or not, but code compiled against ry 0.4.5's headers reads those pointers inline and skips the
+rescan. ry therefore refuses to load such a package and says how to reinstall it:
+
+```
+Error: package or namespace load failed for ‘data.table’:
+ unable to load shared object '/home/me/R/library/data.table/libs/data_table.so':
+  package 'data.table' was compiled by ry 0.4.5 against older C headers, and its compiled code is unsafe to run under this ry. Reinstall it with this ry: install.packages("data.table"), or R CMD INSTALL on its source (ry install for a package you develop).
+```
+
+A package installed by GNU R loads unchanged. Every installation from source by ry records the
+version of its headers' binary interface in a `RyAbi:` field of the package's `DESCRIPTION`, and
+`ry load` and `ry install` rebuild objects that an older ry left in a package's `src/`
+([the CLI reference](/reference/cli#build-and-install)).
+
+## ry 0.4.5
+
+*Released in November 2026.*
+
+Version 0.4.5 builds for Windows, prints a report when a process crashes, adds `ry run --aot`, and
+makes calls faster at both tiers of the interpreter. Every figure below was reported by the change
+that introduced it; none was re-measured for these notes.
+
+### Highlights
+
+- **Windows builds.** Fixes for the Windows archive: lock files open for writing so Windows can lock
+  them, package `inst` directories install by concatenation, directory listings use slashes, package
+  DLLs link Rtools' gettext, the embedded base R's files keep their modification times, base R's code
+  images run without a stray argument, and file errors carry the operating system's wording. The
+  archive is best effort ([Releasing](/development/releasing)).
+- **Calls run in the dispatch loop.** A call to a compiled closure continues in the loop the caller
+  is already running, instead of entering through Rust recursion. A framed call costs 1,172
+  instructions over an empty loop, where it cost 1,880. Validation's instruction count falls 1.5% and
+  the expression tree program's 10.4%.
+- **Tier 1 compiles closure calls with effects.** Every exit from compiled code names a frame
+  state, and deoptimization rebuilds the interpreter frames, those of inlined callees included, so
+  a closure call runs without a frame, an environment or promises. On the applications suite, the
+  orders program runs in 85 ms against 154 ms, and the geometric mean of GNU R's time
+  over ry's moves from 2.83x to 2.96x.
+- **`ry run --aot`** compiles a script's typed functions before it starts.
+- **A crash leaves a report**, and **`ry test --jobs`** runs tests in parallel.
+- **Closure calls allocate less.** A call on a slot frame allocates no environment, no binding cell
+  and, for most arguments, no promise. On the finance code base the collector frees 264.0M objects
+  where it freed 348.2M, and collection time falls from 2.41 s to 1.86 s.
+- **The three code bases run faster.** Native condition prologues, an S3 lookup fast path, a native
+  `compiler::compile` and a recursive `dir.create` move them from 1.53x, 1.47x and 1.38x GNU R's
+  speed to 1.81x, 1.50x and 1.59x (finance, data science, biostatistics; one run each, so expect a
+  few percent of noise). `tryCatch` with no condition costs 17.6% fewer instructions.
+- **A faster DataFrame `:=`.** `x[id4 == step, v1 := v1 + 1L]` in a loop takes 0.111 s from R at
+  1e7 rows against data.table's 0.356 s, and 0.987 s at 1e8 rows against 3.079 s.
+- **Typed ports of all 54 public benchmark programs** run natively and print GNU R's checksum.
+
+### Smaller changes
+
+- The interpreter is split into an engine crate, a numeric crate and four leaf crates (`stats`,
+  `graphics`, `frames`, `services`), so the checker binary builds without the interpreter: 44.3 MB
+  down to 30.5 MB on the iterate profile.
+- Answering a constructed name in the checker reads the package layer instead of folding over every
+  file, which keeps an edit from re-reading the whole project.
+- `%%` and `%/%` on doubles match GNU R bit for bit. Of 2,209 value pairs, 311 differed before and
+  none do after, and whole numbers below 2^53 take a 64-bit path.
+- `parent.env(1)` signals GNU R's "argument is not an environment" error instead of returning a
+  search-path environment.
+- Types and symbols are four-byte ids and an item's syntax carries a stamp, so an edit lowers only
+  the items it changed. A check of the finance code base takes about 7% less wall time, CPU and
+  memory, with byte-identical output.
+- A hot suite (`just bench hot`) replays the 100 package functions that hold the most time in the
+  code bases in about 30 s, and `just bench-mechanisms` prices each R-level operation in instructions.
+- `just bench codebases` times the three 300,000-line code bases per test block against GNU R.
+- The nix shell builds GNU R with the setup hook it needs, and its cache is rebuilt only when the
+  inputs change.
+
+### `ry run --aot` compiles typed code before the script starts
+
+`ry run --aot script.R` compiles the script's typed functions before its first expression runs, so that no function compiles in the middle of the program. Without the flag a typed function compiles at its first call, which costs about a millisecond on that call. The whole run takes the same time either way, because the same compiler does the same work: the flag moves it in front of the program. Untyped R code is not compiled ahead of time. See [the CLI reference](/reference/cli#compiling-ahead-of-time).
+
+A typed function that converts an R vector with `List.from_r` compiles at its first call, and so does one that calls a function of a loaded package such as `stats::rnorm`. Each used to run its first call in the interpreter, to see the vector's item type or to load the function. The item type is the one the type checker gives the conversion. Where the checker says `List<F64>` and R hands over integers or logicals, as `abs(-3:3)` does, the conversion widens them; a vector of any other type stops the conversion with an error that names both types.
+
+### A crash leaves a report
+
+A process that ends in SIGSEGV, SIGBUS or SIGABRT, for example a segmentation fault in a package's compiled code, now prints a report on standard error before it dies: the ry version, the signal with the faulting address and its cause, the R call stack with function names, and the native stack. It then dies by the same signal, so exit statuses and core dumps are unchanged. Windows prints no report yet. See [the CLI reference](/reference/cli#crash-reports).
+
+### Faster aperm, t, apply, sweep, partial sorts and scalar array indexing
+
+`aperm()` and `t()` copied one element at a time through a per-element type dispatch, and `aperm()` allocated an index vector for every element. Both now run one blocked, strided copy specialized by element type, so the data is read and written once, in cache-sized tiles, and a permutation that keeps the first dimension is a plain run copy. `aperm()` and `t()` also read an array whose dimnames were set after creation in place, where they used to copy its data first. `a[i, j, k]` with one plain position per dimension of an array without dimnames reads the element directly instead of building index vectors, and `sort(x, partial = ...)` (so `quantile()` and `median()`) selects on a copy of the numbers instead of an index permutation. `apply()` and `sweep()` get faster through `aperm()`.
+
+Measured on one machine against GNU R 4.6.2 (seconds, best of three, release build):
+
+| | ry before | ry after | GNU R |
+|---|---:|---:|---:|
+| `aperm(a, c(2, 1, 3))`, 200x200x50, 20 times | 1.39 | 0.22 | 0.42 |
+| `aperm(a, c(3, 1, 2))`, 200x200x50, 20 times | 1.25 | 0.14 | 0.26 |
+| `aperm()` of an integer array and of one with dimnames, 20 times | 0.98, 1.22 | 0.07, 0.14 | 0.16, 0.54 |
+| `t(m)`, 1000x1000, 200 times | 1.88 | 0.69 | 0.91 |
+| `a[3, 4, 5]`, 200,000 times | 0.060 | 0.017 | 0.006 |
+| `apply(m, 1, sum)` and `sweep(m, 2, colMeans(m))`, 1000x1000 | 0.037, 0.046 | 0.012, 0.016 | 0.025, 0.016 |
+| `apply(a, c(1, 3), sum)`, 200x200x50 | 0.082 | 0.025 | 0.052 |
+| `quantile()` of 2 million doubles, 5 times | 1.14 | 0.34 | 0.35 |
+| `sort(x, partial = 1e6)`, 5 times | 0.41 | 0.19 | 0.18 |
+
+Character and list arrays are permuted straight into the result, with no intermediate copy, so `aperm()` of a 100x100x100 character array takes 0.45 s for 200 calls, against 1.54 s before and 1.55 s in GNU R. Wider tiles make `aperm(a, c(3, 1, 2))` of a 200x200x200 array take 0.36 s for 20 calls, against 0.59 s before and 1.49 s in GNU R. `aperm()` of an expression array stops with GNU R's error "unimplemented type 'expression' in 'aperm'", and `t()` with "argument is not a matrix", where both used to permute it.
+
+Scalar array indexing at the top level and `rbind()` of data frames (0.075 s before, 0.037 s after for 200 calls, against 0.025 s) are still slower than GNU R, because their remaining time is in the interpreter's per-call overhead.
+
+### The VS Code extension on Windows
+
+The Marketplace had no Windows package for 0.4.4, so VS Code on Windows installed the universal `ry.vsix`, which bundles no binary, and failed with "spawn ry ENOENT" in the log only. A release now publishes the universal `ry.vsix` only when every platform has its package, and the extension shows an error with a link to the installation page when it finds no `ry` to start.
+
+### The Linux runtime loads on glibc 2.41 and later
+
+The `libR.so` of 0.4.4 had no `PT_GNU_STACK` program header, because BOLT's `-use-gnu-stack` overwrote it. glibc 2.41 and later then refused to load the library ("cannot enable executable stack"), so `ry run` failed on such systems. The release build now links with `-z noexecstack`, restores the header after BOLT, and fails if `libR.so` or `ry` lacks it. A load failure for this cause now says that the runtime was packaged without the header, instead of suggesting a `noexec` mount. Until you upgrade, `GLIBC_TUNABLES=glibc.rtld.execstack=2` works around it.
+
+### Parallel tests
+
+`ry test --jobs N` runs the test files in `N` worker processes, and a package that sets `Config/testthat/parallel: true` uses every core without the flag. The workers load the package through ry's lazy loader under the project's `ry.toml`, so they need neither pkgload nor every import installed. On the finance benchmark code base (501 test files, 43,011 expectations, 4 cores) the suite takes 84 s with four workers against 252 s in one process. See [the CLI reference](/reference/cli#parallel-tests).
+
+### httpuv and plumber serve requests
+
+`R_getVarEx()` returns its default when that default is a C `NULL`, which is how Rcpp asks whether a name is bound in an environment. httpuv builds each request that way, so an in-process server answered every request with "object 'REQUEST_METHOD' not found".
+
 ### Faster formatC
 
 A scalar `formatC()` call takes about 40% fewer instructions: its native path calls the formatting code directly instead of building R arguments for it, and reads `options(OutDec)` without calling `getOption()` when `decimal.mark` is left out. The report benchmark, which formats 20,000 account numbers with `formatC()`, takes 12% fewer instructions.
+
+## ry 0.4.4
+
+*Released in November 2026.*
+
+Version 0.4.4 is ry's first full release, not a pre-release. Closure calls run without an
+environment unless something asks for one, packages and base R are compiled before a session
+starts, the Linux build is profile-guided, and typed code runs natively in many more shapes.
+It ships for Linux x86_64 and macOS arm64; Windows follows in a later release.
+
+Every figure below was reported by the change that introduced it (instructions are callgrind
+counts). None was re-measured for these notes.
+
+### Highlights
+
+- **Closure calls run in slot frames.** A call keeps its arguments and locals in slots of the
+  interpreter's register window and creates an environment only when something asks for one.
+  62.5% of the calls on the testthat workload never need theirs.
+- **Code is compiled before a session starts.** `ry install` writes a code image (`.ryc`) beside
+  each package's lazy-load database. It holds the compiled code of every closure and machine code
+  for the package's numeric functions, which a session maps read-only and runs without warming up,
+  even with the JIT off. `ry install --train tests` trains the image on the package's own tests,
+  and `RY_CODE_IMAGE=0` makes a session ignore images ([CLI reference](/reference/cli)). Base R's
+  closures are compiled into the start-up image, which is laid out in the order a session first
+  touches it.
+- **The Linux build is profile-guided.** Every crate is compiled with profile-guided optimization,
+  and BOLT lays out `libR`. Against a plain release build, the test phase of the testthat workload
+  runs 10 to 13% faster, held-out public benchmark programs run 9 to 25% faster, and peak memory is
+  about 6 MB lower.
+- **Typed code runs natively in more shapes.** List literals, `List.append`, slicing, `List.swap`
+  and `List.concat`, sets, logical selection, sorting, records, tags, text and results, the scalar
+  `Num` functions, record updates, `Str.to_utf8` and `Str.from_utf8_lossy` all compile, and typed
+  code calls R natively. The typed mandelbrot_ascii port takes 0.31 s against 30.2 s in the
+  interpreter, and fannkuchredux 0.044 s against 5.8 s. `RY_TYPED_LOG` says why a typed call runs in
+  the interpreter.
+- **A better console.** Input is colored from ry's own parser, with the bracket at the cursor and
+  its partner highlighted (`[console] highlight = false` or `NO_COLOR` turns colors off, and
+  `[console.colors]` overrides a style; see [Configuration](/reference/configuration)). Each command
+  is checked against what earlier commands defined, so a paste costs time in proportion to its
+  length: 5,000 typed lines take 1.36 s, where 1,000 took 3.6 s. A paste no longer stalls on the
+  terminal, and `menu()`, `readline()`, `scan()` and `stdin()` read from the console.
 
 ### Faster sprintf
 
@@ -81,6 +281,33 @@ per pass over its left operand, with each entry summed in the same order as befo
 are unchanged and spectralnorm_math rises from 1.27x to 1.44x.
 Small vectors are allocated inline at the call site, which takes 2.2% off the instructions of
 the testthat workload.
+
+### Also in this release
+
+- **More behavior matches GNU R.** `cat()` rejects a list or a call with GNU R's error, after
+  writing the output before it. `structure()` gives its result its own dimnames list, so xts's
+  `as.xts(m)` no longer clears `m`'s row names. `unlink()` removes files and trees as GNU R's
+  `R_unlink` does. `NaN + NA` is `NaN` and `NA + NaN` is `NA`. `sort`, `order` and `ls` follow GNU
+  R's collation rule for `LC_ALL=C` and `LC_COLLATE=C`, and so do `Rf_isUnsorted` and
+  `R_orderVector` in the C API. A process started with SIGINT ignored keeps ignoring it.
+- **DataFrame functions are qualified, so `package:ry` masks no other package's functions.**
+  `setkey` and `setkeyv` are `DataFrame.set_key(df, cols)`, `key` is `DataFrame.key(df)`, `copy`
+  is `DataFrame.copy(df)`, and `col` and `lit` are `Expr.col(name)` and `Expr.lit(value)`, so
+  `library(data.table)` attaches without a masking message ([DataFrames](/reference/dataframes)).
+- **ry cleans up its cache.** Each ry build assembles an R home under the cache, and homes that no
+  running process holds and no current build uses are deleted. A stale start-up image in a home is
+  rewritten instead of slowing every start.
+- **ry starts without a shell on `PATH` on Linux and macOS**, because `Sys.which()` searches
+  `PATH` natively there.
+- **Collector fixes.** Several objects the collector could free while they were still in use are
+  rooted: evaluated builtin arguments, argument references, tenured weak-pair lists with young
+  values, and a pending unwind during a JIT exit.
+- **Nightly builds.** Linux x86_64 nightlies of any ref are published as GitHub pre-releases, so
+  `releases/latest` always names the newest full release ([Installation](/installation)).
+
+### Known limitations
+
+- **`ry R` needs GNU R**, because it runs your code on GNU R itself.
 
 ## ry 0.4.3-beta, Linux only
 

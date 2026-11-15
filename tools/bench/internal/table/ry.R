@@ -5,12 +5,13 @@
 # Polars-style API. The `:=` loops use the data.table syntax the DataFrame keeps for
 # compatibility, because they measure in-place updates, which the Polars-style API does not do.
 #
-# Usage: ry run ry.R <data-dir> [groupby | joins]   (`groupby` runs only the ten group-by questions,
-#   `joins` only the five join questions)
+# Usage: ry run ry.R <data-dir> [groupby | joins | updates]   (`groupby` runs only the ten group-by
+#   questions, `joins` only the five join questions, and `updates` only the two `:=` loops that
+#   write existing columns)
 
 args <- commandArgs(trailingOnly = TRUE)
 dir <- args[[1]]
-# "groupby" or "joins" limits the run to those questions.
+# "groupby", "joins" or "updates" limits the run to those questions.
 part <- if (length(args) > 1L) args[[2]] else "all"
 cat("# ry DataFrame\n")
 
@@ -18,14 +19,14 @@ read <- function(name, factors = TRUE) DataFrame.read_csv(file.path(dir, name), 
 
 checksum <- function(answer) {
   if (!is.DataFrame(answer)) return(sum(as.numeric(answer)))
-  # One numeric column at a time, chosen from the schema: `as.list` would convert the whole
-  # answer to R vectors at once, which for q10's 1e8 groups doubles the memory the answer holds.
-  total <- 0
+  # The engine sums the numeric columns and hands back one row. Converting each column to an R
+  # vector first would copy it, and `as.numeric` would copy an integer column again, which at 1e8
+  # rows is more memory than the answer itself.
   schema <- DataFrame.schema(answer)
-  for (name in names(schema)[schema %in% c("integer[]", "double[]")]) {
-    total <- total + sum(as.numeric(answer[[name]]), na.rm = TRUE)
-  }
-  total
+  numeric <- names(schema)[schema %in% c("integer[]", "double[]")]
+  sums <- lapply(numeric, function(name) Expr.col(name) |> Expr.sum())
+  sums <- do.call(DataFrame.select, c(list(answer), sums))
+  sum(as.numeric(unlist(as.list(sums))))
 }
 
 report <- function(question, run, seconds, answer) {
@@ -37,6 +38,8 @@ report <- function(question, run, seconds, answer) {
 time_question <- function(question, expr) {
   expr <- substitute(expr)
   for (run in 1:2) {
+    # The previous answer is collected before the clock starts, so two answers never share
+    # memory. At 1e8 rows a join's answer is 4.5 GB.
     gc()
     seconds <- system.time(answer <- eval(expr, parent.frame()))[["elapsed"]]
     report(question, run, seconds, answer)
@@ -49,31 +52,33 @@ if (part != "joins") {
   sum_of <- function(name) Expr.col(name) |> Expr.sum()
   mean_of <- function(name) Expr.col(name) |> Expr.mean()
   by <- function(...) DataFrame.group_by(x, ...)
-  time_question("groupby q1", by("id1") |> GroupBy.agg(sum_of("v1")))
-  time_question("groupby q2", by("id1", "id2") |> GroupBy.agg(sum_of("v1")))
-  time_question("groupby q3", by("id3") |> GroupBy.agg(sum_of("v1"), mean_of("v3")))
-  time_question("groupby q4", by("id4") |> GroupBy.agg(mean_of("v1"), mean_of("v2"), mean_of("v3")))
-  time_question("groupby q5", by("id6") |> GroupBy.agg(sum_of("v1"), sum_of("v2"), sum_of("v3")))
-  time_question("groupby q6", by("id4", "id5") |> GroupBy.agg(
-    median_v3 = Expr.col("v3") |> Expr.median(),
-    sd_v3 = Expr.col("v3") |> Expr.std()
-  ))
-  time_question("groupby q7", by("id3") |> GroupBy.agg(
-    range_v1_v2 = (Expr.col("v1") |> Expr.max()) - (Expr.col("v2") |> Expr.min())
-  ))
-  time_question("groupby q8", DataFrame.lazy(x) |>
-    LazyFrame.sort("v3", descending = TRUE) |>
-    LazyFrame.group_by("id6") |>
-    LazyGroupBy.agg(largest2_v3 = Expr.col("v3") |> Expr.head(2L)) |>
-    LazyFrame.collect())
-  time_question("groupby q9", by("id2", "id4") |> GroupBy.agg(r2 = Expr.cor(Expr.col("v1"), Expr.col("v2"))^2))
-  time_question("groupby q10", by("id1", "id2", "id3", "id4", "id5", "id6") |> GroupBy.agg(
-    sum_of("v3"),
-    count = Expr.len()
-  ))
+  if (part != "updates") {
+    time_question("groupby q1", by("id1") |> GroupBy.agg(sum_of("v1")))
+    time_question("groupby q2", by("id1", "id2") |> GroupBy.agg(sum_of("v1")))
+    time_question("groupby q3", by("id3") |> GroupBy.agg(sum_of("v1"), mean_of("v3")))
+    time_question("groupby q4", by("id4") |> GroupBy.agg(mean_of("v1"), mean_of("v2"), mean_of("v3")))
+    time_question("groupby q5", by("id6") |> GroupBy.agg(sum_of("v1"), sum_of("v2"), sum_of("v3")))
+    time_question("groupby q6", by("id4", "id5") |> GroupBy.agg(
+      median_v3 = Expr.col("v3") |> Expr.median(),
+      sd_v3 = Expr.col("v3") |> Expr.std()
+    ))
+    time_question("groupby q7", by("id3") |> GroupBy.agg(
+      range_v1_v2 = (Expr.col("v1") |> Expr.max()) - (Expr.col("v2") |> Expr.min())
+    ))
+    time_question("groupby q8", DataFrame.lazy(x) |>
+      LazyFrame.sort("v3", descending = TRUE) |>
+      LazyFrame.group_by("id6") |>
+      LazyGroupBy.agg(largest2_v3 = Expr.col("v3") |> Expr.head(2L)) |>
+      LazyFrame.collect())
+    time_question("groupby q9", by("id2", "id4") |> GroupBy.agg(r2 = Expr.cor(Expr.col("v1"), Expr.col("v2"))^2))
+    time_question("groupby q10", by("id1", "id2", "id3", "id4", "id5", "id6") |> GroupBy.agg(
+      sum_of("v3"),
+      count = Expr.len()
+    ))
+  }
 
-  if (part == "all") {
-    # `:=` loops: a whole-column update, a 1% subset update and an added column, each 100 times.
+  if (part %in% c("all", "updates")) {
+    # `:=` loops, each 100 times: a whole-column update and a 1% subset update.
     time_question("update full", {
       for (step in 1:100) x[, v3 := v3 * 1.000001]
       x[, .(v3 = sum(v3))]
@@ -82,6 +87,10 @@ if (part != "joins") {
       for (step in 1:100) x[id4 == step, v1 := v1 + 1L]
       x[, .(v1 = sum(v1))]
     })
+  }
+  if (part == "all") {
+    # The loop that adds a column per pass holds 100 more columns at its end, which is
+    # why a run limited to the updates leaves it out: at 1e8 rows they are 80 GB.
     time_question("update add", {
       for (step in 1:100) x[, paste0("added", step) := v2 * step]
       x[, .(added100 = sum(added100))]
@@ -91,7 +100,7 @@ if (part != "joins") {
   invisible(gc())
 }
 
-if (part != "groupby") {
+if (part %in% c("all", "joins")) {
   x <- read("join_x.csv")
   small <- read("join_small.csv")
   medium <- read("join_medium.csv")

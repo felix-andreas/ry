@@ -9,8 +9,7 @@ file DESCRIPTION
 | Package: shapes
 | Version: 0.1.0
 file R/area.R
-| #: fn(width: F64, height: F64) -> F64
-| area <- function(width, height) width * height
+| area <- function(width: F64, height: F64) -> F64 width * height
 file tests/testthat/helper-values.R
 | expected_area <- 6.0
 file tests/testthat/test-area.R

@@ -40,7 +40,7 @@ use {
         values::{self, missing_arg, nil, symbol_name, symbols},
     },
     heap::{
-        Marker,
+        Marker, activity,
         object::{Sexp, SexpType, gp},
         records::NativeKind,
     },
@@ -58,6 +58,7 @@ pub struct State {
 }
 
 /// Whether a move is being tracked, which every closure entry must take part in.
+#[inline]
 pub fn tracking() -> bool {
     !interp().moves.moves.is_empty()
 }
@@ -234,6 +235,7 @@ pub unsafe fn call_moving_from(
         ended: false,
         shared,
     });
+    activity::set_hook(activity::MOVES, true);
     let result = eval::apply_closure_moved(call, function, &args, caller.sys_parent);
     // The original is rebuilt while the record still lies on the traced stack, because
     // rebuilding allocates and the record holds the only references to the replaced values.
@@ -245,6 +247,7 @@ pub unsafe fn call_moving_from(
     let Some(finished) = interp().moves.moves.pop() else {
         panic!("a moved argument's record disappeared during the call");
     };
+    activity::set_hook(activity::MOVES, tracking());
     if let Some(original) = restored {
         rebind(finished.binding, finished.target, original)?;
     }

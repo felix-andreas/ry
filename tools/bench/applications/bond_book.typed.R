@@ -3,7 +3,7 @@
 bond_price <- function(coupon: F64, rate: F64, years: I64) -> F64 {
   List.walk(List.range(1, years), 0, function(total, year) {
     flow <- if (year == years) coupon + 100 else coupon
-    total + flow * Num.pow(Num.e, -rate * Num.to_f64(year))
+    total + flow * Num.exp(-rate * Num.to_f64(year))
   })
 }
 price_book <- function(n: I64) -> F64 {

@@ -1902,7 +1902,7 @@ fn stacked_type(pieces: &[Option<Column>]) -> Result<DataType> {
         let mut labels: Vec<String> = Vec::new();
         for column in pieces.iter().flatten() {
             match factor::levels(column.dtype()) {
-                Some(levels) => labels.extend(levels.iter().map(str::to_string)),
+                Some(levels) => labels.extend(levels.to_strings()),
                 None => labels.extend(
                     column
                         .as_materialized_series()

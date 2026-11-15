@@ -95,6 +95,16 @@ pub enum Command {
         /// Do not load the package the working directory belongs to into the console
         #[arg(long, conflicts_with = "script")]
         no_load: bool,
+        /// Compile the script's typed functions before it starts, instead of each at its
+        /// first call
+        // `requires` alone does not refuse `--aot -i FILE`: an option that conflicts with a
+        // required argument lifts the requirement, so every console option is named here.
+        #[arg(
+            long,
+            requires = "script",
+            conflicts_with_all = ["interactive", "keybindings", "no_load"]
+        )]
+        aot: bool,
         /// Write a summary of where the run spent its time to FILE when it ends. The summary
         /// holds no source code, identifiers or data, so it is safe to share
         #[arg(long, value_name = "FILE")]
@@ -168,8 +178,8 @@ pub enum Command {
     ///
     /// The package loads as with `ry load`, and the files in `tests/testthat` run as with
     /// `devtools::test()`. The exit status is 0 when every test passed and 1 when one failed.
-    /// With `--watch`, every edit reloads only what changed and reruns the tests it can affect
-    /// first, then the rest.
+    /// With `--jobs`, the files run in that many worker processes. With `--watch`, every edit
+    /// reloads only what changed and reruns the tests it can affect first, then the rest.
     Test {
         /// The package, or any path inside it
         #[arg(default_value = ".")]
@@ -177,6 +187,11 @@ pub enum Command {
         /// Run only the test files whose names match this regular expression
         #[arg(long)]
         filter: Option<String>,
+        /// Run the test files in N worker processes, or in this process with 1. Without it, a
+        /// package whose DESCRIPTION sets `Config/testthat/parallel: true` gets one worker per
+        /// core, and any other package runs in this process
+        #[arg(long, short = 'j', value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+        jobs: Option<u32>,
         /// A testthat reporter by name, such as `progress`, `summary` or `junit`
         #[arg(long)]
         reporter: Option<String>,
@@ -213,17 +228,25 @@ pub enum Command {
     /// The tarball is the one `R CMD build` makes, run on ry's runtime with the options
     /// `devtools::build()` passes: vignettes are rebuilt, data is not re-saved, and no PDF
     /// manual is made. It is written beside the package directory unless `--output` names
-    /// another directory.
+    /// another directory. With `--aot` the package is installed instead, as `ry install` does,
+    /// with the machine code of its typed functions compiled ahead of time.
     Build {
         /// The package, or any path inside it
         #[arg(default_value = ".")]
         path: PathBuf,
         /// The directory to write the tarball to (default: the package directory's parent)
-        #[arg(long, short)]
+        #[arg(long, short, conflicts_with = "aot")]
         output: Option<PathBuf>,
         /// Ship the vignettes as they are instead of rebuilding them
-        #[arg(long, default_value_t = false)]
+        #[arg(long, default_value_t = false, conflicts_with = "aot")]
         no_vignettes: bool,
+        /// Install the package with its typed functions compiled ahead of time into its typed
+        /// code file, as `ry install` does
+        #[arg(long, default_value_t = false)]
+        aot: bool,
+        /// The library to install into with `--aot`
+        #[arg(long, short, requires = "aot")]
+        library: Option<PathBuf>,
         /// `gnu-r` builds with GNU R instead of ry's runtime
         #[arg(long, value_enum, hide = true)]
         runtime: Option<Runtime>,
@@ -244,11 +267,6 @@ pub enum Command {
         /// writing it, so that code that ran hot starts optimized in every session
         #[arg(long, value_name = "WORKLOAD")]
         train: Option<String>,
-        /// List the package's functions that stay in the interpreter, largest first, with what
-        /// kept each from machine code, and for those that compiled, the lookups and argument
-        /// tests their code checks
-        #[arg(long)]
-        explain: bool,
         /// `gnu-r` installs with GNU R instead of ry's runtime
         #[arg(long, value_enum, hide = true)]
         runtime: Option<Runtime>,
@@ -353,6 +371,8 @@ pub enum Mode {
     Script {
         file: PathBuf,
         arguments: Vec<String>,
+        /// Compile the script's typed functions before it starts (`ry run --aot`).
+        ahead: bool,
     },
     /// Open the console, after running `file` when there is one.
     Console {
@@ -373,14 +393,15 @@ impl Command {
                 session,
                 runtime,
                 no_load,
+                aot,
                 ..
             } => Session {
                 runtime: resolve_runtime(*runtime, runtime_variable, Runtime::Ry),
-                mode: session_mode(session, !no_load),
+                mode: session_mode(session, !no_load, *aot),
             },
             Command::R { session, no_load } => Session {
                 runtime: Runtime::GnuR,
-                mode: session_mode(session, !no_load),
+                mode: session_mode(session, !no_load, false),
             },
             Command::Repl {
                 keybindings,
@@ -416,11 +437,12 @@ pub fn resolve_runtime(
     .unwrap_or(default)
 }
 
-fn session_mode(session: &SessionArguments, load_package: bool) -> Mode {
+fn session_mode(session: &SessionArguments, load_package: bool, ahead: bool) -> Mode {
     match session.script.split_first() {
         Some((file, arguments)) => Mode::Script {
             file: PathBuf::from(file),
             arguments: arguments.to_vec(),
+            ahead,
         },
         None => Mode::Console {
             file: session.interactive.clone(),

@@ -43,6 +43,8 @@ group = "awfy"
 display = "Bouncing balls, positional fields"
 summary = "Moves 10,000 balls for 50 steps with lapply, indexing each ball's fields by position and counting bounces through <<-"
 source = "tools/bench/public/awfy/bounce_nonames.R"
+# Typed: a ball is a List indexed by position, with the random seed threaded through calls instead of <<-.
+typed_source = "tools/bench/public/awfy/bounce_nonames.typed.R"
 
 [[programs]]
 id = "bounce_nonames_simple"
@@ -50,6 +52,9 @@ group = "awfy"
 display = "Bouncing balls, positional fields, simple setup"
 summary = "Same as the positional variant, but each ball's four random numbers are drawn into locals before c() builds it"
 source = "tools/bench/public/awfy/bounce_nonames_simple.R"
+# Typed: shares bounce_nonames.typed.R, because threading the seed through calls already draws
+# each ball's four random numbers into locals, as this variant does.
+typed_source = "tools/bench/public/awfy/bounce_nonames.typed.R"
 
 [[programs]]
 id = "mandelbrot"
@@ -65,6 +70,8 @@ group = "awfy"
 display = "Tree allocation"
 summary = "Recursively builds a depth-10 tree of 4-element lists with random leaves, stressing allocation, recursion and <<-"
 source = "tools/bench/public/awfy/storage.R"
+# Typed: a recursive tag union instead of nested lists, with the seed and the count threaded through calls instead of <<-.
+typed_source = "tools/bench/public/awfy/storage.typed.R"
 
 # Benchmarks Game
 
@@ -83,6 +90,8 @@ group = "shootout"
 display = "Binary trees, inline arithmetic"
 summary = "Binary trees with the child items computed inline in the recursive call and double rather than integer depths"
 source = "tools/bench/public/shootout/binarytrees_2.R"
+# Typed: a recursive tag union instead of nested lists, and List.map instead of sapply.
+typed_source = "tools/bench/public/shootout/binarytrees_2.typed.R"
 
 [[programs]]
 id = "binarytrees_naive"
@@ -90,6 +99,8 @@ group = "shootout"
 display = "Binary trees, explicit loop"
 summary = "Binary trees that sums each depth's checks in a for loop instead of sapply"
 source = "tools/bench/public/shootout/binarytrees_naive.R"
+# Typed: a recursive tag union instead of nested lists.
+typed_source = "tools/bench/public/shootout/binarytrees_naive.typed.R"
 
 [[programs]]
 id = "fannkuchredux"
@@ -97,7 +108,7 @@ group = "shootout"
 display = "Fannkuch-redux"
 summary = "Counts pancake flips over all permutations of 9 elements, reversing prefixes with vectorized rev and slice assignment"
 source = "tools/bench/public/shootout/fannkuchredux.R"
-# Typed: element swaps instead of vectorized rev() and slice assignment.
+# Typed: List.reverse and List.concat instead of rev() and slice assignment.
 typed_source = "tools/bench/public/shootout/fannkuchredux.typed.R"
 
 [[programs]]
@@ -106,6 +117,7 @@ group = "shootout"
 display = "Fannkuch-redux, scalar swaps"
 summary = "Fannkuch-redux that reverses prefixes and rotates the permutation one element at a time with [[ swaps"
 source = "tools/bench/public/shootout/fannkuchredux_naive.R"
+typed_source = "tools/bench/public/shootout/fannkuchredux_naive.typed.R"
 
 [[programs]]
 id = "fasta"
@@ -122,6 +134,8 @@ group = "shootout"
 display = "Fasta, vectorized linear search"
 summary = "Fasta that picks each line's codes by a vectorized linear search, advancing indices with which() until all match"
 source = "tools/bench/public/shootout/fasta_2.R"
+# Typed: Lists for the vectorized search, and a seed threaded through calls instead of <<-.
+typed_source = "tools/bench/public/shootout/fasta_2.typed.R"
 
 [[programs]]
 id = "fasta_3"
@@ -129,6 +143,8 @@ group = "shootout"
 display = "Fasta, vectorized binary search"
 summary = "Fasta that picks each line's codes by a vectorized binary search over the cumulative probabilities"
 source = "tools/bench/public/shootout/fasta_3.R"
+# Typed: Lists for the vectorized search, and a seed threaded through calls instead of <<-.
+typed_source = "tools/bench/public/shootout/fasta_3.typed.R"
 
 [[programs]]
 id = "fasta_naive"
@@ -136,6 +152,8 @@ group = "shootout"
 display = "Fasta, scalar linear search"
 summary = "Fasta that picks each character with a scalar linear search loop and joins every line with paste"
 source = "tools/bench/public/shootout/fasta_naive.R"
+# Typed: a seed threaded through calls instead of <<-.
+typed_source = "tools/bench/public/shootout/fasta_naive.typed.R"
 
 [[programs]]
 id = "fasta_naive_2"
@@ -143,6 +161,8 @@ group = "shootout"
 display = "Fasta, scalar binary search"
 summary = "Fasta that picks each character with a scalar binary search loop and joins every line with paste"
 source = "tools/bench/public/shootout/fasta_naive_2.R"
+# Typed: a seed threaded through calls instead of <<-.
+typed_source = "tools/bench/public/shootout/fasta_naive_2.typed.R"
 
 [[programs]]
 id = "fastaredux"
@@ -150,6 +170,8 @@ group = "shootout"
 display = "Fasta-redux"
 summary = "Fasta with a 4,096-entry lookup table that maps a random number to a code, corrected for a whole line at a time"
 source = "tools/bench/public/shootout/fastaredux.R"
+# Typed: Lists for the vectorized correction, and a seed threaded through calls instead of <<-.
+typed_source = "tools/bench/public/shootout/fastaredux.typed.R"
 
 [[programs]]
 id = "fastaredux_naive"
@@ -157,6 +179,8 @@ group = "shootout"
 display = "Fasta-redux, scalar lookup"
 summary = "Fasta-redux that does the table lookup and its correction one character at a time in a scalar loop"
 source = "tools/bench/public/shootout/fastaredux_naive.R"
+# Typed: a seed threaded through calls instead of <<-.
+typed_source = "tools/bench/public/shootout/fastaredux_naive.typed.R"
 
 [[programs]]
 id = "knucleotide"
@@ -173,6 +197,8 @@ group = "shootout"
 display = "K-nucleotide, attribute counts"
 summary = "K-nucleotide that keeps each k-mer's count as an attribute of an integer vector, read with attr and set with attr<-"
 source = "tools/bench/public/shootout/knucleotide_brute.R"
+# Typed: an association list searched in order instead of attributes; R reads the input file.
+typed_source = "tools/bench/public/shootout/knucleotide_brute.typed.R"
 
 [[programs]]
 id = "knucleotide_brute_2"
@@ -180,6 +206,8 @@ group = "shootout"
 display = "K-nucleotide, attribute counts, growing vector"
 summary = "Attribute-count k-nucleotide that also grows the underlying vector by doubling each time a new k-mer appears"
 source = "tools/bench/public/shootout/knucleotide_brute_2.R"
+# Typed: an association list searched in order instead of attributes; R reads the input file.
+typed_source = "tools/bench/public/shootout/knucleotide_brute_2.typed.R"
 
 [[programs]]
 id = "knucleotide_brute_3"
@@ -187,6 +215,8 @@ group = "shootout"
 display = "K-nucleotide, named vector counts"
 summary = "K-nucleotide that keeps the counts in a named integer vector, indexed and assigned by k-mer name"
 source = "tools/bench/public/shootout/knucleotide_brute_3.R"
+# Typed: parallel Lists of names and counts searched in order instead of a named vector; R reads the input file.
+typed_source = "tools/bench/public/shootout/knucleotide_brute_3.typed.R"
 
 [[programs]]
 id = "mandelbrot_ascii"
@@ -194,7 +224,7 @@ group = "shootout"
 display = "Mandelbrot, vectorized rows"
 summary = "Iterates complex vectors one 1,300-point row at a time, packs the bits into raw bytes and prints them"
 source = "tools/bench/public/shootout/mandelbrot_ascii.R"
-# Typed: F64 pairs instead of complex vectors, since typed ry has no complex numbers.
+# Typed: Lists of real and imaginary parts instead of complex vectors, since typed ry has no complex numbers.
 typed_source = "tools/bench/public/shootout/mandelbrot_ascii.typed.R"
 
 [[programs]]
@@ -203,6 +233,8 @@ group = "shootout"
 display = "Mandelbrot, scalar points"
 summary = "Iterates each point as a complex scalar with an escape test, packing bits into bytes one point at a time"
 source = "tools/bench/public/shootout/mandelbrot_naive_ascii.R"
+# Typed: F64 pairs instead of complex numbers, since typed ry has no complex numbers.
+typed_source = "tools/bench/public/shootout/mandelbrot_naive_ascii.typed.R"
 
 [[programs]]
 id = "mandelbrot_noout"
@@ -210,6 +242,8 @@ group = "shootout"
 display = "Mandelbrot, vectorized rows, no output"
 summary = "The vectorized-row Mandelbrot without printing the bitmap, so the time is complex vector arithmetic"
 source = "tools/bench/public/shootout/mandelbrot_noout.R"
+# Typed: Lists of real and imaginary parts instead of complex vectors, since typed ry has no complex numbers.
+typed_source = "tools/bench/public/shootout/mandelbrot_noout.typed.R"
 
 [[programs]]
 id = "mandelbrot_noout_naive"
@@ -217,6 +251,8 @@ group = "shootout"
 display = "Mandelbrot, whole-plane matrix"
 summary = "Iterates a 1,000 x 1,000 complex matrix 20 times, storing exp(-abs(Z)) into slices of a 3-D array"
 source = "tools/bench/public/shootout/mandelbrot_noout_naive.R"
+# Typed: flat Lists of real and imaginary parts instead of a complex matrix, and a List of planes instead of a 3-d array.
+typed_source = "tools/bench/public/shootout/mandelbrot_noout_naive.typed.R"
 
 [[programs]]
 id = "nbody"
@@ -233,6 +269,8 @@ group = "shootout"
 display = "N-body, matrix state"
 summary = "N-body with positions in 3 x 5 matrices and pairwise distances filled into a 3-D array by nested loops, then aperm"
 source = "tools/bench/public/shootout/nbody_2.R"
+# Typed: flat column-major Lists instead of matrices and an array, and a record threaded through calls instead of <<-.
+typed_source = "tools/bench/public/shootout/nbody_2.typed.R"
 
 [[programs]]
 id = "pidigits"
@@ -249,6 +287,8 @@ group = "shootout"
 display = "Regex DNA"
 summary = "Counts nine DNA patterns with gregexpr and expands IUB codes with gsub over one large string"
 source = "tools/bench/public/shootout/regexdna.R"
+# Typed: a hand-written matcher for its class-only patterns and Str.replace_each for the substitutions, since typed ry has no regular expressions; R reads the input file.
+typed_source = "tools/bench/public/shootout/regexdna.typed.R"
 
 [[programs]]
 id = "reversecomplement"
@@ -265,6 +305,8 @@ group = "shootout"
 display = "Reverse complement, whole file"
 summary = "Reverse complement that reads the whole file with one readLines call before mapping each line"
 source = "tools/bench/public/shootout/reversecomplement_2.R"
+# Typed: a Dict lookup per byte instead of indexing a named vector; R reads the input file.
+typed_source = "tools/bench/public/shootout/reversecomplement_2.typed.R"
 
 [[programs]]
 id = "reversecomplement_naive"
@@ -272,6 +314,8 @@ group = "shootout"
 display = "Reverse complement, scalar lookup"
 summary = "Reverse complement that maps one character at a time with [[ on the named vector in a for loop"
 source = "tools/bench/public/shootout/reversecomplement_naive.R"
+# Typed: a Dict lookup per byte instead of indexing a named vector; R reads the input file.
+typed_source = "tools/bench/public/shootout/reversecomplement_naive.typed.R"
 
 [[programs]]
 id = "spectralnorm"
@@ -288,6 +332,8 @@ group = "shootout"
 display = "Spectral norm, precomputed matrix"
 summary = "Builds the 3,000 x 3,000 matrix once with outer() and runs 10 power iterations as matrix products"
 source = "tools/bench/public/shootout/spectralnorm_alt.R"
+# Typed: flat column-major Lists instead of matrices, and dot products with List.sum instead of %*%.
+typed_source = "tools/bench/public/shootout/spectralnorm_alt.typed.R"
 
 [[programs]]
 id = "spectralnorm_alt_2"
@@ -295,6 +341,8 @@ group = "shootout"
 display = "Spectral norm, matrix rebuilt per product"
 summary = "Spectral norm that rebuilds the 1,200 x 1,200 matrix with outer() for every matrix product"
 source = "tools/bench/public/shootout/spectralnorm_alt_2.R"
+# Typed: flat column-major Lists instead of matrices, and dot products with List.sum instead of %*%.
+typed_source = "tools/bench/public/shootout/spectralnorm_alt_2.typed.R"
 
 [[programs]]
 id = "spectralnorm_alt_3"
@@ -302,6 +350,8 @@ group = "shootout"
 display = "Spectral norm, element-wise matrix fill"
 summary = "Spectral norm that copies a precomputed table into a fresh matrix with [[i, j]]<- in nested loops for every product"
 source = "tools/bench/public/shootout/spectralnorm_alt_3.R"
+# Typed: flat column-major Lists instead of matrices, and dot products with List.sum instead of %*%.
+typed_source = "tools/bench/public/shootout/spectralnorm_alt_3.typed.R"
 
 [[programs]]
 id = "spectralnorm_math"
@@ -309,6 +359,8 @@ group = "shootout"
 display = "Spectral norm, eigenvalues"
 summary = "Computes the spectral norm directly as the largest eigenvalue of t(A) %*% A with eigen(), so LAPACK dominates"
 source = "tools/bench/public/shootout/spectralnorm_math.R"
+# Typed: a flat List instead of a matrix, and Householder tridiagonalization with the QL method instead of eigen().
+typed_source = "tools/bench/public/shootout/spectralnorm_math.typed.R"
 
 [[programs]]
 id = "spectralnorm_naive"
@@ -316,6 +368,7 @@ group = "shootout"
 display = "Spectral norm, scalar loops"
 summary = "Spectral norm with every matrix-vector product as nested scalar loops that call a closure per element"
 source = "tools/bench/public/shootout/spectralnorm_naive.R"
+typed_source = "tools/bench/public/shootout/spectralnorm_naive.typed.R"
 
 # rcp
 
@@ -341,6 +394,7 @@ group = "rcp"
 display = "Convolution, [[ indexing"
 summary = "Convolution with nested loops over seq(length =), [[ indexing and the outer element hoisted into a local"
 source = "tools/bench/public/rcp/convolution_slow.R"
+typed_source = "tools/bench/public/rcp/convolution_slow.typed.R"
 
 [[programs]]
 id = "convolution_v"
@@ -348,6 +402,8 @@ group = "rcp"
 display = "Convolution, vectorized"
 summary = "Convolves 1,500-element vectors with outer(), rbind, reshaping through length<- and dim<-, and rowSums"
 source = "tools/bench/public/rcp/convolution_v.R"
+# Typed: Lists instead of a reshaped matrix, with the row sums as whole-List additions.
+typed_source = "tools/bench/public/rcp/convolution_v.typed.R"
 
 [[programs]]
 id = "empty-for"

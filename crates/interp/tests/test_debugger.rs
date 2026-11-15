@@ -7,13 +7,12 @@
 //! replays it, and `FUZZ_ITERS` sets how many seeds run.
 
 use {
+    frames::viewer,
     interp::{
         debugger::{Adapter, Transport},
         envir::env_symbols,
-        heap, interp,
-        testing::with_interpreter,
+        heap, interp, testing,
         values::{global_env, symbol_name},
-        viewer,
     },
     serde_json::{Value, json},
     std::{
@@ -24,6 +23,16 @@ use {
     },
     syntax::testing::{SplitMix64, for_each_seed},
 };
+
+/// Runs `body` with the interpreter and the data viewer, which the `frames` crate installs.
+fn with_interpreter<T>(body: impl FnOnce() -> T) -> T {
+    static VIEWER: std::sync::Once = std::sync::Once::new();
+    testing::with_interpreter(|| {
+        // SAFETY: the interpreter is installed and this thread holds it.
+        VIEWER.call_once(|| unsafe { frames::install() });
+        body()
+    })
+}
 
 #[test]
 fn a_breakpoint_stops_in_a_function_and_shows_its_frames() {

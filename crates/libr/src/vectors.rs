@@ -105,8 +105,9 @@ pub unsafe fn generic_length(object: Sexp) -> ApiResult<R_xlen_t> {
     })
 }
 
-/// A vector's element storage. A writable pointer to handle elements escapes the write
-/// barrier, so the collector rescans such a vector from then on.
+/// A vector's element storage. `writable` is what the caller asked for: an ALTREP class's
+/// `Dataptr` method sees it, and any pointer to handle elements escapes the write barrier,
+/// read-only or not ([`handle_data`]).
 pub unsafe fn data_pointer(object: Sexp, writable: bool) -> ApiResult<*mut u8> {
     refuse_native(object)?;
     if object.is_altrep() {
@@ -119,15 +120,31 @@ pub unsafe fn data_pointer(object: Sexp, writable: bool) -> ApiResult<*mut u8> {
             kind.name()
         )));
     }
-    if writable
-        && matches!(
-            kind,
-            SexpType::String | SexpType::List | SexpType::Expression
-        )
-    {
-        runtime().heap.escape(object);
+    if holds_handles(kind) {
+        return Ok(handle_data(object, writable));
     }
     Ok(object.data())
+}
+
+/// The element storage of a plain character vector, list or expression vector, handed to native
+/// code. The vector escapes the write barrier whether the pointer is read-only or not, because
+/// packages write through `DATAPTR_RO` and `STRING_PTR_RO` in practice: data.table's
+/// `setcolorder` permutes a table's columns with `memcpy` through one. Even a permutation breaks
+/// the barrier, which records young children per card of 128 elements, so a young column moved
+/// to a clean card would be freed by the next minor collection. GNU R records them per object
+/// and never notices. `heap::Heap::escape` says what `writable` changes.
+#[inline]
+pub unsafe fn handle_data(object: Sexp, writable: bool) -> *mut u8 {
+    runtime().heap.escape(object, writable);
+    object.data()
+}
+
+#[inline]
+fn holds_handles(kind: SexpType) -> bool {
+    matches!(
+        kind,
+        SexpType::String | SexpType::List | SexpType::Expression
+    )
 }
 
 unsafe fn typed_data(
@@ -1137,30 +1154,42 @@ pub unsafe extern "C" fn COMPLEX_RO(object: Sexp) -> *const Rcomplex {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn DATAPTR(object: Sexp) -> *mut c_void {
-    // A writable pointer into a list or character vector makes the vector escape, which only the
-    // boundary does, so only atomic vectors skip it.
-    if object.kind().is_atomic() && object.kind() != SexpType::String && !object.is_altrep() {
-        return object.data() as *mut c_void;
-    }
-    enter(|| Ok(data_pointer(object, true)? as *mut c_void))
+    direct_data(object, true)
+        .unwrap_or_else(|| enter(|| Ok(data_pointer(object, true)? as *mut c_void)))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn DATAPTR_RO(object: Sexp) -> *const c_void {
-    if object.kind().is_vector() && !object.is_altrep() {
-        return object.data() as *const c_void;
-    }
-    enter(|| Ok(data_pointer(object, false)? as *const c_void))
+    direct_data(object, false)
+        .unwrap_or_else(|| enter(|| Ok(data_pointer(object, false)? as *mut c_void)))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn DATAPTR_OR_NULL(object: Sexp) -> *const c_void {
+    if let Some(pointer) = direct_data(object, false) {
+        return pointer;
+    }
     enter(|| {
         if object.is_altrep() {
             return altrep::dataptr_or_null(object);
         }
         Ok(data_pointer(object, false)? as *const c_void)
     })
+}
+
+/// The data pointer of a plain vector other than a `CHARSXP`, which needs no boundary: a handle
+/// vector escapes through [`handle_data`], which cannot fail.
+#[inline]
+unsafe fn direct_data(object: Sexp, writable: bool) -> Option<*mut c_void> {
+    let kind = object.kind();
+    if !kind.is_vector() || kind == SexpType::Char || object.is_altrep() {
+        return None;
+    }
+    Some(if holds_handles(kind) {
+        handle_data(object, writable)
+    } else {
+        object.data()
+    } as *mut c_void)
 }
 
 /// `DATAPTR_RW`, which GNU R declares for implementing `Dataptr` methods.
@@ -1344,7 +1373,7 @@ pub unsafe extern "C" fn STRING_PTR(object: Sexp) -> *mut Sexp {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn STRING_PTR_RO(object: Sexp) -> *const Sexp {
     if object.kind() == SexpType::String && !object.is_altrep() {
-        return object.data() as *const Sexp;
+        return handle_data(object, false) as *const Sexp;
     }
     enter(|| {
         Ok(typed_data(

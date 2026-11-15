@@ -59,7 +59,7 @@ pub(crate) fn aggregate(
 ) -> Result<Option<DataFrame>> {
     let frame = table.frame();
     let height = frame.height();
-    if query.by.is_empty() || height == 0 || u32::try_from(height).is_err() {
+    if height == 0 || u32::try_from(height).is_err() {
         return Ok(None);
     }
     let columns: Vec<(PlSmallStr, &Expr)> = match &query.select {
@@ -80,25 +80,30 @@ pub(crate) fn aggregate(
     }
     let order = match &query.rows {
         Rows::All => None,
-        Rows::Order(keys) => match top_k_shape(keys, &columns) {
+        Rows::Order(keys) if !query.by.is_empty() => match top_k_shape(keys, &columns) {
             Some(shape) => Some(shape),
             None => return Ok(None),
         },
-        Rows::Filter(_) | Rows::Positions(_) | Rows::Join(_) => return Ok(None),
-    };
-    let Some(keys) = group_keys(table, schema, &query.by, query.keyed)? else {
-        return Ok(None);
+        Rows::Order(_) | Rows::Filter(_) | Rows::Positions(_) | Rows::Join(_) => return Ok(None),
     };
     let evaluator = Evaluator {
         frame,
         schema,
         rows: None,
     };
-    if let Some((sort, top)) = order {
+    let keys = if query.by.is_empty() {
+        None
+    } else {
+        match group_keys(table, schema, &query.by, query.keyed)? {
+            Some(keys) => Some(keys),
+            None => return Ok(None),
+        }
+    };
+    if let (Some((sort, top)), Some(keys)) = (order, &keys) {
         return top_k(
             frame,
             &evaluator,
-            &keys,
+            keys,
             &query.by,
             query.keyed,
             sort,
@@ -122,13 +127,19 @@ pub(crate) fn aggregate(
         };
         aggregations.push(aggregation);
     }
-    let Some((codes, radix)) = row_codes(&keys, height) else {
-        return Ok(None);
+    let grouping = match &keys {
+        // A query without `by` has one group, which needs no row codes.
+        None => whole(height, &aggregations),
+        Some(keys) => {
+            let Some((codes, radix)) = row_codes(keys, height) else {
+                return Ok(None);
+            };
+            // With nearly one group per row, every per-row and per-group buffer is as large as
+            // a column of the input, so each is released as soon as the next step no longer
+            // needs it.
+            group(&codes, radix, &aggregations, None)
+        }
     };
-    let grouping = group(&codes, radix, &aggregations, None);
-    // With nearly one group per row, every per-row and per-group buffer is as large as a column
-    // of the input, so each is released as soon as the next step no longer needs it.
-    drop(codes);
     let order = output_order(&grouping, query.keyed, height);
     let first_rows: Vec<u32> = order
         .iter()
@@ -477,6 +488,69 @@ fn group(
     }
 }
 
+/// Every row as one group, which is what a query without `by` aggregates. No per-row buffer is
+/// built: each aggregation reads its input column once and keeps one accumulator.
+fn whole(height: usize, aggregations: &[Aggregation]) -> Grouping {
+    let run = |start: usize, end: usize| -> Vec<State> {
+        aggregations
+            .iter()
+            .map(|aggregation| {
+                let mut state = State::new(aggregation, 1, None);
+                update(
+                    &mut state,
+                    aggregation,
+                    None,
+                    end - start,
+                    |index| start + index,
+                    |_| 0,
+                );
+                state
+            })
+            .collect()
+    };
+    let threads = THREAD_POOL.current_num_threads().max(1);
+    let states = if height < PARALLEL_ROWS || threads == 1 || in_row_order(aggregations) {
+        run(0, height)
+    } else {
+        let step = height.div_ceil(threads);
+        let parts: Vec<Vec<State>> = THREAD_POOL.install(|| {
+            (0..threads)
+                .into_par_iter()
+                .map(|thread| {
+                    run(
+                        (thread * step).min(height),
+                        ((thread + 1) * step).min(height),
+                    )
+                })
+                .collect()
+        });
+        let mut parts = parts.into_iter();
+        let mut states = parts.next().unwrap_or_default();
+        // Later runs cover later rows, so merging them in order keeps "first" and "last" right.
+        for later_states in parts {
+            for (state, later) in states.iter_mut().zip(later_states) {
+                state.merge(later, None);
+            }
+        }
+        states
+    };
+    Grouping {
+        first_rows: vec![0],
+        codes: Vec::new(),
+        states,
+    }
+}
+
+/// Whether some aggregation must add a group's values in row order. A sum of doubles does, as
+/// data.table's does: merging the partial sums of several runs would round differently and
+/// depend on the thread count.
+fn in_row_order(aggregations: &[Aggregation]) -> bool {
+    aggregations.iter().any(|aggregation| {
+        matches!(aggregation.function, Function::Sum | Function::Mean)
+            && matches!(aggregation.input, Input::Double { .. })
+    })
+}
+
 fn dense(
     codes: &[u64],
     radix: usize,
@@ -509,12 +583,7 @@ fn dense(
         (first_rows, states)
     };
     let threads = THREAD_POOL.current_num_threads().max(1);
-    // A sum of doubles must add a group's values in row order, as data.table does, and merging
-    // the partial sums of several runs would round differently and depend on the thread count.
-    let ordered = aggregations.iter().any(|aggregation| {
-        matches!(aggregation.function, Function::Sum | Function::Mean)
-            && matches!(aggregation.input, Input::Double { .. })
-    });
+    let ordered = in_row_order(aggregations);
     if height < PARALLEL_ROWS || threads == 1 {
         let (first_rows, states) = run(0, height);
         return Grouping {

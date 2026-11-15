@@ -1,3 +1,4 @@
+# oracle: library-dependent
 # nlm, integrate and findInterval run the same UNCMIN, QUADPACK and interval search as the
 # C API's optif9, Rdqags/Rdqagi and findInterval2, and match GNU R to the last bit.
 options(digits = 15)

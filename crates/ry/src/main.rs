@@ -15,6 +15,7 @@ use {
         env,
         ffi::c_int,
         fs,
+        num::NonZero,
         path::{Path, PathBuf},
         process::ExitCode,
         sync::{Mutex, OnceLock, PoisonError},
@@ -129,6 +130,10 @@ static ALLOCATOR_OPTIONS: extern "C" fn() = {
 };
 
 fn main() -> ExitCode {
+    // First, so that a crash anywhere later, including in a front end, leaves a report. Every
+    // command that runs R goes through this function, and so do the worker processes that
+    // `ry test --jobs` starts.
+    crash::install(concat!("ry ", env!("RY_VERSION")));
     // An R home's front ends link to this binary, so a release needs no separate `ry-rcmd`.
     if rcmd::front_end::invoked_as_front_end() {
         return rcmd::front_end::main(env::args().skip(1).collect());
@@ -182,7 +187,11 @@ fn main() -> ExitCode {
     if let Some(session) = cli.command.session(env::var("RY_RUNTIME").ok().as_deref()) {
         // Embedded R assumes it owns the thread it initializes on, so sessions stay on `main`.
         return match session.mode {
-            Mode::Script { file, arguments } => run_script(session.runtime, &file, arguments),
+            Mode::Script {
+                file,
+                arguments,
+                ahead,
+            } => run_script(session.runtime, &file, arguments, ahead),
             Mode::Console {
                 file,
                 keybindings,
@@ -201,21 +210,35 @@ fn main() -> ExitCode {
         ..
     } = &cli.command
     {
-        return run_load(path, "", expressions, file.as_deref(), *runtime);
+        return run_load(path, "", |_| expressions.clone(), file.as_deref(), *runtime);
     }
 
     if let Command::Test {
         path,
         filter,
+        jobs,
         reporter,
         watch,
         runtime,
-        ..
+        profile_summary,
     } = &cli.command
     {
+        // The summary describes one process, and a worker would overwrite it with its own.
+        let jobs = match (jobs, profile_summary) {
+            (Some(2..), Some(_)) => {
+                cli::error(
+                    "--profile-summary measures one process, so it cannot be combined with \
+                     more than one job",
+                );
+                return ExitCode::from(2);
+            }
+            (_, Some(_)) => Some(1),
+            (jobs, None) => *jobs,
+        };
         return run_test(
             path,
             filter.as_deref(),
+            jobs,
             reporter.as_deref(),
             *watch,
             *runtime,
@@ -235,9 +258,25 @@ fn main() -> ExitCode {
         path,
         output,
         no_vignettes,
+        aot,
+        library,
         runtime,
     } = &cli.command
     {
+        if *aot {
+            // A script's typed functions compile ahead when it runs; only a package has a place
+            // to keep their code.
+            if path.is_file() && load::package_root(path).is_err() {
+                cli::error(&format!(
+                    "{} is a script, and `ry build --aot` compiles a package: run the script \
+                     with `ry run --aot {}` to compile its typed functions before it starts",
+                    path.display(),
+                    path.display()
+                ));
+                return ExitCode::from(2);
+            }
+            return run_install(path, library.as_deref(), None, *runtime);
+        }
         return run_build(path, output.as_deref(), !*no_vignettes, *runtime);
     }
 
@@ -245,17 +284,10 @@ fn main() -> ExitCode {
         path,
         library,
         train,
-        explain,
         runtime,
     } = &cli.command
     {
-        return run_install(
-            path,
-            library.as_deref(),
-            train.as_deref(),
-            *explain,
-            *runtime,
-        );
+        return run_install(path, library.as_deref(), train.as_deref(), *runtime);
     }
 
     if let Command::DebugAdapter = &cli.command {
@@ -424,7 +456,11 @@ fn release_executable_code() {
 
 /// Runs `file` and exits with its status: 1 for a top-level error or a script strict mode
 /// refuses, 2 when the script cannot be read or the runtime cannot start.
-fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode {
+fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>, ahead: bool) -> ExitCode {
+    if ahead && runtime == Runtime::GnuR {
+        cli::error("`--aot` compiles with ry's runtime, which `--runtime gnu-r` does not start");
+        return ExitCode::from(2);
+    }
     // R reads a script in the session's encoding, so a Latin-1 script is valid R. The check
     // sees each invalid byte as `?`, which keeps every offset, and the elaborated program is
     // the file's own bytes with the checker's rewrites.
@@ -447,7 +483,10 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode
         return ExitCode::from(1);
     };
     let program = (!elaborations.is_empty()).then(|| preflight::elaborate(&source, &elaborations));
-    let flags = runtime_flags(preflight.config());
+    let flags = repl::RuntimeFlags {
+        ahead,
+        ..runtime_flags(preflight.config())
+    };
     drop(preflight);
     match runtime {
         Runtime::Ry => {
@@ -592,9 +631,12 @@ fn run_debug_adapter() -> ExitCode {
 }
 
 /// `ry load` with the code that runs the tests, which quits with status 1 when one failed.
+/// `jobs` is the number of worker processes the user asked for, and without it the package's
+/// own testthat configuration decides whether there are any.
 fn run_test(
     path: &Path,
     filter: Option<&str>,
+    jobs: Option<u32>,
     reporter: Option<&str>,
     watch: bool,
     runtime: Option<Runtime>,
@@ -607,15 +649,21 @@ fn run_test(
         }
     };
     let argument = |value: Option<&str>| value.map_or_else(|| "NULL".to_owned(), load::r_string);
-    let run = format!(
-        "if (!({driver})({root}, {filter}, {reporter}, {watch})) quit(status = 1L)",
-        driver = include_str!("test.R").trim_end(),
-        root = load::r_string(&root.to_string_lossy()),
-        filter = argument(filter),
-        reporter = argument(reporter),
-        watch = if watch { "TRUE" } else { "FALSE" },
-    );
-    run_load(path, "", &[run], None, runtime)
+    let cores = thread::available_parallelism().map_or(1, NonZero::get);
+    let run = |flags: repl::RuntimeFlags| {
+        vec![format!(
+            "if (!({driver})({root}, {filter}, {reporter}, {watch}, {jobs}, {cores}L, \
+             {switches}L)) quit(status = 1L)",
+            driver = include_str!("test.R").trim_end(),
+            root = load::r_string(&root.to_string_lossy()),
+            filter = argument(filter),
+            reporter = argument(reporter),
+            watch = if watch { "TRUE" } else { "FALSE" },
+            jobs = jobs.map_or_else(|| "NULL".to_owned(), |jobs| format!("{jobs}L")),
+            switches = flags.bits(),
+        )]
+    };
+    run_load(path, "", run, None, runtime)
 }
 
 /// `ry load` with the code that runs roxygen2 against the lazily loaded namespace.
@@ -646,7 +694,13 @@ fn run_document(path: &Path, roclets: &[String], runtime: Option<Runtime>) -> Ex
         root = load::r_string(&root.to_string_lossy()),
     );
     // roxygen2 reads R6 methods' source references, so the load keeps source, as pkgload's does.
-    run_load(path, "options(keep.source = TRUE)", &[run], None, runtime)
+    run_load(
+        path,
+        "options(keep.source = TRUE)",
+        |_| vec![run],
+        None,
+        runtime,
+    )
 }
 
 /// `ry build`: writes the package's source tarball to `output`, or beside the package.
@@ -659,7 +713,7 @@ fn run_build(
     let built = load::package_root(path)
         .map_err(|error| error.to_string())
         .and_then(|root| {
-            let home = r_home(runtime)?;
+            let (runtime, home) = r_home(runtime)?;
             let output = match output {
                 Some(output) => std::path::absolute(output)
                     .map_err(|error| format!("cannot resolve {}: {error}", output.display()))?,
@@ -668,7 +722,7 @@ fn run_build(
                     .ok_or_else(|| format!("{} has no parent directory", root.display()))?
                     .to_path_buf(),
             };
-            build_tarball(&home, &root, &output, vignettes)
+            build_tarball(runtime, &home, &root, &output, vignettes)
         });
     match built {
         Ok(tarball) => {
@@ -688,17 +742,16 @@ fn run_install(
     path: &Path,
     library: Option<&Path>,
     train: Option<&str>,
-    explain: bool,
     runtime: Option<Runtime>,
 ) -> ExitCode {
     let installed = load::package_root(path)
         .map_err(|error| error.to_string())
         .and_then(|root| {
-            let home = r_home(runtime)?;
+            let (runtime, home) = r_home(runtime)?;
             let staging = env::temp_dir().join(format!("ry-install-{}", std::process::id()));
             fs::create_dir_all(&staging)
                 .map_err(|error| format!("cannot create {}: {error}", staging.display()))?;
-            let result = build_tarball(&home, &root, &staging, false).and_then(|tarball| {
+            let result = build_tarball(runtime, &home, &root, &staging, false).and_then(|tarball| {
                 let mut command = std::process::Command::new(home.join("bin").join("R"));
                 command.args(["CMD", "INSTALL"]);
                 if let Some(library) = library {
@@ -715,9 +768,6 @@ fn run_install(
                             .to_string(),
                     };
                     command.arg(format!("--ry-train={workload}"));
-                }
-                if explain {
-                    command.arg("--ry-explain");
                 }
                 let status = command
                     .arg(&tarball)
@@ -744,19 +794,25 @@ fn run_install(
     }
 }
 
-/// The R home whose `bin/R` runs the chosen runtime: ry's own home, or GNU R's.
-fn r_home(runtime: Option<Runtime>) -> Result<PathBuf, String> {
+/// The chosen runtime, and the R home whose `bin/R` runs it: ry's own home, or GNU R's.
+fn r_home(runtime: Option<Runtime>) -> Result<(Runtime, PathBuf), String> {
     let runtime_variable = env::var("RY_RUNTIME").ok();
-    let home = match resolve_runtime(runtime, runtime_variable.as_deref(), Runtime::Ry) {
+    let runtime = resolve_runtime(runtime, runtime_variable.as_deref(), Runtime::Ry);
+    let home = match runtime {
         Runtime::Ry => repl::ry_r_home(),
         Runtime::GnuR => repl::libr::discover_r_home(),
     };
-    home.map_err(|error| error.to_string())
+    home.map(|home| (runtime, home))
+        .map_err(|error| error.to_string())
 }
 
 /// Runs the home's `R CMD build` on `root` in `output` with `devtools::build()`'s options, and
-/// returns the tarball it wrote.
+/// returns the tarball it wrote. On ry's runtime a typed package is checked first, and its R
+/// files go in as the preflight elaborates them (`preflight::elaborate_package`), so the
+/// installed code runs as the checker read it; the build then reads a copy of the package with
+/// those files rewritten.
 fn build_tarball(
+    runtime: Runtime,
     home: &Path,
     root: &Path,
     output: &Path,
@@ -780,17 +836,64 @@ fn build_tarball(
     ));
     fs::create_dir_all(output)
         .map_err(|error| format!("cannot create {}: {error}", output.display()))?;
+    let elaborated = match runtime {
+        Runtime::Ry => {
+            let config = Config::discover(root).map_err(|error| error.to_string())?;
+            preflight::elaborate_package(root, &config)
+                .map_err(|_| format!("{} was not built", root.display()))?
+        }
+        Runtime::GnuR => Vec::new(),
+    };
+    // The copy lives in a fresh temporary directory, which goes away with `staging` on every
+    // path out of this function.
+    let staging = (!elaborated.is_empty())
+        .then(|| {
+            tempfile::Builder::new()
+                .prefix("ry-build-")
+                .tempdir()
+                .map_err(|error| format!("cannot create a temporary directory: {error}"))
+        })
+        .transpose()?;
+    let copy = match &staging {
+        Some(staging) => {
+            let name = root
+                .file_name()
+                .ok_or_else(|| format!("{} has no directory name", root.display()))?;
+            let copy = staging.path().join(name);
+            copy_package(root, &copy)?;
+            for (path, program) in &elaborated {
+                let relative = path.strip_prefix(root).map_err(|_| {
+                    format!("{} is outside {}", path.display(), root.display())
+                })?;
+                let target = copy.join(relative);
+                // `.Rbuildignore` left this file out, so the build does not read it.
+                if !target.is_file() {
+                    continue;
+                }
+                fs::write(&target, program)
+                    .map_err(|error| format!("cannot write {}: {error}", target.display()))?;
+            }
+            Some(copy)
+        }
+        None => None,
+    };
     let mut command = std::process::Command::new(home.join("bin").join("R"));
     command.args(["CMD", "build", "--no-resave-data", "--no-manual"]);
     if !vignettes {
         command.arg("--no-build-vignettes");
     }
     let status = command
-        .arg(root)
+        .arg(copy.as_deref().unwrap_or(root))
         .current_dir(output)
         .status()
-        .map_err(|error| format!("cannot run {command:?}: {error}"))?;
-    if !status.success() {
+        .map_err(|error| format!("cannot run {command:?}: {error}"));
+    if let Some(staging) = staging {
+        let path = staging.path().to_path_buf();
+        if let Err(error) = staging.close() {
+            cli::warn(&format!("cannot remove {}: {error}", path.display()));
+        }
+    }
+    if !status?.success() {
         return Err(format!("building {} failed", root.display()));
     }
     if !tarball.is_file() {
@@ -799,12 +902,88 @@ fn build_tarball(
     Ok(tarball)
 }
 
+/// Copies the package at `root` to `copy` for `R CMD build`, leaving out version control and
+/// what `.Rbuildignore` names. The build applies `.Rbuildignore` again to the copy, so a
+/// pattern this reader cannot compile (R reads them as Perl) only costs copying. A link is
+/// copied as what it names, and one that names nothing, or names something other than a file
+/// or a directory, is left out.
+fn copy_package(root: &Path, copy: &Path) -> Result<(), String> {
+    let ignore_file = root.join(".Rbuildignore");
+    let ignore_patterns = match fs::read_to_string(&ignore_file) {
+        Ok(patterns) => patterns,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(format!("cannot read {}: {error}", ignore_file.display())),
+    };
+    let ignored: Vec<regex::Regex> = ignore_patterns
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter_map(|pattern| regex::Regex::new(&format!("(?i){pattern}")).ok())
+        .collect();
+    let canonical = |path: &Path| {
+        fs::canonicalize(path).map_err(|error| format!("cannot resolve {}: {error}", path.display()))
+    };
+    let mut ancestors = vec![canonical(root)?];
+    copy_directory(root, copy, Path::new(""), &ignored, &mut ancestors, &canonical)
+}
+
+/// Copies the directory `relative` below `root` into `copy`. `ancestors` holds the directories
+/// the walk is inside, so a link back up the tree is left out rather than copied forever,
+/// while two links to one directory elsewhere are both copied.
+fn copy_directory(
+    root: &Path,
+    copy: &Path,
+    relative: &Path,
+    ignored: &[regex::Regex],
+    ancestors: &mut Vec<PathBuf>,
+    canonical: &impl Fn(&Path) -> Result<PathBuf, String>,
+) -> Result<(), String> {
+    let source = root.join(relative);
+    let target = copy.join(relative);
+    fs::create_dir_all(&target)
+        .map_err(|error| format!("cannot create {}: {error}", target.display()))?;
+    let entries =
+        fs::read_dir(&source).map_err(|error| format!("cannot read {}: {error}", source.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("cannot read {}: {error}", source.display()))?;
+        let name = entry.file_name();
+        let path = relative.join(&name);
+        let shown = path.to_string_lossy().replace('\\', "/");
+        if name == ".git" || ignored.iter().any(|pattern| pattern.is_match(&shown)) {
+            continue;
+        }
+        let metadata = match fs::metadata(entry.path()) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!("cannot read {}: {error}", entry.path().display()));
+            }
+        };
+        if metadata.is_dir() {
+            let directory = canonical(&entry.path())?;
+            if ancestors.contains(&directory) {
+                continue;
+            }
+            ancestors.push(directory);
+            copy_directory(root, copy, &path, ignored, ancestors, canonical)?;
+            ancestors.pop();
+        } else if metadata.is_file() {
+            let target = copy.join(&path);
+            fs::copy(entry.path(), &target).map_err(|error| {
+                format!("cannot copy {} to {}: {error}", entry.path().display(), target.display())
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// Runs `prelude`, loads the package at `path` into a fresh session, runs `expressions` and then
-/// `file` against it, and exits with the session's status.
+/// `file` against it, and exits with the session's status. `expressions` gets the switches the
+/// project's configuration sets for the session.
 fn run_load(
     path: &Path,
     prelude: &str,
-    expressions: &[String],
+    expressions: impl FnOnce(repl::RuntimeFlags) -> Vec<String>,
     file: Option<&Path>,
     runtime: Option<Runtime>,
 ) -> ExitCode {
@@ -815,15 +994,15 @@ fn run_load(
             return ExitCode::from(2);
         }
     };
-    // A new session has nothing loaded, so its first load is always a full one.
-    let mut input = format!("{prelude}\n{}", load::load_statement(&root, false));
-    for expression in expressions {
-        input.push('\n');
-        input.push_str(expression);
-    }
     let Some(preflight) = Preflight::discover(&root, root.clone()) else {
         return ExitCode::from(2);
     };
+    // A new session has nothing loaded, so its first load is always a full one.
+    let mut input = format!("{prelude}\n{}", load::load_statement(&root, false));
+    for expression in expressions(runtime_flags(preflight.config())) {
+        input.push('\n');
+        input.push_str(&expression);
+    }
     let runtime_variable = env::var("RY_RUNTIME").ok();
     match resolve_runtime(runtime, runtime_variable.as_deref(), Runtime::Ry) {
         Runtime::Ry => {
@@ -934,6 +1113,7 @@ fn runtime_flags(config: &Config) -> repl::RuntimeFlags {
         object_systems: config.check.object_systems,
         strict: config.check.strict,
         prelude: config.check.prelude,
+        ahead: false,
     }
 }
 

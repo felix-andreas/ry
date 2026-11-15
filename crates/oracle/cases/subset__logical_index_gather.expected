@@ -1,0 +1,293 @@
+[stdout]
+| n = 0 
+| integer(0)
+| numeric(0)
+| character(0)
+| logical(0)
+| complex(0)
+| raw(0)
+| integer(0)
+| n = 1 
+| [1] 1
+| [1] 0.5
+| [1] "1"
+| [1] FALSE
+| [1] 1+0i
+| [1] 01
+| [1] 1
+| n = 63 
+|  [1]  1  3 NA  6  8 NA 11 13 NA 16 18 NA 21 23 NA 26 28 NA 31 33 NA 36 38 NA 41
+| [26] 43 NA 46 48 NA 51 53 NA 56 58 NA 61 63
+|  [1]  0.5  1.5   NA  3.0  4.0   NA  5.5  6.5   NA  8.0  9.0   NA 10.5 11.5   NA
+| [16] 13.0 14.0   NA 15.5 16.5   NA 18.0 19.0   NA 20.5 21.5   NA 23.0 24.0   NA
+| [31] 25.5 26.5   NA 28.0 29.0   NA 30.5 31.5
+|  [1] "1"  "3"  NA   "6"  "8"  NA   "11" "13" NA   "16" "18" NA   "21" "23" NA  
+| [16] "26" "28" NA   "31" "33" NA   "36" "38" NA   "41" "43" NA   "46" "48" NA  
+| [31] "51" "53" NA   "56" "58" NA   "61" "63"
+|  [1] FALSE  TRUE    NA  TRUE FALSE    NA FALSE FALSE    NA FALSE  TRUE    NA
+| [13]  TRUE FALSE    NA FALSE FALSE    NA FALSE  TRUE    NA  TRUE FALSE    NA
+| [25] FALSE FALSE    NA FALSE  TRUE    NA  TRUE FALSE    NA FALSE FALSE    NA
+| [37] FALSE  TRUE
+|  [1]  1+0i  3+0i    NA  6+0i  8+0i    NA 11+0i 13+0i    NA 16+0i 18+0i    NA
+| [13] 21+0i 23+0i    NA 26+0i 28+0i    NA 31+0i 33+0i    NA 36+0i 38+0i    NA
+| [25] 41+0i 43+0i    NA 46+0i 48+0i    NA 51+0i 53+0i    NA 56+0i 58+0i    NA
+| [37] 61+0i 63+0i
+|  [1] 01 03 00 06 08 00 0b 0d 00 10 12 00 15 17 00 1a 1c 00 1f 21 00 24 26 00 29
+| [26] 2b 00 2e 30 00 33 35 00 38 3a 00 3d 3f
+|  [1]  1  3 -1  6  8 -1 11 13 -1 16 18 -1 21 23 -1 26 28 -1 31 33 -1 36 38 -1 41
+| [26] 43 -1 46 48 -1 51 53 -1 56 58 -1 61 63
+| n = 64 
+|  [1]  1  3 NA  6  8 NA 11 13 NA 16 18 NA 21 23 NA 26 28 NA 31 33 NA 36 38 NA 41
+| [26] 43 NA 46 48 NA 51 53 NA 56 58 NA 61 63 NA
+|  [1]  0.5  1.5   NA  3.0  4.0   NA  5.5  6.5   NA  8.0  9.0   NA 10.5 11.5   NA
+| [16] 13.0 14.0   NA 15.5 16.5   NA 18.0 19.0   NA 20.5 21.5   NA 23.0 24.0   NA
+| [31] 25.5 26.5   NA 28.0 29.0   NA 30.5 31.5   NA
+|  [1] "1"  "3"  NA   "6"  "8"  NA   "11" "13" NA   "16" "18" NA   "21" "23" NA  
+| [16] "26" "28" NA   "31" "33" NA   "36" "38" NA   "41" "43" NA   "46" "48" NA  
+| [31] "51" "53" NA   "56" "58" NA   "61" "63" NA  
+|  [1] FALSE  TRUE    NA  TRUE FALSE    NA FALSE FALSE    NA FALSE  TRUE    NA
+| [13]  TRUE FALSE    NA FALSE FALSE    NA FALSE  TRUE    NA  TRUE FALSE    NA
+| [25] FALSE FALSE    NA FALSE  TRUE    NA  TRUE FALSE    NA FALSE FALSE    NA
+| [37] FALSE  TRUE    NA
+|  [1]  1+0i  3+0i    NA  6+0i  8+0i    NA 11+0i 13+0i    NA 16+0i 18+0i    NA
+| [13] 21+0i 23+0i    NA 26+0i 28+0i    NA 31+0i 33+0i    NA 36+0i 38+0i    NA
+| [25] 41+0i 43+0i    NA 46+0i 48+0i    NA 51+0i 53+0i    NA 56+0i 58+0i    NA
+| [37] 61+0i 63+0i    NA
+|  [1] 01 03 00 06 08 00 0b 0d 00 10 12 00 15 17 00 1a 1c 00 1f 21 00 24 26 00 29
+| [26] 2b 00 2e 30 00 33 35 00 38 3a 00 3d 3f 00
+|  [1]  1  3 -1  6  8 -1 11 13 -1 16 18 -1 21 23 -1 26 28 -1 31 33 -1 36 38 -1 41
+| [26] 43 -1 46 48 -1 51 53 -1 56 58 -1 61 63 -1
+| n = 65 
+|  [1]  1  3 NA  6  8 NA 11 13 NA 16 18 NA 21 23 NA 26 28 NA 31 33 NA 36 38 NA 41
+| [26] 43 NA 46 48 NA 51 53 NA 56 58 NA 61 63 NA
+|  [1]  0.5  1.5   NA  3.0  4.0   NA  5.5  6.5   NA  8.0  9.0   NA 10.5 11.5   NA
+| [16] 13.0 14.0   NA 15.5 16.5   NA 18.0 19.0   NA 20.5 21.5   NA 23.0 24.0   NA
+| [31] 25.5 26.5   NA 28.0 29.0   NA 30.5 31.5   NA
+|  [1] "1"  "3"  NA   "6"  "8"  NA   "11" "13" NA   "16" "18" NA   "21" "23" NA  
+| [16] "26" "28" NA   "31" "33" NA   "36" "38" NA   "41" "43" NA   "46" "48" NA  
+| [31] "51" "53" NA   "56" "58" NA   "61" "63" NA  
+|  [1] FALSE  TRUE    NA  TRUE FALSE    NA FALSE FALSE    NA FALSE  TRUE    NA
+| [13]  TRUE FALSE    NA FALSE FALSE    NA FALSE  TRUE    NA  TRUE FALSE    NA
+| [25] FALSE FALSE    NA FALSE  TRUE    NA  TRUE FALSE    NA FALSE FALSE    NA
+| [37] FALSE  TRUE    NA
+|  [1]  1+0i  3+0i    NA  6+0i  8+0i    NA 11+0i 13+0i    NA 16+0i 18+0i    NA
+| [13] 21+0i 23+0i    NA 26+0i 28+0i    NA 31+0i 33+0i    NA 36+0i 38+0i    NA
+| [25] 41+0i 43+0i    NA 46+0i 48+0i    NA 51+0i 53+0i    NA 56+0i 58+0i    NA
+| [37] 61+0i 63+0i    NA
+|  [1] 01 03 00 06 08 00 0b 0d 00 10 12 00 15 17 00 1a 1c 00 1f 21 00 24 26 00 29
+| [26] 2b 00 2e 30 00 33 35 00 38 3a 00 3d 3f 00
+|  [1]  1  3 -1  6  8 -1 11 13 -1 16 18 -1 21 23 -1 26 28 -1 31 33 -1 36 38 -1 41
+| [26] 43 -1 46 48 -1 51 53 -1 56 58 -1 61 63 -1
+| n = 128 
+|  [1]   1   3  NA   6   8  NA  11  13  NA  16  18  NA  21  23  NA  26  28  NA  31
+| [20]  33  NA  36  38  NA  41  43  NA  46  48  NA  51  53  NA  56  58  NA  61  63
+| [39]  NA  66  68  NA  71  73  NA  76  78  NA  81  83  NA  86  88  NA  91  93  NA
+| [58]  96  98  NA 101 103  NA 106 108  NA 111 113  NA 116 118  NA 121 123  NA 126
+| [77] 128
+|  [1]  0.5  1.5   NA  3.0  4.0   NA  5.5  6.5   NA  8.0  9.0   NA 10.5 11.5   NA
+| [16] 13.0 14.0   NA 15.5 16.5   NA 18.0 19.0   NA 20.5 21.5   NA 23.0 24.0   NA
+| [31] 25.5 26.5   NA 28.0 29.0   NA 30.5 31.5   NA 33.0 34.0   NA 35.5 36.5   NA
+| [46] 38.0 39.0   NA 40.5 41.5   NA 43.0 44.0   NA 45.5 46.5   NA 48.0 49.0   NA
+| [61] 50.5 51.5   NA 53.0 54.0   NA 55.5 56.5   NA 58.0 59.0   NA 60.5 61.5   NA
+| [76] 63.0 64.0
+|  [1] "1"   "3"   NA    "6"   "8"   NA    "11"  "13"  NA    "16"  "18"  NA   
+| [13] "21"  "23"  NA    "26"  "28"  NA    "31"  "33"  NA    "36"  "38"  NA   
+| [25] "41"  "43"  NA    "46"  "48"  NA    "51"  "53"  NA    "56"  "58"  NA   
+| [37] "61"  "63"  NA    "66"  "68"  NA    "71"  "73"  NA    "76"  "78"  NA   
+| [49] "81"  "83"  NA    "86"  "88"  NA    "91"  "93"  NA    "96"  "98"  NA   
+| [61] "101" "103" NA    "106" "108" NA    "111" "113" NA    "116" "118" NA   
+| [73] "121" "123" NA    "126" "128"
+|  [1] FALSE  TRUE    NA  TRUE FALSE    NA FALSE FALSE    NA FALSE  TRUE    NA
+| [13]  TRUE FALSE    NA FALSE FALSE    NA FALSE  TRUE    NA  TRUE FALSE    NA
+| [25] FALSE FALSE    NA FALSE  TRUE    NA  TRUE FALSE    NA FALSE FALSE    NA
+| [37] FALSE  TRUE    NA  TRUE FALSE    NA FALSE FALSE    NA FALSE  TRUE    NA
+| [49]  TRUE FALSE    NA FALSE FALSE    NA FALSE  TRUE    NA  TRUE FALSE    NA
+| [61] FALSE FALSE    NA FALSE  TRUE    NA  TRUE FALSE    NA FALSE FALSE    NA
+| [73] FALSE  TRUE    NA  TRUE FALSE
+|  [1]   1+0i   3+0i     NA   6+0i   8+0i     NA  11+0i  13+0i     NA  16+0i
+| [11]  18+0i     NA  21+0i  23+0i     NA  26+0i  28+0i     NA  31+0i  33+0i
+| [21]     NA  36+0i  38+0i     NA  41+0i  43+0i     NA  46+0i  48+0i     NA
+| [31]  51+0i  53+0i     NA  56+0i  58+0i     NA  61+0i  63+0i     NA  66+0i
+| [41]  68+0i     NA  71+0i  73+0i     NA  76+0i  78+0i     NA  81+0i  83+0i
+| [51]     NA  86+0i  88+0i     NA  91+0i  93+0i     NA  96+0i  98+0i     NA
+| [61] 101+0i 103+0i     NA 106+0i 108+0i     NA 111+0i 113+0i     NA 116+0i
+| [71] 118+0i     NA 121+0i 123+0i     NA 126+0i 128+0i
+|  [1] 01 03 00 06 08 00 0b 0d 00 10 12 00 15 17 00 1a 1c 00 1f 21 00 24 26 00 29
+| [26] 2b 00 2e 30 00 33 35 00 38 3a 00 3d 3f 00 42 44 00 47 49 00 4c 4e 00 51 53
+| [51] 00 56 58 00 5b 5d 00 60 62 00 65 67 00 6a 6c 00 6f 71 00 74 76 00 79 7b 00
+| [76] 7e 80
+|  [1]   1   3  -1   6   8  -1  11  13  -1  16  18  -1  21  23  -1  26  28  -1  31
+| [20]  33  -1  36  38  -1  41  43  -1  46  48  -1  51  53  -1  56  58  -1  61  63
+| [39]  -1  66  68  -1  71  73  -1  76  78  -1  81  83  -1  86  88  -1  91  93  -1
+| [58]  96  98  -1 101 103  -1 106 108  -1 111 113  -1 116 118  -1 121 123  -1 126
+| [77] 128
+| n = 129 
+|  [1]   1   3  NA   6   8  NA  11  13  NA  16  18  NA  21  23  NA  26  28  NA  31
+| [20]  33  NA  36  38  NA  41  43  NA  46  48  NA  51  53  NA  56  58  NA  61  63
+| [39]  NA  66  68  NA  71  73  NA  76  78  NA  81  83  NA  86  88  NA  91  93  NA
+| [58]  96  98  NA 101 103  NA 106 108  NA 111 113  NA 116 118  NA 121 123  NA 126
+| [77] 128  NA
+|  [1]  0.5  1.5   NA  3.0  4.0   NA  5.5  6.5   NA  8.0  9.0   NA 10.5 11.5   NA
+| [16] 13.0 14.0   NA 15.5 16.5   NA 18.0 19.0   NA 20.5 21.5   NA 23.0 24.0   NA
+| [31] 25.5 26.5   NA 28.0 29.0   NA 30.5 31.5   NA 33.0 34.0   NA 35.5 36.5   NA
+| [46] 38.0 39.0   NA 40.5 41.5   NA 43.0 44.0   NA 45.5 46.5   NA 48.0 49.0   NA
+| [61] 50.5 51.5   NA 53.0 54.0   NA 55.5 56.5   NA 58.0 59.0   NA 60.5 61.5   NA
+| [76] 63.0 64.0   NA
+|  [1] "1"   "3"   NA    "6"   "8"   NA    "11"  "13"  NA    "16"  "18"  NA   
+| [13] "21"  "23"  NA    "26"  "28"  NA    "31"  "33"  NA    "36"  "38"  NA   
+| [25] "41"  "43"  NA    "46"  "48"  NA    "51"  "53"  NA    "56"  "58"  NA   
+| [37] "61"  "63"  NA    "66"  "68"  NA    "71"  "73"  NA    "76"  "78"  NA   
+| [49] "81"  "83"  NA    "86"  "88"  NA    "91"  "93"  NA    "96"  "98"  NA   
+| [61] "101" "103" NA    "106" "108" NA    "111" "113" NA    "116" "118" NA   
+| [73] "121" "123" NA    "126" "128" NA   
+|  [1] FALSE  TRUE    NA  TRUE FALSE    NA FALSE FALSE    NA FALSE  TRUE    NA
+| [13]  TRUE FALSE    NA FALSE FALSE    NA FALSE  TRUE    NA  TRUE FALSE    NA
+| [25] FALSE FALSE    NA FALSE  TRUE    NA  TRUE FALSE    NA FALSE FALSE    NA
+| [37] FALSE  TRUE    NA  TRUE FALSE    NA FALSE FALSE    NA FALSE  TRUE    NA
+| [49]  TRUE FALSE    NA FALSE FALSE    NA FALSE  TRUE    NA  TRUE FALSE    NA
+| [61] FALSE FALSE    NA FALSE  TRUE    NA  TRUE FALSE    NA FALSE FALSE    NA
+| [73] FALSE  TRUE    NA  TRUE FALSE    NA
+|  [1]   1+0i   3+0i     NA   6+0i   8+0i     NA  11+0i  13+0i     NA  16+0i
+| [11]  18+0i     NA  21+0i  23+0i     NA  26+0i  28+0i     NA  31+0i  33+0i
+| [21]     NA  36+0i  38+0i     NA  41+0i  43+0i     NA  46+0i  48+0i     NA
+| [31]  51+0i  53+0i     NA  56+0i  58+0i     NA  61+0i  63+0i     NA  66+0i
+| [41]  68+0i     NA  71+0i  73+0i     NA  76+0i  78+0i     NA  81+0i  83+0i
+| [51]     NA  86+0i  88+0i     NA  91+0i  93+0i     NA  96+0i  98+0i     NA
+| [61] 101+0i 103+0i     NA 106+0i 108+0i     NA 111+0i 113+0i     NA 116+0i
+| [71] 118+0i     NA 121+0i 123+0i     NA 126+0i 128+0i     NA
+|  [1] 01 03 00 06 08 00 0b 0d 00 10 12 00 15 17 00 1a 1c 00 1f 21 00 24 26 00 29
+| [26] 2b 00 2e 30 00 33 35 00 38 3a 00 3d 3f 00 42 44 00 47 49 00 4c 4e 00 51 53
+| [51] 00 56 58 00 5b 5d 00 60 62 00 65 67 00 6a 6c 00 6f 71 00 74 76 00 79 7b 00
+| [76] 7e 80 00
+|  [1]   1   3  -1   6   8  -1  11  13  -1  16  18  -1  21  23  -1  26  28  -1  31
+| [20]  33  -1  36  38  -1  41  43  -1  46  48  -1  51  53  -1  56  58  -1  61  63
+| [39]  -1  66  68  -1  71  73  -1  76  78  -1  81  83  -1  86  88  -1  91  93  -1
+| [58]  96  98  -1 101 103  -1 106 108  -1 111 113  -1 116 118  -1 121 123  -1 126
+| [77] 128  -1
+| n = 200 
+|   [1]   1   3  NA   6   8  NA  11  13  NA  16  18  NA  21  23  NA  26  28  NA
+|  [19]  31  33  NA  36  38  NA  41  43  NA  46  48  NA  51  53  NA  56  58  NA
+|  [37]  61  63  NA  66  68  NA  71  73  NA  76  78  NA  81  83  NA  86  88  NA
+|  [55]  91  93  NA  96  98  NA 101 103  NA 106 108  NA 111 113  NA 116 118  NA
+|  [73] 121 123  NA 126 128  NA 131 133  NA 136 138  NA 141 143  NA 146 148  NA
+|  [91] 151 153  NA 156 158  NA 161 163  NA 166 168  NA 171 173  NA 176 178  NA
+| [109] 181 183  NA 186 188  NA 191 193  NA 196 198  NA
+|   [1]  0.5  1.5   NA  3.0  4.0   NA  5.5  6.5   NA  8.0  9.0   NA 10.5 11.5   NA
+|  [16] 13.0 14.0   NA 15.5 16.5   NA 18.0 19.0   NA 20.5 21.5   NA 23.0 24.0   NA
+|  [31] 25.5 26.5   NA 28.0 29.0   NA 30.5 31.5   NA 33.0 34.0   NA 35.5 36.5   NA
+|  [46] 38.0 39.0   NA 40.5 41.5   NA 43.0 44.0   NA 45.5 46.5   NA 48.0 49.0   NA
+|  [61] 50.5 51.5   NA 53.0 54.0   NA 55.5 56.5   NA 58.0 59.0   NA 60.5 61.5   NA
+|  [76] 63.0 64.0   NA 65.5 66.5   NA 68.0 69.0   NA 70.5 71.5   NA 73.0 74.0   NA
+|  [91] 75.5 76.5   NA 78.0 79.0   NA 80.5 81.5   NA 83.0 84.0   NA 85.5 86.5   NA
+| [106] 88.0 89.0   NA 90.5 91.5   NA 93.0 94.0   NA 95.5 96.5   NA 98.0 99.0   NA
+|   [1] "1"   "3"   NA    "6"   "8"   NA    "11"  "13"  NA    "16"  "18"  NA   
+|  [13] "21"  "23"  NA    "26"  "28"  NA    "31"  "33"  NA    "36"  "38"  NA   
+|  [25] "41"  "43"  NA    "46"  "48"  NA    "51"  "53"  NA    "56"  "58"  NA   
+|  [37] "61"  "63"  NA    "66"  "68"  NA    "71"  "73"  NA    "76"  "78"  NA   
+|  [49] "81"  "83"  NA    "86"  "88"  NA    "91"  "93"  NA    "96"  "98"  NA   
+|  [61] "101" "103" NA    "106" "108" NA    "111" "113" NA    "116" "118" NA   
+|  [73] "121" "123" NA    "126" "128" NA    "131" "133" NA    "136" "138" NA   
+|  [85] "141" "143" NA    "146" "148" NA    "151" "153" NA    "156" "158" NA   
+|  [97] "161" "163" NA    "166" "168" NA    "171" "173" NA    "176" "178" NA   
+| [109] "181" "183" NA    "186" "188" NA    "191" "193" NA    "196" "198" NA   
+|   [1] FALSE  TRUE    NA  TRUE FALSE    NA FALSE FALSE    NA FALSE  TRUE    NA
+|  [13]  TRUE FALSE    NA FALSE FALSE    NA FALSE  TRUE    NA  TRUE FALSE    NA
+|  [25] FALSE FALSE    NA FALSE  TRUE    NA  TRUE FALSE    NA FALSE FALSE    NA
+|  [37] FALSE  TRUE    NA  TRUE FALSE    NA FALSE FALSE    NA FALSE  TRUE    NA
+|  [49]  TRUE FALSE    NA FALSE FALSE    NA FALSE  TRUE    NA  TRUE FALSE    NA
+|  [61] FALSE FALSE    NA FALSE  TRUE    NA  TRUE FALSE    NA FALSE FALSE    NA
+|  [73] FALSE  TRUE    NA  TRUE FALSE    NA FALSE FALSE    NA FALSE  TRUE    NA
+|  [85]  TRUE FALSE    NA FALSE FALSE    NA FALSE  TRUE    NA  TRUE FALSE    NA
+|  [97] FALSE FALSE    NA FALSE  TRUE    NA  TRUE FALSE    NA FALSE FALSE    NA
+| [109] FALSE  TRUE    NA  TRUE FALSE    NA FALSE FALSE    NA FALSE  TRUE    NA
+|   [1]   1+0i   3+0i     NA   6+0i   8+0i     NA  11+0i  13+0i     NA  16+0i
+|  [11]  18+0i     NA  21+0i  23+0i     NA  26+0i  28+0i     NA  31+0i  33+0i
+|  [21]     NA  36+0i  38+0i     NA  41+0i  43+0i     NA  46+0i  48+0i     NA
+|  [31]  51+0i  53+0i     NA  56+0i  58+0i     NA  61+0i  63+0i     NA  66+0i
+|  [41]  68+0i     NA  71+0i  73+0i     NA  76+0i  78+0i     NA  81+0i  83+0i
+|  [51]     NA  86+0i  88+0i     NA  91+0i  93+0i     NA  96+0i  98+0i     NA
+|  [61] 101+0i 103+0i     NA 106+0i 108+0i     NA 111+0i 113+0i     NA 116+0i
+|  [71] 118+0i     NA 121+0i 123+0i     NA 126+0i 128+0i     NA 131+0i 133+0i
+|  [81]     NA 136+0i 138+0i     NA 141+0i 143+0i     NA 146+0i 148+0i     NA
+|  [91] 151+0i 153+0i     NA 156+0i 158+0i     NA 161+0i 163+0i     NA 166+0i
+| [101] 168+0i     NA 171+0i 173+0i     NA 176+0i 178+0i     NA 181+0i 183+0i
+| [111]     NA 186+0i 188+0i     NA 191+0i 193+0i     NA 196+0i 198+0i     NA
+|   [1] 01 03 00 06 08 00 0b 0d 00 10 12 00 15 17 00 1a 1c 00 1f 21 00 24 26 00 29
+|  [26] 2b 00 2e 30 00 33 35 00 38 3a 00 3d 3f 00 42 44 00 47 49 00 4c 4e 00 51 53
+|  [51] 00 56 58 00 5b 5d 00 60 62 00 65 67 00 6a 6c 00 6f 71 00 74 76 00 79 7b 00
+|  [76] 7e 80 00 83 85 00 88 8a 00 8d 8f 00 92 94 00 97 99 00 9c 9e 00 a1 a3 00 a6
+| [101] a8 00 ab ad 00 b0 b2 00 b5 b7 00 ba bc 00 bf c1 00 c4 c6 00
+|   [1]   1   3  -1   6   8  -1  11  13  -1  16  18  -1  21  23  -1  26  28  -1
+|  [19]  31  33  -1  36  38  -1  41  43  -1  46  48  -1  51  53  -1  56  58  -1
+|  [37]  61  63  -1  66  68  -1  71  73  -1  76  78  -1  81  83  -1  86  88  -1
+|  [55]  91  93  -1  96  98  -1 101 103  -1 106 108  -1 111 113  -1 116 118  -1
+|  [73] 121 123  -1 126 128  -1 131 133  -1 136 138  -1 141 143  -1 146 148  -1
+|  [91] 151 153  -1 156 158  -1 161 163  -1 166 168  -1 171 173  -1 176 178  -1
+| [109] 181 183  -1 186 188  -1 191 193  -1 196 198  -1
+| [1]  NA  NA NaN   0
+| [1] FALSE FALSE  TRUE  TRUE  TRUE
+| [1] NA NA NA NA NA
+| integer(0)
+|  [1] "a" "b" "c" "d" "e" "f" "g" "h" "i" "j" "k" "l" "m" "n" "o" "p" "q" "r" "s"
+| [20] "t" "u" "v" "w" "x" "y" "z"
+| [[1]]
+| [1] 1
+| 
+| [[2]]
+| NULL
+| 
+| [[3]]
+| NULL
+| 
+| [[4]]
+| [1] 2
+| 
+| [1] 1 3 5 7 9
+|  [1]  1  2  3  4  5  6  7  8  9 10
+|  [1] NA NA NA NA NA NA NA NA NA NA
+|    a <NA>    c 
+|    1   NA    3 
+| [1]  1  3 NA NA
+| [1] "b" NA 
+|    id value name  flag
+| 2   2   2.5    b FALSE
+| NA NA    NA <NA>    NA
+| 4   4   4.5    d  TRUE
+| 5   5   5.5    e  TRUE
+| 6   6   6.5    f FALSE
+|   id value name flag
+| 1  1   1.5    a TRUE
+| 3  3    NA    c   NA
+| 5  5   5.5    e TRUE
+|    id value name flag
+| 1   1   1.5    a TRUE
+| NA NA    NA <NA>   NA
+| 4   4   4.5    d TRUE
+| 5   5   5.5    e TRUE
+| [1] 76469     3
+|       g u  p
+| 4 north 4  5
+| 5 south 5  6
+| 6  east 6  7
+| 7  west 7  8
+| 8 north 8  9
+| 9 south 9 10
+|            g  u   p
+| 99991   west 14  92
+| 99992  north 15  93
+| 99993  south 16  94
+| 99998   east  4  99
+| 99999   west  5 100
+| 100000 north  6   1
+| [1] 3861767
+| 
+|  east north south  west 
+| 19117 19118 19117 19117 
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| structure(c(east = 19117L, north = 19118L, south = 19117L, west = 19117L
+| ), dim = 4L, dimnames = structure(list(c("east", "north", "south", 
+| "west")), names = ""), class = "table")

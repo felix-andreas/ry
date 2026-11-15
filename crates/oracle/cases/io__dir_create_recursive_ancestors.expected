@@ -1,0 +1,21 @@
+[stdout]
+| [1] TRUE
+| [1] TRUE
+| warning: 'ROOT/a/b/c/d' already exists 
+| [1] FALSE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| warning: cannot create dir 'ROOT/file', reason 'Not a directory' 
+| [1] FALSE
+| warning: cannot create dir 'ROOT/file', reason 'Not a directory' 
+| [1] FALSE
+| [1] ""          "a"         "a/b"       "a/b/c"     "a/b/c/d"   "a/b/c/d/e"
+| [7] "a/x"       "a/x/y"    
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("", "a", "a/b", "a/b/c", "a/b/c/d", "a/b/c/d/e", "a/x", "a/x/y"
+| )

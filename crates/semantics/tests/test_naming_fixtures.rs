@@ -34,8 +34,8 @@ fn render(source: &str) -> String {
                 else {
                     continue;
                 };
-                let header = match item.name(db).clone() {
-                    Some(name) => name,
+                let header = match item.name(db) {
+                    Some(name) => name.as_str().to_owned(),
                     None => format!("<{:?}>", item.kind(db)).to_lowercase(),
                 };
                 output.push_str(&format!("# {header}\n"));

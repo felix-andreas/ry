@@ -20,6 +20,7 @@
 
 use {
     crate::{
+        AltrepSummary,
         arrays::{self, OperatorClass},
         builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
         bytecode::Arith,
@@ -715,8 +716,8 @@ unsafe fn do_pretty(call: &Call<'_>) -> R<Sexp> {
         values::as_integer_scalar(call.arg(6)),
         bounds,
     );
-    if let Some(message) = &result.warning {
-        crate::conditions::warning(message.clone())?;
+    for message in result.warnings {
+        crate::conditions::warning(message)?;
     }
     if bounds {
         return values::named_list(&[
@@ -740,21 +741,24 @@ pub struct Pretty {
     pub high: f64,
     pub count: i32,
     pub unit: f64,
-    /// GNU R's warning when the step size had to be clamped into the double range.
-    pub warning: Option<String>,
+    /// GNU R's warnings about a range it had to clamp into the double range.
+    pub warnings: Vec<String>,
 }
 
 /// The step size is kept at most this factor below the largest double, so that a few steps
 /// beyond the range stay finite.
 const LARGEST_CELL_FACTOR: f64 = 1.25;
 
-/// The rounding behind `pretty()` and axis ticks: about `count` intervals of 1, 2 or 5 times a
-/// power of ten that cover `[low, high]`. The step is never below `smallest_factor` times the
-/// smallest normal double.
+/// Unit counts within this fraction of an integer count as that integer.
+const SNAP: f64 = 1e-10;
+
+/// The rounding behind `pretty()`, axis ticks and the C API's `R_pretty`: about `count`
+/// intervals of 1, 2 or 5 times a power of ten that cover `[low, high]`. The step is never below
+/// `smallest_factor` times the smallest normal double.
 #[allow(clippy::too_many_arguments)]
 pub fn pretty(
-    mut low: f64,
-    mut high: f64,
+    low: f64,
+    high: f64,
     count: i32,
     min_count: i32,
     shrink: f64,
@@ -762,12 +766,15 @@ pub fn pretty(
     eps_correction: i32,
     bounds: bool,
 ) -> Pretty {
-    let (original_low, original_high) = (low, high);
     let range = high - low;
-    let scale = low.abs().max(high.abs());
-    let small = if range == 0.0 && scale == 0.0 {
-        true
+    let mut warnings = Vec::new();
+    let mut cell;
+    let small;
+    if range == 0.0 && high == 0.0 {
+        cell = 1.0;
+        small = true;
     } else {
+        cell = low.abs().max(high.abs());
         let bias = 1.0
             + if five_bias >= 1.5 * high_bias + 0.5 {
                 1.0 / (1.0 + high_bias)
@@ -776,45 +783,49 @@ pub fn pretty(
             };
         // The tolerance is formed before it scales the range, so a huge range cannot overflow.
         let tolerance = bias * count.max(1) as f64 * f64::EPSILON;
-        range < scale * tolerance * 3.0
-    };
-    let mut cell;
+        small = range < cell * tolerance * 3.0;
+    }
     if small {
-        cell = if scale == 0.0 { 1.0 } else { scale };
-        if scale > 10.0 {
+        if cell > 10.0 {
             cell = 9.0 + cell / 10.0;
         }
         cell *= shrink;
         if min_count > 1 {
             cell /= min_count as f64;
         }
-    } else if range.is_finite() {
-        cell = range;
-        if count > 1 {
-            cell /= count as f64;
-        }
     } else {
-        // The range overflows, so each bound is divided before they are subtracted.
-        let divisor = count.max(1) as f64;
-        cell = high / divisor - low / divisor;
+        cell = range;
+        if range.is_finite() {
+            if count > 1 {
+                cell /= count as f64;
+            }
+        } else if count < 2 {
+            warnings.push(format!(
+                "R_pretty(): infinite range; *ndiv={count}, should have ndiv >= 2"
+            ));
+        } else {
+            // The range overflows, so each bound is divided before they are subtracted.
+            cell = high / count as f64 - low / count as f64;
+        }
     }
-    let mut warning = None;
     let smallest = match smallest_factor * f64::MIN_POSITIVE {
         0.0 => f64::MIN_POSITIVE,
         smallest => smallest,
     };
     let largest = f64::MAX / LARGEST_CELL_FACTOR;
     if cell < smallest {
-        warning = Some(format!(
-            "R_pretty(): very small range 'cell'={}, corrected to {}",
-            crate::format::format_g(cell),
-            crate::format::format_g(smallest)
-        ));
+        if cell > 0.0 {
+            warnings.push(format!(
+                "R_pretty(): very small range 'cell'={}, increased to {}",
+                crate::format::c_general(cell, 3, false),
+                crate::format::format_g(smallest)
+            ));
+        }
         cell = smallest;
     } else if cell > largest {
-        warning = Some(format!(
-            "R_pretty(): very large range 'cell'={}, corrected to {}",
-            crate::format::format_g(cell),
+        warnings.push(format!(
+            "R_pretty(): very large range 'cell'={}, decreased to {}",
+            crate::format::c_general(cell, 3, false),
             crate::format::format_g(largest)
         ));
         cell = largest;
@@ -830,27 +841,40 @@ pub fn pretty(
             }
         }
     }
-    let mut start = (low / unit + 1e-10).floor();
-    let mut end = (high / unit - 1e-10).ceil();
+    let mut start = (low / unit + SNAP).floor();
+    let mut end = (high / unit - SNAP).ceil();
+    // The eps correction widens the bounds outward by one rounding step, so that a bound a
+    // rounding error past a multiple of the unit does not cost a whole extra step.
+    let (mut covered_low, mut covered_high) = (low, high);
     if eps_correction != 0 && (eps_correction > 1 || !small) {
-        if low != 0.0 {
-            low *= 1.0 - f64::EPSILON
+        covered_low = if low < 0.0 {
+            low * (1.0 + f64::EPSILON)
+        } else if low > 0.0 {
+            low * (1.0 - f64::EPSILON)
         } else {
-            low = -f64::MIN_POSITIVE
-        }
-        if high != 0.0 {
-            high *= 1.0 + f64::EPSILON
+            -unit.min(f64::MIN_POSITIVE)
+        };
+        covered_high = if high < 0.0 {
+            high * (1.0 - f64::EPSILON)
+        } else if high > 0.0 {
+            // Widening the largest doubles would overflow.
+            if high < f64::MAX * (1.0 - f64::EPSILON / 2.0) {
+                high * (1.0 + f64::EPSILON)
+            } else {
+                high
+            }
         } else {
-            high = f64::MIN_POSITIVE
-        }
+            unit.min(f64::MIN_POSITIVE)
+        };
     }
-    while start * unit > low + 1e-10 * unit {
+    while start * unit > covered_low + SNAP * unit {
         start -= 1.0;
     }
+    // GNU R loops on these unguarded, so a NaN unit would never leave them.
     while !(start * unit).is_finite() && start < 0.0 {
         start += 1.0;
     }
-    while end * unit < high - 1e-10 * unit {
+    while end * unit < covered_high - SNAP * unit {
         end += 1.0;
     }
     while !(end * unit).is_finite() && end > 0.0 {
@@ -860,10 +884,11 @@ pub fn pretty(
     if steps < min_count {
         let missing = min_count - steps;
         let (half, rest) = ((missing / 2) as f64, (missing % 2) as f64);
-        // A range that starts or ends at zero keeps that end and grows away from it.
-        if original_low == 0.0 {
+        // A range that starts or ends at zero on a whole unit keeps that end and grows away
+        // from it.
+        if low == 0.0 && start == 0.0 && high != 0.0 {
             end += missing as f64;
-        } else if original_high == 0.0 {
+        } else if high == 0.0 && end == 0.0 && low != 0.0 {
             start -= missing as f64;
         } else if start >= 0.0 {
             end += half;
@@ -874,27 +899,30 @@ pub fn pretty(
         }
         steps = min_count;
     }
-    if bounds {
-        if start * unit < low {
-            low = start * unit;
-        }
-        if end * unit > high {
-            high = end * unit;
-        }
-    } else {
-        low = start;
-        high = end;
+    if !bounds {
+        return Pretty {
+            low: start,
+            high: end,
+            count: steps,
+            unit,
+            warnings,
+        };
+    }
+    if start * unit < covered_low {
+        covered_low = start * unit;
+    }
+    if end * unit > covered_high {
+        covered_high = end * unit;
     }
     Pretty {
-        low,
-        high,
+        low: covered_low,
+        high: covered_high,
         count: steps,
         unit,
-        warning,
+        warnings,
     }
 }
 
-/// `sequence(nvec, from, by)`.
 /// `sequence(nvec, from, by)`, plus R 4.4's `recycle`: `TRUE` recycles all three to the longest,
 /// and `0L` (the argument was not given) keeps the old behavior, recycling only `from` and `by`
 /// to `nvec`, with a warning when that drops elements.
@@ -1510,22 +1538,6 @@ fn quiet(a: f64) -> f64 {
     f64::from_bits(a.to_bits() | 0x0008_0000_0000_0000)
 }
 
-/// R 4.6's `R_pow` multiplies out a cube or a fourth power of a base in [-11, 11] instead of
-/// calling C's `pow`, which can differ in the last bit.
-pub fn small_power_product(base: f64, exponent: f64) -> Option<f64> {
-    if !(exponent == 3.0 || exponent == 4.0)
-        || !(-11.0..=11.0).contains(&base)
-        || !crate::system::r_at_least(4, 6)
-    {
-        return None;
-    }
-    Some(if exponent == 4.0 {
-        base * base * base * base
-    } else {
-        base * base * base
-    })
-}
-
 /// `^` with R's special cases, which C's `pow` leaves to the platform: `1^y` and `x^0` are 1
 /// even for `NA`, and an infinite operand gives a defined limit or `NaN` (`(-Inf)^0.5`).
 pub fn power(base: f64, exponent: f64) -> f64 {
@@ -1546,7 +1558,7 @@ pub fn power(base: f64, exponent: f64) -> f64 {
         };
     }
     if base.is_finite() && exponent.is_finite() {
-        return if let Some(product) = small_power_product(base, exponent) {
+        return if let Some(product) = rmath::small_power_product(base, exponent) {
             product
         } else {
             base.powf(exponent)
@@ -1585,21 +1597,34 @@ pub fn power(base: f64, exponent: f64) -> f64 {
     f64::NAN
 }
 
-/// `a %% b`. The remainder is corrected in x87 extended precision, as GNU R computes it, so
-/// `1e17 %% 7` is the exact 5 rather than the 0 a double computation gives.
+/// `a %% b`, bit for bit as GNU R computes it (`myfmod` in its `arithmetic.c`, built with an
+/// x87 `long double`): the remainder is corrected in extended precision, so `1e17 %% 7` is the
+/// exact 5 rather than the 0 a double computation gives.
 pub fn real_modulo(a: f64, b: f64) -> f64 {
     // GNU R tests for a zero divisor first, so `NA %% 0` is `NaN`.
     if b == 0.0 {
         return f64::NAN;
     }
-    if is_na_real(a) || is_na_real(b) {
-        return NA_REAL;
+    if let Some((remainder, _)) = whole_division(a, b) {
+        return remainder as f64;
     }
-    if let Some(remainder) = exact_integer_modulo(a, b) {
-        return remainder;
+    if a.is_nan() || b.is_nan() {
+        return extended_nan(a, b);
     }
-    if let Some((remainder, _)) = beyond_divisor(a, b) {
-        return remainder;
+    // The extended-precision steps subtract two infinities of one sign, which gives the x87
+    // default NaN, whose sign bit is set.
+    if a.is_infinite() {
+        return f64::from_bits(0xFFF8_0000_0000_0000);
+    }
+    // A divisor so large that `a / b` carries no precision: the result follows from the signs.
+    if b.abs() > EXTENDED_PRECISION_LIMIT && a.abs() <= b.abs() {
+        return if a.abs() == b.abs() {
+            0.0
+        } else if (a < 0.0 && b > 0.0) || (a > 0.0 && b < 0.0) {
+            a + b
+        } else {
+            a
+        };
     }
     let divisor = LongDouble::from(b);
     let rough = LongDouble::from(a) - LongDouble::from((a / b).floor()) * divisor;
@@ -1629,23 +1654,23 @@ pub fn integer_divide(a: i32, b: i32) -> i32 {
     (a as f64 / b as f64).floor() as i32
 }
 
-/// `a %/% b`, consistent with `real_modulo`: `a == (a %/% b) * b + a %% b` up to rounding.
+/// `a %/% b`, bit for bit as GNU R computes it (`myfloor`), and consistent with
+/// [`real_modulo`]: `a == (a %/% b) * b + a %% b` up to rounding.
 pub fn real_integer_divide(a: f64, b: f64) -> f64 {
-    // GNU R divides first, so a NaN operand passes through with the payload of the division.
-    if a.is_nan() || b.is_nan() {
-        return a / b;
+    if let Some((_, quotient)) = whole_division(a, b) {
+        return quotient as f64;
     }
-    if b != 0.0
-        && let Some(remainder) = exact_integer_modulo(a, b)
-    {
-        return (a - remainder) / b;
-    }
-    if let Some((_, quotient)) = beyond_divisor(a, b) {
-        return quotient;
-    }
+    // A NaN operand, a zero divisor and a quotient too large to have a fractional part all
+    // pass the division through, a NaN with the payload the division gives it.
     let quotient = a / b;
-    if b == 0.0 || !quotient.is_finite() {
+    if b == 0.0 || quotient.abs() > EXTENDED_PRECISION_LIMIT || !quotient.is_finite() {
         return quotient;
+    }
+    // A quotient below one floors to 0 or -1 by its sign alone. One that underflowed to zero
+    // has lost its sign, so the operands' signs decide.
+    if quotient.abs() < 1.0 {
+        let negative = quotient < 0.0 || (a < 0.0 && b > 0.0) || (a > 0.0 && b < 0.0);
+        return if negative { -1.0 } else { 0.0 };
     }
     let whole = LongDouble::from(quotient.floor());
     let divisor = LongDouble::from(b);
@@ -1653,42 +1678,67 @@ pub fn real_integer_divide(a: f64, b: f64) -> f64 {
     (whole + (rough / divisor).floor()).to_f64()
 }
 
-/// `a %% b` for whole numbers below 2^53 in magnitude, where every step is exact in doubles, so
-/// the common case skips the extended-precision model and its result is the same. `a - a %% b`
-/// is then an exact multiple of `b`, which makes `(a - a %% b) / b` the exact `a %/% b`.
-fn exact_integer_modulo(a: f64, b: f64) -> Option<f64> {
-    const LIMIT: f64 = 9_007_199_254_740_992.0;
-    if !(a.abs() < LIMIT && b.abs() < LIMIT && a == a.trunc() && b == b.trunc() && b != 0.0) {
+/// 2^63, the reciprocal of the x87 `long double` epsilon: above it a quotient has no
+/// fractional part even in extended precision, and GNU R stops correcting.
+const EXTENDED_PRECISION_LIMIT: f64 = 9_223_372_036_854_775_808.0;
+
+/// The remainder and quotient of `a` by `b` for whole numbers below 2^53 in magnitude and a
+/// non-zero `b`, where 64-bit integer division is exact and agrees with the extended-precision
+/// model, so the common case (counts, dates and times in seconds) skips that model and the
+/// bit-by-bit software `fmod` behind `%` on doubles. The remainder takes the divisor's sign.
+/// A zero remainder or quotient is the integer zero, so it converts to `+0.0` whatever the
+/// operands' signs, as in GNU R: `-6 %% 3` is the difference of two equal products there, and
+/// `0 %/% -3` is the constant zero of a quotient below one.
+#[inline]
+fn whole_division(a: f64, b: f64) -> Option<(i64, i64)> {
+    const LIMIT: u64 = 1 << 53;
+    // The cast saturates and maps NaN to zero, so comparing back rejects every operand that is
+    // not a whole number an `i64` holds, without a call of `trunc`.
+    let (dividend, divisor) = (a as i64, b as i64);
+    if dividend as f64 != a
+        || divisor as f64 != b
+        || divisor == 0
+        || dividend.unsigned_abs() >= LIMIT
+        || divisor.unsigned_abs() >= LIMIT
+    {
         return None;
     }
-    let remainder = a % b;
-    Some(if remainder != 0.0 && (remainder < 0.0) != (b < 0.0) {
-        remainder + b
+    let truncated = dividend % divisor;
+    let remainder = if truncated != 0 && (truncated ^ divisor) < 0 {
+        truncated + divisor
     } else {
-        remainder
-    })
+        truncated
+    };
+    Some((remainder, (dividend - remainder) / divisor))
 }
 
-/// The remainder and quotient when `|a| <= |b|` and `b` is too large for `a / b` to carry any
-/// precision (infinite `b` included), where the result follows from the signs alone.
-fn beyond_divisor(a: f64, b: f64) -> Option<(f64, f64)> {
-    if !(b.abs() * f64::EPSILON > 1.0 && a.is_finite() && a.abs() <= b.abs()) {
-        return None;
-    }
-    Some(if a.abs() == b.abs() {
-        (0.0, a / b)
-    } else if (a < 0.0 && b > 0.0) || (a > 0.0 && b < 0.0) {
-        (a + b, -1.0)
+/// The NaN an x87 operation on `a` and `b` returns when at least one of them is a NaN, which
+/// is what `%%` propagates in GNU R: the NaN operand, quieted, and of two NaNs the one with
+/// the larger payload, the positive one when the payloads are equal. `NA` is a NaN with a
+/// payload, so it wins over a plain `NaN` on either side.
+fn extended_nan(a: f64, b: f64) -> f64 {
+    const QUIET: u64 = 1 << 51;
+    const PAYLOAD: u64 = (1 << 52) - 1;
+    let (left, right) = (a.to_bits() | QUIET, b.to_bits() | QUIET);
+    let chosen = if !b.is_nan() {
+        left
+    } else if !a.is_nan() {
+        right
     } else {
-        (a, 0.0)
-    })
+        match (left & PAYLOAD).cmp(&(right & PAYLOAD)) {
+            std::cmp::Ordering::Greater => left,
+            std::cmp::Ordering::Less => right,
+            std::cmp::Ordering::Equal => left.min(right),
+        }
+    };
+    f64::from_bits(chosen)
 }
 
 /// Whether `a %% b` warns that its result has lost all accuracy, as R does when the
 /// quotient is too large for the remainder to mean anything.
 pub fn modulus_loses_accuracy(a: f64, b: f64) -> bool {
     let quotient = a / b;
-    quotient.is_finite() && quotient.abs() > 2f64.powi(63)
+    quotient.is_finite() && quotient.abs() > EXTENDED_PRECISION_LIMIT
 }
 
 unsafe fn integer_arithmetic(call: Sexp, op: Op, left: Sexp, right: Sexp, count: usize) -> R<Sexp> {
@@ -3110,23 +3160,102 @@ enum Summary {
     Min,
 }
 
-/// The values a summary function reduces, and whether `na.rm` was set.
-unsafe fn summary_args(call: &Call<'_>) -> R<(SmallVec<[Sexp; 4]>, bool)> {
-    let mut items = SmallVec::new();
-    let mut na_rm = false;
-    for arg in call.args {
-        if arg.tag == symbols().na_rm {
-            na_rm = values::as_logical_scalar(arg.value) == 1;
-        } else if arg.value != nil() {
-            // NULL holds no values, and reading its elements as integers would see garbage.
-            items.push(values::materialize(arg.value)?);
-        }
+/// The answer of an integer or double ALTREP vector's class when the vector is the only value
+/// summarized, as GNU R asks the class before it reads any element; `None` when the class has
+/// none and the elements must be read.
+unsafe fn altrep_summary(call: &Call<'_>, function: Summary) -> R<Option<Sexp>> {
+    let which = match function {
+        Summary::Sum => AltrepSummary::Sum,
+        Summary::Min => AltrepSummary::Min,
+        Summary::Max => AltrepSummary::Max,
+        Summary::Product => return Ok(None),
+    };
+    let na_rm = symbols().na_rm;
+    let mut values = call.args.iter().filter(|arg| arg.tag != na_rm);
+    let (Some(only), None) = (values.next(), values.next()) else {
+        return Ok(None);
+    };
+    let x = only.value;
+    if !x.is_altrep() || !matches!(x.kind(), SexpType::Integer | SexpType::Real) {
+        return Ok(None);
     }
-    Ok((items, na_rm))
+    let remove_na = call
+        .args
+        .iter()
+        .any(|arg| arg.tag == na_rm && values::as_logical_scalar(arg.value) == 1);
+    (interp().hooks.altrep_summary)(x, which, remove_na)
+}
+
+/// How a summary reads a compact sequence. GNU R's `sum`, `min`, `max` and `prod` read one by
+/// region, which leaves it compact, while `range` combines its arguments with `c()` first,
+/// which expands it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SequenceRead {
+    /// Only the two ends matter, as for `min` and `max`.
+    Ends,
+    /// Every element, read into a fresh vector.
+    Contents,
+    /// Every element, through the sequence's own expansion.
+    Expand,
+}
+
+/// The values a summary function reduces, and whether `na.rm` was set.
+unsafe fn summary_args(call: &Call<'_>, read: SequenceRead) -> R<(SmallVec<[Sexp; 4]>, bool)> {
+    let mut items = SmallVec::new();
+    for value in summary_values(call) {
+        let item = match values::compact_sequence(value) {
+            _ if read == SequenceRead::Expand => values::materialize(value)?,
+            Some((count, first, increment)) if count > 0 && read == SequenceRead::Ends => {
+                let ends = values::alloc_uninit(value.kind(), 2)?;
+                let last = first + increment * (count - 1) as f64;
+                if value.kind() == SexpType::Integer {
+                    ends.slice_mut::<i32>()
+                        .copy_from_slice(&[first as i32, last as i32]);
+                } else {
+                    ends.slice_mut::<f64>().copy_from_slice(&[first, last]);
+                }
+                crate::heap().root(ends);
+                ends
+            }
+            Some(_) => {
+                let contents = values::read_contents(value)?;
+                crate::heap().root(contents);
+                contents
+            }
+            None => values::materialize(value)?,
+        };
+        items.push(item);
+    }
+    Ok((items, summary_na_rm(call)))
+}
+
+unsafe fn summary_na_rm(call: &Call<'_>) -> bool {
+    call.args
+        .iter()
+        .rfind(|arg| arg.tag == symbols().na_rm)
+        .is_some_and(|arg| values::as_logical_scalar(arg.value) == 1)
+}
+
+/// The arguments a summary function reduces. NULL holds no values, and reading its elements
+/// as integers would see garbage.
+fn summary_values<'a>(call: &'a Call<'_>) -> impl Iterator<Item = Sexp> + 'a {
+    call.args
+        .iter()
+        .filter(|arg| arg.tag != symbols().na_rm && arg.value != nil())
+        .map(|arg| arg.value)
 }
 
 unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
-    let (items, na_rm) = summary_args(call)?;
+    if let Some(answer) = altrep_summary(call, function)? {
+        return Ok(answer);
+    }
+    let (items, na_rm) = summary_args(
+        call,
+        match function {
+            Summary::Min | Summary::Max => SequenceRead::Ends,
+            Summary::Sum | Summary::Product => SequenceRead::Contents,
+        },
+    )?;
     for item in &items {
         if !(item.kind().is_atomic() || *item == nil())
             || (item.kind() == SexpType::String
@@ -3509,7 +3638,7 @@ unsafe fn do_range(call: &Call<'_>) -> R<Sexp> {
         frame: call.frame,
         reusable: None,
     };
-    let (items, na_rm) = summary_args(&inner)?;
+    let (items, na_rm) = summary_args(&inner, SequenceRead::Expand)?;
     let numeric = items.iter().all(|item| {
         *item == nil()
             || matches!(
@@ -3536,7 +3665,7 @@ unsafe fn do_range(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn all_any(call: &Call<'_>, is_all: bool) -> R<Sexp> {
-    let (items, na_rm) = summary_args(call)?;
+    let (items, na_rm) = summary_args(call, SequenceRead::Contents)?;
     let mut saw_na = false;
     for item in items {
         // GNU R skips an empty list as it skips `NULL`.
@@ -3597,7 +3726,8 @@ unsafe fn all_any(call: &Call<'_>, is_all: bool) -> R<Sexp> {
 }
 
 unsafe fn do_mean(call: &Call<'_>) -> R<Sexp> {
-    let operand = values::materialize(call.arg(0))?;
+    // GNU R's mean reads a compact sequence by region, leaving it compact.
+    let operand = values::read_contents(call.arg(0))?;
     let count = length(operand);
     match operand.kind() {
         SexpType::Logical | SexpType::Integer => {
@@ -3969,11 +4099,6 @@ pub unsafe fn colon(start: f64, end: f64) -> R<Sexp> {
     Ok(result)
 }
 
-/// Sequences at least this long are compact ALTREP objects, as GNU R makes every `1:n`, so
-/// `seq_len(2^31 - 1)` costs nothing until its elements are read. Shorter ones stay ordinary
-/// vectors, which the evaluator's hot loops read without an indirection.
-const COMPACT_SEQUENCE_MIN: usize = 1 << 20;
-
 unsafe fn do_seq_len(call: &Call<'_>) -> R<Sexp> {
     let value = call.arg(0);
     if length(value) != 1 {
@@ -3996,10 +4121,12 @@ unsafe fn do_seq_len(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// The integers or doubles `first`, `first + increment`, ... of length `count`, for an
-/// increment of 1 or -1, which the caller keeps in the kind's range, compact from
-/// [`COMPACT_SEQUENCE_MIN`] elements when the host provides ALTREP classes.
+/// increment of 1 or -1, which the caller keeps in the kind's range. From two elements the
+/// sequence is a compact ALTREP object when the host provides the class, as GNU R makes every
+/// `1:n`, so `seq_len(2^31 - 1)` costs nothing until its elements are read and
+/// `.Internal(inspect())` reports what GNU R reports.
 unsafe fn sequence(kind: SexpType, count: usize, first: f64, increment: f64) -> R<Sexp> {
-    if count >= COMPACT_SEQUENCE_MIN
+    if count >= 2
         && let Some(sequence) = (interp().hooks.compact_sequence)(kind, count, first, increment)?
     {
         return Ok(sequence);
@@ -4091,10 +4218,11 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
             let from = from.unwrap_or(1.0);
             let span = to - from;
             if span == 0.0 {
-                return if all_integer {
-                    values::integer_vector(&[from as i32])
-                } else {
-                    values::real_vector(&[from])
+                // GNU R returns `from` itself for equal endpoints, with its type, names and
+                // class, whatever `by` is.
+                return match present(matched[0]) {
+                    Some(argument) => Ok(argument),
+                    None => values::real_vector(&[from]),
                 };
             }
             if by == 0.0 {
@@ -4112,6 +4240,11 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
             };
             if !quotient.is_finite() || quotient > 4_503_599_627_370_496.0 {
                 return Err(call.error("'by' argument is much too small"));
+            }
+            // A unit step is `from:to` in GNU R, so whole endpoints in integer range give an
+            // integer vector whatever the types of the arguments.
+            if by.abs() == 1.0 {
+                return colon(from, to);
             }
             let steps = (quotient + 1e-10).floor() as usize;
             if all_integer {

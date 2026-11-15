@@ -1,3 +1,4 @@
+# oracle: library-dependent
 fr <- function(x) 100 * (x[2] - x[1]^2)^2 + (1 - x[1])^2
 grr <- function(x) c(-400 * x[1] * (x[2] - x[1]^2) - 2 * (1 - x[1]), 200 * (x[2] - x[1]^2))
 o <- optim(c(-1.2, 1), fr, method = "L-BFGS-B", control = list(trace = 1)); print(o)

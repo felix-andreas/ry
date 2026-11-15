@@ -1,3 +1,4 @@
+# oracle: library-dependent
 # loess: interpolated and direct surfaces, degrees 0 to 2, one to three predictors, robust
 # fitting, exact and approximate statistics, parametric and drop.square terms, and predict with
 # standard errors. Every printed number is a checksum of the exact bit pattern of the doubles.

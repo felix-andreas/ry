@@ -12,6 +12,7 @@
 use std::{
     alloc::{GlobalAlloc, Layout},
     ptr::NonNull,
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 /// The smallest vector, in bytes with its header, that gets its own mapping. Smaller large
@@ -158,7 +159,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Mapped<A> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if is_mapped(layout) {
             return page_rounded(layout.size())
-                .and_then(|length| map(length))
+                .and_then(|length| Some(advise_huge(map(length)?, length)))
                 .map_or(std::ptr::null_mut(), NonNull::as_ptr);
         }
         self.0.alloc(layout)
@@ -197,6 +198,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Mapped<A> {
                 match (page_rounded(layout.size()), page_rounded(new_size)) {
                     (Some(length), Some(new_length)) if length == new_length => address,
                     (Some(length), Some(new_length)) => remap(block, length, new_length)
+                        .map(|moved| advise_huge(moved, new_length))
                         .map_or(std::ptr::null_mut(), NonNull::as_ptr),
                     _ => std::ptr::null_mut(),
                 }
@@ -212,6 +214,37 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Mapped<A> {
         }
     }
 }
+
+/// Asks the kernel for huge pages on the blocks [`Mapped`] maps while the returned guard lives,
+/// on every thread. A table operation holds one: it fills buffers as long as its columns and
+/// frees them when it returns, so every operation maps them afresh. With 4 KiB pages a 400 MB
+/// buffer takes a hundred thousand page faults before it is full, and with 2 MiB pages two
+/// hundred. A gather through random row indices also stops missing the TLB on every read.
+///
+/// The advice is scoped to the operation because the block's size cannot tell such a buffer from
+/// one that is reserved and filled only in part, which is what the interpreter's large blocks
+/// are: a hash table that doubled, a list that grows, a stack. On huge pages each of those
+/// commits its last, partly used 2 MiB in full. Outside a guard a block gets small pages.
+///
+/// Guards nest, and a block keeps the pages it was mapped with after its guard is gone. Growing
+/// it inside a later guard advises the whole block.
+pub fn huge_pages() -> HugePages {
+    HUGE_PAGE_SCOPES.fetch_add(1, Ordering::Relaxed);
+    HugePages(())
+}
+
+/// The guard of [`huge_pages`].
+pub struct HugePages(());
+
+impl Drop for HugePages {
+    fn drop(&mut self) {
+        HUGE_PAGE_SCOPES.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// The number of live [`HugePages`] guards. It is one counter for the process, not one per
+/// thread, because an operation's buffers are mapped on the worker threads it hands its work to.
+static HUGE_PAGE_SCOPES: AtomicUsize = AtomicUsize::new(0);
 
 /// Whether a block of `layout` gets a mapping. A mapping is aligned to a page, so a block that
 /// needs more alignment than that comes from the inner allocator.
@@ -273,6 +306,27 @@ unsafe fn remap(address: NonNull<u8>, length: usize, new_length: usize) -> Optio
     NonNull::new(resized.cast())
 }
 
+/// The size of a transparent huge page on the platforms ry targets.
+#[cfg(target_os = "linux")]
+const HUGE_PAGE_BYTES: usize = 2 << 20;
+
+/// Asks the kernel to back one of the global allocator's blocks with huge pages if a
+/// [`huge_pages`] guard is alive.
+///
+/// Large vectors never ask for huge pages. [`MappedPool`] resizes a kept mapping to each new
+/// vector's length, and with huge pages a loop of subsets of differing lengths spent several
+/// times the system time on zeroing and compaction.
+///
+/// The call is advice: a kernel without transparent huge pages refuses it and the block keeps
+/// small pages, so its result is not checked.
+#[cfg(target_os = "linux")]
+unsafe fn advise_huge(address: NonNull<u8>, length: usize) -> NonNull<u8> {
+    if length >= HUGE_PAGE_BYTES && HUGE_PAGE_SCOPES.load(Ordering::Relaxed) > 0 {
+        libc::madvise(address.as_ptr().cast(), length, libc::MADV_HUGEPAGE);
+    }
+    address
+}
+
 #[cfg(target_os = "linux")]
 unsafe fn try_unmap(address: NonNull<u8>, length: usize) -> bool {
     libc::munmap(address.as_ptr().cast(), length) == 0
@@ -302,6 +356,11 @@ unsafe fn map(length: usize) -> Option<NonNull<u8>> {
     NonNull::new(std::alloc::alloc_zeroed(Layout::from_size_align_unchecked(
         length, 16,
     )))
+}
+
+#[cfg(not(target_os = "linux"))]
+unsafe fn advise_huge(address: NonNull<u8>, _length: usize) -> NonNull<u8> {
+    address
 }
 
 #[cfg(not(target_os = "linux"))]

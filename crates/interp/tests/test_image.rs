@@ -46,6 +46,13 @@ fn an_image_of_an_older_format_is_stale() {
         &image_prefix(b"RYSTART\x06", identity),
     );
     assert!(!is_current(&before_method_rows, identity));
+    // The format that stored the image's empty pages too.
+    let with_empty_pages = write(
+        &directory,
+        "with-empty-pages.image",
+        &image_prefix(b"RYSTART\x07", identity),
+    );
+    assert!(!is_current(&with_empty_pages, identity));
     let foreign = write(
         &directory,
         "foreign.image",

@@ -459,3 +459,16 @@ collect <- function(gs) {
 #++++
 collect: Unknown
 144..153 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character | list{pf: Unknown, lpi: double}`
+
+#---- element_write_of_a_wider_type_widens_an_atomic_vector
+h <- function() { x <- 1:3; x[[2]] <- 2.5; x }
+k <- function() { x <- 1:3; x[2] <- 2.5; x }
+m <- function() { x <- c(TRUE, FALSE); x[[1]] <- 2L; x }
+n <- function() { x <- 1:3; x[[2]] <- "a"; x }
+p <- function() { x <- c(1.5, 2); x[[2]] <- 1L; x }
+#++++
+h: fn() -> double[]
+k: fn() -> double[]
+m: fn() -> integer[]
+n: fn() -> character[]
+p: fn() -> double[]

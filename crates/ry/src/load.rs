@@ -532,7 +532,7 @@ fn check_strict_package(root: &Path) -> StrictCheck {
     }
 }
 
-/// The host side of `loader::ry_runtime::set_check`: ry's runtime calls it before a load of a
+/// The host side of `libr::loader_backend::set_check`: ry's runtime calls it before a load of a
 /// strict package runs anything.
 pub extern "C" fn strict_check_on_ry_runtime(root: *const c_char) -> c_int {
     let Some(root) = runtime_path(root) else {
@@ -543,7 +543,7 @@ pub extern "C" fn strict_check_on_ry_runtime(root: *const c_char) -> c_int {
     catch_unwind(|| check_strict_package(&root)).unwrap_or(StrictCheck::Failed) as c_int
 }
 
-/// The host side of the strict query of `loader::ry_runtime::set_check`: 1 when the
+/// The host side of the strict query of `libr::loader_backend::set_check`: 1 when the
 /// configuration that governs the package at `root` turns strict mode on, as [`strict_config`]
 /// decides for GNU R's loader.
 pub extern "C" fn strict_config_on_ry_runtime(root: *const c_char) -> c_int {

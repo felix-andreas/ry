@@ -1,0 +1,115 @@
+[stdout]
+| y missing
+| [1] 5
+| y missing
+| [1] 10
+| y missing
+| [1] 15
+| y missing
+| [1] 20
+| [1] 0 1
+| [1] 0 2
+| [1] 0 3
+| [1] 0 4
+| [1] 1
+| [1] 1
+| [1] 1
+| [1] 1
+| [1] "promise already under evaluation: recursive default argument reference or earlier problems?"
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] FALSE
+| [1] FALSE
+| [1] FALSE
+| List of 4
+|  $ : language a + 1
+|  $ : num 2
+|  $ : num 2
+|  $ : logi TRUE
+| List of 4
+|  $ : language a + 1
+|  $ : num 3
+|  $ : num 3
+|  $ : logi TRUE
+| List of 4
+|  $ : language a + 1
+|  $ : num 4
+|  $ : num 4
+|  $ : logi TRUE
+| [1] 11
+| [1] 22
+| [1] 33
+| [1] 3 6 9
+| [1] 3 6 9
+| [1] 3 6 9
+| [1] 2
+| [1] 4
+| [1] 6
+| force b
+| [1] 101
+| force b
+| [1] 102
+| force b
+| [1] 103
+| [1] "a<a>b<a>1"
+| [1] "a<a>b<a>2"
+| [1] "a<a>b<a>3"
+| [1] 20100
+| [1] 5
+| [1] 5
+| [1] 5
+| [1] "aa"
+| [1] "aa"
+| [1] "aa"
+| [1] "one"
+| [1] "one"
+| [1] "one"
+| [1] "gone"
+| [1] "gone"
+| [1] "gone"
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| f18(1)
+| f18(1)
+| f18(1)
+| [1] 99
+| [1] 99
+| [1] 99
+| [1] 1
+| [1] 2
+| [1] 3
+| exit 1 
+| exit 2 
+| exit 3 
+| [1] 3
+| [1] 4
+| [1] 5
+| [1] 2 3
+| [1] 3 4
+| [1] 4 5
+| [1] 3
+| [1] 3
+| [1] 3
+| [1] "a" "b"
+| [1] "a" "b"
+| [1] "a" "b"
+| [1] 2
+| [1] 4
+| [1] 6
+| [1] 2
+| [1] 2
+| [1] 2
+| [1] FALSE
+| [1] FALSE
+| [1] FALSE
+| [1] 2
+| [1] 2
+| [1] 2
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

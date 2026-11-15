@@ -41,6 +41,7 @@
     clippy::type_complexity
 )]
 
+pub mod ahead;
 pub mod annotations;
 pub mod apply_results;
 mod approximate;
@@ -51,13 +52,15 @@ pub mod base_fast_paths;
 pub mod builtin_libraries;
 pub mod builtins;
 pub mod bytecode;
+mod callgrind;
+pub mod capture;
 pub mod code_image;
 pub mod coerce;
 pub mod combine;
 pub mod conditions;
 pub mod connections;
 pub mod console_server;
-pub mod dataframe;
+pub mod crash;
 pub mod debugger;
 pub mod deparse;
 pub mod dispatch;
@@ -66,23 +69,17 @@ pub mod effects;
 pub mod element_access;
 pub mod envir;
 pub mod eval;
-#[cfg(unix)]
-mod fft;
+pub mod extensions;
 pub mod file_removal;
+#[cfg(unix)]
 pub mod fork;
 pub mod format;
-pub mod frame;
-pub mod graphics;
-pub mod graphics_engine;
-pub mod graphics_render;
 pub mod help_server;
 pub mod http;
 pub mod image;
 pub mod kernels;
 pub mod latex;
 pub mod linalg;
-pub mod linpack;
-pub mod long_double;
 pub mod lower;
 #[path = "../../rcmd/src/makeconf.rs"]
 mod makeconf;
@@ -96,30 +93,16 @@ pub mod parallel;
 pub mod parse_data;
 mod pcre;
 pub mod platform;
-pub mod plotmath;
 pub mod print;
 pub mod profile_summary;
 pub mod random;
 pub mod rd;
 pub mod records;
-pub mod rmath;
+pub mod replay;
 pub mod serialize;
 pub mod session;
 pub mod sort;
 pub mod standard_library;
-pub mod stats;
-pub mod stats_arima;
-pub mod stats_cluster;
-pub mod stats_deriv;
-pub mod stats_lbfgsb;
-pub mod stats_loess;
-pub mod stats_models;
-pub mod stats_nlm;
-pub mod stats_optimize;
-pub mod stats_port;
-pub mod stats_port_minimizer;
-pub mod stats_spline;
-pub mod stats_tests;
 pub mod strings;
 pub mod subset;
 pub mod system;
@@ -128,10 +111,11 @@ pub mod tools;
 pub mod unwind;
 pub mod utils;
 pub mod values;
-pub mod vector_math;
-pub mod viewer;
 
-pub use crate::unwind::{Jump, RError};
+pub use {
+    crate::unwind::{Jump, RError},
+    numeric::{linpack, long_double, rmath, vector_math},
+};
 use {
     crate::{
         base_fast_paths::Entry,
@@ -140,7 +124,7 @@ use {
         unwind::{R, Unwind},
     },
     heap::{
-        Heap, Liveness, Marker, RootSource,
+        Heap, Liveness, Marker, RootSource, activity,
         object::{Sexp, SexpType},
     },
     rustc_hash::FxHashMap,
@@ -153,9 +137,10 @@ pub struct Frame {
     /// The call as written, which `sys.call` returns.
     pub call: Sexp,
     pub function: Sexp,
-    /// The environment the closure body runs in. A slot frame (see [`Frame::slots`]) has none
-    /// until something asks for it, and holds `NULL` until then: read it through
-    /// [`eval::frame_env`], which makes it, wherever the environment is handed on.
+    /// The environment the closure body runs in. A slot frame (see [`Frame::slots`]) runs in
+    /// its slots and holds `NULL` here until one of its variables moves into a binding cell of
+    /// [`Frame::pending`], which is its environment from then on. Read it through
+    /// [`eval::frame_env`] wherever the environment is handed on.
     pub env: Sexp,
     /// The environment the call was evaluated in, which `parent.frame` returns, or `NULL` when
     /// the caller is a slot frame that had no environment when it made the call: the caller is
@@ -171,22 +156,19 @@ pub struct Frame {
     /// Promise code runs in its caller's slots while deeper frames are live, so the caller is
     /// not always the frame just below.
     pub caller: u32,
-    /// For a slot frame that passed promises over its slots, the environment those promises
-    /// name: it has no bindings and carries [`heap::object::gp::PENDING_FRAME`] until the frame reifies into
-    /// it, so a forced promise finds the frame by it and runs on the slots.
+    /// The environment that stands for a slot frame, made the first time anything asks for it:
+    /// promises and closures of the frame name it, and `environment()`, `parent.frame()` and
+    /// `sys.frame()` return it. It binds nothing while every variable is in its slot
+    /// ([`heap::object::gp::PENDING_FRAME`]), takes a variable into a binding cell when
+    /// something reads that variable through it ([`heap::object::gp::PARTIAL_FRAME`], from when
+    /// it is [`Frame::env`] too), and takes them all if it outlives the frame.
     pub pending: Sexp,
-    /// How many promises over [`Frame::pending`] may still be unforced, plus the closures made
-    /// over it ([`Interp::pending_closures`]). When none of them can outlive the frame as it
-    /// returns, the environment is never made.
-    pub unforced: u32,
-    /// Whether `parent.frame` handed out [`Frame::pending`] in place of the environment, so a
-    /// read of its bindings counts as code observing the frame.
-    pub pending_shared: bool,
     /// A builtin wrapper run by [`eval::run_wrapper`]: its slots hold the values of arguments
-    /// that the generic path would have bound as promises, so a reify wraps them.
+    /// that the generic path would have bound as promises, so a variable that moves into a
+    /// binding cell is wrapped as one.
     pub inlined: bool,
-    /// The [`heap::activity::label`] of what gave the slot frame its environment, while a
-    /// profile summary is collected; [`NOT_REIFIED`] otherwise.
+    /// The [`heap::activity::label`] of what last asked for the slot frame's environment, while
+    /// a profile summary is collected; [`NOT_REIFIED`] otherwise.
     pub reified_by: u32,
     /// Where the call's arguments (values or promises, with the tags the call gave them) start
     /// in [`Interp::frame_args`]; they run up to the next frame's start. `sys.function`'s
@@ -210,15 +192,74 @@ pub struct Frame {
     pub handle_mark: u32,
     /// [`Interp::slot_owner`] when the frame was pushed, which [`eval::leave`] restores.
     pub previous_owner: u32,
+    /// [`Interp::references_used`] when the frame was pushed: the argument references a slot
+    /// frame makes for its own defaults sit from here up, and go back to the pool when the
+    /// frame returns.
+    pub references: u32,
 }
 
 impl Frame {
-    /// Whether `env` is this frame's environment, or the pending environment that stands for
-    /// it while a slot frame has none: `parent.frame` hands that one out, and it becomes the
-    /// environment itself if the frame reifies.
+    /// Whether `env` is this frame's environment, which for a slot frame is the one that
+    /// stands for it whether or not it binds anything yet.
     pub unsafe fn owns(&self, env: Sexp) -> bool {
         self.env == env || (self.pending == env && env.kind() == SexpType::Environment)
     }
+}
+
+/// The attached debugger, if any. A call's fast path tests [`activity::hooks`] instead of
+/// this field, so the slot is written only through [`DebuggerSlot::set`] and
+/// [`DebuggerSlot::take`], which keep the [`activity::DEBUGGER`] bit equal to whether it is
+/// occupied.
+pub struct DebuggerSlot(Option<Box<debugger::Adapter>>);
+
+impl DebuggerSlot {
+    pub fn set(&mut self, adapter: Option<Box<debugger::Adapter>>) {
+        activity::set_hook(activity::DEBUGGER, adapter.is_some());
+        self.0 = adapter;
+    }
+
+    pub fn take(&mut self) -> Option<Box<debugger::Adapter>> {
+        activity::set_hook(activity::DEBUGGER, false);
+        self.0.take()
+    }
+
+    pub fn as_mut(&mut self) -> Option<&mut Box<debugger::Adapter>> {
+        self.0.as_mut()
+    }
+}
+
+impl std::ops::Deref for DebuggerSlot {
+    type Target = Option<Box<debugger::Adapter>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// Says whether the session defines S4, R6 and reference classes ([`Interp::object_systems`]),
+/// keeping the [`activity::NO_OBJECT_SYSTEMS`] bit that a call's fast path tests in step.
+pub fn set_object_systems(allowed: bool) {
+    interp().object_systems = allowed;
+    activity::set_hook(activity::NO_OBJECT_SYSTEMS, !allowed);
+}
+
+/// The bits of [`activity::hooks`] that stand for interpreter state, computed from that state:
+/// what the word must hold, apart from the profiling bits.
+pub fn observer_bits() -> u8 {
+    let state = interp();
+    (if state.debugger.is_some() {
+        activity::DEBUGGER
+    } else {
+        0
+    }) | (if moves::tracking() {
+        activity::MOVES
+    } else {
+        0
+    }) | (if state.object_systems {
+        0
+    } else {
+        activity::NO_OBJECT_SYSTEMS
+    })
 }
 
 // A closure call hands its frame to `FrameStack::push` by value. Up to 128 bytes that move is a
@@ -288,6 +329,13 @@ impl FrameStack {
     pub fn clear(&mut self) {
         self.truncate(0);
     }
+
+    /// The frames' address and count for a crash report, which reads them without trusting
+    /// either: the count never exceeds the allocated slots, as the report must tolerate a
+    /// corrupted stack.
+    pub fn crash_view(&self) -> (*const Frame, usize) {
+        (self.slots.as_ptr(), self.depth.min(self.slots.len()))
+    }
 }
 
 impl Default for FrameStack {
@@ -344,7 +392,7 @@ impl<'a> IntoIterator for &'a mut FrameStack {
 /// [`Frame::slots`] of a frame that keeps its variables in an environment.
 pub const NO_SLOTS: u32 = u32::MAX;
 
-/// [`Frame::reified_by`] of a frame no reason was recorded for.
+/// [`Frame::reified_by`] of a frame nothing asked the environment of.
 pub const NOT_REIFIED: u32 = u32::MAX;
 
 /// The arguments of the frame at `index` (zero-based), as the call passed them.
@@ -378,20 +426,49 @@ pub fn method_vars(state: &Interp, index: usize) -> &[(Sexp, Sexp)] {
         .unwrap_or(&[])
 }
 
+/// Where the closures that the slot frame at `owner` made over its environment sit in
+/// [`Interp::pending_closures`]. The list is ordered by frame, and the frame that asks is
+/// nearly always the innermost one with any, so the search runs from the end.
+pub fn pending_closures_of(closures: &[(u32, Sexp)], owner: usize) -> std::ops::Range<usize> {
+    let end = closures.len()
+        - closures
+            .iter()
+            .rev()
+            .take_while(|&&(frame, _)| frame as usize > owner)
+            .count();
+    let start = end
+        - closures[..end]
+            .iter()
+            .rev()
+            .take_while(|&&(frame, _)| frame as usize == owner)
+            .count();
+    start..end
+}
+
+/// Forgets the closures over the environments of the slot frames at `depth` and above
+/// ([`Interp::pending_closures`]), which are popping.
+#[inline(always)]
+pub fn forget_pending_closures(state: &mut Interp, depth: usize) {
+    while let Some(&(owner, _)) = state.pending_closures.last()
+        && owner as usize >= depth
+    {
+        state.pending_closures.pop();
+    }
+}
+
 /// Keeps the first `depth` frames and drops the rest with their arguments.
 pub fn truncate_frames(state: &mut Interp, depth: usize) {
     if let Some(frame) = state.frames.get(depth) {
         state.frame_args.truncate(frame.args as usize);
         state.method_vars.truncate(frame.method_vars as usize);
     }
-    if !state.pending_closures.is_empty() {
-        state
-            .pending_closures
-            .retain(|&(owner, _)| (owner as usize) < depth);
-    }
+    forget_pending_closures(state, depth);
     state.frames.truncate(depth);
     // An unwind to top level skips the releases of the calls it leaves, so their argument
     // references go back to the pool here, cleared, or the pool would keep what they held.
+    if depth == 0 {
+        bytecode::forget_resumes(&mut state.bytecode);
+    }
     if depth == 0 && state.references_used != 0 {
         // SAFETY: `state` is the interpreter's own state, which `release_references` reads
         // through `interp()`, and it is not used after this call.
@@ -417,9 +494,6 @@ pub struct Hooks {
     /// double kind, a length, a first element and an increment of 1 or -1, or `None` when the
     /// host has no compact sequences.
     pub compact_sequence: unsafe fn(SexpType, usize, f64, f64) -> R<Option<Sexp>>,
-    /// The first element and the increment of a compact sequence, or `None` for any other
-    /// value, so that a `for` loop steps through `1:n` without expanding it.
-    pub compact_sequence_steps: unsafe fn(Sexp) -> Option<(f64, f64)>,
     /// An ALTREP vector's read-only data pointer, from its class's `Dataptr` method, or `None`
     /// when the class has none. A class may expand into storage it keeps, as compact sequences
     /// do, so repeated reads do not copy the vector each time.
@@ -429,9 +503,22 @@ pub struct Hooks {
     pub altrep_int_elt: unsafe fn(Sexp, usize) -> R<i32>,
     /// Element `index` of a double ALTREP vector, from its class's `Elt` method.
     pub altrep_real_elt: unsafe fn(Sexp, usize) -> R<f64>,
+    /// Element `index` of a character ALTREP vector, a `CHARSXP` from its class's `Elt` method,
+    /// so that reading one string of a deferred string vector converts only that element.
+    pub altrep_string_elt: unsafe fn(Sexp, usize) -> R<Sexp>,
+    /// An integer or double ALTREP vector's `sum`, `min` or `max` with the given `na.rm`, from
+    /// its class's `Sum`, `Min` or `Max` method, or `None` when the class has no answer.
+    pub altrep_summary: unsafe fn(Sexp, AltrepSummary, bool) -> R<Option<Sexp>>,
     /// `as.character` of an integer or double vector without attributes as a vector that
     /// converts each element when it is read, or `None` when the host has no such class.
     pub defer_strings: unsafe fn(Sexp) -> R<Option<Sexp>>,
+    /// GNU R's `R_tryWrap` for an integer, logical, double, complex, raw or character vector:
+    /// a wrapper that shares the data until something writes, or a copy when the host has no
+    /// wrapper classes.
+    pub altrep_wrap: unsafe fn(Sexp) -> R<Sexp>,
+    /// GNU R's `R_tryUnwrap`: the data under a wrapper that vouches for nothing and that only
+    /// its binding holds, with the wrapper's attributes moved onto it, or the value itself.
+    pub altrep_unwrap: unsafe fn(Sexp) -> Sexp,
     /// Runs finalizers whose objects died, at a safe point.
     pub run_finalizers: unsafe fn(),
     /// Runs the finalizers registered with `onexit = TRUE`, as the session ends.
@@ -459,6 +546,18 @@ pub struct Hooks {
     /// `R_FindSymbol(name, "", NULL)`: a routine of any loaded DLL, as `RNGkind("user-supplied")`
     /// finds `user_unif_rand`.
     pub find_native_symbol: unsafe fn(&str) -> Option<NativeSymbol>,
+    /// `object` serialized as `saveRDS` writes it without compression (XDR, version 3), without
+    /// evaluating R code: the boundary-call recorder serializes inputs of the program it
+    /// records, and an error it raised through `eval` would reach that program's handlers.
+    pub serialize: unsafe fn(Sexp) -> R<Vec<u8>>,
+}
+
+/// The ALTREP summary methods `sum`, `min` and `max` consult.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AltrepSummary {
+    Sum,
+    Min,
+    Max,
 }
 
 /// A C routine as `R_FindSymbol` returns it, to be cast to its real signature.
@@ -478,6 +577,10 @@ pub struct Interp {
     /// The position of the slot frame whose slots the running byte code reads, which a `NULL`
     /// environment handed out by that code stands for; [`NO_SLOTS`] outside slot frames.
     pub slot_owner: u32,
+    /// How many times an active binding's function has run to read its value. Compiled code
+    /// compares it around a variable load to learn that the load called a binding, which it
+    /// must then call again at every later read rather than reuse the value.
+    pub active_binding_reads: u64,
     /// The frame whose fast-path prologue an [`crate::bytecode::Op::Prologue`] is running,
     /// which [`crate::base_fast_paths::finish`] answers by clearing it.
     pub(crate) prologue: Option<crate::base_fast_paths::ClosureFrame>,
@@ -498,9 +601,12 @@ pub struct Interp {
     /// [`FRAME_CLOSURES`] each, which the heap needs to release the frame when the call returns
     /// (`Heap::release_frame`).
     pub frame_closures: Vec<Sexp>,
-    /// The closures slot frames made over their pending environments, each with the index of
-    /// its frame, at most [`FRAME_CLOSURES`] per frame. A frame that returns without its
-    /// environment checks that none outlives it (`eval::finish_frame`).
+    /// The closures slot frames made over the environments that stand for them, each with the
+    /// index of its frame, at most [`FRAME_CLOSURES`] per frame. A frame that returns without
+    /// its environment checks that none outlives it (`eval::finish_frame`). The entries are
+    /// ordered by frame, so a frame's own are together ([`pending_closures_of`]) and the frames
+    /// that pop give up theirs from the end ([`forget_pending_closures`]): a return never
+    /// searches the list for the closures of the frames below it.
     pub pending_closures: Vec<(u32, Sexp)>,
     /// The foreign calls (`.Call`, `.External`, `.C`, `.Fortran`) in progress, each with the
     /// number of frames below it. GNU R gives them a builtin context, which tracebacks list and
@@ -512,8 +618,10 @@ pub struct Interp {
     /// `globalCallingHandlers()`: the bottom of the handler stack, where every top-level task
     /// starts.
     pub global_handlers: HandlerStack,
-    /// Stacks set aside while code runs as if at top level (a help server handler), kept here so
-    /// the collector still sees them.
+    /// Stacks set aside while others are in effect, kept here so the collector still sees them:
+    /// a calling handler runs with the handlers below its own entry, and code run as if at top
+    /// level (`R_ToplevelExec`, `R_tryEval`, a help server handler) sees none. An entry set aside
+    /// may hold the only reference to its handler closure. See [`conditions::set_aside`].
     pub suspended_handlers: Vec<(HandlerStack, RestartStack)>,
     /// Handler entries a frame exit released, which the next handlers established reuse, so a
     /// `tryCatch` in a loop makes no Rust allocation ([`conditions::restore_handlers`]).
@@ -530,6 +638,9 @@ pub struct Interp {
     pub symbols: values::Symbols,
     /// `R_Visible`: whether the value of the last top-level evaluation prints.
     pub visible: bool,
+    /// The DataFrames whose `x[i, j, by]` queries are running, outermost first. An update of a
+    /// frame that an outer query is still reading must not write into it.
+    pub frame_queries: Vec<Sexp>,
     /// `returnValue()` for the `on.exit` code running innermost: the value its function
     /// returns, or `None` when the function is being left by an error or a jump past it.
     pub returned_values: Vec<Option<Sexp>>,
@@ -563,6 +674,8 @@ pub struct Interp {
     pub warnings: Vec<(Sexp, String)>,
     /// Set while `warning(immediate. = TRUE)` signals, so the default handler prints at once.
     pub immediate_warning: bool,
+    /// Where a condition raised by the instruction that is running is signalled.
+    pub signalling: Signalling,
     /// The text `geterrmessage()` returns.
     pub error_message: String,
     /// A buffer builtins reuse to assemble each element of a character result
@@ -573,13 +686,19 @@ pub struct Interp {
     pub show_error_messages: bool,
     /// The attached Debug Adapter Protocol server, which the evaluator consults before each
     /// statement.
-    pub debugger: Option<Box<debugger::Adapter>>,
+    pub debugger: DebuggerSlot,
     /// Depth of nested default error handling, to stop an error in `options(error=)` looping.
     pub in_error: u32,
     /// Objects that live as long as the session: the options list, `.Random.seed` helpers, and
     /// tables the builtins keep.
     pub globals: values::Globals,
     pub hooks: Hooks,
+    /// The host's `compact_intseq` and `compact_realseq` ALTREP classes, `NULL` until it makes
+    /// them, so [`values::compact_sequence`] reads a sequence without a call into the host.
+    pub compact_sequence_classes: [Sexp; 2],
+    /// The host's `deferred_string` ALTREP class, `NULL` until it makes it. Its elements convert
+    /// without running R code, so tier 0 may read one inline.
+    pub deferred_string_class: Sexp,
     pub bytecode: bytecode::State,
     pub random: random::Rng,
     pub connections: connections::Table,
@@ -603,8 +722,19 @@ pub struct Interp {
     pub interactive: bool,
     /// The default packages' libraries `dyn.load` loaded, with the paths it was given.
     pub builtin_libraries: Vec<(&'static str, String)>,
+    /// The native routine tables registered by crates above the interpreter, each with the
+    /// default package it implements ([`builtin_libraries::register_routines`]).
+    pub routine_tables: Vec<(
+        &'static str,
+        &'static [(&'static str, builtin_libraries::NativeFn)],
+    )>,
+    /// The implementation of each of the default packages' routines, in the order of the
+    /// routine list, filled on the first native call and emptied when a table is registered.
+    pub routine_implementations: Vec<Option<builtin_libraries::NativeFn>>,
     /// Inline type annotations turned into checks at function boundaries.
     pub annotations: annotations::State,
+    /// A script's definitions compiled before the script runs (`ry run --aot`).
+    pub ahead: ahead::State,
     /// Values moved out of a caller's variable into a closure's parameter.
     pub moves: moves::State,
     pub method_cache: dispatch::MethodCache,
@@ -641,6 +771,28 @@ pub struct Interp {
     pub builtins_env: Option<Sexp>,
     /// The compiled code images of installed packages ([`code_image`]).
     pub code_image: code_image::State,
+    /// The records of typed-core values R holds unread ([`records::LazyRecords`]).
+    pub lazy_records: records::LazyRecords,
+    /// The graphics system, the tables and the data viewer, which crates above this one
+    /// implement ([`extensions`]).
+    pub extensions: extensions::Extensions,
+}
+
+/// Where a condition is signalled. The optimizing tier runs a closure call without a frame
+/// while nothing can tell, and a signal can: the default error handler, the `error` option and
+/// the traceback read the stack. So while it runs one instruction of such a call, nothing is
+/// signalled until the call has its frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Signalling {
+    /// Where the condition is raised.
+    Immediate,
+    /// Not here: an error a builtin raises is returned unsignalled, for the tier to signal
+    /// once the call has its frame.
+    Deferred,
+    /// As `Deferred`, after the instruction raised a warning whose signalling runs R code,
+    /// as under `options(warn = 2)`. The instruction gave up with an error that stands for
+    /// nothing, and runs again once the call has its frame.
+    Abandoned,
 }
 
 struct InterpState {
@@ -676,6 +828,21 @@ pub fn heap() -> &'static mut Heap {
     }
 }
 
+/// The classes of compact integer and double sequences, or `None` before the interpreter is
+/// installed. It reads without [`interp`]'s panic path, so a hot caller such as the variable-read
+/// feedback stays a leaf function that saves no registers.
+#[inline]
+pub fn compact_sequence_classes() -> Option<[Sexp; 2]> {
+    // SAFETY: single-threaded access, as for `heap`.
+    unsafe {
+        let state = &*STATE.0.get();
+        state
+            .interp
+            .as_ref()
+            .map(|interp| interp.compact_sequence_classes)
+    }
+}
+
 /// The interpreter state.
 #[allow(clippy::mut_from_ref)]
 #[inline]
@@ -706,7 +873,8 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         return;
     }
     state.heap = heap_pointer;
-    heap::set_pending_resolver(crate::eval::resolve_pending_read);
+    heap::set_pending_resolver(crate::eval::resolve_pending_access);
+    system::provide_emulated_r();
     let heap = &mut *heap_pointer;
     heap.inhibit_collection();
     let symbols = values::Symbols::install(heap);
@@ -714,6 +882,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
     state.interp = Some(Interp {
         frames: FrameStack::new(),
         slot_owner: NO_SLOTS,
+        active_binding_reads: 0,
         prologue: None,
         frame_args: Vec::new(),
         method_vars: Vec::new(),
@@ -729,12 +898,15 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         suspended_handlers: Vec::new(),
         handler_pool: Vec::new(),
         srcref: heap.known().nil,
+        compact_sequence_classes: [heap.known().nil; 2],
+        deferred_string_class: heap.known().nil,
         builtins: Vec::new(),
         builtin_index: FxHashMap::default(),
         primitive_formals: Vec::new(),
         symbols,
         visible: true,
         returned_values: Vec::new(),
+        frame_queries: Vec::new(),
         assignment_call: None,
         native_entries: Vec::new(),
         namespace_loader: heap.known().nil,
@@ -743,10 +915,11 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         loops: Vec::new(),
         warnings: Vec::new(),
         immediate_warning: false,
+        signalling: Signalling::Immediate,
         error_message: String::new(),
         text_buffer: Vec::new(),
         show_error_messages: true,
-        debugger: None,
+        debugger: DebuggerSlot(None),
         in_error: 0,
         globals: values::Globals::placeholder(),
         hooks,
@@ -762,7 +935,10 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         command_args: Vec::new(),
         interactive: false,
         builtin_libraries: Vec::new(),
+        routine_tables: Vec::new(),
+        routine_implementations: Vec::new(),
         annotations: annotations::State::default(),
+        ahead: ahead::State::default(),
         moves: moves::State::default(),
         method_cache: dispatch::MethodCache::default(),
         replacement_symbols: FxHashMap::default(),
@@ -777,6 +953,8 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         forks: fork::Forks::default(),
         builtins_env: None,
         code_image: code_image::State::default(),
+        lazy_records: records::LazyRecords::default(),
+        extensions: extensions::Extensions::default(),
     });
     heap.add_root_source(Rc::new(InterpRoots));
     values::Globals::install();
@@ -784,10 +962,24 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
     heap.allow_collection();
 }
 
-/// Adds builtins the host implements, such as the foreign-function interface. A name that is
-/// already registered is replaced, so the host's version wins.
+/// Replaces builtins with the host's versions, such as the foreign-function interface, whose
+/// engine definitions report that the host has none.
 pub unsafe fn register_builtins(definitions: &[BuiltinDef]) {
     builtins::register(definitions);
+}
+
+/// Adds the builtins of a crate above the interpreter. A name the interpreter already defines
+/// would silently replace its builtin, so it is a bug to catch at start-up.
+pub unsafe fn define_builtins(definitions: &[BuiltinDef]) {
+    builtins::assert_undefined(definitions);
+    builtins::register(definitions);
+}
+
+/// Adds builtins that belong to ry's own values, which `package:ry` binds instead of base, so
+/// that plain R code which never names them sees exactly GNU R's base namespace.
+pub unsafe fn define_own_builtins(definitions: &[BuiltinDef]) {
+    builtins::assert_undefined(definitions);
+    builtins::register_own(definitions);
 }
 
 /// The default hooks: console output to the process's stdout and stderr, no ALTREP classes, no
@@ -798,11 +990,14 @@ pub fn default_hooks() -> Hooks {
         materialize_altrep: |_| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_length: |_| Err(unwind::error("ALTREP objects need the libR host")),
         compact_sequence: |_, _, _, _| Ok(None),
-        compact_sequence_steps: |_| None,
         altrep_dataptr: |_| Ok(None),
         altrep_int_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_real_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
+        altrep_string_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
+        altrep_summary: |_, _, _| Ok(None),
         defer_strings: |_| Ok(None),
+        altrep_wrap: |object| unsafe { values::shallow_duplicate(object) },
+        altrep_unwrap: |object| object,
         run_finalizers: || {},
         run_exit_finalizers: || {},
         run_task_callbacks: |_, _, _, _| Ok(()),
@@ -822,6 +1017,7 @@ pub fn default_hooks() -> Hooks {
         },
         connection_vfprintf: None,
         find_native_symbol: |_| None,
+        serialize: |_| Err(unwind::error("serialization needs the libR host")),
     }
 }
 
@@ -928,7 +1124,7 @@ impl RootSource for InterpRoots {
             }
             marker.mark(interp.srcref);
             dispatch::trace_method_cache(&mut interp.method_cache, marker);
-            graphics_engine::trace(marker);
+            (interp.extensions.graphics.trace)(marker);
             if let Some(unwind) = &interp.parked_unwind {
                 crate::unwind::trace_unwind(unwind, marker);
             }
@@ -955,6 +1151,8 @@ impl RootSource for InterpRoots {
             interp.bytecode.trace(marker);
             interp.connections.trace(marker);
             interp.annotations.trace(marker);
+            interp.ahead.trace(marker);
+            crate::replay::trace(marker);
             interp.moves.trace(marker);
             interp.library_tags.trace(marker);
         }
@@ -965,6 +1163,7 @@ impl RootSource for InterpRoots {
         unsafe {
             let state = interp();
             state.bytecode.clear_dead(liveness);
+            state.lazy_records.clear_dead(liveness);
         }
     }
 }

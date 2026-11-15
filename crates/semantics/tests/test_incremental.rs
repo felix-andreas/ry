@@ -1,20 +1,19 @@
 use {
     salsa::{Database, Durability, Setter},
     semantics::{
-        AnalysisSettings, DataFiles, DocumentKind, Item, ProjectFiles, RootDatabase, SourceFile,
-        SourcePaths,
+        AnalysisSettings, DataFiles, Db, DocumentKind, Item, ProjectFiles, RootDatabase,
+        SourceFile, SourcePaths,
         diagnostics::{Severity, derive_from_syntax, file_diagnostics, top_level_diagnostics},
         global_scheme,
         hir::Symbol,
-        interface_group, item_naming, item_tree,
+        item_group, item_naming, item_tree,
         lints::{LintConfig, lint_file},
         load_index::{PackageFile, PackageSources, package_index},
         metadata::{PackageMetadata, attached_union},
-        package_definitions, session,
+        package_definitions, parse, session,
         stubs::install_shipped_stubs,
         testing::{ProbeDatabase, render_semantics},
         types::{Atomic, scalar, unknown},
-        with_held_tree,
     },
     std::{collections::BTreeMap, thread},
 };
@@ -144,11 +143,11 @@ fn a_new_definition_rechecks_nothing_that_does_not_read_it() {
 }
 
 /// A name being typed is a new top-level definition on every keystroke. The project-wide
-/// definition map changes each time, so whatever reads it directly re-runs for every item
-/// checked afterwards; the interface edges and the duplicate check read per-name projections
-/// instead, and the edited file is the only one whose edges re-run.
+/// definition map changes each time, so every item checked afterwards projects it again in
+/// `item_links`. Each projection backdates unless one of the item's own names moved, so the
+/// new item is the only one checked, and the fold runs once.
 #[test]
-fn a_new_definition_rebuilds_no_other_files_interface_edges() {
+fn a_new_definition_reprojects_the_name_maps_and_checks_only_the_new_item() {
     let mut db = ProbeDatabase::default();
     let files = db.project(&[
         "x <- function() 1L\n",
@@ -162,12 +161,115 @@ fn a_new_definition_rebuilds_no_other_files_interface_edges() {
     settle(&db, &files);
     assert_eq!(
         db.executions_since(&[
-            "item_interface_edges",
+            "item_links",
+            "item_check",
+            "file_interface_groups",
             "duplicate_binding_map",
             "package_definition_index",
         ]),
-        [1, 1, 1],
-        "only the new item's edges are derived; the fold runs once and its duplicates backdate"
+        [5, 1, 1, 1, 1],
+        "each item projects the maps again and only the new one is checked; the edited file \
+         walks its groups again, and the fold runs once and its duplicates backdate"
+    );
+}
+
+/// A file's cyclic groups name items rather than positions in the file, so a statement added
+/// before or after a recursive function leaves the function's check alone.
+#[test]
+fn a_new_statement_beside_a_recursive_function_checks_only_itself() {
+    let mut db = ProbeDatabase::default();
+    let recursive =
+        "count <- function(n) if (n > 0L) count(n - 1L) else 0L\nplain <- function() 1L\n";
+    let files = db.project(&[recursive, "other <- function() count(2L)\n"]);
+    settle(&db, &files);
+    db.checked_since();
+
+    db.edit(files[0], format!("first <- 1L\n{recursive}last <- 2L\n"));
+    settle(&db, &files);
+    assert_eq!(db.checked_since(), ["first", "last"]);
+}
+
+/// An item's links ask whether its file belongs to the project, which reads the file list and
+/// not what the project's files bind, so a name a script adds reaches no package item.
+#[test]
+fn a_new_name_in_a_script_links_no_package_item_again() {
+    let mut db = ProbeDatabase::default();
+    let package = SourceFile::new(
+        &db,
+        "x <- function() 1L\nuse_x <- function() x()\n".to_owned(),
+        DocumentKind::Package,
+    );
+    let script = SourceFile::new(&db, "result <- x()\n".to_owned(), DocumentKind::Script);
+    ProjectFiles::new(&db, vec![package, script]);
+    settle(&db, &[package, script]);
+    db.executions_since(&[]);
+
+    db.edit(script, "result <- x()\nfresh <- 2L\n".to_owned());
+    settle(&db, &[package, script]);
+    assert_eq!(
+        db.executions_since(&["item_links"]),
+        [2],
+        "the script's two items resolve their names, and neither package item does"
+    );
+}
+
+/// A check constructs names no naming lists, such as the S3 method of an operand's class. In a
+/// package file the package layer answers whether the file can bind one, so the check reads the
+/// binders of its own file alone and lowers no item of a file it cannot see.
+#[test]
+fn a_package_check_reads_the_binders_of_its_own_file_alone() {
+    let db = ProbeDatabase::default();
+    install_shipped_stubs(&db);
+    let package = SourceFile::new(
+        &db,
+        "stamp <- function() Sys.Date() + 1L\n".to_owned(),
+        DocumentKind::Package,
+    );
+    let neighbour = SourceFile::new(
+        &db,
+        "width <- function() 3L\n".to_owned(),
+        DocumentKind::Package,
+    );
+    let test = SourceFile::new(
+        &db,
+        "test_that(\"it adds\", {\n  value <- 1L\n  expect_equal(value, 1L)\n})\n".to_owned(),
+        DocumentKind::Test,
+    );
+    ProjectFiles::new(&db, vec![package, neighbour, test]);
+    file_diagnostics(&db, package);
+    let [names, file_binders, frame_binders, lowered] =
+        db.executions_since(&["package_name", "file_binders", "frame_binder", "item_hir"])[..]
+    else {
+        panic!("four counts");
+    };
+    assert!(
+        names > 0,
+        "the check constructs a name and asks the package layer"
+    );
+    assert_eq!(
+        (file_binders, frame_binders, lowered),
+        (1, 0, 1),
+        "the check reads its own file's binders, keeps no memo for a name the package layer \
+         does not bind, and lowers its own item alone"
+    );
+}
+
+/// A test file has no layer over its own top-level names, so a name its check constructs is
+/// answered by the file's binders.
+#[test]
+fn a_test_file_asks_its_own_binders_for_a_constructed_name() {
+    let db = ProbeDatabase::default();
+    install_shipped_stubs(&db);
+    let test = SourceFile::new(
+        &db,
+        "stamp <- function() Sys.Date() + 1L\n".to_owned(),
+        DocumentKind::Test,
+    );
+    ProjectFiles::new(&db, vec![test]);
+    file_diagnostics(&db, test);
+    assert!(
+        db.executions_since(&["frame_binder"])[0] > 0,
+        "the file's binders answer a constructed name"
     );
 }
 
@@ -423,12 +525,99 @@ fn an_edit_to_a_low_durability_file_never_revisits_the_others_trees() {
     settle(&db, &files);
     db.checked_since();
 
+    let parses = db.trees().parses();
     db.edit(files[0], "x <- function() 3L\n".to_owned());
     settle(&db, &files);
     assert_eq!(
-        db.validations_since(&["parse_memo", "item_syntax_memo"]),
-        [0, 0],
-        "the untouched files' trees sit below memos that verify by durability alone"
+        db.trees().parses() - parses,
+        1,
+        "only the edited file parses"
+    );
+    assert_eq!(
+        db.executions_since(&["item_spans", "item_hir"]),
+        [1, 1],
+        "only the edited file re-derives its items from its tree"
+    );
+}
+
+/// An item keeps the stamp of its syntax while that syntax is unchanged, wherever the item
+/// moves in its file. Its stamp is read again after every edit to the file and comes out
+/// equal, so nothing derived from the item's syntax runs again. The `#:` block of an item is
+/// a sibling of the item, attached by a per-file walk that comes out equal while no block
+/// changes, so the annotated item's annotations stay memoized too.
+#[test]
+fn an_edit_lowers_only_the_items_whose_syntax_changed() {
+    let mut db = ProbeDatabase::default();
+    let source = |second: &str| {
+        format!(
+            "first <- function() 1L\n{second}\n#: @pure\nthird <- function(x) x + 1L\nfourth <- 4L\n\
+             fourth <- 4L\n"
+        )
+    };
+    let files = db.project(&[&source("second <- function() 2L")]);
+    let derived = [
+        "item_stamp",
+        "item_syntax_flags",
+        "item_hir",
+        "item_annotations",
+        "item_naming",
+    ];
+    settle(&db, &files);
+    assert_eq!(db.executions_since(&derived), [5, 5, 5, 5, 5]);
+
+    db.edit(files[0], source("second <- function() 20L"));
+    settle(&db, &files);
+    assert_eq!(
+        db.executions_since(&derived),
+        [5, 1, 1, 1, 1],
+        "an edit inside one item"
+    );
+
+    db.edit(
+        files[0],
+        format!(
+            "# moved\n\nzeroth <- 0L\n{}",
+            source("second <- function() 20L")
+        ),
+    );
+    settle(&db, &files);
+    assert_eq!(
+        db.executions_since(&derived),
+        [6, 1, 1, 1, 1],
+        "a new item above the others, which all move"
+    );
+
+    db.edit(files[0], source("second <- function() 20L"));
+    settle(&db, &files);
+    assert_eq!(
+        db.executions_since(&derived),
+        [5, 0, 0, 0, 0],
+        "the new item removed again"
+    );
+
+    db.edit(
+        files[0],
+        "first <- function() 1L\nsecond <- function() 20L\n#: @pure\nthird <- function(x) x + 1L\n\
+         fourth <- 4L\n",
+    );
+    settle(&db, &files);
+    assert_eq!(
+        db.executions_since(&derived),
+        [4, 0, 0, 0, 0],
+        "the second of two equal statements removed"
+    );
+
+    db.edit(
+        files[0],
+        "first <- function() 10L\nsecond <- function() 20L\n#: @pure\nthird <- function(x) x + 1L\n\
+         fourth <- 40L\n",
+    );
+    settle(&db, &files);
+    assert_eq!(
+        db.executions_since(&derived),
+        [4, 4, 4, 4, 2],
+        "edits at both ends of the file leave one changed region that spans it, so every item \
+         lowers again, and the two in the middle lower to what they were"
     );
 }
 
@@ -467,15 +656,14 @@ fn an_edit_to_a_low_durability_file_never_revisits_the_others_items() {
 
     db.edit(files[0], "x <- function() 3L\n".to_owned());
     settle(&db, &files);
-    // Each checked item's interface group verifies the edges it reaches, so validations of
-    // `item_interface_reads` follow the items a check demands. What must not happen is any
-    // untouched item recomputing its reads.
+    // Each file's group walk verifies the links it reaches, so validations of `item_links`
+    // follow the items a check demands. What must not happen is any item recomputing them.
     assert_eq!(
-        db.executions_since(&["item_interface_reads", "item_top_level_names"]),
+        db.executions_since(&["item_links", "item_bound_names"]),
         [0, 0],
-        "the edited item's top-level names read only its memoized own-name flag, which backdates; \
-         its naming backdates too, so nothing recomputes interface reads, and none of the five \
-         items in the untouched files reruns either"
+        "the edited item binds only its own name, which its memoized syntax flags say and which \
+         backdate; its naming backdates too, so nothing recomputes links or the edges they hold, \
+         and none of the five items in the untouched files reruns either"
     );
 }
 
@@ -501,9 +689,11 @@ fn wide_project(db: &ProbeDatabase) -> Vec<SourceFile> {
     files
 }
 
-/// The order `ry check` runs in: derive from each tree, name every item, then report.
+/// The order `ry check` runs in: derive from each tree while holding it, name every item, then
+/// report.
 fn cold_check(db: &mut ProbeDatabase, files: &[SourceFile], lints: &LintConfig) {
     for &file in files {
+        let _held = db.trees().hold(file);
         derive_from_syntax(db, file, lints);
     }
     // `ry check` writes the attached namespaces here, so later passes verify memos instead of
@@ -530,7 +720,7 @@ fn a_cold_check_parses_each_file_once() {
     let files = wide_project(&db);
     let lints = LintConfig::default();
     cold_check(&mut db, &files, &lints);
-    assert_eq!(db.executions_since(&["parse_memo"]), [files.len()]);
+    assert_eq!(db.trees().parses(), files.len() as u64);
     let codes = |file: SourceFile| -> Vec<&'static str> {
         file_diagnostics(&db, file)
             .iter()
@@ -555,33 +745,47 @@ fn a_cold_check_parses_each_file_once() {
     );
 }
 
-/// The one-shot cold check holds each file's tree only while it derives that file's facts, so
-/// no tree is memoized and none outlives the syntax pass: a later pass that needed a tree would
-/// show up here as a `parse_memo` execution.
+/// A diagnostics-only host keeps two trees here, never one per file. Its check still parses
+/// each file once, because the pass that derives from a tree holds it and no later pass reads
+/// one, and it reports what a host that keeps every tree reports.
 #[test]
-fn a_one_shot_cold_check_memoizes_no_tree() {
-    let mut db = ProbeDatabase::one_shot();
-    let files = wide_project(&db);
+fn a_diagnostics_only_check_parses_each_file_once_with_two_trees() {
+    let mut bounded = ProbeDatabase::diagnostics_only();
+    let files = wide_project(&bounded);
     let lints = LintConfig::default();
-    for &file in &files {
-        with_held_tree(&db, file, || derive_from_syntax(&db, file, &lints));
-    }
-    db.synthetic_write(Durability::LOW);
-    for &file in &files {
-        for &item in item_tree(&db, file) {
-            item_naming(&db, item);
+    cold_check(&mut bounded, &files, &lints);
+    assert!(bounded.trees().stored() <= 2);
+    assert_eq!(bounded.trees().parses(), files.len() as u64);
+
+    let keeping = ProbeDatabase::default();
+    let kept_files = wide_project(&keeping);
+    let expected = diagnostics_of(&keeping, &kept_files);
+    assert!(!expected.is_empty(), "the project has findings to compare");
+    assert_eq!(diagnostics_of(&bounded, &files), expected);
+}
+
+/// A held file's tree survives the reads of more files than the store keeps, and is dropped like
+/// any other once the hold ends.
+#[test]
+fn a_held_tree_outlives_the_reads_of_other_files() {
+    let db = ProbeDatabase::diagnostics_only();
+    let files = db.project(&["a <- 1L\n", "b <- 2L\n", "c <- 3L\n", "d <- 4L\n"]);
+    let trees = db.trees();
+    {
+        let _held = trees.hold(files[0]);
+        for &file in &files {
+            parse(&db, file);
         }
+        let parses = trees.parses();
+        parse(&db, files[0]);
+        assert_eq!(trees.parses(), parses, "the held file is not parsed again");
     }
-    report(&mut db, &files, &lints);
-    assert_eq!(
-        db.executions_since(&["parse_memo", "item_syntax_memo"]),
-        [0, 0]
-    );
-    let codes: Vec<&str> = file_diagnostics(&db, files[200])
-        .iter()
-        .map(|diagnostic| diagnostic.code)
-        .collect();
-    assert!(codes.contains(&"unused"), "{codes:?}");
+    for &file in &files[1..] {
+        parse(&db, file);
+    }
+    let parses = trees.parses();
+    parse(&db, files[0]);
+    assert_eq!(trees.parses(), parses + 1, "the released file was dropped");
 }
 
 #[test]
@@ -593,11 +797,13 @@ fn an_edit_after_a_cold_check_reparses_and_relints_only_the_edited_file() {
     db.checked_since();
 
     let edited = wide_project_source(0).replace("x + 0L", "x + 9L");
+    let parses = db.trees().parses();
     db.edit(files[0], edited);
     report(&mut db, &files, &lints);
+    assert_eq!(db.trees().parses() - parses, 1);
     assert_eq!(
-        db.executions_since(&["parse_memo", "file_syntax_lints", "item_check"]),
-        [1, 1, 1]
+        db.executions_since(&["file_syntax_lints", "item_check"]),
+        [1, 1]
     );
 }
 
@@ -853,10 +1059,10 @@ fn a_statement_reading_its_own_conditional_write_is_a_cyclic_group() {
     let items = item_tree(&db, files[0]);
     let project = ProjectFiles::get(&db);
     assert!(
-        interface_group(&db, project, items[1]).is_some(),
+        item_group(&db, project, items[1]).is_some(),
         "the loop reads the slot it writes, so the group fixpoint resolves it, not salsa"
     );
-    assert!(interface_group(&db, project, items[0]).is_none());
+    assert!(item_group(&db, project, items[0]).is_none());
     round_trip_edit(
         DocumentKind::Package,
         &["if (TRUE) b <- 3L\nwhile (b > 0L) b <- b - 1L\n"],
@@ -865,7 +1071,7 @@ fn a_statement_reading_its_own_conditional_write_is_a_cyclic_group() {
     );
 }
 
-const ONE_SHOT_PROJECT: &[&str] = &[
+const CYCLIC_PROJECT: &[&str] = &[
     "x <- function() 1L\nping <- function(n) if (n > 0L) pong(n - 1L) else 0L\n",
     "use_x <- function() x()\npong <- function(n) ping(n)\n",
     "other <- function() also()\nbad <- function() use_x() + \"a\"\n",
@@ -880,86 +1086,96 @@ fn diagnostics_of(db: &ProbeDatabase, files: &[SourceFile]) -> Vec<String> {
 }
 
 #[test]
-fn a_one_shot_check_records_no_per_name_or_per_item_group_edges() {
+fn a_check_resolves_the_names_it_spells_through_its_links_and_one_group_walk_per_file() {
     if syntax::testing::invariants_enabled() {
         return;
     }
-    let db = ProbeDatabase::one_shot();
-    let files = db.project(ONE_SHOT_PROJECT);
-    settle(&db, &files);
-    assert_eq!(
-        db.executions_since(&[
-            "package_name",
-            "test_name",
-            "interface_group",
-            "project_interface_groups",
-        ]),
-        [0, 0, 0, 1],
-        "a one-shot host reads the project maps once and finds every cyclic group in one walk"
-    );
-}
-
-#[test]
-fn the_incremental_path_keeps_its_per_name_and_per_item_firewalls() {
     let db = ProbeDatabase::default();
-    let files = db.project(ONE_SHOT_PROJECT);
+    let files = db.project(CYCLIC_PROJECT);
     settle(&db, &files);
-    let [package_names, interface_groups, project_groups] = db.executions_since(&[
-        "package_name",
-        "interface_group",
-        "project_interface_groups",
-    ])[..] else {
-        panic!("three counts");
-    };
-    assert!(
-        package_names > 0,
-        "names resolve through per-name projections"
-    );
-    assert!(interface_groups > 0, "groups are found per item");
     assert_eq!(
-        project_groups, 0,
-        "no edit invalidates a project-wide group walk"
+        db.executions_since(&["item_links", "frame_binder", "file_interface_groups"]),
+        [6, 0, 3],
+        "each item resolves its names in one query, none through a query per name, and each \
+         file finds its items' cyclic groups in one walk"
     );
 }
 
 #[test]
-fn a_one_shot_check_reports_what_the_incremental_check_reports() {
-    let incremental = ProbeDatabase::default();
-    let incremental_files = incremental.project(ONE_SHOT_PROJECT);
-    let one_shot = ProbeDatabase::one_shot();
-    let one_shot_files = one_shot.project(ONE_SHOT_PROJECT);
-    let expected = diagnostics_of(&incremental, &incremental_files);
+fn a_diagnostics_only_check_reports_what_an_editor_check_reports() {
+    let editor = ProbeDatabase::default();
+    let editor_files = editor.project(CYCLIC_PROJECT);
+    let command = ProbeDatabase::diagnostics_only();
+    let command_files = command.project(CYCLIC_PROJECT);
+    let expected = diagnostics_of(&editor, &editor_files);
     assert!(!expected.is_empty(), "the project has findings to compare");
-    assert_eq!(diagnostics_of(&one_shot, &one_shot_files), expected);
+    assert_eq!(diagnostics_of(&command, &command_files), expected);
 }
 
 /// Invariants are process-wide, so the cross-check runs in a child process instead of
 /// switching them on under the tests above that count query executions.
 #[test]
-fn a_one_shot_check_agrees_with_the_projections_under_invariants() {
+fn links_and_file_groups_agree_with_their_from_scratch_forms_under_invariants() {
     let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
-        .args(["--exact", "one_shot_invariants_child", "--nocapture"])
-        .env("RY_ONE_SHOT_INVARIANTS_CHILD", "1")
+        .args(["--exact", "link_invariants_child", "--nocapture"])
+        .env("RY_LINK_INVARIANTS_CHILD", "1")
         .status()
         .expect("child test runs");
-    assert!(status.success(), "the one-shot cross-check failed");
+    assert!(status.success(), "the link cross-check failed");
 }
 
 #[test]
-fn one_shot_invariants_child() {
-    if std::env::var_os("RY_ONE_SHOT_INVARIANTS_CHILD").is_none() {
+fn link_invariants_child() {
+    if std::env::var_os("RY_LINK_INVARIANTS_CHILD").is_none() {
         return;
     }
     syntax::testing::enable_invariants();
-    let db = ProbeDatabase::one_shot();
-    let files = db.project(ONE_SHOT_PROJECT);
+    let db = ProbeDatabase::default();
+    let files = db.project(CYCLIC_PROJECT);
     settle(&db, &files);
     assert!(
-        db.executions_since(&["package_name", "interface_group"])
-            .iter()
-            .all(|&count| count > 0),
-        "the cross-check consulted the incremental projections"
+        db.executions_since(&["package_name"])[0] > 0,
+        "the cross-check consulted the per-name projections"
     );
+
+    // Each way a file binds a method name that a check of the same file constructs. Its layer
+    // must list the name, or the cross-check in the constructed-name lookup panics. The last
+    // source binds none of the names it constructs.
+    let sources = [
+        "`+.Date` <- function(e1, e2) e1\nstamp <- function() Sys.Date() + 1L\n",
+        "if (interactive()) sum.matrix <- function(x, ...) 1L\ntotal <- function() sum(matrix(1:4, 2))\n",
+        "Summary.matrix <- Arith.matrix <- function(...) 1L\nshifted <- function() matrix(1:4, 2) + sum(matrix(1:4, 2))\n",
+        "tryCatch(`-.POSIXct` <- function(e1, e2) 1L, error = identity)\nelapsed <- function() Sys.time() - Sys.time()\n",
+        "for (step in 1:2) `+.matrix` <- function(e1, e2) e1\nadded <- function() matrix(1:4, 2) + 1L\n",
+        "unbound <- function() Sys.time() - Sys.time() + sum(matrix(1:4, 2))\n",
+    ];
+    for kind in [DocumentKind::Package, DocumentKind::TestHelper] {
+        let db = ProbeDatabase::default();
+        install_shipped_stubs(&db);
+        let files: Vec<SourceFile> = sources
+            .iter()
+            .map(|&source| SourceFile::new(&db, source.to_owned(), kind))
+            .collect();
+        ProjectFiles::new(&db, files.clone());
+        settle(&db, &files);
+    }
+
+    // Every read of an item's stamp compares the syntax the stamp names with the item's node
+    // in the file as it stands, through edits that move, repeat, add and remove statements.
+    let mut db = ProbeDatabase::default();
+    let files = db.project(&["first <- 1L\nsecond <- function() first\nfirst <- 1L\n"]);
+    settle(&db, &files);
+    for text in [
+        "first <- 1L\nfirst <- 1L\nsecond <- function() first\n",
+        "first <- 1L\nsecond <- function() first\n",
+        "# note\nsecond <- function() first\nfirst <- 1L\nfirst <- 1L\n",
+        "second <- function() first\nsecond <- function() first\n",
+        "",
+        "first <- 1L\n",
+    ] {
+        db.edit(files[0], text);
+        settle(&db, &files);
+    }
 }
 
 #[test]

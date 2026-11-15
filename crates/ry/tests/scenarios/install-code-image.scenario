@@ -93,24 +93,32 @@ expect stdout "[1] 1 0 3"
 expect stdout "[1] \"new 1\""
 
 # A damaged image costs only its speedup: the package loads with one warning and its functions
-# compile as they run. The file ends with the package's machine code, so a flipped last byte fails
-# that code's hash when the first function is fetched; a flipped byte in a payload would fail the
-# payload's hash at the first call that takes code from it. A truncated file fails when the image
-# is opened.
+# compile as they run. Each record's stream is hashed the first time the record is fetched, so
+# flipping the first byte of every stream fails at the first fetch; a flipped byte in a payload
+# would fail the payload's hash at the first call that takes code from it. A truncated file fails
+# when the image is opened. The record table starts after the magic, the build blob and 24 bytes
+# of flags, stamp and count, and a stream's offset is the u64 at byte 12 of its 52-byte entry.
 file save.R
-| file.copy("library/tally/R/tally.ryc", "good.ryc", overwrite = TRUE)
+| image <- list.files("library/tally/R", "\\.ryc$", full.names = TRUE)
+| stopifnot(length(image) == 1L)
+| file.copy(image, "good.ryc", overwrite = TRUE)
+| writeLines(image, "image.txt")
 file flip.R
 | bytes <- readBin("good.ryc", "raw", file.size("good.ryc"))
-| last <- length(bytes)
-| bytes[last] <- as.raw(bitwXor(as.integer(bytes[last]), 1L))
-| writeBin(bytes, "library/tally/R/tally.ryc")
+| word <- function(at) readBin(bytes[at + 1:4], "integer", size = 4, endian = "little")
+| table <- 8 + 8 + word(8) + 24
+| for (entry in seq_len(word(table - 4))) {
+|   at <- word(table + (entry - 1) * 52 + 12) + 1
+|   bytes[at] <- as.raw(bitwXor(as.integer(bytes[at]), 1L))
+| }
+| writeBin(bytes, readLines("image.txt"))
 file truncate.R
 | bytes <- readBin("good.ryc", "raw", file.size("good.ryc"))
-| writeBin(bytes[1:40], "library/tally/R/tally.ryc")
+| writeBin(bytes[1:40], readLines("image.txt"))
 file build.R
 | bytes <- readBin("good.ryc", "raw", file.size("good.ryc"))
 | bytes[18] <- as.raw(bitwXor(as.integer(bytes[18]), 1L))
-| writeBin(bytes, "library/tally/R/tally.ryc")
+| writeBin(bytes, readLines("image.txt"))
 
 run ry run --runtime ry save.R
 expect exit 0
@@ -174,4 +182,32 @@ expect stdout "code image: closures=4 written=4"
 run ry run --runtime ry use.R
 expect exit 0
 expect stdout "[1] 155"
+expect stderr lacks "cannot use the code image"
+
+# Base is lazy-loaded, so a fresh session holds a promise for each base function it has not
+# called yet. The install fetched `drop` while writing the image, and the image names it; a
+# session whose first call of `drop` comes from the package's code forces the promise to read it.
+file flat/DESCRIPTION
+| Package: flat
+| Version: 1.0.0
+| Title: Flattens a number
+| Description: A small package whose code names a base function.
+| License: MIT
+file flat/NAMESPACE
+| export(flat)
+file flat/R/flat.R
+| flat <- function(x) {
+|     r <- drop(x)
+|     for (i in 1:3) r <- r + 1
+|     r
+| }
+file flat.R
+| library(flat, lib.loc = "library")
+| print(flat(0.5))
+run ry install flat -l library
+expect exit 0
+expect stdout "code image: closures=1 written=1"
+run ry run --runtime ry flat.R
+expect exit 0
+expect stdout "[1] 3.5"
 expect stderr lacks "cannot use the code image"

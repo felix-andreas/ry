@@ -6,7 +6,7 @@
 //! The functions are bound in a `package:ry` environment just above `package:base`, so any
 //! definition a program or package makes of the same name comes first. Session startup moves them
 //! into the `std` namespace and attaches it as `package:std` unless the prelude is off
-//! (`frame::attach_package`).
+//! ([`attach_package`]).
 //! Every function is written for ry's own values, so each accepts a record, tuple or tag.
 //!
 //! A dictionary or set is a record object with a fixed layout (see `heap::records`): its keys as
@@ -27,7 +27,6 @@ use {
         builtins::{Arg, BuiltinDef, BuiltinFn, Call, builtin},
         conditions,
         eval::{self, CallFrame},
-        long_double::{self, LongDouble},
         numbers::{self, Overflow, Rounding},
         records, scope,
         sort::{IdenticalFlags, identical},
@@ -38,6 +37,7 @@ use {
         },
     },
     heap::{
+        HeapError,
         object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, Slot, is_na_real},
         records::{Fields, Layout, NativeKind},
     },
@@ -332,6 +332,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Num.pow_int", num_pow_int),
     library("Num.sqrt", num_sqrt),
     library("Num.log", num_log),
+    library("Num.exp", num_exp),
     library("Num.asin", num_asin),
     library("Num.acos", num_acos),
     library("Num.is_nan", num_is_nan),
@@ -469,6 +470,113 @@ pub(crate) unsafe fn attach() -> Sexp {
         }
     }
     env
+}
+
+/// Registers the `ry` and `std` namespaces and attaches them at position 2 of the search path.
+/// The tables' crate adds its user-facing functions and S3 methods as R source
+/// ([`crate::extensions::Tables`]).
+pub unsafe fn attach_package() -> R<()> {
+    let tables = crate::interp().extensions.tables;
+    let namespace = crate::session::eval_text(
+        &namespace_source("ry", "The ry runtime"),
+        values::global_env(),
+    )?;
+    crate::session::eval_text(
+        &namespace_source("std", "The ry standard library"),
+        values::global_env(),
+    )?;
+    for source in tables.package {
+        crate::session::eval_text(source, namespace)?;
+    }
+    let library_names = names()
+        .map(|name| format!("{name:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    crate::session::eval_text(
+        &attach_source(&format!("c({library_names})"), crate::interp().prelude),
+        values::global_env(),
+    )?;
+    for source in tables.methods {
+        crate::session::eval_text(source, values::global_env())?;
+    }
+    Ok(())
+}
+
+/// A registered namespace in the shape `loadNamespace` builds, so `ry::DataFrame`, `std::List.map`
+/// and `asNamespace("std")` work like they do for an installed package.
+fn namespace_source(name: &str, title: &str) -> String {
+    format!(
+        r#"
+local({{
+  ns <- new.env(hash = TRUE, parent = .BaseNamespaceEnv)
+  info <- new.env(hash = TRUE, parent = baseenv())
+  assign(".__NAMESPACE__.", info, envir = ns)
+  info$spec <- c(name = "{name}", version = "0.0.0")
+  # `packageDescription()`, which `sessionInfo()` calls for every loaded namespace, reads a
+  # DESCRIPTION from the namespace's path. ry has no installed package directory, so the path
+  # is a directory written on first use in the session's temporary directory.
+  makeActiveBinding("path", local({{
+    path <- NULL
+    function() {{
+      if (is.null(path)) {{
+        path <<- file.path(tempdir(), "{name}")
+        dir.create(path, showWarnings = FALSE)
+        writeLines(c("Package: {name}", "Version: 0.0.0", "Title: {title}", "License: GPL (>= 2)"),
+                   file.path(path, "DESCRIPTION"))
+      }}
+      path
+    }}
+  }}), info)
+  info$imports <- list(base = TRUE)
+  info$dynlibs <- character()
+  info$S3methods <- matrix(NA_character_, 0L, 4L)
+  info$lazydata <- new.env(hash = TRUE, parent = baseenv())
+  .Internal(registerNamespace("{name}", ns))
+  ns
+}})
+"#
+    )
+}
+
+/// Moves the bootstrap builtins into their namespaces, the standard library's (`library_names`)
+/// into `std` and the rest into `ry`, exports every function of both, and attaches them at
+/// position 2: `package:ry` always, and `package:std` in front of it when `prelude` is on. The
+/// builtins bind everything in a `package:ry` just above base, which plain code without base R
+/// uses; once the default packages are attached, that environment is replaced by the packages in
+/// front of them, so `col` masks `base::col` and `std::List.map` resolves through the namespace.
+fn attach_source(library_names: &str, prelude: bool) -> String {
+    let prelude = if prelude { "TRUE" } else { "FALSE" };
+    format!(
+        r#"
+local({{
+  ns <- asNamespace("ry")
+  std <- asNamespace("std")
+  library <- as.environment("package:ry")
+  library_names <- {library_names}
+  builtins <- ls(library, all.names = TRUE)
+  for (name in builtins) {{
+    assign(name, get(name, envir = library), envir = if (name %in% library_names) std else ns)
+  }}
+  detach("package:ry", character.only = TRUE)
+  attach_namespace <- function(ns, functions, name) {{
+    exports <- new.env(hash = TRUE, parent = baseenv())
+    for (f in functions) assign(f, f, envir = exports)
+    assign("exports", exports, envir = ns[[".__NAMESPACE__."]])
+    env <- attach(NULL, pos = 2L, name = name)
+    for (f in functions) assign(f, get(f, envir = ns), envir = env)
+  }}
+  attach_namespace(ns, setdiff(union(ls(ns), builtins), library_names), "package:ry")
+  if ({prelude}) {{
+    attach_namespace(std, library_names, "package:std")
+  }} else {{
+    exports <- new.env(hash = TRUE, parent = baseenv())
+    for (f in library_names) assign(f, f, envir = exports)
+    assign("exports", exports, envir = std[[".__NAMESPACE__."]])
+  }}
+  invisible(NULL)
+}})
+"#
+    )
 }
 
 // Arguments and errors.
@@ -2068,14 +2176,15 @@ unsafe fn fold_numbers(
     number_value(Number::Integer(total))
 }
 
-// R's `sum()` accumulates doubles in x87 long double, so `List.sum(xs)` does too and agrees
-// with `sum(xs)` to the last bit.
+// Doubles are added in order in double precision, which is what a loop written in ry over the
+// list computes and what compiled code does. R's `sum()` accumulates in x87 long double, so the
+// two can differ in the last bits.
 unsafe fn list_sum(call: &Call<'_>) -> R<Sexp> {
     if let Some(items) = native_numbers(call)? {
         return fold_native(call, Op::Add, 0, &items);
     }
     fold_numbers(call, 0, i32::checked_add, |start, items| {
-        long_double::add_all(LongDouble::from(start), items).to_f64()
+        items.iter().fold(start, |total, &item| total + item)
     })
 }
 
@@ -2467,6 +2576,15 @@ unsafe fn str_repeat(call: &Call<'_>) -> R<Sexp> {
     let [string, times] = arguments(call, ["string", "count"])?;
     let string = text(call, "string", string)?;
     let times = count(call, "count", times)?;
+    // A result past R's limit on a string's bytes fails before it is built, which would
+    // otherwise ask for gigabytes only to give them back.
+    if string
+        .len()
+        .checked_mul(times)
+        .is_none_or(|total| total > i32::MAX as usize)
+    {
+        return Err(HeapError::StringTooLong.into());
+    }
     scalar_string(&string.repeat(times))
 }
 
@@ -3422,6 +3540,13 @@ unsafe fn num_log(call: &Call<'_>) -> R<Sexp> {
         )));
     }
     scalar_real(value.ln())
+}
+
+unsafe fn num_exp(call: &Call<'_>) -> R<Sexp> {
+    if numbers::has_number_argument(call) {
+        return numbers::library(call);
+    }
+    real_function(call, f64::exp)
 }
 
 /// An inverse sine or cosine, whose argument must lie in `[-1, 1]`.

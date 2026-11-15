@@ -1,0 +1,125 @@
+[stdout]
+| -- tryCatch warning, C level 
+| List of 2
+|  $ value  :List of 3
+|   ..$ : chr [1:3] "simpleWarning" "warning" "condition"
+|   ..$ : chr "NAs introduced by coercion"
+|   ..$ : language coerce("a")
+|  $ visible: logi TRUE
+| -- tryCatch warning, R level 
+| List of 2
+|  $ value  :List of 3
+|   ..$ : chr [1:3] "simpleWarning" "warning" "condition"
+|   ..$ : chr "raised"
+|   ..$ : language raise()
+|  $ visible: logi TRUE
+| -- tryCatch condition 
+| List of 2
+|  $ value  : chr [1:3] "simpleWarning" "warning" "condition"
+|  $ visible: logi TRUE
+| -- tryCatch simpleWarning 
+| List of 2
+|  $ value  : chr "simple"
+|  $ visible: logi TRUE
+| -- tryCatch other class 
+| List of 2
+|  $ value  : chr "outer"
+|  $ visible: logi TRUE
+| -- tryCatch unwinds 
+| on.exit ran
+| finally ran
+| List of 2
+|  $ value  : chr "caught"
+|  $ visible: logi TRUE
+| -- tryCatch frames 
+| List of 2
+|  $ value  : int 25
+|  $ visible: logi TRUE
+| -- tryCatch value is the handler's 
+| List of 2
+|  $ value  : chr "handler"
+|  $ visible: logi FALSE
+| -- calling then exiting 
+| calling saw it
+| List of 2
+|  $ value  : chr "exited"
+|  $ visible: logi TRUE
+| -- exiting then calling 
+| List of 2
+|  $ value  : chr "exited"
+|  $ visible: logi TRUE
+| -- calling, non-matching class 
+| List of 2
+|  $ value  : int NA
+|  $ visible: logi TRUE
+| -- calling, matching 
+| calling: NAs introduced by coercion coerce("k") TRUE 
+| List of 2
+|  $ value  : int NA
+|  $ visible: logi TRUE
+| -- calling, condition class 
+| condition: simpleWarning 
+| List of 2
+|  $ value  : chr "raised"
+|  $ visible: logi FALSE
+| -- restart visible to calling handler 
+| muffleWarning available: TRUE 
+| List of 2
+|  $ value  : int NA
+|  $ visible: logi TRUE
+| -- nested tryCatch picks the inner 
+| List of 2
+|  $ value  : chr "inner"
+|  $ visible: logi TRUE
+| -- in a loop 
+| List of 2
+|  $ value  : num 50
+|  $ visible: logi TRUE
+| -- warn 2, C level 
+| error call: coerce("o") 
+| List of 2
+|  $ value  : chr "error: (converted from warning) NAs introduced by coercion"
+|  $ visible: logi TRUE
+| -- warn 2, R level 
+| error call: raise() 
+| List of 2
+|  $ value  : chr "error: (converted from warning) raised"
+|  $ visible: logi TRUE
+| -- warn 2, tryCatch 
+| List of 2
+|  $ value  : chr "caught first"
+|  $ visible: logi TRUE
+| -- warn 2, calling error handler 
+| error handler: (converted from warning) NAs introduced by coercion 
+| error call: coerce("q") 
+| List of 2
+|  $ value  : chr "error: (converted from warning) NAs introduced by coercion"
+|  $ visible: logi TRUE
+| -- warn 1 
+| List of 2
+|  $ value  : int NA
+|  $ visible: logi TRUE
+| -- warn -1 
+| List of 2
+|  $ value  : int NA
+|  $ visible: logi TRUE
+| -- warn 0 
+| List of 2
+|  $ value  : int NA
+|  $ visible: logi TRUE
+| last.warning: 
+| NULL
+| last.warning after tryCatch: 
+[messages]
+[warnings]
+- NAs introduced by coercion (in coerce("j"))
+- NAs introduced by coercion (in coerce("o"))
+- raised (in raise())
+- NAs introduced by coercion (in coerce("q"))
+- NAs introduced by coercion (in coerce("r"))
+- NAs introduced by coercion (in coerce("s"))
+- NAs introduced by coercion (in coerce("t"))
+[errors]
+[value]
+list
+| structure(list(), dots = list(), class = "warnings")

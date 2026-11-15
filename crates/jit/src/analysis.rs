@@ -24,18 +24,25 @@
 
 pub use interp::effects::{Speculation, base_builtin, resolve_function};
 use {
-    crate::native::{self, Native},
+    crate::{
+        native::{self, Native},
+        runtime::{NO_FRAMES, UNFORCED_FORMALS, elidable},
+    },
     bumpalo::Bump,
     heap::object::{Sexp, SexpType, gp},
     interp::{
         annotations::{self, Declared, Entry},
-        bytecode::{self, ARITHS, Arith, FEEDBACK, Op, feedback, operand_count},
-        effects, values,
+        bytecode::{self, ARITHS, Arith, FEEDBACK, Op, PROFILE, feedback, operand_count, profile},
+        effects,
+        eval::{DOTS_SOURCE, LITERAL_DEFAULT, MATCH_PER_CALL, direct_sources},
+        values,
     },
     rustc_hash::{FxBuildHasher, FxHashSet},
     smallvec::{SmallVec, smallvec},
     std::{
         alloc::{AllocError, Allocator, Layout},
+        cell::Cell,
+        fmt,
         ptr::NonNull,
     },
 };
@@ -76,6 +83,15 @@ pub enum Ty {
     Num,
     /// A boxed, attribute-free, non-ALTREP integer vector of any length.
     IntVec,
+    /// A boxed, attribute-free compact integer sequence (`1:n`, `seq_len(n)`, `seq_along(x)`)
+    /// or plain length-one integer vector, which `n:n` makes: compiled code computes an element
+    /// from the sequence's first element and increment, which are the element and zero for the
+    /// length-one vector, and never reads a sequence's storage, which it does not have. It
+    /// joins with nothing else, so no vector operation or store sees one.
+    IntSeq,
+    /// A boxed, attribute-free compact double sequence (`as.double(1:n)`), read like
+    /// [`Ty::IntSeq`].
+    DblSeq,
     DblVec,
     LglVec,
     /// A boxed, attribute-free list.
@@ -190,8 +206,9 @@ fn declared_ty(declared: Declared) -> Ty {
 }
 
 /// The type tier 0's feedback bits speculate on.
-pub fn from_feedback(bits: u16) -> Ty {
-    let within = |mask: u16| bits & !mask == 0;
+pub fn from_feedback(bits: u32) -> Ty {
+    let bits = bits & !feedback::ACTIVE_BINDING;
+    let within = |mask: u32| bits & !mask == 0;
     match bits {
         0 => Ty::Boxed,
         feedback::INTEGER_SCALAR => Ty::Int,
@@ -204,6 +221,9 @@ pub fn from_feedback(bits: u16) -> Ty {
         feedback::INTEGER_ARRAY => Ty::IntArr,
         feedback::DOUBLE_ARRAY => Ty::DblArr,
         feedback::LOGICAL_ARRAY => Ty::LglArr,
+        // `a:b` with `a == b` makes a plain scalar, which a sequence's guard also passes.
+        _ if within(feedback::INTEGER_SEQUENCE | feedback::INTEGER_SCALAR) => Ty::IntSeq,
+        _ if within(feedback::DOUBLE_SEQUENCE | feedback::DOUBLE_SCALAR) => Ty::DblSeq,
         _ => Ty::Boxed,
     }
 }
@@ -279,8 +299,13 @@ impl Slot {
     };
 
     fn join(self, other: Slot) -> Slot {
+        let sequence = |side: Slot| matches!(side.ty, Ty::IntSeq | Ty::DblSeq);
         let ty = if self.status & status::LOADED == 0 && other.status & status::LOADED == 0 {
             // Both forgotten: the types are what a reload speculates on.
+            self.ty.join(other.ty)
+        } else if sequence(self) || sequence(other) {
+            // A sequence forgotten on one side, as `inds <- 1:n` is across the `which()` that
+            // replaces it on the other, is no plain vector, so the reload must expect both.
             self.ty.join(other.ty)
         } else if self.status & status::LOADED == 0 {
             other.ty
@@ -289,18 +314,17 @@ impl Slot {
         } else {
             self.ty.join(other.ty)
         };
-        // An unboxed local boxed on the way into a join is a fresh object the frame does not
-        // hold, so from there on it is a value to write back, not the frame's own (see
-        // `box_slot` in codegen).
-        let boxed = |side: Slot| {
+        // An unboxed local that the join needs as an object is forgotten on the way in, and
+        // the next read loads the frame's own object again (see `box_slot` in codegen).
+        let forgotten = |side: Slot| {
             side.ty.in_variables()
                 && side.may_be(status::LOCAL)
                 && ty != Ty::Bottom
                 && !ty.in_variables()
         };
         let mut status = self.status | other.status;
-        if boxed(self) || boxed(other) {
-            status |= status::DIRTY;
+        if forgotten(self) || forgotten(other) {
+            status |= status::NOT_LOADED;
         }
         Slot { status, ty }
     }
@@ -511,7 +535,7 @@ impl Live<'_> {
     }
 }
 
-fn bit(words: &[u64], index: usize) -> bool {
+pub(crate) fn bit(words: &[u64], index: usize) -> bool {
     words
         .get(index / 64)
         .is_some_and(|word| word & (1 << (index % 64)) != 0)
@@ -615,6 +639,9 @@ pub enum Intrinsic {
         layout: u32,
         index: u32,
     },
+    /// `a:b` on numeric scalars when it makes integers, which compiled code builds without the
+    /// builtin call; any other result is tier 0's to make.
+    Colon,
 }
 
 /// Where a directly called closure's argument comes from.
@@ -626,6 +653,30 @@ pub enum Argument {
     },
     /// A loaded variable whose boxed value is in its slot cell.
     Slot(usize),
+}
+
+/// What an inlined call ([`Action::Frame`]) passes for one formal, which the callee's first
+/// load of the formal reads.
+#[derive(Clone, Copy, Debug)]
+pub enum Passing {
+    /// What the caller evaluated before the call.
+    Value(Argument),
+    /// The planning body's formal of this name, which compiled code has not loaded and which
+    /// may hold a promise nothing has forced. The callee's load of its formal reads the
+    /// binding in the outermost frame, through every inlined caller that passed it on, and
+    /// forces a promise only when that runs no code. Any other promise leaves compiled code
+    /// at the load.
+    Variable(Sexp),
+    /// Nothing: the callee has never read the formal, and a read hands the call to tier 0,
+    /// which binds the formal to a promise.
+    Promise,
+    /// The formal's default, a literal, because the call leaves the formal out. Nothing
+    /// evaluates a literal, so the callee's load reads the object itself.
+    Default(Sexp),
+    /// Nothing, because the call leaves the formal out and it has no default or one that is
+    /// code. The callee has never read the formal, and a read hands the call to tier 0, which
+    /// binds the default as a promise or reports the missing argument.
+    Omitted,
 }
 
 /// A callback-taking library function compiled code runs as a loop of its own.
@@ -797,15 +848,22 @@ pub enum Action<'a> {
     },
     /// Reads a slot; `load` when the slot may not be loaded, with the type to refine to.
     /// `forcing` marks a load that may evaluate a default argument, which runs in this frame.
+    /// `volatile` marks a variable whose reads have called an active binding: the load leaves
+    /// the slot unloaded, so the next read calls the binding again.
     GetVar {
         dst: usize,
         slot: usize,
         load: Option<Ty>,
         forcing: bool,
+        volatile: bool,
     },
     SetVar {
         slot: usize,
         src: usize,
+        /// Whether a compact sequence is copied on the way in: the body assigns into the
+        /// variable, which expands the sequence anyway, and a plain vector keeps its loads and
+        /// element assignments native.
+        expand: bool,
     },
     /// A function lookup resolved at compile time; the speculations check it still holds.
     GetFun {
@@ -893,6 +951,32 @@ pub enum Action<'a> {
         entry: Entry,
         dst: (usize, Ty),
     },
+    /// A call of a closure known at compile time whose body, planned as `callee`, runs inside
+    /// this compiled code on registers of its own but without a call frame. `steps` evaluate
+    /// the arguments that have no effect, and the callee reads each one where it first loads
+    /// the formal ([`Passing`]), which is where a promise would be forced. The callee's code
+    /// runs nothing that could look at the missing frame: every point where it would hands
+    /// the call to tier 0 through a frame state, which gives the call its real frame first.
+    /// The value arrives in `dst` with the type every `Return` of the callee agrees on.
+    ///
+    /// `args[i]` is what formal `i` gets, and `positions[i]` the position of its argument in
+    /// the call, as tier 0 matches them (`interp::eval::direct_sources`), or a negative
+    /// number when the call leaves the formal out.
+    ///
+    /// `forces[i]` is a bitset, by position, of the planning body's own formals whose promises
+    /// the callee's first read of its formal `i` forces: the argument is that formal, or an
+    /// expression that always reads it. Only a body that is itself inlined records them,
+    /// because its formals are bound to no promise that could record the force itself.
+    Frame {
+        steps: &'a [(Action<'a>, StateId)],
+        callee: &'a Plan<'a>,
+        function: Sexp,
+        call: Sexp,
+        args: &'a [Passing],
+        positions: &'a [i32],
+        forces: &'a [u64],
+        dst: (usize, Ty),
+    },
     /// Calls a native function with the arguments `steps` leave in `args` (scalars unboxed,
     /// vectors as objects), and puts its unboxed value in `dst`. When the function fails, tier 0
     /// runs the call instead.
@@ -930,7 +1014,7 @@ pub enum Action<'a> {
     BranchUnlessBuiltin {
         function: usize,
     },
-    BranchUnlessPrimitive {
+    BranchUnlessSame {
         function: usize,
         expected: Sexp,
     },
@@ -1067,14 +1151,30 @@ pub struct Plan<'a> {
     pub states: States<'a>,
     /// Blocks a backward jump targets, where on-stack replacement may enter.
     pub loop_headers: List<'a, usize>,
+    /// The blocks entered only by falling through from the block before them, by bit, so
+    /// compiled code reaches their first instruction only from that block's last.
+    continuations: List<'a, u64>,
+    /// By slot, a bitset of the variables loaded at every read because a read called an
+    /// active binding.
+    pub volatile: List<'a, u64>,
 }
 
-/// The refusal for a body whose compiled code would hand more instructions to tier 0 than it
-/// runs itself. Each instruction it hands back costs a call into tier 0 on top of the work, and
-/// such bodies are mostly large ones (`[.data.frame`, S4 dispatch) whose compilation costs as
-/// much as tens of thousands of interpreted calls. A loop in the body still compiles once it is
-/// hot, because there the compiled loop control and the native instructions repeat.
+impl fmt::Debug for Plan<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "Plan({} instructions)", self.insts.len())
+    }
+}
+
+/// The refusal at entry for a body with a loop whose work outside the loops would save nothing
+/// in compiled code: there it hands instructions back to tier 0, each of which costs a call
+/// into tier 0 on top of the work, and runs too little natively to make up for them. The loops
+/// still gain, so the body compiles once a loop is hot, and only the loop enters compiled code.
 pub const MOSTLY_TIER0: &str = "compiled code would hand most instructions to tier 0";
+
+/// The refusal for a body whose loops would hand so many instructions back to tier 0 that an
+/// iteration in compiled code costs more than one in tier 0. It is final, and like [`SMALL`]
+/// it leaves the recorded type feedback in place.
+pub const STEPPING_LOOP: &str = "the loops would hand too many instructions to tier 0";
 
 /// The refusal for compiling a fully typed closure at its first call when the call cannot run
 /// long: the body has no loop and calls no closure or native function directly, so the
@@ -1083,6 +1183,11 @@ pub const MOSTLY_TIER0: &str = "compiled code would hand most instructions to ti
 pub const BRIEF: &str = "the first call would end before compiling paid for itself";
 
 impl Plan<'_> {
+    /// Whether block `block` is entered only by falling through from the block before it.
+    pub fn continues(&self, block: usize) -> bool {
+        bit(&self.continuations, block)
+    }
+
     pub fn block_at(&self, pc: usize) -> Option<usize> {
         self.block_at
             .get(pc)
@@ -1142,6 +1247,15 @@ const TEMPORARIES: usize = 32;
 /// How deeply an inlined call may itself inline calls.
 const MAX_INLINE_DEPTH: usize = 3;
 
+/// The longest body, in bytecode words, that is planned as an inlined frame. A longer one runs
+/// long enough that the frame it saves is a small share of the call.
+const MAX_FRAME_WORDS: usize = 512;
+
+/// How many bytecode words of callees one compilation plans as inlined frames, refused ones
+/// included. Planning a callee costs time and arena memory whether or not the call gets its
+/// frame, and a body with many call sites would otherwise plan every callee three levels deep.
+const FRAME_BUDGET: usize = 4096;
+
 /// An inlined call being lowered.
 struct Lowering<'a> {
     /// The state as of the next step.
@@ -1158,6 +1272,11 @@ struct Lowering<'a> {
     /// its own locals, rather than this activation's code (a call's arguments), whose
     /// assignments write this frame's variables.
     inlined: bool,
+    /// Whether the expression being lowered is one R evaluates only on some paths (a branch
+    /// of `if`, anything inside a closure call), although its steps run every time.
+    conditional: bool,
+    /// The planning body's formals the steps so far read on every path, by position.
+    forces: u64,
 }
 
 impl Lowering<'_> {
@@ -1209,22 +1328,54 @@ pub const NATIVE_ENTRY: &str = "the closure's calls run natively";
 /// threshold of entries, with its call rate measured afresh.
 pub const RARE: &str = "the body runs too rarely to repay compiling it";
 
+/// The refusal for a loop-free body whose native work saves less per call than entering
+/// compiled code from tier 0 and handing instructions back to it cost, such as
+/// `function(x) x^2`. It is final: the body's instructions decide it, or what its plan had to
+/// leave to tier 0. The body keeps the type feedback it recorded, so compiled callers can
+/// still inline it.
+pub const SMALL: &str = "the body does too little natively to repay entering compiled code";
+
+/// What compiled code does itself and what it hands to tier 0, as instruction counts.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Work {
+    /// The instructions compiled code runs itself, other than [`Work::calls`].
+    pub native: usize,
+    /// The calls compiled code makes itself: closure calls it inlines or enters directly, and
+    /// calls of a builtin it runs as a loop over their argument.
+    pub calls: usize,
+    /// The instructions compiled code hands to tier 0 one at a time.
+    pub steps: usize,
+}
+
 /// What the instructions of a body allow compiled code to do, whatever its profile records.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Shape {
     /// The body loops, or holds bytecode the scan cannot read, which counts as a loop because
     /// nothing bounds what it runs.
     pub loops: bool,
-    /// The instructions the plan may turn into native work. A call of a builtin counts when it
-    /// names one the plan has a native form for; a builtin reached through another name is
-    /// missed, which costs only the compiled code, not correctness.
+    /// The instructions the plan may turn into native work, other than [`Shape::calls`]. A
+    /// call of a builtin counts when it names one the plan has a native form for; a builtin
+    /// reached through another name is missed, which costs only the compiled code, not
+    /// correctness.
     pub native: usize,
+    /// The calls the plan may make itself: closure calls it may inline or enter directly, and
+    /// calls of a builtin it may run as a loop over its argument.
+    pub calls: usize,
 }
 
 impl Shape {
     /// Whether some profile could make [`Plan::runs_natively`] true.
     pub fn may_run_natively(self) -> bool {
-        self.loops || self.native > 0
+        self.loops || self.native > 0 || self.calls > 0
+    }
+
+    /// The most a plan of the body could run itself, with nothing handed to tier 0.
+    pub fn work(self) -> Work {
+        Work {
+            native: self.native,
+            calls: self.calls,
+            steps: 0,
+        }
     }
 }
 
@@ -1234,11 +1385,13 @@ pub unsafe fn shape(code: Sexp) -> Shape {
     let unbounded = Shape {
         loops: true,
         native: 0,
+        calls: 0,
     };
     if values::length(constants.element(bytecode::LOOPS)) > 0 {
         return unbounded;
     }
     let mut native = 0;
+    let mut calls = 0;
     let mut pc = 0;
     while pc < words.len() {
         let Some(op) = bytecode::op_of(words[pc] as u32) else {
@@ -1255,8 +1408,6 @@ pub unsafe fn shape(code: Sexp) -> Shape {
             | Op::LogicRight
             | Op::SubAssign
             | Op::SubAssignMatrix
-            | Op::CallGeneric
-            | Op::CallRebinding
             | Op::CallBuiltinRebinding
             | Op::Field
             | Op::Item
@@ -1265,21 +1416,31 @@ pub unsafe fn shape(code: Sexp) -> Shape {
             | Op::ForStep
             | Op::ForEnd
             | Op::Internal => true,
+            Op::CallGeneric | Op::CallRebinding => {
+                calls += 1;
+                false
+            }
             Op::Jump if operand(0) <= pc => return unbounded,
             Op::Jump => false,
             Op::CallBuiltin => {
                 let function = constants.element(operand(2)).car();
                 function.kind() != SexpType::Symbol || {
                     let name = values::symbol_name(function);
-                    name == "[" || Traversal::of(&name).is_some() || has_intrinsic(&name)
+                    if Traversal::of(&name).is_some() {
+                        calls += 1;
+                        false
+                    } else {
+                        name == "[" || has_intrinsic(&name)
+                    }
                 }
             }
             Op::Constant
             | Op::GetVar
+            | Op::Argument
             | Op::SetVar
             | Op::GetFun
             | Op::BranchUnlessBuiltin
-            | Op::BranchUnlessPrimitive
+            | Op::BranchUnlessSame
             | Op::BranchIfObject
             | Op::Ast
             | Op::Guard
@@ -1316,6 +1477,7 @@ pub unsafe fn shape(code: Sexp) -> Shape {
     Shape {
         loops: false,
         native,
+        calls,
     }
 }
 
@@ -1324,7 +1486,7 @@ impl Plan<'_> {
     /// a comparison, an intrinsic, an element assignment, `&&` or `||`, or a call it inlines or
     /// makes directly.
     pub fn runs_natively(&self) -> bool {
-        !self.loop_headers.is_empty() || self.native_actions() > 0
+        !self.loop_headers.is_empty() || self.actions.iter().any(native)
     }
 
     /// Whether one activation of the body can run long: it has a loop, or it calls a closure
@@ -1337,18 +1499,65 @@ impl Plan<'_> {
                 .any(|action| matches!(action, Action::Call { .. } | Action::NativeCall { .. }))
     }
 
-    /// How many actions compiled code does itself, and how many it hands to tier 0.
-    pub fn native_actions(&self) -> usize {
-        self.actions.iter().filter(|action| native(action)).count()
-    }
-
-    pub fn tier0_actions(&self) -> usize {
-        self.actions
+    /// The work of the whole body, split into the instructions outside its loops and those
+    /// inside. An instruction is inside a loop when it lies between a backward jump and the
+    /// jump's target, and it counts [`LOOP_WEIGHT`] times per loop around the innermost one,
+    /// the usual static estimate of how much more often a nested loop's body runs: one
+    /// instruction handed to tier 0 in an outer loop must not outweigh an inner loop that runs
+    /// natively. A backward jump counts as native work, because a compiled loop's own control
+    /// costs no dispatch.
+    pub fn work(&self) -> BodyWork {
+        let backward = |inst: &Inst| inst.op == Op::Jump && inst.operand(0) <= inst.pc;
+        let loops: SmallVec<[(usize, usize); 4]> = self
+            .insts
             .iter()
-            .filter(|action| matches!(action, Action::Step { .. }))
-            .count()
+            .filter(|inst| backward(inst))
+            .map(|inst| (inst.operand(0), inst.pc))
+            .collect();
+        let mut work = BodyWork::default();
+        for (inst, action) in self.insts.iter().zip(self.actions.iter()) {
+            let (native, calls, steps) = match action {
+                Action::Inline { .. }
+                | Action::Frame { .. }
+                | Action::Traverse { .. }
+                | Action::Call { .. }
+                | Action::NativeCall { .. } => (0, 1, 0),
+                Action::Step { .. } => (0, 0, 1),
+                action if native(action) || backward(inst) => (1, 0, 0),
+                _ => continue,
+            };
+            let depth = loops
+                .iter()
+                .filter(|&&(first, last)| first <= inst.pc && inst.pc <= last)
+                .count();
+            let (part, weight) = match depth.checked_sub(1) {
+                None => (&mut work.outside, 1),
+                Some(around) => (
+                    &mut work.looped,
+                    LOOP_WEIGHT.pow(around.min(MAX_WEIGHTED_DEPTH) as u32),
+                ),
+            };
+            for (part, weight) in [(part, weight), (&mut work.whole, 1)] {
+                part.native += weight * native;
+                part.calls += weight * calls;
+                part.steps += weight * steps;
+            }
+        }
+        work
     }
 }
+
+/// [`Plan::work`]: the plain counts of the whole body, the counts outside its loops, and the
+/// nesting-weighted counts inside them.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct BodyWork {
+    pub whole: Work,
+    pub outside: Work,
+    pub looped: Work,
+}
+
+const LOOP_WEIGHT: usize = 8;
+const MAX_WEIGHTED_DEPTH: usize = 4;
 
 fn native(action: &Action<'_>) -> bool {
     matches!(
@@ -1356,6 +1565,7 @@ fn native(action: &Action<'_>) -> bool {
         Action::Inline { .. }
             | Action::Traverse { .. }
             | Action::Call { .. }
+            | Action::Frame { .. }
             | Action::NativeCall { .. }
             | Action::Arithmetic { .. }
             | Action::Comparison { .. }
@@ -1367,26 +1577,65 @@ fn native(action: &Action<'_>) -> bool {
     )
 }
 
-/// Builds the plan for `code`, a closure body whose environment's enclosure is `enclosure`, in
-/// `arena`. A `patient` plan refuses as [`COLD`] when an instruction whose result type matters
-/// has never run, because code compiled without that type runs the instruction in tier 0 for
-/// as long as it lives. A `shared` plan speculates only on lookups that every enclosure resolves
-/// the same way (see `runtime::SHARED`).
+/// The frame a body runs in, which decides where the plan keeps its variables.
+#[derive(Clone, Copy)]
+pub enum Frame {
+    /// A closure's frame, which binds `formals` and the symbols the body assigns, each in a
+    /// slot. Names it does not bind are looked up from `enclosure`, the enclosure of the
+    /// closure's environment.
+    Closure { formals: Sexp, enclosure: Sexp },
+    /// The global environment `env`, where a top-level loop runs. It has no locals, so the plan
+    /// has no slots: every variable read and write is a tier-0 step on `env`'s bindings, which
+    /// code the loop calls must see at once. Function lookups start at `env` itself, because any
+    /// of its bindings may shadow the search path, and a later binding of a speculated symbol
+    /// invalidates the code like any other redefinition.
+    #[expect(
+        dead_code,
+        reason = "the tier's entry is not wired to top-level loops, which run with the tier off"
+    )]
+    Global { env: Sexp },
+}
+
+/// Builds the plan for `code`, a body that runs in `frame`, in `arena`. A `patient` plan
+/// refuses as [`COLD`] when an instruction whose result type matters has never run, because
+/// code compiled without that type runs the instruction in tier 0 for as long as it lives. A
+/// `shared` plan speculates only on lookups that every enclosure resolves the same way (see
+/// `runtime::SHARED`).
 pub unsafe fn plan<'a>(
     arena: Arena<'a>,
     code: Sexp,
-    formals: Sexp,
-    enclosure: Sexp,
+    frame: Frame,
     patient: bool,
     shared: bool,
 ) -> Result<Plan<'a>, Refusal> {
+    let budget = arena.0.alloc(Cell::new(FRAME_BUDGET));
+    plan_at(arena, code, frame, patient, shared, 0, budget)
+}
+
+/// [`plan`] for a body `depth` inlined calls inside the one being compiled.
+unsafe fn plan_at<'a>(
+    arena: Arena<'a>,
+    code: Sexp,
+    frame: Frame,
+    patient: bool,
+    shared: bool,
+    depth: usize,
+    budget: &'a Cell<usize>,
+) -> Result<Plan<'a>, Refusal> {
     let constants = code.cdr();
     let source = constants.element(bytecode::SOURCE);
-    // A body that reflects on its frame can bind any symbol, which slots cannot model.
-    let Some(locals) = bytecode::local_symbols(source, formals) else {
-        return Err(Refusal("the body reflects on its frame"));
+    let (formals, enclosure, locals, global) = match frame {
+        Frame::Closure { formals, enclosure } => {
+            // A body that reflects on its frame can bind any symbol, which slots cannot model.
+            let Some(locals) = bytecode::local_symbols(source, formals) else {
+                return Err(Refusal("the body reflects on its frame"));
+            };
+            (formals, enclosure, locals, false)
+        }
+        Frame::Global { env } => (values::nil(), env, FxHashSet::default(), true),
     };
     let insts = decode(arena, code)?;
+    let tier_state = values::ints(constants.element(PROFILE))[profile::TIER_STATE];
     let registers = values::ints(constants.element(bytecode::REGISTERS))[0] as usize;
     let loops = bytecode::loop_count(code);
     let mut builder = Builder {
@@ -1402,19 +1651,46 @@ pub unsafe fn plan<'a>(
         speculations: List::new_in(arena),
         registers,
         defaulted: defaulted_formals(formals, arena),
+        volatile: List::new_in(arena),
         locals,
         hints: List::new_in(arena),
+        modified: List::new_in(arena),
         declared: List::new_in(arena),
         frame_safe: Map::with_hasher_in(FxBuildHasher, arena),
+        callees: Map::with_hasher_in(FxBuildHasher, arena),
+        formals: values::pairlist_items(formals)
+            .iter()
+            .map(|&(symbol, _)| symbol)
+            .collect(),
+        lazy_formals: depth == 0 && tier_state >= 0 && tier_state & UNFORCED_FORMALS != 0,
+        no_frames: depth == 0 && tier_state >= 0 && tier_state & NO_FRAMES != 0,
+        depth,
+        budget,
         closure_code: Map::with_hasher_in(FxBuildHasher, arena),
         states: States::new_in(arena, registers + TEMPORARIES, 0),
         edges: List::new_in(arena),
         patient,
+        global,
     };
     builder.collect_slots(formals);
     builder.states = States::new_in(arena, registers + TEMPORARIES, builder.slots.len());
     let (mut blocks, block_at, successors, loop_headers) = builder.blocks();
     let live = builder.liveness(&blocks, &successors);
+    let mut predecessors: List<'_, u32> = List::with_capacity_in(blocks.len(), arena);
+    predecessors.resize(blocks.len(), 0);
+    for &successor in successors.iter().flatten().flatten() {
+        if let Some(count) = predecessors.get_mut(successor) {
+            *count += 1;
+        }
+    }
+    let mut continuations = List::new_in(arena);
+    continuations.resize(blocks.len().div_ceil(64).max(1), 0u64);
+    for block in 1..blocks.len() {
+        let continues = predecessors[block] == 1
+            && successors[block - 1][0] == Some(block)
+            && loop_headers.binary_search(&block).is_err();
+        set_bit(&mut continuations, block, continues);
+    }
     builder.fixpoint(&mut blocks, &block_at, &live, &loop_headers)?;
     let count = builder.insts.len();
     let mut actions = List::with_capacity_in(count, arena);
@@ -1468,6 +1744,8 @@ pub unsafe fn plan<'a>(
         edges,
         states: builder.states,
         loop_headers,
+        continuations,
+        volatile: builder.volatile,
     })
 }
 
@@ -1499,11 +1777,11 @@ unsafe fn formal_hints(arena: Arena<'_>, code: Sexp, formals: Sexp) -> Option<Sm
         .collect();
     let mut hints: SmallVec<[Ty; 4]> = smallvec![Ty::Bottom; symbols.len()];
     for inst in decode(arena, code).ok()? {
-        if inst.op != Op::GetVar {
+        if !matches!(inst.op, Op::GetVar | Op::Argument) {
             continue;
         }
         let symbol = constants.element(inst.operand(1));
-        let bits = feedback.get(inst.pc).map_or(0, |&bits| bits as u16);
+        let bits = feedback.get(inst.pc).map_or(0, |&bits| bits as u32);
         if let Some(index) = symbols.iter().position(|&formal| formal == symbol)
             && bits != 0
         {
@@ -1639,16 +1917,40 @@ struct Builder<'a> {
     /// Formals whose default is an expression. Their first load may evaluate it in this frame,
     /// where it reads and may assign the body's variables.
     defaulted: Map<'a, Sexp, ()>,
+    /// By slot, whether a read of the variable has called an active binding. Such a variable is
+    /// loaded at every read, since each read must call the binding again, and the load runs R
+    /// code that may read and assign the body's variables.
+    volatile: List<'a, u64>,
     /// The formals and every symbol the body binds. A call through one of them may find a local
     /// function first, so its head cannot be speculated from the enclosure.
     locals: FxHashSet<Sexp>,
     /// Each slot's type as tier 0 saw it at its loads, for inlined code that reads a variable
     /// compiled code has not loaded.
     hints: List<'a, Ty>,
+    /// By slot, whether the body assigns into the variable's value (`x[i] <- v`, `names(x) <-
+    /// v`), which turns a compact sequence the variable held into a plain vector.
+    modified: List<'a, bool>,
     /// By slot, the type the closure's signature declares for a formal, `Boxed` for anything else.
     declared: List<'a, Ty>,
     /// Whether each closure called directly is frame-safe, so each body is walked once.
     frame_safe: Map<'a, Sexp, bool>,
+    /// The plan of each closure asked to be inlined with a frame of its own and the type of
+    /// its value, or `None` for one that cannot be, so each body is planned once however many
+    /// calls of it the body makes.
+    callees: Map<'a, Sexp, Result<(&'a Plan<'a>, Ty), &'static str>>,
+    /// The closure's formals in order, the variables that may hold a promise nothing has
+    /// forced.
+    formals: SmallVec<[Sexp; 8]>,
+    /// Whether inlined code must not read a formal compiled code has not loaded: the body's
+    /// formals kept arriving unforced ([`UNFORCED_FORMALS`]), and each such read hands the
+    /// instruction to tier 0.
+    lazy_formals: bool,
+    /// Whether no call of the body gets an inlined frame ([`NO_FRAMES`]).
+    no_frames: bool,
+    /// How many inlined calls surround the body being planned.
+    depth: usize,
+    /// The bytecode words of callees the compilation may still plan as inlined frames.
+    budget: &'a Cell<usize>,
     /// The byte code of each `function` expression of this body that has run, by source body.
     /// Its feedback says what the closure's arguments have been.
     closure_code: Map<'a, Sexp, Sexp>,
@@ -1657,6 +1959,8 @@ struct Builder<'a> {
     states: States<'a>,
     /// The edges leaving the instruction [`Builder::transfer`] last ran, by target pc.
     edges: List<'a, (usize, StateId)>,
+    /// Whether the body runs in the global frame ([`Frame::Global`]), which has no slots.
+    global: bool,
 }
 
 impl<'a> Builder<'a> {
@@ -1665,13 +1969,16 @@ impl<'a> Builder<'a> {
     }
 
     unsafe fn collect_slots(&mut self, formals: Sexp) {
+        if self.global {
+            return;
+        }
         for position in 0..self.insts.len() {
             let inst = &self.insts[position];
             let symbol_operand = match inst.op {
-                Op::GetVar => Some(inst.operand(1)),
+                Op::GetVar | Op::Argument => Some(inst.operand(1)),
                 Op::SetVar => Some(inst.operand(0)),
                 Op::ForStep => Some(inst.operand(2)),
-                Op::SubAssign | Op::SubAssignMatrix => Some(inst.operand(1)),
+                Op::SubAssign | Op::SubAssignMatrix | Op::Replace => Some(inst.operand(1)),
                 _ => None,
             };
             if let Some(operand) = symbol_operand {
@@ -1680,13 +1987,32 @@ impl<'a> Builder<'a> {
                     self.slot_of.insert(symbol, self.slots.len());
                     self.slots.push(symbol);
                     self.hints.push(Ty::Bottom);
+                    self.modified.push(false);
                     self.declared.push(Ty::Boxed);
                 }
-                let bits = self.feedback.get(inst.pc).map_or(0, |&bits| bits as u16);
-                if inst.op == Op::GetVar && bits != 0 {
-                    let slot = self.slot_of[&symbol];
-                    self.hints[slot] = self.hints[slot].join(from_feedback(bits));
+                if matches!(inst.op, Op::SubAssign | Op::SubAssignMatrix | Op::Replace) {
+                    self.modified[self.slot_of[&symbol]] = true;
                 }
+                let bits = self.feedback.get(inst.pc).map_or(0, |&bits| bits as u32);
+                if inst.op == Op::GetVar && bits & feedback::ACTIVE_BINDING != 0 {
+                    let slot = self.slot_of[&symbol];
+                    let words = (slot + 1).div_ceil(64);
+                    if self.volatile.len() < words {
+                        self.volatile.resize(words, 0);
+                    }
+                    set_bit(&mut self.volatile, slot, true);
+                }
+            }
+        }
+        // A second pass, because a load that comes before the body's first assignment into the
+        // variable must already see it as modified.
+        for position in 0..self.insts.len() {
+            let inst = &self.insts[position];
+            let bits = self.feedback.get(inst.pc).map_or(0, |&bits| bits as u32)
+                & !(feedback::ACTIVE_BINDING | feedback::MISSING);
+            if matches!(inst.op, Op::GetVar | Op::Argument) && bits != 0 {
+                let slot = self.slot_of[&self.constant(inst.operand(1))];
+                self.hints[slot] = self.hints[slot].join(self.variable_ty(slot, bits));
             }
         }
         let source = self.code.cdr().element(bytecode::SOURCE);
@@ -1705,6 +2031,11 @@ impl<'a> Builder<'a> {
             }
             formal = formal.cdr();
         }
+    }
+
+    /// The position of `symbol` among the closure's formals.
+    fn formal(&self, symbol: Sexp) -> Option<usize> {
+        self.formals.iter().position(|&formal| formal == symbol)
     }
 
     fn slot(&self, symbol: Sexp) -> usize {
@@ -1745,8 +2076,12 @@ impl<'a> Builder<'a> {
         Some((u32::try_from(layout).ok()?, u32::try_from(index).ok()?))
     }
 
+    fn feedback_bits(&self, pc: usize) -> u32 {
+        self.feedback.get(pc).map_or(0, |&bits| bits as u32)
+    }
+
     fn feedback_at(&self, pc: usize) -> Ty {
-        from_feedback(self.feedback.get(pc).map_or(0, |&bits| bits as u16))
+        from_feedback(self.feedback.get(pc).map_or(0, |&bits| bits as u32))
     }
 
     /// Whether the instruction at `pc` has never recorded a value.
@@ -1773,11 +2108,31 @@ impl<'a> Builder<'a> {
         // of a closure shared by `make_scaler(2)` and `make_scaler(0.5)`, loads as `Num`, which
         // its arithmetic reads unboxed, rather than as a boxed value every reader hands back to
         // tier 0.
-        let bits = self.feedback.get(pc).map_or(0, |&bits| bits as u16);
+        let bits = self.feedback_bits(pc) & !feedback::ACTIVE_BINDING;
         if bits == feedback::INTEGER_SCALAR | feedback::DOUBLE_SCALAR {
             return Ty::Num;
         }
-        from_feedback(bits)
+        self.variable_ty(slot, bits)
+    }
+
+    /// The type a load of the variable in `slot` speculates on from its feedback `bits`. A
+    /// variable the body assigns into, such as `count <- 0:(n - 1L)` updated by `count[[r]] <-
+    /// r`, holds a compact sequence only until the first assignment, so it loads as the plain
+    /// vector, which also covers feedback that has seen both: the load copies a sequence it
+    /// still finds compact (see `sequence_contents` in codegen), where a guess of a sequence
+    /// would fail on the next pass, deoptimize and recompile the body.
+    fn variable_ty(&self, slot: usize, bits: u32) -> Ty {
+        let within = |mask: u32| bits & !mask == 0;
+        let integers =
+            feedback::INTEGER_SCALAR | feedback::INTEGER_VECTOR | feedback::INTEGER_SEQUENCE;
+        let doubles = feedback::DOUBLE_SCALAR | feedback::DOUBLE_VECTOR | feedback::DOUBLE_SEQUENCE;
+        match from_feedback(bits) {
+            Ty::IntSeq if self.modified[slot] => Ty::IntVec,
+            Ty::DblSeq if self.modified[slot] => Ty::DblVec,
+            Ty::Boxed if bits != 0 && within(integers) => Ty::IntVec,
+            Ty::Boxed if bits != 0 && within(doubles) => Ty::DblVec,
+            ty => ty,
+        }
     }
 
     /// Splits the instructions into blocks and finds each block's successors and the loop
@@ -1993,6 +2348,24 @@ impl<'a> Builder<'a> {
         let operand = |index: usize| inst.operand(index);
         let next_pc = self.insts.get(position + 1).map(|next| next.pc);
         let action = match inst.op {
+            // The global frame's variables are its environment's bindings, which an active
+            // binding or code the loop calls may read or rebind.
+            Op::GetVar | Op::Argument if self.global => self.opaque_step(
+                state,
+                Some((operand(0), self.feedback_at(inst.pc))),
+                &[],
+                Effect::Opaque,
+            ),
+            Op::SetVar | Op::SubAssign | Op::SubAssignMatrix if self.global => {
+                let dst = (inst.op != Op::SetVar).then(|| (operand(0), Ty::Boxed));
+                let action = self.opaque_step(state, dst, &[], Effect::Opaque);
+                state.visible = Some(false);
+                action
+            }
+            // Compiled `for` steps keep the loop variable in a slot.
+            Op::ForStep if self.global => {
+                return Err(Refusal("a loop variable in the global environment"));
+            }
             Op::Constant => {
                 let value = self.constant(operand(1));
                 let ty = constant_type(value);
@@ -2004,12 +2377,27 @@ impl<'a> Builder<'a> {
                     ty,
                 }
             }
-            Op::GetVar => {
+            // The formal has been missing here, and no compiled load yields the empty argument.
+            Op::Argument if self.feedback_bits(inst.pc) & feedback::MISSING != 0 => {
+                self.opaque_step(state, Some((operand(0), Ty::Boxed)), &[], Effect::Opaque)
+            }
+            Op::GetVar | Op::Argument => {
                 let slot = self.slot(self.constant(operand(1)));
                 let current = state.slots[slot];
-                let load = if current.may_be(status::NOT_LOADED) {
+                let volatile = bit(&self.volatile, slot);
+                let load = if volatile && current.may_be(status::NOT_LOADED) {
+                    Some(Ty::Boxed)
+                } else if current.may_be(status::NOT_LOADED) {
                     let ty = if current.may_be(status::LOADED) {
-                        current.ty
+                        // `inds <- 1:n` stores a sequence that a later `inds <- which(...)` on
+                        // another path replaces with a plain vector, so where the feedback has
+                        // seen more than the sequence, the load expects both.
+                        if matches!(current.ty, Ty::IntSeq | Ty::DblSeq) && !self.never_ran(inst.pc)
+                        {
+                            current.ty.join(self.load_ty(inst.pc, slot))
+                        } else {
+                            current.ty
+                        }
                     } else if self.never_ran(inst.pc) && current.ty != Ty::Bottom {
                         // A variable forgotten across an opaque call, read where tier 0 has not
                         // read it yet (a branch not taken so far): the type it had before the call
@@ -2023,13 +2411,23 @@ impl<'a> Builder<'a> {
                 } else {
                     None
                 };
-                let forcing = load.is_some() && self.defaulted.contains_key(&self.slots[slot]);
+                let forcing =
+                    load.is_some() && (volatile || self.defaulted.contains_key(&self.slots[slot]));
                 if let Some(ty) = load {
                     let mut status_bits = current.status & status::LOADED;
                     status_bits |= status::LOCAL | status::ENCLOSING;
-                    let loaded = Slot {
-                        status: status_bits,
-                        ty,
+                    // A binding's value is not kept: the next read calls it again. Code
+                    // generation leaves the runtime status unloaded to match.
+                    let loaded = if volatile {
+                        Slot {
+                            status: (current.status & status::LOADED) | status::NOT_LOADED,
+                            ty: current.ty.join(Ty::Boxed),
+                        }
+                    } else {
+                        Slot {
+                            status: status_bits,
+                            ty,
+                        }
                     };
                     // Code generation writes the variables back before the load and forgets them
                     // after it, but only when the load reaches the runtime: a load the inline
@@ -2052,12 +2450,19 @@ impl<'a> Builder<'a> {
                     slot,
                     load,
                     forcing,
+                    volatile,
                 }
             }
             Op::SetVar => {
                 let slot = self.slot(self.constant(operand(0)));
                 let ty = match state.registers[operand(1)] {
                     Ty::Bottom => Ty::Boxed,
+                    ty => ty,
+                };
+                let expand = self.modified[slot] && matches!(ty, Ty::IntSeq | Ty::DblSeq);
+                let ty = match ty {
+                    Ty::IntSeq if expand => Ty::IntVec,
+                    Ty::DblSeq if expand => Ty::DblVec,
                     ty => ty,
                 };
                 state.slots[slot] = Slot {
@@ -2068,6 +2473,7 @@ impl<'a> Builder<'a> {
                 Action::SetVar {
                     slot,
                     src: operand(1),
+                    expand,
                 }
             }
             Op::GetFun => {
@@ -2124,7 +2530,7 @@ impl<'a> Builder<'a> {
                     }
                 }
             },
-            Op::BranchUnlessPrimitive => {
+            Op::BranchUnlessSame => {
                 let expected = self.constant(operand(1));
                 match state.registers[operand(0)] {
                     Ty::Fun(function) if function == expected => Action::FallThrough,
@@ -2134,7 +2540,7 @@ impl<'a> Builder<'a> {
                     }
                     _ => {
                         self.push_edge(operand(2), state);
-                        Action::BranchUnlessPrimitive {
+                        Action::BranchUnlessSame {
                             function: operand(0),
                             expected,
                         }
@@ -2340,6 +2746,16 @@ impl<'a> Builder<'a> {
                             Some(function.tag()),
                             operand(0),
                         )
+                        .or_else(|| match self.frame(state, call, function, operand(0)) {
+                            Ok(action) => Some(action),
+                            Err(why) => {
+                                if crate::logging() {
+                                    let call = interp::deparse::deparse_one_line(call);
+                                    eprintln!("jit: no inlined frame for {call}: {why}");
+                                }
+                                None
+                            }
+                        })
                         .or_else(|| {
                             self.direct_call(
                                 state,
@@ -2460,7 +2876,10 @@ impl<'a> Builder<'a> {
             // closure's declared formals at its first call.
             Op::Fused => 'fused: {
                 let program = self.constant(operand(1));
-                if program == values::nil() {
+                // The pass reads its variables from the frame, which an inlined call has none
+                // of. The ordinary code computes the same value from the types the pass
+                // recorded for it.
+                if program == values::nil() || self.depth > 0 {
                     break 'fused Action::FallThrough;
                 }
                 // The fused pass records its result's type at the instruction whose value it
@@ -2497,8 +2916,11 @@ impl<'a> Builder<'a> {
                 let src = operand(1);
                 let ty = state.registers[src];
                 let refine = match ty {
-                    // Code generation boxes an unboxed scalar sequence before the loop.
-                    Ty::IntVec
+                    // Code generation boxes an unboxed scalar sequence before the loop, and
+                    // steps through a compact sequence without expanding it.
+                    Ty::IntSeq
+                    | Ty::DblSeq
+                    | Ty::IntVec
                     | Ty::DblVec
                     | Ty::LglVec
                     | Ty::List
@@ -2534,7 +2956,16 @@ impl<'a> Builder<'a> {
                         Some(speculated.vector())
                     }
                 };
-                state.registers[src] = refine.unwrap_or(ty.vector());
+                // From here on the register is only the loop's sequence, which `ForStep` reads
+                // through the first element and increment `ForInit` stored whenever it is
+                // compact, so a compact sequence types as its plain vector. A loop header then
+                // joins the guess from one pass with the refined type from the next, rather
+                // than losing both to `Boxed` and refusing the loop.
+                state.registers[src] = match refine.unwrap_or(ty.vector()) {
+                    Ty::IntSeq => Ty::IntVec,
+                    Ty::DblSeq => Ty::DblVec,
+                    other => other,
+                };
                 Action::ForInit {
                     index: operand(0),
                     src,
@@ -2809,6 +3240,8 @@ impl<'a> Builder<'a> {
             scope: SmallVec::new(),
             closed: None,
             inlined: false,
+            conditional: false,
+            forces: 0,
         };
         let result = self.lower_call(&mut lowering, call, formals, body, closed, 0)?;
         let ty = lowering.state.registers[result];
@@ -2920,6 +3353,8 @@ impl<'a> Builder<'a> {
             scope: SmallVec::new(),
             closed,
             inlined: true,
+            conditional: false,
+            forces: 0,
         };
         let mut accumulator = None;
         if let Some(initial) = initial {
@@ -3161,6 +3596,8 @@ impl<'a> Builder<'a> {
             scope: SmallVec::new(),
             closed: None,
             inlined: false,
+            conditional: false,
+            forces: 0,
         };
         let mut args = List::new_in(self.arena);
         for (tag, expression) in values::pairlist_items(call.cdr()) {
@@ -3244,6 +3681,347 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// Inlines a call of the closure `function` as a frame of its own ([`Action::Frame`]),
+    /// when the callee's plan runs without a frame and the call passes each formal one
+    /// positional argument that evaluates without an effect.
+    unsafe fn frame(
+        &mut self,
+        state: &mut State<'a>,
+        call: Sexp,
+        function: Sexp,
+        dst: usize,
+    ) -> Result<Action<'a>, &'static str> {
+        if self.no_frames {
+            return Err("the body's calls kept being unable to start without their frames");
+        }
+        let formals = values::pairlist_items(function.car());
+        let arguments = values::pairlist_items(call.cdr());
+        // Tier 0's own plan for the call says which argument each formal gets, so the frame
+        // a deoptimization builds is bound exactly as tier 0 binds it.
+        let Ok(Some((_, positions))) = direct_sources(function, call) else {
+            return Err("arguments tier 0 does not bind straight to the formals");
+        };
+        if positions.len() != formals.len()
+            || positions
+                .iter()
+                .any(|&position| position == DOTS_SOURCE || position == MATCH_PER_CALL)
+        {
+            return Err("a call that passes or collects `...`");
+        }
+        let (callee, result) = self.callee(function)?;
+        let mut lowering = Lowering {
+            state: state.clone(),
+            steps: List::new_in(self.arena),
+            next: self.registers,
+            scope: SmallVec::new(),
+            closed: None,
+            inlined: false,
+            conditional: false,
+            forces: 0,
+        };
+        let mut args = List::new_in(self.arena);
+        let mut forces = List::new_in(self.arena);
+        for (&(formal, default), &position) in formals.iter().zip(&positions) {
+            let expression = match arguments.get(position as usize) {
+                Some(&(_, expression)) if position >= 0 => expression,
+                _ if position == LITERAL_DEFAULT => {
+                    args.push(Passing::Default(default));
+                    forces.push(0);
+                    continue;
+                }
+                _ => {
+                    if has_read(callee, function, formal) {
+                        return Err("a formal the call leaves out whose default is code");
+                    }
+                    args.push(Passing::Omitted);
+                    forces.push(0);
+                    continue;
+                }
+            };
+            // An argument that is one of this body's formals forces that formal's promise
+            // where the callee first reads it. A body with a frame has a real promise there,
+            // which records the force itself.
+            let mut own = self
+                .formal(expression)
+                .filter(|_| self.depth > 0)
+                .map_or(0, |position| 1 << position);
+            // A formal the body has assigned is a local, and reading it forces nothing. The
+            // forces of an argument are fixed with the code, so a formal assigned on some
+            // paths only cannot be passed on.
+            if own != 0
+                && let Some(&slot) = self.slot_of.get(&expression)
+            {
+                match lowering.state.slots[slot].status {
+                    status::DIRTY => own = 0,
+                    assigned if assigned & status::DIRTY != 0 => {
+                        return Err("an argument that is a formal assigned on some paths");
+                    }
+                    _ => {}
+                }
+            }
+            // Reading the variable before the call would have to leave a promise unforced,
+            // and a formal the caller passes on before it reads it is exactly that.
+            if !self.lazy_formals
+                && self.formal(expression).is_some()
+                && !self.defaulted.contains_key(&expression)
+                && self
+                    .slot_of
+                    .get(&expression)
+                    .is_none_or(|&slot| lowering.state.slots[slot].status & status::LOADED == 0)
+            {
+                args.push(Passing::Variable(expression));
+                forces.push(own);
+                continue;
+            }
+            if expression.kind() == SexpType::Symbol
+                && let Some(slot) = self.peek_slot(&mut lowering, expression, true)
+                && !lowering.state.slots[slot].ty.is_unboxed()
+            {
+                // The callee reads the object from the slot's cell, which an unboxed number
+                // that may be either kind does not keep current.
+                if lowering.state.slots[slot].ty.in_variables() {
+                    return Err("an argument that is a number of either kind");
+                }
+                args.push(Passing::Value(Argument::Slot(slot)));
+                forces.push(own);
+                continue;
+            }
+            let slot = callee.slots.iter().position(|&symbol| symbol == formal);
+            let (state, steps, next) =
+                (lowering.state.clone(), lowering.steps.len(), lowering.next);
+            lowering.forces = 0;
+            let Some(register) = self.lower_expression(&mut lowering, expression, 0) else {
+                // The argument stays a promise, which only tier 0 forces, so the call is
+                // worth inlining only while the callee has not read the formal.
+                if has_read(callee, function, formal) {
+                    return Err("an argument the callee reads that may have an effect");
+                }
+                lowering.state = state;
+                lowering.steps.truncate(steps);
+                lowering.next = next;
+                args.push(Passing::Promise);
+                forces.push(0);
+                continue;
+            };
+            forces.push(lowering.forces);
+            let ty = lowering.state.registers[register];
+            // The callee's loads of the formal expect what its own calls have passed. An
+            // unboxed argument is never checked against that, so it must be that type, or
+            // one the load converts from.
+            let admitted = callee.actions.iter().all(|action| match *action {
+                Action::GetVar {
+                    slot: read,
+                    load: Some(load),
+                    ..
+                } if Some(read) == slot => {
+                    load == ty || load == Ty::Boxed || (load == Ty::Num && ty != Ty::Lgl)
+                }
+                _ => true,
+            });
+            if !ty.is_unboxed() {
+                return Err("an argument expression whose value is an object");
+            }
+            if !admitted {
+                return Err("an argument of another type than the callee has seen");
+            }
+            args.push(Passing::Value(Argument::Unboxed { register, ty }));
+        }
+        let mut after = lowering.state;
+        for register in self.registers..after.registers.len() {
+            after.registers[register] = Ty::Bottom;
+        }
+        // The callee cannot reach this frame while it has none of its own, so the variables
+        // stay as they are.
+        after.visible = None;
+        after.registers[dst] = result;
+        *state = after;
+        Ok(Action::Frame {
+            steps: lowering.steps.leak(),
+            callee,
+            function,
+            call,
+            args: args.leak(),
+            positions: self.arena.0.alloc_slice_copy(&positions),
+            forces: forces.leak(),
+            dst: (dst, result),
+        })
+    }
+
+    /// The plan of `function`'s body as an inlined frame and the type of its value, or why a
+    /// call of it needs its frame.
+    unsafe fn callee(&mut self, function: Sexp) -> Result<(&'a Plan<'a>, Ty), &'static str> {
+        if let Some(&found) = self.callees.get(&function) {
+            return found;
+        }
+        let found = self.plan_callee(function);
+        self.callees.insert(function, found);
+        found
+    }
+
+    unsafe fn plan_callee(&mut self, function: Sexp) -> Result<(&'a Plan<'a>, Ty), &'static str> {
+        let (formals, code, enclosure) = (function.car(), function.cdr(), function.tag());
+        if self.depth >= MAX_INLINE_DEPTH {
+            return Err("the call is nested too deep");
+        }
+        if code.kind() != SexpType::Bytecode {
+            return Err("the callee has no tier 0 code");
+        }
+        // Entering a frame is where a typed closure's arguments are checked.
+        if annotations::is_typed(function) {
+            return Err("the callee is typed");
+        }
+        if code == self.code {
+            return Err("the call is recursive");
+        }
+        // An environment that stands for a running slot frame holds some or none of the frame's
+        // variables, and a real call of the closure reads the rest through the frame.
+        if enclosure.has_gp(gp::SLOT_FRAME) || (self.shared && !crate::long_lived(enclosure)) {
+            return Err("the callee's environment may not outlive the code");
+        }
+        let constants = code.cdr();
+        if !elidable(values::ints(constants.element(PROFILE))[profile::TIER_STATE]) {
+            return Err("calls of the callee have needed their frame");
+        }
+        // Tier 0 records only near a body's thresholds, and never in a small closure it runs
+        // without an activation, so a body without any feedback says nothing about which of
+        // its instructions have run.
+        let feedback = values::ints(constants.element(FEEDBACK));
+        if feedback.iter().all(|&word| word == 0) {
+            return Err("the callee has no type feedback yet");
+        }
+        // Giving the call its frame later binds each formal in the slot the code numbers it
+        // by, so the body must run in a slot frame.
+        let table = constants.element(bytecode::SLOTS);
+        if table == values::nil() {
+            return Err("the callee runs in an environment");
+        }
+        let names = table.element(1);
+        let parameters = values::pairlist_items(formals);
+        let numbered = parameters.iter().enumerate().all(|(index, &(symbol, _))| {
+            symbol != values::symbols().dots
+                && index < values::length(names)
+                && names.element(index) == symbol
+        });
+        if !numbered {
+            return Err("the callee takes `...`");
+        }
+        // Compiled code records which formals a call has forced in one word.
+        if parameters.len() > u64::BITS as usize {
+            return Err("the callee has more than 64 formals");
+        }
+        if shape(code).loops {
+            return Err("the callee loops");
+        }
+        let words = values::length(code.car());
+        if words > MAX_FRAME_WORDS {
+            return Err("the callee is too long");
+        }
+        let Some(left) = self.budget.get().checked_sub(words) else {
+            return Err("the compilation has planned enough callees");
+        };
+        self.budget.set(left);
+        let plan = plan_at(
+            self.arena,
+            code,
+            Frame::Closure { formals, enclosure },
+            false,
+            self.shared,
+            self.depth + 1,
+            self.budget,
+        )
+        .map_err(|Refusal(why)| why)?;
+        // A loop would need a counter and an entry of its own for a body that leaves compiled
+        // code while it runs.
+        if plan.loops != 0 || !plan.loop_headers.is_empty() {
+            return Err("the callee loops");
+        }
+        let mut result = Ty::Bottom;
+        for (position, action) in plan.actions.iter().enumerate() {
+            let frameless = match *action {
+                // The first load of a formal reads the argument, and where the call leaves the
+                // formal out it reads a literal default or hands the call to tier 0, so it
+                // never evaluates a default. A binding that runs code on a read needs the
+                // frame. An assigned formal is a dirty slot like any local: the frame the call
+                // may get later binds the formal to what the caller passed, and the write-back
+                // of the dirty slots then replaces that binding.
+                Action::GetVar { volatile, .. } => !volatile,
+                Action::Step {
+                    effect: Effect::Pure | Effect::PureUnlessObserved,
+                    fast,
+                    ..
+                } if plan.insts[position].op != Op::Closure => !matches!(fast, Fast::Store(_)),
+                // An instruction that may run R code leaves for tier 0 every time, and so does
+                // one that creates a closure, which captures the environment only a frame has.
+                // Leaving every time is only worth compiling where the instruction has never
+                // run, and one with no destination records nothing that would say so.
+                Action::Step { dst, fast, .. } => {
+                    dst.is_some()
+                        && fast == Fast::No
+                        && feedback.get(plan.insts[position].pc).copied().unwrap_or(0) == 0
+                }
+                Action::Return { src } => {
+                    let returned = plan
+                        .before(position)
+                        .ok_or("an instruction without a state")?
+                        .registers[src];
+                    result = match (result, returned) {
+                        (joined, Ty::Bottom) => joined,
+                        (Ty::Bottom, ty) => ty,
+                        (joined, ty) if joined == ty => ty,
+                        _ => Ty::Boxed,
+                    };
+                    true
+                }
+                Action::Inline { .. }
+                | Action::Traverse { .. }
+                | Action::Call { .. }
+                | Action::NativeCall { .. }
+                | Action::GetFunSlot { .. }
+                | Action::Peek { .. }
+                | Action::Prologue { .. }
+                | Action::Fused { .. }
+                | Action::SubAssign { .. }
+                | Action::SubAssignMatrix { .. }
+                | Action::ForInit { .. }
+                | Action::ForStep { .. }
+                | Action::ForEnd { .. } => false,
+                _ => true,
+            };
+            if !frameless {
+                if crate::logging() {
+                    let inst = &plan.insts[position];
+                    eprintln!("jit: an inlined frame cannot run {:?}@{}", inst.op, inst.pc);
+                }
+                return Err(match *action {
+                    Action::GetVar { .. } => "the callee reads a variable that may run code",
+                    Action::Step { .. } if plan.insts[position].op == Op::Closure => {
+                        "the callee creates a closure"
+                    }
+                    Action::Step {
+                        effect: Effect::Opaque,
+                        ..
+                    } => "the callee runs an instruction only tier 0 has",
+                    Action::Step { .. } => "the callee stores into an object",
+                    Action::Call { .. } | Action::GetFunSlot { .. } => {
+                        "the callee calls a closure that needs a frame"
+                    }
+                    Action::ForInit { .. } | Action::ForStep { .. } | Action::ForEnd { .. } => {
+                        "the callee loops"
+                    }
+                    _ => "the callee runs an instruction that needs its frame",
+                });
+            }
+        }
+        // A value that is a closure the plan knows is still an object to the caller.
+        let result = match result {
+            Ty::Bottom => return Err("the callee never returns"),
+            Ty::Fun(_) | Ty::Closure(..) | Ty::Num => Ty::Boxed,
+            ty => ty,
+        };
+        let plan: &'a Plan<'a> = self.arena.0.alloc(plan);
+        Ok((plan, result))
+    }
+
     #[allow(clippy::too_many_arguments)]
     unsafe fn lower_call(
         &mut self,
@@ -3275,6 +4053,9 @@ impl<'a> Builder<'a> {
             return None;
         }
         let outer = std::mem::take(&mut lowering.scope);
+        // The closure forces an argument only where its body reads the formal, which may be on
+        // some paths only.
+        let outer_conditional = std::mem::replace(&mut lowering.conditional, true);
         let mut scope: SmallVec<[usize; 4]> = SmallVec::with_capacity(args.len());
         for (_, expression) in &args {
             let register = self.lower_expression(lowering, *expression, depth);
@@ -3282,6 +4063,7 @@ impl<'a> Builder<'a> {
                 Some(register) => scope.push(register),
                 None => {
                     lowering.scope = outer;
+                    lowering.conditional = outer_conditional;
                     return None;
                 }
             }
@@ -3307,6 +4089,7 @@ impl<'a> Builder<'a> {
         lowering.scope = outer;
         lowering.closed = outer_closed;
         lowering.inlined = outer_inlined;
+        lowering.conditional = outer_conditional;
         let result = result?;
         // Inlined code has no frame to check annotations in, so a typed closure is inlined only
         // when its checks are known to pass; tier 0 runs any other call and reports the failure.
@@ -3355,6 +4138,24 @@ impl<'a> Builder<'a> {
                 if lowering.closed.is_some() {
                     return None;
                 }
+                // The steps read the variable whether or not R would evaluate this expression,
+                // which is right only while the read tells nobody. In an inlined body a read
+                // of a formal is what forces its promise, so the formal must be one R reads on
+                // every path too.
+                // A formal the body has assigned is a local, which no read forces.
+                let assigned = self
+                    .slot_of
+                    .get(&expression)
+                    .map_or(0, |&slot| lowering.state.slots[slot].status);
+                if self.depth > 0
+                    && assigned != status::DIRTY
+                    && let Some(position) = self.formal(expression)
+                {
+                    if lowering.conditional || assigned & status::DIRTY != 0 {
+                        return None;
+                    }
+                    lowering.forces |= 1 << position;
+                }
                 let slot = self.peek_slot(lowering, expression, false)?;
                 let ty = lowering.state.slots[slot].ty;
                 if !ty.is_unboxed() {
@@ -3368,6 +4169,7 @@ impl<'a> Builder<'a> {
                         slot,
                         load: None,
                         forcing: false,
+                        volatile: false,
                     },
                 );
                 lowering.state.registers[dst] = ty;
@@ -3397,6 +4199,10 @@ impl<'a> Builder<'a> {
                 if lowering.closed.is_none()
                     && let Some(&slot) = self.slot_of.get(&head)
                 {
+                    // Calling an inlined body's formal forces its promise.
+                    if self.depth > 0 && self.formal(head).is_some() {
+                        return None;
+                    }
                     // A closure this activation made, called from inlined code: inline it too.
                     self.peek_slot(lowering, head, false)?;
                     let Ty::Closure(formals, body) = lowering.state.slots[slot].ty else {
@@ -3420,10 +4226,18 @@ impl<'a> Builder<'a> {
                 if name == "{" {
                     return self.lower_block(lowering, &args, depth);
                 }
+                let outer_conditional = lowering.conditional;
                 let registers = args
                     .iter()
-                    .map(|&arg| self.lower_expression(lowering, arg, depth))
-                    .collect::<Option<SmallVec<[usize; 4]>>>()?;
+                    .enumerate()
+                    .map(|(index, &arg)| {
+                        // Both branches of `if` are lowered, and R evaluates one.
+                        lowering.conditional = outer_conditional || (name == "if" && index > 0);
+                        self.lower_expression(lowering, arg, depth)
+                    })
+                    .collect::<Option<SmallVec<[usize; 4]>>>();
+                lowering.conditional = outer_conditional;
+                let registers = registers?;
                 let types: SmallVec<[Ty; 4]> = registers
                     .iter()
                     .map(|&register| lowering.state.registers[register])
@@ -3592,7 +4406,8 @@ impl<'a> Builder<'a> {
     /// Makes sure `symbol`'s slot is loaded in inlined code, peeking at it when it may not be,
     /// and returns the slot.
     /// A variable compiled code has not loaded is assumed to have the type tier 0 saw at its
-    /// loads, which the peek checks. Only a `boxed` peek may find a boxed value.
+    /// loads, which the peek checks. Only a `boxed` peek may find a boxed value, or load a
+    /// variable tier 0 has not.
     unsafe fn peek_slot(
         &mut self,
         lowering: &mut Lowering<'a>,
@@ -3605,10 +4420,20 @@ impl<'a> Builder<'a> {
         }
         let current = lowering.state.slots[slot];
         if current.may_be(status::NOT_LOADED) {
+            if self.lazy_formals && self.formal(symbol).is_some() {
+                return None;
+            }
             let ty = if current.may_be(status::LOADED) {
                 current.ty
             } else {
                 self.hints[slot]
+            };
+            // A variable the body only passes on has no load that recorded a type, and an
+            // argument that stays an object needs none.
+            let ty = if ty == Ty::Bottom && boxed {
+                Ty::Boxed
+            } else {
+                ty
             };
             if ty == Ty::Bottom || (ty == Ty::Boxed && !boxed) {
                 return None;
@@ -3863,7 +4688,15 @@ impl<'a> Builder<'a> {
                 result,
             });
         }
-        if untagged && let Some((intrinsic, mut result)) = intrinsic_for(name, &types) {
+        // A site that has made doubles, as `0.5:n` does, keeps the builtin call, since the
+        // compiled `a:b` only makes integers and would hand every call to tier 0.
+        let doubles = name == ":"
+            && !self.never_ran(inst.pc)
+            && !matches!(self.feedback_at(inst.pc), Ty::Int | Ty::IntSeq | Ty::IntVec);
+        if untagged
+            && !doubles
+            && let Some((intrinsic, mut result)) = intrinsic_for(name, &types)
+        {
             // A list element is boxed, so its type comes from what the site has read so far,
             // which the compiled read checks before it unboxes the element.
             let feedback = self.feedback_at(inst.pc);
@@ -3885,7 +4718,13 @@ impl<'a> Builder<'a> {
         let feedback = if untagged && self.never_ran(inst.pc) {
             builtin_result(name, &types).unwrap_or(Ty::Boxed)
         } else {
-            self.feedback_at(inst.pc)
+            // `1:line` that has so far made only `1:1`, a plain scalar, makes a compact
+            // sequence for a longer line, which the sequence's guard takes as well as the scalar.
+            match (self.feedback_at(inst.pc), builtin_result(name, &types)) {
+                (Ty::Int, Some(Ty::IntSeq)) if untagged => Ty::IntSeq,
+                (Ty::Dbl, Some(Ty::DblSeq)) if untagged => Ty::DblSeq,
+                (feedback, _) => feedback,
+            }
         };
         // A library leaf never dispatches, but reading an ALTREP argument runs its class's
         // methods, which a package may write in R, so every boxed argument is observed.
@@ -3902,9 +4741,9 @@ impl<'a> Builder<'a> {
                 Effect::PureUnlessObserved,
             ));
         }
-        // Tier 0's fast handler takes only a scalar index, which feedback types as a scalar, so
-        // an index typed as a vector has not been one at this site and would only pay for the
-        // handler's decline.
+        // Tier 0's fast handler takes only a plain scalar index, which feedback types as a
+        // scalar, so an index typed as a vector or a compact sequence has not been one at this
+        // site and would only pay for the handler's decline.
         let fast = if count == 2
             && matches!(name, "[" | "[[")
             && !matches!(
@@ -3912,6 +4751,8 @@ impl<'a> Builder<'a> {
                 Ty::IntVec
                     | Ty::DblVec
                     | Ty::LglVec
+                    | Ty::IntSeq
+                    | Ty::DblSeq
                     | Ty::IntArr
                     | Ty::DblArr
                     | Ty::LglArr
@@ -3988,6 +4829,49 @@ impl<'a> Builder<'a> {
     }
 }
 
+/// Whether calls of `function`, planned as the inlined frame `plan`, have read `formal`: a load
+/// of it has run, the body reads it for a call it inlines, or the body passes it on to an
+/// inlined call that has read it.
+unsafe fn has_read(plan: &Plan, function: Sexp, formal: Sexp) -> bool {
+    unsafe {
+        let feedback = values::ints(function.cdr().cdr().element(FEEDBACK));
+        let slot = plan.slots.iter().position(|&symbol| symbol == formal);
+        let peeks = |steps: &[(Action, StateId)]| {
+            steps.iter().any(
+                |&(step, _)| matches!(step, Action::Peek { slot: read, .. } if Some(read) == slot),
+            )
+        };
+        plan.actions
+            .iter()
+            .zip(plan.insts.iter())
+            .any(|(action, inst)| match *action {
+                Action::GetVar { slot: read, .. } if Some(read) == slot => {
+                    feedback.get(inst.pc).copied().unwrap_or(0) != 0
+                }
+                Action::Frame {
+                    steps,
+                    callee,
+                    function,
+                    args,
+                    ..
+                } => {
+                    peeks(steps)
+                        || args.iter().zip(values::pairlist_items(function.car())).any(
+                            |(passing, (inner, _))| {
+                                matches!(*passing, Passing::Variable(symbol) if symbol == formal)
+                                    && has_read(callee, function, inner)
+                            },
+                        )
+                }
+                Action::Inline { steps }
+                | Action::Call { steps, .. }
+                | Action::NativeCall { steps, .. } => peeks(steps),
+                Action::Traverse { prelude, steps, .. } => peeks(prelude) || peeks(steps),
+                _ => false,
+            })
+    }
+}
+
 /// The closure a variable lookup of `symbol` finds from `start`, as tier 0 finds it but
 /// without forcing a promise or calling an active binding.
 unsafe fn resolve_variable(symbol: Sexp, start: Sexp) -> Option<Speculation> {
@@ -4030,6 +4914,8 @@ pub(crate) unsafe fn constant_type(value: Sexp) -> Ty {
         feedback::INTEGER_ARRAY => Ty::IntArr,
         feedback::DOUBLE_ARRAY => Ty::DblArr,
         feedback::LOGICAL_ARRAY => Ty::LglArr,
+        feedback::INTEGER_SEQUENCE => Ty::IntSeq,
+        feedback::DOUBLE_SEQUENCE => Ty::DblSeq,
         _ if values::is_function(value) => Ty::Fun(value),
         _ => Ty::Boxed,
     }
@@ -4080,8 +4966,13 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
             (Intrinsic::Element, array.element())
         }
         ("[[", [Ty::List, Ty::Int | Ty::Dbl]) => (Intrinsic::Element, Ty::Boxed),
+        ("[" | "[[", [Ty::IntSeq, Ty::Int | Ty::Dbl]) => (Intrinsic::Element, Ty::Int),
+        ("[" | "[[", [Ty::DblSeq, Ty::Int | Ty::Dbl]) => (Intrinsic::Element, Ty::Dbl),
         ("length", [ty])
-            if ty.is_vector() || ty.is_array() || ty.is_numeric_scalar() || *ty == Ty::List =>
+            if ty.is_vector()
+                || ty.is_array()
+                || ty.is_numeric_scalar()
+                || matches!(ty, Ty::List | Ty::IntSeq | Ty::DblSeq) =>
         {
             (Intrinsic::Length, Ty::Int)
         }
@@ -4117,6 +5008,9 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
                 },
             )
         }
+        (":", [from, to]) if from.is_numeric_scalar() && to.is_numeric_scalar() => {
+            (Intrinsic::Colon, integer_sequence())
+        }
         ("%/%", [a, b]) if a.is_numeric_scalar() && b.is_numeric_scalar() => {
             let numeric = if *a == Ty::Dbl || *b == Ty::Dbl {
                 Numeric::Dbl
@@ -4134,6 +5028,17 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
         }
         _ => return None,
     })
+}
+
+/// The type of an integer `a:b`, `seq_len()` or `seq_along()` result. These make compact
+/// sequences from two elements on, the common case to guess, wherever the runtime has
+/// registered the classes; an interpreter without them makes plain vectors.
+fn integer_sequence() -> Ty {
+    if interp::interp().compact_sequence_classes[0] != values::nil() {
+        Ty::IntSeq
+    } else {
+        Ty::IntVec
+    }
 }
 
 /// Whether [`intrinsic_for`] has an intrinsic for builtin `name` given some argument types. It
@@ -4161,6 +5066,7 @@ fn has_intrinsic(name: &str) -> bool {
             | "ceiling"
             | "%%"
             | "%/%"
+            | ":"
     )
 }
 
@@ -4180,11 +5086,12 @@ fn builtin_result(name: &str, types: &[Ty]) -> Option<Ty> {
             Ty::Dbl
         }
     };
+    let sequence = integer_sequence();
     Some(match (name, types) {
-        ("seq_len", [length]) if length.is_numeric_scalar() => Ty::IntVec,
-        ("seq_along", [along]) if along.is_plain() => Ty::IntVec,
+        ("seq_len", [length]) if length.is_numeric_scalar() => sequence,
+        ("seq_along", [along]) if along.is_plain() => sequence,
         // `1:n` makes integers even from double literals whenever the start is a whole number.
-        (":", [from, to]) if from.is_numeric_scalar() && to.is_numeric_scalar() => Ty::IntVec,
+        (":", [from, to]) if from.is_numeric_scalar() && to.is_numeric_scalar() => sequence,
         ("sum", _) if all(&numeric) => match widest() {
             Ty::Dbl => Ty::Dbl,
             _ => Ty::Int,
@@ -4281,7 +5188,7 @@ pub fn reads(inst: &Inst) -> SmallVec<[usize; 4]> {
         Op::Move => smallvec![operand(1)],
         Op::BoundEval | Op::Internal => (operand(3)..operand(3) + operand(4)).collect(),
         Op::MatchCondition | Op::SwitchArm => smallvec![operand(1)],
-        Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
+        Op::BranchUnlessBuiltin | Op::BranchUnlessSame | Op::BranchIfObject => {
             smallvec![operand(0)]
         }
         Op::DispatchSubject => smallvec![operand(1), operand(3)],
@@ -4304,7 +5211,7 @@ pub fn jump_target(inst: &Inst) -> Option<usize> {
         Op::BranchUnlessBuiltin | Op::BranchIfObject => Some(inst.operand(1)),
         Op::MatchShape | Op::MatchTag | Op::MatchLiteral => Some(inst.operand(2)),
         Op::Item => Some(inst.operand(4)),
-        Op::BranchUnlessPrimitive => Some(inst.operand(2)),
+        Op::BranchUnlessSame => Some(inst.operand(2)),
         Op::ForStep => Some(inst.operand(3)),
         Op::LogicLeft => Some(inst.operand(4)),
         Op::Guard => Some(inst.operand(4)),
@@ -4320,7 +5227,7 @@ fn ends_block(op: Op) -> bool {
             | Op::Resume
             | Op::JumpUnless
             | Op::BranchUnlessBuiltin
-            | Op::BranchUnlessPrimitive
+            | Op::BranchUnlessSame
             | Op::BranchIfObject
             | Op::MatchShape
             | Op::MatchTag
@@ -4346,6 +5253,7 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
     match inst.op {
         Op::Constant
         | Op::GetVar
+        | Op::Argument
         | Op::GetFun
         | Op::Ast
         | Op::Closure
@@ -4359,7 +5267,7 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
             }
         }
         Op::SetVar | Op::SuperAssign => gen_(operand(1), live),
-        Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
+        Op::BranchUnlessBuiltin | Op::BranchUnlessSame | Op::BranchIfObject => {
             gen_(operand(0), live)
         }
         Op::DispatchSubject => {

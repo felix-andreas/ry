@@ -1,3 +1,4 @@
+# oracle: library-dependent
 # 600 pseudo-random parameter points across the continuous and discrete families, with one
 # checksum of the exact bit pattern per function, tail and scale.
 bits <- function(x) {

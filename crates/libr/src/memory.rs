@@ -80,7 +80,14 @@ pub unsafe fn duplicate(object: Sexp, deep: bool) -> ApiResult<Sexp> {
         if let Some(copy) = crate::altrep::duplicate(object, deep)? {
             return Ok(copy);
         }
-        let copy = crate::altrep::materialize(object)?;
+        let mut copy = crate::altrep::materialize(object)?;
+        // The materialized vector may be storage the object keeps, such as a compact
+        // sequence's expansion, and the caller may write into its duplicate.
+        if copy.refcount() > 0 {
+            runtime().heap.root(copy);
+            copy = duplicate(copy, false)?;
+        }
+        runtime().heap.root(copy);
         if deep && matches!(object.kind(), SexpType::List | SexpType::Expression) {
             for index in 0..copy.length() as usize {
                 let element = duplicate(copy.element(index), true)?;

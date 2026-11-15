@@ -6,6 +6,7 @@ use {
         DataPath, Db, TypeDefinitions,
         annotations::Annotation,
         data_file_layout,
+        dense::{Bitset, Column},
         diagnostics::nearest_name,
         exhaustiveness::{MatchFinding, match_findings},
         hir::{
@@ -23,21 +24,24 @@ use {
             BindingId, BindingKind, ItemNaming, MATCH_FUN_CALLERS, dot_dot_variable,
             is_column_update, query_index_arguments,
         },
+        native::{Judged, NativeBlocker, has_r_bound, native_blockers},
         sorted::{SortedMap, SortedSet},
         stubs::{NATIVE_NAMESPACES, StubLibrary, is_ry_type, lower_type_text, stubs},
         top_level::super_assigned_names,
         types::{
             Atomic, Constraint, DefaultRead, FlagReturn, FrameKind, FunctionType, InferenceVar,
             Name, NativeField, NativeScalar, NullUnless, NumberLiteral, Parameter, RecordField,
-            ReduceForward, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind, TypeScheme, any, array,
-            array_element, column_type, conflicting_tags, contains_inference_var, erase_vars,
-            for_each_child_type, is_ry_value_type, is_tag_type, map_child_types, native_record,
-            native_scalar, null, scalar, substitute_rigid, type_size, union_of, unknown,
+            ReduceForward, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind, TypeList, TypeScheme, any,
+            array, array_element, column_type, conflicting_tags, contains_inference_var,
+            erase_vars, for_each_child_type, is_ry_value_type, is_tag_type, map_child_types,
+            native_record, native_scalar, null, scalar, substitute_rigid, type_size, union_of,
+            unknown,
         },
     },
     bumpalo::{Bump, collections::Vec as BumpVec},
     hashbrown::{HashMap, HashSet},
     rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet},
+    smallvec::SmallVec,
     std::{
         alloc::{AllocError, Allocator, Layout},
         borrow::Cow,
@@ -51,7 +55,11 @@ use {
             atomic::{AtomicUsize, Ordering},
         },
     },
-    syntax::{NumberType, TextRange, TextSize, native_values::accepts_native},
+    syntax::{
+        NumberType, TextRange, TextSize,
+        annotation::{Paired, pair_formals},
+        native_values::accepts_native,
+    },
     thin_vec::ThinVec,
 };
 
@@ -357,24 +365,32 @@ pub enum NativeValueKind {
     List,
 }
 
-/// What only the checker knows about a value the runtime builds empty: the storage of a list's
-/// items, or the key and value types of a dictionary.
+/// A type only the checker knows that the runtime needs: the storage of a list's items for a list
+/// the runtime may build empty, the key and value types of a dictionary built from no entries,
+/// or the number a `Num.from_r` gives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
-pub enum Empty {
+pub enum CheckedType {
     List(ListItems),
     /// A `Dict` of `I64`, `F64` or `Str` keys and values, the ones typed code holds unboxed.
     Dict {
         key: ListItems,
         value: ListItems,
     },
+    /// A `Num.from_r(x)` of an `x` the checker typed `integer` (`I64`) or `double` (`F64`).
+    Number(NumberType),
 }
 
-impl Empty {
-    /// The name `.ry_items` takes: `"I64"` for a list, `"Dict<Str, I64>"` for a dictionary.
+impl CheckedType {
+    /// The name `.ry_items` takes: `"I64"` for a list or a number, `"Dict<Str, I64>"` for a
+    /// dictionary.
     pub fn name(self) -> std::borrow::Cow<'static, str> {
         match self {
-            Empty::List(items) => items.name().into(),
-            Empty::Dict { key, value } => format!("Dict<{}, {}>", key.name(), value.name()).into(),
+            CheckedType::List(items) => items.name().into(),
+            CheckedType::Dict { key, value } => {
+                format!("Dict<{}, {}>", key.name(), value.name()).into()
+            }
+            CheckedType::Number(NumberType::I64) => "I64".into(),
+            CheckedType::Number(NumberType::F64) => "F64".into(),
         }
     }
 }
@@ -425,6 +441,9 @@ pub enum OperandExpectation {
 pub struct ItemCheck<'db> {
     pub errors: ThinVec<TypeError<'db>>,
     pub strict_origins: ThinVec<StrictOrigin>,
+    /// What keeps the item's native functions off native code, in source order. Recorded only
+    /// where strict origins are, because the finding is a strict-mode one.
+    pub native_blockers: ThinVec<NativeBlocker>,
     pub scheme: Option<TypeScheme<'db>>,
     /// Reads inside a `data.table` bracket's index arguments: they evaluate in the
     /// data's own frame, so bare names are columns and skip the unresolved-name check.
@@ -443,16 +462,17 @@ pub struct ItemCheck<'db> {
     /// `double` whatever the checker decided, so the code ry's runtime runs spells each one with
     /// its suffix (`preflight` in the `ry` crate); without it, `-> I64` could return a `double`.
     pub i64_literals: ThinVec<ExprId>,
-    /// The expressions whose item types only this check knows: an empty `[]`, a call to a
-    /// library function whose result items come from a callback rather than from a list it was
-    /// given (`List.map`), and a library call that builds a dictionary from no entries
-    /// (`Dict.empty()`). An empty list is stored by its items' storage, and one built from no
-    /// items is `logical`, and typed code lays a dictionary out by its key and value types, so
-    /// the code ry's runtime runs passes each of these through `.ry_items` with the types
+    /// The expressions whose types only this check knows and the runtime needs: an empty `[]`, a
+    /// call to a library function whose result items come from a callback rather than from a
+    /// list it was given (`List.map`), a library call that builds a dictionary from no entries
+    /// (`Dict.empty()`), and a `Num.from_r`. An empty list is stored by its items' storage, and
+    /// one built from no items is `logical`, typed code lays a dictionary out by its key and
+    /// value types, and the number a `Num.from_r` gives otherwise depends on the R value, so the
+    /// code ry's runtime runs passes each of these through `.ry_items` with the type
     /// (`preflight` in the `ry` crate). In id order.
-    pub typed_empties: ThinVec<(ExprId, Empty)>,
+    pub checked_types: ThinVec<(ExprId, CheckedType)>,
     /// What only editor features read, absent when the host asked for no editor facts, so a
-    /// one-shot check keeps no per-item slots for them.
+    /// command's check keeps no per-item slots for them.
     pub editor: Option<Box<EditorFacts<'db>>>,
 }
 
@@ -708,7 +728,7 @@ pub trait GlobalEnv<'db> {
     /// Every stub candidate for `name`, ignoring project definitions: what `pkg::name` or a
     /// call that skipped the project's non-function binding reaches. Empty for an export
     /// the stubs list without a type.
-    fn library_candidates(&self, name: &str) -> Option<&'db [TypeScheme<'db>]>;
+    fn library_candidates(&self, name: Symbol) -> Option<&'db [TypeScheme<'db>]>;
 
     /// What a call reaches once its lookup has left the file's top-level frame without finding
     /// a function, the library aside. A package file's frame is the namespace itself, so it
@@ -724,7 +744,7 @@ pub trait GlobalEnv<'db> {
     /// item pay for the whole table.
     fn type_definitions(&self) -> TypeDefinitions<'db>;
 
-    fn arithmetic_classes(&self) -> &'db FxHashSet<String>;
+    fn arithmetic_classes(&self) -> crate::ArithmeticClasses<'db>;
 
     /// Whether the project defines an arithmetic or `Ops` method for a class that no type
     /// declares, so a plain list operand may carry that class.
@@ -788,7 +808,8 @@ fn check_item_in<'db>(
     top_level_ry_values: bool,
 ) -> ItemCheck<'db> {
     let mut table = InferenceTable::default();
-    table.reserve_resolutions(module.expression_count());
+    let expressions = module.expression_count();
+    let bindings = naming.bindings.len();
     if let Some(globals) = globals {
         table.definitions = Some(globals.type_definitions());
         table.arithmetic_classes = Some(globals.arithmetic_classes());
@@ -803,26 +824,33 @@ fn check_item_in<'db>(
         table,
         frame_level: 0,
         discarded_if: None,
-        parameter_hints: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        parameter_hints: Column::new_in(arena, expressions),
         hinted_parameters: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
         expression_annotations: {
-            let mut annotations = HashMap::with_hasher_in(FxBuildHasher, Arena(arena));
-            annotations.extend(expression_annotations.iter().cloned());
+            let mut annotations = Column::new_in(arena, expressions);
+            for (expression, annotation) in expression_annotations {
+                annotations.insert(*expression, annotation.clone());
+            }
             annotations
         },
-        environment: Environment::default(),
+        environment: Environment {
+            entries: Column::new_in(arena, bindings),
+            facts: Vec::new(),
+            undo: Vec::new(),
+            written: Bitset::new_in(arena, bindings),
+        },
         scheme_arena: Vec::new(),
-        literal_reads: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
-        recorded: RecordedTypes(vec![None; module.expression_count()]),
-        recorded_patterns: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
-        recorded_expectations: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
-        recorded_loop_variables: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
-        selected_overloads: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
-        callee_targets: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
-        masked_reads: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
+        literal_reads: Bitset::new_in(arena, expressions),
+        recorded: RecordedTypes(vec![None; expressions]),
+        recorded_patterns: Column::new_in(arena, module.pattern_count()),
+        recorded_expectations: Column::new_in(arena, expressions),
+        recorded_loop_variables: Column::new_in(arena, expressions),
+        selected_overloads: Column::new_in(arena, expressions),
+        callee_targets: Column::new_in(arena, expressions),
+        masked_reads: Bitset::new_in(arena, expressions),
         unseen_frames: 0,
         column_scopes: Vec::new(),
-        column_misses: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        column_misses: Column::new_in(arena, expressions),
         query_depth: 0,
         errors: Vec::new(),
         record_strict_origins,
@@ -837,19 +865,19 @@ fn check_item_in<'db>(
         return_frames: Vec::new(),
         bare_na_returns: FxHashSet::default(),
         pending_enclosing_writes: Vec::new(),
-        forward_captured: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
-        capture_joins: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        forward_captured: Bitset::new_in(arena, bindings),
+        capture_joins: Column::new_in(arena, bindings),
         capture_repass_needed: false,
-        superassign_seeds: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
-        pre_materialized: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
-        no_default_formals: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
-        defaulted_formals: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
+        superassign_seeds: SmallVec::new(),
+        pre_materialized: Column::new_in(arena, bindings),
+        no_default_formals: Bitset::new_in(arena, bindings),
+        defaulted_formals: Bitset::new_in(arena, bindings),
         non_local_slots: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
-        string_values: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
+        string_values: Column::new_in(arena, bindings),
         value_read_slots: None,
-        computed_slots: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
-        lookup_slots: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
-        valued_slots: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
+        computed_slots: Bitset::new_in(arena, bindings),
+        lookup_slots: Bitset::new_in(arena, bindings),
+        valued_slots: Bitset::new_in(arena, bindings),
         super_assigned: super_assigned_names(module),
         next_non_local_slot: naming
             .bindings
@@ -883,7 +911,7 @@ fn check_item_in<'db>(
         let declared_fn = annotation.filter(|a| !a.trusted).and_then(|a| {
             let declared = a.declared.as_ref()?;
             match declared.body.kind(db) {
-                TyKind::Function(function) => Some((declared.clone(), function.clone())),
+                TyKind::Function(function) => Some((declared.clone(), *function)),
                 _ => None,
             }
         });
@@ -892,7 +920,7 @@ fn check_item_in<'db>(
             // declared type is then checked against that like any other value.
             (ExpressionKind::Assign { value, .. }, Some((declared, function)))
                 if matches!(module.kind(*value), ExpressionKind::Function { .. })
-                    && !context.expression_annotations.contains_key(value) =>
+                    && !context.expression_annotations.contains_key(*value) =>
             {
                 for (name, constraint) in &declared.binders {
                     context.table.rigid_constraints.insert(*name, *constraint);
@@ -903,7 +931,7 @@ fn check_item_in<'db>(
                     binders: declared.binders,
                     body: context.check_declared_function(
                         *value,
-                        &function,
+                        function,
                         annotation.map_or(&[], |annotation| &annotation.inline_parameters),
                     ),
                 };
@@ -1014,21 +1042,43 @@ fn check_item_in<'db>(
                 .then_some(id)
         })
         .collect();
-    let mut typed_empties: ThinVec<(ExprId, Empty)> = recorded
+    let num_from_r = Symbol::lookup("Num.from_r");
+    let mut checked_types: ThinVec<(ExprId, CheckedType)> = recorded
         .iter()
         .enumerate()
         .filter_map(|(index, slot)| {
             let id = ExprId::new(index);
+            let library = |callee: &ExprId, name: Symbol| {
+                !naming.resolutions.contains_key(callee)
+                    && context
+                        .globals
+                        .and_then(|globals| globals.library_candidates(name))
+                        .is_some()
+            };
             let candidate = match module.kind(id) {
                 ExpressionKind::Array(items) => module[items].is_empty(),
-                // `.ry_items` returns any other value unchanged, so a library name a project
-                // function shadows is wrapped harmlessly.
                 ExpressionKind::Call { callee, .. } => match module.kind(*callee) {
+                    // `.ry_items` checks a `Num.from_r` by the call's text, so it wraps only the
+                    // standard library's.
+                    ExpressionKind::NameRef(name) if Some(*name) == num_from_r => {
+                        if !library(callee, *name) {
+                            return None;
+                        }
+                        let ty = context.table.resolve(db, (*slot)?);
+                        let number = match ty.kind(db) {
+                            TyKind::Native(NativeScalar::I64) => NumberType::I64,
+                            TyKind::Native(NativeScalar::F64) => NumberType::F64,
+                            _ => return None,
+                        };
+                        return Some((id, CheckedType::Number(number)));
+                    }
+                    // `.ry_items` returns any other value unchanged, so a library name a project
+                    // function shadows is wrapped harmlessly.
                     ExpressionKind::NameRef(name) => {
-                        !naming.resolutions.contains_key(callee)
+                        library(callee, *name)
                             && context
                                 .globals
-                                .and_then(|globals| globals.library_candidates(name))
+                                .and_then(|globals| globals.library_candidates(*name))
                                 .is_some_and(|candidates| {
                                     candidates.iter().any(|scheme| {
                                         builds_fresh_items(db, scheme)
@@ -1054,21 +1104,124 @@ fn check_item_in<'db>(
                 };
                 return Some((
                     id,
-                    Empty::Dict {
+                    CheckedType::Dict {
                         key: key?,
                         value: scalar(value)?,
                     },
                 ));
             }
-            list_items(db, crate::types::array_element(db, ty)?)
-                .map(|items| (id, Empty::List(items)))
+            let item = crate::types::array_element(db, ty)?;
+            // A nominal such as `type Tree = :Leaf(I64) | ...` is stored as its representation.
+            let item = match item.kind(db) {
+                TyKind::Named(name, arguments) => context
+                    .table
+                    .representation(db, *name, arguments)
+                    .unwrap_or(item),
+                _ => item,
+            };
+            list_items(db, item).map(|items| (id, CheckedType::List(items)))
         })
         .collect();
-    typed_empties.sort_unstable_by_key(|(id, _)| id.index());
+    checked_types.sort_unstable_by_key(|(id, _)| id.index());
     let match_findings = match_findings(db, context.table.definitions, module, |scrutinee| {
         let ty = (*recorded.get(scrutinee.index())?)?;
         Some(context.table.resolve(db, ty))
     });
+    let native_blockers = if context.record_strict_origins {
+        // The declaration as written decides whether a function is judged, so a formal the
+        // author left untyped keeps the function out.
+        let mut signatures: Column<ExprId, &'db FunctionType<'db>> =
+            Column::new_in(arena, expressions);
+        let mut aliased_signatures: Bitset<ExprId> = Bitset::new_in(arena, expressions);
+        let declared_function = |annotation: &Annotation<'db>| {
+            if annotation.trusted || annotation.if_unknown || annotation.new_nominal.is_some() {
+                return None;
+            }
+            let declared = annotation.declared.as_ref()?;
+            // An alias of a function type declares the signature too, without writing it where
+            // the runtime reads it.
+            let mut body = declared.body;
+            let mut through_alias = false;
+            for _ in 0..8 {
+                let TyKind::Named(name, arguments) = body.kind(db) else {
+                    break;
+                };
+                let alias = context
+                    .table
+                    .definitions
+                    .and_then(|definitions| definitions.get(db, *name))
+                    .filter(|definition| definition.alias && arguments.is_empty());
+                let Some(alias) = alias else {
+                    break;
+                };
+                body = alias.body;
+                through_alias = true;
+            }
+            match body.kind(db) {
+                TyKind::Function(function) if !has_r_bound(declared) => {
+                    Some((*function, through_alias && !annotation.written_signature))
+                }
+                _ => None,
+            }
+        };
+        for id in module.expression_ids() {
+            match *module.kind(id) {
+                ExpressionKind::Function { .. } => {
+                    if let Some((function, aliased)) = context
+                        .expression_annotations
+                        .get(id)
+                        .and_then(declared_function)
+                    {
+                        signatures.insert(id, function);
+                        if aliased {
+                            aliased_signatures.insert(id);
+                        }
+                    }
+                }
+                ExpressionKind::Assign { value, .. }
+                    if matches!(module.kind(value), ExpressionKind::Function { .. })
+                        && !context.expression_annotations.contains_key(value) =>
+                {
+                    let item_annotation = if Some(id) == module.root {
+                        annotation
+                    } else {
+                        None
+                    };
+                    if let Some((function, aliased)) = context
+                        .expression_annotations
+                        .get(id)
+                        .or(item_annotation)
+                        .and_then(declared_function)
+                    {
+                        signatures.insert(value, function);
+                        if aliased {
+                            aliased_signatures.insert(value);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if signatures.is_empty() {
+            ThinVec::new()
+        } else {
+            native_blockers(Judged {
+                db,
+                module,
+                naming,
+                definitions: context.table.definitions,
+                globals: context.globals,
+                types: &|id| {
+                    let ty = (*recorded.get(id.index())?)?;
+                    Some(context.table.resolve(db, ty))
+                },
+                signatures: &signatures,
+                aliased: &aliased_signatures,
+            })
+        }
+    } else {
+        ThinVec::new()
+    };
     let editor_facts = db.editor_facts();
     let mut editor = None;
     if editor_facts {
@@ -1077,7 +1230,7 @@ fn check_item_in<'db>(
             .map(|slot| slot.map(|ty| context.table.resolve(context.db, ty)))
             .collect();
         let mut patterns = vec![None; module.pattern_count()];
-        for (&id, &ty) in &context.recorded_patterns {
+        for (id, &ty) in context.recorded_patterns.iter() {
             if let Some(slot) = patterns.get_mut(id.index()) {
                 *slot = Some(context.table.resolve(context.db, ty));
             }
@@ -1086,12 +1239,12 @@ fn check_item_in<'db>(
         let literal_expectations = context
             .recorded_expectations
             .iter()
-            .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
+            .map(|(id, &ty)| (id, context.table.resolve(context.db, ty)))
             .collect();
         let loop_variables = context
             .recorded_loop_variables
             .iter()
-            .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
+            .map(|(id, &ty)| (id, context.table.resolve(context.db, ty)))
             .collect();
         editor = Some(Box::new(EditorFacts {
             expression_types,
@@ -1101,12 +1254,12 @@ fn check_item_in<'db>(
             selected_overloads: context
                 .selected_overloads
                 .iter()
-                .map(|(&callee, &index)| (callee, index))
+                .map(|(callee, &index)| (callee, index))
                 .collect(),
             callee_targets: context
                 .callee_targets
                 .iter()
-                .map(|(&callee, &target)| (callee, target))
+                .map(|(callee, &target)| (callee, target))
                 .collect(),
         }));
     }
@@ -1170,13 +1323,14 @@ fn check_item_in<'db>(
     ItemCheck {
         match_findings: ThinVec::from(match_findings),
         i64_literals,
-        typed_empties,
+        checked_types,
         errors: ThinVec::from(errors),
         strict_origins: ThinVec::from(context.strict_origins),
+        native_blockers,
         scheme,
         editor,
-        masked_reads: context.masked_reads.into_iter().collect(),
-        column_misses: context.column_misses.into_iter().collect(),
+        masked_reads: context.masked_reads.iter().collect(),
+        column_misses: context.column_misses.drain().collect(),
         top_level_bindings: ThinVec::from(top_level_bindings),
     }
 }
@@ -1320,13 +1474,14 @@ fn erase_residual_vars_at<'db>(
     rigid
 }
 
-#[derive(Debug, Default)]
-struct Environment<'db> {
-    entries: FxHashMap<BindingId, EnvEntry<'db>>,
+struct Environment<'db, 'a> {
+    entries: Column<'a, BindingId, EnvEntry<'db>>,
     /// What dominating tests showed about slots' values beyond their types. A write to a slot
     /// drops every fact that mentions it.
     facts: Vec<Fact>,
     undo: Vec<Undo<'db>>,
+    /// Scratch for [`Environment::writes_since`], empty between calls.
+    written: Bitset<'a, BindingId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1364,9 +1519,9 @@ enum EnvEntry<'db> {
     MissingFormal(Ty<'db>),
 }
 
-impl<'db> Environment<'db> {
+impl<'db> Environment<'db, '_> {
     fn get(&self, slot: BindingId) -> Option<EnvEntry<'db>> {
-        self.entries.get(&slot).copied()
+        self.entries.get(slot).copied()
     }
 
     fn set(&mut self, slot: BindingId, entry: EnvEntry<'db>) {
@@ -1422,7 +1577,7 @@ impl<'db> Environment<'db> {
                     self.entries.insert(slot, entry);
                 }
                 Undo::Entry(slot, None) => {
-                    self.entries.remove(&slot);
+                    self.entries.remove(slot);
                 }
                 Undo::Established(fact) => self.facts.retain(|&held| held != fact),
                 Undo::Dropped(fact) => self.facts.push(fact),
@@ -1430,23 +1585,25 @@ impl<'db> Environment<'db> {
         }
     }
 
-    fn writes_since(&self, mark: usize) -> Vec<(BindingId, Option<EnvEntry<'db>>)> {
-        let mut seen = FxHashSet::default();
+    fn writes_since(&mut self, mark: usize) -> Vec<(BindingId, Option<EnvEntry<'db>>)> {
         let mut writes = Vec::new();
         for undo in &self.undo[mark..] {
             let Undo::Entry(slot, _) = undo else {
                 continue;
             };
-            if seen.insert(*slot) {
-                writes.push((*slot, self.entries.get(slot).copied()));
+            if self.written.insert(*slot) {
+                writes.push((*slot, self.entries.get(*slot).copied()));
             }
+        }
+        for (slot, _) in &writes {
+            self.written.remove(*slot);
         }
         writes
     }
 }
 
-/// A map whose table lives in the check's arena: the working maps grow and rehash many times
-/// per item, and the arena frees every superseded table in one step when the check ends.
+/// A map whose table lives in the check's arena, for the few facts whose key is not one of
+/// the item's dense ids. The arena frees every superseded table in one step when the check ends.
 type ArenaMap<'a, K, V> = HashMap<K, V, FxBuildHasher, Arena<'a>>;
 type ArenaSet<'a, T> = HashSet<T, FxBuildHasher, Arena<'a>>;
 
@@ -1486,28 +1643,28 @@ struct Checker<'db, 'a> {
     discarded_if: Option<ExprId>,
     /// Parameter types an unannotated function literal takes from the function type its call
     /// argument position expects, by formal position; `None` leaves a formal to inference.
-    parameter_hints: ArenaMap<'a, ExprId, Vec<Option<Ty<'db>>>>,
+    parameter_hints: Column<'a, ExprId, Vec<Option<Ty<'db>>>>,
     /// The ranges of the formals that took their type from a call's expected function type, so
     /// only findings on those say the call supplied the type.
     hinted_parameters: ArenaSet<'a, TextRange>,
-    expression_annotations: ArenaMap<'a, ExprId, Annotation<'db>>,
-    environment: Environment<'db>,
+    expression_annotations: Column<'a, ExprId, Annotation<'db>>,
+    environment: Environment<'db, 'a>,
     scheme_arena: Vec<TypeScheme<'db>>,
     /// The reads that may keep a literal variable open, because they are an operand whose
     /// other operand may decide it. Every other read decides it as R's type.
-    literal_reads: ArenaSet<'a, ExprId>,
+    literal_reads: Bitset<'a, ExprId>,
     recorded: RecordedTypes<'db>,
-    recorded_patterns: ArenaMap<'a, PatId, Ty<'db>>,
-    recorded_expectations: ArenaMap<'a, ExprId, Ty<'db>>,
-    recorded_loop_variables: ArenaMap<'a, ExprId, Ty<'db>>,
-    selected_overloads: ArenaMap<'a, ExprId, usize>,
-    callee_targets: ArenaMap<'a, ExprId, CalleeTarget>,
-    masked_reads: ArenaSet<'a, ExprId>,
+    recorded_patterns: Column<'a, PatId, Ty<'db>>,
+    recorded_expectations: Column<'a, ExprId, Ty<'db>>,
+    recorded_loop_variables: Column<'a, ExprId, Ty<'db>>,
+    selected_overloads: Column<'a, ExprId, usize>,
+    callee_targets: Column<'a, ExprId, CalleeTarget>,
+    masked_reads: Bitset<'a, ExprId>,
     /// How many enclosing `[` index a value that may be a data.table of unknown columns.
     unseen_frames: u32,
     /// Queries being inferred, innermost last: a bare name inside one reads a column.
     column_scopes: Vec<ColumnScope<'db>>,
-    column_misses: ArenaMap<'a, ExprId, ColumnMiss>,
+    column_misses: Column<'a, ExprId, ColumnMiss>,
     /// Frame queries being inferred. data.table syntax makes naming resolve a whole
     /// bracket quietly, but inside a frame query ry knows the columns, so a quiet read
     /// that is no column still reads its global.
@@ -1542,21 +1699,22 @@ struct Checker<'db, 'a> {
     /// so the join survives at the definition site.
     pending_enclosing_writes: Vec<(BindingId, Ty<'db>)>,
     /// Slots a closure read before any write reached them (the letrec shape).
-    forward_captured: ArenaSet<'a, BindingId>,
+    forward_captured: Bitset<'a, BindingId>,
     /// Variable-erased join of every write to a captured slot, surviving rollbacks;
     /// forward-capture reads resolve here instead of the empty definition-point entry.
-    capture_joins: ArenaMap<'a, BindingId, Ty<'db>>,
+    capture_joins: Column<'a, BindingId, Ty<'db>>,
     /// Closures were inferred against an incomplete capture join, so the body re-checks once.
     capture_repass_needed: bool,
     /// Per function body: the variable each `<<-`-written enclosing slot reads beside its
-    /// enclosing type on entry, and whether the body's first write has bound it yet.
-    superassign_seeds: ArenaMap<'a, BindingId, (Ty<'db>, bool)>,
+    /// enclosing type on entry, and whether the body's first write has bound it yet. A body
+    /// seeds the few slots it writes with `<<-`, so the list is searched, not indexed.
+    superassign_seeds: SmallVec<[SuperassignSeed<'db>; 2]>,
     /// Top-level slots whose unwritten path read the cross-item binding: a pre-state
     /// that loop passes re-establish after their rollback.
-    pre_materialized: ArenaMap<'a, BindingId, Ty<'db>>,
-    no_default_formals: ArenaSet<'a, BindingId>,
+    pre_materialized: Column<'a, BindingId, Ty<'db>>,
+    no_default_formals: Bitset<'a, BindingId>,
     /// Unannotated formals with a default; a condition on one does not pin its type.
-    defaulted_formals: ArenaSet<'a, BindingId>,
+    defaulted_formals: Bitset<'a, BindingId>,
     /// Slots for names this item reads but another item binds, so guard refinements live
     /// in the environment like any slot's. Ids are minted above naming's so they never collide.
     non_local_slots: ArenaMap<'a, Symbol, BindingId>,
@@ -1565,20 +1723,20 @@ struct Checker<'db, 'a> {
     /// compared by site so a re-pass over the same write keeps it. `None` once a second write
     /// site, or a write of anything else, appears. Queries read it for column names given through a variable
     /// (`.SDcols = cols`, `(cols) := ...`).
-    string_values: ArenaMap<'a, BindingId, Option<StringWrite>>,
+    string_values: Column<'a, BindingId, Option<StringWrite>>,
     /// Slots read somewhere other than as a call head, built on first need.
-    value_read_slots: Option<ArenaSet<'a, BindingId>>,
+    value_read_slots: Option<Bitset<'a, BindingId>>,
     /// Slots whose type the code inferred rather than a declaration stated: those an
     /// unannotated assignment in the body has written so far, and undeclared formals, whose
     /// `NULL` is a placeholder default (NlcOptim's `solqp(H = NULL, ...)`) or the shape an
     /// `is.null()` test gave them (Rsolnp's `if (is.null(eqfun)) ...`).
-    computed_slots: ArenaSet<'a, BindingId>,
+    computed_slots: Bitset<'a, BindingId>,
     /// Slots whose latest write so far is a lookup in a collection (`handler <- handlers[[name]]`),
     /// so a call through them must suit every member the collection holds.
-    lookup_slots: ArenaSet<'a, BindingId>,
+    lookup_slots: Bitset<'a, BindingId>,
     /// Slots that some write so far gave a type other than `NULL`, so a `NULL` read from them
     /// is a path the code takes rather than a placeholder.
-    valued_slots: ArenaSet<'a, BindingId>,
+    valued_slots: Bitset<'a, BindingId>,
     /// The item's `<<-` target names, sorted.
     super_assigned: Vec<Symbol>,
 }
@@ -1604,6 +1762,15 @@ enum Callable {
     Yes,
 }
 
+/// The variable an enclosing slot reads on entry to a body that writes it with `<<-`.
+#[derive(Clone, Copy)]
+struct SuperassignSeed<'db> {
+    slot: BindingId,
+    variable: Ty<'db>,
+    /// The body's first write has bound the variable.
+    written: bool,
+}
+
 /// The evaluation frame of one query `f[i, j, by]`.
 struct ColumnScope<'db> {
     /// `None` when the frame's columns are not known, which makes every bare name silent.
@@ -1612,8 +1779,8 @@ struct ColumnScope<'db> {
     /// A binding made inside the bracket (a closure's parameter in `j`) stays lexical.
     bracket: TextRange,
     subset_data: Ty<'db>,
-    /// Called names inside the bracket, which never read a column.
-    callees: FxHashSet<ExprId>,
+    /// Called names inside the bracket, which never read a column, in ascending order.
+    callees: SmallVec<[ExprId; 8]>,
     /// The two sides of a join, which `j` can also read as `x.col` and `i.col`.
     join: Option<JoinSides<'db>>,
 }
@@ -1943,7 +2110,7 @@ fn mirrored(operator: BinaryOperator) -> BinaryOperator {
 
 fn guard_members<'db>(db: &'db dyn Db, resolved: Ty<'db>) -> Vec<Ty<'db>> {
     match resolved.kind(db) {
-        TyKind::Union(members) => members.clone(),
+        TyKind::Union(members) => members.to_vec(),
         _ => vec![resolved],
     }
 }
@@ -2362,7 +2529,7 @@ fn shape_verdict<'db>(
             .position(|field| field.name == name)
             .is_some_and(filled)
     };
-    for read in &function.default_reads {
+    for read in function.default_reads.iter() {
         let name = read.formal.text(db);
         if !supplied(read.formal)
             && !supplied(read.default_of)
@@ -2809,7 +2976,7 @@ struct EarlyReturn<'db> {
     value: Option<ExprId>,
 }
 
-impl<'db> Checker<'db, '_> {
+impl<'db, 'a> Checker<'db, 'a> {
     fn recorded_type(&self, id: ExprId) -> Ty<'db> {
         self.recorded
             .get(&id)
@@ -3025,7 +3192,7 @@ impl<'db> Checker<'db, '_> {
         let TyKind::NativeRecord(fields) = expected.kind(self.db) else {
             return None;
         };
-        let [field] = fields.as_slice() else {
+        let [field] = fields else {
             return None;
         };
         let mut current = value;
@@ -3113,23 +3280,23 @@ impl<'db> Checker<'db, '_> {
         // Of a union such as `Record{...} | NULL`, only a member of the literal's own shape can
         // be the one the literal was meant to be.
         let candidates: Vec<Ty<'db>> = match expected.kind(self.db) {
-            TyKind::Union(members) => members.clone(),
+            TyKind::Union(members) => members.to_vec(),
             _ => vec![expected],
         };
         let (component, expected, found) = match module.kind(value) {
             ExpressionKind::Record(fields) => {
-                let TyKind::NativeRecord(found_fields) = found.kind(self.db).clone() else {
+                let TyKind::NativeRecord(found_fields) = *found.kind(self.db) else {
                     return None;
                 };
                 let expected_fields = unique_member(self.db, &candidates, |kind| match kind {
-                    TyKind::NativeRecord(fields) => Some(fields.clone()),
+                    TyKind::NativeRecord(fields) => Some(*fields),
                     _ => None,
                 })?;
                 if expected_fields.len() != found_fields.len() {
                     return None;
                 }
                 let mut differing = Vec::new();
-                for found_field in &found_fields {
+                for found_field in found_fields.iter() {
                     let expected_field = expected_fields
                         .iter()
                         .find(|field| field.name == found_field.name)?;
@@ -3146,19 +3313,21 @@ impl<'db> Checker<'db, '_> {
                 single(differing)?
             }
             ExpressionKind::Tuple(items) => {
-                let TyKind::NativeTuple(found_items) = found.kind(self.db).clone() else {
+                let TyKind::NativeTuple(found_items) = *found.kind(self.db) else {
                     return None;
                 };
                 let expected_items = unique_member(self.db, &candidates, |kind| match kind {
-                    TyKind::NativeTuple(items) => Some(items.clone()),
+                    TyKind::NativeTuple(items) => Some(*items),
                     _ => None,
                 })?;
                 if expected_items.len() != found_items.len() || items.len() != found_items.len() {
                     return None;
                 }
                 let mut differing = Vec::new();
-                for ((&item, &expected_ty), &found_ty) in
-                    module[items].iter().zip(&expected_items).zip(&found_items)
+                for ((&item, &expected_ty), &found_ty) in module[items]
+                    .iter()
+                    .zip(expected_items.iter())
+                    .zip(found_items.iter())
                 {
                     let expected_ty = self.table.resolve(self.db, expected_ty);
                     let found_ty = self.table.resolve(self.db, found_ty);
@@ -3283,13 +3452,13 @@ impl<'db> Checker<'db, '_> {
                 let (spelling, target, value) = (*spelling, *target, *value);
                 let declares_function = self.declared_function_annotation(id).filter(|_| {
                     matches!(self.module.kind(value), ExpressionKind::Function { .. })
-                        && !self.expression_annotations.contains_key(&value)
+                        && !self.expression_annotations.contains_key(value)
                 });
                 let computed =
-                    declares_function.is_none() && !self.expression_annotations.contains_key(&id);
+                    declares_function.is_none() && !self.expression_annotations.contains_key(id);
                 // An annotated value (`@UserId(5L)`) is typed by its annotation, so it is
                 // never one of the bare literals below.
-                let value_annotated = self.expression_annotations.contains_key(&value);
+                let value_annotated = self.expression_annotations.contains_key(value);
                 let value_ty = match declares_function {
                     Some(declared) => {
                         for (name, constraint) in &declared.binders {
@@ -3313,7 +3482,7 @@ impl<'db> Checker<'db, '_> {
                         let literal = number_literal(self.module, value).filter(|_| {
                             binds_name
                                 && !value_annotated
-                                && !self.expression_annotations.contains_key(&id)
+                                && !self.expression_annotations.contains_key(id)
                         });
                         let value_ty = match literal {
                             Some(literal) => {
@@ -3336,7 +3505,7 @@ impl<'db> Checker<'db, '_> {
                                     kind @ (LiteralKind::String(_) | LiteralKind::Logical(_)),
                                 ) if binds_name
                                     && !value_annotated
-                                    && !self.expression_annotations.contains_key(&id) =>
+                                    && !self.expression_annotations.contains_key(id) =>
                                 {
                                     let constraint = match kind {
                                         LiteralKind::String(_) => Constraint::StrLiteral,
@@ -3349,12 +3518,29 @@ impl<'db> Checker<'db, '_> {
                                 // An annotated binding of a variable may decide the variable's
                                 // literal, so its read stays undecided until the annotation.
                                 ExpressionKind::NameRef(_)
-                                    if self.expression_annotations.contains_key(&id) =>
+                                    if self.expression_annotations.contains_key(id) =>
                                 {
                                     let fresh = self.literal_reads.insert(value);
                                     let ty = self.infer(value);
                                     if fresh {
-                                        self.literal_reads.remove(&value);
+                                        self.literal_reads.remove(value);
+                                    }
+                                    ty
+                                }
+                                // A write into a ry list's item or a ry record's field may
+                                // decide the variable's literal (`lookup[[i]] <- j`,
+                                // `r$x <- j`), which the write itself does.
+                                ExpressionKind::NameRef(_)
+                                    if matches!(
+                                        self.module.kind(target),
+                                        ExpressionKind::Index { double: true, .. }
+                                            | ExpressionKind::Field { .. }
+                                    ) =>
+                                {
+                                    let fresh = self.literal_reads.insert(value);
+                                    let ty = self.infer(value);
+                                    if fresh {
+                                        self.literal_reads.remove(value);
                                     }
                                     ty
                                 }
@@ -3363,7 +3549,7 @@ impl<'db> Checker<'db, '_> {
                                 // binding in a typed file they are a ry value too.
                                 _ if binds_name
                                     && !value_annotated
-                                    && !self.expression_annotations.contains_key(&id)
+                                    && !self.expression_annotations.contains_key(id)
                                     && self.binds_ry_value()
                                     && let Some(scalar) =
                                         literal_value_scalar(self.module, value) =>
@@ -3387,11 +3573,11 @@ impl<'db> Checker<'db, '_> {
                 if let Some(&slot) = self.naming.resolutions.get(&target) {
                     match computed {
                         true => self.computed_slots.insert(slot),
-                        false => self.computed_slots.remove(&slot),
+                        false => self.computed_slots.remove(slot),
                     };
                     match self.is_lookup(value) {
                         true => self.lookup_slots.insert(slot),
-                        false => self.lookup_slots.remove(&slot),
+                        false => self.lookup_slots.remove(slot),
                     };
                     // A `<<-` write reaches the readers in sibling closures only once the
                     // defining frame joins it, so until then they still read the `NULL`.
@@ -3459,7 +3645,7 @@ impl<'db> Checker<'db, '_> {
                 );
                 let ty = self.infer_call_expression(id, range, callee, &module[arguments]);
                 for &value in &literal_arguments {
-                    self.literal_reads.remove(&value);
+                    self.literal_reads.remove(value);
                     let argument = self.recorded_type(value);
                     if self.open_literal_var(argument) {
                         self.default_literal_var(argument, false);
@@ -3507,7 +3693,7 @@ impl<'db> Checker<'db, '_> {
                     if reaches_project {
                         globals.namespace_scheme(name)
                     } else {
-                        self.library?.schemes.get(name.as_str())?.last().cloned()
+                        self.library?.schemes.get(name)?.last().cloned()
                     }
                 }) {
                     Some(namespace_scheme) => self.instantiate(&namespace_scheme),
@@ -3547,7 +3733,7 @@ impl<'db> Checker<'db, '_> {
                 // item type and `acc + x` makes the accumulator that type too.
                 let hints: Vec<Option<Ty<'db>>> = self
                     .parameter_hints
-                    .remove(&id)
+                    .remove(id)
                     .filter(|hints| {
                         hints.iter().flatten().any(|&hint| {
                             let hint = self.table.resolve(self.db, hint);
@@ -3671,29 +3857,29 @@ impl<'db> Checker<'db, '_> {
                 self.table.level -= 1;
                 Ty::new(
                     self.db,
-                    TyKind::Function(FunctionType {
-                        positional: Vec::new(),
-                        named,
+                    TyKind::Function(&FunctionType {
+                        positional: &[],
+                        named: &named,
                         variadic,
                         ret: return_ty,
                         inferred: true,
                         flag_return,
-                        quoted: module[parameters]
+                        quoted: &module[parameters]
                             .iter()
                             .filter(|parameter| uses.quotes(parameter.name))
                             .map(|parameter| Name::new(self.db, parameter.name))
-                            .collect(),
-                        default_reads,
-                        missing_tested: module[parameters]
+                            .collect::<Vec<_>>(),
+                        default_reads: &default_reads,
+                        missing_tested: &module[parameters]
                             .iter()
                             .filter(|parameter| uses.missing_tested.contains(&parameter.name))
                             .map(|parameter| Name::new(self.db, parameter.name))
-                            .collect(),
-                        condition_only: self
+                            .collect::<Vec<_>>(),
+                        condition_only: &self
                             .condition_only_names(*body, &module[parameters])
                             .into_iter()
                             .map(|name| Name::new(self.db, name))
-                            .collect(),
+                            .collect::<Vec<_>>(),
                         null_unless,
                         reduces,
                         from_calls: false,
@@ -3756,8 +3942,11 @@ impl<'db> Checker<'db, '_> {
             ExpressionKind::Break | ExpressionKind::Next => unknown(self.db),
             ExpressionKind::Tuple(items) => {
                 let items = *items;
-                let items = module[items].iter().map(|&item| self.infer(item)).collect();
-                Ty::new(self.db, TyKind::NativeTuple(items))
+                let items = module[items]
+                    .iter()
+                    .map(|&item| self.component(item))
+                    .collect::<TypeList<'db>>();
+                Ty::new(self.db, TyKind::NativeTuple(&items))
             }
             ExpressionKind::Array(items) => self.infer_array_literal(&module[items]),
             ExpressionKind::Record(fields) => {
@@ -3766,14 +3955,16 @@ impl<'db> Checker<'db, '_> {
                     .iter()
                     .map(|field| NativeField {
                         name: Name::new(self.db, field.name),
-                        ty: self.infer(field.value),
+                        ty: self.component(field.value),
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
                 native_record(self.db, fields)
             }
             ExpressionKind::Tag { name, payload, .. } => {
                 let (name, payload) = (*name, *payload);
-                let payload = payload.map(|payload| self.infer(payload));
+                // A payload's literals are decided now: tags join by their payload types,
+                // which an open literal would leave undecided.
+                let payload = payload.map(|payload| self.infer_payload(payload));
                 Ty::new(
                     self.db,
                     TyKind::Tag(Name::new(self.db, module.name(name).as_str()), payload),
@@ -3850,7 +4041,7 @@ impl<'db> Checker<'db, '_> {
                 && self.library.is_some_and(|library| {
                     NATIVE_NAMESPACES
                         .iter()
-                        .any(|namespace| library.exports(namespace, function))
+                        .any(|namespace| library.exports(*namespace, function))
                 }))
         {
             return;
@@ -3894,7 +4085,7 @@ impl<'db> Checker<'db, '_> {
     /// `@trust` and `@if-unknown` do not check the value, and `@new` mints a nominal
     /// rather than declaring a signature.
     fn declared_function_annotation(&self, annotated: ExprId) -> Option<TypeScheme<'db>> {
-        let annotation = self.expression_annotations.get(&annotated)?;
+        let annotation = self.expression_annotations.get(annotated)?;
         if annotation.trusted || annotation.if_unknown || annotation.new_nominal.is_some() {
             return None;
         }
@@ -3904,7 +4095,7 @@ impl<'db> Checker<'db, '_> {
 
     fn inline_parameters(&self, annotated: ExprId) -> Vec<String> {
         self.expression_annotations
-            .get(&annotated)
+            .get(annotated)
             .map(|annotation| annotation.inline_parameters.clone())
             .unwrap_or_default()
     }
@@ -3915,7 +4106,7 @@ impl<'db> Checker<'db, '_> {
         value: ExprId,
         value_ty: Ty<'db>,
     ) -> Ty<'db> {
-        let Some(annotation) = self.expression_annotations.get(&annotated).cloned() else {
+        let Some(annotation) = self.expression_annotations.get(annotated).cloned() else {
             return value_ty;
         };
         if annotation.declared.is_some() || annotation.new_nominal.is_some() {
@@ -4105,7 +4296,7 @@ impl<'db> Checker<'db, '_> {
         let ty = self.read_slot(id, slot);
         // Only an operand whose other operand is a ry number may still decide a variable
         // written with a literal; every other read makes it R's type.
-        if !self.literal_reads.contains(&id) && self.open_literal_var(ty) {
+        if !self.literal_reads.contains(id) && self.open_literal_var(ty) {
             self.default_literal_var(ty, false);
         }
         if self.unseen_frames > 0
@@ -4186,7 +4377,7 @@ impl<'db> Checker<'db, '_> {
             && !is_base_export(self.db, name)
             && (self
                 .globals
-                .is_some_and(|globals| globals.library_candidates(name).is_some())
+                .is_some_and(|globals| globals.library_candidates(*name).is_some())
                 || imported_by_name(self.db, name))
         {
             self.record_strict_origin(
@@ -4225,7 +4416,7 @@ impl<'db> Checker<'db, '_> {
             None => {
                 if self.naming.extras().captured_slots.contains(&slot) {
                     self.forward_captured.insert(slot);
-                    if let Some(&join) = self.capture_joins.get(&slot) {
+                    if let Some(&join) = self.capture_joins.get(slot) {
                         return join;
                     }
                 } else if let Some(observed) = self.materialize_pre_state(slot, false) {
@@ -4249,7 +4440,7 @@ impl<'db> Checker<'db, '_> {
         if self
             .column_scopes
             .iter()
-            .any(|scope| scope.callees.contains(&id))
+            .any(|scope| scope.callees.binary_search(&id).is_ok())
         {
             return match resolved {
                 Some(_) => None,
@@ -4452,7 +4643,7 @@ impl<'db> Checker<'db, '_> {
                 let literal = spelling != AssignSpelling::Super
                     && literal_strings(self.module, value).is_some();
                 let write = StringWrite { target, value };
-                let tracked = match self.string_values.get(&slot) {
+                let tracked = match self.string_values.get(slot) {
                     None if literal => Some(write),
                     Some(Some(existing)) if literal && *existing == write => Some(write),
                     _ => None,
@@ -4462,16 +4653,17 @@ impl<'db> Checker<'db, '_> {
                     // The rest of this body reads the value just written. The scopes that
                     // hold the variable join it with their own writes once the body ends.
                     let written = self.table.resolve(self.db, value_ty);
-                    if let Some((seed, bound)) = self.superassign_seeds.get(&slot).copied()
-                        && !bound
+                    if let Some(position) = self
+                        .superassign_seeds
+                        .iter()
+                        .position(|seed| seed.slot == slot && !seed.written)
                     {
+                        let seed = self.superassign_seeds[position].variable;
                         // A read before this first write already used the variable as a
                         // value of some type, so a write of another type breaks that read.
                         let snapshot = self.table.snapshot();
                         match self.table.unify(self.db, seed, written) {
-                            Ok(()) => {
-                                self.superassign_seeds.insert(slot, (seed, true));
-                            }
+                            Ok(()) => self.superassign_seeds[position].written = true,
                             // An accumulator `x <<- c(x, list(item))` reads itself inside the
                             // write, which the occurs check rejects; the seed stays open.
                             Err(UnifyError::Occurs(..)) => self.table.rollback(snapshot),
@@ -4545,7 +4737,7 @@ impl<'db> Checker<'db, '_> {
         match module.kind(id) {
             ExpressionKind::NameRef(_) => {
                 let slot = self.naming.resolutions.get(&id)?;
-                let write = self.string_values.get(slot)?.as_ref()?;
+                let write = self.string_values.get(*slot)?.as_ref()?;
                 literal_strings(module, write.value)
             }
             ExpressionKind::Paren(inner) => self.column_names(*inner),
@@ -4558,14 +4750,14 @@ impl<'db> Checker<'db, '_> {
             return;
         }
         let written = erase_vars(self.db, self.table.resolve(self.db, value_ty));
-        let joined = match self.capture_joins.get(&slot) {
+        let joined = match self.capture_joins.get(slot) {
             Some(&existing) if existing != written => self.join_types(existing, written),
             Some(&existing) => existing,
             None => written,
         };
-        let changed = self.capture_joins.get(&slot) != Some(&joined);
+        let changed = self.capture_joins.get(slot) != Some(&joined);
         self.capture_joins.insert(slot, joined);
-        if changed && self.forward_captured.contains(&slot) {
+        if changed && self.forward_captured.contains(slot) {
             self.capture_repass_needed = true;
         }
     }
@@ -4639,6 +4831,10 @@ impl<'db> Checker<'db, '_> {
         let prior = self.table.resolve(self.db, prior);
         let value_resolved = self.table.resolve(self.db, value_ty);
         let written = self.replacement_written_type(target, base, value, prior, value_resolved);
+        // Only a ry list decides a literal it is written; any other container gives it R's type.
+        if self.open_literal_var(value_ty) {
+            self.default_literal_var(value_ty, false);
+        }
         if let Some(&slot) = self.naming.resolutions.get(&base) {
             self.environment.set(slot, EnvEntry::Mono(written));
         }
@@ -4872,9 +5068,8 @@ impl<'db> Checker<'db, '_> {
             )
         {
             let written = members
-                .clone()
-                .into_iter()
-                .map(|member| {
+                .iter()
+                .map(|&member| {
                     self.write_replacement_step(lhs, step.clone(), value_expression, member, value)
                 })
                 .collect::<Vec<_>>();
@@ -4887,8 +5082,9 @@ impl<'db> Checker<'db, '_> {
             _ => None,
         };
         if let Some(field_name) = field_name {
-            return match prior.kind(self.db).clone() {
-                TyKind::Record(mut fields) => {
+            return match *prior.kind(self.db) {
+                TyKind::Record(fields) => {
+                    let mut fields = fields.to_vec();
                     match fields
                         .iter_mut()
                         .find(|field| field.name.text(self.db) == field_name)
@@ -4900,13 +5096,14 @@ impl<'db> Checker<'db, '_> {
                             optional: false,
                         }),
                     }
-                    Ty::new(self.db, TyKind::Record(fields))
+                    Ty::new(self.db, TyKind::Record(&fields))
                 }
                 // R's `f$x <- NULL` drops the column, as `:=` does.
                 TyKind::Frame(
                     kind @ (FrameKind::DataFrame | FrameKind::DataTable),
-                    Some(mut columns),
+                    Some(columns),
                 ) => {
+                    let mut columns = columns.to_vec();
                     let position = columns
                         .iter()
                         .position(|column| column.name.text(self.db) == field_name);
@@ -4926,20 +5123,20 @@ impl<'db> Checker<'db, '_> {
                             optional: false,
                         }),
                     }
-                    Ty::new(self.db, TyKind::Frame(kind, Some(columns)))
+                    Ty::new(self.db, TyKind::Frame(kind, Some(&columns)))
                 }
                 // `x <- NULL; x$a <- 1` and `list()` both grow into a one-field list.
                 TyKind::Null => Ty::new(
                     self.db,
-                    TyKind::Record(vec![RecordField {
+                    TyKind::Record(&[RecordField {
                         name: Name::new(self.db, field_name),
                         ty: value,
                         optional: false,
                     }]),
                 ),
-                TyKind::Tuple(items) if items.is_empty() => Ty::new(
+                TyKind::Tuple([]) => Ty::new(
                     self.db,
-                    TyKind::Record(vec![RecordField {
+                    TyKind::Record(&[RecordField {
                         name: Name::new(self.db, field_name),
                         ty: value,
                         optional: false,
@@ -4952,8 +5149,14 @@ impl<'db> Checker<'db, '_> {
                         .iter()
                         .find(|field| field.name.text(self.db) == field_name)
                     {
+                        // A literal written into the field takes the field's type, as one
+                        // written into a list's item does.
                         Some(field) => {
-                            if !matches!(value.kind(self.db), TyKind::Unknown)
+                            if self.adapt_literal(value_expression, field.ty)
+                                == LiteralFit::NotLiteral
+                                && !(self.open_literal_var(value)
+                                    && self.table.unify(self.db, value, field.ty).is_ok())
+                                && !matches!(value.kind(self.db), TyKind::Unknown)
                                 && !self.table.compatible(self.db, value, field.ty)
                             {
                                 let range = self.blame_range(value_expression);
@@ -5007,6 +5210,10 @@ impl<'db> Checker<'db, '_> {
                         TyKind::NamedList(union_of(self.db, [element, value])),
                     )
                 }
+                // `x[["b"]] <- 2.5` on an atomic vector writes an element, as `x[[2]]` does.
+                _ if matches!(kind, ExpressionKind::Index { double: true, .. }) => {
+                    atomic_write(self.db, prior, value).unwrap_or(prior)
+                }
                 _ => prior,
             };
         }
@@ -5014,26 +5221,12 @@ impl<'db> Checker<'db, '_> {
             (&step, prior.kind(self.db))
             && *position < items.len()
         {
-            let mut items = items.clone();
+            let mut items = TypeList::from_slice(items);
             items[*position] = value;
-            return Ty::new(self.db, TyKind::Tuple(items));
+            return Ty::new(self.db, TyKind::Tuple(&items));
         }
-        // R coerces the whole vector when the written value has a wider type, so
-        // `prob <- rep(NA, n); prob[i] <- 0.5` leaves `prob` a `double[]`.
         if matches!(step, ReplacementStep::Slice) {
-            let (Some(container), Some(written)) = (
-                combine_operand_atomic(self.db, prior),
-                combine_operand_atomic(self.db, value),
-            ) else {
-                return prior;
-            };
-            let element = scalar(self.db, promote_combine_atomic(container, written));
-            // A type carries no length, so a scalar stays a scalar as it does after `x[1] <- 2L`.
-            return match prior.kind(self.db) {
-                TyKind::Scalar(_) => element,
-                TyKind::NamedVector(_) => Ty::new(self.db, TyKind::NamedVector(element)),
-                _ => Ty::new(self.db, TyKind::Vector(element)),
-            };
+            return atomic_write(self.db, prior, value).unwrap_or(prior);
         }
         if !matches!(
             step,
@@ -5041,8 +5234,28 @@ impl<'db> Checker<'db, '_> {
         ) {
             return prior;
         }
+        if let Some(written) = atomic_write(self.db, prior, value) {
+            return written;
+        }
+        // A ry list's item type is fixed, so the write is checked against it, and it is the use
+        // that decides a literal: `j <- 1; lookup[[i]] <- j` makes `j` an `I64` in a `List<I64>`.
+        if let Some(item) = array_element(self.db, prior) {
+            if self.adapt_literal(value_expression, item) == LiteralFit::NotLiteral
+                && !(self.open_literal_var(value) && self.table.unify(self.db, value, item).is_ok())
+            {
+                let value = self.table.resolve(self.db, value);
+                if !matches!(value.kind(self.db), TyKind::Unknown | TyKind::Any)
+                    && !self.table.compatible(self.db, value, item)
+                {
+                    let range = self.blame_range(value_expression);
+                    let error = self.type_mismatch(range, item, value, Some(value_expression));
+                    self.errors.push(error);
+                }
+            }
+            return prior;
+        }
         match prior.kind(self.db) {
-            TyKind::Tuple(items) if items.is_empty() => Ty::new(self.db, TyKind::NamedList(value)),
+            TyKind::Tuple([]) => Ty::new(self.db, TyKind::NamedList(value)),
             // `globals[[key]] <- value` under a computed key may add a field or replace any
             // one, so the record's fields are no longer known and a later `globals[[key]]` may
             // be `value` as much as an original field.
@@ -5217,8 +5430,8 @@ impl<'db> Checker<'db, '_> {
         };
         let probed = &self.module[text];
         self.globals.is_some_and(|globals| {
-            globals
-                .library_candidates(probed)
+            Symbol::lookup(probed)
+                .and_then(|probed| globals.library_candidates(probed))
                 .is_some_and(|candidates| !candidates.is_empty())
                 && !globals.defined_in_project(Symbol::new(probed), false)
         })
@@ -5389,8 +5602,8 @@ impl<'db> Checker<'db, '_> {
                 let items = self.module[items]
                     .iter()
                     .map(|_| self.fresh(Constraint::Unconstrained))
-                    .collect();
-                Some(Ty::new(self.db, TyKind::NativeTuple(items)))
+                    .collect::<TypeList<'db>>();
+                Some(Ty::new(self.db, TyKind::NativeTuple(&items)))
             }
             PatternKind::Record { fields, rest: None } => {
                 let fields = self.module[fields]
@@ -5399,7 +5612,7 @@ impl<'db> Checker<'db, '_> {
                         name: Name::new(self.db, field.name),
                         ty: self.fresh(Constraint::Unconstrained),
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
                 Some(native_record(self.db, fields))
             }
             _ => None,
@@ -5494,9 +5707,10 @@ impl<'db> Checker<'db, '_> {
             range: name_range,
         } = self.module[name];
         let subject = self.table.resolve(self.db, subject);
-        let members = match subject.kind(self.db) {
-            TyKind::Union(members) => members.clone(),
-            _ => vec![subject],
+        let single = [subject];
+        let members: &[Ty<'db>] = match subject.kind(self.db) {
+            TyKind::Union(members) => members,
+            _ => &single,
         };
         let tags: Vec<(&str, Option<Ty<'db>>)> = members
             .iter()
@@ -5637,12 +5851,13 @@ impl<'db> Checker<'db, '_> {
         subject: Ty<'db>,
         component: impl Fn(&'db dyn Db, Ty<'db>) -> Option<Ty<'db>>,
     ) -> Ty<'db> {
-        let members = match subject.kind(self.db) {
-            TyKind::Union(members) => members.clone(),
-            _ => vec![subject],
+        let single = [subject];
+        let members: &[Ty<'db>] = match subject.kind(self.db) {
+            TyKind::Union(members) => members,
+            _ => &single,
         };
         let mut found = Vec::with_capacity(members.len());
-        for member in members {
+        for &member in members {
             match component(self.db, member) {
                 Some(ty) => found.push(ty),
                 None => return unknown(self.db),
@@ -5665,9 +5880,8 @@ impl<'db> Checker<'db, '_> {
         }
         if let TyKind::Union(members) = subject.kind(self.db) {
             return members
-                .clone()
-                .into_iter()
-                .any(|member| self.pattern_admits(pattern, member));
+                .iter()
+                .any(|&member| self.pattern_admits(pattern, member));
         }
         match &module.pattern(pattern).kind {
             PatternKind::Missing | PatternKind::Wildcard | PatternKind::Bind(_) => true,
@@ -5852,6 +6066,67 @@ impl<'db> Checker<'db, '_> {
         Some(ty)
     }
 
+    /// A tag's payload, a tuple or a record whose own items are inferred as written.
+    fn infer_payload(&mut self, payload: ExprId) -> Ty<'db> {
+        let module = self.module;
+        let ty = match module.kind(payload) {
+            ExpressionKind::Tuple(items) => {
+                let items = module[*items]
+                    .iter()
+                    .map(|&item| self.infer(item))
+                    .collect::<TypeList<'db>>();
+                Ty::new(self.db, TyKind::NativeTuple(&items))
+            }
+            ExpressionKind::Record(fields) => {
+                let fields = module[*fields]
+                    .iter()
+                    .map(|field| NativeField {
+                        name: Name::new(self.db, field.name),
+                        ty: self.infer(field.value),
+                    })
+                    .collect::<Vec<_>>();
+                native_record(self.db, fields)
+            }
+            _ => return self.infer(payload),
+        };
+        self.record(payload, ty)
+    }
+
+    /// A tuple item or a record field. A literal there is open, as a literal bound
+    /// to a variable is: a later use decides it (`Str.concat(s, pair[[1]])` makes `"a"` in
+    /// `pair <- ("a", 1)` a `Str`), and otherwise it has R's type.
+    fn component(&mut self, value: ExprId) -> Ty<'db> {
+        let module = self.module;
+        let mut inner = value;
+        while let ExpressionKind::Paren(paren) = module.kind(inner) {
+            inner = *paren;
+        }
+        let ty = if let Some(literal) = number_literal(module, inner) {
+            let constraint = if literal.is_fraction() {
+                Constraint::FracLiteral
+            } else {
+                Constraint::WholeLiteral {
+                    integer: literal.integer,
+                }
+            };
+            let ty = self.fresh_literal(constraint, false);
+            self.record_literal(inner, ty);
+            ty
+        } else {
+            let constraint = match module.kind(inner) {
+                ExpressionKind::Literal(LiteralKind::String(_)) => Constraint::StrLiteral,
+                ExpressionKind::Literal(LiteralKind::Logical(_)) => Constraint::BoolLiteral,
+                _ => return self.infer(value),
+            };
+            let ty = self.fresh_literal(constraint, false);
+            self.record(inner, ty)
+        };
+        if inner != value {
+            self.record(value, ty);
+        }
+        ty
+    }
+
     /// A `List` holds ry values only. An R value would bring `NA`, attributes and recycling
     /// into a type that has none, so it crosses into a `List` through `List.from_r`.
     fn array_item_allowed(&mut self, ty: Ty<'db>) -> bool {
@@ -5884,14 +6159,15 @@ impl<'db> Checker<'db, '_> {
         let operand_range = self.blame_range(operand);
         let inferred = self.infer(operand);
         let resolved = self.settle_literals(inferred);
-        let members = match resolved.kind(self.db) {
-            TyKind::Union(members) => members.clone(),
+        let single = [resolved];
+        let members: &[Ty<'db>] = match resolved.kind(self.db) {
+            TyKind::Union(members) => members,
             TyKind::Unknown | TyKind::Any => return resolved,
-            _ => vec![resolved],
+            _ => &single,
         };
         let mut oks = Vec::new();
         let mut errs = Vec::new();
-        for member in members {
+        for &member in members {
             match member.kind(self.db) {
                 TyKind::Tag(name, Some(payload)) if name.text(self.db) == "Ok" => {
                     match payload.kind(self.db) {
@@ -5941,7 +6217,7 @@ impl<'db> Checker<'db, '_> {
         let inferred = self.infer(base);
         let resolved = self.table.resolve(self.db, inferred);
         let native = match resolved.kind(self.db) {
-            TyKind::NativeRecord(native) => Some(native.clone()),
+            TyKind::NativeRecord(native) => Some(*native),
             TyKind::Unknown | TyKind::Any | TyKind::Var(_) => None,
             _ => {
                 for field in fields {
@@ -6061,7 +6337,7 @@ impl<'db> Checker<'db, '_> {
         match resolved.kind(self.db) {
             TyKind::Union(members) => {
                 let mut elements = Vec::with_capacity(members.len());
-                for &member in members {
+                for &member in members.iter() {
                     let element = self.iteration_element(member).map_err(|_| resolved)?;
                     elements.push(element);
                 }
@@ -6134,7 +6410,7 @@ impl<'db> Checker<'db, '_> {
             self.environment.rollback(mark);
             // A read this pass discovered the slot's pre-loop state through the cross-item
             // binding; establish it so the body's writes join into it.
-            for (&slot, &ty) in &self.pre_materialized {
+            for (slot, &ty) in self.pre_materialized.iter() {
                 if self.environment.get(slot).is_none() {
                     self.environment.set(slot, EnvEntry::Mono(ty));
                 }
@@ -6469,18 +6745,18 @@ impl<'db> Checker<'db, '_> {
                     ExpressionKind::NameRef(name) => {
                         let forwards = self
                             .globals
-                            .is_none_or(|globals| globals.library_candidates(name).is_none());
+                            .is_none_or(|globals| globals.library_candidates(*name).is_none());
                         let optional_targets = match forwards {
                             true => self.optional_argument_targets(
                                 *callee,
                                 name,
                                 &self.module[arguments],
                             ),
-                            false => Vec::new(),
+                            false => Bitset::new_in(self.arena, 0),
                         };
                         (forwards, optional_targets)
                     }
-                    _ => (false, Vec::new()),
+                    _ => (false, Bitset::new_in(self.arena, 0)),
                 };
                 let library_name = match self.module.kind(*callee) {
                     ExpressionKind::NameRef(name) if !forwards => Some(name.as_str()),
@@ -6499,7 +6775,7 @@ impl<'db> Checker<'db, '_> {
                     if let ExpressionKind::NameRef(value_name) = self.module.kind(value)
                         && ((forwards
                             && (argument_name == Some(*value_name)
-                                || optional_targets.get(index).copied().unwrap_or(false)))
+                                || optional_targets.contains(index)))
                             || library_name.zip(argument_name).is_some_and(
                                 |(function, parameter)| {
                                     tests_missing_without_default(function, parameter.as_str())
@@ -6537,7 +6813,7 @@ impl<'db> Checker<'db, '_> {
         callee: ExprId,
         name: &str,
         arguments: &[Argument],
-    ) -> Vec<bool> {
+    ) -> Bitset<'a, usize> {
         let callee_ty = match self.naming.resolutions.get(&callee) {
             Some(&slot) => match self.environment.get(slot) {
                 Some(EnvEntry::Mono(ty)) => Some(ty),
@@ -6553,7 +6829,11 @@ impl<'db> Checker<'db, '_> {
                         && info.range.start() > self.module.range(callee).start()
                 }) =>
                 {
-                    return vec![true; arguments.len()];
+                    let mut targets = Bitset::new_in(self.arena, arguments.len());
+                    for index in 0..arguments.len() {
+                        targets.insert(index);
+                    }
+                    return targets;
                 }
                 None => None,
             },
@@ -6562,16 +6842,16 @@ impl<'db> Checker<'db, '_> {
                 .and_then(|globals| globals.scheme(Symbol::new(name), true))
                 .map(|scheme| scheme.body),
         };
+        let mut targets = Bitset::new_in(self.arena, arguments.len());
         let Some(TyKind::Function(function)) = callee_ty.map(|ty| ty.kind(self.db)) else {
-            return Vec::new();
+            return targets;
         };
         let leaves_unread = |parameter: &Parameter<'db>| {
             parameter.optional
                 && (parameter.default.is_none()
                     || function.missing_tested.contains(&parameter.name))
         };
-        let mut claimed = vec![false; function.named.len()];
-        let mut targets = vec![false; arguments.len()];
+        let mut claimed = Bitset::new_in(self.arena, function.named.len());
         for (index, argument) in arguments.iter().enumerate() {
             let Some(argument_name) = self.module.argument_name(argument) else {
                 continue;
@@ -6581,8 +6861,10 @@ impl<'db> Checker<'db, '_> {
                 .iter()
                 .position(|parameter| parameter.name.text(self.db) == argument_name.as_str())
             {
-                claimed[formal] = true;
-                targets[index] = leaves_unread(&function.named[formal]);
+                claimed.insert(formal);
+                if leaves_unread(&function.named[formal]) {
+                    targets.insert(index);
+                }
             }
         }
         let pre_rest = function
@@ -6591,7 +6873,7 @@ impl<'db> Checker<'db, '_> {
             .map_or(function.named.len(), |rest| {
                 rest.preceding_named.min(function.named.len())
             });
-        let mut unclaimed = (0..pre_rest).filter(|formal| !claimed[*formal]);
+        let mut unclaimed = (0..pre_rest).filter(|formal| !claimed.contains(*formal));
         for (index, argument) in arguments.iter().enumerate() {
             if argument.name.is_some() {
                 continue;
@@ -6599,7 +6881,9 @@ impl<'db> Checker<'db, '_> {
             let Some(formal) = unclaimed.next() else {
                 break;
             };
-            targets[index] = leaves_unread(&function.named[formal]);
+            if leaves_unread(&function.named[formal]) {
+                targets.insert(index);
+            }
         }
         targets
     }
@@ -6928,7 +7212,7 @@ impl<'db> Checker<'db, '_> {
                 if name == "missing" {
                     return self
                         .no_default_formals
-                        .contains(&slot)
+                        .contains(slot)
                         .then(|| GuardRefinement {
                             true_edge: vec![SlotRefinement::Missing(slot)],
                             false_edge: Vec::new(),
@@ -7405,10 +7689,7 @@ impl<'db> Checker<'db, '_> {
         }
         self.errors.truncate(errors_mark);
         self.strict_origins.truncate(origins_mark);
-        Ty::new(
-            self.db,
-            TyKind::Named(Name::new(self.db, "formula"), Vec::new()),
-        )
+        Ty::new(self.db, TyKind::Named(Name::new(self.db, "formula"), &[]))
     }
 
     fn infer_unary_minus(&mut self, operand: ExprId) -> Ty<'db> {
@@ -7601,7 +7882,7 @@ impl<'db> Checker<'db, '_> {
             return resolved;
         }
         let members: Vec<Ty<'db>> = match resolved.kind(self.db) {
-            TyKind::Union(members) => members.clone(),
+            TyKind::Union(members) => members.to_vec(),
             _ => vec![resolved],
         };
         // `!` coerces a numeric operand as a condition does (`!0` is TRUE), and `!NULL` is an
@@ -7706,8 +7987,8 @@ impl<'db> Checker<'db, '_> {
                 self.literal_reads.insert(rhs);
                 let left = self.infer(lhs);
                 let right = self.infer(rhs);
-                self.literal_reads.remove(&lhs);
-                self.literal_reads.remove(&rhs);
+                self.literal_reads.remove(lhs);
+                self.literal_reads.remove(rhs);
                 if let Some(result) = self.infer_native_operator(operator, lhs, rhs, left, right) {
                     return result;
                 }
@@ -7877,6 +8158,20 @@ impl<'db> Checker<'db, '_> {
         use BinaryOperator::*;
         let left = self.structural(left);
         let right = self.structural(right);
+        // A DataFrame expression beside another one, or beside a ry value that shares R's
+        // representation, builds a bigger expression, as `Ops.Expr` does at run time. `I64` is
+        // left to the ordinary rule, which rejects it: an R operator cannot read one.
+        for (expression, other) in [(left, right), (right, left)] {
+            if is_expr_type(self.db, expression)
+                && (is_expr_type(self.db, other)
+                    || matches!(
+                        other.kind(self.db),
+                        TyKind::Native(NativeScalar::F64 | NativeScalar::Bool | NativeScalar::Str)
+                    ))
+            {
+                return Some(expression);
+            }
+        }
         let (known, known_side, other, other_ty) =
             match (self.ry_number_class(left), self.ry_number_class(right)) {
                 (Some(class), _) => (class, left, rhs, right),
@@ -7929,6 +8224,8 @@ impl<'db> Checker<'db, '_> {
             },
         };
         if !fits {
+            let left = self.settle_literals(left);
+            let right = self.settle_literals(right);
             self.errors.push(TypeError {
                 range,
                 kind: TypeErrorKind::NumberOperands {
@@ -8205,7 +8502,7 @@ impl<'db> Checker<'db, '_> {
                 self.adapt_components(&items, |_| Some(element), expected, value)
             }
             ExpressionKind::Tuple(items) => {
-                let TyKind::NativeTuple(expected_items) = expected.kind(self.db).clone() else {
+                let TyKind::NativeTuple(expected_items) = *expected.kind(self.db) else {
                     return LiteralFit::NotLiteral;
                 };
                 let items = module[items].to_vec();
@@ -8225,11 +8522,12 @@ impl<'db> Checker<'db, '_> {
             } => {
                 let (name, payload) = (*name, *payload);
                 let name = module.name(name);
-                let members = match expected.kind(self.db) {
-                    TyKind::Union(members) => members.clone(),
-                    _ => vec![expected],
+                let single = [expected];
+                let members: &[Ty<'db>] = match expected.kind(self.db) {
+                    TyKind::Union(members) => members,
+                    _ => &single,
                 };
-                let Some(member) = members.into_iter().find(|member| {
+                let Some(member) = members.iter().copied().find(|member| {
                     matches!(member.kind(self.db), TyKind::Tag(tag, Some(_)) if tag.text(self.db) == name.as_str())
                 }) else {
                     return LiteralFit::NotLiteral;
@@ -8244,7 +8542,7 @@ impl<'db> Checker<'db, '_> {
                 fit
             }
             ExpressionKind::Record(fields) => {
-                let TyKind::NativeRecord(expected_fields) = expected.kind(self.db).clone() else {
+                let TyKind::NativeRecord(expected_fields) = *expected.kind(self.db) else {
                     return LiteralFit::NotLiteral;
                 };
                 let fields = module[fields].to_vec();
@@ -8564,7 +8862,6 @@ impl<'db> Checker<'db, '_> {
             else {
                 continue;
             };
-            let members = members.clone();
             let has_class = members
                 .iter()
                 .any(|member| matches!(member.kind(self.db), TyKind::Named(..)));
@@ -8573,7 +8870,7 @@ impl<'db> Checker<'db, '_> {
             let origins_before = self.strict_origins.len();
             let snapshot = self.table.snapshot();
             let mut results = Vec::with_capacity(members.len());
-            for member in members {
+            for &member in members.iter() {
                 let (member_left, member_right) = match index {
                     0 => (member, right),
                     _ => (left, member),
@@ -8638,7 +8935,8 @@ impl<'db> Checker<'db, '_> {
             self.operand_argument(lhs, probe_operand(left)),
             self.operand_argument(rhs, probe_operand(right)),
         ];
-        let class_of = |ty: Ty<'db>| match self.table.shallow_resolve(self.db, ty).kind(self.db) {
+        // Resolved fully, so an alias of a class dispatches as the class it names.
+        let class_of = |ty: Ty<'db>| match self.table.resolve(self.db, ty).kind(self.db) {
             TyKind::Named(name, _) => Some(name.text(self.db).to_owned()),
             _ => None,
         };
@@ -8664,13 +8962,13 @@ impl<'db> Checker<'db, '_> {
         // `Period` that `+.Period` gives. So every class with arithmetic methods is a fit.
         let own_classes = classes.len();
         if !flexible.is_empty() && !classes.is_empty() {
-            let mut others: Vec<&String> = globals
+            let mut others: Vec<Symbol> = globals
                 .arithmetic_classes()
                 .iter()
-                .filter(|class| !classes.contains(class))
+                .filter(|class| !classes.iter().any(|known| known == class))
                 .collect();
             others.sort();
-            classes.extend(others.into_iter().cloned());
+            classes.extend(others.into_iter().map(|class| class.as_str().to_owned()));
         }
         let mut fitting_returns: Vec<Ty<'db>> = Vec::new();
         let mut fits_another_class = false;
@@ -8797,7 +9095,6 @@ impl<'db> Checker<'db, '_> {
         // open members (a parameter rebound on one path) are bound to `logical` as a lone open
         // value would be.
         if let TyKind::Union(members) = resolved.kind(self.db) {
-            let members = members.clone();
             let values: Vec<_> = members
                 .iter()
                 .copied()
@@ -8877,7 +9174,7 @@ impl<'db> Checker<'db, '_> {
                 .naming
                 .resolutions
                 .get(&operand)
-                .is_some_and(|slot| self.defaulted_formals.contains(slot))
+                .is_some_and(|slot| self.defaulted_formals.contains(*slot))
     }
 
     /// An unconstrained variable, or an unconstrained rigid so that a rendered `<T>` scheme
@@ -9165,7 +9462,7 @@ impl<'db> Checker<'db, '_> {
                     .copied()
                     .filter(|member| !matches!(member.kind(self.db), TyKind::Null))
                     .collect(),
-                TyKind::Union(members) => members.clone(),
+                TyKind::Union(members) => members.to_vec(),
                 _ => vec![resolved],
             };
             let atomics: Option<Vec<Atomic>> = members
@@ -9394,7 +9691,7 @@ impl<'db> Checker<'db, '_> {
                 let numeric_beside = members
                     .iter()
                     .any(|&member| numeric_operand_parts(self.db, member).is_some());
-                for &member in members {
+                for &member in members.iter() {
                     if let Some(part) = numeric_operand_parts(self.db, member) {
                         parts.push(part);
                         continue;
@@ -9465,7 +9762,7 @@ impl<'db> Checker<'db, '_> {
         let module = self.module;
         let expression = function_id;
         let ExpressionKind::Function { parameters, body } = module.kind(expression) else {
-            return Ty::new(self.db, TyKind::Function(declared.clone()));
+            return Ty::new(self.db, TyKind::Function(&declared.clone()));
         };
         let range = module.range(expression);
 
@@ -9483,32 +9780,31 @@ impl<'db> Checker<'db, '_> {
         let enclosing_frame_level = mem::replace(&mut self.frame_level, self.table.level);
         // Pairs formals with declared types as R's matcher pairs arguments; any declared
         // entry the walk never consumes is a disagreement.
+        let declared_names: Vec<&str> = declared
+            .named
+            .iter()
+            .map(|field| field.name.text(self.db))
+            .collect();
+        let paired = pair_formals(
+            module[parameters]
+                .iter()
+                .map(|parameter| parameter.name.as_str()),
+            &declared_names,
+            declared.positional.len(),
+        );
         let mut positional_index = 0usize;
-        let mut used_named: Vec<bool> = vec![false; declared.named.len()];
+        let mut used_named = Bitset::new_in(self.arena, declared.named.len());
         let mut formal_types: Vec<(Ty<'db>, bool)> = Vec::with_capacity(parameters.len());
-        let mut signature = FunctionType {
-            positional: Vec::new(),
-            named: Vec::new(),
-            variadic: None,
-            ret: declared.ret,
-            inferred: false,
-            flag_return: None,
-            quoted: Vec::new(),
-            default_reads: Vec::new(),
-            missing_tested: Vec::new(),
-            condition_only: Vec::new(),
-            null_unless: None,
-            reduces: None,
-            from_calls: false,
-        };
-        for parameter in &module[parameters] {
-            if parameter.name == "..." {
-                signature.variadic = Some(RestParameter {
+        let mut named: Vec<Parameter<'db>> = Vec::with_capacity(parameters.len());
+        let mut variadic = None;
+        for (parameter, paired) in module[parameters].iter().zip(paired) {
+            if paired == Paired::Rest {
+                variadic = Some(RestParameter {
                     element: declared
                         .variadic
                         .as_ref()
                         .map_or_else(|| any(self.db), |rest| rest.element),
-                    preceding_named: signature.named.len(),
+                    preceding_named: named.len(),
                 });
                 formal_types.push((self.fresh(Constraint::Unconstrained), false));
                 continue;
@@ -9516,33 +9812,34 @@ impl<'db> Checker<'db, '_> {
             // A disagreeing declaration is reported below, and the definition wins: a declared
             // `[name]` over a forced formal stays required, a declared required parameter over
             // a defaulted or `missing()`-tested formal stays optional.
-            let (declared_ty, optional) = if let Some(index) = declared
-                .named
-                .iter()
-                .position(|field| field.name.text(self.db) == parameter.name)
-            {
-                used_named[index] = true;
-                let field = &declared.named[index];
-                let optional =
-                    is_declared_optional(parameter) || field.optional && is_optional(parameter);
-                (Some(field.ty), optional)
-            } else if positional_index < declared.positional.len() {
-                let ty = declared.positional[positional_index];
-                positional_index += 1;
-                (Some(ty), is_declared_optional(parameter))
-            } else {
+            let (declared_ty, optional) = match paired {
+                Paired::Named(index) => {
+                    used_named.insert(index);
+                    let field = &declared.named[index];
+                    let optional =
+                        is_declared_optional(parameter) || field.optional && is_optional(parameter);
+                    (Some(field.ty), optional)
+                }
+                Paired::Positional(index) => {
+                    positional_index = index + 1;
+                    (
+                        Some(declared.positional[index]),
+                        is_declared_optional(parameter),
+                    )
+                }
                 // Partial annotation: an unannotated formal infers from its uses as if unannotated.
-                (None, is_optional(parameter))
+                Paired::Rest | Paired::Undeclared => (None, is_optional(parameter)),
             };
             let parameter_ty = declared_ty.unwrap_or_else(|| self.fresh(Constraint::Unconstrained));
             formal_types.push((parameter_ty, declared_ty.is_some()));
-            signature.named.push(Parameter {
+            named.push(Parameter {
                 name: Name::new(self.db, parameter.name),
                 ty: parameter_ty,
                 optional,
                 default: parameter.default.map(|default| self.infer(default)),
             });
         }
+        let mut signature = FunctionType::declared(&[], &named, variadic, declared.ret);
 
         // A declared optional needs a real default, `...` must sit at the same boundary on
         // both sides, and every declared type needs a formal. The body still checks under
@@ -9572,8 +9869,8 @@ impl<'db> Checker<'db, '_> {
             self.errors.push(TypeError {
                 range,
                 kind: TypeErrorKind::Mismatch {
-                    expected: Ty::new(self.db, TyKind::Function(declared.clone())),
-                    found: Ty::new(self.db, TyKind::Function(signature.clone())),
+                    expected: Ty::new(self.db, TyKind::Function(&declared.clone())),
+                    found: Ty::new(self.db, TyKind::Function(&signature.clone())),
                 },
             });
         }
@@ -9599,7 +9896,7 @@ impl<'db> Checker<'db, '_> {
             }
         }
         for (index, field) in declared.named.iter().enumerate() {
-            if !used_named[index] {
+            if !used_named.contains(index) {
                 self.errors.push(TypeError {
                     range,
                     kind: TypeErrorKind::AnnotationParameterMismatch {
@@ -9682,8 +9979,9 @@ impl<'db> Checker<'db, '_> {
         // An `Unknown` declared return (elided `->`) is inferred from the body, so
         // annotating only the parameters does not drop the return.
         if matches!(declared.ret.kind(self.db), TyKind::Unknown) {
-            signature.ret = self.join_early_returns(&early_returns, trailing_ty, *body);
-            self.record_untyped_parameters(function_id, &untyped_candidates, signature.ret);
+            let ret = self.join_early_returns(&early_returns, trailing_ty, *body);
+            signature.ret = ret;
+            self.record_untyped_parameters(function_id, &untyped_candidates, ret);
         } else {
             self.record_untyped_parameters(function_id, &untyped_candidates, declared.ret);
             // Each `return` is checked at its own site, not as one union blamed on the tail.
@@ -9782,7 +10080,7 @@ impl<'db> Checker<'db, '_> {
         self.table.level -= 1;
         // Not resolved: annotation-sourced types hold no inference variables, and resolving
         // would expand the aliases and nominals the author wrote.
-        Ty::new(self.db, TyKind::Function(signature))
+        Ty::new(self.db, TyKind::Function(&signature))
     }
 
     /// DistributionUtils' `pDist(..., valueOnly = TRUE)` ends in `if (valueOnly) prob else
@@ -10255,10 +10553,7 @@ impl<'db> Checker<'db, '_> {
     /// the first run is fully discarded (environment, unification, diagnostics, `<<-` writes).
     fn infer_body_with_capture_discovery(&mut self, body: ExprId, pending_mark: usize) -> Ty<'db> {
         let saved_repass = mem::replace(&mut self.capture_repass_needed, false);
-        let saved_seeds = mem::replace(
-            &mut self.superassign_seeds,
-            HashMap::with_hasher_in(FxBuildHasher, Arena(self.arena)),
-        );
+        let saved_seeds = mem::take(&mut self.superassign_seeds);
         let body_mark = self.environment.mark();
         let body_snapshot = self.table.snapshot();
         let errors_mark = self.errors.len();
@@ -10283,8 +10578,13 @@ impl<'db> Checker<'db, '_> {
         }
         // A write the body never reached leaves its seed open; it must not generalize.
         let seeds = mem::replace(&mut self.superassign_seeds, saved_seeds);
-        for (seed, written) in seeds.into_values() {
-            if !written && self.table.unify(self.db, seed, unknown(self.db)).is_err() {
+        for seed in seeds {
+            if !seed.written
+                && self
+                    .table
+                    .unify(self.db, seed.variable, unknown(self.db))
+                    .is_err()
+            {
                 panic!("an open superassignment seed always unifies with `Unknown`");
             }
         }
@@ -10311,7 +10611,11 @@ impl<'db> Checker<'db, '_> {
                 continue;
             }
             let seed = self.fresh(Constraint::Unconstrained);
-            self.superassign_seeds.insert(slot, (seed, false));
+            self.superassign_seeds.push(SuperassignSeed {
+                slot,
+                variable: seed,
+                written: false,
+            });
             let entry = union_of(self.db, [existing, seed]);
             self.environment.set(slot, EnvEntry::Mono(entry));
         }
@@ -10735,7 +11039,7 @@ impl<'db> Checker<'db, '_> {
                     .naming
                     .resolutions
                     .get(&value)
-                    .is_some_and(|slot| !self.valued_slots.contains(slot));
+                    .is_some_and(|slot| !self.valued_slots.contains(*slot));
         }
         if !matches!(ty.kind(self.db), TyKind::Null) {
             return false;
@@ -10747,7 +11051,7 @@ impl<'db> Checker<'db, '_> {
         self.naming
             .resolutions
             .get(&value)
-            .is_none_or(|slot| !self.valued_slots.contains(slot))
+            .is_none_or(|slot| !self.valued_slots.contains(*slot))
     }
 
     /// A function stored into a field at top level (`generator_funs$new <- function(...)`) is
@@ -10974,17 +11278,15 @@ impl<'db> Checker<'db, '_> {
         let arena = self.arena;
         self.value_read_slots
             .get_or_insert_with(|| {
-                let mut slots = HashSet::with_hasher_in(FxBuildHasher, Arena(arena));
-                slots.extend(
-                    naming
-                        .resolutions
-                        .iter()
-                        .filter(|(read, _)| !naming.callee_fallbacks.contains_key(read))
-                        .map(|(_, slot)| *slot),
-                );
+                let mut slots = Bitset::new_in(arena, naming.bindings.len());
+                for (read, slot) in naming.resolutions.iter() {
+                    if !naming.callee_fallbacks.contains_key(read) {
+                        slots.insert(*slot);
+                    }
+                }
                 slots
             })
-            .contains(&slot)
+            .contains(slot)
     }
 
     fn is_top_level_slot(&self, slot: BindingId) -> bool {
@@ -10997,7 +11299,7 @@ impl<'db> Checker<'db, '_> {
     /// The library's candidates for `name` when the last one, which a plain read takes, is a
     /// function.
     fn library_function(&mut self, name: Symbol) -> Option<&'db [TypeScheme<'db>]> {
-        let candidates = self.globals?.library_candidates(&name)?;
+        let candidates = self.globals?.library_candidates(name)?;
         match candidates.last() {
             Some(last) if self.callable(last.body) == Callable::No => None,
             _ => Some(candidates),
@@ -11018,14 +11320,11 @@ impl<'db> Checker<'db, '_> {
                 Some(Constraint::Unconstrained) => Callable::Untyped,
                 _ => Callable::No,
             },
-            TyKind::Union(members) => {
-                let members = members.clone();
-                members
-                    .into_iter()
-                    .map(|member| self.callable(member))
-                    .max()
-                    .unwrap_or(Callable::No)
-            }
+            TyKind::Union(members) => members
+                .iter()
+                .map(|&member| self.callable(member))
+                .max()
+                .unwrap_or(Callable::No),
             TyKind::Null
             | TyKind::Scalar(_)
             | TyKind::Vector(_)
@@ -11085,7 +11384,7 @@ impl<'db> Checker<'db, '_> {
         }
         Some(Ty::new(
             self.db,
-            TyKind::Frame(FrameKind::DataFrame, columns),
+            TyKind::Frame(FrameKind::DataFrame, columns.as_deref()),
         ))
     }
 
@@ -11182,7 +11481,7 @@ impl<'db> Checker<'db, '_> {
         }
         let subject_ty = *self.recorded.get(&subject)?;
         let rest = &arguments[1..];
-        let (subject_kind, columns) = match self.structural(subject_ty).kind(db).clone() {
+        let (subject_kind, columns) = match *self.structural(subject_ty).kind(db) {
             TyKind::Frame(kind, Some(columns)) => (kind, columns),
             TyKind::Frame(_, None) => {
                 self.note_unchecked_columns(subject, rest);
@@ -11206,7 +11505,7 @@ impl<'db> Checker<'db, '_> {
                 {
                     continue;
                 }
-                match checker.frame_argument(value, &columns, frame) {
+                match checker.frame_argument(value, columns, frame) {
                     Some(mut column) => {
                         if let Some(name) = module.argument_name(argument) {
                             column.name = name.to_string();
@@ -11244,7 +11543,7 @@ impl<'db> Checker<'db, '_> {
             }
             DataFrameVerb::WithColumns { lazy } => {
                 let computed = expressions(self, &|_| true)?;
-                let mut result = existing(&columns);
+                let mut result = existing(columns);
                 for (name, ty) in fields(computed) {
                     match result.iter_mut().find(|(existing, _)| *existing == name) {
                         Some(slot) => slot.1 = ty,
@@ -11261,7 +11560,7 @@ impl<'db> Checker<'db, '_> {
                 let keys = fields(expressions(self, &|_| true)?);
                 let key_count = u32::try_from(keys.len()).ok()?;
                 let mut result = keys;
-                for (name, ty) in existing(&columns) {
+                for (name, ty) in existing(columns) {
                     if !result.iter().any(|(key, _)| *key == name) {
                         result.push((name, ty));
                     }
@@ -11303,7 +11602,7 @@ impl<'db> Checker<'db, '_> {
                 result.extend(fields(computed));
                 Some(frame_of(db, frame_kind(lazy), result))
             }
-            DataFrameVerb::Join { lazy, asof } => self.join_type(lazy, asof, &columns, frame, rest),
+            DataFrameVerb::Join { lazy, asof } => self.join_type(lazy, asof, columns, frame, rest),
             DataFrameVerb::Convert(_) if matches!(subject_kind, FrameKind::GroupBy { .. }) => None,
             DataFrameVerb::Convert(kind) => Some(Ty::new(db, TyKind::Frame(kind, Some(columns)))),
             DataFrameVerb::ReadCsv(_) => None,
@@ -11375,7 +11674,7 @@ impl<'db> Checker<'db, '_> {
         let matched = match_formals(self.module, arguments, formals);
         let other = matched[0]?;
         let other_ty = *self.recorded.get(&other)?;
-        let right = match self.structural(other_ty).kind(db).clone() {
+        let right = match *self.structural(other_ty).kind(db) {
             TyKind::Frame(FrameKind::DataFrame | FrameKind::LazyFrame, Some(columns)) => columns,
             _ => return None,
         };
@@ -11427,10 +11726,7 @@ impl<'db> Checker<'db, '_> {
         // `on` names each key once for both frames, so a key missing from both is reported once,
         // against the left frame.
         let mut reported: Vec<TextRange> = Vec::new();
-        for (keys, columns, name) in [
-            (&left_keys, left, frame),
-            (&right_keys, right.as_slice(), other_name),
-        ] {
+        for (keys, columns, name) in [(&left_keys, left, frame), (&right_keys, right, other_name)] {
             for (key, range) in keys {
                 if !columns.iter().any(|column| column.name.text(db) == key)
                     && !reported.contains(range)
@@ -11451,7 +11747,7 @@ impl<'db> Checker<'db, '_> {
             .map(|column| (column.name.text(db).to_owned(), column.ty))
             .collect();
         if !matches!(how.as_str(), "semi" | "anti") {
-            for column in &right {
+            for column in right.iter() {
                 let name = column.name.text(db);
                 if right_keys.iter().any(|(key, _)| key == name) {
                     continue;
@@ -11972,8 +12268,15 @@ impl<'db> Checker<'db, '_> {
             return operand.ty;
         }
         match self.recorded.get(&value) {
-            Some(&ty) if !is_expr_type(self.db, ty) => self.table.resolve(self.db, ty),
-            _ => operand.ty,
+            Some(&ty) => {
+                let ty = self.table.resolve(self.db, ty);
+                if is_expr_type(self.db, ty) {
+                    operand.ty
+                } else {
+                    ty
+                }
+            }
+            None => operand.ty,
         }
     }
 
@@ -11988,7 +12291,8 @@ impl<'db> Checker<'db, '_> {
         if let Some(column) = self.frame_expression(value, columns, frame) {
             return Some(column);
         }
-        let ty = *self.recorded.get(&value)?;
+        // Resolved first, so an alias of `Expr` reads as the expression it names.
+        let ty = self.table.resolve(self.db, *self.recorded.get(&value)?);
         if is_expr_type(self.db, ty) {
             return None;
         }
@@ -12046,7 +12350,7 @@ impl<'db> Checker<'db, '_> {
         let ty = *self.recorded.get(&value)?;
         match self.structural(ty).kind(self.db) {
             TyKind::Frame(FrameKind::DataFrame | FrameKind::DataTable, Some(columns)) => {
-                Some(columns.clone())
+                Some(columns.to_vec())
             }
             _ => None,
         }
@@ -12690,9 +12994,10 @@ impl<'db> Checker<'db, '_> {
                 TyKind::Vector(element) | TyKind::NamedVector(element) => open(*element),
                 _ => open(ty),
             };
-            let members = match resolved.kind(self.db) {
-                TyKind::Union(members) => members.clone(),
-                _ => vec![resolved],
+            let single = [resolved];
+            let members: &[Ty<'db>] = match resolved.kind(self.db) {
+                TyKind::Union(members) => members,
+                _ => &single,
             };
             if members.iter().any(|&member| open_vector(member)) {
                 self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
@@ -12763,7 +13068,7 @@ impl<'db> Checker<'db, '_> {
     fn list_element_type(&self, ty: Ty<'db>) -> Option<Ty<'db>> {
         match ty.kind(self.db) {
             TyKind::List(element) | TyKind::NamedList(element) => Some(*element),
-            TyKind::Tuple(items) => Some(union_of(self.db, items.clone())),
+            TyKind::Tuple(items) => Some(union_of(self.db, items.iter().copied())),
             TyKind::Record(fields) => Some(union_of(self.db, fields.iter().map(|field| field.ty))),
             _ => None,
         }
@@ -12800,7 +13105,7 @@ impl<'db> Checker<'db, '_> {
 
     fn infer_list(&mut self, arguments: &[Argument]) -> Ty<'db> {
         if arguments.is_empty() {
-            return Ty::new(self.db, TyKind::Tuple(Vec::new()));
+            return Ty::new(self.db, TyKind::Tuple(&[]));
         }
         // `list(...)` splices arguments whose number and names are unknown, so the list is
         // open: any field may be present, and reading one yields `Unknown`.
@@ -12851,9 +13156,9 @@ impl<'db> Checker<'db, '_> {
             }
         }
         if all_named {
-            Ty::new(self.db, TyKind::Record(fields))
+            Ty::new(self.db, TyKind::Record(&fields))
         } else {
-            Ty::new(self.db, TyKind::Tuple(items))
+            Ty::new(self.db, TyKind::Tuple(&items))
         }
     }
 
@@ -13087,7 +13392,7 @@ impl<'db> Checker<'db, '_> {
                 let name =
                     validated_namespace_name(self.db, self.library, *internal, package, name)?;
                 if !namespace_reaches_project(self.db, package) {
-                    let schemes = self.library?.schemes.get(name.as_str())?;
+                    let schemes = self.library?.schemes.get(name)?;
                     if schemes.len() < 2 {
                         return None;
                     }
@@ -13442,7 +13747,7 @@ impl<'db> Checker<'db, '_> {
         self.errors.push(error);
         self.recorded.insert(callee, unknown(self.db));
         // A capture-discovery re-pass must not keep a stale commitment from the first pass.
-        self.selected_overloads.remove(&callee);
+        self.selected_overloads.remove(callee);
         unknown(self.db)
     }
 
@@ -13484,7 +13789,7 @@ impl<'db> Checker<'db, '_> {
     ) -> bool {
         let witness = Ty::new(
             self.db,
-            TyKind::Named(Name::new(self.db, UNCHECKED_WITNESS), Vec::new()),
+            TyKind::Named(Name::new(self.db, UNCHECKED_WITNESS), &[]),
         );
         let mut witnessed = call_arguments.to_vec();
         for argument in &mut witnessed {
@@ -13537,7 +13842,7 @@ impl<'db> Checker<'db, '_> {
         scheme: &TypeScheme<'db>,
         call_arguments: &[CallArgument<'db>],
         courtesy: bool,
-    ) -> Result<(Ty<'db>, FunctionType<'db>), Vec<TypeError<'db>>> {
+    ) -> Result<(Ty<'db>, &'db FunctionType<'db>), Vec<TypeError<'db>>> {
         // Instantiation renames type variables and keeps the parameter list, so a candidate
         // the arguments cannot land on fails the same way uninstantiated. A courtesy probe
         // records expectations as it checks, so it always runs in full.
@@ -13573,7 +13878,7 @@ impl<'db> Checker<'db, '_> {
             self.overload_probe_depth -= 1;
         }
         if outcome.is_empty() {
-            Ok((resolved, function.clone()))
+            Ok((resolved, *function))
         } else {
             Err(outcome)
         }
@@ -13600,36 +13905,38 @@ impl<'db> Checker<'db, '_> {
         arguments: &[Argument],
         callees: &[Ty<'db>],
     ) -> Vec<CallArgument<'db>> {
-        let deferred = BumpVec::from_iter_in(
-            arguments.iter().map(|argument| {
-                !callees.is_empty()
-                    && argument
-                        .value
-                        .is_some_and(|value| self.needs_parameter_hints(value))
-            }),
-            self.arena,
-        );
+        let mut deferred = Bitset::new_in(self.arena, arguments.len());
+        if !callees.is_empty() {
+            for (index, argument) in arguments.iter().enumerate() {
+                if argument
+                    .value
+                    .is_some_and(|value| self.needs_parameter_hints(value))
+                {
+                    deferred.insert(index);
+                }
+            }
+        }
         let mut call_arguments: Vec<CallArgument<'db>> = arguments
             .iter()
             .map(|argument| self.call_argument(range, argument, None))
             .collect();
         let quoted = self.quoted_arguments(callees, &call_arguments);
         for (index, argument) in arguments.iter().enumerate() {
-            if deferred[index] {
+            if deferred.contains(index) {
                 continue;
             }
-            call_arguments[index].ty = if quoted.get(index).copied().unwrap_or(false) {
+            call_arguments[index].ty = if quoted.contains(index) {
                 Some(unknown(self.db))
             } else {
                 argument.value.map(|value| self.infer(value))
             };
         }
-        if !deferred.contains(&true) {
+        if deferred.is_empty() {
             return call_arguments;
         }
         let hints = self.parameter_hints_for(callees, &call_arguments, &deferred);
         for (index, argument) in arguments.iter().enumerate() {
-            let Some(value) = argument.value.filter(|_| deferred[index]) else {
+            let Some(value) = argument.value.filter(|_| deferred.contains(index)) else {
                 continue;
             };
             if let Some(hint) = hints.get(index).cloned().flatten() {
@@ -13644,22 +13951,35 @@ impl<'db> Checker<'db, '_> {
 
     /// The arguments every candidate callee binds to a quoted formal: code the callee captures
     /// with `substitute()`, which reads names from a frame the caller cannot see.
-    fn quoted_arguments(&self, callees: &[Ty<'db>], arguments: &[CallArgument<'db>]) -> Vec<bool> {
-        let mut quoted = vec![!callees.is_empty(); arguments.len()];
+    fn quoted_arguments(
+        &self,
+        callees: &[Ty<'db>],
+        arguments: &[CallArgument<'db>],
+    ) -> Bitset<'a, usize> {
+        let arena = self.arena;
+        let mut quoted = Bitset::new_in(arena, arguments.len());
+        if callees.is_empty() {
+            return quoted;
+        }
+        for index in 0..arguments.len() {
+            quoted.insert(index);
+        }
         for &callee in callees {
             let resolved = self.table.resolve(self.db, callee);
             let TyKind::Function(function) = resolved.kind(self.db) else {
-                return vec![false; arguments.len()];
+                return Bitset::new_in(arena, 0);
             };
             if function.quoted.is_empty() {
-                return vec![false; arguments.len()];
+                return Bitset::new_in(arena, 0);
             }
-            let arena = self.arena;
             let targets =
                 &*argument_targets(self.db, arena, function, argument_shapes(arena, arguments));
-            for (flag, target) in quoted.iter_mut().zip(targets) {
-                *flag &= matches!(target, Some(ArgumentTarget::Named(formal))
-                    if function.named.get(*formal).is_some_and(|parameter| function.quoted.contains(&parameter.name)));
+            for (index, target) in targets.iter().enumerate() {
+                if !matches!(target, Some(ArgumentTarget::Named(formal))
+                    if function.named.get(*formal).is_some_and(|parameter| function.quoted.contains(&parameter.name)))
+                {
+                    quoted.remove(index);
+                }
             }
         }
         quoted
@@ -13843,7 +14163,7 @@ impl<'db> Checker<'db, '_> {
         &mut self,
         callees: &[Ty<'db>],
         arguments: &[CallArgument<'db>],
-        deferred: &[bool],
+        deferred: &Bitset<'a, usize>,
     ) -> Vec<Option<Vec<Option<Ty<'db>>>>> {
         let mut agreed: Vec<Option<Vec<Option<Ty<'db>>>>> = vec![None; arguments.len()];
         let mut first_candidate = true;
@@ -13876,9 +14196,9 @@ impl<'db> Checker<'db, '_> {
             // widened, so its formal keeps the hint. Read before the probe binds the variables.
             let state_vars: FxHashSet<InferenceVar> = targets
                 .iter()
-                .zip(deferred)
-                .filter(|(_, deferred)| !**deferred)
-                .filter_map(|(target, _)| target_ty(target))
+                .enumerate()
+                .filter(|(index, _)| !deferred.contains(*index))
+                .filter_map(|(_, target)| target_ty(target))
                 .filter_map(
                     |ty| match self.table.shallow_resolve(self.db, ty).kind(self.db) {
                         TyKind::Var(var) => Some(*var),
@@ -13886,46 +14206,49 @@ impl<'db> Checker<'db, '_> {
                     },
                 )
                 .collect();
-            let accumulators: Vec<Vec<bool>> = targets
+            let accumulators: Vec<Bitset<'a, usize>> = targets
                 .iter()
-                .zip(deferred)
-                .map(|(target, &deferred)| {
+                .enumerate()
+                .map(|(index, target)| {
+                    let mut accumulating = Bitset::new_in(arena, 0);
                     let expected = target_ty(target)
-                        .filter(|_| deferred)
+                        .filter(|_| deferred.contains(index))
                         .map(|expected| self.table.shallow_resolve(self.db, expected));
                     let Some(TyKind::Function(expected)) = expected.map(|ty| ty.kind(self.db))
                     else {
-                        return Vec::new();
+                        return accumulating;
                     };
                     let mut result_vars = FxHashSet::default();
                     self.table
                         .collect_unbound_vars(self.db, expected.ret, &mut result_vars);
                     result_vars.retain(|var| state_vars.contains(var));
-                    expected
+                    let formals = expected
                         .positional
                         .iter()
                         .copied()
-                        .chain(expected.named.iter().map(|parameter| parameter.ty))
-                        .map(|formal| {
-                            let mut formal_vars = FxHashSet::default();
-                            self.table
-                                .collect_unbound_vars(self.db, formal, &mut formal_vars);
-                            !formal_vars.is_disjoint(&result_vars)
-                        })
-                        .collect()
+                        .chain(expected.named.iter().map(|parameter| parameter.ty));
+                    for (formal_index, formal) in formals.enumerate() {
+                        let mut formal_vars = FxHashSet::default();
+                        self.table
+                            .collect_unbound_vars(self.db, formal, &mut formal_vars);
+                        if !formal_vars.is_disjoint(&result_vars) {
+                            accumulating.insert(formal_index);
+                        }
+                    }
+                    accumulating
                 })
                 .collect();
             let mut argument_vars = FxHashSet::default();
-            for (argument, &deferred) in arguments.iter().zip(deferred) {
-                if let (Some(ty), false) = (argument.ty, deferred) {
+            for (index, argument) in arguments.iter().enumerate() {
+                if let (Some(ty), false) = (argument.ty, deferred.contains(index)) {
                     self.table
                         .collect_unbound_vars(self.db, ty, &mut argument_vars);
                 }
             }
             let snapshot = self.table.snapshot();
-            let accepts = arguments.iter().zip(targets.iter()).zip(deferred).all(
-                |((argument, target), &deferred)| {
-                    if deferred {
+            let accepts = arguments.iter().zip(targets.iter()).enumerate().all(
+                |(index, (argument, target))| {
+                    if deferred.contains(index) {
                         return true;
                     }
                     match (argument.ty, target_ty(target)) {
@@ -13943,11 +14266,11 @@ impl<'db> Checker<'db, '_> {
             );
             let candidate: Vec<Option<Vec<Option<Ty<'db>>>>> = targets
                 .iter()
-                .zip(deferred)
+                .enumerate()
                 .zip(&accumulators)
                 .zip(arguments)
-                .map(|(((target, &deferred), accumulators), argument)| {
-                    if !deferred || !accepts {
+                .map(|(((argument_index, target), accumulators), argument)| {
+                    if !deferred.contains(argument_index) || !accepts {
                         return None;
                     }
                     let expected = self.table.shallow_resolve(self.db, target_ty(target)?);
@@ -13989,7 +14312,16 @@ impl<'db> Checker<'db, '_> {
                             .enumerate()
                             .map(|(index, formal)| {
                                 let formal = self.table.resolve(self.db, formal);
-                                if accumulators.get(index).copied().unwrap_or(false)
+                                // An accumulator whose initial state is a settled ry value keeps
+                                // that type, because only a tag union widens among ry types. In
+                                // `List.walk(xs, List.repeat(0f64, n), \(sums, x) sums + x)` the
+                                // state is `List<F64>` before the body reads `sums + x`. A state
+                                // with a tag anywhere in it, such as `[:A]`, stays open.
+                                let widening_accumulator = accumulators.contains(index)
+                                    && !(is_ry_value_type(self.db, formal)
+                                        && !mentions_tag(self.db, formal)
+                                        && !self.table.contains_unbound_var(self.db, formal));
+                                if widening_accumulator
                                     || (index < declared_count
                                         && matches!(
                                             formal.kind(self.db),
@@ -14074,7 +14406,7 @@ impl<'db> Checker<'db, '_> {
                 // An export the stubs list without a type is still a function.
                 if let Some(candidates) = self
                     .globals
-                    .and_then(|globals| globals.library_candidates(name.as_str()))
+                    .and_then(|globals| globals.library_candidates(*name))
                 {
                     argument.named_function = Some(match candidates.last() {
                         Some(scheme) => self.instantiate(scheme),
@@ -14089,8 +14421,8 @@ impl<'db> Checker<'db, '_> {
             // here. A formal used only as a function still infers as one.
             if let Some(&binding) = self.naming.resolutions.get(&value)
                 && matches!(resolved.kind(self.db), TyKind::Var(_))
-                && (self.no_default_formals.contains(&binding)
-                    || self.defaulted_formals.contains(&binding))
+                && (self.no_default_formals.contains(binding)
+                    || self.defaulted_formals.contains(binding))
                 && self.reads_as_value(binding)
             {
                 argument.named_function = Some(unknown(self.db));
@@ -14188,9 +14520,9 @@ impl<'db> Checker<'db, '_> {
                     .collect();
                 let expected = Ty::new(
                     self.db,
-                    TyKind::Function(FunctionType {
-                        positional,
-                        named: arguments
+                    TyKind::Function(&FunctionType {
+                        positional: &positional,
+                        named: &arguments
                             .iter()
                             .filter_map(|argument| {
                                 argument.name.as_ref().map(|name| Parameter {
@@ -14200,7 +14532,7 @@ impl<'db> Checker<'db, '_> {
                                     default: None,
                                 })
                             })
-                            .collect(),
+                            .collect::<Vec<_>>(),
                         variadic: forwards_dots.then(|| RestParameter {
                             element: any(self.db),
                             preceding_named: 0,
@@ -14208,10 +14540,10 @@ impl<'db> Checker<'db, '_> {
                         ret,
                         inferred: true,
                         flag_return: None,
-                        quoted: Vec::new(),
-                        default_reads: Vec::new(),
-                        missing_tested: Vec::new(),
-                        condition_only: Vec::new(),
+                        quoted: &[],
+                        default_reads: &[],
+                        missing_tested: &[],
+                        condition_only: &[],
                         null_unless: None,
                         reduces: None,
                         from_calls: true,
@@ -14293,12 +14625,11 @@ impl<'db> Checker<'db, '_> {
                     )
                 }) =>
             {
-                let members = members.clone();
-                let functions: Vec<FunctionType<'db>> = members
+                let functions: Vec<&'db FunctionType<'db>> = members
                     .iter()
                     .filter_map(|&member| {
                         match self.table.shallow_resolve(self.db, member).kind(self.db) {
-                            TyKind::Function(function) => Some(function.clone()),
+                            TyKind::Function(function) => Some(*function),
                             _ => None,
                         }
                     })
@@ -14623,40 +14954,33 @@ impl<'db> Checker<'db, '_> {
         // too: the value of a parameter the call left out, as in a getter and setter
         // `function(key, value)` called as a getter, or a variable the callee's scheme leaves
         // free. A variable of the enclosing scope, which a closure returns, keeps its meaning.
-        let mut supplied_positional = vec![false; function.positional.len()];
-        let mut supplied_named = vec![false; function.named.len()];
+        let mut supplied_positional = Bitset::new_in(self.arena, function.positional.len());
+        let mut supplied_named = Bitset::new_in(self.arena, function.named.len());
         for target in targets.iter().flatten() {
             match target {
                 ArgumentTarget::Positional(slot) => {
-                    if let Some(supplied) = supplied_positional.get_mut(*slot) {
-                        *supplied = true;
-                    }
+                    supplied_positional.insert(*slot);
                 }
                 ArgumentTarget::Named(formal) => {
-                    if let Some(supplied) = supplied_named.get_mut(*formal) {
-                        *supplied = true;
-                    }
+                    supplied_named.insert(*formal);
                 }
                 _ => {}
             }
         }
-        let omitted_types: Vec<Ty<'db>> = function
+        let omitted_positional = function
             .positional
             .iter()
-            .zip(&supplied_positional)
-            .filter(|(_, supplied)| !**supplied)
-            .map(|(ty, _)| *ty)
-            .chain(
-                function
-                    .named
-                    .iter()
-                    .zip(&supplied_named)
-                    .filter(|(_, supplied)| !**supplied)
-                    .map(|(parameter, _)| parameter.ty),
-            )
-            .collect();
+            .enumerate()
+            .filter(|(slot, _)| !supplied_positional.contains(*slot))
+            .map(|(_, ty)| *ty);
+        let omitted_named = function
+            .named
+            .iter()
+            .enumerate()
+            .filter(|(formal, _)| !supplied_named.contains(*formal))
+            .map(|(_, parameter)| parameter.ty);
         let mut omitted = FxHashSet::default();
-        for ty in omitted_types {
+        for ty in omitted_positional.chain(omitted_named) {
             collect_vars(self.db, self.table.resolve(self.db, ty), &mut omitted);
         }
         let mut bound = FxHashSet::default();
@@ -14941,12 +15265,11 @@ impl<'db> Checker<'db, '_> {
                 (self.item_variable(*item)?, found)
             }
             TyKind::Named(name, items) if name.text(db) == "List" => {
-                let (TyKind::Named(found_name, found_items), [item]) =
-                    (found.kind(db), items.as_slice())
+                let (TyKind::Named(found_name, found_items), [item]) = (found.kind(db), items)
                 else {
                     return None;
                 };
-                let (true, [found_item]) = (found_name == name, found_items.as_slice()) else {
+                let (true, [found_item]) = (found_name == name, found_items) else {
                     return None;
                 };
                 (self.item_variable(*item)?, *found_item)
@@ -15078,7 +15401,7 @@ impl<'db> Checker<'db, '_> {
                 .naming
                 .resolutions
                 .get(&value)
-                .is_some_and(|slot| !self.computed_slots.contains(slot)))
+                .is_some_and(|slot| !self.computed_slots.contains(*slot)))
     }
 
     /// An element read from a collection, directly or through a variable it was stored in.
@@ -15089,7 +15412,7 @@ impl<'db> Checker<'db, '_> {
                 .naming
                 .resolutions
                 .get(&expression)
-                .is_some_and(|slot| self.lookup_slots.contains(slot)),
+                .is_some_and(|slot| self.lookup_slots.contains(*slot)),
             _ => false,
         }
     }
@@ -15102,7 +15425,7 @@ impl<'db> Checker<'db, '_> {
                 .naming
                 .resolutions
                 .get(&value)
-                .is_some_and(|slot| self.computed_slots.contains(slot)),
+                .is_some_and(|slot| self.computed_slots.contains(*slot)),
             ExpressionKind::Call { callee, .. } => matches!(
                 self.module.kind(*callee),
                 ExpressionKind::NameRef(name) if name.as_str() == "switch"
@@ -15267,8 +15590,8 @@ impl<'db> Checker<'db, '_> {
         };
         let snapshot = self.table.snapshot();
         let verdict = 'probe: {
-            let mut open_positionals = actual_callback.positional.clone();
-            let mut open_named = actual_callback.named.clone();
+            let mut open_positionals = actual_callback.positional.to_vec();
+            let mut open_named = actual_callback.named.to_vec();
             let mut pre_rest_open = match &actual_callback.variadic {
                 Some(rest) => rest.preceding_named,
                 None => open_named.len(),
@@ -15485,7 +15808,7 @@ impl<'db> Checker<'db, '_> {
                 .map(|_| self.fresh(Constraint::Unconstrained))
                 .collect()
         };
-        let nominal = Ty::new(self.db, TyKind::Named(name, arguments.clone()));
+        let nominal = Ty::new(self.db, TyKind::Named(name, &arguments.clone()));
         if !matches!(definition.body.kind(self.db), TyKind::Unknown) {
             let representation = apply_definition(self.db, &definition, &arguments);
             self.record_expectation(value, representation);
@@ -15609,10 +15932,7 @@ impl<'db> Checker<'db, '_> {
         if double || slots != 2 {
             return (slots >= 1).then(|| any(self.db));
         }
-        let matrix = Ty::new(
-            self.db,
-            TyKind::Named(Name::new(self.db, "matrix"), Vec::new()),
-        );
+        let matrix = Ty::new(self.db, TyKind::Named(Name::new(self.db, "matrix"), &[]));
         if keep_dimensions {
             return Some(matrix);
         }
@@ -15867,12 +16187,13 @@ impl<'db> Checker<'db, '_> {
         let frame = variable_name(module, target);
         let bracket = module.range(id);
         let subject_columns = frame_columns(db, subject);
-        let mut callees = FxHashSet::default();
+        let mut callees = SmallVec::new();
         for value in arguments.iter().filter_map(|argument| argument.value) {
             collect_callees(module, value, &mut callees);
         }
+        callees.sort_unstable();
         let i_value = i.and_then(|argument| argument.value);
-        let mut source_columns = subject_columns.clone();
+        let mut source_columns = subject_columns.map(<[_]>::to_vec);
         let mut join = None;
         let mut layout = None;
         let each_i = by.and_then(|argument| argument.value).is_some_and(
@@ -15891,7 +16212,7 @@ impl<'db> Checker<'db, '_> {
                 )) => {
                     // Under `.EACHI`, `i.col` reads one row of `i`, like a bare column of `i`.
                     join = Some(JoinSides {
-                        x: subject_columns.clone(),
+                        x: subject_columns.map(<[_]>::to_vec),
                         i: joined_columns.as_ref().map(|columns| {
                             columns
                                 .iter()
@@ -15901,7 +16222,7 @@ impl<'db> Checker<'db, '_> {
                                     } else {
                                         column.ty
                                     },
-                                    ..column.clone()
+                                    ..*column
                                 })
                                 .collect()
                         }),
@@ -15935,12 +16256,12 @@ impl<'db> Checker<'db, '_> {
                             }
                             layout = self.join_columns(
                                 &keys,
-                                (frame, subject_columns.as_deref()),
+                                (frame, subject_columns),
                                 (joined_name, joined_columns.as_deref()),
                             );
-                            layout.as_ref().map(|layout| {
-                                layout.iter().map(|column| column.field.clone()).collect()
-                            })
+                            layout
+                                .as_ref()
+                                .map(|layout| layout.iter().map(|column| column.field).collect())
                         }
                         None => {
                             self.infer(on_value);
@@ -15980,7 +16301,7 @@ impl<'db> Checker<'db, '_> {
                         } else {
                             column.field.ty
                         },
-                        ..column.field.clone()
+                        ..column.field
                     })
                     .collect(),
             ),
@@ -16017,10 +16338,7 @@ impl<'db> Checker<'db, '_> {
                         .filter(|column| column.condition.is_some())
                         .collect();
                     compared.sort_by_key(|column| column.condition);
-                    compared
-                        .into_iter()
-                        .map(|column| column.field.clone())
-                        .collect()
+                    compared.into_iter().map(|column| column.field).collect()
                 })
             }
             Some(value) => self.query_groups(value),
@@ -16045,7 +16363,7 @@ impl<'db> Checker<'db, '_> {
             }),
             (None, None) => None,
         };
-        let subset_data = Ty::new(db, TyKind::Frame(kind, subset_columns));
+        let subset_data = Ty::new(db, TyKind::Frame(kind, subset_columns.as_deref()));
         if let Some(scope) = self.column_scopes.last_mut() {
             scope.subset_data = subset_data;
         }
@@ -16067,7 +16385,8 @@ impl<'db> Checker<'db, '_> {
                         &module[update],
                         subject_columns,
                         i_value.is_some() || by.is_some(),
-                    ),
+                    )
+                    .as_deref(),
                 ),
             ),
             // `with = FALSE` and a `..name` `j` read `j` as column names or positions, which ry
@@ -16090,7 +16409,7 @@ impl<'db> Checker<'db, '_> {
                 groups,
                 by.is_some(),
             ),
-            None => Ty::new(db, TyKind::Frame(kind, source_columns)),
+            None => Ty::new(db, TyKind::Frame(kind, source_columns.as_deref())),
         };
         for argument in arguments {
             let handled = [i, j, by, on, named(".SDcols")]
@@ -16195,7 +16514,7 @@ impl<'db> Checker<'db, '_> {
             layout.push(JoinedColumn {
                 field: RecordField {
                     ty: joined.unwrap_or(column.ty),
-                    ..column.clone()
+                    ..*column
                 },
                 from_i: condition.is_some(),
                 condition,
@@ -16232,10 +16551,7 @@ impl<'db> Checker<'db, '_> {
                 column.name
             };
             layout.push(JoinedColumn {
-                field: RecordField {
-                    name,
-                    ..column.clone()
-                },
+                field: RecordField { name, ..*column },
                 from_i: true,
                 condition: None,
             });
@@ -16338,7 +16654,7 @@ impl<'db> Checker<'db, '_> {
                 match columns.iter().find(|column| column.name.text(db) == name) {
                     Some(column) => {
                         if let Some(groups) = groups.as_mut() {
-                            groups.push(column.clone());
+                            groups.push(*column);
                         }
                     }
                     None => {
@@ -16512,7 +16828,7 @@ impl<'db> Checker<'db, '_> {
                 .iter()
                 .zip(selected)
                 .filter(|(_, chosen)| *chosen != negated)
-                .map(|(column, _)| column.clone())
+                .map(|(column, _)| *column)
                 .collect(),
         )
     }
@@ -16537,7 +16853,7 @@ impl<'db> Checker<'db, '_> {
         }
         let subset_data = self.column_scopes.last()?.subset_data;
         let columns = match subset_data.kind(db) {
-            TyKind::Frame(_, Some(columns)) if !columns.is_empty() => columns.clone(),
+            TyKind::Frame(_, Some(columns)) if !columns.is_empty() => *columns,
             _ => {
                 self.infer(value);
                 return Some(None);
@@ -16567,9 +16883,9 @@ impl<'db> Checker<'db, '_> {
                 }
             }
         } else {
-            for column in &columns {
+            for column in columns.iter() {
                 if let Some(scope) = self.column_scopes.last_mut() {
-                    scope.subset_data = Ty::new(db, TyKind::Record(vec![column.clone()]));
+                    scope.subset_data = Ty::new(db, TyKind::Record(&[*column]));
                 }
                 let recorded_errors = self.errors.len();
                 let ty = self.infer(value);
@@ -16595,7 +16911,7 @@ impl<'db> Checker<'db, '_> {
             self.infer(*callee);
         }
         let applied_ty = match &applied {
-            Some(applied) => Ty::new(db, TyKind::Record(applied.clone())),
+            Some(applied) => Ty::new(db, TyKind::Record(&applied.clone())),
             None => unknown(db),
         };
         self.record(value, applied_ty);
@@ -17032,7 +17348,7 @@ impl<'db> Checker<'db, '_> {
                         .all(|other| other.name != column.name)
                 })
             });
-            Ty::new(db, TyKind::Frame(kind, columns))
+            Ty::new(db, TyKind::Frame(kind, columns.as_deref()))
         };
         if let Some(applied) = self.subset_apply(j) {
             return frame_of(groups.zip(applied).map(|(mut groups, applied)| {
@@ -17068,7 +17384,7 @@ impl<'db> Checker<'db, '_> {
         let resolved = self.table.resolve(db, ty);
         let bare_column = match module.kind(j) {
             ExpressionKind::NameRef(name)
-                if self.masked_reads.contains(&j)
+                if self.masked_reads.contains(j)
                     && source_columns.is_some_and(|columns| {
                         columns.iter().any(|column| column.name.text(db) == name)
                     }) =>
@@ -17104,7 +17420,7 @@ impl<'db> Checker<'db, '_> {
             }
             (None, TyKind::Frame(_, Some(computed))) => columns.extend(computed.iter().cloned()),
             (None, TyKind::Record(fields)) => {
-                for field in fields.clone() {
+                for field in fields.iter() {
                     let name = field.name.text(db).to_owned();
                     columns.push(self.column_field(&name, field.ty));
                 }
@@ -17124,7 +17440,7 @@ impl<'db> Checker<'db, '_> {
     fn column_update(
         &mut self,
         arguments: &[Argument],
-        base: Option<Vec<RecordField<'db>>>,
+        base: Option<&[RecordField<'db>]>,
         partial: bool,
     ) -> Option<Vec<RecordField<'db>>> {
         let module = self.module;
@@ -17221,7 +17537,7 @@ impl<'db> Checker<'db, '_> {
                 }
             }
         }
-        let mut columns = base?;
+        let mut columns = base?.to_vec();
         for (name, ty, value) in updates? {
             let resolved = self.table.resolve(db, ty);
             let single = value.is_some_and(|value| is_literal(module, value));
@@ -17294,7 +17610,7 @@ impl<'db> Checker<'db, '_> {
             let mut results = Vec::with_capacity(members.len());
             // An empty `list()` member is the accumulator on a path that never filled it,
             // where R reads `NULL`.
-            for &member in members {
+            for &member in members.iter() {
                 if is_empty_list(self.db, member) {
                     results.push(null(self.db));
                     continue;
@@ -17384,7 +17700,7 @@ impl<'db> Checker<'db, '_> {
             },
             // `list()` is the accumulator idiom: code fills it after building it, often in
             // another function, so its type knows none of the elements read later.
-            TyKind::Tuple(items) if items.is_empty() => {
+            TyKind::Tuple([]) => {
                 self.record_strict_origin(origin, StrictOriginKind::UnsupportedConstruct);
                 Ok(unknown(self.db))
             }
@@ -17494,7 +17810,7 @@ impl<'db> Checker<'db, '_> {
     ) -> Result<Ty<'db>, TypeError<'db>> {
         if let TyKind::Union(members) = subject.kind(self.db) {
             let mut results = Vec::with_capacity(members.len());
-            for &member in members {
+            for &member in members.iter() {
                 let result = self
                     .subset_result(origin, range, member, index)
                     .map_err(|error| widen_error_container(error, subject))?;
@@ -17576,7 +17892,7 @@ impl<'db> Checker<'db, '_> {
             | TyKind::Named(..) => Ok(VectorIndexShape::ScalarLike),
             TyKind::Union(members) => {
                 let mut shape = VectorIndexShape::ScalarLike;
-                for &member in members {
+                for &member in members.iter() {
                     if self.classify_vector_index(range, member)? == VectorIndexShape::VectorLike {
                         shape = VectorIndexShape::VectorLike;
                     }
@@ -17684,7 +18000,7 @@ impl<'db> Checker<'db, '_> {
             let mut results = Vec::with_capacity(members.len());
             let mut absent: Option<TypeError<'db>> = None;
             let mut unfilled = false;
-            for &member in members {
+            for &member in members.iter() {
                 // An empty `list()` member is the accumulator on a path that never filled
                 // it, where R reads `NULL`.
                 if is_empty_list(self.db, member) {
@@ -17817,7 +18133,7 @@ impl<'db> Checker<'db, '_> {
                     }),
                 }
             }
-            TyKind::Tuple(items) if items.is_empty() => {
+            TyKind::Tuple([]) => {
                 self.record_strict_origin(origin, StrictOriginKind::UnsupportedConstruct);
                 Ok(unknown(self.db))
             }
@@ -18192,6 +18508,22 @@ fn single<T>(items: Vec<T>) -> Option<T> {
     items.next().is_none().then_some(first)
 }
 
+/// The type an atomic vector `prior` has after an element or slice write of the atomic `value`.
+/// R coerces the whole vector when the written value has a wider type, so
+/// `prob <- rep(NA, n); prob[i] <- 0.5` and `x <- 1:3; x[[2]] <- 2.5` both leave a `double[]`.
+/// `None` when either is not atomic.
+fn atomic_write<'db>(db: &'db dyn Db, prior: Ty<'db>, value: Ty<'db>) -> Option<Ty<'db>> {
+    let container = combine_operand_atomic(db, prior)?;
+    let written = combine_operand_atomic(db, value)?;
+    let element = scalar(db, promote_combine_atomic(container, written));
+    // A type carries no length, so a scalar stays a scalar as it does after `x[1] <- 2L`.
+    Some(match prior.kind(db) {
+        TyKind::Scalar(_) => element,
+        TyKind::NamedVector(_) => Ty::new(db, TyKind::NamedVector(element)),
+        _ => Ty::new(db, TyKind::Vector(element)),
+    })
+}
+
 fn combine_operand_atomic<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Atomic> {
     match ty.kind(db) {
         TyKind::Scalar(atomic) => Some(*atomic),
@@ -18371,9 +18703,9 @@ fn is_literal(module: &Module, id: ExprId) -> bool {
     }
 }
 
-fn frame_columns<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Vec<RecordField<'db>>> {
+fn frame_columns<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<&'db [RecordField<'db>]> {
     match ty.kind(db) {
-        TyKind::Frame(_, columns) => columns.clone(),
+        TyKind::Frame(_, columns) => *columns,
         _ => None,
     }
 }
@@ -18427,7 +18759,7 @@ fn element_types<'db>(db: &'db dyn Db, x: Ty<'db>) -> (Vec<Ty<'db>>, bool) {
     match x.kind(db) {
         TyKind::Vector(element) | TyKind::List(element) => (vec![*element], false),
         TyKind::NamedVector(element) | TyKind::NamedList(element) => (vec![*element], true),
-        TyKind::Tuple(items) => (items.clone(), false),
+        TyKind::Tuple(items) => (items.to_vec(), false),
         TyKind::Record(fields) | TyKind::Frame(_, Some(fields)) => {
             (fields.iter().map(|field| field.ty).collect(), true)
         }
@@ -18620,7 +18952,7 @@ fn frame_of<'db>(db: &'db dyn Db, kind: FrameKind, columns: Vec<(String, Ty<'db>
             optional: false,
         });
     }
-    Ty::new(db, TyKind::Frame(kind, Some(fields)))
+    Ty::new(db, TyKind::Frame(kind, Some(&fields)))
 }
 
 /// The element type of a vector type.
@@ -18641,7 +18973,7 @@ fn is_expr_type(db: &dyn Db, ty: Ty<'_>) -> bool {
 }
 
 fn factor_type(db: &dyn Db) -> Ty<'_> {
-    Ty::new(db, TyKind::Named(Name::new(db, "factor"), Vec::new()))
+    Ty::new(db, TyKind::Named(Name::new(db, "factor"), &[]))
 }
 
 /// The column type data.table gives values of several column types stacked together: the
@@ -18695,12 +19027,12 @@ fn string_literals(module: &Module, arguments: &[Argument]) -> Option<Vec<String
         .collect()
 }
 
-fn collect_callees(module: &Module, id: ExprId, callees: &mut FxHashSet<ExprId>) {
+fn collect_callees(module: &Module, id: ExprId, callees: &mut SmallVec<[ExprId; 8]>) {
     let kind = module.kind(id);
     if let ExpressionKind::Call { callee, .. } = kind
         && matches!(module.kind(*callee), ExpressionKind::NameRef(_))
     {
-        callees.insert(*callee);
+        callees.push(*callee);
     }
     module.for_each_child(id, |child| collect_callees(module, child, callees));
 }
@@ -19160,6 +19492,21 @@ fn list_items<'db>(db: &'db dyn Db, item: Ty<'db>) -> Option<ListItems> {
     }
 }
 
+/// Whether a tag or a tag union appears anywhere in `ty`, the part of a ry type that widens.
+fn mentions_tag<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
+    if matches!(
+        ty.kind(db),
+        TyKind::Tag(..) | TyKind::Union(_) | TyKind::OtherTags
+    ) {
+        return true;
+    }
+    let mut found = false;
+    for_each_child_type(db, ty, &mut |child| {
+        found = found || mentions_tag(db, child)
+    });
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use {
@@ -19182,7 +19529,7 @@ mod tests {
             .find(|child| is_expression_kind(child.kind()))
             .expect("one top-level item");
         let module = lower_item(&item);
-        let naming = resolve_item(&module, &FxHashMap::default(), &|_, _| false);
+        let naming = resolve_item(&module, &Default::default(), &|_, _| false);
         check_item_with_annotation(
             db,
             &module,
@@ -19611,7 +19958,7 @@ mod tests {
 
     fn scheme_ret<'db>(db: &'db RootDatabase, check: &ItemCheck<'db>) -> Ty<'db> {
         let scheme = check.scheme.clone().expect("scheme");
-        let TyKind::Function(function) = scheme.body.kind(db).clone() else {
+        let TyKind::Function(function) = *scheme.body.kind(db) else {
             panic!("expected a function scheme");
         };
         function.ret

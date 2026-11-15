@@ -1,5 +1,6 @@
 # A package author loads the package into ry's runtime, calls into it, and runs a test
-# script; a failing check makes the run fail.
+# script; a failing check makes the run fail. The `#:` signature on `area` is checked at its
+# boundary, so a wrong argument is reported by name before the body runs.
 
 requires ry-runtime
 
@@ -27,7 +28,7 @@ file tests/check.R
 | for (file in list.files("R", full.names = TRUE)) source(file)
 | stopifnot(area(2, 3) == 6)
 | caught <- tryCatch(area(2, "wide"), error = function(condition) conditionMessage(condition))
-| stopifnot(grepl("non-numeric", caught))
+| stopifnot(identical(caught, "argument `height` must be `double`, not `character`"))
 | cat("all checks passed\n")
 
 run ry run --runtime ry tests/check.R

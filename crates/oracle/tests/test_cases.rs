@@ -1,6 +1,7 @@
 //! Replays the recorded cases under GNU R, and under the engine in `ORACLE_ENGINE` when set.
 //! `RY_BLESS=1` re-records the expectations. The test passes without R installed, and skips
-//! when GNU R is another release than the one `cases/gnu-r.txt` names.
+//! when GNU R is another release than the one `cases/gnu-r.txt` names. On other BLAS or LAPACK
+//! libraries it skips the cases marked `# oracle: library-dependent`.
 //!
 //! When ry's runtime is built, a rotating subset of the cases also runs under each collection
 //! stress (`ry-gctorture` and `ry-gctorture-young`) and must give what ry gives unstressed.
@@ -9,11 +10,11 @@
 
 use {
     oracle::{
-        BUILD_FILE, BuildCheck, Engine, EngineError, KNOWN_FAILURES_FILE, ProcessEngine, Verdict,
-        check_build, diff, engine_from_environment, expected_path, fails_run, find_cases,
+        BUILD_FILE, BuildCheck, CaseRun, Engine, EngineError, KNOWN_FAILURES_FILE, ProcessEngine,
+        Verdict, check_build, diff, engine_from_environment, expected_path, fails_run, find_cases,
         gnu_r_available, gnu_r_build, installed_packages, known_failure, known_failures,
-        libraries_ahead_of_reference, parse, parse_known_failures, render, runnable_cases,
-        ry_runtime_available, verdict, write_build,
+        libraries_ahead_of_reference, library_dependent, parse, parse_known_failures, render,
+        runnable_cases, ry_runtime_available, verdict, write_build,
     },
     std::{
         ffi::OsStr,
@@ -38,6 +39,8 @@ const REGRESSION_CASES: &[&str] = &[
     "datetime__year_overflow",
     "assignment__dollar_in_place",
     "environments__unread_loop_variable",
+    "datatable__setcolorder_young_columns",
+    "datatable__setorder_young_strings",
 ];
 
 fn cases() -> Vec<PathBuf> {
@@ -54,9 +57,13 @@ fn recorded_outcomes_match_gnu_r() {
     let bless = std::env::var_os("RY_BLESS").is_some();
     let build = gnu_r_build().unwrap_or_else(|error| panic!("{error}"));
     eprintln!("GNU R {build}");
+    let mut other_libraries = false;
     match check_build(&case_directory(), &build).unwrap_or_else(|error| panic!("{error}")) {
         BuildCheck::Same => {}
-        BuildCheck::LibrariesDiffer(message) => eprintln!("warning: {message}"),
+        BuildCheck::LibrariesDiffer(message) => {
+            eprintln!("warning: {message}");
+            other_libraries = true;
+        }
         BuildCheck::ReleaseDiffers(message) if bless => panic!(
             "refusing to bless: {message}; to move the suite to another release, delete \
              cases/{BUILD_FILE} and bless again"
@@ -73,6 +80,15 @@ fn recorded_outcomes_match_gnu_r() {
     let mut failures = Vec::new();
     assert!(!cases().is_empty(), "no oracle cases found");
     for case in cases() {
+        // A bless records them all the same, as `oracle record` does on other libraries.
+        if other_libraries && !bless && library_dependent(&case) {
+            eprintln!(
+                "skipped {}: its digits follow the numerical libraries, and this GNU R's differ \
+                 from the recorded build's",
+                case.display()
+            );
+            continue;
+        }
         let actual = match gnu_r.run(&case) {
             Ok(actual) => actual,
             Err(EngineError::Crashed(error)) => {
@@ -115,9 +131,16 @@ fn second_engine_matches_gnu_r() {
     let name = second.name();
     let mut failures = Vec::new();
     for case in cases() {
-        let failure = match second.run(&case) {
+        let (run, failure) = match second.run(&case) {
             Err(EngineError::Unavailable(_)) => return,
-            Err(error) => Some(format!("{}: {error}", case.display())),
+            Err(EngineError::Crashed(error)) => (
+                CaseRun::Crashed,
+                Some(format!("{} crashed: {error}", case.display())),
+            ),
+            Err(error) => (
+                CaseRun::Failed,
+                Some(format!("{}: {error}", case.display())),
+            ),
             Ok(actual) => {
                 let expected = match gnu_r.run(&case) {
                     Ok(expected) => expected,
@@ -127,12 +150,17 @@ fn second_engine_matches_gnu_r() {
                     }
                     Err(error) => panic!("{}: {error}", case.display()),
                 };
-                diff("GNU R", &expected, &name, &actual)
-                    .map(|difference| format!("{}\n{difference}", case.display()))
+                match diff("GNU R", &expected, &name, &actual) {
+                    Some(difference) => (
+                        CaseRun::Failed,
+                        Some(format!("{}\n{difference}", case.display())),
+                    ),
+                    None => (CaseRun::Passed, None),
+                }
             }
         };
         let entry = known_failure(&known, &case, &name);
-        match verdict(failure.is_some(), entry) {
+        match verdict(run, entry) {
             Verdict::Known => {
                 if let Some(entry) = entry {
                     eprintln!("known {}: {}", case.display(), entry.reason);
@@ -143,7 +171,7 @@ fn second_engine_matches_gnu_r() {
                 "{} passes under {name}, so delete its entry from {KNOWN_FAILURES_FILE}",
                 case.display()
             )),
-            Verdict::Passed | Verdict::IntermittentPassed => {}
+            Verdict::Passed => {}
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -157,72 +185,57 @@ fn known_failures_are_valid() {
     }
 }
 
-/// A crash that depends on the host or on timing is listed as intermittent, and its case passing
-/// does not fail the run, while any other listed case that passes does, so its fix deletes it.
+/// A listed case that passes fails the run, so its fix deletes its entry. A listed case that
+/// crashes fails it too, and no mark turns either into a pass.
 #[test]
-fn a_passing_intermittent_entry_does_not_fail_the_run() {
-    let known = parse_known_failures(
-        r#"
-[[failure]]
-case = "base__match_arg_native"
-engine = "ry-jit-gctorture"
-area = "jit"
-reason = "aborts under the collector on some hosts"
-intermittent = true
-
-[[failure]]
-case = "base__match_arg_native"
-engine = "ry-gctorture"
-area = "gc"
-reason = "aborts under the collector"
-"#,
-        Path::new(env!("CARGO_MANIFEST_DIR")),
-    )
-    .unwrap_or_else(|error| panic!("{error}"));
+fn a_listed_case_fails_the_run_when_it_passes_or_crashes() {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let entry = "[[failure]]\ncase = \"base__match_arg_native\"\nengine = \"ry-jit-gctorture\"\n\
+                 area = \"jit\"\nreason = \"prints one warning GNU R does not\"\n";
+    let known = parse_known_failures(entry, directory).unwrap_or_else(|error| panic!("{error}"));
     let case = case_directory().join("base__match_arg_native.R");
-    let intermittent = known_failure(&known, &case, "ry-jit-gctorture");
-    let plain = known_failure(&known, &case, "ry-gctorture");
+    let listed = known_failure(&known, &case, "ry-jit-gctorture");
+    assert!(listed.is_some());
 
-    assert_eq!(verdict(false, intermittent), Verdict::IntermittentPassed);
-    assert!(!fails_run(verdict(false, intermittent)));
-    assert_eq!(verdict(true, intermittent), Verdict::Known);
-    assert!(!fails_run(verdict(true, intermittent)));
+    assert_eq!(verdict(CaseRun::Passed, listed), Verdict::ListedButPassing);
+    assert!(fails_run(verdict(CaseRun::Passed, listed)));
+    assert_eq!(verdict(CaseRun::Failed, listed), Verdict::Known);
+    assert!(!fails_run(verdict(CaseRun::Failed, listed)));
+    assert_eq!(verdict(CaseRun::Crashed, listed), Verdict::New);
+    assert!(fails_run(verdict(CaseRun::Crashed, listed)));
 
-    assert_eq!(verdict(false, plain), Verdict::ListedButPassing);
-    assert!(fails_run(verdict(false, plain)));
-    assert_eq!(verdict(true, plain), Verdict::Known);
-    assert!(!fails_run(verdict(true, plain)));
+    assert!(fails_run(verdict(CaseRun::Failed, None)));
+    assert!(fails_run(verdict(CaseRun::Crashed, None)));
+    assert!(!fails_run(verdict(CaseRun::Passed, None)));
 
-    assert!(fails_run(verdict(true, None)));
-    assert!(!fails_run(verdict(false, None)));
+    match parse_known_failures(&format!("{entry}intermittent = true\n"), directory) {
+        Ok(_) => panic!("an entry marked intermittent must be refused"),
+        Err(error) => assert!(error.contains("intermittent"), "{error}"),
+    }
 }
 
-/// Only a collector-stress engine's crash may be intermittent: a failure under any other engine
-/// reproduces on every host, so the file refuses the mark there.
+/// An entry that names an unknown engine, a case that does not exist, or the same case and engine
+/// twice is refused.
 #[test]
-fn intermittent_is_refused_outside_the_gctorture_engines() {
-    let entry = |engine: &str| {
+fn a_mistyped_or_repeated_known_failure_is_refused() {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let entry = |case: &str, engine: &str| {
         format!(
-            "[[failure]]\ncase = \"base__match_arg_native\"\nengine = \"{engine}\"\n\
-             area = \"jit\"\nreason = \"crashes\"\nintermittent = true\n"
+            "[[failure]]\ncase = \"{case}\"\nengine = \"{engine}\"\narea = \"jit\"\n\
+             reason = \"differs\"\n"
         )
     };
-    let directory = Path::new(env!("CARGO_MANIFEST_DIR"));
-    for engine in ["ry", "ry-tier0", "ry-jit"] {
-        let error = parse_known_failures(&entry(engine), directory)
-            .expect_err("an intermittent entry under an engine without gctorture");
+    let valid = entry("base__match_arg_native", "ry-jit");
+    assert!(parse_known_failures(&valid, directory).is_ok());
+    for refused in [
+        entry("base__match_arg_native", "ry-turbo"),
+        entry("base__no_such_case", "ry-jit"),
+        format!("{valid}{valid}"),
+    ] {
         assert!(
-            error.contains(&format!(
-                "`base__match_arg_native` under `{engine}` is marked intermittent, which only an \
-                 entry under ry-gctorture, ry-gctorture-young, ry-jit-gctorture may be"
-            )),
-            "{error}"
+            parse_known_failures(&refused, directory).is_err(),
+            "{refused}"
         );
-    }
-    for engine in ["ry-gctorture", "ry-gctorture-young", "ry-jit-gctorture"] {
-        if let Err(error) = parse_known_failures(&entry(engine), directory) {
-            panic!("{error}");
-        }
     }
 }
 
@@ -370,16 +383,30 @@ fn a_case_can_interrupt_itself_when_the_oracle_inherits_an_ignored_sigint() {
 
 #[test]
 fn cases_survive_gc_torture() {
-    cases_survive(ProcessEngine::ry_gc_torture());
+    cases_survive(|_| ProcessEngine::ry_gc_torture(), &[], 0);
 }
 
 #[test]
 fn cases_survive_young_gc_torture() {
-    cases_survive(ProcessEngine::ry_gc_torture_young());
+    cases_survive(|_| ProcessEngine::ry_gc_torture_young(), &[], 0);
 }
 
-/// A seeded subset of the cases under `torture` gives what ry gives unstressed.
-fn cases_survive(torture: ProcessEngine) {
+/// The groups whose cases run the most native code through the C API, where a pointer handed
+/// out to package code can bypass the write barrier.
+const NATIVE_GROUPS: &[&str] = &["datatable", "packages", "altrep", "serialize"];
+
+/// Seeded stress with the barrier check on, over the cases that run the most native code: a
+/// store that skips the write barrier fails the check at the next collection, which comes at a
+/// random gap so the objects involved are often still young.
+#[test]
+fn native_cases_keep_the_write_barrier_under_seeded_gc_torture() {
+    cases_survive(ProcessEngine::ry_gc_torture_seeded, NATIVE_GROUPS, 3);
+}
+
+/// A seeded subset of the cases under the stressed engine `torture` makes for the seed gives
+/// what ry gives unstressed: every regression case, `focused` cases from the `focus` groups,
+/// and one more from anywhere.
+fn cases_survive(torture: fn(u64) -> ProcessEngine, focus: &[&str], focused: usize) {
     if !ry_runtime_available() {
         eprintln!("skipped: ry's runtime is not built; run `cargo build -p ry-lang -p libr`");
         return;
@@ -388,12 +415,23 @@ fn cases_survive(torture: ProcessEngine) {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
-    let (mut chosen, mut all): (Vec<PathBuf>, Vec<PathBuf>) =
-        cases().into_iter().partition(|case| {
+    let torture = torture(seed);
+    let (mut chosen, rest): (Vec<PathBuf>, Vec<PathBuf>) = cases().into_iter().partition(|case| {
+        case.file_stem()
+            .is_some_and(|stem| REGRESSION_CASES.iter().any(|name| stem == *name))
+    });
+    let (mut focused_cases, mut all): (Vec<PathBuf>, Vec<PathBuf>) =
+        rest.into_iter().partition(|case| {
             case.file_stem()
-                .is_some_and(|stem| REGRESSION_CASES.iter().any(|name| stem == *name))
+                .and_then(|stem| stem.to_str())
+                .and_then(|stem| stem.split_once("__"))
+                .is_some_and(|(group, _)| focus.contains(&group))
         });
     let mut rng = SplitMix64(seed);
+    for _ in 0..fuzz_iterations(focused).min(focused_cases.len()) {
+        chosen.push(focused_cases.swap_remove(rng.below(focused_cases.len())));
+    }
+    all.extend(focused_cases);
     for _ in 0..fuzz_iterations(1).min(all.len()) {
         chosen.push(all.swap_remove(rng.below(all.len())));
     }

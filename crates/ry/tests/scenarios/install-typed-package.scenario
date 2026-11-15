@@ -1,0 +1,406 @@
+# A package's typed functions keep their declared types once the package is installed: a new
+# session checks their arguments, converts a whole number to the `I64` a parameter declares, and
+# runs them as compiled for the declared types, with the code image and without it. A strict file
+# goes in as the preflight elaborates it, so a conversion compiles at its first call and a
+# parameter declared with an alias is checked as the type the alias names.
+#
+# The install writes the package's typed code file, so a new session attaches the machine code of
+# each typed function at its first call instead of compiling it; a version the file cannot
+# supply compiles in the session as it would without the file.
+
+requires ry-runtime
+
+file pkg/DESCRIPTION
+| Package: typedpkg
+| Version: 1.0.0
+| Title: Typed
+| Description: Typed functions that an install must keep typed.
+| License: MIT
+file pkg/NAMESPACE
+| export(grow, total, label, total_reading, length_of, capped, step_total)
+file pkg/R/typed.R
+| grow <- function(x: F64, rate: F64) -> F64 x + rate * x
+| total <- function(n: I64, rate: F64) -> F64 {
+|   sum <- 0.0
+|   for (i in List.range(1, n)) {
+|     sum <- grow(sum, rate) + Num.to_f64(i)
+|   }
+|   sum
+| }
+| label <- function(name: Str, n: I64) -> Str Str.concat(name, Num.to_str(n))
+file pkg/R/strict.R
+| # typing: strict
+| alias Point = Record{x: F64, y: F64}
+| total_reading <- function(scale: F64) -> F64 {
+|   xs <- List.from_r(seq(0.5, 2.5))
+|   List.walk(xs, 0.0, \(sum, x) sum + x * scale)
+| }
+| length_of <- function(p: Point) -> F64 Num.sqrt(p$x * p$x + p$y * p$y)
+| limit <- 10
+| steps <- [1, 2, 3, 4]
+| capped <- function(n: I64) -> I64 if (n > limit) limit else n
+| step_total <- function() -> I64 List.walk(steps, 0, \(sum, x) sum + x)
+
+run ry install pkg -l library
+expect exit 0
+expect stdout "typed code: closures=7 written=4 (left out: compiles with its caller (1), does not compile (2))"
+
+file use.R
+| library(typedpkg, lib.loc = "library")
+| print(total(1000, 0.001))
+| print(label("a", 3))
+| print(tryCatch(grow("a", 1), error = conditionMessage))
+| print(total_reading(2))
+| wrong <- list(x = 3, y = 4)
+| print(tryCatch(length_of(wrong), error = conditionMessage))
+| print(capped(20) == 10)
+| print(step_total() == 10)
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "[1] 718640.9"
+expect stdout "[1] \"a3\""
+expect stdout "[1] \"argument `x` must be `F64`, not `character`\""
+expect stderr "typed: attached `total` for [I64, Dbl] -> Dbl from typedpkg's code file"
+expect stderr "typed: attached `label` for [Str, I64] -> Str from typedpkg's code file"
+expect stdout "[1] 9"
+expect stderr "typed: attached `total_reading` for [Dbl] -> Dbl from typedpkg's code file"
+expect stderr lacks "typed: compiled"
+expect stderr lacks "`total_reading` runs in the interpreter"
+expect stdout "[1] \"argument `p` must be `Record{x: F64, y: F64}`, not `list`\""
+expect stdout "[1] TRUE\n[1] TRUE"
+
+env RY_CODE_IMAGE 0
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "[1] 718640.9"
+expect stdout "[1] \"argument `x` must be `F64`, not `character`\""
+expect stderr "typed: attached `total` for [I64, Dbl] -> Dbl from typedpkg's code file"
+
+# A version the file does not supply compiles in the session, with the same output.
+env RY_AHEAD_MISS 1
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "[1] 718640.9"
+expect stdout "[1] \"a3\""
+expect stdout "[1] 9"
+expect stderr "typed: compiled for [I64, Dbl] -> Dbl"
+expect stderr lacks "typed: attached"
+unset RY_AHEAD_MISS
+env RY_CODE_IMAGE 1
+
+# Attached code keeps what it reads alive across collections at every allocation.
+env RY_GC_STRESS 1
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "[1] 718640.9"
+expect stdout "[1] 9"
+expect stderr "typed: attached `total` for [I64, Dbl] -> Dbl from typedpkg's code file"
+unset RY_GC_STRESS
+
+# Where the code cannot map from the file, it is copied into the same range and runs the same.
+env RY_TYPED_FILE_COPY 1
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "[1] 718640.9"
+expect stdout "[1] 9"
+expect stderr "typed: attached `total` for [I64, Dbl] -> Dbl from typedpkg's code file"
+expect stderr lacks "typed: compiled"
+unset RY_TYPED_FILE_COPY
+
+# A saved typed function reads back typed too.
+file save.R
+| half <- function(x: F64) -> F64 x / 2
+| saveRDS(half, "half.rds")
+| again <- readRDS("half.rds")
+| print(again(3))
+| print(tryCatch(again("a"), error = conditionMessage))
+| print(names(attributes(again)))
+
+run ry run --runtime ry save.R
+expect exit 0
+expect stdout "[1] 1.5"
+expect stdout "[1] \"argument `x` must be `F64`, not `character`\""
+expect stdout "NULL"
+
+# `ry build --aot` installs the package with its typed code file, as `ry install` does, and
+# points a script at `ry run --aot`.
+run ry build --aot pkg -l built
+expect exit 0
+expect stdout "typed code: closures=7 written=4"
+env RY_TYPED_LOG 1
+file use-built.R
+| library(typedpkg, lib.loc = "built")
+| print(total(1000, 0.001))
+run ry run --runtime ry use-built.R
+expect exit 0
+expect stdout "[1] 718640.9"
+expect stderr "typed: attached `total` for [I64, Dbl] -> Dbl from typedpkg's code file"
+
+run ry build --aot use.R
+expect exit 2
+expect stderr "use.R is a script, and `ry build --aot` compiles a package: run the script with `ry run --aot use.R`"
+
+# Under `ry run --aot`, a package whose typed code file is another build's compiles its typed
+# functions as its namespace loads, and the run says to reinstall it.
+file foreign.R
+| file <- list.files("built/typedpkg/R", "\\.ryt$", full.names = TRUE)
+| stopifnot(file.rename(file, "built/typedpkg/R/typedpkg.0000000000000000.ryt"))
+run ry run --runtime ry foreign.R
+expect exit 0
+unset RY_TYPED_LOG
+run ry run --runtime ry use-built.R
+expect exit 0
+expect stdout "[1] 718640.9"
+expect stderr lacks "reinstall"
+env RY_TYPED_LOG 1
+run ry run --aot --runtime ry use-built.R
+expect exit 0
+expect stdout "[1] 718640.9"
+expect stderr "typed: compiled 4 functions ahead of time"
+expect stderr "ry: another build of ry installed typedpkg, so its typed functions compiled as it loaded; reinstall it to compile them at install"
+expect stderr lacks "typed: attached"
+
+# Shape ids in file code come from the offset table, so a process that interned other records and
+# tags before the package loaded runs a `match` over a closed union, a record parameter and a sort
+# comparator from the file correctly.
+file shapes/DESCRIPTION
+| Package: shapepkg
+| Version: 1.0.0
+| Title: Shapes
+| Description: Typed functions over tags and records.
+| License: MIT
+file shapes/NAMESPACE
+| export(weight, norms, largest)
+file shapes/R/shapes.R
+| # typing: strict
+| alias Size = :Small | :Big(n: I64)
+| size_of <- function(n: I64) -> Size if (n > 2) :Big(n = n) else :Small
+| weight <- function(n: I64) -> I64 {
+|   total <- 0
+|   for (i in List.range(1, n)) {
+|     total <- total + match (size_of(i)) {
+|       :Small => 1
+|       :Big(n = k) => k
+|     }
+|   }
+|   total
+| }
+| norm <- function(p: Record{x: F64, y: F64}) -> F64 Num.sqrt(p$x * p$x + p$y * p$y)
+| norms <- function(n: I64) -> F64 {
+|   sum <- 0.0
+|   for (i in List.range(1, n)) sum <- sum + norm((x = Num.to_f64(i), y = 1.0))
+|   sum
+| }
+| largest <- function(n: I64) -> I64 {
+|   xs <- List.sort_with(List.range(1, n), \(a, b) Num.compare(b, a))
+|   List.walk(xs, 0, function(acc: I64, x: I64) -> I64 acc * 10 + x)
+| }
+
+run ry install shapes -l library
+expect exit 0
+expect stdout "typed code: closures=5 written=4 (left out: compiles with its caller (1))"
+
+file shapes-first.R
+| other <- function(n: I64) -> I64 {
+|   r <- (a = n, b = 2.0, c = n)
+|   s <- (y = 1.0, x = 2.0, z = n)
+|   t <- if (n > 1) :Big(n = n, m = n) else :Tiny
+|   r$a + r$c + s$z
+| }
+| print(other(3))
+| library(shapepkg, lib.loc = "library")
+| print(weight(5))
+| print(norms(3))
+| print(largest(4))
+
+run ry run --runtime ry shapes-first.R
+expect exit 0
+expect stdout "9i64\n14i64\n[1] 6.812559\n4321i64"
+expect stderr "typed: attached `weight` for [I64] -> I64 from shapepkg's code file"
+expect stderr "typed: attached `norms` for [I64] -> Dbl from shapepkg's code file"
+expect stderr "typed: attached `largest` for [I64] -> I64 from shapepkg's code file"
+
+# A copy of a closure made at run time has another environment, so it compiles in the session,
+# and the closure it was copied from still attaches.
+file copy.R
+| library(shapepkg, lib.loc = "library")
+| copy <- weight
+| environment(copy) <- new.env(parent = environment(weight))
+| print(copy(5))
+| print(weight(5))
+
+run ry run --runtime ry copy.R
+expect exit 0
+expect stdout "14i64\n14i64"
+expect stderr "typed: compiled for [I64] -> I64"
+expect stderr "typed: attached `weight` for [I64] -> I64 from shapepkg's code file"
+
+# A reinstall in a running session replaces the file, and a function fetched before it compiles
+# in the session instead of attaching code written for the new sources.
+file reinstall.R
+| library(shapepkg, lib.loc = "library")
+| before <- weight
+| install.packages("shapes", repos = NULL, type = "source", lib = "library", quiet = TRUE)
+| print(before(5))
+
+run ry run --runtime ry reinstall.R
+expect exit 0
+expect stdout "14i64"
+expect stderr "typed: shapepkg's typed code file is not used: it was written for another copy of the package"
+expect stderr "typed: compiled for [I64] -> I64"
+
+# A function left out of the file takes the functions that call it with it, and the rest of the
+# file attaches.
+file drop/DESCRIPTION
+| Package: droppkg
+| Version: 1.0.0
+| Title: Drop
+| Description: A function left out of the file and its caller.
+| License: MIT
+file drop/NAMESPACE
+| export(caller, other)
+file drop/R/drop.R
+| root <- local(function(x: F64) -> F64 Num.sqrt(x))
+| caller <- function(x: F64) -> F64 root(x) + 1.0
+| other <- function(x: F64) -> F64 x * 3.0
+
+run ry install drop -l library
+expect exit 0
+expect stdout "typed code: closures=3 written=1 (left out: assumes a lookup a session cannot check (1), calls a function left out of the file (1))"
+
+file drop.R
+| library(droppkg, lib.loc = "library")
+| print(caller(2))
+| print(other(2))
+
+run ry run --runtime ry drop.R
+expect exit 0
+expect stdout "[1] 2.414214\n[1] 6"
+expect stderr "typed: attached `other` for [Dbl] -> Dbl from droppkg's code file"
+expect stderr lacks "is not used"
+
+# A `match` over any tag tests for the shapes the install had seen, so it attaches when this
+# session has seen no other shape its patterns name, and compiles in the session when it has. A
+# shape seen after it attached makes it stale, as code compiled in the session would be.
+file trees/DESCRIPTION
+| Package: treepkg
+| Version: 1.0.0
+| Title: Trees
+| Description: A match over any tag.
+| License: MIT
+file trees/NAMESPACE
+| export(nodes)
+file trees/R/trees.R
+| # typing: strict
+| type Tree = :Leaf | :Node(left: Tree, right: Tree)
+| grow <- function(depth: I64) -> Tree {
+|   if (depth == 0) @Tree(:Leaf) else @Tree(:Node(left = grow(depth - 1), right = grow(depth - 1)))
+| }
+| count <- function(tree: Tree) -> I64 {
+|   match (tree) {
+|     :Leaf => 1
+|     :Node(left = l, right = r) => count(l) + count(r)
+|   }
+| }
+| nodes <- function(depth: I64) -> I64 count(grow(depth))
+
+run ry install trees -l library
+expect exit 0
+expect stdout "typed code: closures=3 written=4"
+
+file trees-use.R
+| library(treepkg, lib.loc = "library")
+| print(nodes(4))
+| stray <- function(x: F64) -> F64 {
+|   t <- :Node(left = x, right = x)
+|   x
+| }
+| print(stray(1.5))
+| print(nodes(5))
+
+run ry run --runtime ry trees-use.R
+expect exit 0
+expect stdout "16i64\n[1] 1.5\n32i64"
+expect stderr "typed: attached `count` for [Tag(4294967295)] -> I64 from treepkg's code file"
+expect stderr "typed: attached `nodes` for [I64] -> I64 from treepkg's code file"
+expect stderr "typed: compiled for [Tag(4294967295)] -> I64"
+
+file trees-stray.R
+| stray <- function(x: F64) -> F64 {
+|   t <- :Node(left = x, right = x)
+|   x
+| }
+| print(stray(1.5))
+| library(treepkg, lib.loc = "library")
+| print(nodes(4))
+
+run ry run --runtime ry trees-stray.R
+expect exit 0
+expect stdout "[1] 1.5\n16i64"
+expect stderr "typed: `count` for [Tag(4294967295)] is not attached from treepkg's code file: a `match` in it tests for fewer shapes than this session has seen"
+expect stderr "typed: compiled for [Tag(4294967295)] -> I64"
+
+# `ry install --train` also writes every version the training run compiled, such as one for the
+# type a conversion the checker cannot type gave in the run. A session where the conversion gives
+# another type runs that call again in the interpreter and compiles no code for it from then on.
+file trained/DESCRIPTION
+| Package: trainpkg
+| Version: 1.0.0
+| Title: Trained
+| Description: A version only a training run compiles.
+| License: MIT
+file trained/NAMESPACE
+| export(scaled)
+file trained/R/trained.R
+| rate <- function() get("factor_value", envir = globalenv())
+| note <- function() cat("before\n")
+| scaled <- function(k: I64) -> I64 {
+|   note()
+|   y <- Num.from_r(rate())
+|   print(y)
+|   k
+| }
+file train.R
+| assign("factor_value", 2.5, envir = globalenv())
+| scaled(1)
+| scaled(2)
+
+run ry install trained -l library
+expect exit 0
+expect stdout "typed code: closures=1 written=0 (left out: does not compile (1))"
+
+run ry install trained -l library --train train.R
+expect exit 0
+expect stdout "typed code: closures=1 written=1"
+
+file trained-use.R
+| library(trainpkg, lib.loc = "library")
+| assign("factor_value", 1.5)
+| print(scaled(3))
+| assign("factor_value", as.integer(7))
+| print(scaled(4))
+| print(scaled(5))
+
+run ry run --runtime ry trained-use.R
+expect exit 0
+expect stdout "before\n[1] 1.5\n3i64\nbefore\n7i64\n4i64\nbefore\n7i64\n5i64"
+expect stderr "typed: attached `scaled` for [I64] -> I64 from trainpkg's code file"
+expect stderr "typed: `scaled` runs in the interpreter: `Num.from_r(rate())` gave `I64`, which its native code was not compiled for"
+expect stderr "typed: refused [I64]"
+expect stderr lacks "typed: compiled for"
+
+# The attached code runs `note()` before the conversion that gives up, and the interpreter takes
+# its recorded value instead of calling it again, so each call prints once. A session in which
+# the interpreter already saw the conversion give another type does not attach the version.
+file trained-seen.R
+| library(trainpkg, lib.loc = "library")
+| assign("factor_value", as.integer(7))
+| print(scaled(identity(3)))
+| print(scaled(4))
+
+run ry run --runtime ry trained-seen.R
+expect exit 0
+expect stdout "before\n7i64\n3i64\nbefore\n7i64\n4i64"
+expect stderr "typed: `scaled` for [I64] is not attached from trainpkg's code file: a conversion it guessed the type of gave another type in this session"

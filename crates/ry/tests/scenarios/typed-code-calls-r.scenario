@@ -1,7 +1,9 @@
 # Typed code calls an R function on native code when it uses the call as a statement or converts
-# its value with `Num.from_r`, `Str.from_r`, `Bool.from_r` or `List.from_r`. The first call runs
-# in the interpreter, which loads `stats` and records the type `List.from_r` gives, and the calls
-# after it run natively with the same results, R's random number generator included.
+# its value with `Num.from_r`, `Str.from_r`, `Bool.from_r` or `List.from_r`. The checker knows
+# that `stats::rnorm` gives doubles, so `List.from_r` needs no interpreted call to learn its item
+# type, and the function a lazy-loaded namespace binds is read from the package database when the
+# code compiles. Every call runs natively, the first included, with R's random number generator
+# giving what it gives the interpreter.
 
 requires ry-runtime
 
@@ -28,5 +30,189 @@ expect exit 0
 expect stdout "sum of 5 \n[1] 0.6463495"
 expect stdout "sum of 5 \n[1] 0.6463495"
 expect stdout "sum of 5 \n[1] -0.3348475"
-expect stderr "typed: `walk` runs in the interpreter: no code for [I64, I64]: it waits on the interpreter to run `"
 expect stderr "typed: compiled for [I64, I64] -> Dbl"
+expect stderr lacks "runs in the interpreter"
+
+# The checker types `factor()` as a `double`, so `Num.from_r` gives an `F64` and the first call
+# compiles, as `List.from_r` above does.
+
+file scale.R
+| factor <- function() 2.5
+| scale <- function(x: F64) -> F64 {
+|   x * Num.from_r(factor())
+| }
+| print(scale(2))
+| print(scale(4))
+
+run ry run --runtime ry scale.R
+expect exit 0
+expect stdout "[1] 5\n[1] 10"
+expect stderr "typed: compiled for [Dbl] -> Dbl"
+expect stderr lacks "runs in the interpreter"
+
+# A conversion whose type the checker does not know waits for the interpreter to run the call
+# once: `Num.from_r` of R code whose value `get` finds, which only a project without strict mode
+# accepts.
+
+file loose/ry.toml
+| [check]
+| typing = true
+
+file loose/later.R
+| rate <- 2.5
+| factor <- function() get("rate")
+| later <- function(x: F64) -> F64 {
+|   x * Num.from_r(factor())
+| }
+| print(later(2))
+| print(later(4))
+
+run ry run --runtime ry loose/later.R
+expect exit 0
+expect stdout "[1] 5\n[1] 10"
+expect stderr "typed: `later` runs in the interpreter: no code for [Dbl]: it waits on the interpreter to run `"
+expect stderr "typed: compiled for [Dbl] -> Dbl"
+
+# The code compiled for the type a guessed conversion gave first. When the conversion gives
+# another type, the code gives up, and the interpreter runs the call again with the values the
+# R calls made so far returned, so `note("before")` and `factor()` run once. A conversion that has
+# given two types refuses to compile from then on, and its calls run in the interpreter. With the
+# native tier off, the program prints the same.
+
+file loose/changes.R
+| rate <- 2.5
+| factor <- function() { cat("factor called\n"); get("rate") }
+| note <- function(s) cat("note:", s, "\n")
+| later <- function(x: I64) -> I64 {
+|   note("before")
+|   y <- Num.from_r(factor())
+|   note("after")
+|   print(y)
+|   x
+| }
+| print(later(2))
+| print(later(4))
+| rate <- as.integer(3)
+| print(later(5))
+| rate <- 1.5
+| print(later(6))
+
+run ry run --runtime ry loose/changes.R
+expect exit 0
+expect stdout "note: before \nfactor called\nnote: after \n[1] 2.5\n4i64\nnote: before \nfactor called\nnote: after \n3i64\n5i64\nnote: before \nfactor called\nnote: after \n[1] 1.5\n6i64"
+expect stderr "typed: `later` runs in the interpreter: `Num.from_r(factor())` gave `I64`, which its native code was not compiled for, and the interpreter ran the call again with the values its R calls had returned"
+expect stderr "typed: `later` runs in the interpreter: no code for [I64]: `Num.from_r(factor())` gave `F64` in one call and `I64` in another, so its type is not known before it runs: convert the value to one type in R first"
+
+env RY_JIT off
+run ry run --runtime ry loose/changes.R
+expect exit 0
+expect stdout "note: before \nfactor called\nnote: after \n[1] 2.5\n4i64\nnote: before \nfactor called\nnote: after \n3i64\n5i64\nnote: before \nfactor called\nnote: after \n[1] 1.5\n6i64"
+unset RY_JIT
+
+# The interpreter cannot run a call again without repeating its R calls once the code has made
+# more of them than it records, so giving up after that is an error.
+
+file loose/many.R
+| rate <- 2.5
+| factor <- function() get("rate")
+| tick <- function() cat("")
+| many <- function(n: I64) -> I64 {
+|   i <- 0
+|   while (i < n) { tick(); i <- i + 1 }
+|   y <- Num.from_r(factor())
+|   n
+| }
+| print(many(1))
+| print(many(1))
+| rate <- as.integer(3)
+| print(many(5000))
+
+run ry run --runtime ry loose/many.R
+expect exit 1
+expect stderr "`Num.from_r(factor())` gave `I64`, which its native code was not compiled for, after it had called R more than 4096 times or kept more than 64 MiB of what those calls returned, so the interpreter cannot run the call again without calling R a second time: make fewer R calls in one typed call"
+
+# A `Num.from_r` the checker typed gives that number whatever R gives: an R integer where the
+# checker read a `double` becomes an `F64`, as R converts it, and a `double` where it read an
+# `integer` is an error. `@trust` makes the checker read the types R code declares. The
+# interpreter and compiled code, compiled at the first call or ahead of time, agree.
+
+file loose/numbers.R
+| widen <- function(x) { y: @trust double <- x; y }
+| half <- function(x: I64) -> F64 Num.from_r(widen(Num.to_r(x))) / 2
+| print(half(3))
+| liar <- function(x) { y: @trust integer <- x + 0.5; y }
+| whole <- function(x: I64) -> I64 Num.from_r(liar(Num.to_r(x)))
+| print(whole(3))
+
+run ry run --runtime ry loose/numbers.R
+expect exit 1
+expect stdout "[1] 1.5"
+expect stderr "typed: compiled for [I64] -> Dbl"
+expect stderr "typed: compiled for [I64] -> I64"
+expect stderr "`Num.from_r(liar(Num.to_r(x)))` gave an `F64` where the type checker expects an `I64`, the type of the R code it read: convert the value to an integer in R first, for example with `as.integer()`"
+
+run ry run --runtime ry --aot loose/numbers.R
+expect exit 1
+expect stdout "[1] 1.5"
+expect stderr "typed: compiled 2 functions ahead of time in "
+expect stderr "`Num.from_r(liar(Num.to_r(x)))` gave an `F64` where the type checker expects an `I64`"
+
+env RY_JIT off
+run ry run --runtime ry loose/numbers.R
+expect exit 1
+expect stdout "[1] 1.5"
+expect stderr "`Num.from_r(liar(Num.to_r(x)))` gave an `F64` where the type checker expects an `I64`"
+unset RY_JIT
+
+# The checker reads `whole` and `prices` and types both conversions as a `List<F64>`. R gives an
+# integer vector for `abs(-3:3)`, which the conversion widens as R would, and the empty integer
+# vector `abs(-3:3)[0]` becomes an empty `List<F64>`. The interpreter and compiled code give the same list.
+
+file widened.R
+| whole <- function() abs(-3:3)
+| none <- function() abs(-3:3)[0]
+| total <- function(extra: F64) -> F64 {
+|   listed <- List.from_r(whole())
+|   List.sum(listed) + List.sum(List.from_r(none())) + extra
+| }
+| print(total(0.5))
+| print(total(1.5))
+
+run ry run --runtime ry widened.R
+expect exit 0
+expect stdout "[1] 12.5\n[1] 13.5"
+expect stderr "typed: compiled for [Dbl] -> Dbl"
+expect stderr lacks "runs in the interpreter"
+
+run ry run --runtime ry --aot widened.R
+expect exit 0
+expect stdout "[1] 12.5\n[1] 13.5"
+expect stderr "typed: compiled 1 function ahead of time in "
+
+env RY_JIT off
+run ry run --runtime ry widened.R
+expect exit 0
+expect stdout "[1] 12.5\n[1] 13.5"
+
+# A vector no widening turns into the checker's type stops the conversion: R code rebinds
+# `prices` after the check, and the strings it gives are no `List<F64>`. The interpreter and
+# compiled code stop with the same error.
+
+file rebound.R
+| prices <- function() c(1.5, 2.5)
+| count <- function(extra: F64) -> F64 {
+|   listed <- List.from_r(prices())
+|   Num.to_f64(List.len(listed)) + extra
+| }
+| assign("prices", function() c("1.5", "2.5"))
+| print(count(3))
+
+unset RY_JIT
+run ry run --runtime ry rebound.R
+expect exit 1
+expect stderr "`List.from_r(prices())` gave a `List<Str>` where the type checker expects a `List<F64>`, the type of the R code it read: convert the vector to that type in R first, for example with `as.numeric()`"
+
+env RY_JIT off
+run ry run --runtime ry rebound.R
+expect exit 1
+expect stderr "`List.from_r(prices())` gave a `List<Str>` where the type checker expects a `List<F64>`, the type of the R code it read: convert the vector to that type in R first, for example with `as.numeric()`"

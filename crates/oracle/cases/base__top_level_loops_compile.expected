@@ -1,0 +1,37 @@
+[stdout]
+| [1] 100 100
+| NULL
+| [1] "b"
+| [1] 100
+| [1] 10050
+| [1] 200
+| [1] 150
+| [1] 2500
+| [1] 300
+| [1] 70
+| [1] 80
+| [1] "no loop for break/next, jumping to top level"
+| eval(expression, globalenv())
+| [1] "object 'undefined_variable' not found"
+| log(-1)
+| [1] TRUE
+| k()
+| [1] -2
+| [1] 0
+| [1]   1 100   3
+| [1] 100
+| exit
+| after on.exit
+| [1] "'missing(x)' did not find an argument"
+| $value
+| NULL
+| 
+| $visible
+| [1] FALSE
+| 
+[messages]
+[warnings]
+[errors]
+[value]
+list
+| list(value = NULL, visible = FALSE)

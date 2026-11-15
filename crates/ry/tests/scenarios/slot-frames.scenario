@@ -118,7 +118,7 @@ file tier1.R
 | for (k in 1:3) cat(shared(), pending(), "")
 | cat("\n")
 
-env RY_JIT_THRESHOLDS 1,1,0
+env RY_JIT_THRESHOLDS 1,1
 run ry run --runtime ry tier1.R
 expect exit 0
 expect stdout "50 50 50"

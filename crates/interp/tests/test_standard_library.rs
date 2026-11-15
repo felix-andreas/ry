@@ -6,8 +6,9 @@
 //! The interpreter runs here without base R, so the setup defines the few functions base R would.
 
 use {
+    frames::{dataframe, frame},
     heap::{Heap, object::Sexp},
-    interp::{dataframe, eval, frame, lower, print, standard_library, unwind::Unwind, values},
+    interp::{eval, lower, print, standard_library, unwind::Unwind, values},
     std::{cell::RefCell, collections::BTreeSet, fs, path::Path},
     syntax::testing::{SplitMix64, for_each_seed, replay_command},
 };
@@ -180,10 +181,14 @@ const PRINTS: &[(&str, &str)] = &[
     ),
     ("List.sum(xs)", "[1] 6\n"),
     ("List.sum(list())", "[1] 0\n"),
+    // Doubles are added in order in double precision: each `1e-16` is lost against the `1`,
+    // where R's `sum()` keeps them in its extended-precision total.
+    ("List.sum(list(1, 1e-16, 1e-16)) == 1", "[1] TRUE\n"),
     (
-        "identical(List.sum(List.from_r((0:999999) / 999999 * 2 + 1)), sum((0:999999) / 999999 * 2 + 1))",
+        "List.sum(List.from_r(c(1, 1e-16, 1e-16))) == 1",
         "[1] TRUE\n",
     ),
+    ("sum(c(1, 1e-16, 1e-16)) == 1", "[1] FALSE\n"),
     ("List.product(list(2, 2.5))", "[1] 5\n"),
     ("List.min(xs)", ":Ok(1L)\n"),
     ("List.max(list())", ":Err(:ListWasEmpty)\n"),
@@ -834,6 +839,7 @@ const PRINTS: &[(&str, &str)] = &[
     ("typeof(Num.pow_int(2L, 0L))", "[1] \"integer\"\n"),
     ("Num.sqrt(16L)", "[1] 4\n"),
     ("Num.log(1)", "[1] 0\n"),
+    ("c(Num.exp(0), Num.log(Num.exp(2)))", "[1] 1 2\n"),
     (
         "c(Num.asin(1) * 2, Num.acos(-1))",
         "[1] 3.141593 3.141593\n",
@@ -1479,6 +1485,7 @@ fn standard_library_at_runtime() {
         let mut hooks = interp::default_hooks();
         hooks.write_console = capture;
         interp::install(heap, hooks);
+        frames::install();
         interp::interp().show_error_messages = false;
         evaluate(SETUP).unwrap_or_else(|failure| panic!("the setup failed: {failure}"));
         let mut failures = Vec::new();

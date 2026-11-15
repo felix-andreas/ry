@@ -17,6 +17,7 @@
 
 use std::{
     collections::BTreeMap,
+    ffi::{OsStr, OsString},
     fmt,
     fs::{self, File, TryLockError},
     io,
@@ -30,6 +31,16 @@ use std::{
 /// does (`interp::system::MINIMUM_SVN_REVISION`).
 pub const MINIMUM_SVN_REVISION: u32 = 89194;
 
+/// The version of the binary interface that ry's headers (`crates/libr/include`) give compiled
+/// code: what their inline functions and macros read and write without calling into libR. An
+/// installation records it as `RyAbi:`, and `dyn.load` refuses a package ry compiled under another
+/// version (`stale_native_build`), because its code may skip what libR now does on its behalf.
+/// Bump it whenever a header change makes code compiled against the old headers unsafe to run.
+///
+/// 1: `DATAPTR_RO` and `STRING_PTR_RO` call into libR, which keeps the collector's write barrier
+/// for writes through the pointer; ry 0.4.5 and earlier inlined them and recorded no `RyAbi:`.
+pub const NATIVE_ABI: u32 = 1;
+
 /// The R-level half of an installation, run on ry's interpreter.
 const INSTALL_DRIVER: &str = include_str!("install.R");
 const CODE_IMAGE_DRIVER: &str = include_str!("code-image.R");
@@ -41,6 +52,7 @@ mod headers {
 
 pub mod base;
 pub mod front_end;
+pub mod images;
 mod makeconf;
 
 use makeconf::{expand_make, make_assignments};
@@ -196,8 +208,10 @@ pub struct Toolchain {
 impl Default for Toolchain {
     /// The GNU toolchain with the system's reference BLAS and LAPACK, which is what GNU R's
     /// Linux builds and the package binaries of the corpus link against. On macOS it is Apple's
-    /// clang with the Accelerate framework's BLAS and LAPACK, which every Mac has, and on
-    /// Windows it is [`Toolchain::rtools`].
+    /// clang with the Accelerate framework's BLAS and LAPACK, which every Mac has, and no Fortran
+    /// runtime: CRAN's gfortran and Homebrew's keep `libgfortran` off the linker's default path,
+    /// so a bare `-lgfortran` in `FLIBS` fails every package that links `$(FLIBS)` after LAPACK,
+    /// Fortran code or not (Matrix does). On Windows it is [`Toolchain::rtools`].
     fn default() -> Toolchain {
         if cfg!(windows) {
             return Toolchain::rtools();
@@ -209,7 +223,7 @@ impl Default for Toolchain {
                 fc: "gfortran".into(),
                 blas_libs: "-framework Accelerate".into(),
                 lapack_libs: "-framework Accelerate".into(),
-                flibs: "-lgfortran -lm".into(),
+                flibs: "-lm".into(),
                 cppflags: String::new(),
                 ldflags: String::new(),
                 openmp: String::new(),
@@ -406,7 +420,7 @@ fn assemble_as(root: &Path, home: &Path, sources: &HomeSources<'_>) -> Result<()
     write(&root.join("share/make/shlib.mk"), SHLIB_MK)?;
     // The interpreter registers an `ry` namespace with no path, so `packageDescription("ry")`
     // searches the library, and `sessionInfo()` fails on a loaded namespace it cannot describe.
-    // The version is the one the namespace's `spec` gives (`crates/interp/src/frame.rs`).
+    // The version is the one the namespace's `spec` gives (`namespace_source` in `crates/interp/src/standard_library.rs`).
     let ry_package = root.join("library/ry");
     fs::create_dir_all(&ry_package).map_err(io_error(&ry_package))?;
     write(
@@ -428,7 +442,7 @@ fn assemble_as(root: &Path, home: &Path, sources: &HomeSources<'_>) -> Result<()
             link(&entry, &target)?;
         }
     }
-    refresh_start_image(sources)?;
+    refresh_start_image(sources.base, sources.rcmd, sources.libr)?;
     for entry in read_directory(&gnu_share)? {
         let name = entry.file_name().unwrap_or_default();
         if name == "make" {
@@ -563,37 +577,61 @@ exec "$cmd" $extra "$@"
     )
 }
 
-/// Rewrites the base tree's start-up image when the runtime `libr` cannot load it: the image
-/// predates a change to its format, or another build of the runtime wrote it. A home links the
-/// base tree's image, so without this every start in the home would quietly take the slow path.
-/// A base without an image, such as a GNU R installation, is left as it is.
-fn refresh_start_image(sources: &HomeSources<'_>) -> Result<()> {
+/// Writes the images of the runtime `libr` into the base tree `base` when the tree holds none
+/// this runtime loads: none of its build, or one of an older format. A home links the base
+/// tree's packages, so without this every start in the home would quietly take the slow path.
+/// Other builds' images are left in place ([`images`]). A base without a manifest, such as a GNU R
+/// installation, has no images and is left as it is.
+///
+/// The process then holds a shared lock on its build's start-up image until it exits
+/// ([`images::hold_start_image`]), so another build's writer does not prune the images this
+/// process is about to load. The lock is taken before the image is checked, and a start that
+/// loses a race with a pruner finds the image gone and writes it again.
+fn refresh_start_image(base: &Path, rcmd: &Path, libr: &Path) -> Result<()> {
     type Current = unsafe extern "C" fn(*const std::ffi::c_char) -> std::ffi::c_int;
-    let image = sources.base.join("library/base/R/ry-start.image");
-    if !image.is_file() {
+    if !base.join(base::MANIFEST).is_file() {
         return Ok(());
     }
-    let library = front_end::load_runtime(sources.libr)?;
+    let build = front_end::runtime_identity(libr)?;
+    let library = front_end::load_runtime(libr)?;
     let current = unsafe { library.get::<Current>(b"ry_start_image_current\0") }
         .map(|entry| *entry)
-        .map_err(|error| {
-            Error::Usage(format!(
-                "{} is not ry's runtime: {error}",
-                sources.libr.display()
-            ))
-        });
+        .map_err(|error| Error::Usage(format!("{} is not ry's runtime: {error}", libr.display())));
     // Unloading a Rust library that may have started threads or registered thread-local
     // destructors is unsound, and the process that assembles a home usually runs it next.
     std::mem::forget(library);
     let current = current?;
+    let image = images::start_image(base, &build);
     let path = std::ffi::CString::new(image.to_string_lossy().into_owned())
         .map_err(|_| Error::Usage(format!("{} contains a NUL byte", image.display())))?;
-    rewrite_stale_image(
-        &image,
-        sources.base,
-        || unsafe { current(path.as_ptr()) } == 1,
-        || base::write_start_image(sources.base, sources.rcmd, sources.libr, None),
-    )
+    let is_current = || unsafe { current(path.as_ptr()) } == 1;
+    // Each round either finds a current image under the lock or writes one, so only a pruner
+    // that removes the new image before this process locks it forces another round.
+    for _ in 0..3 {
+        if let Some(held) = images::hold_start_image(&image).map_err(io_error(&image))?
+            && is_current()
+        {
+            hold(held);
+            return Ok(());
+        }
+        rewrite_stale_image(&image, base, is_current, || {
+            if image_log() {
+                eprintln!(
+                    "ry: image written: the start-up and code images of build {build} into {}",
+                    base.display()
+                );
+            }
+            base::write_start_image(base, rcmd, libr, None).map(drop)
+        })?;
+    }
+    Ok(())
+}
+
+/// Whether `RY_IMAGE_LOG` asks for a line on standard error about every image a start writes or
+/// cannot use (`interp::image::report_unused`), as `tools/bench/bench.py` does for every process
+/// it times.
+fn image_log() -> bool {
+    std::env::var_os("RY_IMAGE_LOG").is_some_and(|value| !value.is_empty())
 }
 
 /// Runs `write` when `is_current` says the start-up image at `image` is stale. A current image
@@ -613,12 +651,11 @@ fn rewrite_stale_image(
     let lock_path = base.join(".start-image.lock");
     let lock = fs::File::create(&lock_path).map_err(|error| {
         Error::Usage(format!(
-            "the start-up image {} was written by another build of ry, and its base R tree \
-             cannot be written to replace it ({}: {error}); run `just start-image` with write \
-             access to {}",
+            "the base R tree {} has no start-up image of this build of ry ({}), and it cannot \
+             be written to add one ({}: {error}); run `just start-image` with write access to it",
+            base.display(),
             image.display(),
             lock_path.display(),
-            base.display()
         ))
     })?;
     lock.lock().map_err(io_error(&lock_path))?;
@@ -658,6 +695,12 @@ pub fn runtime_home(libr: &Path, base: &Path) -> Result<PathBuf> {
     if is_ry_home(base) {
         if let Some(lock) = lock_home(base)? {
             hold(lock);
+        }
+        // A process the home started, such as a worker, keeps its build's images as its parent
+        // does ([`refresh_start_image`]).
+        let image = images::start_image(base, &front_end::runtime_identity(libr)?);
+        if let Some(held) = images::hold_start_image(&image).map_err(io_error(&image))? {
+            hold(held);
         }
         return Ok(base.to_path_buf());
     }
@@ -719,6 +762,9 @@ pub fn cached_home(cache: &Path, libr: &Path, rcmd: &Path, base: &Path) -> Resul
         && let Some(lock) = lock_home(&home)?
     {
         hold(lock);
+        // Another build's images can have pushed this one's out of the base tree since the home
+        // was assembled ([`images::prune`]).
+        refresh_start_image(base, rcmd, libr)?;
         return Ok(home);
     }
     fs::create_dir_all(cache).map_err(io_error(cache))?;
@@ -770,20 +816,26 @@ pub fn cached_home(cache: &Path, libr: &Path, rcmd: &Path, base: &Path) -> Resul
         drop(fs::remove_dir_all(&staging));
         return Err(error);
     }
-    // The rename and the downgrade to a shared lock happen under the cache's lock, which a
-    // pruner holds while it works, because converting a lock first releases it and a pruner
-    // could otherwise take the new home in between.
+    // The lock is released and retaken on the final path under the cache's lock, which every
+    // pruner holds while it works, so none can take the new home in between. Windows cannot
+    // rename a directory that holds an open file, which is why the lock cannot simply be kept
+    // across the rename.
     let cache_lock = lock_cache(cache)?;
+    drop(lock);
     match fs::rename(&staging, &home) {
         Ok(()) => {
-            lock.lock_shared().map_err(io_error(&home))?;
+            let lock = lock_home(&home)?.ok_or_else(|| {
+                Error::Io(
+                    home.clone(),
+                    io::Error::other("the home vanished while it was locked"),
+                )
+            })?;
             hold(lock);
             prune_stale_homes(cache, &home, &cache_lock);
             Ok(home)
         }
         // Another process renamed its home into place first.
         Err(_) if home.join("etc").join("Makeconf").exists() => {
-            drop(lock);
             fs::remove_dir_all(&staging).map_err(io_error(&staging))?;
             drop(cache_lock);
             cached_home(cache, libr, rcmd, base)
@@ -802,7 +854,8 @@ const LOCK_FILE: &str = ".lock";
 /// The name prefix of a home a pruner moved away to delete.
 const REMOVING: &str = ".removing-";
 
-/// The locks this process holds on the homes it uses, kept open until it exits.
+/// The locks this process holds on the homes and start-up images it uses, kept open until it
+/// exits.
 static HELD_HOMES: Mutex<Vec<File>> = Mutex::new(Vec::new());
 
 fn hold(lock: File) {
@@ -818,7 +871,7 @@ fn hold(lock: File) {
 /// taken. A home from an older ry has no lock file, and the first process to use it adds one.
 fn lock_home(home: &Path) -> Result<Option<File>> {
     let path = home.join(LOCK_FILE);
-    let lock = match File::options().create(true).append(true).open(&path) {
+    let lock = match File::options().create(true).write(true).open(&path) {
         Ok(lock) => lock,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(Error::Io(path, error)),
@@ -834,7 +887,7 @@ fn lock_cache(cache: &Path) -> Result<File> {
     let path = cache.join(LOCK_FILE);
     let lock = File::options()
         .create(true)
-        .append(true)
+        .write(true)
         .open(&path)
         .map_err(io_error(&path))?;
     lock.lock().map_err(io_error(&path))?;
@@ -862,7 +915,7 @@ fn prune_stale_homes(cache: &Path, current: &Path, _cache_lock: &File) {
         }
         // A staging directory without its lock yet is being created this instant, while a home
         // from an older ry, and one a pruner failed to delete, have no lock to take.
-        let lock = match File::options().append(true).open(entry.join(LOCK_FILE)) {
+        let lock = match File::options().write(true).open(entry.join(LOCK_FILE)) {
             Ok(lock) => Some(lock),
             Err(error) if error.kind() == io::ErrorKind::NotFound && !staging => None,
             Err(_) => continue,
@@ -1484,7 +1537,9 @@ pub fn makeconf(root: &Path, toolchain: &Toolchain, platform: Platform) -> Strin
     // (`$(BINPREF)gcc`, `$(PKG_CONFIG)`), and its `winshlib.mk` links a DLL exporting what the
     // package's `<name>-win.def` lists, or else every global symbol. Exporting every symbol
     // keeps `R_init_<name>` visible even when an object marks other symbols `dllexport`, which
-    // turns the linker's automatic export off.
+    // turns the linker's automatic export off. A package that includes `libintl.h` has `vsnprintf`
+    // redirected to `libintl_vsnprintf`, which GNU R's `R.dll` exports but ry's `libR` does not,
+    // so the DLL links Rtools' gettext (`LIBINTL`).
     let platform_variables = match platform {
         Platform::Windows => {
             "BINPREF ?=\nIMPDIR = bin/x64\nPKG_CONFIG = $(BINPREF)pkg-config\n\
@@ -1493,7 +1548,8 @@ pub fn makeconf(root: &Path, toolchain: &Toolchain, platform: Platform) -> Strin
              STRIP_STATIC_LIB = $(BINPREF)strip --strip-debug\n\
              SHLIB_DEF = $(wildcard $(basename $(SHLIB))-win.def)\n\
              EXPORT_ALL_SYMBOLS = -Wl,--export-all-symbols\n\
-             SHLIB_EXPORTS = $(if $(SHLIB_DEF),$(SHLIB_DEF),$(EXPORT_ALL_SYMBOLS))\n"
+             SHLIB_EXPORTS = $(if $(SHLIB_DEF),$(SHLIB_DEF),$(EXPORT_ALL_SYMBOLS))\n\
+             LIBINTL = -lintl -liconv\n"
         }
         Platform::Linux | Platform::MacOs => "SHLIB_EXPORTS =\n",
     };
@@ -1678,7 +1734,7 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
                         "--install-tests" => options.tests = true,
                         "--no-test-load" => options.test_load = false,
                         "--ry-no-code-image" => options.code_image = false,
-                        "--ry-explain" => options.explain = true,
+                        "--ry-no-typed-code" => options.typed_code = false,
                         "--build" => build = true,
                         "--no-docs" | "--no-help" => options.driver_flags.push("--no-docs".into()),
                         // A single-architecture build has nothing to skip, and every build
@@ -1715,8 +1771,8 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
                             tarball.display()
                         ));
                     }
-                    if let Some(code_image) = &installed.code_image {
-                        output.push_str(&format!("** {code_image}\n"));
+                    for report in &installed.images {
+                        output.push_str(&format!("** {report}\n"));
                     }
                     output.push_str(&format!("* DONE ({})\n", installed.name));
                 }
@@ -1794,6 +1850,52 @@ pub fn config(home: &Path, variable: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+/// Why the shared library at `path` must not load, when it belongs to an installed package that ry
+/// compiled against headers with another binary interface than this ry's (`NATIVE_ABI`). A library
+/// outside a package's `libs/`, and a package GNU R compiled, always load: GNU R's package headers
+/// reach element pointers through libR's functions, so they inline none of ry's accessors.
+pub fn stale_native_build(path: &Path) -> Option<String> {
+    let mut libs = path.parent()?;
+    // A Windows package keeps its DLL under `libs/x64`.
+    if libs.file_name()? != "libs" {
+        libs = libs.parent()?;
+    }
+    if libs.file_name()? != "libs" {
+        return None;
+    }
+    let package_dir = libs.parent()?;
+    let path = package_dir.join("DESCRIPTION");
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            return Some(format!(
+                "cannot read {} to check which headers its package was compiled against: {error}",
+                path.display()
+            ));
+        }
+    };
+    let description = Description::parse(&text);
+    let built_by = description.get("RyBuilt")?;
+    let headers = match description.get("RyAbi").map(str::parse::<u32>) {
+        Some(Ok(abi)) if abi == NATIVE_ABI => return None,
+        Some(Ok(abi)) if abi > NATIVE_ABI => "newer C headers",
+        Some(Ok(_)) | None => "older C headers",
+        Some(Err(_)) => "C headers of an unknown version",
+    };
+    let package = package_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let package = description.get("Package").unwrap_or(&package);
+    Some(format!(
+        "package '{package}' was compiled by ry {built_by} against {headers}, and its \
+         compiled code is unsafe to run under this ry. Reinstall it with this ry: \
+         install.packages(\"{package}\"), or R CMD INSTALL on its source (ry install for a \
+         package you develop)."
+    ))
+}
+
 /// A package's `DESCRIPTION`, as ordered fields.
 #[derive(Clone, Debug, Default)]
 pub struct Description {
@@ -1864,9 +1966,9 @@ pub struct Installed {
     pub directory: PathBuf,
     /// The package's shared object, when it has compiled code.
     pub library: Option<PathBuf>,
-    /// What writing the package's code image reported: how many closures it compiled, or the
-    /// warning that it was left out.
-    pub code_image: Option<String>,
+    /// What writing the package's code image and typed code file reported, one line each: how
+    /// many closures each compiled, or the warning that it was left out.
+    pub images: Vec<String>,
 }
 
 /// How `R CMD INSTALL` installs a package.
@@ -1882,10 +1984,11 @@ pub struct InstallOptions {
     /// Writes the compiled code image beside each lazy-load database; `--ry-no-code-image` turns
     /// it off.
     pub code_image: bool,
+    /// Writes the typed code file, the machine code of the package's typed functions, beside its
+    /// lazy-load database; `--ry-no-typed-code` turns it off.
+    pub typed_code: bool,
     /// The workload the code image is trained on before it is written (`--ry-train=`).
     pub training: Training,
-    /// Prints what kept each function from install-time machine code (`--ry-explain`).
-    pub explain: bool,
 }
 
 /// The workload an install runs before it writes the package's code image, so that the image
@@ -1932,8 +2035,8 @@ impl Default for InstallOptions {
             test_load: true,
             driver_flags: Vec::new(),
             code_image: true,
+            typed_code: true,
             training: Training::None,
-            explain: false,
         }
     }
 }
@@ -2142,7 +2245,7 @@ fn install_binary(
         name: name.to_owned(),
         directory: target,
         library: library_path,
-        code_image: None,
+        images: Vec::new(),
     })
 }
 
@@ -2240,6 +2343,7 @@ fn install_source(
     // `tools:::.install_package_description` copies the build's DESCRIPTION and adds `Built:`,
     // so the field that marks an installation as ry's goes in first.
     description.set("RyBuilt", env!("CARGO_PKG_VERSION").to_owned());
+    description.set("RyAbi", NATIVE_ABI.to_string());
     write(&build.join("DESCRIPTION"), &description.render())?;
     let target = library.join(name);
     let driver = staging.join("install.R");
@@ -2265,7 +2369,7 @@ fn install_source(
             "installing the R code of package '{name}' failed\n{error}"
         ))
     })?;
-    let code_image = options.code_image.then(|| {
+    let images = if options.code_image || options.typed_code {
         write_code_image(
             home,
             staging,
@@ -2275,7 +2379,9 @@ fn install_source(
             &r_libs,
             options,
         )
-    });
+    } else {
+        Vec::new()
+    };
     if options.test_load {
         let check = staging.join("test-load.R");
         write(
@@ -2308,14 +2414,15 @@ fn install_source(
                 .find(|path| path.exists())
         }),
         directory: target,
-        code_image,
+        images,
     })
 }
 
-/// Writes the code image of the package `name` staged in `staged_library`, in a fresh session
-/// that loads it, trains on `options.training`, and compiles every closure of its lazy-load
-/// database. An image speeds up the package's first calls but is not part of what the package
-/// means, so a failure leaves the package without one and turns into a warning.
+/// Writes the code image and the typed code file of the package `name` staged in
+/// `staged_library`, as `options` asks, in a fresh session that loads it, trains on
+/// `options.training`, and compiles every closure of its lazy-load database. Both speed up the
+/// package's first calls but are not part of what the package means, so a failure leaves the
+/// package without them and turns into a warning. Returns one report line per file written.
 fn write_code_image(
     home: &Path,
     staging: &Path,
@@ -2324,7 +2431,7 @@ fn write_code_image(
     staged_library: &Path,
     r_libs: &str,
     options: &InstallOptions,
-) -> String {
+) -> Vec<String> {
     let driver = staging.join("code-image.R");
     let training = match &options.training {
         Training::None => "none".to_owned(),
@@ -2342,22 +2449,21 @@ fn write_code_image(
                 staged_library.display().to_string(),
                 build.display().to_string(),
                 training,
-                options.explain.to_string(),
+                if options.code_image { "image" } else { "no-image" }.to_owned(),
+                if options.typed_code { "typed" } else { "no-typed" }.to_owned(),
             ],
             r_libs,
         )
     });
     match written {
-        Ok(output) => {
-            let mut lines: Vec<&str> = output.lines().collect();
-            let counts = lines.pop().unwrap_or_default();
-            if options.explain {
-                format!("{}\ncode image: {counts}", lines.join("\n"))
-            } else {
-                format!("code image: {counts}")
-            }
-        }
-        Err(error) => format!("Warning: the code image of '{name}' was not written\n{error}"),
+        Ok(output) => output
+            .lines()
+            .filter(|line| line.starts_with("typed code: ") || line.starts_with("code image: "))
+            .map(str::to_owned)
+            .collect(),
+        Err(error) => vec![format!(
+            "Warning: the code image of '{name}' was not written\n{error}"
+        )],
     }
 }
 
@@ -2402,6 +2508,21 @@ fn compile_in(
 ) -> Result<Option<String>> {
     let platform = Platform::of_home(home)?;
     let environment = build_environment(home, platform, name, target, paths)?;
+    let src = build.join("src");
+    // Objects that an earlier in-place build left in `src/` (`ry load`, or the copy of such a tree
+    // that an install builds) hold the inline accessors of the headers they were compiled
+    // against, and make rebuilds only what the sources outdate, so objects from other headers
+    // than this ry's go first. The stamp names the headers' binary interface (`NATIVE_ABI`).
+    let stamp = src.join(ABI_STAMP);
+    let current = NATIVE_ABI.to_string();
+    if src.is_dir() {
+        match fs::read_to_string(&stamp) {
+            Ok(text) if text.trim() == current => {}
+            Ok(_) => remove_build_products(&src)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => remove_build_products(&src)?,
+            Err(error) => return Err(Error::Io(stamp, error)),
+        }
+    }
     if let Some(configure) = platform.build_file(build, "configure") {
         run_command(
             Command::new("sh").arg(&configure).current_dir(build).envs(
@@ -2416,7 +2537,6 @@ fn compile_in(
             ))
         })?;
     }
-    let src = build.join("src");
     if !src.is_dir() {
         return Ok(None);
     }
@@ -2449,7 +2569,30 @@ fn compile_in(
             Error::Package(format!("compilation failed for package '{name}'\n{error}"))
         })?;
     }
+    write(&stamp, &current)?;
     Ok(Some(library_name))
+}
+
+/// The file in a package's `src/` that names the binary interface of the headers its objects were
+/// compiled against.
+const ABI_STAMP: &str = ".ry-abi";
+
+/// Deletes the objects and shared libraries under `directory`. Static libraries stay, because a
+/// source package may ship one prebuilt.
+fn remove_build_products(directory: &Path) -> Result<()> {
+    for entry in fs::read_dir(directory).map_err(io_error(directory))? {
+        let path = entry.map_err(io_error(directory))?.path();
+        if path.is_dir() {
+            remove_build_products(&path)?;
+        } else if path.extension().is_some_and(|extension| {
+            ["o", "so", "dll", "dylib", "sl"]
+                .iter()
+                .any(|known| extension == *known)
+        }) {
+            fs::remove_file(&path).map_err(io_error(&path))?;
+        }
+    }
+    Ok(())
 }
 
 /// Runs an R file on ry's interpreter through the home's `bin/R`, in `directory`, with
@@ -2487,17 +2630,14 @@ fn libs_directory(package: &Path, platform: Platform) -> PathBuf {
     package.join(format!("libs{}", platform.arch()))
 }
 
-fn extension_of(platform: Platform) -> Option<&'static std::ffi::OsStr> {
-    Some(std::ffi::OsStr::new(
-        platform.shlib_ext().trim_start_matches('.'),
-    ))
+fn extension_of(platform: Platform) -> Option<&'static OsStr> {
+    Some(OsStr::new(platform.shlib_ext().trim_start_matches('.')))
 }
 
-/// `directory` put in front of the `PATH` this process runs with.
-fn path_with(directory: &Path) -> Result<String> {
-    let inherited = std::env::var_os("PATH").unwrap_or_default();
+/// `directory` put in front of the search path `inherited`.
+fn path_with(directory: &Path, inherited: &OsStr) -> Result<String> {
     std::env::join_paths(
-        std::iter::once(directory.to_path_buf()).chain(std::env::split_paths(&inherited)),
+        std::iter::once(directory.to_path_buf()).chain(std::env::split_paths(inherited)),
     )
     .map(|joined| joined.to_string_lossy().into_owned())
     .map_err(|error| {
@@ -2528,7 +2668,13 @@ fn build_environment(
     paths: &[PathBuf],
 ) -> Result<BTreeMap<String, String>> {
     let mut environment = BTreeMap::new();
-    environment.insert("PATH".to_owned(), path_with(&home.join("bin"))?);
+    environment.insert(
+        "PATH".to_owned(),
+        path_with(
+            &home.join("bin"),
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )?,
+    );
     environment.insert("R_HOME".to_owned(), shell_path(home));
     environment.insert("R_ARCH".to_owned(), platform.arch().to_owned());
     environment.insert("R_PACKAGE_NAME".to_owned(), name.to_owned());
@@ -2626,6 +2772,24 @@ pub fn shlib(
     );
     let mut command = Command::new("make");
     command.current_dir(directory);
+    // On Windows `R CMD SHLIB` runs in the environment `Rcmd.exe` sets from `etc/Rcmd_environ`,
+    // which puts Rtools ahead of other toolchains on `PATH`. Building base R calls this without
+    // the front end, and another toolchain's `as` rejects the flags Rtools' GCC passes it.
+    let r_home = home.display().to_string().replace('\\', "/");
+    let environment = command_environment(home, |name| {
+        if name == "R_HOME" {
+            Some(r_home.clone())
+        } else {
+            std::env::var(name).ok()
+        }
+    })?;
+    let search_path = environment
+        .iter()
+        .rfind(|(name, _)| name == "PATH")
+        .map(|(_, value)| OsString::from(value))
+        .or_else(|| std::env::var_os("PATH"))
+        .unwrap_or_default();
+    command.envs(environment);
     if let Some(makevars) = &makevars {
         command.arg("-f").arg(makevars);
     }
@@ -2672,7 +2836,7 @@ pub fn shlib(
         command.arg(format!("CLINK_CPPFLAGS={}", include_flags.join(" ")));
     }
     command.env("R_HOME", home);
-    command.env("PATH", path_with(&home.join("bin"))?);
+    command.env("PATH", path_with(&home.join("bin"), &search_path)?);
     run_make(&mut command)?;
     Ok(directory.join(output))
 }
@@ -3388,6 +3552,44 @@ PATH="${R_CUSTOM_TOOLS_PATH:-${R_RTOOLS45_PATH}};${PATH}/"
             Some("E:/tools/bin;C:/bin/")
         );
         fs::remove_dir_all(&home).expect("remove home");
+    }
+
+    /// Building base R runs `shlib` without the front end, so `shlib` itself must search the
+    /// `PATH` that `etc/Rcmd_environ` sets: there the toolchain's `make` comes first.
+    #[cfg(unix)]
+    #[test]
+    fn shlib_runs_make_on_the_path_rcmd_environ_sets() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("ry-rcmd-shlib-path-{}", std::process::id()));
+        let (home, tools, source) = (root.join("home"), root.join("tools"), root.join("src"));
+        for directory in [home.join("etc"), tools.clone(), source.clone()] {
+            fs::create_dir_all(&directory).expect("create directory");
+        }
+        write(
+            &home.join("etc/Makeconf"),
+            &makeconf(&home, &Toolchain::default(), Platform::Linux),
+        )
+        .expect("write Makeconf");
+        write(
+            &home.join("etc/Rcmd_environ"),
+            &format!("PATH=\"{}:${{PATH}}\"\n", tools.display()),
+        )
+        .expect("write Rcmd_environ");
+        let make = tools.join("make");
+        write(
+            &make,
+            "#!/bin/sh\nprintf '%s' \"$PATH\" > seen-path\n: > probe.so\n",
+        )
+        .expect("write make");
+        fs::set_permissions(&make, fs::Permissions::from_mode(0o755)).expect("make executable");
+        write(&source.join("probe.c"), "").expect("write source");
+
+        let built = shlib(&home, &source, &[], Some("probe.so"), &[], &[]).expect("shlib");
+        assert_eq!(built, source.join("probe.so"));
+        let seen = fs::read_to_string(source.join("seen-path")).expect("make ran");
+        let expected = format!("{}:{}:", home.join("bin").display(), tools.display());
+        assert!(seen.starts_with(&expected), "make saw PATH={seen}");
+        fs::remove_dir_all(&root).expect("remove root");
     }
 
     #[test]

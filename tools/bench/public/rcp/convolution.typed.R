@@ -9,8 +9,8 @@ execute <- function(n: I64) -> F64 {
     ab
   }
 
-  a <- List.map(List.range(1, n), Num.to_f64)
-  b <- List.map(List.range(1, n), Num.to_f64)
+  a <- List.map(List.range(1, n), function(i: I64) -> F64 Num.to_f64(i))
+  b <- List.map(List.range(1, n), function(i: I64) -> F64 Num.to_f64(i))
   checksum <- 0
   for (i in List.range(1, 10)) {
     checksum <- checksum + convolve(a, b)[[n]]

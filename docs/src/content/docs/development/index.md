@@ -48,6 +48,12 @@ these trees, which hold GNU R and CRAN packages, and never ry's own builds or an
 cloud session's proxy holds the write token for `app.cachix.org`, which is why the push names that
 host; elsewhere, set `CACHIX_AUTH_TOKEN`.
 
+`nix develop` (the `default` and `ci` shells) downloads everything from `cache.nixos.org` or
+`ry.cachix.org` and builds nothing. The custom GNU R (`lib.gnuR`) and the R packages built against it
+are not in nixpkgs, so `ry.cachix.org` holds them. The Cachix workflow rebuilds and pushes the two
+shells when `flake.nix`, `flake.lock` or `tools/base-r` changes on main; the Rust toolchain and
+crane's `ry-deps-*` build are left out.
+
 `just doctor` also checks that `ry`, `libR.so` and the start-up image were built from the working
 tree, by recomputing the runtime hash they embed, and it reports free disk and the size of each
 `target/` profile. A cloud container's disk quota is about 40 GB whatever `df` says. `just prune`
@@ -55,9 +61,10 @@ frees space without forcing a full rebuild: it removes build configurations noth
 days and incremental caches older than an hour, and `just prune --tests` also removes test
 executables.
 
-The nix dev shell (`nix develop`) carries the same toolchain, but its closure is about 6.5 GB, and
-its GNU R is nixpkgs' build rather than the reference one, so the script is the default for cloud
-sessions.
+The flake's dev shells carry the same toolchain and a GNU R built like the reference one, and CI
+runs in them: `nix develop .#ci` holds what `just ci` needs, and `nix develop` adds the editing
+tools. The script stays the default for cloud sessions, because it restores the reference R and
+the oracle's packages from the binary cache in seconds and needs no nix store.
 
 ## Build and test
 
@@ -135,7 +142,8 @@ cargo's thin LTO inside each crate). After an edit to the interpreter it rebuild
 under 16 GB of memory. No inlining then crosses a crate boundary, so a single program can run
 a quarter faster or slower than under release: `ry --version` names the profile
 (`ry 0.4.3-beta (iterate build)`), and `tools/bench/bench.py` refuses any binary that is not a
-release build. `profiling` is release with line tables kept and the same fat LTO, so the profiler sees
+release build. Its `--any-build` flag lifts that refusal for a look at where a build stands, for
+example `just bench typed --ry target/iterate/ry --any-build`, and such a run cannot be stored. `profiling` is release with line tables kept and the same fat LTO, so the profiler sees
 release's inlining: the `.text` of `ry` and `libR.so` is within 0.2% of release's, and its link
 peaks near 11 GB.
 

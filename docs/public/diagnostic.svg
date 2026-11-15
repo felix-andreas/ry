@@ -2,7 +2,7 @@
 <title id="title">ry check reports a match that misses a case</title>
 <desc id="desc">  × this `match` does not handle `:Pending`: add an arm for it, or a catch-all `_ =&gt; ...` arm
  7 │   match (payment) {
-   │   ^^^^^^^^^^^^^^^</desc>
+       ^^^^^^^^^^^^^^^</desc>
 <style>
 .bg { fill: #f6f8fa; stroke: #d0d7de; }
 text { fill: #1f2328; font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; font-size: 14px; white-space: pre; }
@@ -18,5 +18,5 @@ text { fill: #e6edf3; }
 <rect class="bg" x="0.5" y="0.5" width="813" height="91" rx="6"/>
 <text y="30.5"><tspan x="16.0">  </tspan><tspan x="32.8" class="red">×</tspan><tspan x="41.2"> this `match` does not handle `:Pending`: add an arm for it, or a catch-all `_ =&gt; ...` arm</tspan></text>
 <text y="50.5"><tspan x="16.0"> </tspan><tspan x="24.4" class="dim">7</tspan><tspan x="32.8"> │   match (payment) {</tspan></text>
-<text y="70.5"><tspan x="16.0">   │ </tspan><tspan x="58.0" class="magenta" font-weight="bold">  ^^^^^^^^^^^^^^^</tspan></text>
+<text y="70.5"><tspan x="16.0">     </tspan><tspan x="58.0" class="magenta" font-weight="bold">  ^^^^^^^^^^^^^^^</tspan></text>
 </svg>

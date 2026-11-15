@@ -1,9 +1,14 @@
 # Builds the flake's package and dev shell for x86_64-linux at a released commit and pushes every
 # store path the build produces to the public binary cache ry.cachix.org, so `nix profile install`
-# and `nix develop` on a release download ry instead of compiling it. Only releases are cached,
-# because the cache's 5 GB also holds the oracle's prebuilt trees (tools/cache.sh) and a build of
-# every main push would crowd them out. The cross-built release packages (`ry-linux-x86_64` and the
-# other two) are left out because nothing installs them through nix.
+# and `nix develop` on a release download ry instead of compiling it. Only releases cache the `ry`
+# package, because the cache's 5 GB also holds the oracle's prebuilt trees (tools/cache.sh) and a
+# build of every main push would crowd them out. The cross-built release packages
+# (`ry-linux-x86_64` and the other two) are left out because nothing installs them through nix.
+#
+# The dev shells (`default` and `ci`) are cached on their own, so that `nix develop` downloads
+# everything, including the custom GNU R (`lib.gnuR`) that takes a long time to compile. A push to
+# main builds and pushes them only when flake.nix, flake.lock or the pinned base R changes, which
+# are the only inputs of that R.
 #
 # Release and Nightly publish with the workflow's GITHUB_TOKEN, and GitHub starts no workflow for
 # an event that token causes, so their releases never fire `release`. This workflow follows those
@@ -18,6 +23,12 @@ on:
     types: [completed]
   release:
     types: [published]
+  push:
+    branches: [main]
+    paths:
+      - flake.nix
+      - flake.lock
+      - tools/base-r/**
   workflow_dispatch:
 
 permissions:
@@ -62,11 +73,11 @@ jobs:
         with:
           name: ry
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          pushFilter: "-ry-deps-"
+          pushFilter: "-ry-deps-|-rust-|-rustc-|-cargo-|-clippy-|-rustfmt-|-llvm-tools-"
       # `ry` is also `default` and pulls in `ry-unwrapped`, so this covers every native package.
       - name: package
-        if: steps.published.outputs.published == 'true'
+        if: steps.published.outputs.published == 'true' && github.event_name != 'push'
         run: nix build --print-build-logs .#packages.x86_64-linux.ry
-      - name: dev shell
+      - name: dev shells
         if: steps.published.outputs.published == 'true'
-        run: nix build --print-build-logs .#devShells.x86_64-linux.default
+        run: nix build --print-build-logs .#devShells.x86_64-linux.default .#devShells.x86_64-linux.ci

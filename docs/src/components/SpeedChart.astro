@@ -1,8 +1,9 @@
 ---
-// A horizontal bar chart of a suite's speed relative to GNU R, rendered to static HTML at build time.
-// The axis is logarithmic and centred on 1x, so a bar to the right means faster than GNU R and a bar
-// to the left slower, and 10x either way has the same length. A thin line across a bar spans its
-// interval. Values sit in their own columns beside the bars, so they stay legible on a phone, and
+// A horizontal bar chart of a suite's ratios to its baseline, rendered to static HTML at build time.
+// The axis is logarithmic and centred on 1x, so 10x either way has the same length. Against GNU R a
+// ratio is a speed-up, so a bar to the right means faster and a bar to the left slower. Against
+// Rust it is a time, so the sides swap, and the note under the chart says which reading applies.
+// A thin line across a bar spans its interval. Values sit in their own columns beside the bars, so they stay legible on a phone, and
 // every bar's title gives the seconds behind it. A suite with groups gets one chart per group.
 import { engineLabel, formatRatio, suite as findSuite, suiteCharts } from '../lib/benchmarks';
 
@@ -126,7 +127,7 @@ const tickLabel = (value: number) => (value >= 1 ? `${value}x` : `${Number(value
 					</div>
 				</div>
 				<p class="note">
-					Speed relative to GNU R on a log scale: a bar to the right of 1x is faster than GNU R, to the left slower.
+					{chart.axisNote}
 					{values.length > 0 && chart.rows.some((row) => row.bars.some((bar) => bar.ratio?.low !== undefined)) && ' The line across a bar spans its 95% interval.'}
 					{chart.notes.map((note) => ` ${note}`)}
 				</p>

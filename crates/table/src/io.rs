@@ -69,6 +69,13 @@ pub fn read_csv_with(path: &Path, options: &ReadOptions) -> Result<Table> {
     read_file(path, options, SLICE_BYTES).map(|(table, _)| table)
 }
 
+/// [`read_csv_with`] in slices of about `slice_bytes`, so that a test's small file takes as many
+/// slices as a large file does and holds as little of itself in memory at a time.
+#[doc(hidden)]
+pub fn read_csv_in_slices(path: &Path, options: &ReadOptions, slice_bytes: usize) -> Result<Table> {
+    read_file(path, options, slice_bytes.max(1)).map(|(table, _)| table)
+}
+
 fn read_file(path: &Path, options: &ReadOptions, slice_bytes: usize) -> Result<(Table, Pass)> {
     let file = File::open(path)?;
     // SAFETY: the map is read-only and dropped before this returns. Another process truncating

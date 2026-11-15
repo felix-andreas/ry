@@ -21,7 +21,10 @@ pairs <- list(zw = list(z, w), zd = list(z, d), dz = list(d, z), zn = list(z, n)
   nas = list(NA_complex_, z), z2 = list(z, 2), z2i = list(z, 2L), z2c = list(z, 2 + 0i),
   zneg = list(z, -2), zhalf = list(z, 0.5), short = list(z, c(1i, NA)),
   uneven = list(z, c(1 + 1i, 2, 3)))
+# An NA part plus a NaN part is NA or NaN depending on which operand GNU R's C compiler put
+# first, so those sums are in kernels__complex_na_nan_sums.R, which the recorded build checks.
 for (op in names(ops)) for (pair in names(pairs)) {
+  if (op == "+" && pair %in% c("zd", "dz", "zna", "nas")) next
   cat(op, pair, ":\n")
   parts(quiet(ops[[op]](pairs[[pair]][[1]], pairs[[pair]][[2]])))
 }

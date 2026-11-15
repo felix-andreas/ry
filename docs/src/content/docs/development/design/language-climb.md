@@ -26,8 +26,10 @@ before anything else. Among the other scores, speed and friendliness weigh equal
 
 - **Speed.** The 17 typed benchmark programs, each a `<name>.typed.R` (typed ry, strict mode) beside
   its plain R `<name>.R` in `tools/bench/kernels/` or `tools/bench/applications/`, and each with a
-  Rust reference in `tools/climb/rust/` written the way a Rust programmer would and printing the
-  same checksum.
+  Rust reference in `tools/bench/typed/` written the way a Rust programmer would and printing the
+  same checksum. They are the `typed` benchmark suite, and the climb times them through that
+  suite's runner (`tools/bench/bench.py`), so both report the same statistic: the median warm run
+  of each engine, and the geometric mean of typed ry's time over Rust's.
 - **Friendliness.** `tools/climb/friendly/*.R`. A case starts with `# expect: ok` or
   `# expect: CODE`. An `ok` case must pass strict mode and, on ry's runtime, print exactly its `#>`
   lines; any other case must report exactly that one diagnostic code. A known gap gets a case first,

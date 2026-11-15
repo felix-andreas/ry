@@ -33,7 +33,9 @@ handlers[["probe"]] <- function(path, query, body, headers) {
   list(payload = rawToChar(headers), "text/plain")
 }
 fetch("/custom/probe/echo/a%20b?x=1&y=a+b%26c&&z")
-fetch("/custom/probe/echo?")
+# An empty query field: libcurl 8.8 and later drop a bare trailing `?` from the URL it sends, so
+# the field is spelled `=` to reach the server whatever libcurl the client has.
+fetch("/custom/probe/echo?=")
 fetch("/custom/probe/raw")
 status("/custom/probe/fail")
 status("/custom/probe/string")

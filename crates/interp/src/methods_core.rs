@@ -1020,7 +1020,7 @@ unsafe fn basic_classes<'a>() -> R<Vec<&'a [u8]>> {
 
 /// Whether `value` is an unforced promise of `lazyLoadDBfetch()`, the binding a lazy-loaded
 /// namespace or its imports hold until first use.
-unsafe fn is_lazy_load_promise(value: Sexp) -> R<bool> {
+pub unsafe fn is_lazy_load_promise(value: Sexp) -> R<bool> {
     Ok(value.kind() == SexpType::Promise
         && value.car() == unbound()
         && value.cdr().kind() == SexpType::Language
@@ -3367,7 +3367,6 @@ impl Pending {
             match crate::heap().frame_cell(env, symbol) {
                 Some(cell) if cell.has_gp(gp::BINDING_LOCKED) => {
                     cell.set_gp_bits(gp::BINDING_LOCKED, false);
-                    crate::code_image::invalidate_checks();
                     let written = crate::heap().set_binding_value(cell, definition);
                     cell.set_gp_bits(gp::BINDING_LOCKED, true);
                     written.map_err(|error| crate::unwind::error(error.to_string()))?;

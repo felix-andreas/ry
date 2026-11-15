@@ -252,7 +252,22 @@ impl Bits {
             .is_some_and(|word| word & (1 << (index % 64)) != 0)
     }
 
-    fn union(&mut self, other: &Bits) {
+    pub fn intersects(&self, other: &Bits) -> bool {
+        self.0
+            .iter()
+            .zip(&other.0)
+            .any(|(word, other)| word & other != 0)
+    }
+
+    /// Whether every index in `other` is in this set.
+    pub fn covers(&self, other: &Bits) -> bool {
+        self.0
+            .iter()
+            .zip(&other.0)
+            .all(|(word, other)| other & !word == 0)
+    }
+
+    pub fn union(&mut self, other: &Bits) {
         for (word, other) in self.0.iter_mut().zip(&other.0) {
             *word |= other;
         }

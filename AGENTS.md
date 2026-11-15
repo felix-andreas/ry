@@ -14,6 +14,7 @@ The crates live in `crates/`:
 - `loader`: the package-development loader behind `ry load`.
 - `repl`: the R console behind `ry repl` and `ry run`. It loads R at runtime, which is why the rest of the workspace can build without R.
 - `heap`: the R runtime's object model and garbage collector.
+- `interp`: the R interpreter. `numeric` (the numeric kernels) sits below it, and the leaf crates `stats`, `graphics`, `frames` (the `DataFrame` binding) and `services` (the HTTP client) sit above it, so the interpreter links no Polars, rasterizer or HTTP stack.
 - `typed`: the typed core, which compiles strict typed closures to run on native values.
 - `libr`: R's C API, built as an ABI-compatible `libR` shared library.
 - `rcmd`: ry's R home and the `R CMD` commands that install packages against it.
@@ -158,6 +159,17 @@ A check must never read a project-wide map directly, because then every edit any
 
 There are two written homes. Keep both current, spend the minimum effort that keeps them useful, and prefer bullet points.
 
+## Anonymize user feedback
+
+Feedback from users and test users (bug reports, profiles, reproductions, kernels) often contains real names of customers, companies, internal projects, packages, files, functions, columns or data, and an agent-written reproduction may be only lightly simplified real code. Before anything from such feedback enters the repository (code, fixtures, oracle cases, scenarios, benchmarks, docs, memory, commit messages, PR titles and bodies, or `.agents/orchestrator.md`), anonymize it:
+
+- Replace identifying names with neutral ones (`f`, `col1`, `Key`, `pkg`).
+- Reduce the example to the minimal shape that shows the behavior.
+- Drop file names, paths, IDs and data values that come from the user's code.
+- Refer to the source only as "a user" or "a test user".
+
+A reproduction that names the user's own functions or files is real code, not an abstraction. Public package names (data.table, xts, CRAN packages) and the public repositories in the dependency list above are fine.
+
 ## `.agents/memory/`
 
 The agent knowledge base lives in the repository. Its index is `MEMORY.md`, which must keep these three sections under exactly these names:
@@ -183,7 +195,7 @@ The docs site holds the specs for users and contributors. They are contracts, so
 - (user directive) The docs are written for humans, so they get straight to the point in plain, concise language and cut everything irrelevant. Each page puts the most important information first and gives details after. Agents own the docs and radically cut outdated or irrelevant material instead of preserving it.
 - The sidebar has four sections (`docs/astro.config.ts`). **Introduction** is `getting-started.mdx` (the landing page of the docs: a short pitch, what ry does, the benchmark summary, next steps; no code example, by user direction), `installation.md` (binary, R, editors) and `benchmarks.mdx` (bar charts, what each suite contains, how it is measured). **Learn** is `guide.mdx` ("Adopting ry": one H2 per adoption step, each a sequence of snippets with real output) and `ry.mdx` (the language tour: every feature once, code first, also served as `/ry.md`; keep it current when a feature changes). **Reference** (`reference/`) holds the contracts: `type-system.mdx` is the semantics contract, the other pages document the tool. **Development** (`development/`) is for contributors. Detail belongs in Reference or Development, never in the introduction or the guide.
 - Pages with annotation tabs are `.mdx` (see `development/index.md`). A typed example offers synced tabs for untyped plain R, `#:` comment annotations and inline syntax where the forms differ; use one tab group per idea, not per snippet, so the tabs do not bloat the page.
-- `benchmarks.mdx` has one section per measured suite, in the order public R JIT benchmarks, package test suites, numeric kernels (ours) and application workloads (ours), with typed as a column where a typed version exists; a suite without committed results gets no section and no summary row. Each suite is a directory under `tools/bench/` holding `suite.toml` (its `id`, names, summaries, source paths) and `results.json` (written by `just bench <suite> --release ARCHIVE --write` on the tagged release archive, whose runner `tools/bench/bench.py` owns every too-short or refused flag and every geometric mean). `docs/src/lib/benchmarks.ts` and `tools/bench/readme.py` only render those files, so never type a benchmark number into prose; `just readme --check` (in `just gate`) catches a stale README block or diagnostic image.
+- `benchmarks.mdx` has one section per measured suite, in the order public R JIT benchmarks, package test suites, numeric kernels (ours), application workloads (ours), hot package entries and typed ry against Rust, with typed as a column where a typed version exists; a suite without committed results gets no section and no summary row. The suite against Rust reports typed ry's time over Rust's, where lower is faster, so it never shares a table, a chart or a sentence with the speed-ups over GNU R. Each suite is a directory under `tools/bench/` holding `suite.toml` (its `id`, names, summaries, source paths) and `results.json` (written by `just bench <suite> --release ARCHIVE --write` on the tagged release archive, whose runner `tools/bench/bench.py` owns every too-short or refused flag and every geometric mean). `docs/src/lib/benchmarks.ts` and `tools/bench/readme.py` only render those files, so never type a benchmark number into prose; `just readme --check` (in `just gate`) catches a stale README block or diagnostic image.
 - A moved or deleted page gets an entry in the `redirects` map in `docs/astro.config.ts`.
 - `development/design/` holds unsettled drafts. They are explicitly not contracts, which makes them the one place in the docs allowed to describe behavior that does not exist. Keep them out of the sidebar; the folder's index page lists them.
 - Treat the docs as a first-class deliverable. When behavior, design, or the fixture contract changes, update the relevant page in the same session, and leave it clear, accurate, and free of stale status. Never rewrite a spec to paper over a temporary gap in the implementation; note the gap instead.

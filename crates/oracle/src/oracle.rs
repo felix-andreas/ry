@@ -96,12 +96,13 @@ struct Report {
 }
 
 /// The modes of ry's runtime that `--engine` names, which [`KnownFailure::engine`] must be one of.
-pub const ENGINES: [&str; 6] = [
+pub const ENGINES: [&str; 7] = [
     "ry",
     "ry-tier0",
     "ry-jit",
     "ry-gctorture",
     "ry-gctorture-young",
+    "ry-gctorture-seeded",
     "ry-jit-gctorture",
 ];
 
@@ -118,17 +119,7 @@ pub struct KnownFailure {
     /// Seen failing on a branch but not yet on main.
     #[serde(default)]
     pub provisional: bool,
-    /// A crash under a collector-stress engine that depends on the host or on timing, so a run
-    /// where the case passes is not a stale entry.
-    #[serde(default)]
-    pub intermittent: bool,
 }
-
-/// The engines that collect before every allocation. Only their failures may be
-/// [`KnownFailure::intermittent`]: a crash there depends on where the collector happens to run,
-/// while a failure under any other engine reproduces on every host.
-pub const GC_TORTURE_ENGINES: [&str; 3] =
-    ["ry-gctorture", "ry-gctorture-young", "ry-jit-gctorture"];
 
 /// How one case's result under one engine counts against [`KNOWN_FAILURES_FILE`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,22 +127,31 @@ pub enum Verdict {
     Passed,
     /// A failure the file lists.
     Known,
-    /// A failure the file does not list.
+    /// A failure the file does not list, or a crash, which the file cannot excuse.
     New,
     /// A listed case that passes, so its entry is stale.
     ListedButPassing,
-    /// An intermittent entry whose case passed this time.
-    IntermittentPassed,
 }
 
-/// The verdict for a case that `failed` or passed, given its entry in the known failures.
-pub fn verdict(failed: bool, entry: Option<&KnownFailure>) -> Verdict {
-    match (failed, entry) {
-        (false, None) => Verdict::Passed,
-        (false, Some(entry)) if entry.intermittent => Verdict::IntermittentPassed,
-        (false, Some(_)) => Verdict::ListedButPassing,
-        (true, Some(_)) => Verdict::Known,
-        (true, None) => Verdict::New,
+/// How one case ran under one engine, as far as the known failures tell results apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseRun {
+    Passed,
+    /// The engine reported something GNU R does not, or wrote no usable report.
+    Failed,
+    /// The engine was killed by a signal ([`EngineError::Crashed`]).
+    Crashed,
+}
+
+/// The verdict for a case that ran as `run`, given its entry in the known failures. A crash is
+/// new even when the case is listed: a signal means memory was misused, and where it shows
+/// depends on where the collector happens to run, so a listed crash would pass on some hosts.
+pub fn verdict(run: CaseRun, entry: Option<&KnownFailure>) -> Verdict {
+    match (run, entry) {
+        (CaseRun::Passed, None) => Verdict::Passed,
+        (CaseRun::Passed, Some(_)) => Verdict::ListedButPassing,
+        (CaseRun::Failed, Some(_)) => Verdict::Known,
+        (CaseRun::Failed, None) | (CaseRun::Crashed, _) => Verdict::New,
     }
 }
 
@@ -182,8 +182,8 @@ pub fn known_failures() -> Result<Vec<KnownFailure>, String> {
 }
 
 /// Parses the known failures in `text`, the file in `directory`, refusing an entry that names an
-/// unknown engine, a case missing from `directory/cases`, the same case and engine twice, or
-/// `intermittent` outside [`GC_TORTURE_ENGINES`], so a stale or mistyped entry cannot hide.
+/// unknown engine, a case missing from `directory/cases` or the same case and engine twice, so a
+/// stale or mistyped entry cannot hide.
 pub fn parse_known_failures(text: &str, directory: &Path) -> Result<Vec<KnownFailure>, String> {
     let path = directory.join(KNOWN_FAILURES_FILE);
     let file: KnownFailuresFile =
@@ -196,16 +196,6 @@ pub fn parse_known_failures(text: &str, directory: &Path) -> Result<Vec<KnownFai
                 entry.case,
                 entry.engine,
                 ENGINES.join(", ")
-            ));
-        }
-        if entry.intermittent && !GC_TORTURE_ENGINES.contains(&entry.engine.as_str()) {
-            return Err(format!(
-                "{}: `{}` under `{}` is marked intermittent, which only an entry under {} may be, \
-                 because a failure under any other engine reproduces on every host",
-                path.display(),
-                entry.case,
-                entry.engine,
-                GC_TORTURE_ENGINES.join(", ")
             ));
         }
         if !directory
@@ -311,6 +301,7 @@ impl ProcessEngine {
             "ry-jit" => Some(ProcessEngine::ry_jit()),
             "ry-gctorture" => Some(ProcessEngine::ry_gc_torture()),
             "ry-gctorture-young" => Some(ProcessEngine::ry_gc_torture_young()),
+            "ry-gctorture-seeded" => Some(ProcessEngine::ry_gc_torture_seeded(0)),
             "ry-jit-gctorture" => Some(ProcessEngine::ry_jit_gc_torture()),
             command => ProcessEngine::from_command(command),
         }
@@ -355,6 +346,24 @@ impl ProcessEngine {
         engine
             .environment
             .push(("RY_GC_STRESS".to_string(), "young".to_string()));
+        engine
+    }
+
+    /// ry's runtime with seeded collection stress (`RY_GC_STRESS=seed:N`) and the write barrier
+    /// checked before every collection short of a major one (`RY_GC_VERIFY`). Collections come
+    /// at random gaps of up to a few thousand allocations, so objects stay young across whole
+    /// operations, and a store that skipped the barrier fails the check at the next collection
+    /// rather than freeing a live object only when the timing is unlucky. The seed picks the
+    /// gaps, so a failure replays with the same seed.
+    pub fn ry_gc_torture_seeded(seed: u64) -> Self {
+        let mut engine = ProcessEngine::ry();
+        engine.name = "ry-gctorture-seeded".to_string();
+        engine
+            .environment
+            .push(("RY_GC_STRESS".to_string(), format!("seed:{seed}")));
+        engine
+            .environment
+            .push(("RY_GC_VERIFY".to_string(), "1".to_string()));
         engine
     }
 
@@ -1042,6 +1051,21 @@ pub fn runnable_cases(
 }
 
 const LOCALE_REQUIREMENT: &str = "locale ";
+
+/// Whether `case` declares, in a leading `# oracle: library-dependent` comment, that its recorded
+/// last digits are those of the libraries GNU R ran on: BLAS and LAPACK (`lm`, `optim`, matrix
+/// products) or the C math library. Another build of those libraries moves the digits, and an
+/// optimizer's iteration count or warnings with them, so only a GNU R on the recorded libraries
+/// can confirm such a case's expectation.
+pub fn library_dependent(case: &Path) -> bool {
+    std::fs::read_to_string(case).is_ok_and(|text| {
+        text.lines()
+            .take_while(|line| line.starts_with('#'))
+            .any(|line| line.trim_end() == LIBRARY_DEPENDENT)
+    })
+}
+
+const LIBRARY_DEPENDENT: &str = "# oracle: library-dependent";
 
 fn case_requirements(case: &Path) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(case) else {

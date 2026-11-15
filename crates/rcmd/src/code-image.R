@@ -1,16 +1,18 @@
-# Writes the compiled code image of an installed package: loads it, fetches every lazy-loaded
-# binding of its namespace so that each closure's record is recorded, optionally runs a training
-# workload, and has the runtime compile and write the code of every recorded closure.
+# Writes the compiled code image and the typed code file of an installed package: loads it,
+# fetches every lazy-loaded binding of its namespace so that each closure's record is recorded,
+# optionally runs a training workload, and has the runtime compile and write the code of every
+# recorded closure and the machine code of every typed one.
 #
 # Arguments: the package, the library it is installed in, its source directory, the training
-# workload ("none", "tests", "examples", or the path of a script), and whether to print what kept
-# each function from machine code ("true" or "false").
+# workload ("none", "tests", "examples", or the path of a script), whether to write the code
+# image ("image" or "no-image") and whether to write the typed code file ("typed" or "no-typed").
 arguments <- commandArgs(TRUE)
 package <- arguments[[1L]]
 library <- arguments[[2L]]
 source_directory <- arguments[[3L]]
 training <- arguments[[4L]]
-explain <- arguments[[5L]] == "true"
+write_image <- arguments[[5L]] == "image"
+write_typed <- arguments[[6L]] == "typed"
 
 .Internal(ryCodeImageRecord(file.path(library, package)))
 namespace <- loadNamespace(package, lib.loc = library)
@@ -61,13 +63,31 @@ if (training == "tests") {
     run_quietly(training, chdir = TRUE)
 }
 
-counts <- .Internal(ryCodeImageWrite(trained, explain, TRUE))
-summary <- sprintf(
-    "closures=%d written=%d native=%d",
-    counts[["closures"]], counts[["written"]], counts[["native"]]
-)
-left_out <- counts[-(1:3)]
-if (length(left_out)) {
-    summary <- sprintf("%s (left out: %s)", summary, paste0(names(left_out), " (", left_out, ")", collapse = ", "))
+summarize <- function(label, counts) {
+    summary <- sprintf(
+        "%s: closures=%d written=%d",
+        label, counts[["closures"]], counts[["written"]]
+    )
+    left_out <- counts[-(1:2)]
+    if (length(left_out)) {
+        summary <- sprintf("%s (left out: %s)", summary, paste0(names(left_out), " (", left_out, ")", collapse = ", "))
+    }
+    cat(summary, "\n", sep = "")
 }
-cat(summary, "\n", sep = "")
+
+# The typed code file goes first: writing the code image ends the recording.
+if (write_typed) {
+    counts <- tryCatch(
+        .Internal(ryTypedCodeWrite(package)),
+        error = function(condition) {
+            cat("typed code: not written: ", conditionMessage(condition), "\n", sep = "")
+            NULL
+        }
+    )
+    if (!is.null(counts) && counts[["closures"]] > 0L) {
+        summarize("typed code", counts)
+    }
+}
+if (write_image) {
+    summarize("code image", .Internal(ryCodeImageWrite(trained, TRUE)))
+}

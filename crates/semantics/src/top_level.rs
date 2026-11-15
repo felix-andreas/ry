@@ -15,8 +15,8 @@ use {
         },
         inline_annotations_enabled, item_hir, item_syntax_flags,
         metadata::namespace_active,
+        name_layer,
         naming::{base_masking_family, data_argument_flags},
-        package_layer,
         stubs::{QUALIFIED_ONLY_NAMESPACES, StubSources, stubs},
     },
     rustc_hash::FxHashSet,
@@ -239,7 +239,7 @@ fn generator_part(module: &Module, id: ExprId) -> bool {
 /// where the declaration would live. A project definition shadows a stub's.
 pub fn callee_purity(db: &dyn Db, package: Option<&str>, name: &str) -> (bool, CalleeOrigin) {
     if package.is_none() {
-        let definitions = package_layer(db, Symbol::new(name), false);
+        let definitions = name_layer(db, Symbol::new(name), false);
         if !definitions.conditional_writers.is_empty() {
             return (false, CalleeOrigin::Conditional);
         }
@@ -660,7 +660,7 @@ impl Classifier<'_> {
     /// Whether the project binds `name` once, unconditionally, to a value that is plainly a
     /// vector or a list.
     fn outer_value_is_copied(&self, name: Symbol) -> bool {
-        let definitions = package_layer(self.db, name, false);
+        let definitions = name_layer(self.db, name, false);
         definitions.conditional_writers.is_empty()
             && definitions
                 .winner

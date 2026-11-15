@@ -5,7 +5,7 @@ edition = "2024"
 version.workspace = true
 license = "UPL-1.0"
 publish = false
-# `benches/allocator.rs` is a module the benchmarks share, not a benchmark.
+# `benches/allocator.rs` and `benches/streaming.rs` are modules of the benchmarks, not benchmarks.
 autobenches = false
 
 [lib]
@@ -46,6 +46,11 @@ foldhash.workspace = true
 hashbrown.workspace = true
 thiserror.workspace = true
 
+[features]
+# `db_benchmark --polars-streaming` compares ry's kernels with Polars' streaming engine. The
+# library does not use that engine, so only a build that asks for the comparison compiles it.
+polars-streaming = ["polars/streaming"]
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Memory"] }
 
@@ -53,6 +58,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 # The benchmarks run on the allocator and options `libR` gives the engine.
 mimalloc = { version = "0.1", features = ["local_dynamic_tls", "v2"] }
 libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
+heap = { path = "../heap" }
 sniff = { path = "../sniff" }
 syntax = { path = "../syntax" }
 

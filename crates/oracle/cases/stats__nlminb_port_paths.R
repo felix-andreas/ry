@@ -1,3 +1,4 @@
+# oracle: library-dependent
 # nlminb runs PORT's own drivers, so its iterates, counts, codes and trace output match GNU R
 # to the last bit. Each problem prints every evaluated point in hex, then the full result.
 show <- function(fit) {

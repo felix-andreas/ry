@@ -131,14 +131,14 @@ local({
             paths
         }
         directories <- keep(list.dirs("inst")[-1L])
-        for (directory in sub("^inst", instdir, directories)) dir.create(directory, showWarnings = FALSE, recursive = TRUE)
+        for (directory in paste0(instdir, substring(directories, 5L))) dir.create(directory, showWarnings = FALSE, recursive = TRUE)
         files <- keep(list.files("inst", all.files = TRUE, full.names = TRUE, recursive = TRUE))
         files <- files[files %notin% c("inst/doc/Rplots.pdf", "inst/doc/Rplots.ps", "inst/Makefile")]
         files <- files[!grepl("inst/doc/.*[.](log|aux|bbl|blg|dvi)$", files, perl = TRUE, ignore.case = TRUE)]
         if (!dir.exists("vignettes")) {
             files <- files[!grepl("inst/doc/.*[.](png|jpg|jpeg|gif|ps|eps)$", files, perl = TRUE, ignore.case = TRUE)]
         }
-        targets <- sub("^inst", instdir, files)
+        targets <- paste0(instdir, substring(files, 5L))
         file.copy(files, targets, overwrite = TRUE)
         executable <- as.logical(file.mode(files) & as.octmode("100"))
         if (any(executable, na.rm = TRUE)) Sys.chmod(targets[which(executable)], "755")

@@ -722,7 +722,7 @@ int R_remhash(R_hashtab_type h, SEXP key);
 int R_numhash(R_hashtab_type h);
 int R_typhash(R_hashtab_type h);
 SEXP R_maphash(R_hashtab_type h, SEXP FUN);
-void R_maphashC(R_hashtab_type h, void (*FUN)(SEXP, SEXP, void *), void *data);
+SEXP R_maphashC(R_hashtab_type h, SEXP (*FUN)(SEXP, SEXP, void *), void *data);
 void R_clrhash(R_hashtab_type h);
 
 /* Names R 4.6 dropped from the API that GNU R 4.3's headers still declared. Package sources
@@ -1043,7 +1043,11 @@ SEXP R_Unserialize(R_inpstream_t stream);
  * libR, and libR's tests pin the layout. The accessors are function-like macros, so `&INTEGER`
  * and `(INTEGER)(x)` still name the libR function. A package that wants the plain functions, or
  * includes a header declaring its own function of one of these names, defines
- * RY_NO_INLINE_ACCESSORS before including this header. */
+ * RY_NO_INLINE_ACCESSORS before including this header.
+ *
+ * What these accessors read, and which cases they leave to libR, is compiled into every package,
+ * so a change here that makes old package binaries unsafe bumps rcmd::NATIVE_ABI, and ry then
+ * refuses to load a package it compiled against the old headers until it is reinstalled. */
 #ifndef RY_NO_INLINE_ACCESSORS
 
 /* C89 has no inline keyword; GCC and Clang accept __inline__ in every mode. */
@@ -1155,8 +1159,11 @@ RY_INLINE const Rbyte *Ry_RAW_RO(SEXP x)
     return RY_PLAIN(x, RAWSXP) ? (const Rbyte *) RY_DATA(x) : (RAW_RO)(x);
 }
 
-/* A writable pointer into a list or character vector makes libR treat the vector as escaped,
- * so only atomic vectors take the inline path. */
+/* Any pointer into a list or character vector, read-only or not, must go through libR, which
+ * marks the vector escaped so the collector rescans it whole: packages permute elements through
+ * DATAPTR_RO (data.table's setcolorder memcpys columns), and the collector remembers old-to-young
+ * pointers per 128-element card, so a moved element would otherwise land on a clean card. Only
+ * atomic vectors take the inline path. */
 RY_INLINE void *Ry_DATAPTR(SEXP x)
 {
     return RY_PLAIN_ATOMIC(x) ? RY_DATA(x) : (DATAPTR)(x);
@@ -1164,12 +1171,7 @@ RY_INLINE void *Ry_DATAPTR(SEXP x)
 
 RY_INLINE const void *Ry_DATAPTR_RO(SEXP x)
 {
-    return RY_PLAIN_VECTOR(x) ? (const void *) RY_DATA(x) : (DATAPTR_RO)(x);
-}
-
-RY_INLINE const SEXP *Ry_STRING_PTR_RO(SEXP x)
-{
-    return RY_PLAIN(x, STRSXP) ? (const SEXP *) RY_DATA(x) : (STRING_PTR_RO)(x);
+    return RY_PLAIN_ATOMIC(x) ? (const void *) RY_DATA(x) : (DATAPTR_RO)(x);
 }
 
 RY_INLINE SEXP Ry_STRING_ELT(SEXP x, R_xlen_t i)
@@ -1275,7 +1277,6 @@ RY_INLINE SEXP Ry_CADDR(SEXP x)
 #define RAW_RO(x) Ry_RAW_RO(x)
 #define DATAPTR(x) Ry_DATAPTR(x)
 #define DATAPTR_RO(x) Ry_DATAPTR_RO(x)
-#define STRING_PTR_RO(x) Ry_STRING_PTR_RO(x)
 #define STRING_ELT(x, i) Ry_STRING_ELT(x, i)
 #define VECTOR_ELT(x, i) Ry_VECTOR_ELT(x, i)
 #define LOGICAL_ELT(x, i) Ry_LOGICAL_ELT(x, i)

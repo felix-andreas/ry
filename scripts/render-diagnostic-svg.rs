@@ -154,12 +154,26 @@ fn finding(ry: &Path, panel: &Panel, example: &str) -> Result<Vec<Vec<Span>>, Bo
         .filter(|&(index, _)| {
             plain[index].trim_start().starts_with('×') || underline(index) || (source(index) && underline(index + 1))
         })
-        .map(|(_, line)| parse_sgr(line))
+        .map(|(index, line)| {
+            let mut spans = parse_sgr(line);
+            if underline(index) && !(index + 1..plain.len()).any(underline) {
+                blank_gutter_bar(&mut spans);
+            }
+            spans
+        })
         .collect();
     if !(0..plain.len()).any(underline) {
         return Err(format!("`ry check {}` underlined no source line:\n{report}", panel.file_name).into());
     }
     Ok(kept)
+}
+
+/// Replaces the `│` of the last underline line with a space, so the panel does not end on a bar
+/// that leads nowhere; the carets keep their columns.
+fn blank_gutter_bar(spans: &mut [Span]) {
+    if let Some(span) = spans.iter_mut().find(|span| span.text.contains('│')) {
+        span.text = span.text.replacen('│', " ", 1);
+    }
 }
 
 /// One SVG holding the colored lines, styled for both GitHub themes.

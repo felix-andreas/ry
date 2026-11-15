@@ -12,7 +12,7 @@
 
 use std::sync::{
     Mutex,
-    atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 
 /// The categories of the time split, in the order the summary prints them.
@@ -100,6 +100,27 @@ impl Activity {
             Activity::Profiler => "profile summary bookkeeping",
         }
     }
+
+    /// A stable snake_case name, for machine-readable output.
+    pub fn key(self) -> &'static str {
+        match self {
+            Activity::Other => "other",
+            Activity::Interpreter => "interpreter",
+            Activity::Evaluator => "evaluator",
+            Activity::CallSetup => "call_setup",
+            Activity::Lookup => "lookup",
+            Activity::Builtin => "builtin",
+            Activity::S3Dispatch => "s3_dispatch",
+            Activity::S4Dispatch => "s4_dispatch",
+            Activity::Native => "native",
+            Activity::Conditions => "conditions",
+            Activity::Introspection => "introspection",
+            Activity::Collector => "collector",
+            Activity::JitCompile => "jit_compile",
+            Activity::Compiled => "compiled",
+            Activity::Profiler => "profiler",
+        }
+    }
 }
 
 /// Event counts the summary reports beside the time split.
@@ -123,7 +144,10 @@ pub enum Counter {
     JitDeoptimizations,
     JitEntries,
     LookupMisses,
+    FrameEnvironments,
     FramesReified,
+    VariablesBoxed,
+    FramesLifted,
     PackageCalls,
     PackageCallsDirect,
     PackageCallsObserved,
@@ -132,7 +156,7 @@ pub enum Counter {
 }
 
 impl Counter {
-    pub const ALL: [Counter; 23] = [
+    pub const ALL: [Counter; 26] = [
         Counter::ClosureCalls,
         Counter::NativeEntries,
         Counter::BuiltinCalls,
@@ -150,7 +174,10 @@ impl Counter {
         Counter::JitDeoptimizations,
         Counter::JitEntries,
         Counter::LookupMisses,
+        Counter::FrameEnvironments,
         Counter::FramesReified,
+        Counter::VariablesBoxed,
+        Counter::FramesLifted,
         Counter::PackageCalls,
         Counter::PackageCallsDirect,
         Counter::PackageCallsObserved,
@@ -177,16 +204,55 @@ impl Counter {
             Counter::JitDeoptimizations => "JIT deoptimizations",
             Counter::JitEntries => "entries into compiled code",
             Counter::LookupMisses => "lookups past the inline caches",
-            Counter::FramesReified => "slot frames turned into environments",
+            Counter::FrameEnvironments => "slot frames that made an environment to stand for them",
+            Counter::FramesReified => {
+                "slot frames that switched to reading their variables by name"
+            }
+            Counter::VariablesBoxed => "variables moved from a slot into a binding cell",
+            Counter::FramesLifted => {
+                "slot frames whose environment took every variable, to be listed or to outlive them"
+            }
             Counter::PackageCalls => "calls to closures of package namespaces",
             Counter::PackageCallsDirect => {
                 "package calls that ran in slots, with no argument promise and no environment"
             }
             Counter::PackageCallsObserved => {
-                "package calls whose frame was reified because code observed its environment"
+                "package calls that read variables by name because code observed the environment"
             }
             Counter::WrappersInlined => "calls of one-builtin wrappers run without their body",
             Counter::DoCallsInlined => "do.call calls run without its body",
+        }
+    }
+
+    /// A stable snake_case name, for machine-readable output.
+    pub fn key(self) -> &'static str {
+        match self {
+            Counter::ClosureCalls => "closure_calls",
+            Counter::NativeEntries => "native_entries",
+            Counter::BuiltinCalls => "builtin_calls",
+            Counter::PromisesCreated => "promises_created",
+            Counter::ArgumentReferences => "argument_references",
+            Counter::PromisesForced => "promises_forced",
+            Counter::FormalsMatchedByName => "formals_matched_by_name",
+            Counter::DotsCalls => "dots_calls",
+            Counter::S3Dispatches => "s3_dispatches",
+            Counter::S4Dispatches => "s4_dispatches",
+            Counter::NativeCalls => "native_calls",
+            Counter::ConditionsSignalled => "conditions_signalled",
+            Counter::HandlersEstablished => "handlers_established",
+            Counter::JitCompiles => "jit_compiles",
+            Counter::JitDeoptimizations => "jit_deoptimizations",
+            Counter::JitEntries => "jit_entries",
+            Counter::LookupMisses => "lookup_misses",
+            Counter::FrameEnvironments => "frame_environments",
+            Counter::FramesReified => "frames_reified",
+            Counter::VariablesBoxed => "variables_boxed",
+            Counter::FramesLifted => "frames_lifted",
+            Counter::PackageCalls => "package_calls",
+            Counter::PackageCallsDirect => "package_calls_direct",
+            Counter::PackageCallsObserved => "package_calls_observed",
+            Counter::WrappersInlined => "wrappers_inlined",
+            Counter::DoCallsInlined => "do_calls_inlined",
         }
     }
 }
@@ -197,15 +263,41 @@ pub const BUILTIN_SLOTS: usize = 4096;
 /// The most [`label`]s [`count_package_fallback`] keeps a count for.
 pub const LABEL_SLOTS: usize = 1024;
 
-static ENABLED: AtomicBool = AtomicBool::new(false);
+/// What makes a call leave its fast path, one bit each: [`SUMMARY`] while anything needs every
+/// closure call to pass the profiling hooks (a profile summary, benchmark regions, the
+/// boundary-call recorder), [`CAPTURE`] while boundary calls are recorded, [`PROFILE_TICK`] once
+/// per `Rprof` sampling interval, and the interpreter's own observers of calls ([`DEBUGGER`], [`MOVES`], [`NO_OBJECT_SYSTEMS`]). They share one byte so
+/// a call tests all of them with a single load ([`hooks`]). The byte is atomic because `Rprof`'s
+/// timer thread sets its bit; every other bit is written by the R thread, by whatever changes
+/// the state the bit stands for ([`set_hook`]).
+static HOOKS: AtomicU8 = AtomicU8::new(0);
+/// The [`HOOKS`] bit [`enabled`] reads.
+pub const SUMMARY: u8 = 1;
+/// The [`HOOKS`] bit set by `Rprof`'s timer thread and cleared once the R thread records a
+/// sample. GNU R takes its samples in a `SIGPROF` handler; ry checks the bit where calls begin.
+pub const PROFILE_TICK: u8 = 2;
+/// The [`HOOKS`] bit set while a debugger is attached to the interpreter.
+pub const DEBUGGER: u8 = 4;
+/// The [`HOOKS`] bit set while a call that moves an argument into its callee is running.
+pub const MOVES: u8 = 8;
+/// The [`HOOKS`] bit set while the session refuses to define S4, R6 and reference classes.
+pub const NO_OBJECT_SYSTEMS: u8 = 16;
+/// The [`HOOKS`] bit set while the boundary-call recorder runs. It is set only together with
+/// [`SUMMARY`], so a call's entry tests one bit for both. Code that runs without a call entry
+/// reads it on its own: closures that run natively without a frame, to take their frame path
+/// instead, and the places that evaluate code in an environment (a promise being forced,
+/// `eval`, and the C API's evaluators).
+pub const CAPTURE: u8 = 32;
 static CURRENT: AtomicU32 = AtomicU32::new(0);
 static COUNTERS: [AtomicU64; Counter::ALL.len()] =
     [const { AtomicU64::new(0) }; Counter::ALL.len()];
 static BUILTINS: [AtomicU64; BUILTIN_SLOTS] = [const { AtomicU64::new(0) }; BUILTIN_SLOTS];
 static LABELS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static PACKAGE_FALLBACKS: [AtomicU64; LABEL_SLOTS] = [const { AtomicU64::new(0) }; LABEL_SLOTS];
+static REIFICATIONS: [AtomicU64; LABEL_SLOTS] = [const { AtomicU64::new(0) }; LABEL_SLOTS];
 static FRAME_OWNERS: [AtomicU32; FRAME_SLOTS] = [const { AtomicU32::new(0) }; FRAME_SLOTS];
 static FRAME_NAMES: [AtomicUsize; FRAME_SLOTS] = [const { AtomicUsize::new(0) }; FRAME_SLOTS];
+static FRAME_BODIES: [AtomicUsize; FRAME_SLOTS] = [const { AtomicUsize::new(0) }; FRAME_SLOTS];
 static FRAME_DEPTH: AtomicU32 = AtomicU32::new(0);
 
 /// The deepest closure frame the sampler sees; a sample deeper than this is attributed to the
@@ -215,12 +307,46 @@ pub const FRAME_SLOTS: usize = 1024;
 /// Whether a profile summary is being collected.
 #[inline(always)]
 pub fn enabled() -> bool {
-    ENABLED.load(Ordering::Relaxed)
+    hooks() & SUMMARY != 0
 }
 
 /// Starts or stops publishing activities and counting events.
 pub fn set_enabled(on: bool) {
-    ENABLED.store(on, Ordering::Relaxed);
+    if on {
+        HOOKS.fetch_or(SUMMARY, Ordering::Relaxed);
+    } else {
+        HOOKS.fetch_and(!SUMMARY, Ordering::Relaxed);
+    }
+}
+
+/// The hook bits that are set; zero while nothing observes calls.
+#[inline(always)]
+pub fn hooks() -> u8 {
+    HOOKS.load(Ordering::Relaxed)
+}
+
+/// Whether `Rprof`'s interval elapsed since the last sample.
+#[inline(always)]
+pub fn profile_ticked() -> bool {
+    hooks() & PROFILE_TICK != 0
+}
+
+/// Sets (`Rprof`'s timer) or clears (a recorded sample, a stopped profile) the profile tick.
+pub fn set_profile_tick(on: bool) {
+    if on {
+        HOOKS.fetch_or(PROFILE_TICK, Ordering::Relaxed);
+    } else {
+        HOOKS.fetch_and(!PROFILE_TICK, Ordering::Relaxed);
+    }
+}
+
+/// Sets or clears one of the interpreter's bits in [`HOOKS`], as the state it stands for changes.
+pub fn set_hook(bit: u8, on: bool) {
+    if on {
+        HOOKS.fetch_or(bit, Ordering::Relaxed);
+    } else {
+        HOOKS.fetch_and(!bit, Ordering::Relaxed);
+    }
 }
 
 /// The current activity word, for the sampling thread.
@@ -270,6 +396,14 @@ pub fn count(counter: Counter) {
     }
 }
 
+/// [`count`] for `events` events at once.
+pub fn count_by(counter: Counter, events: u64) {
+    if enabled() {
+        let slot = &COUNTERS[counter as usize];
+        slot.store(slot.load(Ordering::Relaxed) + events, Ordering::Relaxed);
+    }
+}
+
 #[inline(always)]
 pub fn count_builtin(index: usize) {
     if enabled()
@@ -293,7 +427,23 @@ pub fn count_package_fallback(reason: u32) {
 
 /// The package calls [`count_package_fallback`] counted under each reason, largest first.
 pub fn package_fallbacks() -> Vec<(String, u64)> {
-    let mut fallbacks: Vec<(String, u64)> = PACKAGE_FALLBACKS
+    by_label(&PACKAGE_FALLBACKS)
+}
+
+/// Counts a slot frame turned into an environment, under the [`label`] of what asked for it.
+pub fn count_reification(reason: u32) {
+    if let Some(slot) = REIFICATIONS.get(reason as usize) {
+        bump(slot);
+    }
+}
+
+/// The slot frames [`count_reification`] counted under each reason, largest first.
+pub fn reifications() -> Vec<(String, u64)> {
+    by_label(&REIFICATIONS)
+}
+
+fn by_label(slots: &[AtomicU64; LABEL_SLOTS]) -> Vec<(String, u64)> {
+    let mut counts: Vec<(String, u64)> = slots
         .iter()
         .enumerate()
         .filter_map(|(id, slot)| {
@@ -306,8 +456,8 @@ pub fn package_fallbacks() -> Vec<(String, u64)> {
             })
         })
         .collect();
-    fallbacks.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    fallbacks
+    counts.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    counts
 }
 
 pub fn counter(counter: Counter) -> u64 {
@@ -352,20 +502,23 @@ pub struct FrameScope {
 
 /// Publishes a closure call for the sampler: `owner` is a [`label`] for the package (or other top
 /// level) the closure belongs to, and `name` is the address of the symbol the call used, which is
-/// never freed, or 0 for an anonymous function.
+/// never freed, or 0 for an anonymous function. `body` is the address of the closure's body, which
+/// tells closures of one name apart and counts a body's entries however many closures share it.
 ///
 /// The sampler reads the stack without synchronizing with the R thread, so a sample taken during
 /// a push or pop can see one frame too many or too few. That is noise of one sample, and it keeps
 /// the push to three stores.
 #[inline(always)]
-pub fn push_frame(owner: u32, name: usize) -> FrameScope {
+pub fn push_frame(owner: u32, name: usize, body: usize) -> FrameScope {
     let depth = FRAME_DEPTH.load(Ordering::Relaxed);
-    if let (Some(owner_slot), Some(name_slot)) = (
+    if let (Some(owner_slot), Some(name_slot), Some(body_slot)) = (
         FRAME_OWNERS.get(depth as usize),
         FRAME_NAMES.get(depth as usize),
+        FRAME_BODIES.get(depth as usize),
     ) {
         owner_slot.store(owner, Ordering::Relaxed);
         name_slot.store(name, Ordering::Relaxed);
+        body_slot.store(body, Ordering::Relaxed);
     }
     FRAME_DEPTH.store(depth + 1, Ordering::Release);
     FrameScope {
@@ -375,6 +528,7 @@ pub fn push_frame(owner: u32, name: usize) -> FrameScope {
 }
 
 /// A scope that publishes nothing, for when no summary is being collected.
+#[inline(always)]
 pub fn no_frame() -> FrameScope {
     FrameScope {
         depth: 0,
@@ -393,13 +547,89 @@ impl Drop for FrameScope {
     }
 }
 
-/// Copies the published closure frames, outermost first, into `owners` and `names`.
-pub fn read_frames(owners: &mut Vec<u32>, names: &mut Vec<usize>) {
+/// Copies the published closure frames, outermost first, into `owners`, `names` and `bodies`.
+pub fn read_frames(owners: &mut Vec<u32>, names: &mut Vec<usize>, bodies: &mut Vec<usize>) {
     owners.clear();
     names.clear();
+    bodies.clear();
     let depth = (FRAME_DEPTH.load(Ordering::Acquire) as usize).min(FRAME_SLOTS);
     for index in 0..depth {
         owners.push(FRAME_OWNERS[index].load(Ordering::Relaxed));
         names.push(FRAME_NAMES[index].load(Ordering::Relaxed));
+        bodies.push(FRAME_BODIES[index].load(Ordering::Relaxed));
+    }
+}
+
+/// Exact allocation counts by object kind, and the call paths of a sample of them, while a
+/// profile summary is collected with `RY_ALLOC_SITES` set to the sampling period.
+static ALLOCATED: [AtomicU64; 32] = [const { AtomicU64::new(0) }; 32];
+static ALLOCATION_PERIOD: AtomicU64 = AtomicU64::new(0);
+static ALLOCATION_SITES: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
+
+pub fn set_allocation_period(period: u64) {
+    ALLOCATION_PERIOD.store(period, Ordering::Relaxed);
+}
+
+#[inline(always)]
+pub fn allocated(kind: u32) {
+    if enabled() {
+        allocated_slow(kind);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn allocated_slow(kind: u32) {
+    let Some(counter) = ALLOCATED.get(kind as usize) else {
+        return;
+    };
+    let count = counter.load(Ordering::Relaxed) + 1;
+    counter.store(count, Ordering::Relaxed);
+    let period = ALLOCATION_PERIOD.load(Ordering::Relaxed);
+    if period == 0 || count % period != 0 {
+        return;
+    }
+    let trace = std::backtrace::Backtrace::force_capture().to_string();
+    let mut frames: Vec<&str> = Vec::new();
+    for line in trace.lines() {
+        let line = line.trim_start();
+        let Some((index, name)) = line.split_once(": ") else {
+            continue;
+        };
+        if index.parse::<u32>().is_err() {
+            continue;
+        }
+        if name.contains("activity::")
+            || name.contains("backtrace")
+            || name.contains("Heap>::alloc")
+            || name.contains("Heap>::init_small")
+            || name.contains("heap::heap::Heap")
+        {
+            continue;
+        }
+        frames.push(name);
+        if frames.len() == 10 {
+            break;
+        }
+    }
+    let key = format!("{kind}\t{}", frames.join(" < "));
+    let mut sites = match ALLOCATION_SITES.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    match sites.iter_mut().find(|(site, _)| *site == key) {
+        Some((_, count)) => *count += 1,
+        None => sites.push((key, 1)),
+    }
+}
+
+pub fn allocation_counts() -> [u64; 32] {
+    std::array::from_fn(|kind| ALLOCATED[kind].load(Ordering::Relaxed))
+}
+
+pub fn allocation_sites() -> Vec<(String, u64)> {
+    match ALLOCATION_SITES.lock() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
     }
 }

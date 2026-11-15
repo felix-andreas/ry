@@ -1,0 +1,17 @@
+[stdout]
+| [1] 42
+| Note: no visible global function definition for 'undefined_fn' 
+| [1] TRUE
+| Note: no visible global function definition for 'undefined_fn' 
+| [1] "options forced"
+| [1] "argument is not an environment"
+| [1] 6
+| [1] "env" "e"  
+| parent.env(1)
+| [1] "argument is not an environment"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "argument is not an environment"

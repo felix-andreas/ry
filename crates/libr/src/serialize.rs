@@ -75,9 +75,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
     })
     .invisible(),
     internal("saveToConn", 6, |call| unsafe { do_save_to_conn(call) }).invisible(),
+    // A typed package's bindings include its `I64` and `List<I64>` constants, which the
+    // serializer writes; it refuses the other native values itself.
     internal("lazyLoadDBinsertValue", 5, |call| unsafe {
         do_lazy_load_insert(call)
-    }),
+    })
+    .accepting_native(),
 ];
 
 /// `lazyLoadDBinsertValue(value, file, ascii, compress, hook)`: serializes `value` (version 3,
@@ -168,7 +171,7 @@ unsafe fn do_serialize(call: &Call<'_>, format: Format) -> ApiResult<Sexp> {
     Ok(result)
 }
 
-unsafe fn serialize_to_bytes(
+pub(crate) unsafe fn serialize_to_bytes(
     object: Sexp,
     format: Format,
     version: c_int,
@@ -559,8 +562,22 @@ impl Writer<'_, '_> {
     unsafe fn write_item_unguarded(&mut self, mut object: Sexp) -> ApiResult<()> {
         // Pairlist tails are written in a loop, so a long list costs no stack.
         loop {
-            // ry's records, tuples and tagged unions have no R representation to write.
+            // An `I64` or a `List<I64>`, as typed code and the literals the preflight
+            // elaborates make them, is written as ry's own type code, which only ry reads back.
+            // A typed package's lazy-load database holds them, in code and as bindings, and is
+            // installed for the runtime that runs it. ry's records, tuples and tagged unions have
+            // no stream representation.
             if interp::records::is_native(object) {
+                if object.kind() == SexpType::I64 {
+                    self.write_integer(SexpType::I64.code() as i32)?;
+                    self.write_integer(i32::from(object.is_array()))?;
+                    self.write_length(object.length())?;
+                    for &value in object.slice::<i64>() {
+                        self.write_integer((value as u64 >> 32) as u32 as i32)?;
+                        self.write_integer(value as u64 as u32 as i32)?;
+                    }
+                    return Ok(());
+                }
                 return Err(error(interp::records::boundary_message(
                     "the value",
                     object,
@@ -604,8 +621,16 @@ impl Writer<'_, '_> {
                 _ => false,
             };
             // A promise's attribute slot holds its compiled code, which is no part of the R object.
-            let has_attr = !matches!(kind, SexpType::Char | SexpType::Promise)
-                && object.attrib() != self.known.nil;
+            // A typed closure's signature lives in the session's registry, so the stream
+            // carries it as the first attribute, which the reader puts back into its registry.
+            let signature = if kind == SexpType::Closure {
+                interp::annotations::stream_signature(object)?
+            } else {
+                None
+            };
+            let has_attr = signature.is_some()
+                || !matches!(kind, SexpType::Char | SexpType::Promise)
+                    && object.attrib() != self.known.nil;
             let mut levels = object.gp();
             if kind == SexpType::Char {
                 levels &= !CHARSXP_SESSION_BITS;
@@ -622,7 +647,9 @@ impl Writer<'_, '_> {
                 | SexpType::Promise
                 | SexpType::Dots => {
                     self.write_integer(flags as i32)?;
-                    if has_attr {
+                    if let Some(signature) = signature {
+                        self.write_signature(signature, object.attrib())?;
+                    } else if has_attr {
                         self.write_item(object.attrib())?;
                     }
                     if has_tag {
@@ -641,6 +668,18 @@ impl Writer<'_, '_> {
             }
             return Ok(());
         }
+    }
+
+    /// Writes a typed closure's attribute list: one cell that holds `signature` under
+    /// [`interp::annotations::STREAM_ATTRIBUTE`], then the closure's own attributes `rest`.
+    unsafe fn write_signature(&mut self, signature: Sexp, rest: Sexp) -> ApiResult<()> {
+        runtime().heap.root(signature);
+        let name = interp::values::install(interp::annotations::STREAM_ATTRIBUTE)?;
+        let flags = pack_flags(SexpType::Pairlist.code(), 0, false, false, true);
+        self.write_integer(flags as i32)?;
+        self.write_item(name)?;
+        self.write_item(signature)?;
+        self.write_item(rest)
     }
 
     /// Writes an ALTREP object as `ALTREP_SXP`: its class information, the state its class

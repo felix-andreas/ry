@@ -1,11 +1,30 @@
 // @ts-check
-import { defineConfig } from 'astro/config';
+import { defineConfig, fontProviders } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import tailwind from '@tailwindcss/vite';
 import starlightThemeBlack from 'starlight-theme-black'
 
 // https://astro.build/config
 export default defineConfig({
+	// The theme declares Geist at weight 400 only, so bold, medium and semibold text would be
+	// synthesized. These entries replace the theme's and load every weight the site uses. The
+	// fontsource provider has no variable files, and Geist Sans has no italic.
+	fonts: [
+		{
+			provider: fontProviders.fontsource(),
+			name: 'Geist Sans',
+			cssVariable: '--font-geist',
+			weights: [400, 500, 600, 700],
+			styles: ['normal'],
+		},
+		{
+			provider: fontProviders.fontsource(),
+			name: 'Geist Mono',
+			cssVariable: '--font-geist-mono',
+			weights: [400, 500, 600],
+			styles: ['normal', 'italic'],
+		},
+	],
 	site: 'https://ry-lang.org',
 	// Every page published before the docs were reorganised keeps working.
 	redirects: {
@@ -82,6 +101,7 @@ export default defineConfig({
 		'/contributing/design/repl': '/development/design/repl',
 		'/contributing/design/standard-library': '/development/design/standard-library',
 		'/contributing/design/typed-runtime': '/development/design/typed-runtime',
+		'/development/design/typed-code-file': '/development/typed-code-file',
 	},
 	integrations: [
 		starlight({
@@ -138,6 +158,7 @@ export default defineConfig({
 					items: [
 						{ slug: 'development', label: 'Build and test' },
 						{ slug: 'development/architecture' },
+						{ slug: 'development/typed-code-file' },
 						{ slug: 'development/structure' },
 						{ slug: 'development/testing' },
 						{ slug: 'development/robustness' },

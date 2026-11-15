@@ -1,0 +1,72 @@
+# The tests that need no GNU R: the fixture suites and the other tests of the crates that build
+# without the interpreter, libR and Polars, and a bounded libFuzzer pass over every target that
+# builds without Polars. This file runs when started by hand and inside a release, which calls it,
+# so a release fails on these checks; no push or pull request starts it. Each job runs one `just`
+# recipe, so each one also runs locally; to change what a job runs, edit its recipe in the
+# justfile. The full gate, which compares ry with GNU R, is ci.yml, and it starts by hand too.
+name: Tests
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  tests:
+    name: fixture suites and fast crates
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      # Reads rust-toolchain.toml and caches the build. An empty `rustflags` keeps the action's
+      # `-D warnings` out of a test run, which `just clippy` owns.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      # A test that compares with GNU R runs when it finds `R` on the PATH, against whatever
+      # version the runner image ships. The gate pins GNU R; this job runs with none.
+      - name: remove any R from the runner
+        run: |
+          for program in R Rscript; do
+            while path=$(command -v "$program"); do sudo rm "$path"; done
+          done
+      - name: just test-fast
+        run: just test-fast
+
+  fuzz:
+    name: bounded fuzz pass
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      # `cargo fuzz` builds into fuzz/target, which the action caches only when told about it.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+          cache-workspaces: |
+            . -> target
+            fuzz -> target
+      - name: install cargo-fuzz
+        run: command -v cargo-fuzz || cargo install cargo-fuzz --locked --version 0.13.2
+      # `runtime` leaves out the two targets that link Polars (`csv` and `unserialize`): built
+      # with coverage instrumentation, Polars needs more memory than a hosted runner has.
+      - name: just fuzz-all
+        run: just fuzz-all 60 runtime
+      - name: upload the failing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore
