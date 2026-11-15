@@ -1609,6 +1609,7 @@ unsafe fn compile_promise_arguments(function: Sexp, arguments: Sexp) -> R<Sexp> 
         slot_formals: slot_names(function.cdr()),
         slots_fixed: true,
         bound: None,
+        assigned: Vec::new(),
         cold: Vec::new(),
         temporary: None,
         sites: None,
@@ -2148,6 +2149,10 @@ struct Compiler {
     /// While a `match` guard compiles: its arm's bound names, which it reads from registers
     /// instead of the frame.
     bound: Option<Bound>,
+    /// The local variables that are bound wherever the code being compiled runs: the variable
+    /// of each enclosing `for`, and each `name <- value` that an earlier statement of an
+    /// enclosing block ran. Reading one runs no code and cannot fail.
+    assigned: Vec<Sexp>,
     /// Guard fallbacks waiting to be laid out after the body's `Return` or the innermost open
     /// loop's back edge (see [`Compiler::cold_fallback`]).
     cold: Vec<Cold>,
@@ -2347,6 +2352,7 @@ unsafe fn compile_unreported(
         rebinding: None,
         assigning: None,
         bound: None,
+        assigned: Vec::new(),
         tail_updates: tail_updates(body, function),
         cold: Vec::new(),
         argument: false,
@@ -4335,17 +4341,20 @@ impl Compiler {
         // promises it may never force, or force in another environment (`[<-.data.table`
         // evaluates `i` inside the table). So the target is read before any subscript runs, and
         // an object leaves the whole assignment to `complex_assign`; only the builtin replacement
-        // takes the subscripts evaluated. A self-evaluating subscript is the same either way.
+        // takes the subscripts evaluated. A constant subscript, or a local variable known to be
+        // bound here ([`Compiler::assigned`]), is the same either way: `SubAssign` hands a method
+        // the forced promise of its code, and reading it runs nothing and cannot fail. Such
+        // subscripts skip the probe, which keeps `x[[k]] <- v` and `x[i] <- v` in a loop as
+        // cheap as before.
         let registers: SmallVec<[u32; 2]> = subscripts.iter().map(|_| self.allocate()).collect();
+        let eager = subscripts
+            .iter()
+            .all(|subscript| self_evaluating(*subscript) || self.assigned.contains(subscript));
         // The probe reads the target into the first subscript's register, which the subscript
         // then overwrites: a register still holding the target would make the store copy it
         // instead of changing it in place (`slot_owns`).
         let dispatching = match registers.first() {
-            Some(&object)
-                if !subscripts
-                    .iter()
-                    .all(|subscript| self_evaluating(*subscript)) =>
-            {
+            Some(&object) if !eager => {
                 self.expression(target.cdr().car(), object)?;
                 Some(self.emit_patchable(Op::BranchIfObject, &[object, 0]))
             }
@@ -4944,6 +4953,7 @@ impl Compiler {
                 let outer = self.srcref;
                 let start = self.next_register;
                 let mut used = start;
+                let assigned = self.assigned.len();
                 for (index, (_, statement)) in args.iter().enumerate() {
                     // Registers are allocated in stack order, so the statement's temporaries
                     // are exactly `start..used`.
@@ -4960,7 +4970,14 @@ impl Compiler {
                     self.expression(*statement, dst)?;
                     used = self.registers;
                     self.registers = peak.max(used);
+                    if statement.kind() == SexpType::Language
+                        && statement.car().kind() == SexpType::Symbol
+                        && matches!(&*symbol_name(statement.car()), "<-" | "=")
+                    {
+                        self.note_assigned(statement.cdr().car());
+                    }
                 }
+                self.assigned.truncate(assigned);
                 if srcrefs == nil() {
                     return Ok(());
                 }
@@ -5227,7 +5244,10 @@ impl Compiler {
         let exit = self.emit_patchable(Op::ForStep, &[loop_index as u32, sequence, variable, 0]);
         let mark = self.next_register;
         let body = self.allocate();
+        let assigned = self.assigned.len();
+        self.note_assigned(args[0].1);
         self.expression(args[2].1, body)?;
+        self.assigned.truncate(assigned);
         self.release_to(mark);
         self.back_edge(step);
         self.patch(exit);
@@ -5236,6 +5256,19 @@ impl Compiler {
         self.release_to(sequence);
         self.loop_value(dst);
         Ok(())
+    }
+
+    /// Records that `name` is bound from here to the end of the enclosing block or loop body,
+    /// when it is one of the frame's local variables.
+    unsafe fn note_assigned(&mut self, name: Sexp) {
+        if name.kind() == SexpType::Symbol
+            && self
+                .local_symbols
+                .as_ref()
+                .is_some_and(|locals| locals.contains(&name))
+        {
+            self.assigned.push(name);
+        }
     }
 
     fn open_loop(&mut self) -> usize {

@@ -107,10 +107,16 @@ fn replacement_promises(rng: &mut SplitMix64) -> String {
                 format!("z[[{index}]] <- 5"),
                 "attr(z, \"seen\")".to_owned(),
             ),
+            // GNU R's own `match.call()` in a `$<-` method shows the name as `abc` or `"abc"`
+            // depending on whether GNU R compiled the caller, so that body is no oracle here.
             3 => (
                 format!(
                     "`$<-.{class}` <- function(x, name, value) {{ attr(x, \"seen\") <- {}; x }}",
-                    report("name")
+                    if body.contains("match.call") {
+                        BODIES[0].replace('@', "name")
+                    } else {
+                        report("name")
+                    }
                 ),
                 start,
                 "z$abc <- 5".to_owned(),
