@@ -240,6 +240,12 @@ bench-base *args:
     cargo build --release -p ry-lang -p libr -p rcmd
     python3 -I tools/bench/internal/base/run.py {{ args }}
 
+# Times the kernels cut from a user's profile of a package test suite (S4 construction, scalar calls of small base closures,
+# date conversion, xts and data.table calls) on GNU R and ry's runtime with checksums, e.g. `just bench-ci --only k1,k3`.
+bench-ci *args:
+    cargo build --release -p ry-lang -p libr -p rcmd
+    python3 -I tools/bench/internal/ci/run.py {{ args }}
+
 # Times each List, Str, Dict and Result function on ry against its fastest GNU R equivalent (base R, purrr, stringr, stringi from R_LIBS_USER), e.g.
 # `just bench-stdlib` (every function at n = 1e6), `just bench-stdlib Str. 1e5`, or `just bench-stdlib "" 1e6 --sort ratio --write tools/bench/internal/stdlib/results.md`.
 bench-stdlib filter="" n="1e6" *args:
