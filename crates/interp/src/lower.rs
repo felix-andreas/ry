@@ -80,7 +80,7 @@ pub unsafe fn parse_with_srcfile(text: &str, source_name: &str, srcfile: Sexp) -
         // the parse itself on a large file.
         let keep_data = crate::envir::get_option("keep.parse.data");
         if (keep_data == nil() || values::as_logical_scalar(keep_data) == 1)
-            && let Some(data) = crate::parse_data::parse_data(&script.root, source)?
+            && let Some(data) = crate::parse_data::parse_data(script.root.node_ref(), source)?
         {
             crate::heap().define(srcfile, install("parseData")?, data)?;
         }
@@ -210,7 +210,7 @@ pub unsafe fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailu
     let may_hold_pipe = text.contains("|>");
     let mut expressions = Vec::new();
     for child in root.children() {
-        if is_skipped(&child) {
+        if is_skipped(child.kind()) {
             continue;
         }
         let start = usize::from(child.text_range().start()).min(text.len());
@@ -669,7 +669,7 @@ fn repeated_formal(parameters: &SyntaxNode) -> Option<SyntaxFailure> {
             .children_with_tokens()
             .find(|element| match element {
                 SyntaxElement::Token(token) => !token.kind().is_trivia(),
-                SyntaxElement::Node(node) => !is_skipped(node),
+                SyntaxElement::Node(node) => !is_skipped(node.kind()),
             })?;
         let (text, range) = match &name {
             SyntaxElement::Token(token) => (token.text().to_owned(), token.text_range()),
@@ -1018,7 +1018,7 @@ fn significant_range(node: &SyntaxNode) -> TextRange {
             && !token
                 .parent_ancestors()
                 .take_while(|ancestor| ancestor != node)
-                .any(|ancestor| is_skipped(&ancestor))
+                .any(|ancestor| is_skipped(ancestor.kind()))
     };
     let first = std::iter::successors(node.first_token(), SyntaxToken::next_token)
         .take_while(|token| range.contains_range(token.text_range()))
@@ -1071,9 +1071,9 @@ pub unsafe fn file_srcfile(path: &str, text: &str) -> R<Sexp> {
     Ok(srcfile)
 }
 
-pub(crate) fn is_skipped(node: &SyntaxNode) -> bool {
+pub(crate) fn is_skipped(kind: SyntaxKind) -> bool {
     matches!(
-        node.kind(),
+        kind,
         SyntaxKind::ANNOTATION
             | SyntaxKind::TYPE_ASCRIPTION
             | SyntaxKind::RETURN_TYPE
@@ -1086,7 +1086,9 @@ pub(crate) fn is_skipped(node: &SyntaxNode) -> bool {
 
 /// The expression children of a node, without trivia, tokens or annotations.
 fn expression_children(node: &SyntaxNode) -> Vec<SyntaxNode> {
-    node.children().filter(|child| !is_skipped(child)).collect()
+    node.children()
+        .filter(|child| !is_skipped(child.kind()))
+        .collect()
 }
 
 fn significant_tokens(node: &SyntaxNode) -> Vec<SyntaxToken> {
@@ -1986,7 +1988,7 @@ unsafe fn parameter_value(node: &SyntaxNode, source: Option<&SourceMap>) -> R<(S
                     _ => install(&token_name(&token)?)?,
                 };
             }
-            SyntaxElement::Node(child) if is_skipped(&child) => {}
+            SyntaxElement::Node(child) if is_skipped(child.kind()) => {}
             SyntaxElement::Node(child) if !after_equals => tag = tag_from_node(&child)?,
             SyntaxElement::Node(child) => default = lower(&child, source)?,
             SyntaxElement::Token(token) => default = literal(&token)?,
