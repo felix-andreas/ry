@@ -357,6 +357,10 @@ only when the slot alone holds it (`slot_owns`: a reference count of one and no 
 register holding it); otherwise the slot gets a copy, so `y <- x; x[1] <- 0` leaves `y` alone.
 An object target goes through `eval::complex_assign` in the frame's environment, because a
 replacement method may look at the frame, and that moves the assigned variable into a cell.
+A method or a replacement closure receives the subscripts as promises of their code, so when a
+subscript is not a constant the compiled code reads the target (and, for `f(x, i) <- v`, looks up
+`f<-`) before any subscript runs, and an object target or a closure setter branches to
+`Op::ComplexAssign`, which runs the whole assignment with the subscripts unevaluated.
 `x$name` reads on a non-object likewise skip the environment.
 
 ## Argument references

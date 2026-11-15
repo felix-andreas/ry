@@ -1462,6 +1462,7 @@ pub unsafe fn shape(code: Sexp) -> Shape {
             | Op::MatchCondition
             | Op::SwitchArm
             | Op::Replace
+            | Op::ComplexAssign
             | Op::Missing
             | Op::Namespace
             | Op::SuperAssign
@@ -2811,6 +2812,18 @@ impl<'a> Builder<'a> {
                 let action =
                     self.opaque_step(state, Some((operand(0), value)), &[], Effect::Opaque);
                 state.registers[operand(5)] = Ty::Boxed;
+                state.visible = Some(false);
+                action
+            }
+            // The general assignment, where a replacement method or closure takes the target's
+            // other arguments unevaluated.
+            Op::ComplexAssign => {
+                let value = match state.registers[operand(1)] {
+                    Ty::Bottom => Ty::Boxed,
+                    ty => ty,
+                };
+                let action =
+                    self.opaque_step(state, Some((operand(0), value)), &[], Effect::Opaque);
                 state.visible = Some(false);
                 action
             }
@@ -5199,7 +5212,7 @@ pub fn reads(inst: &Inst) -> SmallVec<[usize; 4]> {
         Op::JumpUnless | Op::Return | Op::ForEnd => smallvec![operand(0)],
         Op::ForInit | Op::ForStep | Op::LogicLeft => smallvec![operand(1)],
         Op::LogicRight => smallvec![operand(1), operand(2)],
-        Op::SetVar | Op::SuperAssign => smallvec![operand(1)],
+        Op::SetVar | Op::SuperAssign | Op::ComplexAssign => smallvec![operand(1)],
         _ => SmallVec::new(),
     }
 }
@@ -5350,6 +5363,10 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
             gen_(operand(2), live);
             gen_(operand(3), live);
             gen_(operand(4), live);
+        }
+        Op::ComplexAssign => {
+            kill(operand(0), live);
+            gen_(operand(1), live);
         }
         Op::Replace => {
             kill(operand(0), live);

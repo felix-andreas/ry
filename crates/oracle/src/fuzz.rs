@@ -9,6 +9,12 @@
 //! length-two condition, a missing variable, a call with the wrong arity); those sit inside
 //! `tryCatch` and print the error message, and a few programs end in an uncaught error.
 //!
+//! Every program also carries a block of replacement calls (`x[i] <- v`, `f(x, i) <- v` and their
+//! kin), each run three times inside a function, in a loop, at top level and under `replicate`,
+//! because a replacement function written in R receives its index arguments as promises and a
+//! compiled body must not evaluate them first. The block draws from its own stream, so adding it
+//! left the rest of every seed's program unchanged.
+//!
 //! Every program is deterministic under GNU R: nothing reads the clock, addresses, the
 //! environment or an unseeded random number, and no environment or closure is ever printed.
 
@@ -35,7 +41,121 @@ pub fn program(seed: u64) -> String {
         text.push('\n');
     }
     generator.ill_typed = false;
+    text.push_str(&replacement_promises(&mut SplitMix64(
+        seed ^ 0x9e37_79b9_7f4a_7c15,
+    )));
     text.push_str(&generator.ending());
+    text
+}
+
+/// Replacement calls whose index arguments the replacement function receives as promises: S3
+/// `[<-`, `[[<-` and `$<-` methods, replacement closures, nested targets, and builtin replacements
+/// for the evaluation order. Each method reports what it sees of its argument (its code, whether it
+/// is missing, `nargs()`, `match.call()`, or its value once or twice), and `note_rp` records every
+/// evaluation, so a subscript evaluated too early, too often or not at all shows up in the trace.
+/// Every shape runs three times in each context, because a body compiles after its first call.
+fn replacement_promises(rng: &mut SplitMix64) -> String {
+    const INDICES: [&str; 5] = [
+        "note_rp(\"i\", 1)",
+        "undefined_rp == 1",
+        "k_rp + 1",
+        "1L",
+        "note_rp(\"i\", k_rp)",
+    ];
+    // `@` stands for the parameter the method reports on.
+    const BODIES: [&str; 5] = [
+        "paste(deparse(substitute(@)), missing(@), nargs())",
+        "paste(deparse(match.call()), collapse = \" \")",
+        "paste(@, deparse(substitute(@)))",
+        "{ @; @; paste(@) }",
+        "paste(nargs(), if (missing(@)) \"missing\" else \"given\")",
+    ];
+    let mut text = String::from(
+        "trace_rp <- character()\nnote_rp <- function(tag, value) { trace_rp <<- c(trace_rp, tag); value }\nk_rp <- 1L\nreport_rp <- function(label, n, f) {\n  trace_rp <<- character()\n  out <- tryCatch(paste(deparse(f()), collapse = \" \"), error = function(e) paste(\"error:\", conditionMessage(e)))\n  cat(label, n, out, \"| trace:\", paste(trace_rp, collapse = \",\"), \"\\n\")\n}\n",
+    );
+    for shape_number in 0..1 + rng.below(3) {
+        let index = INDICES[rng.below(INDICES.len())];
+        let body = BODIES[rng.below(BODIES.len())];
+        let class = format!("rp{shape_number}");
+        let start = format!("z <- structure(list(), class = \"{class}\")");
+        let report = |parameter: &str| body.replace('@', parameter);
+        let (definition, setup, assignment, observe) = match rng.below(8) {
+            0 => (
+                format!(
+                    "`[<-.{class}` <- function(x, i, j, value) {{ attr(x, \"seen\") <- {}; x }}",
+                    report("i")
+                ),
+                start,
+                ["z[@] <- 5", "z[@, \"a\"] <- 5"][rng.below(2)].replace('@', index),
+                "attr(z, \"seen\")".to_owned(),
+            ),
+            1 => (
+                format!(
+                    "`[<-.{class}` <- function(x, i, j, value) {{ attr(x, \"seen\") <- {}; x }}",
+                    report("j")
+                ),
+                start,
+                format!("z[, {index}] <- 5"),
+                "attr(z, \"seen\")".to_owned(),
+            ),
+            2 => (
+                format!(
+                    "`[[<-.{class}` <- function(x, i, value) {{ attr(x, \"seen\") <- {}; x }}",
+                    report("i")
+                ),
+                start,
+                format!("z[[{index}]] <- 5"),
+                "attr(z, \"seen\")".to_owned(),
+            ),
+            3 => (
+                format!(
+                    "`$<-.{class}` <- function(x, name, value) {{ attr(x, \"seen\") <- {}; x }}",
+                    report("name")
+                ),
+                start,
+                "z$abc <- 5".to_owned(),
+                "attr(z, \"seen\")".to_owned(),
+            ),
+            4 => (
+                format!(
+                    "`sub_{class}<-` <- function(x, i, value) {{ attr(x, \"seen\") <- {}; x }}",
+                    report("i")
+                ),
+                start,
+                format!("sub_{class}(z, {index}) <- 5"),
+                "attr(z, \"seen\")".to_owned(),
+            ),
+            5 => (
+                format!(
+                    "`sub_{class}<-` <- function(x, i, value) {{ attr(x, \"seen\") <- {}; x }}\n`[<-.{class}` <- `sub_{class}<-`",
+                    report("i")
+                ),
+                format!("z <- list(a = structure(list(), class = \"{class}\"))"),
+                [
+                    format!("sub_{class}(z$a, {index}) <- 5"),
+                    format!("z$a[{index}] <- 5"),
+                ][rng.below(2)]
+                .clone(),
+                "attr(z$a, \"seen\")".to_owned(),
+            ),
+            6 => (
+                String::new(),
+                "z <- c(a = 1, b = 2)".to_owned(),
+                format!("names(z)[{index}] <- note_rp(\"v\", \"q\")"),
+                "names(z)".to_owned(),
+            ),
+            _ => (
+                String::new(),
+                "z <- matrix(1:4, 2)".to_owned(),
+                format!("z[{index}, note_rp(\"j\", 2)] <- note_rp(\"v\", 9L)"),
+                "z".to_owned(),
+            ),
+        };
+        let label = format!("rp{shape_number}");
+        text.push_str(&format!(
+            "{definition}\nfor (n in 1:3) report_rp(\"{label} function\", n, function() {{ {setup}; {assignment}; {observe} }})\nfor (n in 1:3) report_rp(\"{label} loop\", n, function() {{ for (r in 1:3) {{ {setup}; {assignment} }}; {observe} }})\nfor (n in 1:3) {{\n  trace_rp <- character()\n  out <- tryCatch({{ {setup}; {assignment}; {observe} }}, error = function(e) paste(\"error:\", conditionMessage(e)))\n  cat(\"{label} top level\", n, out, \"| trace:\", paste(trace_rp, collapse = \",\"), \"\\n\")\n}}\nreport_rp(\"{label} replicate\", 1, function() replicate(3, {{ {setup}; {assignment}; {observe} }}))\n"
+        ));
+    }
     text
 }
 

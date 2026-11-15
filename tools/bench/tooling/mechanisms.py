@@ -133,9 +133,11 @@ OPERATIONS = [
     ("builtin: `unlist` of a short list", "unlist(plain)"),
     ("builtin: `environment()`", "environment()"),
     ("assign: element of a local vector", "{ numbers[2L] <- 9; 0L }"),
+    ("assign: element at a computed subscript", "{ numbers[i %% 4L + 1L] <- 9; 0L }"),
     ("assign: field of a local list", "{ plain$a <- i; 0L }"),
     ("assign: `names<-`", '{ names(numbers) <- words[c(1L, 2L, 3L, 1L)]; 0L }'),
     ("assign: `attr<-`", '{ attr(numbers, "unit") <- "m"; 0L }'),
+    ("assign: `attr<-` with a computed name", '{ attr(numbers, if (i > 0L) "unit" else "u") <- "m"; 0L }'),
     ("assign: `class<-`", '{ class(plain) <- "widget"; 0L }'),
     ("assign: variable in an environment", "{ holder$value <- i; 0L }"),
 ]

@@ -1604,6 +1604,10 @@ overhead, not allocation.
 
 ## Open: untyped R against GNU R
 
+- A builtin generic passes an S3 method promises of the call's code where GNU R passes values: with `length.cls <- function(x) deparse(substitute(x))`, `length(obj)` is `"obj"` on ry and the deparsed object on GNU R, and `` `names<-.cls` `` sees `substitute(value)` as `v` where GNU R sees `"a"`. The same in every tier (`dispatch.rs`, `internal_dispatch`).
+- `mapply` and `Map` pass the function values, where GNU R passes promises whose code is `dots[[2L]][[1L]]`: `Map(function(a, b) deparse(substitute(b)), 1:2, 3:4)` gives `"3L"` and `"4L"` on ry (`envir.rs`, `do_mapply`).
+- `l <- list(1); l[[1, 2]] <- 3` fails with "incorrect number of subscripts on matrix" where GNU R says "[[ ]] improper number of subscripts".
+- A compiled `x[i] <- v` decides between the builtin and a method by reading `x` before the subscripts run (`bytecode.rs`, `element_assignment`). A subscript that turns `x` into an object as a side effect (`x[{class(x) <<- "k"; 1}] <- v` from a nested function) dispatches on GNU R and runs the builtin compiled. Nothing real is known to do this.
 - Closures over equal but distinct body copies compile again. `Bodies` (`crates/interp/src/bytecode.rs`) shares code by body identity, but a lambda inside a testthat `expect_*()` argument is a fresh copy of its expression at each evaluation, so `testthat_full` compiles about 43 bodies per warm iteration (about 4M Ir of its 629M). GNU R's JIT cache hashes the structure and confirms with `identical`, so it shares them. A structural lookup at the compile decision, confirming with a deep compare of body, formals and srcref, would close it.
 - `readChar` reads one byte per device call: an 11 MB file takes 150 ms against GNU R's 29 ms (`readChar(f, file.size(f))`). Its ceiling on measured workloads is 0%, since `testthat_full`, the strings app and the report app never call it, so a bulk read (one device read per string) waits for a workload that does.
 - A missing argument forwarded through two calls is reported on the wrong call: with `leaf <- function(x) x; mid <- function(a) leaf(a * 2); wrap <- function(q) mid(q)`, `wrap()` fails with `argument "q" is missing, with no default` on both engines, but GNU R's condition call is `wrap()` and ry's is `leaf(a * 2)`. The same in every tier.
@@ -3744,6 +3748,7 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
   validation. All three need R.
 
 ## Shipped ledger (one line each; rationale in `decisions.md`, contracts in the docs site)
+- A compiled replacement call passes its index arguments to an R method or replacement closure as promises, `Recall` forwards its promises, and an S3 method of `$`, `$<-`, `@` or `@<-` gets the name as a string (`decisions.md`, "A compiled replacement probes the target before any subscript runs").
 
 - **Code images of installed packages.** `R CMD INSTALL` writes each closure's tier-0 code and, with `--ry-train`, its trained profile beside the lazy-load database. `decisions.md`, "Code images: compiled code beside the lazy-load database".
 - **Console attach and the data viewer.** `ry run` serves the debugger, a paged data viewer and live values over a Unix socket; VS Code attaches, opens `View()`, and hover/completion read the console. `decisions.md`, "A running console is a debug adapter".
