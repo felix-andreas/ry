@@ -1,7 +1,7 @@
 # parse(file, keep.source = TRUE) gives GNU R's exact parse data and srcrefs for files with
 # non-ASCII strings and comments, tabs before tokens, `#:` comments, CRLF line ends, `if`/`else`
 # split across lines inside braces, an empty file and a file that does not parse. GNU R's srcref
-# byte fields count one byte too many for each multibyte character of a file read as UTF-8, which
+# byte fields count one byte too many for each multibyte character in a string of a UTF-8 file, which
 # ry does not reproduce, so the non-ASCII file shows its parse data only.
 show <- function(lines, eol = "\n", srcrefs = TRUE) {
   path <- tempfile(fileext = ".R")
