@@ -1218,7 +1218,9 @@ fn stores_through_an_escaped_pointer_survive_minor_collections() {
 /// collections of every kind run at random points, some during the escape. The barrier check
 /// runs before each collection short of a major one, and every element must hold what the model
 /// says. The list spans several 128-element cards, so a permutation moves young elements between
-/// dirty and clean cards.
+/// dirty and clean cards. Whenever no escape is pending, each element's reference count must equal
+/// the number of slots holding it, in the list and in a second list that never escapes, because a
+/// barriered store into an escaped list must not be counted again when the escape retires.
 #[test]
 fn element_pointer_permutations_keep_the_write_barrier() {
     for_each_seed(200, |seed| {
@@ -1231,7 +1233,12 @@ fn element_pointer_permutations_keep_the_write_barrier() {
                 .alloc_vector(SexpType::List, length as isize)
                 .expect("alloc");
             heap.add_global_root(list);
-            heap.collect(Collection::Major);
+            let holder = heap.alloc_vector(SexpType::List, 16).expect("alloc");
+            heap.add_global_root(holder);
+            // A list that is still young when it escapes takes the other retirement path.
+            if rng.chance(3, 4) {
+                heap.collect(Collection::Major);
+            }
             let mut model: Vec<Option<i32>> = vec![None; length];
             let mut next = 0;
             // Whether the list is escaped, and whether any pointer to it was writable.
@@ -1249,6 +1256,9 @@ fn element_pointer_permutations_keep_the_write_barrier() {
                         let (value, number) = young_integer(&mut heap);
                         heap.set_element(list, index, value);
                         model[index] = Some(number);
+                        if rng.chance(1, 3) {
+                            heap.set_element(holder, rng.below(16), value);
+                        }
                     }
                     2 => {
                         let writable = rng.chance(1, 3);
@@ -1294,6 +1304,23 @@ fn element_pointer_permutations_keep_the_write_barrier() {
                                 "seed {seed}, step {step}: element {index} after a {kind:?} collection"
                             );
                         }
+                    }
+                }
+                if escaped.is_none() {
+                    let slots: Vec<Sexp> = list
+                        .slice::<Sexp>()
+                        .iter()
+                        .chain(holder.slice::<Sexp>())
+                        .copied()
+                        .filter(|element| element.kind() == SexpType::Integer)
+                        .collect();
+                    for &element in &slots {
+                        let holding = slots.iter().filter(|&&other| other == element).count();
+                        assert_eq!(
+                            element.refcount() as usize,
+                            holding,
+                            "seed {seed}, step {step}: the count of an element {holding} slots hold"
+                        );
                     }
                 }
             }

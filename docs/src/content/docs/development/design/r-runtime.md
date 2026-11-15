@@ -433,7 +433,8 @@ pointers included. Packages write through read-only pointers: data.table's `setc
 `setorder` permute columns and character data with `memcpy` through `DATAPTR_RO`. GNU R
 remembers a whole object, so a permutation inside one vector is harmless there, but ry remembers
 per card, and moving a young element from a dirty card to a clean one hides it from the next minor
-collection, which then frees it. Every collection scans an escaped vector whole, and a writable
+collection, which then frees it. Every collection marks all of an escaped vector's children (a
+minor collection does so for a character vector by marking every young string), and a writable
 pointer to an old vector remembers it at once, because native code may store a young element
 through it. When the outermost native call returns, an old escaped vector that may hold a younger
 child has all its cards marked dirty and joins the remembered set, so the next minor collection
@@ -445,6 +446,16 @@ takes on every column it only reads cost no rescan. Deferring the rescan to the 
 rather than rescanning at return, costs one scan however many native calls touched the vector
 between two collections. `RY_GC_VERIFY=1` checks this contract before every collection short of a
 major one ([Robustness](/development/robustness/)).
+
+The escape lasts until the outermost native call returns, so a pointer native code keeps after
+that, across two `.Call`s or taken by an embedding host outside any call, is unprotected if it
+later moves elements. Reference counts need less: moving elements leaves them right, so a
+read-only pointer changes nothing about them. A writable pointer to a list takes a snapshot of its
+elements, because native code may replace elements uncounted, and the retirement counts what the
+list then holds and releases what the snapshot names. A `SET_VECTOR_ELT` into that list in between
+counts the new value at once, so copy-on-modify sees it shared, and adds it to the snapshot; the
+value it replaced keeps its count until the retirement releases it. Collections keep every value
+the snapshot names allocated until then, which `RY_GC_VERIFY=1` checks.
 A list that counts references also snapshots its elements on escape, so the counts move from what
 it held to what it holds when the call returns. Pointers into atomic vectors need none of this,
 because their elements are not objects.
