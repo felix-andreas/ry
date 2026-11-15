@@ -33,6 +33,8 @@ jiff = "0.2"
 zstd = "0.13"
 encoding_rs = "0.8"
 memchr = "2.7"
+getrandom = "0.3"
+siphasher = "1"
 
 [dev-dependencies]
 frames = { path = "../frames" }

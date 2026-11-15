@@ -296,6 +296,17 @@ your code and no data. It lists:
   environment, and no argument was a promise;
 - slot frames turned into environments, by what asked for the environment.
 
+A private package's hash is keyed with a secret, so someone who guesses the name cannot confirm
+the guess by hashing it. The key belongs to the project the session started in (the nearest
+directory with `ry.toml`, `roughly.toml` or `DESCRIPTION`), so two summaries of one project on
+one machine give a package the same label. ry draws the key at random the first time it profiles
+the project and keeps it in your cache directory, under `ry/profile-keys/`, never inside the
+project. A session outside any project uses one key for all such sessions. Set
+`RY_PROFILE_KEY` to 32 hexadecimal digits to use that key instead, for example from a CI secret so
+that runs on different machines agree. The summary's header names the key it used; when no key
+file can be kept (no cache directory, or one ry cannot write to), the run uses a key of its own
+and the header says why.
+
 The time split comes from sampling what the runtime is doing once a millisecond, so a share below
 about 1% of a short run is noise. Collecting it slows a run by up to about 7% (1% on the fastest
 of three runs of the `timeseries` application workload, 7% on the median). Without the

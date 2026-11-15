@@ -5,7 +5,7 @@
 //! that word every millisecond and counts the values it sees. The summary reports the shares of
 //! those samples together with the event counters the hooks keep. The only names it prints are
 //! base R's builtins and the packages that own native code; a package outside the public list
-//! below is printed as a hash of its name.
+//! below is printed as a hash of its name, keyed with a secret ([`private_key`]).
 //!
 //! The same sampler measures benchmark regions: `.ry_bench_region(name)` marks where a region
 //! starts (and the one before it ends), and `RY_PROFILE_REGIONS` names a file that gets one JSON
@@ -23,10 +23,13 @@ use {
         object::{Header, Sexp, SexpType},
     },
     rustc_hash::FxHashMap,
+    siphasher::sip::{SipHasher13, SipHasher24},
     smallvec::SmallVec,
     std::{
         ffi::CString,
         fmt::Write as _,
+        hash::Hasher,
+        io::{self, Write as _},
         path::{Path, PathBuf},
         sync::{
             Mutex,
@@ -57,6 +60,10 @@ pub const STACKS_VARIABLE: &str = "RY_PROFILE_STACKS";
 /// The environment variable that sets the sampling interval in microseconds (default 1000).
 pub const INTERVAL_VARIABLE: &str = "RY_PROFILE_INTERVAL_US";
 
+/// The environment variable that gives the key private package names are hashed with, as 32
+/// hexadecimal digits, in place of the key file [`private_key`] keeps.
+pub const KEY_VARIABLE: &str = "RY_PROFILE_KEY";
+
 /// The sampling interval in microseconds, fixed when sampling starts.
 static INTERVAL_MICROS: AtomicU64 = AtomicU64::new(1000);
 
@@ -70,6 +77,9 @@ struct Sampler {
     /// The process that started sampling. A forked child inherits this record but not the
     /// sampling thread, so it writes nothing.
     process: u32,
+    /// The directory the session started in, which decides the project whose key hashes
+    /// private package names.
+    started_in: Option<PathBuf>,
     started: Instant,
     thread: JoinHandle<Samples>,
 }
@@ -316,6 +326,7 @@ pub fn start_from_environment() {
         regions,
         stacks,
         process: std::process::id(),
+        started_in: std::env::current_dir().ok(),
         started: Instant::now(),
         thread,
     });
@@ -532,8 +543,9 @@ pub fn finish() -> R<()> {
         return Ok(());
     };
     let ready = lock(&READY_AT).map(|ready| ready.duration_since(sampler.started));
-    let text =
-        report(&samples, elapsed, ready).map_err(|_| error("cannot format the profile summary"))?;
+    let key = private_key(sampler.started_in.as_deref()).map_err(error)?;
+    let text = report(&samples, elapsed, ready, &key)
+        .map_err(|_| error("cannot format the profile summary"))?;
     write_file(path, &text, "the profile summary")?;
     if let (Some(path), Some(stacks)) = (&sampler.stacks, &samples.stacks) {
         write_file(path, &stack_lines(stacks), "the profile stacks")?;
@@ -899,30 +911,191 @@ const BASE_PACKAGES: &[&str] = &[
     "utils",
 ];
 
-fn owner_display(label: u32) -> String {
+fn owner_display(label: u32, key: &[u8; 16]) -> String {
     match activity::label_name(label) {
         Some(name) if name == GLOBAL_LABEL => "(scripts and the console)".to_owned(),
         Some(name) if name == "other" => "(other top levels)".to_owned(),
-        Some(name) => package_display(&name),
+        Some(name) => package_display(&name, key),
         None => "unknown".to_owned(),
     }
 }
 
-fn package_display(name: &str) -> String {
+/// A package's name as the summary prints it: a public name as it is, any other name as a keyed
+/// hash. With an unkeyed hash, anyone who guesses a private name could confirm the guess by
+/// hashing it. With a secret key, a name gets the same label in every summary made with that
+/// key, but a guess cannot be checked.
+fn package_display(name: &str, key: &[u8; 16]) -> String {
     if PUBLIC_PACKAGES.contains(&name) {
         return name.to_owned();
     }
-    // FNV-1a: stable across runs and machines, so two summaries of one code base agree.
-    let hash = name.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
-        (hash ^ byte as u64).wrapping_mul(0x0100_0000_01b3)
-    });
-    format!("private-{:08x}", hash as u32)
+    let mut hasher = SipHasher24::new_with_key(key);
+    hasher.write(name.as_bytes());
+    format!("private-{:08x}", hasher.finish() as u32)
+}
+
+/// The secret key private package names are hashed with, and where it came from.
+struct PrivateKey {
+    key: [u8; 16],
+    source: KeySource,
+}
+
+enum KeySource {
+    /// [`KEY_VARIABLE`] gave it.
+    Variable,
+    /// The key file of the project the session started in.
+    Project,
+    /// The user's key file for sessions that start outside any project.
+    OutsideProjects,
+    /// Drawn for this run alone, because no key file could be kept, for the reason given.
+    ThisRun(String),
+}
+
+/// The files that mark a project's root directory: ry's configuration files and a package's
+/// `DESCRIPTION`. The nearest directory with any of them wins, as on the command line.
+const PROJECT_MARKERS: &[&str] = &["ry.toml", "roughly.toml", "DESCRIPTION"];
+
+/// The key for a summary of a session that started in `started_in`: [`KEY_VARIABLE`] when it is
+/// set, else the key of the project that contains `started_in`, else the user's key for sessions
+/// outside projects.
+///
+/// Key files live in the user's cache directory under `ry/profile-keys`, never inside a project
+/// where they could be committed with the code. A project's file is named by a hash of the
+/// project's path, so a moved project gets a new key. A key is drawn from the operating system's
+/// randomness the first time it is needed. When no file can be kept, the summary uses a key for
+/// that run alone and says so, rather than losing the run's profile.
+fn private_key(started_in: Option<&Path>) -> Result<PrivateKey, String> {
+    if let Some(text) = std::env::var_os(KEY_VARIABLE).filter(|text| !text.is_empty()) {
+        let key = text
+            .to_str()
+            .and_then(parse_key)
+            .ok_or_else(|| format!("{KEY_VARIABLE} must be 32 hexadecimal digits"))?;
+        return Ok(PrivateKey {
+            key,
+            source: KeySource::Variable,
+        });
+    }
+    let Some(cache) = rcmd::cache_directory() else {
+        return run_key(
+            "there is no cache directory (none of XDG_CACHE_HOME, LOCALAPPDATA and HOME is set)"
+                .to_owned(),
+        );
+    };
+    let directory = cache.join("ry").join("profile-keys");
+    let (path, source) = match started_in.and_then(project_root) {
+        Some(root) => {
+            let mut hasher = SipHasher13::new();
+            hasher.write(root.as_os_str().as_encoded_bytes());
+            (
+                directory.join(format!("{:016x}", hasher.finish())),
+                KeySource::Project,
+            )
+        }
+        None => (directory.join("outside-projects"), KeySource::OutsideProjects),
+    };
+    match read_or_create_key(&path) {
+        Ok(key) => Ok(PrivateKey { key, source }),
+        // The summary is shared, so the reason leaves out the path, which can name the user.
+        Err(failure) => run_key(format!(
+            "no key file can be kept in the cache directory ({failure})"
+        )),
+    }
+}
+
+/// The nearest directory at or above `start` that holds one of the [`PROJECT_MARKERS`]. The
+/// path is resolved first, so a project reached through a symbolic link keeps one key.
+fn project_root(start: &Path) -> Option<PathBuf> {
+    let start = std::fs::canonicalize(start).unwrap_or_else(|_| start.to_path_buf());
+    start
+        .ancestors()
+        .find(|directory| {
+            PROJECT_MARKERS
+                .iter()
+                .any(|marker| directory.join(marker).is_file())
+        })
+        .map(Path::to_path_buf)
+}
+
+fn run_key(reason: String) -> Result<PrivateKey, String> {
+    Ok(PrivateKey {
+        key: random_key()?,
+        source: KeySource::ThisRun(reason),
+    })
+}
+
+fn random_key() -> Result<[u8; 16], String> {
+    let mut key = [0u8; 16];
+    getrandom::fill(&mut key).map_err(|failure| {
+        format!("cannot draw a key for the profile summary from the operating system: {failure}")
+    })?;
+    Ok(key)
+}
+
+/// The key in the file at `path`, creating the file with a new random key when there is none.
+fn read_or_create_key(path: &Path) -> io::Result<[u8; 16]> {
+    match read_key(path) {
+        Err(failure) if failure.kind() == io::ErrorKind::NotFound => {}
+        read => return read,
+    }
+    let key = random_key().map_err(io::Error::other)?;
+    if let Some(directory) = path.parent() {
+        std::fs::create_dir_all(directory)?;
+    }
+    write_key(path, &key)
+}
+
+/// Writes `key` to a new file at `path` and returns it, or returns the key already there when
+/// another session created the file first.
+fn write_key(path: &Path, key: &[u8; 16]) -> io::Result<[u8; 16]> {
+    // The key goes to a file of this process's own, which is then linked under the final name.
+    // The link fails when another session got there first, and both sessions then use that
+    // session's key, so no session reads a half-written key or replaces one already in use.
+    let staging = path.with_extension(format!("{}.new", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let written = options
+        .open(&staging)
+        .and_then(|mut file| writeln!(file, "{}", format_key(key)))
+        .and_then(|()| std::fs::hard_link(&staging, path));
+    let removed = std::fs::remove_file(&staging);
+    match written {
+        Ok(()) => removed.map(|()| *key),
+        Err(failure) if failure.kind() == io::ErrorKind::AlreadyExists => read_key(path),
+        Err(failure) => Err(failure),
+    }
+}
+
+fn read_key(path: &Path) -> io::Result<[u8; 16]> {
+    let text = std::fs::read_to_string(path)?;
+    parse_key(text.trim()).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the file does not hold 32 hexadecimal digits",
+        )
+    })
+}
+
+fn parse_key(text: &str) -> Option<[u8; 16]> {
+    if text.len() != 32 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut key = [0u8; 16];
+    for (index, byte) in key.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(text.get(2 * index..2 * index + 2)?, 16).ok()?;
+    }
+    Some(key)
+}
+
+fn format_key(key: &[u8; 16]) -> String {
+    key.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn report(
     samples: &Samples,
     elapsed: Duration,
     ready: Option<Duration>,
+    key: &PrivateKey,
 ) -> Result<String, std::fmt::Error> {
     let total: u64 = samples.words.values().sum();
     let seconds = |count: u64| {
@@ -963,9 +1136,16 @@ fn report(
     }
     writeln!(
         out,
-        "Samples after start-up: {total} (one per {} ms)\n",
+        "Samples after start-up: {total} (one per {} ms)",
         INTERVAL_MICROS.load(Ordering::Relaxed) as f64 / 1000.0
     )?;
+    let hashed_with = match &key.source {
+        KeySource::Variable => format!("the key in {KEY_VARIABLE}"),
+        KeySource::Project => "this project's key".to_owned(),
+        KeySource::OutsideProjects => "your key for code outside projects".to_owned(),
+        KeySource::ThisRun(reason) => format!("a key for this run alone, because {reason}"),
+    };
+    writeln!(out, "Private package names are hashed with {hashed_with}.\n")?;
 
     writeln!(out, "## Time split\n")?;
     writeln!(out, "| activity | share | seconds |\n| --- | ---: | ---: |")?;
@@ -1103,7 +1283,7 @@ fn report(
     let mut packages: Vec<(String, PackageTime)> = samples
         .packages
         .iter()
-        .map(|(&label, &time)| (owner_display(label), time))
+        .map(|(&label, &time)| (owner_display(label, &key.key), time))
         .collect();
     packages.sort_by(|left, right| {
         right
@@ -1270,4 +1450,44 @@ fn report(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_key, package_display, parse_key, read_or_create_key};
+
+    #[test]
+    fn private_names_depend_on_the_key() {
+        let first = [7u8; 16];
+        let second = [8u8; 16];
+        let label = package_display("privatepkg", &first);
+        assert!(label.starts_with("private-") && label.len() == "private-".len() + 8);
+        assert_eq!(label, package_display("privatepkg", &first));
+        assert_ne!(label, package_display("privatepkg", &second));
+        assert_ne!(label, package_display("otherpkg", &first));
+        assert_eq!(package_display("data.table", &first), "data.table");
+    }
+
+    #[test]
+    fn keys_round_trip_through_text() {
+        let key: [u8; 16] = std::array::from_fn(|index| (index * 17) as u8);
+        assert_eq!(parse_key(&format_key(&key)), Some(key));
+        assert_eq!(parse_key("00"), None);
+        assert_eq!(parse_key(&"g".repeat(32)), None);
+        assert_eq!(parse_key(&"é".repeat(16)), None);
+    }
+
+    #[test]
+    fn a_key_file_is_created_once_and_read_after() {
+        let directory =
+            std::env::temp_dir().join(format!("ry-profile-key-{}", std::process::id()));
+        let path = directory.join("profile-keys").join("project");
+        let created = read_or_create_key(&path).expect("the key file is created");
+        assert_eq!(read_or_create_key(&path).ok(), Some(created));
+        let entries = std::fs::read_dir(directory.join("profile-keys"))
+            .expect("the key directory exists")
+            .count();
+        assert_eq!(entries, 1, "the staging file is removed");
+        std::fs::remove_dir_all(&directory).expect("the test directory is removed");
+    }
 }
