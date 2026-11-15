@@ -2617,6 +2617,18 @@ impl SourceEncoding {
             SourceEncoding::Utf8 => String::from_utf8(bytes).ok(),
         }
     }
+
+    /// The bytes of `text` in this encoding, or `None` when a latin1 file cannot hold one of its
+    /// characters.
+    pub fn encode(self, text: &str) -> Option<Vec<u8>> {
+        match self {
+            SourceEncoding::Latin1 => text
+                .chars()
+                .map(|character| u8::try_from(u32::from(character)).ok())
+                .collect(),
+            SourceEncoding::Utf8 => Some(text.as_bytes().to_vec()),
+        }
+    }
 }
 
 /// A code file's text, decoded as `encoding` and with its line endings normalized to `\n`.

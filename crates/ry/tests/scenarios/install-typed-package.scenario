@@ -1,6 +1,8 @@
 # A package's typed functions keep their declared types once the package is installed: a new
 # session checks their arguments, converts a whole number to the `I64` a parameter declares, and
-# compiles them for the declared types, with the code image and without it.
+# compiles them for the declared types, with the code image and without it. A strict file goes in
+# as the preflight elaborates it, so a conversion compiles at its first call and a parameter
+# declared with an alias is checked as the type the alias names.
 
 requires ry-runtime
 
@@ -11,7 +13,7 @@ file pkg/DESCRIPTION
 | Description: Typed functions that an install must keep typed.
 | License: MIT
 file pkg/NAMESPACE
-| export(grow, total, label)
+| export(grow, total, label, total_reading, length_of, capped, step_total)
 file pkg/R/typed.R
 | grow <- function(x: F64, rate: F64) -> F64 x + rate * x
 | total <- function(n: I64, rate: F64) -> F64 {
@@ -22,6 +24,18 @@ file pkg/R/typed.R
 |   sum
 | }
 | label <- function(name: Str, n: I64) -> Str Str.concat(name, Num.to_str(n))
+file pkg/R/strict.R
+| # typing: strict
+| alias Point = Record{x: F64, y: F64}
+| total_reading <- function(scale: F64) -> F64 {
+|   xs <- List.from_r(seq(0.5, 2.5))
+|   List.walk(xs, 0.0, \(sum, x) sum + x * scale)
+| }
+| length_of <- function(p: Point) -> F64 Num.sqrt(p$x * p$x + p$y * p$y)
+| limit <- 10
+| steps <- [1, 2, 3, 4]
+| capped <- function(n: I64) -> I64 if (n > limit) limit else n
+| step_total <- function() -> I64 List.walk(steps, 0, \(sum, x) sum + x)
 
 run ry install pkg -l library
 expect exit 0
@@ -31,6 +45,11 @@ file use.R
 | print(total(1000, 0.001))
 | print(label("a", 3))
 | print(tryCatch(grow("a", 1), error = conditionMessage))
+| print(total_reading(2))
+| wrong <- list(x = 3, y = 4)
+| print(tryCatch(length_of(wrong), error = conditionMessage))
+| print(capped(20) == 10)
+| print(step_total() == 10)
 
 env RY_TYPED_LOG 1
 run ry run --runtime ry use.R
@@ -40,6 +59,11 @@ expect stdout "[1] \"a3\""
 expect stdout "[1] \"argument `x` must be `F64`, not `character`\""
 expect stderr "typed: compiled for [I64, Dbl] -> Dbl"
 expect stderr "typed: compiled for [Str, I64] -> Str"
+expect stdout "[1] 9"
+expect stderr "typed: compiled for [Dbl] -> Dbl"
+expect stderr lacks "`total_reading` runs in the interpreter"
+expect stdout "[1] \"argument `p` must be `Record{x: F64, y: F64}`, not `list`\""
+expect stdout "[1] TRUE\n[1] TRUE"
 
 env RY_CODE_IMAGE 0
 run ry run --runtime ry use.R

@@ -733,6 +733,24 @@ pub fn inline_slots<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Vec<SlotType<'db
     slots
 }
 
+/// The type the written type `node` declares, read on its own with the type parameters of the
+/// blocks, function types and literals around it in scope. `None` when lowering it reports an
+/// error, which leaves the written type to the diagnostics.
+pub fn lower_written_type<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Option<Ty<'db>> {
+    let mut lowering = Lowering::new(db);
+    let mut bound = Vec::new();
+    for ancestor in node.ancestors().skip(1) {
+        for list in ancestor
+            .children()
+            .filter(|child| child.kind() == SyntaxKind::TYPE_BINDER_LIST)
+        {
+            lowering.lower_binders(&list, &mut bound, "a signature");
+        }
+    }
+    let ty = lowering.lower_type(node);
+    (lowering.errors.is_empty() && !lowering.beyond_check_depth).then_some(ty)
+}
+
 /// Whether the function literal that `statement` is or assigns has a signature the runtime
 /// reads (see [`Annotation::written_signature`]). `block` is the `#:` block attached to the
 /// statement.

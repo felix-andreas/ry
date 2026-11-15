@@ -466,6 +466,23 @@ Both run R's own `build` and `INSTALL` scripts on ry's runtime, from ry's R home
 built against ry's libR, as `ry run` loads it. `--runtime gnu-r` (or `RY_RUNTIME=gnu-r`) uses GNU R
 instead.
 
+On ry's runtime, both check a typed package (one with `strict = true` under `[check]` in its
+`ry.toml`, or with a file that holds ry syntax or a `# typing: strict` line) before they build it.
+A strict-mode error stops the build, and the command prints the errors and exits with status 1:
+
+```
+  x strict mode found 1 error, so this code does not run
+  x /home/you/bad was not built
+```
+
+The tarball then holds the package's sources as `ry run` would run them: a number literal carries
+the type the checker gave it, an empty `List` or `Dict` carries its item type, and each parameter
+and return annotation that fits on one line is written as the type it stands for, with aliases
+expanded and the package's own `type` definitions unfolded (`p: Point` becomes
+`p: Record{x: F64, y: F64}`). A type with no such spelling, such as the open record
+`Record{a: I64, ..}`, stays as written. Only the tarball changes, never the package directory, and a
+package that declares `Encoding: latin1` gets its rewritten files in latin1.
+
 ry's `R CMD INSTALL` and `R CMD SHLIB` run `make` with one job per processor unless `MAKEFLAGS`
 is set to a value. A package
 whose `Makevars` builds correctly only with one job fails in parallel, so a failed parallel build
