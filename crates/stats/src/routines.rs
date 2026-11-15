@@ -2461,9 +2461,10 @@ std::thread_local! {
     static SUPSMU_TRACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// The three spans the cross-validated super smoother chooses between. GNU R's `ppr.f`
-/// initialises them from single-precision constants, so they carry `f32` rounding.
-const SUPSMU_SPANS: [f64; 3] = [0.05_f32 as f64, 0.2_f32 as f64, 0.5_f32 as f64];
+/// The three spans the cross-validated super smoother chooses between. GNU R 4.6's `ppr.f`
+/// writes them as double-precision constants, but `big`, `sml` and `eps` beside them are
+/// single-precision ones, so those three carry `f32` rounding.
+const SUPSMU_SPANS: [f64; 3] = [0.05, 0.2, 0.5];
 const SUPSMU_BIG: f64 = 1.0e20_f32 as f64;
 const SUPSMU_SMALL: f64 = 1.0e-7_f32 as f64;
 const SUPSMU_EPS: f64 = 1.0e-3_f32 as f64;
