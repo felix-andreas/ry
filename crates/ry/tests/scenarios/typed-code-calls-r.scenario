@@ -100,7 +100,7 @@ file loose/changes.R
 run ry run --runtime ry loose/changes.R
 expect exit 0
 expect stdout "note: before \nfactor called\nnote: after \n[1] 2.5\n4i64\nnote: before \nfactor called\nnote: after \n3i64\n5i64\nnote: before \nfactor called\nnote: after \n[1] 1.5\n6i64"
-expect stderr "typed: `later` runs in the interpreter: `Num.from_r(factor())` gave a value of type `I64`, which its native code was not compiled for, and the interpreter ran the call again with the values its R calls had returned"
+expect stderr "typed: `later` runs in the interpreter: `Num.from_r(factor())` gave `I64`, which its native code was not compiled for, and the interpreter ran the call again with the values its R calls had returned"
 expect stderr "typed: `later` runs in the interpreter: no code for [I64]: `Num.from_r(factor())` gave `F64` in one call and `I64` in another, so its type is not known before it runs: convert the value to one type in R first"
 
 env RY_JIT off
@@ -129,7 +129,7 @@ file loose/many.R
 
 run ry run --runtime ry loose/many.R
 expect exit 1
-expect stderr "`Num.from_r(factor())` gave a value of type `I64`, which its native code was not compiled for, after it had called R more than 4096 times, so the interpreter cannot run the call again without calling R a second time: make fewer R calls in one typed call"
+expect stderr "`Num.from_r(factor())` gave `I64`, which its native code was not compiled for, after it had called R more than 4096 times, so the interpreter cannot run the call again without calling R a second time: make fewer R calls in one typed call"
 
 # A `Num.from_r` the checker typed gives that number whatever R gives: an R integer where the
 # checker read a `double` becomes an `F64`, as R converts it, and a `double` where it read an

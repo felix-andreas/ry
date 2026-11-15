@@ -341,3 +341,50 @@ expect exit 0
 expect stdout "[1] 1.5\n16i64"
 expect stderr "typed: `count` for [Tag(4294967295)] is not attached from treepkg's code file: a `match` in it tests for fewer shapes than this session has seen"
 expect stderr "typed: compiled for [Tag(4294967295)] -> I64"
+
+# `ry install --train` also writes every version the training run compiled, such as one for the
+# type a conversion the checker cannot type gave in the run. A session where the conversion gives
+# another type runs that call again in the interpreter and compiles no code for it from then on.
+file trained/DESCRIPTION
+| Package: trainpkg
+| Version: 1.0.0
+| Title: Trained
+| Description: A version only a training run compiles.
+| License: MIT
+file trained/NAMESPACE
+| export(scaled)
+file trained/R/trained.R
+| rate <- function() get("factor_value", envir = globalenv())
+| scaled <- function(k: I64) -> I64 {
+|   y <- Num.from_r(rate())
+|   print(y)
+|   k
+| }
+file train.R
+| assign("factor_value", 2.5, envir = globalenv())
+| scaled(1)
+| scaled(2)
+
+run ry install trained -l library
+expect exit 0
+expect stdout "typed code: closures=1 written=0 (left out: does not compile (1))"
+
+run ry install trained -l library --train train.R
+expect exit 0
+expect stdout "typed code: closures=1 written=1"
+
+file trained-use.R
+| library(trainpkg, lib.loc = "library")
+| assign("factor_value", 1.5)
+| print(scaled(3))
+| assign("factor_value", as.integer(7))
+| print(scaled(4))
+| print(scaled(5))
+
+run ry run --runtime ry trained-use.R
+expect exit 0
+expect stdout "[1] 1.5\n3i64\n7i64\n4i64\n7i64\n5i64"
+expect stderr "typed: attached `scaled` for [I64] -> I64 from trainpkg's code file"
+expect stderr "typed: `scaled` runs in the interpreter: `Num.from_r(rate())` gave `I64`, which its native code was not compiled for"
+expect stderr "typed: refused [I64]"
+expect stderr lacks "typed: compiled for"

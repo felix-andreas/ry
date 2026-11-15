@@ -2574,11 +2574,15 @@ unsafe fn attach_version(
     let state = mapped.states.borrow()[index as usize];
     match state {
         // As for a session compile: code that calls a session version with a `match` over any tag
-        // is stale once a shape is confirmed since.
+        // is stale once a shape is confirmed since, and code that guessed a conversion's type is
+        // stale once a conversion gives another.
         State::Attached(attached, compiled) => {
             let current = attached == closure
                 && crate::still_resolves(compiled)
-                && compiled.epoch.is_none_or(|epoch| epoch == shapes::epoch());
+                && compiled.epoch.is_none_or(|epoch| epoch == shapes::epoch())
+                && compiled
+                    .guessed
+                    .is_none_or(|epoch| epoch == interp::numbers::conversion_epoch());
             return current.then_some(compiled);
         }
         State::Attaching | State::Failed => return None,
