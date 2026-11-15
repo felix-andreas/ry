@@ -567,11 +567,16 @@ unsafe fn compile<'a>(
         // that ever changes.
         Err(_) => compile_in(&Bump::new(), machine, patient, trigger),
     });
-    activity::count(if compiled.is_ok() {
-        Counter::JitCompiles
-    } else {
-        Counter::JitRefusals
-    });
+    match &compiled {
+        Ok(_) => activity::count(Counter::JitCompiles),
+        // The reasons are the ones `RY_JIT_LOG` prints, so the summary's table and the log agree.
+        Err(Refusal(reason)) => {
+            activity::count(Counter::JitRefusals);
+            if activity::enabled() {
+                activity::count_jit_refusal(activity::label(reason));
+            }
+        }
+    }
     compiled
 }
 

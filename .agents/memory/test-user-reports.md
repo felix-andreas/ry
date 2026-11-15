@@ -537,3 +537,8 @@ Driven on a three-file package with a record type, a tag alias, `match`, stdlib 
   and every helper reported `unused`, hiding a planted typo and the wrong-arity catch. A literal
   `source()` path is now followed by `ry check` and the editor (`semantics::sourced_files`, the
   `source-a-helper-script` scenario).
+
+## The profile summary
+
+- **"JIT compilations" counted attempts.** A run that compiled nothing showed a large count, which read as tier 1 compiling bodies but never entering them. The counter counts finished compiles, refused attempts have their own row, and a table counts them by the reason `RY_JIT_LOG=1` prints (`count_jit_refusal` in `crates/heap/src/activity.rs`; the `profile-summary` scenario).
+- **A private package's label was an unkeyed hash**, so a guessed name could be confirmed. The label is keyed with a per-project secret kept in the user's cache directory (`decisions.md`, "The profile summary hashes private package names with a secret key per project").

@@ -5,6 +5,16 @@ description: Release announcements and project news
 
 ## Unreleased
 
+### The profile summary counts refused compiles, and keys private names
+
+The profile summary's "JIT compilations" counts only the compiles tier 1 finished. The attempts it
+refused have a row of their own, "JIT compile attempts refused", and a table counts them by reason,
+in the words `RY_JIT_LOG=1` prints, so a run that compiled nothing no longer reads as one that
+compiled every hot body. A private package's `private-` label is a hash keyed with a secret that ry
+keeps for the project in your cache directory, so a guessed name cannot be confirmed by hashing it.
+Labels from earlier summaries differ from new ones. See [the CLI
+reference](/reference/cli#profile-summary).
+
 ### An installed typed package runs like a script
 
 `ry install` and `ry build` on ry's runtime check a typed package before they build it, and an

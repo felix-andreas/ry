@@ -1389,6 +1389,21 @@ fn report(
         }
     }
 
+    let refusals = activity::jit_refusals();
+    if !refusals.is_empty() {
+        writeln!(out, "\n## JIT compile attempts refused, by reason\n")?;
+        writeln!(
+            out,
+            "Each row counts the times tier 1 tried to compile a body and left it to tier 0 for \
+             that reason, and one body can be refused more than once. `RY_JIT_LOG=1` prints the \
+             same reasons, each with the body it refused.\n"
+        )?;
+        writeln!(out, "| reason | attempts |\n| --- | ---: |")?;
+        for (reason, count) in refusals {
+            writeln!(out, "| {reason} | {count} |")?;
+        }
+    }
+
     writeln!(out, "\n## Events\n")?;
     writeln!(out, "| event | count |\n| --- | ---: |")?;
     for counter in Counter::ALL {

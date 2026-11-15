@@ -25,6 +25,19 @@ expect file summary.md lacks "confidential_input"
 expect file summary.md lacks "hidden failure text"
 expect file summary.md "Private package names are hashed with your key for code outside projects."
 
+# A run whose hot function is too small to compile says so: the events count compiled bodies and
+# refused compile attempts apart, and a table counts the refusals by the reason `RY_JIT_LOG=1`
+# prints for each.
+file tiny.R
+| add_one <- function(x) x + 1
+| for (i in 1:20000) add_one(i)
+run ry run --profile-summary tiny.md tiny.R
+expect exit 0
+expect file tiny.md "| JIT compilations | 0 |"
+expect file tiny.md "| JIT compile attempts refused | 1 |"
+expect file tiny.md "## JIT compile attempts refused, by reason"
+expect file tiny.md "| the body does too little natively to repay entering compiled code | 1 |"
+
 # The same summary covers a package load and the code run after it, as a CI job that runs its
 # test suite through `ry load -e` would.
 file DESCRIPTION

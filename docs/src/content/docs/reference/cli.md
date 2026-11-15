@@ -289,12 +289,25 @@ your code and no data. It lists:
   recommended packages and the common CRAN dependencies ry benchmarks against is printed as
   `private-` and a hash of its name;
 - event counts: closure calls, promises created and forced, S3 and S4 dispatches, conditions
-  signalled, JIT compilations, the bodies tier 1 examined and left to tier 0, entries into
-  compiled code and deoptimizations, collections and the peak memory in use;
+  signalled, entries into compiled code and deoptimizations, collections and the peak memory in
+  use. "JIT compilations" counts the compiles tier 1 finished, and "JIT compile attempts refused"
+  the attempts it gave up on, leaving the body to tier 0;
 - calls to closures of package namespaces other than base, and how many of them skipped the
   generic call protocol: the call ran natively or in a slot frame that never made its
   environment, and no argument was a promise;
-- slot frames turned into environments, by what asked for the environment.
+- slot frames turned into environments, by what asked for the environment;
+- the refused compile attempts by reason, with the reasons `RY_JIT_LOG=1` prints beside each
+  body it refuses (such as "the body runs too rarely to repay compiling it").
+
+A run that compiled nothing reads, for a script whose only hot function is `function(x) x + 1`:
+
+```
+| JIT compilations | 0 |
+| JIT compile attempts refused | 1 |
+```
+
+and its table of refusals names the reason, "the body does too little natively to repay entering
+compiled code".
 
 A private package's hash is keyed with a secret, so someone who guesses the name cannot confirm
 the guess by hashing it. The key belongs to the project the session started in (the nearest
