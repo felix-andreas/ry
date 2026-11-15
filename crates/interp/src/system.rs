@@ -9,6 +9,7 @@ use {
         http::FetchError,
         interp,
         platform::{Iconv, IconvStop, convert_all},
+        strings::NamePattern,
         unwind::{R, error},
         values::{
             self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real,
@@ -2706,6 +2707,8 @@ unsafe fn do_file_info(call: &Call<'_>) -> R<Sexp> {
     ])
 }
 
+/// The entries below `directory`, in the order the system lists them. A directory is listed
+/// itself only on request, and is descended into when `recursive`.
 fn walk(
     directory: &Path,
     recursive: bool,
@@ -2717,12 +2720,18 @@ fn walk(
         return;
     };
     for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !all && name.starts_with('.') {
+        if !all && entry.file_name().as_encoded_bytes().starts_with(b".") {
             continue;
         }
-        if path.is_dir() && recursive {
+        let path = entry.path();
+        // The entry carries its type, which saves a `stat` per file. A link is followed, as GNU R
+        // follows it.
+        let is_directory = recursive
+            && match entry.file_type() {
+                Ok(kind) if !kind.is_symlink() => kind.is_dir(),
+                _ => path.is_dir(),
+            };
+        if is_directory {
             if include_dirs {
                 output.push(path.clone());
             }
@@ -2735,7 +2744,7 @@ fn walk(
 
 unsafe fn do_list_files(call: &Call<'_>) -> R<Sexp> {
     let directories = call.arg(0);
-    let pattern = values::first_string(call.arg(1)).map(|text| text.into_owned());
+    let pattern = values::first_string(call.arg(1));
     let all = values::as_logical_scalar(call.arg(2)) == 1;
     let full = values::as_logical_scalar(call.arg(3)) == 1;
     let recursive = values::as_logical_scalar(call.arg(4)) == 1;
@@ -2744,17 +2753,8 @@ unsafe fn do_list_files(call: &Call<'_>) -> R<Sexp> {
     let no_dots = values::as_logical_scalar(call.arg(7)) == 1;
     // R 4.5 added `fixed`, which matches the pattern as a literal string.
     let fixed = values::as_logical_scalar(call.arg(8)) == 1;
-    let regex = match &pattern {
-        Some(pattern) => Some(
-            regex::RegexBuilder::new(&if fixed {
-                regex::escape(pattern)
-            } else {
-                crate::strings::translate_regex(pattern)
-            })
-            .case_insensitive(ignore_case)
-            .build()
-            .map_err(|failure| error(format!("invalid 'pattern' regular expression: {failure}")))?,
-        ),
+    let pattern = match &pattern {
+        Some(pattern) => Some(NamePattern::compile(pattern, ignore_case, fixed)?),
         None => None,
     };
     let mut names = Vec::new();
@@ -2786,17 +2786,20 @@ unsafe fn do_list_files(call: &Call<'_>) -> R<Sexp> {
         for path in paths {
             let name = path
                 .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
+                .map(|name| name.to_string_lossy())
                 .unwrap_or_default();
-            if let Some(regex) = &regex
-                && !regex.is_match(&name)
+            if let Some(pattern) = &pattern
+                && !pattern.matches(&name)?
             {
                 continue;
             }
             let shown = if full {
                 slashed(&path)
             } else {
-                path.strip_prefix(&directory).map(slashed).unwrap_or(name)
+                match path.strip_prefix(&directory) {
+                    Ok(relative) => slashed(relative),
+                    Err(_) => name.into_owned(),
+                }
             };
             names.push(shown);
         }
@@ -2805,8 +2808,6 @@ unsafe fn do_list_files(call: &Call<'_>) -> R<Sexp> {
     string_vector(&names)
 }
 
-/// A path as R names it: separated by `/` on every platform, as GNU R's listings are, so that
-/// code that takes the names apart on `/` (`dir.create(recursive = TRUE)`, `dirname`) works.
 fn slashed(path: &Path) -> String {
     let text = path.to_string_lossy();
     if cfg!(windows) {
