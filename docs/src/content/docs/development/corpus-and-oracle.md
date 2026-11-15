@@ -50,12 +50,13 @@ only the corpus library and its own base packages. The script therefore copies e
 non-priority package of the running R's `.Library` (the reference R ships about 50, testthat and
 rlang among them) into the corpus library, so both runtimes see the same packages.
 
-Some snapshot C code calls functions that libR still exports but R 4.6's headers no longer
-declare, such as `ATTRIB` and `Rf_findVarInFrame`. It compiles with only a warning, and the
-implicit `int` return truncates the pointer, so the package crashes at that call under GNU R and
-ry alike. After installing, the script lists each package whose shared object imports such a
-function and reinstalls it from the newest CRAN source; `logs/install.log` names any that still
-import one.
+Some snapshot C code calls pointer-returning functions that libR exports but R 4.6's headers
+declare only under `ENABLE_LEGACY_NONAPI`, such as `ATTRIB` and `Rf_findVarInFrame`. With gcc 13
+it compiles with only a warning, and the implicit `int` return truncates the pointer, so the
+package crashes at that call under GNU R and ry alike. After installing, the script lists each
+package whose shared object imports such a function and reinstalls it from the newest CRAN source.
+`logs/install.log` names any package that imports one after the rebuild: either it declares the
+function itself (S7 does, and is correct), or its newest source failed to install.
 
 ## The differential oracle
 

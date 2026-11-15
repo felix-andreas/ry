@@ -96,22 +96,22 @@ if (length(bundled) > 0 && !all(file.copy(file.path(.Library, bundled), library_
   stop("cannot copy R's own packages into ", library_dir)
 }
 
-# R 4.6's headers no longer declare some entry points that libR still exports, such as `ATTRIB`,
-# `Rf_findVar` and `Rf_findVarInFrame`. C code from the pinned snapshot that calls one compiles
-# with only a warning, and the implicit declaration truncates the returned pointer to an int, so
-# the package aborts at its first such call, under GNU R and ry alike (xts's `x[2:4]`, Matrix's
-# `Cholesky`). This holds for a Posit binary and for a package compiled here alike, so the check
-# reads each shared object's imports instead of its `Built:` field: a package that imports an
-# exported libR function the running R's headers do not declare by default is reinstalled from the
-# newest CRAN source, which compiles against those headers. A package can opt back into such a
-# declaration (S7 defines `ENABLE_LEGACY_NONAPI_FUNS`), so a few correct packages are rebuilt too,
-# which costs only their build time. Fortran-callable helpers (`dblepr_` and the like) carry no
-# prototype in any R version and are left out. A newest source that needs a newer dependency than
-# the snapshot holds fails to install and leaves the old build in place, named in the log below.
+# R 4.6's headers declare some functions libR exports, such as `ATTRIB`, `Rf_findVar` and
+# `Rf_findVarInFrame`, only when a package defines `ENABLE_LEGACY_NONAPI`. With gcc 13, C code from
+# the pinned snapshot that calls one compiles with only a warning, and the implicit `int` return
+# truncates the returned pointer, so the package aborts at its first such call, under GNU R and ry
+# alike (xts's `x[2:4]`, Matrix's `Cholesky`). A Posit binary and a package compiled here are
+# equally affected, so the check reads each shared object's imports instead of its `Built:` field:
+# a package that imports a pointer-returning function the default headers leave undeclared is
+# reinstalled from the newest CRAN source, which compiles against those headers. A function that
+# returns an `int` or nothing survives the implicit declaration, so it does not count. A package
+# that declares the function itself (S7 defines `ENABLE_LEGACY_NONAPI_FUNS`) is rebuilt for nothing
+# and logged again below, and so is one whose newest source needs a newer dependency than the
+# snapshot holds, which fails to install and leaves the old build in place.
 undeclared_entry_points <- function() {
   libr <- file.path(R.home("lib"), "libR.so")
-  if (!file.exists(libr)) {
-    message("libR.so not found: R is not built as a shared library, so imports are not checked")
+  if (!file.exists(libr) || !nzchar(Sys.which("nm"))) {
+    message("libR.so or nm not found, so packages' imports are not checked")
     return(character())
   }
   include <- R.home("include")
@@ -123,19 +123,33 @@ undeclared_entry_points <- function() {
   source <- tempfile(fileext = ".h")
   writeLines(sprintf("#include <%s>", headers), source)
   r <- file.path(R.home("bin"), "R")
-  declared <- unique(unlist(lapply(c(c = "CC", "c++" = "CXX"), function(compiler) {
+  preprocess <- function(compiler, defines = "") {
     command <- system2(r, c("CMD", "config", compiler), stdout = TRUE)
     language <- if (compiler == "CC") "c" else "c++"
-    text <- suppressWarnings(system(
-      paste(command, "-E -P -w -x", language, "-I", shQuote(include), shQuote(source), "2>/dev/null"),
+    suppressWarnings(system(
+      paste(command, "-E -P -w", defines, "-x", language, "-I", shQuote(include), shQuote(source), "2>/dev/null"),
       intern = TRUE
     ))
-    unlist(regmatches(text, gregexpr("[A-Za-z_][A-Za-z0-9_]*", text)))
-  })))
-  if (length(declared) == 0) stop("the C preprocessor read nothing from R's headers")
-  exported <- read.table(text = system2("nm", c("-D", "--defined-only", shQuote(libr)), stdout = TRUE), fill = TRUE)
-  functions <- exported[[3]][exported[[2]] %in% c("T", "W")]
-  setdiff(functions[!grepl("_$", functions)], declared)
+  }
+  identifiers <- function(text) unlist(regmatches(text, gregexpr("[A-Za-z_][A-Za-z0-9_]*", text)))
+  declared <- unique(c(identifiers(preprocess("CC")), identifiers(preprocess("CXX"))))
+  legacy <- preprocess("CC", "-DENABLE_LEGACY_NONAPI")
+  if (length(declared) == 0 || length(legacy) == 0) {
+    message("the C preprocessor read nothing from R's headers, so packages' imports are not checked")
+    return(character())
+  }
+  exported <- read.table(
+    text = system2("nm", c("-D", "--defined-only", shQuote(libr)), stdout = TRUE),
+    fill = TRUE, colClasses = "character", quote = "", comment.char = ""
+  )
+  candidates <- setdiff(exported[[3]][exported[[2]] %in% c("T", "W")], declared)
+  statements <- trimws(strsplit(paste(legacy, collapse = " "), ";", fixed = TRUE)[[1]])
+  returns_pointer <- vapply(candidates, function(name) {
+    call <- sprintf("\\(?%s\\)?\\s*\\(", name)
+    prototype <- grep(sprintf("^[^(]*[ *(]%s", call), statements, value = TRUE)
+    length(prototype) > 0 && grepl("\\*|\\bSEXP\\b", sub(sprintf("%s.*", call), "", prototype[1]))
+  }, TRUE)
+  candidates[returns_pointer]
 }
 
 packages_calling_undeclared <- function(undeclared) {
@@ -143,23 +157,24 @@ packages_calling_undeclared <- function(undeclared) {
   imports <- lapply(shared_objects, function(object) {
     sub("@.*", "", system2("nm", c("-D", "--undefined-only", "--format=just-symbols", shQuote(object)), stdout = TRUE))
   })
-  hits <- vapply(imports, function(names) paste(sort(intersect(names, undeclared)), collapse = " "), "")
+  hits <- lapply(imports, intersect, undeclared)
   package <- basename(dirname(dirname(shared_objects)))
-  tapply(hits, package, function(found) paste(unique(found[nzchar(found)]), collapse = " "))
+  calls <- vapply(split(hits, package), function(found) paste(sort(unique(unlist(found))), collapse = " "), "")
+  calls[nzchar(calls)]
 }
 
 undeclared <- undeclared_entry_points()
 calls <- packages_calling_undeclared(undeclared)
-stale <- names(calls)[nzchar(calls)]
-if (length(stale) > 0) {
-  cat(sprintf("calls an entry point R's headers do not declare: %s (%s)\n", stale, calls[stale]), sep = "")
+if (length(calls) > 0) {
+  cat(sprintf("imports a function R's headers do not declare: %s (%s)\n", names(calls), calls), sep = "")
   with_warnings(install.packages(
-    stale, lib = library_dir, repos = c(CRAN = "https://cloud.r-project.org"),
+    names(calls), lib = library_dir, repos = c(CRAN = "https://cloud.r-project.org"),
     type = "source", dependencies = FALSE
   ))
   calls <- packages_calling_undeclared(undeclared)
-  still <- names(calls)[nzchar(calls)]
-  if (length(still) > 0) cat(sprintf("still imports an undeclared entry point: %s (%s)\n", still, calls[still]), sep = "")
+  if (length(calls) > 0) {
+    cat(sprintf("imports one after the rebuild (fine if it declares it itself): %s (%s)\n", names(calls), calls), sep = "")
+  }
 }
 
 # Record the outcome per package: every root and remote, with its reason when missing.
