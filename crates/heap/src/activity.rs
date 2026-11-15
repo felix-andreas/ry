@@ -141,6 +141,7 @@ pub enum Counter {
     ConditionsSignalled,
     HandlersEstablished,
     JitCompiles,
+    JitRefusals,
     JitDeoptimizations,
     JitEntries,
     LookupMisses,
@@ -156,7 +157,7 @@ pub enum Counter {
 }
 
 impl Counter {
-    pub const ALL: [Counter; 26] = [
+    pub const ALL: [Counter; 27] = [
         Counter::ClosureCalls,
         Counter::NativeEntries,
         Counter::BuiltinCalls,
@@ -171,6 +172,7 @@ impl Counter {
         Counter::ConditionsSignalled,
         Counter::HandlersEstablished,
         Counter::JitCompiles,
+        Counter::JitRefusals,
         Counter::JitDeoptimizations,
         Counter::JitEntries,
         Counter::LookupMisses,
@@ -201,6 +203,7 @@ impl Counter {
             Counter::ConditionsSignalled => "conditions signalled",
             Counter::HandlersEstablished => "handlers established",
             Counter::JitCompiles => "JIT compilations",
+            Counter::JitRefusals => "bodies tier 1 examined and left to tier 0",
             Counter::JitDeoptimizations => "JIT deoptimizations",
             Counter::JitEntries => "entries into compiled code",
             Counter::LookupMisses => "lookups past the inline caches",
@@ -241,6 +244,7 @@ impl Counter {
             Counter::ConditionsSignalled => "conditions_signalled",
             Counter::HandlersEstablished => "handlers_established",
             Counter::JitCompiles => "jit_compiles",
+            Counter::JitRefusals => "jit_refusals",
             Counter::JitDeoptimizations => "jit_deoptimizations",
             Counter::JitEntries => "jit_entries",
             Counter::LookupMisses => "lookup_misses",

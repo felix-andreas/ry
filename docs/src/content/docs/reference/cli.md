@@ -289,7 +289,8 @@ your code and no data. It lists:
   recommended packages and the common CRAN dependencies ry benchmarks against is printed as
   `private-` and a hash of its name;
 - event counts: closure calls, promises created and forced, S3 and S4 dispatches, conditions
-  signalled, JIT compilations and deoptimizations, collections and the peak memory in use;
+  signalled, JIT compilations, the bodies tier 1 examined and left to tier 0, entries into
+  compiled code and deoptimizations, collections and the peak memory in use;
 - calls to closures of package namespaces other than base, and how many of them skipped the
   generic call protocol: the call ran natively or in a slot frame that never made its
   environment, and no argument was a promise;
