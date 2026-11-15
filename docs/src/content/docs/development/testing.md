@@ -516,8 +516,8 @@ argument checker over `list(...)` (`k4`), `%in%` and `which` on a small vector (
 (`k6`), a data.table grown by `rbind` (`k7`) and `pmin`/`pmax` on matrices (`k8`). The table shows
 the fastest of `--runs` runs on each engine and the speed-up, and a kernel whose checksum differs
 from GNU R's is marked `DIFFERS` and fails the run. The packages (xts, zoo, data.table, purrr) load
-from `R_LIBS`, by default the corpus library. The file says which kernels are the reporter's code
-and which are reconstructions.
+from `R_LIBS`, by default the corpus library that `just bench-packages install` fills. The file
+says which kernels are the user's code and which are reconstructions.
 
 Compare peak RSS between two builds only from the same page-cache state. A freshly built `.ryc`
 or `libR.so` sits in the page cache in large folios, so one fault maps a whole block, and the same
