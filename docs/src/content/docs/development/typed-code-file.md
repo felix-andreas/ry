@@ -61,6 +61,7 @@ reason:
 | `matches over any tag` | its code tests for the shapes the installing process had confirmed, which depends on the process |
 | `assumes a lookup a session cannot check` | it resolved a name in an environment the file cannot name, or it took the result of an untyped function as a table value because of the function's return annotation |
 | `calls R with code a session cannot rebuild` | an R call site holds a value the file cannot store |
+| `makes an R call that is not in a body a session can find` | an R call site is not a call in the body of the closure or of a typed function lowered into it |
 | `calls a function it cannot name`, `has a type a file cannot name` | the same for a callee and for a type |
 | `does not compile into a file`, `does not link` | the code needs a relocation the writer does not resolve, or a relative call that does not reach |
 | `calls a function left out of the file` | it calls a version of the same file directly, and that version is left out for one of the reasons above |
@@ -107,7 +108,7 @@ All integers in the header are little-endian `u64`s after the magic and a `u32` 
 
 | Part | Contents |
 |---|---|
-| Header | magic `RYTYPED\0`, format version 1, then the hash of the build identity, the `.rdb`'s length and modification time, the hash of the code target (triple and ISA flags), the metadata's length, the number of slots, the code's offset, the code's length, the data's length, where the shared code starts, the metadata's hash, the shared part's hash, and a reserved zero word |
+| Header | magic `RYTYPED\0`, format version 3, then the hash of the build identity, the `.rdb`'s length and modification time, the hash of the code target (triple and ISA flags), the metadata's length, the number of slots, the code's offset, the code's length, the data's length, where the shared code starts, the metadata's hash, the shared part's hash, and a reserved zero word |
 | Metadata | LEB128 varints, in this order: `strings`, `shapes`, `slots`, `lookups`, `sites`, `callees`, `functions` |
 | Padding | zeros up to the code's offset, a multiple of 64 KiB |
 | Code | the function bodies and their trampolines, then the code every function shares (the free entries) |
@@ -122,8 +123,9 @@ The metadata tables are:
 - **`lookups`**: per name a version resolved when it compiled: the symbol, whether a function was
   looked up, the environment the lookup starts from and the one it found the binding in, and the
   class of what it found (below).
-- **`sites`**: per R call site, every field of its `RCall`: the environment, the call expression, the
-  called function's lookup, per argument its tag, code, type and conversion, how the result is used,
+- **`sites`**: per R call site, every field of its `RCall`: the environment, where the call stands
+  (the closure whose body holds it, which is the version's own or one a lookup finds, and the item
+  positions from the body to it), the called function's lookup, per argument its tag, code, type and conversion, how the result is used,
   and the flags `diverges` and `effect_free`.
 - **`callees`**: per typed function a version calls, its lookup, the signature the caller compiled
   against, and whether it is a version of this file (a direct call) or reached through a `Callee`
@@ -209,7 +211,10 @@ attaching builds the same `Compiled` entry a session compile would:
 1. Find the version by the closure's note and the argument types. No version is a miss.
 2. Check the hash of the version's code.
 3. Resolve each lookup in the live session and require the class it recorded.
-4. Build each R call site's `RCall` from its recorded fields and fill its slot.
+4. Build each R call site's `RCall` from its recorded fields and fill its slot. The call and a
+   conversion's call are the nodes of the live closure's body at their recorded positions, not
+   copies: the interpreter knows a call by its node when it replays a recorded call or reads
+   what a conversion gave.
 5. For each callee: a version of this file attaches first, depth first, and must be noted from the
    same record and position; a typed function of another namespace attaches or compiles through
    `compiled_or_refusal`, and its entry fills the `Callee` slot. Its result type must match the

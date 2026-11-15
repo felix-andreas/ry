@@ -276,7 +276,7 @@ pub unsafe fn call(
             return None;
         }
         // The code called R before it stopped, so the interpreter runs the call again with
-        // what those calls returned, which the recorded values of the calls still root.
+        // what those calls returned, which their records keep alive.
         STOPS.set(STOPS.get() + 1);
         let replayed = replay::replay(
             segment,
@@ -285,16 +285,22 @@ pub unsafe fn call(
             typed.args,
             typed.sys_parent,
         );
-        heap.release_handles(mark);
         let Some(result) = replayed else {
+            heap.release_handles(mark);
             return Some(Err(interp::unwind::error(format!(
-                "{}, after it had called R more than {} times, so the interpreter cannot run the \
-                 call again without calling R a second time: make fewer R calls in one typed call",
+                "{}, after it had called R more than {} times or kept more than {} MiB of what \
+                 those calls returned, so the interpreter cannot run the call again without \
+                 calling R a second time: make fewer R calls in one typed call",
                 stop_reason(guess),
                 replay::MAX_RECORDED,
+                replay::MAX_RECORDED_MIB,
             ))));
         };
         if interp::annotations::typed_logging() {
+            // Deparsing the call for the log may collect, and nothing else holds the result.
+            if let Ok(value) = &result {
+                heap.root(*value);
+            }
             interp::annotations::log_interpreted_because(
                 typed.call,
                 &format!(
@@ -304,6 +310,7 @@ pub unsafe fn call(
                 ),
             );
         }
+        heap.release_handles(mark);
         return Some(result);
     }
     replay::close(segment);
@@ -1457,9 +1464,6 @@ pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *
     if !effect_free || interp::conditions::warnings_raised() != warnings {
         R_CALLS.set(R_CALLS.get() + 1);
         if let Some(made) = made {
-            // The value stays rooted until the call that entered typed code releases its
-            // handles, which is after any run in the interpreter that replays it.
-            heap.root(made.value);
             replay::record(site.call, made.value);
         }
     }

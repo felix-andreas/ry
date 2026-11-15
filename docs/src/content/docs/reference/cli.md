@@ -224,9 +224,8 @@ parameters. A file the script sources into the global environment, as `source("h
 compiles the same way when `source()` has read it, before any of it runs. These compile at their
 first call instead:
 
-- a function defined inside a block or another function, or in a file sourced into another
-  environment, such as `sys.source("helpers.R", envir = e)` or `source(local = TRUE)` inside a
-  function;
+- a function defined inside a block or another function, or in a file sourced any other way,
+  such as by `sys.source()` or by `source(local = TRUE)` inside a function;
 - a function of a package, unless the package's [typed code file](#build-and-install) holds it,
   in which case it runs code compiled at install. Under `--aot`, a package whose typed code file
   another build of ry wrote compiles its typed functions as it loads instead, and prints

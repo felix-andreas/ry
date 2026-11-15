@@ -1152,6 +1152,7 @@ impl RootSource for InterpRoots {
             interp.connections.trace(marker);
             interp.annotations.trace(marker);
             interp.ahead.trace(marker);
+            crate::replay::trace(marker);
             interp.moves.trace(marker);
             interp.library_tags.trace(marker);
         }

@@ -586,6 +586,22 @@ pub unsafe fn peek_variable(symbol: Sexp, env: Sexp) -> Option<Sexp> {
         .then_some(value)
 }
 
+/// The value `env`'s own frame binds `symbol` to, read without forcing or calling anything, as
+/// [`peek_variable`] reads it but without looking in an enclosing environment.
+pub unsafe fn peek_frame_variable(symbol: Sexp, env: Sexp) -> Option<Sexp> {
+    let cell = if env.has_gp(gp::PENDING_FRAME) {
+        match pending_name(env, symbol) {
+            PendingName::Slot(value) => return (value != missing_arg()).then_some(value),
+            PendingName::Enclosure(_) => return None,
+        }
+    } else {
+        crate::heap().frame_cell(env, symbol)?
+    };
+    let value = cell.cdr();
+    (!cell.has_gp(gp::ACTIVE_BINDING) && value != missing_arg() && value != unbound())
+        .then_some(value)
+}
+
 /// Settles `promise`, unforced, with the `value` forcing it would give, which the caller found
 /// without forcing it ([`pending_name`]).
 pub unsafe fn settle_unforced(promise: Sexp, value: Sexp) -> R<Sexp> {

@@ -34,7 +34,7 @@ use {
         records::{Fields, Layout},
     },
     interp::{
-        annotations,
+        annotations, bytecode,
         code_image::{self, DatabaseStamp, Note},
         values as rvalues,
     },
@@ -51,7 +51,7 @@ use {
 };
 
 const MAGIC: &[u8; 8] = b"RYTYPED\0";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 /// The bytes of the fixed header.
 const HEADER_SIZE: usize = 8 + 4 + 8 * 13;
 /// The alignment of the code in the file and of the offset table's reservation, which is the
@@ -130,11 +130,17 @@ pub unsafe fn write(package: &str) -> Result<Written, String> {
         }
     }
     // Every version a training run compiled is one the package's users call, whatever its
-    // argument types (a record, a list literal) and whatever type a conversion gave in the run.
+    // argument types (a record, a list literal) and whatever type a conversion gave in the run,
+    // unless a later conversion in the run gave another type than the version guessed.
+    let conversions = interp::numbers::conversion_epoch();
     let mut roots: Vec<Key> = COMPILED.with_borrow(|compiled| {
         compiled
             .iter()
-            .filter(|(key, entry)| entry.is_ok() && own.contains_key(&key.0))
+            .filter(|(key, entry)| {
+                entry.as_ref().is_ok_and(|compiled| {
+                    compiled.guessed.is_none_or(|epoch| epoch == conversions)
+                }) && own.contains_key(&key.0)
+            })
             .map(|(key, _)| key.clone())
             .collect()
     });
@@ -660,10 +666,23 @@ pub enum Expr {
     Lgl(i32),
 }
 
+/// Where a call a version makes stands: a call in the body of a closure, which a later session
+/// takes from its own copy of that body. The interpreter knows a call by its node, so replaying
+/// a recorded call or reading what a conversion gave needs the node the body holds, not a copy.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Place {
+    /// The closure whose body holds the call: the version's own (`None`) or the one a lookup
+    /// finds, which lowering took the call from.
+    pub holder: Option<u32>,
+    /// The way from the body to the call, each step the place of an item in a call, 0 for the
+    /// function.
+    pub steps: Vec<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Site {
     pub env: EnvRef,
-    pub call: Expr,
+    pub call: Place,
     pub function: u32,
     pub arguments: Vec<Argument>,
     pub result: SiteResult,
@@ -681,7 +700,7 @@ pub struct Argument {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileConversion {
-    pub call: Expr,
+    pub call: Place,
     pub function: u32,
     pub checked: Option<Item>,
 }
@@ -917,6 +936,7 @@ struct Encoder<'a> {
 
 const UNNAMED_LOOKUP: &str = "assumes a lookup a session cannot check";
 const UNNAMED_CODE: &str = "calls R with code a session cannot rebuild";
+const UNPLACED_CODE: &str = "makes an R call that is not in a body a session can find";
 const UNNAMED_FUNCTION: &str = "calls a function it cannot name";
 const UNNAMED_SHAPE: &str = "has a type a file cannot name";
 
@@ -945,9 +965,30 @@ impl Encoder<'_> {
                 .position(|speculation| speculation.function == function)
                 .and_then(|found| lookups.get(found).copied())
         };
+        let locate = |call: Sexp| -> Option<Place> {
+            let mut steps = Vec::new();
+            if path_to(bytecode::closure_body(version.key.0), call, &mut steps) {
+                return Some(Place {
+                    holder: None,
+                    steps,
+                });
+            }
+            lowered
+                .speculations
+                .iter()
+                .zip(&lookups)
+                .find(|(speculation, _)| {
+                    speculation.function.kind() == SexpType::Closure
+                        && path_to(bytecode::closure_body(speculation.function), call, &mut steps)
+                })
+                .map(|(_, &lookup)| Place {
+                    holder: Some(lookup),
+                    steps: std::mem::take(&mut steps),
+                })
+        };
         let mut sites = Vec::with_capacity(lowered.r_calls.len());
         for site in &lowered.r_calls {
-            let encoded = self.site(site, &identify)?;
+            let encoded = self.site(site, &identify, &locate)?;
             self.sites.push(encoded);
             sites.push(self.sites.len() as u32 - 1);
         }
@@ -1123,6 +1164,7 @@ impl Encoder<'_> {
         &mut self,
         site: &RCall,
         identify: &dyn Fn(Sexp) -> Option<u32>,
+        locate: &dyn Fn(Sexp) -> Option<Place>,
     ) -> Result<Site, &'static str> {
         let mut arguments = Vec::with_capacity(site.arguments.len());
         for argument in &site.arguments {
@@ -1132,7 +1174,7 @@ impl Encoder<'_> {
                 Some(self.shapes.strings.id(&rvalues::symbol_name(argument.tag)))
             };
             let conversion = match argument.conversion {
-                Some(conversion) => Some(self.conversion(conversion, identify)?),
+                Some(conversion) => Some(self.conversion(conversion, identify, locate)?),
                 None => None,
             };
             arguments.push(Argument {
@@ -1145,14 +1187,14 @@ impl Encoder<'_> {
         let result = match site.result {
             RResult::Unused => SiteResult::Unused,
             RResult::Converted(conversion, ty) => SiteResult::Converted(
-                self.conversion(conversion, identify)?,
+                self.conversion(conversion, identify, locate)?,
                 self.shapes.ty(ty).map_err(|_| UNNAMED_SHAPE)?,
             ),
             RResult::Table => SiteResult::Table,
         };
         Ok(Site {
             env: self.env(site.env).ok_or(UNNAMED_CODE)?,
-            call: self.expr(site.call).ok_or(UNNAMED_CODE)?,
+            call: locate(site.call).ok_or(UNPLACED_CODE)?,
             function: identify(site.function).ok_or(UNNAMED_FUNCTION)?,
             arguments,
             result,
@@ -1165,9 +1207,10 @@ impl Encoder<'_> {
         &mut self,
         conversion: Conversion,
         identify: &dyn Fn(Sexp) -> Option<u32>,
+        locate: &dyn Fn(Sexp) -> Option<Place>,
     ) -> Result<FileConversion, &'static str> {
         Ok(FileConversion {
-            call: self.expr(conversion.call).ok_or(UNNAMED_CODE)?,
+            call: locate(conversion.call).ok_or(UNPLACED_CODE)?,
             function: identify(conversion.function).ok_or(UNNAMED_FUNCTION)?,
             checked: match conversion.checked {
                 Some(item) => Some(self.shapes.item(item).map_err(|_| UNNAMED_SHAPE)?),
@@ -1382,8 +1425,16 @@ impl Out {
         }
     }
 
+    fn place(&mut self, place: &Place) {
+        self.option(place.holder);
+        self.number(place.steps.len() as u64);
+        for &step in &place.steps {
+            self.number(u64::from(step));
+        }
+    }
+
     fn conversion(&mut self, conversion: &FileConversion) {
-        self.expr(&conversion.call);
+        self.place(&conversion.call);
         self.number(u64::from(conversion.function));
         match conversion.checked {
             Some(item) => {
@@ -1505,7 +1556,7 @@ fn encode_metadata(parsed: &Parsed) -> Vec<u8> {
     out.number(parsed.sites.len() as u64);
     for site in &parsed.sites {
         out.env(&site.env);
-        out.expr(&site.call);
+        out.place(&site.call);
         out.number(u64::from(site.function));
         out.number(site.arguments.len() as u64);
         for argument in &site.arguments {
@@ -1769,14 +1820,26 @@ impl In<'_> {
         })
     }
 
+    fn place(&mut self, lookups: usize) -> Result<Place, Malformed> {
+        let holder = self.option(lookups)?;
+        let count = self.count()?;
+        if count > MAX_EXPR_DEPTH {
+            return Err(MALFORMED);
+        }
+        let mut steps = Vec::with_capacity(count);
+        for _ in 0..count {
+            steps.push(u32::try_from(self.number()?).map_err(|_| MALFORMED)?);
+        }
+        Ok(Place { holder, steps })
+    }
+
     fn conversion(
         &mut self,
-        strings: usize,
         shapes: &[ShapeEntry],
         lookups: usize,
     ) -> Result<FileConversion, Malformed> {
         Ok(FileConversion {
-            call: self.expr(strings, 0)?,
+            call: self.place(lookups)?,
             function: self.index(lookups)?,
             checked: if self.flag()? {
                 Some(self.item(shapes, false)?)
@@ -1979,7 +2042,7 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, Malformed> {
     let count = input.count()?;
     for _ in 0..count {
         let env = input.env(strings)?;
-        let call = input.expr(strings, 0)?;
+        let call = input.place(lookups)?;
         let function = input.index(lookups)?;
         let length = input.count()?;
         let mut arguments = Vec::with_capacity(length);
@@ -1988,7 +2051,7 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, Malformed> {
             let code = input.expr(strings, 0)?;
             let ty = input.ty(&parsed.shapes)?;
             let conversion = if input.flag()? {
-                Some(input.conversion(strings, &parsed.shapes, lookups)?)
+                Some(input.conversion(&parsed.shapes, lookups)?)
             } else {
                 None
             };
@@ -2002,7 +2065,7 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, Malformed> {
         let result = match input.number()? {
             0 => SiteResult::Unused,
             1 => {
-                let conversion = input.conversion(strings, &parsed.shapes, lookups)?;
+                let conversion = input.conversion(&parsed.shapes, lookups)?;
                 SiteResult::Converted(conversion, input.ty(&parsed.shapes)?)
             }
             2 => SiteResult::Table,
@@ -2589,7 +2652,7 @@ unsafe fn attach_version(
         State::Unattached => {}
     }
     mapped.states.borrow_mut()[index as usize] = State::Attaching;
-    let attached = attach_inner(mapped, index);
+    let attached = attach_inner(mapped, index, closure);
     let version = &mapped.parsed.functions[index as usize];
     let name = &mapped.parsed.strings[version.name as usize];
     let params = &mapped.params[index as usize];
@@ -2619,7 +2682,11 @@ unsafe fn attach_version(
     Some(compiled)
 }
 
-unsafe fn attach_inner(mapped: &'static Mapped, index: u32) -> Result<&'static Compiled, &'static str> {
+unsafe fn attach_inner(
+    mapped: &'static Mapped,
+    index: u32,
+    closure: Sexp,
+) -> Result<&'static Compiled, &'static str> {
     let version = &mapped.parsed.functions[index as usize];
     // SAFETY: parsing checked that the version's code lies inside the mapped code.
     let code = std::slice::from_raw_parts(
@@ -2636,7 +2703,7 @@ unsafe fn attach_inner(mapped: &'static Mapped, index: u32) -> Result<&'static C
     }
     let mut guessed = None;
     for &site in &version.sites {
-        let call = build_site(mapped, &mut resolved, site)?;
+        let call = build_site(mapped, &mut resolved, closure, site)?;
         if let RResult::Converted(conversion, ty) = call.result
             && conversion.guessed()
         {
@@ -2849,12 +2916,13 @@ unsafe fn loaded_namespace(package: Sexp) -> Option<Sexp> {
 unsafe fn build_site(
     mapped: &Mapped,
     resolved: &mut FxHashMap<u32, Speculation>,
+    closure: Sexp,
     site: u32,
 ) -> Result<&'static RCall, &'static str> {
     let site = &mapped.parsed.sites[site as usize];
     let heap = interp::heap();
     let mark = heap.handle_mark();
-    let built = build_site_inner(mapped, resolved, site);
+    let built = build_site_inner(mapped, resolved, closure, site);
     heap.release_handles(mark);
     built.map(|call| &*Box::leak(Box::new(call)))
 }
@@ -2862,9 +2930,25 @@ unsafe fn build_site(
 unsafe fn build_site_inner(
     mapped: &Mapped,
     resolved: &mut FxHashMap<u32, Speculation>,
+    closure: Sexp,
     site: &Site,
 ) -> Result<RCall, &'static str> {
     const UNBUILT: &str = "the session cannot build an R call it makes";
+    const UNPLACED: &str = "an R call it makes is not where the file says in its function's body";
+    let placed = |place: &Place,
+                  resolved: &mut FxHashMap<u32, Speculation>|
+     -> Result<Sexp, &'static str> {
+        let holder = match place.holder {
+            None => closure,
+            Some(lookup) => found(mapped, resolved, lookup)?.function,
+        };
+        if holder.kind() != SexpType::Closure {
+            return Err(UNPLACED);
+        }
+        follow(bytecode::closure_body(holder), &place.steps)
+            .filter(|call| call.kind() == SexpType::Language)
+            .ok_or(UNPLACED)
+    };
     let heap = interp::heap();
     let strings = &mapped.parsed.strings;
     // Everything the site holds lives as long as the code that may use it, which is the session.
@@ -2877,7 +2961,7 @@ unsafe fn build_site_inner(
      -> Result<Conversion, &'static str> {
         let function = found(mapped, resolved, conversion.function)?.function;
         Ok(Conversion {
-            call: build_expr(strings, &conversion.call).ok_or(UNBUILT)?,
+            call: placed(&conversion.call, resolved)?,
             function,
             checked: conversion.checked.map(|item| live_item(item, &mapped.live)),
         })
@@ -2889,11 +2973,7 @@ unsafe fn build_site_inner(
             None => rvalues::nil(),
         };
         let converted = match &argument.conversion {
-            Some(converted) => {
-                let converted = conversion(converted, resolved)?;
-                keep(converted.call);
-                Some(converted)
-            }
+            Some(converted) => Some(conversion(converted, resolved)?),
             None => None,
         };
         arguments.push(RArgument {
@@ -2906,15 +2986,13 @@ unsafe fn build_site_inner(
     let result = match &site.result {
         SiteResult::Unused => RResult::Unused,
         SiteResult::Converted(converted, ty) => {
-            let converted = conversion(converted, resolved)?;
-            keep(converted.call);
-            RResult::Converted(converted, live_type(*ty, &mapped.live))
+            RResult::Converted(conversion(converted, resolved)?, live_type(*ty, &mapped.live))
         }
         SiteResult::Table => RResult::Table,
     };
     Ok(RCall {
         function: found(mapped, resolved, site.function)?.function,
-        call: keep(build_expr(strings, &site.call).ok_or(UNBUILT)?),
+        call: placed(&site.call, resolved)?,
         env: live_env(mapped, &site.env).ok_or("an R call it makes runs in a missing environment")?,
         arguments,
         result,
@@ -2960,13 +3038,56 @@ unsafe fn build_expr(strings: &[String], expr: &Expr) -> Option<Sexp> {
     Some(value)
 }
 
+/// The way from `code` to the call `target` inside it, pushed onto `steps`, which [`follow`]
+/// takes back. Leaves `steps` as it was and gives `false` when `code` does not hold `target`.
+unsafe fn path_to(code: Sexp, target: Sexp, steps: &mut Vec<u32>) -> bool {
+    if code == target {
+        return true;
+    }
+    if code.kind() != SexpType::Language || steps.len() >= MAX_EXPR_DEPTH {
+        return false;
+    }
+    let mut cell = code;
+    let mut place = 0;
+    while matches!(cell.kind(), SexpType::Language | SexpType::Pairlist) {
+        steps.push(place);
+        if path_to(cell.car(), target, steps) {
+            return true;
+        }
+        steps.pop();
+        cell = cell.cdr();
+        place += 1;
+    }
+    false
+}
+
+/// The code the way `steps` reaches from `code`, when there is such code.
+unsafe fn follow(code: Sexp, steps: &[u32]) -> Option<Sexp> {
+    let mut code = code;
+    for &step in steps {
+        if code.kind() != SexpType::Language {
+            return None;
+        }
+        let mut cell = code;
+        for _ in 0..step {
+            cell = cell.cdr();
+            if !matches!(cell.kind(), SexpType::Language | SexpType::Pairlist) {
+                return None;
+            }
+        }
+        code = cell.car();
+    }
+    Some(code)
+}
+
 /// Checks of the file format for the fuzz tests and fuzz targets: random valid metadata must
 /// read back as written, and corrupt bytes must parse or fail with [`MALFORMED`], never panic.
 pub mod testing {
     use {
         super::{
             ALIGN, Argument, Class, EnvRef, Expr, FieldNames, FileCallee, FileConversion,
-            HEADER_SIZE, Header, Item, LayoutKey, Lookup, Matches, Parsed, ShapeEntry, Site, SiteResult, Target,
+            HEADER_SIZE, Header, Item, LayoutKey, Lookup, Matches, Parsed, Place, ShapeEntry, Site,
+            SiteResult, Target,
             Version, encode_header, encode_metadata, parse,
         },
         crate::{
@@ -3118,13 +3239,17 @@ pub mod testing {
         let lookups = parsed.lookups.len();
         if lookups > 0 {
             for _ in 0..entropy.below(4) {
+                let place = |entropy: &mut dyn FnMut(usize) -> usize| Place {
+                    holder: (entropy(2) == 0).then(|| entropy(lookups) as u32),
+                    steps: (0..entropy(4)).map(|_| entropy(5) as u32).collect(),
+                };
                 let conversion = |entropy: &mut dyn FnMut(usize) -> usize| FileConversion {
-                    call: Expr::Symbol(entropy(strings) as u32),
+                    call: place(entropy),
                     function: entropy(lookups) as u32,
                     checked: None,
                 };
                 let mut below = |bound: usize| entropy.below(bound);
-                let arguments = (0..below(3))
+                let mut arguments: Vec<Argument> = (0..below(3))
                     .map(|_| Argument {
                         tag: (below(2) == 0).then(|| below(strings) as u32),
                         code: Expr::Symbol(below(strings) as u32),
@@ -3137,9 +3262,13 @@ pub mod testing {
                     1 => SiteResult::Converted(conversion(&mut below), Type::I64),
                     _ => SiteResult::Table,
                 };
+                let call = place(&mut below);
+                for argument in &mut arguments {
+                    argument.code = random_expr(entropy, strings, 0);
+                }
                 let site = Site {
                     env: random_env(entropy, strings),
-                    call: random_expr(entropy, strings, 0),
+                    call,
                     function: entropy.below(lookups) as u32,
                     arguments,
                     result,

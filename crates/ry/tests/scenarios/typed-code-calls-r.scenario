@@ -129,7 +129,7 @@ file loose/many.R
 
 run ry run --runtime ry loose/many.R
 expect exit 1
-expect stderr "`Num.from_r(factor())` gave `I64`, which its native code was not compiled for, after it had called R more than 4096 times, so the interpreter cannot run the call again without calling R a second time: make fewer R calls in one typed call"
+expect stderr "`Num.from_r(factor())` gave `I64`, which its native code was not compiled for, after it had called R more than 4096 times or kept more than 64 MiB of what those calls returned, so the interpreter cannot run the call again without calling R a second time: make fewer R calls in one typed call"
 
 # A `Num.from_r` the checker typed gives that number whatever R gives: an R integer where the
 # checker read a `double` becomes an `F64`, as R converts it, and a `double` where it read an

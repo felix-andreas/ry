@@ -137,14 +137,16 @@ unsafe fn prepare_script(script: &Script<'_>, keep_source: bool) -> R<Prepared> 
 /// `source()` evaluates the file, so that the calls the script makes after it find code. Called
 /// with every file `parse()` reads whole in the frame `env` while the session compiles ahead.
 /// Only a definition evaluated in the global environment binds the closure made here, so the
-/// file compiles only when `env` is a frame that will evaluate it there: one whose `envir`,
-/// read without forcing anything, is the global environment, as in `source()` and
-/// `sys.source()`. A definition evaluated elsewhere makes its own closure, as without `--aot`.
+/// file compiles only when `env` is a frame that will evaluate it there: one that binds `envir`
+/// itself, read without forcing anything, to the global environment, as `source()` at the top
+/// level does. A definition evaluated elsewhere makes its own closure, as without `--aot`.
 pub unsafe fn parsed_file(expressions: Sexp, env: Sexp) -> R<()> {
     if !interp().ahead.enabled || interp().ahead.lowering || env == global_env() {
         return Ok(());
     }
-    let Some(mut envir) = crate::eval::peek_variable(values::install("envir")?, env) else {
+    // Only the frame's own binding counts: one an enclosing environment holds, such as a global
+    // `envir`, says nothing about where this frame evaluates the file.
+    let Some(mut envir) = crate::eval::peek_frame_variable(values::install("envir")?, env) else {
         return Ok(());
     };
     if envir.kind() == SexpType::Promise {

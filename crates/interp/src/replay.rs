@@ -19,7 +19,10 @@ use {
         unwind::R,
         values::{self, nil},
     },
-    heap::object::{Sexp, SexpType},
+    heap::{
+        Marker,
+        object::{Sexp, SexpType, object_size},
+    },
     rustc_hash::FxHashSet,
     std::cell::RefCell,
 };
@@ -30,12 +33,19 @@ pub const BUILTINS: &[BuiltinDef] = &[special(".ry_replay", 2, do_replay)];
 #[must_use]
 pub struct Segment {
     start: usize,
+    bytes: usize,
     overflowed: bool,
 }
 
 /// How many R calls one native call records at most. A call that makes more cannot run again in
 /// the interpreter, so giving up after them is an error.
 pub const MAX_RECORDED: usize = 4096;
+
+/// How many MiB of values one native call's records keep alive at most, counted as each value's
+/// own bytes and those of a list's elements. A loop that calls R for a large vector each time
+/// would otherwise keep thousands of them alive; past the limit the call records no more, as past
+/// [`MAX_RECORDED`].
+pub const MAX_RECORDED_MIB: usize = 64;
 
 thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::default());
@@ -47,6 +57,8 @@ struct State {
     recorded: Vec<Recorded>,
     /// Where the innermost native call's recorded calls start.
     start: usize,
+    /// The bytes of the values the innermost native call's records keep alive.
+    bytes: usize,
     /// How many native calls are under way.
     open: usize,
     /// Whether the innermost native call made more R calls than it records.
@@ -79,6 +91,7 @@ pub fn open() -> Segment {
         state.open += 1;
         Segment {
             start: std::mem::replace(&mut state.start, state.recorded.len()),
+            bytes: std::mem::take(&mut state.bytes),
             overflowed: std::mem::take(&mut state.overflowed),
         }
     })
@@ -95,25 +108,45 @@ pub fn close(segment: Segment) {
 
 fn restore(state: &mut State, segment: Segment) {
     state.start = segment.start;
+    state.bytes = segment.bytes;
     state.overflowed = segment.overflowed;
     state.open -= 1;
 }
 
 /// Records that the native code under way made the R call `code`, which returned `value`, or
-/// `NULL` when the code does not use the value. The caller keeps `value` rooted until the native
-/// call that made it ends.
+/// `NULL` when the code does not use the value. The record keeps `value` alive ([`trace`]).
 pub fn record(code: Sexp, value: Sexp) {
     STATE.with_borrow_mut(|state| {
         if state.open == 0 || state.overflowed {
             return;
         }
-        if state.recorded.len() - state.start >= MAX_RECORDED {
+        state.bytes = state.bytes.saturating_add(kept_bytes(value));
+        if state.recorded.len() - state.start >= MAX_RECORDED
+            || state.bytes > MAX_RECORDED_MIB << 20
+        {
             state.recorded.truncate(state.start);
             state.overflowed = true;
             return;
         }
         state.recorded.push(Recorded { code, value });
     });
+}
+
+/// The bytes `value` keeps alive: its own, and those of its elements when it is a list.
+fn kept_bytes(value: Sexp) -> usize {
+    // SAFETY: `value` is a live object an R call returned.
+    unsafe {
+        let own = |value: Sexp| {
+            object_size(value.kind(), values::length(value)).unwrap_or(0)
+        };
+        let mut bytes = own(value);
+        if value.kind() == SexpType::List {
+            for index in 0..values::length(value) {
+                bytes = bytes.saturating_add(own(value.element(index)));
+            }
+        }
+        bytes
+    }
 }
 
 /// The value the R call `code` returned when native code made it before giving up, when a
@@ -129,8 +162,16 @@ pub fn replayed(code: Sexp) -> Option<Sexp> {
                     .iter()
                     .position(|recorded| recorded.code == code)?;
             let value = replay.recorded[index].value;
-            replay.recorded[index].code = nil();
-            replay.remaining -= 1;
+            // The recorded value stands for the whole call, so the calls in its arguments that
+            // the native code made first are not evaluated now and must not be used later, where
+            // a loop reaches the same code again.
+            for earlier in replay.next..=index {
+                let recorded = &mut replay.recorded[earlier];
+                if recorded.code != nil() && (earlier == index || holds(code, recorded.code)) {
+                    recorded.code = nil();
+                    replay.remaining -= 1;
+                }
+            }
             while replay
                 .recorded
                 .get(replay.next)
@@ -141,6 +182,24 @@ pub fn replayed(code: Sexp) -> Option<Sexp> {
             Some(value)
         })
     })
+}
+
+/// Whether the call `code` holds the call `inner` at any depth.
+fn holds(code: Sexp, inner: Sexp) -> bool {
+    // SAFETY: the caller's code is a live call of a closure body.
+    unsafe {
+        if code.kind() != SexpType::Language {
+            return false;
+        }
+        let mut cell = code;
+        while matches!(cell.kind(), SexpType::Language | SexpType::Pairlist) {
+            if cell.car() == inner || holds(cell.car(), inner) {
+                return true;
+            }
+            cell = cell.cdr();
+        }
+        false
+    }
 }
 
 /// Runs the call `call` of the typed closure `function` with `args` in the interpreter, after
@@ -169,6 +228,22 @@ pub unsafe fn replay(
     let result = eval::run_interpreted(call, function, args, sys_parent);
     STATE.with_borrow_mut(|state| state.replays.pop());
     Some(result)
+}
+
+/// Marks the values of the recorded calls, which no handle holds: a native loop that makes many
+/// R calls keeps at most [`MAX_RECORDED`] of them, and [`MAX_RECORDED_MIB`], alive.
+///
+/// # Safety
+///
+/// Called while the collector marks, on the interpreter's thread.
+pub unsafe fn trace(marker: &mut Marker<'_>) {
+    STATE.with_borrow(|state| {
+        let replays = state.replays.iter().flat_map(|replay| &replay.recorded);
+        for recorded in state.recorded.iter().chain(replays) {
+            // SAFETY: a recorded value is a live object the native call that made it returned.
+            unsafe { marker.mark(recorded.value) };
+        }
+    });
 }
 
 /// The body a call of `function` evaluates while a replay has recorded calls left to use: its
