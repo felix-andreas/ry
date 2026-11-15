@@ -2224,9 +2224,13 @@ unsafe fn open_file(database: &str, note: Note, package: String) -> Result<Mappe
 /// Maps the file's code and data at the address it returns, below which it reserves a
 /// writable offset table of the file's slots. The mapping lives as long as the process, since
 /// attached code may run until it ends.
-#[cfg(target_os = "linux")]
+///
+/// On Linux the code pages map straight from the file, so every process shares them. Where that
+/// is refused (a file system mounted without execution, or a system that has not been verified
+/// to run file pages, such as macOS), the code is copied into the same range instead, which
+/// keeps the table at its fixed distance and gives up only the sharing.
+#[cfg(unix)]
 unsafe fn map(file: &std::fs::File, header: &Header) -> Result<usize, String> {
-    use std::os::fd::AsRawFd;
     let table = (header.slots * 8).next_multiple_of(ALIGN) as usize;
     let tail = (header.code_length.next_multiple_of(8) + header.data_length) as usize;
     let span = table + tail.next_multiple_of(ALIGN as usize);
@@ -2248,23 +2252,75 @@ unsafe fn map(file: &std::fs::File, header: &Header) -> Result<usize, String> {
         return Err(error);
     }
     let code = reserved.cast::<u8>().add(table);
-    let mapped = libc::mmap(
-        code.cast(),
-        tail,
-        libc::PROT_READ | libc::PROT_EXEC,
-        libc::MAP_PRIVATE | libc::MAP_FIXED,
-        file.as_raw_fd(),
-        header.code_offset as libc::off_t,
-    );
-    if mapped == libc::MAP_FAILED {
-        let error = failed("code");
-        libc::munmap(reserved, span);
-        return Err(error);
+    #[cfg(target_os = "linux")]
+    if !copies() {
+        use std::os::fd::AsRawFd;
+        let mapped = libc::mmap(
+            code.cast(),
+            tail,
+            libc::PROT_READ | libc::PROT_EXEC,
+            libc::MAP_PRIVATE | libc::MAP_FIXED,
+            file.as_raw_fd(),
+            header.code_offset as libc::off_t,
+        );
+        if mapped != libc::MAP_FAILED {
+            return Ok(code as usize);
+        }
     }
+    copy_code(file, header, code, tail).inspect_err(|_| {
+        libc::munmap(reserved, span);
+    })?;
     Ok(code as usize)
 }
 
-#[cfg(not(target_os = "linux"))]
+/// Whether `RY_TYPED_FILE_COPY` asks that the code be copied even where the file maps, which
+/// tests of the copy use.
+#[cfg(target_os = "linux")]
+fn copies() -> bool {
+    static COPIES: OnceLock<bool> = OnceLock::new();
+    *COPIES.get_or_init(|| std::env::var_os("RY_TYPED_FILE_COPY").is_some())
+}
+
+/// Copies the file's code and data to `code`, inside a range [`map`] reserved, and makes them
+/// executable.
+#[cfg(unix)]
+unsafe fn copy_code(
+    file: &std::fs::File,
+    header: &Header,
+    code: *mut u8,
+    tail: usize,
+) -> Result<(), String> {
+    use std::os::unix::fs::FileExt;
+    let failed = |what: &str| format!("cannot copy its {what}: {}", std::io::Error::last_os_error());
+    // A failed fixed mapping may have released part of the range, so map it afresh.
+    let writable = libc::mmap(
+        code.cast(),
+        tail,
+        libc::PROT_READ | libc::PROT_WRITE,
+        libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
+        -1,
+        0,
+    );
+    if writable == libc::MAP_FAILED {
+        return Err(failed("code"));
+    }
+    // SAFETY: the range was just mapped writable with `tail` bytes.
+    let bytes = std::slice::from_raw_parts_mut(code, tail);
+    file.read_exact_at(bytes, header.code_offset)
+        .map_err(|failure| format!("cannot copy its code: {failure}"))?;
+    if libc::mprotect(code.cast(), tail, libc::PROT_READ | libc::PROT_EXEC) != 0 {
+        return Err(failed("code"));
+    }
+    // A processor whose instruction cache does not follow its data cache, such as an AArch64
+    // one, must drop what it holds for these addresses before it runs the copy.
+    wasmtime_internal_jit_icache_coherence::clear_cache(code.cast(), tail)
+        .map_err(|failure| format!("cannot copy its code: {failure}"))?;
+    wasmtime_internal_jit_icache_coherence::pipeline_flush_mt()
+        .map_err(|failure| format!("cannot copy its code: {failure}"))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
 unsafe fn map(_: &std::fs::File, _: &Header) -> Result<usize, String> {
     Err(String::from("this system does not map typed code files"))
 }

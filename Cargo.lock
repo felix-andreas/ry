@@ -4971,6 +4971,7 @@ dependencies = [
  "ssa",
  "stacker",
  "syntax",
+ "wasmtime-internal-jit-icache-coherence",
 ]
 
 [[package]]

@@ -99,6 +99,16 @@ expect stdout "[1] 9"
 expect stderr "typed: attached `total` for [I64, Dbl] -> Dbl from typedpkg's code file"
 unset RY_GC_STRESS
 
+# Where the code cannot map from the file, it is copied into the same range and runs the same.
+env RY_TYPED_FILE_COPY 1
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "[1] 718640.9"
+expect stdout "[1] 9"
+expect stderr "typed: attached `total` for [I64, Dbl] -> Dbl from typedpkg's code file"
+expect stderr lacks "typed: compiled"
+unset RY_TYPED_FILE_COPY
+
 # A saved typed function reads back typed too.
 file save.R
 | half <- function(x: F64) -> F64 x / 2
