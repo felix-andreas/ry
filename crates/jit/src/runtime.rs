@@ -871,7 +871,8 @@ pub unsafe extern "C" fn jit_record(activation: *mut Activation, pc: i64, value:
 /// enclosure when that is a function's frame, through the lookup slot's hint. Only a plain value
 /// or an evaluated promise counts, since that case runs no code and changes nothing; the result
 /// is the value with its low bit set when the frame does not own it (the enclosure bound it, or
-/// it is a promise's value, which the caller may hold too), or 0 when tier 0's lookup must run. The probe lives out of line because inlining both frame walks at every variable load
+/// it is a promise's value, which the caller may hold too), or 0 when tier 0's lookup must run.
+/// The probe lives out of line because inlining both frame walks at every variable load
 /// made a large body's code grow by about a hundred instructions per load.
 pub unsafe extern "C" fn jit_probe(
     activation: *const Activation,

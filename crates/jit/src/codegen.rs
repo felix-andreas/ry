@@ -3798,7 +3798,8 @@ impl<'p> Translator<'p> {
         let bound = self.builder.ins().iadd_imm_s(length, 1);
         let (index_value, in_range) =
             self.subscript_position(before.registers[index], index, bound, false);
-        // A variable of an enclosing frame is copied into this frame first, which tier 0 does.
+        // A value the frame does not own, an enclosing frame's variable or a promise's value, is
+        // copied into this frame first, which tier 0 does.
         let status = self.status(slot);
         let local =
             self.builder
