@@ -1,0 +1,29 @@
+[stdout]
+| [1] 6975
+| List of 2
+|  $ :List of 4
+|   ..$ : language show_call(w + i, )
+|   ..$ : language w + i
+|   ..$ : logi TRUE
+|   ..$ : int 2
+|  $ : int 23
+| [1] "first"  "i"      "n"      "second" "seen"   "third" 
+|  [1] 100 100 100 100 100 100 100 100 100 100 100 100
+| [1] 15
+| [1] "no 1"  "no 12"
+| [1] "left through an argument"
+| [1] 615
+| [1] 21839
+| [1] 250
+| exit 1 
+| exit 2 
+| exit 3 
+| [1] 12
+| [1] "kept"
+| [1] "i"     "mine"  "n"     "total"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("i", "mine", "n", "total")

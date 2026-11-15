@@ -1089,7 +1089,26 @@ unsafe fn do_as_function(call: &Call<'_>) -> R<Sexp> {
         formals.push((values::install(&name)?, value));
     }
     let formals = values::pairlist(&formals, SexpType::Pairlist)?;
-    crate::eval::make_closure(formals, list.element(count - 1), values::nil(), env)
+    let body = list.element(count - 1);
+    if !matches!(
+        body.kind(),
+        SexpType::Nil
+            | SexpType::Pairlist
+            | SexpType::Language
+            | SexpType::Symbol
+            | SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::String
+            | SexpType::Raw
+            | SexpType::List
+            | SexpType::Expression
+            | SexpType::Bytecode
+    ) {
+        return Err(call.error("invalid body for function"));
+    }
+    crate::eval::make_closure(formals, body, values::nil(), env)
 }
 
 unsafe fn do_vector(call: &Call<'_>) -> R<Sexp> {

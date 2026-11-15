@@ -163,9 +163,9 @@ pub struct Frame {
     /// something reads that variable through it ([`heap::object::gp::PARTIAL_FRAME`], from when
     /// it is [`Frame::env`] too), and takes them all if it outlives the frame.
     pub pending: Sexp,
-    /// A builtin wrapper run by [`eval::run_wrapper`]: its slots hold the values of arguments
-    /// that the generic path would have bound as promises, so a variable that moves into a
-    /// binding cell is wrapped as one.
+    /// A frame [`crate::eval::run_inlined`] runs without the closure's body, as for `do.call`:
+    /// its slots hold the values of arguments that the generic path would have bound as
+    /// promises, so a variable that moves into a binding cell is wrapped as one.
     pub inlined: bool,
     /// The [`heap::activity::label`] of what last asked for the slot frame's environment, while
     /// a profile summary is collected; [`NOT_REIFIED`] otherwise.

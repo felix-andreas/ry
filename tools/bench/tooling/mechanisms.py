@@ -52,6 +52,12 @@ kparent <- function() parent.frame()
 ksyscall <- function(x) sys.call()
 kinvisible <- function(x) invisible(x)
 kreturn <- function(x) { if (x > 0L) return(x); 0L }
+kpeek <- function() { parent.frame(); 1L }
+kwatched <- function(x) { kpeek(); x }
+kassign <- function(x) { assign("y", x); x }
+kassign_call <- function(x) { assign("y", x); k1(x) }
+kapply <- function(f, x) f(x)
+kbuiltin <- function(x) { unclass(x) }
 describe <- function(x, ...) UseMethod("describe")
 describe.default <- function(x, ...) if (is.null(x)) 0L else 1L
 describe.widget <- function(x, ...) if (is.null(x)) 0L else 2L
@@ -86,6 +92,11 @@ OPERATIONS = [
     ("call: `sys.call()`", "ksyscall(i)"),
     ("call: `invisible`", "kinvisible(i)"),
     ("call: early `return`", "kreturn(i)"),
+    ("call: its callee reads `parent.frame()`", "kwatched(i)"),
+    ("call: `assign` to a local", "kassign(i)"),
+    ("call: `assign` to a local, then a call", "kassign_call(i)"),
+    ("call: a function expression as an argument", "kapply(function(z) z + 1L, i)"),
+    ("call: body is one builtin call", "kbuiltin(i)"),
     ("call: function held in an environment", "holder$method(i)"),
     ("call: `do.call`", "do.call(k1, list(i))"),
     ("call: `eval` of a quoted call", "eval(quoted)"),
