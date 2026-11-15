@@ -14,7 +14,8 @@ use {
     crate::{
         annotations,
         builtins::{Arg, BuiltinDef, Call, special},
-        bytecode, eval,
+        bytecode,
+        eval,
         unwind::R,
         values::{self, nil},
     },
@@ -135,7 +136,9 @@ pub fn record(code: Sexp, value: Sexp) {
 fn kept_bytes(value: Sexp) -> usize {
     // SAFETY: `value` is a live object an R call returned.
     unsafe {
-        let own = |value: Sexp| object_size(value.kind(), values::length(value)).unwrap_or(0);
+        let own = |value: Sexp| {
+            object_size(value.kind(), values::length(value)).unwrap_or(0)
+        };
         let mut bytes = own(value);
         if value.kind() == SexpType::List {
             for index in 0..values::length(value) {

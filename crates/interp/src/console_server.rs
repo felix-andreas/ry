@@ -1063,9 +1063,7 @@ mod platform {
         interp().debugger.set(None);
         *lock(&DEBUG_CONNECTION) = Some(connection);
         let transport = Box::new(ConsoleTransport { connection });
-        interp()
-            .debugger
-            .set(Some(Box::new(Adapter::for_console(transport))));
+        interp().debugger.set(Some(Box::new(Adapter::for_console(transport))));
         debug_request(request, false);
     }
 

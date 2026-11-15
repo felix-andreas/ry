@@ -317,9 +317,7 @@ pub unsafe fn namespace_loaded(namespace: Sexp) {
     let mark = heap.handle_mark();
     let definitions = typed_closures(namespace);
     if let Some(tier) = bytecode::tier() {
-        (tier.ahead)(&Program {
-            definitions: &definitions,
-        });
+        (tier.ahead)(&Program { definitions: &definitions });
         crate::write_console(
             format!(
                 "ry: another build of ry installed {package}, so its typed functions compiled as \

@@ -990,10 +990,7 @@ fn private_key(started_in: Option<&Path>) -> Result<PrivateKey, String> {
                 KeySource::Project,
             )
         }
-        None => (
-            directory.join("outside-projects"),
-            KeySource::OutsideProjects,
-        ),
+        None => (directory.join("outside-projects"), KeySource::OutsideProjects),
     };
     match read_or_create_key(&path) {
         Ok(key) => Ok(PrivateKey { key, source }),
@@ -1148,10 +1145,7 @@ fn report(
         KeySource::OutsideProjects => "your key for code outside projects".to_owned(),
         KeySource::ThisRun(reason) => format!("a key for this run alone, because {reason}"),
     };
-    writeln!(
-        out,
-        "Private package names are hashed with {hashed_with}.\n"
-    )?;
+    writeln!(out, "Private package names are hashed with {hashed_with}.\n")?;
 
     writeln!(out, "## Time split\n")?;
     writeln!(out, "| activity | share | seconds |\n| --- | ---: | ---: |")?;
@@ -1500,7 +1494,8 @@ mod tests {
 
     #[test]
     fn a_key_file_is_created_once_and_read_after() {
-        let directory = std::env::temp_dir().join(format!("ry-profile-key-{}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("ry-profile-key-{}", std::process::id()));
         let path = directory.join("profile-keys").join("project");
         let created = read_or_create_key(&path).expect("the key file is created");
         assert_eq!(read_or_create_key(&path).ok(), Some(created));
