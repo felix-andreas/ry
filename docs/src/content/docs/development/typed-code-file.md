@@ -61,14 +61,16 @@ reason:
 | `matches over any tag` | its code tests for the shapes the installing process had confirmed, which depends on the process |
 | `assumes a lookup a session cannot check` | it resolved a name in an environment the file cannot name, or it took the result of an untyped function as a table value because of the function's return annotation |
 | `calls R with code a session cannot rebuild` | an R call site holds a value the file cannot store |
+| `makes an R call that is not in a body a session can find` | an R call site is not a call in the body of the closure or of a typed function lowered into it |
 | `calls a function it cannot name`, `has a type a file cannot name` | the same for a callee and for a type |
 | `does not compile into a file`, `does not link` | the code needs a relocation the writer does not resolve, or a relative call that does not reach |
 | `calls a function left out of the file` | it calls a version of the same file directly, and that version is left out for one of the reasons above |
 
 A closure copied at run time (an R6 method bound by `$new()`, a function after `environment<-`, the
 per-class copy of an S4 method) is another closure with another environment, so it compiles in the
-session, and the closure it was copied from still attaches. The versions a `--train` workload
-compiles are not in the file.
+session, and the closure it was copied from still attaches. A `--train` workload adds the versions
+it compiled for the package's own closures, among them a version for the type a `Num.from_r` or a
+`List.from_r` the checker cannot type gave in that run (a guessed conversion, below).
 
 ## Position-independent code
 
@@ -106,7 +108,7 @@ All integers in the header are little-endian `u64`s after the magic and a `u32` 
 
 | Part | Contents |
 |---|---|
-| Header | magic `RYTYPED\0`, format version 1, then the hash of the build identity, the `.rdb`'s length and modification time, the hash of the code target (triple and ISA flags), the metadata's length, the number of slots, the code's offset, the code's length, the data's length, where the shared code starts, the metadata's hash, the shared part's hash, and a reserved zero word |
+| Header | magic `RYTYPED\0`, format version 3, then the hash of the build identity, the `.rdb`'s length and modification time, the hash of the code target (triple and ISA flags), the metadata's length, the number of slots, the code's offset, the code's length, the data's length, where the shared code starts, the metadata's hash, the shared part's hash, and a reserved zero word |
 | Metadata | LEB128 varints, in this order: `strings`, `shapes`, `slots`, `lookups`, `sites`, `callees`, `functions` |
 | Padding | zeros up to the code's offset, a multiple of 64 KiB |
 | Code | the function bodies and their trampolines, then the code every function shares (the free entries) |
@@ -121,8 +123,9 @@ The metadata tables are:
 - **`lookups`**: per name a version resolved when it compiled: the symbol, whether a function was
   looked up, the environment the lookup starts from and the one it found the binding in, and the
   class of what it found (below).
-- **`sites`**: per R call site, every field of its `RCall`: the environment, the call expression, the
-  called function's lookup, per argument its tag, code, type and conversion, how the result is used,
+- **`sites`**: per R call site, every field of its `RCall`: the environment, where the call stands
+  (the closure whose body holds it, which is the version's own or one a lookup finds, and the item
+  positions from the body to it), the called function's lookup, per argument its tag, code, type and conversion, how the result is used,
   and the flags `diverges` and `effect_free`.
 - **`callees`**: per typed function a version calls, its lookup, the signature the caller compiled
   against, and whether it is a version of this file (a direct call) or reached through a `Callee`
@@ -159,8 +162,9 @@ the image ends the recording of the database's closures that the code file names
 
 1. Takes every typed closure the install recorded from the package's database, with its record
    offset and position.
-2. Compiles each root for its declared types, and repeats the pass while it confirms new shapes,
-   as `ry run --aot` does for a script.
+2. Takes as roots every version the training workload compiled for one of those closures, then
+   compiles each closure for its declared types, and repeats the pass while it confirms new
+   shapes, as `ry run --aot` does for a script.
 3. Lowers every version the roots reach through calls of the same database again for the file
    target, and leaves out what the table under "What the file holds" lists.
 4. Encodes, compiles, lays out and links the versions that remain. When one of them cannot be
@@ -207,19 +211,28 @@ attaching builds the same `Compiled` entry a session compile would:
 1. Find the version by the closure's note and the argument types. No version is a miss.
 2. Check the hash of the version's code.
 3. Resolve each lookup in the live session and require the class it recorded.
-4. Build each R call site's `RCall` from its recorded fields and fill its slot.
+4. Build each R call site's `RCall` from its recorded fields and fill its slot. The call and a
+   conversion's call are the nodes of the live closure's body at their recorded positions, not
+   copies: the interpreter knows a call by its node when it replays a recorded call or reads
+   what a conversion gave.
 5. For each callee: a version of this file attaches first, depth first, and must be noted from the
    same record and position; a typed function of another namespace attaches or compiles through
    `compiled_or_refusal`, and its entry fills the `Callee` slot. Its result type must match the
    signature the caller compiled against.
 6. Confirm the shapes the version constructs (`shapes::confirm`), as a session compile does.
+   For a site whose conversion was guessed, record that the conversion gave the type the version
+   was compiled for (`numbers::assume_conversion`). When this session already saw it give another
+   type, the version is refused; when it later gives another type, the native code gives up at
+   that site, the interpreter runs the call again with the values its R calls returned, and the
+   version is stale from then on, as session code compiled for a guess is.
 7. Insert the entry into `COMPILED` and root the closure. The entry's speculations are its own
    lookups and those of every callee, and its epoch is the earliest of theirs.
 
 Any failure marks the version as failed, prints one `RY_TYPED_LOG` line with the reason, and leaves
 the closure to compile in the session. A version whose direct callee is still being attached
 misses, so mutually recursive functions compile in the session; a function that calls itself
-attaches. An attached entry holds no JIT memory, so it does not count toward `MAX_COMPILED`. Every
+attaches. No package in the benchmark set or the typed benchmark programs has mutually recursive
+typed functions, so attaching a cycle as one unit waits for one that does. An attached entry holds no JIT memory, so it does not count toward `MAX_COMPILED`. Every
 later call checks the entry's speculations as it does for session code, so a rebinding after
 `unlockBinding` drops the entry the same way. `RY_AHEAD_MISS=1` makes every attach miss, which the
 tests of the fallback use.

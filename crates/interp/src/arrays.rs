@@ -225,18 +225,28 @@ unsafe fn do_array(call: &Call<'_>) -> R<Sexp> {
 /// unchanged: its `"Dict<K, V>"` name is for typed code, which lays the dictionary out by it.
 ///
 /// Around a `List.from_r(x)` the name is the type the checker gave the conversion, and the
-/// conversion gives a list of that type or fails ([`checked_conversion`]). The test is the
-/// call's text, because the preflight writes the wrapper around the standard library's
-/// `List.from_r` only.
+/// conversion gives a list of that type or fails ([`checked_conversion`]); around a
+/// `Num.from_r(x)` it is `"I64"` or `"F64"`, and the conversion gives that number or fails
+/// ([`numbers::checked_number`]). The test is the call's text, because the preflight writes the
+/// wrapper around the standard library's conversions only.
 unsafe fn do_items(call: &Call<'_>) -> R<Sexp> {
     let list = call.arg(0);
+    let converted = call.call.cdr().car();
+    let conversion = (converted.kind() == SexpType::Language
+        && converted.car().kind() == SexpType::Symbol)
+        .then(|| symbol_name(converted.car()));
+    if conversion.as_deref() == Some("Num.from_r") {
+        let expected = match values::as_string_scalar(call.arg(1))?.as_deref() {
+            Some("I64") => Items::I64,
+            Some("F64") => Items::Double,
+            _ => return Err(call.error("the number type must be \"I64\" or \"F64\"")),
+        };
+        return numbers::checked_number(converted, list, expected);
+    }
     if !list.is_array() {
         return Ok(list);
     }
-    let converted = call.call.cdr().car();
-    let converts = converted.kind() == SexpType::Language
-        && converted.car().kind() == SexpType::Symbol
-        && symbol_name(converted.car()) == "List.from_r";
+    let converts = conversion.as_deref() == Some("List.from_r");
     if length(list) != 0 && !converts {
         return Ok(list);
     }

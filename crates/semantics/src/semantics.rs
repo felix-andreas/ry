@@ -20,7 +20,7 @@ pub mod types;
 
 use {
     crate::{
-        check::Empty,
+        check::CheckedType,
         hir::{ExpressionKind, Symbol},
         infer::InferenceTable,
         naming::RefClassKey,
@@ -1383,9 +1383,10 @@ pub fn file_holds_ry_values(db: &dyn Db, file: SourceFile) -> bool {
 pub enum Elaboration {
     /// An unsuffixed number literal the checker typed as `I64`, which R reads as a `double`.
     I64Literal(TextRange),
-    /// A list expression the runtime may build empty, whose item storage only the checker
-    /// knows (`ItemCheck::typed_empties`), or a dictionary built from no entries.
-    TypedEmpty(TextRange, Empty),
+    /// An expression whose type only the checker knows and the runtime needs
+    /// (`ItemCheck::checked_types`): a list the runtime may build empty, a dictionary built from
+    /// no entries, or a `Num.from_r`.
+    CheckedType(TextRange, CheckedType),
     /// A one-line type in a function's signature, spelled as the checker reads it: with every
     /// alias expanded and a nominal type replaced by its representation, so that the runtime
     /// reads it without the type definitions ([`canonical_annotation`]).
@@ -1396,7 +1397,7 @@ impl Elaboration {
     pub fn range(&self) -> TextRange {
         match self {
             Elaboration::I64Literal(range)
-            | Elaboration::TypedEmpty(range, _)
+            | Elaboration::CheckedType(range, _)
             | Elaboration::Annotation(range, _) => *range,
         }
     }
@@ -1410,7 +1411,7 @@ pub fn file_elaborations(db: &dyn Db, file: SourceFile) -> Vec<Elaboration> {
         let Some(check) = item_check(db, span.item) else {
             continue;
         };
-        if check.i64_literals.is_empty() && check.typed_empties.is_empty() {
+        if check.i64_literals.is_empty() && check.checked_types.is_empty() {
             continue;
         }
         let Some(module) = item_hir(db, span.item) else {
@@ -1425,9 +1426,9 @@ pub fn file_elaborations(db: &dyn Db, file: SourceFile) -> Vec<Elaboration> {
         );
         elaborations.extend(
             check
-                .typed_empties
+                .checked_types
                 .iter()
-                .map(|&(id, items)| Elaboration::TypedEmpty(module.range(id) + offset, items)),
+                .map(|&(id, ty)| Elaboration::CheckedType(module.range(id) + offset, ty)),
         );
     }
     elaborations.extend(signature_elaborations(db, file));
@@ -4100,7 +4101,7 @@ mod tests {
             column_misses: Default::default(),
             match_findings: ThinVec::new(),
             i64_literals: ThinVec::new(),
-            typed_empties: ThinVec::new(),
+            checked_types: ThinVec::new(),
             top_level_bindings: vec![(
                 hir::Symbol::new("value"),
                 types::TypeScheme::monomorphic(integer),

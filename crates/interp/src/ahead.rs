@@ -14,6 +14,9 @@
 //! must see when the expression's turn comes. An expression whose lowering warns or fails is
 //! therefore left out here and lowered when the run reaches it, as without `--aot`.
 //!
+//! A file the script sources is compiled the same way when `source()` has parsed it
+//! ([`parsed_file`]), before `source()` evaluates any of it.
+//!
 //! An installed typed package brings its own code, compiled at install into its typed code file.
 //! When a namespace loads whose package has such a file only for another build of ry,
 //! [`namespace_loaded`] compiles its typed functions as the namespace loads and says to reinstall
@@ -80,9 +83,10 @@ pub struct Definition {
 
 /// The expressions of a script lowered by [`prepare`].
 pub struct Prepared {
-    /// Whether they were lowered with source references. An expression that runs after
-    /// `options(keep.source)` changed is lowered again, as a console would lower it.
-    keep_source: bool,
+    /// Which of them were lowered with source references, one bit per expression. An
+    /// expression that runs with `options(keep.source)` set otherwise is lowered again, as a
+    /// console would lower it.
+    keep_source: Vec<u64>,
 }
 
 /// Lowers the expressions of `script`, makes the closures of its top-level definitions and has
@@ -97,52 +101,119 @@ pub unsafe fn prepare(script: &Script<'_>, keep_source: bool) -> R<Prepared> {
 
 unsafe fn prepare_script(script: &Script<'_>, keep_source: bool) -> R<Prepared> {
     finish();
-    for node in &script.expressions {
+    let mut keep_source = keep_source;
+    let mut kept = vec![0u64; script.expressions.len().div_ceil(64)];
+    for (index, node) in script.expressions.iter().enumerate() {
         let state = &mut interp().ahead;
         state.lowering = true;
         state.warned = false;
         let lowered = lower_script_expression(script, node, keep_source);
+        if keep_source {
+            kept[index / 64] |= 1 << (index % 64);
+        }
         let state = &mut interp().ahead;
         state.lowering = false;
         // The error is the expression's to report when it runs, so lowering it again finds it.
         let lowered = lowered.ok().filter(|_| !state.warned);
         state.lowered.push(lowered);
+        if let Some(set) = lowered.and_then(|expression| sets_keep_source(expression)) {
+            keep_source = set;
+        }
     }
     let mut definitions = Vec::new();
     for index in 0..interp().ahead.lowered.len() {
         let Some(expression) = interp().ahead.lowered[index] else {
             continue;
         };
-        let Some((symbol, value)) = assignment(expression)? else {
-            continue;
-        };
-        if value.kind() != SexpType::Language || value.car() != symbols().function {
-            continue;
+        if let Some(definition) = definition(expression, false)? {
+            definitions.push(definition);
         }
-        let (formals, body, srcref) = (
-            value.cdr().car(),
-            value.cdr().cdr().car(),
-            value.cdr().cdr().cdr().car(),
-        );
-        let Some(key) = definition_key(formals, body) else {
-            continue;
-        };
-        let closure = values::triple(SexpType::Closure, formals, body, global_env())?;
-        interp().ahead.waiting.insert(key, closure);
-        if srcref != nil() {
-            values::set_attr(closure, symbols().srcref, srcref)?;
-        }
-        definitions.push(Definition { symbol, closure });
     }
+    compile(&definitions);
+    Ok(Prepared { keep_source: kept })
+}
+
+/// Compiles the typed functions a file that `source()` parsed defines at its top level, before
+/// `source()` evaluates the file, so that the calls the script makes after it find code. Called
+/// with every file `parse()` reads whole in the frame `env` while the session compiles ahead.
+/// Only a definition evaluated in the global environment binds the closure made here, so the
+/// file compiles only when `env` is a frame that will evaluate it there: one that binds `envir`
+/// itself, read without forcing anything, to the global environment, as `source()` at the top
+/// level does. A definition evaluated elsewhere makes its own closure, as without `--aot`.
+pub unsafe fn parsed_file(expressions: Sexp, env: Sexp) -> R<()> {
+    if !interp().ahead.enabled || interp().ahead.lowering || env == global_env() {
+        return Ok(());
+    }
+    // Only the frame's own binding counts: one an enclosing environment holds, such as a global
+    // `envir`, says nothing about where this frame evaluates the file.
+    let Some(mut envir) = crate::eval::peek_frame_variable(values::install("envir")?, env) else {
+        return Ok(());
+    };
+    if envir.kind() == SexpType::Promise {
+        envir = envir.car();
+    }
+    if envir != global_env() {
+        return Ok(());
+    }
+    let heap = crate::heap();
+    let mark = heap.handle_mark();
+    let mut definitions = Vec::new();
+    let mut result = Ok(());
+    for index in 0..values::length(expressions) {
+        match definition(expressions.element(index), true) {
+            Ok(Some(definition)) => definitions.push(definition),
+            Ok(None) => {}
+            Err(error) => {
+                result = Err(error);
+                break;
+            }
+        }
+    }
+    if result.is_ok() {
+        compile(&definitions);
+    }
+    heap.release_handles(mark);
+    result
+}
+
+/// The closure made ahead for `expression` when it is a definition `name <- function(...) ...`,
+/// which [`take`] gives the definition when the run reaches it. With `typed_only`, a definition
+/// of an untyped function gets none, because nothing would compile for it.
+unsafe fn definition(expression: Sexp, typed_only: bool) -> R<Option<Definition>> {
+    let Some((symbol, value)) = assignment(expression)? else {
+        return Ok(None);
+    };
+    if value.kind() != SexpType::Language || value.car() != symbols().function {
+        return Ok(None);
+    }
+    let (formals, body, srcref) = (
+        value.cdr().car(),
+        value.cdr().cdr().car(),
+        value.cdr().cdr().cdr().car(),
+    );
+    let Some(key) = definition_key(formals, body) else {
+        return Ok(None);
+    };
+    let closure = values::triple(SexpType::Closure, formals, body, global_env())?;
+    crate::heap().root(closure);
+    if typed_only && !crate::annotations::is_typed(closure) {
+        return Ok(None);
+    }
+    if srcref != nil() {
+        values::set_attr(closure, symbols().srcref, srcref)?;
+    }
+    interp().ahead.waiting.insert(key, closure);
+    Ok(Some(Definition { symbol, closure }))
+}
+
+/// Has the optimizing tier compile the typed closures among `definitions`.
+unsafe fn compile(definitions: &[Definition]) {
     if let Some(tier) = bytecode::tier() {
-        (tier.ahead)(&Program {
-            definitions: &definitions,
-        });
+        (tier.ahead)(&Program { definitions });
     }
     if discards_closures() {
         interp().ahead.waiting.clear();
     }
-    Ok(Prepared { keep_source })
 }
 
 /// Compiles the typed functions of `namespace`, which `loadNamespace` just returned, when the
@@ -257,7 +328,30 @@ fn discards_closures() -> bool {
 pub fn lowered(prepared: &Prepared, index: usize, keep_source: bool) -> Option<Sexp> {
     let expression = interp().ahead.lowered.get_mut(index)?.take()?;
     crate::heap().root(expression);
-    (prepared.keep_source == keep_source).then_some(expression)
+    let kept = prepared.keep_source.get(index / 64)? >> (index % 64) & 1 == 1;
+    (kept == keep_source).then_some(expression)
+}
+
+/// The value a top-level `options(keep.source = TRUE)` or `FALSE` sets, so [`prepare`] lowers
+/// the expressions after it as the run will. Any other way of setting the option is not
+/// foreseen, and the expressions it affects are lowered again when they run.
+unsafe fn sets_keep_source(expression: Sexp) -> Option<bool> {
+    if expression.kind() != SexpType::Language
+        || expression.car().kind() != SexpType::Symbol
+        || expression.car().car().bytes() != b"options"
+    {
+        return None;
+    }
+    values::pairlist_items(expression.cdr())
+        .iter()
+        .rev()
+        .find(|(tag, _)| tag.kind() == SexpType::Symbol && tag.car().bytes() == b"keep.source")
+        .and_then(|&(_, value)| {
+            (value.kind() == SexpType::Logical && values::length(value) == 1)
+                .then(|| values::ints(value)[0])
+                .filter(|&flag| flag != heap::object::NA_LOGICAL)
+                .map(|flag| flag != 0)
+        })
 }
 
 /// Whether a warning lowering is about to signal is held back because [`prepare`] is lowering

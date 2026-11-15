@@ -666,11 +666,11 @@ pub fn elaborate(input: &[u8], elaborations: &[Elaboration]) -> Vec<u8> {
                 program.extend_from_slice(b"i64");
                 copied = end;
             }
-            Elaboration::TypedEmpty(_, items) => {
+            Elaboration::CheckedType(_, ty) => {
                 program.extend_from_slice(&input[copied..start]);
                 program.extend_from_slice(b".ry_items(");
                 copied = start;
-                open.push((end, items.name()));
+                open.push((end, ty.name()));
             }
             // A type printed with a non-ASCII field name would not stand for the bytes of a
             // script in another encoding, so it stays as written.

@@ -220,9 +220,12 @@ A function compiles ahead when it is defined at the top level of the script as
 `name <- function(...)` and each parameter's annotation says which values arrive from R: a number,
 `Bool`, `Str`, a `List` of those, a tag union or a table such as `DataFrame` or
 `DataFrame{price: double[]}`. The typed functions it calls compile with it, whatever their
-parameters. These compile at their first call instead:
+parameters. A file the script sources into the global environment, as `source("helpers.R")` does,
+compiles the same way when `source()` has read it, before any of it runs. These compile at their
+first call instead:
 
-- a function defined inside a block, another function or a file the script sources;
+- a function defined inside a block or another function, or in a file sourced any other way,
+  such as by `sys.source()` or by `source(local = TRUE)` inside a function;
 - a function of a package, unless the package's [typed code file](#build-and-install) holds it,
   in which case it runs code compiled at install. Under `--aot`, a package whose typed code file
   another build of ry wrote compiles its typed functions as it loads instead, and prints
@@ -502,7 +505,10 @@ that use the same package share that code. The install log counts what the file 
 ```
 
 A function the file leaves out, such as one with a `match` over any tag, is counted by reason after
-`left out:` and compiles at its first call; `RY_TYPED_LOG=1` names each function that attaches and
+`left out:` and compiles at its first call. With `--train`, the file also holds the versions the training run
+compiled that an install cannot compile on its own, such as one for the type a `Num.from_r` gave in
+that run. A session in which that conversion gives another type runs the call in the interpreter
+instead; `RY_TYPED_LOG=1` names each function that attaches and
 each one that compiles. `ry build --aot` on a package does what `ry install` does (`-l DIR` names
 the library), and on a script it is a usage error that points at `ry run --aot`.
 `R CMD INSTALL --ry-no-typed-code` writes no typed code file. A typed code file another build of ry
