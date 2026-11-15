@@ -322,18 +322,20 @@ const PACKAGE_TIERINGS: [Tiering; 2] = [
 ];
 
 /// `ry run --aot` changes when typed functions compile and nothing a script can observe. Each
-/// seed writes a script of typed functions and runs it every way [`TIERINGS`] lists, and every
-/// run must end with the same exit code, standard output and standard error. A script whose
+/// seed writes a script of typed functions and runs it every way [`TIERINGS`] lists and as an
+/// executable `ry build --aot --exe` built, and every run must end with the same exit code,
+/// standard output and standard error. A script whose
 /// meaning does not rest on its annotations also runs with the annotations erased, which must
 /// print the same, and a script whose definitions mean the same in a package also runs with them
-/// installed as one, from a script that attaches it.
+/// installed as one, from a script that attaches it, and with them in a file the script sources.
 ///
 /// The scripts are built from the shapes that make compiling ahead differ from compiling at a
 /// first call: a function called before its callee is defined, a name defined twice or bound to
 /// another function between calls, a definition inside a block, parameters typed by an alias, a
 /// conversion of what R returns, one whose vector is of a narrower type than the checker's or
-/// empty, a literal that warns when it is lowered, a statement that collects garbage between
-/// its arguments, a changed `keep.source`, and a script that stops with an error partway.
+/// empty, one whose type changes between calls after an R call that printed, a literal that
+/// warns when it is lowered, a statement that collects garbage between its arguments, a changed
+/// `keep.source`, and a script that stops with an error partway.
 #[test]
 fn typed_scripts_agree_however_they_compile() {
     if let Some(reason) =
@@ -370,7 +372,27 @@ fn typed_scripts_agree_however_they_compile() {
             log.join("\n"),
         )
     };
+    let run_executable = |executable: &Path| {
+        let output = Command::new(executable)
+            .current_dir(directory.path())
+            .env("RY_TYPED_LOG", "1")
+            .env_remove("RY_JIT")
+            .env_remove("RY_AHEAD_MISS")
+            .env("XDG_CACHE_HOME", directory.path().join(".cache"))
+            .output()
+            .expect("run the executable");
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let (log, errors): (Vec<&str>, Vec<&str>) =
+            stderr.lines().partition(|line| line.starts_with("typed: "));
+        (
+            status_code(output.status),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            errors.join("\n"),
+            log.join("\n"),
+        )
+    };
     let (mut scripts, mut ahead, mut nothing_late, mut packaged, mut attached) = (0, 0, 0, 0, 0);
+    let (mut sourced_ahead, mut from_executable) = (0, 0);
     for_each_seed(16, |seed| {
         let (text, erasable) = typed_script(&mut SplitMix64(seed));
         let script = directory.path().join(format!("script_{seed}.R"));
@@ -393,6 +415,32 @@ fn typed_scripts_agree_however_they_compile() {
                 nothing_late += usize::from(!after.contains("typed: compiled for"));
             }
         }
+        // Built into an executable, the script attaches the code its build compiled.
+        let executable = directory.path().join(format!("executable_{seed}"));
+        let build = Command::new(env!("CARGO_BIN_EXE_ry"))
+            .args(["build", "--aot", "--exe"])
+            .arg(&script)
+            .arg("-o")
+            .arg(&executable)
+            .current_dir(directory.path())
+            .env_remove("RY_JIT")
+            .env_remove("RY_AHEAD_MISS")
+            .env("XDG_CACHE_HOME", directory.path().join(".cache"))
+            .output()
+            .expect("run ry build");
+        assert!(
+            build.status.success(),
+            "seed {seed}: building the executable failed:\n{}\n{text}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let (exe_code, exe_stdout, exe_stderr, log) = run_executable(&executable);
+        assert_eq!(
+            (code, &stdout, &stderr),
+            (exe_code, &exe_stdout, &exe_stderr),
+            "seed {seed}: the executable differs from {}:\n{text}",
+            TIERINGS[0].name
+        );
+        from_executable += usize::from(log.contains("from the executable's code file"));
         if let Some((definitions, rest)) = package_parts(&statements_of(&text)) {
             let name = format!("typedseed{seed}");
             let package = directory.path().join(&name);
@@ -451,6 +499,34 @@ fn typed_scripts_agree_however_they_compile() {
                 }
             }
             packaged += 1;
+            // The same definitions in a file the script sources compile ahead as `source()`
+            // parses the file, before it evaluates any of it.
+            let sourced = directory.path().join(format!("definitions_{seed}.R"));
+            fs::write(&sourced, definitions.join("\n") + "\n").expect("write the definitions");
+            let user = directory.path().join(format!("source_{seed}.R"));
+            fs::write(
+                &user,
+                format!("source({sourced:?})\n{}\n", rest.join("\n")),
+            )
+            .expect("write the script that sources the definitions");
+            for tiering in [&TIERINGS[2], &TIERINGS[3]] {
+                let (sourced_code, sourced_stdout, sourced_stderr, log) = run(&user, tiering);
+                assert_eq!(
+                    (code, &stdout, &stderr),
+                    (sourced_code, &sourced_stdout, &sourced_stderr),
+                    "seed {seed}: the definitions sourced from a file print something else \
+                     ({}):\n{text}",
+                    tiering.name
+                );
+                if tiering.environment.is_empty() {
+                    sourced_ahead += usize::from(
+                        log.lines()
+                            .filter(|line| line.contains(" ahead of time in "))
+                            .nth(1)
+                            .is_some_and(|line| !line.starts_with("typed: compiled 0 functions")),
+                    );
+                }
+            }
         }
         if erasable {
             let erased = directory.path().join(format!("erased_{seed}.R"));
@@ -476,10 +552,16 @@ fn typed_scripts_agree_however_they_compile() {
     // call by design: a rebound name, a definition inside a block, a `Num.from_r`.
     assert!(
         scripts < 8
-            || (ahead * 4 >= scripts * 3 && nothing_late > 0 && packaged > 0 && attached > 0),
+            || (ahead * 4 >= scripts * 3
+                && nothing_late > 0
+                && packaged > 0
+                && attached > 0
+                && sourced_ahead > 0
+                && from_executable * 2 >= scripts),
         "of {scripts} scripts, {ahead} compiled functions ahead, {nothing_late} compiled \
-         nothing later, {packaged} ran as an installed package and {attached} attached code \
-         from its typed code file"
+         nothing later, {packaged} ran as an installed package, {attached} attached code \
+         from its typed code file, {sourced_ahead} compiled a sourced file's functions ahead \
+         and {from_executable} attached code from its executable"
     );
 }
 
@@ -713,7 +795,7 @@ fn typed_script(rng: &mut SplitMix64) -> (String, bool) {
     let mut erasable = true;
     for index in 0..rng.below(4) + 2 {
         let n = rng.below(9) + 2;
-        let mut lines = match rng.below(15) {
+        let mut lines = match rng.below(16) {
             0 => {
                 let operator = ["+", "*", "-"][rng.below(3)];
                 let mut definitions = vec![
@@ -870,6 +952,30 @@ fn typed_script(rng: &mut SplitMix64) -> (String, bool) {
                      third = c({n}.5, 2.5)))"
                 ),
             ],
+            14 => {
+                // The checker cannot type what `get` finds, so the code compiles for the type
+                // the conversion gave first, and gives up when it gives another after an R call
+                // that printed. Printing an `I64` shows ry's suffix, which erased code lacks.
+                erasable = false;
+                vec![
+                    format!("assign(\"rate_{index}\", {n}.5)"),
+                    format!(
+                        "read_{index} <- function() {{\n  cat(\"read {index}\\n\")\n  \
+                         get(\"rate_{index}\")\n}}"
+                    ),
+                    format!(
+                        "scaled_{index} <- function(k: I64) -> F64 {{\n  cat(\"before \
+                         {index}\\n\")\n  y <- Num.from_r(read_{index}())\n  print(y)\n  \
+                         Num.to_f64(k)\n}}"
+                    ),
+                    format!("print(scaled_{index}({n}))"),
+                    format!("print(scaled_{index}({n}))"),
+                    format!("assign(\"rate_{index}\", as.integer({n}))"),
+                    format!("print(scaled_{index}({n}))"),
+                    format!("assign(\"rate_{index}\", {n}.25)"),
+                    format!("print(scaled_{index}({n}))"),
+                ]
+            }
             _ => vec![
                 format!("plain_{index} <- function(x) x + 1"),
                 format!(
@@ -2756,9 +2862,14 @@ impl Journey {
                     Err(format!("{path} lacks `{needle}`:\n{text}"))
                 }
             }
-            ["run", program @ ("ry" | "single-ry"), arguments @ ..] => {
+            ["run", program, arguments @ ..]
+                if matches!(*program, "ry" | "single-ry") || program.starts_with("./") =>
+            {
                 let executable = if *program == "single-ry" {
                     single_ry()?.clone()
+                } else if program.starts_with("./") {
+                    // An executable the scenario built, such as `ry build --aot --exe` writes.
+                    self.root.join(program)
                 } else {
                     // `ry build` and `ry install` find `ry-rcmd` beside libR, and cargo test
                     // only builds it for the scenario's R home.

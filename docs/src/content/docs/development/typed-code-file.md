@@ -1,6 +1,6 @@
 ---
 title: The typed code file
-description: "How an installed package carries the machine code of its typed functions: position-independent code mapped from one file per package, a per-process offset table, attachment per function at its first call, the file format and the tests"
+description: "How an installed package or an executable carries the machine code of its typed functions: position-independent code mapped from one file per package, a per-process offset table, attachment per function at its first call, the file format and the tests"
 ---
 
 `ry install` compiles a package's typed functions and writes their machine code into the installed
@@ -61,14 +61,16 @@ reason:
 | `matches over any tag` | its code tests for the shapes the installing process had confirmed, which depends on the process |
 | `assumes a lookup a session cannot check` | it resolved a name in an environment the file cannot name, or it took the result of an untyped function as a table value because of the function's return annotation |
 | `calls R with code a session cannot rebuild` | an R call site holds a value the file cannot store |
+| `makes an R call that is not in a body a session can find` | an R call site is not a call in the body of the closure or of a typed function lowered into it |
 | `calls a function it cannot name`, `has a type a file cannot name` | the same for a callee and for a type |
 | `does not compile into a file`, `does not link` | the code needs a relocation the writer does not resolve, or a relative call that does not reach |
 | `calls a function left out of the file` | it calls a version of the same file directly, and that version is left out for one of the reasons above |
 
 A closure copied at run time (an R6 method bound by `$new()`, a function after `environment<-`, the
 per-class copy of an S4 method) is another closure with another environment, so it compiles in the
-session, and the closure it was copied from still attaches. The versions a `--train` workload
-compiles are not in the file.
+session, and the closure it was copied from still attaches. A `--train` workload adds the versions
+it compiled for the package's own closures, among them a version for the type a `Num.from_r` or a
+`List.from_r` the checker cannot type gave in that run (a guessed conversion, below).
 
 ## Position-independent code
 
@@ -106,7 +108,7 @@ All integers in the header are little-endian `u64`s after the magic and a `u32` 
 
 | Part | Contents |
 |---|---|
-| Header | magic `RYTYPED\0`, format version 1, then the hash of the build identity, the `.rdb`'s length and modification time, the hash of the code target (triple and ISA flags), the metadata's length, the number of slots, the code's offset, the code's length, the data's length, where the shared code starts, the metadata's hash, the shared part's hash, and a reserved zero word |
+| Header | magic `RYTYPED\0`, format version 3, then the hash of the build identity, the `.rdb`'s length and modification time, the hash of the code target (triple and ISA flags), the metadata's length, the number of slots, the code's offset, the code's length, the data's length, where the shared code starts, the metadata's hash, the shared part's hash, and a reserved zero word |
 | Metadata | LEB128 varints, in this order: `strings`, `shapes`, `slots`, `lookups`, `sites`, `callees`, `functions` |
 | Padding | zeros up to the code's offset, a multiple of 64 KiB |
 | Code | the function bodies and their trampolines, then the code every function shares (the free entries) |
@@ -121,8 +123,9 @@ The metadata tables are:
 - **`lookups`**: per name a version resolved when it compiled: the symbol, whether a function was
   looked up, the environment the lookup starts from and the one it found the binding in, and the
   class of what it found (below).
-- **`sites`**: per R call site, every field of its `RCall`: the environment, the call expression, the
-  called function's lookup, per argument its tag, code, type and conversion, how the result is used,
+- **`sites`**: per R call site, every field of its `RCall`: the environment, where the call stands
+  (the closure whose body holds it, which is the version's own or one a lookup finds, and the item
+  positions from the body to it), the called function's lookup, per argument its tag, code, type and conversion, how the result is used,
   and the flags `diverges` and `effect_free`.
 - **`callees`**: per typed function a version calls, its lookup, the signature the caller compiled
   against, and whether it is a version of this file (a direct call) or reached through a `Callee`
@@ -159,8 +162,9 @@ the image ends the recording of the database's closures that the code file names
 
 1. Takes every typed closure the install recorded from the package's database, with its record
    offset and position.
-2. Compiles each root for its declared types, and repeats the pass while it confirms new shapes,
-   as `ry run --aot` does for a script.
+2. Takes as roots every version the training workload compiled for one of those closures, then
+   compiles each closure for its declared types, and repeats the pass while it confirms new
+   shapes, as `ry run --aot` does for a script.
 3. Lowers every version the roots reach through calls of the same database again for the file
    target, and leaves out what the table under "What the file holds" lists.
 4. Encodes, compiles, lays out and links the versions that remain. When one of them cannot be
@@ -207,19 +211,28 @@ attaching builds the same `Compiled` entry a session compile would:
 1. Find the version by the closure's note and the argument types. No version is a miss.
 2. Check the hash of the version's code.
 3. Resolve each lookup in the live session and require the class it recorded.
-4. Build each R call site's `RCall` from its recorded fields and fill its slot.
+4. Build each R call site's `RCall` from its recorded fields and fill its slot. The call and a
+   conversion's call are the nodes of the live closure's body at their recorded positions, not
+   copies: the interpreter knows a call by its node when it replays a recorded call or reads
+   what a conversion gave.
 5. For each callee: a version of this file attaches first, depth first, and must be noted from the
    same record and position; a typed function of another namespace attaches or compiles through
    `compiled_or_refusal`, and its entry fills the `Callee` slot. Its result type must match the
    signature the caller compiled against.
 6. Confirm the shapes the version constructs (`shapes::confirm`), as a session compile does.
+   For a site whose conversion was guessed, record that the conversion gave the type the version
+   was compiled for (`numbers::assume_conversion`). When this session already saw it give another
+   type, the version is refused; when it later gives another type, the native code gives up at
+   that site, the interpreter runs the call again with the values its R calls returned, and the
+   version is stale from then on, as session code compiled for a guess is.
 7. Insert the entry into `COMPILED` and root the closure. The entry's speculations are its own
    lookups and those of every callee, and its epoch is the earliest of theirs.
 
 Any failure marks the version as failed, prints one `RY_TYPED_LOG` line with the reason, and leaves
 the closure to compile in the session. A version whose direct callee is still being attached
 misses, so mutually recursive functions compile in the session; a function that calls itself
-attaches. An attached entry holds no JIT memory, so it does not count toward `MAX_COMPILED`. Every
+attaches. No package in the benchmark set or the typed benchmark programs has mutually recursive
+typed functions, so attaching a cycle as one unit waits for one that does. An attached entry holds no JIT memory, so it does not count toward `MAX_COMPILED`. Every
 later call checks the entry's speculations as it does for session code, so a rebinding after
 `unlockBinding` drops the entry the same way. `RY_AHEAD_MISS=1` makes every attach miss, which the
 tests of the fallback use.
@@ -236,6 +249,37 @@ ry: another build of ry installed rates, so its typed functions compiled as it l
 A package with no file at all is not compiled at load, because telling an untyped package from one
 installed with `--ry-no-typed-code` would mean reading every function.
 
+## Executables
+
+`ry build --aot --exe main.R` writes a script's code file into an executable: a copy of `ry` with
+a payload appended (`crates/ry/src/executable.rs`).
+
+| Part | Contents |
+|---|---|
+| `ry` | the running `ry` executable, byte for byte |
+| Padding | zeros up to a multiple of 64 KiB, so the code maps straight from the executable |
+| Code file | a typed code file in the format above, for the script's top-level definitions |
+| Metadata | the run flags as a little-endian `i32`, then four fields, each a little-endian `u64` length and its bytes: the script's name, its elaborated text, and the runtime library and base R tree of a development build (empty for a release) |
+| Trailer | five little-endian `u64`s (the code file's offset and length, the metadata's offset and length, the metadata's FNV-1a hash) and the magic `ry-exe\0\x01` |
+
+At start `ry` reads its own last 48 bytes. Without the magic it is `ry`. With it, a trailer whose
+offsets do not meet end to end or whose metadata's hash does not match is an error that asks for
+a new build, and a sound one runs the script as `ry run --aot` does, without the checker.
+
+A script has no lazy-load database, so its code file names a closure differently:
+
+- **Record and position.** The closure of the top-level definition at index `i` among the script's
+  expressions is record `i`, position 0. A definition that is not a typed closure has no entry.
+- **Database stamp.** The header's database length and modification time hold the elaborated
+  text's length and its hash, so code built from another text never attaches.
+- **Package.** The file's package is `""`, which no package can be called, and a `File` lookup
+  of a script function requires a closure noted from the executable's script.
+
+The closures a run makes are noted with these names before the script's first statement runs, so
+the first call of each attaches from the executable through the same checks as a package's file.
+A function the file does not hold compiles at its first call, and a file the script sources is
+read from disk and compiles as it does under `ry run --aot`.
+
 ## Trust
 
 A code file is machine code that the process runs, like the shared objects in a package's `libs`
@@ -251,6 +295,6 @@ database that changed, not an attacker.
 | `install-typed-package.scenario` | the attach line; `RY_GC_STRESS` and the copy path over attached code; `ry build --aot`; a file from another build under `ry run --aot`; a `match` over a closed union, a record parameter and a sort comparator attached after the process interned other shapes; a closure copied at run time; a reinstall in a running session |
 | `fuzz_typed_code_parse` (`crates/typed/tests/test_file.rs`, `cargo fuzz` target `typed_code_parse`) | random valid metadata reads back as written, and truncated or bit-flipped bytes never panic the parser |
 | `fuzz_typed_code_file` (`crates/ry/tests/test_scenarios.rs`) | an installed file damaged in its header, metadata or code never attaches, and a second write against one install gives the same bytes |
-
-`ry build --aot --exe main.R`, which appends a script's code file to a copy of the `ry` executable,
-is not built (`backlog.md`, "Open: ahead-of-time compilation").
+| `build-exe.scenario` | an executable prints what `ry run --aot` prints for the same arguments, attaches every function and compiles none, and compiles at first calls under `RY_AHEAD_MISS=1` |
+| `typed_scripts_agree_however_they_compile` with executables | every generated typed script built with `ry build --aot --exe` prints what the interpreter prints, and at least half of them attach from the executable |
+| `fuzz_executable_payloads` (`crates/ry/tests/test_fuzz.rs`, `cargo fuzz` target `executable_payload`) | a payload reads back as written, and a damaged trailer or metadata reads as damaged or as no payload, never as a payload that lies outside the file |

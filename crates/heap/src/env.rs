@@ -807,9 +807,8 @@ impl Frame {
             && let Some(duplicate) = (position + 1..(self.formals & !SHADOWED) as usize)
                 .find(|&later| self.bindings[later].symbol == symbol)
         {
-            self.bindings.with_index(|index, bindings| {
-                index.insert(symbol, duplicate as u32, bindings)
-            });
+            self.bindings
+                .with_index(|index, bindings| index.insert(symbol, duplicate as u32, bindings));
         }
         if self.removed as usize * 2 > self.bindings.len() {
             self.compact();

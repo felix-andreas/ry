@@ -277,8 +277,9 @@ pub unsafe fn slot_binding(env: Sexp, symbol: Sexp, forcing: bool) -> Option<Sex
         return None;
     }
     let frame = &interp().frames[pending_owner(env)];
-    // An inlined wrapper's slot holds the value where a cell would hold the forced promise of
-    // the caller's variable ([`box_slots`]), which a reader of the binding itself expects.
+    // A slot of a frame run without its body ([`run_inlined`]) holds the value where a cell
+    // would hold the forced promise of the caller's variable ([`box_slots`]), which a reader
+    // of the binding itself expects.
     if frame.inlined && !forcing {
         return None;
     }
@@ -586,6 +587,22 @@ pub unsafe fn peek_variable(symbol: Sexp, env: Sexp) -> Option<Sexp> {
         .then_some(value)
 }
 
+/// The value `env`'s own frame binds `symbol` to, read without forcing or calling anything, as
+/// [`peek_variable`] reads it but without looking in an enclosing environment.
+pub unsafe fn peek_frame_variable(symbol: Sexp, env: Sexp) -> Option<Sexp> {
+    let cell = if env.has_gp(gp::PENDING_FRAME) {
+        match pending_name(env, symbol) {
+            PendingName::Slot(value) => return (value != missing_arg()).then_some(value),
+            PendingName::Enclosure(_) => return None,
+        }
+    } else {
+        crate::heap().frame_cell(env, symbol)?
+    };
+    let value = cell.cdr();
+    (!cell.has_gp(gp::ACTIVE_BINDING) && value != missing_arg() && value != unbound())
+        .then_some(value)
+}
+
 /// Settles `promise`, unforced, with the `value` forcing it would give, which the caller found
 /// without forcing it ([`pending_name`]).
 pub unsafe fn settle_unforced(promise: Sexp, value: Sexp) -> R<Sexp> {
@@ -780,9 +797,10 @@ unsafe fn box_slots(owner: usize, slots: std::ops::Range<usize>) -> R<()> {
         frame.missing,
         frame.pending,
     );
-    // A variable the caller passed to an inlined wrapper sits in its slot as the value; the
-    // generic path would have bound a promise of the variable, forced by the builtin call, and
-    // `substitute` reads the variable from it. Constants bind as themselves either way.
+    // A variable the caller passed to a frame run without its body ([`run_inlined`]) sits in
+    // its slot as the value; the generic path would have bound a promise of the variable,
+    // forced by the body, and `substitute` reads the variable from it. Constants bind as
+    // themselves either way.
     let sources = if frame.inlined {
         direct_sources(function, frame.call)?
     } else {
@@ -2411,6 +2429,18 @@ pub unsafe fn apply_closure(
     run_on_heap_frame(call, function, args, sys_parent, supplied, Entry::Unchecked)
 }
 
+/// Runs the call `call` of the typed closure `function` with `args` in the interpreter, as a
+/// call the native tier did not take runs, for a call whose native code gave up
+/// ([`crate::replay::replay`]).
+pub unsafe fn run_interpreted(
+    call: Sexp,
+    function: Sexp,
+    args: &[Arg],
+    sys_parent: Sexp,
+) -> R<Sexp> {
+    run_on_heap_frame(call, function, args, sys_parent, None, Entry::Unchecked)
+}
+
 /// Runs a call of `function` in a fresh environment that binds `args`, the path of a call
 /// that gets no slot frame. An environment can be read after the call that made an argument
 /// reference returns, so a reference among `args` becomes the promise it stands for first
@@ -3681,8 +3711,10 @@ unsafe fn run_frame_general(
                     interp().slot_owner = owner;
                     return result;
                 }
-                let body = function.cdr();
-                bytecode::run_body(function, body, env)
+                match crate::replay::body(function)? {
+                    Some(replayed) => eval(replayed, env),
+                    None => bytecode::run_body(function, function.cdr(), env),
+                }
             })
         });
         (signature, result)
@@ -5393,6 +5425,12 @@ unsafe fn do_function(call: &Call<'_>) -> R<Sexp> {
 pub unsafe fn make_closure(formals: Sexp, body: Sexp, srcref: Sexp, env: Sexp) -> R<Sexp> {
     if !matches!(formals.kind(), SexpType::Nil | SexpType::Pairlist) {
         return Err(error("invalid formal argument list for \"function\""));
+    }
+    if matches!(
+        body.kind(),
+        SexpType::Closure | SexpType::Builtin | SexpType::Special
+    ) {
+        return Err(error("invalid body argument for 'function'"));
     }
     let closure = match crate::ahead::take(formals, body, env) {
         Some(closure) => closure,

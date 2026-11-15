@@ -23,6 +23,20 @@ expect file summary.md lacks "secret_scoring_model"
 expect file summary.md lacks "classify_customer"
 expect file summary.md lacks "confidential_input"
 expect file summary.md lacks "hidden failure text"
+expect file summary.md "Private package names are hashed with your key for code outside projects."
+
+# A run whose hot function is too small to compile says so: the events count compiled bodies and
+# refused compile attempts apart, and a table counts the refusals by the reason `RY_JIT_LOG=1`
+# prints for each.
+file tiny.R
+| add_one <- function(x) x + 1
+| for (i in 1:20000) add_one(i)
+run ry run --profile-summary tiny.md tiny.R
+expect exit 0
+expect file tiny.md "| JIT compilations | 0 |"
+expect file tiny.md "| JIT compile attempts refused | 1 |"
+expect file tiny.md "## JIT compile attempts refused, by reason"
+expect file tiny.md "| the body does too little natively to repay entering compiled code | 1 |"
 
 # The same summary covers a package load and the code run after it, as a CI job that runs its
 # test suite through `ry load -e` would.
@@ -34,7 +48,7 @@ file NAMESPACE
 file R/pricing.R
 | secret_pricing_rule <- function(confidential_amount) confidential_amount * 1.07
 
-run ry load --profile-summary load-summary.md -e "for (i in 1:20000) secret_pricing_rule(i)" -e "cat('loaded\n')"
+run ry load --profile-summary load-summary.md -e "for (i in 1:200000) secret_pricing_rule(i)" -e "cat('loaded\n')"
 expect exit 0
 expect stdout "loaded"
 expect file load-summary.md "## Time split"
@@ -42,6 +56,32 @@ expect file load-summary.md "closure calls"
 expect file load-summary.md lacks "secret_pricing_rule"
 expect file load-summary.md lacks "confidential_amount"
 expect file load-summary.md lacks "privatepkg"
+expect file load-summary.md "Private package names are hashed with this project's key."
+
+# A private package's label is a hash keyed with a secret that ry keeps for the project in the
+# user's cache directory, outside the project. Two summaries of the project agree, so they can be
+# compared, but someone who guesses the name cannot confirm the guess by hashing it. A key in
+# `RY_PROFILE_KEY` replaces the project's.
+run ry load --profile-summary load-again.md -e "for (i in 1:200000) secret_pricing_rule(i)"
+expect exit 0
+env RY_PROFILE_KEY 000102030405060708090a0b0c0d0e0f
+run ry load --profile-summary load-keyed.md -e "for (i in 1:200000) secret_pricing_rule(i)"
+expect exit 0
+expect file load-keyed.md "Private package names are hashed with the key in RY_PROFILE_KEY."
+unset RY_PROFILE_KEY
+file labels.R
+| label <- function(file) {
+|   text <- readLines(file)
+|   unique(regmatches(text, regexpr("private-[0-9a-f]{8}", text)))
+| }
+| project <- label("load-summary.md")
+| stopifnot(length(project) == 1L)
+| stopifnot(identical(project, label("load-again.md")))
+| stopifnot(length(label("load-keyed.md")) == 1L, !identical(project, label("load-keyed.md")))
+| cat(sort(list.files(".cache/ry/profile-keys")), sep = "\n")
+run ry run labels.R
+expect exit 0
+expect stdout "outside-projects"
 
 # A directory in the environment gives every session its own summary, child processes included,
 # so the workers a test suite starts are profiled too. A relative directory is taken from where

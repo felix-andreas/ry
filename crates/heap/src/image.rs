@@ -941,6 +941,7 @@ impl Heap {
 
         self.remembered.clear();
         self.escaped.clear();
+        self.escaped_collected = false;
         self.escaped_lists.clear();
         self.zero_count.clear();
         self.returned.clear();

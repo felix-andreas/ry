@@ -5,16 +5,14 @@ description: Install the ry binary and set up your editor
 
 ## The binary
 
-The [latest release](https://github.com/felix-andreas/ry/releases/latest) has binaries for Linux
-and macOS. Windows users install
-[0.4.1-beta](https://github.com/felix-andreas/ry/releases/tag/0.4.1-beta) for now.
-Each archive holds a single `ry` binary:
+The [latest release](https://github.com/felix-andreas/ry/releases/latest) has binaries for Linux,
+macOS and Windows. Each archive holds a single `ry` binary:
 
 | Platform | Release | Archive |
 | --- | --- | --- |
 | Linux x86_64, glibc 2.35 or newer | latest | `ry-x86_64-unknown-linux-gnu.tar.gz` |
 | macOS on Apple silicon | latest | `ry-aarch64-apple-darwin.tar.gz` |
-| Windows x86_64 | 0.4.1-beta | `ry-x86_64-pc-windows-gnullvm.zip` |
+| Windows x86_64 | latest | `ry-x86_64-pc-windows-gnullvm.zip` |
 
 ```bash
 curl -fsSL https://github.com/felix-andreas/ry/releases/latest/download/ry-x86_64-unknown-linux-gnu.tar.gz | tar xz
@@ -22,9 +20,17 @@ sudo mv ry /usr/local/bin/
 ry --version
 ```
 
-On macOS, download `ry-aarch64-apple-darwin.tar.gz` the same way. To pin a version, replace
-`latest/download` with `download/<tag>`. On Windows, put the folder holding `ry.exe` on your
-`PATH`. Other ways to install:
+On macOS, download `ry-aarch64-apple-darwin.tar.gz` the same way. On Windows, download
+`ry-x86_64-pc-windows-gnullvm.zip` in PowerShell, unpack it, and put the folder holding `ry.exe`
+on your `PATH`:
+
+```powershell
+curl.exe -fsSLO https://github.com/felix-andreas/ry/releases/latest/download/ry-x86_64-pc-windows-gnullvm.zip
+Expand-Archive ry-x86_64-pc-windows-gnullvm.zip -DestinationPath ry
+.\ry\ry.exe --version
+```
+
+To pin a version, replace `latest/download` with `download/<tag>`. Other ways to install:
 
 ```bash
 cargo +nightly install --git https://github.com/felix-andreas/ry ry-lang   # from source
@@ -51,12 +57,8 @@ snapshots for early feedback, so use a numbered release for anything else.
 ## R
 
 `ry check`, `ry fmt` and the language server never run R. The commands that do (`ry run`, `ry load`,
-`ry test`, `ry document`) run on ry's runtime, which needs base R:
-
-| ry | Base R comes from |
-| --- | --- |
-| The latest release, or built from source | a copy of base R 4.6.2 inside `ry`; no GNU R needed |
-| 0.4.1-beta (Windows) | a GNU R installation, 4.3 or newer, built as a shared library |
+`ry test`, `ry document`) run on ry's runtime, which carries its own copy of base R 4.6.2 on every
+platform, so no GNU R is needed.
 
 `ry R` runs your code on GNU R itself, so it always needs a GNU R installation.
 [CLI](/reference/cli#how-ry-finds-r) covers `R_HOME`, BLAS and LAPACK, and where ry caches its
@@ -72,8 +74,8 @@ runtime.
 | RStudio | Formatting only: under **Tools → Global Options → Code → Formatting**, set **Code formatter** to **External** and the command to `ry fmt`. |
 | Any LSP client | Run `ry server` as the language server for R files. |
 
-On Linux and macOS the extension bundles the `ry` of its release. On other platforms it bundles no
-binary and runs the `ry` on your `PATH`. The `ry.path` setting overrides either. The language
+On Linux, macOS and Windows the extension bundles the `ry` of its release. On other platforms it
+bundles no binary and runs the `ry` on your `PATH`. The `ry.path` setting overrides either. The language
 server reads the project's `ry.toml`, so the editor and `ry check` report the same findings.
 [Editor settings](/reference/configuration#editor-settings) lists the extension's options.
 

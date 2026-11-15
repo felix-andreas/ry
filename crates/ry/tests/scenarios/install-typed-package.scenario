@@ -140,7 +140,7 @@ expect stderr "typed: attached `total` for [I64, Dbl] -> Dbl from typedpkg's cod
 
 run ry build --aot use.R
 expect exit 2
-expect stderr "use.R is a script, and `ry build --aot` compiles a package: run the script with `ry run --aot use.R`"
+expect stderr "use.R is a script, and `ry build --aot` compiles a package: build an executable from the script with `ry build --aot --exe use.R`"
 
 # Under `ry run --aot`, a package whose typed code file is another build's compiles its typed
 # functions as its namespace loads, and the run says to reinstall it.
@@ -248,7 +248,7 @@ file reinstall.R
 run ry run --runtime ry reinstall.R
 expect exit 0
 expect stdout "14i64"
-expect stderr "typed: shapepkg's typed code file is not used: it was written for another copy of the package"
+expect stderr "typed: shapepkg's code file is not used: it was written for another copy of the package"
 expect stderr "typed: compiled for [I64] -> I64"
 
 # A function left out of the file takes the functions that call it with it, and the rest of the
@@ -280,3 +280,127 @@ expect exit 0
 expect stdout "[1] 2.414214\n[1] 6"
 expect stderr "typed: attached `other` for [Dbl] -> Dbl from droppkg's code file"
 expect stderr lacks "is not used"
+
+# A `match` over any tag tests for the shapes the install had seen, so it attaches when this
+# session has seen no other shape its patterns name, and compiles in the session when it has. A
+# shape seen after it attached makes it stale, as code compiled in the session would be.
+file trees/DESCRIPTION
+| Package: treepkg
+| Version: 1.0.0
+| Title: Trees
+| Description: A match over any tag.
+| License: MIT
+file trees/NAMESPACE
+| export(nodes)
+file trees/R/trees.R
+| # typing: strict
+| type Tree = :Leaf | :Node(left: Tree, right: Tree)
+| grow <- function(depth: I64) -> Tree {
+|   if (depth == 0) @Tree(:Leaf) else @Tree(:Node(left = grow(depth - 1), right = grow(depth - 1)))
+| }
+| count <- function(tree: Tree) -> I64 {
+|   match (tree) {
+|     :Leaf => 1
+|     :Node(left = l, right = r) => count(l) + count(r)
+|   }
+| }
+| nodes <- function(depth: I64) -> I64 count(grow(depth))
+
+run ry install trees -l library
+expect exit 0
+expect stdout "typed code: closures=3 written=4"
+
+file trees-use.R
+| library(treepkg, lib.loc = "library")
+| print(nodes(4))
+| stray <- function(x: F64) -> F64 {
+|   t <- :Node(left = x, right = x)
+|   x
+| }
+| print(stray(1.5))
+| print(nodes(5))
+
+run ry run --runtime ry trees-use.R
+expect exit 0
+expect stdout "16i64\n[1] 1.5\n32i64"
+expect stderr "typed: attached `count` for [Tag(4294967295)] -> I64 from treepkg's code file"
+expect stderr "typed: attached `nodes` for [I64] -> I64 from treepkg's code file"
+expect stderr "typed: compiled for [Tag(4294967295)] -> I64"
+
+file trees-stray.R
+| stray <- function(x: F64) -> F64 {
+|   t <- :Node(left = x, right = x)
+|   x
+| }
+| print(stray(1.5))
+| library(treepkg, lib.loc = "library")
+| print(nodes(4))
+
+run ry run --runtime ry trees-stray.R
+expect exit 0
+expect stdout "[1] 1.5\n16i64"
+expect stderr "typed: `count` for [Tag(4294967295)] is not attached from treepkg's code file: a `match` in it tests for fewer shapes than this session has seen"
+expect stderr "typed: compiled for [Tag(4294967295)] -> I64"
+
+# `ry install --train` also writes every version the training run compiled, such as one for the
+# type a conversion the checker cannot type gave in the run. A session where the conversion gives
+# another type runs that call again in the interpreter and compiles no code for it from then on.
+file trained/DESCRIPTION
+| Package: trainpkg
+| Version: 1.0.0
+| Title: Trained
+| Description: A version only a training run compiles.
+| License: MIT
+file trained/NAMESPACE
+| export(scaled)
+file trained/R/trained.R
+| rate <- function() get("factor_value", envir = globalenv())
+| note <- function() cat("before\n")
+| scaled <- function(k: I64) -> I64 {
+|   note()
+|   y <- Num.from_r(rate())
+|   print(y)
+|   k
+| }
+file train.R
+| assign("factor_value", 2.5, envir = globalenv())
+| scaled(1)
+| scaled(2)
+
+run ry install trained -l library
+expect exit 0
+expect stdout "typed code: closures=1 written=0 (left out: does not compile (1))"
+
+run ry install trained -l library --train train.R
+expect exit 0
+expect stdout "typed code: closures=1 written=1"
+
+file trained-use.R
+| library(trainpkg, lib.loc = "library")
+| assign("factor_value", 1.5)
+| print(scaled(3))
+| assign("factor_value", as.integer(7))
+| print(scaled(4))
+| print(scaled(5))
+
+run ry run --runtime ry trained-use.R
+expect exit 0
+expect stdout "before\n[1] 1.5\n3i64\nbefore\n7i64\n4i64\nbefore\n7i64\n5i64"
+expect stderr "typed: attached `scaled` for [I64] -> I64 from trainpkg's code file"
+expect stderr "typed: `scaled` runs in the interpreter: `Num.from_r(rate())` gave `I64`, which its native code was not compiled for"
+expect stderr "typed: refused [I64]"
+expect stderr lacks "typed: compiled for"
+
+# The attached code runs `note()` before the conversion that gives up, and the interpreter takes
+# its recorded value instead of calling it again, so each call prints once. A session in which
+# the interpreter already saw the conversion give another type does not attach the version.
+file trained-seen.R
+| library(trainpkg, lib.loc = "library")
+| assign("factor_value", as.integer(7))
+| print(scaled(identity(3)))
+| print(scaled(4))
+
+run ry run --runtime ry trained-seen.R
+expect exit 0
+expect stdout "before\n7i64\n3i64\nbefore\n7i64\n4i64"
+expect stderr "typed: `scaled` for [I64] is not attached from trainpkg's code file: a conversion it guessed the type of gave another type in this session"

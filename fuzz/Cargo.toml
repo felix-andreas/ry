@@ -123,6 +123,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "executable_payload"
+path = "fuzz_targets/executable_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "unserialize"
 path = "fuzz_targets/unserialize.rs"
 required-features = ["polars"]

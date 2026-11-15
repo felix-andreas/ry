@@ -829,7 +829,7 @@ unsafe fn run_script(text: &str, source_name: &str) -> Outcome {
 }
 
 /// `getOption("keep.source")`: whether console input keeps its source references.
-unsafe fn keep_source() -> bool {
+pub unsafe fn keep_source() -> bool {
     values::as_logical_scalar(crate::envir::get_option("keep.source")) == 1
 }
 

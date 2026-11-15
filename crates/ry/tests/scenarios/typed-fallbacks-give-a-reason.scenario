@@ -25,6 +25,39 @@ expect stdout "[1] 4"
 expect stderr "typed: `double_it` runs in the interpreter: argument 1 is `Num.from_r(sqrt(y))`, which R code wrote"
 expect stderr lacks "recorded no reason"
 
+# The native tier reads ahead an argument that runs no R code: constants, variables, arithmetic,
+# and list, record, tuple and tag literals of them. A call with such arguments runs natively. An
+# `I64` sum that overflows is left to the interpreter, which raises the error.
+file literals.R
+| alias Shape = :Circle(radius: F64) | :Square(side: F64)
+| mean <- function(xs: List<F64>) -> F64 List.sum(xs) / Num.to_f64(List.len(xs))
+| area <- function(shape: Shape) -> F64 {
+|   match (shape) {
+|     :Circle(radius = r) => 3 * r * r
+|     :Square(side = s) => s * s
+|   }
+| }
+| far <- function(p: Record{x: F64, y: F64}) -> F64 p$x + p$y
+| twice <- function(k: I64) -> I64 k * 2
+| print(mean([2.5, 3.5]))
+| print(area(:Square(side = 3.25)))
+| print(far((x = 1.5, y = 2)))
+| print(twice(3 + 1))
+| print(twice(9223372036854775807 + 1))
+
+run ry run --runtime ry literals.R
+expect exit 1
+expect stdout "[1] 3\n[1] 10.5625\n[1] 3.5\n8i64"
+expect stderr "typed: compiled for [Vector { item: Dbl, array: true }] -> Dbl"
+expect stderr "typed: compiled for [Tag(4294967295)] -> Dbl"
+expect stderr "typed: compiled for [I64] -> I64"
+expect stderr "typed: `twice` runs in the interpreter: argument 1 is `9223372036854775807i64 + 1i64`, which R code wrote"
+expect stderr "integer overflow in `+`: the result does not fit I64"
+expect stderr lacks "`mean` runs in the interpreter"
+expect stderr lacks "`area` runs in the interpreter"
+expect stderr lacks "`far` runs in the interpreter"
+expect stderr lacks "argument 1 is `3i64 + 1i64`"
+
 # A tag from R converts with its payloads, ry lists included. A bare `[]` does not record what
 # its items are, so a tag holding one runs in the interpreter, and the reason says so.
 file tags.R

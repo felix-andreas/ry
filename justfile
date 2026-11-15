@@ -240,6 +240,12 @@ bench-base *args:
     cargo build --release -p ry-lang -p libr -p rcmd
     python3 -I tools/bench/internal/base/run.py {{ args }}
 
+# Times the kernels cut from a user's profile of a package test suite (S4 construction, scalar calls of small base closures,
+# date conversion, xts and data.table calls, parsing and reading source files) on GNU R and ry's runtime with checksums, e.g. `just bench-ci --only k1,k3`.
+bench-ci *args:
+    cargo build --release -p ry-lang -p libr -p rcmd
+    python3 -I tools/bench/internal/ci/run.py {{ args }}
+
 # Times each List, Str, Dict and Result function on ry against its fastest GNU R equivalent (base R, purrr, stringr, stringi from R_LIBS_USER), e.g.
 # `just bench-stdlib` (every function at n = 1e6), `just bench-stdlib Str. 1e5`, or `just bench-stdlib "" 1e6 --sort ratio --write tools/bench/internal/stdlib/results.md`.
 bench-stdlib filter="" n="1e6" *args:
@@ -702,12 +708,14 @@ fuzz-differential seed="0" count="200" engines="ry-tier0,ry-jit":
 
 # Every oracle case under collection stress (`RY_GC_STRESS`), compared with ry unstressed;
 # `just gc-torture young` keeps survivors collectable (`RY_GC_STRESS=young`), which finds an
-# object only a Rust local holds. `ORACLE_ENGINE=ry-gctorture cargo test -p oracle` compares
-# the cases with GNU R instead.
+# object only a Rust local holds, and `just gc-torture seeded` collects at random gaps with the
+# write barrier checked (`RY_GC_STRESS=seed:N`, `RY_GC_VERIFY`), which finds a store that skipped
+# the barrier; `FUZZ_SEED` picks its gaps. `ORACLE_ENGINE=ry-gctorture cargo test -p oracle`
+# compares the cases with GNU R instead.
 gc-torture mode="plain":
     cargo build -q -p ry-lang -p libr -p rcmd
     FUZZ_ITERS=1000000 cargo test -p oracle --test test_cases \
-        {{ if mode == "young" { "cases_survive_young_gc_torture" } else { "cases_survive_gc_torture" } }} \
+        {{ if mode == "young" { "cases_survive_young_gc_torture" } else if mode == "seeded" { "native_cases_keep_the_write_barrier_under_seeded_gc_torture" } else { "cases_survive_gc_torture" } }} \
         -- --exact --nocapture
 
 # The language-server simulator over many seeds: `just simulate 1000 120` runs seeds 0 to 999 with
