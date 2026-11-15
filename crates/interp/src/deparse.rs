@@ -1025,6 +1025,7 @@ impl Deparser {
     /// The calls ry's own syntax lowers to, printed back in that syntax.
     unsafe fn ry_call(&mut self, form: RyForm, arguments: Sexp) {
         match form {
+            RyForm::Elaborated => self.deparse(arguments.car()),
             RyForm::Record | RyForm::Tuple => {
                 self.print("(");
                 self.in_list += 1;
@@ -1700,6 +1701,10 @@ enum RyForm {
     Tuple,
     Tag,
     Match,
+    /// `.ry_items(x, "F64")`, which the preflight writes around an expression whose type only
+    /// the checker knows (`preflight::elaborate` in the `ry` crate): it prints as the `x` the
+    /// code's author wrote.
+    Elaborated,
 }
 
 /// Which ry form a call of `name` with `arguments` is, when its arguments have that form's
@@ -1711,6 +1716,13 @@ unsafe fn ry_form(name: &[u8], arguments: Sexp) -> Option<RyForm> {
         b".ry_record" if !items.is_empty() && named == items.len() => Some(RyForm::Record),
         b".ry_tuple" if named == 0 => Some(RyForm::Tuple),
         b".ry_array" if named == 0 => Some(RyForm::Array),
+        b".ry_items"
+            if named == 0
+                && matches!(items[..], [_, (_, hint)]
+                    if hint.kind() == SexpType::String && length(hint) == 1) =>
+        {
+            Some(RyForm::Elaborated)
+        }
         b".ry_tag" => {
             let (first_tag, first) = items.first()?;
             (*first_tag == nil() && first.kind() == SexpType::String && length(*first) == 1)

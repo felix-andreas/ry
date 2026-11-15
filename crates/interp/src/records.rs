@@ -272,6 +272,30 @@ unsafe fn do_tag(call: &Call<'_>) -> R<Sexp> {
     make(Some(tag), &items).map_err(|message| call.error(message))
 }
 
+/// The value the constructor `name` (`.ry_record`, `.ry_tuple` or `.ry_tag`) builds from `items`,
+/// its arguments' names (`nil` for none) and values, or `None` where the constructor raises an
+/// error, which it then reports itself when the code runs. The native tier builds a literal
+/// argument with it before the call, as forcing the argument would build it.
+pub unsafe fn constructed(name: &str, items: &[(Sexp, Sexp)]) -> Option<Sexp> {
+    let named = |&(tag, _): &(Sexp, Sexp)| {
+        (tag.kind() == SexpType::Symbol && !symbol_name(tag).is_empty()).then_some(tag)
+    };
+    let (tag, payload) = match name {
+        ".ry_tag" => {
+            let ((_, tag), payload) = items.split_first()?;
+            (Some(tag_id(*tag).ok()?), payload)
+        }
+        ".ry_record" if !items.is_empty() && items.iter().all(|item| named(item).is_some()) => {
+            (None, items)
+        }
+        ".ry_tuple" if items.iter().all(|item| named(item).is_none()) => (None, items),
+        _ => return None,
+    };
+    let items: Vec<(Option<Sexp>, Sexp)> =
+        payload.iter().map(|item| (named(item), item.1)).collect();
+    make(tag, &items).ok()
+}
+
 /// `try result`: the payload of an `:Ok`, or a `return` of the whole `:Err` from the function
 /// whose body evaluates it. A payload of several items comes back as a tuple of them.
 unsafe fn do_try(call: &Call<'_>) -> R<Sexp> {
