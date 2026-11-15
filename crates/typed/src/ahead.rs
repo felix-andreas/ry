@@ -163,7 +163,7 @@ pub(crate) unsafe fn defined_later(symbol: Sexp, start: Sexp) -> Option<Sexp> {
 
 /// The argument types a typed closure declares, as [`crate::call`] reads them from values of
 /// the declared types.
-unsafe fn declared_params(closure: Sexp) -> Result<SmallVec<[Type; 4]>, Refusal> {
+pub(crate) unsafe fn declared_params(closure: Sexp) -> Result<SmallVec<[Type; 4]>, Refusal> {
     let formals = closure.car();
     let body = interp::bytecode::closure_body(closure);
     let (declared, _) = annotations::declared_formals(formals, body);

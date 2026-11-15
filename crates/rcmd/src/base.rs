@@ -445,7 +445,8 @@ fn run_image_writer(
                 library.as_os_str(),
                 work.as_os_str(),
                 OsStr::new("none"),
-                OsStr::new("false"),
+                OsStr::new("image"),
+                OsStr::new("no-typed"),
             ]),
         ) {
             eprintln!("Warning: the code image of '{name}' was not written\n{error}");

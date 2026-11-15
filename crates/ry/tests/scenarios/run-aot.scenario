@@ -71,6 +71,25 @@ expect exit 1
 expect stdout lacks "second"
 expect stderr "(converted from warning) integer literal 1.5L contains decimal; using numeric value"
 
+# A function defined after `options(keep.source = TRUE)` keeps its source, and the pass up front
+# lowers it with that source, so it compiles once and prints as written.
+
+file sourced.R
+| options(keep.source = TRUE)
+| bump <- function(x: I64) -> I64 {
+|   # one more
+|   x + 1
+| }
+| print(bump(1))
+| print(bump)
+
+run ry run --runtime ry --aot sourced.R
+expect exit 0
+expect stdout "2i64\nfunction(x: I64) -> I64 {\n  # one more\n"
+expect stderr "typed: compiled 1 function ahead of time in "
+expect stderr "typed: compiled for [I64] -> I64 in"
+expect stderr lacks "us\ntyped: compiled for"
+
 # A table parameter that spells out its columns compiles ahead like a bare `DataFrame`.
 
 file table.R

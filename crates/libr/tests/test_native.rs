@@ -530,6 +530,57 @@ fn objects_survive_collection_and_finalizers_run() {
     assert_eq!(finalized(&r), before + 101, "old handouts are released");
 }
 
+/// Native code may permute the elements of a list or character vector through any element
+/// pointer, read-only ones included, as data.table's `setcolorder` does with `memcpy` through
+/// `DATAPTR_RO`. The collector remembers an old vector's young children per 128-element card, so
+/// a young element moved from a dirty card onto a clean one must still be found by the next
+/// minor collection, whose barrier check fails otherwise.
+#[test]
+fn element_pointers_keep_permuted_young_elements_alive() {
+    let r = r();
+    rytest(&r);
+    let accessors = [
+        "DATAPTR_RO",
+        "(DATAPTR_RO)",
+        "STRING_PTR_RO or VECTOR_PTR_RO",
+        "DATAPTR_OR_NULL",
+        "DATAPTR",
+        "STRING_PTR or VECTOR_PTR",
+    ];
+    for kind in [VECSXP, STRSXP] {
+        for (via, accessor) in accessors.iter().enumerate() {
+            let vector = r.keep(unsafe { (r.api().Rf_allocVector)(kind, 300) });
+            r.collect(true);
+            let value = 1000 + via as c_int;
+            r.call(
+                "rytest_set_young",
+                &[vector, r.integer(250), r.integer(value)],
+            )
+            .expect("the store");
+            r.call("rytest_reverse_handles", &[vector, r.integer(via as c_int)])
+                .expect("the permutation");
+            r.verify(true);
+            r.collect(false);
+            r.collect(false);
+            r.verify(false);
+            let moved = 300 - 1 - 250;
+            if kind == STRSXP {
+                assert_eq!(
+                    r.strings(vector)[moved],
+                    Some(format!("young {value}")),
+                    "a string moved through {accessor}"
+                );
+            } else {
+                assert_eq!(
+                    r.integers(r.element(vector, moved)),
+                    vec![value],
+                    "a list element moved through {accessor}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn altrep_objects_dispatch_to_their_class() {
     let r = r();

@@ -289,8 +289,12 @@ pub enum Constant {
     Str(u64, u64),
     I64(i64),
     Null,
-    /// A static object, such as a tag without a payload, whose count never changes.
-    Object(u64),
+    /// The static object of a shape with no fields, such as a tag without a payload, whose
+    /// count never changes.
+    Object(u32),
+    /// The id of a shape, as an `Int`. Shape ids are numbered per process, so a code file
+    /// reads it from its offset table.
+    Shape(u32),
 }
 
 /// Arithmetic on two scalars or vectors.

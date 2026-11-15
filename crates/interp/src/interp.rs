@@ -98,6 +98,7 @@ pub mod profile_summary;
 pub mod random;
 pub mod rd;
 pub mod records;
+pub mod replay;
 pub mod serialize;
 pub mod session;
 pub mod sort;
@@ -1151,6 +1152,7 @@ impl RootSource for InterpRoots {
             interp.connections.trace(marker);
             interp.annotations.trace(marker);
             interp.ahead.trace(marker);
+            crate::replay::trace(marker);
             interp.moves.trace(marker);
             interp.library_tags.trace(marker);
         }

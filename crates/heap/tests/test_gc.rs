@@ -788,7 +788,7 @@ fn an_escaped_list_keeps_what_native_code_stored_into_it() {
     unsafe {
         let escaped = heap.alloc_vector(SexpType::List, 1).expect("alloc");
         heap.add_global_root(escaped);
-        heap.escape(escaped);
+        heap.escape(escaped, true);
         let mark = heap.handle_mark();
         let vector = big_vector(&mut heap, 1.5);
         heap.root(vector);
@@ -1177,8 +1177,8 @@ fn stores_through_an_escaped_pointer_survive_minor_collections() {
         heap.root(strings);
         heap.root(list);
         heap.collect(Collection::Minor);
-        heap.escape(strings);
-        heap.escape(list);
+        heap.escape(strings, true);
+        heap.escape(list, true);
         // Native code stores through the raw element pointers, bypassing the barrier.
         let text = heap
             .mk_char(b"escaped text", Encoding::Native)
@@ -1210,6 +1210,265 @@ fn stores_through_an_escaped_pointer_survive_minor_collections() {
         assert_eq!(strings.element(0).bytes(), b"escaped text");
         assert_eq!(strings.element(1).bytes(), b"stored before return");
         assert_eq!(list.element(0).slice::<i32>(), &[7]);
+    }
+}
+
+/// Native code permutes a large list and stores into it through element pointers, read-only and
+/// writable, as data.table's `setcolorder` permutes columns through `DATAPTR_RO`, while
+/// collections of every kind run at random points, some during the escape. The barrier check
+/// runs before each collection short of a major one, and every element must hold what the model
+/// says. The list spans several 128-element cards, so a permutation moves young elements between
+/// dirty and clean cards. Whenever no escape is pending, each element's reference count must equal
+/// the number of slots holding it, in the list and in a second list that never escapes, because a
+/// barriered store into an escaped list must not be counted again when the escape retires.
+#[test]
+fn element_pointer_permutations_keep_the_write_barrier() {
+    for_each_seed(200, |seed| {
+        let mut rng = SplitMix64(0xca7d_5eed ^ seed);
+        let mut heap = Heap::new();
+        heap.update_policy(|policy| policy.verify = true);
+        unsafe {
+            let length = 129 + rng.below(600);
+            let list = heap
+                .alloc_vector(SexpType::List, length as isize)
+                .expect("alloc");
+            heap.add_global_root(list);
+            let holder = heap.alloc_vector(SexpType::List, 16).expect("alloc");
+            heap.add_global_root(holder);
+            // A list that is still young when it escapes takes the other retirement path.
+            if rng.chance(3, 4) {
+                heap.collect(Collection::Major);
+            }
+            let mut model: Vec<Option<i32>> = vec![None; length];
+            let mut next = 0;
+            // Whether the list is escaped, and whether any pointer to it was writable.
+            let mut escaped: Option<bool> = None;
+            // Whether native code stored a duplicate through a read-only pointer, after which
+            // counts may only err high.
+            let mut overcounted = false;
+            let mut young_integer = |heap: &mut Heap| {
+                next += 1;
+                let value = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+                *value.slice_mut::<i32>().first_mut().expect("one element") = next;
+                (value, next)
+            };
+            for step in 0..80 {
+                match rng.below(11) {
+                    0 | 1 => {
+                        let index = rng.below(length);
+                        let (value, number) = young_integer(&mut heap);
+                        heap.set_element(list, index, value);
+                        model[index] = Some(number);
+                        if rng.chance(1, 3) {
+                            heap.set_element(holder, rng.below(16), value);
+                        }
+                    }
+                    2 => {
+                        let writable = rng.chance(1, 3);
+                        heap.escape(list, writable);
+                        escaped = Some(escaped.unwrap_or(false) || writable);
+                    }
+                    3 | 4 if escaped.is_some() => {
+                        let elements = list.slice_mut::<Sexp>();
+                        let start = rng.below(length);
+                        let end = start + rng.below(length - start) + 1;
+                        if rng.chance(1, 2) {
+                            elements[start..end].reverse();
+                            model[start..end].reverse();
+                        } else {
+                            let other = rng.below(length);
+                            elements.swap(start, other);
+                            model.swap(start, other);
+                        }
+                    }
+                    5 if escaped == Some(true) => {
+                        let index = rng.below(length);
+                        let (value, number) = young_integer(&mut heap);
+                        list.slice_mut::<Sexp>()[index] = value;
+                        model[index] = Some(number);
+                    }
+                    6 => {
+                        heap.retire_escaped();
+                        escaped = None;
+                    }
+                    7 => {
+                        let (value, _) = young_integer(&mut heap);
+                        heap.set_attrib(list, value);
+                    }
+                    8 if escaped.is_some() => {
+                        let from = rng.below(length);
+                        let to = rng.below(length);
+                        let elements = list.slice_mut::<Sexp>();
+                        elements[to] = elements[from];
+                        model[to] = model[from];
+                        overcounted |= escaped == Some(false);
+                    }
+                    _ => {
+                        let kind = match rng.below(8) {
+                            0 => Collection::Major,
+                            1 | 2 => Collection::Intermediate,
+                            _ => Collection::Minor,
+                        };
+                        heap.collect(kind);
+                        for (index, expected) in model.iter().enumerate() {
+                            let element = list.element(index);
+                            let found = (element.kind() == SexpType::Integer)
+                                .then(|| element.slice::<i32>()[0]);
+                            assert_eq!(
+                                found, *expected,
+                                "seed {seed}, step {step}: element {index} after a {kind:?} collection"
+                            );
+                        }
+                    }
+                }
+                if escaped.is_none() {
+                    let slots: Vec<Sexp> = list
+                        .slice::<Sexp>()
+                        .iter()
+                        .chain(holder.slice::<Sexp>())
+                        .chain(std::iter::once(&list.attrib()))
+                        .copied()
+                        .filter(|element| element.kind() == SexpType::Integer)
+                        .collect();
+                    for &element in &slots {
+                        let holding = slots.iter().filter(|&&other| other == element).count();
+                        let count = element.refcount() as usize;
+                        assert!(
+                            count == holding || overcounted && count > holding,
+                            "seed {seed}, step {step}: an element {holding} slots hold counts {count}"
+                        );
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// The ways a list can stop being what its escape's entry describes before the escape retires:
+/// its contents move to another list, or the list dies.
+#[test]
+fn lists_that_change_hands_during_an_escape_keep_their_counts() {
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| policy.verify = true);
+    unsafe {
+        let nil = heap.known().nil;
+        let element = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        let list = heap.alloc_vector(SexpType::List, 2).expect("alloc");
+        heap.root(list);
+        heap.set_element(list, 0, element);
+        heap.escape(list, true);
+        let grown = heap.alloc_vector(SexpType::List, 4).expect("alloc");
+        heap.root(grown);
+        heap.move_elements(grown, list);
+        heap.retire_escaped();
+        assert_eq!(grown.element(0), element);
+        assert_eq!(
+            element.refcount(),
+            2,
+            "a list whose pointer escaped is copied, so both lists count the element"
+        );
+        heap.release_handles(0);
+
+        let holder = heap.alloc_vector(SexpType::List, 1).expect("alloc");
+        heap.root(holder);
+        let counted = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        let stored = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        heap.root(stored);
+        let dying = heap.alloc_vector(SexpType::List, 1).expect("alloc");
+        heap.set_element(holder, 0, dying);
+        heap.set_element(dying, 0, counted);
+        heap.escape(dying, true);
+        dying.slice_mut::<Sexp>()[0] = stored;
+        heap.set_element(holder, 0, nil);
+        heap.collect(Collection::Major);
+        assert_eq!(
+            counted.refcount(),
+            0,
+            "the list that died released what its snapshot counted"
+        );
+        assert_eq!(
+            stored.refcount(),
+            0,
+            "and not what native code stored into it uncounted"
+        );
+        heap.retire_escaped();
+    }
+}
+
+/// Counted changes to a list while native code holds a pointer to its elements, after native
+/// code stored through that pointer uncounted. The counts may err high, never low: a value
+/// another list holds must keep a count.
+#[test]
+fn counted_changes_during_an_escape_never_lose_a_count() {
+    unsafe fn setup(heap: &mut Heap, length: isize) -> (Sexp, Sexp) {
+        unsafe {
+            let list = heap.alloc_vector(SexpType::List, length).expect("alloc");
+            heap.add_global_root(list);
+            heap.mark_resizable(list);
+            let other = heap.alloc_vector(SexpType::List, 1).expect("alloc");
+            heap.add_global_root(other);
+            (list, other)
+        }
+    }
+    unsafe fn integer(heap: &mut Heap) -> Sexp {
+        unsafe { heap.alloc_vector(SexpType::Integer, 1).expect("alloc") }
+    }
+    unsafe {
+        // A shift through a read-only pointer duplicates a value, then counted stores overwrite
+        // both copies.
+        let mut heap = Heap::new();
+        let nil = heap.known().nil;
+        let (list, other) = setup(&mut heap, 2);
+        let (shared, alone) = (integer(&mut heap), integer(&mut heap));
+        heap.set_element(list, 0, shared);
+        heap.set_element(list, 1, alone);
+        heap.set_element(other, 0, shared);
+        heap.escape(list, false);
+        list.slice_mut::<Sexp>()[1] = shared;
+        heap.set_element(list, 0, nil);
+        heap.set_element(list, 1, nil);
+        assert!(shared.refcount() >= 1, "during the escape");
+        heap.retire_escaped();
+        assert!(shared.refcount() >= 1, "another list holds the duplicated value");
+
+        // A value from another list stored through a read-only pointer, then overwritten.
+        let mut heap = Heap::new();
+        let nil = heap.known().nil;
+        let (list, other) = setup(&mut heap, 1);
+        let (held, foreign) = (integer(&mut heap), integer(&mut heap));
+        heap.set_element(list, 0, held);
+        heap.set_element(other, 0, foreign);
+        heap.escape(list, false);
+        list.slice_mut::<Sexp>()[0] = foreign;
+        heap.set_element(list, 0, nil);
+        assert!(foreign.refcount() >= 1, "during the escape");
+        heap.retire_escaped();
+        assert!(foreign.refcount() >= 1, "another list holds the foreign value");
+
+        // A shrink drops a slot behind a writable pointer.
+        let mut heap = Heap::new();
+        let (list, other) = setup(&mut heap, 2);
+        let (kept, dropped) = (integer(&mut heap), integer(&mut heap));
+        heap.set_element(list, 0, kept);
+        heap.set_element(list, 1, dropped);
+        heap.set_element(other, 0, dropped);
+        heap.escape(list, true);
+        heap.resize_vector(list, 1).expect("shrink");
+        heap.retire_escaped();
+        assert_eq!((kept.refcount(), dropped.refcount()), (1, 1));
+
+        // A grow and a counted store behind a read-only pointer change nothing native code did.
+        let mut heap = Heap::new();
+        let (list, _) = setup(&mut heap, 4);
+        heap.resize_vector(list, 2).expect("shrink");
+        let values = [integer(&mut heap), integer(&mut heap), integer(&mut heap)];
+        heap.set_element(list, 0, values[0]);
+        heap.set_element(list, 1, values[1]);
+        heap.escape(list, false);
+        heap.resize_vector(list, 3).expect("grow");
+        heap.set_element(list, 2, values[2]);
+        heap.retire_escaped();
+        assert_eq!(values.map(|value| value.refcount()), [1, 1, 1], "exact counts");
     }
 }
 

@@ -96,12 +96,13 @@ struct Report {
 }
 
 /// The modes of ry's runtime that `--engine` names, which [`KnownFailure::engine`] must be one of.
-pub const ENGINES: [&str; 6] = [
+pub const ENGINES: [&str; 7] = [
     "ry",
     "ry-tier0",
     "ry-jit",
     "ry-gctorture",
     "ry-gctorture-young",
+    "ry-gctorture-seeded",
     "ry-jit-gctorture",
 ];
 
@@ -300,6 +301,7 @@ impl ProcessEngine {
             "ry-jit" => Some(ProcessEngine::ry_jit()),
             "ry-gctorture" => Some(ProcessEngine::ry_gc_torture()),
             "ry-gctorture-young" => Some(ProcessEngine::ry_gc_torture_young()),
+            "ry-gctorture-seeded" => Some(ProcessEngine::ry_gc_torture_seeded(0)),
             "ry-jit-gctorture" => Some(ProcessEngine::ry_jit_gc_torture()),
             command => ProcessEngine::from_command(command),
         }
@@ -344,6 +346,24 @@ impl ProcessEngine {
         engine
             .environment
             .push(("RY_GC_STRESS".to_string(), "young".to_string()));
+        engine
+    }
+
+    /// ry's runtime with seeded collection stress (`RY_GC_STRESS=seed:N`) and the write barrier
+    /// checked before every collection short of a major one (`RY_GC_VERIFY`). Collections come
+    /// at random gaps of up to a few thousand allocations, so objects stay young across whole
+    /// operations, and a store that skipped the barrier fails the check at the next collection
+    /// rather than freeing a live object only when the timing is unlucky. The seed picks the
+    /// gaps, so a failure replays with the same seed.
+    pub fn ry_gc_torture_seeded(seed: u64) -> Self {
+        let mut engine = ProcessEngine::ry();
+        engine.name = "ry-gctorture-seeded".to_string();
+        engine
+            .environment
+            .push(("RY_GC_STRESS".to_string(), format!("seed:{seed}")));
+        engine
+            .environment
+            .push(("RY_GC_VERIFY".to_string(), "1".to_string()));
         engine
     }
 

@@ -73,6 +73,7 @@ api! {
     ry_initialize: fn() -> c_int;
     ry_start_session: fn() -> c_int;
     ry_set_gc_stress: fn(c_int);
+    ry_set_gc_verify: fn(c_int);
     ry_set_slow_paths_only: fn(c_int);
     ry_collect: fn(c_int);
     ry_gc_stats: fn(*mut GcStats);
@@ -243,6 +244,7 @@ impl Drop for R<'_> {
         unsafe {
             (self.api().Rf_unprotect)(self.protected.get());
             (self.api().ry_set_gc_stress)(0);
+            (self.api().ry_set_gc_verify)(std::env::var_os("RY_GC_VERIFY").is_some() as c_int);
         }
     }
 }
@@ -417,6 +419,16 @@ impl R<'_> {
 
     pub fn stress(&self, on: bool) {
         unsafe { (self.api().ry_set_gc_stress)(on as c_int) };
+    }
+
+    /// Checks the write barrier's invariant before every collection short of a major one.
+    pub fn verify(&self, on: bool) {
+        unsafe { (self.api().ry_set_gc_verify)(on as c_int) };
+    }
+
+    /// Runs a minor collection, or a major one with `major`.
+    pub fn collect(&self, major: bool) {
+        unsafe { (self.api().ry_collect)(major as c_int) };
     }
 
     /// Young stress: every allocation runs an intermediate collection that also frees untenured

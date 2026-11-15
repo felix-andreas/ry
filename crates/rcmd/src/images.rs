@@ -7,6 +7,7 @@
 //! |---|---|
 //! | start-up image of an R home or base R tree | `library/base/R/ry-start.<build>.image` |
 //! | code image of the lazy-load database `R/<name>.rdb` | `R/<name>.<build>.ryc` |
+//! | typed code file of the lazy-load database `R/<name>.rdb` | `R/<name>.<build>.ryt` |
 //!
 //! Builds that share a base R tree, such as a release and a nightly, or the two sides of a
 //! benchmark, each find their own images there and never overwrite another's. A build that finds
@@ -35,6 +36,7 @@ pub const KEPT_BUILDS: usize = 4;
 const START_PREFIX: &str = "ry-start.";
 const START_SUFFIX: &str = ".image";
 const CODE_SUFFIX: &str = ".ryc";
+const TYPED_SUFFIX: &str = ".ryt";
 /// The ledger of a base R tree: the builds whose images it holds, one identity per line, in the
 /// order they last wrote them, oldest first.
 const LEDGER: &str = "library/base/R/ry-builds";
@@ -48,13 +50,23 @@ pub fn start_image(home: &Path, build: &str) -> PathBuf {
 /// The code image the runtime build `build` loads for the lazy-load database `database`
 /// (`R/<name>.rdb`): `R/<name>.<build>.ryc`.
 pub fn code_image(database: &Path, build: &str) -> PathBuf {
+    keyed(database, build, CODE_SUFFIX)
+}
+
+/// The typed code file the runtime build `build` maps for the lazy-load database `database`
+/// (`R/<name>.rdb`): `R/<name>.<build>.ryt`, the machine code of the package's typed functions.
+pub fn typed_code(database: &Path, build: &str) -> PathBuf {
+    keyed(database, build, TYPED_SUFFIX)
+}
+
+fn keyed(database: &Path, build: &str, suffix: &str) -> PathBuf {
     let database = database.as_os_str();
     let stem = database
         .to_str()
         .and_then(|text| text.strip_suffix(".rdb"))
         .map_or_else(|| database.to_owned(), OsString::from);
     let mut path = stem;
-    path.push(format!(".{build}{CODE_SUFFIX}"));
+    path.push(format!(".{build}{suffix}"));
     PathBuf::from(path)
 }
 
@@ -210,9 +222,10 @@ pub fn hold_start_image(image: &Path) -> io::Result<Option<File>> {
 }
 
 /// Every build-keyed image file under the base R tree `tree`, with the build that wrote it: the
-/// start-up images in `library/base/R`, and in each package's `R/` the code images of its
-/// lazy-load databases. A build identity has no dot, which tells `data.table.<build>.ryc`, an
-/// image of `data.table.rdb`, from an image of a `data.rdb`, and an unkeyed image is named
+/// start-up images in `library/base/R`, and in each package's `R/` the code images and typed
+/// code files of its lazy-load databases. A build identity has no dot, which tells
+/// `data.table.<build>.ryc`, an image of `data.table.rdb`, from an image of a `data.rdb`, and an
+/// unkeyed image is named
 /// exactly after its database, which tells `data.table.ryc` from an image of `data.rdb` by a
 /// build named `table`.
 fn image_files(tree: &Path) -> io::Result<Vec<(String, PathBuf)>> {
@@ -233,7 +246,9 @@ fn image_files(tree: &Path) -> io::Result<Vec<(String, PathBuf)>> {
                 .then(|| name.strip_prefix(START_PREFIX)?.strip_suffix(START_SUFFIX))
                 .flatten();
             let code_build = || {
-                let keyed = name.strip_suffix(CODE_SUFFIX)?;
+                let keyed = name
+                    .strip_suffix(CODE_SUFFIX)
+                    .or_else(|| name.strip_suffix(TYPED_SUFFIX))?;
                 if databases.contains(&keyed) {
                     return None;
                 }

@@ -142,6 +142,7 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
     frames::install();
     services::install();
     jit::install();
+    interp::register_builtins(typed::file::BUILTINS);
     interp::register_builtins(NATIVE_BUILTINS);
     interp::register_builtins(BOOTSTRAP_BUILTINS);
     interp::register_builtins(crate::loader_backend::BUILTINS);
@@ -937,7 +938,7 @@ unsafe fn c_call(
             SexpType::List if kind == RoutineKind::C => {
                 let copy = crate::memory::duplicate(value, false)?;
                 runtime.heap.root(copy);
-                runtime.heap.escape(copy);
+                runtime.heap.escape(copy, true);
                 pointers.push(copy.data() as *mut std::ffi::c_void);
                 CArgument::Vector(copy)
             }

@@ -55,6 +55,9 @@ export type Measurement = {
   compileSeconds?: Record<string, number>;
   // The first run of the program in its process, where the harness times one.
   firstSeconds?: Record<string, number>;
+  // How many functions compiled in the session on the engines that run the program's typed
+  // functions from an installed package's typed code file, which are what the file left out.
+  compiledInSession?: Record<string, number>;
   tests?: Record<string, TestCounts>;
   flags: Flag[];
   failures: Failure[];
@@ -128,13 +131,14 @@ export function comparedEngines(suite: Suite): string[] {
   return (suite.results?.engines ?? []).filter((engine) => engine !== baselineOf(suite));
 }
 
-// Typed ry compiled before the program starts (`ry run --aot`). It runs the code that typed ry
-// compiles at a first call, so its bar would repeat the typed one: the charts leave it out, and
-// the tables show it.
+// Typed ry compiled before the program starts (`ry run --aot`), and typed ry run from an
+// installed package's typed code file. Both run the code that typed ry compiles at a first call,
+// so their bars would repeat the typed one: the charts leave them out, and the tables show them.
 const typedAhead = 'ry_typed_aot';
+const typedInstalled = 'ry_typed_file';
 
 function chartedEngines(suite: Suite): string[] {
-  return comparedEngines(suite).filter((engine) => engine !== typedAhead);
+  return comparedEngines(suite).filter((engine) => engine !== typedAhead && engine !== typedInstalled);
 }
 
 // What the time of typed ry compiled ahead holds. A program that times a warm run has no compile
@@ -145,6 +149,11 @@ function aheadNote(programs: (Program & { measurement: Measurement })[]): string
   return programs.some((program) => program.measurement.firstSeconds !== undefined)
     ? `${label} compiles each typed function before the program starts, which the First run table shows.`
     : `${label} compiles each typed function before the program starts. Its time is the program's clock plus that compile, so it counts the same work as the other columns.`;
+}
+
+// What the time of typed ry run from an installed package holds.
+function installedNote(): string {
+  return `${engineLabel(typedInstalled)} installs the program's definitions as a package, with the machine code of its typed functions in the package's typed code file, and runs the rest of the program from a script that attaches the package. That script is plain R, because ry's checker does not resolve the names \`library()\` attaches, so each call of the measured function from it converts its arguments at the boundary.`;
 }
 
 export function measuredPrograms(suite: Suite): (Program & { measurement: Measurement })[] {
@@ -490,22 +499,26 @@ export function tableViews(suite: Suite): TableView[] {
     note: (slowdown
       ? `Each time is the median over the rounds. Each ratio is the median of the per-round ratios of the engine's time over ${engineLabel(baseline)}'s, with its 95% interval in parentheses.`
       : 'Each time is the median over the rounds. Each speed-up is the median of the per-round ratios, with its 95% interval in parentheses.')
-      + (engines.includes(typedAhead) ? ` ${aheadNote(programs)}` : ''),
+      + (engines.includes(typedAhead) ? ` ${aheadNote(programs)}` : '')
+      + (engines.includes(typedInstalled) ? ` ${installedNote()}` : ''),
   }];
   const first = programs.filter((program) => program.measurement.firstSeconds !== undefined);
   if (first.length > 0) {
+    const installed = engines.includes(typedInstalled);
     views.push({
       label: 'First run',
-      columns: ['program', ...engines.map(engineLabel)],
+      columns: ['program', ...engines.map(engineLabel), ...(installed ? ['compiled in the session, installed'] : [])],
       rows: first.map((program) => [
         name(program),
         ...engines.map((engine) => {
           const value = program.measurement.firstSeconds?.[engine];
           return value === undefined ? 'n/a' : time(value);
         }),
+        ...(installed ? [String(program.measurement.compiledInSession?.[typedInstalled] ?? 'n/a')] : []),
       ]),
       note: 'The first run of the program in its process, as the median over the rounds. It holds whatever compiles at a first call, which the warm runs of the Time table do not.'
-        + (engines.includes(typedAhead) ? ` ${engineLabel(typedAhead)} compiled the program before it started, so its first run compiles nothing.` : ''),
+        + (engines.includes(typedAhead) ? ` ${engineLabel(typedAhead)} compiled the program before it started, so its first run compiles nothing.` : '')
+        + (installed ? ` ${engineLabel(typedInstalled)} runs the code compiled at install, and the last column counts the functions its package's typed code file left out, which compile in the session.` : ''),
     });
   }
   if (programs.some((program) => program.measurement.peakMib !== undefined)) {
@@ -701,6 +714,7 @@ type RawResults = {
     peak_mib?: Record<string, number>;
     compile_seconds?: Record<string, number>;
     first_seconds?: Record<string, number>;
+    compiled_in_session?: Record<string, number>;
     tests?: Record<string, TestCounts>;
     flags?: Flag[];
     failures?: Failure[];
@@ -762,7 +776,7 @@ function loadSuites(): Suite[] {
 
 function measurement(program: RawResults['programs'][number] | undefined): Measurement | undefined {
   if (program === undefined) return undefined;
-  return { seconds: program.seconds, ratio: program.ratio, peakMib: program.peak_mib, compileSeconds: program.compile_seconds, firstSeconds: program.first_seconds, tests: program.tests, flags: program.flags ?? [], failures: program.failures ?? [] };
+  return { seconds: program.seconds, ratio: program.ratio, peakMib: program.peak_mib, compileSeconds: program.compile_seconds, firstSeconds: program.first_seconds, compiledInSession: program.compiled_in_session, tests: program.tests, flags: program.flags ?? [], failures: program.failures ?? [] };
 }
 
 function meta(raw: RawResults['meta']): Meta {

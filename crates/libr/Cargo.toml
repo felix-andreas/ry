@@ -25,6 +25,7 @@ frames = { path = "../frames" }
 services = { path = "../services" }
 serde_json.workspace = true
 jit = { path = "../jit" }
+typed = { path = "../typed" }
 loader = { path = "../loader" }
 libc = "0.2"
 mimalloc = { version = "0.1", features = ["local_dynamic_tls", "v2"] }

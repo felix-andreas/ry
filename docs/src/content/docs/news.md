@@ -26,6 +26,19 @@ own type code that only ry reads back, so a typed package can bind `limit <- 10`
 types `10` as `I64`. `saveRDS(5i64, file)` is refused, and records, tuples, tags, dictionaries and
 sets do not serialize.
 
+### An installed typed package carries its machine code
+
+`ry install` on ry's runtime compiles a package's typed functions and writes their machine code
+beside the package's lazy-load database, as `R/<package>.<build>.ryt`. A new session maps that file
+and runs a typed function's first call on the code compiled at install instead of compiling it: 50
+typed functions of one package took 1.43 ms for their first calls against 18.5 ms compiled in the
+session, and 2.2 MiB of peak memory against 5.0 MiB (iterate build). Processes that use the same
+package share its code pages. `ry build --aot` on a package installs it the same way, and
+`R CMD INSTALL --ry-no-typed-code` skips the file. Under `ry run --aot`, a package installed by
+another build of ry compiles its typed functions as it loads and says to reinstall it. See
+[the CLI reference](/reference/cli#build-and-install) and
+[the typed code file](/development/typed-code-file/).
+
 ## ry 0.4.5
 
 *Released in November 2026.*

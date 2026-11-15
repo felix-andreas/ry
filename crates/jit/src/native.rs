@@ -2979,8 +2979,8 @@ pub(crate) unsafe fn gather(
                     format!(
                         "argument {} is `{}`, which R code wrote, so it stays lazy until the \
                          function uses it, as in R, and the native tier reads ahead only \
-                         constants, variables and arithmetic: compute it into a variable before \
-                         the call",
+                         constants, variables, arithmetic and literals: compute it into a \
+                         variable before the call",
                         position + 1,
                         interp::deparse::deparse_first_line(bytecode::source_of_body(
                             arg.value.cdr()
@@ -3210,8 +3210,9 @@ const MAX_PURE_DEPTH: usize = 8;
 
 /// The value `expression` has in `env` when evaluating it can run no R code, signal no
 /// condition and change nothing: a constant, a variable bound to a value or a forced promise,
-/// and `(`, unary and binary `+`, `-`, `*`, `/` of numbers without attributes, and `c()` of
-/// such numbers, each named by its base function. A typed closure's call is not read ahead,
+/// `(`, unary and binary `+`, `-`, `*`, `/` of numbers without attributes, `c()` of such
+/// numbers, `+`, `-` and `*` of `I64`s, and a list, record, tuple or tag literal of such values,
+/// each named by its base function. A typed closure's call is not read ahead,
 /// although its native code changes nothing, because it may not finish, and an argument the
 /// callee never forces must not run. Evaluating such an argument before the call
 /// gives the value forcing its promise would give, since the native code it is passed to runs
@@ -3272,24 +3273,70 @@ unsafe fn pure_value(
         env
     };
     let items = values::pairlist_items(expression.cdr());
-    if items.iter().any(|&(tag, value)| {
-        tag != values::nil() || value == values::missing_arg() || value == values::symbols().dots
-    }) {
+    if items
+        .iter()
+        .any(|&(_, value)| value == values::missing_arg() || value == values::symbols().dots)
+    {
         return None;
     }
     let function = resolve_function(head, start)?.function;
     let name = base_builtin(function, head)?;
+    // A list, record, tuple or tag literal builds a new value from its items and runs no R code,
+    // so it is built ahead as forcing it would build it. One the constructor rejects is left to
+    // tier 0, which raises the error when the callee uses the argument.
+    if matches!(name, ".ry_array" | ".ry_record" | ".ry_tuple" | ".ry_tag") {
+        let mut built: SmallVec<[(Sexp, Sexp); 4]> = SmallVec::new();
+        for &(tag, item) in &items {
+            built.push((tag, pure_value(item, env, read, depth + 1)?));
+        }
+        let value = if name == ".ry_array" {
+            if built.iter().any(|&(tag, _)| tag != values::nil()) {
+                return None;
+            }
+            let values: SmallVec<[Sexp; 4]> = built.iter().map(|&(_, value)| value).collect();
+            interp::arrays::from_items(&values).ok()?.ok()?
+        } else {
+            interp::records::constructed(name, &built)?
+        };
+        interp::heap().root(value);
+        return Some(value);
+    }
+    if items.iter().any(|&(tag, _)| tag != values::nil()) {
+        return None;
+    }
     let mut operands: SmallVec<[Sexp; 4]> = SmallVec::new();
     for &(_, item) in &items {
         let operand = pure_value(item, env, read, depth + 1)?;
         if !matches!(
             operand.kind(),
-            SexpType::Integer | SexpType::Real | SexpType::Logical
+            SexpType::Integer | SexpType::Real | SexpType::Logical | SexpType::I64
         ) || operand.attrib() != values::nil()
         {
             return None;
         }
         operands.push(operand);
+    }
+    // `I64` arithmetic, which ry's literals give, reads ahead for `+`, `-` and `*` of `I64`s only.
+    // One that overflows is left to tier 0, which raises the error.
+    if operands.iter().any(|operand| operand.kind() == SexpType::I64) {
+        let mut numbers: SmallVec<[i64; 2]> = SmallVec::new();
+        for operand in &operands {
+            if operand.kind() != SexpType::I64 || operand.length() != 1 {
+                return None;
+            }
+            numbers.push(operand.slice::<i64>()[0]);
+        }
+        let result = match (name, numbers.as_slice()) {
+            ("(" | "+", &[_]) => return Some(operands[0]),
+            ("-", &[x]) => x.checked_neg(),
+            ("+", &[x, y]) => x.checked_add(y),
+            ("-", &[x, y]) => x.checked_sub(y),
+            ("*", &[x, y]) => x.checked_mul(y),
+            _ => None,
+        }?;
+        let value = interp::numbers::alloc(result).ok()?;
+        interp::heap().root(value);
+        return Some(value);
     }
     let value = match (name, operands.as_slice()) {
         ("(", &[inner]) => return Some(inner),
