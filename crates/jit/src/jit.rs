@@ -556,9 +556,8 @@ unsafe fn compile<'a>(
     patient: bool,
     trigger: Trigger,
 ) -> Result<&'a Compiled, Refusal> {
-    activity::count(Counter::JitCompiles);
     let _activity = activity::enter(Activity::JitCompile, 0);
-    ARENA.with(|arena| match arena.try_borrow_mut() {
+    let compiled = ARENA.with(|arena| match arena.try_borrow_mut() {
         Ok(mut arena) => {
             let compiled = compile_in(&arena, machine, patient, trigger);
             arena.reset();
@@ -567,7 +566,13 @@ unsafe fn compile<'a>(
         // Compilation never runs R code, so it does not nest; a fresh arena keeps it correct if
         // that ever changes.
         Err(_) => compile_in(&Bump::new(), machine, patient, trigger),
-    })
+    });
+    activity::count(if compiled.is_ok() {
+        Counter::JitCompiles
+    } else {
+        Counter::JitRefusals
+    });
+    compiled
 }
 
 unsafe fn compile_in<'a>(
