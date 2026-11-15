@@ -3597,7 +3597,7 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
     points than degrees of freedom warns "span too small. fewer data values than degrees of
     freedom.", "pseudoinverse used at ...", "all data on boundary of neighborhood. make span
     bigger" and more, and returns NaN fits, so `predict` then errors. ry's
-    `crates/interp/src/stats_loess.rs` fits the points exactly. Port the netlib `lowesd`/`ehg`
+    `crates/stats/src/loess.rs` fits the points exactly. Port the netlib `lowesd`/`ehg`
     checks and their `ehg182` warnings. Repro:
     `fitted(loess(y ~ x, data.frame(x = c(1, 2), y = c(1, 3))))` gives `NaN NaN` and 13 warnings
     on GNU R, `1 3` on ry.
