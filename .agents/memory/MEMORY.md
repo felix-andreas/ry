@@ -27,8 +27,9 @@ Most important first. Each line names the open item, and the detail is at its po
 - Open bug: with `RY_JIT=force`, compiled code misses a write that an argument promise makes to its caller's variable, so `crates/oracle/cases/environments__code_argument_references.R` fails in force mode ("Open: the JIT").
 - Runtime gaps, among them annotations at run time, graphics ("Graphics gaps"), the corpus packages' own tests ("Corpus package tests: what still fails") and GNU R's regression tests: "Open: the runtime".
 - The three benchmark code bases pass every generated test, and their per-test time trails GNU R's. Close that gap, then run `ry check` over the generated code for false reports ("Open: the benchmark packages under ry's runtime").
-- The Windows release job fails while building ry's own base R ("Open: the Windows release build").
+- Windows has no crash report handler ("Open: Windows crash reports").
 - The methods package's core moves to Rust, and the next step is a native class table with dense ids ("Open: native methods core").
+- Cut low-signal tests across the code base, folding small unit tests into fixtures, table tests or property tests; the rule goes into `testing.md` and `robustness.md` afterwards ("Open: cut low-signal tests").
 - Package loader gaps: "Open: the package loader". `RY_FAST_PATHS=0` covers three prologues only ("Open: one switch for every fast path").
 
 **Untyped performance**
