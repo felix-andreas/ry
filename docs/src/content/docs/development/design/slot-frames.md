@@ -116,7 +116,7 @@ it.
   call instruction's first operand, so a site without a plan costs nothing. The table holds its
   keys (the site's code, the closure's formals and body) weakly: after marking, the collector calls
   `RootSource::clear_dead`, which frees every plan with a dead key before its address can be
-  reused. A closure without formals gets no plan. A call
+  reused. A closure without formals has a plan without sources. A call
   that passes `...` has a plan of one entry, `MATCH_PER_CALL`, because what `...` holds differs
   per call: `call_matching` matches the expanded arguments each time (`matched_sources`) and then
   writes them like any plan. The plan is refused for a `..N` argument or a left-out formal whose
@@ -313,8 +313,8 @@ empty environment and no binding cell.
   from the end (`pending_closures_of`), and the frames that pop give theirs up from the end
   (`forget_pending_closures`). A return therefore never searches the list: a frame without an
   environment has no entry, and `bytecode::return_fast` takes every such return whatever the
-  frames below it hold. A wrapper frame that keeps a handler closure for a whole test would
-  otherwise send every return above it down the general path.
+  frames below it hold. A frame that keeps a handler closure for a whole test would otherwise
+  send every return above it down the general path.
 - **Return.** A closure dies with its frame when its reference count equals the number of the
   frame's slots and cells that hold it, it is not the frame's result, `R_PreserveObject` does not
   hold it and no global calling handler is it. A frame that returns with any other closure makes
@@ -430,42 +430,48 @@ code.
 `environments__code_argument_references.R`, `environments__dots_argument_references.R` and
 `dispatch__argument_references_dots_and_missing.R` pin these rules.
 
-## Builtin wrappers
+## The fast call path
 
-Package code is full of closures whose body is one builtin call, such as rlang's
-`node_car <- function(x) { .Call(ffi_node_car, x) }`. A planned call of such a wrapper runs the
-builtin directly (`call_wrapper` in `bytecode.rs`, `eval::run_wrapper`), with no body to
-execute, no promises and no environment.
+A closure call from compiled code that needs nothing but its arguments written and its frame
+pushed stays in the dispatch loop (`call_fast` and `return_fast` in `bytecode.rs`). It enters no
+Rust frame, matches nothing, and allocates nothing unless the argument reference pool grows.
 
-- **Which bodies.** A slot-table body that is `f(...)` or `{ f(...) }`, where `f` is a builtin
-  found from the closure's environment, and every argument of `f` is a formal, a literal or a
-  variable bound outside any function frame. The closure has no `...` formal, and every default
-  is missing, `NULL` or a constant.
-- **Pin.** The site's plan keeps a pin (`CallPlans::pins`, the one heap object a plan holds
-  strongly, and dropped at every major collection because the enclosure it holds can reach the
-  plan's own keys): the enclosure, each
-  argument's source, and the cell and lookup stamp of each looked-up symbol, `f` first and `{`
-  when the body has braces. A rebinding of any of them changes its stamp, so the next call
-  re-pins. A body that does not qualify is pinned as `NULL` and never analyzed again.
-- **Which calls.** Each argument the call passes must read without running code: a literal, a
-  slot or variable holding a value, a forced promise, or an argument reference that resolves
-  without code. A call argument (`-1` included) or an unforced promise sends the call down the
-  generic path, so laziness is unchanged. A formal the call does not supply takes its constant
-  default. Debugged, stepped or traced closures, the debugger and move tracking also take the
-  generic path.
-- **Frame.** The call still pushes a slot frame for the wrapper, holding the argument values,
-  so `sys.call`, `sys.calls`, `sys.function`, `conditionCall` and native code that calls back
-  into R see the wrapper exactly as they would through the generic path. The builtin gets the
-  inner call (`log(x)`, not the `{` around it) as its call.
-- **Environment.** The slots hold values, so a variable of the wrapper's frame that moves into a
-  cell (a handler calling `sys.frames()` and reading it, say) is bound as a forced promise whose
-  code is the variable the caller passed, as the generic path would have bound it.
-  `substitute(x, frame)` then answers the variable's name, and building those promises costs
-  nothing on calls where nothing reads the frame.
+- **Which sites.** A site whose plan is prepared (`prepare_plan`). The site prepares on a call
+  after the one that stored its plan, because the compiled form of its arguments is settled only
+  once the site has run for a function. Preparing records how each argument binds: a constant or
+  the empty argument, a variable in one of the caller's slots, a variable outside them, code
+  compiled against the caller's slots, or code that needs an environment. An argument that is
+  `...`, `..N` or a promise leaves the site to the generic path, and so does a plan that matches
+  per call (`MATCH_PER_CALL`).
+- **Which callers.** A frame whose code runs on its slots passes its arguments as references to
+  the slots or to code compiled against them, and the callee finds its caller as the frame below
+  its own (`PLAN_FAST`). A frame that reads its variables by name passes references over its
+  environment, and that environment is the callee's caller (`PLAN_FAST_BY_NAME`): a slot frame
+  that left its slots, a body compiled without a slot table, top-level code. Only a frame that
+  reads by name can pass code the compiler did not compile against slots, so a site with such
+  an argument is fast from those frames alone.
+- **Which callees.** Any closure with a compiled body whose formals and body are the plan's. A
+  body compiles when it is a call, one variable or one constant (`compilable`), so
+  `function(x) x` and `function() NULL` take the path, and so does a closure without formals.
+  A closure whose body is one builtin call, such as rlang's
+  `node_car <- function(x) { .Call(ffi_node_car, x) }`, is an ordinary callee: its arguments
+  arrive as references, and the builtin forces the ones it reads.
+- **What leaves the path.** A debugger, a profile, a tracked move or a refused object system
+  (`activity::hooks`), a closure flagged for debugging, stepping or tracing, a closure with a
+  native entry, the namespace loader, `do.call`, a full frame stack or register file, and a
+  site's first calls, before its plan is stored and prepared. A site that met `PLAN_MISSES`
+  closures it could not plan for stays on the generic path for good.
+- **Return.** `return_fast` takes the return of a frame whose code is still on its slots, with
+  no `on.exit` code and nothing observing calls. When the frame handed out an environment while
+  its code stayed on the slots (a callee asked for its parent frame, or a promise or a closure
+  was made over it), the return discards that environment if nothing counts a reference to it,
+  it is not the result and `R_PreserveObject` does not hold it. Any other frame returns through
+  `eval::leave`.
 
-`crates/oracle/cases/functions__builtin_wrappers.R` pins these rules with the JIT off, on and
-forced. Measured on a `node_car` loop: 7,751 instructions per call through the generic path,
-6,258 inlined.
+`crates/oracle/cases/calls__fast_calls_from_frames_read_by_name.R`,
+`calls__closures_without_formals.R`, `calls__trivial_bodies.R`,
+`environments__frame_environment_dies_at_return.R` and `functions__builtin_wrappers.R` pin these
+rules with the JIT off, on and forced. `just bench-mechanisms --filter call:` prices each shape.
 
 ## Checking it
 
