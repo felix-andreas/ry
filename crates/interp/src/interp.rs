@@ -98,6 +98,7 @@ pub mod profile_summary;
 pub mod random;
 pub mod rd;
 pub mod records;
+pub mod replay;
 pub mod serialize;
 pub mod session;
 pub mod sort;

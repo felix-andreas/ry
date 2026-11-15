@@ -25,7 +25,7 @@ use {
         object::{Sexp, SexpType},
         records::{Fields, Layout},
     },
-    interp::values as rvalues,
+    interp::{numbers::Observed, values as rvalues},
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
     std::{borrow::Cow, cell::Cell},
@@ -132,6 +132,19 @@ pub struct Conversion {
     /// `Num.from_r`, which the preflight writes around the call (`.ry_items(List.from_r(x),
     /// "F64")`). It types the conversion before the interpreter has run it.
     pub checked: Option<Item>,
+}
+
+impl Conversion {
+    /// Whether the code takes the type of the value this conversion gives from what the
+    /// interpreter saw it give, which a later run may contradict: a `Num.from_r` or
+    /// `List.from_r` the checker did not type.
+    pub unsafe fn guessed(self) -> bool {
+        self.checked.is_none()
+            && matches!(
+                &*rvalues::symbol_name(self.call.car()),
+                "Num.from_r" | "List.from_r"
+            )
+    }
 }
 
 /// How a refusal that waits on the interpreter starts. The type a conversion of what an R call
@@ -6577,12 +6590,12 @@ unsafe fn r_result(r_use: RUse) -> Result<RResult, Refusal> {
 
 /// The type a conversion of what an R call returns gives: fixed for `Str.from_r` and
 /// `Bool.from_r`, and for `Num.from_r` and `List.from_r` the type the conversion gave when the
-/// interpreter last ran it. A conversion the checker typed takes that type, which it gives or
-/// fails with when the code runs (`interp::arrays::checked_conversion` and
-/// `interp::numbers::checked_number`).
+/// interpreter ran it, which the code guesses it gives again ([`Conversion::guessed`]). A
+/// conversion that has given two types has no type to guess, so the code does not compile. A
+/// conversion the checker typed takes that type, which it gives or fails with when the code runs
+/// (`interp::arrays::checked_conversion` and `interp::numbers::checked_number`).
 unsafe fn conversion_type(conversion: Conversion) -> Result<Type, Refusal> {
     let name = rvalues::symbol_name(conversion.call.car());
-    let observed = || interp::numbers::observed_conversion(conversion.call);
     let awaiting = || {
         AWAITED.set(Some(Awaited::Conversion(conversion.call)));
         Refusal(Cow::Owned(format!(
@@ -6591,31 +6604,62 @@ unsafe fn conversion_type(conversion: Conversion) -> Result<Type, Refusal> {
         )))
     };
     let list = |item| Type::Vector { item, array: true };
-    match &*name {
-        "Str.from_r" => Ok(Type::Str),
-        "Bool.from_r" => Ok(Type::Lgl),
-        "Num.from_r" if conversion.checked.is_some() => match conversion.checked {
-            Some(Item::I64) => Ok(Type::I64),
-            _ => Ok(Type::Dbl),
-        },
-        "Num.from_r" => match observed() {
-            Some(SexpType::Real) => Ok(Type::Dbl),
-            Some(SexpType::I64) => Ok(Type::I64),
-            Some(_) => Err(Refusal::new("a `Num.from_r` of an unexpected type")),
-            None => Err(awaiting()),
-        },
+    let observed = match &*name {
+        "Str.from_r" => return Ok(Type::Str),
+        "Bool.from_r" => return Ok(Type::Lgl),
+        "Num.from_r" if conversion.checked.is_some() => {
+            return match conversion.checked {
+                Some(Item::I64) => Ok(Type::I64),
+                _ => Ok(Type::Dbl),
+            };
+        }
         // The conversion gives the checker's type or fails, whatever the interpreter saw it give.
-        _ if conversion.checked.is_some() => conversion.checked.map(list).ok_or_else(awaiting),
-        _ => match observed() {
-            Some(SexpType::Real) => Ok(list(Item::Dbl)),
-            Some(SexpType::Logical) => Ok(list(Item::Lgl)),
-            Some(SexpType::String) => Ok(list(Item::Str)),
-            Some(SexpType::I64) => Ok(list(Item::I64)),
-            Some(_) => Err(Refusal::new(
-                "a `List.from_r` of an R list, whose items typed code cannot take from R yet",
-            )),
-            None => Err(awaiting()),
+        _ if conversion.checked.is_some() => {
+            return conversion.checked.map(list).ok_or_else(awaiting);
+        }
+        _ => match interp::numbers::observed_conversion(conversion.call) {
+            Some(Observed::Steady(kind)) => kind,
+            Some(Observed::Changed(before, after)) => {
+                let named = |kind| observed_name(&name, kind);
+                return Err(Refusal(Cow::Owned(format!(
+                    "`{}` gave {} in one call and {} in another, so its type is not known before \
+                     it runs: convert the value to one type in R first",
+                    interp::deparse::deparse_first_line(conversion.call),
+                    named(before),
+                    named(after)
+                ))));
+            }
+            None => return Err(awaiting()),
         },
+    };
+    match (&*name, observed) {
+        ("Num.from_r", SexpType::Real) => Ok(Type::Dbl),
+        ("Num.from_r", SexpType::I64) => Ok(Type::I64),
+        ("Num.from_r", _) => Err(Refusal::new("a `Num.from_r` of an unexpected type")),
+        (_, SexpType::Real) => Ok(list(Item::Dbl)),
+        (_, SexpType::Logical) => Ok(list(Item::Lgl)),
+        (_, SexpType::String) => Ok(list(Item::Str)),
+        (_, SexpType::I64) => Ok(list(Item::I64)),
+        _ => Err(Refusal::new(
+            "a `List.from_r` of an R list, whose items typed code cannot take from R yet",
+        )),
+    }
+}
+
+/// The ry type, in backticks, of the value the conversion `name` gave when the value's R type
+/// was `kind`.
+pub fn observed_name(name: &str, kind: SexpType) -> String {
+    let item = match kind {
+        SexpType::Real => "F64",
+        SexpType::I64 => "I64",
+        SexpType::Logical => "Bool",
+        SexpType::String => "Str",
+        _ => kind.name(),
+    };
+    if name == "List.from_r" {
+        format!("`List<{item}>`")
+    } else {
+        format!("`{item}`")
     }
 }
 

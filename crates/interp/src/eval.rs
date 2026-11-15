@@ -2411,6 +2411,18 @@ pub unsafe fn apply_closure(
     run_on_heap_frame(call, function, args, sys_parent, supplied, Entry::Unchecked)
 }
 
+/// Runs the call `call` of the typed closure `function` with `args` in the interpreter, as a
+/// call the native tier did not take runs, for a call whose native code gave up
+/// ([`crate::replay::replay`]).
+pub unsafe fn run_interpreted(
+    call: Sexp,
+    function: Sexp,
+    args: &[Arg],
+    sys_parent: Sexp,
+) -> R<Sexp> {
+    run_on_heap_frame(call, function, args, sys_parent, None, Entry::Unchecked)
+}
+
 /// Runs a call of `function` in a fresh environment that binds `args`, the path of a call
 /// that gets no slot frame. An environment can be read after the call that made an argument
 /// reference returns, so a reference among `args` becomes the promise it stands for first
@@ -3681,8 +3693,10 @@ unsafe fn run_frame_general(
                     interp().slot_owner = owner;
                     return result;
                 }
-                let body = function.cdr();
-                bytecode::run_body(function, body, env)
+                match crate::replay::body(function)? {
+                    Some(replayed) => eval(replayed, env),
+                    None => bytecode::run_body(function, function.cdr(), env),
+                }
             })
         });
         (signature, result)

@@ -3,7 +3,8 @@
 //!
 //! `ry install` runs [`write`] in the process that records the package's code image. It compiles
 //! every typed closure of the package's database for the argument types its annotations
-//! declare, and every typed function of the same database those call, and writes the code
+//! declare, every version a training run compiled (`ry install --train`), and every typed
+//! function of the same database those call, and writes the code
 //! beside the database as `R/<package>.<build>.ryt` (`rcmd::images::typed_code`). The code is
 //! position independent: every word that differs between processes (a runtime helper's address,
 //! a shape's id, an R call site, a typed function of another namespace) is loaded from an offset
@@ -19,7 +20,7 @@
 use {
     crate::{
         COMPILED, Compiled, Key, Linker, Refusal, compiled_or_refusal, earliest, lower_settled,
-        optimize,
+        optimize, storage,
         backend::{
             self, Callee, Code, Entry, Helper, Slot, Slots, declare, file_frees, helper_address,
             libcall_helper,
@@ -123,18 +124,37 @@ pub unsafe fn write(package: &str) -> Result<Written, String> {
     };
     let mut written = Written::default();
     let mut own: FxHashMap<Sexp, (u64, u32)> = FxHashMap::default();
-    let mut roots: Vec<Key> = Vec::new();
     for (offset, position, closure) in code_image::recorded_closures(&database) {
-        if !annotations::is_typed(closure) || own.contains_key(&closure) {
+        if annotations::is_typed(closure) && !own.contains_key(&closure) {
+            own.insert(closure, (offset, position));
+        }
+    }
+    // Every version a training run compiled is one the package's users call, whatever its
+    // argument types (a record, a list literal) and whatever type a conversion gave in the run.
+    let mut roots: Vec<Key> = COMPILED.with_borrow(|compiled| {
+        compiled
+            .iter()
+            .filter(|(key, entry)| entry.is_ok() && own.contains_key(&key.0))
+            .map(|(key, _)| key.clone())
+            .collect()
+    });
+    let trained: FxHashSet<Sexp> = roots.iter().map(|key| key.0).collect();
+    for (offset, position, closure) in code_image::recorded_closures(&database) {
+        if own.get(&closure) != Some(&(offset, position)) {
             continue;
         }
-        own.insert(closure, (offset, position));
         written.closures += 1;
         match crate::ahead::declared_params(closure) {
             Ok(params) => match compiled_or_refusal(closure, &params) {
-                Ok(_) => roots.push((closure, params)),
+                Ok(_) => {
+                    let key = (closure, params);
+                    if !roots.contains(&key) {
+                        roots.push(key);
+                    }
+                }
                 Err(_) => *written.skipped.entry("does not compile").or_default() += 1,
             },
+            Err(_) if trained.contains(&closure) => {}
             Err(_) => *written.skipped.entry("compiles with its caller").or_default() += 1,
         }
     }
@@ -2610,8 +2630,21 @@ unsafe fn attach_inner(mapped: &'static Mapped, index: u32) -> Result<&'static C
     for &lookup in &version.lookups {
         speculations.push(found(mapped, &mut resolved, lookup)?);
     }
+    let mut guessed = None;
     for &site in &version.sites {
         let call = build_site(mapped, &mut resolved, site)?;
+        if let RResult::Converted(conversion, ty) = call.result
+            && conversion.guessed()
+        {
+            // The code was compiled for the type the conversion gave in the install's session.
+            let assumed = storage(ty).is_some_and(|(kind, _)| {
+                interp::numbers::assume_conversion(conversion.call, kind)
+            });
+            if !assumed {
+                return Err("a conversion it guessed the type of gave another type in this session");
+            }
+            guessed = Some(interp::numbers::conversion_epoch());
+        }
         if let Some(slot) = mapped.site_slots[site as usize] {
             write_slot(mapped.base, slot, call as *const RCall as u64);
         }
@@ -2650,6 +2683,7 @@ unsafe fn attach_inner(mapped: &'static Mapped, index: u32) -> Result<&'static C
         }
         speculations.extend_from_slice(&compiled.speculations);
         epoch = earliest(epoch, compiled.epoch);
+        guessed = earliest(guessed, compiled.guessed);
         calls_r |= compiled.calls_r;
     }
     for &shape in &version.confirms {
@@ -2671,6 +2705,7 @@ unsafe fn attach_inner(mapped: &'static Mapped, index: u32) -> Result<&'static C
         speculations,
         epoch,
         calls_r,
+        guessed,
     })))
 }
 

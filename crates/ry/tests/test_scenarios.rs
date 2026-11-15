@@ -332,8 +332,9 @@ const PACKAGE_TIERINGS: [Tiering; 2] = [
 /// first call: a function called before its callee is defined, a name defined twice or bound to
 /// another function between calls, a definition inside a block, parameters typed by an alias, a
 /// conversion of what R returns, one whose vector is of a narrower type than the checker's or
-/// empty, a literal that warns when it is lowered, a statement that collects garbage between
-/// its arguments, a changed `keep.source`, and a script that stops with an error partway.
+/// empty, one whose type changes between calls after an R call that printed, a literal that
+/// warns when it is lowered, a statement that collects garbage between its arguments, a changed
+/// `keep.source`, and a script that stops with an error partway.
 #[test]
 fn typed_scripts_agree_however_they_compile() {
     if let Some(reason) =
@@ -713,7 +714,7 @@ fn typed_script(rng: &mut SplitMix64) -> (String, bool) {
     let mut erasable = true;
     for index in 0..rng.below(4) + 2 {
         let n = rng.below(9) + 2;
-        let mut lines = match rng.below(15) {
+        let mut lines = match rng.below(16) {
             0 => {
                 let operator = ["+", "*", "-"][rng.below(3)];
                 let mut definitions = vec![
@@ -870,6 +871,30 @@ fn typed_script(rng: &mut SplitMix64) -> (String, bool) {
                      third = c({n}.5, 2.5)))"
                 ),
             ],
+            14 => {
+                // The checker cannot type what `get` finds, so the code compiles for the type
+                // the conversion gave first, and gives up when it gives another after an R call
+                // that printed. Printing an `I64` shows ry's suffix, which erased code lacks.
+                erasable = false;
+                vec![
+                    format!("assign(\"rate_{index}\", {n}.5)"),
+                    format!(
+                        "read_{index} <- function() {{\n  cat(\"read {index}\\n\")\n  \
+                         get(\"rate_{index}\")\n}}"
+                    ),
+                    format!(
+                        "scaled_{index} <- function(k: I64) -> F64 {{\n  cat(\"before \
+                         {index}\\n\")\n  y <- Num.from_r(read_{index}())\n  print(y)\n  \
+                         Num.to_f64(k)\n}}"
+                    ),
+                    format!("print(scaled_{index}({n}))"),
+                    format!("print(scaled_{index}({n}))"),
+                    format!("assign(\"rate_{index}\", as.integer({n}))"),
+                    format!("print(scaled_{index}({n}))"),
+                    format!("assign(\"rate_{index}\", {n}.25)"),
+                    format!("print(scaled_{index}({n}))"),
+                ]
+            }
             _ => vec![
                 format!("plain_{index} <- function(x) x + 1"),
                 format!(

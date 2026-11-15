@@ -21,7 +21,10 @@ use {
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, is_na_real},
     rustc_hash::FxHashMap,
-    std::{cell::RefCell, cmp::Ordering},
+    std::{
+        cell::{Cell, RefCell},
+        cmp::Ordering,
+    },
 };
 
 /// The builtins whose operands may be native numbers: the arithmetic and comparison operators.
@@ -651,31 +654,74 @@ pub unsafe fn checked_number(conversion: Sexp, number: Sexp, expected: arrays::I
 }
 
 thread_local! {
-    /// The R type the last run of each `Num.from_r` and `List.from_r` call gave, by call: the
-    /// type feedback that fixes the type compiled typed code gives the conversion of what an R
-    /// call returns, which depends on the R value.
-    static CONVERSIONS: RefCell<FxHashMap<Sexp, SexpType>> = RefCell::new(FxHashMap::default());
+    /// What the runs of each `Num.from_r` and `List.from_r` call gave, by call: the type feedback
+    /// that fixes the type compiled typed code gives the conversion of what an R call returns,
+    /// which depends on the R value.
+    static CONVERSIONS: RefCell<FxHashMap<Sexp, Observed>> = RefCell::new(FxHashMap::default());
+    /// How many conversions have given a second type, which makes code compiled for the first
+    /// stale ([`conversion_epoch`]).
+    static CONVERSION_EPOCH: Cell<u64> = const { Cell::new(0) };
+}
+
+/// What the runs of one `Num.from_r` or `List.from_r` call gave: the R type of the value it
+/// converted to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Observed {
+    /// Every run gave this type.
+    Steady(SexpType),
+    /// The runs gave the first type and later the second, so no type is known before a run.
+    Changed(SexpType, SexpType),
 }
 
 /// How many call sites [`CONVERSIONS`] holds before it starts again, since code that `eval`
 /// parses anew in a loop makes a new call every time.
 const MAX_CONVERSIONS: usize = 65536;
 
-/// The R type the last run of the `Num.from_r` or `List.from_r` call `call` gave.
-pub fn observed_conversion(call: Sexp) -> Option<SexpType> {
+/// What the runs of the `Num.from_r` or `List.from_r` call `call` gave.
+pub fn observed_conversion(call: Sexp) -> Option<Observed> {
     CONVERSIONS.with_borrow(|conversions| conversions.get(&call).copied())
+}
+
+/// A count that grows whenever a conversion gives a type other than the one it gave before.
+/// Code compiled for the type a conversion gave is stale once the count has grown.
+pub fn conversion_epoch() -> u64 {
+    CONVERSION_EPOCH.get()
 }
 
 unsafe fn observe(call: Sexp, value: Sexp) {
     let kind = value.kind();
-    CONVERSIONS.with_borrow_mut(|conversions| {
-        if conversions.get(&call) != Some(&kind) {
-            if conversions.len() >= MAX_CONVERSIONS {
-                conversions.clear();
-            }
-            conversions.insert(call, kind);
+    CONVERSIONS.with_borrow_mut(|conversions| match conversions.get(&call) {
+        Some(Observed::Steady(before)) if *before == kind => {}
+        Some(&Observed::Steady(before)) => {
+            conversions.insert(call, Observed::Changed(before, kind));
+            CONVERSION_EPOCH.set(CONVERSION_EPOCH.get() + 1);
         }
+        Some(Observed::Changed(..)) => {}
+        None => first_observed(conversions, call, kind),
     });
+}
+
+/// Records that code compiled before this session took the conversion `call` to give values of
+/// R type `kind`, as if the interpreter had seen it give one, so that a value of another type
+/// makes that code stale. `false` when this session has seen the conversion give another type.
+pub fn assume_conversion(call: Sexp, kind: SexpType) -> bool {
+    CONVERSIONS.with_borrow_mut(|conversions| match conversions.get(&call) {
+        Some(&Observed::Steady(before)) => before == kind,
+        Some(Observed::Changed(..)) => false,
+        None => {
+            first_observed(conversions, call, kind);
+            true
+        }
+    })
+}
+
+fn first_observed(conversions: &mut FxHashMap<Sexp, Observed>, call: Sexp, kind: SexpType) {
+    if conversions.len() >= MAX_CONVERSIONS {
+        // Forgetting a change would leave code compiled for one of its types current.
+        conversions.clear();
+        CONVERSION_EPOCH.set(CONVERSION_EPOCH.get() + 1);
+    }
+    conversions.insert(call, Observed::Steady(kind));
 }
 
 /// `Num.to_r(number)`: an `I64` as an R integer when it fits 32 bits and is not the bit pattern R

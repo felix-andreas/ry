@@ -1025,7 +1025,7 @@ impl Deparser {
     /// The calls ry's own syntax lowers to, printed back in that syntax.
     unsafe fn ry_call(&mut self, form: RyForm, arguments: Sexp) {
         match form {
-            RyForm::Elaborated => self.deparse(arguments.car()),
+            RyForm::Elaborated | RyForm::Replayed => self.deparse(arguments.car()),
             RyForm::Record | RyForm::Tuple => {
                 self.print("(");
                 self.in_list += 1;
@@ -1705,6 +1705,10 @@ enum RyForm {
     /// the checker knows (`preflight::elaborate` in the `ry` crate): it prints as the `x` the
     /// code's author wrote.
     Elaborated,
+    /// `.ry_replay(x, call)`, which a typed call running again in the interpreter evaluates in
+    /// place of an R call its native code made (`crate::replay`): it prints as the `x` the code's
+    /// author wrote.
+    Replayed,
 }
 
 /// Which ry form a call of `name` with `arguments` is, when its arguments have that form's
@@ -1723,6 +1727,7 @@ unsafe fn ry_form(name: &[u8], arguments: Sexp) -> Option<RyForm> {
         {
             Some(RyForm::Elaborated)
         }
+        b".ry_replay" if named == 0 && items.len() == 2 => Some(RyForm::Replayed),
         b".ry_tag" => {
             let (first_tag, first) = items.first()?;
             (*first_tag == nil() && first.kind() == SexpType::String && length(*first) == 1)

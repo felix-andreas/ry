@@ -101,8 +101,10 @@ illegal dependency unrepresentable.
   interpreter unchanged. Typed code calls an R function from native code when the call is a
   statement or the argument of a `*.from_r` conversion; the arguments arrive as forced promises
   of the code written in the call, and the conversion's result type comes from the type the
-  interpreter saw it give, so the first call of such a function runs interpreted. Code that has
-  called R cannot run again, so giving up after an R call is an error. It depends on `heap` and
+  interpreter saw it give, so the first call of such a function runs interpreted. Code that
+  gives up after calling R is run again by the interpreter, which takes the value of each R
+  call the code already made from a record instead of calling R a second time
+  (`interp::replay`). It depends on `heap` and
   `interp`. `RY_TYPED_LOG=1` prints each compilation with the time it took
   (`typed: compiled for [F64] -> F64 in 412 us`, the time of that function alone), each refused
   compilation with its time (`typed: refused [Str] after 85 us`), so the lines of a run add up to

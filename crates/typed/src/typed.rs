@@ -56,6 +56,7 @@ use {
         builtins::Arg,
         bytecode::TypedCall,
         records::NativeValues,
+        replay,
         unwind::Unwind,
         values as rvalues,
     },
@@ -97,6 +98,11 @@ pub struct Compiled {
     pub epoch: Option<u64>,
     /// Whether the code, or a function it calls, calls an R function.
     pub calls_r: bool,
+    /// The [`interp::numbers::conversion_epoch`] at which this code, or a function it calls,
+    /// took the type of a conversion from what the interpreter saw it give
+    /// ([`lower::Conversion::guessed`]). The code is stale once a conversion has given another
+    /// type.
+    pub guessed: Option<u64>,
 }
 
 type Key = (Sexp, SmallVec<[Type; 4]>);
@@ -122,6 +128,9 @@ thread_local! {
     /// The error an R call from compiled code raised, which [`call`] raises once the code has
     /// given up.
     static PARKED: RefCell<Option<Unwind>> = const { RefCell::new(None) };
+    /// The conversion whose value had a type its compiled code was not compiled for, with that
+    /// type, which made the code give up.
+    static FAILED_GUESS: Cell<Option<(Sexp, SexpType)>> = const { Cell::new(None) };
     /// The interpreter's call whose compiled code is running, which an R call the code makes
     /// runs in a frame of. A typed callee that compiled code calls directly has no call of its
     /// own, so its R calls see its caller's.
@@ -242,6 +251,7 @@ pub unsafe fn call(
     let mut out = [0u64; 2];
     let trampoline: Trampoline = std::mem::transmute(compiled.code.trampoline);
     let r_calls = R_CALLS.get();
+    let segment = replay::open();
     let outer = RUNNING.replace(Some(Running {
         call: typed.call,
         function,
@@ -253,27 +263,50 @@ pub unsafe fn call(
     RUNNING.set(outer);
     if status != 0 {
         arguments.release();
-        heap.release_handles(mark);
-        if let Some(unwind) = PARKED.take() {
-            return Some(Err(unwind));
+        let unwind = PARKED.take();
+        let guess = FAILED_GUESS.take();
+        if unwind.is_some() || R_CALLS.get() == r_calls {
+            replay::close(segment);
+            heap.release_handles(mark);
+            if let Some(unwind) = unwind {
+                return Some(Err(unwind));
+            }
+            STOPS.set(STOPS.get() + 1);
+            decline(|| format!("{}, and the interpreter ran the call again", stop_reason(guess)));
+            return None;
         }
-        if R_CALLS.get() != r_calls {
-            return Some(Err(interp::unwind::error(
-                "a typed function stopped at an operation only the interpreter finishes after it \
-                 had called R, so it cannot run again in the interpreter: the operation is one \
-                 that raises an error or a warning, or a value that leaves the range its type \
-                 holds",
-            )));
-        }
+        // The code called R before it stopped, so the interpreter runs the call again with
+        // what those calls returned, which the recorded values of the calls still root.
         STOPS.set(STOPS.get() + 1);
-        decline(|| {
-            String::from(
-                "its native code stopped at an operation only the interpreter finishes, such as \
-                 one that raises an error or a warning, and the interpreter ran the call again",
-            )
-        });
-        return None;
+        let replayed = replay::replay(
+            segment,
+            typed.call,
+            function,
+            typed.args,
+            typed.sys_parent,
+        );
+        heap.release_handles(mark);
+        let Some(result) = replayed else {
+            return Some(Err(interp::unwind::error(format!(
+                "{}, after it had called R more than {} times, so the interpreter cannot run the \
+                 call again without calling R a second time: make fewer R calls in one typed call",
+                stop_reason(guess),
+                replay::MAX_RECORDED,
+            ))));
+        };
+        if interp::annotations::typed_logging() {
+            interp::annotations::log_interpreted_because(
+                typed.call,
+                &format!(
+                    "{}, and the interpreter ran the call again with the values its R calls had \
+                     returned",
+                    stop_reason(guess)
+                ),
+            );
+        }
+        return Some(result);
     }
+    replay::close(segment);
     let value = to_r(compiled.result, out);
     drop_words(compiled.result, out);
     arguments.release();
@@ -307,7 +340,10 @@ unsafe fn compiled_or_refusal(
         // misses shapes confirmed since: compile it again.
         Some(Some(compiled))
             if !still_resolves(compiled)
-                || compiled.epoch.is_some_and(|epoch| epoch != shapes::epoch()) => {}
+                || compiled.epoch.is_some_and(|epoch| epoch != shapes::epoch())
+                || compiled
+                    .guessed
+                    .is_some_and(|epoch| epoch != interp::numbers::conversion_epoch()) => {}
         Some(Some(compiled)) => return Ok(compiled),
         Some(None) => {
             let refusal = COMPILED.with_borrow(|compiled| match compiled.get(&key) {
@@ -391,6 +427,21 @@ unsafe fn compiled_or_refusal(
 /// How many calls on this thread stopped in native code and ran again in the interpreter.
 pub fn native_stops() -> u64 {
     STOPS.get()
+}
+
+/// Why compiled code stopped partway: the conversion that gave a type the code was not compiled
+/// for when that is why.
+unsafe fn stop_reason(guess: Option<(Sexp, SexpType)>) -> String {
+    match guess {
+        Some((conversion, kind)) => format!(
+            "`{}` gave {}, which its native code was not compiled for",
+            interp::deparse::deparse_first_line(conversion),
+            lower::observed_name(&rvalues::symbol_name(conversion.car()), kind)
+        ),
+        None => "its native code stopped at an operation only the interpreter finishes, such as \
+                 one that raises an error or a warning"
+            .to_owned(),
+    }
 }
 
 /// Whether `function` has compiled code for some argument types.
@@ -511,6 +562,13 @@ unsafe fn generate(params: &[Type], lowered: Lowered, linker: Linker) -> Result<
             .r_calls
             .iter()
             .any(|site| !site.diverges && !site.effect_free);
+    let guesses = lowered.r_calls.iter().any(|site| {
+        matches!(site.result, RResult::Converted(conversion, _) if conversion.guessed())
+    });
+    let guessed = earliest(
+        guesses.then(interp::numbers::conversion_epoch),
+        linker.guessed,
+    );
     // The code calls each function and conversion it was compiled against, and keeps every site
     // for as long as it lives, which is the whole session.
     let heap = interp::heap();
@@ -539,6 +597,7 @@ unsafe fn generate(params: &[Type], lowered: Lowered, linker: Linker) -> Result<
         speculations,
         epoch,
         calls_r,
+        guessed,
     })
 }
 
@@ -581,6 +640,7 @@ struct Linker {
     speculations: Vec<Speculation>,
     epoch: Option<u64>,
     calls_r: bool,
+    guessed: Option<u64>,
 }
 
 impl Callees for Linker {
@@ -601,6 +661,7 @@ impl Callees for Linker {
         // lookups hold.
         self.speculations.extend_from_slice(&compiled.speculations);
         self.epoch = earliest(self.epoch, compiled.epoch);
+        self.guessed = earliest(self.guessed, compiled.guessed);
         self.called.push((function, SmallVec::from_slice(params)));
         self.callees.push(Callee {
             entry: Entry::Address(compiled.code.address),
@@ -642,7 +703,7 @@ fn declared_type(declared: interp::annotations::Declared) -> Option<Type> {
 }
 
 /// The R storage type of a value of `ty` once it crosses back, and whether it is an `Array`.
-fn storage(ty: Type) -> Option<(SexpType, bool)> {
+pub(crate) fn storage(ty: Type) -> Option<(SexpType, bool)> {
     Some(match ty {
         Type::Int => (SexpType::Integer, false),
         Type::Dbl => (SexpType::Real, false),
@@ -1349,21 +1410,27 @@ unsafe fn to_r(ty: Type, out: [u64; 2]) -> Result<Sexp, Unwind> {
 }
 
 /// Makes the R call `site` for compiled code, with the argument words at `words`, and writes the
-/// words of its converted value to `out`. 0 when the call returned, 1 when it raised an error,
-/// which [`call`] raises once the code has given up.
+/// words of its converted value to `out`. 0 when the call returned; 1 when it raised an error,
+/// which [`call`] raises once the code has given up, or when a conversion the code guessed the
+/// type of gave another type ([`FAILED_GUESS`]), after which [`call`] runs the call again in
+/// the interpreter.
+///
+/// A call that may have done something visible is recorded ([`replay::record`]), so that the
+/// interpreter does not make it a second time if the code gives up later. While the interpreter
+/// runs such a call again, a call the code makes that was recorded gives its recorded value.
 ///
 /// # Safety
 ///
 /// `site` is a site the code was compiled with, `words` holds the words of its arguments, and
 /// `out` has room for the words of its result.
 pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *mut u64) -> i32 {
+    let site = &*site;
+    let replayed = replay::replayed(site.call);
     // An effect-free call changes nothing a second run would see unless it warns, so only then
-    // does it count as a call the code cannot make again.
-    let effect_free = (*site).effect_free;
+    // does it count as a call the code cannot make again. A replayed call counts, since running
+    // the code again must give it the same value.
+    let effect_free = site.effect_free && replayed.is_none();
     let warnings = interp::conditions::warnings_raised();
-    if !effect_free {
-        R_CALLS.set(R_CALLS.get() + 1);
-    }
     let heap = interp::heap();
     let mark = heap.handle_mark();
     let outcome = match RUNNING.get() {
@@ -1374,24 +1441,39 @@ pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *
                 args: std::slice::from_raw_parts(running.args, running.count),
                 sys_parent: running.sys_parent,
             };
-            interp::eval::run_in_frame(&typed, |env| call_r(&*site, words, out, env))
+            let mut made = None;
+            interp::eval::run_in_frame(&typed, |env| {
+                made = Some(call_r(site, words, out, env, replayed)?);
+                Ok(())
+            })
+            .and_then(|()| {
+                made.ok_or_else(|| interp::unwind::error("a typed function's R call made nothing"))
+            })
         }
-        None => call_r(&*site, words, out, (*site).env),
+        None => call_r(site, words, out, site.env, replayed),
     };
     heap.release_handles(mark);
-    if effect_free && interp::conditions::warnings_raised() != warnings {
+    let made = outcome.as_ref().ok().copied();
+    if !effect_free || interp::conditions::warnings_raised() != warnings {
         R_CALLS.set(R_CALLS.get() + 1);
+        if let Some(made) = made {
+            // The value stays rooted until the call that entered typed code releases its
+            // handles, which is after any run in the interpreter that replays it.
+            heap.root(made.value);
+            replay::record(site.call, made.value);
+        }
     }
     // Compiled code holds a table as a bare word, which the collector does not see, so the table
     // stays rooted until the call that entered typed code releases its handles.
-    if matches!((*site).result, RResult::Table)
-        && outcome.is_ok()
+    if matches!(site.result, RResult::Table)
+        && made.is_some()
         && let Some(value) = Sexp::from_raw(*out as *mut _)
     {
         heap.root(value);
     }
     match outcome {
-        Ok(()) => 0,
+        Ok(Made { fits: true, .. }) => 0,
+        Ok(Made { fits: false, .. }) => 1,
         Err(unwind) => {
             PARKED.set(Some(unwind));
             1
@@ -1399,12 +1481,56 @@ pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *
     }
 }
 
+/// What an R call compiled code made gave: the value the R function returned, `NULL` when the
+/// code does not use it, and whether its conversion gave the type the code was compiled for.
+#[derive(Clone, Copy)]
+struct Made {
+    value: Sexp,
+    fits: bool,
+}
+
 unsafe fn call_r(
     site: &RCall,
-    mut words: *const u64,
+    words: *const u64,
     out: *mut u64,
     env: Sexp,
-) -> Result<(), Unwind> {
+    replayed: Option<Sexp>,
+) -> Result<Made, Unwind> {
+    let heap = interp::heap();
+    let value = match replayed {
+        Some(value) => value,
+        None => apply_r(site, words, env)?,
+    };
+    let (conversion, ty) = match site.result {
+        RResult::Unused => {
+            return Ok(Made {
+                value: rvalues::nil(),
+                fits: true,
+            });
+        }
+        RResult::Converted(conversion, ty) => (conversion, ty),
+        RResult::Table => {
+            if !(interp::interp().extensions.tables.is_table_value)(value) {
+                return Err(interp::unwind::error(format!(
+                    "`{}` gave a value of type `{}` where the typed function was compiled for a \
+                     table value",
+                    interp::deparse::deparse_first_line(site.call.car()),
+                    value.kind().name()
+                )));
+            }
+            *out = value.as_ptr() as u64;
+            return Ok(Made { value, fits: true });
+        }
+    };
+    heap.root(value);
+    let converted = convert(conversion, site.call, value, site.env)?;
+    heap.root(converted);
+    let fits = write_converted(conversion, ty, converted, out)?;
+    Ok(Made { value, fits })
+}
+
+/// Calls the R function of `site` with the argument words at `words` in `env`.
+unsafe fn apply_r(site: &RCall, mut words: *const u64, env: Sexp) -> Result<Sexp, Unwind> {
     let heap = interp::heap();
     let mut args: SmallVec<[Arg; 4]> = SmallVec::new();
     for argument in &site.arguments {
@@ -1426,27 +1552,7 @@ unsafe fn call_r(
             value: promise,
         });
     }
-    let value = interp::eval::apply(site.call, site.function, &args, env)?;
-    let (conversion, ty) = match site.result {
-        RResult::Unused => return Ok(()),
-        RResult::Converted(conversion, ty) => (conversion, ty),
-        RResult::Table => {
-            if !(interp::interp().extensions.tables.is_table_value)(value) {
-                return Err(interp::unwind::error(format!(
-                    "`{}` gave a value of type `{}` where the typed function was compiled for a \
-                     table value",
-                    interp::deparse::deparse_first_line(site.call.car()),
-                    value.kind().name()
-                )));
-            }
-            *out = value.as_ptr() as u64;
-            return Ok(());
-        }
-    };
-    heap.root(value);
-    let converted = convert(conversion, site.call, value, site.env)?;
-    heap.root(converted);
-    write_converted(conversion, ty, converted, out)
+    interp::eval::apply(site.call, site.function, &args, env)
 }
 
 /// Applies the conversion `conversion` to `value`, the value of the code `code`, as the
@@ -1467,13 +1573,14 @@ unsafe fn convert(
 }
 
 /// Writes the words of `value`, which the conversion `conversion` gave, as a native value of
-/// `ty`, the type it gave when the code compiled.
+/// `ty`, the type it gave when the code compiled. `false` when a conversion whose type the code
+/// guessed gave a value of another type ([`FAILED_GUESS`]), which writes nothing.
 unsafe fn write_converted(
     conversion: lower::Conversion,
     ty: Type,
     value: Sexp,
     out: *mut u64,
-) -> Result<(), Unwind> {
+) -> Result<bool, Unwind> {
     let value = match conversion.checked {
         Some(item) if rvalues::symbol_name(conversion.call.car()) == "Num.from_r" => {
             let expected = match item {
@@ -1500,6 +1607,10 @@ unsafe fn write_converted(
     if expected != Some(value.kind())
         || rvalues::length(value) != 1 && !matches!(ty, Type::Vector { .. })
     {
+        if conversion.guessed() {
+            FAILED_GUESS.set(Some((conversion.call, value.kind())));
+            return Ok(false);
+        }
         return Err(interp::unwind::error(format!(
             "`{}` gave a value of type `{}`, and the typed function was compiled for the type \
              it gave before: convert the value to one type in R first",
@@ -1548,7 +1659,7 @@ unsafe fn write_converted(
             ));
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 unsafe fn charsxp_of(string: Str) -> Result<Sexp, Unwind> {

@@ -73,6 +73,64 @@ expect stdout "[1] 5\n[1] 10"
 expect stderr "typed: `later` runs in the interpreter: no code for [Dbl]: it waits on the interpreter to run `"
 expect stderr "typed: compiled for [Dbl] -> Dbl"
 
+# The code compiled for the type a guessed conversion gave first. When the conversion gives
+# another type, the code gives up, and the interpreter runs the call again with the values the
+# R calls made so far returned, so `note("before")` and `factor()` run once. A conversion that has
+# given two types refuses to compile from then on, and its calls run in the interpreter. With the
+# native tier off, the program prints the same.
+
+file loose/changes.R
+| rate <- 2.5
+| factor <- function() { cat("factor called\n"); get("rate") }
+| note <- function(s) cat("note:", s, "\n")
+| later <- function(x: I64) -> I64 {
+|   note("before")
+|   y <- Num.from_r(factor())
+|   note("after")
+|   print(y)
+|   x
+| }
+| print(later(2))
+| print(later(4))
+| rate <- as.integer(3)
+| print(later(5))
+| rate <- 1.5
+| print(later(6))
+
+run ry run --runtime ry loose/changes.R
+expect exit 0
+expect stdout "note: before \nfactor called\nnote: after \n[1] 2.5\n4i64\nnote: before \nfactor called\nnote: after \n3i64\n5i64\nnote: before \nfactor called\nnote: after \n[1] 1.5\n6i64"
+expect stderr "typed: `later` runs in the interpreter: `Num.from_r(factor())` gave a value of type `I64`, which its native code was not compiled for, and the interpreter ran the call again with the values its R calls had returned"
+expect stderr "typed: `later` runs in the interpreter: no code for [I64]: `Num.from_r(factor())` gave `F64` in one call and `I64` in another, so its type is not known before it runs: convert the value to one type in R first"
+
+env RY_JIT off
+run ry run --runtime ry loose/changes.R
+expect exit 0
+expect stdout "note: before \nfactor called\nnote: after \n[1] 2.5\n4i64\nnote: before \nfactor called\nnote: after \n3i64\n5i64\nnote: before \nfactor called\nnote: after \n[1] 1.5\n6i64"
+unset RY_JIT
+
+# The interpreter cannot run a call again without repeating its R calls once the code has made
+# more of them than it records, so giving up after that is an error.
+
+file loose/many.R
+| rate <- 2.5
+| factor <- function() get("rate")
+| tick <- function() cat("")
+| many <- function(n: I64) -> I64 {
+|   i <- 0
+|   while (i < n) { tick(); i <- i + 1 }
+|   y <- Num.from_r(factor())
+|   n
+| }
+| print(many(1))
+| print(many(1))
+| rate <- as.integer(3)
+| print(many(5000))
+
+run ry run --runtime ry loose/many.R
+expect exit 1
+expect stderr "`Num.from_r(factor())` gave a value of type `I64`, which its native code was not compiled for, after it had called R more than 4096 times, so the interpreter cannot run the call again without calling R a second time: make fewer R calls in one typed call"
+
 # A `Num.from_r` the checker typed gives that number whatever R gives: an R integer where the
 # checker read a `double` becomes an `F64`, as R converts it, and a `double` where it read an
 # `integer` is an error. `@trust` makes the checker read the types R code declares. The
