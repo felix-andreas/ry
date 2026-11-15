@@ -768,6 +768,24 @@ impl Reader<'_> {
             _ => {}
         }
         let object = match kind {
+            // ry's `I64` literal in code (see the writer in `libr`): a length of 1 and the
+            // value's high and low 32 bits.
+            28 => {
+                let array = self.integer()? != 0;
+                let count = self.length()?;
+                self.expect_elements(count, 8)?;
+                let mut items = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let high = self.integer()? as u32 as u64;
+                    let low = self.integer()? as u32 as u64;
+                    items.push((high << 32 | low) as i64);
+                }
+                match (array, items.as_slice()) {
+                    (true, _) => crate::numbers::list(&items)?,
+                    (false, &[value]) => crate::numbers::alloc(value)?,
+                    (false, _) => return Err(error("an I64 in the stream is not a scalar")),
+                }
+            }
             10 | 13 => {
                 let count = self.length()?;
                 self.expect_elements(count, 4)?;

@@ -3,6 +3,24 @@ title: News
 description: Release announcements and project news
 ---
 
+## Unreleased
+
+### An installed typed package runs like a script
+
+`ry install` and `ry build` on ry's runtime check a typed package in strict mode before they build
+it, and a strict-mode error stops the build. The tarball holds the sources as `ry run` runs them:
+literals carry the types the checker gave them, and every one-line parameter and return annotation
+is written as the type it stands for, with aliases expanded. So a typed function of an installed
+package that converts an R vector with `List.from_r`, or that reads a parameter typed by an alias,
+compiles at its first call instead of running that call in the interpreter, and a parameter typed by
+a record alias is checked at run time
+(``argument `p` must be `Record{x: F64, y: F64}`, not `list` ``). See [the CLI reference](/reference/cli#build-and-install).
+
+An `I64` or a `List<I64>` inside a function, a list or a package's namespace serializes, as ry's
+own type code that only ry reads back, so a typed package can bind `limit <- 10` where the checker
+types `10` as `I64`. `saveRDS(5i64, file)` is refused, and records, tuples, tags, dictionaries and
+sets do not serialize.
+
 ## ry 0.4.5
 
 *Released in November 2026.*

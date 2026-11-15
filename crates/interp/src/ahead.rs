@@ -61,9 +61,6 @@ impl State {
 pub struct Program<'a> {
     /// The definitions in the order the script runs them.
     pub definitions: &'a [Definition],
-    /// The types the script names with `type` or `alias`, by name, each as its definition is
-    /// written. An annotation that uses such a name says nothing to the runtime without it.
-    pub named_types: &'a FxHashMap<String, String>,
 }
 
 /// A closure made ahead for a definition written at the top level of a script.
@@ -131,10 +128,8 @@ unsafe fn prepare_script(script: &Script<'_>, keep_source: bool) -> R<Prepared> 
         definitions.push(Definition { symbol, closure });
     }
     if let Some(tier) = bytecode::tier() {
-        let named_types = script.named_types().into_iter().collect();
         (tier.ahead)(&Program {
             definitions: &definitions,
-            named_types: &named_types,
         });
     }
     if discards_closures() {

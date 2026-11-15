@@ -309,7 +309,8 @@ const TIERINGS: [Tiering; 5] = [
 /// seed writes a script of typed functions and runs it every way [`TIERINGS`] lists, and every
 /// run must end with the same exit code, standard output and standard error. A script whose
 /// meaning does not rest on its annotations also runs with the annotations erased, which must
-/// print the same.
+/// print the same, and a script whose definitions mean the same in a package also runs with them
+/// installed as one, from a script that attaches it.
 ///
 /// The scripts are built from the shapes that make compiling ahead differ from compiling at a
 /// first call: a function called before its callee is defined, a name defined twice or bound to
@@ -353,7 +354,7 @@ fn typed_scripts_agree_however_they_compile() {
             log.join("\n"),
         )
     };
-    let (mut scripts, mut ahead, mut nothing_late) = (0, 0, 0);
+    let (mut scripts, mut ahead, mut nothing_late, mut packaged) = (0, 0, 0, 0);
     for_each_seed(16, |seed| {
         let (text, erasable) = typed_script(&mut SplitMix64(seed));
         let script = directory.path().join(format!("script_{seed}.R"));
@@ -375,6 +376,50 @@ fn typed_scripts_agree_however_they_compile() {
                 ahead += usize::from(!before.ends_with("typed: compiled 0 functions"));
                 nothing_late += usize::from(!after.contains("typed: compiled for"));
             }
+        }
+        if let Some((definitions, rest)) = package_parts(&statements_of(&text)) {
+            let name = format!("typedseed{seed}");
+            let package = directory.path().join(&name);
+            fs::create_dir_all(package.join("R")).expect("create the package");
+            fs::write(
+                package.join("DESCRIPTION"),
+                format!(
+                    "Package: {name}\nVersion: 1.0\nTitle: Seed\nDescription: A seed.\nLicense: MIT\n"
+                ),
+            )
+            .expect("write DESCRIPTION");
+            fs::write(package.join("NAMESPACE"), "exportPattern(\"^[^.]\")\n")
+                .expect("write NAMESPACE");
+            fs::write(package.join("R").join("program.R"), definitions.join("\n") + "\n")
+                .expect("write the definitions");
+            let library = directory.path().join(format!("library_{seed}"));
+            let install = Command::new(env!("CARGO_BIN_EXE_ry"))
+                .arg("install")
+                .arg(&package)
+                .arg("-l")
+                .arg(&library)
+                .current_dir(directory.path())
+                .env("XDG_CACHE_HOME", directory.path().join(".cache"))
+                .output()
+                .expect("run ry install");
+            assert!(
+                install.status.success(),
+                "seed {seed}: installing the definitions failed:\n{}\n{text}",
+                String::from_utf8_lossy(&install.stderr)
+            );
+            let user = directory.path().join(format!("use_{seed}.R"));
+            fs::write(
+                &user,
+                format!("library({name}, lib.loc = {library:?})\n{}\n", rest.join("\n")),
+            )
+            .expect("write the script that uses the package");
+            let (package_code, package_stdout, package_stderr, _) = run(&user, &TIERINGS[1]);
+            assert_eq!(
+                (code, &stdout, &stderr),
+                (package_code, &package_stdout, &package_stderr),
+                "seed {seed}: the definitions installed as a package print something else:\n{text}"
+            );
+            packaged += 1;
         }
         if erasable {
             let erased = directory.path().join(format!("erased_{seed}.R"));
@@ -399,10 +444,68 @@ fn typed_scripts_agree_however_they_compile() {
     // that compiles nothing later is rarer, because several of the units compile at a first
     // call by design: a rebound name, a definition inside a block, a `Num.from_r`.
     assert!(
-        scripts < 8 || (ahead * 4 >= scripts * 3 && nothing_late > 0),
-        "of {scripts} scripts, {ahead} compiled functions ahead and {nothing_late} compiled \
-         nothing later"
+        scripts < 8 || (ahead * 4 >= scripts * 3 && nothing_late > 0 && packaged > 0),
+        "of {scripts} scripts, {ahead} compiled functions ahead, {nothing_late} compiled \
+         nothing later and {packaged} ran as an installed package"
     );
+}
+
+/// A generated script's top-level statements, each with the `#:` block above it.
+fn statements_of(text: &str) -> Vec<String> {
+    let mut statements: Vec<String> = Vec::new();
+    let mut attached = false;
+    for line in text.lines() {
+        let continues = line.starts_with([' ', '}']);
+        match statements.last_mut() {
+            Some(last) if continues || attached => {
+                last.push('\n');
+                last.push_str(line);
+            }
+            _ => statements.push(line.to_owned()),
+        }
+        attached = line.starts_with("#:");
+    }
+    statements
+}
+
+/// The definitions of a script as a package holds them, and the statements left to the script
+/// that attaches it, when the script means the same that way: each name is defined once, at the
+/// top level, and the script never binds or removes one of them.
+fn package_parts(statements: &[String]) -> Option<(Vec<String>, Vec<String>)> {
+    let code_of = |statement: &str| {
+        statement
+            .lines()
+            .find(|line| !line.starts_with("#:"))
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let is_definition = |statement: &str| {
+        let code = code_of(statement);
+        code.starts_with("alias ")
+            || code.starts_with("type ")
+            || code
+                .split_once(" <- ")
+                .is_some_and(|(name, value)| {
+                    name.chars().all(|character| character.is_alphanumeric() || character == '_')
+                        && value.starts_with("function(")
+                })
+    };
+    let (definitions, rest): (Vec<String>, Vec<String>) =
+        statements.iter().cloned().partition(|statement| is_definition(statement));
+    let mut names: Vec<String> = definitions
+        .iter()
+        .filter_map(|definition| {
+            let code = code_of(definition);
+            Some(code.split_once(" <- ")?.0.to_owned())
+        })
+        .collect();
+    let defined = names.len();
+    names.sort_unstable();
+    names.dedup();
+    let rebinds = rest
+        .iter()
+        .any(|statement| statement.contains(" <- ") || statement.starts_with("rm("));
+    (names.len() == defined && !rebinds && !definitions.is_empty()).then_some((definitions, rest))
 }
 
 /// A session limits how many closures it compiles, because a running program can make closures

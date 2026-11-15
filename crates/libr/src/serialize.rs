@@ -75,9 +75,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
     })
     .invisible(),
     internal("saveToConn", 6, |call| unsafe { do_save_to_conn(call) }).invisible(),
+    // A typed package's bindings include its `I64` and `List<I64>` constants, which the
+    // serializer writes; it refuses the other native values itself.
     internal("lazyLoadDBinsertValue", 5, |call| unsafe {
         do_lazy_load_insert(call)
-    }),
+    })
+    .accepting_native(),
 ];
 
 /// `lazyLoadDBinsertValue(value, file, ascii, compress, hook)`: serializes `value` (version 3,
@@ -559,8 +562,22 @@ impl Writer<'_, '_> {
     unsafe fn write_item_unguarded(&mut self, mut object: Sexp) -> ApiResult<()> {
         // Pairlist tails are written in a loop, so a long list costs no stack.
         loop {
-            // ry's records, tuples and tagged unions have no R representation to write.
+            // An `I64` or a `List<I64>`, as typed code and the literals the preflight
+            // elaborates make them, is written as ry's own type code, which only ry reads back.
+            // A typed package's lazy-load database holds them, in code and as bindings, and is
+            // installed for the runtime that runs it. ry's records, tuples and tagged unions have
+            // no stream representation.
             if interp::records::is_native(object) {
+                if object.kind() == SexpType::I64 {
+                    self.write_integer(SexpType::I64.code() as i32)?;
+                    self.write_integer(i32::from(object.is_array()))?;
+                    self.write_length(object.length())?;
+                    for &value in object.slice::<i64>() {
+                        self.write_integer((value as u64 >> 32) as u32 as i32)?;
+                        self.write_integer(value as u64 as u32 as i32)?;
+                    }
+                    return Ok(());
+                }
                 return Err(error(interp::records::boundary_message(
                     "the value",
                     object,

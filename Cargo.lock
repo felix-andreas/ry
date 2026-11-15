@@ -4963,9 +4963,11 @@ dependencies = [
  "heap",
  "interp",
  "rustc-hash",
+ "semantics",
  "smallvec",
  "ssa",
  "stacker",
+ "syntax",
 ]
 
 [[package]]

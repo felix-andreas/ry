@@ -398,6 +398,12 @@ these rules:
   attributes are not checked, and a type the storage type cannot decide (an alias, a class, a type
   parameter, `Any`, `data.frame`) is not checked at all. A check therefore fails only on a value that really does not
   have the annotated type.
+- **An installed typed package's signatures name the types, not their aliases.** `ry install` and
+  `ry build` on ry's runtime write each one-line parameter and return annotation of a typed package
+  as the type it stands for ([CLI reference](/reference/cli#build-and-install)), so an installed
+  function with a parameter `p: Point`, where `alias Point = Record{x: F64, y: F64}`, checks `p` as
+  a record. A type with no such spelling, such as the open record `Record{a: I64, ..}`, and an
+  annotation that spans lines stay as written.
 - **A function with no parameters whose body is a constant or a bare name is not checked**, because
   it has no language object to carry its signature.
 

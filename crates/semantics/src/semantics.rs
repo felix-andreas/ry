@@ -1377,27 +1377,25 @@ pub fn file_holds_ry_values(db: &dyn Db, file: SourceFile) -> bool {
 
 /// One rewrite the code ry's runtime runs needs, because R would read the text with a type other
 /// than the one the checker gave it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Elaboration {
     /// An unsuffixed number literal the checker typed as `I64`, which R reads as a `double`.
     I64Literal(TextRange),
     /// A list expression the runtime may build empty, whose item storage only the checker
     /// knows (`ItemCheck::typed_empties`), or a dictionary built from no entries.
     TypedEmpty(TextRange, Empty),
+    /// A type in a strict function's signature, spelled as the checker reads it: with every
+    /// alias expanded and a nominal type replaced by its representation, so that the runtime
+    /// reads it without the type definitions ([`canonical_annotation`]).
+    Annotation(TextRange, Box<str>),
 }
 
 impl Elaboration {
-    pub fn range(self) -> TextRange {
+    pub fn range(&self) -> TextRange {
         match self {
-            Elaboration::I64Literal(range) | Elaboration::TypedEmpty(range, _) => range,
-        }
-    }
-
-    /// The same rewrite at `range`.
-    pub fn at(self, range: TextRange) -> Elaboration {
-        match self {
-            Elaboration::I64Literal(_) => Elaboration::I64Literal(range),
-            Elaboration::TypedEmpty(_, items) => Elaboration::TypedEmpty(range, items),
+            Elaboration::I64Literal(range)
+            | Elaboration::TypedEmpty(range, _)
+            | Elaboration::Annotation(range, _) => *range,
         }
     }
 }
@@ -1430,11 +1428,133 @@ pub fn file_elaborations(db: &dyn Db, file: SourceFile) -> Vec<Elaboration> {
                 .map(|&(id, items)| Elaboration::TypedEmpty(module.range(id) + offset, items)),
         );
     }
+    elaborations.extend(signature_elaborations(db, file));
     elaborations.sort_unstable_by_key(|elaboration| {
         let range = elaboration.range();
         (range.start(), std::cmp::Reverse(range.end()))
     });
     elaborations
+}
+
+/// The canonical spelling of each type the signatures in `file` write where the runtime reads
+/// it ([`syntax::annotation::signature`]) and spell differently. A type is left as written when
+/// it has no canonical spelling ([`canonical_annotation`]), or when it spans lines, because a
+/// rewrite must keep every line where it is.
+fn signature_elaborations(db: &dyn Db, file: SourceFile) -> Vec<Elaboration> {
+    let inline = inline_annotations_enabled(db);
+    let definitions = TypeDefinitions::of(db, file);
+    let root = parse(db, file).syntax_node();
+    let mut written = Vec::new();
+    for function in root
+        .descendants()
+        .filter(|node| node.kind() == SyntaxKind::FUNCTION_DEF)
+    {
+        let signature = syntax::annotation::signature(&function, inline);
+        written.extend(signature.formals.into_iter().flatten().chain(signature.ret));
+    }
+    written.sort_unstable_by_key(|node| node.text_range().start());
+    written.dedup_by_key(|node| node.text_range());
+    written
+        .into_iter()
+        .filter(|node| !node.text().contains('\n'))
+        .filter_map(|node| {
+            let text = canonical_annotation(db, definitions, &node)?;
+            (text != node.text()).then(|| Elaboration::Annotation(node.text_range(), text.into()))
+        })
+        .collect()
+}
+
+/// The canonical spelling of the written type `node`: the type the checker reads, with every
+/// alias expanded and every nominal type of the project replaced by its representation,
+/// printed by [`diagnostics::TypeRenderer`]. `None` when that type is not closed (it holds a
+/// type parameter, an `Unknown` or a name with no definition), or when reading the printed text
+/// back gives another type, so that a rewrite never changes what the checker declared.
+pub fn canonical_annotation<'db>(
+    db: &'db dyn Db,
+    definitions: TypeDefinitions<'db>,
+    node: &SyntaxNode,
+) -> Option<String> {
+    let ty = canonical_type(db, definitions, annotations::lower_written_type(db, node)?)?;
+    let text = diagnostics::TypeRenderer::default().render(db, ty);
+    let reread = syntax::parse(&format!("function(x: {text}) NULL"));
+    if !reread.errors().is_empty() {
+        return None;
+    }
+    let function = reread
+        .syntax_node()
+        .descendants()
+        .find(|node| node.kind() == SyntaxKind::FUNCTION_DEF)?;
+    let written = syntax::annotation::signature(&function, true)
+        .formals
+        .into_iter()
+        .next()
+        .flatten()
+        .filter(|written| written.text() == text)?;
+    // The text names a recursive type inside its own representation, so it is read back as
+    // written rather than unfolded again.
+    let mut table = infer::InferenceTable::default();
+    table.definitions = Some(definitions);
+    let again = table.resolve(db, annotations::lower_written_type(db, &written)?);
+    (again == ty).then_some(text)
+}
+
+/// `ty` with its aliases expanded and every nominal type the project defines unfolded to its
+/// representation, or `None` when it is not closed. A nominal type of the stubs, such as
+/// `List<T>`, is spelled by its name, which the runtime reads, and so is a recursive one inside
+/// its own representation, which only a tag's payload can hold.
+fn canonical_type<'db>(
+    db: &'db dyn Db,
+    definitions: TypeDefinitions<'db>,
+    ty: types::Ty<'db>,
+) -> Option<types::Ty<'db>> {
+    let mut table = infer::InferenceTable::default();
+    table.definitions = Some(definitions);
+    let ty = unfold_nominal(db, definitions, &mut table, ty, &mut Vec::new());
+    is_closed(db, definitions, ty).then_some(ty)
+}
+
+fn unfold_nominal<'db>(
+    db: &'db dyn Db,
+    definitions: TypeDefinitions<'db>,
+    table: &mut infer::InferenceTable<'db>,
+    ty: types::Ty<'db>,
+    unfolding: &mut Vec<types::Name<'db>>,
+) -> types::Ty<'db> {
+    let ty = table.resolve(db, ty);
+    if let types::TyKind::Named(name, arguments) = ty.kind(db)
+        && !unfolding.contains(name)
+        && let Some(definition) = definitions.get(db, *name)
+        && !definition.alias
+        && !matches!(definition.body.kind(db), types::TyKind::Unknown)
+        && !definitions.library().is_some_and(|library| {
+            library
+                .type_definitions
+                .get(name)
+                .is_some_and(|stub| std::ptr::eq(stub, definition))
+        })
+    {
+        unfolding.push(*name);
+        let representation = infer::apply_definition(db, definition, arguments);
+        let unfolded = unfold_nominal(db, definitions, table, representation, unfolding);
+        unfolding.pop();
+        return unfolded;
+    }
+    types::map_child_types(db, ty, &mut |child| {
+        unfold_nominal(db, definitions, table, child, unfolding)
+    })
+}
+
+fn is_closed<'db>(db: &'db dyn Db, definitions: TypeDefinitions<'db>, ty: types::Ty<'db>) -> bool {
+    let own = match ty.kind(db) {
+        types::TyKind::Unknown | types::TyKind::Var(_) | types::TyKind::Rigid(_) => false,
+        types::TyKind::Named(name, _) => definitions.get(db, *name).is_some(),
+        _ => true,
+    };
+    let mut children = own;
+    types::for_each_child_type(db, ty, &mut |child| {
+        children &= children && is_closed(db, definitions, child);
+    });
+    children
 }
 
 /// Package files first, in path order; the order decides last-writer-wins winners.

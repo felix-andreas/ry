@@ -12,6 +12,7 @@ use {
         config::Config,
         diagnostics::{apply_suppressions, document_diagnostics},
     },
+    loader::SourceEncoding,
     repl::{Filtered, InputFilter},
     rustc_hash::FxHashMap,
     semantics::{
@@ -131,7 +132,7 @@ impl Preflight {
     pub fn check(&mut self, input: &str) -> Option<String> {
         let elaborations = self.check_elaborations(input)?;
         let program = elaborate(input.as_bytes(), &elaborations);
-        // Only ASCII is inserted, and only between tokens, so the text stays UTF-8.
+        // Only ASCII is inserted, between tokens or in place of whole ones, so the text stays UTF-8.
         Some(String::from_utf8_lossy(&program).into_owned())
     }
 
@@ -413,6 +414,126 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
     Ok(Verdict::Refuse)
 }
 
+/// The package's R files that `ry install` and `ry build` put in the tarball rewritten, each
+/// with its path under `root` and the bytes ry's runtime should run: the [`elaborate`]d source
+/// of every file whose checked types change how it runs, in the package's declared encoding. A
+/// package with no typed code costs one read and one parse of each file. Strict mode's errors
+/// are printed and refuse the build, as they refuse `ry load`.
+pub fn elaborate_package(
+    root: &Path,
+    config: &Config,
+) -> Result<Vec<(PathBuf, Vec<u8>)>, CommandError> {
+    let sources = root.join("R");
+    let description = match fs::read_to_string(root.join("DESCRIPTION")) {
+        Ok(description) => description,
+        Err(error) => {
+            crate::cli::error(&format!("cannot read {}/DESCRIPTION: {error}", root.display()));
+            return Err(CommandError);
+        }
+    };
+    let encoding = SourceEncoding::of(&description);
+    let typed = config.check.strict || holds_typed_code(&sources, encoding)?;
+    if !typed {
+        return Ok(Vec::new());
+    }
+    on_analysis_stack(|| {
+        let analysis = analyze_project(
+            root,
+            root,
+            config.clone(),
+            std::slice::from_ref(&sources),
+            CacheUse::Off,
+            Purpose::Diagnostics,
+        )?;
+        if analysis.failures > 0 {
+            return Err(CommandError);
+        }
+        let errors = strict_errors(&analysis);
+        let resolve_note = |related: &RelatedLocation| analysis.related_note(related);
+        let mut problems = 0;
+        for (file, errors) in analysis.files.iter().zip(&errors) {
+            problems += render_findings(
+                OutputFormat::Human,
+                MinSeverity::Warning,
+                &file.path,
+                analysis.shown_source(file),
+                errors,
+                &resolve_note,
+            );
+        }
+        if problems > 0 {
+            refuse(problems);
+            return Err(CommandError);
+        }
+        let mut rewritten = Vec::new();
+        for file in analysis
+            .files
+            .iter()
+            .filter(|file| file.requested && file.document.is_none())
+        {
+            let elaborations = semantics::file_elaborations(&analysis.db, file.file);
+            if elaborations.is_empty() {
+                continue;
+            }
+            let source = analysis.source(file);
+            let program = elaborate(source.as_bytes(), &elaborations);
+            // The rewrites insert ASCII between tokens or in place of whole ones, so the program
+            // is UTF-8, parses as the source does, and keeps every line where it was. A rewrite
+            // that breaks one of those is a bug in ry, and installing its output would run code
+            // the checker never saw.
+            let program = String::from_utf8(program)
+                .ok()
+                .filter(|program| {
+                    program.lines().count() == source.lines().count()
+                        && syntax::parse(program).errors().len()
+                            == syntax::parse(source).errors().len()
+                })
+                .and_then(|program| encoding.encode(&program));
+            let Some(program) = program else {
+                crate::cli::error(&format!(
+                    "ry's rewrite of {} for its runtime does not read as the file does; this is \
+                     a bug in ry",
+                    file.path.display()
+                ));
+                return Err(CommandError);
+            };
+            rewritten.push((file.path.clone(), program));
+        }
+        Ok(rewritten)
+    })
+}
+
+/// Whether a file in `sources` asks for strict mode or uses ry's syntax, which is when the
+/// package's code needs checking before it installs.
+fn holds_typed_code(sources: &Path, encoding: SourceEncoding) -> Result<bool, CommandError> {
+    let failed = |path: &Path, error: std::io::Error| {
+        crate::cli::error(&format!("cannot read {}: {error}", path.display()));
+        CommandError
+    };
+    let entries = match fs::read_dir(sources) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(failed(sources, error)),
+    };
+    for entry in entries {
+        let path = entry.map_err(|error| failed(sources, error))?.path();
+        if !path.is_file() {
+            continue;
+        }
+        let bytes = fs::read(&path).map_err(|error| failed(&path, error))?;
+        // A file that is not text in the package's encoding is the analysis's to report.
+        let Some(source) = encoding.decode(bytes) else {
+            return Ok(true);
+        };
+        if source.contains("typing: strict")
+            || has_ry_syntax(&syntax::parse(&source).syntax_node(), &source)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Each package's analysis from its last strict check in this process, by canonical root:
 /// `None` after a first check that read the shared record, and the database kept for edits
 /// after any later one.
@@ -496,6 +617,8 @@ fn findings(
 /// - A list the runtime may build empty is passed through `.ry_items` with its item type, so
 ///   `List.map(xs, f)` runs as `.ry_items(List.map(xs, f), "I64")`, and a dictionary built from
 ///   no entries with its key and value types, as in `.ry_items(Dict.empty(), "Dict<Str, I64>")`.
+/// - A type in a function's signature is spelled canonically, so `x: Region` with
+///   `alias Region = :North | :South` runs as `x: :North | :South`.
 ///
 /// Text after a rewrite on its line moves right.
 pub fn elaborate(input: &[u8], elaborations: &[Elaboration]) -> Vec<u8> {
@@ -522,7 +645,7 @@ pub fn elaborate(input: &[u8], elaborations: &[Elaboration]) -> Vec<u8> {
             continue;
         }
         close_through(&mut program, &mut copied, &mut open, start);
-        match *elaboration {
+        match elaboration {
             Elaboration::I64Literal(_) => {
                 let Some(text) = std::str::from_utf8(&input[start..end]).ok() else {
                     continue;
@@ -542,6 +665,14 @@ pub fn elaborate(input: &[u8], elaborations: &[Elaboration]) -> Vec<u8> {
                 copied = start;
                 open.push((end, items.name()));
             }
+            // A type printed with a non-ASCII field name would not stand for the bytes of a
+            // script in another encoding, so it stays as written.
+            Elaboration::Annotation(_, text) if text.is_ascii() => {
+                program.extend_from_slice(&input[copied..start]);
+                program.extend_from_slice(text.as_bytes());
+                copied = end;
+            }
+            Elaboration::Annotation(..) => {}
         }
     }
     close_through(&mut program, &mut copied, &mut open, usize::MAX);
