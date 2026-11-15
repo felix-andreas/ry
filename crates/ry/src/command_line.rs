@@ -228,17 +228,25 @@ pub enum Command {
     /// The tarball is the one `R CMD build` makes, run on ry's runtime with the options
     /// `devtools::build()` passes: vignettes are rebuilt, data is not re-saved, and no PDF
     /// manual is made. It is written beside the package directory unless `--output` names
-    /// another directory.
+    /// another directory. With `--aot` the package is installed instead, as `ry install` does,
+    /// with the machine code of its typed functions compiled ahead of time.
     Build {
         /// The package, or any path inside it
         #[arg(default_value = ".")]
         path: PathBuf,
         /// The directory to write the tarball to (default: the package directory's parent)
-        #[arg(long, short)]
+        #[arg(long, short, conflicts_with = "aot")]
         output: Option<PathBuf>,
         /// Ship the vignettes as they are instead of rebuilding them
-        #[arg(long, default_value_t = false)]
+        #[arg(long, default_value_t = false, conflicts_with = "aot")]
         no_vignettes: bool,
+        /// Install the package with its typed functions compiled ahead of time into its typed
+        /// code file, as `ry install` does
+        #[arg(long, default_value_t = false)]
+        aot: bool,
+        /// The library to install into with `--aot`
+        #[arg(long, short, requires = "aot")]
+        library: Option<PathBuf>,
         /// `gnu-r` builds with GNU R instead of ry's runtime
         #[arg(long, value_enum, hide = true)]
         runtime: Option<Runtime>,

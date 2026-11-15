@@ -104,3 +104,21 @@ expect exit 0
 expect stdout "[1] 1.5"
 expect stdout "[1] \"argument `x` must be `F64`, not `character`\""
 expect stdout "NULL"
+
+# `ry build --aot` installs the package with its typed code file, as `ry install` does, and
+# points a script at `ry run --aot`.
+run ry build --aot pkg -l built
+expect exit 0
+expect stdout "typed code: closures=7 written=4"
+env RY_TYPED_LOG 1
+file use-built.R
+| library(typedpkg, lib.loc = "built")
+| print(total(1000, 0.001))
+run ry run --runtime ry use-built.R
+expect exit 0
+expect stdout "[1] 718640.9"
+expect stderr "typed: attached `total` for [I64, Dbl] -> Dbl from typedpkg's code file"
+
+run ry build --aot use.R
+expect exit 2
+expect stderr "use.R is a script, and `ry build --aot` compiles a package: run the script with `ry run --aot use.R`"
