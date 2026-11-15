@@ -2342,6 +2342,10 @@ unsafe fn do_parse(call: &Call<'_>) -> R<Sexp> {
         (content, name)
     };
     let expressions = parse_with_srcfile(&source, &name, call.arg(4))?;
+    if text == nil() && count < 0 {
+        crate::heap().root(expressions);
+        crate::ahead::parsed_file(expressions, call.env()?)?;
+    }
     truncate_parse(expressions, count)
 }
 

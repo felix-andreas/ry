@@ -5210,6 +5210,10 @@ impl<'db, 'a> Checker<'db, 'a> {
                         TyKind::NamedList(union_of(self.db, [element, value])),
                     )
                 }
+                // `x[["b"]] <- 2.5` on an atomic vector writes an element, as `x[[2]]` does.
+                _ if matches!(kind, ExpressionKind::Index { double: true, .. }) => {
+                    atomic_write(self.db, prior, value).unwrap_or(prior)
+                }
                 _ => prior,
             };
         }
@@ -5221,28 +5225,17 @@ impl<'db, 'a> Checker<'db, 'a> {
             items[*position] = value;
             return Ty::new(self.db, TyKind::Tuple(&items));
         }
-        // R coerces the whole vector when the written value has a wider type, so
-        // `prob <- rep(NA, n); prob[i] <- 0.5` leaves `prob` a `double[]`.
         if matches!(step, ReplacementStep::Slice) {
-            let (Some(container), Some(written)) = (
-                combine_operand_atomic(self.db, prior),
-                combine_operand_atomic(self.db, value),
-            ) else {
-                return prior;
-            };
-            let element = scalar(self.db, promote_combine_atomic(container, written));
-            // A type carries no length, so a scalar stays a scalar as it does after `x[1] <- 2L`.
-            return match prior.kind(self.db) {
-                TyKind::Scalar(_) => element,
-                TyKind::NamedVector(_) => Ty::new(self.db, TyKind::NamedVector(element)),
-                _ => Ty::new(self.db, TyKind::Vector(element)),
-            };
+            return atomic_write(self.db, prior, value).unwrap_or(prior);
         }
         if !matches!(
             step,
             ReplacementStep::Position(_) | ReplacementStep::Element
         ) {
             return prior;
+        }
+        if let Some(written) = atomic_write(self.db, prior, value) {
+            return written;
         }
         // A ry list's item type is fixed, so the write is checked against it, and it is the use
         // that decides a literal: `j <- 1; lookup[[i]] <- j` makes `j` an `I64` in a `List<I64>`.
@@ -18513,6 +18506,22 @@ fn single<T>(items: Vec<T>) -> Option<T> {
     let mut items = items.into_iter();
     let first = items.next()?;
     items.next().is_none().then_some(first)
+}
+
+/// The type an atomic vector `prior` has after an element or slice write of the atomic `value`.
+/// R coerces the whole vector when the written value has a wider type, so
+/// `prob <- rep(NA, n); prob[i] <- 0.5` and `x <- 1:3; x[[2]] <- 2.5` both leave a `double[]`.
+/// `None` when either is not atomic.
+fn atomic_write<'db>(db: &'db dyn Db, prior: Ty<'db>, value: Ty<'db>) -> Option<Ty<'db>> {
+    let container = combine_operand_atomic(db, prior)?;
+    let written = combine_operand_atomic(db, value)?;
+    let element = scalar(db, promote_combine_atomic(container, written));
+    // A type carries no length, so a scalar stays a scalar as it does after `x[1] <- 2L`.
+    Some(match prior.kind(db) {
+        TyKind::Scalar(_) => element,
+        TyKind::NamedVector(_) => Ty::new(db, TyKind::NamedVector(element)),
+        _ => Ty::new(db, TyKind::Vector(element)),
+    })
 }
 
 fn combine_operand_atomic<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Atomic> {

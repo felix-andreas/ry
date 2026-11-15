@@ -14,6 +14,9 @@
 //! must see when the expression's turn comes. An expression whose lowering warns or fails is
 //! therefore left out here and lowered when the run reaches it, as without `--aot`.
 //!
+//! A file the script sources is compiled the same way when `source()` has parsed it
+//! ([`parsed_file`]), before `source()` evaluates any of it.
+//!
 //! An installed typed package brings its own code, compiled at install into its typed code file.
 //! When a namespace loads whose package has such a file only for another build of ry,
 //! [`namespace_loaded`] compiles its typed functions as the namespace loads and says to reinstall
@@ -122,36 +125,93 @@ unsafe fn prepare_script(script: &Script<'_>, keep_source: bool) -> R<Prepared> 
         let Some(expression) = interp().ahead.lowered[index] else {
             continue;
         };
-        let Some((symbol, value)) = assignment(expression)? else {
-            continue;
-        };
-        if value.kind() != SexpType::Language || value.car() != symbols().function {
-            continue;
+        if let Some(definition) = definition(expression, false)? {
+            definitions.push(definition);
         }
-        let (formals, body, srcref) = (
-            value.cdr().car(),
-            value.cdr().cdr().car(),
-            value.cdr().cdr().cdr().car(),
-        );
-        let Some(key) = definition_key(formals, body) else {
-            continue;
-        };
-        let closure = values::triple(SexpType::Closure, formals, body, global_env())?;
-        interp().ahead.waiting.insert(key, closure);
-        if srcref != nil() {
-            values::set_attr(closure, symbols().srcref, srcref)?;
-        }
-        definitions.push(Definition { symbol, closure });
     }
+    compile(&definitions);
+    Ok(Prepared { keep_source: kept })
+}
+
+/// Compiles the typed functions a file that `source()` parsed defines at its top level, before
+/// `source()` evaluates the file, so that the calls the script makes after it find code. Called
+/// with every file `parse()` reads whole in the frame `env` while the session compiles ahead.
+/// Only a definition evaluated in the global environment binds the closure made here, so the
+/// file compiles only when `env` is a frame that will evaluate it there: one whose `envir`,
+/// read without forcing anything, is the global environment, as in `source()` and
+/// `sys.source()`. A definition evaluated elsewhere makes its own closure, as without `--aot`.
+pub unsafe fn parsed_file(expressions: Sexp, env: Sexp) -> R<()> {
+    if !interp().ahead.enabled || interp().ahead.lowering || env == global_env() {
+        return Ok(());
+    }
+    let Some(mut envir) = crate::eval::peek_variable(values::install("envir")?, env) else {
+        return Ok(());
+    };
+    if envir.kind() == SexpType::Promise {
+        envir = envir.car();
+    }
+    if envir != global_env() {
+        return Ok(());
+    }
+    let heap = crate::heap();
+    let mark = heap.handle_mark();
+    let mut definitions = Vec::new();
+    let mut result = Ok(());
+    for index in 0..values::length(expressions) {
+        match definition(expressions.element(index), true) {
+            Ok(Some(definition)) => definitions.push(definition),
+            Ok(None) => {}
+            Err(error) => {
+                result = Err(error);
+                break;
+            }
+        }
+    }
+    if result.is_ok() {
+        compile(&definitions);
+    }
+    heap.release_handles(mark);
+    result
+}
+
+/// The closure made ahead for `expression` when it is a definition `name <- function(...) ...`,
+/// which [`take`] gives the definition when the run reaches it. With `typed_only`, a definition
+/// of an untyped function gets none, because nothing would compile for it.
+unsafe fn definition(expression: Sexp, typed_only: bool) -> R<Option<Definition>> {
+    let Some((symbol, value)) = assignment(expression)? else {
+        return Ok(None);
+    };
+    if value.kind() != SexpType::Language || value.car() != symbols().function {
+        return Ok(None);
+    }
+    let (formals, body, srcref) = (
+        value.cdr().car(),
+        value.cdr().cdr().car(),
+        value.cdr().cdr().cdr().car(),
+    );
+    let Some(key) = definition_key(formals, body) else {
+        return Ok(None);
+    };
+    let closure = values::triple(SexpType::Closure, formals, body, global_env())?;
+    crate::heap().root(closure);
+    if typed_only && !crate::annotations::is_typed(closure) {
+        return Ok(None);
+    }
+    if srcref != nil() {
+        values::set_attr(closure, symbols().srcref, srcref)?;
+    }
+    interp().ahead.waiting.insert(key, closure);
+    Ok(Some(Definition { symbol, closure }))
+}
+
+/// Has the optimizing tier compile the typed closures among `definitions`.
+unsafe fn compile(definitions: &[Definition]) {
     if let Some(tier) = bytecode::tier() {
-        (tier.ahead)(&Program {
-            definitions: &definitions,
-        });
+        (tier.ahead)(&Program { definitions });
     }
     if discards_closures() {
         interp().ahead.waiting.clear();
     }
-    Ok(Prepared { keep_source: kept })
 }
 
 /// Compiles the typed functions of `namespace`, which `loadNamespace` just returned, when the

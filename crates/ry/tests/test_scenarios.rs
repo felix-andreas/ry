@@ -326,7 +326,7 @@ const PACKAGE_TIERINGS: [Tiering; 2] = [
 /// run must end with the same exit code, standard output and standard error. A script whose
 /// meaning does not rest on its annotations also runs with the annotations erased, which must
 /// print the same, and a script whose definitions mean the same in a package also runs with them
-/// installed as one, from a script that attaches it.
+/// installed as one, from a script that attaches it, and with them in a file the script sources.
 ///
 /// The scripts are built from the shapes that make compiling ahead differ from compiling at a
 /// first call: a function called before its callee is defined, a name defined twice or bound to
@@ -372,6 +372,7 @@ fn typed_scripts_agree_however_they_compile() {
         )
     };
     let (mut scripts, mut ahead, mut nothing_late, mut packaged, mut attached) = (0, 0, 0, 0, 0);
+    let mut sourced_ahead = 0;
     for_each_seed(16, |seed| {
         let (text, erasable) = typed_script(&mut SplitMix64(seed));
         let script = directory.path().join(format!("script_{seed}.R"));
@@ -452,6 +453,34 @@ fn typed_scripts_agree_however_they_compile() {
                 }
             }
             packaged += 1;
+            // The same definitions in a file the script sources compile ahead as `source()`
+            // parses the file, before it evaluates any of it.
+            let sourced = directory.path().join(format!("definitions_{seed}.R"));
+            fs::write(&sourced, definitions.join("\n") + "\n").expect("write the definitions");
+            let user = directory.path().join(format!("source_{seed}.R"));
+            fs::write(
+                &user,
+                format!("source({sourced:?})\n{}\n", rest.join("\n")),
+            )
+            .expect("write the script that sources the definitions");
+            for tiering in [&TIERINGS[2], &TIERINGS[3]] {
+                let (sourced_code, sourced_stdout, sourced_stderr, log) = run(&user, tiering);
+                assert_eq!(
+                    (code, &stdout, &stderr),
+                    (sourced_code, &sourced_stdout, &sourced_stderr),
+                    "seed {seed}: the definitions sourced from a file print something else \
+                     ({}):\n{text}",
+                    tiering.name
+                );
+                if tiering.environment.is_empty() {
+                    sourced_ahead += usize::from(
+                        log.lines()
+                            .filter(|line| line.contains(" ahead of time in "))
+                            .nth(1)
+                            .is_some_and(|line| !line.starts_with("typed: compiled 0 functions")),
+                    );
+                }
+            }
         }
         if erasable {
             let erased = directory.path().join(format!("erased_{seed}.R"));
@@ -477,10 +506,14 @@ fn typed_scripts_agree_however_they_compile() {
     // call by design: a rebound name, a definition inside a block, a `Num.from_r`.
     assert!(
         scripts < 8
-            || (ahead * 4 >= scripts * 3 && nothing_late > 0 && packaged > 0 && attached > 0),
+            || (ahead * 4 >= scripts * 3
+                && nothing_late > 0
+                && packaged > 0
+                && attached > 0
+                && sourced_ahead > 0),
         "of {scripts} scripts, {ahead} compiled functions ahead, {nothing_late} compiled \
-         nothing later, {packaged} ran as an installed package and {attached} attached code \
-         from its typed code file"
+         nothing later, {packaged} ran as an installed package, {attached} attached code \
+         from its typed code file and {sourced_ahead} compiled a sourced file's functions ahead"
     );
 }
 
