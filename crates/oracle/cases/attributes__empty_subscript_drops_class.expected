@@ -35,9 +35,11 @@
 | $dim
 | [1] 2 2
 | 
+| [1] "foo"   "names"
+| [1] "foo"   "names"
 [messages]
 [warnings]
 [errors]
 [value]
-list
-| list(dim = c(2L, 2L))
+character
+| c("foo", "names")

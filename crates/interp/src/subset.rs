@@ -1096,7 +1096,9 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
     }
     if index == missing_arg() {
         // `x[]` keeps every attribute but the class and `tsp`, which the default method drops
-        // as it does for any subscript; a class with a `[` method restores its own.
+        // as it does for any subscript; a class with a `[` method restores its own. The copy
+        // replaces the names set above, so the attributes keep the object's order.
+        values::clear_attributes(result);
         values::copy_attributes(object, result)?;
         values::remove_attr(result, symbols().class);
         values::remove_attr(result, symbols().tsp);

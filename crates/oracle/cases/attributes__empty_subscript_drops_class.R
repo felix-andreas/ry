@@ -10,3 +10,7 @@ v <- structure(1:3, class = "foo"); v[] <- 0L; print(attributes(v))
 e <- structure(list(), class = "bar"); print(attributes(e[]))
 m <- structure(1:4, dim = c(2L, 2L), class = "mm"); print(attributes(m[]))
 print(attributes(m[, ]))
+# The attributes keep the object's order.
+x <- structure(1:4, class = "zz", foo = "bar", names = letters[1:4])
+print(names(attributes(x[])))
+print(names(attributes(unclass(x)[])))

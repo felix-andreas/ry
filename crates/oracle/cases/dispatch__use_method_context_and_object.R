@@ -74,3 +74,8 @@ b <- function(x) UseMethod("b")
 b.k <- function(x) identity(NextMethod())
 b.default <- function(x) "b.default"
 print(b(structure(1, class = "k")))
+# An empty first argument dispatches on the empty argument marker, a symbol of class "name".
+h4 <- function(x, y) UseMethod("g4")
+g4.name <- function(x, y) "g4.name"
+g4.default <- function(x, y) "g4.default"
+print(h4(, 1))

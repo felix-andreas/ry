@@ -3136,9 +3136,10 @@ pub(crate) unsafe fn run(
 }
 
 /// Forces each argument promise a compiled call read without forcing: a promise shared through
-/// `...` must keep the value this call saw, as if tier 0 had forced it. Settling runs code only
-/// for a checked promise, which the reads decline, but the native call may have run R code that
-/// checks one since, and that check's error is the call's.
+/// `...` must keep the value this call saw, as if tier 0 had forced it. Settling a checked
+/// promise runs its annotation checks, which a read took only when they admit the value
+/// unchanged (`annotations::accepts_unchanged`), but the native call may have run R code since
+/// that changed what they admit, and a check's error is the call's.
 unsafe fn force_read(read: &[(Sexp, Sexp)]) -> R<()> {
     for &(promise, value) in read {
         settle_unforced(promise, value)?;

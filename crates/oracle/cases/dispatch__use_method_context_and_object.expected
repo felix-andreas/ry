@@ -22,9 +22,10 @@
 | [1] "formal argument \"x\" matched by multiple actual arguments"
 | [1] "character" "after"    
 | [1] "b.default"
+| [1] "g4.name"
 [messages]
 [warnings]
 [errors]
 [value]
 character
-| "b.default"
+| "g4.name"

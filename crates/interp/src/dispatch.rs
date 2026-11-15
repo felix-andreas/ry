@@ -1194,11 +1194,11 @@ unsafe fn dispatch_argument(function: Sexp, args: &[Arg]) -> R<Sexp> {
             chosen = args.iter().find(|arg| arg.tag == nil()).map(|arg| arg.value);
         }
     }
-    // GNU R takes the first argument even when it was left empty.
+    // GNU R takes the first argument even when it was left empty, and dispatches on the empty
+    // argument marker itself, a symbol, so on class "name".
     match chosen.or_else(|| args.first().map(|arg| arg.value)) {
         None => Ok(nil()),
         Some(value) if value.kind() == SexpType::Dots => value_of(value.car()),
-        Some(value) if value == missing_arg() => Ok(nil()),
         Some(value) => value_of(value),
     }
 }

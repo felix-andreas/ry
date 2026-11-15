@@ -6957,6 +6957,8 @@ pub unsafe fn passes_missing_argument(machine: &mut Machine<'_>, pc: usize) -> R
     Ok(missing)
 }
 
+/// Loads the variable the `GetVar` at `pc` reads, with whether the frame owns the value: it
+/// binds it directly rather than through a promise, whose value the caller may hold too.
 pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)> {
     let code = machine.code;
     let words = values::ints(code.car());
@@ -7000,7 +7002,7 @@ pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)>
                 } else {
                     value.car()
                 };
-                (forced, true)
+                (forced, false)
             } else if value == missing_arg() {
                 let env = machine.reify(Reify::Site("missing argument lookup"))?;
                 (
@@ -7026,7 +7028,9 @@ pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)>
         }
         None => {
             let env = machine.env();
-            let local = crate::heap().frame_cell(env, symbol).is_some();
+            let local = crate::heap()
+                .frame_cell(env, symbol)
+                .is_some_and(|cell| cell.cdr().kind() != SexpType::Promise);
             (
                 lookup_variable(symbol, env, LookupCache::of(code), cache, 0..0)?,
                 local,
