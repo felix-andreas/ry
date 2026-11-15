@@ -382,13 +382,12 @@ Built: `ry install --train` writes the versions the workload compiled, guessed c
 - **Mutually recursive functions in the file.** A version whose direct callee is still attaching misses, so `even`/`odd` compile in the session while `fib` attaches. Attach a strongly connected component at once (all or none) when a real package shows such a cycle.
 - **Script roots with record, tuple, `Dict`, `Set` or function parameters** compile ahead only when a compiled-ahead function calls them. Training covers the installed case; the script case needs the checker's call-site types.
 
-### Step 4: `ry build --aot --exe main.R`
+### Step 4: `ry build --aot --exe main.R` (built)
 
-- **Shape.** A copy of the running `ry` executable with a payload appended: the elaborated script, its sourced strict files, a code file for the script's top-level definitions in the format of `development/typed-code-file.md`, and a trailer with the payload's offset and length. At start, `ry` looks for the trailer on its own executable, and if it finds one it runs the script as `ry run --aot` does, attaching from the payload instead of compiling. A script closure's identity is (top-level expression index, position) in place of the record offset. Packages load from the library. On macOS the appended file must be signed again (ad hoc is enough), as `bun build --compile` does.
-- **Files.** `Build` in `crates/ry/src/command_line.rs` gains `--exe`; `-o/--output` is the tarball's directory for a package build and names the output file with `--exe` (default: the script's name without `.R`); `main` in `crates/ry/src/main.rs` checks its own executable for the trailer before it parses arguments; `interp::ahead::take` hands out closures whose code attaches from the payload.
-- **Tests.** A scenario that builds an executable, runs it with arguments (`commandArgs()`), and compares with `ry run --aot`; the tier matrix gains the executable mode; the payload parser is fuzzed.
-- **Success.** The executable prints what `ry run` prints, compiles nothing (`RY_TYPED_LOG=1`), and its start is within 1 ms of `ry run` on an empty script.
-- **Stop rule.** Embedding packages or their shared objects is out of scope (`typed-runtime.md`, "Open questions").
+Built: `ry build --aot --exe main.R [-o FILE]` writes a copy of `ry` with the elaborated script and the code file of its top-level definitions appended, and the executable attaches every compiled function from itself (`reference/cli.md`, "Executables"; `development/typed-code-file.md`, "Executables"; `decisions.md`, "`ry build --aot --exe` appends the script and its code file to a copy of `ry`", with the measurements and where the build differs from the plan). Loose ends:
+
+- **macOS has not run it.** `sign` calls `codesign --force --sign -` on the output; run the `build-exe` scenario on a macOS machine or CI job when one is available.
+- **Sourced files compile at run time.** A file the script sources is read from disk and compiles as under `ry run --aot`. Embed sourced strict files when a real program ships as an executable with them.
 
 ### Not planned
 

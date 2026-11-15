@@ -572,6 +572,12 @@ fn build_executable(file: &Path, output: Option<&Path>, runtime: Option<Runtime>
         ahead: true,
         ..flags
     };
+    if let Some(directory) = output.parent().filter(|directory| !directory.as_os_str().is_empty())
+        && let Err(error) = fs::create_dir_all(directory)
+    {
+        cli::error(&format!("cannot create {}: {error}", directory.display()));
+        return ExitCode::from(1);
+    }
     let mut code_path = output.as_os_str().to_owned();
     code_path.push(".ryt.partial");
     let code_path = PathBuf::from(code_path);

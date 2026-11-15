@@ -8943,7 +8943,7 @@ is rejected below.
 
 ## Typed code compiles ahead of time, and `ry build --aot --exe` writes an executable
 
-**Status:** planned. Built so far: `ry run --aot` compiles a script's typed functions before it starts (the entry "`ry run --aot` compiles a script's typed code before it starts"), typed closures otherwise compile in memory at their first call, and plain `ry build` writes a source tarball.
+**Status:** built. `ry run --aot` compiles a script's typed functions before it starts (the entry "`ry run --aot` compiles a script's typed code before it starts"), `ry install` writes an installed package's typed code file (the entry "The typed code file is position-independent code whose offset table is the per-process table"), `ry build --aot --exe` writes an executable (the entry "`ry build --aot --exe` appends the script and its code file to a copy of `ry`"), and plain `ry build` writes a source tarball.
 
 - **Command line (user directive).** Compiling ahead of time is asked for with `--aot`: `ry run --aot main.R` compiles before the program starts, so nothing compiles while it runs; `ry build --aot` on a package compiles into the installed package, and `ry install` does the same; `ry build --aot --exe main.R` writes one executable and comes after the up-front path, because compiling up front matters more than a single file. Without `--aot` typed code compiles at its first call.
 
@@ -9015,7 +9015,7 @@ is rejected below.
 
 ## The typed code file is position-independent code whose offset table is the per-process table
 
-**Status:** built for installed packages; `ry build --aot --exe` is not. `development/typed-code-file.md` is the contract.
+**Status:** built for installed packages and for executables. `development/typed-code-file.md` is the contract.
 
 - **Previous shape.** A typed closure of an installed package compiles in every process at its first call, about 0.8 ms each, and the code lives in that process's JIT memory. The backend writes process addresses into the code as immediates (runtime helpers, typed callees, R call sites, static strings and boxes, shape ids), so the bytes mean nothing in another process.
 - **What was weak.** The same code is compiled again by every process and held privately by each, which is the cost the four test processes of a CI machine pay per dependency. A prototype of install-time code that is not in the tree measured 50 typed functions of a generated package on an iterate build: first calls took about 1 ms against about 40 ms, and added 1.8 MiB of peak resident memory against 5.9 MiB.
@@ -9039,6 +9039,16 @@ is rejected below.
   - Linux maps the file; every other Unix, and Linux where the mapping is refused, copies the code into the same reserved range and flushes the instruction cache (`RY_TYPED_FILE_COPY=1` forces it). Windows does not use the file. The copy path compiles for `aarch64-apple-darwin` but has not run on macOS.
   - Under `ry run --aot`, a package is compiled at load only when its `R/` holds a `.ryt` of another build, because a package with no file cannot be told from one installed with `--ry-no-typed-code` without reading every function (`interp::ahead::namespace_loaded`).
   - The bench engine `ry_typed_file` drives the installed package from a plain R script, because the checker does not resolve names `library()` attaches, so each measured call converts its arguments at the boundary.
+
+## `ry build --aot --exe` appends the script and its code file to a copy of `ry`
+
+**Status:** built. `reference/cli.md` ("Executables") documents the command and `development/typed-code-file.md` ("Executables") the layout.
+
+- **Previous shape.** A script's typed functions compile in every run: at their first call under `ry run`, or before the script starts under `ry run --aot`. Shipping a typed program means shipping its source and ry, and every run checks the script again.
+- **Chosen shape.** The executable is `[ry][zero padding to 64 KiB][typed code file][metadata][48-byte trailer]` (`crates/ry/src/executable.rs`). The trailer holds the code file's offset and length, the metadata's offset, length and FNV-1a hash, and an 8-byte magic. The metadata holds the run flags, the script's name, its elaborated text, and the runtime library and base R paths of a development build. `main` reads its own executable's trailer before it parses arguments, so every argument belongs to the script, and a damaged payload is an error, not a silent `ry`. The run skips the checker and goes straight to `ry run --aot`'s path with `interp().ahead.code` set, so `prepare` notes each closure instead of compiling it and the first call attaches through `typed::file::open` with the file mapped from the executable at its offset.
+- **Script identity.** A script closure's note is `(SCRIPT_DATABASE = u32::MAX, top-level expression index, position 0)`, stamped with the elaborated text's length and stream hash, which build and run compute from the same bytes. In the code file the script is the package `""`. A closure whose index or text differs never attaches, so it compiles as under `ry run --aot`.
+- **Where the build differs from the plan.** Sourced strict files are not embedded: `source()` reads them from disk and they compile as under `ry run --aot`, because embedding needs a virtual file system under `source()` and no real program asks for it yet. A development build records the absolute paths of its runtime library and base R, because a copy moved out of `target/` cannot find them through its own path; `RY_LIBR` and `RY_BASE_R` override them, and a release records none. `RY_AHEAD_MISS=1` makes the executable compile at first calls, which the scenario uses to check the fallback.
+- **Impact.** The executable starts about 1.6 ms sooner than `ry run` on an empty script (no checker), its first calls attach instead of compiling (0.29 ms against 6.6 ms for 20 functions on an iterate build), and its peak resident memory is about 6 MiB lower. Correctness rests on the code file's existing checks; incremental analysis is untouched.
 
 ## The methods package's core runs natively behind hash-guarded prologues
 

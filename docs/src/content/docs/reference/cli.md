@@ -12,7 +12,7 @@ ry R [FILE]                    # the same on GNU R
 ry load [PATH]                 # load an R package from source, run code against it, and exit
 ry test [PATH]                 # run a package's testthat tests against the loaded package
 ry document [PATH]             # write a package's Rd files and NAMESPACE with roxygen2
-ry build [PATH]                # build a package's source tarball; with --aot, install it compiled
+ry build [PATH]                # build a package's source tarball; --aot installs it compiled, --aot --exe makes a script an executable
 ry install [PATH]              # build and install a package
 ry debug-adapter               # a debugger for editors, over stdio
 ry server                      # the language server, over stdio; your editor starts it
@@ -457,6 +457,8 @@ ry install                # install into the first library on .libPaths()
 ry install -l ~/rlib      # install into ~/rlib
 ry install --train tests  # train the package's code image on its tests
 ry build --aot -l ~/rlib  # install, as ry install does
+ry build --aot --exe main.R           # write the executable ./main
+ry build --aot --exe main.R -o bin/app  # write it to bin/app instead
 ```
 
 `ry build` writes the source tarball of the package at `PATH` (default: the one containing the
@@ -510,9 +512,50 @@ compiled that an install cannot compile on its own, such as one for the type a `
 that run. A session in which that conversion gives another type runs the call in the interpreter
 instead; `RY_TYPED_LOG=1` names each function that attaches and
 each one that compiles. `ry build --aot` on a package does what `ry install` does (`-l DIR` names
-the library), and on a script it is a usage error that points at `ry run --aot`.
+the library), and on a script it is a usage error that points at `--exe`.
 `R CMD INSTALL --ry-no-typed-code` writes no typed code file. A typed code file another build of ry
 wrote is ignored. [The typed code file](/development/typed-code-file/) is the design.
+
+### Executables
+
+`ry build --aot --exe main.R` checks the script as `ry run` does, compiles its typed top-level
+functions, and writes an executable that runs the script with that code. The executable is named
+after the script, in the current directory, unless `-o FILE` names another path. The build prints
+what the code file holds and then the executable's path:
+
+```r
+total <- function(n: I64) -> I64 {
+  sum <- 0
+  for (i in List.range(1, n)) sum <- sum + square(i)
+  sum
+}
+square <- function(x: I64) -> I64 x * x
+n <- as.integer(commandArgs(trailingOnly = TRUE)[[1]])
+print(total(n))
+```
+
+```console
+$ ry build --aot --exe totals.R
+typed code: closures=2 written=2
+totals
+$ RY_TYPED_LOG=1 ./totals 10
+typed: attached `total` for [I64] -> I64 from the executable's code file
+385i64
+```
+
+The executable prints what `ry run --aot` prints for the same arguments, and every argument goes
+to the script, so `--help` is the script's to read. Its typed functions attach their code from the
+executable instead of compiling, and it does not check the script again, so it starts sooner than
+`ry run` does. A function [Compiling ahead of time](#compiling-ahead-of-time) lists as compiling
+at its first call still does, and so does a file the script sources: only the script itself is in
+the executable.
+
+The executable is a copy of `ry` with the script and its code appended, so it runs on the ry
+runtime and base R that `ry` itself uses (see [How ry finds R](#how-ry-finds-r)). One built by a
+development build of ry remembers where that build's runtime and base R are, and `RY_LIBR` and
+`RY_BASE_R` override them. Packages load from the library as they do for `ry run`, and are not in
+the executable. On macOS the executable is signed again ad hoc, because appending to `ry`
+invalidates its signature.
 
 An install on ry's runtime also writes the package's code image, `R/<package>.<build>.ryc`
 beside its lazy-load database: the compiled code of every closure, which a later session takes instead of
