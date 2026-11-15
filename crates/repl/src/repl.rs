@@ -15,6 +15,7 @@ use std::{
     hint::black_box,
     io::{self, IsTerminal},
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 #[derive(Debug)]
@@ -512,7 +513,11 @@ pub fn base_r() -> Result<PathBuf, ReplError> {
 /// ry's own base R tree: one installed outside the executable (`rcmd::base::installed`), else
 /// the copy a release embeds, extracted into the user's cache ([`extract_base`]).
 pub fn bundled_base() -> Result<PathBuf, ReplError> {
-    if let Some(base) = rcmd::base::installed() {
+    let recorded = std::env::var_os("RY_BASE_R")
+        .is_none_or(|path| path.is_empty())
+        .then(|| recorded_file(|files| &files.1))
+        .flatten();
+    if let Some(base) = recorded.or_else(rcmd::base::installed) {
         if !rcmd::base::holds_base_r(&base) {
             return Err(ReplError(format!(
                 "ry's base R at {} is incomplete (no library/base/R/base); rebuild it with \
@@ -550,12 +555,40 @@ fn export_r_home() -> Result<(), ReplError> {
     Ok(())
 }
 
+/// The runtime library and base R tree an executable `ry build --aot --exe` wrote recorded
+/// from the development build that wrote it ([`use_runtime_files`]).
+static RECORDED_FILES: OnceLock<(Option<PathBuf>, Option<PathBuf>)> = OnceLock::new();
+
+/// Makes this process prefer `library` and `base`, where they exist, to the runtime library and
+/// base R tree it would find beside its executable. `RY_LIBR` and `RY_BASE_R` still win. Unlike
+/// setting those variables, this does not reach the processes the script starts, which may be
+/// another build of ry.
+pub fn use_runtime_files(library: Option<PathBuf>, base: Option<PathBuf>) {
+    if RECORDED_FILES.set((library, base)).is_err() {
+        panic!("the runtime files are recorded once, before the runtime starts");
+    }
+}
+
+/// The recorded file `pick` selects, when it exists.
+fn recorded_file(
+    pick: fn(&(Option<PathBuf>, Option<PathBuf>)) -> &Option<PathBuf>,
+) -> Option<PathBuf> {
+    RECORDED_FILES
+        .get()
+        .and_then(|files| pick(files).clone())
+        .filter(|path| path.exists())
+}
+
 /// ry's runtime library, and whether it was extracted from this executable. `RY_LIBR` wins,
-/// then a library beside the executable, in `deps/` or in `../lib/ry/` (a development build or
-/// a distribution's package), and last the copy a release embeds ([`extract_runtime`]).
+/// then one an executable recorded ([`use_runtime_files`]), then a library beside the
+/// executable, in `deps/` or in `../lib/ry/` (a development build or a distribution's package),
+/// and last the copy a release embeds ([`extract_runtime`]).
 fn ry_runtime_library() -> Result<(PathBuf, bool), ReplError> {
     if let Some(path) = std::env::var_os("RY_LIBR") {
         return Ok((PathBuf::from(path), false));
+    }
+    if let Some(path) = recorded_file(|files| &files.0) {
+        return Ok((path, false));
     }
     let executable = std::env::current_exe()
         .map_err(|error| ReplError(format!("cannot locate the ry executable: {error}")))?;

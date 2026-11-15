@@ -520,8 +520,9 @@ wrote is ignored. [The typed code file](/development/typed-code-file/) is the de
 
 `ry build --aot --exe main.R` checks the script as `ry run` does, compiles its typed top-level
 functions, and writes an executable that runs the script with that code. The executable is named
-after the script, in the current directory, unless `-o FILE` names another path. The build prints
-what the code file holds and then the executable's path:
+after the script, in the current directory, unless `-o FILE` names another path; an output that
+is the script itself or a directory is a usage error. The build prints what the code file holds
+and then the executable's path:
 
 ```r
 total <- function(n: I64) -> I64 {

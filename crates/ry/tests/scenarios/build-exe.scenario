@@ -67,3 +67,13 @@ expect stderr "is not a script"
 run ry build --aot -o somewhere main.R
 expect exit 2
 expect stderr "add `--exe` to build an executable from a script"
+
+# The build never replaces the script it builds, and an existing directory is not a file name.
+
+run ry build --aot --exe main.R -o main.R
+expect exit 2
+expect stderr "would replace the script main.R"
+
+run ry build --aot --exe main.R -o .
+expect exit 2
+expect stderr "is a directory"

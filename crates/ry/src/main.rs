@@ -134,12 +134,9 @@ fn main() -> ExitCode {
     // command that runs R goes through this function, and so do the worker processes that
     // `ry test --jobs` starts.
     crash::install(concat!("ry ", env!("RY_VERSION")));
-    // An R home's front ends link to this binary, so a release needs no separate `ry-rcmd`.
-    if rcmd::front_end::invoked_as_front_end() {
-        return rcmd::front_end::main(env::args().skip(1).collect());
-    }
     // Before the arguments are parsed, because an executable `ry build --aot --exe` wrote hands
-    // every argument to its script.
+    // every argument to its script, and before the front ends, because its name is the
+    // script's and may be one of theirs.
     match executable::own() {
         Ok(None) => {}
         Ok(Some((path, payload))) => return run_executable(&path, payload),
@@ -147,6 +144,10 @@ fn main() -> ExitCode {
             cli::error(&error);
             return ExitCode::from(2);
         }
+    }
+    // An R home's front ends link to this binary, so a release needs no separate `ry-rcmd`.
+    if rcmd::front_end::invoked_as_front_end() {
+        return rcmd::front_end::main(env::args().skip(1).collect());
     }
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::from_default_env())
@@ -563,6 +564,22 @@ fn build_executable(file: &Path, output: Option<&Path>, runtime: Option<Runtime>
             PathBuf::from(name)
         }
     };
+    if output.is_dir() {
+        cli::error(&format!(
+            "{} is a directory; name the executable to write with `-o`",
+            output.display()
+        ));
+        return ExitCode::from(2);
+    }
+    if fs::canonicalize(&output)
+        .is_ok_and(|output| fs::canonicalize(file).is_ok_and(|file| file == output))
+    {
+        cli::error(&format!(
+            "the executable would replace the script {}; name another path with `-o`",
+            file.display()
+        ));
+        return ExitCode::from(2);
+    }
     let (source, elaborated, flags) = match checked_script(file) {
         Ok(checked) => checked,
         Err(status) => return status,
@@ -663,15 +680,7 @@ fn run_executable(executable: &Path, payload: executable::Payload) -> ExitCode {
         .map(|argument| argument.to_string_lossy().into_owned())
         .collect();
     let metadata = payload.metadata;
-    for (variable, path) in [("RY_LIBR", &metadata.runtime), ("RY_BASE_R", &metadata.base)] {
-        if let Some(path) = path
-            && env::var_os(variable).is_none()
-            && path.exists()
-        {
-            // SAFETY: no other thread runs yet.
-            unsafe { env::set_var(variable, path) };
-        }
-    }
+    repl::use_runtime_files(metadata.runtime, metadata.base);
     let flags = repl::RuntimeFlags::from_bits(metadata.flags);
     #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
     release_executable_code();

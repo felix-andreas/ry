@@ -57,15 +57,15 @@ pub struct Payload {
 }
 
 /// The payload of the running executable: `Ok(None)` for `ry` itself, and an error when the
-/// executable ends in the trailer but the payload is damaged.
+/// executable ends in the trailer but the payload is damaged. An executable this process cannot
+/// read, such as an execute-only copy or one in a sandbox without `/proc`, is `ry`: a payload is
+/// only ever written onto a copy its builder could read.
 pub fn own() -> Result<Option<(PathBuf, Payload)>, String> {
-    let executable = std::env::current_exe()
-        .map_err(|failure| format!("cannot locate this executable: {failure}"))?;
-    let mut file = fs::File::open(&executable)
-        .map_err(|failure| format!("cannot read {}: {failure}", executable.display()))?;
-    let found = read(&mut file)
-        .map_err(|failure| format!("cannot read {}: {failure}", executable.display()))?;
-    match found {
+    let Ok(executable) = std::env::current_exe() else {
+        return Ok(None);
+    };
+    let found = fs::File::open(&executable).and_then(|mut file| read(&mut file));
+    match found.unwrap_or(Found::None) {
         Found::None => Ok(None),
         Found::Payload(payload) => Ok(Some((executable, payload))),
         Found::Damaged => Err(format!(
@@ -84,21 +84,36 @@ pub fn write(output: &Path, executable: &Path, code: &[u8], metadata: &Metadata)
     let partial = PathBuf::from(partial);
     // `fs::copy` keeps the executable's permissions, so the copy runs.
     let written = fs::copy(executable, &partial).and_then(|length| {
+        // An installed `ry` is often read-only (mode 0555), and so is its copy, which its owner
+        // must be able to append to.
+        let mut permissions = fs::metadata(&partial)?.permissions();
+        owner_writable(&mut permissions);
+        fs::set_permissions(&partial, permissions)?;
         let mut file = fs::OpenOptions::new().append(true).open(&partial)?;
         let mut payload = Vec::new();
         append(&mut payload, length, code, metadata);
         file.write_all(&payload)?;
-        file.sync_all()
+        file.sync_all()?;
+        fs::rename(&partial, output)
     });
-    match written {
-        Ok(()) => fs::rename(&partial, output),
-        Err(failure) => {
-            if let Err(removal) = fs::remove_file(&partial) {
-                tracing::warn!("cannot remove {}: {removal}", partial.display());
-            }
-            Err(failure)
-        }
+    if written.is_err()
+        && let Err(removal) = fs::remove_file(&partial)
+        && removal.kind() != io::ErrorKind::NotFound
+    {
+        tracing::warn!("cannot remove {}: {removal}", partial.display());
     }
+    written
+}
+
+#[cfg(unix)]
+fn owner_writable(permissions: &mut fs::Permissions) {
+    use std::os::unix::fs::PermissionsExt;
+    permissions.set_mode(permissions.mode() | 0o200);
+}
+
+#[cfg(not(unix))]
+fn owner_writable(permissions: &mut fs::Permissions) {
+    permissions.set_readonly(false);
 }
 
 /// Appends to `bytes` the payload of an executable whose first `length` bytes are `ry`.
