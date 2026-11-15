@@ -305,6 +305,22 @@ const TIERINGS: [Tiering; 5] = [
     },
 ];
 
+/// The ways [`typed_scripts_agree_however_they_compile`] runs a script that attaches the
+/// installed package of its definitions: with the package's typed code file, and with every
+/// attach from it failing, so that each version compiles in the session.
+const PACKAGE_TIERINGS: [Tiering; 2] = [
+    Tiering {
+        name: "installed with its typed code file",
+        environment: &[],
+        ahead: false,
+    },
+    Tiering {
+        name: "installed, every attach failing",
+        environment: &[("RY_AHEAD_MISS", "1")],
+        ahead: false,
+    },
+];
+
 /// `ry run --aot` changes when typed functions compile and nothing a script can observe. Each
 /// seed writes a script of typed functions and runs it every way [`TIERINGS`] lists, and every
 /// run must end with the same exit code, standard output and standard error. A script whose
@@ -354,7 +370,7 @@ fn typed_scripts_agree_however_they_compile() {
             log.join("\n"),
         )
     };
-    let (mut scripts, mut ahead, mut nothing_late, mut packaged) = (0, 0, 0, 0);
+    let (mut scripts, mut ahead, mut nothing_late, mut packaged, mut attached) = (0, 0, 0, 0, 0);
     for_each_seed(16, |seed| {
         let (text, erasable) = typed_script(&mut SplitMix64(seed));
         let script = directory.path().join(format!("script_{seed}.R"));
@@ -413,12 +429,27 @@ fn typed_scripts_agree_however_they_compile() {
                 format!("library({name}, lib.loc = {library:?})\n{}\n", rest.join("\n")),
             )
             .expect("write the script that uses the package");
-            let (package_code, package_stdout, package_stderr, _) = run(&user, &TIERINGS[1]);
-            assert_eq!(
-                (code, &stdout, &stderr),
-                (package_code, &package_stdout, &package_stderr),
-                "seed {seed}: the definitions installed as a package print something else:\n{text}"
-            );
+            // The install wrote the package's typed code file, so the first run attaches its
+            // code; the second makes every attach miss and compiles in the session instead.
+            for tiering in [&PACKAGE_TIERINGS[0], &PACKAGE_TIERINGS[1]] {
+                let (package_code, package_stdout, package_stderr, log) = run(&user, tiering);
+                assert_eq!(
+                    (code, &stdout, &stderr),
+                    (package_code, &package_stdout, &package_stderr),
+                    "seed {seed}: the definitions installed as a package print something else \
+                     ({}):\n{text}",
+                    tiering.name
+                );
+                if tiering.environment.is_empty() {
+                    attached += usize::from(log.contains("from typedseed"));
+                } else {
+                    assert!(
+                        !log.contains("typed: attached"),
+                        "seed {seed}: {} attached code:\n{log}",
+                        tiering.name
+                    );
+                }
+            }
             packaged += 1;
         }
         if erasable {
@@ -444,9 +475,11 @@ fn typed_scripts_agree_however_they_compile() {
     // that compiles nothing later is rarer, because several of the units compile at a first
     // call by design: a rebound name, a definition inside a block, a `Num.from_r`.
     assert!(
-        scripts < 8 || (ahead * 4 >= scripts * 3 && nothing_late > 0 && packaged > 0),
+        scripts < 8
+            || (ahead * 4 >= scripts * 3 && nothing_late > 0 && packaged > 0 && attached > 0),
         "of {scripts} scripts, {ahead} compiled functions ahead, {nothing_late} compiled \
-         nothing later and {packaged} ran as an installed package"
+         nothing later, {packaged} ran as an installed package and {attached} attached code \
+         from its typed code file"
     );
 }
 
