@@ -1609,7 +1609,11 @@ unsafe fn do_read_lines(call: &Call<'_>) -> R<Sexp> {
 
 /// Reads one line of `con` into `line` a character at a time: the character that ended it
 /// (a newline or `EOF`), and whether an embedded nul cut the line short.
-unsafe fn connection_line(con: Rconnection, skip_nul: bool, line: &mut Vec<u8>) -> R<(c_int, bool)> {
+unsafe fn connection_line(
+    con: Rconnection,
+    skip_nul: bool,
+    line: &mut Vec<u8>,
+) -> R<(c_int, bool)> {
     let mut nul = false;
     loop {
         let character = read_char(con)?;
@@ -1681,14 +1685,18 @@ unsafe fn remaining_text(con: Rconnection) -> R<Vec<u8>> {
         }
     }
     let start = text.len();
+    // The buffer is zeroed before each read, so the blocks start small and double: a short
+    // file pays for a few kilobytes, not for a whole block.
+    let mut block = 4096;
     loop {
         let filled = text.len();
-        text.resize(filled + READ_CHUNK, 0);
+        text.resize(filled + block, 0);
         let count = device_read(con, text.get_mut(filled..).unwrap_or_default())?;
         text.truncate(filled + count);
         if count == 0 {
             break;
         }
+        block = (block * 2).min(READ_CHUNK);
     }
     if memchr(b'\r', text.get(start..).unwrap_or_default()).is_some() {
         // `read_char` reads the character after a `\r` to drop a `\n`, and a second `\r`

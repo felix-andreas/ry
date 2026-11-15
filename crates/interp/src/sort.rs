@@ -425,7 +425,10 @@ unsafe fn do_psort(call: &Call<'_>) -> R<Sexp> {
     let mut positions = Vec::with_capacity(length(partial));
     for &position in values::reals(partial) {
         if !(position >= 1.0 && position <= count as f64) {
-            return Err(error(format!("'partial' index {} outside bounds", position as i64)));
+            return Err(error(format!(
+                "'partial' index {} outside bounds",
+                position as i64
+            )));
         }
         positions.push(position as usize - 1);
     }
