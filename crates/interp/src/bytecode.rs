@@ -7789,14 +7789,22 @@ unsafe fn fast_call_generic(state: &mut Activation<'_, '_>, at: usize) {
     become GENERIC_HANDLERS[Op::CallGeneric as usize](state, at)
 }
 
-/// `CallGeneric` of a closure whose site has a prepared plan ([`prepare_plan`]), from a slot
-/// frame, while nothing observes calls: the arguments are written once, onto the frame
-/// argument stack, the slots are filled from them by the plan's sources, the call's frame is
-/// pushed, and the dispatch loop goes on in the callee's body. Nothing is matched, no Rust
-/// frame is entered, and nothing is allocated unless the argument reference pool grows or the
-/// callee collects arguments in `...`.
+/// `CallGeneric` of a closure whose site has a prepared plan ([`prepare_plan`]), while nothing
+/// observes calls: the arguments are written once, onto the frame argument stack, the slots
+/// are filled from them by the plan's sources, the call's frame is pushed, and the dispatch
+/// loop goes on in the callee's body. Nothing is matched, no Rust frame is entered, and
+/// nothing is allocated unless the argument reference pool grows or the callee collects
+/// arguments in `...`.
 ///
-/// It does what [`op_call_generic`] does for the same call through [`slot_promises_into`],
+/// The calling frame's header register says where the arguments are read. While it is `NULL`
+/// the caller's code runs on its slots, an argument is a reference to a slot or to code
+/// compiled against the slots, and the callee finds its caller as the frame below its own.
+/// Otherwise the register holds the environment the caller reads by name (a slot frame that
+/// left its slots, or a body run in a heap frame), every argument is a reference over that
+/// environment, and the environment is the callee's caller.
+///
+/// It does what [`op_call_generic`] does for the same call through [`slot_promises_into`] or
+/// [`eval::referenced_args_into`], then
 /// [`eval::bind_plan`], [`eval::enter`] and [`enter_in_place`], and leaves every call that
 /// needs anything else to them: a debugger, a profile, a tracked move or a refused object
 /// system ([`activity::hooks`]), a closure flagged for debugging or with a native entry, the
@@ -7811,11 +7819,18 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
     let feedback = pool_entry(state.constants, FEEDBACK);
     if at + 1 >= feedback.length() as usize
         || state.resume_base == NO_RESUMES
-        || *state.header != nil
         || activity::hooks() != 0
     {
         return None;
     }
+    // `NULL` while the calling frame's code runs on its slots, and otherwise the environment
+    // it reads by name, which is then where the arguments are read and the callee's caller.
+    let caller_env = *state.header;
+    let fast = if caller_env == nil {
+        PLAN_FAST
+    } else {
+        PLAN_FAST_BY_NAME
+    };
     let word = *feedback.data().cast::<i32>().add(at + 1);
     let function = *state.registers.add(*code.add(at + 2) as usize);
     let plans = &mut interp.bytecode.call_plans;
@@ -7833,7 +7848,7 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
         || (*row).site as usize != at
         || (*row).formals != function.car()
         || (*row).body != body
-        || (*row).flags & PLAN_FAST == 0
+        || (*row).flags & fast == 0
         || function
             .has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE | gp::NATIVE_ENTRY)
         || function == interp.namespace_loader
@@ -7893,8 +7908,10 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
         let value = if kind == ARGUMENT_VALUE {
             expression
         } else {
-            let eager_value = if !eager || kind == ARGUMENT_CODE {
+            let eager_value = if !eager || kind <= ARGUMENT_CODE {
                 None
+            } else if caller_env != nil {
+                effects::eager_argument(expression, caller_env)
             } else if kind >= 0 {
                 let value = *state.header.add(1 + kind as usize);
                 if value == missing_value {
@@ -7912,7 +7929,13 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
             match eager_value {
                 Some(value) => value,
                 None => {
-                    let reference = if kind == ARGUMENT_CODE {
+                    let reference = if caller_env != nil {
+                        if expression.kind() == SexpType::Bytecode {
+                            eval::env_code_reference(caller_env, expression)
+                        } else {
+                            eval::env_reference(caller_env, expression)
+                        }
+                    } else if kind == ARGUMENT_CODE {
                         eval::code_reference(owner, expression)
                     } else {
                         let slot = if kind >= 0 {
@@ -7988,12 +8011,12 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
         window.add(index).write(nil);
     }
     interp.calls_ever = interp.calls_ever.wrapping_add(1);
-    let caller = interp.slot_owner;
+    let previous_owner = interp.slot_owner;
     let frame = Frame {
         call,
         function,
         env: nil,
-        sys_parent: nil,
+        sys_parent: caller_env,
         args: args_start as u32,
         on_exit: ThinVec::new(),
         handlers: interp.handlers.clone(),
@@ -8003,12 +8026,16 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
         closures: interp.frame_closures.len() as u32,
         slots: header as u32,
         missing,
-        caller,
+        caller: if caller_env == nil {
+            previous_owner
+        } else {
+            crate::NO_SLOTS
+        },
         pending: nil,
         inlined: false,
         reified_by: crate::NOT_REIFIED,
         handle_mark: (*heap).handle_mark() as u32,
-        previous_owner: caller,
+        previous_owner,
         references: interp.references_used,
     };
     interp.frames.push_with(|| frame);
@@ -8077,9 +8104,10 @@ unsafe fn call_fast_left(
 }
 
 /// `Return` from a body the dispatch loop entered in place, when the frame has nothing to run
-/// or keep on the way out: no environment, no pending environment, no `on.exit`, and nothing
-/// observing calls. It does what [`finished`] does through [`eval::leave`] for such a frame
-/// and goes on after the caller's call instruction.
+/// or keep on the way out: its code is still on the slots, no `on.exit`, nothing observing
+/// calls, and nothing left that names the environment it may have handed out. It does what
+/// [`finished`] does through [`eval::leave`] for such a frame and goes on after the caller's
+/// call instruction.
 ///
 /// The value needs no root between the callee's registers and the caller's: giving up the
 /// slots' references frees nothing by itself, and nothing here allocates.
@@ -8100,14 +8128,25 @@ unsafe fn return_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize
     if depth != interp.frames.len() || crate::annotations::checks_pending() {
         return None;
     }
-    // A frame that made closures over its environment has that environment, so the frames
-    // that return here have none to check.
     let frame = &interp.frames[depth - 1];
-    if frame.pending != nil || !frame.on_exit.is_empty() {
+    if !frame.on_exit.is_empty() {
         return None;
     }
     debug_assert!(frame.env == nil && frame.slots as usize == state.machine.header);
     let value = *state.registers.add(*state.code.add(at + 1) as usize);
+    // The frame handed out an environment while its code stayed on the slots: a callee asked
+    // for its parent frame, or a promise or a closure was made over it. When nothing counts a
+    // reference to that environment any more it dies here, as [`eval::leave`] would find.
+    let pending = frame.pending;
+    if pending != nil {
+        if pending.refcount() != 0 || value == pending || heap.is_preserved(pending) {
+            return None;
+        }
+        crate::forget_pending_closures(interp, depth - 1);
+        heap.discard_frame(pending, value);
+        pending.set_gp_bits(gp::COMPILED_FRAME, false);
+    }
+    let frame = &interp.frames[depth - 1];
     let (args, method_vars, closures) = (frame.args, frame.method_vars, frame.closures);
     heap.release_handles(frame.handle_mark as usize);
     interp.slot_owner = frame.previous_owner;
@@ -9292,11 +9331,10 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         }
         if let Some(id) = plan
             && !per_call
-            && state.in_slots()
             && function != (*state.interp).do_call
         {
             let plans = &(*state.interp).bytecode.call_plans;
-            // The site's compiled arguments are settled once it has run on a slot frame.
+            // The site's compiled arguments are settled once it has run for a function.
             if plans.rows[id as usize].flags & PLAN_PREPARED == 0
                 && plans.pins[id as usize] == nil()
                 && state.constants.element(instruction.operand(2) + 1) != unbound()
@@ -9547,8 +9585,7 @@ unsafe fn direct_plan(
     if misses >= PLAN_MISSES {
         return Ok(None);
     }
-    // A closure without formals has nothing to plan.
-    let plan = eval::direct_sources(function, call)?.filter(|(_, sources)| !sources.is_empty());
+    let plan = eval::direct_sources(function, call)?;
     let plans = &mut (*state.interp).bytecode.call_plans;
     // Matching allocates, and a collection frees a plan whose closure died.
     let existing = existing.and_then(|id| plans.owned(id as u32, owner, instruction.at));
@@ -9642,10 +9679,14 @@ struct PlanRow {
 
 /// The [`PlanRow::flags`] bit set once the kinds of the site's arguments are worked out.
 const PLAN_PREPARED: u8 = 1;
-/// The [`PlanRow::flags`] bit set when [`call_fast`] may take the site's calls.
+/// The [`PlanRow::flags`] bit set when [`call_fast`] may take the site's calls from a frame
+/// whose code runs on its slots.
 const PLAN_FAST: u8 = 2;
 /// The [`PlanRow::flags`] bit holding the answer [`PlanRow::effects_env`] is kept for.
 const PLAN_EFFECT_FREE: u8 = 4;
+/// The [`PlanRow::flags`] bit set when [`call_fast`] may take the site's calls from a frame
+/// that reads its variables by name, in its environment.
+const PLAN_FAST_BY_NAME: u8 = 8;
 
 /// The kind of an argument a site passes as it is written: a constant, or the empty argument.
 const ARGUMENT_VALUE: i32 = -1;
@@ -9654,6 +9695,9 @@ const ARGUMENT_VALUE: i32 = -1;
 const ARGUMENT_OUTSIDE: i32 = -2;
 /// The kind of an argument that is code compiled to run on the calling frame's slots.
 const ARGUMENT_CODE: i32 = -3;
+/// The kind of an argument that is code only a frame with an environment can run: the
+/// compiler rejected it, or compiled it for a frame that has no slot table.
+const ARGUMENT_BY_NAME: i32 = -4;
 
 impl CallPlans {
     /// The plan `id` when it belongs to the site at `at` in the code whose constants are
@@ -9799,13 +9843,16 @@ impl CallPlans {
 }
 
 /// Works out, once the site at `at` knows its callee is no wrapper, how each of the site's
-/// `arguments` binds ([`ARGUMENT_VALUE`] and the kinds beside it), and whether [`call_fast`]
-/// may take the site's calls: every argument is a constant, the empty argument, a variable or
-/// code compiled against the calling frame's slots. `...`, `..N` and code that needs the
-/// frame's environment leave the site to the generic path.
+/// `arguments` binds ([`ARGUMENT_VALUE`] and the kinds beside it), and from which frames
+/// [`call_fast`] may take the site's calls. A frame whose code runs on its slots passes a
+/// constant, the empty argument, a variable, or code compiled against its slots
+/// ([`PLAN_FAST`]). A frame that reads by name also passes code that needs its environment
+/// ([`PLAN_FAST_BY_NAME`]). `...` and `..N` leave the site to the generic path.
 unsafe fn prepare_plan(state: &Activation<'_, '_>, id: u32, arguments: Sexp) {
     let mut kinds: SmallVec<[i32; 8]> = SmallVec::new();
-    let mut fast = true;
+    // Code compiled without a slot table never runs on slots.
+    let slotted = state.constants.element(SLOTS) != nil();
+    let (mut on_slots, mut by_name) = (slotted, true);
     let mut cell = arguments;
     while cell.kind() == SexpType::Pairlist {
         let expression = cell.car();
@@ -9814,15 +9861,20 @@ unsafe fn prepare_plan(state: &Activation<'_, '_>, id: u32, arguments: Sexp) {
             SexpType::Symbol
                 if expression == symbols().dots || eval::dot_dot_index(expression).is_some() =>
             {
-                fast = false;
+                (on_slots, by_name) = (false, false);
                 break;
             }
-            SexpType::Symbol => {
+            SexpType::Symbol if slotted => {
                 slot_index(state, expression).map_or(ARGUMENT_OUTSIDE, |slot| slot as i32)
             }
+            SexpType::Symbol => ARGUMENT_OUTSIDE,
             SexpType::Bytecode if expression.cdr().element(SLOTS) != nil() => ARGUMENT_CODE,
-            SexpType::Bytecode | SexpType::Language | SexpType::Promise => {
-                fast = false;
+            SexpType::Bytecode | SexpType::Language => {
+                on_slots = false;
+                ARGUMENT_BY_NAME
+            }
+            SexpType::Promise => {
+                (on_slots, by_name) = (false, false);
                 break;
             }
             _ => ARGUMENT_VALUE,
@@ -9832,11 +9884,11 @@ unsafe fn prepare_plan(state: &Activation<'_, '_>, id: u32, arguments: Sexp) {
     let plans = &mut (*state.interp).bytecode.call_plans;
     let row = &mut plans.rows[id as usize];
     row.flags |= PLAN_PREPARED;
-    if !fast || kinds.len() != row.arguments as usize || row.loops == u16::MAX {
+    if !(on_slots || by_name) || kinds.len() != row.arguments as usize || row.loops == u16::MAX {
         return;
     }
     let start = (row.sources_at + row.sources_len) as usize;
-    row.flags |= PLAN_FAST;
+    row.flags |= if on_slots { PLAN_FAST } else { 0 } | if by_name { PLAN_FAST_BY_NAME } else { 0 };
     plans.pool[start..start + kinds.len()].copy_from_slice(&kinds);
 }
 
