@@ -2143,6 +2143,7 @@ dependencies = [
  "stats",
  "syntax",
  "table",
+ "typed",
  "unicode-width 0.2.2",
 ]
 
@@ -4963,6 +4964,7 @@ dependencies = [
  "heap",
  "interp",
  "libc",
+ "rcmd",
  "rustc-hash",
  "semantics",
  "smallvec",

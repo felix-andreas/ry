@@ -1,8 +1,12 @@
 # A package's typed functions keep their declared types once the package is installed: a new
 # session checks their arguments, converts a whole number to the `I64` a parameter declares, and
-# compiles them for the declared types, with the code image and without it. A strict file goes in
-# as the preflight elaborates it, so a conversion compiles at its first call and a parameter
-# declared with an alias is checked as the type the alias names.
+# runs them as compiled for the declared types, with the code image and without it. A strict file
+# goes in as the preflight elaborates it, so a conversion compiles at its first call and a
+# parameter declared with an alias is checked as the type the alias names.
+#
+# The install writes the package's typed code file, so a new session attaches the machine code of
+# each typed function at its first call instead of compiling it; a version the file cannot
+# supply compiles in the session as it would without the file.
 
 requires ry-runtime
 
@@ -39,6 +43,7 @@ file pkg/R/strict.R
 
 run ry install pkg -l library
 expect exit 0
+expect stdout "typed code: closures=7 written=4 (left out: compiles with its caller (1), does not compile (2))"
 
 file use.R
 | library(typedpkg, lib.loc = "library")
@@ -57,10 +62,11 @@ expect exit 0
 expect stdout "[1] 718640.9"
 expect stdout "[1] \"a3\""
 expect stdout "[1] \"argument `x` must be `F64`, not `character`\""
-expect stderr "typed: compiled for [I64, Dbl] -> Dbl"
-expect stderr "typed: compiled for [Str, I64] -> Str"
+expect stderr "typed: attached `total` for [I64, Dbl] -> Dbl from typedpkg's code file"
+expect stderr "typed: attached `label` for [Str, I64] -> Str from typedpkg's code file"
 expect stdout "[1] 9"
-expect stderr "typed: compiled for [Dbl] -> Dbl"
+expect stderr "typed: attached `total_reading` for [Dbl] -> Dbl from typedpkg's code file"
+expect stderr lacks "typed: compiled"
 expect stderr lacks "`total_reading` runs in the interpreter"
 expect stdout "[1] \"argument `p` must be `Record{x: F64, y: F64}`, not `list`\""
 expect stdout "[1] TRUE\n[1] TRUE"
@@ -70,7 +76,19 @@ run ry run --runtime ry use.R
 expect exit 0
 expect stdout "[1] 718640.9"
 expect stdout "[1] \"argument `x` must be `F64`, not `character`\""
+expect stderr "typed: attached `total` for [I64, Dbl] -> Dbl from typedpkg's code file"
+
+# A version the file does not supply compiles in the session, with the same output.
+env RY_AHEAD_MISS 1
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "[1] 718640.9"
+expect stdout "[1] \"a3\""
+expect stdout "[1] 9"
 expect stderr "typed: compiled for [I64, Dbl] -> Dbl"
+expect stderr lacks "typed: attached"
+unset RY_AHEAD_MISS
+env RY_CODE_IMAGE 1
 
 # A saved typed function reads back typed too.
 file save.R

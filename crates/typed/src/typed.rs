@@ -25,6 +25,7 @@
 
 pub mod ahead;
 pub mod backend;
+pub mod file;
 pub mod fusion;
 pub mod ir;
 pub mod loops;
@@ -318,9 +319,13 @@ unsafe fn compiled_or_refusal(
         }
         None => {}
     }
+    // An installed package's typed code file may hold the code already.
+    if let Some(compiled) = file::attach(function, params) {
+        return Ok(compiled);
+    }
     if !ahead::compiling_ahead()
         && COMPILED.with_borrow(|compiled| compiled.values().filter(|entry| entry.is_ok()).count())
-            >= MAX_COMPILED + ahead::compiled_ahead()
+            >= MAX_COMPILED + ahead::compiled_ahead() + file::attached()
     {
         decline(|| format!("the session compiled its limit of {MAX_COMPILED} typed functions"));
         return Err(Refusal::new(
@@ -493,15 +498,7 @@ unsafe fn lower_settled(function: Sexp, params: &[Type]) -> Result<(Lowered, Lin
 /// Machine code for a lowered function whose shapes are confirmed.
 unsafe fn generate(params: &[Type], lowered: Lowered, linker: Linker) -> Result<Compiled, Refusal> {
     let mut ir = lowered.function;
-    unbox::replace_split_lists(&mut ir);
-    loops::fuse_loops(&mut ir);
-    unbox::unbox(&mut ir);
-    unbox::remove_unread(&mut ir);
-    fusion::fuse(&mut ir);
-    ownership::insert(&mut ir);
-    if std::env::var_os("RY_TYPED_DUMP").is_some() {
-        eprintln!("{ir}");
-    }
+    optimize(&mut ir);
     let sites: Vec<usize> = lowered
         .r_calls
         .iter()
@@ -544,6 +541,19 @@ unsafe fn generate(params: &[Type], lowered: Lowered, linker: Linker) -> Result<
     })
 }
 
+/// The passes between lowering and machine code.
+fn optimize(ir: &mut ir::Function) {
+    unbox::replace_split_lists(ir);
+    loops::fuse_loops(ir);
+    unbox::unbox(ir);
+    unbox::remove_unread(ir);
+    fusion::fuse(ir);
+    ownership::insert(ir);
+    if std::env::var_os("RY_TYPED_DUMP").is_some() {
+        eprintln!("{ir}");
+    }
+}
+
 fn earliest(a: Option<u64>, b: Option<u64>) -> Option<u64> {
     match (a, b) {
         (Some(a), Some(b)) => Some(a.min(b)),
@@ -565,6 +575,8 @@ fn calls_itself(function: &ir::Function) -> bool {
 #[derive(Default)]
 struct Linker {
     callees: Vec<Callee>,
+    /// The closure and argument types of each callee, which a typed code file names it by.
+    called: Vec<Key>,
     speculations: Vec<Speculation>,
     epoch: Option<u64>,
     calls_r: bool,
@@ -588,6 +600,7 @@ impl Callees for Linker {
         // lookups hold.
         self.speculations.extend_from_slice(&compiled.speculations);
         self.epoch = earliest(self.epoch, compiled.epoch);
+        self.called.push((function, SmallVec::from_slice(params)));
         self.callees.push(Callee {
             entry: Entry::Address(compiled.code.address),
             params: SmallVec::from_slice(params),

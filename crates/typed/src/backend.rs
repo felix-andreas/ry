@@ -467,6 +467,19 @@ pub struct Frees {
     object: Entry,
 }
 
+impl Frees {
+    /// The functions of a code file's free entries ([`file_frees`]).
+    pub fn ids(&self) -> SmallVec<[FuncId; 2]> {
+        [self.string, self.object]
+            .into_iter()
+            .filter_map(|entry| match entry {
+                Entry::Function(id) => Some(id),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 thread_local! {
     /// Compiled on first use and kept per thread, as the code modules are.
     static FREES: Cell<Option<Frees>> = const { Cell::new(None) };

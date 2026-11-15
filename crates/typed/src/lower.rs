@@ -6660,7 +6660,7 @@ fn is_operator(name: &str) -> bool {
 
 /// Whether a call resolved to one of the table API's functions that gives a table value: the
 /// `ry` namespace's own function of that name, which `package:ry` binds too.
-unsafe fn is_table_function(speculation: &Speculation) -> bool {
+pub(crate) unsafe fn is_table_function(speculation: &Speculation) -> bool {
     if !gives_table_value(&rvalues::symbol_name(speculation.symbol)) {
         return false;
     }
@@ -6717,7 +6717,7 @@ unsafe fn returns_table(function: Sexp) -> bool {
         })
 }
 
-unsafe fn is_base_function(speculation: &Speculation) -> bool {
+pub(crate) unsafe fn is_base_function(speculation: &Speculation) -> bool {
     let function = speculation.function;
     match function.kind() {
         SexpType::Builtin | SexpType::Special => interp::eval::builtin_def(function)
