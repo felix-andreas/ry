@@ -96,18 +96,19 @@ if (length(bundled) > 0 && !all(file.copy(file.path(.Library, bundled), library_
   stop("cannot copy R's own packages into ", library_dir)
 }
 
-# R 4.6's headers declare some functions libR exports, such as `ATTRIB`, `Rf_findVar` and
-# `Rf_findVarInFrame`, only when a package defines `ENABLE_LEGACY_NONAPI`. With gcc 13, C code from
-# the pinned snapshot that calls one compiles with only a warning, and the implicit `int` return
-# truncates the returned pointer, so the package aborts at its first such call, under GNU R and ry
-# alike (xts's `x[2:4]`, Matrix's `Cholesky`). A Posit binary and a package compiled here are
-# equally affected, so the check reads each shared object's imports instead of its `Built:` field:
-# a package that imports a pointer-returning function the default headers leave undeclared is
-# reinstalled from the newest CRAN source, which compiles against those headers. A function that
-# returns an `int` or nothing survives the implicit declaration, so it does not count. A package
-# that declares the function itself (S7 defines `ENABLE_LEGACY_NONAPI_FUNS`) is rebuilt for nothing
-# and logged again below, and so is one whose newest source needs a newer dependency than the
-# snapshot holds, which fails to install and leaves the old build in place.
+# Older R headers declared functions that libR exports but R 4.6's leave undeclared by default,
+# such as `ATTRIB`, `ENCLOS` and `Rf_findVarInFrame`. With gcc 13, C code from the pinned snapshot
+# that calls one compiles with only a warning, and the implicit `int` return truncates a returned
+# pointer, so the package aborts at its first such call, under GNU R and ry alike (xts's `x[2:4]`,
+# Matrix's `Cholesky`). A Posit binary and a package compiled here are equally affected, so the
+# check reads each shared object's imports instead of its `Built:` field: a package that imports an
+# exported function the default headers leave undeclared is reinstalled from the newest CRAN source,
+# which compiles against those headers. A function whose prototype under `ENABLE_LEGACY_NONAPI`
+# returns an `int` or nothing (`OBJECT`, `SET_ATTRIB`) survives the implicit declaration and does
+# not count; one with no prototype at all (`ENCLOS`, `CLOENV`) does. A package that declares the
+# function itself (S7 defines `ENABLE_LEGACY_NONAPI_FUNS`) is rebuilt for nothing and logged again
+# below, and so is one whose newest source needs a newer dependency than the snapshot holds, which
+# fails to install and leaves the old build in place.
 undeclared_entry_points <- function() {
   libr <- file.path(R.home("lib"), "libR.so")
   if (!file.exists(libr) || !nzchar(Sys.which("nm"))) {
@@ -142,14 +143,16 @@ undeclared_entry_points <- function() {
     text = system2("nm", c("-D", "--defined-only", shQuote(libr)), stdout = TRUE),
     fill = TRUE, colClasses = "character", quote = "", comment.char = ""
   )
+  # Fortran-callable helpers (`dblepr_` and the like) have no C prototype in any R version.
   candidates <- setdiff(exported[[3]][exported[[2]] %in% c("T", "W")], declared)
+  candidates <- candidates[!grepl("_$", candidates)]
   statements <- trimws(strsplit(paste(legacy, collapse = " "), ";", fixed = TRUE)[[1]])
-  returns_pointer <- vapply(candidates, function(name) {
+  returns_scalar <- vapply(candidates, function(name) {
     call <- sprintf("\\(?%s\\)?\\s*\\(", name)
     prototype <- grep(sprintf("^[^(]*[ *(]%s", call), statements, value = TRUE)
-    length(prototype) > 0 && grepl("\\*|\\bSEXP\\b", sub(sprintf("%s.*", call), "", prototype[1]))
+    length(prototype) > 0 && !grepl("\\*|\\bSEXP\\b", sub(sprintf("%s.*", call), "", prototype[1]))
   }, TRUE)
-  candidates[returns_pointer]
+  candidates[!returns_scalar]
 }
 
 packages_calling_undeclared <- function(undeclared) {
