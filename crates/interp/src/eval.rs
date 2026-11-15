@@ -660,6 +660,12 @@ unsafe fn slot_content(function: Sexp, header: usize, symbol: Sexp) -> Option<Se
     (value != unbound()).then_some(value)
 }
 
+/// The value of `symbol` read from `enclosure` for the running slot frame, whose own slots do
+/// not bind it.
+pub(crate) unsafe fn enclosed_value(symbol: Sexp, enclosure: Sexp) -> R<Sexp> {
+    eval_enclosed_name(symbol, enclosure, interp().slot_owner as usize)
+}
+
 /// Evaluates `symbol` from `enclosure` for the slot frame at `owner`, whose own slots do not bind
 /// it, so an unbound name is reported against the frame's call and not the enclosure's.
 unsafe fn eval_enclosed_name(symbol: Sexp, enclosure: Sexp, owner: usize) -> R<Sexp> {
