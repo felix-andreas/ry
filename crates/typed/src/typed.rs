@@ -441,7 +441,8 @@ unsafe fn compile(function: Sexp, params: &[Type]) -> Result<Compiled, Refusal> 
         for &shape in &lowered.constructed {
             shapes::confirm(shape);
         }
-        if earliest(lowered.epoch, linker.epoch).is_none_or(|epoch| epoch == shapes::epoch()) {
+        let epoch = earliest(lowered.any_tag.as_ref().map(|any| any.epoch), linker.epoch);
+        if epoch.is_none_or(|epoch| epoch == shapes::epoch()) {
             return generate(params, lowered, linker);
         }
     }
@@ -530,7 +531,7 @@ unsafe fn generate(params: &[Type], lowered: Lowered, linker: Linker) -> Result<
     std::mem::forget(lowered.r_calls);
     let mut speculations = lowered.speculations;
     speculations.extend(linker.speculations);
-    let epoch = earliest(lowered.epoch, linker.epoch);
+    let epoch = earliest(lowered.any_tag.as_ref().map(|any| any.epoch), linker.epoch);
     Ok(Compiled {
         code,
         params: SmallVec::from_slice(params),

@@ -280,3 +280,64 @@ expect exit 0
 expect stdout "[1] 2.414214\n[1] 6"
 expect stderr "typed: attached `other` for [Dbl] -> Dbl from droppkg's code file"
 expect stderr lacks "is not used"
+
+# A `match` over any tag tests for the shapes the install had seen, so it attaches when this
+# session has seen no other shape its patterns name, and compiles in the session when it has. A
+# shape seen after it attached makes it stale, as code compiled in the session would be.
+file trees/DESCRIPTION
+| Package: treepkg
+| Version: 1.0.0
+| Title: Trees
+| Description: A match over any tag.
+| License: MIT
+file trees/NAMESPACE
+| export(nodes)
+file trees/R/trees.R
+| # typing: strict
+| type Tree = :Leaf | :Node(left: Tree, right: Tree)
+| grow <- function(depth: I64) -> Tree {
+|   if (depth == 0) @Tree(:Leaf) else @Tree(:Node(left = grow(depth - 1), right = grow(depth - 1)))
+| }
+| count <- function(tree: Tree) -> I64 {
+|   match (tree) {
+|     :Leaf => 1
+|     :Node(left = l, right = r) => count(l) + count(r)
+|   }
+| }
+| nodes <- function(depth: I64) -> I64 count(grow(depth))
+
+run ry install trees -l library
+expect exit 0
+expect stdout "typed code: closures=3 written=4"
+
+file trees-use.R
+| library(treepkg, lib.loc = "library")
+| print(nodes(4))
+| stray <- function(x: F64) -> F64 {
+|   t <- :Node(left = x, right = x)
+|   x
+| }
+| print(stray(1.5))
+| print(nodes(5))
+
+run ry run --runtime ry trees-use.R
+expect exit 0
+expect stdout "16i64\n[1] 1.5\n32i64"
+expect stderr "typed: attached `count` for [Tag(4294967295)] -> I64 from treepkg's code file"
+expect stderr "typed: attached `nodes` for [I64] -> I64 from treepkg's code file"
+expect stderr "typed: compiled for [Tag(4294967295)] -> I64"
+
+file trees-stray.R
+| stray <- function(x: F64) -> F64 {
+|   t <- :Node(left = x, right = x)
+|   x
+| }
+| print(stray(1.5))
+| library(treepkg, lib.loc = "library")
+| print(nodes(4))
+
+run ry run --runtime ry trees-stray.R
+expect exit 0
+expect stdout "[1] 1.5\n16i64"
+expect stderr "typed: `count` for [Tag(4294967295)] is not attached from treepkg's code file: a `match` in it tests for fewer shapes than this session has seen"
+expect stderr "typed: compiled for [Tag(4294967295)] -> I64"

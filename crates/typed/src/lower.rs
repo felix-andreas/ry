@@ -55,10 +55,26 @@ pub struct Lowered {
     pub speculations: Vec<Speculation>,
     /// The R calls the code makes, as [`Op::CallR`] indexes them.
     pub r_calls: Vec<RCall>,
-    /// The [`shapes::epoch`] whose confirmed shapes a `match` over any tag tests for.
-    pub epoch: Option<u64>,
+    /// What the code's matches over any tag relied on, when it has one.
+    pub any_tag: Option<AnyTag>,
     /// The tag shapes the code constructs, which the caller confirms before it generates code.
     pub constructed: SmallVec<[u32; 4]>,
+}
+
+/// What the matches over any tag in one lowering relied on. Each tests for the confirmed shapes
+/// whose layout or tag one of its patterns names, so code written for one process runs in another
+/// as that process would compile it exactly when every shape the other process has confirmed and
+/// a pattern names is among `tested`.
+#[derive(Clone, Debug, Default)]
+pub struct AnyTag {
+    /// The earliest [`shapes::epoch`] a match read the confirmed shapes at.
+    pub epoch: u64,
+    /// The layouts the patterns name exactly.
+    pub layouts: SmallVec<[u32; 4]>,
+    /// The tags the patterns name with any fields.
+    pub tags: SmallVec<[u32; 4]>,
+    /// The shapes the matches test for.
+    pub tested: SmallVec<[u32; 4]>,
 }
 
 /// A call of an R function from typed code, which compiled code makes through
@@ -258,7 +274,7 @@ unsafe fn lower_calling(
         nesting: 0,
         control: 0,
         unusable: SmallVec::new(),
-        epoch: None,
+        any_tag: None,
         returned: None,
         tail_branch: None,
         constructed: SmallVec::new(),
@@ -318,7 +334,7 @@ unsafe fn lower_calling(
         function: lowering.builder.function,
         speculations: lowering.speculations,
         r_calls: lowering.r_calls,
-        epoch: lowering.epoch,
+        any_tag: lowering.any_tag,
         constructed: lowering.constructed,
     })
 }
@@ -399,8 +415,8 @@ struct Lowering<'c> {
     control: usize,
     /// The results of an `if` whose branches have different types, which nothing may read.
     unusable: SmallVec<[Local; 4]>,
-    /// The earliest [`shapes::epoch`] a `match` over any tag relied on.
-    epoch: Option<u64>,
+    /// What the matches over any tag relied on.
+    any_tag: Option<AnyTag>,
     /// The type an early `return` of the function itself gives, the union of the tags when it
     /// returns tags.
     returned: Option<Type>,
@@ -4622,7 +4638,6 @@ impl Lowering<'_> {
             Type::Tag(union) => match shapes::members(union) {
                 Some(members) => Ok((members, true)),
                 None => {
-                    self.epoch.get_or_insert(shapes::epoch());
                     let heap = interp::heap();
                     let mut candidates = shapes::confirmed();
                     for &shape in &self.constructed {
@@ -4641,7 +4656,22 @@ impl Lowering<'_> {
                                     .and_then(|layout| layout.tag)
                                     .is_some_and(|tag| tags.contains(&tag))
                         })
-                        .collect();
+                        .collect::<SmallVec<[u32; 4]>>();
+                    let any_tag = self.any_tag.get_or_insert_with(|| AnyTag {
+                        epoch: shapes::epoch(),
+                        ..AnyTag::default()
+                    });
+                    for (into, from) in [
+                        (&mut any_tag.layouts, layouts),
+                        (&mut any_tag.tags, tags),
+                        (&mut any_tag.tested, &found[..]),
+                    ] {
+                        for &id in from {
+                            if !into.contains(&id) {
+                                into.push(id);
+                            }
+                        }
+                    }
                     Ok((found, false))
                 }
             },

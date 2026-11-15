@@ -50,7 +50,7 @@ use {
 };
 
 const MAGIC: &[u8; 8] = b"RYTYPED\0";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 /// The bytes of the fixed header.
 const HEADER_SIZE: usize = 8 + 4 + 8 * 13;
 /// The alignment of the code in the file and of the offset table's reservation, which is the
@@ -202,11 +202,6 @@ unsafe fn collect(
             *written.skipped.entry("does not compile").or_default() += 1;
             continue;
         };
-        // Which shapes a `match` over any tag tests for depends on the session that runs it.
-        if earliest(lowered.epoch, linker.epoch).is_some() {
-            *written.skipped.entry("matches over any tag").or_default() += 1;
-            continue;
-        }
         let mut preserved = Vec::new();
         for site in &lowered.r_calls {
             preserved.push(site.call);
@@ -715,6 +710,28 @@ pub struct Version {
     pub callees: Vec<u32>,
     /// The shapes the code constructs, which a session confirms before it runs the code.
     pub confirms: Vec<u32>,
+    /// What the code's matches over any tag test for, when it has one.
+    pub matches: Option<Matches>,
+}
+
+/// The patterns of a version's matches over any tag and the shapes they test for
+/// ([`crate::lower::AnyTag`]). A session attaches the code only when every shape it has
+/// confirmed whose layout or tag a pattern names is among `tested`, which is when it would
+/// compile the same tests.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Matches {
+    pub layouts: Vec<LayoutKey>,
+    /// Tag names, as indexes into the strings.
+    pub tags: Vec<u32>,
+    /// Shape entries.
+    pub tested: Vec<u32>,
+}
+
+/// A heap layout by the names of its tag and fields.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutKey {
+    pub tag: Option<u32>,
+    pub fields: FieldNames,
 }
 
 #[derive(Default)]
@@ -760,18 +777,29 @@ impl ShapeWriter {
             return Err(String::from("a shape that contains itself"));
         }
         let (layout, items) = shapes::fields(id);
+        let LayoutKey { tag, fields } = self.layout(layout)?;
+        let mut file_items = Vec::with_capacity(items.len());
+        for &item in &items {
+            file_items.push(self.item(item)?);
+        }
+        let entry = self.push(ShapeEntry::Shape {
+            tag,
+            fields,
+            items: file_items,
+        });
+        self.visiting.remove(&(0, id));
+        self.shapes.insert(id, entry);
+        Ok(entry)
+    }
+
+    /// The session's heap layout `id` by the names of its tag and fields.
+    unsafe fn layout(&mut self, id: u32) -> Result<LayoutKey, String> {
         let heap = interp::heap();
-        let Some(layout) = heap.layouts.get(layout).cloned() else {
+        let Some(layout) = heap.layouts.get(id).cloned() else {
             return Err(String::from("a shape without a layout"));
         };
         let tag = match layout.tag {
-            Some(tag) => {
-                let symbol = heap
-                    .layouts
-                    .tag_name(tag)
-                    .ok_or_else(|| String::from("a tag without a name"))?;
-                Some(self.strings.id(&rvalues::symbol_name(symbol)))
-            }
+            Some(tag) => Some(self.tag(tag)?),
             None => None,
         };
         let fields = match &layout.fields {
@@ -785,18 +813,16 @@ impl ShapeWriter {
             Fields::Dict => FieldNames::Dict,
             Fields::Set => FieldNames::Set,
         };
-        let mut file_items = Vec::with_capacity(items.len());
-        for &item in &items {
-            file_items.push(self.item(item)?);
-        }
-        let entry = self.push(ShapeEntry::Shape {
-            tag,
-            fields,
-            items: file_items,
-        });
-        self.visiting.remove(&(0, id));
-        self.shapes.insert(id, entry);
-        Ok(entry)
+        Ok(LayoutKey { tag, fields })
+    }
+
+    /// The session's tag `id` by its name.
+    unsafe fn tag(&mut self, id: u32) -> Result<u32, String> {
+        let symbol = interp::heap()
+            .layouts
+            .tag_name(id)
+            .ok_or_else(|| String::from("a tag without a name"))?;
+        Ok(self.strings.id(&rvalues::symbol_name(symbol)))
     }
 
     unsafe fn union(&mut self, id: u32) -> Result<u32, String> {
@@ -935,6 +961,23 @@ impl Encoder<'_> {
         for &shape in &lowered.constructed {
             confirms.push(self.shapes.shape(shape).map_err(|_| UNNAMED_SHAPE)?);
         }
+        let matches = match &lowered.any_tag {
+            Some(any_tag) => {
+                let mut matches = Matches::default();
+                for &layout in &any_tag.layouts {
+                    let key = self.shapes.layout(layout).map_err(|_| UNNAMED_SHAPE)?;
+                    matches.layouts.push(key);
+                }
+                for &tag in &any_tag.tags {
+                    matches.tags.push(self.shapes.tag(tag).map_err(|_| UNNAMED_SHAPE)?);
+                }
+                for &shape in &any_tag.tested {
+                    matches.tested.push(self.shapes.shape(shape).map_err(|_| UNNAMED_SHAPE)?);
+                }
+                Some(matches)
+            }
+            None => None,
+        };
         let name = names
             .get(&version.key.0)
             .map_or("<anonymous>", String::as_str);
@@ -959,6 +1002,7 @@ impl Encoder<'_> {
             sites,
             callees,
             confirms,
+            matches,
         })
     }
 
@@ -1179,6 +1223,21 @@ impl Out {
         }
     }
 
+    fn fields(&mut self, fields: &FieldNames) {
+        match fields {
+            FieldNames::Positional(count) => {
+                self.number(0);
+                self.number(u64::from(*count));
+            }
+            FieldNames::Named(names) => {
+                self.number(1);
+                self.list(names);
+            }
+            FieldNames::Dict => self.number(2),
+            FieldNames::Set => self.number(3),
+        }
+    }
+
     fn item(&mut self, item: Item) {
         match item {
             Item::Int => self.number(0),
@@ -1351,18 +1410,7 @@ fn encode_metadata(parsed: &Parsed) -> Vec<u8> {
             ShapeEntry::Shape { tag, fields, items } => {
                 out.number(0);
                 out.option(*tag);
-                match fields {
-                    FieldNames::Positional(count) => {
-                        out.number(0);
-                        out.number(u64::from(*count));
-                    }
-                    FieldNames::Named(names) => {
-                        out.number(1);
-                        out.list(names);
-                    }
-                    FieldNames::Dict => out.number(2),
-                    FieldNames::Set => out.number(3),
-                }
+                out.fields(fields);
                 out.number(items.len() as u64);
                 for &item in items {
                     out.item(item);
@@ -1492,6 +1540,19 @@ fn encode_metadata(parsed: &Parsed) -> Vec<u8> {
         out.list(&version.sites);
         out.list(&version.callees);
         out.list(&version.confirms);
+        match &version.matches {
+            Some(matches) => {
+                out.number(1);
+                out.number(matches.layouts.len() as u64);
+                for layout in &matches.layouts {
+                    out.option(layout.tag);
+                    out.fields(&layout.fields);
+                }
+                out.list(&matches.tags);
+                out.list(&matches.tested);
+            }
+            None => out.number(0),
+        }
     }
     out.0
 }
@@ -1552,6 +1613,16 @@ impl In<'_> {
     fn list(&mut self, bound: usize) -> Result<Vec<u32>, Malformed> {
         let count = self.count()?;
         (0..count).map(|_| self.index(bound)).collect()
+    }
+
+    fn fields(&mut self, strings: usize) -> Result<FieldNames, Malformed> {
+        Ok(match self.number()? {
+            0 => FieldNames::Positional(self.word()?),
+            1 => FieldNames::Named(self.list(strings)?),
+            2 => FieldNames::Dict,
+            3 => FieldNames::Set,
+            _ => return Err(MALFORMED),
+        })
     }
 
     fn flag(&mut self) -> Result<bool, Malformed> {
@@ -1777,13 +1848,7 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, Malformed> {
         let entry = match input.number()? {
             0 => {
                 let tag = input.option(strings)?;
-                let fields = match input.number()? {
-                    0 => FieldNames::Positional(input.word()?),
-                    1 => FieldNames::Named(input.list(strings)?),
-                    2 => FieldNames::Dict,
-                    3 => FieldNames::Set,
-                    _ => return Err(MALFORMED),
-                };
+                let fields = input.fields(strings)?;
                 let length = input.count()?;
                 // A record has an item per field, and a layout keeps its names in the order of
                 // their bytes.
@@ -1975,10 +2040,28 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, Malformed> {
         let sites = input.list(parsed.sites.len())?;
         let callees = input.list(parsed.callees.len())?;
         let confirms = input.list(parsed.shapes.len())?;
+        let matches = match input.number()? {
+            0 => None,
+            1 => {
+                let mut matches = Matches::default();
+                for _ in 0..input.count()? {
+                    let tag = input.option(strings)?;
+                    let fields = input.fields(strings)?;
+                    matches.layouts.push(LayoutKey { tag, fields });
+                }
+                matches.tags = input.list(strings)?;
+                matches.tested = input.list(parsed.shapes.len())?;
+                Some(matches)
+            }
+            _ => return Err(MALFORMED),
+        };
         if body >= end
             || trampoline >= end
             || end > header.shared_start
             || confirms.iter().any(|&shape| !is_shape(shape))
+            || matches
+                .as_ref()
+                .is_some_and(|matches| matches.tested.iter().any(|&shape| !is_shape(shape)))
         {
             return Err(MALFORMED);
         }
@@ -1997,6 +2080,7 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, Malformed> {
             sites,
             callees,
             confirms,
+            matches,
         });
     }
     if input.at != metadata.len()
@@ -2380,32 +2464,12 @@ unsafe fn write_slot(base: usize, number: u32, word: u64) {
 
 /// This process's id of each of the file's shape entries, interning the ones it has not seen.
 unsafe fn live_shapes(parsed: &Parsed) -> Result<Vec<u32>, String> {
-    let heap = interp::heap();
-    let symbol = |index: u32| {
-        rvalues::install(&parsed.strings[index as usize])
-            .map_err(|_| String::from("cannot name a field"))
-    };
     let mut live: Vec<u32> = Vec::with_capacity(parsed.shapes.len());
     for entry in &parsed.shapes {
         let id = match entry {
             ShapeEntry::Shape { tag, fields, items } => {
-                let tag = match tag {
-                    Some(name) => Some(heap.layouts.intern_tag(symbol(*name)?)),
-                    None => None,
-                };
-                let fields = match fields {
-                    FieldNames::Positional(count) => Fields::Positional(*count),
-                    FieldNames::Named(names) => {
-                        let mut symbols = Vec::with_capacity(names.len());
-                        for &name in names {
-                            symbols.push(symbol(name)?);
-                        }
-                        Fields::Named(symbols.into_boxed_slice())
-                    }
-                    FieldNames::Dict => Fields::Dict,
-                    FieldNames::Set => Fields::Set,
-                };
-                let layout = heap.layouts.intern(Layout { tag, fields });
+                let layout = live_layout(parsed, *tag, fields)
+                    .map_err(|_| String::from("cannot name a field"))?;
                 let items: SmallVec<[Item; 4]> =
                     items.iter().map(|&item| live_item(item, &live)).collect();
                 shapes::intern(layout, &items)
@@ -2421,6 +2485,36 @@ unsafe fn live_shapes(parsed: &Parsed) -> Result<Vec<u32>, String> {
         live.push(id);
     }
     Ok(live)
+}
+
+/// This process's heap layout of a tag and fields the file names.
+unsafe fn live_layout(
+    parsed: &Parsed,
+    tag: Option<u32>,
+    fields: &FieldNames,
+) -> Result<u32, Malformed> {
+    let heap = interp::heap();
+    let tag = match tag {
+        Some(name) => Some(heap.layouts.intern_tag(live_symbol(parsed, name)?)),
+        None => None,
+    };
+    let fields = match fields {
+        FieldNames::Positional(count) => Fields::Positional(*count),
+        FieldNames::Named(names) => {
+            let mut symbols = Vec::with_capacity(names.len());
+            for &name in names {
+                symbols.push(live_symbol(parsed, name)?);
+            }
+            Fields::Named(symbols.into_boxed_slice())
+        }
+        FieldNames::Dict => Fields::Dict,
+        FieldNames::Set => Fields::Set,
+    };
+    Ok(heap.layouts.intern(Layout { tag, fields }))
+}
+
+unsafe fn live_symbol(parsed: &Parsed, name: u32) -> Result<Sexp, Malformed> {
+    rvalues::install(&parsed.strings[name as usize]).map_err(|_| MALFORMED)
 }
 
 fn live_item(item: Item, live: &[u32]) -> Item {
@@ -2561,6 +2655,12 @@ unsafe fn attach_inner(mapped: &'static Mapped, index: u32) -> Result<&'static C
     for &shape in &version.confirms {
         shapes::confirm(mapped.live[shape as usize]);
     }
+    if let Some(matches) = &version.matches {
+        if !tests_for_every_shape(mapped, matches)? {
+            return Err("a `match` in it tests for fewer shapes than this session has seen");
+        }
+        epoch = earliest(epoch, Some(shapes::epoch()));
+    }
     Ok(Box::leak(Box::new(Compiled {
         code: Code {
             address: mapped.base + version.body as usize,
@@ -2572,6 +2672,35 @@ unsafe fn attach_inner(mapped: &'static Mapped, index: u32) -> Result<&'static C
         epoch,
         calls_r,
     })))
+}
+
+/// Whether a version's matches over any tag test for every shape this session has confirmed
+/// whose layout or tag a pattern names, which is when compiling it here would give the same
+/// tests. A shape the file tests for and the session never confirmed costs a comparison.
+unsafe fn tests_for_every_shape(mapped: &Mapped, matches: &Matches) -> Result<bool, &'static str> {
+    let heap = interp::heap();
+    let mut layouts: SmallVec<[u32; 4]> = SmallVec::new();
+    for key in &matches.layouts {
+        layouts.push(live_layout(&mapped.parsed, key.tag, &key.fields)?);
+    }
+    let mut tags: SmallVec<[u32; 4]> = SmallVec::new();
+    for &name in &matches.tags {
+        tags.push(heap.layouts.intern_tag(live_symbol(&mapped.parsed, name)?));
+    }
+    Ok(shapes::confirmed().into_iter().all(|shape| {
+        let layout = shapes::shape(shape).layout;
+        let named = layouts.contains(&layout)
+            || heap
+                .layouts
+                .get(layout)
+                .and_then(|layout| layout.tag)
+                .is_some_and(|tag| tags.contains(&tag));
+        !named
+            || matches
+                .tested
+                .iter()
+                .any(|&entry| mapped.live[entry as usize] == shape)
+    }))
 }
 
 /// The binding lookup `index` finds in this session, when it finds what the file assumed.
@@ -2798,7 +2927,7 @@ pub mod testing {
     use {
         super::{
             ALIGN, Argument, Class, EnvRef, Expr, FieldNames, FileCallee, FileConversion,
-            HEADER_SIZE, Header, Item, Lookup, Parsed, ShapeEntry, Site, SiteResult, Target,
+            HEADER_SIZE, Header, Item, LayoutKey, Lookup, Matches, Parsed, ShapeEntry, Site, SiteResult, Target,
             Version, encode_header, encode_metadata, parse,
         },
         crate::{
@@ -3051,6 +3180,19 @@ pub mod testing {
                 } else {
                     vec![records[below(records.len())]]
                 },
+                matches: (below(2) == 0).then(|| Matches {
+                    layouts: (0..below(3))
+                        .map(|_| LayoutKey {
+                            tag: (below(2) == 0).then(|| below(strings) as u32),
+                            fields: FieldNames::Positional(below(4) as u32),
+                        })
+                        .collect(),
+                    tags: pick(&mut below, strings),
+                    tested: pick(&mut below, records.len())
+                        .into_iter()
+                        .map(|record| records[record as usize])
+                        .collect(),
+                }),
             };
             parsed.functions.push(version);
         }
