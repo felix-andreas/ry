@@ -151,3 +151,92 @@ expect stdout "[1] 718640.9"
 expect stderr "typed: compiled 4 functions ahead of time"
 expect stderr "ry: another build of ry installed typedpkg, so its typed functions compiled as it loaded; reinstall it to compile them at install"
 expect stderr lacks "typed: attached"
+
+# Shape ids in file code come from the offset table, so a process that interned other records and
+# tags before the package loaded runs a `match` over a closed union, a record parameter and a sort
+# comparator from the file correctly.
+file shapes/DESCRIPTION
+| Package: shapepkg
+| Version: 1.0.0
+| Title: Shapes
+| Description: Typed functions over tags and records.
+| License: MIT
+file shapes/NAMESPACE
+| export(weight, norms, largest)
+file shapes/R/shapes.R
+| # typing: strict
+| alias Size = :Small | :Big(n: I64)
+| size_of <- function(n: I64) -> Size if (n > 2) :Big(n = n) else :Small
+| weight <- function(n: I64) -> I64 {
+|   total <- 0
+|   for (i in List.range(1, n)) {
+|     total <- total + match (size_of(i)) {
+|       :Small => 1
+|       :Big(n = k) => k
+|     }
+|   }
+|   total
+| }
+| norm <- function(p: Record{x: F64, y: F64}) -> F64 Num.sqrt(p$x * p$x + p$y * p$y)
+| norms <- function(n: I64) -> F64 {
+|   sum <- 0.0
+|   for (i in List.range(1, n)) sum <- sum + norm((x = Num.to_f64(i), y = 1.0))
+|   sum
+| }
+| largest <- function(n: I64) -> I64 {
+|   xs <- List.sort_with(List.range(1, n), \(a, b) Num.compare(b, a))
+|   List.walk(xs, 0, function(acc: I64, x: I64) -> I64 acc * 10 + x)
+| }
+
+run ry install shapes -l library
+expect exit 0
+expect stdout "typed code: closures=5 written=4 (left out: compiles with its caller (1))"
+
+file shapes-first.R
+| other <- function(n: I64) -> I64 {
+|   r <- (a = n, b = 2.0, c = n)
+|   s <- (y = 1.0, x = 2.0, z = n)
+|   t <- if (n > 1) :Big(n = n, m = n) else :Tiny
+|   r$a + r$c + s$z
+| }
+| print(other(3))
+| library(shapepkg, lib.loc = "library")
+| print(weight(5))
+| print(norms(3))
+| print(largest(4))
+
+run ry run --runtime ry shapes-first.R
+expect exit 0
+expect stdout "9i64\n14i64\n[1] 6.812559\n4321i64"
+expect stderr "typed: attached `weight` for [I64] -> I64 from shapepkg's code file"
+expect stderr "typed: attached `norms` for [I64] -> Dbl from shapepkg's code file"
+expect stderr "typed: attached `largest` for [I64] -> I64 from shapepkg's code file"
+
+# A copy of a closure made at run time has another environment, so it compiles in the session,
+# and the closure it was copied from still attaches.
+file copy.R
+| library(shapepkg, lib.loc = "library")
+| copy <- weight
+| environment(copy) <- new.env(parent = environment(weight))
+| print(copy(5))
+| print(weight(5))
+
+run ry run --runtime ry copy.R
+expect exit 0
+expect stdout "14i64\n14i64"
+expect stderr "typed: compiled for [I64] -> I64"
+expect stderr "typed: attached `weight` for [I64] -> I64 from shapepkg's code file"
+
+# A reinstall in a running session replaces the file, and a function fetched before it compiles
+# in the session instead of attaching code written for the new sources.
+file reinstall.R
+| library(shapepkg, lib.loc = "library")
+| before <- weight
+| install.packages("shapes", repos = NULL, type = "source", lib = "library", quiet = TRUE)
+| print(before(5))
+
+run ry run --runtime ry reinstall.R
+expect exit 0
+expect stdout "14i64"
+expect stderr "typed: shapepkg's typed code file is not used: it was written for another copy of the package"
+expect stderr "typed: compiled for [I64] -> I64"
