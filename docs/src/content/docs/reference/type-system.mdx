@@ -395,8 +395,10 @@ these rules:
   computed value; a return value gets no such allowance. A list type admits any R list, a
   `Record{...}` or `Tuple{...}` type any ry record or tuple, a function type any function, and a
   union any of its members. Vector shape, element types, and
-  attributes are not checked, and a type the storage type cannot decide (an alias, a class, a type
-  parameter, `Any`, `data.frame`) is not checked at all. A check therefore fails only on a value that really does not
+  attributes are not checked, and a type the storage type cannot decide (a class, a type
+  parameter, `Any`, `data.frame`) is not checked at all. Under `ry run`, the console and an
+  installed package, an alias is checked as the type it stands for, because ry's runtime reads
+  each one-line annotation there with its aliases expanded. A check therefore fails only on a value that really does not
   have the annotated type.
 - **An installed typed package's signatures name the types, not their aliases.** `ry install` and
   `ry build` on ry's runtime write each one-line parameter and return annotation of a typed package

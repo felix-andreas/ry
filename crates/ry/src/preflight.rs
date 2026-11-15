@@ -23,7 +23,7 @@ use {
     },
     std::{
         borrow::Cow,
-        fs,
+        fs, io,
         path::{Path, PathBuf},
         sync::{Arc, LazyLock, Mutex, PoisonError},
         thread,
@@ -379,18 +379,7 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
     if analysis.failures > 0 {
         return Err(CommandError);
     }
-    let resolve_note = |related: &RelatedLocation| analysis.related_note(related);
-    let mut problems = 0;
-    for (file, errors) in analysis.files.iter().zip(errors) {
-        problems += render_findings(
-            OutputFormat::Human,
-            MinSeverity::Warning,
-            &file.path,
-            analysis.shown_source(file),
-            errors,
-            &resolve_note,
-        );
-    }
+    let problems = render_strict_errors(analysis, errors);
     let kept = match check {
         Checked::Recorded(analysis, _) => {
             // Freeing every memo of a large package takes longer than any phase of its check,
@@ -416,51 +405,53 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
 
 /// The package's R files that `ry install` and `ry build` put in the tarball rewritten, each
 /// with its path under `root` and the bytes ry's runtime should run: the [`elaborate`]d source
-/// of every file whose checked types change how it runs, in the package's declared encoding. A
-/// package with no typed code costs one read and one parse of each file. Strict mode's errors
-/// are printed and refuse the build, as they refuse `ry load`.
+/// of every code file R installs (the `.R`, `.r`, `.S` and `.q` files directly in `R/`) whose
+/// checked types change how it runs, in the package's declared encoding. A package with no
+/// typed code costs one read and one parse of each such file. Strict mode's errors are printed
+/// and refuse the build, as they refuse `ry load`.
 pub fn elaborate_package(
     root: &Path,
     config: &Config,
 ) -> Result<Vec<(PathBuf, Vec<u8>)>, CommandError> {
-    let sources = root.join("R");
-    let description = match fs::read_to_string(root.join("DESCRIPTION")) {
-        Ok(description) => description,
-        Err(error) => {
-            crate::cli::error(&format!("cannot read {}/DESCRIPTION: {error}", root.display()));
-            return Err(CommandError);
-        }
+    let failed = |path: &Path, error: io::Error| {
+        crate::cli::error(&format!("cannot read {}: {error}", path.display()));
+        CommandError
     };
+    let description_path = root.join("DESCRIPTION");
+    let description =
+        fs::read_to_string(&description_path).map_err(|error| failed(&description_path, error))?;
     let encoding = SourceEncoding::of(&description);
-    let typed = config.check.strict || holds_typed_code(&sources, encoding)?;
+    let code_files = installed_code_files(&root.join("R")).map_err(|(path, error)| failed(&path, error))?;
+    let mut typed = config.check.strict;
+    for path in &code_files {
+        if typed {
+            break;
+        }
+        let bytes = fs::read(path).map_err(|error| failed(path, error))?;
+        // A file that is not text in the package's encoding is the analysis's to report.
+        typed = encoding.decode(bytes).is_none_or(|source| {
+            source.contains("typing: strict")
+                || has_ry_syntax(&syntax::parse(&source).syntax_node(), &source)
+        });
+    }
     if !typed {
         return Ok(Vec::new());
     }
     on_analysis_stack(|| {
+        // The files are named one by one, because R installs exactly these, whatever the
+        // project's ignore files say, and nothing in a directory below `R/`.
         let analysis = analyze_project(
             root,
             root,
             config.clone(),
-            std::slice::from_ref(&sources),
+            &code_files,
             CacheUse::Off,
             Purpose::Diagnostics,
         )?;
         if analysis.failures > 0 {
             return Err(CommandError);
         }
-        let errors = strict_errors(&analysis);
-        let resolve_note = |related: &RelatedLocation| analysis.related_note(related);
-        let mut problems = 0;
-        for (file, errors) in analysis.files.iter().zip(&errors) {
-            problems += render_findings(
-                OutputFormat::Human,
-                MinSeverity::Warning,
-                &file.path,
-                analysis.shown_source(file),
-                errors,
-                &resolve_note,
-            );
-        }
+        let problems = render_strict_errors(&analysis, &strict_errors(&analysis));
         if problems > 0 {
             refuse(problems);
             return Err(CommandError);
@@ -477,17 +468,22 @@ pub fn elaborate_package(
             }
             let source = analysis.source(file);
             let program = elaborate(source.as_bytes(), &elaborations);
-            // The rewrites insert ASCII between tokens or in place of whole ones, so the program
-            // is UTF-8, parses as the source does, and keeps every line where it was. A rewrite
-            // that breaks one of those is a bug in ry, and installing its output would run code
-            // the checker never saw.
+            // The rewrites are ASCII, between tokens or in place of whole ones, so the program
+            // is UTF-8, keeps every line where it was, and parses into as many functions with
+            // as many errors as the source. A rewrite that breaks one of those is a bug in ry,
+            // and installing its output would run code the checker never saw.
+            let shape = |text: &str| {
+                let parsed = syntax::parse(text);
+                let functions = parsed
+                    .syntax_node()
+                    .descendants()
+                    .filter(|node| node.kind() == SyntaxKind::FUNCTION_DEF)
+                    .count();
+                (text.lines().count(), parsed.errors().len(), functions)
+            };
             let program = String::from_utf8(program)
                 .ok()
-                .filter(|program| {
-                    program.lines().count() == source.lines().count()
-                        && syntax::parse(program).errors().len()
-                            == syntax::parse(source).errors().len()
-                })
+                .filter(|program| shape(program) == shape(source))
                 .and_then(|program| encoding.encode(&program));
             let Some(program) = program else {
                 crate::cli::error(&format!(
@@ -503,35 +499,26 @@ pub fn elaborate_package(
     })
 }
 
-/// Whether a file in `sources` asks for strict mode or uses ry's syntax, which is when the
-/// package's code needs checking before it installs.
-fn holds_typed_code(sources: &Path, encoding: SourceEncoding) -> Result<bool, CommandError> {
-    let failed = |path: &Path, error: std::io::Error| {
-        crate::cli::error(&format!("cannot read {}: {error}", path.display()));
-        CommandError
-    };
+/// The code files R installs from `sources`, a package's `R/` directory: the files directly in
+/// it named `.R`, `.r`, `.S` or `.q`, in path order.
+fn installed_code_files(sources: &Path) -> Result<Vec<PathBuf>, (PathBuf, io::Error)> {
     let entries = match fs::read_dir(sources) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(failed(sources, error)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err((sources.to_path_buf(), error)),
     };
+    let mut files = Vec::new();
     for entry in entries {
-        let path = entry.map_err(|error| failed(sources, error))?.path();
-        if !path.is_file() {
-            continue;
-        }
-        let bytes = fs::read(&path).map_err(|error| failed(&path, error))?;
-        // A file that is not text in the package's encoding is the analysis's to report.
-        let Some(source) = encoding.decode(bytes) else {
-            return Ok(true);
-        };
-        if source.contains("typing: strict")
-            || has_ry_syntax(&syntax::parse(&source).syntax_node(), &source)
-        {
-            return Ok(true);
+        let path = entry.map_err(|error| (sources.to_path_buf(), error))?.path();
+        let code = path
+            .extension()
+            .is_some_and(|extension| ["R", "r", "S", "q"].iter().any(|code| extension == *code));
+        if code && path.is_file() {
+            files.push(path);
         }
     }
-    Ok(false)
+    files.sort();
+    Ok(files)
 }
 
 /// Each package's analysis from its last strict check in this process, by canonical root:
@@ -548,6 +535,26 @@ enum Checked {
 
 /// Each file's strict-mode errors, empty for a file outside `R/` or one that strict mode does
 /// not cover.
+/// Prints each file's strict errors and returns how many it printed.
+fn render_strict_errors(analysis: &ProjectAnalysis, errors: &[Vec<Diagnostic>]) -> usize {
+    let resolve_note = |related: &RelatedLocation| analysis.related_note(related);
+    analysis
+        .files
+        .iter()
+        .zip(errors)
+        .map(|(file, errors)| {
+            render_findings(
+                OutputFormat::Human,
+                MinSeverity::Warning,
+                &file.path,
+                analysis.shown_source(file),
+                errors,
+                &resolve_note,
+            )
+        })
+        .sum()
+}
+
 fn strict_errors(analysis: &ProjectAnalysis) -> Vec<Vec<Diagnostic>> {
     analysis
         .files
@@ -620,7 +627,7 @@ fn findings(
 /// - A type in a function's signature is spelled canonically, so `x: Region` with
 ///   `alias Region = :North | :South` runs as `x: :North | :South`.
 ///
-/// Text after a rewrite on its line moves right.
+/// Text after a rewrite on its line moves with it.
 pub fn elaborate(input: &[u8], elaborations: &[Elaboration]) -> Vec<u8> {
     let mut program = Vec::with_capacity(input.len() + 16 * elaborations.len());
     let mut copied = 0;

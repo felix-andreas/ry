@@ -793,8 +793,8 @@ fn r_home(runtime: Option<Runtime>) -> Result<(Runtime, PathBuf), String> {
 /// Runs the home's `R CMD build` on `root` in `output` with `devtools::build()`'s options, and
 /// returns the tarball it wrote. On ry's runtime a typed package is checked first, and its R
 /// files go in as the preflight elaborates them (`preflight::elaborate_package`), so the
-/// installed code runs as `ry load` and `ry run` run it; the build then reads a copy of the
-/// package with those files rewritten.
+/// installed code runs as the checker read it; the build then reads a copy of the package with
+/// those files rewritten.
 fn build_tarball(
     runtime: Runtime,
     home: &Path,
@@ -850,6 +850,10 @@ fn build_tarball(
                     format!("{} is outside {}", path.display(), root.display())
                 })?;
                 let target = copy.join(relative);
+                // `.Rbuildignore` left this file out, so the build does not read it.
+                if !target.is_file() {
+                    continue;
+                }
                 fs::write(&target, program)
                     .map_err(|error| format!("cannot write {}: {error}", target.display()))?;
             }
@@ -884,7 +888,9 @@ fn build_tarball(
 
 /// Copies the package at `root` to `copy` for `R CMD build`, leaving out version control and
 /// what `.Rbuildignore` names. The build applies `.Rbuildignore` again to the copy, so a
-/// pattern this reader cannot compile (R reads them as Perl) only costs copying.
+/// pattern this reader cannot compile (R reads them as Perl) only costs copying. A link is
+/// copied as what it names, and one that names nothing, or names something other than a file
+/// or a directory, is left out.
 fn copy_package(root: &Path, copy: &Path) -> Result<(), String> {
     let ignore_file = root.join(".Rbuildignore");
     let ignore_patterns = match fs::read_to_string(&ignore_file) {
@@ -898,40 +904,58 @@ fn copy_package(root: &Path, copy: &Path) -> Result<(), String> {
         .filter(|line| !line.is_empty())
         .filter_map(|pattern| regex::Regex::new(&format!("(?i){pattern}")).ok())
         .collect();
-    let mut pending = vec![PathBuf::new()];
-    let mut entered = std::collections::HashSet::from([fs::canonicalize(root)
-        .map_err(|error| format!("cannot resolve {}: {error}", root.display()))?]);
-    while let Some(relative) = pending.pop() {
-        let source = root.join(&relative);
-        let target = copy.join(&relative);
-        fs::create_dir_all(&target)
-            .map_err(|error| format!("cannot create {}: {error}", target.display()))?;
-        let entries = fs::read_dir(&source)
-            .map_err(|error| format!("cannot read {}: {error}", source.display()))?;
-        for entry in entries {
-            let entry =
-                entry.map_err(|error| format!("cannot read {}: {error}", source.display()))?;
-            let name = entry.file_name();
-            let path = relative.join(&name);
-            let shown = path.to_string_lossy().replace('\\', "/");
-            if name == ".git" || ignored.iter().any(|pattern| pattern.is_match(&shown)) {
+    let canonical = |path: &Path| {
+        fs::canonicalize(path).map_err(|error| format!("cannot resolve {}: {error}", path.display()))
+    };
+    let mut ancestors = vec![canonical(root)?];
+    copy_directory(root, copy, Path::new(""), &ignored, &mut ancestors, &canonical)
+}
+
+/// Copies the directory `relative` below `root` into `copy`. `ancestors` holds the directories
+/// the walk is inside, so a link back up the tree is left out rather than copied forever,
+/// while two links to one directory elsewhere are both copied.
+fn copy_directory(
+    root: &Path,
+    copy: &Path,
+    relative: &Path,
+    ignored: &[regex::Regex],
+    ancestors: &mut Vec<PathBuf>,
+    canonical: &impl Fn(&Path) -> Result<PathBuf, String>,
+) -> Result<(), String> {
+    let source = root.join(relative);
+    let target = copy.join(relative);
+    fs::create_dir_all(&target)
+        .map_err(|error| format!("cannot create {}: {error}", target.display()))?;
+    let entries =
+        fs::read_dir(&source).map_err(|error| format!("cannot read {}: {error}", source.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("cannot read {}: {error}", source.display()))?;
+        let name = entry.file_name();
+        let path = relative.join(&name);
+        let shown = path.to_string_lossy().replace('\\', "/");
+        if name == ".git" || ignored.iter().any(|pattern| pattern.is_match(&shown)) {
+            continue;
+        }
+        let metadata = match fs::metadata(entry.path()) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!("cannot read {}: {error}", entry.path().display()));
+            }
+        };
+        if metadata.is_dir() {
+            let directory = canonical(&entry.path())?;
+            if ancestors.contains(&directory) {
                 continue;
             }
-            // A link is copied as what it names, and a directory is entered once, so a link
-            // back up the tree cannot make the copy endless.
-            if entry.path().is_dir() {
-                let directory = fs::canonicalize(entry.path()).map_err(|error| {
-                    format!("cannot resolve {}: {error}", entry.path().display())
-                })?;
-                if entered.insert(directory) {
-                    pending.push(path);
-                }
-            } else {
-                let target = copy.join(&path);
-                fs::copy(entry.path(), &target).map_err(|error| {
-                    format!("cannot copy {} to {}: {error}", entry.path().display(), target.display())
-                })?;
-            }
+            ancestors.push(directory);
+            copy_directory(root, copy, &path, ignored, ancestors, canonical)?;
+            ancestors.pop();
+        } else if metadata.is_file() {
+            let target = copy.join(&path);
+            fs::copy(entry.path(), &target).map_err(|error| {
+                format!("cannot copy {} to {}: {error}", entry.path().display(), target.display())
+            })?;
         }
     }
     Ok(())

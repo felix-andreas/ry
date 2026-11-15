@@ -7,14 +7,19 @@ description: Release announcements and project news
 
 ### An installed typed package runs like a script
 
-`ry install` and `ry build` on ry's runtime check a typed package in strict mode before they build
-it, and a strict-mode error stops the build. The tarball holds the sources as `ry run` runs them:
+`ry install` and `ry build` on ry's runtime check a typed package before they build it, and an
+error in a strict file stops the build. The tarball holds the sources as `ry run` runs them:
 literals carry the types the checker gave them, and every one-line parameter and return annotation
 is written as the type it stands for, with aliases expanded. So a typed function of an installed
 package that converts an R vector with `List.from_r`, or that reads a parameter typed by an alias,
 compiles at its first call instead of running that call in the interpreter, and a parameter typed by
 a record alias is checked at run time
 (``argument `p` must be `Record{x: F64, y: F64}`, not `list` ``). See [the CLI reference](/reference/cli#build-and-install).
+
+The same rewrite applies to typed code that `ry run --runtime ry` and the console run, strict or
+not, so a parameter typed by an alias of a checkable type is checked at run time there too:
+`half("a")`, where `half <- function(x: Meters)` and `alias Meters = F64`, stops with
+``argument `x` must be `F64`, not `character` `` instead of failing inside the body.
 
 An `I64` or a `List<I64>` inside a function, a list or a package's namespace serializes, as ry's
 own type code that only ry reads back, so a typed package can bind `limit <- 10` where the checker

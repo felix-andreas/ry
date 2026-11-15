@@ -768,9 +768,13 @@ impl Reader<'_> {
             _ => {}
         }
         let object = match kind {
-            // ry's `I64` literal in code (see the writer in `libr`): a length of 1 and the
-            // value's high and low 32 bits.
+            // ry's `I64` (see the writer in `libr`): whether it is a `List<I64>`, its length,
+            // and each item's high and low 32 bits.
             28 => {
+                // The writer gives an I64 no attributes, and a ry number cannot hold any.
+                if has_attributes || is_object || levels != 0 {
+                    return Err(error("an I64 in the stream carries attributes"));
+                }
                 let array = self.integer()? != 0;
                 let count = self.length()?;
                 self.expect_elements(count, 8)?;

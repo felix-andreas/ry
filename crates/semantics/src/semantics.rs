@@ -22,8 +22,10 @@ use {
     crate::{
         check::Empty,
         hir::{ExpressionKind, Symbol},
+        infer::InferenceTable,
         naming::RefClassKey,
         sorted::{SortedMap, SortedSet},
+        types::{Ty, TyKind},
     },
     rustc_hash::{FxHashMap, FxHashSet},
     salsa::plumbing::AsId,
@@ -1384,7 +1386,7 @@ pub enum Elaboration {
     /// A list expression the runtime may build empty, whose item storage only the checker
     /// knows (`ItemCheck::typed_empties`), or a dictionary built from no entries.
     TypedEmpty(TextRange, Empty),
-    /// A type in a strict function's signature, spelled as the checker reads it: with every
+    /// A one-line type in a function's signature, spelled as the checker reads it: with every
     /// alias expanded and a nominal type replaced by its representation, so that the runtime
     /// reads it without the type definitions ([`canonical_annotation`]).
     Annotation(TextRange, Box<str>),
@@ -1467,8 +1469,9 @@ fn signature_elaborations(db: &dyn Db, file: SourceFile) -> Vec<Elaboration> {
 /// The canonical spelling of the written type `node`: the type the checker reads, with every
 /// alias expanded and every nominal type of the project replaced by its representation,
 /// printed by [`diagnostics::TypeRenderer`]. `None` when that type is not closed (it holds a
-/// type parameter, an `Unknown` or a name with no definition), or when reading the printed text
-/// back gives another type, so that a rewrite never changes what the checker declared.
+/// type parameter, an `Unknown` or a name with no definition), when its spelling would be
+/// unreasonably long, or when reading the printed text back as a parameter's or a result's
+/// type gives another type, so that a rewrite never changes what the checker declared.
 pub fn canonical_annotation<'db>(
     db: &'db dyn Db,
     definitions: TypeDefinitions<'db>,
@@ -1476,56 +1479,74 @@ pub fn canonical_annotation<'db>(
 ) -> Option<String> {
     let ty = canonical_type(db, definitions, annotations::lower_written_type(db, node)?)?;
     let text = diagnostics::TypeRenderer::default().render(db, ty);
-    let reread = syntax::parse(&format!("function(x: {text}) NULL"));
-    if !reread.errors().is_empty() {
-        return None;
-    }
-    let function = reread
-        .syntax_node()
-        .descendants()
-        .find(|node| node.kind() == SyntaxKind::FUNCTION_DEF)?;
-    let written = syntax::annotation::signature(&function, true)
-        .formals
-        .into_iter()
-        .next()
-        .flatten()
+    for (program, result) in [
+        (format!("function(x: {text}) NULL"), false),
+        (format!("function() -> {text} NULL"), true),
+    ] {
+        let reread = syntax::parse(&program);
+        if !reread.errors().is_empty() {
+            return None;
+        }
+        let function = reread
+            .syntax_node()
+            .descendants()
+            .find(|node| node.kind() == SyntaxKind::FUNCTION_DEF)?;
+        let signature = syntax::annotation::signature(&function, true);
+        let written = if result {
+            signature.ret
+        } else {
+            signature.formals.into_iter().next().flatten()
+        }
         .filter(|written| written.text() == text)?;
-    // The text names a recursive type inside its own representation, so it is read back as
-    // written rather than unfolded again.
-    let mut table = infer::InferenceTable::default();
-    table.definitions = Some(definitions);
-    let again = table.resolve(db, annotations::lower_written_type(db, &written)?);
-    (again == ty).then_some(text)
+        // The text names a recursive type inside its own representation, so it is read back
+        // as written rather than unfolded again.
+        let mut table = InferenceTable::default();
+        table.definitions = Some(definitions);
+        if table.resolve(db, annotations::lower_written_type(db, &written)?) != ty {
+            return None;
+        }
+    }
+    Some(text)
 }
 
+/// How many types [`canonical_type`] visits before it gives up: unfolding definitions that
+/// each name another twice doubles the spelling at every step.
+const UNFOLD_BUDGET: usize = 4096;
+
 /// `ty` with its aliases expanded and every nominal type the project defines unfolded to its
-/// representation, or `None` when it is not closed. A nominal type of the stubs, such as
-/// `List<T>`, is spelled by its name, which the runtime reads, and so is a recursive one inside
-/// its own representation, which only a tag's payload can hold.
+/// representation, or `None` when it is not closed or too large to spell. A nominal type of
+/// the stubs, such as `List<T>`, is spelled by its name, which the runtime reads, and so is a
+/// recursive one inside its own representation, which only a tag's payload can hold.
 fn canonical_type<'db>(
     db: &'db dyn Db,
     definitions: TypeDefinitions<'db>,
-    ty: types::Ty<'db>,
-) -> Option<types::Ty<'db>> {
-    let mut table = infer::InferenceTable::default();
+    ty: Ty<'db>,
+) -> Option<Ty<'db>> {
+    let mut table = InferenceTable::default();
     table.definitions = Some(definitions);
-    let ty = unfold_nominal(db, definitions, &mut table, ty, &mut Vec::new());
-    is_closed(db, definitions, ty).then_some(ty)
+    let mut budget = UNFOLD_BUDGET;
+    let ty = unfold_nominal(db, definitions, &mut table, ty, &mut Vec::new(), &mut budget);
+    (budget > 0 && is_closed(db, definitions, ty)).then_some(ty)
 }
 
 fn unfold_nominal<'db>(
     db: &'db dyn Db,
     definitions: TypeDefinitions<'db>,
-    table: &mut infer::InferenceTable<'db>,
-    ty: types::Ty<'db>,
+    table: &mut InferenceTable<'db>,
+    ty: Ty<'db>,
     unfolding: &mut Vec<types::Name<'db>>,
-) -> types::Ty<'db> {
+    budget: &mut usize,
+) -> Ty<'db> {
     let ty = table.resolve(db, ty);
-    if let types::TyKind::Named(name, arguments) = ty.kind(db)
+    if *budget == 0 {
+        return ty;
+    }
+    *budget -= 1;
+    if let TyKind::Named(name, arguments) = ty.kind(db)
         && !unfolding.contains(name)
         && let Some(definition) = definitions.get(db, *name)
         && !definition.alias
-        && !matches!(definition.body.kind(db), types::TyKind::Unknown)
+        && !matches!(definition.body.kind(db), TyKind::Unknown)
         && !definitions.library().is_some_and(|library| {
             library
                 .type_definitions
@@ -1535,19 +1556,19 @@ fn unfold_nominal<'db>(
     {
         unfolding.push(*name);
         let representation = infer::apply_definition(db, definition, arguments);
-        let unfolded = unfold_nominal(db, definitions, table, representation, unfolding);
+        let unfolded = unfold_nominal(db, definitions, table, representation, unfolding, budget);
         unfolding.pop();
         return unfolded;
     }
     types::map_child_types(db, ty, &mut |child| {
-        unfold_nominal(db, definitions, table, child, unfolding)
+        unfold_nominal(db, definitions, table, child, unfolding, budget)
     })
 }
 
-fn is_closed<'db>(db: &'db dyn Db, definitions: TypeDefinitions<'db>, ty: types::Ty<'db>) -> bool {
+fn is_closed<'db>(db: &'db dyn Db, definitions: TypeDefinitions<'db>, ty: Ty<'db>) -> bool {
     let own = match ty.kind(db) {
-        types::TyKind::Unknown | types::TyKind::Var(_) | types::TyKind::Rigid(_) => false,
-        types::TyKind::Named(name, _) => definitions.get(db, *name).is_some(),
+        TyKind::Unknown | TyKind::Var(_) | TyKind::Rigid(_) => false,
+        TyKind::Named(name, _) => definitions.get(db, *name).is_some(),
         _ => true,
     };
     let mut children = own;
@@ -3673,7 +3694,7 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
                     0 => None,
                     1 => schemes.pop(),
                     _ => {
-                        let bodies: Vec<types::Ty<'db>> =
+                        let bodies: Vec<Ty<'db>> =
                             schemes.into_iter().map(|scheme| scheme.body).collect();
                         Some(types::TypeScheme::monomorphic(types::union_of(
                             self.db, bodies,
@@ -4225,7 +4246,7 @@ mod tests {
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         let scheme = global_scheme(&db, even);
         assert!(
-            matches!(scheme.body.kind(&db), types::TyKind::Function(_)),
+            matches!(scheme.body.kind(&db), TyKind::Function(_)),
             "mutual recursion must converge to a function scheme, got {:?}",
             scheme.body.kind(&db)
         );
