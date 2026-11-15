@@ -3687,10 +3687,18 @@ unsafe fn run_frame_general(
         });
         (signature, result)
     });
+    let loaded = _namespace_load.is_some();
     drop(_namespace_load);
     let (signature, result) = match result {
         Ok(pair) => pair,
         Err(unwind) => (None, Err(unwind)),
+    };
+    let result = match result {
+        Ok(namespace) if loaded => {
+            crate::ahead::namespace_loaded(namespace);
+            Ok(namespace)
+        }
+        result => result,
     };
     let result = finish_frame(call, depth, signature, result);
     let result = pop_frame(function, depth, result);

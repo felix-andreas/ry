@@ -2201,6 +2201,11 @@ impl Lowering<'_> {
             .emit(Type::Int, Op::Const(Constant::Int(value)))
     }
 
+    fn shape_id(&mut self, shape: u32) -> Local {
+        self.builder
+            .emit(Type::Int, Op::Const(Constant::Shape(shape)))
+    }
+
     fn length(&mut self, value: Local) -> Local {
         match self.builder.ty(value) {
             Type::Null => self.int(0),
@@ -3581,7 +3586,7 @@ impl Lowering<'_> {
         let callable = self.function_argument(function)?;
         let greater =
             shapes::intern(tag_layout("GT", 0)?, &[]).ok_or(Refusal::new("a comparison result"))?;
-        let greater = self.int(greater as i32);
+        let greater = self.shape_id(greater);
         let one = self.int(1);
         let source = self.builder.local(ty);
         self.builder.push(Some(source), Op::Copy(list));
@@ -4578,7 +4583,7 @@ impl Lowering<'_> {
             Type::Record(shape)
         };
         if fields.is_empty() {
-            let constant = Constant::Object(shapes::constant(shape));
+            let constant = Constant::Object(shape);
             return Ok(self.builder.emit(ty, Op::Const(constant)));
         }
         Ok(self
@@ -4675,7 +4680,7 @@ impl Lowering<'_> {
             let body = self.builder.block();
             match case {
                 Some(shape) if position + 1 < cases.len() => {
-                    let expected = self.int(shape as i32);
+                    let expected = self.shape_id(shape);
                     let same = self.builder.emit(Type::Bool, Op::Same(shape_of, expected));
                     let next = self.builder.block();
                     self.builder.terminate(Terminator::Branch {
@@ -6655,7 +6660,7 @@ fn is_operator(name: &str) -> bool {
 
 /// Whether a call resolved to one of the table API's functions that gives a table value: the
 /// `ry` namespace's own function of that name, which `package:ry` binds too.
-unsafe fn is_table_function(speculation: &Speculation) -> bool {
+pub(crate) unsafe fn is_table_function(speculation: &Speculation) -> bool {
     if !gives_table_value(&rvalues::symbol_name(speculation.symbol)) {
         return false;
     }
@@ -6697,7 +6702,7 @@ fn gives_table_value(name: &str) -> bool {
 }
 
 /// Whether `function` is a typed closure that declares a table value as its result.
-unsafe fn returns_table(function: Sexp) -> bool {
+pub(crate) unsafe fn returns_table(function: Sexp) -> bool {
     function.kind() == SexpType::Closure
         && interp::annotations::return_annotation(function).is_some_and(|declared| {
             let name = declared
@@ -6712,7 +6717,7 @@ unsafe fn returns_table(function: Sexp) -> bool {
         })
 }
 
-unsafe fn is_base_function(speculation: &Speculation) -> bool {
+pub(crate) unsafe fn is_base_function(speculation: &Speculation) -> bool {
     let function = speculation.function;
     match function.kind() {
         SexpType::Builtin | SexpType::Special => interp::eval::builtin_def(function)

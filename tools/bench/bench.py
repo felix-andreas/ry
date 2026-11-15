@@ -15,7 +15,10 @@ The suites, each described by the suite.toml in its directory:
 In the first four the engines are GNU R, ry, ry typed, and ry typed with `--aot`: a program whose
 suite.toml entry names a `typed_source` (its own `<name>.typed.R`, or a variant's identical one)
 also runs that typed version in strict mode, once compiled at each function's first call and once
-compiled before the program starts (`ry run --aot`). Every run is a fresh process. A round runs every program on
+compiled before the program starts (`ry run --aot`). The kernels and applications also run it as
+an installed package (`ry typed, installed`): typed_package.py turns the program's definitions
+into a package, which is installed with its typed code file outside the clock, and a script that
+attaches the package runs the rest. Every run is a fresh process. A round runs every program on
 every engine once, programs in an order shuffled per round and engines in an order shuffled per
 program, so no engine always follows another and inherits its cache state, and a drift of the
 machine's speed hits all engines alike. Each suite first evicts every ry build's files from the
@@ -50,6 +53,9 @@ to that clock, and the column counts the same work as the others. The kernels an
 harnesses time warm runs, which no compile is part of on either typed engine, and they also time
 the first run of the program in the process. A row stores that as `first_seconds`, the median over
 rounds per engine, which is where compiling ahead shows: the first run compiles nothing.
+For the installed engine a row also stores `compiled_in_session`, the number of functions whose
+`RY_TYPED_LOG` line says `compiled for` in one run, which are the functions the package's typed
+code file left out.
 
 The typed suite also stores each program's `compile_seconds`: what `rustc` took to compile the Rust
 twin, and what the typed core took to compile the typed program, which is the sum of the times in
@@ -123,6 +129,7 @@ root = here.parent.parent
 sys.path.insert(0, str(here / "tooling"))
 sys.path.insert(0, str(here))
 import packages as corpus  # noqa: E402
+import typed_package  # noqa: E402
 from evict import evict  # noqa: E402
 
 SUITES = ["public", "packages", "kernels", "applications", "codebases", "hot", "typed"]
@@ -283,10 +290,12 @@ def main():
 # Suites and engines.
 
 class Engine:
-    def __init__(self, key, label, command, env, typed=False, ahead=False):
+    def __init__(self, key, label, command, env, typed=False, ahead=False, installed=False):
         self.key, self.label, self.command, self.env, self.typed = key, label, command, env, typed
         # Whether the engine compiles a program's typed functions before the program starts.
         self.ahead = ahead
+        # Whether the engine runs the typed program's definitions from an installed package.
+        self.installed = installed
 
 
 def baseline_key(suite):
@@ -328,6 +337,8 @@ def engines(args, suite):
     if typed:
         table.append(Engine("ry_typed", "ry typed", ry, ry_env, typed=True))
         table.append(Engine("ry_typed_aot", "ry typed, AOT", ry + ["--aot"], ry_env, typed=True, ahead=True))
+    if suite in ("kernels", "applications"):
+        table.append(Engine("ry_typed_file", "ry typed, installed", ry, ry_env, typed=True, installed=True))
     if args.jit_off or suite == "codebases":
         table.append(Engine("ry_nojit", "ry, JIT off", ry, dict(ry_env, RY_JIT="off")))
     if args.baseline:
@@ -837,6 +848,9 @@ class WorkloadRunner:
         self.typed_compile = {}
 
     def run(self, program, engine):
+        if engine.installed:
+            folder = self.installed(program, engine)
+            return self.reported(program, *spawn(engine.command + ["use.R"], engine.env, cwd=folder))
         if engine.typed:
             source, harness, folder = root / program["typed_source"], self.typed_harness, self.work / "typed"
         else:
@@ -844,6 +858,29 @@ class WorkloadRunner:
         script = folder / f"{program['id']}.R"
         script.write_text(harness + "\n" + source.read_text())
         return self.reported(program, *spawn(engine.command + [script.name], engine.env, cwd=folder))
+
+    def installed(self, program, engine):
+        """The folder that holds the package generated from the typed program, installed into its
+        `library` with its typed code file on first use, and the `use.R` that attaches it."""
+        folder = self.work / "installed" / program["id"]
+        if not folder.is_dir():
+            name = re.sub(r"[^A-Za-z0-9.]", ".", program["id"])
+            package = typed_package.write(root / program["typed_source"], folder, name)
+            (folder / "library").mkdir()
+            status, out, err, _, _ = spawn([engine.command[0], "install", str(package), "--library", "library"],
+                                           engine.env, cwd=folder, check_images=False, sample=False)
+            if status != 0:
+                sys.exit(f"error: `ry install` fails on the package of {program['typed_source']}: {failure_reason(out, err)}")
+        return folder
+
+    def compiled_in_session(self, program, engine):
+        """How many functions the installed program compiled in the session, counted from the
+        `compiled for` lines of one `RY_TYPED_LOG` run outside the timed rounds."""
+        env = dict(engine.env, RY_TYPED_LOG="1", RY_BENCH_REPEAT="1")
+        status, out, err, _, _ = spawn(engine.command + ["use.R"], env, cwd=self.installed(program, engine))
+        if status != 0:
+            sys.exit(f"error: the typed log run of the installed package failed: {failure_reason(out, err)}")
+        return sum(1 for line in err.splitlines() if line.startswith("typed: compiled for"))
 
     def reported(self, program, status, out, err, _, memory):
         """What a finished process's harness line says: the checksum and the median warm time."""
@@ -1773,6 +1810,9 @@ def summarize(suite, manifest, programs, table, state, args, meta, runner):
             reason = runner.typed_refusal(program, typed)
             if reason:
                 row["flags"].append({"kind": "typed_refused", "engine": typed.key, "reason": reason})
+        installed = next((engine for engine in table if engine.installed), None)
+        if installed is not None and "typed_source" in program and not failures:
+            row["compiled_in_session"] = {installed.key: runner.compiled_in_session(program, installed)}
         if suite == RUST_SUITE and not failures:
             row["compile_seconds"] = runner.compile_seconds(program)
         rows.append(row)

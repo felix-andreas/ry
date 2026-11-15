@@ -109,6 +109,22 @@ pub struct State {
     pub build: &'static str,
     /// The package libraries this session named packages to reinstall in ([`note_foreign`]).
     noted_libraries: Vec<PathBuf>,
+    /// Per typed closure fetched from a database that has a typed code file, which record and
+    /// position it came from ([`typed_note`]). Each closure is preserved while it is noted, so
+    /// its address cannot name another closure.
+    notes: FxHashMap<Sexp, Note>,
+}
+
+/// Where a typed closure was read from: the record at `offset` of `database`, the closure at
+/// `position` in the order [`serialize::unserialize_with_closures`] makes them, and the stamp the
+/// database had when this process first read it. A typed code file names its functions this way
+/// (`typed::file`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Note {
+    pub database: u32,
+    pub offset: u64,
+    pub position: u32,
+    pub stamp: DatabaseStamp,
 }
 
 /// The lazy-load databases this process fetched from, numbered in the order they were first
@@ -126,6 +142,17 @@ struct Databases {
     images: Vec<ImageSlot>,
     /// One bit per database under the directory an install is recording.
     recorded: Vec<u64>,
+    /// Whether each database has a typed code file, looked up at its first fetch.
+    typed: Vec<TypedFile>,
+}
+
+/// Whether a database has a typed code file beside it, and the database's stamp when it was
+/// looked up.
+#[derive(Clone, Copy)]
+enum TypedFile {
+    Unchecked,
+    Absent,
+    Present(DatabaseStamp),
 }
 
 /// Whether a database's code image was looked for, and what was found.
@@ -187,7 +214,7 @@ struct Recorded {
 }
 
 /// The length and modification time of a database, which an image must have been written for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DatabaseStamp {
     pub length: u64,
     pub modified: u64,
@@ -226,6 +253,7 @@ pub fn forget(database: &str) {
     };
     state.databases.files[index] = None;
     state.databases.images[index] = ImageSlot::Unopened;
+    state.databases.typed[index] = TypedFile::Unchecked;
     drop_pending(state, index as u32);
 }
 
@@ -311,6 +339,7 @@ pub unsafe fn database(name: Sexp) -> u32 {
     databases.paths.push(path);
     databases.files.push(None);
     databases.images.push(ImageSlot::Unopened);
+    databases.typed.push(TypedFile::Unchecked);
     index as u32
 }
 
@@ -420,10 +449,119 @@ pub unsafe fn read_image_record(database: u32, record: &ImageRecord, hook: Sexp)
     // flushes the database.
     let (value, closures) = serialize::unserialize_with_closures(stream(record), hook)?;
     crate::heap().root(value);
+    let offset = record.image.entries[record.entry].offset;
+    note_typed(database, offset, &closures);
     if let Err(message) = note_pending(&record.image, record.entry, database, &closures) {
         give_up(database, &message);
     }
     Ok(value)
+}
+
+/// Reads the record at `offset` of `database` from its decompressed `stream`, noting its typed
+/// closures when the database has a typed code file, which names them by record and position.
+/// A database without one reads as `unserialize` reads it.
+///
+/// # Safety
+/// Runs on the interpreter's thread.
+pub unsafe fn read_database_record(
+    database: u32,
+    offset: u64,
+    stream: &[u8],
+    hook: Sexp,
+) -> R<Sexp> {
+    if typed_stamp(database).is_none() {
+        return serialize::unserialize(stream, hook);
+    }
+    let (value, closures) = serialize::unserialize_with_closures(stream, hook)?;
+    crate::heap().root(value);
+    note_typed(database, offset, &closures);
+    Ok(value)
+}
+
+/// The stamp `database` had when this process first looked for its typed code file, or `None`
+/// when it has none. Only a package's own database has one: `sysdata.rdb` and the databases an
+/// install is recording are never looked up.
+fn typed_stamp(database: u32) -> Option<DatabaseStamp> {
+    let state = &mut interp().code_image;
+    let index = database as usize;
+    match state.databases.typed[index] {
+        TypedFile::Present(stamp) => return Some(stamp),
+        TypedFile::Absent => return None,
+        TypedFile::Unchecked => {}
+    }
+    let path = Rc::clone(&state.databases.paths[index]);
+    let recorded = state.databases.recorded[index / 64] & (1 << (index % 64)) != 0;
+    let found = (!state.build.is_empty()
+        && !recorded
+        && Path::new(&*path).file_name().is_some_and(|name| name != "sysdata.rdb")
+        && rcmd::images::typed_code(Path::new(&*path), state.build).is_file())
+    .then(|| DatabaseStamp::of(&path).ok().flatten())
+    .flatten();
+    state.databases.typed[index] = match found {
+        Some(stamp) => TypedFile::Present(stamp),
+        None => TypedFile::Absent,
+    };
+    found
+}
+
+/// Notes each typed closure of a record read from `database` at `offset`.
+unsafe fn note_typed(database: u32, offset: u64, closures: &[Sexp]) {
+    let Some(stamp) = typed_stamp(database) else {
+        return;
+    };
+    let heap = crate::heap();
+    let notes = &mut interp().code_image.notes;
+    for (position, &closure) in closures.iter().enumerate() {
+        if !crate::annotations::is_typed(closure) {
+            continue;
+        }
+        let note = Note {
+            database,
+            offset,
+            position: position as u32,
+            stamp,
+        };
+        if notes.insert(closure, note).is_none() {
+            heap.preserve(closure);
+        }
+    }
+}
+
+/// Where the typed closure `closure` was read from, when it came from a database with a typed
+/// code file. A copy of the closure made at run time has no note.
+pub fn typed_note(closure: Sexp) -> Option<Note> {
+    interp().code_image.notes.get(&closure).copied()
+}
+
+/// The closures an install recorded from the database at `database`, each with its record's
+/// offset and its position in the record, in record order.
+///
+/// # Safety
+/// Runs on the interpreter's thread.
+pub unsafe fn recorded_closures(database: &str) -> Vec<(u64, u32, Sexp)> {
+    let Some(recording) = &interp().code_image.recording else {
+        return Vec::new();
+    };
+    let Some(records) = recording.records.get(database) else {
+        return Vec::new();
+    };
+    let mut closures = Vec::new();
+    for (&offset, recorded) in records {
+        for position in 0..length(recorded.closures) / 2 {
+            closures.push((offset, position as u32, recorded.closures.element(position * 2)));
+        }
+    }
+    closures
+}
+
+/// The databases the install under way recorded fetches from.
+pub fn recorded_databases() -> Vec<String> {
+    interp()
+        .code_image
+        .recording
+        .as_ref()
+        .map(|recording| recording.records.keys().cloned().collect())
+        .unwrap_or_default()
 }
 
 /// Reads the record at `offset` of `database`, `length` bytes long there, from its decompressed

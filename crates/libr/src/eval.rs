@@ -142,6 +142,7 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
     frames::install();
     services::install();
     jit::install();
+    interp::register_builtins(typed::file::BUILTINS);
     interp::register_builtins(NATIVE_BUILTINS);
     interp::register_builtins(BOOTSTRAP_BUILTINS);
     interp::register_builtins(crate::loader_backend::BUILTINS);

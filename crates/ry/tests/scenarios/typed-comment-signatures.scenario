@@ -182,6 +182,8 @@ expect stderr "typed: compiled for [I64, Dbl] -> Dbl"
 run ry install pkg -l library
 expect exit 0
 
+# The install writes the typed code file, so a signature written in a `#:` comment attaches its
+# machine code as an inline one does.
 file installed.R
 | library(commented, lib.loc = "library")
 | source("pkg/use.R")
@@ -191,8 +193,9 @@ expect exit 0
 expect stdout "[1] 718640.9"
 expect stdout "[1] \"a3\""
 expect stdout "[1] \"argument `x` must be `F64`, not `character`\""
-expect stderr "typed: compiled for [I64, Dbl] -> Dbl"
-expect stderr "typed: compiled for [Str, I64] -> Str"
+expect stderr "typed: attached `total` for [I64, Dbl] -> Dbl from commented's code file"
+expect stderr "typed: attached `label` for [Str, I64] -> Str from commented's code file"
+expect stderr "typed: attached `scale_by` for [Dbl, I64] -> Dbl from commented's code file"
 
 # A `#:` line that does not read as an annotation is a comment, in a package as in a script: the
 # check reports it, and the definition below it still loads, from the syntax tree on the first

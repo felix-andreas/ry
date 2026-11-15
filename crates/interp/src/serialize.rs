@@ -1458,7 +1458,8 @@ unsafe fn do_lazy_load_fetch(call: &Call<'_>) -> R<Sexp> {
                 code_image::read_recorded(database, offset as u64, size, stream, hook)
             }
             Source::Database => {
-                unserialize(&record_stream(database, offset, size, compressed)?, hook)
+                let stream = record_stream(database, offset, size, compressed)?;
+                code_image::read_database_record(database, offset as u64, &stream, hook)
             }
         },
     )?;

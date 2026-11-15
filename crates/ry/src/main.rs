@@ -258,9 +258,25 @@ fn main() -> ExitCode {
         path,
         output,
         no_vignettes,
+        aot,
+        library,
         runtime,
     } = &cli.command
     {
+        if *aot {
+            // A script's typed functions compile ahead when it runs; only a package has a place
+            // to keep their code.
+            if path.is_file() && load::package_root(path).is_err() {
+                cli::error(&format!(
+                    "{} is a script, and `ry build --aot` compiles a package: run the script \
+                     with `ry run --aot {}` to compile its typed functions before it starts",
+                    path.display(),
+                    path.display()
+                ));
+                return ExitCode::from(2);
+            }
+            return run_install(path, library.as_deref(), None, *runtime);
+        }
         return run_build(path, output.as_deref(), !*no_vignettes, *runtime);
     }
 

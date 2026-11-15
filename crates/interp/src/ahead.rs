@@ -13,6 +13,11 @@
 //! literal such as `1.5L`, which a handler or `options(warn = 2)` set earlier in the script
 //! must see when the expression's turn comes. An expression whose lowering warns or fails is
 //! therefore left out here and lowered when the run reaches it, as without `--aot`.
+//!
+//! An installed typed package brings its own code, compiled at install into its typed code file.
+//! When a namespace loads whose package has such a file only for another build of ry,
+//! [`namespace_loaded`] compiles its typed functions as the namespace loads and says to reinstall
+//! the package.
 
 use {
     crate::{
@@ -44,6 +49,8 @@ pub struct State {
     /// The closures made ahead whose definitions the run has not reached, by what identifies a
     /// definition: its formals, or its body when it has none.
     waiting: FxHashMap<Sexp, Sexp>,
+    /// The packages whose namespaces [`namespace_loaded`] has looked at.
+    namespaces: Vec<String>,
 }
 
 impl State {
@@ -136,6 +143,103 @@ unsafe fn prepare_script(script: &Script<'_>, keep_source: bool) -> R<Prepared> 
         interp().ahead.waiting.clear();
     }
     Ok(Prepared { keep_source })
+}
+
+/// Compiles the typed functions of `namespace`, which `loadNamespace` just returned, when the
+/// session compiles ahead and the package has a typed code file for another build of ry but none
+/// for this one. Without this, those functions would compile at their first calls while the
+/// program runs, which `--aot` asks to avoid. A package with no typed code file at all is either
+/// untyped or was installed without one on purpose (`--ry-no-typed-code`), and telling the two
+/// apart would read every function of every package the script loads.
+///
+/// Compiling ahead never changes whether a namespace loads: a binding this cannot read is left to
+/// compile at its first call, as it would without `--aot`.
+pub unsafe fn namespace_loaded(namespace: Sexp) {
+    if !interp().ahead.enabled || namespace.kind() != SexpType::Environment {
+        return;
+    }
+    let Some(package) = crate::envir::namespace_name(namespace) else {
+        return;
+    };
+    if interp().ahead.namespaces.contains(&package) {
+        return;
+    }
+    interp().ahead.namespaces.push(package.clone());
+    let build = interp().code_image.build;
+    let Some(folder) = namespace_folder(namespace) else {
+        return;
+    };
+    let folder = folder.join("R");
+    let database = folder.join(format!("{package}.rdb"));
+    if build.is_empty() || rcmd::images::typed_code(&database, build).is_file() {
+        return;
+    }
+    let prefix = format!("{package}.");
+    let foreign = std::fs::read_dir(&folder).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(&prefix) && name.ends_with(".ryt")
+        })
+    });
+    if !foreign {
+        return;
+    }
+    let heap = crate::heap();
+    let mark = heap.handle_mark();
+    let definitions = typed_closures(namespace);
+    if let Some(tier) = bytecode::tier() {
+        (tier.ahead)(&Program { definitions: &definitions });
+        crate::write_console(
+            format!(
+                "ry: another build of ry installed {package}, so its typed functions compiled as \
+                 it loaded; reinstall it to compile them at install\n"
+            )
+            .as_bytes(),
+            true,
+        );
+    }
+    heap.release_handles(mark);
+}
+
+/// The folder a namespace's package was loaded from, its `.__NAMESPACE__.$path`.
+unsafe fn namespace_folder(namespace: Sexp) -> Option<std::path::PathBuf> {
+    let info = crate::eval::find_var_in_frame(symbols().dot_namespace, namespace).ok()?;
+    if info.kind() != SexpType::Environment {
+        return None;
+    }
+    let path = crate::eval::find_var_in_frame(values::install("path").ok()?, info).ok()?;
+    values::first_string(path).map(|path| std::path::PathBuf::from(&*path))
+}
+
+/// The typed closures `namespace` binds, each forced from the package's database. Forcing a
+/// lazy-load promise reads the database and runs no code of the package; one that cannot be read
+/// is left for the run to force.
+unsafe fn typed_closures(namespace: Sexp) -> Vec<Definition> {
+    let heap = crate::heap();
+    let mut definitions = Vec::new();
+    for symbol in heap.frame_symbols(namespace) {
+        let Some(cell) = heap.frame_cell(namespace, symbol) else {
+            continue;
+        };
+        let mut value = cell.cdr();
+        if value.kind() == SexpType::Promise {
+            if !crate::methods_core::is_lazy_load_promise(value).unwrap_or(false) {
+                continue;
+            }
+            let Ok(forced) = crate::eval::force_promise(value) else {
+                continue;
+            };
+            value = forced;
+        }
+        if value.kind() == SexpType::Closure && crate::annotations::is_typed(value) {
+            definitions.push(Definition {
+                symbol,
+                closure: value,
+            });
+        }
+    }
+    definitions
 }
 
 /// Whether `RY_AHEAD_MISS` asks that no definition gets the closure made ahead for it. Every

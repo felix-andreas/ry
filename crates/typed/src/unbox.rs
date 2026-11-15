@@ -330,9 +330,7 @@ fn unbox_once(function: &mut Function) -> bool {
                 let group = groups.find(local) as usize;
                 let builds = match inst.op {
                     Op::Construct(..) => true,
-                    Op::Const(Constant::Object(pointer)) => {
-                        shapes::constant_shape(pointer).is_some()
-                    }
+                    Op::Const(Constant::Object(_)) => true,
                     _ => false,
                 };
                 let copies = matches!(inst.op, Op::Copy(source) if holds_box(function, source));
@@ -454,7 +452,7 @@ fn unbox_once(function: &mut Function) -> bool {
             match (&inst.op, inst.dest) {
                 (Op::Construct(shape, values), Some(dest)) if replaced(dest) => {
                     let first = first[dest.0 as usize];
-                    let constant = Constant::Int(*shape as i32);
+                    let constant = Constant::Shape(*shape);
                     body.insts
                         .push(Inst::new(Some(Local(first)), Op::Const(constant)));
                     let mut at = fields.heads[groups.find(dest) as usize];
@@ -468,9 +466,8 @@ fn unbox_once(function: &mut Function) -> bool {
                         }
                     }
                 }
-                (&Op::Const(Constant::Object(pointer)), Some(dest)) if replaced(dest) => {
-                    let shape = shapes::constant_shape(pointer).unwrap_or(NONE);
-                    let constant = Constant::Int(shape as i32);
+                (&Op::Const(Constant::Object(shape)), Some(dest)) if replaced(dest) => {
+                    let constant = Constant::Shape(shape);
                     let local = Local(first[dest.0 as usize]);
                     body.insts.push(Inst::new(Some(local), Op::Const(constant)));
                 }
