@@ -131,10 +131,14 @@ per-item and per-file tables after the type store".
 
 ## Open: the kernels of a package test suite's profile
 
-`just bench-ci` runs eight kernels from a user's profile of a large package's test suite on ry 0.4.5 (`tools/bench/internal/ci/kernels.R`; `development/testing.md` describes them). In the profile tier 0 held 32% of the time, builtins 32%, native code 17% and closure call setup 10%, and tier 1 ran 0.1%. Speed-up over GNU R per kernel before any work: `k1` 1.6x, `k2` 2.1x, `k3` 2.3x, `k4` 3.1x, `k5` 2.4x, `k6` 0.27x, `k7` 1.8x, `k8` 1.3x.
+`just bench-ci` runs eleven kernels from a user's profiles of a large package's test suite on ry 0.4.5 (`tools/bench/internal/ci/kernels.R`; `development/testing.md` describes them). In the profile tier 0 held 32% of the time, builtins 32%, native code 17% and closure call setup 10%, and tier 1 ran 0.1%. Speed-up over GNU R per kernel before any work: `k1` 1.6x, `k2` 2.1x, `k3` 2.3x, `k4` 3.1x, `k5` 2.4x, `k6` 0.27x, `k7` 1.8x, `k8` 1.3x, `k9` 0.55x, `k10` 0.60x, `k11` 0.59x.
 
 - `k4` (an argument checker over `list(...)` with `delayedAssign`) and `k7` (a data.table grown by `rbind`) have no work planned. `k4` and `k5` are tier-0 closure calls: see "Open: JIT on against JIT off".
 - Replacement calls turned 23.0M slot frames into environments in the profile, and `standardGeneric` 24.8M.
+- Sourcing a package's files is slower than GNU R per call: `parse` with source references (`k9`), `readLines` (`k10`) and a recursive `list.files` with a pattern (`k11`) each take about 1.7 times GNU R's time. The profile had `parse` at 287 µs per call, `readLines` at 182 µs and `list.files` at 640 µs.
+- Loading packages held about 7% of a 6 s test run in a second profile: the loader's plan (90 ms in one call), running and forcing its entries, `lazyLoadDBfetch` (104 ms over 3,889 calls), `dyn.load` (26 ms over 35 calls) and `unz` (19 ms over 438 calls). No kernel covers it.
+- Builtin unit costs the same profile ranked: `sys.calls` 6.4 µs per call, `grepl` 5 µs, the deparse behind `all.names` and `traceback`, and the reset of the gettext cache that withr asks for (9 µs). No kernel covers them.
+- data.table's own code held 17% of that run's self time. It is a normal package, so only the runtime under it can get faster.
 
 ## Open: JIT on against JIT off
 

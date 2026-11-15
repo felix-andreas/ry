@@ -508,12 +508,14 @@ kernel whose checksum differs from GNU R's is marked `MISMATCH`. With `--memory`
 runs in its own process, and the table adds both engines' peak RSS. zoo and xts load from
 `RY_BENCH_RLIB` (default `~/R/library`).
 
-`just bench-ci [--only k1,k3 --runs 2 --scale 1]` runs eight kernels cut from a profile of a large
-package's test suite (`tools/bench/internal/ci/kernels.R`) under GNU R and `ry run`. Each kernel is
-one code shape the profile ranked high: creating an S4 object with a validity method (`k1`),
-`as.Date` on a character scalar (`k2`), scalar calls of `ifelse`, `isTRUE` and `unname` (`k3`), an
-argument checker over `list(...)` (`k4`), `%in%` and `which` on a small vector (`k5`), an xts merge
-(`k6`), a data.table grown by `rbind` (`k7`) and `pmin`/`pmax` on matrices (`k8`). The table shows
+`just bench-ci [--only k1,k3 --runs 2 --scale 1]` runs eleven kernels cut from a user's profiles
+of a large package's test suite (`tools/bench/internal/ci/kernels.R`) under GNU R and `ry run`.
+Each kernel is one code shape a profile ranked high: creating an S4 object with a validity method
+(`k1`), `as.Date` on a character scalar (`k2`), scalar calls of `ifelse`, `isTRUE` and `unname`
+(`k3`), an argument checker over `list(...)` (`k4`), `%in%` and `which` on a small vector (`k5`),
+an xts merge (`k6`), a data.table grown by `rbind` (`k7`), `pmin`/`pmax` on matrices (`k8`), and
+`parse` with source references (`k9`), `readLines` (`k10`) and a recursive `list.files` (`k11`)
+over forty generated source files. The table shows
 the fastest of `--runs` runs on each engine and the speed-up, and a kernel whose checksum differs
 from GNU R's is marked `DIFFERS` and fails the run. The packages (xts, zoo, data.table, purrr) load
 from `R_LIBS`, by default the corpus library that `just bench-packages install` fills. The file

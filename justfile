@@ -241,7 +241,7 @@ bench-base *args:
     python3 -I tools/bench/internal/base/run.py {{ args }}
 
 # Times the kernels cut from a user's profile of a package test suite (S4 construction, scalar calls of small base closures,
-# date conversion, xts and data.table calls) on GNU R and ry's runtime with checksums, e.g. `just bench-ci --only k1,k3`.
+# date conversion, xts and data.table calls, parsing and reading source files) on GNU R and ry's runtime with checksums, e.g. `just bench-ci --only k1,k3`.
 bench-ci *args:
     cargo build --release -p ry-lang -p libr -p rcmd
     python3 -I tools/bench/internal/ci/run.py {{ args }}
