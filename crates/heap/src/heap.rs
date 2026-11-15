@@ -162,9 +162,12 @@ pub struct Heap {
     /// to which an intermediate one adds what it tenures.
     tenured_vector_cells: u64,
     escaped: Vec<Sexp>,
-    /// The elements each escaped list held when it escaped. Native stores through the pointer
-    /// bypass the counts, so retiring the escape recounts the list from this snapshot.
-    escaped_lists: Vec<(Sexp, Vec<Sexp>)>,
+    /// Whether a collection ran while `escaped` held a vector, which scanned it whole and may
+    /// have aged its children without remembering it.
+    escaped_collected: bool,
+    /// The lists among `escaped` whose counts native stores may have bypassed, with what the
+    /// retirement needs to put them right.
+    escaped_lists: Vec<EscapedList>,
     /// Objects a store left without a counted reference, which the next reconcile frees if no
     /// root holds them either (`Heap::reconcile`).
     zero_count: Vec<Sexp>,
@@ -232,6 +235,10 @@ pub struct Heap {
     pretenure_young_bytes: usize,
     pretenure_young_large: usize,
     stress_counter: u64,
+    /// [`GcStress::Seeded`]'s generator state, and the allocations left until its next
+    /// collection.
+    stress_rng: u64,
+    stress_countdown: u64,
     /// Set while [`GcStress::Young`] runs an intermediate collection that ages its survivors
     /// only into the younger old generation.
     keep_untenured: bool,
@@ -286,6 +293,29 @@ struct Returned {
     closures: SmallVec<[Sexp; 2]>,
     /// How many of those a collection freed, whose references to `env` stay counted.
     swept: u32,
+}
+
+/// A list a pointer to whose elements escaped, and what [`Heap::retire_escaped`] needs to put
+/// its counts right afterwards.
+struct EscapedList {
+    list: Sexp,
+    counted: Counted,
+}
+
+enum Counted {
+    /// For a writable pointer: what the list held when it escaped, and each value a counted
+    /// element store put into it since. Native stores through the pointer bypass the counts, so
+    /// the retirement counts what the list holds and releases each of these. Collections keep
+    /// them allocated until then, because one may have left the list.
+    Snapshot(Vec<Sexp>),
+    /// For a read-only pointer: an order-independent digest of the elements ([`element_digest`]).
+    /// Native code writing through a read-only pointer only permutes the elements, which leaves
+    /// the counts right and the digest equal, so this costs no copy. A digest that changed means
+    /// it stored something else, so every element is counted once more, which errs toward
+    /// keeping objects. The first counted change to the list turns the digest into a snapshot
+    /// ([`Heap::escaped_snapshot`]): a counted store releases what the slot held, which native
+    /// code may have put there uncounted, and no digest can say what it was.
+    Digest(u64),
 }
 
 /// A formal bound by [`Heap::define_formals`]. `missing` marks a formal the call did not supply,
@@ -477,6 +507,16 @@ pub enum GcStress {
     /// can free it. Every 64th collection tenures the survivors, so the objects traced again
     /// stay few, and major collections are spaced as for `EveryAllocation`.
     Young,
+    /// Collect at random allocations drawn from `seed`: the gaps between collections follow a
+    /// heavy-tailed distribution from one allocation to a few thousand, and most collections
+    /// are minor. Collecting at every allocation promotes each object before the operation
+    /// that made it is done with it, so a store that skips the write barrier on a young object
+    /// goes unnoticed; here objects routinely stay young across whole operations, such as a
+    /// native call that permutes a list, and a missed barrier frees them. A major collection
+    /// runs once per as many allocations as there are live objects.
+    Seeded {
+        seed: u64,
+    },
 }
 
 /// When `RY_GC_STRESS` turns collection stress on for a whole run.
@@ -488,6 +528,40 @@ pub enum GcStressStart {
     /// stress without paying for base R's loading under it. The host that runs the script
     /// switches it on.
     Script,
+}
+
+/// SplitMix64's step: deterministic, so a seeded stress run replays exactly.
+/// The multiset digest of `list`'s elements: a sum of hashes, so any permutation gives the same
+/// value and one store changes it by the difference of two hashes.
+unsafe fn element_digest(list: Sexp) -> u64 {
+    (0..list.length() as usize).fold(0, |digest, index| {
+        digest.wrapping_add(element_hash(list.stored_element(index)))
+    })
+}
+
+unsafe fn element_snapshot(list: Sexp) -> Vec<Sexp> {
+    (0..list.length() as usize)
+        .map(|index| list.stored_element(index))
+        .collect()
+}
+
+unsafe fn increment_elements(list: Sexp) {
+    for index in 0..list.length() as usize {
+        list.stored_element(index).increment_refcount();
+    }
+}
+
+fn element_hash(value: Sexp) -> u64 {
+    let mut state = value.as_ptr() as u64;
+    split_mix(&mut state)
+}
+
+fn split_mix(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
 }
 
 /// Opens the collection log `RY_GC_LOG` names for appending, so the processes of one run,
@@ -508,16 +582,28 @@ fn open_pause_log() -> Option<std::fs::File> {
 }
 
 /// The collection stress `RY_GC_STRESS` asks for, if any, and when it starts. `young` and
-/// `startup-young` ask for [`GcStress::Young`]; any other value asks for
-/// [`GcStress::EveryAllocation`].
+/// `startup-young` ask for [`GcStress::Young`], `seed:N` and `startup-seed:N` for
+/// [`GcStress::Seeded`] with seed `N`; any other value asks for [`GcStress::EveryAllocation`].
 pub fn gc_stress_requested() -> Option<(GcStressStart, GcStress)> {
-    match std::env::var("RY_GC_STRESS").as_deref() {
-        Err(_) | Ok("" | "0") => None,
-        Ok("startup") => Some((GcStressStart::Startup, GcStress::EveryAllocation)),
-        Ok("startup-young") => Some((GcStressStart::Startup, GcStress::Young)),
-        Ok("young") => Some((GcStressStart::Script, GcStress::Young)),
-        Ok(_) => Some((GcStressStart::Script, GcStress::EveryAllocation)),
-    }
+    let value = std::env::var("RY_GC_STRESS").ok()?;
+    let (start, mode) = match value.strip_prefix("startup") {
+        Some(rest) => (GcStressStart::Startup, rest.trim_start_matches('-')),
+        None => (GcStressStart::Script, value.as_str()),
+    };
+    let stress = match mode {
+        "" if start == GcStressStart::Startup => GcStress::EveryAllocation,
+        "" | "0" => return None,
+        "young" => GcStress::Young,
+        _ => match mode.strip_prefix("seed:") {
+            Some(seed) => GcStress::Seeded {
+                seed: seed.parse().unwrap_or_else(|_| {
+                    panic!("RY_GC_STRESS=seed:N needs a whole number, not {seed:?}")
+                }),
+            },
+            None => GcStress::EveryAllocation,
+        },
+    };
+    Some((start, stress))
 }
 
 pub struct GcPolicy {
@@ -829,6 +915,10 @@ impl Heap {
     }
 
     pub fn with_policy(policy: GcPolicy) -> Heap {
+        let stress_rng = match policy.stress {
+            GcStress::Seeded { seed } => seed,
+            _ => 0,
+        };
         let mut heap = Heap {
             allocation_ceiling: memory_ceiling(),
             space: Space::new(),
@@ -844,6 +934,7 @@ impl Heap {
             remembered: Vec::new(),
             tenured_vector_cells: 0,
             escaped: Vec::new(),
+            escaped_collected: false,
             escaped_lists: Vec::new(),
             zero_count: Vec::new(),
             returned: Vec::new(),
@@ -892,6 +983,8 @@ impl Heap {
             pretenure_young_bytes: 0,
             pretenure_young_large: 0,
             stress_counter: 0,
+            stress_rng,
+            stress_countdown: 0,
             keep_untenured: false,
             deeper: false,
             pause_log: open_pause_log(),
@@ -1017,7 +1110,14 @@ impl Heap {
     /// Changes the collection policy. The allocation fast path reads a budget derived from it,
     /// which this recomputes, so the policy has no other mutable access.
     pub fn update_policy(&mut self, change: impl FnOnce(&mut GcPolicy)) {
+        let before = self.policy.stress;
         change(&mut self.policy);
+        if let GcStress::Seeded { seed } = self.policy.stress
+            && self.policy.stress != before
+        {
+            self.stress_rng = seed;
+            self.stress_countdown = 0;
+        }
         self.refresh_small_trigger();
         self.refresh_quarantine();
     }
@@ -1068,9 +1168,13 @@ impl Heap {
         // cell trigger ignores vector memory, because a session holding a few big vectors would
         // otherwise let as many bytes of small garbage pile up.
         self.small_trigger = match self.policy.stress {
-            GcStress::EveryAllocation | GcStress::Young => 0,
-            GcStress::Off => self.policy.young_limit.max(self.old_small_bytes / 2),
+            GcStress::EveryAllocation | GcStress::Young | GcStress::Seeded { .. } => 0,
+            GcStress::Off => self.small_budget(),
         };
+    }
+
+    fn small_budget(&self) -> usize {
+        self.policy.young_limit.max(self.old_small_bytes / 2)
     }
 
     /// Suspends collection until the matching [`Heap::allow_collection`], for code that builds
@@ -1441,6 +1545,10 @@ impl Heap {
     #[inline]
     pub unsafe fn resize_within_capacity(&mut self, vector: Sexp, length: isize) {
         let old = vector.length();
+        // The retirement settles the counts of an escaped list from its snapshot, which keeps
+        // what the dropped slots held.
+        let settled_later =
+            vector.gc_bits() & gc_bits::ESCAPED != 0 && self.escaped_snapshot(vector).is_some();
         if length > old {
             let element = vector.kind().element_size().unwrap_or(0);
             match vector.kind() {
@@ -1465,7 +1573,8 @@ impl Heap {
         } else if matches!(
             vector.kind(),
             SexpType::String | SexpType::List | SexpType::Expression
-        ) {
+        ) && !settled_later
+        {
             // A table over-allocates its column list and names by a thousand or so slots and
             // shrinks them to the columns it has, so most dropped slots still hold the value
             // they were allocated with. Chunks holding only that value are skipped: comparing
@@ -2155,7 +2264,9 @@ impl Heap {
         let tracked = to.flags() & flag_bits::UNTRACKED == 0;
         for offset in 0..count {
             let value = from.stored_element(from_start + offset);
-            if tracked {
+            if tracked
+                && !(to.gc_bits() & gc_bits::ESCAPED != 0 && self.count_escaped_store(to, value))
+            {
                 value.increment_refcount();
                 let old = to.stored_element(to_start + offset);
                 if old.release_reference() {
@@ -2189,12 +2300,17 @@ impl Heap {
     /// element instead of counting each element into the copy and, when the collector sweeps
     /// the original, back out of it.
     ///
+    /// A list whose pointer escaped is copied instead, because its retirement settles its counts
+    /// from what it holds then.
+    ///
     /// # Safety
     /// `to` and `from` are distinct, non-ALTREP vectors of one handle kind, `to` has room for
     /// `from`'s elements in slots that hold `nil`, and nothing reads `from` afterwards.
     pub unsafe fn move_elements(&mut self, to: Sexp, from: Sexp) {
         let count = from.length() as usize;
-        if (to.flags() ^ from.flags()) & flag_bits::UNTRACKED != 0 {
+        if (to.flags() ^ from.flags()) & flag_bits::UNTRACKED != 0
+            || from.gc_bits() & gc_bits::ESCAPED != 0
+        {
             self.copy_elements(to, 0, from, 0, count);
             return;
         }
@@ -2236,7 +2352,9 @@ impl Heap {
         {
             return (elements.write)(vector, index, value);
         }
-        self.count_store(vector, vector.stored_element(index), value);
+        if !(vector.gc_bits() & gc_bits::ESCAPED != 0 && self.count_escaped_store(vector, value)) {
+            self.count_store(vector, vector.stored_element(index), value);
+        }
         self.element_barrier(vector, index, value);
         vector.set_element_unbarriered(index, value);
     }
@@ -2310,51 +2428,149 @@ impl Heap {
         pointer.set_external_protected_unbarriered(value);
     }
 
-    /// Records that native code received a writable pointer to `vector`'s handle elements, so
-    /// its stores bypass the barrier and every minor collection must scan it.
-    pub unsafe fn escape(&mut self, vector: Sexp) {
-        if vector.gc_bits() & gc_bits::ESCAPED == 0 {
+    /// Records that native code received a pointer to `vector`'s handle elements, so its stores
+    /// bypass the barrier and every collection scans it whole until [`Heap::retire_escaped`] (a
+    /// minor collection marks every young string instead of scanning an old character vector).
+    /// An escaped list also gets an [`EscapedList`] entry, from which the retirement settles the
+    /// counts that native stores through the pointer bypassed.
+    ///
+    /// A read-only pointer escapes too, because packages write through `DATAPTR_RO`: data.table's
+    /// `setcolorder` permutes a table's columns with `memcpy`. A permutation adds no child, so
+    /// GNU R, which remembers a whole object, never needs to see it, but the barrier remembers a
+    /// carded vector per card, and a permutation can move a young child onto a clean card.
+    /// Native code may store a new child through a `writable` pointer, so an old vector that
+    /// receives one is remembered at once, which makes the retirement rescan it.
+    pub unsafe fn escape(&mut self, vector: Sexp, writable: bool) {
+        let bits = vector.gc_bits();
+        if writable && bits & gc_bits::OLD != 0 {
+            self.remember(vector);
+        }
+        let first = bits & gc_bits::ESCAPED == 0;
+        if first {
             vector.set_gc_bit(gc_bits::ESCAPED, true);
             self.escaped.push(vector);
-            if matches!(vector.kind(), SexpType::List | SexpType::Expression)
-                && vector.tracks_references()
-            {
-                let elements = (0..vector.length() as usize)
-                    .map(|index| vector.stored_element(index))
-                    .collect();
-                self.escaped_lists.push((vector, elements));
+        }
+        if !matches!(vector.kind(), SexpType::List | SexpType::Expression)
+            || !vector.tracks_references()
+        {
+            return;
+        }
+        if !first {
+            if writable {
+                self.escaped_snapshot(vector);
             }
+            return;
+        }
+        let counted = if writable {
+            Counted::Snapshot(element_snapshot(vector))
+        } else {
+            Counted::Digest(element_digest(vector))
+        };
+        self.escaped_lists.push(EscapedList {
+            list: vector,
+            counted,
+        });
+    }
+
+    /// Counts `value` into `list` when an escape of `list` is pending, and says whether it did.
+    /// The retirement counts what the list then holds and releases what the snapshot names, so
+    /// the value counts now, which keeps copy-on-modify right while native code runs, and joins
+    /// the snapshot to be released once. The value it replaces is not released now: if the
+    /// counts ever counted it, the snapshot names it and the retirement releases it, and if
+    /// native code stored it uncounted, nothing may.
+    ///
+    /// Only element stores come here: the retirement settles a list's elements, never its
+    /// attributes.
+    #[cold]
+    #[inline(never)]
+    unsafe fn count_escaped_store(&mut self, list: Sexp, value: Sexp) -> bool {
+        if !matches!(list.kind(), SexpType::List | SexpType::Expression) {
+            return false;
+        }
+        let Some(snapshot) = self.escaped_snapshot(list) else {
+            return false;
+        };
+        value.increment_refcount();
+        snapshot.push(value);
+        true
+    }
+
+    /// The snapshot of escaped `list`'s counted values, taken now if a read-only escape recorded
+    /// only a digest. Before any counted change, the counts match what the list held when it
+    /// escaped, unless native code stored something other than a permutation through the
+    /// pointer; then every element it holds now is counted once more, which may keep a value
+    /// alive too long but never frees one still held.
+    unsafe fn escaped_snapshot(&mut self, list: Sexp) -> Option<&mut Vec<Sexp>> {
+        let entry = self
+            .escaped_lists
+            .iter_mut()
+            .find(|entry| entry.list == list)?;
+        if let Counted::Digest(digest) = entry.counted {
+            if digest != element_digest(list) {
+                increment_elements(list);
+            }
+            entry.counted = Counted::Snapshot(element_snapshot(list));
+        }
+        match &mut entry.counted {
+            Counted::Snapshot(snapshot) => Some(snapshot),
+            Counted::Digest(_) => None,
         }
     }
 
     /// Ends every escape once the outermost native call returns. Native code may store through
-    /// a writable element pointer only while the call that took it runs (GNU R's collector never
-    /// sees those stores at all), so each escaped vector that is old is remembered instead: the
-    /// next minor collection rescans it once, catching the stores made meanwhile, and from then
-    /// on it is an ordinary object whose stores go through the barrier. Without this a column a
-    /// package touched once would be rescanned by every minor collection for the rest of the
-    /// session.
+    /// an element pointer only while the call that took it runs (GNU R's collector never sees
+    /// those stores at all), so an escaped vector that is old and may hold younger children is
+    /// remembered with every card dirty instead: the next minor collection rescans it once,
+    /// catching wherever native code moved or stored them, and from then on it is an ordinary
+    /// object whose stores go through the barrier. Without this a column a package touched once
+    /// would be rescanned by every minor collection for the rest of the session.
+    ///
+    /// A vector may hold younger children when it is remembered, which covers the ones it held
+    /// before the escape, the ones stored since through the barrier, and any writable escape;
+    /// and when a collection ran during the escape, which may have aged its children without
+    /// remembering it, since an escaped vector's children are all marked. Any other old vector held only
+    /// old children throughout, and permuting them through a read-only pointer cannot change
+    /// that, so it costs no rescan: data.table reads most columns through `DATAPTR_RO` and
+    /// `STRING_PTR_RO` without changing them.
     pub unsafe fn retire_escaped(&mut self) {
         // Most native calls hand out no data pointer, and this runs after every one of them.
         if self.escaped_lists.is_empty() && self.escaped.is_empty() {
+            self.escaped_collected = false;
             return;
         }
-        // Native code may have replaced elements without counting either side, so the counts
-        // move from what the list held when it escaped to what it holds now.
-        for (vector, before) in std::mem::take(&mut self.escaped_lists) {
-            for index in 0..vector.length() as usize {
-                vector.stored_element(index).increment_refcount();
-            }
-            for old in before {
-                if old.release_reference() {
-                    self.note_zero(old);
+        for EscapedList { list, counted } in std::mem::take(&mut self.escaped_lists) {
+            match counted {
+                // Native code may have replaced elements without counting either side, so the
+                // counts move from what the list held when it escaped to what it holds now.
+                Counted::Snapshot(before) => {
+                    if self.policy.verify
+                        && let Some(freed) = before.iter().find(|value| value.is_poisoned())
+                    {
+                        panic!(
+                            "write barrier violation: a collection freed {freed:?}, which the \
+                             snapshot of an escaped list still names"
+                        );
+                    }
+                    increment_elements(list);
+                    for old in before {
+                        if old.release_reference() {
+                            self.note_zero(old);
+                        }
+                    }
+                }
+                Counted::Digest(digest) => {
+                    if digest != element_digest(list) {
+                        increment_elements(list);
+                    }
                 }
             }
         }
+        let collected = std::mem::take(&mut self.escaped_collected);
         let mut escaped = std::mem::take(&mut self.escaped);
         for vector in escaped.drain(..) {
             vector.set_gc_bit(gc_bits::ESCAPED, false);
-            if vector.gc_bits() & gc_bits::OLD != 0 {
+            let bits = vector.gc_bits();
+            if bits & gc_bits::OLD != 0 && (collected || bits & gc_bits::REMEMBERED != 0) {
                 if vector.is_carded() {
                     std::ptr::write_bytes(vector.cards(), CARD_YOUNG, vector.card_count());
                 }
@@ -3446,6 +3662,35 @@ impl Heap {
                     self.escalate_if_full(keep, request);
                 }
             }
+            GcStress::Seeded { .. } => {
+                if self.stress_countdown > 0 {
+                    self.stress_countdown -= 1;
+                    // A gap of thousands of allocations must not outgrow the budget an
+                    // unstressed heap collects at.
+                    if self.inhibit == 0 && self.over_budget(request, large) {
+                        self.collect_keeping(Collection::Minor, keep, request);
+                        self.escalate_if_full(keep, request);
+                    }
+                    return;
+                }
+                // A gap of 2^k allocations plus up to as many again, k uniform in 0..12: half the
+                // gaps are under a hundred allocations, and one in six passes a thousand.
+                let draw = split_mix(&mut self.stress_rng);
+                let scale = 1u64 << (draw % 12);
+                self.stress_countdown = scale + (draw >> 8) % scale;
+                self.stress_counter += self.stress_countdown + 1;
+                let spacing = (self.stats.live_objects / 16).max(8);
+                if self.stress_counter >= spacing.saturating_mul(16) {
+                    self.stress_counter = 0;
+                    self.collect_keeping(Collection::Major, keep, request);
+                } else if (draw >> 4) % 8 == 0 {
+                    self.collect_keeping(Collection::Intermediate, keep, request);
+                    self.escalate_if_full(keep, request);
+                } else {
+                    self.collect_keeping(Collection::Minor, keep, request);
+                    self.escalate_if_full(keep, request);
+                }
+            }
             GcStress::Off => {
                 if self.collection_due(request, large) {
                     self.collect_keeping(Collection::Minor, keep, request);
@@ -3717,12 +3962,41 @@ impl Heap {
         while let Some(object) = dying.pop() {
             let attributes = object.attrib();
             object.set_attrib_unbarriered(nil);
-            let elements = (0..object.length() as usize).map(|index| {
+            // A list that dies with an escape pending may hold what native code stored
+            // uncounted, so what it counted is what the escape's entry says.
+            let mut counted = None;
+            if object.gc_bits() & gc_bits::ESCAPED != 0
+                && let Some(position) = self
+                    .escaped_lists
+                    .iter()
+                    .position(|entry| entry.list == object)
+            {
+                counted = Some(match self.escaped_lists.swap_remove(position).counted {
+                    Counted::Snapshot(before) => before,
+                    Counted::Digest(digest) if digest == element_digest(object) => {
+                        (0..object.length() as usize)
+                            .map(|index| object.stored_element(index))
+                            .collect()
+                    }
+                    Counted::Digest(_) => Vec::new(),
+                });
+            }
+            let held = (0..object.length() as usize).map(|index| {
                 let child = object.stored_element(index);
                 object.set_element_unbarriered(index, nil);
                 child
             });
-            for child in std::iter::once(attributes).chain(elements) {
+            let (held, counted) = match counted {
+                Some(counted) => {
+                    held.for_each(drop);
+                    (None, counted)
+                }
+                None => (Some(held), Vec::new()),
+            };
+            for child in std::iter::once(attributes)
+                .chain(held.into_iter().flatten())
+                .chain(counted)
+            {
                 if !child.release_reference() {
                     continue;
                 }
@@ -3816,9 +4090,12 @@ impl Heap {
         if self.inhibit > 0 {
             return false;
         }
-        if self.policy.stress != GcStress::Off {
-            return true;
-        }
+        self.policy.stress != GcStress::Off || self.over_budget(request, large)
+    }
+
+    /// Whether allocating `request` more bytes passes the young generation's budget, which
+    /// decides when a collection runs without collection stress.
+    fn over_budget(&self, request: usize, large: bool) -> bool {
         // Large vectors get a budget of their own. They do not crowd the nursery's cache, and
         // a reader such as `fread` allocates every column before filling any, so charging
         // them to the nursery would buy a collection per column that rescans the columns
@@ -3828,7 +4105,13 @@ impl Heap {
             self.young_large_bytes + request > self.policy.young_large_limit.max(old_bytes / 2)
                 || self.old_large_bytes + self.young_large_bytes + request > self.policy.heap_limit
         } else {
-            self.young_bytes + request > self.small_trigger
+            // Under stress the trigger is zero so that every allocation reaches the stress
+            // schedule, and the budget is computed instead.
+            let budget = match self.policy.stress {
+                GcStress::Off => self.small_trigger,
+                _ => self.small_budget(),
+            };
+            self.young_bytes + request > budget
         }
     }
 
@@ -3884,6 +4167,17 @@ impl Heap {
             self.mark(object);
         }
         self.mark_roots(kind);
+        // The retirement of a writable escape releases each value its snapshot names, so one
+        // that left the list must stay allocated until then.
+        let escaped_lists = std::mem::take(&mut self.escaped_lists);
+        for entry in &escaped_lists {
+            if let Counted::Snapshot(before) = &entry.counted {
+                for &value in before {
+                    self.mark(value);
+                }
+            }
+        }
+        self.escaped_lists = escaped_lists;
         if kind == Collection::Intermediate {
             // A tenured object stays marked, so tracing stops at it; the ones that may point at
             // younger objects are exactly the remembered and escaped ones, so tracing starts
@@ -3986,8 +4280,9 @@ impl Heap {
         self.release_swept_lists();
         let space = &self.space;
         self.escaped.retain(|&object| space.is_marked(object));
+        self.escaped_collected |= !self.escaped.is_empty();
         self.escaped_lists
-            .retain(|(object, _)| space.is_marked(*object));
+            .retain(|entry| space.is_marked(entry.list));
         for entry in &mut self.returned {
             let env = entry.env;
             entry.closures.retain(|&mut closure| {

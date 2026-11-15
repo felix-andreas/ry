@@ -225,7 +225,7 @@ harness of that kind yet; the gap is filed in the backlog.
 | Environment variables | seeded random `Sys.setenv`, `Sys.unsetenv` and Rust-side writes over prefix-sharing, empty, `NA`, `=`-holding and non-ASCII names and values (`interp` `test_fuzz` `fuzz_environment_variables_agree_with_the_c_library`); the `system__sys_env_round_trips` oracle case | the C library's environment, on every `Sys.getenv`, `Sys.setenv` and `Sys.unsetenv` result; GNU R, through the oracle case |
 | Native helpers (withr, base) | seeded random calls of withr's environment and option helpers, `Sys.getenv`, `Sys.setenv`, `Sys.unsetenv`, `intersect` and `structure(names =)` with `NA`, empty, unset and non-ASCII values (`fuzz_native_helpers_match_their_r_bodies` in `oracle` `test_differential`, at tier 0 and under the JIT, `FUZZ_SEED` replays) | each function's own R body, by `identical()` on the value, visibility, condition and environment and option state; GNU R, through the oracle cases |
 | Graphics renderer | random drawings with nested, dangling and wrong-kind definitions and non-finite geometry (`interp` `test_fuzz`); the `graphics__` and `grid__` oracle cases; the plot gallery against GNU R (`oracle` `test_gallery`) | no panic, identical bytes on a second render, one file per page, and files a reader parses (PDF cross-reference offsets and page count, balanced SVG markup, a decodable PNG, BMP, TIFF, JPEG and PostScript headers); GNU R's warnings and capabilities |
-| Garbage collector | seeded allocation and mutation sequences (`heap` `test_gc`), including string and symbol interning in every encoding; `RY_GC_STRESS` and `RY_GC_STRESS=young` over the oracle cases and generated programs; `RY_GC_VERIFY` | a model of the live graph; reference `HashMap`s of the interned strings and symbols; the unstressed run, the write-barrier invariant, a full collection over every reconcile's frees |
+| Garbage collector | seeded allocation and mutation sequences (`heap` `test_gc`), including string and symbol interning in every encoding; `RY_GC_STRESS` and `RY_GC_STRESS=young` over the oracle cases and generated programs; `RY_GC_STRESS=seed:N` with `RY_GC_VERIFY` over the cases that run native code; native code permuting a list or character vector through every element pointer accessor (`libr` `element_pointers_keep_permuted_young_elements_alive`) | a model of the live graph; reference `HashMap`s of the interned strings and symbols; the unstressed run, the write-barrier invariant, a full collection over every reconcile's frees |
 | C API | native fuzzing (`libr` `test_fuzz_native`); mutated serialized streams (`rdb` `mutated_streams_never_panic`); `cargo fuzz` `unserialize` | GNU R's behavior; an R error, never a panic; the PROTECT balance check on every `.Call` |
 | JIT | `test_tiers`, including generated typed closures over vectors, records, tuples, tags and `match` that the first call compiles (`fuzz_typed_closures_agree_with_tier_zero`); random lists through every library traversal the JIT loops (`fuzz_stdlib_traversals_agree_with_model`); random comparison, `&`, `|` and `!` programs over lists and scalars with `NA`, `NaN` and length mismatches through the fused mask count (`typed` `test_values` `fused_counts_follow_three_valued_logic`); differential fuzzing with `RY_JIT=force` | tier 0's value, output and error message; GNU R; a Rust model of the library traversals and of R's three-valued logic |
 | Compiling ahead of time (`ry run --aot`) | seeded scripts of typed functions built from the shapes that make compiling ahead differ from compiling at a first call: a call before the callee's definition, a name defined twice or rebound between calls, a definition inside a block, alias-typed parameters, conversions of what R returns, a conversion whose vector is narrower than the checker's type or empty, a literal that warns when it is lowered, a changed `keep.source`, a script that stops partway (`ry` `test_scenarios` `typed_scripts_agree_however_they_compile`, `FUZZ_SEED` replays); every typed benchmark program with `--aot` (`typed_benchmarks_run_natively`); a script with more definitions than the session's limit on compiled closures; the `run-aot` scenario | the same script interpreted (`RY_JIT=off`), compiled at first call, compiled ahead, compiled ahead with every sibling guess failing (`RY_AHEAD_MISS=1`), compiled ahead with tier 1 forced, and with its annotations erased: one exit status, standard output and standard error; no compile after the script starts on the benchmark programs |
@@ -257,11 +257,28 @@ the plain mode's spacing. A small script runs about five times slower than under
 | `startup` | at the first allocation | a minor collection |
 | `young` | when the script starts | a collection that keeps survivors untenured |
 | `startup-young` | at the first allocation | a collection that keeps survivors untenured |
+| `seed:N` | when the script starts | a collection at random gaps drawn from seed `N` |
+| `startup-seed:N` | at the first allocation | a collection at random gaps drawn from seed `N` |
+
+Both modes above collect so often that an object is promoted before the operation that made it
+is done with it, so neither catches a store that skips the write barrier: by the time native code
+moves a young object, the object is old. `RY_GC_STRESS=seed:N` collects at random gaps instead,
+from one allocation to a few thousand with a heavy tail, so objects routinely stay young across a
+whole native call. Seven collections in eight are minor, the rest intermediate, and a major one
+runs once per as many allocations as there are live objects. With `RY_GC_VERIFY=1` each
+collection short of a major one first checks the barrier's invariant: every old object that
+points at a young one is remembered, has the element on a dirty card, or is escaped (see the
+barrier contract in [R runtime](/development/design/r-runtime/)). A missed barrier then panics
+at the next collection instead of freeing a live object only when the timing is unlucky.
 
 The default suite runs a seeded sample of the oracle cases (`cases_survive_gc_torture`,
 `cases_survive_young_gc_torture`) and of the generated programs (`fuzz_programs_survive_gc_torture`)
-under both modes, compared with ry unstressed. The sample always includes the cases in
-`REGRESSION_CASES` and the seeds in `REGRESSION_SEEDS`, which once read freed memory.
+under the first two modes, compared with ry unstressed. A third test
+(`native_cases_keep_the_write_barrier_under_seeded_gc_torture`) runs three cases from the groups
+that run the most native code (`datatable`, `packages`, `altrep`, `serialize`) and one more from
+anywhere under `seed:N` with verification, where `N` is `FUZZ_SEED`. Each sample always includes
+the cases in `REGRESSION_CASES` and the seeds in `REGRESSION_SEEDS`, which once read freed memory
+or lost a live object.
 
 Collecting often is not enough on its own, because each sweep hands a freed slot out again at the
 next allocation, and a stale reference then reads a valid object. So while `RY_GC_STRESS` or
@@ -286,7 +303,7 @@ object, while plain `RY_GC_STRESS=1` passed 3 of 3, since it tenures the object 
 | `just simulate COUNT ACTIONS BASE` | The language-server simulator over `COUNT` seeds from `BASE`. |
 | `just scenarios [NAME]` | Every scenario, or one. |
 | `just fuzz-differential SEED COUNT ENGINES` | Generated programs under GNU R and ry's engines. |
-| `just gc-torture [young]` | Every oracle case under collection stress, or under `RY_GC_STRESS=young`. |
+| `just gc-torture [young\|seeded]` | Every oracle case under collection stress, under `RY_GC_STRESS=young`, or under `RY_GC_STRESS=seed:N` with the barrier checked. |
 | `just fuzz-deep [MINUTES] [BASE] [DEPTH]` | Every seeded harness at a deep budget until the time limit, described below. |
 | `just fuzz-run TARGET` | One `cargo fuzz` target under libFuzzer. |
 | `just fuzz-all SECONDS [FEATURES]` | Every `cargo fuzz` target for `SECONDS` of wall clock each, after seeding the corpora and building the targets. `FEATURES` limits the targets: `runtime` leaves out the two that link Polars. |

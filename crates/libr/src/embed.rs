@@ -43,6 +43,16 @@ pub extern "C" fn ry_set_gc_stress(mode: c_int) {
     });
 }
 
+/// With `enabled`, every collection short of a major one first checks the write barrier's
+/// invariant: each old object that points at a young one is
+/// remembered, on a dirty card, or escaped.
+#[unsafe(no_mangle)]
+pub extern "C" fn ry_set_gc_verify(enabled: c_int) {
+    runtime()
+        .heap
+        .update_policy(|policy| policy.verify = enabled != 0);
+}
+
 /// With `enabled`, hot API functions skip their direct success paths (see
 /// [`crate::boundary::direct`]).
 #[unsafe(no_mangle)]

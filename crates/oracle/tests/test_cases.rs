@@ -39,6 +39,8 @@ const REGRESSION_CASES: &[&str] = &[
     "datetime__year_overflow",
     "assignment__dollar_in_place",
     "environments__unread_loop_variable",
+    "datatable__setcolorder_young_columns",
+    "datatable__setorder_young_strings",
 ];
 
 fn cases() -> Vec<PathBuf> {
@@ -381,16 +383,30 @@ fn a_case_can_interrupt_itself_when_the_oracle_inherits_an_ignored_sigint() {
 
 #[test]
 fn cases_survive_gc_torture() {
-    cases_survive(ProcessEngine::ry_gc_torture());
+    cases_survive(|_| ProcessEngine::ry_gc_torture(), &[], 0);
 }
 
 #[test]
 fn cases_survive_young_gc_torture() {
-    cases_survive(ProcessEngine::ry_gc_torture_young());
+    cases_survive(|_| ProcessEngine::ry_gc_torture_young(), &[], 0);
 }
 
-/// A seeded subset of the cases under `torture` gives what ry gives unstressed.
-fn cases_survive(torture: ProcessEngine) {
+/// The groups whose cases run the most native code through the C API, where a pointer handed
+/// out to package code can bypass the write barrier.
+const NATIVE_GROUPS: &[&str] = &["datatable", "packages", "altrep", "serialize"];
+
+/// Seeded stress with the barrier check on, over the cases that run the most native code: a
+/// store that skips the write barrier fails the check at the next collection, which comes at a
+/// random gap so the objects involved are often still young.
+#[test]
+fn native_cases_keep_the_write_barrier_under_seeded_gc_torture() {
+    cases_survive(ProcessEngine::ry_gc_torture_seeded, NATIVE_GROUPS, 3);
+}
+
+/// A seeded subset of the cases under the stressed engine `torture` makes for the seed gives
+/// what ry gives unstressed: every regression case, `focused` cases from the `focus` groups,
+/// and one more from anywhere.
+fn cases_survive(torture: fn(u64) -> ProcessEngine, focus: &[&str], focused: usize) {
     if !ry_runtime_available() {
         eprintln!("skipped: ry's runtime is not built; run `cargo build -p ry-lang -p libr`");
         return;
@@ -399,12 +415,23 @@ fn cases_survive(torture: ProcessEngine) {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
-    let (mut chosen, mut all): (Vec<PathBuf>, Vec<PathBuf>) =
-        cases().into_iter().partition(|case| {
+    let torture = torture(seed);
+    let (mut chosen, rest): (Vec<PathBuf>, Vec<PathBuf>) = cases().into_iter().partition(|case| {
+        case.file_stem()
+            .is_some_and(|stem| REGRESSION_CASES.iter().any(|name| stem == *name))
+    });
+    let (mut focused_cases, mut all): (Vec<PathBuf>, Vec<PathBuf>) =
+        rest.into_iter().partition(|case| {
             case.file_stem()
-                .is_some_and(|stem| REGRESSION_CASES.iter().any(|name| stem == *name))
+                .and_then(|stem| stem.to_str())
+                .and_then(|stem| stem.split_once("__"))
+                .is_some_and(|(group, _)| focus.contains(&group))
         });
     let mut rng = SplitMix64(seed);
+    for _ in 0..fuzz_iterations(focused).min(focused_cases.len()) {
+        chosen.push(focused_cases.swap_remove(rng.below(focused_cases.len())));
+    }
+    all.extend(focused_cases);
     for _ in 0..fuzz_iterations(1).min(all.len()) {
         chosen.push(all.swap_remove(rng.below(all.len())));
     }
