@@ -31,6 +31,16 @@ use std::{
 /// does (`interp::system::MINIMUM_SVN_REVISION`).
 pub const MINIMUM_SVN_REVISION: u32 = 89194;
 
+/// The version of the binary interface that ry's headers (`crates/libr/include`) give compiled
+/// code: what their inline functions and macros read and write without calling into libR. An
+/// installation records it as `RyAbi:`, and `dyn.load` refuses a package ry compiled under another
+/// version (`stale_native_build`), because its code may skip what libR now does on its behalf.
+/// Bump it whenever a header change makes code compiled against the old headers unsafe to run.
+///
+/// 1: `DATAPTR_RO` and `STRING_PTR_RO` call into libR, which keeps the collector's write barrier
+/// for writes through the pointer; ry 0.4.5 and earlier inlined them and recorded no `RyAbi:`.
+pub const NATIVE_ABI: u32 = 1;
+
 /// The R-level half of an installation, run on ry's interpreter.
 const INSTALL_DRIVER: &str = include_str!("install.R");
 const CODE_IMAGE_DRIVER: &str = include_str!("code-image.R");
@@ -1832,6 +1842,52 @@ pub fn config(home: &Path, variable: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+/// Why the shared library at `path` must not load, when it belongs to an installed package that ry
+/// compiled against headers with another binary interface than this ry's (`NATIVE_ABI`). A library
+/// outside a package's `libs/`, and a package GNU R compiled, always load: GNU R's package headers
+/// reach element pointers through libR's functions, so they inline none of ry's accessors.
+pub fn stale_native_build(path: &Path) -> Option<String> {
+    let mut libs = path.parent()?;
+    // A Windows package keeps its DLL under `libs/x64`.
+    if libs.file_name()? != "libs" {
+        libs = libs.parent()?;
+    }
+    if libs.file_name()? != "libs" {
+        return None;
+    }
+    let package_dir = libs.parent()?;
+    let path = package_dir.join("DESCRIPTION");
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            return Some(format!(
+                "cannot read {} to check which headers its package was compiled against: {error}",
+                path.display()
+            ));
+        }
+    };
+    let description = Description::parse(&text);
+    let built_by = description.get("RyBuilt")?;
+    let headers = match description.get("RyAbi").map(str::parse::<u32>) {
+        Some(Ok(abi)) if abi == NATIVE_ABI => return None,
+        Some(Ok(abi)) if abi > NATIVE_ABI => "newer C headers",
+        Some(Ok(_)) | None => "older C headers",
+        Some(Err(_)) => "C headers of an unknown version",
+    };
+    let package = package_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let package = description.get("Package").unwrap_or(&package);
+    Some(format!(
+        "package '{package}' was compiled by ry {built_by} against {headers}, and its \
+         compiled code is unsafe to run under this ry. Reinstall it with this ry: \
+         install.packages(\"{package}\"), or R CMD INSTALL on its source (ry install for a \
+         package you develop)."
+    ))
+}
+
 /// A package's `DESCRIPTION`, as ordered fields.
 #[derive(Clone, Debug, Default)]
 pub struct Description {
@@ -2279,6 +2335,7 @@ fn install_source(
     // `tools:::.install_package_description` copies the build's DESCRIPTION and adds `Built:`,
     // so the field that marks an installation as ry's goes in first.
     description.set("RyBuilt", env!("CARGO_PKG_VERSION").to_owned());
+    description.set("RyAbi", NATIVE_ABI.to_string());
     write(&build.join("DESCRIPTION"), &description.render())?;
     let target = library.join(name);
     let driver = staging.join("install.R");
@@ -2443,6 +2500,21 @@ fn compile_in(
 ) -> Result<Option<String>> {
     let platform = Platform::of_home(home)?;
     let environment = build_environment(home, platform, name, target, paths)?;
+    let src = build.join("src");
+    // Objects that an earlier in-place build left in `src/` (`ry load`, or the copy of such a tree
+    // that an install builds) hold the inline accessors of the headers they were compiled
+    // against, and make rebuilds only what the sources outdate, so objects from other headers
+    // than this ry's go first. The stamp names the headers' binary interface (`NATIVE_ABI`).
+    let stamp = src.join(ABI_STAMP);
+    let current = NATIVE_ABI.to_string();
+    if src.is_dir() {
+        match fs::read_to_string(&stamp) {
+            Ok(text) if text.trim() == current => {}
+            Ok(_) => remove_build_products(&src)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => remove_build_products(&src)?,
+            Err(error) => return Err(Error::Io(stamp, error)),
+        }
+    }
     if let Some(configure) = platform.build_file(build, "configure") {
         run_command(
             Command::new("sh").arg(&configure).current_dir(build).envs(
@@ -2457,7 +2529,6 @@ fn compile_in(
             ))
         })?;
     }
-    let src = build.join("src");
     if !src.is_dir() {
         return Ok(None);
     }
@@ -2490,7 +2561,30 @@ fn compile_in(
             Error::Package(format!("compilation failed for package '{name}'\n{error}"))
         })?;
     }
+    write(&stamp, &current)?;
     Ok(Some(library_name))
+}
+
+/// The file in a package's `src/` that names the binary interface of the headers its objects were
+/// compiled against.
+const ABI_STAMP: &str = ".ry-abi";
+
+/// Deletes the objects and shared libraries under `directory`. Static libraries stay, because a
+/// source package may ship one prebuilt.
+fn remove_build_products(directory: &Path) -> Result<()> {
+    for entry in fs::read_dir(directory).map_err(io_error(directory))? {
+        let path = entry.map_err(io_error(directory))?.path();
+        if path.is_dir() {
+            remove_build_products(&path)?;
+        } else if path.extension().is_some_and(|extension| {
+            ["o", "so", "dll", "dylib", "sl"]
+                .iter()
+                .any(|known| extension == *known)
+        }) {
+            fs::remove_file(&path).map_err(io_error(&path))?;
+        }
+    }
+    Ok(())
 }
 
 /// Runs an R file on ry's interpreter through the home's `bin/R`, in `directory`, with
