@@ -1,6 +1,6 @@
 ---
 title: The typed code file
-description: "How an installed package carries the machine code of its typed functions: position-independent code mapped from one file per package, a per-process offset table, attachment per function at its first call, the file format and the tests"
+description: "How an installed package or an executable carries the machine code of its typed functions: position-independent code mapped from one file per package, a per-process offset table, attachment per function at its first call, the file format and the tests"
 ---
 
 `ry install` compiles a package's typed functions and writes their machine code into the installed
@@ -249,6 +249,37 @@ ry: another build of ry installed rates, so its typed functions compiled as it l
 A package with no file at all is not compiled at load, because telling an untyped package from one
 installed with `--ry-no-typed-code` would mean reading every function.
 
+## Executables
+
+`ry build --aot --exe main.R` writes a script's code file into an executable: a copy of `ry` with
+a payload appended (`crates/ry/src/executable.rs`).
+
+| Part | Contents |
+|---|---|
+| `ry` | the running `ry` executable, byte for byte |
+| Padding | zeros up to a multiple of 64 KiB, so the code maps straight from the executable |
+| Code file | a typed code file in the format above, for the script's top-level definitions |
+| Metadata | the run flags as a little-endian `i32`, then four fields, each a little-endian `u64` length and its bytes: the script's name, its elaborated text, and the runtime library and base R tree of a development build (empty for a release) |
+| Trailer | five little-endian `u64`s (the code file's offset and length, the metadata's offset and length, the metadata's FNV-1a hash) and the magic `ry-exe\0\x01` |
+
+At start `ry` reads its own last 48 bytes. Without the magic it is `ry`. With it, a trailer whose
+offsets do not meet end to end or whose metadata's hash does not match is an error that asks for
+a new build, and a sound one runs the script as `ry run --aot` does, without the checker.
+
+A script has no lazy-load database, so its code file names a closure differently:
+
+- **Record and position.** The closure of the top-level definition at index `i` among the script's
+  expressions is record `i`, position 0. A definition that is not a typed closure has no entry.
+- **Database stamp.** The header's database length and modification time hold the elaborated
+  text's length and its hash, so code built from another text never attaches.
+- **Package.** The file's package is `""`, which no package can be called, and a `File` lookup
+  of a script function requires a closure noted from the executable's script.
+
+The closures a run makes are noted with these names before the script's first statement runs, so
+the first call of each attaches from the executable through the same checks as a package's file.
+A function the file does not hold compiles at its first call, and a file the script sources is
+read from disk and compiles as it does under `ry run --aot`.
+
 ## Trust
 
 A code file is machine code that the process runs, like the shared objects in a package's `libs`
@@ -264,6 +295,6 @@ database that changed, not an attacker.
 | `install-typed-package.scenario` | the attach line; `RY_GC_STRESS` and the copy path over attached code; `ry build --aot`; a file from another build under `ry run --aot`; a `match` over a closed union, a record parameter and a sort comparator attached after the process interned other shapes; a closure copied at run time; a reinstall in a running session |
 | `fuzz_typed_code_parse` (`crates/typed/tests/test_file.rs`, `cargo fuzz` target `typed_code_parse`) | random valid metadata reads back as written, and truncated or bit-flipped bytes never panic the parser |
 | `fuzz_typed_code_file` (`crates/ry/tests/test_scenarios.rs`) | an installed file damaged in its header, metadata or code never attaches, and a second write against one install gives the same bytes |
-
-`ry build --aot --exe main.R`, which appends a script's code file to a copy of the `ry` executable,
-is not built (`backlog.md`, "Open: ahead-of-time compilation").
+| `build-exe.scenario` | an executable prints what `ry run --aot` prints for the same arguments, attaches every function and compiles none, and compiles at first calls under `RY_AHEAD_MISS=1` |
+| `typed_scripts_agree_however_they_compile` with executables | every generated typed script built with `ry build --aot --exe` prints what the interpreter prints, and at least half of them attach from the executable |
+| `fuzz_executable_payloads` (`crates/ry/tests/test_fuzz.rs`, `cargo fuzz` target `executable_payload`) | a payload reads back as written, and a damaged trailer or metadata reads as damaged or as no payload, never as a payload that lies outside the file |

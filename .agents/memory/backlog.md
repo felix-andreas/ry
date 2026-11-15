@@ -24,6 +24,7 @@ The quality bar is four things.
 
 ## Open: broken on main
 
+- **`native_cases_keep_the_write_barrier_under_seeded_gc_torture` (`oracle` `test_cases`) times out on a 4-core iterate build.** Seed 0 picks `assignment__dollar_in_place`, `datetime__year_overflow`, `environments__unread_loop_variable` and `altrep__colon_in_loops`, and each is killed after 600 s under `RY_GC_STRESS=seed:0 RY_GC_VERIFY=1`, also with the machine otherwise idle. None of them is native or typed. Unverified on main itself; either the stress is too dense for loop-heavy cases or verification is quadratic in the heap, so time one case with and without `RY_GC_VERIFY` before tuning the sample.
 - The code image leaves out every closure that calls an inlined base wrapper (`paste`,
   `sprintf`, the `vector` family): tier 0 compiles such a call to an `Op::Guard` whose constant is
   the wrapper's closure, and `serialize::Encoder` encodes only the closures in `BASE_FUNCTIONS`
@@ -395,13 +396,12 @@ Built: `ry install --train` writes the versions the workload compiled, guessed c
 - **Mutually recursive functions in the file.** A version whose direct callee is still attaching misses, so `even`/`odd` compile in the session while `fib` attaches. Attach a strongly connected component at once (all or none) when a real package shows such a cycle.
 - **Script roots with record, tuple, `Dict`, `Set` or function parameters** compile ahead only when a compiled-ahead function calls them. Training covers the installed case; the script case needs the checker's call-site types.
 
-### Step 4: `ry build --aot --exe main.R`
+### Step 4: `ry build --aot --exe main.R` (built)
 
-- **Shape.** A copy of the running `ry` executable with a payload appended: the elaborated script, its sourced strict files, a code file for the script's top-level definitions in the format of `development/typed-code-file.md`, and a trailer with the payload's offset and length. At start, `ry` looks for the trailer on its own executable, and if it finds one it runs the script as `ry run --aot` does, attaching from the payload instead of compiling. A script closure's identity is (top-level expression index, position) in place of the record offset. Packages load from the library. On macOS the appended file must be signed again (ad hoc is enough), as `bun build --compile` does.
-- **Files.** `Build` in `crates/ry/src/command_line.rs` gains `--exe`; `-o/--output` is the tarball's directory for a package build and names the output file with `--exe` (default: the script's name without `.R`); `main` in `crates/ry/src/main.rs` checks its own executable for the trailer before it parses arguments; `interp::ahead::take` hands out closures whose code attaches from the payload.
-- **Tests.** A scenario that builds an executable, runs it with arguments (`commandArgs()`), and compares with `ry run --aot`; the tier matrix gains the executable mode; the payload parser is fuzzed.
-- **Success.** The executable prints what `ry run` prints, compiles nothing (`RY_TYPED_LOG=1`), and its start is within 1 ms of `ry run` on an empty script.
-- **Stop rule.** Embedding packages or their shared objects is out of scope (`typed-runtime.md`, "Open questions").
+Built: `ry build --aot --exe main.R [-o FILE]` writes a copy of `ry` with the elaborated script and the code file of its top-level definitions appended, and the executable attaches every compiled function from itself (`reference/cli.md`, "Executables"; `development/typed-code-file.md`, "Executables"; `decisions.md`, "`ry build --aot --exe` appends the script and its code file to a copy of `ry`", with the measurements and where the build differs from the plan). Loose ends:
+
+- **macOS has not run it.** `sign` calls `codesign --force --sign -` on the output; run the `build-exe` scenario on a macOS machine or CI job when one is available.
+- **Sourced files compile at run time.** A file the script sources is read from disk and compiles as under `ry run --aot`. Embed sourced strict files when a real program ships as an executable with them.
 
 ### Not planned
 
@@ -520,6 +520,14 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
   cached definition differs, other packages' generics, group generics and primitives.
 - A reload after editing a method or a class takes 0.2 to 0.45 s, and dispatch costs 2.3 to
   4.5 µs per call.
+- **Per-object frames in `new()`.** Every `new()` of a class with a validity method makes four
+  environments: `standardGeneric("initialize")` reifies the generic's slot frame
+  (`dispatch::do_standard_generic` takes `call.env()`, and `methods::exec_method` copies its
+  binding cells into the method's environment), and the prologues of `new`, the default
+  `initialize` and `validObject` pass `environment()`. Fix: read the signature arguments and the
+  formals' bindings from the generic's slot frame without reifying it, and give the prologues
+  frame access that does not reify (`decisions.md`, "`validObject` runs validity methods without
+  its slot loop").
 - `setDataPart()` (R code, about 28 µs per call), which the default `initialize` calls for every
   data part, so `new("MethodDefinition", f)` costs about 50 µs (GNU R about 340 µs).
   `.mergeAttrs` decides the attribute order, so a native version must reproduce it exactly.

@@ -1,0 +1,290 @@
+[stdout]
+| Class "Record" [in ".GlobalEnv"]
+| 
+| Slots:
+|                                     
+| Name:          a         b         e
+| Class: character character   integer
+| [1] "x"
+| List of 3
+|  $ message: chr "invalid class “Record” object: a and b differ in length"
+|  $ class  : chr [1:3] "simpleError" "error" "condition"
+|  $ call   : chr "validObject(.Object)"
+|  logi TRUE
+| List of 3
+|  $ message: chr "invalid class “Record” object: a and b differ in length"
+|  $ class  : chr [1:3] "simpleError" "error" "condition"
+|  $ call   : chr "validObject(r)"
+| [1] "a and b differ in length"
+| [1] TRUE
+| [1] TRUE
+| Class "Point" [in ".GlobalEnv"]
+| 
+| Slots:
+|                       
+| Name:        x       y
+| Class: numeric numeric
+| An object of class "Point"
+| Slot "x":
+| [1] 1
+| 
+| Slot "y":
+| [1] 2
+| 
+| List of 3
+|  $ message: chr "invalid class “Point” object: 1: x must have length 1\ninvalid class “Point” object: 2: y must have length 1"
+|  $ class  : chr [1:3] "simpleError" "error" "condition"
+|  $ call   : chr "validObject(.Object)"
+| An object of class "Flag"
+| Slot "v":
+| [1] TRUE
+| 
+| List of 3
+|  $ message: chr "invalid class “Flag” object: FALSE"
+|  $ class  : chr [1:3] "simpleError" "error" "condition"
+|  $ call   : chr "validObject(.Object)"
+| List of 3
+|  $ message: chr "invalid class “Flag” object: NA"
+|  $ class  : chr [1:3] "simpleError" "error" "condition"
+|  $ call   : chr "validObject(.Object)"
+| Base validity on Base 
+| Derived validity on Derived 
+| Base validity on Base 
+| List of 3
+|  $ message: chr "invalid class “Derived” object: negative id"
+|  $ class  : chr [1:3] "simpleError" "error" "condition"
+|  $ call   : chr "validObject(.Object)"
+| Base validity on Base 
+| Derived validity on Derived 
+| List of 3
+|  $ message: chr "invalid class “Derived” object: one label only"
+|  $ class  : chr [1:3] "simpleError" "error" "condition"
+|  $ call   : chr "validObject(.Object)"
+| Base validity on Base 
+| An object of class "Plain"
+| Slot "z":
+| [1] 1
+| 
+| Slot "id":
+| [1] 2
+| 
+| Base validity on Base 
+| List of 3
+|  $ message: chr "invalid class “Plain” object: negative id"
+|  $ class  : chr [1:3] "simpleError" "error" "condition"
+|  $ call   : chr "validObject(.Object)"
+| validityMethod(object)
+| [1] "function"
+|  [1] "anyStrings"     "attrNames"      "Class"          "classDef"      
+|  [5] "classDefi"      "classi"         "complete"       "errors"        
+|  [9] "extends"        "i"              "idx"            "namei"         
+| [13] "object"         "ok"             "sloti"          "slotNames"     
+| [17] "slotTypes"      "test"           "validityMethod" "where"         
+| [1] "Probe"
+| attr(,"package")
+| [1] ".GlobalEnv"
+| NULL
+| [1] "n"
+| [1] TRUE
+| [1] TRUE
+| [1] "validObject(.Object)"   "isTRUE(x)"              "validityMethod(object)"
+| [1] 34
+| Base validity on Base 
+| [1] "Derived"
+| attr(,"package")
+| [1] ".GlobalEnv"
+| Base validity on Base 
+| [1] TRUE
+| List of 3
+|  $ message: chr "invalid class “Holder” object: invalid object for slot \"item\" in class \"Holder\": got class \"Point\", shoul"| __truncated__
+|  $ class  : chr [1:3] "simpleError" "error" "condition"
+|  $ call   : chr "validObject(bad)"
+| An object of class "Cell"
+| Slot "value":
+| [1] 1
+| 
+| An object of class "Cell"
+| Slot "value":
+| [1] "a"
+| 
+| List of 3
+|  $ message: chr "invalid class “Cell” object: empty cell"
+|  $ class  : chr [1:3] "simpleError" "error" "condition"
+|  $ call   : chr "validObject(.Object)"
+| An object of class "Drawing"
+| Slot "shape":
+| An object of class "Circle"
+| Slot "r":
+| [1] 1
+| 
+| 
+| Slot "name":
+| [1] "c"
+| 
+| List of 3
+|  $ message: chr "invalid class “Drawing” object: unnamed drawing"
+|  $ class  : chr [1:3] "simpleError" "error" "condition"
+|  $ call   : chr "validObject(.Object)"
+| Base validity on Base 
+| Derived validity on Derived 
+| An object of class "Derived"
+| Slot "label":
+| [1] "default"
+| 
+| Slot "id":
+| [1] 4
+| 
+| Base validity on Base 
+| List of 3
+|  $ message: chr "invalid class “Derived” object: negative id"
+|  $ class  : chr [1:3] "simpleError" "error" "condition"
+|  $ call   : chr "validObject(.Object)"
+| Base validity on Base 
+| Base validity on Base 
+| Derived validity on Derived 
+| An object of class "Derived"
+| Slot "label":
+| [1] "from base"
+| 
+| Slot "id":
+| [1] 5
+| 
+| Base validity on Base 
+| Base validity on Base 
+| Derived validity on Derived 
+| List of 3
+|  $ message: chr "invalid class “Derived” object: one label only"
+|  $ class  : chr [1:3] "simpleError" "error" "condition"
+|  $ call   : chr "validObject(.Object)"
+| [1] "SClassExtension"
+| attr(,"package")
+| [1] "methods"
+| [1] "SClassExtension"
+| attr(,"package")
+| [1] "methods"
+| [1] "SClassExtension"
+| attr(,"package")
+| [1] "methods"
+| [1] "SClassExtension"
+| attr(,"package")
+| [1] "methods"
+| [1] "SClassExtension"
+| attr(,"package")
+| [1] "methods"
+| [1] "SClassExtension"
+| attr(,"package")
+| [1] "methods"
+|  [1] "anyStrings"     "attrNames"      "Class"          "classDef"      
+|  [5] "classDefi"      "classi"         "complete"       "errors"        
+|  [9] "extends"        "exti"           "i"              "idx"           
+| [13] "namei"          "object"         "ok"             "sloti"         
+| [17] "slotNames"      "slotTypes"      "superClass"     "superDef"      
+| [21] "test"           "validityMethod" "where"         
+| i : [1] 3
+| namei : [1] "unit"
+| idx : [1] 1 3
+| attrNames : [1] ".Data"    ".S3Class" "unit"     "class"   
+| slotNames : [1] ".Data" "unit" 
+| errors : character(0)
+|  [1] "anyStrings"     "attrNames"      "Class"          "classDef"      
+|  [5] "classDefi"      "classi"         "complete"       "errors"        
+|  [9] "extends"        "exti"           "i"              "idx"           
+| [13] "namei"          "object"         "ok"             "sloti"         
+| [17] "slotNames"      "slotTypes"      "superClass"     "superDef"      
+| [21] "test"           "validityMethod" "where"         
+| i : [1] 3
+| namei : [1] "unit"
+| idx : [1] 1 3
+| attrNames : [1] ".Data"    ".S3Class" "unit"     "class"   
+| slotNames : [1] ".Data" "unit" 
+| errors : character(0)
+|  [1] "anyStrings"     "attrNames"      "Class"          "classDef"      
+|  [5] "classDefi"      "classi"         "complete"       "errors"        
+|  [9] "extends"        "exti"           "i"              "idx"           
+| [13] "namei"          "object"         "ok"             "sloti"         
+| [17] "slotNames"      "slotTypes"      "superClass"     "superDef"      
+| [21] "test"           "validityMethod" "where"         
+| i : [1] 3
+| namei : [1] "unit"
+| idx : [1] 1 3
+| attrNames : [1] ".Data"    ".S3Class" "unit"     "class"    "names"   
+| slotNames : [1] ".Data" "unit" 
+| errors : character(0)
+|  [1] "anyStrings"     "attrNames"      "Class"          "classDef"      
+|  [5] "complete"       "errors"         "extends"        "exti"          
+|  [9] "i"              "idx"            "object"         "slotNames"     
+| [13] "slotTypes"      "superClass"     "superDef"       "test"          
+| [17] "validityMethod" "where"         
+| i : [1] 1
+| idx : integer(0)
+| attrNames : [1] ".Data"    ".S3Class" "class"   
+| slotNames : NULL
+| errors : character(0)
+|  [1] "anyStrings"     "attrNames"      "Class"          "classDef"      
+|  [5] "classDefi"      "classi"         "complete"       "errors"        
+|  [9] "extends"        "i"              "idx"            "namei"         
+| [13] "object"         "ok"             "sloti"          "slotNames"     
+| [17] "slotTypes"      "test"           "validityMethod" "where"         
+| i : NULL
+| namei : [1] "old"
+| idx : [1] 3 4
+| attrNames : [1] ".Data"    ".S3Class" "any"      "old"      "class"   
+| slotNames : [1] "any" "old"
+| errors : character(0)
+|  [1] "anyStrings"     "attrNames"      "Class"          "classDef"      
+|  [5] "classDefi"      "classi"         "complete"       "errors"        
+|  [9] "extends"        "i"              "idx"            "namei"         
+| [13] "object"         "ok"             "sloti"          "slotNames"     
+| [17] "slotTypes"      "test"           "validityMethod" "where"         
+| i : NULL
+| namei : [1] "old"
+| idx : [1] 3 4
+| attrNames : [1] ".Data"    ".S3Class" "any"      "old"      "class"   
+| slotNames : [1] "any" "old"
+| errors : character(0)
+|  [1] "anyStrings"     "attrNames"      "Class"          "classDef"      
+|  [5] "classDefi"      "classi"         "complete"       "errors"        
+|  [9] "extends"        "i"              "idx"            "namei"         
+| [13] "object"         "ok"             "sloti"          "slotNames"     
+| [17] "slotTypes"      "test"           "validityMethod" "where"         
+| i : NULL
+| namei : [1] "old"
+| idx : [1] 3 4
+| attrNames : [1] ".Data"    ".S3Class" "any"      "old"      "class"    "extra"   
+| slotNames : [1] "any" "old"
+| errors : character(0)
+| [1] "SClassExtension"
+| attr(,"package")
+| [1] "methods"
+| List of 3
+|  $ message: chr "invalid class “Tail” object: slots in class definition but not in object: \"n\""
+|  $ class  : chr [1:3] "simpleError" "error" "condition"
+|  $ call   : chr "validObject(partial)"
+| [1] "SClassExtension"
+| attr(,"package")
+| [1] "methods"
+| Base validity on Base 
+| Derived validity on Derived 
+| [1] "SClassExtension"
+| attr(,"package")
+| [1] "methods"
+| [1] "SClassExtension"
+| attr(,"package")
+| [1] "methods"
+| [1] "SClassExtension"
+| attr(,"package")
+| [1] "methods"
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| List of 3
+|  $ message: chr "invalid class “Target” object: bad Target"
+|  $ class  : chr [1:3] "simpleError" "error" "condition"
+|  $ call   : chr "validObject(.Object)"
+| [1] "long Source"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "long Source"

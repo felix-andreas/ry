@@ -201,7 +201,7 @@ impl Counter {
             Counter::ConditionsSignalled => "conditions signalled",
             Counter::HandlersEstablished => "handlers established",
             Counter::JitCompiles => "JIT compilations",
-            Counter::JitRefusals => "bodies tier 1 examined and left to tier 0",
+            Counter::JitRefusals => "JIT compile attempts refused",
             Counter::JitDeoptimizations => "JIT deoptimizations",
             Counter::JitEntries => "entries into compiled code",
             Counter::LookupMisses => "lookups past the inline caches",
@@ -295,6 +295,7 @@ static BUILTINS: [AtomicU64; BUILTIN_SLOTS] = [const { AtomicU64::new(0) }; BUIL
 static LABELS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static PACKAGE_FALLBACKS: [AtomicU64; LABEL_SLOTS] = [const { AtomicU64::new(0) }; LABEL_SLOTS];
 static REIFICATIONS: [AtomicU64; LABEL_SLOTS] = [const { AtomicU64::new(0) }; LABEL_SLOTS];
+static JIT_REFUSALS: [AtomicU64; LABEL_SLOTS] = [const { AtomicU64::new(0) }; LABEL_SLOTS];
 static FRAME_OWNERS: [AtomicU32; FRAME_SLOTS] = [const { AtomicU32::new(0) }; FRAME_SLOTS];
 static FRAME_NAMES: [AtomicUsize; FRAME_SLOTS] = [const { AtomicUsize::new(0) }; FRAME_SLOTS];
 static FRAME_BODIES: [AtomicUsize; FRAME_SLOTS] = [const { AtomicUsize::new(0) }; FRAME_SLOTS];
@@ -440,6 +441,18 @@ pub fn count_reification(reason: u32) {
 /// The slot frames [`count_reification`] counted under each reason, largest first.
 pub fn reifications() -> Vec<(String, u64)> {
     by_label(&REIFICATIONS)
+}
+
+/// Counts a compile attempt tier 1 refused, under the [`label`] of the refusal's reason.
+pub fn count_jit_refusal(reason: u32) {
+    if let Some(slot) = JIT_REFUSALS.get(reason as usize) {
+        bump(slot);
+    }
+}
+
+/// The compile attempts [`count_jit_refusal`] counted under each reason, largest first.
+pub fn jit_refusals() -> Vec<(String, u64)> {
+    by_label(&JIT_REFUSALS)
 }
 
 fn by_label(slots: &[AtomicU64; LABEL_SLOTS]) -> Vec<(String, u64)> {
