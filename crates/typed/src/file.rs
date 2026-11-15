@@ -515,7 +515,7 @@ unsafe fn build_file(
 // file is parsed, so the loader indexes without a second check.
 
 /// A parsed typed code file's header and metadata.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, PartialEq)]
 pub struct Parsed {
     pub header: Header,
     pub strings: Vec<String>,
@@ -2689,4 +2689,373 @@ unsafe fn build_expr(strings: &[String], expr: &Expr) -> Option<Sexp> {
     };
     heap.root(value);
     Some(value)
+}
+
+/// Checks of the file format for the fuzz tests and fuzz targets: random valid metadata must
+/// read back as written, and corrupt bytes must parse or fail with [`MALFORMED`], never panic.
+pub mod testing {
+    use {
+        super::{
+            ALIGN, Argument, Class, EnvRef, Expr, FieldNames, FileCallee, FileConversion,
+            HEADER_SIZE, Header, Item, Lookup, Parsed, ShapeEntry, Site, SiteResult, Target,
+            Version, encode_header, encode_metadata, parse,
+        },
+        crate::{
+            backend::{Helper, Slot},
+            ir::Type,
+            shapes,
+        },
+        interp::code_image::{self, DatabaseStamp},
+        syntax::testing::Entropy,
+    };
+
+    /// Writes random valid metadata, parses it back, then parses corruptions of it.
+    pub fn check_round_trip(entropy: &mut impl Entropy) {
+        let parsed = random_parsed(entropy);
+        let bytes = file_bytes(&parsed);
+        match parse(&bytes) {
+            Ok(read) => assert_eq!(read, parsed, "metadata reads back as written"),
+            Err(message) => panic!("written metadata must parse: {message}\n{parsed:#?}"),
+        }
+        for _ in 0..1 + entropy.below(4) {
+            let mut corrupt = bytes.clone();
+            match entropy.below(3) {
+                0 => corrupt.truncate(entropy.below(bytes.len())),
+                1 => {
+                    let at = entropy.below(corrupt.len());
+                    corrupt[at] ^= 1 << entropy.below(8);
+                }
+                _ => {
+                    // Corrupt the metadata and fix its hash, so the parser reads the bytes.
+                    let end = HEADER_SIZE + parsed.header.metadata_length as usize;
+                    if end > HEADER_SIZE {
+                        let at = HEADER_SIZE + entropy.below(end - HEADER_SIZE);
+                        corrupt[at] = entropy.below(256) as u8;
+                        let hash = code_image::stream_hash(&corrupt[HEADER_SIZE..end]);
+                        let word = 12 + 8 * 10;
+                        corrupt[word..word + 8].copy_from_slice(&hash.to_le_bytes());
+                    }
+                }
+            }
+            check_parse_input(&corrupt);
+        }
+    }
+
+    /// Parses arbitrary bytes, which must give metadata or an error.
+    pub fn check_parse_input(bytes: &[u8]) {
+        if let Ok(parsed) = parse(bytes) {
+            // Every index the loader follows is in range.
+            let in_range = |indices: &[u32], length: usize| {
+                indices.iter().all(|&index| (index as usize) < length)
+            };
+            for version in &parsed.functions {
+                assert!(in_range(&version.sites, parsed.sites.len()));
+                assert!(in_range(&version.callees, parsed.callees.len()));
+                assert!(in_range(&version.lookups, parsed.lookups.len()));
+                assert!(version.body < version.end && version.end <= parsed.header.shared_start);
+            }
+        }
+    }
+
+    /// The file's bytes up to its code: the header and the metadata, padded to the code.
+    fn file_bytes(parsed: &Parsed) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        encode_header(&parsed.header, &mut bytes);
+        bytes.extend_from_slice(&encode_metadata(parsed));
+        bytes
+    }
+
+    fn random_parsed(entropy: &mut impl Entropy) -> Parsed {
+        let mut parsed = Parsed::default();
+        for index in 0..1 + entropy.below(6) {
+            parsed.strings.push(format!("name{index}"));
+        }
+        let strings = parsed.strings.len();
+        for _ in 0..entropy.below(6) {
+            let shapes = &parsed.shapes;
+            let records: Vec<u32> = indices(shapes, |entry| matches!(entry, ShapeEntry::Shape { .. }));
+            let entry = match entropy.below(3) {
+                1 if !records.is_empty() => {
+                    let count = 1 + entropy.below(records.len());
+                    ShapeEntry::Union(
+                        (0..count)
+                            .map(|_| records[entropy.below(records.len())])
+                            .collect(),
+                    )
+                }
+                2 => ShapeEntry::Array(random_item(entropy, shapes)),
+                _ => {
+                    let fields = match entropy.below(4) {
+                        0 => FieldNames::Positional(entropy.below(4) as u32),
+                        1 => FieldNames::Named(
+                            (0..entropy.below(3))
+                                .map(|_| entropy.below(strings) as u32)
+                                .collect(),
+                        ),
+                        2 => FieldNames::Dict,
+                        _ => FieldNames::Set,
+                    };
+                    let items = (0..entropy.below(3))
+                        .map(|_| match random_item(entropy, shapes) {
+                            Item::Tag(_) => Item::Tag(shapes::ANY),
+                            item => item,
+                        })
+                        .collect();
+                    ShapeEntry::Shape {
+                        tag: entropy.chance(1, 2).then(|| entropy.below(strings) as u32),
+                        fields,
+                        items,
+                    }
+                }
+            };
+            parsed.shapes.push(entry);
+        }
+        let records = indices(&parsed.shapes, |entry| {
+            matches!(entry, ShapeEntry::Shape { .. })
+        });
+        for _ in 0..entropy.below(5) {
+            let lookup = Lookup {
+                symbol: entropy.below(strings) as u32,
+                function: entropy.chance(1, 2),
+                start: random_env(entropy, strings),
+                found: random_env(entropy, strings),
+                class: match entropy.below(5) {
+                    0 => Class::Base,
+                    1 => Class::Table,
+                    2 => Class::Library,
+                    3 => Class::File {
+                        package: entropy.below(strings) as u32,
+                        offset: entropy.next_u64(),
+                        position: entropy.below(9) as u32,
+                        stamp: DatabaseStamp {
+                            length: entropy.next_u64(),
+                            modified: entropy.next_u64(),
+                        },
+                    },
+                    _ => Class::Other,
+                },
+            };
+            parsed.lookups.push(lookup);
+        }
+        let lookups = parsed.lookups.len();
+        if lookups > 0 {
+            for _ in 0..entropy.below(4) {
+                let conversion = |entropy: &mut dyn FnMut(usize) -> usize| FileConversion {
+                    call: Expr::Symbol(entropy(strings) as u32),
+                    function: entropy(lookups) as u32,
+                    checked: None,
+                };
+                let mut below = |bound: usize| entropy.below(bound);
+                let arguments = (0..below(3))
+                    .map(|_| Argument {
+                        tag: (below(2) == 0).then(|| below(strings) as u32),
+                        code: Expr::Symbol(below(strings) as u32),
+                        ty: Type::Dbl,
+                        conversion: (below(2) == 0).then(|| conversion(&mut below)),
+                    })
+                    .collect();
+                let result = match below(3) {
+                    0 => SiteResult::Unused,
+                    1 => SiteResult::Converted(conversion(&mut below), Type::I64),
+                    _ => SiteResult::Table,
+                };
+                let site = Site {
+                    env: random_env(entropy, strings),
+                    call: random_expr(entropy, strings, 0),
+                    function: entropy.below(lookups) as u32,
+                    arguments,
+                    result,
+                    diverges: entropy.chance(1, 2),
+                    effect_free: entropy.chance(1, 2),
+                };
+                parsed.sites.push(site);
+            }
+        }
+        let data_length = entropy.below(64) as u64;
+        let slot_count = entropy.below(8);
+        for _ in 0..slot_count {
+            let slot = match entropy.below(7) {
+                0 => Slot::Helper(Helper::ALL[entropy.below(Helper::ALL.len())]),
+                2 if !records.is_empty() => Slot::Shape(records[entropy.below(records.len())]),
+                3 if !records.is_empty() => {
+                    Slot::Constant(records[entropy.below(records.len())])
+                }
+                4 if data_length > 0 => Slot::Data(entropy.below(data_length as usize) as u32),
+                5 if !parsed.sites.is_empty() => {
+                    Slot::Site(entropy.below(parsed.sites.len()) as u32)
+                }
+                _ => Slot::Interrupt,
+            };
+            parsed.slots.push(slot);
+        }
+        let function_count = entropy.below(4);
+        if lookups > 0 {
+            for _ in 0..entropy.below(3) {
+                let target = if function_count > 0 && entropy.chance(1, 2) {
+                    Target::Direct(entropy.below(function_count) as u32)
+                } else {
+                    Target::Slot
+                };
+                parsed.callees.push(FileCallee {
+                    lookup: entropy.below(lookups) as u32,
+                    params: (0..entropy.below(3))
+                        .map(|_| random_type(entropy, &parsed.shapes))
+                        .collect(),
+                    result: random_type(entropy, &parsed.shapes),
+                    target,
+                });
+            }
+        }
+        if !parsed.callees.is_empty() && entropy.chance(1, 2) {
+            parsed
+                .slots
+                .push(Slot::Callee(entropy.below(parsed.callees.len()) as u32));
+        }
+        let code_length = 64 + entropy.below(4096) as u64;
+        let shared_start = 32 + entropy.below(code_length as usize - 32) as u64;
+        for _ in 0..function_count {
+            let end = 2 + entropy.below(shared_start as usize - 1) as u64;
+            let pick = |entropy: &mut dyn FnMut(usize) -> usize, length: usize| -> Vec<u32> {
+                if length == 0 {
+                    return Vec::new();
+                }
+                (0..entropy(3)).map(|_| entropy(length) as u32).collect()
+            };
+            let mut below = |bound: usize| entropy.below(bound);
+            let version = Version {
+                name: below(strings) as u32,
+                offset: below(1 << 20) as u64,
+                position: below(4) as u32,
+                params: SmallVec::new(),
+                result: Type::Dbl,
+                body: below(end as usize - 1) as u64,
+                trampoline: below(end as usize - 1) as u64,
+                end,
+                hash: below(usize::MAX) as u64,
+                calls_r: below(2) == 0,
+                lookups: pick(&mut below, lookups),
+                sites: pick(&mut below, parsed.sites.len()),
+                callees: pick(&mut below, parsed.callees.len()),
+                confirms: if records.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![records[below(records.len())]]
+                },
+            };
+            parsed.functions.push(version);
+        }
+        let metadata = encode_metadata(&parsed);
+        let metadata_end = (HEADER_SIZE + metadata.len()) as u64;
+        parsed.header = Header {
+            build: entropy.next_u64(),
+            stamp: DatabaseStamp {
+                length: entropy.next_u64(),
+                modified: entropy.next_u64(),
+            },
+            target: entropy.next_u64(),
+            metadata_length: metadata.len() as u64,
+            slots: parsed.slots.len() as u64,
+            code_offset: metadata_end.div_ceil(ALIGN) * ALIGN,
+            code_length,
+            data_length,
+            shared_start,
+            metadata_hash: code_image::stream_hash(&metadata),
+            shared_hash: entropy.next_u64(),
+        };
+        parsed
+    }
+
+    use smallvec::SmallVec;
+
+    fn indices(shapes: &[ShapeEntry], wanted: impl Fn(&ShapeEntry) -> bool) -> Vec<u32> {
+        (0..shapes.len() as u32)
+            .filter(|&index| wanted(&shapes[index as usize]))
+            .collect()
+    }
+
+    fn random_item(entropy: &mut impl Entropy, shapes: &[ShapeEntry]) -> Item {
+        let pick = |entropy: &mut dyn FnMut(usize) -> usize, wanted: fn(&ShapeEntry) -> bool| {
+            let found = indices(shapes, wanted);
+            (!found.is_empty()).then(|| found[entropy(found.len())])
+        };
+        let mut below = |bound: usize| entropy.below(bound);
+        match below(8) {
+            0 => Item::Int,
+            1 => Item::Dbl,
+            2 => Item::Lgl,
+            3 => Item::Str,
+            5 => pick(&mut below, |entry| matches!(entry, ShapeEntry::Shape { .. }))
+                .map_or(Item::I64, Item::Record),
+            6 => pick(&mut below, |entry| matches!(entry, ShapeEntry::Union(_)))
+                .map_or(Item::Tag(shapes::ANY), Item::Tag),
+            7 => pick(&mut below, |entry| matches!(entry, ShapeEntry::Array(_)))
+                .map_or(Item::I64, Item::Array),
+            _ => Item::I64,
+        }
+    }
+
+    fn random_type(entropy: &mut impl Entropy, shapes: &[ShapeEntry]) -> Type {
+        match entropy.below(14) {
+            0 => Type::Int,
+            1 => Type::Dbl,
+            2 => Type::Lgl,
+            3 => Type::Bool,
+            4 => Type::Str,
+            6 => Type::Null,
+            7 => Type::Vector {
+                item: random_item(entropy, shapes),
+                array: entropy.chance(1, 2),
+            },
+            8 => Type::List(random_item(entropy, shapes)),
+            9 => Type::Set(random_item(entropy, shapes)),
+            10 => Type::Dict {
+                key: random_item(entropy, shapes),
+                value: random_item(entropy, shapes),
+            },
+            11 => match random_item(entropy, shapes) {
+                Item::Record(entry) => Type::Record(entry),
+                _ => Type::Table,
+            },
+            12 => match random_item(entropy, shapes) {
+                Item::Tag(entry) => Type::Tag(entry),
+                _ => Type::Tag(shapes::ANY),
+            },
+            13 => Type::Table,
+            _ => Type::I64,
+        }
+    }
+
+    fn random_env(entropy: &mut impl Entropy, strings: usize) -> EnvRef {
+        match entropy.below(7) {
+            0 => EnvRef::Global,
+            1 => EnvRef::BaseEnv,
+            2 => EnvRef::BaseNamespace,
+            3 => EnvRef::StandardLibrary,
+            4 => EnvRef::Namespace(entropy.below(strings) as u32),
+            5 => EnvRef::Imports(entropy.below(strings) as u32),
+            _ => EnvRef::Package(entropy.below(strings) as u32),
+        }
+    }
+
+    fn random_expr(entropy: &mut impl Entropy, strings: usize, depth: usize) -> Expr {
+        match entropy.below(if depth < 3 { 8 } else { 7 }) {
+            0 => Expr::Nil,
+            1 => Expr::Missing,
+            2 => Expr::Symbol(entropy.below(strings) as u32),
+            3 => Expr::Str(entropy.below(strings) as u32),
+            4 => Expr::Dbl(entropy.next_u64()),
+            5 => Expr::Int(entropy.next_u64() as i32),
+            6 => Expr::Lgl(entropy.below(3) as i32 - 1),
+            _ => Expr::Call(
+                (0..1 + entropy.below(3))
+                    .map(|_| {
+                        (
+                            entropy.chance(1, 3).then(|| entropy.below(strings) as u32),
+                            random_expr(entropy, strings, depth + 1),
+                        )
+                    })
+                    .collect(),
+            ),
+        }
+    }
 }

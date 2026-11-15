@@ -90,6 +90,15 @@ expect stderr lacks "typed: attached"
 unset RY_AHEAD_MISS
 env RY_CODE_IMAGE 1
 
+# Attached code keeps what it reads alive across collections at every allocation.
+env RY_GC_STRESS 1
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "[1] 718640.9"
+expect stdout "[1] 9"
+expect stderr "typed: attached `total` for [I64, Dbl] -> Dbl from typedpkg's code file"
+unset RY_GC_STRESS
+
 # A saved typed function reads back typed too.
 file save.R
 | half <- function(x: F64) -> F64 x / 2

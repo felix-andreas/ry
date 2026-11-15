@@ -483,6 +483,128 @@ fn typed_scripts_agree_however_they_compile() {
     );
 }
 
+/// An installed package's typed code file is build output: writing it twice for one install
+/// gives the same bytes, and a file damaged anywhere is refused, so the package's typed functions
+/// compile in the session and the script prints what it prints with an intact file.
+#[test]
+fn fuzz_typed_code_file() {
+    if let Some(reason) =
+        missing_requirement(&["ry-runtime".to_owned()], None).expect("a known requirement")
+    {
+        eprintln!("typed code file: skipped, {reason}");
+        return;
+    }
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = directory.path();
+    let package = root.join("pkg");
+    fs::create_dir_all(package.join("R")).expect("create the package");
+    fs::write(
+        package.join("DESCRIPTION"),
+        "Package: typedfile\nVersion: 1.0\nTitle: File\nDescription: A file.\nLicense: MIT\n",
+    )
+    .expect("write DESCRIPTION");
+    fs::write(package.join("NAMESPACE"), "exportPattern(\"^[^.]\")\n").expect("write NAMESPACE");
+    fs::write(
+        package.join("R").join("typed.R"),
+        "grow <- function(x: F64, rate: F64) -> F64 x + rate * x\n\
+         total <- function(n: I64, rate: F64) -> F64 {\n  sum <- 0.0\n  \
+         for (i in List.range(1, n)) {\n    sum <- grow(sum, rate) + Num.to_f64(i)\n  }\n  sum\n}\n\
+         label <- function(name: Str, n: I64) -> Str Str.concat(name, Num.to_str(n))\n",
+    )
+    .expect("write the definitions");
+    let ry = |arguments: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ry"))
+            .args(arguments)
+            .current_dir(root)
+            .env("RY_TYPED_LOG", "1")
+            .env_remove("RY_AHEAD_MISS")
+            .env("XDG_CACHE_HOME", root.join(".cache"))
+            .output()
+            .expect("run ry")
+    };
+    let installed = ry(&["install", "pkg", "-l", "first"]);
+    assert!(
+        installed.status.success(),
+        "install failed:\n{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let typed_file = |library: &str| {
+        fs::read_dir(root.join(library).join("typedfile/R"))
+            .expect("the installed package's R directory")
+            .map(|entry| entry.expect("a directory entry").path())
+            .find(|path| path.extension().is_some_and(|extension| extension == "ryt"))
+            .unwrap_or_else(|| panic!("{library} holds no typed code file"))
+    };
+    let original = fs::read(typed_file("first")).expect("read the typed code file");
+
+    // A second write against the same install, with the database's stamp kept by `cp -a`.
+    let copied = Command::new("cp")
+        .args(["-a", "first", "second"])
+        .current_dir(root)
+        .status()
+        .expect("run cp");
+    assert!(copied.success());
+    fs::write(root.join("write.R"), include_str!("../../rcmd/src/code-image.R"))
+        .expect("write the driver");
+    let second = root.join("second").display().to_string();
+    let rewritten = ry(&[
+        "run", "--runtime", "ry", "write.R", "typedfile", &second, "pkg", "none", "no-image",
+        "typed",
+    ]);
+    assert!(
+        rewritten.status.success(),
+        "rewriting failed:\n{}",
+        String::from_utf8_lossy(&rewritten.stderr)
+    );
+    assert!(
+        fs::read(typed_file("second")).expect("read the second file") == original,
+        "two writes against one install give different bytes"
+    );
+
+    fs::write(
+        root.join("use.R"),
+        "library(typedfile, lib.loc = \"first\")\nprint(total(1000, 0.001))\nprint(label(\"a\", 3))\n",
+    )
+    .expect("write the script");
+    let intact = ry(&["run", "--runtime", "ry", "use.R"]);
+    let intact_stderr = String::from_utf8_lossy(&intact.stderr);
+    assert!(
+        intact.status.success() && intact_stderr.contains("typed: attached `total`"),
+        "the intact file is not attached:\n{intact_stderr}"
+    );
+    let path = typed_file("first");
+    for_each_seed(16, |seed| {
+        let mut rng = SplitMix64(seed);
+        let mut damaged = original.clone();
+        // The bytes that mean something: the header and metadata (whose length is the header's
+        // fifth word), and the code and data from the 64 KiB boundary on, not the padding.
+        let word = |index: usize| {
+            let start = 12 + 8 * index;
+            u64::from_le_bytes(original[start..start + 8].try_into().expect("a header word"))
+        };
+        let metadata_end = 116 + word(4);
+        let code_offset = word(6);
+        let at = if rng.next_u64() % 2 == 0 {
+            rng.next_u64() % metadata_end
+        } else {
+            code_offset + rng.next_u64() % (original.len() as u64 - code_offset)
+        } as usize;
+        if rng.next_u64() % 4 == 0 {
+            damaged.truncate(at);
+        } else {
+            damaged[at] ^= 1 << (rng.next_u64() % 8);
+        }
+        fs::write(&path, &damaged).expect("write the damaged file");
+        let output = ry(&["run", "--runtime", "ry", "use.R"]);
+        assert_eq!(
+            (status_code(output.status), &output.stdout),
+            (status_code(intact.status), &intact.stdout),
+            "seed {seed}: a file damaged at byte {at} changes what the script prints:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    });
+}
+
 /// A generated script's top-level statements, each with the `#:` block above it.
 fn statements_of(text: &str) -> Vec<String> {
     let mut statements: Vec<String> = Vec::new();
