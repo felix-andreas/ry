@@ -938,7 +938,7 @@ unsafe fn c_call(
             SexpType::List if kind == RoutineKind::C => {
                 let copy = crate::memory::duplicate(value, false)?;
                 runtime.heap.root(copy);
-                runtime.heap.escape(copy);
+                runtime.heap.escape(copy, true);
                 pointers.push(copy.data() as *mut std::ffi::c_void);
                 CArgument::Vector(copy)
             }

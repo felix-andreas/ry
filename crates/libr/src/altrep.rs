@@ -488,24 +488,26 @@ pub unsafe fn dataptr(object: Sexp, writable: bool) -> ApiResult<*mut u8> {
             ));
         }
     };
-    if writable
-        && matches!(
+    escape_storage(object, pointer, writable);
+    Ok(pointer)
+}
+
+/// An element pointer into a handle vector lets native code store without the write barrier,
+/// read-only or not (`vectors::handle_data`). Classes conventionally keep their materialized
+/// storage in data1 or data2, so the vector the pointer points into is found there and rescanned
+/// from then on.
+unsafe fn escape_storage(object: Sexp, pointer: *const u8, writable: bool) {
+    if pointer.is_null()
+        || !matches!(
             object.kind(),
             SexpType::String | SexpType::List | SexpType::Expression
         )
     {
-        escape_storage(object, pointer);
+        return;
     }
-    Ok(pointer)
-}
-
-/// A writable element pointer into a handle vector lets native code store without the write
-/// barrier. Classes conventionally keep their materialized storage in data1 or data2, so the
-/// vector the pointer points into is found there and rescanned from then on.
-unsafe fn escape_storage(object: Sexp, pointer: *mut u8) {
     for slot in [object.car(), object.cdr()] {
-        if slot.kind().is_vector() && !slot.is_altrep() && slot.data() == pointer {
-            runtime().heap.escape(slot);
+        if slot.kind().is_vector() && !slot.is_altrep() && slot.data().cast_const() == pointer {
+            runtime().heap.escape(slot, writable);
         }
     }
 }
@@ -520,13 +522,15 @@ pub unsafe fn readable_dataptr(object: Sexp) -> ApiResult<Option<*const u8>> {
 }
 
 pub unsafe fn dataptr_or_null(object: Sexp) -> ApiResult<*const c_void> {
-    match methods(object).dataptr_or_null {
+    let pointer = match methods(object).dataptr_or_null {
         Method::Native(method) => native(std::ptr::null(), |result| {
             ry_altrep_dataptr_or_null(method, object, result)
-        }),
-        Method::Builtin(method) => method(object),
-        Method::Default => Ok(std::ptr::null()),
-    }
+        })?,
+        Method::Builtin(method) => method(object)?,
+        Method::Default => std::ptr::null(),
+    };
+    escape_storage(object, pointer.cast(), false);
+    Ok(pointer)
 }
 
 pub unsafe fn int_elt(object: Sexp, index: R_xlen_t) -> ApiResult<i32> {
@@ -1845,11 +1849,8 @@ unsafe fn deferred_expand(object: Sexp) -> ApiResult<Sexp> {
     Ok(object.cdr())
 }
 
-unsafe fn deferred_dataptr(object: Sexp, writable: bool) -> ApiResult<*mut u8> {
+unsafe fn deferred_dataptr(object: Sexp, _writable: bool) -> ApiResult<*mut u8> {
     let converted = deferred_expand(object)?;
-    if writable {
-        runtime().heap.escape(converted);
-    }
     Ok(converted.data())
 }
 

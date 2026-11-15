@@ -788,7 +788,7 @@ fn an_escaped_list_keeps_what_native_code_stored_into_it() {
     unsafe {
         let escaped = heap.alloc_vector(SexpType::List, 1).expect("alloc");
         heap.add_global_root(escaped);
-        heap.escape(escaped);
+        heap.escape(escaped, true);
         let mark = heap.handle_mark();
         let vector = big_vector(&mut heap, 1.5);
         heap.root(vector);
@@ -1177,8 +1177,8 @@ fn stores_through_an_escaped_pointer_survive_minor_collections() {
         heap.root(strings);
         heap.root(list);
         heap.collect(Collection::Minor);
-        heap.escape(strings);
-        heap.escape(list);
+        heap.escape(strings, true);
+        heap.escape(list, true);
         // Native code stores through the raw element pointers, bypassing the barrier.
         let text = heap
             .mk_char(b"escaped text", Encoding::Native)
@@ -1211,6 +1211,94 @@ fn stores_through_an_escaped_pointer_survive_minor_collections() {
         assert_eq!(strings.element(1).bytes(), b"stored before return");
         assert_eq!(list.element(0).slice::<i32>(), &[7]);
     }
+}
+
+/// Native code permutes a large list and stores into it through element pointers, read-only and
+/// writable, as data.table's `setcolorder` permutes columns through `DATAPTR_RO`, while
+/// collections of every kind run at random points, some during the escape. The barrier check
+/// runs before each collection short of a major one, and every element must hold what the model
+/// says. The list spans several 128-element cards, so a permutation moves young elements between
+/// dirty and clean cards.
+#[test]
+fn element_pointer_permutations_keep_the_write_barrier() {
+    for_each_seed(200, |seed| {
+        let mut rng = SplitMix64(0xca7d_5eed ^ seed);
+        let mut heap = Heap::new();
+        heap.update_policy(|policy| policy.verify = true);
+        unsafe {
+            let length = 129 + rng.below(600);
+            let list = heap
+                .alloc_vector(SexpType::List, length as isize)
+                .expect("alloc");
+            heap.add_global_root(list);
+            heap.collect(Collection::Major);
+            let mut model: Vec<Option<i32>> = vec![None; length];
+            let mut next = 0;
+            // Whether the list is escaped, and whether any pointer to it was writable.
+            let mut escaped: Option<bool> = None;
+            let mut young_integer = |heap: &mut Heap| {
+                next += 1;
+                let value = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+                *value.slice_mut::<i32>().first_mut().expect("one element") = next;
+                (value, next)
+            };
+            for step in 0..80 {
+                match rng.below(9) {
+                    0 | 1 => {
+                        let index = rng.below(length);
+                        let (value, number) = young_integer(&mut heap);
+                        heap.set_element(list, index, value);
+                        model[index] = Some(number);
+                    }
+                    2 => {
+                        let writable = rng.chance(1, 3);
+                        heap.escape(list, writable);
+                        escaped = Some(escaped.unwrap_or(false) || writable);
+                    }
+                    3 | 4 if escaped.is_some() => {
+                        let elements = list.slice_mut::<Sexp>();
+                        let start = rng.below(length);
+                        let end = start + rng.below(length - start) + 1;
+                        if rng.chance(1, 2) {
+                            elements[start..end].reverse();
+                            model[start..end].reverse();
+                        } else {
+                            let other = rng.below(length);
+                            elements.swap(start, other);
+                            model.swap(start, other);
+                        }
+                    }
+                    5 if escaped == Some(true) => {
+                        let index = rng.below(length);
+                        let (value, number) = young_integer(&mut heap);
+                        list.slice_mut::<Sexp>()[index] = value;
+                        model[index] = Some(number);
+                    }
+                    6 => {
+                        heap.retire_escaped();
+                        escaped = None;
+                    }
+                    _ => {
+                        let kind = match rng.below(8) {
+                            0 => Collection::Major,
+                            1 | 2 => Collection::Intermediate,
+                            _ => Collection::Minor,
+                        };
+                        heap.collect(kind);
+                        for (index, expected) in model.iter().enumerate() {
+                            let element = list.element(index);
+                            let found = (element.kind() == SexpType::Integer)
+                                .then(|| element.slice::<i32>()[0]);
+                            assert_eq!(
+                                found, *expected,
+                                "seed {seed}, step {step}: element {index} after a {kind:?} collection"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    });
 }
 
 #[test]

@@ -702,12 +702,14 @@ fuzz-differential seed="0" count="200" engines="ry-tier0,ry-jit":
 
 # Every oracle case under collection stress (`RY_GC_STRESS`), compared with ry unstressed;
 # `just gc-torture young` keeps survivors collectable (`RY_GC_STRESS=young`), which finds an
-# object only a Rust local holds. `ORACLE_ENGINE=ry-gctorture cargo test -p oracle` compares
-# the cases with GNU R instead.
+# object only a Rust local holds, and `just gc-torture seeded` collects at random gaps with the
+# write barrier checked (`RY_GC_STRESS=seed:N`, `RY_GC_VERIFY`), which finds a store that skipped
+# the barrier; `FUZZ_SEED` picks its gaps. `ORACLE_ENGINE=ry-gctorture cargo test -p oracle`
+# compares the cases with GNU R instead.
 gc-torture mode="plain":
     cargo build -q -p ry-lang -p libr -p rcmd
     FUZZ_ITERS=1000000 cargo test -p oracle --test test_cases \
-        {{ if mode == "young" { "cases_survive_young_gc_torture" } else { "cases_survive_gc_torture" } }} \
+        {{ if mode == "young" { "cases_survive_young_gc_torture" } else if mode == "seeded" { "native_cases_keep_the_write_barrier_under_seeded_gc_torture" } else { "cases_survive_gc_torture" } }} \
         -- --exact --nocapture
 
 # The language-server simulator over many seeds: `just simulate 1000 120` runs seeds 0 to 999 with
