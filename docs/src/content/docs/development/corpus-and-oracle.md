@@ -45,6 +45,20 @@ packages that load system libraries (`git2r`, `odbc`, `pdftools`, `Rglpk` and th
 dependencies) need the Ubuntu packages in `tools/corpus/system-packages.txt` first; without them
 they install but fail to load.
 
+GNU R does not install a dependency its own `.Library` already holds, but ry's runtime searches
+only the corpus library and its own base packages. The script therefore copies every
+non-priority package of the running R's `.Library` (the reference R ships about 50, testthat and
+rlang among them) into the corpus library, so both runtimes see the same packages.
+
+Older R headers declared functions that libR exports but R 4.6's leave undeclared by default,
+such as `ATTRIB`, `ENCLOS` and `Rf_findVarInFrame`. Snapshot C code that calls one compiles with
+only a warning under gcc 13, and the implicit `int` return truncates a returned pointer, so the
+package crashes at that call under GNU R and ry alike. After installing, the script lists each
+package whose shared object imports such a function (unless its prototype under
+`ENABLE_LEGACY_NONAPI` returns an `int` or nothing) and reinstalls it from the newest CRAN source.
+`logs/install.log` names any package that imports one after the rebuild: either it declares the
+function itself (S7 does, and is correct), or its newest source failed to install.
+
 ## The differential oracle
 
 ```sh

@@ -24,48 +24,7 @@ The quality bar is four things.
 
 ## Open: broken on main
 
-- **`native_cases_keep_the_write_barrier_under_seeded_gc_torture` (`oracle` `test_cases`) times out on a 4-core iterate build.** Seed 0 picks `assignment__dollar_in_place`, `datetime__year_overflow`, `environments__unread_loop_variable` and `altrep__colon_in_loops`, and each is killed after 600 s under `RY_GC_STRESS=seed:0 RY_GC_VERIFY=1`, also with the machine otherwise idle. None of them is native or typed. Unverified on main itself; either the stress is too dense for loop-heavy cases or verification is quadratic in the heap, so time one case with and without `RY_GC_VERIFY` before tuning the sample.
-- The code image leaves out every closure that calls an inlined base wrapper (`paste`,
-  `sprintf`, the `vector` family): tier 0 compiles such a call to an `Op::Guard` whose constant is
-  the wrapper's closure, and `serialize::Encoder` encodes only the closures in `BASE_FUNCTIONS`
-  (`local`), so `Unencodable("a closure")`. `install-code-image` and `install-machine-code`
-  scenarios fail on it (`written=3` of 4, `written=4` of 5). Encode the guard's closure as a
-  base function by name, as `local` is.
-- `test_tiers` `fuzz_typed_record_natives_agree_with_tier_zero` fails in the full suite (an old
-  object "lost its mark" in `Heap::write_barrier_slow`, seed 104 or 121 depending on the build)
-  but passes alone, so it depends on heap state earlier seeds leave behind. It fails on main
-  without the untyped-tier changes too; the frame release (`Heap::release_frame`) is the
-  suspect.
-- `test_tiers` `element_ops_cost_no_more_than_tier_zero` fails its instruction budget (1,011
-  against 880).
-- `test_scenarios` `native_diagnostics_agree_with_the_typed_core` fails on the
-  `blocked-argument-count` case: the `native` check and the typed core disagree about it.
-- ry's own base R has no recommended packages, so `zoo` cannot load (`there is no package called
-  'lattice'`) and the `timeseries` workload of `just bench applications` fails.
-- Recursion past `options(expressions=)` with the JIT on does not finish: `options(expressions = 500000); f <- function(n) if (n == 0) 0 else 1 + f(n - 1); tryCatch(f(1e6), error = identity)` runs for minutes (stopped after 120 s, unfinished) where GNU R raises an error. A native self-call in tier 1 counts the expression limit down (`jit_depth_budget`) and, when it runs out, hands the activation back to tier 0, which pushes one frame and enters the native code again for the next level, so every level repeats a descent of up to the whole limit. Tier 1 should stop entering a body natively once a descent ran out of budget. At the default limit of 5,000 the repeats cost nothing and the error arrives at once. With the JIT off the same program raises "evaluation nested too deeply: the register file is full". Recursion within the limit is fine, because a tier-0 call runs in the dispatch loop without a Rust frame of its own: `count <- function(n) if (n == 0L) 0L else 1L + count(n - 1L); count(400000L)` returns under that option.
-- `libr`'s `hot_api_functions_stay_within_instruction_budgets` (`crates/libr/tests/test_api_boundary.rs`) fails on two of its budgets, on the `iterate` and the `release` profile alike: `bench_binding_probes` costs 232 instructions per call against a budget of 203, and `bench_duplicate_call` 2,118 against 2,100. Neither loop calls a closure (`R_existsVarInFrame` with `R_GetBindingType`, and `Rf_duplicate` of a small call). Find the change that added the 36 instructions to a binding probe before moving either budget.
-- testthat 3.3.2 fails to load under ry's runtime with "attempt to use zero-length variable name" ; 3.2.3 loads. ry raises that error for `new.env()[[""]]`; whether GNU R does too, and so whether that is the cause, is unverified (no GNU R on the measuring host).
-- `o[]` on a list with a class attribute keeps the class; GNU R drops it (`o <-
-  structure(list(a = 1), class = "settings"); attributes(o[])` gives only `$names`). `o[1]`
-  already drops it.
-- A temporary passed on through `...` is modified in place by the callee, and `..1` then reads
-  the modified value: `g <- function(v) { v[1] <- 99; v }; f1 <- function(...) { a <- g(...);
-  ..1 }; f1(c(1, 2))` gives `99 2`, and GNU R gives `1 2`. The cause is unverified; the
-  suspect is the count of a forwarded promise's value, which the `...` list still reaches.
-- `UseMethod` differs from GNU R in two ways, and the two together crash.
-  - Inside `try()` it dispatches: `g <- function(x) { r <- try(UseMethod("g"), silent = TRUE);
-    ... }` runs `g.default` in ry. GNU R raises "'UseMethod' used in an inappropriate fashion"
-    there without calling a method, because the call's function context is `try`'s, not `g`'s.
-  - It dispatches on the variable, not on the argument: `f <- function(x) { x <- structure(1,
-    class = "k"); UseMethod("f") }` called as `f(c(10, 20))` runs `f.k` in ry and `f.default`
-    in GNU R, which reads the class of the argument as passed.
-  - With `f <- function(x) { x <- structure(1, class = "k"); r <- try(UseMethod("f"), silent =
-    TRUE); UseMethod("f") }`, a method `f.k` that stops on its first call, and a caller `g <-
-    function() { w <- c(30, 40); f(w) }`, `g()` ends in a segmentation fault, and under
-    `RY_GC_STRESS=young` in the panic "a promise was forced after its last counted reference
-    was released" (`eval.rs`). Once the generic overwrites `x`, only the uncounted `frame_args`
-    entry holds the argument's promise, and the failed dispatch releases it. Matching GNU R on
-    the first point removes the path.
+- **`RY_JIT=force` aborts on `jit__inlined_frames_free_variables.R` in a debug build**: `assertion failed: (*child).machine.mark == heap().handle_mark()` in `jit_enter_frame` (`crates/jit/src/runtime.rs`), so some helper between two starts of an inlined frame leaves the handle stack changed. It needs a free variable of the inlined callee rebound to a `delayedAssign` promise in the global environment mid-loop (the case's `on_global`/`poke_global`/`weigh` part, run on its own). `oracle compare --engine ry-jit` passes the case, so find what the oracle engine sets that hides it. Release builds skip the check, but a leaked handle keeps a value alive until the frame ends.
 
 ## Open: the evaluator's edit loop
 
@@ -457,7 +416,8 @@ User directive: go through the whole code base and delete low-signal tests. The 
 
 - **Old runtimes stay in the cache after an upgrade.** Each release extracts its runtime into a new `ry/runtime/<key>/` (tens of MB), and nothing removes the previous release's directory. R homes are pruned already (`rcmd::cached_home` removes stale homes no process holds); runtimes need the same treatment, without removing one a running session still maps.
 - **Measured state at the full benchmark size** (`generate.py --lines 300000 --files 500`, about 306,000 lines each; the `codebases` suite, one round, release build). With the dependency closure installed except `polars`, `Rblpapi` and `esgtoolkit`, ry matches GNU R on every test (finbench 9,592, dsbench 9,416, biobench 8,927) and the suite times are 1.48x, 1.59x and 1.53x faster than GNU R's (135.3 s against 199.6 s, 63.0 s against 99.9 s, 73.8 s against 113.2 s); per-test geometric means are 1.44x, 1.59x and 1.57x. The JIT is within 3% of `RY_JIT=off` (131.5 s, 62.6 s, 73.5 s), because profitability gates keep it from compiling bodies that would mostly hand back to tier 0 (`decisions.md`, "Bodies that would mostly hand back to tier 0 compile only for loops"). The earlier figure of 1.21x to 1.35x slower, from a run with 10,000 or more tests per suite, predates these and is not reproduced; whether the cause is the library, the test set or the interpreter work since is not isolated.
-- **The scoreboard** is the `codebases` suite (`tools/bench/codebases/`, `just bench codebases`; it needs `cargo build --release -p oracle` and the library from `just corpus`, read from `RY_CORPUS_DIR` or `.corpus/library`). `--profile-summary` splits time by the entry count of the innermost closure body; `big-levers.md`, "Where the full-size code bases spend their time", has the three splits. The compiled packages of the Posit snapshot are built for an older R, and xts 0.14.1's binary truncates `ATTRIB`'s result to an `int` (GNU R 4.6.2 aborts on `x[2:4]` of an xts object the same way), so the installer reinstalls xts from source.
+- **The scoreboard** is the `codebases` suite (`tools/bench/codebases/`, `just bench codebases`; it needs `cargo build --release -p oracle` and the library from `just corpus`, read from `RY_CORPUS_DIR` or `.corpus/library`). `--profile-summary` splits time by the entry count of the innermost closure body; `big-levers.md`, "Where the full-size code bases spend their time", has the three splits. Snapshot code that calls an entry point R 4.6's headers no longer declare (`ATTRIB`, `Rf_findVar`, `Rf_findVarInFrame`) truncates the returned pointer to an `int` and aborts under GNU R 4.6.2 too (xts's `x[2:4]`, Matrix's `Cholesky`), so `tools/corpus/install.R` reinstalls every package whose shared object imports such a function from the newest CRAN source (`MEMORY.md`, Long-term, "Testing").
+- **Corpus packages that still fail to load under GNU R 4.6.2.** Missing system libraries: udunits2, proj, gsl, netcdf, Magick++, mysqlclient, protobuf and tesseract (add them to `tools/corpus/system-packages.txt`), plus rJava. The snapshot's rbibutils 2.3 is older than the `> 2.4` its installed Rdpack 2.6.6 requires, which breaks lme4, ergm, glmmTMB, mice and other Rdpack users in `.corpus-top`; spatstat.random's newest source needs spatstat.data >= 3.1.9.
 - **Next.** Re-measure on the release archive (`--write`), then run `ry check` over the generated code and treat every finding as a possible false report.
 
 ### Why the code bases run at 1.5x, ranked
@@ -520,6 +480,14 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
   cached definition differs, other packages' generics, group generics and primitives.
 - A reload after editing a method or a class takes 0.2 to 0.45 s, and dispatch costs 2.3 to
   4.5 µs per call.
+- **Per-object frames in `new()`.** Every `new()` of a class with a validity method makes four
+  environments: `standardGeneric("initialize")` reifies the generic's slot frame
+  (`dispatch::do_standard_generic` takes `call.env()`, and `methods::exec_method` copies its
+  binding cells into the method's environment), and the prologues of `new`, the default
+  `initialize` and `validObject` pass `environment()`. Fix: read the signature arguments and the
+  formals' bindings from the generic's slot frame without reifying it, and give the prologues
+  frame access that does not reify (`decisions.md`, "`validObject` runs validity methods without
+  its slot loop").
 - `setDataPart()` (R code, about 28 µs per call), which the default `initialize` calls for every
   data part, so `new("MethodDefinition", f)` costs about 50 µs (GNU R about 340 µs).
   `.mergeAttrs` decides the attribute order, so a native version must reproduce it exactly.
@@ -3764,6 +3732,8 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
 - A compiled replacement call passes its index arguments to an R method or replacement closure as promises, `Recall` forwards its promises, and an S3 method of `$`, `$<-`, `@` or `@<-` gets the name as a string (`decisions.md`, "A compiled replacement probes the target before any subscript runs").
 
 - **ry's own base R on Windows.** The release job builds the base tree (recommended packages included), packages the archive and passes the smoke test, which runs ry's bundled base, its start-up and code images, BLAS/LAPACK, a package install and a GNU R binary package.
+- **`UseMethod`, `x[]` and `...` arguments match GNU R.** `UseMethod` dispatches only as the innermost call of its generic (`try(UseMethod("f"))` is "used in an inappropriate fashion", which also removed a crash), and it and `NextMethod` dispatch on the argument as passed, found as GNU R's `GetObject` finds it (`dispatch::dispatch_argument`). `x[]` drops the class and `tsp`. A callee that modifies an argument forwarded through `...` copies it, because the promise the `...` list also holds counts as shared (`eval::complex_assign`). Compiled code copies an argument before its first element assignment too, because a load through a promise, or of a value a caller passed an inlined call, counts as not the frame's own. Oracle cases `dispatch__use_method_context_and_object`, `attributes__empty_subscript_drops_class`, `promises__dots_arguments_stay_shared`, `jit__argument_copied_before_element_assignment`.
+- **A type-checked argument reads ahead into native code.** A promise with a pending annotation check (`gp::CHECKED_PROMISE`) is read ahead when every check admits its value unchanged (`annotations::accepts_unchanged`), so a typed function called from an interpreted typed caller runs natively; `native_diagnostics_agree_with_the_typed_core` covers it.
 - **Code images of installed packages.** `R CMD INSTALL` writes each closure's tier-0 code and, with `--ry-train`, its trained profile beside the lazy-load database. `decisions.md`, "Code images: compiled code beside the lazy-load database".
 - **Console attach and the data viewer.** `ry run` serves the debugger, a paged data viewer and live values over a Unix socket; VS Code attaches, opens `View()`, and hover/completion read the console. `decisions.md`, "A running console is a debug adapter".
 - **R Markdown and Quarto in the editor.** Chunks of a `.Rmd`/`.qmd`/`.Rnw` are one script for diagnostics, hover, completion and goto, and `ry fmt` formats each chunk. `decisions.md`, "Literate documents keep their offsets".
