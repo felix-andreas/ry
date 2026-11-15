@@ -131,3 +131,23 @@ expect stderr "typed: attached `total` for [I64, Dbl] -> Dbl from typedpkg's cod
 run ry build --aot use.R
 expect exit 2
 expect stderr "use.R is a script, and `ry build --aot` compiles a package: run the script with `ry run --aot use.R`"
+
+# Under `ry run --aot`, a package whose typed code file is another build's compiles its typed
+# functions as its namespace loads, and the run says to reinstall it.
+file foreign.R
+| file <- list.files("built/typedpkg/R", "\\.ryt$", full.names = TRUE)
+| stopifnot(file.rename(file, "built/typedpkg/R/typedpkg.0000000000000000.ryt"))
+run ry run --runtime ry foreign.R
+expect exit 0
+unset RY_TYPED_LOG
+run ry run --runtime ry use-built.R
+expect exit 0
+expect stdout "[1] 718640.9"
+expect stderr lacks "reinstall"
+env RY_TYPED_LOG 1
+run ry run --aot --runtime ry use-built.R
+expect exit 0
+expect stdout "[1] 718640.9"
+expect stderr "typed: compiled 4 functions ahead of time"
+expect stderr "ry: another build of ry installed typedpkg, so its typed functions compiled as it loaded; reinstall it to compile them at install"
+expect stderr lacks "typed: attached"
