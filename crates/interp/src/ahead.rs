@@ -80,9 +80,10 @@ pub struct Definition {
 
 /// The expressions of a script lowered by [`prepare`].
 pub struct Prepared {
-    /// Whether they were lowered with source references. An expression that runs after
-    /// `options(keep.source)` changed is lowered again, as a console would lower it.
-    keep_source: bool,
+    /// Which of them were lowered with source references, one bit per expression. An
+    /// expression that runs with `options(keep.source)` set otherwise is lowered again, as a
+    /// console would lower it.
+    keep_source: Vec<u64>,
 }
 
 /// Lowers the expressions of `script`, makes the closures of its top-level definitions and has
@@ -97,16 +98,24 @@ pub unsafe fn prepare(script: &Script<'_>, keep_source: bool) -> R<Prepared> {
 
 unsafe fn prepare_script(script: &Script<'_>, keep_source: bool) -> R<Prepared> {
     finish();
-    for node in &script.expressions {
+    let mut keep_source = keep_source;
+    let mut kept = vec![0u64; script.expressions.len().div_ceil(64)];
+    for (index, node) in script.expressions.iter().enumerate() {
         let state = &mut interp().ahead;
         state.lowering = true;
         state.warned = false;
         let lowered = lower_script_expression(script, node, keep_source);
+        if keep_source {
+            kept[index / 64] |= 1 << (index % 64);
+        }
         let state = &mut interp().ahead;
         state.lowering = false;
         // The error is the expression's to report when it runs, so lowering it again finds it.
         let lowered = lowered.ok().filter(|_| !state.warned);
         state.lowered.push(lowered);
+        if let Some(set) = lowered.and_then(|expression| sets_keep_source(expression)) {
+            keep_source = set;
+        }
     }
     let mut definitions = Vec::new();
     for index in 0..interp().ahead.lowered.len() {
@@ -142,7 +151,7 @@ unsafe fn prepare_script(script: &Script<'_>, keep_source: bool) -> R<Prepared> 
     if discards_closures() {
         interp().ahead.waiting.clear();
     }
-    Ok(Prepared { keep_source })
+    Ok(Prepared { keep_source: kept })
 }
 
 /// Compiles the typed functions of `namespace`, which `loadNamespace` just returned, when the
@@ -257,7 +266,30 @@ fn discards_closures() -> bool {
 pub fn lowered(prepared: &Prepared, index: usize, keep_source: bool) -> Option<Sexp> {
     let expression = interp().ahead.lowered.get_mut(index)?.take()?;
     crate::heap().root(expression);
-    (prepared.keep_source == keep_source).then_some(expression)
+    let kept = prepared.keep_source.get(index / 64)? >> (index % 64) & 1 == 1;
+    (kept == keep_source).then_some(expression)
+}
+
+/// The value a top-level `options(keep.source = TRUE)` or `FALSE` sets, so [`prepare`] lowers
+/// the expressions after it as the run will. Any other way of setting the option is not
+/// foreseen, and the expressions it affects are lowered again when they run.
+unsafe fn sets_keep_source(expression: Sexp) -> Option<bool> {
+    if expression.kind() != SexpType::Language
+        || expression.car().kind() != SexpType::Symbol
+        || expression.car().car().bytes() != b"options"
+    {
+        return None;
+    }
+    values::pairlist_items(expression.cdr())
+        .iter()
+        .rev()
+        .find(|(tag, _)| tag.kind() == SexpType::Symbol && tag.car().bytes() == b"keep.source")
+        .and_then(|&(_, value)| {
+            (value.kind() == SexpType::Logical && values::length(value) == 1)
+                .then(|| values::ints(value)[0])
+                .filter(|&flag| flag != heap::object::NA_LOGICAL)
+                .map(|flag| flag != 0)
+        })
 }
 
 /// Whether a warning lowering is about to signal is held back because [`prepare`] is lowering
