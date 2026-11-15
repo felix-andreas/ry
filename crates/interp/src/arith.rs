@@ -1666,7 +1666,8 @@ pub fn real_integer_divide(a: f64, b: f64) -> f64 {
     if b == 0.0 || quotient.abs() > EXTENDED_PRECISION_LIMIT || !quotient.is_finite() {
         return quotient;
     }
-    // A quotient that underflowed to zero still has the sign the operands give it.
+    // A quotient below one floors to 0 or -1 by its sign alone. One that underflowed to zero
+    // has lost its sign, so the operands' signs decide.
     if quotient.abs() < 1.0 {
         let negative = quotient < 0.0 || (a < 0.0 && b > 0.0) || (a > 0.0 && b < 0.0);
         return if negative { -1.0 } else { 0.0 };
@@ -1686,8 +1687,8 @@ const EXTENDED_PRECISION_LIMIT: f64 = 9_223_372_036_854_775_808.0;
 /// model, so the common case (counts, dates and times in seconds) skips that model and the
 /// bit-by-bit software `fmod` behind `%` on doubles. The remainder takes the divisor's sign.
 /// A zero remainder or quotient is the integer zero, so it converts to `+0.0` whatever the
-/// operands' signs, which is what GNU R's subtraction of equal products gives: `-6 %% 3` and
-/// `0 %/% -3` are both positive zero there.
+/// operands' signs, as in GNU R: `-6 %% 3` is the difference of two equal products there, and
+/// `0 %/% -3` is the constant zero of a quotient below one.
 #[inline]
 fn whole_division(a: f64, b: f64) -> Option<(i64, i64)> {
     const LIMIT: u64 = 1 << 53;
@@ -1737,7 +1738,7 @@ fn extended_nan(a: f64, b: f64) -> f64 {
 /// quotient is too large for the remainder to mean anything.
 pub fn modulus_loses_accuracy(a: f64, b: f64) -> bool {
     let quotient = a / b;
-    quotient.is_finite() && quotient.abs() > 2f64.powi(63)
+    quotient.is_finite() && quotient.abs() > EXTENDED_PRECISION_LIMIT
 }
 
 unsafe fn integer_arithmetic(call: Sexp, op: Op, left: Sexp, right: Sexp, count: usize) -> R<Sexp> {
