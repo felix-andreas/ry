@@ -67,8 +67,9 @@ reason:
 
 A closure copied at run time (an R6 method bound by `$new()`, a function after `environment<-`, the
 per-class copy of an S4 method) is another closure with another environment, so it compiles in the
-session, and the closure it was copied from still attaches. The versions a `--train` workload
-compiles are not in the file.
+session, and the closure it was copied from still attaches. A `--train` workload adds the versions
+it compiled for the package's own closures, among them a version for the type a `Num.from_r` or a
+`List.from_r` the checker cannot type gave in that run (a guessed conversion, below).
 
 ## Position-independent code
 
@@ -159,8 +160,9 @@ the image ends the recording of the database's closures that the code file names
 
 1. Takes every typed closure the install recorded from the package's database, with its record
    offset and position.
-2. Compiles each root for its declared types, and repeats the pass while it confirms new shapes,
-   as `ry run --aot` does for a script.
+2. Takes as roots every version the training workload compiled for one of those closures, then
+   compiles each closure for its declared types, and repeats the pass while it confirms new
+   shapes, as `ry run --aot` does for a script.
 3. Lowers every version the roots reach through calls of the same database again for the file
    target, and leaves out what the table under "What the file holds" lists.
 4. Encodes, compiles, lays out and links the versions that remain. When one of them cannot be
@@ -213,13 +215,19 @@ attaching builds the same `Compiled` entry a session compile would:
    `compiled_or_refusal`, and its entry fills the `Callee` slot. Its result type must match the
    signature the caller compiled against.
 6. Confirm the shapes the version constructs (`shapes::confirm`), as a session compile does.
+   For a site whose conversion was guessed, record that the conversion gave the type the version
+   was compiled for (`numbers::assume_conversion`). When this session already saw it give another
+   type, the version is refused; when it later gives another type, the native code gives up at
+   that site, the interpreter runs the call again with the values its R calls returned, and the
+   version is stale from then on, as session code compiled for a guess is.
 7. Insert the entry into `COMPILED` and root the closure. The entry's speculations are its own
    lookups and those of every callee, and its epoch is the earliest of theirs.
 
 Any failure marks the version as failed, prints one `RY_TYPED_LOG` line with the reason, and leaves
 the closure to compile in the session. A version whose direct callee is still being attached
 misses, so mutually recursive functions compile in the session; a function that calls itself
-attaches. An attached entry holds no JIT memory, so it does not count toward `MAX_COMPILED`. Every
+attaches. No package in the benchmark set or the typed benchmark programs has mutually recursive
+typed functions, so attaching a cycle as one unit waits for one that does. An attached entry holds no JIT memory, so it does not count toward `MAX_COMPILED`. Every
 later call checks the entry's speculations as it does for session code, so a rebinding after
 `unlockBinding` drops the entry the same way. `RY_AHEAD_MISS=1` makes every attach miss, which the
 tests of the fallback use.

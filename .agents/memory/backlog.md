@@ -375,16 +375,12 @@ Built: `ry install` and `ry build --aot` write `R/<package>.<build>.ryt` and a s
 - **The bench driver is plain R.** `ry_typed_file` in `tools/bench/bench.py` calls the installed package from an untyped script, because the checker does not resolve names `library()` attaches; each call converts its arguments at the boundary, which shows in `vector_arith`'s warm time. Make the driver strict once the checker resolves attached packages' exports (structure track, `crates/semantics`).
 - **Published numbers.** The `ry_typed_file` column needs `just bench kernels --release ARCHIVE --write` and the same for `applications` on a release that has the file.
 
-### Step 3: fewer first-call compiles
+### Step 3: fewer first-call compiles (built)
 
-Each item removes a reason a function is not in the file or not compiled by `ry run --aot`. Order by how many typed benchmark and test functions each one frees (`RY_TYPED_LOG=1` prints the reason per function).
+Built: `ry install --train` writes the versions the workload compiled, guessed conversions included; `ry run --aot` compiles a file sourced into the global environment; the checker widens an atomic vector on `[[<-` as on `[<-`. Decided against: `ry load` and loading namespaces up front (`decisions.md`, "`ry run --aot` compiles a script's typed code before it starts"). What remains compiles at a first call by design or waits for a real program:
 
-- **Mutually recursive functions in the file.** A version whose direct callee is still attaching misses, so `even`/`odd` compile in the session while `fib` attaches. Attach a strongly connected component at once (all or none) if a real package shows such a cycle.
-- **Training instantiations in the file.** With `ry install --train`, write every successful `COMPILED` entry of the namespace, including versions for record, tuple, `Dict`, `Set` and function parameters and for observed conversion types. A version compiled for a guessed conversion type (`Compiled::guessed`) must say so in the file, so that a session where the conversion gives another type treats it as stale.
-- **Namespaces not loaded yet.** A typed function that calls `pkg::name` before `pkg` is loaded waits for one interpreted call. The up-front pass could load the namespaces the script's typed code names, which moves their `.onLoad`. Decide whether that is observable enough to matter; if it is, compile the caller when the namespace loads.
-- **Sourced files and `ry load`.** `--aot` covers the script file. Compile a sourced strict file's definitions when `source()` has lowered it, and a development package's when `ry load` has defined them, through the same `Tier.ahead` entry.
-- **Roots with record, tuple, `Dict`, `Set` or function parameters** compile ahead only when a compiled-ahead function calls them. Training instantiations cover the installed case; the script case needs the checker's call-site types.
-- **The checker types some R code as `integer` where R gives a double.** `h <- function() { x <- 1:3; x[[2]] <- 2.5; x }` is typed `integer`, so `List.from_r(h())` is checked as `List<I64>` and stops at run time in every tier. The R type rule for `[[<-` belongs to the checker; the conversion is right to stop.
+- **Mutually recursive functions in the file.** A version whose direct callee is still attaching misses, so `even`/`odd` compile in the session while `fib` attaches. Attach a strongly connected component at once (all or none) when a real package shows such a cycle.
+- **Script roots with record, tuple, `Dict`, `Set` or function parameters** compile ahead only when a compiled-ahead function calls them. Training covers the installed case; the script case needs the checker's call-site types.
 
 ### Step 4: `ry build --aot --exe main.R`
 
