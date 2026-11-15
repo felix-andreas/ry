@@ -152,12 +152,11 @@ pub enum Counter {
     PackageCalls,
     PackageCallsDirect,
     PackageCallsObserved,
-    WrappersInlined,
     DoCallsInlined,
 }
 
 impl Counter {
-    pub const ALL: [Counter; 27] = [
+    pub const ALL: [Counter; 26] = [
         Counter::ClosureCalls,
         Counter::NativeEntries,
         Counter::BuiltinCalls,
@@ -183,7 +182,6 @@ impl Counter {
         Counter::PackageCalls,
         Counter::PackageCallsDirect,
         Counter::PackageCallsObserved,
-        Counter::WrappersInlined,
         Counter::DoCallsInlined,
     ];
 
@@ -222,7 +220,6 @@ impl Counter {
             Counter::PackageCallsObserved => {
                 "package calls that read variables by name because code observed the environment"
             }
-            Counter::WrappersInlined => "calls of one-builtin wrappers run without their body",
             Counter::DoCallsInlined => "do.call calls run without its body",
         }
     }
@@ -255,7 +252,6 @@ impl Counter {
             Counter::PackageCalls => "package_calls",
             Counter::PackageCallsDirect => "package_calls_direct",
             Counter::PackageCallsObserved => "package_calls_observed",
-            Counter::WrappersInlined => "wrappers_inlined",
             Counter::DoCallsInlined => "do_calls_inlined",
         }
     }
