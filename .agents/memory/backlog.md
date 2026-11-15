@@ -25,7 +25,6 @@ The quality bar is four things.
 ## Open: broken on main
 
 - **`native_cases_keep_the_write_barrier_under_seeded_gc_torture` (`oracle` `test_cases`) times out on a 4-core iterate build.** Seed 0 picks `assignment__dollar_in_place`, `datetime__year_overflow`, `environments__unread_loop_variable` and `altrep__colon_in_loops`, and each is killed after 600 s under `RY_GC_STRESS=seed:0 RY_GC_VERIFY=1`, also with the machine otherwise idle. None of them is native or typed. Unverified on main itself; either the stress is too dense for loop-heavy cases or verification is quadratic in the heap, so time one case with and without `RY_GC_VERIFY` before tuning the sample.
-- `libr`'s `hot_api_functions_stay_within_instruction_budgets` (`crates/libr/tests/test_api_boundary.rs`) fails on two of its budgets, on the `iterate` and the `release` profile alike: `bench_binding_probes` costs 232 instructions per call against a budget of 203, and `bench_duplicate_call` 2,118 against 2,100. Neither loop calls a closure (`R_existsVarInFrame` with `R_GetBindingType`, and `Rf_duplicate` of a small call). Find the change that added the 36 instructions to a binding probe before moving either budget.
 
 ## Open: the evaluator's edit loop
 
