@@ -305,7 +305,7 @@ unsafe fn do_new(call: &Call<'_>) -> R<Sexp> {
     if values::as_logical_scalar(slot(definition, symbols().virtual_)?) != 0 {
         return values::scalar_bool(false);
     }
-    let value = crate::methods::new_object(definition)?;
+    let value = crate::methods::new_object_copying(definition, false)?;
     eval::define(install("ClassDef")?, definition, frame)?;
     eval::define(symbols().value, value, frame)?;
     values::scalar_bool(true)
@@ -4972,8 +4972,9 @@ unsafe fn try_new(class: Sexp, place: Sexp) -> R<Option<Sexp>> {
     }
     // `new(definition)` makes the object and calls `initialize()` on it without arguments. When
     // dispatch selects the default method for the object's class, that call returns the object,
-    // so the object and the method dispatch caches are the whole result. The value becomes a slot of the new class's
-    // prototype, which `new()` copies deeply, so a shallow copy is enough here.
+    // so the object and the method dispatch caches are the whole result. The value becomes a
+    // slot of the new class's prototype, and a shallow copy is enough for the reason
+    // `new_object_copying` gives.
     if !own_initialize && !crate::methods::first_units_pending() {
         let value = crate::methods::new_object_copying(definition, false)?;
         crate::heap().root(value);
