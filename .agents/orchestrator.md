@@ -66,6 +66,7 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 
 ## Lessons
 
+- **Anonymize user feedback before it enters the repository** (briefs, log entries, memory, PR text): replace real names with neutral ones and drop paths, IDs and data; see AGENTS.md, "Anonymize user feedback".
 - **Do not trust time estimates, yours or a session's.** Agents habitually overestimate how long work takes: the whole runtime was built in four days, and the call-path redesign reached 50% in 30 minutes after its session called it too big for a release. Default to "do it now, in full", and never hold work back from a release on a pessimistic estimate (user feedback).
 - **Verify reports before acting on them.** Agents over-claim completion and miscount tests, so check the diff, the test output, or the merged tree before you call something done or tell the user.
 - **One writer per area of the tree.** Two agents editing the same files in one checkout corrupt each other's diffs; give overlapping work to one agent or to separate cloud sessions.
@@ -109,14 +110,14 @@ Nightly (user ask, 2026-11-05): nightly.20261105.1146.82f7b6 published 12:07 UTC
 | session_0111kWqAcNjLMbDCLa8CoMZm (Fable high, code-base runtime) | #576 merged 6f6c8dc (%% and %/% bit-exact with GNU R; finbench hot -1.3% instructions); stopped on budget. Finding: 3x needs a compiler tier for generic package code (tier 1 refuses ~200 package bodies); tier-0 candidates 1-3% each in backlog | done 03:01Z |
 | session_0111kWqC7RFhwr7cUXCLb1kD (Fable high, call setup) | closure call setup end shape; draft #579 (fast path 49->72%, hot suite ~-1%); Opus subagent fixing replacement-call promise bug on fix/replacement-call-promises | working |
 | session_0111kWqEwiRrnRpeZBcJJkuo (Opus high, GC barrier) | #580 d7e921c (barrier fix), #582 d1eea4b (RyAbi stamp: refuse packages built by <=0.4.5; ry load clears stale src objects) | done 21:27Z |
-| session_0111kWqEuykBqAFmDRUX18Uv (Fable high + up to 2 Opus high subagents, user suite) | user feedback 2026-11-15: large package test suite on 0.4.5 (24 CI procs, 5,539 s): kernels k1-k8; why tier 1 compiles nothing, S4 new/validObject/standardGeneric frames, small base closures (ifelse, isTRUE, %in%, unique), as.Date/strptime, pmin/pmax. Item 5 (replacement-call reification 23.0M) forwarded to the call-setup session | started 21:15Z |
+| session_0111kWqEuykBqAFmDRUX18Uv (Fable high + up to 2 Opus high subagents, user suite) | user feedback 2026-11-15: a large package test suite profiled on 0.4.5, abstracted to kernels k1-k8; why tier 1 compiles nothing, S4 new/validObject/standardGeneric frames, small base closures (ifelse, isTRUE, %in%, unique), as.Date/strptime, pmin/pmax. Item 5 (replacement-call reification 23.0M) forwarded to the call-setup session | started 21:15Z |
 | session_0111kWqCiKioWPLCokQyKGSs (Opus high, AOT) | typed-code-file.md steps 1-4. #577 a8f1b17, #578 d60cc67, #581 3fdee93 (step 3: --train, sourced files, replay) | step 4 (--exe) started 21:00Z |
 
 Queued on the user: (user: wait for #557) publish 0.4.5 (execstack, Windows, crash reports, aperm, call loop, DataFrame); dry run green 21:1xZ; then start an Opus AOT implementation session from the Fable design (user: "Start opus after 0.4.5 ships"). Unanswered older asks: deploy the docs site, pre-release the nightly, data.table name arms in check.rs.
 
 Scheduled tasks: the check-in trig_01LuX97P7ZbAg4TRxYu7c1tu (cron 34 */6 * * *) babysits the live sessions above; north star is the applications geomean, JIT on.
 
-Later: `tools/loader-bench/s4_package.py` hangs for seed 2 and fails for seeds 7 and 42 with `--local-share 0.3`; a worker saw `f <- function(x) x + 1; f('a')` with `double` annotations pass `ry check` with no problem (annotation form not recorded; check whether it should be flagged); `/usr/lib/R/library` from /etc/R/Renviron missing from `.libPaths()`; about 20 stale remote branches (check test/top-cran-packages and perf/old-generations first; leave feat/runtime-stats and runtime-packages-round4 alone); the log_rank typed regression is unverified; CRAN itself is unreachable, but the user's CRAN clone https://rrepo.org works (client: github.com/scalerail-solutions/rpx).
+Later: `tools/loader-bench/s4_package.py` hangs for seed 2 and fails for seeds 7 and 42 with `--local-share 0.3`; a worker saw `f <- function(x) x + 1; f('a')` with `double` annotations pass `ry check` with no problem (annotation form not recorded; check whether it should be flagged); `/usr/lib/R/library` from /etc/R/Renviron missing from `.libPaths()`; about 20 stale remote branches (check test/top-cran-packages and perf/old-generations first; leave feat/runtime-stats and runtime-packages-round4 alone); the log_rank typed regression is unverified; CRAN itself is unreachable, but the rrepo CRAN mirror (https://rrepo.org) works.
 
 ## Next
 
