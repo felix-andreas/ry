@@ -93,7 +93,31 @@ bound <- function(m, floor = 0, cap = 0.03) {
 }
 k8 <- function(n) for (i in seq_len(n)) bound(grid)
 
-sizes <- c(k1 = 20000, k2 = 30000, k3 = 100000, k4 = 60000, k5 = 20000, k6 = 4000, k7 = 500, k8 = 30000)
+# K9 to K11 come from a second profile, of a session that sources a package's files: `parse`,
+# `readLines` and `list.files` per call. The files are generated here, forty of about 120 lines.
+sourceDir <- file.path(tempdir(), "bench-ci-sources")
+dir.create(file.path(sourceDir, "sub"), recursive = TRUE, showWarnings = FALSE)
+sourceFiles <- vapply(1:40, function(j) {
+  path <- file.path(sourceDir, if (j %% 4 == 0) "sub" else "", sprintf("file%02d.R", j))
+  blocks <- vapply(1:12, function(b) paste(c(
+    sprintf("#' Computes step %d of file %d.", b, j),
+    sprintf("step_%d_%d <- function(x, scale = %d, ..., label = \"s%d\") {", j, b, b, b),
+    "  if (is.null(x) || length(x) == 0L) return(invisible(NULL))",
+    "  total <- 0",
+    "  for (value in x) total <- total + value * scale",
+    sprintf("  out <- list(total = total, label = paste0(label, \"-\", %d), ok = total > 0)", j),
+    "  structure(out, class = c(\"step\", \"list\"))",
+    "}", ""), collapse = "\n"), "")
+  writeLines(blocks, path)
+  normalizePath(path)
+}, "")
+k9 <- function(n) for (i in seq_len(n)) for (path in sourceFiles) parse(path, keep.source = TRUE)
+k10 <- function(n) for (i in seq_len(n)) for (path in sourceFiles) readLines(path, warn = FALSE)
+k11 <- function(n) for (i in seq_len(n))
+  list.files(sourceDir, pattern = "\\.[Rr]$", recursive = TRUE, full.names = TRUE)
+
+sizes <- c(k1 = 20000, k2 = 30000, k3 = 100000, k4 = 60000, k5 = 20000, k6 = 4000, k7 = 500, k8 = 30000,
+           k9 = 20, k10 = 100, k11 = 2000)
 checks <- list(
   k1 = function() recordLabel(makeRecord(a = "id1", b = "p", c = "q")),
   k2 = function() format(c(toDate("2024-03-15"), toDate(as.Date("2024-01-02")))),
@@ -103,7 +127,12 @@ checks <- list(
   k5 = function() onShelf(shelf, c("A3", "B7", "Z1")),
   k6 = function() { merged <- mergeSeries(xl); c(dim(merged), round(sum(merged, na.rm = TRUE), 6)) },
   k7 = function() { acc <- growTable(10L); c(dim(acc), sum(acc$value), nchar(paste(acc$name, collapse = ""))) },
-  k8 = function() round(sum(bound(grid)), 10)
+  k8 = function() round(sum(bound(grid)), 10),
+  k9 = function() { parsed <- lapply(sourceFiles, parse, keep.source = TRUE)
+    c(sum(lengths(parsed)), sum(nchar(unlist(lapply(parsed, function(e) as.character(attr(e, "srcref")))))),
+      nrow(getParseData(parsed[[1]]))) },
+  k10 = function() sum(nchar(unlist(lapply(sourceFiles, readLines)))),
+  k11 = function() basename(list.files(sourceDir, pattern = "\\.[Rr]$", recursive = TRUE, full.names = TRUE))[c(1, 20, 40)]
 )
 
 selected <- Sys.getenv("KERNELS", "")
