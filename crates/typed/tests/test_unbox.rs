@@ -227,7 +227,7 @@ fn boxes_of_two_shapes_built_on_two_branches_and_read_after_the_join_are_removed
             .insts
             .iter()
             .find_map(|inst| match inst.op {
-                Op::Const(Constant::Int(shape)) => Some(shape as u32),
+                Op::Const(Constant::Shape(shape)) => Some(shape),
                 _ => None,
             })
     };
@@ -268,7 +268,7 @@ fn a_tag_without_a_payload_joins_a_box_as_its_shape() {
     let union = Type::Tag(shapes::union_of(&[ok, none]));
     let mut builder = Builder::new(String::from("test"), &[Type::Dbl, Type::Bool]);
     let (then, join) = (builder.block(), builder.block());
-    let constant = Constant::Object(shapes::constant(none));
+    let constant = Constant::Object(none);
     let result = builder.emit(union, Op::Const(constant));
     builder.terminate(Terminator::Branch {
         condition: Local(1),
@@ -287,12 +287,12 @@ fn a_tag_without_a_payload_joins_a_box_as_its_shape() {
     let mut function = builder.function;
     unbox(&mut function);
     assert_eq!(constructs(&function), 0);
-    let Some(Op::Const(Constant::Int(held))) =
+    let Some(Op::Const(Constant::Shape(held))) =
         function.blocks[0].insts.first().map(|inst| &inst.op)
     else {
         panic!("the tag is its shape: {:?}", function.blocks[0].insts);
     };
-    assert_eq!(*held as u32, none);
+    assert_eq!(*held, none);
 }
 
 #[test]
@@ -341,7 +341,7 @@ fn a_variable_that_only_holds_tags_without_payloads_becomes_their_shape() {
     let union = Type::Tag(shapes::union_of(&[north, south]));
     let mut builder = Builder::new(String::from("test"), &[Type::Bool]);
     let (then, join) = (builder.block(), builder.block());
-    let constant = Constant::Object(shapes::constant(north));
+    let constant = Constant::Object(north);
     let region = builder.emit(union, Op::Const(constant));
     builder.terminate(Terminator::Branch {
         condition: Local(0),
@@ -349,7 +349,7 @@ fn a_variable_that_only_holds_tags_without_payloads_becomes_their_shape() {
         otherwise: join,
     });
     builder.switch_to(then);
-    let constant = Constant::Object(shapes::constant(south));
+    let constant = Constant::Object(south);
     builder.push(Some(region), Op::Const(constant));
     builder.terminate(Terminator::Jump(join));
     builder.switch_to(join);
@@ -363,7 +363,7 @@ fn a_variable_that_only_holds_tags_without_payloads_becomes_their_shape() {
     assert!(
         insts
             .clone()
-            .all(|inst| matches!(inst.op, Op::Const(Constant::Int(_)) | Op::Copy(_))),
+            .all(|inst| matches!(inst.op, Op::Const(Constant::Shape(_)) | Op::Copy(_))),
         "{function}"
     );
     assert_eq!(insts.count(), 4);

@@ -48,10 +48,6 @@ thread_local! {
 /// shape that a `match` in an earlier one must test for.
 const MAX_ROUNDS: usize = 4;
 
-/// How many names of types an annotation is followed through before it counts as unknown, which
-/// ends a definition that names itself.
-const MAX_NAMED_DEPTH: usize = 8;
-
 /// Compiles the typed closures among the definitions of `program` for the argument types they
 /// declare.
 pub unsafe fn compile(program: &Program<'_>) {
@@ -80,7 +76,7 @@ pub unsafe fn compile(program: &Program<'_>) {
             continue;
         }
         let name = || rvalues::symbol_name(definition.symbol);
-        match declared_params(definition.closure, program.named_types) {
+        match declared_params(definition.closure) {
             Ok(params) => match compiled_or_refusal(definition.closure, &params) {
                 Ok(_) => roots.push((definition.closure, params)),
                 Err(refusal) => {
@@ -167,10 +163,7 @@ pub(crate) unsafe fn defined_later(symbol: Sexp, start: Sexp) -> Option<Sexp> {
 
 /// The argument types a typed closure declares, as [`crate::call`] reads them from values of
 /// the declared types.
-unsafe fn declared_params(
-    closure: Sexp,
-    named_types: &FxHashMap<String, String>,
-) -> Result<SmallVec<[Type; 4]>, Refusal> {
+pub(crate) unsafe fn declared_params(closure: Sexp) -> Result<SmallVec<[Type; 4]>, Refusal> {
     let formals = closure.car();
     let body = interp::bytecode::closure_body(closure);
     let (declared, _) = annotations::declared_formals(formals, body);
@@ -183,7 +176,7 @@ unsafe fn declared_params(
             Some(Type::I64)
         } else {
             annotations::formal_annotation(formals, body, position)
-                .and_then(|annotation| annotated_type(&annotation, named_types, 0))
+                .and_then(|annotation| annotated_type(&annotation))
                 .or_else(|| {
                     declared
                         .get(position)
@@ -204,33 +197,25 @@ unsafe fn declared_params(
 }
 
 /// The type of the values an annotation's text admits from R, for the annotations whose type
-/// the checks' storage masks do not give. A tag from R is any tag, whichever union the
-/// annotation names, because R code can build every tag. A record from R has no type of its own
-/// and a set or a dictionary has no R value, so a parameter of one is never passed from R.
-fn annotated_type(
-    annotation: &str,
-    named_types: &FxHashMap<String, String>,
-    depth: usize,
-) -> Option<Type> {
+/// the checks' storage masks do not give. The preflight spells every type of a signature
+/// canonically (`semantics::canonical_annotation`), with no alias or type of the program left to
+/// look up, so the text alone says which values arrive. A tag from R is any tag, whichever union
+/// the annotation names, because R code can build every tag. A record from R has no type of its
+/// own and a set or a dictionary has no R value, so a parameter of one is never passed from R.
+pub fn annotated_type(annotation: &str) -> Option<Type> {
     let annotation = annotation.trim();
-    if let Some(definition) = named_types.get(annotation) {
-        return (depth < MAX_NAMED_DEPTH)
-            .then(|| annotated_type(definition, named_types, depth + 1))
-            .flatten();
-    }
     if annotation.starts_with(':') {
         return Some(Type::Tag(shapes::ANY));
     }
     if let Some(items) = annotation.strip_suffix("[]") {
-        return annotated_item(items, named_types, depth).map(Type::vector);
+        return annotated_item(items.trim_end()).map(Type::vector);
     }
     if let Some(items) = annotation
         .strip_prefix("List")
         .and_then(|rest| rest.trim_start().strip_prefix('<'))
         .and_then(|rest| rest.strip_suffix('>'))
     {
-        return annotated_item(items, named_types, depth)
-            .map(|item| Type::Vector { item, array: true });
+        return annotated_item(items.trim()).map(|item| Type::Vector { item, array: true });
     }
     // A table type may spell out its columns, as in `DataFrame{price: double[]}`, which say
     // nothing about how the value arrives.
@@ -244,20 +229,10 @@ fn annotated_type(
     ) {
         return Some(Type::Table);
     }
-    annotated_item(annotation, named_types, depth).map(Type::of_item)
+    annotated_item(annotation).map(Type::of_item)
 }
 
-fn annotated_item(
-    name: &str,
-    named_types: &FxHashMap<String, String>,
-    depth: usize,
-) -> Option<Item> {
-    let name = name.trim();
-    if let Some(definition) = named_types.get(name) {
-        return (depth < MAX_NAMED_DEPTH)
-            .then(|| annotated_item(definition, named_types, depth + 1))
-            .flatten();
-    }
+fn annotated_item(name: &str) -> Option<Item> {
     Some(match name {
         "I64" => Item::I64,
         "F64" | "double" => Item::Dbl,

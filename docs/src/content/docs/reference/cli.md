@@ -12,7 +12,7 @@ ry R [FILE]                    # the same on GNU R
 ry load [PATH]                 # load an R package from source, run code against it, and exit
 ry test [PATH]                 # run a package's testthat tests against the loaded package
 ry document [PATH]             # write a package's Rd files and NAMESPACE with roxygen2
-ry build [PATH]                # build a package's source tarball
+ry build [PATH]                # build a package's source tarball; with --aot, install it compiled
 ry install [PATH]              # build and install a package
 ry debug-adapter               # a debugger for editors, over stdio
 ry server                      # the language server, over stdio; your editor starts it
@@ -220,10 +220,16 @@ A function compiles ahead when it is defined at the top level of the script as
 `name <- function(...)` and each parameter's annotation says which values arrive from R: a number,
 `Bool`, `Str`, a `List` of those, a tag union or a table such as `DataFrame` or
 `DataFrame{price: double[]}`. The typed functions it calls compile with it, whatever their
-parameters. These compile at their first call instead:
+parameters. A file the script sources into the global environment, as `source("helpers.R")` does,
+compiles the same way when `source()` has read it, before any of it runs. These compile at their
+first call instead:
 
-- a function defined inside a block, another function or a file the script sources, and a function
-  of a package;
+- a function defined inside a block or another function, or in a file sourced any other way,
+  such as by `sys.source()` or by `source(local = TRUE)` inside a function;
+- a function of a package, unless the package's [typed code file](#build-and-install) holds it,
+  in which case it runs code compiled at install. Under `--aot`, a package whose typed code file
+  another build of ry wrote compiles its typed functions as it loads instead, and prints
+  `ry: another build of ry installed rates, so its typed functions compiled as it loaded; reinstall it to compile them at install`;
 - a function defined after the script set `options(keep.source = TRUE)`, or in a statement that
   holds a literal R warns about, such as `1.5L`;
 - a top-level function with a record, tuple, `Dict`, `Set` or function parameter that no typed
@@ -450,6 +456,7 @@ ry build -o dist          # write it into dist/ instead
 ry install                # install into the first library on .libPaths()
 ry install -l ~/rlib      # install into ~/rlib
 ry install --train tests  # train the package's code image on its tests
+ry build --aot -l ~/rlib  # install, as ry install does
 ```
 
 `ry build` writes the source tarball of the package at `PATH` (default: the one containing the
@@ -466,10 +473,65 @@ Both run R's own `build` and `INSTALL` scripts on ry's runtime, from ry's R home
 built against ry's libR, as `ry run` loads it. `--runtime gnu-r` (or `RY_RUNTIME=gnu-r`) uses GNU R
 instead.
 
+On ry's runtime, both check a typed package (one with `strict = true` under `[check]` in its
+`ry.toml`, or with a file that holds ry syntax or a `# typing: strict` line) before they build it.
+A strict-mode error stops the build, and the command prints the errors and exits with status 1:
+
+```
+  x strict mode found 1 error, so this code does not run
+  x /home/you/bad was not built
+```
+
+The tarball then holds the package's sources as `ry run` would run them: a number literal carries
+the type the checker gave it, an empty `List` or `Dict` carries its item type, and each parameter
+and return annotation that fits on one line is written as the type it stands for, with aliases
+expanded and the package's own `type` definitions unfolded (`p: Point` becomes
+`p: Record{x: F64, y: F64}`). A type with no such spelling, such as the open record
+`Record{a: I64, ..}`, stays as written. Only the tarball changes, never the package directory, and a
+package that declares `Encoding: latin1` gets its rewritten files in latin1.
+
 ry's `R CMD INSTALL` and `R CMD SHLIB` run `make` with one job per processor unless `MAKEFLAGS`
 is set to a value. A package
 whose `Makevars` builds correctly only with one job fails in parallel, so a failed parallel build
 runs again with one job, reusing the objects already built.
+
+Compiled code built by ry's `R CMD INSTALL` reads ry's object layout through the headers' inline
+accessors, so it runs only under a ry whose headers have the same binary interface. The install
+records that interface's version as `RyAbi:` in the package's `DESCRIPTION`, beside `RyBuilt:`
+(ry's version). Loading a package that has `RyBuilt:` and whose `RyAbi:` is missing or differs
+fails at its shared library:
+
+```
+Error: package or namespace load failed for ‘tally’:
+ unable to load shared object '/home/me/library/tally/libs/tally.so':
+  package 'tally' was compiled by ry 0.4.5 against older C headers, and its compiled code is unsafe to run under this ry. Reinstall it with this ry: install.packages("tally"), or R CMD INSTALL on its source (ry install for a package you develop).
+```
+
+A package GNU R installed has neither field and loads under ry as it is.
+
+A build in place, by `ry load` or by an install from a directory, leaves its objects in `src/` with
+a stamp file, `src/.ry-abi`, that names the same version. When the stamp is missing or differs, the
+next build first deletes the objects and shared libraries under `src/` (static libraries stay), so
+make cannot reuse objects that other headers compiled.
+
+An install on ry's runtime compiles the package's typed functions and writes their machine code to
+its typed code file, `R/<package>.<build>.ryt`. A later session maps that file and runs the first
+call of each typed function on the code compiled at install, instead of compiling it, and processes
+that use the same package share that code. The install log counts what the file holds:
+
+```
+** typed code: closures=2 written=2
+```
+
+A function the file leaves out, such as one with a `match` over any tag, is counted by reason after
+`left out:` and compiles at its first call. With `--train`, the file also holds the versions the training run
+compiled that an install cannot compile on its own, such as one for the type a `Num.from_r` gave in
+that run. A session in which that conversion gives another type runs the call in the interpreter
+instead; `RY_TYPED_LOG=1` names each function that attaches and
+each one that compiles. `ry build --aot` on a package does what `ry install` does (`-l DIR` names
+the library), and on a script it is a usage error that points at `ry run --aot`.
+`R CMD INSTALL --ry-no-typed-code` writes no typed code file. A typed code file another build of ry
+wrote is ignored. [The typed code file](/development/typed-code-file/) is the design.
 
 An install on ry's runtime also writes the package's code image, `R/<package>.<build>.ryc`
 beside its lazy-load database: the compiled code of every closure, which a later session takes instead of

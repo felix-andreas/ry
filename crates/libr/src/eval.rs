@@ -29,7 +29,7 @@ use {
     },
     std::{
         ffi::{c_char, c_int, c_void},
-        path::PathBuf,
+        path::{Path, PathBuf},
     },
 };
 
@@ -142,6 +142,7 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
     frames::install();
     services::install();
     jit::install();
+    interp::register_builtins(typed::file::BUILTINS);
     interp::register_builtins(NATIVE_BUILTINS);
     interp::register_builtins(BOOTSTRAP_BUILTINS);
     interp::register_builtins(crate::loader_backend::BUILTINS);
@@ -937,7 +938,7 @@ unsafe fn c_call(
             SexpType::List if kind == RoutineKind::C => {
                 let copy = crate::memory::duplicate(value, false)?;
                 runtime.heap.root(copy);
-                runtime.heap.escape(copy);
+                runtime.heap.escape(copy, true);
                 pointers.push(copy.data() as *mut std::ffi::c_void);
                 CArgument::Vector(copy)
             }
@@ -1035,6 +1036,11 @@ unsafe fn do_dyn_load(call: &Call<'_>) -> ApiResult<Sexp> {
     }
     if let Some(reason) = builtin_libraries::refused_library(&path) {
         return Err(error(reason));
+    }
+    if let Some(reason) = rcmd::stale_native_build(Path::new(&path)) {
+        return Err(error(format!(
+            "unable to load shared object '{path}':\n  {reason}"
+        )));
     }
     let local = call.arg(1) == runtime().nil() || crate::vectors::as_logical(call.arg(1))? != 0;
     let dll = crate::dynload::load_library(&path, local)?;
@@ -1295,7 +1301,7 @@ pub unsafe extern "C" fn ry_crash_traceback(
 pub unsafe extern "C" fn ry_start_image_current(path: *const c_char) -> c_int {
     let path = unsafe { std::ffi::CStr::from_ptr(path) }.to_string_lossy();
     c_int::from(interp::image::is_current(
-        std::path::Path::new(&*path),
+        Path::new(&*path),
         env!("RY_RUNTIME_ID"),
     ))
 }

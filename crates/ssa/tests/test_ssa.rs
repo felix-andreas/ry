@@ -4,7 +4,7 @@
 //! only, and leave through guards mid-block, which are the shapes SSA construction gets wrong.
 
 use {
-    ssa::{AbiParam, Block, Builder, CallConv, IntCC, Signature, Variable, types::I64},
+    ssa::{AbiParam, Block, Builder, CallConv, IntCC, Signature, Target, Variable, types::I64},
     syntax::testing::{SplitMix64, for_each_seed},
 };
 
@@ -287,4 +287,89 @@ fn sum(builder: &mut Builder, variables: &[Variable]) -> ssa::Value {
         total = builder.ins().iadd(total, scaled);
     }
     total
+}
+
+/// A relocatable object of two functions, where the outer one loads a word from the offset
+/// table, calls a host function through another, and calls the inner one directly. Mapped
+/// below a table that holds those words, it runs without any relocation applied at load, and
+/// the JIT module refuses the table load instead of compiling it.
+#[test]
+fn relocatable_code_runs_against_its_table() {
+    extern "C" fn triple(value: i64) -> i64 {
+        3 * value
+    }
+    let mut host = Signature::new(CallConv::Host);
+    host.params.push(AbiParam::new(I64));
+    host.returns.push(AbiParam::new(I64));
+    let mut object = ssa::Relocatable::new().expect("a relocatable object");
+    let inner = Target::declare(&mut object, &host).expect("declare the inner function");
+    let outer = Target::declare(&mut object, &host).expect("declare the outer function");
+    let mut builder = Builder::new(host.clone());
+    let entry = builder.create_block();
+    builder.append_block_params_for_function_params(entry);
+    builder.switch_to_block(entry);
+    let value = builder.block_params(entry)[0];
+    let doubled = builder.ins().iadd(value, value);
+    builder.ins().return_(&[doubled]);
+    builder.seal_all_blocks();
+    Target::define(&mut object, inner, &builder.finalize()).expect("define the inner function");
+    let outer_body = |builder: &mut Builder| {
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        let value = builder.block_params(entry)[0];
+        let callee = builder.import_function(inner, host.clone());
+        let call = builder.ins().call(callee, &[value]);
+        let doubled = builder.inst_results(call)[0];
+        let signature = builder.import_signature(host.clone());
+        let address = builder.ins().table_word(1);
+        let call = builder.ins().call_indirect(signature, address, &[doubled]);
+        let tripled = builder.inst_results(call)[0];
+        let added = builder.ins().table_word(0);
+        let sum = builder.ins().iadd(tripled, added);
+        builder.ins().return_(&[sum]);
+        builder.seal_all_blocks();
+    };
+    let mut builder = Builder::new(host.clone());
+    outer_body(&mut builder);
+    let function = builder.finalize();
+    Target::define(&mut object, outer, &function).expect("define the outer function");
+    let refused = ssa::with_module(ssa::Allocator::Backtracking, |module| {
+        let id = module.declare(&host)?;
+        module.define(id, &function).map(|_| ())
+    });
+    assert!(refused.is_err(), "the JIT module compiled a table load");
+    let linked = object.finish(&mut |_| None);
+    let start = |id: ssa::FuncId| match linked.functions[id.as_u32() as usize] {
+        Ok(offset) => offset as usize,
+        Err(error) => panic!("left out: {error:?}"),
+    };
+    let (inner_start, outer_start) = (start(inner), start(outer));
+    assert!(inner_start < outer_start);
+    const TABLE: usize = 1 << 16;
+    let size = TABLE + linked.code.len().next_multiple_of(1 << 16);
+    // SAFETY: a fresh private mapping, written before it is made executable.
+    unsafe {
+        let base = libc::mmap(
+            std::ptr::null_mut(),
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        ) as *mut u8;
+        assert_ne!(base as *mut libc::c_void, libc::MAP_FAILED);
+        let code = base.add(TABLE);
+        std::ptr::copy_nonoverlapping(linked.code.as_ptr(), code, linked.code.len());
+        *(code.sub(8) as *mut i64) = 1000;
+        *(code.sub(16) as *mut usize) = triple as *const () as usize;
+        assert_eq!(
+            libc::mprotect(code as *mut libc::c_void, size - TABLE, libc::PROT_READ | libc::PROT_EXEC),
+            0
+        );
+        let function = std::mem::transmute::<*const u8, extern "C" fn(i64) -> i64>(
+            code.add(outer_start),
+        );
+        assert_eq!(function(7), 3 * 14 + 1000);
+    }
 }

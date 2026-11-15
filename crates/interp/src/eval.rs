@@ -586,6 +586,22 @@ pub unsafe fn peek_variable(symbol: Sexp, env: Sexp) -> Option<Sexp> {
         .then_some(value)
 }
 
+/// The value `env`'s own frame binds `symbol` to, read without forcing or calling anything, as
+/// [`peek_variable`] reads it but without looking in an enclosing environment.
+pub unsafe fn peek_frame_variable(symbol: Sexp, env: Sexp) -> Option<Sexp> {
+    let cell = if env.has_gp(gp::PENDING_FRAME) {
+        match pending_name(env, symbol) {
+            PendingName::Slot(value) => return (value != missing_arg()).then_some(value),
+            PendingName::Enclosure(_) => return None,
+        }
+    } else {
+        crate::heap().frame_cell(env, symbol)?
+    };
+    let value = cell.cdr();
+    (!cell.has_gp(gp::ACTIVE_BINDING) && value != missing_arg() && value != unbound())
+        .then_some(value)
+}
+
 /// Settles `promise`, unforced, with the `value` forcing it would give, which the caller found
 /// without forcing it ([`pending_name`]).
 pub unsafe fn settle_unforced(promise: Sexp, value: Sexp) -> R<Sexp> {
@@ -2411,6 +2427,18 @@ pub unsafe fn apply_closure(
     run_on_heap_frame(call, function, args, sys_parent, supplied, Entry::Unchecked)
 }
 
+/// Runs the call `call` of the typed closure `function` with `args` in the interpreter, as a
+/// call the native tier did not take runs, for a call whose native code gave up
+/// ([`crate::replay::replay`]).
+pub unsafe fn run_interpreted(
+    call: Sexp,
+    function: Sexp,
+    args: &[Arg],
+    sys_parent: Sexp,
+) -> R<Sexp> {
+    run_on_heap_frame(call, function, args, sys_parent, None, Entry::Unchecked)
+}
+
 /// Runs a call of `function` in a fresh environment that binds `args`, the path of a call
 /// that gets no slot frame. An environment can be read after the call that made an argument
 /// reference returns, so a reference among `args` becomes the promise it stands for first
@@ -3681,16 +3709,26 @@ unsafe fn run_frame_general(
                     interp().slot_owner = owner;
                     return result;
                 }
-                let body = function.cdr();
-                bytecode::run_body(function, body, env)
+                match crate::replay::body(function)? {
+                    Some(replayed) => eval(replayed, env),
+                    None => bytecode::run_body(function, function.cdr(), env),
+                }
             })
         });
         (signature, result)
     });
+    let loaded = _namespace_load.is_some();
     drop(_namespace_load);
     let (signature, result) = match result {
         Ok(pair) => pair,
         Err(unwind) => (None, Err(unwind)),
+    };
+    let result = match result {
+        Ok(namespace) if loaded => {
+            crate::ahead::namespace_loaded(namespace);
+            Ok(namespace)
+        }
+        result => result,
     };
     let result = finish_frame(call, depth, signature, result);
     let result = pop_frame(function, depth, result);

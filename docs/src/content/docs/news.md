@@ -3,6 +3,62 @@ title: News
 description: Release announcements and project news
 ---
 
+## Unreleased
+
+### An installed typed package runs like a script
+
+`ry install` and `ry build` on ry's runtime check a typed package before they build it, and an
+error in a strict file stops the build. The tarball holds the sources as `ry run` runs them:
+literals carry the types the checker gave them, and every one-line parameter and return annotation
+is written as the type it stands for, with aliases expanded. So a typed function of an installed
+package that converts an R vector with `List.from_r`, or that reads a parameter typed by an alias,
+compiles at its first call instead of running that call in the interpreter, and a parameter typed by
+a record alias is checked at run time
+(``argument `p` must be `Record{x: F64, y: F64}`, not `list` ``). See [the CLI reference](/reference/cli#build-and-install).
+
+The same rewrite applies to typed code that `ry run --runtime ry` and the console run, strict or
+not, so a parameter typed by an alias of a checkable type is checked at run time there too:
+`half("a")`, where `half <- function(x: Meters)` and `alias Meters = F64`, stops with
+``argument `x` must be `F64`, not `character` `` instead of failing inside the body.
+
+An `I64` or a `List<I64>` inside a function, a list or a package's namespace serializes, as ry's
+own type code that only ry reads back, so a typed package can bind `limit <- 10` where the checker
+types `10` as `I64`. `saveRDS(5i64, file)` is refused, and records, tuples, tags, dictionaries and
+sets do not serialize.
+
+### An installed typed package carries its machine code
+
+`ry install` on ry's runtime compiles a package's typed functions and writes their machine code
+beside the package's lazy-load database, as `R/<package>.<build>.ryt`. A new session maps that file
+and runs a typed function's first call on the code compiled at install instead of compiling it: 50
+typed functions of one package took 1.43 ms for their first calls against 18.5 ms compiled in the
+session, and 2.2 MiB of peak memory against 5.0 MiB (iterate build). Processes that use the same
+package share its code pages. `ry build --aot` on a package installs it the same way, and
+`R CMD INSTALL --ry-no-typed-code` skips the file. Under `ry run --aot`, a package installed by
+another build of ry compiles its typed functions as it loads and says to reinstall it. See
+[the CLI reference](/reference/cli#build-and-install) and
+[the typed code file](/development/typed-code-file/).
+
+### Reinstall packages that ry 0.4.5 or earlier compiled
+
+A package that writes into a list or character vector through a read-only pointer, as data.table's
+`setcolorder` does, could lose an element to the garbage collector, so a data.table program that
+added columns with `:=` and then reordered them failed with "malformed data.table" or crashed. The
+collector now rescans every list or character vector that native code took a pointer into, read-only
+or not, but code compiled against ry 0.4.5's headers reads those pointers inline and skips the
+rescan. ry therefore refuses to load such a package and says how to reinstall it:
+
+```
+Error: package or namespace load failed for ‘data.table’:
+ unable to load shared object '/home/me/R/library/data.table/libs/data_table.so':
+  package 'data.table' was compiled by ry 0.4.5 against older C headers, and its compiled code is unsafe to run under this ry. Reinstall it with this ry: install.packages("data.table"), or R CMD INSTALL on its source (ry install for a package you develop).
+```
+
+A package installed by GNU R loads unchanged. Every installation from source by ry records the
+version of its headers' binary interface in a `RyAbi:` field of the package's `DESCRIPTION`, and
+`ry load` and `ry install` rebuild objects that an older ry left in a package's `src/`
+([the CLI reference](/reference/cli#build-and-install)).
+
 ## ry 0.4.5
 
 *Released in November 2026.*

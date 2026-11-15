@@ -105,9 +105,9 @@ data, R call sites, typed functions of other namespaces) is loaded from a small 
 process fills when it maps the file and when a function attaches. The code pages are mapped read-only straight from the file, so the four
 test processes a CI machine runs share one copy of every installed dependency's typed code, and
 only the table is private to each. `ry install` writes the file to a temporary name and renames it
-into place, so a process never maps a half-written file. [The typed code file](/development/design/typed-code-file/)
-is the implementation plan: the table as the code's global offset table, the file format, how a
-function attaches at its first call, and the tests.
+into place, so a process never maps a half-written file. [The typed code file](/development/typed-code-file/)
+is the contract: the table as the code's global offset table, the file format, how a function
+attaches at its first call, and the tests.
 
 **Standalone executables.** `ry build --aot --exe main.R` writes one executable in the spirit of
 `bun build --compile`: ry's runtime, the elaborated script and the strict files it sources, and the
@@ -521,8 +521,10 @@ this draft in five ways:
   `match` over any tag (a tag from R, or a tag field) tests the shapes the process has confirmed,
   and the code compiles again once another shape is confirmed (`decisions.md`, "Typed boxes have
   shapes, and a tag type is a union of them").
-- Code lives in memory for the process. Code files, `ry install` compilation,
-  `ry build --aot --exe`, value tracking, pools and the background workers are not built.
+- A script's code lives in memory for the process. An installed package's typed code is compiled
+  by `ry install` into a code file that each process maps and attaches per function at its first
+  call ([the typed code file](/development/typed-code-file/)). `ry build --aot --exe`, value
+  tracking, pools and the background workers are not built.
 
 `ry run --aot` is built for a script ([CLI reference](/reference/cli#compiling-ahead-of-time)).
 Before the script's first expression runs, it lowers every top-level expression, creates the

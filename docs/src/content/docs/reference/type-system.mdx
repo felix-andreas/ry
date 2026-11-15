@@ -395,9 +395,17 @@ these rules:
   computed value; a return value gets no such allowance. A list type admits any R list, a
   `Record{...}` or `Tuple{...}` type any ry record or tuple, a function type any function, and a
   union any of its members. Vector shape, element types, and
-  attributes are not checked, and a type the storage type cannot decide (an alias, a class, a type
-  parameter, `Any`, `data.frame`) is not checked at all. A check therefore fails only on a value that really does not
+  attributes are not checked, and a type the storage type cannot decide (a class, a type
+  parameter, `Any`, `data.frame`) is not checked at all. Under `ry run`, the console and an
+  installed package, an alias is checked as the type it stands for, because ry's runtime reads
+  each one-line annotation there with its aliases expanded. A check therefore fails only on a value that really does not
   have the annotated type.
+- **An installed typed package's signatures name the types, not their aliases.** `ry install` and
+  `ry build` on ry's runtime write each one-line parameter and return annotation of a typed package
+  as the type it stands for ([CLI reference](/reference/cli#build-and-install)), so an installed
+  function with a parameter `p: Point`, where `alias Point = Record{x: F64, y: F64}`, checks `p` as
+  a record. A type with no such spelling, such as the open record `Record{a: I64, ..}`, and an
+  annotation that spans lines stay as written.
 - **A function with no parameters whose body is a constant or a bare name is not checked**, because
   it has no language object to carry its signature.
 
@@ -4678,14 +4686,19 @@ interpreted
 The rule covers the function's body. How R code calls a native function is not checked, so these
 calls from the interpreter run in the interpreter with no finding:
 
-- a call that passes a record, a tuple, a list literal, a function, or any argument that is neither
-  a constant nor a variable;
+- a call that passes a function, or an argument that runs R code to compute (anything but a
+  constant, a variable, arithmetic of them, and list, record, tuple and tag literals of them);
 - a call that passes a variable to a native function that calls R, because that R code could change
   the variable before R would read the argument;
 - the first call of a native function that calls into a namespace R has not loaded yet, such as
   `tools::file_ext`, or that converts a value whose type the checker does not know, with
   `Num.from_r` or with a `List.from_r` such as `List.from_r(get("prices"))`: the interpreter runs
   that call once, which loads the namespace or gives the type, and later calls run natively;
+- a call in which such a conversion gives a type other than the one it gave before. The native code
+  stops there, and the interpreter runs the call again from the start, with each R call the native
+  code already made giving the value it gave then instead of running a second time, so what those
+  calls printed or assigned happens once. From then on the conversion's type is not known before
+  it runs, so every call of the function runs in the interpreter;
 - a call of a function that returns a `Dict` or a `Set`.
 
 A native function called from another native function has none of these limits.

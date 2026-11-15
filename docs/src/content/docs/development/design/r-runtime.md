@@ -425,6 +425,50 @@ because its bindings are only appended or compacted: the rescan marks the cells 
 last scan, which keeps a namespace that is filled during a load from being rescanned whole at every
 collection.
 
+**Native code gets no barrier, so its element pointers escape.** Every C API function that hands
+out a pointer into a list's or character vector's elements (`DATAPTR`, `DATAPTR_RO`,
+`DATAPTR_OR_NULL`, `STRING_PTR`, `STRING_PTR_RO`, `VECTOR_PTR`, `VECTOR_PTR_RO`, an ALTREP
+class's `Dataptr` or `Dataptr_or_null` over such a vector) marks the vector escaped, read-only
+pointers included. Packages write through read-only pointers: data.table's `setcolorder` and
+`setorder` permute columns and character data with `memcpy` through `DATAPTR_RO`. GNU R
+remembers a whole object, so a permutation inside one vector is harmless there, but ry remembers
+per card, and moving a young element from a dirty card to a clean one hides it from the next minor
+collection, which then frees it. Every collection marks all of an escaped vector's children (a
+minor collection does so for a character vector by marking every young string), and a writable
+pointer to an old vector remembers it at once, because native code may store a young element
+through it. When the outermost native call returns, an old escaped vector that may hold a younger
+child has all its cards marked dirty and joins the remembered set, so the next minor collection
+rescans it once and its later stores go through the barrier again. It may hold one when it is
+remembered (which covers barriered stores and writable pointers) or when a collection ran during
+the escape, which can age its children without remembering it. Any other old vector held only old
+children throughout, and permuting them cannot change that, so the read-only pointers data.table
+takes on every column it only reads cost no rescan. Deferring the rescan to the next collection,
+rather than rescanning at return, costs one scan however many native calls touched the vector
+between two collections. `RY_GC_VERIFY=1` checks this contract before every collection short of a
+major one ([Robustness](/development/robustness/)).
+
+The escape lasts until the outermost native call returns, so a pointer native code keeps after
+that, across two `.Call`s or taken by an embedding host outside any call, is unprotected if it
+later moves elements.
+
+Reference counts are settled per list, from an entry the escape records. A writable pointer takes
+a snapshot of the list's elements, because native code may replace elements uncounted, and the
+retirement counts what the list then holds and releases what the snapshot names. A
+`SET_VECTOR_ELT` into that list in between counts the new value at once, so copy-on-modify sees it
+shared, and adds it to the snapshot; the value it replaced keeps its count until the retirement
+releases it. Collections keep every value the snapshot names allocated until then, which
+`RY_GC_VERIFY=1` checks. A read-only pointer records only a digest of the elements that ignores
+their order, because permuting them leaves the counts right and copying a large list on every
+`DATAPTR_RO` would cost more than the call that reads it. If the digest differs, native code
+stored something other than a permutation through the read-only pointer, and every element the
+list then holds is counted once more: the counts err high, which keeps objects alive and makes
+copy-on-modify copy, but never frees anything still held. The first counted change to such a
+list (a `SET_VECTOR_ELT` or a resize) checks the digest that way and takes the snapshot, because
+a counted store releases what the slot held, which native code may have put there uncounted. A
+resize of a list with a snapshot leaves the dropped slots to the retirement. A list that dies, or
+whose elements move to a grown list, before its escape retires is settled from the same entry.
+Pointers into atomic vectors need none of this, because their elements are not objects.
+
 A lazy-load fetch allocates pretenured: what it reads is a package's functions and data, which live
 as long as the session, so a minor collection would trace them only to promote them. Small objects
 come from separate allocation runs whose pages hold no young objects, and no collection runs while
@@ -485,10 +529,13 @@ is an error, and a region left unbalanced on return is a warning and is cut back
 
 **Hot accessors are inline.** `Rinternals.h` defines `INTEGER`, `REAL`, `LOGICAL`, `RAW`,
 `COMPLEX`, their `_RO` and `_ELT` forms, `DATAPTR`, `DATAPTR_RO`, `STRING_ELT`, `VECTOR_ELT`,
-`STRING_PTR_RO`, `TYPEOF`, `LENGTH`, `XLENGTH`, `Rf_length`, `Rf_xlength`, `Rf_isNull`, `R_CHAR`,
-`CAR`, `CDR`, `TAG`, `CADR`, `CDDR` and `CADDR` as inline functions that read the object header
-and fall back to libR for anything unusual (an ALTREP instance, a wrong type, an index out of
-bounds). The exported functions take the same fast paths before entering the API, so binaries built
+`TYPEOF`, `LENGTH`, `XLENGTH`, `Rf_length`, `Rf_xlength`, `Rf_isNull`, `R_CHAR`, `CAR`, `CDR`,
+`TAG`, `CADR`, `CDDR` and `CADDR` as inline functions that read the object header and fall back to
+libR for anything unusual (an ALTREP instance, a wrong type, an index out of bounds). `DATAPTR`
+and `DATAPTR_RO` are inline for atomic vectors only, and `STRING_PTR_RO` is not inline at all,
+because a pointer into a list or character vector must reach libR to escape the vector (see the
+write barrier above). A package built against older ry headers inlines those pointers, so ry
+refuses to load it until it is reinstalled (`RyAbi:`, in [Packaging](/development/design/packaging/)). The exported functions take the same fast paths before entering the API, so binaries built
 against GNU R's headers benefit too. A package that defines `RY_NO_INLINE_ACCESSORS` gets plain
 calls.
 

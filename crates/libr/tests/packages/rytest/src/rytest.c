@@ -1464,6 +1464,47 @@ SEXP rytest_api_bench(SEXP count, SEXP env)
     return R_NilValue;
 }
 
+/* Stores a newly allocated element at x[index]: an integer scalar holding `value` in a list, or
+ * a string spelling it in a character vector. The element is young and only x holds it. */
+SEXP rytest_set_young(SEXP x, SEXP index, SEXP value)
+{
+    int number = asInteger(value);
+    if (TYPEOF(x) == STRSXP) {
+        char text[32];
+        snprintf(text, sizeof text, "young %d", number);
+        SET_STRING_ELT(x, asInteger(index), mkChar(text));
+    } else {
+        SET_VECTOR_ELT(x, asInteger(index), ScalarInteger(number));
+    }
+    return R_NilValue;
+}
+
+/* Reverses the elements of the list or character vector x in place, through the element pointer
+ * accessor `via` names, the way data.table's setcolorder permutes a table's columns: memcpy
+ * through a pointer that may be declared read-only. No element is stored through
+ * SET_VECTOR_ELT or SET_STRING_ELT. */
+SEXP rytest_reverse_handles(SEXP x, SEXP via)
+{
+    int string = TYPEOF(x) == STRSXP;
+    SEXP *elements;
+    switch (asInteger(via)) {
+    case 0: elements = (SEXP *) DATAPTR_RO(x); break;
+    case 1: elements = (SEXP *) (DATAPTR_RO)(x); break;
+    case 2: elements = (SEXP *) (string ? STRING_PTR_RO(x) : VECTOR_PTR_RO(x)); break;
+    case 3: elements = (SEXP *) DATAPTR_OR_NULL(x); break;
+    case 4: elements = (SEXP *) DATAPTR(x); break;
+    default: elements = string ? STRING_PTR(x) : (SEXP *) VECTOR_PTR(x); break;
+    }
+    if (elements == NULL)
+        error("no element pointer");
+    R_xlen_t n = XLENGTH(x);
+    SEXP *reversed = (SEXP *) R_alloc(n, sizeof(SEXP));
+    for (R_xlen_t i = 0; i < n; i++)
+        reversed[i] = elements[n - 1 - i];
+    memcpy(elements, reversed, n * sizeof(SEXP));
+    return R_NilValue;
+}
+
 SEXP rytest_cpp_unwind(SEXP call);
 SEXP rytest_destructor_count(void);
 
@@ -1519,6 +1560,8 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_destructor_count", (DL_FUNC) &rytest_destructor_count, 0},
     {"rytest_api_extras", (DL_FUNC) &rytest_api_extras, 0},
     {"rytest_accessor_agreement", (DL_FUNC) &rytest_accessor_agreement, 1},
+    {"rytest_reverse_handles", (DL_FUNC) &rytest_reverse_handles, 2},
+    {"rytest_set_young", (DL_FUNC) &rytest_set_young, 3},
     {"rytest_frame_lifetime", (DL_FUNC) &rytest_frame_lifetime, 1},
     {"rytest_interrupt", (DL_FUNC) &rytest_interrupt, 0},
     {"rytest_suspended_interrupt", (DL_FUNC) &rytest_suspended_interrupt, 0},
