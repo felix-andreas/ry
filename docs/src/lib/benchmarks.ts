@@ -517,7 +517,7 @@ export function tableViews(suite: Suite): TableView[] {
         + (engines.includes(typedAhead) ? ` ${engineLabel(typedAhead)} compiled the program before it started, so its first run compiles nothing.` : ''),
     });
   }
-  if (programs.some((program) => program.measurement.peakMib !== undefined)) {
+  if (programs.some((program) => Object.keys(program.measurement.peakMib ?? {}).length > 0)) {
     views.push({
       label: 'Memory',
       columns: ['program', ...engines.map(engineLabel)],

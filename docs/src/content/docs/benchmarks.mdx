@@ -13,7 +13,8 @@ import SpeedChart from '../../components/SpeedChart.astro';
 Four suites compare ry's runtime with GNU R. Two run code that others wrote: the programs that
 R compiler research measures itself on, and the test suites of CRAN packages. The other two run
 code we wrote: small numeric kernels, each also written in typed ry, and programs in the shape of
-package and business code. Each suite's geometric mean of ry's speed-ups over GNU R:
+package and business code. A fifth section times the three benchmark code bases, outside this
+summary. Each suite's geometric mean of ry's speed-ups over GNU R:
 
 <BenchmarkSummary />
 
@@ -94,9 +95,9 @@ base, runs on its own. A code base's time is the sum of its blocks' own times, s
 and testthat's per-file garbage collection are outside it. The result is checked by the number of
 blocks that pass, which must agree between the engines.
 
-The suite measures ry with the JIT on and with it off, which shows how much of the time the JIT
-decides. It is not part of the summary above: the code bases are generated, they depend on the
-packages of the corpus library, and a run takes hours, so the suite has fewer rounds than the others.
+The suite measures ry with the JIT on and with it off. It is not part of the summary above: the code
+bases are generated, they depend on the packages of the corpus library, and one round takes about 20
+minutes, so the suite runs its 10 rounds without extra rounds for wide intervals.
 
 <SpeedChart suite="codebases" />
 
@@ -108,13 +109,9 @@ packages of the corpus library, and a run takes hours, so the suite has fewer ro
 </details>
 
 The Per test table gives the geometric mean over the test blocks, so a code base counts every test
-alike, and the note under it names the slowest code base against the mean. A single block is rarely
-the cost of a run: the code spends its time in package code, S3 dispatch and the packages the tests
-import, which is also why these ratios sit below those of the kernels.
+alike, and the note under it names the slowest code base against the mean.
 
-The corpus library lacks polars, Rblpapi and esgtoolkit, which are not on CRAN and have no
-public binary for the machine that measured. A block that needs one of them fails the same way on
-both engines and stays out of the speed-up.
+The corpus library lacks polars, Rblpapi and esgtoolkit, so the code bases run without them.
 
 <BenchmarkPrograms suite="codebases" />
 
