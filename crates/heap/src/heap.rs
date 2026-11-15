@@ -165,11 +165,9 @@ pub struct Heap {
     /// Whether a collection ran while `escaped` held a vector, which scanned it whole and may
     /// have aged its children without remembering it.
     escaped_collected: bool,
-    /// The elements each list held when a writable pointer to it escaped, and every value a
-    /// counted store put into it since. Native stores through the pointer bypass the counts, so
-    /// retiring the escape counts what the list holds and releases each of these. Collections
-    /// keep them allocated until then, because one may have left the list.
-    escaped_lists: Vec<(Sexp, Vec<Sexp>)>,
+    /// The lists among `escaped` whose counts native stores may have bypassed, with what the
+    /// retirement needs to put them right.
+    escaped_lists: Vec<EscapedList>,
     /// Objects a store left without a counted reference, which the next reconcile frees if no
     /// root holds them either (`Heap::reconcile`).
     zero_count: Vec<Sexp>,
@@ -295,6 +293,27 @@ struct Returned {
     closures: SmallVec<[Sexp; 2]>,
     /// How many of those a collection freed, whose references to `env` stay counted.
     swept: u32,
+}
+
+/// A list a pointer to whose elements escaped, and what [`Heap::retire_escaped`] needs to put
+/// its counts right afterwards.
+struct EscapedList {
+    list: Sexp,
+    counted: Counted,
+}
+
+enum Counted {
+    /// For a writable pointer: what the list held when it escaped, and each value a counted
+    /// element store put into it since. Native stores through the pointer bypass the counts, so
+    /// the retirement counts what the list holds and releases each of these. Collections keep
+    /// them allocated until then, because one may have left the list.
+    Snapshot(Vec<Sexp>),
+    /// For a read-only pointer: an order-independent digest of the elements ([`element_digest`]),
+    /// kept up to date by counted element stores. Native code writing through a read-only
+    /// pointer only permutes the elements, which leaves the counts right and the digest equal,
+    /// so this costs no copy. A digest that changed means it stored something else, and the
+    /// retirement then counts every element once more, which errs toward keeping objects.
+    Digest(u64),
 }
 
 /// A formal bound by [`Heap::define_formals`]. `missing` marks a formal the call did not supply,
@@ -510,6 +529,25 @@ pub enum GcStressStart {
 }
 
 /// SplitMix64's step: deterministic, so a seeded stress run replays exactly.
+/// The multiset digest of `list`'s elements: a sum of hashes, so any permutation gives the same
+/// value and one store changes it by the difference of two hashes.
+unsafe fn element_digest(list: Sexp) -> u64 {
+    (0..list.length() as usize).fold(0, |digest, index| {
+        digest.wrapping_add(element_hash(list.stored_element(index)))
+    })
+}
+
+unsafe fn increment_elements(list: Sexp) {
+    for index in 0..list.length() as usize {
+        list.stored_element(index).increment_refcount();
+    }
+}
+
+fn element_hash(value: Sexp) -> u64 {
+    let mut state = value.as_ptr() as u64;
+    split_mix(&mut state)
+}
+
 fn split_mix(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
     let mut z = *state;
@@ -2137,9 +2175,6 @@ impl Heap {
     #[inline(always)]
     unsafe fn count_store(&mut self, parent: Sexp, old: Sexp, new: Sexp) {
         if parent.flags() & flag_bits::UNTRACKED == 0 {
-            if parent.gc_bits() & gc_bits::ESCAPED != 0 && self.count_into_snapshot(parent, new) {
-                return;
-            }
             new.increment_refcount();
             if old.release_reference() {
                 self.note_zero(old);
@@ -2216,11 +2251,12 @@ impl Heap {
         let tracked = to.flags() & flag_bits::UNTRACKED == 0;
         for offset in 0..count {
             let value = from.stored_element(from_start + offset);
+            let old = to.stored_element(to_start + offset);
             if tracked
-                && !(to.gc_bits() & gc_bits::ESCAPED != 0 && self.count_into_snapshot(to, value))
+                && !(to.gc_bits() & gc_bits::ESCAPED != 0
+                    && self.count_escaped_store(to, old, value))
             {
                 value.increment_refcount();
-                let old = to.stored_element(to_start + offset);
                 if old.release_reference() {
                     self.note_zero(old);
                 }
@@ -2252,12 +2288,17 @@ impl Heap {
     /// element instead of counting each element into the copy and, when the collector sweeps
     /// the original, back out of it.
     ///
+    /// A list whose pointer escaped is copied instead, because its retirement settles its counts
+    /// from what it holds then.
+    ///
     /// # Safety
     /// `to` and `from` are distinct, non-ALTREP vectors of one handle kind, `to` has room for
     /// `from`'s elements in slots that hold `nil`, and nothing reads `from` afterwards.
     pub unsafe fn move_elements(&mut self, to: Sexp, from: Sexp) {
         let count = from.length() as usize;
-        if (to.flags() ^ from.flags()) & flag_bits::UNTRACKED != 0 {
+        if (to.flags() ^ from.flags()) & flag_bits::UNTRACKED != 0
+            || from.gc_bits() & gc_bits::ESCAPED != 0
+        {
             self.copy_elements(to, 0, from, 0, count);
             return;
         }
@@ -2299,7 +2340,12 @@ impl Heap {
         {
             return (elements.write)(vector, index, value);
         }
-        self.count_store(vector, vector.stored_element(index), value);
+        let old = vector.stored_element(index);
+        if !(vector.gc_bits() & gc_bits::ESCAPED != 0
+            && self.count_escaped_store(vector, old, value))
+        {
+            self.count_store(vector, old, value);
+        }
         self.element_barrier(vector, index, value);
         vector.set_element_unbarriered(index, value);
     }
@@ -2376,8 +2422,8 @@ impl Heap {
     /// Records that native code received a pointer to `vector`'s handle elements, so its stores
     /// bypass the barrier and every collection scans it whole until [`Heap::retire_escaped`] (a
     /// minor collection marks every young string instead of scanning an old character vector).
-    /// A writable pointer to a list also has the retirement recount the list from a snapshot of
-    /// its elements ([`Heap::count_into_snapshot`]).
+    /// An escaped list also gets an [`EscapedList`] entry, from which the retirement settles the
+    /// counts that native stores through the pointer bypassed.
     ///
     /// A read-only pointer escapes too, because packages write through `DATAPTR_RO`: data.table's
     /// `setcolorder` permutes a table's columns with `memcpy`. A permutation adds no child, so
@@ -2390,41 +2436,84 @@ impl Heap {
         if writable && bits & gc_bits::OLD != 0 {
             self.remember(vector);
         }
-        if bits & gc_bits::ESCAPED == 0 {
+        let first = bits & gc_bits::ESCAPED == 0;
+        if first {
             vector.set_gc_bit(gc_bits::ESCAPED, true);
             self.escaped.push(vector);
         }
-        // Through a read-only pointer native code only moves elements, which leaves the counts
-        // right, so only a writable one needs the recount.
-        if writable
-            && matches!(vector.kind(), SexpType::List | SexpType::Expression)
-            && vector.tracks_references()
-            && !self.escaped_lists.iter().any(|(list, _)| *list == vector)
+        if !matches!(vector.kind(), SexpType::List | SexpType::Expression)
+            || !vector.tracks_references()
         {
-            let elements = (0..vector.length() as usize)
+            return;
+        }
+        let snapshot = || {
+            (0..vector.length() as usize)
                 .map(|index| vector.stored_element(index))
-                .collect();
-            self.escaped_lists.push((vector, elements));
+                .collect()
+        };
+        if first {
+            let counted = if writable {
+                Counted::Snapshot(snapshot())
+            } else {
+                Counted::Digest(element_digest(vector))
+            };
+            self.escaped_lists.push(EscapedList {
+                list: vector,
+                counted,
+            });
+            return;
+        }
+        if !writable {
+            return;
+        }
+        let Some(entry) = self
+            .escaped_lists
+            .iter_mut()
+            .find(|entry| entry.list == vector)
+        else {
+            return;
+        };
+        if let Counted::Digest(digest) = entry.counted {
+            if digest != element_digest(vector) {
+                increment_elements(vector);
+            }
+            entry.counted = Counted::Snapshot(snapshot());
         }
     }
 
-    /// Counts `value` into `list` when a writable escape of `list` is pending, and says whether
-    /// it did. The retirement counts what the list then holds and releases what the snapshot
-    /// names, so the value counts now, which keeps copy-on-modify right while native code
-    /// runs, and joins the snapshot to be released once. The value it replaces is not released
-    /// now: if the counts ever counted it, the snapshot names it and the retirement releases it,
-    /// and if native code stored it uncounted, nothing may.
-    unsafe fn count_into_snapshot(&mut self, list: Sexp, value: Sexp) -> bool {
-        let Some((_, counted)) = self
+    /// Accounts for a counted element store of `value` over `old` into an escaped `list`, and
+    /// says whether it counted the store itself.
+    ///
+    /// Under a snapshot, the retirement counts what the list then holds and releases what the
+    /// snapshot names, so the value counts now, which keeps copy-on-modify right while native
+    /// code runs, and joins the snapshot to be released once. The value it replaces is not
+    /// released now: if the counts ever counted it, the snapshot names it and the retirement
+    /// releases it, and if native code stored it uncounted, nothing may. Under a digest, the
+    /// store counts as usual and the digest follows it.
+    ///
+    /// Only element stores come here: the retirement settles a list's elements, never its
+    /// attributes.
+    unsafe fn count_escaped_store(&mut self, list: Sexp, old: Sexp, value: Sexp) -> bool {
+        let Some(entry) = self
             .escaped_lists
             .iter_mut()
-            .find(|(escaped, _)| *escaped == list)
+            .find(|entry| entry.list == list)
         else {
             return false;
         };
-        value.increment_refcount();
-        counted.push(value);
-        true
+        match &mut entry.counted {
+            Counted::Snapshot(counted) => {
+                value.increment_refcount();
+                counted.push(value);
+                true
+            }
+            Counted::Digest(digest) => {
+                *digest = digest
+                    .wrapping_sub(element_hash(old))
+                    .wrapping_add(element_hash(value));
+                false
+            }
+        }
     }
 
     /// Ends every escape once the outermost native call returns. Native code may store through
@@ -2448,23 +2537,30 @@ impl Heap {
             self.escaped_collected = false;
             return;
         }
-        // Native code may have replaced elements without counting either side, so the counts
-        // move from what the list held when it escaped to what it holds now.
-        for (vector, before) in std::mem::take(&mut self.escaped_lists) {
-            if self.policy.verify
-                && let Some(freed) = before.iter().find(|value| value.is_poisoned())
-            {
-                panic!(
-                    "write barrier violation: a collection freed {freed:?}, which the snapshot of \
-                     an escaped list still names"
-                );
-            }
-            for index in 0..vector.length() as usize {
-                vector.stored_element(index).increment_refcount();
-            }
-            for old in before {
-                if old.release_reference() {
-                    self.note_zero(old);
+        for EscapedList { list, counted } in std::mem::take(&mut self.escaped_lists) {
+            match counted {
+                // Native code may have replaced elements without counting either side, so the
+                // counts move from what the list held when it escaped to what it holds now.
+                Counted::Snapshot(before) => {
+                    if self.policy.verify
+                        && let Some(freed) = before.iter().find(|value| value.is_poisoned())
+                    {
+                        panic!(
+                            "write barrier violation: a collection freed {freed:?}, which the \
+                             snapshot of an escaped list still names"
+                        );
+                    }
+                    increment_elements(list);
+                    for old in before {
+                        if old.release_reference() {
+                            self.note_zero(old);
+                        }
+                    }
+                }
+                Counted::Digest(digest) => {
+                    if digest != element_digest(list) {
+                        increment_elements(list);
+                    }
                 }
             }
         }
@@ -3865,12 +3961,41 @@ impl Heap {
         while let Some(object) = dying.pop() {
             let attributes = object.attrib();
             object.set_attrib_unbarriered(nil);
-            let elements = (0..object.length() as usize).map(|index| {
+            // A list that dies with an escape pending may hold what native code stored
+            // uncounted, so what it counted is what the escape's entry says.
+            let mut counted = None;
+            if object.gc_bits() & gc_bits::ESCAPED != 0
+                && let Some(position) = self
+                    .escaped_lists
+                    .iter()
+                    .position(|entry| entry.list == object)
+            {
+                counted = Some(match self.escaped_lists.swap_remove(position).counted {
+                    Counted::Snapshot(before) => before,
+                    Counted::Digest(digest) if digest == element_digest(object) => {
+                        (0..object.length() as usize)
+                            .map(|index| object.stored_element(index))
+                            .collect()
+                    }
+                    Counted::Digest(_) => Vec::new(),
+                });
+            }
+            let held = (0..object.length() as usize).map(|index| {
                 let child = object.stored_element(index);
                 object.set_element_unbarriered(index, nil);
                 child
             });
-            for child in std::iter::once(attributes).chain(elements) {
+            let (held, counted) = match counted {
+                Some(counted) => {
+                    held.for_each(drop);
+                    (None, counted)
+                }
+                None => (Some(held), Vec::new()),
+            };
+            for child in std::iter::once(attributes)
+                .chain(held.into_iter().flatten())
+                .chain(counted)
+            {
                 if !child.release_reference() {
                     continue;
                 }
@@ -4043,12 +4168,15 @@ impl Heap {
         self.mark_roots(kind);
         // The retirement of a writable escape releases each value its snapshot names, so one
         // that left the list must stay allocated until then.
-        for list in 0..self.escaped_lists.len() {
-            for index in 0..self.escaped_lists[list].1.len() {
-                let value = self.escaped_lists[list].1[index];
-                self.mark(value);
+        let escaped_lists = std::mem::take(&mut self.escaped_lists);
+        for entry in &escaped_lists {
+            if let Counted::Snapshot(before) = &entry.counted {
+                for &value in before {
+                    self.mark(value);
+                }
             }
         }
+        self.escaped_lists = escaped_lists;
         if kind == Collection::Intermediate {
             // A tenured object stays marked, so tracing stops at it; the ones that may point at
             // younger objects are exactly the remembered and escaped ones, so tracing starts
@@ -4153,7 +4281,7 @@ impl Heap {
         self.escaped.retain(|&object| space.is_marked(object));
         self.escaped_collected |= !self.escaped.is_empty();
         self.escaped_lists
-            .retain(|(object, _)| space.is_marked(*object));
+            .retain(|entry| space.is_marked(entry.list));
         for entry in &mut self.returned {
             let env = entry.env;
             entry.closures.retain(|&mut closure| {
@@ -5175,7 +5303,6 @@ unsafe fn has_younger_child(parent: Sexp) -> bool {
 /// Whether storing `child` into `parent`, an old object, makes the parent point below its own
 /// generation: at a young object, or from a tenured parent at an untenured one. The parent's
 /// generation bits must all be set in the child's.
-
 #[inline(always)]
 unsafe fn younger(parent: Sexp, child: Sexp) -> bool {
     parent.gc_bits() & (gc_bits::OLD | gc_bits::TENURED) & !child.gc_bits() != 0

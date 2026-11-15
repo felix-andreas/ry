@@ -449,16 +449,22 @@ major one ([Robustness](/development/robustness/)).
 
 The escape lasts until the outermost native call returns, so a pointer native code keeps after
 that, across two `.Call`s or taken by an embedding host outside any call, is unprotected if it
-later moves elements. Reference counts need less: moving elements leaves them right, so a
-read-only pointer changes nothing about them. A writable pointer to a list takes a snapshot of its
-elements, because native code may replace elements uncounted, and the retirement counts what the
-list then holds and releases what the snapshot names. A `SET_VECTOR_ELT` into that list in between
-counts the new value at once, so copy-on-modify sees it shared, and adds it to the snapshot; the
-value it replaced keeps its count until the retirement releases it. Collections keep every value
-the snapshot names allocated until then, which `RY_GC_VERIFY=1` checks.
-A list that counts references also snapshots its elements on escape, so the counts move from what
-it held to what it holds when the call returns. Pointers into atomic vectors need none of this,
-because their elements are not objects.
+later moves elements.
+
+Reference counts are settled per list, from an entry the escape records. A writable pointer takes
+a snapshot of the list's elements, because native code may replace elements uncounted, and the
+retirement counts what the list then holds and releases what the snapshot names. A
+`SET_VECTOR_ELT` into that list in between counts the new value at once, so copy-on-modify sees it
+shared, and adds it to the snapshot; the value it replaced keeps its count until the retirement
+releases it. Collections keep every value the snapshot names allocated until then, which
+`RY_GC_VERIFY=1` checks. A read-only pointer records only a digest of the elements that ignores
+their order, because permuting them leaves the counts right and copying a large list on every
+`DATAPTR_RO` would cost more than the call that reads it. If the digest differs at retirement,
+native code stored something other than a permutation through the read-only pointer, and every
+element the list then holds is counted once more: the counts err high, which keeps objects
+alive and makes copy-on-modify copy, but never frees anything still held. A list that dies, or
+whose elements move to a grown list, before its escape retires is settled from the same entry.
+Pointers into atomic vectors need none of this, because their elements are not objects.
 
 A lazy-load fetch allocates pretenured: what it reads is a package's functions and data, which live
 as long as the session, so a minor collection would trace them only to promote them. Small objects
