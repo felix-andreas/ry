@@ -35,6 +35,10 @@ The quality bar is four things.
   but passes alone, so it depends on heap state earlier seeds leave behind. It fails on main
   without the untyped-tier changes too; the frame release (`Heap::release_frame`) is the
   suspect.
+- `test_tiers` `element_ops_cost_no_more_than_tier_zero` fails its instruction budget (1,011
+  against 880).
+- `test_scenarios` `native_diagnostics_agree_with_the_typed_core` fails on the
+  `blocked-argument-count` case: the `native` check and the typed core disagree about it.
 - ry's own base R has no recommended packages, so `zoo` cannot load (`there is no package called
   'lattice'`) and the `timeseries` workload of `just bench applications` fails.
 - Recursion past `options(expressions=)` with the JIT on does not finish: `options(expressions = 500000); f <- function(n) if (n == 0) 0 else 1 + f(n - 1); tryCatch(f(1e6), error = identity)` runs for minutes (stopped after 120 s, unfinished) where GNU R raises an error. A native self-call in tier 1 counts the expression limit down (`jit_depth_budget`) and, when it runs out, hands the activation back to tier 0, which pushes one frame and enters the native code again for the next level, so every level repeats a descent of up to the whole limit. Tier 1 should stop entering a body natively once a descent ran out of budget. At the default limit of 5,000 the repeats cost nothing and the error arrives at once. With the JIT off the same program raises "evaluation nested too deeply: the register file is full". Recursion within the limit is fine, because a tier-0 call runs in the dispatch loop without a Rust frame of its own: `count <- function(n) if (n == 0L) 0L else 1L + count(n - 1L); count(400000L)` returns under that option.
