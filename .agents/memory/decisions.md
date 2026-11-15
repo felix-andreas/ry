@@ -11711,6 +11711,7 @@ is rejected below.
 - **Why the cache directory, not the project's `.ry/`.** A file inside the project can be committed by accident, and `ry run` does not otherwise write into a project. The price is that two machines key the same project differently, so summaries from a laptop and a CI runner do not share labels; `RY_PROFILE_KEY` from a CI secret gives a fleet one key.
 - **Randomness seam.** OS randomness is drawn only when a key file is created or a run key is needed; tests call `package_display` with a fixed key, and the scenario sets `RY_PROFILE_KEY`.
 - **Impact.** One SipHash per private package per summary, so no measurable cost. Labels change once for every existing user, because the key is new.
+
 ## `validObject` runs validity methods without its slot loop, and `new()` copies the prototype shallowly
 
 **Status:** built.
