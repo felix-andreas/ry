@@ -11645,3 +11645,11 @@ is rejected below.
 - **Contract.** `crates/oracle/cases/builtins__modulo_bit_patterns.R` prints the bit pattern of both results over a 37 by 37 grid and checks that the scalar and vector kernels agree.
 - **Measured** (hot suite, callgrind instructions per call, `iterate` build): `PerformanceAnalytics::table.AnnualizedReturns` 41.63M to 39.82M (-4.4%), `SharpeRatio.annualized` 26.83M to 25.63M (-4.5%), `Return.calculate` 5.91M to 5.82M (-1.5%), `rmgarch::dccspec` 2.00M to 1.97M (-1.3%). On the weighted totals: finbench -1.3%, dsbench -0.1%, biobench -0.1%. The code bases were not run for this change, because the predicted change is far below what one wall-time run resolves.
 
+
+## The code bases are a benchmark suite of their own, outside the headline
+
+- **Previous shape.** The three generated code bases were measured by `oracle bench` for the backlog's scoreboard only. The published benchmarks held no suite built from them.
+- **Choice.** `tools/bench/codebases` is a suite like the others: `bench.py codebases --release ARCHIVE --write` records a code base's time as the sum of its test blocks' own times, with GNU R, ry and ry with the JIT off in the same rounds, plus each code base's per-block geometric mean and each engine's slowest code base. The benchmarks page shows it in its own section after the package suites.
+- **Why it has no headline row.** The code bases are generated, so they say less about real code than the package suites do. One round takes about 24 minutes with three engines, so a release run has far fewer rounds than the other suites and its intervals are wider. The corpus library lacks polars, Rblpapi and esgtoolkit, so blocks that load them do not run. The suite is kept out of the summary table, the landing page and the README (`outsideSummary` in `docs/src/lib/benchmarks.ts`, `outside_summary` in `tools/bench/readme.py`).
+- **Revisit.** Reconsider a headline row after two release runs, once the intervals are known.
+- **Dependency note.** The Posit snapshot's xts binary was built for an older R and truncates `ATTRIB`'s return value, so xts subsetting aborts on R 4.6 under either engine. `tools/corpus/install.R` reinstalls xts from source for that reason.

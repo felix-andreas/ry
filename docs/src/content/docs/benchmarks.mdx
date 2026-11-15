@@ -84,6 +84,40 @@ engine is marked as failing there and has no speed-up.
 
 <BenchmarkPrograms suite="packages" />
 
+## Benchmark code bases
+
+These are the three [synthetic code bases](/development/corpus-and-oracle#the-benchmark-generator)
+(finance, data science and biostatistics) of about 300,000 lines in 500 files each, the size of the
+code ry is built to run. A program here is one whole code base: ry loads the package with `ry load`,
+GNU R loads it the same way, and each of the code base's `test_that()` blocks, about 10,000 per code
+base, runs on its own. A code base's time is the sum of its blocks' own times, so loading the package
+and testthat's per-file garbage collection are outside it. The result is checked by the number of
+blocks that pass, which must agree between the engines.
+
+The suite measures ry with the JIT on and with it off, which shows how much of the time the JIT
+decides. It is not part of the summary above: the code bases are generated, they depend on the
+packages of the corpus library, and a run takes hours, so the suite has fewer rounds than the others.
+
+<SpeedChart suite="codebases" />
+
+<details>
+<summary>The numbers: seconds, speed-ups and the speed-up per test</summary>
+
+<BenchmarkTable suite="codebases" />
+
+</details>
+
+The Per test table gives the geometric mean over the test blocks, so a code base counts every test
+alike, and the note under it names the slowest code base against the mean. A single block is rarely
+the cost of a run: the code spends its time in package code, S3 dispatch and the packages the tests
+import, which is also why these ratios sit below those of the kernels.
+
+The corpus library lacks polars, Rblpapi and esgtoolkit, which are not on CRAN and have no
+public binary for the machine that measured. A block that needs one of them fails the same way on
+both engines and stays out of the speed-up.
+
+<BenchmarkPrograms suite="codebases" />
+
 ## Numeric kernels (ours)
 
 These are small programs we wrote whose time goes into arithmetic on numbers and numeric vectors:
