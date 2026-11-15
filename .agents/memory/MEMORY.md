@@ -12,6 +12,7 @@ The specs live in the docs site under `docs/src/content/docs/`. `reference/type-
 
 ## Short-term
 
+- **Reinstall `.corpus/ry-library`** (`just corpus-ry-install`) once: ry refuses its compiled packages, which carry `RyBuilt:` without `RyAbi:` (`decisions.md`, "A package ry compiled records its headers' binary interface"). Delete this line after.
 - **Vector kernels.** Toward 10x on element-wise code, the next steps are fusing `sum`/`mean` consumers into the fused pass and an AVX-512 `exp` (`crates/interp/src/kernels.rs`, `vector_math.rs`; `backlog.md`, "Open: untyped R against GNU R").
 - **Closure calls.** 72% of the hot suite's closure calls from compiled code take tier 0's fast call path, which costs 750 to 1,200 instructions. Next are the calls that leave it (sites without a plan, unprepared plans, callees with a native entry, `...`) and the path's own cost against the 200-instruction end shape (`backlog.md`, "Open: closure calls that leave tier 0's fast call path").
 - **Ahead-of-time compilation.** `ry run --aot` compiles a script's top-level typed functions before it starts, and `ry install` installs a typed package's elaborated sources with canonical annotations, so its functions compile at their first call as a script's do. Next is the package code file for `ry build --aot` and `ry install`: the design is `development/design/typed-code-file.md`, and `backlog.md`, "Open: ahead-of-time compilation", lists the steps in order with files, tests, target numbers and stop rules.
@@ -28,8 +29,9 @@ Most important first. Each line names the open item, and the detail is at its po
 - Open bug: with `RY_JIT=force`, compiled code misses a write that an argument promise makes to its caller's variable, so `crates/oracle/cases/environments__code_argument_references.R` fails in force mode ("Open: the JIT").
 - Runtime gaps, among them annotations at run time, graphics ("Graphics gaps"), the corpus packages' own tests ("Corpus package tests: what still fails") and GNU R's regression tests: "Open: the runtime".
 - The three benchmark code bases pass every generated test, and their per-test time trails GNU R's. Close that gap, then run `ry check` over the generated code for false reports ("Open: the benchmark packages under ry's runtime").
-- The Windows release job fails while building ry's own base R ("Open: the Windows release build").
+- Windows has no crash report handler ("Open: Windows crash reports").
 - The methods package's core moves to Rust, and the next step is a native class table with dense ids ("Open: native methods core").
+- Cut low-signal tests across the code base, folding small unit tests into fixtures, table tests or property tests; the rule goes into `testing.md` and `robustness.md` afterwards ("Open: cut low-signal tests").
 - Package loader gaps: "Open: the package loader". `RY_FAST_PATHS=0` covers three prologues only ("Open: one switch for every fast path").
 
 **Untyped performance**
@@ -77,6 +79,7 @@ Most important first. Each line names the open item, and the detail is at its po
 
 - **Root a handle nothing else roots before allocating** (`heap.root`, or the `keep` list of `Heap::allocate`). Only collection stress shows a miss: run `test_fuzz_native.rs` with a large `FUZZ_ITERS`.
 - **Any pointer native code gets into a list's or character vector's elements must escape the vector** (`Heap::escape`), read-only ones included: packages permute through `DATAPTR_RO`, and per-card remembering loses a moved young element. Never inline such an accessor in `Rinternals.h`. Check a barrier change with `RY_GC_STRESS=seed:N RY_GC_VERIFY=1` (`decisions.md`, "Read-only element pointers escape too").
+- **A change to what `Rinternals.h` inlines bumps `rcmd::NATIVE_ABI`**, or packages ry compiled against the old headers keep running the old inline code; with the bump, `dyn.load` refuses them until they are reinstalled (`decisions.md`, "A package ry compiled records its headers' binary interface").
 - **Rust calls native code only through a C trampoline in `native.c`, and API callbacks run from C**, so a `longjmp` or C++ exception never crosses a Rust frame. An exported API function runs its body through `boundary::enter`.
 - **Mark a C function that native code calls `RY_EXPORT` in `native.c` (data: `RY_EXPORT_DATA`).** rustc hides C symbols in a cdylib, and `build.rs` exports only the marked ones.
 - **ry's headers declare and `libR` exports every name in `crates/libr/tests/headers/r_api_names.txt`** (`decisions.md`, "GNU R's public C API is a checked list, not a measured subset"). A libr test package must also build under gcc 14 and load into GNU R 4.6, so its C declares a non-API entry itself, with a parenthesized name (`SEXP (ATTRIB)(SEXP x);`).

@@ -159,6 +159,17 @@ A check must never read a project-wide map directly, because then every edit any
 
 There are two written homes. Keep both current, spend the minimum effort that keeps them useful, and prefer bullet points.
 
+## Anonymize user feedback
+
+Feedback from users and test users (bug reports, profiles, reproductions, kernels) often contains real names of customers, companies, internal projects, packages, files, functions, columns or data, and an agent-written reproduction may be only lightly simplified real code. Before anything from such feedback enters the repository (code, fixtures, oracle cases, scenarios, benchmarks, docs, memory, commit messages, PR titles and bodies, or `.agents/orchestrator.md`), anonymize it:
+
+- Replace identifying names with neutral ones (`f`, `col1`, `Key`, `pkg`).
+- Reduce the example to the minimal shape that shows the behavior.
+- Drop file names, paths, IDs and data values that come from the user's code.
+- Refer to the source only as "a user" or "a test user".
+
+A reproduction that names the user's own functions or files is real code, not an abstraction. Public package names (data.table, xts, CRAN packages) and the public repositories in the dependency list above are fine.
+
 ## `.agents/memory/`
 
 The agent knowledge base lives in the repository. Its index is `MEMORY.md`, which must keep these three sections under exactly these names:

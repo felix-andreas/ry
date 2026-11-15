@@ -1043,7 +1043,11 @@ SEXP R_Unserialize(R_inpstream_t stream);
  * libR, and libR's tests pin the layout. The accessors are function-like macros, so `&INTEGER`
  * and `(INTEGER)(x)` still name the libR function. A package that wants the plain functions, or
  * includes a header declaring its own function of one of these names, defines
- * RY_NO_INLINE_ACCESSORS before including this header. */
+ * RY_NO_INLINE_ACCESSORS before including this header.
+ *
+ * What these accessors read, and which cases they leave to libR, is compiled into every package,
+ * so a change here that makes old package binaries unsafe bumps rcmd::NATIVE_ABI, and ry then
+ * refuses to load a package it compiled against the old headers until it is reinstalled. */
 #ifndef RY_NO_INLINE_ACCESSORS
 
 /* C89 has no inline keyword; GCC and Clang accept __inline__ in every mode. */
