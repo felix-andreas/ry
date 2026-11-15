@@ -53,20 +53,24 @@ pub unsafe fn deparse_lines_with(
     opts: u32,
     backtick: bool,
 ) -> Vec<String> {
-    deparse_checked(object, cutoff, opts, backtick).0
+    deparse_checked(object, cutoff, opts, backtick, usize::MAX).0
 }
 
 /// Deparses, and also reports whether the text cannot reparse to the object because it holds
 /// an environment, pointer, or other value with no source form, and the first error that
-/// `deparse` itself raises (an S4 object whose class is not defined).
+/// `deparse` itself raises (an S4 object whose class is not defined). The deparse stops after
+/// `max_lines` lines, as GNU R's does for `deparse(nlines = )`: whatever follows them is neither
+/// written nor looked at, so it raises no error and does not count as incomplete.
 unsafe fn deparse_checked(
     object: Sexp,
     cutoff: usize,
     opts: u32,
     backtick: bool,
+    max_lines: usize,
 ) -> (Vec<String>, bool, Option<Unwind>) {
     let mut deparser = Deparser::new(cutoff, opts);
     deparser.backtick = backtick;
+    deparser.max_lines = max_lines;
     deparser.deparse(object);
     let incomplete = deparser.incomplete;
     let failure = deparser.failure.take();
@@ -81,8 +85,10 @@ unsafe fn deparse_warning(
     cutoff: usize,
     opts: u32,
     backtick: bool,
+    max_lines: usize,
 ) -> R<Vec<String>> {
-    let (lines, incomplete, failure) = deparse_checked(object, cutoff, opts, backtick);
+    let (lines, incomplete, failure) =
+        deparse_checked(object, cutoff, opts, backtick, max_lines);
     if let Some(failure) = failure {
         return Err(failure);
     }
@@ -108,7 +114,7 @@ pub unsafe fn deparse_one_line(object: Sexp) -> String {
 /// [`deparse_one_line`] for coercion (`as.character` of a list), which raises deparse's errors
 /// as GNU R's `deparse1line` does.
 pub unsafe fn deparse_one_line_checked(object: Sexp) -> R<String> {
-    let (lines, _, failure) = deparse_checked(object, 60, options::SIMPLE, true);
+    let (lines, _, failure) = deparse_checked(object, 60, options::SIMPLE, true, usize::MAX);
     match failure {
         Some(failure) => Err(failure),
         None => Ok(join_one_line(lines)),
@@ -252,6 +258,8 @@ struct Deparser {
     in_list: usize,
     depth: usize,
     backtick: bool,
+    /// The deparse stops once it has written this many lines.
+    max_lines: usize,
     /// Set just before deparsing the left operand of a binary operator, to that operator's
     /// precedence. Whatever ends that operand without parentheses (an `if`, a loop, or a
     /// low-precedence unary operator) would swallow the rest of the expression on reparsing.
@@ -275,6 +283,7 @@ impl Deparser {
             in_curly: 0,
             in_list: 0,
             backtick: true,
+            max_lines: usize::MAX,
             depth: 0,
             left_of: None,
             incomplete: false,
@@ -283,13 +292,20 @@ impl Deparser {
     }
 
     fn finish(mut self) -> Vec<String> {
-        if !self.line.is_empty() || self.lines.is_empty() {
+        if !self.stopped() && (!self.line.is_empty() || self.lines.is_empty()) {
             self.lines.push(std::mem::take(&mut self.line));
         }
         self.lines
     }
 
+    fn stopped(&self) -> bool {
+        self.lines.len() >= self.max_lines
+    }
+
     fn print(&mut self, text: &str) {
+        if self.stopped() {
+            return;
+        }
         if self.start_of_line {
             self.start_of_line = false;
             for level in 1..=self.indent {
@@ -303,6 +319,9 @@ impl Deparser {
     }
 
     fn write_line(&mut self) {
+        if self.stopped() {
+            return;
+        }
         self.lines.push(std::mem::take(&mut self.line));
         self.length = 0;
         self.start_of_line = true;
@@ -322,6 +341,9 @@ impl Deparser {
 
     unsafe fn deparse(&mut self, object: Sexp) {
         let left_of = self.left_of.take();
+        if self.stopped() {
+            return;
+        }
         self.depth += 1;
         if self.depth > 500 {
             self.print("...");
@@ -1367,6 +1389,9 @@ impl Deparser {
             if index > 0 && self.length > self.cutoff {
                 self.write_line();
             }
+            if self.stopped() {
+                break;
+            }
             if nice {
                 self.name_prefix(names, index);
             }
@@ -1861,10 +1886,8 @@ pub(crate) unsafe fn do_deparse(call: &Call<'_>) -> R<Sexp> {
     let opts = values::as_integer_scalar(call.arg(3)).max(0) as u32;
     let nlines = values::as_integer_scalar(call.arg(4));
     let backtick = values::as_logical_scalar(call.arg(2)) == 1;
-    let mut lines = deparse_warning(object, cutoff, opts, backtick)?;
-    if nlines > 0 && (nlines as usize) < lines.len() {
-        lines.truncate(nlines as usize);
-    }
+    let max_lines = if nlines > 0 { nlines as usize } else { usize::MAX };
+    let lines = deparse_warning(object, cutoff, opts, backtick, max_lines)?;
     values::string_vector(&lines)
 }
 
@@ -1897,7 +1920,7 @@ unsafe fn do_dump(call: &Call<'_>) -> R<Sexp> {
         text.push_str(" <-\n");
         // GNU R writes each name before deparsing its value, so a value that fails to deparse
         // leaves everything up to its name in the file.
-        let lines = match deparse_warning(value, 60, opts, true) {
+        let lines = match deparse_warning(value, 60, opts, true, usize::MAX) {
             Ok(lines) => lines,
             Err(failure) => {
                 crate::connections::write_text(file, &text)?;
@@ -1918,7 +1941,7 @@ unsafe fn do_dput(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let file = call.arg(1);
     let opts = values::as_integer_scalar(call.arg(2)).max(0) as u32;
-    let lines = deparse_warning(object, 60, opts, true)?;
+    let lines = deparse_warning(object, 60, opts, true, usize::MAX)?;
     let mut text = lines.join("\n");
     text.push('\n');
     crate::connections::write_text(file, &text)?;
