@@ -19,7 +19,7 @@
 
 mod lower;
 
-pub use lower::{Allocator, Error, FuncId, Module, with_module};
+pub use lower::{Allocator, Error, FuncId, Module, Object, Relocatable, Target, with_module};
 use {
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
@@ -333,6 +333,8 @@ enum Op {
     /// A store of the value's low 16 bits when the flag is set.
     Store(bool, MemFlagsData, Value, Value, i32),
     StackAddr(Type, StackSlot, i32),
+    /// The word in slot `n` of the offset table a relocatable object's code is mapped above.
+    TableWord(u32),
     StackLoad(Type, StackSlot, i32),
     StackStore(Value, StackSlot, i32),
     Convert(Convert, Type, Value),
@@ -1293,6 +1295,12 @@ impl Ins<'_> {
 
     pub fn stack_addr(self, ty: Type, slot: StackSlot, offset: i32) -> Value {
         self.single(Op::StackAddr(ty, slot, offset), ty)
+    }
+
+    /// The word in slot `slot` of the table that relocatable code loads every process address
+    /// from. Only [`Relocatable`] lowers it; the JIT module refuses it.
+    pub fn table_word(self, slot: u32) -> Value {
+        self.single(Op::TableWord(slot), Type::I64)
     }
 
     pub fn stack_load(self, _pointer: Type, ty: Type, slot: StackSlot, offset: i32) -> Value {
