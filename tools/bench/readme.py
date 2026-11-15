@@ -88,10 +88,15 @@ def load_suites():
     rank = lambda suite: (suite_order.index(suite["id"]) if suite["id"] in suite_order else len(suite_order), suite["id"])
     return sorted(suites, key=rank)
 
+# Suites that the benchmarks page shows in a section of their own, outside the summary.
+outside_summary = ["codebases"]
+
 def against_gnu_r(suites):
-    """The suites whose ratios are speed-ups over GNU R. A results file that names no baseline is
-    one of them: every suite compared ry with GNU R before a results file said so."""
-    return [suite for suite in suites if suite["results"].get("baseline", "gnu_r") == "gnu_r"]
+    """The suites whose ratios are speed-ups over GNU R and that belong in the summary. A results
+    file that names no baseline is one of them: every suite compared ry with GNU R before a results
+    file said so."""
+    return [suite for suite in suites
+            if suite["results"].get("baseline", "gnu_r") == "gnu_r" and suite["id"] not in outside_summary]
 
 def summary_block(suites):
     """A bullet per suite measured against GNU R, such as `**Numeric kernels: 4.89x, 11x in typed
@@ -107,7 +112,8 @@ def summary_block(suites):
         title = f"[{short_name(suite['name'])}](https://ry-lang.org/benchmarks#{section_anchor(suite['name'])})"
         lines.append(f"- **{title}: {', '.join(speeds)}.** {len(suite['results']['programs'])} {suite['summary']}.")
     paragraphs = [" ".join([measured_sentence(compared)] + mixed_machines(compared))]
-    paragraphs += [slowdown_paragraph(suite) for suite in suites if suite not in compared]
+    paragraphs += [slowdown_paragraph(suite) for suite in suites
+                   if suite["results"].get("baseline", "gnu_r") != "gnu_r"]
     paragraphs[-1] += " [Benchmarks](https://ry-lang.org/benchmarks) shows every program and how it is measured."
     return "\n".join(lines + [line for paragraph in paragraphs for line in ("", paragraph)])
 
