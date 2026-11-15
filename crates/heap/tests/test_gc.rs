@@ -1395,6 +1395,83 @@ fn lists_that_change_hands_during_an_escape_keep_their_counts() {
     }
 }
 
+/// Counted changes to a list while native code holds a pointer to its elements, after native
+/// code stored through that pointer uncounted. The counts may err high, never low: a value
+/// another list holds must keep a count.
+#[test]
+fn counted_changes_during_an_escape_never_lose_a_count() {
+    unsafe fn setup(heap: &mut Heap, length: isize) -> (Sexp, Sexp) {
+        unsafe {
+            let list = heap.alloc_vector(SexpType::List, length).expect("alloc");
+            heap.add_global_root(list);
+            heap.mark_resizable(list);
+            let other = heap.alloc_vector(SexpType::List, 1).expect("alloc");
+            heap.add_global_root(other);
+            (list, other)
+        }
+    }
+    unsafe fn integer(heap: &mut Heap) -> Sexp {
+        unsafe { heap.alloc_vector(SexpType::Integer, 1).expect("alloc") }
+    }
+    unsafe {
+        // A shift through a read-only pointer duplicates a value, then counted stores overwrite
+        // both copies.
+        let mut heap = Heap::new();
+        let nil = heap.known().nil;
+        let (list, other) = setup(&mut heap, 2);
+        let (shared, alone) = (integer(&mut heap), integer(&mut heap));
+        heap.set_element(list, 0, shared);
+        heap.set_element(list, 1, alone);
+        heap.set_element(other, 0, shared);
+        heap.escape(list, false);
+        list.slice_mut::<Sexp>()[1] = shared;
+        heap.set_element(list, 0, nil);
+        heap.set_element(list, 1, nil);
+        assert!(shared.refcount() >= 1, "during the escape");
+        heap.retire_escaped();
+        assert!(shared.refcount() >= 1, "another list holds the duplicated value");
+
+        // A value from another list stored through a read-only pointer, then overwritten.
+        let mut heap = Heap::new();
+        let nil = heap.known().nil;
+        let (list, other) = setup(&mut heap, 1);
+        let (held, foreign) = (integer(&mut heap), integer(&mut heap));
+        heap.set_element(list, 0, held);
+        heap.set_element(other, 0, foreign);
+        heap.escape(list, false);
+        list.slice_mut::<Sexp>()[0] = foreign;
+        heap.set_element(list, 0, nil);
+        assert!(foreign.refcount() >= 1, "during the escape");
+        heap.retire_escaped();
+        assert!(foreign.refcount() >= 1, "another list holds the foreign value");
+
+        // A shrink drops a slot behind a writable pointer.
+        let mut heap = Heap::new();
+        let (list, other) = setup(&mut heap, 2);
+        let (kept, dropped) = (integer(&mut heap), integer(&mut heap));
+        heap.set_element(list, 0, kept);
+        heap.set_element(list, 1, dropped);
+        heap.set_element(other, 0, dropped);
+        heap.escape(list, true);
+        heap.resize_vector(list, 1).expect("shrink");
+        heap.retire_escaped();
+        assert_eq!((kept.refcount(), dropped.refcount()), (1, 1));
+
+        // A grow and a counted store behind a read-only pointer change nothing native code did.
+        let mut heap = Heap::new();
+        let (list, _) = setup(&mut heap, 4);
+        heap.resize_vector(list, 2).expect("shrink");
+        let values = [integer(&mut heap), integer(&mut heap), integer(&mut heap)];
+        heap.set_element(list, 0, values[0]);
+        heap.set_element(list, 1, values[1]);
+        heap.escape(list, false);
+        heap.resize_vector(list, 3).expect("grow");
+        heap.set_element(list, 2, values[2]);
+        heap.retire_escaped();
+        assert_eq!(values.map(|value| value.refcount()), [1, 1, 1], "exact counts");
+    }
+}
+
 #[test]
 fn large_objects_are_allocated_and_freed_individually() {
     let mut heap = Heap::new();

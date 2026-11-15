@@ -308,11 +308,13 @@ enum Counted {
     /// the retirement counts what the list holds and releases each of these. Collections keep
     /// them allocated until then, because one may have left the list.
     Snapshot(Vec<Sexp>),
-    /// For a read-only pointer: an order-independent digest of the elements ([`element_digest`]),
-    /// kept up to date by counted element stores. Native code writing through a read-only
-    /// pointer only permutes the elements, which leaves the counts right and the digest equal,
-    /// so this costs no copy. A digest that changed means it stored something else, and the
-    /// retirement then counts every element once more, which errs toward keeping objects.
+    /// For a read-only pointer: an order-independent digest of the elements ([`element_digest`]).
+    /// Native code writing through a read-only pointer only permutes the elements, which leaves
+    /// the counts right and the digest equal, so this costs no copy. A digest that changed means
+    /// it stored something else, so every element is counted once more, which errs toward
+    /// keeping objects. The first counted change to the list turns the digest into a snapshot
+    /// ([`Heap::escaped_snapshot`]): a counted store releases what the slot held, which native
+    /// code may have put there uncounted, and no digest can say what it was.
     Digest(u64),
 }
 
@@ -535,6 +537,12 @@ unsafe fn element_digest(list: Sexp) -> u64 {
     (0..list.length() as usize).fold(0, |digest, index| {
         digest.wrapping_add(element_hash(list.stored_element(index)))
     })
+}
+
+unsafe fn element_snapshot(list: Sexp) -> Vec<Sexp> {
+    (0..list.length() as usize)
+        .map(|index| list.stored_element(index))
+        .collect()
 }
 
 unsafe fn increment_elements(list: Sexp) {
@@ -1537,6 +1545,10 @@ impl Heap {
     #[inline]
     pub unsafe fn resize_within_capacity(&mut self, vector: Sexp, length: isize) {
         let old = vector.length();
+        // The retirement settles the counts of an escaped list from its snapshot, which keeps
+        // what the dropped slots held.
+        let settled_later =
+            vector.gc_bits() & gc_bits::ESCAPED != 0 && self.escaped_snapshot(vector).is_some();
         if length > old {
             let element = vector.kind().element_size().unwrap_or(0);
             match vector.kind() {
@@ -1561,7 +1573,8 @@ impl Heap {
         } else if matches!(
             vector.kind(),
             SexpType::String | SexpType::List | SexpType::Expression
-        ) {
+        ) && !settled_later
+        {
             // A table over-allocates its column list and names by a thousand or so slots and
             // shrinks them to the columns it has, so most dropped slots still hold the value
             // they were allocated with. Chunks holding only that value are skipped: comparing
@@ -2251,12 +2264,11 @@ impl Heap {
         let tracked = to.flags() & flag_bits::UNTRACKED == 0;
         for offset in 0..count {
             let value = from.stored_element(from_start + offset);
-            let old = to.stored_element(to_start + offset);
             if tracked
-                && !(to.gc_bits() & gc_bits::ESCAPED != 0
-                    && self.count_escaped_store(to, old, value))
+                && !(to.gc_bits() & gc_bits::ESCAPED != 0 && self.count_escaped_store(to, value))
             {
                 value.increment_refcount();
+                let old = to.stored_element(to_start + offset);
                 if old.release_reference() {
                     self.note_zero(old);
                 }
@@ -2340,11 +2352,8 @@ impl Heap {
         {
             return (elements.write)(vector, index, value);
         }
-        let old = vector.stored_element(index);
-        if !(vector.gc_bits() & gc_bits::ESCAPED != 0
-            && self.count_escaped_store(vector, old, value))
-        {
-            self.count_store(vector, old, value);
+        if !(vector.gc_bits() & gc_bits::ESCAPED != 0 && self.count_escaped_store(vector, value)) {
+            self.count_store(vector, vector.stored_element(index), value);
         }
         self.element_barrier(vector, index, value);
         vector.set_element_unbarriered(index, value);
@@ -2446,73 +2455,65 @@ impl Heap {
         {
             return;
         }
-        let snapshot = || {
-            (0..vector.length() as usize)
-                .map(|index| vector.stored_element(index))
-                .collect()
-        };
-        if first {
-            let counted = if writable {
-                Counted::Snapshot(snapshot())
-            } else {
-                Counted::Digest(element_digest(vector))
-            };
-            self.escaped_lists.push(EscapedList {
-                list: vector,
-                counted,
-            });
-            return;
-        }
-        if !writable {
-            return;
-        }
-        let Some(entry) = self
-            .escaped_lists
-            .iter_mut()
-            .find(|entry| entry.list == vector)
-        else {
-            return;
-        };
-        if let Counted::Digest(digest) = entry.counted {
-            if digest != element_digest(vector) {
-                increment_elements(vector);
+        if !first {
+            if writable {
+                self.escaped_snapshot(vector);
             }
-            entry.counted = Counted::Snapshot(snapshot());
+            return;
         }
+        let counted = if writable {
+            Counted::Snapshot(element_snapshot(vector))
+        } else {
+            Counted::Digest(element_digest(vector))
+        };
+        self.escaped_lists.push(EscapedList {
+            list: vector,
+            counted,
+        });
     }
 
-    /// Accounts for a counted element store of `value` over `old` into an escaped `list`, and
-    /// says whether it counted the store itself.
-    ///
-    /// Under a snapshot, the retirement counts what the list then holds and releases what the
-    /// snapshot names, so the value counts now, which keeps copy-on-modify right while native
-    /// code runs, and joins the snapshot to be released once. The value it replaces is not
-    /// released now: if the counts ever counted it, the snapshot names it and the retirement
-    /// releases it, and if native code stored it uncounted, nothing may. Under a digest, the
-    /// store counts as usual and the digest follows it.
+    /// Counts `value` into `list` when an escape of `list` is pending, and says whether it did.
+    /// The retirement counts what the list then holds and releases what the snapshot names, so
+    /// the value counts now, which keeps copy-on-modify right while native code runs, and joins
+    /// the snapshot to be released once. The value it replaces is not released now: if the
+    /// counts ever counted it, the snapshot names it and the retirement releases it, and if
+    /// native code stored it uncounted, nothing may.
     ///
     /// Only element stores come here: the retirement settles a list's elements, never its
     /// attributes.
-    unsafe fn count_escaped_store(&mut self, list: Sexp, old: Sexp, value: Sexp) -> bool {
-        let Some(entry) = self
-            .escaped_lists
-            .iter_mut()
-            .find(|entry| entry.list == list)
-        else {
+    #[cold]
+    #[inline(never)]
+    unsafe fn count_escaped_store(&mut self, list: Sexp, value: Sexp) -> bool {
+        if !matches!(list.kind(), SexpType::List | SexpType::Expression) {
+            return false;
+        }
+        let Some(snapshot) = self.escaped_snapshot(list) else {
             return false;
         };
+        value.increment_refcount();
+        snapshot.push(value);
+        true
+    }
+
+    /// The snapshot of escaped `list`'s counted values, taken now if a read-only escape recorded
+    /// only a digest. Before any counted change, the counts match what the list held when it
+    /// escaped, unless native code stored something other than a permutation through the
+    /// pointer; then every element it holds now is counted once more, which may keep a value
+    /// alive too long but never frees one still held.
+    unsafe fn escaped_snapshot(&mut self, list: Sexp) -> Option<&mut Vec<Sexp>> {
+        let entry = self
+            .escaped_lists
+            .iter_mut()
+            .find(|entry| entry.list == list)?;
+        if let Counted::Digest(digest) = entry.counted {
+            if digest != element_digest(list) {
+                increment_elements(list);
+            }
+            entry.counted = Counted::Snapshot(element_snapshot(list));
+        }
         match &mut entry.counted {
-            Counted::Snapshot(counted) => {
-                value.increment_refcount();
-                counted.push(value);
-                true
-            }
-            Counted::Digest(digest) => {
-                *digest = digest
-                    .wrapping_sub(element_hash(old))
-                    .wrapping_add(element_hash(value));
-                false
-            }
+            Counted::Snapshot(snapshot) => Some(snapshot),
+            Counted::Digest(_) => None,
         }
     }
 

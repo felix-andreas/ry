@@ -459,10 +459,13 @@ shared, and adds it to the snapshot; the value it replaced keeps its count until
 releases it. Collections keep every value the snapshot names allocated until then, which
 `RY_GC_VERIFY=1` checks. A read-only pointer records only a digest of the elements that ignores
 their order, because permuting them leaves the counts right and copying a large list on every
-`DATAPTR_RO` would cost more than the call that reads it. If the digest differs at retirement,
-native code stored something other than a permutation through the read-only pointer, and every
-element the list then holds is counted once more: the counts err high, which keeps objects
-alive and makes copy-on-modify copy, but never frees anything still held. A list that dies, or
+`DATAPTR_RO` would cost more than the call that reads it. If the digest differs, native code
+stored something other than a permutation through the read-only pointer, and every element the
+list then holds is counted once more: the counts err high, which keeps objects alive and makes
+copy-on-modify copy, but never frees anything still held. The first counted change to such a
+list (a `SET_VECTOR_ELT` or a resize) checks the digest that way and takes the snapshot, because
+a counted store releases what the slot held, which native code may have put there uncounted. A
+resize of a list with a snapshot leaves the dropped slots to the retirement. A list that dies, or
 whose elements move to a grown list, before its escape retires is settled from the same entry.
 Pointers into atomic vectors need none of this, because their elements are not objects.
 
