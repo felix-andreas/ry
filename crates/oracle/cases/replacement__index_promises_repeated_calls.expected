@@ -1,0 +1,19 @@
+[stdout]
+| z[expr, j] <- v (S3 method)    call 1: ok
+| z[expr, j] <- v (S3 method)    call 2: ok
+| z[expr, j] <- v (S3 method)    call 3: ok
+| z[sym] <- v (S3 method)        call 1: ok
+| z[sym] <- v (S3 method)        call 2: ok
+| z[sym] <- v (S3 method)        call 3: ok
+| sub(z, expr) <- v (closure)    call 1: ok
+| sub(z, expr) <- v (closure)    call 2: ok
+| sub(z, expr) <- v (closure)    call 3: ok
+| z[expr, j] <- v (top level)    call 1: ok
+| z[expr, j] <- v (top level)    call 2: ok
+| z[expr, j] <- v (top level)    call 3: ok
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

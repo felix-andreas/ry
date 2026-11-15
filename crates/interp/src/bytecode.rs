@@ -1610,6 +1610,7 @@ unsafe fn compile_promise_arguments(function: Sexp, arguments: Sexp) -> R<Sexp> 
         slot_formals: slot_names(function.cdr()),
         slots_fixed: true,
         bound: None,
+        assigned: Vec::new(),
         cold: Vec::new(),
         temporary: None,
         sites: None,
@@ -1927,6 +1928,12 @@ pub enum Op {
     /// the formal is missing, as when the caller passed on its own missing formal, and what
     /// [`Op::GetVar`] reads otherwise.
     Argument,
+    /// `dst value call`: the complex assignment `call` with its right-hand side already
+    /// evaluated into `value`, run as `<-` runs it ([`eval::complex_assign`]), so the
+    /// replacement function gets the target's other arguments as promises of their code. It is
+    /// where a compiled replacement goes when an R function may receive those arguments: a
+    /// method of an object, or a replacement closure.
+    ComplexAssign,
 }
 
 /// Which replacement an [`Op::SubAssign`] does, stored as its sixth operand.
@@ -1941,7 +1948,7 @@ pub enum ElementKind {
     Dollar = 2,
 }
 
-pub const OPS: [Op; 53] = [
+pub const OPS: [Op; 54] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -1995,6 +2002,7 @@ pub const OPS: [Op; 53] = [
     Op::Prologue,
     Op::Internal,
     Op::Argument,
+    Op::ComplexAssign,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2152,6 +2160,10 @@ struct Compiler {
     /// While a `match` guard compiles: its arm's bound names, which it reads from registers
     /// instead of the frame.
     bound: Option<Bound>,
+    /// The local variables that are bound wherever the code being compiled runs: the variable
+    /// of each enclosing `for`, and each `name <- value` that an earlier statement of an
+    /// enclosing block ran. Reading one runs no code and cannot fail.
+    assigned: Vec<Sexp>,
     /// Guard fallbacks waiting to be laid out after the body's `Return` or the innermost open
     /// loop's back edge (see [`Compiler::cold_fallback`]).
     cold: Vec<Cold>,
@@ -2351,6 +2363,7 @@ unsafe fn compile_unreported(
         rebinding: None,
         assigning: None,
         bound: None,
+        assigned: Vec::new(),
         tail_updates: tail_updates(body, function),
         cold: Vec::new(),
         argument: false,
@@ -2864,6 +2877,18 @@ unsafe fn assigns_fusible(expression: Sexp) -> bool {
     ARITHS.iter().any(|(_, name)| *name == &*operator)
         || math_index(&operator).is_some()
         || matches!(&*operator, "&" | "|" | "!")
+}
+
+/// Whether the argument code `code` evaluates to itself, so the function that receives it
+/// cannot tell its value from a promise of it: a constant, or the empty argument. Any other
+/// argument of a call that may reach an R function stays unevaluated until that function
+/// forces it.
+unsafe fn self_evaluating(code: Sexp) -> bool {
+    code == missing_arg()
+        || !matches!(
+            code.kind(),
+            SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode
+        )
 }
 
 /// Whether `expression` is `x <- f(x, ...)`, whose call may update the value of `x` in place
@@ -4207,6 +4232,12 @@ impl Compiler {
     /// `f(x, ...) <- value`, guarded by `<-`: the value, then the other arguments, evaluate
     /// into registers, and [`Op::Replace`] reads the variable, calls the replacement function
     /// and binds its result.
+    ///
+    /// A replacement closure, or a method an object dispatches to, gets the other arguments as
+    /// promises, so when one of them is not [self-evaluating](self_evaluating) the compiled code
+    /// reads the variable and looks the replacement up first, as GNU R does, and leaves the
+    /// assignment to [`Op::ComplexAssign`] unless only a builtin can receive the arguments: a
+    /// builtin replacement, or base's `[<-` or `[[<-` on a value that is not an object.
     unsafe fn replacement(
         &mut self,
         call: Sexp,
@@ -4217,29 +4248,17 @@ impl Compiler {
         args: &[(Sexp, Sexp)],
     ) -> R<()> {
         let target = args[0].1;
-        let guard = self.guard(call, head, primitive)?;
+        let mut guards: SmallVec<[usize; 2]> =
+            self.guard(call, head, primitive)?.into_iter().collect();
         let rest = values::pairlist_items(target.cdr().cdr());
-        let count = rest.len() as u32 + 2;
-        let mark = self.next_register;
-        let base = self.next_register;
-        for _ in 0..count {
-            self.allocate();
-        }
-        self.expression(args[1].1, base + count - 1)?;
-        self.read_target_first(
-            target.cdr().car(),
-            rest.iter()
-                .map(|(_, value)| *value)
-                .filter(|value| *value != missing_arg()),
-        )?;
-        for (index, (_, value)) in rest.iter().enumerate() {
-            let register = base + 1 + index as u32;
-            if *value == missing_arg() {
-                let empty = self.constant(missing_arg());
-                self.emit(Op::Constant, &[register, empty]);
-            } else {
-                self.expression(*value, register)?;
-            }
+        let lazy = !rest.iter().all(|(_, value)| self_evaluating(*value));
+        let setter_name = symbol_name(setter);
+        let element_setter = match &*setter_name {
+            "[<-" | "[[<-" if lazy => self.base_primitive(setter, &setter_name)?,
+            _ => None,
+        };
+        if let Some(element_setter) = element_setter {
+            guards.extend(self.guard(call, setter, element_setter)?);
         }
         // The call the builtin sees, as GNU R builds it: `` `f<-`(`*tmp*`, ..., value = <rhs>) ``.
         let mut items: SmallVec<[(Sexp, Sexp); 6]> =
@@ -4249,9 +4268,43 @@ impl Compiler {
         let setter_call = values::pairlist(&items, SexpType::Language)?;
         let variable = self.constant(target.cdr().car());
         let setter_symbol = self.constant(setter);
-        let cache = self.cache();
         let setter_call = self.constant(setter_call);
         let whole = self.constant(call);
+        let count = rest.len() as u32 + 2;
+        let mark = self.next_register;
+        let base = self.next_register;
+        for _ in 0..count {
+            self.allocate();
+        }
+        let value = base + count - 1;
+        self.expression(args[1].1, value)?;
+        let dispatching = if lazy {
+            // The first argument's register, which that argument overwrites: a register still
+            // holding the target would make the replacement copy it instead of changing it in
+            // place (`slot_owns`).
+            let object = base + 1;
+            self.expression(target.cdr().car(), object)?;
+            Some(if element_setter.is_some() {
+                self.emit_patchable(Op::BranchIfObject, &[object, 0])
+            } else {
+                let function = self.allocate();
+                let cache = self.cache();
+                self.emit(Op::GetFun, &[function, setter_symbol, cache, whole]);
+                self.emit_patchable(Op::BranchUnlessBuiltin, &[function, 0])
+            })
+        } else {
+            None
+        };
+        for (index, (_, value)) in rest.iter().enumerate() {
+            let register = base + 1 + index as u32;
+            if *value == missing_arg() {
+                let empty = self.constant(missing_arg());
+                self.emit(Op::Constant, &[register, empty]);
+            } else {
+                self.expression(*value, register)?;
+            }
+        }
+        let cache = self.cache();
         self.emit(
             Op::Replace,
             &[
@@ -4266,25 +4319,10 @@ impl Compiler {
             ],
         );
         self.release_to(mark);
-        self.cold_fallback(guard.as_slice(), call, dst)?;
-        Ok(())
-    }
-
-    /// Reads `variable` into a scratch register when one of `subscripts` might observe or change
-    /// it, so the assignment reads it before evaluating them, as GNU R's does: an unbound
-    /// variable is the error, before anything a subscript prints or raises.
-    unsafe fn read_target_first(
-        &mut self,
-        variable: Sexp,
-        mut subscripts: impl Iterator<Item = Sexp>,
-    ) -> R<()> {
-        if subscripts.all(|subscript| self.side_effect_free_index(subscript, variable, 0)) {
-            return Ok(());
+        if let Some(branch) = dispatching {
+            self.dispatching_fallback(branch, call, dst, value);
         }
-        let mark = self.next_register;
-        let scratch = self.allocate();
-        self.expression(variable, scratch)?;
-        self.release_to(mark);
+        self.cold_fallback(&guards, call, dst)?;
         Ok(())
     }
 
@@ -4292,9 +4330,8 @@ impl Compiler {
     /// into a register: anything but `...`, `..1` or an empty argument that assigns to `target`
     /// nowhere in its code. Such an assignment rebinds the variable while the replacement holds
     /// its old value, which [`eval::complex_assign`] handles by copying. The instruction that
-    /// takes the registers hands them to the replacement as forced promises, so nothing is
-    /// evaluated twice, and when `index` is not [side-effect free](Self::side_effect_free_index)
-    /// the compiled code reads `target` before it, as GNU R does.
+    /// takes the registers hands them to the builtin replacement as forced promises, so nothing
+    /// is evaluated twice.
     unsafe fn lowerable_subscript(&self, index: Sexp, target: Sexp) -> bool {
         let symbol = index.kind() == SexpType::Symbol;
         !(symbol
@@ -4302,79 +4339,6 @@ impl Compiler {
                 || index == missing_arg()
                 || eval::dot_dot_index(index).is_some()))
             && !eval::assigns_to(index, target, symbols())
-    }
-
-    /// Whether evaluating the subscript `index` cannot change `target` or anything outside the
-    /// frame, so the compiled assignment may evaluate it before reading `target`: a variable of
-    /// the frame (a formal's promise runs in the caller's frame), a numeric constant, a name,
-    /// base arithmetic and comparison on those, base `$` and `[[` reading one of those, `if`
-    /// or parentheses over them, or an assignment of one of them to another local variable (the
-    /// growth idiom `x[[cap <- if (cap < n) 2L * cap else cap]] <- v`).
-    unsafe fn side_effect_free_index(&self, index: Sexp, target: Sexp, depth: u32) -> bool {
-        match index.kind() {
-            SexpType::Symbol => {
-                index != symbols().dots
-                    && index != missing_arg()
-                    && eval::dot_dot_index(index).is_none()
-                    && (self.formals.contains(&index)
-                        || self
-                            .local_symbols
-                            .as_ref()
-                            .is_some_and(|found| found.contains(&index)))
-            }
-            SexpType::Integer | SexpType::Real => {
-                length(index) == 1 && !values::has_attributes(index)
-            }
-            // A name is a subscript, but an operand of arithmetic would be an error.
-            SexpType::String => depth == 0 && length(index) == 1 && !values::has_attributes(index),
-            SexpType::Language if depth < 8 && index.car().kind() == SexpType::Symbol => {
-                let operator = symbol_name(index.car());
-                let arguments = values::pairlist_items(index.cdr());
-                let name = |value: Sexp| {
-                    value.kind() == SexpType::String
-                        && length(value) == 1
-                        && !values::has_attributes(value)
-                };
-                if let ("$" | "[[", [(nil_tag, object), (key_tag, key)]) =
-                    (&*operator, arguments.as_slice())
-                {
-                    let key_free = match &*operator {
-                        "$" => key.kind() == SexpType::Symbol && *key != symbols().dots,
-                        _ => name(*key) || self.side_effect_free_index(*key, target, depth + 1),
-                    };
-                    return *nil_tag == nil()
-                        && *key_tag == nil()
-                        && key_free
-                        && !self.frame_may_bind(index.car())
-                        && self.side_effect_free_index(*object, target, depth + 1);
-                }
-                if arguments.iter().any(|(tag, _)| *tag != nil())
-                    || self.frame_may_bind(index.car())
-                {
-                    return false;
-                }
-                let operand =
-                    |argument: Sexp| self.side_effect_free_index(argument, target, depth + 1);
-                match (&*operator, arguments.as_slice()) {
-                    ("<-" | "=", [(_, variable), (_, value)]) => {
-                        variable.kind() == SexpType::Symbol
-                            && *variable != target
-                            && self.side_effect_free_index(*variable, target, depth + 1)
-                            && operand(*value)
-                    }
-                    ("if", [(_, condition), (_, yes), (_, no)]) => {
-                        operand(*condition) && operand(*yes) && operand(*no)
-                    }
-                    ("(", [(_, inner)]) => operand(*inner),
-                    _ => {
-                        ARITHS.iter().any(|(_, name)| *name == &*operator)
-                            && (1..=2).contains(&arguments.len())
-                            && arguments.iter().all(|(_, argument)| operand(*argument))
-                    }
-                }
-            }
-            _ => false,
-        }
     }
 
     /// `x[i] <- value`, guarded by both `<-` and the replacement function.
@@ -4403,10 +4367,30 @@ impl Compiler {
         let mark = self.next_register;
         let value = self.allocate();
         self.expression(args[1].1, value)?;
-        self.read_target_first(target.cdr().car(), subscripts.iter().copied())?;
-        let mut registers: SmallVec<[u32; 2]> = SmallVec::new();
-        for &subscript in subscripts {
-            let register = self.allocate();
+        // An object dispatches to a replacement method, which must get the subscripts as
+        // promises it may never force, or force in another environment (`[<-.data.table`
+        // evaluates `i` inside the table). So the target is read before any subscript runs, and
+        // an object leaves the whole assignment to `complex_assign`; only the builtin replacement
+        // takes the subscripts evaluated. A constant subscript, or a local variable known to be
+        // bound here ([`Compiler::assigned`]), is the same either way: `SubAssign` hands a method
+        // the forced promise of its code, and reading it runs nothing and cannot fail. Such
+        // subscripts skip the probe, which keeps `x[[k]] <- v` and `x[i] <- v` in a loop as
+        // cheap as before.
+        let registers: SmallVec<[u32; 2]> = subscripts.iter().map(|_| self.allocate()).collect();
+        let eager = subscripts
+            .iter()
+            .all(|subscript| self_evaluating(*subscript) || self.assigned.contains(subscript));
+        // The probe reads the target into the first subscript's register, which the subscript
+        // then overwrites: a register still holding the target would make the store copy it
+        // instead of changing it in place (`slot_owns`).
+        let dispatching = match registers.first() {
+            Some(&object) if !eager => {
+                self.expression(target.cdr().car(), object)?;
+                Some(self.emit_patchable(Op::BranchIfObject, &[object, 0]))
+            }
+            _ => None,
+        };
+        for (&subscript, &register) in subscripts.iter().zip(&registers) {
             if self.formals.contains(&subscript) {
                 // A missing argument selects everything, which only the general assignment
                 // does, so the instruction looks the formal up itself (see `subscript_value`).
@@ -4415,7 +4399,6 @@ impl Compiler {
             } else {
                 self.expression(subscript, register)?;
             }
-            registers.push(register);
         }
         let variable = self.constant(target.cdr().car());
         let call_constant = self.constant(call);
@@ -4453,8 +4436,27 @@ impl Compiler {
             [] => self.evaluate(dst, call_constant),
         }
         self.release_to(mark);
+        if let Some(branch) = dispatching {
+            self.dispatching_fallback(branch, call, dst, value);
+        }
         self.cold_fallback(&guards, call, dst)?;
         Ok(())
+    }
+
+    /// Compiles what runs when the replacement `branch` tests may hand the target's other
+    /// arguments to an R function: the assignment `call` with its value already in `value`, as
+    /// `<-` runs it, with those arguments unevaluated. It goes out of line, as a guard's fallback
+    /// does ([`Compiler::cold_fallback`]).
+    fn dispatching_fallback(&mut self, branch: usize, call: Sexp, dst: u32, value: u32) {
+        let resume = self.here();
+        let call_constant = self.constant(call);
+        self.emit(Op::ComplexAssign, &[dst, value, call_constant]);
+        let words = self.code.drain(resume as usize..).collect();
+        self.cold.push(Cold {
+            guards: smallvec![branch],
+            words,
+            resume,
+        });
     }
 
     /// The base primitive `symbol` names from the closure's enclosure, if it is one the compiler
@@ -4981,6 +4983,7 @@ impl Compiler {
                 let outer = self.srcref;
                 let start = self.next_register;
                 let mut used = start;
+                let assigned = self.assigned.len();
                 for (index, (_, statement)) in args.iter().enumerate() {
                     // Registers are allocated in stack order, so the statement's temporaries
                     // are exactly `start..used`.
@@ -4997,7 +5000,14 @@ impl Compiler {
                     self.expression(*statement, dst)?;
                     used = self.registers;
                     self.registers = peak.max(used);
+                    if statement.kind() == SexpType::Language
+                        && statement.car().kind() == SexpType::Symbol
+                        && matches!(&*symbol_name(statement.car()), "<-" | "=")
+                    {
+                        self.note_assigned(statement.cdr().car());
+                    }
                 }
+                self.assigned.truncate(assigned);
                 if srcrefs == nil() {
                     return Ok(());
                 }
@@ -5264,7 +5274,10 @@ impl Compiler {
         let exit = self.emit_patchable(Op::ForStep, &[loop_index as u32, sequence, variable, 0]);
         let mark = self.next_register;
         let body = self.allocate();
+        let assigned = self.assigned.len();
+        self.note_assigned(args[0].1);
         self.expression(args[2].1, body)?;
+        self.assigned.truncate(assigned);
         self.release_to(mark);
         self.back_edge(step);
         self.patch(exit);
@@ -5273,6 +5286,19 @@ impl Compiler {
         self.release_to(sequence);
         self.loop_value(dst);
         Ok(())
+    }
+
+    /// Records that `name` is bound from here to the end of the enclosing block or loop body,
+    /// when it is one of the frame's local variables.
+    unsafe fn note_assigned(&mut self, name: Sexp) {
+        if name.kind() == SexpType::Symbol
+            && self
+                .local_symbols
+                .as_ref()
+                .is_some_and(|locals| locals.contains(&name))
+        {
+            self.assigned.push(name);
+        }
     }
 
     fn open_loop(&mut self) -> usize {
@@ -5834,6 +5860,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::DispatchSubject => 4,
         Op::Fused | Op::Unfused => 3,
         Op::Internal => 5,
+        Op::ComplexAssign => 3,
     }
 }
 
@@ -6049,6 +6076,7 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
         Op::Missing => &[Register, Symbol],
         Op::Namespace => &[Register, Symbol, Symbol, Immediate, Cache],
         Op::SuperAssign => &[Symbol, Register],
+        Op::ComplexAssign => &[Register, Register, Call],
         Op::Prologue => &[Register, Constant, Call],
         Op::ForInit => &[Loop, Register, Constant],
         Op::ForStep => &[Loop, Register, Symbol, Target],
@@ -7718,6 +7746,7 @@ handlers! {
     run_super_assign: SuperAssign, true, op_super_assign;
     run_internal: Internal, true, op_internal;
     run_argument: Argument, true, op_argument;
+    run_complex_assign: ComplexAssign, true, op_complex_assign;
 }
 
 /// `Jump`, the one instruction whose failure resumes somewhere other than after itself: the
@@ -12403,6 +12432,19 @@ unsafe fn op_replace(state: &mut Activation<'_, '_>, instruction: Instruction) -
             eval::complex_assign(whole, target, value, env, false, &evaluated)?;
         }
     }
+    instruction.output(0, value);
+    (*state.interp).visible = false;
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_complex_assign(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let whole = state.constant(instruction, 2);
+    let value = instruction.input(1);
+    let env = state.env(Reify::Site("dispatching replacement"))?;
+    eval::complex_assign(whole, whole.cdr().car(), value, env, false, &[])?;
+    // The optimizing tier speculates past a site that has never run.
+    state.record(instruction.at, value);
     instruction.output(0, value);
     (*state.interp).visible = false;
     Ok(Flow::Next)

@@ -1,0 +1,107 @@
+[stdout]
+| S3 [<- lazy expr #1: "note(\"i\") == 1 note(\"j\") 4 FALSE" | trace: 
+| S3 [<- lazy expr #2: "note(\"i\") == 1 note(\"j\") 4 FALSE" | trace: 
+| S3 [<- lazy expr #3: "note(\"i\") == 1 note(\"j\") 4 FALSE" | trace: 
+| S3 [<- symbol #1: "k <missing j> 3 FALSE" | trace: k
+| S3 [<- symbol #2: "k <missing j> 3 FALSE" | trace: k
+| S3 [<- symbol #3: "k <missing j> 3 FALSE" | trace: k
+| S3 [<- missing i #1: " note(\"j\") 4 TRUE" | trace: 
+| S3 [<- missing i #2: " note(\"j\") 4 TRUE" | trace: 
+| S3 [<- missing i #3: " note(\"j\") 4 TRUE" | trace: 
+| S3 [<- three subscripts #1: Error: unused argument (note("k")) | trace: 
+| S3 [<- three subscripts #2: Error: unused argument (note("k")) | trace: 
+| S3 [<- three subscripts #3: Error: unused argument (note("k")) | trace: 
+| S3 [<- in a loop #1: "note(\"i\") <missing j> 3 FALSE" | trace: 
+| S3 [<- in a loop #2: "note(\"i\") <missing j> 3 FALSE" | trace: 
+| S3 [<- in a loop #3: "note(\"i\") <missing j> 3 FALSE" | trace: 
+| S3 [<- loop variable #1: "k <missing j> 3 FALSE" | trace: 
+| S3 [<- loop variable #2: "k <missing j> 3 FALSE" | trace: 
+| S3 [<- loop variable #3: "k <missing j> 3 FALSE" | trace: 
+| S3 [<- formal #1: "k <missing j> 3 FALSE" | trace: 
+| S3 [<- formal #2: "k <missing j> 3 FALSE" | trace: 
+| S3 [<- formal #3: "k <missing j> 3 FALSE" | trace: 
+| S3 [<- missing formal #1: "k <missing j> 3 TRUE" | trace: 
+| S3 [<- missing formal #2: "k <missing j> 3 TRUE" | trace: 
+| S3 [<- missing formal #3: "k <missing j> 3 TRUE" | trace: 
+| S3 [[<- #1: "note(\"i\") 3" | trace: 
+| S3 [[<- #2: "note(\"i\") 3" | trace: 
+| S3 [[<- #3: "note(\"i\") 3" | trace: 
+| S3 $<- #1: "\"abc\" abc" | trace: 
+| S3 $<- #2: "\"abc\" abc" | trace: 
+| S3 $<- #3: "\"abc\" abc" | trace: 
+| closure f<- unforced #1: "note(\"i\")" | trace: 
+| closure f<- unforced #2: "note(\"i\")" | trace: 
+| closure f<- unforced #3: "note(\"i\")" | trace: 
+| closure f<- forced twice #1: 7 | trace: i
+| closure f<- forced twice #2: 7 | trace: i
+| closure f<- forced twice #3: 7 | trace: i
+| closure f<- match.call #1: "`mc<-`(x = `*tmp*`, i = note(\"i\"), value = 5)" | trace: 
+| closure f<- match.call #2: "`mc<-`(x = `*tmp*`, i = note(\"i\"), value = 5)" | trace: 
+| closure f<- match.call #3: "`mc<-`(x = `*tmp*`, i = note(\"i\"), value = 5)" | trace: 
+| closure f<- two subscripts #1: c("note(\"i\")", "note(\"j\")") | trace: 
+| closure f<- two subscripts #2: c("note(\"i\")", "note(\"j\")") | trace: 
+| closure f<- two subscripts #3: c("note(\"i\")", "note(\"j\")") | trace: 
+| closure f<- local #1: "k" | trace: 
+| closure f<- local #2: "k" | trace: 
+| closure f<- local #3: "k" | trace: 
+| closure f<- formal #1: "k" | trace: 
+| closure f<- formal #2: "k" | trace: 
+| closure f<- formal #3: "k" | trace: 
+| nested f(g(x), i) #1: "note(\"i\")" | trace: 
+| nested f(g(x), i) #2: "note(\"i\")" | trace: 
+| nested f(g(x), i) #3: "note(\"i\")" | trace: 
+| nested x$a[i] #1: "note(\"i\") <missing j> 3 FALSE" | trace: 
+| nested x$a[i] #2: "note(\"i\") <missing j> 3 FALSE" | trace: 
+| nested x$a[i] #3: "note(\"i\") <missing j> 3 FALSE" | trace: 
+| nested x[[1]][i] #1: "note(\"i\") <missing j> 3 FALSE" | trace: 
+| nested x[[1]][i] #2: "note(\"i\") <missing j> 3 FALSE" | trace: 
+| nested x[[1]][i] #3: "note(\"i\") <missing j> 3 FALSE" | trace: 
+| nested attr(x)[i] #1: "note(\"i\") <missing j> 3 FALSE" | trace: 
+| nested attr(x)[i] #2: "note(\"i\") <missing j> 3 FALSE" | trace: 
+| nested attr(x)[i] #3: "note(\"i\") <missing j> 3 FALSE" | trace: 
+| nested S4 slot [i] #1: "note(\"i\") <missing j> 3 FALSE" | trace: 
+| nested S4 slot [i] #2: "note(\"i\") <missing j> 3 FALSE" | trace: 
+| nested S4 slot [i] #3: "note(\"i\") <missing j> 3 FALSE" | trace: 
+| nested S4 slot f<- #1: "note(\"i\")" | trace: 
+| nested S4 slot f<- #2: "note(\"i\")" | trace: 
+| nested S4 slot f<- #3: "note(\"i\")" | trace: 
+| superassign S3 #1: "note(\"i\") <missing j> 3 FALSE" | trace: 
+| superassign S3 #2: "note(\"i\") <missing j> 3 FALSE" | trace: 
+| superassign S3 #3: "note(\"i\") <missing j> 3 FALSE" | trace: 
+| replicate #1: c(1, 1) | trace: 
+| replicate #2: c(1, 1) | trace: 
+| replicate #3: c(1, 1) | trace: 
+| names(x)[i] #1: c("a", "q") | trace: i
+| names(x)[i] #2: c("a", "q") | trace: i
+| names(x)[i] #3: c("a", "q") | trace: i
+| levels(x)[i] #1: c("a", "q") | trace: i
+| levels(x)[i] #2: c("a", "q") | trace: i
+| levels(x)[i] #3: c("a", "q") | trace: i
+| vector [<- order #1: c(1L, 9L, 3L) | trace: v,i
+| vector [<- order #2: c(1L, 9L, 3L) | trace: v,i
+| vector [<- order #3: c(1L, 9L, 3L) | trace: v,i
+| matrix [<- order #1: structure(c(1L, 2L, 9L, 4L), dim = c(2L, 2L)) | trace: v,i,j
+| matrix [<- order #2: structure(c(1L, 2L, 9L, 4L), dim = c(2L, 2L)) | trace: v,i,j
+| matrix [<- order #3: structure(c(1L, 2L, 9L, 4L), dim = c(2L, 2L)) | trace: v,i,j
+| attr<- order #1: list(q = 9L) | trace: v,n
+| attr<- order #2: list(q = 9L) | trace: v,n
+| attr<- order #3: list(q = 9L) | trace: v,n
+| substr<- order #1: "aXYdef" | trace: a,b
+| substr<- order #2: "aXYdef" | trace: a,b
+| substr<- order #3: "aXYdef" | trace: a,b
+| plain loop #1: c(1, 2, 3) | trace: 
+| plain loop #2: c(1, 2, 3) | trace: 
+| plain loop #3: c(1, 2, 3) | trace: 
+| data frame #1: c(5L, 2L) | trace: 
+| data frame #2: c(5L, 2L) | trace: 
+| data frame #3: c(5L, 2L) | trace: 
+| top level #1: note("i") | trace: 
+| top level #2: note("i") | trace: 
+| top level #3: note("i") | trace: 
+| [1] "notDefined" "notDefined" "notDefined"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("notDefined", "notDefined", "notDefined")

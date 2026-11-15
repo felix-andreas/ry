@@ -1867,8 +1867,8 @@ unsafe fn promised_args(call: Sexp, args: &[Arg]) -> R<Args> {
     Ok(result)
 }
 
-/// S3 dispatch for a builtin that evaluated its own arguments (`$`, `$<-`). A call named
-/// `<generic>.default` comes from `NextMethod` and runs the builtin's own code.
+/// S3 dispatch for a builtin that evaluated its own arguments (`$`, `$<-`, `@`, `@<-`). A call
+/// named `<generic>.default` comes from `NextMethod` and runs the builtin's own code.
 pub unsafe fn dispatch_builtin(
     generic: Sexp,
     call: Sexp,
@@ -1889,7 +1889,16 @@ pub unsafe fn dispatch_builtin(
     {
         return Ok(Some(value));
     }
-    internal_dispatch(generic, call, args, env)
+    // GNU R's `$` and `@` hand a method the name as a string that is also the code of its
+    // promise, so `substitute(name)` is `"abc"` for `x$abc`, not the symbol.
+    let mut named: SmallVec<[Arg; 3]> = args.iter().copied().collect();
+    if let Some(name) = named.get_mut(1)
+        && name.value.kind() == SexpType::String
+    {
+        name.value = forced_promise(name.value, name.value)?;
+        crate::heap().root(name.value);
+    }
+    internal_dispatch(generic, call, &named, env)
 }
 
 /// GNU R's `DispatchOrEval`, for a [`BuiltinDef::dispatch_or_eval`] special called with the
