@@ -1,0 +1,79 @@
+# `ry build --aot --exe` turns a script into an executable that runs it with its typed functions
+# compiled ahead of time. The executable prints what `ry run --aot` prints for the same
+# arguments, passes every argument to the script, and compiles nothing: the typed core's log
+# shows each function's code attached from the executable itself.
+
+requires ry-runtime
+
+file main.R
+| fib <- function(n: I64) -> I64 if (n < 2) n else fib(n - 1) + fib(n - 2)
+| square <- function(x: F64) -> F64 x * x
+| twice <- function(x: F64) -> F64 square(x) + square(x)
+| args <- commandArgs(trailingOnly = TRUE)
+| n <- if (length(args)) as.integer(args[[1]]) else 20L
+| print(Num.to_str(fib(n)))
+| print(twice(1.5))
+| cat("args:", args, "\n")
+| if ("fail" %in% args) stop("asked to fail")
+
+run ry run --runtime ry --aot main.R 7 --verbose
+expect exit 0
+expect stdout "[1] \"13\"\n[1] 4.5\nargs: 7 --verbose \n"
+
+run ry build --aot --exe main.R -o app
+expect exit 0
+expect stdout "typed code: closures=3 written=3\napp\n"
+
+env RY_TYPED_LOG 1
+run ./app 7 --verbose
+expect exit 0
+expect stdout "[1] \"13\"\n[1] 4.5\nargs: 7 --verbose \n"
+expect stderr "typed: attached `fib` for [I64] -> I64 from the executable's code file"
+expect stderr "typed: attached `twice` for [Dbl] -> Dbl from the executable's code file"
+expect stderr lacks "typed: compiled"
+
+# An error ends the executable as it ends `ry run`, with the same status.
+
+run ./app 3 fail
+expect exit 1
+expect stdout "[1] \"2\"\n"
+expect stderr "asked to fail"
+
+# With every closure made ahead thrown away, nothing attaches, and each function compiles at its
+# first call instead, printing the same.
+
+env RY_AHEAD_MISS 1
+run ./app 7
+expect exit 0
+expect stdout "[1] \"13\"\n[1] 4.5\nargs: 7 \n"
+expect stderr lacks "typed: attached"
+expect stderr "typed: compiled for [I64] -> I64"
+unset RY_AHEAD_MISS
+unset RY_TYPED_LOG
+
+# Without `--output` the executable is named after the script. `--exe` takes one script, and
+# `--output` with `--aot` alone names nothing a package install writes.
+
+run ry build --aot --exe main.R
+expect exit 0
+expect stdout "main\n"
+run ./main 5
+expect stdout "[1] \"5\"\n"
+
+run ry build --aot --exe .
+expect exit 2
+expect stderr "is not a script"
+
+run ry build --aot -o somewhere main.R
+expect exit 2
+expect stderr "add `--exe` to build an executable from a script"
+
+# The build never replaces the script it builds, and an existing directory is not a file name.
+
+run ry build --aot --exe main.R -o main.R
+expect exit 2
+expect stderr "would replace the script main.R"
+
+run ry build --aot --exe main.R -o .
+expect exit 2
+expect stderr "is a directory"

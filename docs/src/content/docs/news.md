@@ -49,6 +49,15 @@ another build of ry compiles its typed functions as it loads and says to reinsta
 [the CLI reference](/reference/cli#build-and-install) and
 [the typed code file](/development/typed-code-file/).
 
+### A typed script builds into one executable
+
+`ry build --aot --exe main.R` writes an executable that runs the script with its typed functions
+compiled in: a copy of `ry` with the script and their machine code appended. It skips the checker
+and attaches each function's code from itself at its first call, so 20 typed functions took
+0.29 ms for their first calls against 6.6 ms under `ry run` (iterate build). Every argument goes to
+the script, and packages load from the library as they do for `ry run`. See
+[the CLI reference](/reference/cli#executables).
+
 ### Reinstall packages that ry 0.4.5 or earlier compiled
 
 A package that writes into a list or character vector through a read-only pointer, as data.table's
