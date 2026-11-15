@@ -128,9 +128,9 @@ pub struct RArgument {
 pub struct Conversion {
     pub call: Sexp,
     pub function: Sexp,
-    /// The item type the checker gave a `List.from_r`, which the preflight writes around the
-    /// call (`.ry_items(List.from_r(x), "F64")`). It types the conversion before the
-    /// interpreter has run it.
+    /// The item type the checker gave a `List.from_r`, or the number type it gave a
+    /// `Num.from_r`, which the preflight writes around the call (`.ry_items(List.from_r(x),
+    /// "F64")`). It types the conversion before the interpreter has run it.
     pub checked: Option<Item>,
 }
 
@@ -3153,6 +3153,16 @@ impl Lowering<'_> {
                         .and_then(dict_type)
                         .ok_or(Refusal::new("an empty dictionary of an unknown type"))?;
                     return Ok(self.builder.emit(ty, Op::DictNew));
+                }
+                if self.is_library_call(list, "Num.from_r", 1)? {
+                    self.checked_items = match constant_string(hint).as_deref() {
+                        Some("I64") => Some(Item::I64),
+                        Some("F64") => Some(Item::Dbl),
+                        _ => None,
+                    };
+                    let value = self.value(list);
+                    self.checked_items = None;
+                    return value;
                 }
                 if self.is_library_call(list, "List.from_r", 1)? {
                     self.checked_items = match constant_string(hint).as_deref() {
@@ -6567,8 +6577,9 @@ unsafe fn r_result(r_use: RUse) -> Result<RResult, Refusal> {
 
 /// The type a conversion of what an R call returns gives: fixed for `Str.from_r` and
 /// `Bool.from_r`, and for `Num.from_r` and `List.from_r` the type the conversion gave when the
-/// interpreter last ran it. A `List.from_r` the checker typed takes that item type, which the
-/// conversion gives or fails with when the code runs (`interp::arrays::checked_conversion`).
+/// interpreter last ran it. A conversion the checker typed takes that type, which it gives or
+/// fails with when the code runs (`interp::arrays::checked_conversion` and
+/// `interp::numbers::checked_number`).
 unsafe fn conversion_type(conversion: Conversion) -> Result<Type, Refusal> {
     let name = rvalues::symbol_name(conversion.call.car());
     let observed = || interp::numbers::observed_conversion(conversion.call);
@@ -6583,6 +6594,10 @@ unsafe fn conversion_type(conversion: Conversion) -> Result<Type, Refusal> {
     match &*name {
         "Str.from_r" => Ok(Type::Str),
         "Bool.from_r" => Ok(Type::Lgl),
+        "Num.from_r" if conversion.checked.is_some() => match conversion.checked {
+            Some(Item::I64) => Ok(Type::I64),
+            _ => Ok(Type::Dbl),
+        },
         "Num.from_r" => match observed() {
             Some(SexpType::Real) => Ok(Type::Dbl),
             Some(SexpType::I64) => Ok(Type::I64),

@@ -1475,6 +1475,15 @@ unsafe fn write_converted(
     out: *mut u64,
 ) -> Result<(), Unwind> {
     let value = match conversion.checked {
+        Some(item) if rvalues::symbol_name(conversion.call.car()) == "Num.from_r" => {
+            let expected = match item {
+                Item::I64 => Items::I64,
+                _ => Items::Double,
+            };
+            let number = interp::numbers::checked_number(conversion.call, value, expected)?;
+            interp::heap().root(number);
+            number
+        }
         Some(item) if value.is_array() => {
             let expected = match item {
                 Item::I64 => Items::I64,

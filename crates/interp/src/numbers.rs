@@ -629,6 +629,27 @@ pub(crate) unsafe fn num_from_r(call: &Call<'_>) -> R<Sexp> {
     Ok(number)
 }
 
+/// The number the `Num.from_r` call `conversion` gave, as the `expected` number, the type the
+/// checker gave the conversion: `Items::I64` or `Items::Double`.
+///
+/// The checker types the conversion from R's types, and a value R code types as `double` is an
+/// integer whenever R computed it from integers (`abs(-3L)`), so an `I64` becomes an `F64` where
+/// the checker expects one, as R converts an integer wherever it needs a double. A `double`
+/// where the checker expects an `I64` means R code gave a value its types do not describe, which
+/// is an error. The interpreter and compiled typed code both convert through this function, so
+/// they agree on every value.
+pub unsafe fn checked_number(conversion: Sexp, number: Sexp, expected: arrays::Items) -> R<Sexp> {
+    match (number.kind(), expected) {
+        (SexpType::I64, arrays::Items::I64) | (SexpType::Real, arrays::Items::Double) => Ok(number),
+        (SexpType::I64, arrays::Items::Double) => scalar_real(number.slice::<i64>()[0] as f64),
+        _ => Err(error(format!(
+            "`{}` gave an `F64` where the type checker expects an `I64`, the type of the R code \
+             it read: convert the value to an integer in R first, for example with `as.integer()`",
+            crate::deparse::deparse_first_line(conversion),
+        ))),
+    }
+}
+
 thread_local! {
     /// The R type the last run of each `Num.from_r` and `List.from_r` call gave, by call: the
     /// type feedback that fixes the type compiled typed code gives the conversion of what an R

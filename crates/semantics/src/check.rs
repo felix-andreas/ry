@@ -365,24 +365,32 @@ pub enum NativeValueKind {
     List,
 }
 
-/// What only the checker knows about a value the runtime builds empty: the storage of a list's
-/// items, or the key and value types of a dictionary.
+/// A type only the checker knows that the runtime needs: the storage of a list's items for a list
+/// the runtime may build empty, the key and value types of a dictionary built from no entries,
+/// or the number a `Num.from_r` gives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
-pub enum Empty {
+pub enum CheckedType {
     List(ListItems),
     /// A `Dict` of `I64`, `F64` or `Str` keys and values, the ones typed code holds unboxed.
     Dict {
         key: ListItems,
         value: ListItems,
     },
+    /// A `Num.from_r(x)` of an `x` the checker typed `integer` (`I64`) or `double` (`F64`).
+    Number(NumberType),
 }
 
-impl Empty {
-    /// The name `.ry_items` takes: `"I64"` for a list, `"Dict<Str, I64>"` for a dictionary.
+impl CheckedType {
+    /// The name `.ry_items` takes: `"I64"` for a list or a number, `"Dict<Str, I64>"` for a
+    /// dictionary.
     pub fn name(self) -> std::borrow::Cow<'static, str> {
         match self {
-            Empty::List(items) => items.name().into(),
-            Empty::Dict { key, value } => format!("Dict<{}, {}>", key.name(), value.name()).into(),
+            CheckedType::List(items) => items.name().into(),
+            CheckedType::Dict { key, value } => {
+                format!("Dict<{}, {}>", key.name(), value.name()).into()
+            }
+            CheckedType::Number(NumberType::I64) => "I64".into(),
+            CheckedType::Number(NumberType::F64) => "F64".into(),
         }
     }
 }
@@ -454,14 +462,15 @@ pub struct ItemCheck<'db> {
     /// `double` whatever the checker decided, so the code ry's runtime runs spells each one with
     /// its suffix (`preflight` in the `ry` crate); without it, `-> I64` could return a `double`.
     pub i64_literals: ThinVec<ExprId>,
-    /// The expressions whose item types only this check knows: an empty `[]`, a call to a
-    /// library function whose result items come from a callback rather than from a list it was
-    /// given (`List.map`), and a library call that builds a dictionary from no entries
-    /// (`Dict.empty()`). An empty list is stored by its items' storage, and one built from no
-    /// items is `logical`, and typed code lays a dictionary out by its key and value types, so
-    /// the code ry's runtime runs passes each of these through `.ry_items` with the types
+    /// The expressions whose types only this check knows and the runtime needs: an empty `[]`, a
+    /// call to a library function whose result items come from a callback rather than from a
+    /// list it was given (`List.map`), a library call that builds a dictionary from no entries
+    /// (`Dict.empty()`), and a `Num.from_r`. An empty list is stored by its items' storage, and
+    /// one built from no items is `logical`, typed code lays a dictionary out by its key and
+    /// value types, and the number a `Num.from_r` gives otherwise depends on the R value, so the
+    /// code ry's runtime runs passes each of these through `.ry_items` with the type
     /// (`preflight` in the `ry` crate). In id order.
-    pub typed_empties: ThinVec<(ExprId, Empty)>,
+    pub checked_types: ThinVec<(ExprId, CheckedType)>,
     /// What only editor features read, absent when the host asked for no editor facts, so a
     /// command's check keeps no per-item slots for them.
     pub editor: Option<Box<EditorFacts<'db>>>,
@@ -1033,18 +1042,40 @@ fn check_item_in<'db>(
                 .then_some(id)
         })
         .collect();
-    let mut typed_empties: ThinVec<(ExprId, Empty)> = recorded
+    let num_from_r = Symbol::lookup("Num.from_r");
+    let mut checked_types: ThinVec<(ExprId, CheckedType)> = recorded
         .iter()
         .enumerate()
         .filter_map(|(index, slot)| {
             let id = ExprId::new(index);
+            let library = |callee: &ExprId, name: Symbol| {
+                !naming.resolutions.contains_key(callee)
+                    && context
+                        .globals
+                        .and_then(|globals| globals.library_candidates(name))
+                        .is_some()
+            };
             let candidate = match module.kind(id) {
                 ExpressionKind::Array(items) => module[items].is_empty(),
-                // `.ry_items` returns any other value unchanged, so a library name a project
-                // function shadows is wrapped harmlessly.
                 ExpressionKind::Call { callee, .. } => match module.kind(*callee) {
+                    // `.ry_items` checks a `Num.from_r` by the call's text, so it wraps only the
+                    // standard library's.
+                    ExpressionKind::NameRef(name) if Some(*name) == num_from_r => {
+                        if !library(callee, *name) {
+                            return None;
+                        }
+                        let ty = context.table.resolve(db, (*slot)?);
+                        let number = match ty.kind(db) {
+                            TyKind::Native(NativeScalar::I64) => NumberType::I64,
+                            TyKind::Native(NativeScalar::F64) => NumberType::F64,
+                            _ => return None,
+                        };
+                        return Some((id, CheckedType::Number(number)));
+                    }
+                    // `.ry_items` returns any other value unchanged, so a library name a project
+                    // function shadows is wrapped harmlessly.
                     ExpressionKind::NameRef(name) => {
-                        !naming.resolutions.contains_key(callee)
+                        library(callee, *name)
                             && context
                                 .globals
                                 .and_then(|globals| globals.library_candidates(*name))
@@ -1073,7 +1104,7 @@ fn check_item_in<'db>(
                 };
                 return Some((
                     id,
-                    Empty::Dict {
+                    CheckedType::Dict {
                         key: key?,
                         value: scalar(value)?,
                     },
@@ -1088,10 +1119,10 @@ fn check_item_in<'db>(
                     .unwrap_or(item),
                 _ => item,
             };
-            list_items(db, item).map(|items| (id, Empty::List(items)))
+            list_items(db, item).map(|items| (id, CheckedType::List(items)))
         })
         .collect();
-    typed_empties.sort_unstable_by_key(|(id, _)| id.index());
+    checked_types.sort_unstable_by_key(|(id, _)| id.index());
     let match_findings = match_findings(db, context.table.definitions, module, |scrutinee| {
         let ty = (*recorded.get(scrutinee.index())?)?;
         Some(context.table.resolve(db, ty))
@@ -1292,7 +1323,7 @@ fn check_item_in<'db>(
     ItemCheck {
         match_findings: ThinVec::from(match_findings),
         i64_literals,
-        typed_empties,
+        checked_types,
         errors: ThinVec::from(errors),
         strict_origins: ThinVec::from(context.strict_origins),
         native_blockers,

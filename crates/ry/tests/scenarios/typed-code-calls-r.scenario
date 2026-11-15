@@ -33,8 +33,8 @@ expect stdout "sum of 5 \n[1] -0.3348475"
 expect stderr "typed: compiled for [I64, I64] -> Dbl"
 expect stderr lacks "runs in the interpreter"
 
-# A conversion whose type the checker does not know waits for the interpreter to run the call
-# once: `Num.from_r` of a call into R code that declares no result type.
+# The checker types `factor()` as a `double`, so `Num.from_r` gives an `F64` and the first call
+# compiles, as `List.from_r` above does.
 
 file scale.R
 | factor <- function() 2.5
@@ -47,8 +47,64 @@ file scale.R
 run ry run --runtime ry scale.R
 expect exit 0
 expect stdout "[1] 5\n[1] 10"
-expect stderr "typed: `scale` runs in the interpreter: no code for [Dbl]: it waits on the interpreter to run `"
 expect stderr "typed: compiled for [Dbl] -> Dbl"
+expect stderr lacks "runs in the interpreter"
+
+# A conversion whose type the checker does not know waits for the interpreter to run the call
+# once: `Num.from_r` of R code whose value `get` finds, which only a project without strict mode
+# accepts.
+
+file loose/ry.toml
+| [check]
+| typing = true
+
+file loose/later.R
+| rate <- 2.5
+| factor <- function() get("rate")
+| later <- function(x: F64) -> F64 {
+|   x * Num.from_r(factor())
+| }
+| print(later(2))
+| print(later(4))
+
+run ry run --runtime ry loose/later.R
+expect exit 0
+expect stdout "[1] 5\n[1] 10"
+expect stderr "typed: `later` runs in the interpreter: no code for [Dbl]: it waits on the interpreter to run `"
+expect stderr "typed: compiled for [Dbl] -> Dbl"
+
+# A `Num.from_r` the checker typed gives that number whatever R gives: an R integer where the
+# checker read a `double` becomes an `F64`, as R converts it, and a `double` where it read an
+# `integer` is an error. `@trust` makes the checker read the types R code declares. The
+# interpreter and compiled code, compiled at the first call or ahead of time, agree.
+
+file loose/numbers.R
+| widen <- function(x) { y: @trust double <- x; y }
+| half <- function(x: I64) -> F64 Num.from_r(widen(Num.to_r(x))) / 2
+| print(half(3))
+| liar <- function(x) { y: @trust integer <- x + 0.5; y }
+| whole <- function(x: I64) -> I64 Num.from_r(liar(Num.to_r(x)))
+| print(whole(3))
+
+run ry run --runtime ry loose/numbers.R
+expect exit 1
+expect stdout "[1] 1.5"
+expect stderr "typed: compiled for [I64] -> Dbl"
+expect stderr "typed: compiled for [I64] -> I64"
+expect stderr "`Num.from_r(liar(Num.to_r(x)))` gave an `F64` where the type checker expects an `I64`, the type of the R code it read: convert the value to an integer in R first, for example with `as.integer()`"
+
+run ry run --runtime ry --aot loose/numbers.R
+expect exit 1
+expect stdout "[1] 1.5"
+expect stderr "typed: compiled 2 functions ahead of time in "
+expect stderr "`Num.from_r(liar(Num.to_r(x)))` gave an `F64` where the type checker expects an `I64`"
+
+env RY_JIT off
+run ry run --runtime ry loose/numbers.R
+expect exit 1
+expect stdout "[1] 1.5"
+expect stderr "`Num.from_r(liar(Num.to_r(x)))` gave an `F64` where the type checker expects an `I64`"
+unset RY_JIT
 
 # The checker reads `whole` and `prices` and types both conversions as a `List<F64>`. R gives an
 # integer vector for `abs(-3:3)`, which the conversion widens as R would, and the empty integer
