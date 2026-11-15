@@ -383,6 +383,30 @@ impl Relocatable {
                 }
             }
         }
+        // A relocation out of range leaves out a function whose callers were already patched to
+        // it, and a call to a function left out stays unpatched, so its callers go too.
+        loop {
+            let mut changed = false;
+            for (index, function) in compiled.iter().enumerate() {
+                let Ok(function) = function else {
+                    continue;
+                };
+                if functions.get(index).is_none_or(Result::is_err) {
+                    continue;
+                }
+                let calls_left_out = function.relocations.iter().any(|relocation| {
+                    matches!(relocation.target, Link::Function(callee)
+                        if functions.get(callee as usize).is_none_or(Result::is_err))
+                });
+                if calls_left_out && let Some(entry) = functions.get_mut(index) {
+                    *entry = Err(Error("it calls a function that is left out"));
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
         Object { code, functions }
     }
 }

@@ -59,10 +59,11 @@ reason:
 | `compiles with its caller` | a parameter type R cannot pass, such as a record, so the closure is not a root; it is in the file when a root calls it |
 | `does not compile` | the typed core refuses the function, so it runs in the interpreter in every session |
 | `matches over any tag` | its code tests for the shapes the installing process had confirmed, which depends on the process |
-| `assumes a lookup a session cannot check` | it resolved a name in an environment the file cannot name |
+| `assumes a lookup a session cannot check` | it resolved a name in an environment the file cannot name, or it took the result of an untyped function as a table value because of the function's return annotation |
 | `calls R with code a session cannot rebuild` | an R call site holds a value the file cannot store |
 | `calls a function it cannot name`, `has a type a file cannot name` | the same for a callee and for a type |
-| `does not compile into a file`, `calls code that did not link` | the code needs a relocation the writer does not resolve, or calls such code |
+| `does not compile into a file`, `does not link` | the code needs a relocation the writer does not resolve, or a relative call that does not reach |
+| `calls a function left out of the file` | it calls a version of the same file directly, and that version is left out for one of the reasons above |
 
 A closure copied at run time (an R6 method bound by `$new()`, a function after `environment<-`, the
 per-class copy of an S4 method) is another closure with another environment, so it compiles in the
@@ -161,10 +162,13 @@ the image ends the recording of the database's closures that the code file names
 2. Compiles each root for its declared types, and repeats the pass while it confirms new shapes,
    as `ry run --aot` does for a script.
 3. Lowers every version the roots reach through calls of the same database again for the file
-   target, leaves out what the table under "What the file holds" lists, and encodes its lookups,
-   sites and callees.
-4. Compiles, lays out and links, drops a version whose direct callee was dropped, and writes the
-   file to `<name>.ryt.partial` before it renames it into place, so a process never maps a
+   target, and leaves out what the table under "What the file holds" lists.
+4. Encodes, compiles, lays out and links the versions that remain. When one of them cannot be
+   written, it is left out with every version that calls it directly, and the writer starts this
+   step again over the rest, so every lookup, site, callee and code byte of the file belongs to a
+   written version.
+5. Parses its own bytes, so a file the loader would refuse fails the install, and writes the file
+   to `<name>.ryt.partial` before it renames it into place, so a process never maps a
    half-written file.
 
 Two writes against one installed package give the same bytes. `images::prune` removes the `.ryt`

@@ -6702,7 +6702,7 @@ fn gives_table_value(name: &str) -> bool {
 }
 
 /// Whether `function` is a typed closure that declares a table value as its result.
-unsafe fn returns_table(function: Sexp) -> bool {
+pub(crate) unsafe fn returns_table(function: Sexp) -> bool {
     function.kind() == SexpType::Closure
         && interp::annotations::return_annotation(function).is_some_and(|declared| {
             let name = declared

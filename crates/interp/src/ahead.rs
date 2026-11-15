@@ -151,25 +151,28 @@ unsafe fn prepare_script(script: &Script<'_>, keep_source: bool) -> R<Prepared> 
 /// program runs, which `--aot` asks to avoid. A package with no typed code file at all is either
 /// untyped or was installed without one on purpose (`--ry-no-typed-code`), and telling the two
 /// apart would read every function of every package the script loads.
-pub unsafe fn namespace_loaded(namespace: Sexp) -> R<()> {
+///
+/// Compiling ahead never changes whether a namespace loads: a binding this cannot read is left to
+/// compile at its first call, as it would without `--aot`.
+pub unsafe fn namespace_loaded(namespace: Sexp) {
     if !interp().ahead.enabled || namespace.kind() != SexpType::Environment {
-        return Ok(());
+        return;
     }
     let Some(package) = crate::envir::namespace_name(namespace) else {
-        return Ok(());
+        return;
     };
     if interp().ahead.namespaces.contains(&package) {
-        return Ok(());
+        return;
     }
     interp().ahead.namespaces.push(package.clone());
     let build = interp().code_image.build;
-    let Some(folder) = namespace_folder(namespace)? else {
-        return Ok(());
+    let Some(folder) = namespace_folder(namespace) else {
+        return;
     };
     let folder = folder.join("R");
     let database = folder.join(format!("{package}.rdb"));
     if build.is_empty() || rcmd::images::typed_code(&database, build).is_file() {
-        return Ok(());
+        return;
     }
     let prefix = format!("{package}.");
     let foreign = std::fs::read_dir(&folder).is_ok_and(|entries| {
@@ -180,15 +183,13 @@ pub unsafe fn namespace_loaded(namespace: Sexp) -> R<()> {
         })
     });
     if !foreign {
-        return Ok(());
+        return;
     }
     let heap = crate::heap();
     let mark = heap.handle_mark();
     let definitions = typed_closures(namespace);
-    if let Ok(definitions) = &definitions
-        && let Some(tier) = bytecode::tier()
-    {
-        (tier.ahead)(&Program { definitions });
+    if let Some(tier) = bytecode::tier() {
+        (tier.ahead)(&Program { definitions: &definitions });
         crate::write_console(
             format!(
                 "ry: another build of ry installed {package}, so its typed functions compiled as \
@@ -199,22 +200,22 @@ pub unsafe fn namespace_loaded(namespace: Sexp) -> R<()> {
         );
     }
     heap.release_handles(mark);
-    definitions.map(|_| ())
 }
 
 /// The folder a namespace's package was loaded from, its `.__NAMESPACE__.$path`.
-unsafe fn namespace_folder(namespace: Sexp) -> R<Option<std::path::PathBuf>> {
-    let info = crate::eval::find_var_in_frame(symbols().dot_namespace, namespace)?;
+unsafe fn namespace_folder(namespace: Sexp) -> Option<std::path::PathBuf> {
+    let info = crate::eval::find_var_in_frame(symbols().dot_namespace, namespace).ok()?;
     if info.kind() != SexpType::Environment {
-        return Ok(None);
+        return None;
     }
-    let path = crate::eval::find_var_in_frame(values::install("path")?, info)?;
-    Ok(values::first_string(path).map(|path| std::path::PathBuf::from(&*path)))
+    let path = crate::eval::find_var_in_frame(values::install("path").ok()?, info).ok()?;
+    values::first_string(path).map(|path| std::path::PathBuf::from(&*path))
 }
 
 /// The typed closures `namespace` binds, each forced from the package's database. Forcing a
-/// lazy-load promise reads the database and runs no code of the package.
-unsafe fn typed_closures(namespace: Sexp) -> R<Vec<Definition>> {
+/// lazy-load promise reads the database and runs no code of the package; one that cannot be read
+/// is left for the run to force.
+unsafe fn typed_closures(namespace: Sexp) -> Vec<Definition> {
     let heap = crate::heap();
     let mut definitions = Vec::new();
     for symbol in heap.frame_symbols(namespace) {
@@ -223,10 +224,13 @@ unsafe fn typed_closures(namespace: Sexp) -> R<Vec<Definition>> {
         };
         let mut value = cell.cdr();
         if value.kind() == SexpType::Promise {
-            if !crate::methods_core::is_lazy_load_promise(value)? {
+            if !crate::methods_core::is_lazy_load_promise(value).unwrap_or(false) {
                 continue;
             }
-            value = crate::eval::force_promise(value)?;
+            let Ok(forced) = crate::eval::force_promise(value) else {
+                continue;
+            };
+            value = forced;
         }
         if value.kind() == SexpType::Closure && crate::annotations::is_typed(value) {
             definitions.push(Definition {
@@ -235,7 +239,7 @@ unsafe fn typed_closures(namespace: Sexp) -> R<Vec<Definition>> {
             });
         }
     }
-    Ok(definitions)
+    definitions
 }
 
 /// Whether `RY_AHEAD_MISS` asks that no definition gets the closure made ahead for it. Every

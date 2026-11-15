@@ -250,3 +250,33 @@ expect exit 0
 expect stdout "14i64"
 expect stderr "typed: shapepkg's typed code file is not used: it was written for another copy of the package"
 expect stderr "typed: compiled for [I64] -> I64"
+
+# A function left out of the file takes the functions that call it with it, and the rest of the
+# file attaches.
+file drop/DESCRIPTION
+| Package: droppkg
+| Version: 1.0.0
+| Title: Drop
+| Description: A function left out of the file and its caller.
+| License: MIT
+file drop/NAMESPACE
+| export(caller, other)
+file drop/R/drop.R
+| root <- local(function(x: F64) -> F64 Num.sqrt(x))
+| caller <- function(x: F64) -> F64 root(x) + 1.0
+| other <- function(x: F64) -> F64 x * 3.0
+
+run ry install drop -l library
+expect exit 0
+expect stdout "typed code: closures=3 written=1 (left out: assumes a lookup a session cannot check (1), calls a function left out of the file (1))"
+
+file drop.R
+| library(droppkg, lib.loc = "library")
+| print(caller(2))
+| print(other(2))
+
+run ry run --runtime ry drop.R
+expect exit 0
+expect stdout "[1] 2.414214\n[1] 6"
+expect stderr "typed: attached `other` for [Dbl] -> Dbl from droppkg's code file"
+expect stderr lacks "is not used"

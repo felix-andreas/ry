@@ -3694,7 +3694,10 @@ unsafe fn run_frame_general(
         Err(unwind) => (None, Err(unwind)),
     };
     let result = match result {
-        Ok(namespace) if loaded => crate::ahead::namespace_loaded(namespace).map(|()| namespace),
+        Ok(namespace) if loaded => {
+            crate::ahead::namespace_loaded(namespace);
+            Ok(namespace)
+        }
         result => result,
     };
     let result = finish_frame(call, depth, signature, result);

@@ -43,7 +43,7 @@ use {
     std::{
         cell::{Cell, RefCell},
         collections::{BTreeMap, VecDeque},
-        io::{Read, Write as _},
+        io::Read,
         path::Path,
         sync::OnceLock,
     },
@@ -267,6 +267,8 @@ unsafe fn binding_names(package: &str) -> FxHashMap<Sexp, String> {
     names
 }
 
+const LEFT_OUT_CALLEE: &str = "calls a function left out of the file";
+
 #[allow(clippy::too_many_arguments)]
 unsafe fn build_file(
     versions: &[Pending],
@@ -278,20 +280,94 @@ unsafe fn build_file(
     database: &str,
     written: &mut Written,
 ) -> Result<(), String> {
-    let refused = |refusal: Refusal| refusal.0.into_owned();
-    let mut object = Relocatable::new().map_err(|error| error.0.to_owned())?;
-    let target = object.target();
-    let mut ids: Vec<(FuncId, FuncId)> = Vec::with_capacity(versions.len());
-    for version in versions {
-        let ir = &version.ir;
-        ids.push(declare(&mut object, &ir.locals[..ir.params], ir.result).map_err(refused)?);
+    // A version left out takes every version that calls it directly with it. Each emission that
+    // leaves a version out starts again over the versions that remain, so the tables, the slots
+    // and the code hold only what the written versions name.
+    let mut left_out: Vec<Option<&'static str>> = vec![None; versions.len()];
+    let bytes = loop {
+        leave_out_callers(versions, &mut left_out);
+        match emit(versions, &left_out, own, names, package, stamp, build)? {
+            Emission::File(bytes) => break bytes,
+            Emission::LeftOut(found) => {
+                for (position, reason) in found {
+                    left_out[position] = Some(reason);
+                }
+            }
+        }
+    };
+    for reason in left_out.iter().flatten() {
+        *written.skipped.entry(reason).or_default() += 1;
     }
-    let mut slots = Slots::default();
-    let frees = file_frees(&mut object, &mut slots).map_err(refused)?;
+    written.written += left_out.iter().filter(|reason| reason.is_none()).count();
+    // The loader's parser is the definition of a well-formed file, so a file it would refuse is a
+    // bug in the writer and fails the install instead of being refused in every session.
+    parse(&bytes).map_err(|_| String::from("ry wrote a typed code file it cannot read"))?;
+    let path = rcmd::images::typed_code(Path::new(database), build);
+    let temporary = path.with_extension("ryt.partial");
+    let saved = std::fs::write(&temporary, &bytes)
+        .and_then(|()| std::fs::rename(&temporary, &path))
+        .map_err(|failure| format!("cannot write {}: {failure}", path.display()));
+    if saved.is_err() && temporary.exists() {
+        std::fs::remove_file(&temporary)
+            .map_err(|failure| format!("cannot remove {}: {failure}", temporary.display()))?;
+    }
+    saved
+}
+
+/// Leaves out every version that calls a left-out version of the file directly, transitively.
+fn leave_out_callers(versions: &[Pending], left_out: &mut [Option<&'static str>]) {
     let index: FxHashMap<&Key, usize> = versions
         .iter()
         .enumerate()
         .map(|(position, version)| (&version.key, position))
+        .collect();
+    loop {
+        let mut changed = false;
+        for (position, version) in versions.iter().enumerate() {
+            if left_out[position].is_some() {
+                continue;
+            }
+            let calls_left_out = version.linker.called.iter().any(|key| {
+                index
+                    .get(key)
+                    .is_some_and(|&target| left_out[target].is_some())
+            });
+            if calls_left_out {
+                left_out[position] = Some(LEFT_OUT_CALLEE);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+enum Emission {
+    File(Vec<u8>),
+    /// The versions that cannot be written, by position, with the reason for the log.
+    LeftOut(Vec<(usize, &'static str)>),
+}
+
+/// The bytes of the file that holds every version not left out, or the versions that cannot be
+/// written.
+unsafe fn emit(
+    versions: &[Pending],
+    left_out: &[Option<&'static str>],
+    own: &FxHashMap<Sexp, (u64, u32)>,
+    names: &FxHashMap<Sexp, String>,
+    package: &str,
+    stamp: DatabaseStamp,
+    build: &str,
+) -> Result<Emission, String> {
+    let refused = |refusal: Refusal| refusal.0.into_owned();
+    let included: Vec<usize> = (0..versions.len())
+        .filter(|&position| left_out[position].is_none())
+        .collect();
+    let index: FxHashMap<&Key, usize> = included
+        .iter()
+        .enumerate()
+        .map(|(number, &position)| (&versions[position].key, number))
         .collect();
     let mut encoder = Encoder {
         own,
@@ -302,42 +378,46 @@ unsafe fn build_file(
         sites: Vec::new(),
         callees: Vec::new(),
     };
-    let mut records: Vec<Option<VersionRecord>> = Vec::with_capacity(versions.len());
-    for (position, version) in versions.iter().enumerate() {
-        let record = match encoder.version(version, &index, names) {
-            Ok(record) => record,
-            Err(reason) => {
-                *written.skipped.entry(reason).or_default() += 1;
-                records.push(None);
-                continue;
-            }
-        };
+    let mut records: Vec<Version> = Vec::with_capacity(included.len());
+    let mut failed: Vec<(usize, &'static str)> = Vec::new();
+    for &position in &included {
+        match encoder.version(&versions[position], &index, names) {
+            Ok(record) => records.push(record),
+            Err(reason) => failed.push((position, reason)),
+        }
+    }
+    if !failed.is_empty() {
+        return Ok(Emission::LeftOut(failed));
+    }
+    let mut object = Relocatable::new().map_err(|error| error.0.to_owned())?;
+    let target = object.target();
+    let mut ids: Vec<(FuncId, FuncId)> = Vec::with_capacity(included.len());
+    for &position in &included {
+        let ir = &versions[position].ir;
+        ids.push(declare(&mut object, &ir.locals[..ir.params], ir.result).map_err(refused)?);
+    }
+    let mut slots = Slots::default();
+    let frees = file_frees(&mut object, &mut slots).map_err(refused)?;
+    for (number, record) in records.iter().enumerate() {
+        let version = &versions[included[number]];
         let callees: Vec<Callee> = record
             .callees
             .iter()
-            .map(|&callee| {
+            .zip(&version.linker.callees)
+            .map(|(&callee, session)| {
                 let entry = &encoder.callees[callee as usize];
+                // The session-side types of the callees, which the emitter needs, not the file's.
                 Callee {
                     entry: match entry.target {
                         Target::Direct(target) => Entry::Function(ids[target as usize].0),
                         Target::Slot => Entry::Callee(callee),
                     },
-                    params: entry.params.clone(),
-                    result: entry.result,
+                    params: session.params.clone(),
+                    result: session.result,
                 }
             })
             .collect();
         let sites: Vec<usize> = record.sites.iter().map(|&site| site as usize).collect();
-        // The session-side types of the callees, which the emitter needs, not the file's.
-        let callees: Vec<Callee> = callees
-            .into_iter()
-            .zip(&version.linker.callees)
-            .map(|(mut callee, session)| {
-                callee.params = session.params.clone();
-                callee.result = session.result;
-                callee
-            })
-            .collect();
         if backend::compile_into(
             &mut object,
             &mut slots,
@@ -345,27 +425,19 @@ unsafe fn build_file(
             &version.ir,
             &callees,
             &sites,
-            ids[position],
+            ids[number],
         )
         .is_err()
         {
-            *written.skipped.entry("does not compile into a file").or_default() += 1;
-            records.push(None);
-            continue;
+            failed.push((included[number], "does not compile into a file"));
         }
-        records.push(Some(record));
+    }
+    if !failed.is_empty() {
+        return Ok(Emission::LeftOut(failed));
     }
     let linked = object.finish(&mut |name| {
         libcall_helper(name).map(|helper| slots.number(Slot::Helper(helper)))
     });
-    let free_ids = frees.ids();
-    let mut shared_start = linked.code.len() as u64;
-    for id in free_ids {
-        match linked.functions.get(id.as_u32() as usize) {
-            Some(Ok(offset)) => shared_start = shared_start.min(u64::from(*offset)),
-            _ => return Err(String::from("the free entries of a typed code file do not compile")),
-        }
-    }
     let offset_of = |id: FuncId| -> Option<u64> {
         linked
             .functions
@@ -373,41 +445,21 @@ unsafe fn build_file(
             .and_then(|found| found.as_ref().ok())
             .map(|&offset| u64::from(offset))
     };
-    // A version is kept when its code and its trampoline linked and every version of the file
-    // it calls directly is kept too.
-    let mut kept: Vec<bool> = records
-        .iter()
-        .zip(&ids)
-        .map(|(record, &(body, trampoline))| {
-            record.is_some() && offset_of(body).is_some() && offset_of(trampoline).is_some()
-        })
-        .collect();
-    loop {
-        let mut changed = false;
-        for position in 0..records.len() {
-            if !kept[position] {
-                continue;
-            }
-            let Some(record) = &records[position] else {
-                continue;
-            };
-            let calls_dropped = record.callees.iter().any(|&callee| {
-                matches!(encoder.callees[callee as usize].target,
-                    Target::Direct(target) if !kept[target as usize])
-            });
-            if calls_dropped {
-                kept[position] = false;
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
+    let mut shared_start = linked.code.len() as u64;
+    for id in frees.ids() {
+        let offset = offset_of(id)
+            .ok_or_else(|| String::from("the free entries of a typed code file do not compile"))?;
+        shared_start = shared_start.min(offset);
+    }
+    let mut placed: Vec<(u64, u64)> = Vec::with_capacity(ids.len());
+    for (number, &(body, trampoline)) in ids.iter().enumerate() {
+        match (offset_of(body), offset_of(trampoline)) {
+            (Some(body), Some(trampoline)) => placed.push((body, trampoline)),
+            _ => failed.push((included[number], "does not link")),
         }
     }
-    for (position, record) in records.iter().enumerate() {
-        if record.is_some() && !kept[position] {
-            *written.skipped.entry("calls code that did not link").or_default() += 1;
-        }
+    if !failed.is_empty() {
+        return Ok(Emission::LeftOut(failed));
     }
     let mut boundaries: Vec<u64> = linked
         .functions
@@ -416,23 +468,8 @@ unsafe fn build_file(
         .collect();
     boundaries.push(linked.code.len() as u64);
     boundaries.sort_unstable();
-    let mut renumbered: Vec<Option<u32>> = vec![None; records.len()];
-    let mut next = 0u32;
-    for (position, keep) in kept.iter().enumerate() {
-        if *keep {
-            renumbered[position] = Some(next);
-            next += 1;
-        }
-    }
-    let mut functions: Vec<Version> = Vec::new();
-    for (position, record) in records.into_iter().enumerate() {
-        let Some(record) = record.filter(|_| kept[position]) else {
-            continue;
-        };
-        let (body, trampoline) = ids[position];
-        let (Some(body), Some(trampoline)) = (offset_of(body), offset_of(trampoline)) else {
-            continue;
-        };
+    let mut functions: Vec<Version> = Vec::with_capacity(records.len());
+    for (record, (body, trampoline)) in records.into_iter().zip(placed) {
         let last = body.max(trampoline);
         let end = boundaries
             .iter()
@@ -448,15 +485,8 @@ unsafe fn build_file(
             trampoline,
             end,
             hash: code_image::hash(code),
-            ..record.version
+            ..record
         });
-        written.written += 1;
-    }
-    for callee in &mut encoder.callees {
-        if let Target::Direct(target) = callee.target {
-            // A dropped target leaves only dropped callers, whose records are gone.
-            callee.target = Target::Direct(renumbered[target as usize].unwrap_or(u32::MAX));
-        }
     }
     let mut file_slots = Vec::with_capacity(slots.slots.len());
     for &slot in &slots.slots {
@@ -499,16 +529,7 @@ unsafe fn build_file(
     bytes.extend_from_slice(&metadata);
     bytes.resize(code_offset as usize, 0);
     bytes.extend_from_slice(&tail);
-    let path = rcmd::images::typed_code(Path::new(database), build);
-    let temporary = path.with_extension("ryt.partial");
-    let mut file = std::fs::File::create(&temporary)
-        .map_err(|failure| format!("cannot write {}: {failure}", temporary.display()))?;
-    file.write_all(&bytes)
-        .map_err(|failure| format!("cannot write {}: {failure}", temporary.display()))?;
-    drop(file);
-    std::fs::rename(&temporary, &path)
-        .map_err(|failure| format!("cannot write {}: {failure}", path.display()))?;
-    Ok(())
+    Ok(Emission::File(bytes))
 }
 
 // The file's metadata, as the loader reads it. Every index is checked against its table when the
@@ -696,13 +717,6 @@ pub struct Version {
     pub confirms: Vec<u32>,
 }
 
-/// A version's metadata before its code is placed.
-struct VersionRecord {
-    version: Version,
-    sites: Vec<u32>,
-    callees: Vec<u32>,
-}
-
 #[derive(Default)]
 struct Strings {
     list: Vec<String>,
@@ -866,7 +880,7 @@ impl Encoder<'_> {
         version: &Pending,
         index: &FxHashMap<&Key, usize>,
         names: &FxHashMap<Sexp, String>,
-    ) -> Result<VersionRecord, &'static str> {
+    ) -> Result<Version, &'static str> {
         let lowered = &version.lowered;
         let (offset, position) = self
             .own
@@ -929,25 +943,22 @@ impl Encoder<'_> {
                 .r_calls
                 .iter()
                 .any(|site| !site.diverges && !site.effect_free);
-        Ok(VersionRecord {
-            version: Version {
-                name: self.shapes.strings.id(name),
-                offset,
-                position,
-                params,
-                result,
-                body: 0,
-                trampoline: 0,
-                end: 0,
-                hash: 0,
-                calls_r,
-                lookups,
-                sites: sites.clone(),
-                callees: callees.clone(),
-                confirms,
-            },
+        // The code's place in the file is filled in once it is linked.
+        Ok(Version {
+            name: self.shapes.strings.id(name),
+            offset,
+            position,
+            params,
+            result,
+            body: 0,
+            trampoline: 0,
+            end: 0,
+            hash: 0,
+            calls_r,
+            lookups,
             sites,
             callees,
+            confirms,
         })
     }
 
@@ -1000,6 +1011,9 @@ impl Encoder<'_> {
                     stamp: note.stamp,
                 }
             }
+        } else if lower::returns_table(function) {
+            // Lowering took the declared result as a table value, which `Other` does not recheck.
+            return None;
         } else {
             Class::Other
         };
@@ -1771,6 +1785,21 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, Malformed> {
                     _ => return Err(MALFORMED),
                 };
                 let length = input.count()?;
+                // A record has an item per field, and a layout keeps its names in the order of
+                // their bytes.
+                let fits = match &fields {
+                    FieldNames::Positional(count) => *count as usize == length,
+                    FieldNames::Named(names) => {
+                        names.len() == length
+                            && names.windows(2).all(|pair| {
+                                parsed.strings[pair[0] as usize] < parsed.strings[pair[1] as usize]
+                            })
+                    }
+                    FieldNames::Dict | FieldNames::Set => true,
+                };
+                if !fits {
+                    return Err(MALFORMED);
+                }
                 let mut items = Vec::with_capacity(length);
                 for _ in 0..length {
                     items.push(input.item(&parsed.shapes, true)?);
@@ -2147,6 +2176,7 @@ unsafe fn open_file(database: &str, note: Note, package: String) -> Result<Mappe
         (tail - header.shared_start) as usize,
     );
     if code_image::stream_hash(shared) != header.shared_hash {
+        unmap(base, &header);
         return Err(String::from(MALFORMED));
     }
     let data = base + header.code_length.next_multiple_of(8) as usize;
@@ -2231,9 +2261,7 @@ unsafe fn open_file(database: &str, note: Note, package: String) -> Result<Mappe
 /// keeps the table at its fixed distance and gives up only the sharing.
 #[cfg(unix)]
 unsafe fn map(file: &std::fs::File, header: &Header) -> Result<usize, String> {
-    let table = (header.slots * 8).next_multiple_of(ALIGN) as usize;
-    let tail = (header.code_length.next_multiple_of(8) + header.data_length) as usize;
-    let span = table + tail.next_multiple_of(ALIGN as usize);
+    let (table, tail, span) = mapped_span(header);
     let failed = |what: &str| format!("cannot map its {what}: {}", std::io::Error::last_os_error());
     let reserved = libc::mmap(
         std::ptr::null_mut(),
@@ -2272,6 +2300,24 @@ unsafe fn map(file: &std::fs::File, header: &Header) -> Result<usize, String> {
     })?;
     Ok(code as usize)
 }
+
+/// The sizes of the offset table, of the code and data, and of the whole range [`map`] reserves.
+#[cfg(unix)]
+fn mapped_span(header: &Header) -> (usize, usize, usize) {
+    let table = (header.slots * 8).next_multiple_of(ALIGN) as usize;
+    let tail = (header.code_length.next_multiple_of(8) + header.data_length) as usize;
+    (table, tail, table + tail.next_multiple_of(ALIGN as usize))
+}
+
+/// Releases the range [`map`] reserved for a file whose code starts at `base`.
+#[cfg(unix)]
+unsafe fn unmap(base: usize, header: &Header) {
+    let (table, _, span) = mapped_span(header);
+    libc::munmap((base - table) as *mut libc::c_void, span);
+}
+
+#[cfg(not(unix))]
+unsafe fn unmap(_: usize, _: &Header) {}
 
 /// Whether `RY_TYPED_FILE_COPY` asks that the code be copied even where the file maps, which
 /// tests of the copy use.
@@ -2350,12 +2396,6 @@ unsafe fn live_shapes(parsed: &Parsed) -> Result<Vec<u32>, String> {
                 let fields = match fields {
                     FieldNames::Positional(count) => Fields::Positional(*count),
                     FieldNames::Named(names) => {
-                        // A layout keeps its names in the order of their bytes.
-                        if names.windows(2).any(|pair| {
-                            parsed.strings[pair[0] as usize] >= parsed.strings[pair[1] as usize]
-                        }) {
-                            return Err(String::from(MALFORMED));
-                        }
                         let mut symbols = Vec::with_capacity(names.len());
                         for &name in names {
                             symbols.push(symbol(name)?);
@@ -2419,8 +2459,13 @@ unsafe fn attach_version(
 ) -> Option<&'static Compiled> {
     let state = mapped.states.borrow()[index as usize];
     match state {
+        // As for a session compile: code that calls a session version with a `match` over any tag
+        // is stale once a shape is confirmed since.
         State::Attached(attached, compiled) => {
-            return (attached == closure && crate::still_resolves(compiled)).then_some(compiled);
+            let current = attached == closure
+                && crate::still_resolves(compiled)
+                && compiled.epoch.is_none_or(|epoch| epoch == shapes::epoch());
+            return current.then_some(compiled);
         }
         State::Attaching | State::Failed => return None,
         State::Unattached => {}
@@ -2843,15 +2888,24 @@ pub mod testing {
                 _ => {
                     let fields = match entropy.below(4) {
                         0 => FieldNames::Positional(entropy.below(4) as u32),
-                        1 => FieldNames::Named(
-                            (0..entropy.below(3))
+                        1 => {
+                            let text = |name: &u32| parsed.strings[*name as usize].clone();
+                            let mut names: Vec<u32> = (0..entropy.below(3))
                                 .map(|_| entropy.below(strings) as u32)
-                                .collect(),
-                        ),
+                                .collect();
+                            names.sort_by_key(text);
+                            names.dedup_by_key(|name| text(name));
+                            FieldNames::Named(names)
+                        }
                         2 => FieldNames::Dict,
                         _ => FieldNames::Set,
                     };
-                    let items = (0..entropy.below(3))
+                    let length = match &fields {
+                        FieldNames::Positional(count) => *count as usize,
+                        FieldNames::Named(names) => names.len(),
+                        FieldNames::Dict | FieldNames::Set => entropy.below(3),
+                    };
+                    let items = (0..length)
                         .map(|_| match random_item(entropy, shapes) {
                             Item::Tag(_) => Item::Tag(shapes::ANY),
                             item => item,
