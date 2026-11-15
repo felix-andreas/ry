@@ -49,13 +49,14 @@ or not, but code compiled against ry 0.4.5's headers reads those pointers inline
 rescan. ry therefore refuses to load such a package and says how to reinstall it:
 
 ```
-Error: package or namespace load failed for 'data.table':
+Error: package or namespace load failed for ‘data.table’:
  unable to load shared object '/home/me/R/library/data.table/libs/data_table.so':
   package 'data.table' was compiled by ry 0.4.5 against older C headers, and its compiled code is unsafe to run under this ry. Reinstall it with this ry: install.packages("data.table"), or R CMD INSTALL on its source (ry install for a package you develop).
 ```
 
-A package installed by GNU R loads unchanged. Every installation by ry records the version of its
-headers' binary interface in a `RyAbi:` field of the package's `DESCRIPTION`
+A package installed by GNU R loads unchanged. Every installation from source by ry records the
+version of its headers' binary interface in a `RyAbi:` field of the package's `DESCRIPTION`, and
+`ry load` and `ry install` rebuild objects that an older ry left in a package's `src/`
 ([the CLI reference](/reference/cli#build-and-install)).
 
 ## ry 0.4.5

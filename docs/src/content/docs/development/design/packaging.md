@@ -104,7 +104,7 @@ version of the headers' binary interface (`rcmd::NATIVE_ABI`). `dyn.load` refuse
 of a package whose `RyBuilt:` is set and whose `RyAbi:` is missing or differs:
 
 ```
-Error: package or namespace load failed for 'tally':
+Error: package or namespace load failed for ‘tally’:
  unable to load shared object '/home/me/library/tally/libs/tally.so':
   package 'tally' was compiled by ry 0.4.5 against older C headers, and its compiled code is unsafe to run under this ry. Reinstall it with this ry: install.packages("tally"), or R CMD INSTALL on its source (ry install for a package you develop).
 ```
