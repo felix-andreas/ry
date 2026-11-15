@@ -1,8 +1,10 @@
 # Overview
 
-ry is becoming a full, backwards-compatible reimplementation of R, extended with ry's static typing (user directive). Today it ships as a language server and a command-line tool that aim to be world class at code analysis on the level of rust-analyzer, code formatting, and linting, with a static type checker at the core of the analysis. That tooling stays, and the runtime grows beside it.
+ry is a backwards-compatible reimplementation of R, extended with ry's static typing (user directive). It runs R on its own runtime, with a bundled copy of base R, on Linux, macOS and Windows, and its ABI-compatible `libR` implements R's C API, so `R CMD` installs compiled packages against it. It runs the three benchmark code bases below and the test suites of pinned CRAN packages faster than GNU R on every benchmark suite (`docs/src/content/docs/benchmarks.mdx`). Typed ry compiles to native code, at a typed closure's first call or ahead of time (`ry run --aot`, a package's typed code file), and a JIT compiles hot untyped code. The runtime is incomplete: code that needs something it lacks stops with an error that names it.
 
-No static type checker exists for R, so ry defines its own typing semantics, and the typing reference at `docs/src/content/docs/reference/type-system.mdx` is their contract. R has no syntax for type annotations either, so annotations currently live in `#:` comments written in a JSDoc-like notation, which keeps annotated code ordinary R that every other tool can read. The mandate below adds an inline annotation syntax beside them.
+The same binary is the tooling: a language server and a command-line tool that aim to be world class at code analysis on the level of rust-analyzer, code formatting, and linting, with a static type checker at the core of the analysis.
+
+R has no static type system, so ry defines its own typing semantics, and the typing reference at `docs/src/content/docs/reference/type-system.mdx` is their contract. Annotations are written inline (`function(price: double) -> double`) or in `#:` comments in a JSDoc-like notation, which keep annotated code ordinary R that every other tool can read.
 
 The crates live in `crates/`:
 
@@ -10,15 +12,21 @@ The crates live in `crates/`:
 - `semantics`: the salsa-based analysis core and the type checker.
 - `format`: the formatter, which reads syntax only.
 - `ide`: editor features, implemented as pure reads.
+- `rdb`: reads installed packages' lazy-load databases and help pages for editor navigation, without R.
 - `ry`: the LSP server and the CLI.
 - `loader`: the package-development loader behind `ry load`.
 - `repl`: the R console behind `ry repl` and `ry run`. It loads R at runtime, which is why the rest of the workspace can build without R.
 - `heap`: the R runtime's object model and garbage collector.
-- `interp`: the R interpreter. `numeric` (the numeric kernels) sits below it, and the leaf crates `stats`, `graphics`, `frames` (the `DataFrame` binding) and `services` (the HTTP client) sit above it, so the interpreter links no Polars, rasterizer or HTTP stack.
-- `typed`: the typed core, which compiles strict typed closures to run on native values.
+- `interp`: the R interpreter. `numeric` (the numeric kernels) sits below it, and the leaf crates `stats`, `graphics`, `frames` (the `DataFrame` binding over `table`, the Polars engine) and `services` (the HTTP client) sit above it, so the interpreter links no Polars, rasterizer or HTTP stack.
+- `sniff`: delimited-text dialect and column-type inference, shared by the table reader and the checker.
+- `jit`: the optimizing tier, which compiles hot bytecode to machine code with Cranelift.
+- `typed`: the typed core, which compiles strict typed closures to run on native values, at run time or ahead of time.
+- `ssa`: the one mid-level SSA IR that `jit` and `typed` both lower to machine code.
 - `libr`: R's C API, built as an ABI-compatible `libR` shared library.
 - `rcmd`: ry's R home and the `R CMD` commands that install packages against it.
+- `crash`: the report a fatal signal prints before the process dies.
 - `oracle`: the differential test harness that compares an engine against GNU R.
+- `features`: links nothing; its manifest unifies dev-dependency features so tests and builds share one dependency tree.
 
 AI agents drive development here, with light human steering. They keep two written homes current. The docs site in `docs/` holds the specs for users and contributors, and because those specs are contracts, keeping them accurate is mandatory. The knowledge base in `.agents/memory/MEMORY.md` holds engineering state, priorities, debt, and the non-obvious reasons behind designs, so that no agent has to rediscover them. Update both in the same session as the work that changes them.
 
@@ -39,11 +47,11 @@ AI agents drive development here, with light human steering. They keep two writt
 - ry ships a standard library modeled on Roc's where it fits (`Result`, `List`, `Str`, `Dict` and so on), using plain qualified names such as `Result.map` rather than static dispatch.
 - (user directive) Typed ry is a small, friendly language in the spirit of Roc, independent of R's semantics and designed for close to Rust's performance: sound types, functions and a reasonable standard library, and nothing more until it earns its place (no static dispatch or other advanced features by default). A typed program can be written entirely in ry's own types (numbers, `Bool`, `Str`, `List`, `Dict`, `Set`, records, tuples, tags and functions) without touching an R data type, and the typed benchmark programs are written that way. R values meet ry's types only at an explicit boundary.
 
-The tooling goals still hold. Diagnostics follow the style of Rust and Elm: clear, precise, and actionable, in plain user-facing wording rather than internal or theory-heavy language, and with precise source ranges rather than coarse fallback ones. Editor tooling stays complete (hover, completion, goto-definition, references, rename, and inlay hints), so preserve the semantic information those features need whenever practical. Formatting and linting stay first class.
+The tooling has goals of its own. Diagnostics follow the style of Rust and Elm: clear, precise, and actionable, in plain user-facing wording rather than internal or theory-heavy language, and with precise source ranges rather than coarse fallback ones. Editor tooling stays complete (hover, completion, goto-definition, references, rename, and inlay hints), so preserve the semantic information those features need whenever practical. Formatting and linting stay first class.
 
 ## The C API comes first
 
-Most packages that real R code depends on ship compiled C, C++ or Rust code written against R's C API: `SEXP` values, the memory-protection discipline, and `.Call`. Full compatibility therefore means implementing that C API, not only R's language semantics. Because that interface constrains the object model, the memory manager and the calling convention, it shapes the architecture more than the JIT does, so design it first and let the JIT fit around it.
+Most packages that real R code depends on ship compiled C, C++ or Rust code written against R's C API: `SEXP` values, the memory-protection discipline, and `.Call`. Full compatibility therefore means implementing that C API, not only R's language semantics. Because that interface constrains the object model, the memory manager and the calling convention, it shapes the architecture more than the JIT does, so it is designed first and the JIT fits around it.
 
 ## Benchmark
 
