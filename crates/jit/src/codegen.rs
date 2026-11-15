@@ -3798,7 +3798,8 @@ impl<'p> Translator<'p> {
         let bound = self.builder.ins().iadd_imm_s(length, 1);
         let (index_value, in_range) =
             self.subscript_position(before.registers[index], index, bound, false);
-        // A variable of an enclosing frame is copied into this frame first, which tier 0 does.
+        // A value the frame does not own, an enclosing frame's variable or a promise's value, is
+        // copied into this frame first, which tier 0 does.
         let status = self.status(slot);
         let local =
             self.builder
@@ -4275,6 +4276,10 @@ impl<'p> Translator<'p> {
         }
         self.builder.switch_to_block(load);
         let local = self.builder.ins().iconst(I32, status::RUNTIME_LOCAL);
+        // What the caller passes stays the caller's: the caller's variable, a register it may
+        // read again, or a constant of its code. A boxed copy of an unboxed value is the
+        // callee's own.
+        let borrowed = self.builder.ins().iconst(I32, status::RUNTIME_ENCLOSING);
         let passed = self
             .frame
             .formal(slot)
@@ -4309,12 +4314,12 @@ impl<'p> Translator<'p> {
             Some(Passed::Object(variable)) => {
                 let value = self.builder.use_var(variable);
                 self.store_slot_cell(slot, value);
-                Some((value, local))
+                Some((value, borrowed))
             }
             Some(Passed::Literal(literal)) => {
                 let value = self.builder.ins().iconst(I64, literal.as_ptr() as i64);
                 self.store_slot_cell(slot, value);
-                Some((value, local))
+                Some((value, borrowed))
             }
             Some(Passed::Variable { caller, symbol }) => {
                 let source = self.builder.ins().iconst(I64, symbol.as_ptr() as i64);
@@ -4341,7 +4346,7 @@ impl<'p> Translator<'p> {
                 );
                 let unforced = self.deopt(pc, before.id, None, position, reason::UNFORCED);
                 self.guard(found, unforced);
-                Some((self.load_slot_cell(slot), local))
+                Some((self.load_slot_cell(slot), borrowed))
             }
             // Only tier 0 forces a promise, in the frame it gives the call.
             Some(Passed::Lazy) => {
@@ -4430,6 +4435,8 @@ impl<'p> Translator<'p> {
                     .ins()
                     .load(I64, flags(), header, (8 * (1 + slot as usize)) as i32);
             let local_status = self.builder.ins().iconst(I32, status::RUNTIME_LOCAL);
+            // A promise's value is the argument's, which the caller may hold too.
+            let borrowed_status = self.builder.ins().iconst(I32, status::RUNTIME_ENCLOSING);
             let unbound = values::unbound().as_ptr() as i64;
             for marker in [values::missing_arg().as_ptr() as i64, unbound] {
                 let differs = self
@@ -4465,7 +4472,7 @@ impl<'p> Translator<'p> {
             let done = self.builder.create_block();
             self.builder.ins().brif(evaluated, done, &[], slow, &[]);
             self.builder.switch_to_block(done);
-            self.builder.ins().jump(merged, &[promised, local_status]);
+            self.builder.ins().jump(merged, &[promised, borrowed_status]);
         } else {
             self.builder.ins().jump(outline, &[]);
         }

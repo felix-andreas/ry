@@ -6957,6 +6957,8 @@ pub unsafe fn passes_missing_argument(machine: &mut Machine<'_>, pc: usize) -> R
     Ok(missing)
 }
 
+/// Loads the variable the `GetVar` at `pc` reads, with whether the frame owns the value: it
+/// binds it directly rather than through a promise, whose value the caller may hold too.
 pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)> {
     let code = machine.code;
     let words = values::ints(code.car());
@@ -7000,7 +7002,7 @@ pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)>
                 } else {
                     value.car()
                 };
-                (forced, true)
+                (forced, false)
             } else if value == missing_arg() {
                 let env = machine.reify(Reify::Site("missing argument lookup"))?;
                 (
@@ -7026,7 +7028,9 @@ pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)>
         }
         None => {
             let env = machine.env();
-            let local = crate::heap().frame_cell(env, symbol).is_some();
+            let local = crate::heap()
+                .frame_cell(env, symbol)
+                .is_some_and(|cell| cell.cdr().kind() != SexpType::Promise);
             (
                 lookup_variable(symbol, env, LookupCache::of(code), cache, 0..0)?,
                 local,
@@ -10503,16 +10507,8 @@ unsafe fn slot_use_method(
     {
         return Ok(None);
     }
-    let formals = state.machine.function.car();
-    let first = if formals.kind() == SexpType::Pairlist {
-        match slot_named(state, formals.tag()) {
-            Some(slot) => slot,
-            None => return Ok(None),
-        }
-    } else {
-        std::ptr::null_mut()
-    };
     // Through R 4.3 the method sees the generic's locals, which only an environment can show.
+    let formals = state.machine.function.car();
     let names = state.constants.element(SLOTS).element(1);
     let locals =
         (length(formals)..length(names)).any(|index| *state.header.add(1 + index) != unbound());
@@ -10520,7 +10516,7 @@ unsafe fn slot_use_method(
         return Ok(None);
     }
     let owner = (*state.interp).slot_owner as usize;
-    dispatch::use_method_in_slots(generic, owner, first, object)
+    dispatch::use_method_in_slots(generic, owner, object)
 }
 
 /// A builtin call from a slot frame whose arguments the slots answer: `...`, a constant, or a

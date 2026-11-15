@@ -870,8 +870,9 @@ pub unsafe extern "C" fn jit_record(activation: *mut Activation, pc: i64, value:
 /// reified or the variable is free in the body: in the activation's own environment, else in its
 /// enclosure when that is a function's frame, through the lookup slot's hint. Only a plain value
 /// or an evaluated promise counts, since that case runs no code and changes nothing; the result
-/// is the value with its low bit set when the enclosure bound it, or 0 when tier 0's lookup must
-/// run. The probe lives out of line because inlining both frame walks at every variable load
+/// is the value with its low bit set when the frame does not own it (the enclosure bound it, or
+/// it is a promise's value, which the caller may hold too), or 0 when tier 0's lookup must run.
+/// The probe lives out of line because inlining both frame walks at every variable load
 /// made a large body's code grow by about a hundred instructions per load.
 pub unsafe extern "C" fn jit_probe(
     activation: *const Activation,
@@ -908,13 +909,13 @@ pub unsafe extern "C" fn jit_probe(
         if value == values::missing_arg() || value == values::unbound() {
             return 0;
         }
-        let value = if value.kind() == SexpType::Promise {
+        let (value, tag) = if value.kind() == SexpType::Promise {
             match value.car() {
                 forced if forced == values::unbound() => return 0,
-                forced => forced,
+                forced => (forced, 1),
             }
         } else {
-            value
+            (value, tag)
         };
         value.as_ptr() as u64 | tag
     }
@@ -938,7 +939,7 @@ pub unsafe extern "C" fn jit_load_slot(activation: *mut Activation, slot: i64) -
                             } else {
                                 value.car()
                             };
-                            Ok((forced, true))
+                            Ok((forced, false))
                         }
                         Some(value)
                             if value != values::unbound() && value != values::missing_arg() =>
@@ -954,7 +955,9 @@ pub unsafe extern "C" fn jit_load_slot(activation: *mut Activation, slot: i64) -
                             .map(|value| (value, false)),
                     };
                 }
-                let local = heap().frame_cell(machine.env(), symbol).is_some();
+                let local = heap()
+                    .frame_cell(machine.env(), symbol)
+                    .is_some_and(|cell| cell.cdr().kind() != SexpType::Promise);
                 eval::eval_symbol(symbol, machine.env()).map(|value| (value, local))
             });
             finish_load(activation, slot, loaded, epoch)
@@ -1060,14 +1063,15 @@ unsafe fn peek_variable(activation: &mut Activation, slot: i64) -> i32 {
             if env == values::nil() {
                 if let Some(frame_slot) = frame_slot(activation, machine, slot) {
                     let mut value = *frame_slot;
-                    if value.kind() == SexpType::Promise {
+                    let promised = value.kind() == SexpType::Promise;
+                    if promised {
                         value = value.car();
                     }
                     if value == values::missing_arg() || value == values::unbound() {
                         return outcome::LOAD_FAILED;
                     }
                     *slot_cell(activation, slot) = value;
-                    return 1;
+                    return if promised { 2 } else { 1 };
                 }
                 env = machine.enclosure();
                 local = false;
@@ -1078,7 +1082,8 @@ unsafe fn peek_variable(activation: &mut Activation, slot: i64) -> i32 {
                         return outcome::LOAD_FAILED;
                     }
                     let mut value = cell.cdr();
-                    if value.kind() == SexpType::Promise {
+                    let promised = value.kind() == SexpType::Promise;
+                    if promised {
                         if value.car() == values::unbound() {
                             return outcome::LOAD_FAILED;
                         }
@@ -1088,7 +1093,7 @@ unsafe fn peek_variable(activation: &mut Activation, slot: i64) -> i32 {
                         return outcome::LOAD_FAILED;
                     }
                     *slot_cell(activation, slot) = value;
-                    return if local { 1 } else { 2 };
+                    return if local && !promised { 1 } else { 2 };
                 }
                 local = false;
                 env = env.enclosure();
@@ -1954,7 +1959,7 @@ pub unsafe extern "C" fn jit_load_passed(
             match value {
                 Some(value) if value != values::missing_arg() && value != values::unbound() => {
                     *slot_cell(&*callee, slot) = value;
-                    status::RUNTIME_LOCAL as i32
+                    status::RUNTIME_ENCLOSING as i32
                 }
                 _ => {
                     count_declined_load(compiled(caller));

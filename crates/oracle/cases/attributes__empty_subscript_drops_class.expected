@@ -1,0 +1,45 @@
+[stdout]
+| $names
+| [1] "a"
+| 
+| $dim
+| [1] 2 2
+| 
+| $tsp
+| [1] 1 5 1
+| 
+| $class
+| [1] "ts"
+| 
+| [1] "data.frame"
+| [1] "factor"
+| $names
+| [1] "a" "b" "c"
+| 
+| $extra
+| [1] TRUE
+| 
+| $names
+| [1] "a"
+| 
+| $class
+| [1] "settings"
+| 
+| $class
+| [1] "foo"
+| 
+| NULL
+| $dim
+| [1] 2 2
+| 
+| $dim
+| [1] 2 2
+| 
+| [1] "foo"   "names"
+| [1] "foo"   "names"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("foo", "names")
