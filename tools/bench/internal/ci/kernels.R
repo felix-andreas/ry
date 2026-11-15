@@ -116,8 +116,16 @@ k10 <- function(n) for (i in seq_len(n)) for (path in sourceFiles) readLines(pat
 k11 <- function(n) for (i in seq_len(n))
   list.files(sourceDir, pattern = "\\.[Rr]$", recursive = TRUE, full.names = TRUE)
 
+# K12 and K13 follow a reproducer the user sent for `new()`: a class of two plain slots, and a
+# class whose prototype holds a million doubles, which `new()` must not copy.
+setClass("Plain", representation(a = "numeric", b = "character"))
+setClass("Seeded", representation(series = "numeric", name = "character"),
+         prototype(series = runif(1e6), name = "x"))
+k12 <- function(n) for (i in seq_len(n)) new("Plain", a = 1, b = "x")
+k13 <- function(n) for (i in seq_len(n)) new("Seeded", name = "y")
+
 sizes <- c(k1 = 20000, k2 = 30000, k3 = 100000, k4 = 60000, k5 = 20000, k6 = 4000, k7 = 500, k8 = 30000,
-           k9 = 20, k10 = 100, k11 = 2000)
+           k9 = 20, k10 = 100, k11 = 2000, k12 = 100000, k13 = 500)
 checks <- list(
   k1 = function() recordLabel(makeRecord(a = "id1", b = "p", c = "q")),
   k2 = function() format(c(toDate("2024-03-15"), toDate(as.Date("2024-01-02")))),
@@ -132,7 +140,11 @@ checks <- list(
     c(sum(lengths(parsed)), sum(nchar(unlist(lapply(parsed, function(e) as.character(attr(e, "srcref")))))),
       nrow(getParseData(parsed[[1]]))) },
   k10 = function() sum(nchar(unlist(lapply(sourceFiles, readLines)))),
-  k11 = function() basename(list.files(sourceDir, pattern = "\\.[Rr]$", recursive = TRUE, full.names = TRUE))[c(1, 20, 40)]
+  k11 = function() basename(list.files(sourceDir, pattern = "\\.[Rr]$", recursive = TRUE, full.names = TRUE))[c(1, 20, 40)],
+  k12 = function() { object <- new("Plain", a = 1, b = "x"); c(object@a, nchar(object@b), isVirtualClass("Plain")) },
+  k13 = function() { first <- new("Seeded", name = "y"); first@series[1] <- -1; second <- new("Seeded")
+    c(length(first@series), first@series[1], second@series[1] >= 0, nchar(paste0(first@name, second@name)),
+      round(sum(getClass("Seeded")@prototype@series), 6)) }
 )
 
 selected <- Sys.getenv("KERNELS", "")

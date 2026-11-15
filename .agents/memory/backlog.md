@@ -131,7 +131,7 @@ per-item and per-file tables after the type store".
 
 ## Open: the kernels of a package test suite's profile
 
-`just bench-ci` runs eleven kernels from a user's profiles of a large package's test suite on ry 0.4.5 (`tools/bench/internal/ci/kernels.R`; `development/testing.md` describes them). In the profile tier 0 held 32% of the time, builtins 32%, native code 17% and closure call setup 10%, and tier 1 ran 0.1%. Speed-up over GNU R per kernel before any work: `k1` 1.6x, `k2` 2.1x, `k3` 2.3x, `k4` 3.1x, `k5` 2.4x, `k6` 0.27x, `k7` 1.8x, `k8` 1.3x, `k9` 0.55x, `k10` 0.60x, `k11` 0.59x.
+`just bench-ci` runs thirteen kernels from a user's profiles of a large package's test suite on ry 0.4.5 (`tools/bench/internal/ci/kernels.R`; `development/testing.md` describes them). In the profile tier 0 held 32% of the time, builtins 32%, native code 17% and closure call setup 10%, and tier 1 ran 0.1%. Speed-up over GNU R per kernel before any work: `k1` 1.6x, `k2` 2.1x, `k3` 2.3x, `k4` 3.1x, `k5` 2.4x, `k6` 0.27x, `k7` 1.8x, `k8` 1.3x, `k9` 0.55x, `k10` 0.60x, `k11` 0.59x.
 
 - `k4` (an argument checker over `list(...)` with `delayedAssign`) and `k7` (a data.table grown by `rbind`) have no work planned. `k4` and `k5` are tier-0 closure calls: see "Open: JIT on against JIT off".
 - Replacement calls turned 23.0M slot frames into environments in the profile, and `standardGeneric` 24.8M.
