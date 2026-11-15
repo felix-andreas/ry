@@ -305,7 +305,7 @@ unsafe fn do_new(call: &Call<'_>) -> R<Sexp> {
     if values::as_logical_scalar(slot(definition, symbols().virtual_)?) != 0 {
         return values::scalar_bool(false);
     }
-    let value = crate::methods::new_object(definition)?;
+    let value = crate::methods::new_object_copying(definition, false)?;
     eval::define(install("ClassDef")?, definition, frame)?;
     eval::define(symbols().value, value, frame)?;
     values::scalar_bool(true)
@@ -587,85 +587,233 @@ unsafe fn call_args<const N: usize>(call: Sexp, function: &str) -> R<Option<[(Se
     Ok((cell == nil()).then_some(args))
 }
 
-/// `validObject(object)` for an object whose slots all hold values of their declared classes
-/// and whose class and superclasses define no validity method: `TRUE` when it checked that.
+/// `validObject(object)` when its slot loop would find every slot holding a value of its
+/// declared class: `1` (`TRUE`) when no validity method or conditional superclass is left to
+/// run. Otherwise a validity method has to run, and R code has to call it, so that
+/// `sys.call()`, `sys.function()`, `parent.frame()` and `sys.calls()` inside it see what they
+/// see without the fast path. The fast path then binds the variables the body binds before and
+/// in its slot loop, to the values they would hold after it, and returns `2`, on which the
+/// prologue runs the body's statements after the loop. `0` runs the whole body.
 unsafe fn do_valid(call: &Call<'_>) -> R<Sexp> {
     let (object, frame) = (call.arg(0), call.arg(1));
-    let valid = quiet_value(install("complete")?, frame)?
-        .is_some_and(|complete| complete.kind() == SexpType::Logical && is_false(complete))
-        && plainly_valid(object)?;
-    values::scalar_bool(valid)
+    let complete = quiet_value(install("complete")?, frame)?;
+    if !complete.is_some_and(|flag| flag.kind() == SexpType::Logical && is_false(flag)) {
+        return scalar_integer(BAIL);
+    }
+    let Some(check) = check_slots(object)? else {
+        return scalar_integer(BAIL);
+    };
+    if !check.runs_validity {
+        return scalar_integer(1);
+    }
+    let last = match check.last {
+        Last::Empty => None,
+        Last::Slot(last) => Some(last),
+        Last::Unmodelled => bail!(scalar_integer(BAIL)?, "the last slot is the data part"),
+    };
+    let class = get_attr(object, symbols().class);
+    // `attributes()` lists the names first, which the fast path does not reorder.
+    if class == nil() || has_attribute(object, symbols().names) {
+        bail!(scalar_integer(BAIL)?);
+    }
+    // `.classEnv(classDef)`, which is `.requirePackage(classDef@package)`.
+    let package = slot(check.definition, symbols().package)?;
+    let registry = crate::heap().known().namespace_registry;
+    let where_ = match package.element(0).bytes() {
+        b"" => bail!(scalar_integer(BAIL)?),
+        name => match quiet_value(install_text(package.element(0))?, registry)? {
+            Some(namespace) => namespace,
+            None if name == b".GlobalEnv" => values::global_env(),
+            None => bail!(scalar_integer(BAIL)?, "the class's package is not loaded"),
+        },
+    };
+    let slot_names = values::names(check.slots);
+    let mut attribute_names = vec![values::mkchar(".Data")?, values::mkchar(".S3Class")?];
+    let mut cell = object.attrib();
+    while cell.kind() == SexpType::Pairlist {
+        attribute_names.push(cell.tag().car());
+        cell = cell.cdr();
+    }
+    let attr_names = alloc_strings(attribute_names.len())?;
+    crate::heap().root(attr_names);
+    for (index, &name) in attribute_names.iter().enumerate() {
+        values::set_elt(attr_names, index, name);
+    }
+    let idx = values::alloc(SexpType::Integer, length(check.slots))?;
+    crate::heap().root(idx);
+    for (index, matched) in values::ints_mut(idx).iter_mut().enumerate() {
+        let name = slot_names.element(index).bytes();
+        let Some(position) = attribute_names.iter().position(|&tag| tag.bytes() == name) else {
+            bail!(scalar_integer(BAIL)?);
+        };
+        *matched = i32::try_from(position + 1).unwrap_or(i32::MAX);
+    }
+    for (name, value) in [
+        ("Class", class),
+        ("classDef", check.definition),
+        ("where", where_),
+        ("errors", alloc_strings(0)?),
+        ("slotTypes", check.slots),
+        ("slotNames", slot_names),
+        ("attrNames", attr_names),
+        ("idx", idx),
+    ] {
+        eval::define(install(name)?, value, frame)?;
+    }
+    match last {
+        // `for` over an empty sequence leaves its variable `NULL`.
+        None => eval::define(install("i")?, nil(), frame)?,
+        Some(last) => {
+            let index = scalar_integer(i32::try_from(last.index + 1).unwrap_or(i32::MAX))?;
+            eval::define(install("i")?, index, frame)?;
+            eval::define(install("classi")?, last.class, frame)?;
+            eval::define(install("classDefi")?, last.definition, frame)?;
+            let name = values::scalar_string_charsxp(last.name)?;
+            eval::define(install("namei")?, name, frame)?;
+            eval::define(install("sloti")?, last.value, frame)?;
+            let ok = match last.ok {
+                Some(extension) => extension,
+                None => values::scalar_bool(true)?,
+            };
+            eval::define(install("ok")?, ok, frame)?;
+        }
+    }
+    scalar_integer(2)
 }
 
-unsafe fn plainly_valid(object: Sexp) -> R<bool> {
+/// What `validObject`'s slot loop leaves when it finds nothing wrong.
+struct SlotCheck {
+    definition: Sexp,
+    slots: Sexp,
+    last: Last,
+    /// Whether the R code after the loop runs anything: a validity method of the class or of a
+    /// superclass, or the checks of a conditional extension or of a superclass not cached.
+    runs_validity: bool,
+}
+
+enum Last {
+    /// The class has no slots, so the loop never ran.
+    Empty,
+    Slot(LastSlot),
+    /// The last slot is the data part, whose value `slot()` makes.
+    Unmodelled,
+}
+
+/// The loop's variables after its pass over the last slot.
+struct LastSlot {
+    index: usize,
+    class: Sexp,
+    definition: Sexp,
+    name: Sexp,
+    value: Sexp,
+    /// `ok`: `None` for `TRUE`.
+    ok: Option<Sexp>,
+}
+
+/// The slot loop of `validObject(object)` with `complete = FALSE`, when every slot holds a value
+/// its declared class accepts and every class involved is cached; `None` when the loop would
+/// record an error or look past the cache.
+unsafe fn check_slots(object: Sexp) -> R<Option<SlotCheck>> {
     let class = dispatch::class_of(object)?;
     let Some(definition) = cached_class(class)? else {
-        return Ok(false);
+        return Ok(None);
     };
     // The R code looks up the class's package first, which loads it when it is not loaded.
     if !package_loaded(slot(definition, symbols().package)?)? {
-        return Ok(false);
+        return Ok(None);
     }
     let slots = slot(definition, symbols().slots)?;
     if slots.kind() != SexpType::List {
-        return Ok(false);
+        return Ok(None);
     }
     let slot_names = values::names(slots);
+    let mut last = Last::Empty;
     for index in 0..length(slots) {
         let name = slot_names.element(index);
         if name.bytes() == b".S3Class" {
-            return Ok(false);
+            return Ok(None);
         }
         let slot_class = slots.element(index);
         if slot_class.kind() != SexpType::String || length(slot_class) != 1 {
-            return Ok(false);
+            return Ok(None);
         }
         let Some(slot_definition) = cached_class(slot_class)? else {
-            return Ok(false);
+            return Ok(None);
         };
-        let value_class = if name.bytes() == b".Data" {
+        let data_part = name.bytes() == b".Data";
+        let (value, value_class) = if data_part {
             match data_part_class(object, slot_class.element(0).bytes())? {
-                Some(class) => values::scalar_string(class)?,
-                None => return Ok(false),
+                Some(class) => (nil(), values::scalar_string(class)?),
+                None => return Ok(None),
             }
         } else {
             let symbol = install_text(name)?;
             if !has_attribute(object, symbol) {
-                return Ok(false);
+                return Ok(None);
             }
-            dispatch::class_of(crate::subset::get_slot(object, symbol, nil())?)?
+            let value = crate::subset::get_slot(object, symbol, nil())?;
+            crate::heap().root(value);
+            (value, dispatch::class_of(value)?)
         };
         let class2 = slot_class.element(0).bytes();
-        if value_class.element(0).bytes() == class2 || class2 == b"ANY" {
-            continue;
-        }
-        let Some(value_definition) = cached_class(value_class)? else {
-            return Ok(false);
+        // What `possibleExtends()` returns, which the loop binds as `ok`: `TRUE`, or the
+        // `SClassExtension` through which the value's class extends the slot's.
+        let ok = if value_class.element(0).bytes() == class2 || class2 == b"ANY" {
+            None
+        } else {
+            let Some(value_definition) = cached_class(value_class)? else {
+                return Ok(None);
+            };
+            match possible_extends(
+                value_class,
+                class2,
+                Some(value_definition),
+                Some(slot_definition),
+            )? {
+                None | Some(Relation::No) => return Ok(None),
+                Some(Relation::Yes) => None,
+                Some(Relation::Via) => {
+                    let contains = slot(value_definition, symbols().contains)?;
+                    let subclasses = slot(slot_definition, symbols().subclasses)?;
+                    let through_subclass = (0..length(value_class))
+                        .find_map(|index| element(subclasses, value_class.element(index).bytes()));
+                    match element(contains, class2).or(through_subclass) {
+                        Some(extension) => Some(extension),
+                        None => return Ok(None),
+                    }
+                }
+            }
         };
-        let relation = possible_extends(
-            value_class,
-            class2,
-            Some(value_definition),
-            Some(slot_definition),
-        )?;
-        if matches!(relation, None | Some(Relation::No)) {
-            return Ok(false);
-        }
+        last = if data_part {
+            Last::Unmodelled
+        } else {
+            Last::Slot(LastSlot {
+                index,
+                class: slot_class,
+                definition: slot_definition,
+                name,
+                value,
+                ok,
+            })
+        };
     }
+    let mut runs_validity = values::is_function(slot(definition, symbols().validity)?);
     let contains = slot(definition, symbols().contains)?;
-    for index in (0..length(contains)).rev() {
+    for index in 0..length(contains) {
         let extension = contains.element(index);
-        if !is_true(slot(extension, symbols().simple)?) {
-            return Ok(false);
-        }
-        let Some(superclass) = cached_class(slot(extension, symbols().super_class)?)? else {
-            return Ok(false);
+        runs_validity |= match cached_class(slot(extension, symbols().super_class)?)? {
+            Some(superclass) if is_true(slot(extension, symbols().simple)?) => {
+                values::is_function(slot(superclass, symbols().validity)?)
+            }
+            _ => true,
         };
-        if values::is_function(slot(superclass, symbols().validity)?) {
-            return Ok(false);
-        }
     }
-    Ok(!values::is_function(slot(definition, symbols().validity)?))
+    Ok(Some(SlotCheck {
+        definition,
+        slots,
+        last,
+        runs_validity,
+    }))
 }
 
 /// The class of `getDataPart(object)` when the data part is a basic class that `getDataPart`
@@ -4824,8 +4972,9 @@ unsafe fn try_new(class: Sexp, place: Sexp) -> R<Option<Sexp>> {
     }
     // `new(definition)` makes the object and calls `initialize()` on it without arguments. When
     // dispatch selects the default method for the object's class, that call returns the object,
-    // so the object and the method dispatch caches are the whole result. The value becomes a slot of the new class's
-    // prototype, which `new()` copies deeply, so a shallow copy is enough here.
+    // so the object and the method dispatch caches are the whole result. The value becomes a
+    // slot of the new class's prototype, and a shallow copy is enough for the reason
+    // `new_object_copying` gives.
     if !own_initialize && !crate::methods::first_units_pending() {
         let value = crate::methods::new_object_copying(definition, false)?;
         crate::heap().root(value);

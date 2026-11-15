@@ -520,6 +520,14 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
   cached definition differs, other packages' generics, group generics and primitives.
 - A reload after editing a method or a class takes 0.2 to 0.45 s, and dispatch costs 2.3 to
   4.5 µs per call.
+- **Per-object frames in `new()`.** Every `new()` of a class with a validity method makes four
+  environments: `standardGeneric("initialize")` reifies the generic's slot frame
+  (`dispatch::do_standard_generic` takes `call.env()`, and `methods::exec_method` copies its
+  binding cells into the method's environment), and the prologues of `new`, the default
+  `initialize` and `validObject` pass `environment()`. Fix: read the signature arguments and the
+  formals' bindings from the generic's slot frame without reifying it, and give the prologues
+  frame access that does not reify (`decisions.md`, "`validObject` runs validity methods without
+  its slot loop").
 - `setDataPart()` (R code, about 28 µs per call), which the default `initialize` calls for every
   data part, so `new("MethodDefinition", f)` costs about 50 µs (GNU R about 340 µs).
   `.mergeAttrs` decides the attribute order, so a native version must reproduce it exactly.
