@@ -24,6 +24,7 @@ The quality bar is four things.
 
 ## Open: broken on main
 
+- **`native_cases_keep_the_write_barrier_under_seeded_gc_torture` (`oracle` `test_cases`) times out on a 4-core iterate build.** Seed 0 picks `assignment__dollar_in_place`, `datetime__year_overflow`, `environments__unread_loop_variable` and `altrep__colon_in_loops`, and each is killed after 600 s under `RY_GC_STRESS=seed:0 RY_GC_VERIFY=1`, also with the machine otherwise idle. None of them is native or typed. Unverified on main itself; either the stress is too dense for loop-heavy cases or verification is quadratic in the heap, so time one case with and without `RY_GC_VERIFY` before tuning the sample.
 - The code image leaves out every closure that calls an inlined base wrapper (`paste`,
   `sprintf`, the `vector` family): tier 0 compiles such a call to an `Op::Guard` whose constant is
   the wrapper's closure, and `serialize::Encoder` encodes only the closures in `BASE_FUNCTIONS`
