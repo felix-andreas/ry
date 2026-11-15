@@ -33,6 +33,7 @@ use {
         strings::Encoding,
     },
     lzma_rust2::{CheckType, XzOptions, XzReader, XzWriter},
+    memchr::memchr,
     std::{
         borrow::Cow,
         ffi::{CStr, CString, c_char, c_int, c_void},
@@ -1552,23 +1553,19 @@ unsafe fn do_read_lines(call: &Call<'_>) -> R<Sexp> {
         (*con).incomplete = 0;
         let mut lines: Vec<Vec<u8>> = Vec::new();
         let mut line = Vec::new();
+        // Reading to the end takes the device's bytes in blocks, which costs a fraction of
+        // asking the connection for each character.
+        let rest = if n < 0 && reads_device_bytes(con)? {
+            Some(remaining_text(con)?)
+        } else {
+            None
+        };
+        let mut offset = 0;
         while n < 0 || (lines.len() as i64) < n {
             line.clear();
-            let mut nul = false;
-            let character = loop {
-                let character = read_char(con)?;
-                if character == EOF || character == b'\n' as c_int {
-                    break character;
-                }
-                if character == 0 {
-                    if !skip_nul {
-                        nul = true;
-                    }
-                    continue;
-                }
-                if !nul {
-                    line.push(character as u8);
-                }
+            let (character, nul) = match &rest {
+                Some(text) => text_line(text, &mut offset, skip_nul, &mut line),
+                None => connection_line(con, skip_nul, &mut line)?,
             };
             if nul {
                 crate::conditions::warning(format!(
@@ -1608,6 +1605,113 @@ unsafe fn do_read_lines(call: &Call<'_>) -> R<Sexp> {
         };
         strings_vector(&lines, encoding)
     })
+}
+
+/// Reads one line of `con` into `line` a character at a time: the character that ended it
+/// (a newline or `EOF`), and whether an embedded nul cut the line short.
+unsafe fn connection_line(con: Rconnection, skip_nul: bool, line: &mut Vec<u8>) -> R<(c_int, bool)> {
+    let mut nul = false;
+    loop {
+        let character = read_char(con)?;
+        if character == EOF || character == b'\n' as c_int {
+            return Ok((character, nul));
+        }
+        if character == 0 {
+            nul = !skip_nul;
+        } else if !nul {
+            line.push(character as u8);
+        }
+    }
+}
+
+/// [`connection_line`] over text already read: the line of `text` that starts at `offset`,
+/// which moves past it.
+fn text_line(text: &[u8], offset: &mut usize, skip_nul: bool, line: &mut Vec<u8>) -> (c_int, bool) {
+    let rest = text.get(*offset..).unwrap_or_default();
+    let (content, character) = match memchr(b'\n', rest) {
+        Some(end) => {
+            *offset += end + 1;
+            (rest.get(..end).unwrap_or_default(), b'\n' as c_int)
+        }
+        None => {
+            *offset = text.len();
+            (rest, EOF)
+        }
+    };
+    match memchr(0, content) {
+        None => line.extend_from_slice(content),
+        Some(_) if skip_nul => line.extend(content.iter().filter(|&&byte| byte != 0)),
+        Some(first) => {
+            line.extend_from_slice(content.get(..first).unwrap_or_default());
+            return (character, true);
+        }
+    }
+    (character, false)
+}
+
+/// Whether [`read_char`] on `con` returns the device's own bytes, and reading the device ahead
+/// of the reader changes nothing a user can see. A connection with an encoding or with methods
+/// from native code converts or produces its characters one at a time, and a console or a
+/// socket hands over what has arrived so far.
+unsafe fn reads_device_bytes(con: Rconnection) -> R<bool> {
+    let builtin = (*con)
+        .fgetc
+        .is_some_and(|method| is_method(method, builtin_fgetc as IntMethod));
+    Ok(builtin
+        && matches!(
+            device(con)?,
+            Device::File(_)
+                | Device::Raw(_)
+                | Device::TextInput(_)
+                | Device::Loaded(_)
+                | Device::Gzcon(_)
+                | Device::Pipe(_)
+        ))
+}
+
+/// Everything left to read on `con`, as [`read_char`] would return it one character at a time:
+/// what is pushed back or looked ahead, then the device's bytes with `\r` and `\r\n` read as
+/// `\n`.
+unsafe fn remaining_text(con: Rconnection) -> R<Vec<u8>> {
+    let mut text = Vec::new();
+    while has_buffered_input(con) {
+        let character = read_char(con)?;
+        if character != EOF {
+            text.push(character as u8);
+        }
+    }
+    let start = text.len();
+    loop {
+        let filled = text.len();
+        text.resize(filled + READ_CHUNK, 0);
+        let count = device_read(con, text.get_mut(filled..).unwrap_or_default())?;
+        text.truncate(filled + count);
+        if count == 0 {
+            break;
+        }
+    }
+    if memchr(b'\r', text.get(start..).unwrap_or_default()).is_some() {
+        // `read_char` reads the character after a `\r` to drop a `\n`, and a second `\r`
+        // there is its own line end.
+        let device = text.split_off(start);
+        let mut bytes = device.iter().copied().peekable();
+        while let Some(byte) = bytes.next() {
+            if byte != b'\r' {
+                text.push(byte);
+                continue;
+            }
+            text.push(b'\n');
+            match bytes.peek() {
+                Some(b'\n') => drop(bytes.next()),
+                Some(b'\r') => {
+                    bytes.next();
+                    text.push(b'\n');
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(text)
 }
 
 /// `writeLines(text, con, sep, useBytes)`.

@@ -2772,16 +2772,18 @@ unsafe fn do_list_files(call: &Call<'_>) -> R<Sexp> {
             all,
         );
         if all && !recursive && !no_dots {
-            names.push(if full {
-                format!("{directory}/.")
-            } else {
-                ".".into()
-            });
-            names.push(if full {
-                format!("{directory}/..")
-            } else {
-                "..".into()
-            });
+            for dots in [".", ".."] {
+                if let Some(pattern) = &pattern
+                    && !pattern.matches(dots)?
+                {
+                    continue;
+                }
+                names.push(if full {
+                    format!("{directory}/{dots}")
+                } else {
+                    dots.into()
+                });
+            }
         }
         for path in paths {
             let name = path
