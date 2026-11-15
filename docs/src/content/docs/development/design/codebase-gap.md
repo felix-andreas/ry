@@ -148,6 +148,29 @@ identified cause. Shares are of ry's block time, and the ratios are GNU R's time
 | `dir.create`, openxlsx's `write_file` | dsbench 1.7%, biobench 4.0% | `dir.create` 0.35x and 0.80x, 1.24x in finbench | Inside openxlsx's `saveWorkbook` ry issues 3.5 times GNU R's `mkdir` system calls, 71% of them failing with `EEXIST`, because a recursive `dir.create` calls `mkdir` on every ancestor from the root where GNU R checks with `stat` first. In isolation ry's `dir.create` is faster (28 µs against 63 µs). |
 | `apply`, `as.character.POSIXt`, `[[.data.frame`, `lm.fit`, `.POSIXct`, `.subset_xts`, `as.double.xts`, `glue_data` | 0.4% to 2.1% each | 0.51x to 0.94x | Closures that are mostly argument handling and attribute work around a builtin. They are interpreter-bound, so they share the closure call's cost. |
 
+## Which package entries hold the instructions
+
+The hot suite (`testing.md`, "The hot suite") replays the 100 package entries the code bases spend
+their time in and counts instructions under callgrind. Weighted like each code base, a handful of
+entries hold most of the count. This table is from an `iterate` build with the JIT on, over the 76
+programs that produced a count in that run:
+
+| Code base | Entries above 4% of the weighted instructions |
+| --- | --- |
+| finbench | `testthat::expect_equal` 22.8%, `PerformanceAnalytics::table.AnnualizedReturns` 17.8%, `ompr::solve_model` 11.7%, `SharpeRatio.annualized` 11.0%, `openxlsx::write.xlsx` 4.8%, `testthat::expect_error` 4.0% |
+| dsbench | `expect_equal` 39.0%, `expect_error` 7.7%, `[.data.table` 7.4%, `stats::glm` 7.1%, `data.table::dcast` 6.3%, `write.xlsx` 4.8%, `base::mean` 4.3% |
+| biobench | ``foreach::`%do%` `` 27.0%, `expect_equal` 22.5%, `write.xlsx` 12.3%, `expect_error` 4.7% |
+
+`expect_equal` costs 2.17 million instructions per call, and nothing inside it stands out. A loop of
+40,000 expectations on small values, with testthat's third edition set, takes GNU R 10.9 s and ry
+4.44 s (2.46x), and the self time of every R function in it is between 1.3x and 2.4x of GNU R's,
+except five small ones below 1x (`withRestarts` 0.37x, `modifyList` 0.45x, `quo_squash_impl` 0.71x,
+`%||%` 0.75x, `match.call` 0.89x). The entry is waldo, rlang, cli and the condition helpers calling
+each other, so it speeds up only as fast as package code in general does. Tier 1 refuses about 200
+of these bodies (too rare, or too little that compiles to native operations), which is why the JIT
+changes the code bases' instruction count by 0.2% to 0.4%. Getting past 3x therefore needs a
+compiler tier that covers generic package code: boxed values, S3 dispatch, promises and conditions.
+
 ## The Amdahl table
 
 Each row is one cause, its share of ry's block time, its ratio against GNU R today, and the suite's
