@@ -25,24 +25,6 @@ The quality bar is four things.
 ## Open: broken on main
 
 - **`native_cases_keep_the_write_barrier_under_seeded_gc_torture` (`oracle` `test_cases`) times out on a 4-core iterate build.** Seed 0 picks `assignment__dollar_in_place`, `datetime__year_overflow`, `environments__unread_loop_variable` and `altrep__colon_in_loops`, and each is killed after 600 s under `RY_GC_STRESS=seed:0 RY_GC_VERIFY=1`, also with the machine otherwise idle. None of them is native or typed. Unverified on main itself; either the stress is too dense for loop-heavy cases or verification is quadratic in the heap, so time one case with and without `RY_GC_VERIFY` before tuning the sample.
-- The code image leaves out every closure that calls an inlined base wrapper (`paste`,
-  `sprintf`, the `vector` family): tier 0 compiles such a call to an `Op::Guard` whose constant is
-  the wrapper's closure, and `serialize::Encoder` encodes only the closures in `BASE_FUNCTIONS`
-  (`local`), so `Unencodable("a closure")`. `install-code-image` and `install-machine-code`
-  scenarios fail on it (`written=3` of 4, `written=4` of 5). Encode the guard's closure as a
-  base function by name, as `local` is.
-- `test_tiers` `fuzz_typed_record_natives_agree_with_tier_zero` fails in the full suite (an old
-  object "lost its mark" in `Heap::write_barrier_slow`, seed 104 or 121 depending on the build)
-  but passes alone, so it depends on heap state earlier seeds leave behind. It fails on main
-  without the untyped-tier changes too; the frame release (`Heap::release_frame`) is the
-  suspect.
-- `test_tiers` `element_ops_cost_no_more_than_tier_zero` fails its instruction budget (1,011
-  against 880).
-- `test_scenarios` `native_diagnostics_agree_with_the_typed_core` fails on the
-  `blocked-argument-count` case: the `native` check and the typed core disagree about it.
-- ry's own base R has no recommended packages, so `zoo` cannot load (`there is no package called
-  'lattice'`) and the `timeseries` workload of `just bench applications` fails.
-- Recursion past `options(expressions=)` with the JIT on does not finish: `options(expressions = 500000); f <- function(n) if (n == 0) 0 else 1 + f(n - 1); tryCatch(f(1e6), error = identity)` runs for minutes (stopped after 120 s, unfinished) where GNU R raises an error. A native self-call in tier 1 counts the expression limit down (`jit_depth_budget`) and, when it runs out, hands the activation back to tier 0, which pushes one frame and enters the native code again for the next level, so every level repeats a descent of up to the whole limit. Tier 1 should stop entering a body natively once a descent ran out of budget. At the default limit of 5,000 the repeats cost nothing and the error arrives at once. With the JIT off the same program raises "evaluation nested too deeply: the register file is full". Recursion within the limit is fine, because a tier-0 call runs in the dispatch loop without a Rust frame of its own: `count <- function(n) if (n == 0L) 0L else 1L + count(n - 1L); count(400000L)` returns under that option.
 - `libr`'s `hot_api_functions_stay_within_instruction_budgets` (`crates/libr/tests/test_api_boundary.rs`) fails on two of its budgets, on the `iterate` and the `release` profile alike: `bench_binding_probes` costs 232 instructions per call against a budget of 203, and `bench_duplicate_call` 2,118 against 2,100. Neither loop calls a closure (`R_existsVarInFrame` with `R_GetBindingType`, and `Rf_duplicate` of a small call). Find the change that added the 36 instructions to a binding probe before moving either budget.
 
 ## Open: the evaluator's edit loop
@@ -3738,7 +3720,6 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
 - **ry's own base R on Windows.** The release job builds the base tree (recommended packages included), packages the archive and passes the smoke test, which runs ry's bundled base, its start-up and code images, BLAS/LAPACK, a package install and a GNU R binary package.
 - **`UseMethod`, `x[]` and `...` arguments match GNU R.** `UseMethod` dispatches only as the innermost call of its generic (`try(UseMethod("f"))` is "used in an inappropriate fashion", which also removed a crash), and it and `NextMethod` dispatch on the argument as passed, found as GNU R's `GetObject` finds it (`dispatch::dispatch_argument`). `x[]` drops the class and `tsp`. A callee that modifies an argument forwarded through `...` copies it, because the promise the `...` list also holds counts as shared (`eval::complex_assign`). Oracle cases `dispatch__use_method_context_and_object`, `attributes__empty_subscript_drops_class`, `promises__dots_arguments_stay_shared`.
 - **A type-checked argument reads ahead into native code.** A promise with a pending annotation check (`gp::CHECKED_PROMISE`) is read ahead when every check admits its value unchanged (`annotations::accepts_unchanged`), so a typed function called from an interpreted typed caller runs natively; `native_diagnostics_agree_with_the_typed_core` covers it.
-
 - **Code images of installed packages.** `R CMD INSTALL` writes each closure's tier-0 code and, with `--ry-train`, its trained profile beside the lazy-load database. `decisions.md`, "Code images: compiled code beside the lazy-load database".
 - **Console attach and the data viewer.** `ry run` serves the debugger, a paged data viewer and live values over a Unix socket; VS Code attaches, opens `View()`, and hover/completion read the console. `decisions.md`, "A running console is a debug adapter".
 - **R Markdown and Quarto in the editor.** Chunks of a `.Rmd`/`.qmd`/`.Rnw` are one script for diagnostics, hover, completion and goto, and `ry fmt` formats each chunk. `decisions.md`, "Literate documents keep their offsets".
