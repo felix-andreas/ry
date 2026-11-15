@@ -37,7 +37,7 @@ pub mod values;
 
 use {
     crate::{
-        backend::{Callee, Code, Trampoline},
+        backend::{Callee, Code, Entry, Trampoline},
         ir::{Item, Type},
         lower::{Callees, Lowered, RCall, RResult, Speculation},
         shapes::Shapes,
@@ -589,7 +589,7 @@ impl Callees for Linker {
         self.speculations.extend_from_slice(&compiled.speculations);
         self.epoch = earliest(self.epoch, compiled.epoch);
         self.callees.push(Callee {
-            address: compiled.code.address,
+            entry: Entry::Address(compiled.code.address),
             params: SmallVec::from_slice(params),
             result: compiled.result,
         });
