@@ -87,14 +87,79 @@ for (remote in remotes) {
   }
 }
 
-# The snapshot's binaries were built for an older R. xts 0.14.1's calls `ATTRIB` without a
-# prototype there and truncates the returned pointer to an int, so `x[2:4]` of an xts object aborts
-# on R 4.6 under GNU R and ry alike. The newest source compiles against the running R's headers.
-if ("xts" %in% installed()) {
+# GNU R skips a dependency its own `.Library` already holds, but ry's runtime reads only this library,
+# so a non-priority package an R build ships there (the reference R ships testthat, rlang and about 50
+# more) would be missing under ry. Copying those builds keeps this library self-contained.
+bundled <- installed.packages(lib.loc = .Library, noCache = TRUE)
+bundled <- setdiff(rownames(bundled)[is.na(bundled[, "Priority"])], installed())
+if (length(bundled) > 0 && !all(file.copy(file.path(.Library, bundled), library_dir, recursive = TRUE))) {
+  stop("cannot copy R's own packages into ", library_dir)
+}
+
+# R 4.6's headers no longer declare some entry points that libR still exports, such as `ATTRIB`,
+# `Rf_findVar` and `Rf_findVarInFrame`. C code from the pinned snapshot that calls one compiles
+# with only a warning, and the implicit declaration truncates the returned pointer to an int, so
+# the package aborts at its first such call, under GNU R and ry alike (xts's `x[2:4]`, Matrix's
+# `Cholesky`). This holds for a Posit binary and for a package compiled here alike, so the check
+# reads each shared object's imports instead of its `Built:` field: a package that imports an
+# exported libR function the running R's headers do not declare by default is reinstalled from the
+# newest CRAN source, which compiles against those headers. A package can opt back into such a
+# declaration (S7 defines `ENABLE_LEGACY_NONAPI_FUNS`), so a few correct packages are rebuilt too,
+# which costs only their build time. Fortran-callable helpers (`dblepr_` and the like) carry no
+# prototype in any R version and are left out. A newest source that needs a newer dependency than
+# the snapshot holds fails to install and leaves the old build in place, named in the log below.
+undeclared_entry_points <- function() {
+  libr <- file.path(R.home("lib"), "libR.so")
+  if (!file.exists(libr)) {
+    message("libR.so not found: R is not built as a shared library, so imports are not checked")
+    return(character())
+  }
+  include <- R.home("include")
+  ext <- setdiff(list.files(file.path(include, "R_ext"), "\\.h$"), c("GraphicsEngine.h", "GraphicsDevice.h"))
+  headers <- c(
+    "R.h", "Rinternals.h", "Rmath.h", "Rdefines.h", "Rembedded.h", "Rinterface.h",
+    "R_ext/GraphicsEngine.h", file.path("R_ext", ext)
+  )
+  source <- tempfile(fileext = ".h")
+  writeLines(sprintf("#include <%s>", headers), source)
+  r <- file.path(R.home("bin"), "R")
+  declared <- unique(unlist(lapply(c(c = "CC", "c++" = "CXX"), function(compiler) {
+    command <- system2(r, c("CMD", "config", compiler), stdout = TRUE)
+    language <- if (compiler == "CC") "c" else "c++"
+    text <- suppressWarnings(system(
+      paste(command, "-E -P -w -x", language, "-I", shQuote(include), shQuote(source), "2>/dev/null"),
+      intern = TRUE
+    ))
+    unlist(regmatches(text, gregexpr("[A-Za-z_][A-Za-z0-9_]*", text)))
+  })))
+  if (length(declared) == 0) stop("the C preprocessor read nothing from R's headers")
+  exported <- read.table(text = system2("nm", c("-D", "--defined-only", shQuote(libr)), stdout = TRUE), fill = TRUE)
+  functions <- exported[[3]][exported[[2]] %in% c("T", "W")]
+  setdiff(functions[!grepl("_$", functions)], declared)
+}
+
+packages_calling_undeclared <- function(undeclared) {
+  shared_objects <- Sys.glob(file.path(library_dir, "*", "libs", "*.so"))
+  imports <- lapply(shared_objects, function(object) {
+    sub("@.*", "", system2("nm", c("-D", "--undefined-only", "--format=just-symbols", shQuote(object)), stdout = TRUE))
+  })
+  hits <- vapply(imports, function(names) paste(sort(intersect(names, undeclared)), collapse = " "), "")
+  package <- basename(dirname(dirname(shared_objects)))
+  tapply(hits, package, function(found) paste(unique(found[nzchar(found)]), collapse = " "))
+}
+
+undeclared <- undeclared_entry_points()
+calls <- packages_calling_undeclared(undeclared)
+stale <- names(calls)[nzchar(calls)]
+if (length(stale) > 0) {
+  cat(sprintf("calls an entry point R's headers do not declare: %s (%s)\n", stale, calls[stale]), sep = "")
   with_warnings(install.packages(
-    "xts", lib = library_dir, repos = c(CRAN = "https://cloud.r-project.org"),
+    stale, lib = library_dir, repos = c(CRAN = "https://cloud.r-project.org"),
     type = "source", dependencies = FALSE
   ))
+  calls <- packages_calling_undeclared(undeclared)
+  still <- names(calls)[nzchar(calls)]
+  if (length(still) > 0) cat(sprintf("still imports an undeclared entry point: %s (%s)\n", still, calls[still]), sep = "")
 }
 
 # Record the outcome per package: every root and remote, with its reason when missing.
