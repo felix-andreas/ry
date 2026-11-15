@@ -36,9 +36,13 @@
 | [1] 1 2 3
 | [1] "function (f = sys.function()) " "f"                             
 | matched(x = i + 1L)
+| [1] "invalid body argument for 'function'"
+| [1] "invalid body argument for 'function'"
+| [1] "invalid body argument for 'function'"
+| [1] 0+1i
 [messages]
 [warnings]
 [errors]
 [value]
-language
-| matched(x = i + 1L)
+complex
+| 0+1i

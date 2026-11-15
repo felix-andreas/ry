@@ -5388,6 +5388,12 @@ pub unsafe fn make_closure(formals: Sexp, body: Sexp, srcref: Sexp, env: Sexp) -
     if !matches!(formals.kind(), SexpType::Nil | SexpType::Pairlist) {
         return Err(error("invalid formal argument list for \"function\""));
     }
+    if matches!(
+        body.kind(),
+        SexpType::Closure | SexpType::Builtin | SexpType::Special
+    ) {
+        return Err(error("invalid body argument for 'function'"));
+    }
     let closure = match crate::ahead::take(formals, body, env) {
         Some(closure) => closure,
         None => {

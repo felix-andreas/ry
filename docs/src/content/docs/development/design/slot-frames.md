@@ -449,7 +449,9 @@ Rust frame, matches nothing, and allocates nothing unless the argument reference
   environment, and that environment is the callee's caller (`PLAN_FAST_BY_NAME`): a slot frame
   that left its slots, a body compiled without a slot table, top-level code. Only a frame that
   reads by name can pass code the compiler did not compile against slots, so a site with such
-  an argument is fast from those frames alone.
+  an argument is fast from those frames alone. A site settles how its arguments bind when it
+  first runs for a function, so a top-level site is fast only when every argument is a
+  variable or a constant: one with an argument that is a call never settles.
 - **Which callees.** Any closure with a compiled body whose formals and body are the plan's. A
   body compiles when it is a call, one variable or one constant (`compilable`), so
   `function(x) x` and `function() NULL` take the path, and so does a closure without formals.

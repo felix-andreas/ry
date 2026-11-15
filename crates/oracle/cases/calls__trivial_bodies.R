@@ -103,3 +103,9 @@ matched <- function(x, y = match.call()) y
 for (i in 1:12) { shown <- deparse(function_of()); call <- matched(i + 1L) }
 print(shown)
 print(call)
+
+# `function` refuses a body that is itself a function, as `as.function` does.
+for (body in list(sum, quote, function() 1)) {
+  print(tryCatch(eval(call("function", NULL, body)), error = conditionMessage))
+}
+print(eval(call("function", NULL, 1i))())

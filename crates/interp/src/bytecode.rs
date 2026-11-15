@@ -9877,10 +9877,11 @@ impl CallPlans {
 }
 
 /// Works out how each of the `arguments` of the site with plan `id` binds ([`ARGUMENT_VALUE`]
-/// and the kinds beside it), and from which frames [`call_fast`] may take the site's calls. A frame whose code runs on its slots passes a
-/// constant, the empty argument, a variable, or code compiled against its slots
-/// ([`PLAN_FAST`]). A frame that reads by name also passes code that needs its environment
-/// ([`PLAN_FAST_BY_NAME`]). `...` and `..N` leave the site to the generic path.
+/// and the kinds beside it), and from which frames [`call_fast`] may take the site's calls. A
+/// frame whose code runs on its slots passes a constant, the empty argument, a variable, or
+/// code compiled against its slots ([`PLAN_FAST`]). A frame that reads by name also passes
+/// code that needs its environment ([`PLAN_FAST_BY_NAME`]). `...` and `..N` leave the site to
+/// the generic path.
 unsafe fn prepare_plan(state: &Activation<'_, '_>, id: u32, arguments: Sexp) {
     let mut kinds: SmallVec<[i32; 8]> = SmallVec::new();
     // Code compiled without a slot table never runs on slots.
