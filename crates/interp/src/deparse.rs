@@ -78,7 +78,7 @@ unsafe fn deparse_checked(
 }
 
 /// Deparses for `deparse`, `dput` and `dump`, warning as `warnIncomplete` asks. Only these
-/// and coercion ([`deparse_one_line_checked`]) raise a deparse error; the text an error message
+/// and coercion ([`deparse_for_coercion`]) raise a deparse error; the text an error message
 /// or `print` shows falls back to the plain value, because a message must never fail.
 unsafe fn deparse_warning(
     object: Sexp,
@@ -111,13 +111,15 @@ pub unsafe fn deparse_one_line(object: Sexp) -> String {
     join_one_line(deparse_lines(object, 60, options::SIMPLE))
 }
 
-/// [`deparse_one_line`] for coercion (`as.character` of a list), which raises deparse's errors
-/// as GNU R's `deparse1line` does.
-pub unsafe fn deparse_one_line_checked(object: Sexp) -> R<String> {
-    let (lines, _, failure) = deparse_checked(object, 60, options::SIMPLE, true, usize::MAX);
+/// The deparse `as.character` of a list stores for an element, GNU R's `deparse1line` with no
+/// option but the names: integers lose their `L`, a missing value is a plain `NA`, and the lines
+/// of a function or a block are joined by newlines. It raises deparse's errors.
+pub unsafe fn deparse_for_coercion(object: Sexp) -> R<String> {
+    let (lines, _, failure) =
+        deparse_checked(object, 500, options::NICE_NAMES, true, usize::MAX);
     match failure {
         Some(failure) => Err(failure),
-        None => Ok(join_one_line(lines)),
+        None => Ok(lines.join("\n")),
     }
 }
 
@@ -1356,16 +1358,6 @@ impl Deparser {
             self.print(&format!("{}:{}", data[0], data[count - 1]));
             return;
         }
-        if kind == SexpType::Raw {
-            self.print("as.raw(c(");
-            let items: Vec<String> = values::raws(vector)
-                .iter()
-                .map(|byte| format!("0x{byte:02x}"))
-                .collect();
-            self.print(&items.join(", "));
-            self.print("))");
-            return;
-        }
         let all_na = match kind {
             SexpType::Logical | SexpType::Integer => values::ints(vector)
                 .iter()
@@ -1380,6 +1372,9 @@ impl Deparser {
             _ => false,
         };
         let wrap = count > 1 || nice;
+        if kind == SexpType::Raw {
+            self.print("as.raw(");
+        }
         if wrap {
             self.print("c(");
         }
@@ -1483,6 +1478,7 @@ impl Deparser {
                         format::encode_element(element, Some('"'))
                     }
                 }
+                SexpType::Raw => format!("0x{:02x}", values::raws(vector)[index]),
                 _ => String::new(),
             };
             self.print(&text);
@@ -1494,6 +1490,9 @@ impl Deparser {
             if self.length > self.cutoff {
                 self.write_line();
             }
+            self.print(")");
+        }
+        if kind == SexpType::Raw {
             self.print(")");
         }
     }

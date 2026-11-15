@@ -112,6 +112,28 @@ pub fn string_to_logical(text: &str) -> i32 {
     }
 }
 
+/// One element of a list or pairlist as a `CHARSXP`. Only a string scalar is taken as it is.
+/// GNU R deparses every other element, so a missing logical or number is the string `"NA"`, and
+/// a named scalar keeps its name.
+unsafe fn list_element_as_charsxp(element: Sexp) -> R<Sexp> {
+    if element.kind() == SexpType::String && length(element) == 1 {
+        return Ok(element.element(0));
+    }
+    let number = matches!(
+        element.kind(),
+        SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex
+    );
+    if number && length(element) == 1 && values::names(element) == nil() {
+        let text = element_as_charsxp(element, 0)?;
+        return if text == na_string() {
+            values::mkchar("NA")
+        } else {
+            Ok(text)
+        };
+    }
+    values::mkchar(&deparse::deparse_for_coercion(element)?)
+}
+
 /// Element `index` of an atomic vector as a `CHARSXP`, formatted as `as.character` does.
 pub unsafe fn element_as_charsxp(vector: Sexp, index: usize) -> R<Sexp> {
     let vector = values::materialize(vector)?;
@@ -148,22 +170,7 @@ pub unsafe fn element_as_charsxp(vector: Sexp, index: usize) -> R<Sexp> {
             }
         }
         SexpType::Raw => values::mkchar(&format!("{:02x}", values::raws(vector)[index])),
-        SexpType::List | SexpType::Expression => {
-            let element = vector.element(index);
-            if element.kind() == SexpType::String && length(element) == 1 {
-                Ok(element.element(0))
-            } else if element.kind().is_atomic()
-                && length(element) == 1
-                && values::names(element) == nil()
-            {
-                // A named scalar other than a string deparses with its name, as in GNU R.
-                element_as_charsxp(element, 0)
-            } else if element.kind() == SexpType::Symbol {
-                Ok(element.car())
-            } else {
-                values::mkchar(&deparse::deparse_one_line_checked(element)?)
-            }
-        }
+        SexpType::List | SexpType::Expression => list_element_as_charsxp(vector.element(index)),
         _ => Err(error(format!(
             "cannot coerce type '{}' to vector of type 'character'",
             vector.kind().name()
@@ -295,12 +302,8 @@ unsafe fn coerce_pairlist(list: Sexp, kind: SexpType, warnings: &mut CoercionWar
             for (index, (_, value)) in items.iter().enumerate() {
                 let charsxp = if value.kind() == SexpType::Symbol {
                     value.car()
-                } else if value.kind() == SexpType::String && length(*value) == 1 {
-                    value.element(0)
-                } else if value.kind().is_atomic() && length(*value) == 1 {
-                    element_as_charsxp(*value, 0)?
                 } else {
-                    values::mkchar(&deparse::deparse_one_line_checked(*value)?)?
+                    list_element_as_charsxp(*value)?
                 };
                 values::set_elt(result, index, charsxp);
             }
