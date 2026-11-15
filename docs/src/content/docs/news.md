@@ -29,6 +29,13 @@ that introduced it; none was re-measured for these notes.
   over ry's moves from 2.83x to 2.96x.
 - **`ry run --aot`** compiles a script's typed functions before it starts.
 - **A crash leaves a report**, and **`ry test --jobs`** runs tests in parallel.
+- **Closure calls allocate less.** A call on a slot frame allocates no environment, no binding cell
+  and, for most arguments, no promise. On the finance code base the collector frees 264.0M objects
+  where it freed 348.2M, and collection time falls from 2.41 s to 1.86 s.
+- **The three code bases run faster.** Native condition prologues, an S3 lookup fast path, a native
+  `compiler::compile` and a recursive `dir.create` move them from 1.53x, 1.47x and 1.38x GNU R's
+  speed to 1.81x, 1.50x and 1.59x (finance, data science, biostatistics; one run each, so expect a
+  few percent of noise). `tryCatch` with no condition costs 17.6% fewer instructions.
 - **A faster DataFrame `:=`.** `x[id4 == step, v1 := v1 + 1L]` in a loop takes 0.111 s from R at
   1e7 rows against data.table's 0.356 s, and 0.987 s at 1e8 rows against 3.079 s.
 - **Typed ports of all 54 public benchmark programs** run natively and print GNU R's checksum.
@@ -40,6 +47,15 @@ that introduced it; none was re-measured for these notes.
   down to 30.5 MB on the iterate profile.
 - Answering a constructed name in the checker reads the package layer instead of folding over every
   file, which keeps an edit from re-reading the whole project.
+- `%%` and `%/%` on doubles match GNU R bit for bit. Of 2,209 value pairs, 311 differed before and
+  none do after, and whole numbers below 2^53 take a 64-bit path.
+- `parent.env(1)` signals GNU R's "argument is not an environment" error instead of returning a
+  search-path environment.
+- Types and symbols are four-byte ids and an item's syntax carries a stamp, so an edit lowers only
+  the items it changed. A check of the finance code base takes about 7% less wall time, CPU and
+  memory, with byte-identical output.
+- A hot suite (`just bench hot`) replays the 100 package functions that hold the most time in the
+  code bases in about 30 s, and `just bench-mechanisms` prices each R-level operation in instructions.
 - `just bench codebases` times the three 300,000-line code bases per test block against GNU R.
 - The nix shell builds GNU R with the setup hook it needs, and its cache is rebuilt only when the
   inputs change.
