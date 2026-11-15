@@ -435,6 +435,21 @@ pub unsafe fn check_forced(promise: Sexp, mut value: Sexp) -> R<Sexp> {
     Ok(value)
 }
 
+/// Whether every pending check of `promise` admits `value` as it is, so code that reads the
+/// value ahead of forcing the promise may use it: settling the promise then passes its checks
+/// and stores `value` unchanged.
+pub unsafe fn accepts_unchanged(promise: Sexp, value: Sexp) -> bool {
+    interp()
+        .annotations
+        .pending
+        .iter()
+        .filter(|entry| entry.promise == promise)
+        .all(|entry| {
+            let mask = mask_at(entry.signature.element(MASKS), entry.slot);
+            mask == 0 || (admits(mask, value) && !lacks_item_type(mask, value))
+        })
+}
+
 /// What an annotation that admits exactly one of `logical`, `integer` or `double` declares
 /// (each of these also admits the narrower ones, as R's coercions do), for a compiler that
 /// takes it as the type to expect before it has seen a value.

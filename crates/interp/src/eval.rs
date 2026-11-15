@@ -6829,6 +6829,10 @@ pub unsafe fn complex_assign(
             format!("object '{}' not found", symbol_name(inner)),
         ));
     }
+    // A promise that another reference also holds, as the caller's `...` list does for an
+    // argument passed on through `...`, shares its value with that holder. GNU R wraps each such
+    // argument in a promise of its own, whose value then counts a second reference.
+    let shared_promise = base.kind() == SexpType::Promise && values::maybe_shared(base);
     if base.kind() == SexpType::Promise {
         base = force_promise(base)?;
     }
@@ -6853,6 +6857,7 @@ pub unsafe fn complex_assign(
     // must come before any level changes in place, since an inner level is an element of it.
     crate::moves::modifying(base)?;
     if values::maybe_shared(base)
+        || shared_promise
         || locked
         || index_assigns
         || (!superassign && local_cell.is_none())

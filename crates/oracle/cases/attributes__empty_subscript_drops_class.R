@@ -1,0 +1,12 @@
+# `x[]` keeps every attribute but the class and `tsp`; a class with its own `[` method keeps them.
+o <- structure(list(a = 1), class = "settings"); print(attributes(o[]))
+m <- structure(matrix(1:4, 2), class = "foo", tsp = NULL); print(attributes(m[]))
+t1 <- ts(1:5); print(attributes(t1[]))
+df <- data.frame(a = 1:2); print(class(df[]))
+f <- factor(c("a", "b")); print(class(f[]))
+v <- structure(1:3, class = "foo", names = c("a", "b", "c"), extra = TRUE); print(attributes(v[]))
+o <- structure(list(a = 1), class = "settings"); o[] <- list(2); print(attributes(o))
+v <- structure(1:3, class = "foo"); v[] <- 0L; print(attributes(v))
+e <- structure(list(), class = "bar"); print(attributes(e[]))
+m <- structure(1:4, dim = c(2L, 2L), class = "mm"); print(attributes(m[]))
+print(attributes(m[, ]))

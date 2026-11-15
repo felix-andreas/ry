@@ -10503,16 +10503,8 @@ unsafe fn slot_use_method(
     {
         return Ok(None);
     }
-    let formals = state.machine.function.car();
-    let first = if formals.kind() == SexpType::Pairlist {
-        match slot_named(state, formals.tag()) {
-            Some(slot) => slot,
-            None => return Ok(None),
-        }
-    } else {
-        std::ptr::null_mut()
-    };
     // Through R 4.3 the method sees the generic's locals, which only an environment can show.
+    let formals = state.machine.function.car();
     let names = state.constants.element(SLOTS).element(1);
     let locals =
         (length(formals)..length(names)).any(|index| *state.header.add(1 + index) != unbound());
@@ -10520,7 +10512,7 @@ unsafe fn slot_use_method(
         return Ok(None);
     }
     let owner = (*state.interp).slot_owner as usize;
-    dispatch::use_method_in_slots(generic, owner, first, object)
+    dispatch::use_method_in_slots(generic, owner, object)
 }
 
 /// A builtin call from a slot frame whose arguments the slots answer: `...`, a constant, or a

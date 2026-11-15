@@ -1,7 +1,8 @@
 # Tier 0 runs a closure call to a compiled body inside its own dispatch loop, so a recursion
 # that nests 50,000 R calls needs no Rust frame per call. The unwinding paths out of those
 # calls stay exact at that depth: an error raised at the bottom reaches a handler at the top,
-# and the `on.exit` of every frame in between runs.
+# and the `on.exit` of every frame in between runs. A recursion past the raised limit with the
+# JIT on reports the error at once rather than retrying native descents level by level.
 
 requires ry-runtime
 
@@ -18,6 +19,8 @@ file deep.R
 | print(exits)
 | escape <- function(n) if (n == 0L) return("top") else escape(n - 1L)
 | print(escape(50000L))
+| deeper <- function(n) if (n == 0) 0 else 1 + deeper(n - 1)
+| print(inherits(tryCatch(deeper(1e6), error = identity), "error"))
 
 run ry run --runtime ry deep.R
 expect exit 0
@@ -25,3 +28,4 @@ expect stdout "[1] 50000"
 expect stdout "[1] \"bottom\""
 expect stdout "[1] 20001"
 expect stdout "[1] \"top\""
+expect stdout "[1] TRUE"
