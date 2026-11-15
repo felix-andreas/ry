@@ -1,0 +1,76 @@
+# A user upgrades ry over a package that an older ry compiled. ry 0.4.5 and earlier compiled C code
+# against headers that inlined `DATAPTR_RO`, so that code skips the collector's write barrier; ry
+# refuses to load it and says how to reinstall, and the reinstalled package loads.
+
+requires ry-runtime
+
+file pkg/DESCRIPTION
+| Package: tally
+| Version: 1.0.0
+| Title: Sums numbers in C
+| Description: A small package with compiled code.
+| License: MIT
+file pkg/NAMESPACE
+| useDynLib(tally, .registration = TRUE)
+| export(tally)
+file pkg/R/tally.R
+| tally <- function(values) .Call(tally_sum, as.double(values))
+file pkg/src/tally.c
+| #include <R.h>
+| #include <Rinternals.h>
+| #include <R_ext/Rdynload.h>
+|
+| SEXP tally_sum(SEXP values)
+| {
+|     double total = 0;
+|     const double *data = REAL(values);
+|     for (R_xlen_t i = 0; i < XLENGTH(values); i++)
+|         total += data[i];
+|     return ScalarReal(total);
+| }
+|
+| static const R_CallMethodDef calls[] = {
+|     {"tally_sum", (DL_FUNC) &tally_sum, 1},
+|     {NULL, NULL, 0}
+| };
+|
+| void R_init_tally(DllInfo *info)
+| {
+|     R_registerRoutines(info, NULL, calls, NULL, NULL);
+|     R_useDynamicSymbols(info, FALSE);
+| }
+
+run ry install pkg -l library
+expect exit 0
+expect file library/tally/DESCRIPTION "RyAbi: 1"
+
+file use.R
+| library(tally, lib.loc = "library")
+| print(tally(c(1, 2, 3.5)))
+
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "[1] 6.5"
+
+# An installation by ry 0.4.5 records only `RyBuilt:`.
+file library/tally/DESCRIPTION
+| Package: tally
+| Version: 1.0.0
+| Title: Sums numbers in C
+| Description: A small package with compiled code.
+| License: MIT
+| RyBuilt: 0.4.5
+| Built: R 4.6.0; x86_64-pc-linux-gnu; 2026-11-01 10:00:00 UTC; unix
+
+run ry run --runtime ry use.R
+expect exit 1
+expect stderr "package 'tally' was compiled by ry 0.4.5 against older C headers"
+expect stderr "Reinstall it with this ry: install.packages(\"tally\")"
+expect stdout lacks "[1] 6.5"
+
+run ry install pkg -l library
+expect exit 0
+
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "[1] 6.5"

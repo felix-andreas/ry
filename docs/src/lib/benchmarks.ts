@@ -13,7 +13,7 @@ const sourceFiles = import.meta.glob(['../../../tools/bench/**/*.R', '../../../t
 export const repository = 'https://github.com/felix-andreas/ry/blob/main';
 
 // The order of the summary, the page and the README.
-const suiteOrder = ['public', 'packages', 'kernels', 'applications', 'hot', 'typed'];
+const suiteOrder = ['public', 'packages', 'codebases', 'kernels', 'applications', 'hot', 'typed'];
 
 export type Interval = { median: number; low?: number; high?: number };
 export type Flag = { kind: string; engine?: string; reason?: string };
@@ -59,6 +59,9 @@ export type Measurement = {
   // functions from an installed package's typed code file, which are what the file left out.
   compiledInSession?: Record<string, number>;
   tests?: Record<string, TestCounts>;
+  // For a code base: per engine, the geometric mean over its test blocks of GNU R's time over the
+  // engine's, the blocks that count and the blocks it has.
+  perBlock?: Record<string, { geomean: number; blocks: number; of: number }>;
   flags: Flag[];
   failures: Failure[];
 };
@@ -72,6 +75,8 @@ export type Results = {
   // is faster.
   ratioKind: RatioKind;
   geomean: Record<string, Interval & { programs: number }>;
+  // Each engine's slowest counted program and its ratio.
+  worst: Record<string, { id: string; ratio: number }>;
   meta: Meta;
 };
 export type RatioKind = 'speedup' | 'slowdown';
@@ -120,10 +125,14 @@ export function measuredSuites(): Suite[] {
   return suites.filter((candidate) => candidate.results !== undefined);
 }
 
+// Suites the benchmarks page shows in a section of their own, outside the summary table, the landing
+// page and the README.
+const outsideSummary = ['codebases'];
+
 // The measured suites that compare ry with GNU R. Their speed-ups share one scale, so the summary
 // table, the landing page and the README chart show them together.
 export function gnuRSuites(): Suite[] {
-  return measuredSuites().filter((candidate) => baselineOf(candidate) === gnuR);
+  return measuredSuites().filter((candidate) => baselineOf(candidate) === gnuR && !outsideSummary.includes(candidate.id));
 }
 
 // The engines a suite compares against its baseline, in the order of its results file.
@@ -521,7 +530,7 @@ export function tableViews(suite: Suite): TableView[] {
         + (installed ? ` ${engineLabel(typedInstalled)} runs the code compiled at install, and the last column counts the functions its package's typed code file left out, which compile in the session.` : ''),
     });
   }
-  if (programs.some((program) => program.measurement.peakMib !== undefined)) {
+  if (programs.some((program) => Object.keys(program.measurement.peakMib ?? {}).length > 0)) {
     views.push({
       label: 'Memory',
       columns: ['program', ...engines.map(engineLabel)],
@@ -559,6 +568,25 @@ export function tableViews(suite: Suite): TableView[] {
           return counts === undefined ? 'n/a' : `${counts.passed}, ${counts.failed}, ${counts.errors}`;
         }),
       ]),
+    });
+  }
+  if (programs.some((program) => program.measurement.perBlock !== undefined)) {
+    const worst = suite.results?.worst ?? {};
+    const worstNote = compared
+      .filter((engine) => worst[engine] !== undefined)
+      .map((engine) => `${engineLabel(engine)}: ${programs.find((program) => program.id === worst[engine].id)?.display ?? worst[engine].id} at ${formatRatio(worst[engine].ratio)}`)
+      .join('; ');
+    views.push({
+      label: 'Per test',
+      columns: ['code base', ...compared.map((engine) => `${engineLabel(engine)}, speed-up per test`)],
+      rows: programs.map((program) => [
+        name(program),
+        ...compared.map((engine) => {
+          const found = program.measurement.perBlock?.[engine];
+          return found === undefined ? 'n/a' : `${formatRatio(found.geomean)} over ${found.blocks} of ${found.of} tests`;
+        }),
+      ]),
+      note: `Each test block is timed on its own. The speed-up is the geometric mean over the blocks that GNU R runs in 1 ms or more of GNU R's median time over the engine's, so it weighs every test alike, where the Time table weighs the tests by how long they take.${worstNote === '' ? '' : ` The slowest code base against the mean of the suite: ${worstNote}.`}`,
     });
   }
   return views;
@@ -716,10 +744,12 @@ type RawResults = {
     first_seconds?: Record<string, number>;
     compiled_in_session?: Record<string, number>;
     tests?: Record<string, TestCounts>;
+    per_block?: Record<string, { geomean: number; blocks: number; of: number }>;
     flags?: Flag[];
     failures?: Failure[];
   }[];
   geomean: Record<string, Interval & { programs: number }>;
+  worst?: Record<string, { id: string; ratio: number }>;
 };
 
 function loadSuites(): Suite[] {
@@ -762,6 +792,7 @@ function loadSuites(): Suite[] {
             baseline: results.baseline ?? gnuR,
             ratioKind: results.ratio_kind ?? 'speedup',
             geomean: results.geomean,
+            worst: results.worst ?? {},
             meta: meta(results.meta),
           },
     } satisfies Suite;
@@ -776,7 +807,7 @@ function loadSuites(): Suite[] {
 
 function measurement(program: RawResults['programs'][number] | undefined): Measurement | undefined {
   if (program === undefined) return undefined;
-  return { seconds: program.seconds, ratio: program.ratio, peakMib: program.peak_mib, compileSeconds: program.compile_seconds, firstSeconds: program.first_seconds, compiledInSession: program.compiled_in_session, tests: program.tests, flags: program.flags ?? [], failures: program.failures ?? [] };
+  return { seconds: program.seconds, ratio: program.ratio, peakMib: program.peak_mib, compileSeconds: program.compile_seconds, firstSeconds: program.first_seconds, compiledInSession: program.compiled_in_session, tests: program.tests, perBlock: program.per_block, flags: program.flags ?? [], failures: program.failures ?? [] };
 }
 
 function meta(raw: RawResults['meta']): Meta {

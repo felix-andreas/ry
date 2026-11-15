@@ -95,10 +95,21 @@ request's `User-Agent` and serves source otherwise. `install.packages` builds th
 
 ry's runtime builds a source package with `R CMD INSTALL` semantics: `configure`, `Makevars`, and the
 compiler flags that `R CMD config` reports. The headers are ry's own R 4.6-compatible set, and
-`R CMD config` reports ry's `libR`, so a package compiled under ry links against ry. ry's headers are
-intended to be ABI-identical to GNU R's, inline functions and macros included, so the result is
-intended to load under GNU R too. Until the oracle has shown that, a package built under ry is marked
-with an extra `DESCRIPTION` field (`RyBuilt:` with ry's version), and the corpus is built only by GNU
+`R CMD config` reports ry's `libR`, so a package compiled under ry links against ry. The headers
+inline the hot accessors (`INTEGER`, `REAL`, `DATAPTR_RO` and the like), which read ry's object
+layout directly, so the compiled code belongs to ry: GNU R does not share that layout, and another
+ry runs the code only if its headers have the same binary interface. A package built under ry
+therefore carries two extra `DESCRIPTION` fields, `RyBuilt:` with ry's version and `RyAbi:` with the
+version of the headers' binary interface (`rcmd::NATIVE_ABI`). `dyn.load` refuses the shared library
+of a package whose `RyBuilt:` is set and whose `RyAbi:` is missing or differs:
+
+```
+Error: package or namespace load failed for ‘tally’:
+ unable to load shared object '/home/me/library/tally/libs/tally.so':
+  package 'tally' was compiled by ry 0.4.5 against older C headers, and its compiled code is unsafe to run under this ry. Reinstall it with this ry: install.packages("tally"), or R CMD INSTALL on its source (ry install for a package you develop).
+```
+
+A package GNU R built carries neither field and loads as it is. The corpus is built only by GNU
 R, so a difference the oracle finds is never a build difference.
 
 ### ry's per-package cache
@@ -223,7 +234,7 @@ The steps are those of the [runtime design](/development/design/r-runtime/), sec
 | --- | --- |
 | 1. Corpus and oracle | The closure's `renv.lock` on a dated P3M snapshot, with Rust and C++ toolchains for the four source-only packages; GNU R discovery and the `[r]` settings. |
 | 1, directly after | The analysis finds the library by the fixed rule and reads installed versions, `NAMESPACE` and `.rdx`; stubs gain version ranges. |
-| 4. Full C API and packages | Binary loading under ry from `.rdb`, `R CMD INSTALL` under ry with the `RyBuilt:` mark, ry's `R_HOME`, and `install.packages`, renv and pak running under ry. At the exit criterion the default runtime flips. |
+| 4. Full C API and packages | Binary loading under ry from `.rdb`, `R CMD INSTALL` under ry with the `RyBuilt:` and `RyAbi:` marks, ry's `R_HOME`, and `install.packages`, renv and pak running under ry. At the exit criterion the default runtime flips. |
 | 5. Lazy loading | The per-package cache with the object index and bytecode, filled on first load. |
 
 ## What was measured
