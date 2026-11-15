@@ -450,8 +450,9 @@ The second is the right kind of target. The first is not, because native is not 
 
 So judge the track by what a call no longer does. On the testthat workload a closure call costs
 about 8,100 instructions and frees 7 to 8 objects, 1.2 to 1.4 of them promises (`r-runtime.md`,
-`backlog.md`). The end shape in "Closure call setup: the 10x end shape" takes call setup from
-about 2,100 instructions to about 200 and from 7 objects to none on a two-function microbenchmark.
+`backlog.md`). The end shape in the `decisions.md` entry "Closure call setup: the 10x end shape"
+takes call setup from about 2,100 instructions to about 200 and from 7 objects to none on a
+two-function microbenchmark.
 Report those per-call counts on the workload after each merge, with the share of dynamic calls that
 run inlined.
 
@@ -474,8 +475,8 @@ estimate. The 30x in the roadmap's R-code row does not.
 
 **Cost.** Very large; it is the bulk of the runtime effort for months.
 
-**Depends on.** Slot frames in compiled code and the enter and leave contract of "Closure call
-setup: the 10x end shape".
+**Depends on.** Slot frames in compiled code (`slot-frames.md`) and the enter and leave contract
+of the `decisions.md` entry "Closure call setup: the 10x end shape".
 
 **Biggest risk.** Deoptimization that must rebuild what R's reflection can observe (`sys.call`,
 `parent.frame`, `substitute`, `on.exit`), and months of the largest effort spent on a result

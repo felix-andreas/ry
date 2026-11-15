@@ -6802,7 +6802,12 @@ pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<Option<Sexp>> 
     if op_of(*state.code.add(pc) as u32) == Some(Op::CallGeneric) {
         state.resume_base = (*state.interp).bytecode.resumes.len();
         state.stepping = true;
-        match call_fast(&mut state, pc) {
+        let entered = if *state.header == (*state.heap).known().nil {
+            call_fast::<false>(&mut state, pc)
+        } else {
+            call_fast::<true>(&mut state, pc)
+        };
+        match entered {
             Some(STOP) => {}
             Some(next) => {
                 (*RUN_HANDLERS.as_ptr().add(op_index(state.code, next)))(&mut state, next)
@@ -7761,6 +7766,7 @@ macro_rules! fast_paths {
         const fn fast_path_table(mut table: [Handler; HANDLER_COUNT]) -> [Handler; HANDLER_COUNT] {
             $(table[Op::$op as usize] = $name;)*
             table[Op::CallGeneric as usize] = fast_call_generic;
+            table[Op::Return as usize] = fast_return;
             table
         }
     };
@@ -7782,20 +7788,57 @@ fast_paths! {
     fast_call_builtin: CallBuiltin, call_builtin_fast;
     fast_sub_assign: SubAssign, sub_assign_fast;
     fast_field: Field, field_fast;
-    fast_return: Return, return_fast;
 }
 
 /// The fast handler of `CallGeneric`. Unlike the other fast paths, [`call_fast`] can end the
 /// activation the loop started with: an error the callee's entry raised, or the optimizing
 /// tier running the body whole and finishing it, answers [`STOP`].
+///
+/// The handler holds the path for a caller on its slots only. What that path leaves goes on
+/// in [`call_generic_by_name`], a tail call, so the rarer path adds no saved register to this
+/// one.
 unsafe fn fast_call_generic(state: &mut Activation<'_, '_>, at: usize) {
-    if let Some(next) = call_fast(state, at) {
+    if let Some(next) = call_fast::<false>(state, at) {
+        if next == STOP {
+            return;
+        }
+        dispatch!(state, next);
+    }
+    become call_generic_by_name(state, at)
+}
+
+/// `CallGeneric` from a frame that reads its variables by name, through [`call_fast`] when it
+/// takes the call, and the generic handler for every call that neither path took.
+#[inline(never)]
+unsafe fn call_generic_by_name(state: &mut Activation<'_, '_>, at: usize) {
+    if *state.header != (*state.heap).known().nil
+        && let Some(next) = call_fast::<true>(state, at)
+    {
         if next == STOP {
             return;
         }
         dispatch!(state, next);
     }
     become GENERIC_HANDLERS[Op::CallGeneric as usize](state, at)
+}
+
+/// The fast handler of `Return`: [`return_fast`] for a frame that handed out no environment,
+/// and otherwise [`return_discarding`], a tail call for the reason [`fast_call_generic`] gives.
+unsafe fn fast_return(state: &mut Activation<'_, '_>, at: usize) {
+    if let Some(next) = return_fast::<false>(state, at) {
+        dispatch!(state, next);
+    }
+    become return_discarding(state, at)
+}
+
+/// `Return` from a frame that handed out an environment nothing holds any more, through
+/// [`return_fast`], and the generic handler for every return that neither path took.
+#[inline(never)]
+unsafe fn return_discarding(state: &mut Activation<'_, '_>, at: usize) {
+    if let Some(next) = return_fast::<true>(state, at) {
+        dispatch!(state, next);
+    }
+    become GENERIC_HANDLERS[Op::Return as usize](state, at)
 }
 
 /// `CallGeneric` of a closure whose site has a prepared plan ([`prepare_plan`]), while nothing
@@ -7805,12 +7848,14 @@ unsafe fn fast_call_generic(state: &mut Activation<'_, '_>, at: usize) {
 /// nothing is allocated unless the argument reference pool grows or the callee collects
 /// arguments in `...`.
 ///
-/// The calling frame's header register says where the arguments are read. While it is `NULL`
-/// the caller's code runs on its slots, an argument is a reference to a slot or to code
-/// compiled against the slots, and the callee finds its caller as the frame below its own.
-/// Otherwise the register holds the environment the caller reads by name (a slot frame that
-/// left its slots, or a body run in a heap frame), every argument is a reference over that
-/// environment, and the environment is the callee's caller.
+/// `BY_NAME` says where the arguments are read, and it must agree with the calling frame's
+/// header register. While the register is `NULL` the caller's code runs on its slots, an
+/// argument is a reference to a slot or to code compiled against the slots, and the callee
+/// finds its caller as the frame below its own. Otherwise the register holds the environment
+/// the caller reads by name (a slot frame that left its slots, or a body run in a heap
+/// frame), every argument is a reference over that environment, and the environment is the
+/// callee's caller. A call from the other kind of frame is left alone. The two are compiled
+/// apart so that the path from slots carries none of the other's tests.
 ///
 /// It does what [`op_call_generic`] does for the same call through [`slot_promises_into`] or
 /// [`eval::referenced_args_into`], then
@@ -7819,26 +7864,30 @@ unsafe fn fast_call_generic(state: &mut Activation<'_, '_>, at: usize) {
 /// system ([`activity::hooks`]), a closure flagged for debugging or with a native entry, the
 /// namespace loader, `do.call`, a frame stack or register file that is full.
 #[inline(always)]
-unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+unsafe fn call_fast<const BY_NAME: bool>(
+    state: &mut Activation<'_, '_>,
+    at: usize,
+) -> Option<usize> {
     let interp = &mut *state.interp;
     let heap = state.heap;
     let known = (*heap).known();
     let (nil, unbound, missing_value) = (known.nil, known.unbound, known.missing_arg);
     let code = state.code;
     let feedback = pool_entry(state.constants, FEEDBACK);
+    // The environment the calling frame reads by name, which is then where the arguments are
+    // read and the callee's caller.
+    let caller_env = if BY_NAME { *state.header } else { nil };
     if at + 1 >= feedback.length() as usize
         || state.resume_base == NO_RESUMES
+        || BY_NAME != (*state.header != nil)
         || activity::hooks() != 0
     {
         return None;
     }
-    // `NULL` while the calling frame's code runs on its slots, and otherwise the environment
-    // it reads by name, which is then where the arguments are read and the callee's caller.
-    let caller_env = *state.header;
-    let fast = if caller_env == nil {
-        PLAN_FAST
-    } else {
+    let fast = if BY_NAME {
         PLAN_FAST_BY_NAME
+    } else {
+        PLAN_FAST
     };
     let word = *feedback.data().cast::<i32>().add(at + 1);
     let function = *state.registers.add(*code.add(at + 2) as usize);
@@ -7919,7 +7968,7 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
         } else {
             let eager_value = if !eager || kind <= ARGUMENT_CODE {
                 None
-            } else if caller_env != nil {
+            } else if BY_NAME {
                 effects::eager_argument(expression, caller_env)
             } else if kind >= 0 {
                 let value = *state.header.add(1 + kind as usize);
@@ -7938,7 +7987,7 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
             match eager_value {
                 Some(value) => value,
                 None => {
-                    let reference = if caller_env != nil {
+                    let reference = if BY_NAME {
                         if expression.kind() == SexpType::Bytecode {
                             eval::env_code_reference(caller_env, expression)
                         } else {
@@ -8035,10 +8084,10 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
         closures: interp.frame_closures.len() as u32,
         slots: header as u32,
         missing,
-        caller: if caller_env == nil {
-            previous_owner
-        } else {
+        caller: if BY_NAME {
             crate::NO_SLOTS
+        } else {
+            previous_owner
         },
         pending: nil,
         inlined: false,
@@ -8118,10 +8167,18 @@ unsafe fn call_fast_left(
 /// [`finished`] does through [`eval::leave`] for such a frame and goes on after the caller's
 /// call instruction.
 ///
+/// Without `DISCARD` it takes the frames that handed out no environment. With it, it takes
+/// the ones that did while their code stayed on the slots (a callee asked for its parent
+/// frame, or a promise or a closure was made over the frame): when nothing counts a reference
+/// to that environment any more it dies here, as [`eval::leave`] would find.
+///
 /// The value needs no root between the callee's registers and the caller's: giving up the
 /// slots' references frees nothing by itself, and nothing here allocates.
 #[inline(always)]
-unsafe fn return_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+unsafe fn return_fast<const DISCARD: bool>(
+    state: &mut Activation<'_, '_>,
+    at: usize,
+) -> Option<usize> {
     let interp = &mut *state.interp;
     let heap = &mut *state.heap;
     let nil = heap.known().nil;
@@ -8138,16 +8195,13 @@ unsafe fn return_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize
         return None;
     }
     let frame = &interp.frames[depth - 1];
-    if !frame.on_exit.is_empty() {
+    let pending = frame.pending;
+    if !frame.on_exit.is_empty() || DISCARD == (pending == nil) {
         return None;
     }
     debug_assert!(frame.env == nil && frame.slots as usize == state.machine.header);
     let value = *state.registers.add(*state.code.add(at + 1) as usize);
-    // The frame handed out an environment while its code stayed on the slots: a callee asked
-    // for its parent frame, or a promise or a closure was made over it. When nothing counts a
-    // reference to that environment any more it dies here, as [`eval::leave`] would find.
-    let pending = frame.pending;
-    if pending != nil {
+    if DISCARD {
         if pending.refcount() != 0 || value == pending || heap.is_preserved(pending) {
             return None;
         }
