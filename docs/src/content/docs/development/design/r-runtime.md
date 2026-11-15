@@ -534,8 +534,8 @@ is an error, and a region left unbalanced on return is a warning and is cut back
 libR for anything unusual (an ALTREP instance, a wrong type, an index out of bounds). `DATAPTR`
 and `DATAPTR_RO` are inline for atomic vectors only, and `STRING_PTR_RO` is not inline at all,
 because a pointer into a list or character vector must reach libR to escape the vector (see the
-write barrier above). A package built against older ry headers inlines those pointers and must be
-reinstalled. The exported functions take the same fast paths before entering the API, so binaries built
+write barrier above). A package built against older ry headers inlines those pointers, so ry
+refuses to load it until it is reinstalled (`RyAbi:`, in [Packaging](/development/design/packaging/)). The exported functions take the same fast paths before entering the API, so binaries built
 against GNU R's headers benefit too. A package that defines `RY_NO_INLINE_ACCESSORS` gets plain
 calls.
 

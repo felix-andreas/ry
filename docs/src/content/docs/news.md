@@ -48,6 +48,26 @@ and attaches each function's code from itself at its first call, so 20 typed fun
 the script, and packages load from the library as they do for `ry run`. See
 [the CLI reference](/reference/cli#executables).
 
+### Reinstall packages that ry 0.4.5 or earlier compiled
+
+A package that writes into a list or character vector through a read-only pointer, as data.table's
+`setcolorder` does, could lose an element to the garbage collector, so a data.table program that
+added columns with `:=` and then reordered them failed with "malformed data.table" or crashed. The
+collector now rescans every list or character vector that native code took a pointer into, read-only
+or not, but code compiled against ry 0.4.5's headers reads those pointers inline and skips the
+rescan. ry therefore refuses to load such a package and says how to reinstall it:
+
+```
+Error: package or namespace load failed for ‘data.table’:
+ unable to load shared object '/home/me/R/library/data.table/libs/data_table.so':
+  package 'data.table' was compiled by ry 0.4.5 against older C headers, and its compiled code is unsafe to run under this ry. Reinstall it with this ry: install.packages("data.table"), or R CMD INSTALL on its source (ry install for a package you develop).
+```
+
+A package installed by GNU R loads unchanged. Every installation from source by ry records the
+version of its headers' binary interface in a `RyAbi:` field of the package's `DESCRIPTION`, and
+`ry load` and `ry install` rebuild objects that an older ry left in a package's `src/`
+([the CLI reference](/reference/cli#build-and-install)).
+
 ## ry 0.4.5
 
 *Released in November 2026.*

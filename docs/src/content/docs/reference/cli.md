@@ -497,6 +497,25 @@ is set to a value. A package
 whose `Makevars` builds correctly only with one job fails in parallel, so a failed parallel build
 runs again with one job, reusing the objects already built.
 
+Compiled code built by ry's `R CMD INSTALL` reads ry's object layout through the headers' inline
+accessors, so it runs only under a ry whose headers have the same binary interface. The install
+records that interface's version as `RyAbi:` in the package's `DESCRIPTION`, beside `RyBuilt:`
+(ry's version). Loading a package that has `RyBuilt:` and whose `RyAbi:` is missing or differs
+fails at its shared library:
+
+```
+Error: package or namespace load failed for ‘tally’:
+ unable to load shared object '/home/me/library/tally/libs/tally.so':
+  package 'tally' was compiled by ry 0.4.5 against older C headers, and its compiled code is unsafe to run under this ry. Reinstall it with this ry: install.packages("tally"), or R CMD INSTALL on its source (ry install for a package you develop).
+```
+
+A package GNU R installed has neither field and loads under ry as it is.
+
+A build in place, by `ry load` or by an install from a directory, leaves its objects in `src/` with
+a stamp file, `src/.ry-abi`, that names the same version. When the stamp is missing or differs, the
+next build first deletes the objects and shared libraries under `src/` (static libraries stay), so
+make cannot reuse objects that other headers compiled.
+
 An install on ry's runtime compiles the package's typed functions and writes their machine code to
 its typed code file, `R/<package>.<build>.ryt`. A later session maps that file and runs the first
 call of each typed function on the code compiled at install, instead of compiling it, and processes
