@@ -12,7 +12,7 @@ ry R [FILE]                    # the same on GNU R
 ry load [PATH]                 # load an R package from source, run code against it, and exit
 ry test [PATH]                 # run a package's testthat tests against the loaded package
 ry document [PATH]             # write a package's Rd files and NAMESPACE with roxygen2
-ry build [PATH]                # build a package's source tarball
+ry build [PATH]                # build a package's source tarball; with --aot, install it compiled
 ry install [PATH]              # build and install a package
 ry debug-adapter               # a debugger for editors, over stdio
 ry server                      # the language server, over stdio; your editor starts it
@@ -222,8 +222,11 @@ A function compiles ahead when it is defined at the top level of the script as
 `DataFrame{price: double[]}`. The typed functions it calls compile with it, whatever their
 parameters. These compile at their first call instead:
 
-- a function defined inside a block, another function or a file the script sources, and a function
-  of a package;
+- a function defined inside a block, another function or a file the script sources;
+- a function of a package, unless the package's [typed code file](#build-and-install) holds it,
+  in which case it runs code compiled at install. Under `--aot`, a package whose typed code file
+  another build of ry wrote compiles its typed functions as it loads instead, and prints
+  `ry: another build of ry installed rates, so its typed functions compiled as it loaded; reinstall it to compile them at install`;
 - a function defined after the script set `options(keep.source = TRUE)`, or in a statement that
   holds a literal R warns about, such as `1.5L`;
 - a top-level function with a record, tuple, `Dict`, `Set` or function parameter that no typed
@@ -450,6 +453,7 @@ ry build -o dist          # write it into dist/ instead
 ry install                # install into the first library on .libPaths()
 ry install -l ~/rlib      # install into ~/rlib
 ry install --train tests  # train the package's code image on its tests
+ry build --aot -l ~/rlib  # install, as ry install does
 ```
 
 `ry build` writes the source tarball of the package at `PATH` (default: the one containing the
@@ -487,6 +491,22 @@ ry's `R CMD INSTALL` and `R CMD SHLIB` run `make` with one job per processor unl
 is set to a value. A package
 whose `Makevars` builds correctly only with one job fails in parallel, so a failed parallel build
 runs again with one job, reusing the objects already built.
+
+An install on ry's runtime compiles the package's typed functions and writes their machine code to
+its typed code file, `R/<package>.<build>.ryt`. A later session maps that file and runs the first
+call of each typed function on the code compiled at install, instead of compiling it, and processes
+that use the same package share that code. The install log counts what the file holds:
+
+```
+** typed code: closures=2 written=2
+```
+
+A function the file leaves out, such as one with a `match` over any tag, is counted by reason after
+`left out:` and compiles at its first call; `RY_TYPED_LOG=1` names each function that attaches and
+each one that compiles. `ry build --aot` on a package does what `ry install` does (`-l DIR` names
+the library), and on a script it is a usage error that points at `ry run --aot`.
+`R CMD INSTALL --ry-no-typed-code` writes no typed code file. A typed code file another build of ry
+wrote is ignored. [The typed code file](/development/typed-code-file/) is the design.
 
 An install on ry's runtime also writes the package's code image, `R/<package>.<build>.ryc`
 beside its lazy-load database: the compiled code of every closure, which a later session takes instead of

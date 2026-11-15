@@ -101,6 +101,7 @@ export default defineConfig({
 		'/contributing/design/repl': '/development/design/repl',
 		'/contributing/design/standard-library': '/development/design/standard-library',
 		'/contributing/design/typed-runtime': '/development/design/typed-runtime',
+		'/development/design/typed-code-file': '/development/typed-code-file',
 	},
 	integrations: [
 		starlight({
@@ -157,6 +158,7 @@ export default defineConfig({
 					items: [
 						{ slug: 'development', label: 'Build and test' },
 						{ slug: 'development/architecture' },
+						{ slug: 'development/typed-code-file' },
 						{ slug: 'development/structure' },
 						{ slug: 'development/testing' },
 						{ slug: 'development/robustness' },
