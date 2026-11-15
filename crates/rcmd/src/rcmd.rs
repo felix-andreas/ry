@@ -31,6 +31,16 @@ use std::{
 /// does (`interp::system::MINIMUM_SVN_REVISION`).
 pub const MINIMUM_SVN_REVISION: u32 = 89194;
 
+/// The version of the binary interface that ry's headers (`crates/libr/include`) give compiled
+/// code: what their inline functions and macros read and write without calling into libR. An
+/// installation records it as `RyAbi:`, and `dyn.load` refuses a package ry compiled under another
+/// version (`stale_native_build`), because its code may skip what libR now does on its behalf.
+/// Bump it whenever a header change makes code compiled against the old headers unsafe to run.
+///
+/// 1: `DATAPTR_RO` and `STRING_PTR_RO` call into libR, which keeps the collector's write barrier
+/// for writes through the pointer; ry 0.4.5 and earlier inlined them and recorded no `RyAbi:`.
+pub const NATIVE_ABI: u32 = 1;
+
 /// The R-level half of an installation, run on ry's interpreter.
 const INSTALL_DRIVER: &str = include_str!("install.R");
 const CODE_IMAGE_DRIVER: &str = include_str!("code-image.R");
@@ -1832,6 +1842,38 @@ pub fn config(home: &Path, variable: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+/// Why the shared library at `path` must not load, when it belongs to an installed package that ry
+/// compiled against headers with another binary interface than this ry's (`NATIVE_ABI`). A library
+/// outside a package's `libs/`, and a package GNU R compiled, always load: GNU R's package headers
+/// reach every object through libR's functions, so its binaries depend on no header of ry's.
+pub fn stale_native_build(path: &Path) -> Option<String> {
+    let mut libs = path.parent()?;
+    // A Windows package keeps its DLL under `libs/x64`.
+    if libs.file_name()? != "libs" {
+        libs = libs.parent()?;
+    }
+    if libs.file_name()? != "libs" {
+        return None;
+    }
+    let package_dir = libs.parent()?;
+    let description =
+        Description::parse(&fs::read_to_string(package_dir.join("DESCRIPTION")).ok()?);
+    let built_by = description.get("RyBuilt")?;
+    let abi = description.get("RyAbi").map(|abi| abi.parse::<u32>().ok());
+    let age = match abi {
+        Some(Some(abi)) if abi == NATIVE_ABI => return None,
+        Some(Some(abi)) if abi > NATIVE_ABI => "newer",
+        _ => "older",
+    };
+    let package = description.get("Package").unwrap_or("the package");
+    Some(format!(
+        "package '{package}' was compiled by ry {built_by} against {age} C headers, and its \
+         compiled code is unsafe to run under this ry. Reinstall it with this ry: \
+         install.packages(\"{package}\"), or R CMD INSTALL on its source (ry install for a \
+         package you develop)."
+    ))
+}
+
 /// A package's `DESCRIPTION`, as ordered fields.
 #[derive(Clone, Debug, Default)]
 pub struct Description {
@@ -2279,6 +2321,7 @@ fn install_source(
     // `tools:::.install_package_description` copies the build's DESCRIPTION and adds `Built:`,
     // so the field that marks an installation as ry's goes in first.
     description.set("RyBuilt", env!("CARGO_PKG_VERSION").to_owned());
+    description.set("RyAbi", NATIVE_ABI.to_string());
     write(&build.join("DESCRIPTION"), &description.render())?;
     let target = library.join(name);
     let driver = staging.join("install.R");
