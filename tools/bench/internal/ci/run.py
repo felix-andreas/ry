@@ -2,8 +2,9 @@
 
 Each engine runs the file `--runs` times in a fresh process, and the table shows the fastest run
 per kernel with the speed-up over GNU R. A kernel whose checksum differs between the engines or
-between two runs, or that one engine did not print, is marked, and the exit status is then 1. Packages load from `R_LIBS`, which defaults to the
-package-test corpus library (`just bench-packages install`).
+between two runs, or that one engine did not print, is marked, and the exit status is then 1.
+Packages load from `R_LIBS`, which defaults to the package-test corpus library
+(`just bench-packages install`).
 
 Usage: python3 -I tools/bench/internal/ci/run.py [--only k1,k3] [--runs 2] [--scale 1] [--ry PATH]
 """

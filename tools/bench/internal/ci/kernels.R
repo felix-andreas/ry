@@ -1,6 +1,6 @@
-# Kernels modeled on a user's profile of a package's test suite: each is one code shape that the
-# profile ranked high, cut down to a loop, with every name replaced by a neutral one. K1 to K5
-# follow shapes the user sent as code. K6, K7 and K8 are reconstructions from one-line
+# Kernels modeled on a user's profiles of a package's test suite: each is one code shape that a
+# profile ranked high, cut down to a loop, with every name replaced by a neutral one. K1 to K5,
+# K12 and K13 follow shapes a user sent as code. K6 to K11 are reconstructions from one-line
 # descriptions, and so are the sizes and the runner. `set.seed` and the `checks` list make the
 # data and one result per kernel comparable between GNU R and ry.
 #
@@ -116,7 +116,7 @@ k10 <- function(n) for (i in seq_len(n)) for (path in sourceFiles) readLines(pat
 k11 <- function(n) for (i in seq_len(n))
   list.files(sourceDir, pattern = "\\.[Rr]$", recursive = TRUE, full.names = TRUE)
 
-# K12 and K13 follow a reproducer the user sent for `new()`: a class of two plain slots, and a
+# K12 and K13 follow a reproducer a user sent for `new()`: a class of two plain slots, and a
 # class whose prototype holds a million doubles, which `new()` must not copy.
 setClass("Plain", representation(a = "numeric", b = "character"))
 setClass("Seeded", representation(series = "numeric", name = "character"),
@@ -131,7 +131,8 @@ checks <- list(
   k2 = function() format(c(toDate("2024-03-15"), toDate(as.Date("2024-01-02")))),
   k3 = function() c(isBlank("abc"), isBlank(NA_integer_), isBlank(3.5), isBlank("NA")),
   k4 = function() { x <- "a"; y <- 1L; z <- Sys.Date()
-    checkArguments(x, y, z, types = c("character", "numeric", "Date")) },
+    c(checkArguments(x, y, z, types = c("character", "numeric", "Date")),
+      tryCatch(checkArguments(x, y, z, types = c("character", "character", "Date")), error = conditionMessage)) },
   k5 = function() onShelf(shelf, c("A3", "B7", "Z1")),
   k6 = function() { merged <- mergeSeries(xl); c(dim(merged), round(sum(merged, na.rm = TRUE), 6)) },
   k7 = function() { acc <- growTable(10L); c(dim(acc), sum(acc$value), nchar(paste(acc$name, collapse = ""))) },
@@ -141,7 +142,7 @@ checks <- list(
       nrow(getParseData(parsed[[1]]))) },
   k10 = function() sum(nchar(unlist(lapply(sourceFiles, readLines)))),
   k11 = function() basename(list.files(sourceDir, pattern = "\\.[Rr]$", recursive = TRUE, full.names = TRUE))[c(1, 20, 40)],
-  k12 = function() { object <- new("Plain", a = 1, b = "x"); c(object@a, nchar(object@b), isVirtualClass("Plain")) },
+  k12 = function() { object <- new("Plain", a = 1, b = "x"); c(object@a, nchar(object@b), length(slotNames(object))) },
   k13 = function() { first <- new("Seeded", name = "y"); first@series[1] <- -1; second <- new("Seeded")
     c(length(first@series), first@series[1], second@series[1] >= 0, nchar(paste0(first@name, second@name)),
       round(sum(getClass("Seeded")@prototype@series), 6)) }
