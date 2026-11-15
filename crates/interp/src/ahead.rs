@@ -17,6 +17,11 @@
 //! A file the script sources is compiled the same way when `source()` has parsed it
 //! ([`parsed_file`]), before `source()` evaluates any of it.
 //!
+//! An executable that `ry build --aot --exe` wrote carries the code of its script's definitions
+//! ([`ScriptCode`]). [`prepare`] then compiles nothing: it notes each typed closure it made by
+//! the index of its definition among the script's top-level expressions, and the closure's first
+//! call attaches the code the executable holds for it (`typed::file`).
+//!
 //! An installed typed package brings its own code, compiled at install into its typed code file.
 //! When a namespace loads whose package has such a file only for another build of ry,
 //! [`namespace_loaded`] compiles its typed functions as the namespace loads and says to reinstall
@@ -54,6 +59,19 @@ pub struct State {
     waiting: FxHashMap<Sexp, Sexp>,
     /// The packages whose namespaces [`namespace_loaded`] has looked at.
     namespaces: Vec<String>,
+    /// The code of the script's definitions, when the session runs an executable that carries
+    /// it.
+    pub code: Option<ScriptCode>,
+}
+
+/// Where an executable keeps the typed code file of its script's definitions: `length` bytes at
+/// `offset` of the file at `path`, written for the script whose text hashes to `stamp`.
+#[derive(Clone)]
+pub struct ScriptCode {
+    pub path: std::path::PathBuf,
+    pub offset: u64,
+    pub length: u64,
+    pub stamp: crate::code_image::DatabaseStamp,
 }
 
 impl State {
@@ -79,6 +97,9 @@ pub struct Definition {
     /// The name the script binds the closure to.
     pub symbol: Sexp,
     pub closure: Sexp,
+    /// The index of the definition among the expressions of its script or file, which names
+    /// the closure in an executable's code file.
+    pub index: u32,
 }
 
 /// The expressions of a script lowered by [`prepare`].
@@ -91,15 +112,48 @@ pub struct Prepared {
 
 /// Lowers the expressions of `script`, makes the closures of its top-level definitions and has
 /// the optimizing tier compile them.
+/// With [`State::code`], it notes the closures for the code the executable carries instead.
 pub unsafe fn prepare(script: &Script<'_>, keep_source: bool) -> R<Prepared> {
     // The session's state keeps what this makes alive, so the handles made on the way go.
     let mark = crate::heap().handle_mark();
-    let prepared = prepare_script(script, keep_source);
+    let prepared = prepare_script(script, keep_source).map(|(prepared, definitions)| {
+        match &interp().ahead.code {
+            Some(code) => {
+                let stamp = code.stamp;
+                for definition in &definitions {
+                    crate::code_image::note_script_closure(
+                        definition.closure,
+                        definition.index,
+                        stamp,
+                    );
+                }
+                if discards_closures() {
+                    interp().ahead.waiting.clear();
+                }
+            }
+            None => compile(&definitions),
+        }
+        prepared
+    });
     crate::heap().release_handles(mark);
     prepared
 }
 
-unsafe fn prepare_script(script: &Script<'_>, keep_source: bool) -> R<Prepared> {
+/// Lowers `text` as a script, makes the closures of its top-level definitions and compiles them,
+/// for `ry build --aot --exe` to write their code. Nothing of the script runs. The definitions
+/// stay alive until [`finish`].
+pub unsafe fn compile_script(text: &str, keep_source: bool) -> R<Vec<Definition>> {
+    let (script, failure) = crate::lower::parse_script_prefix(text);
+    if let Some(failure) = failure {
+        let message = crate::lower::script_syntax_failure_message(&script, &failure);
+        return Err(crate::unwind::error(message));
+    }
+    let (_, definitions) = prepare_script(&script, keep_source)?;
+    compile(&definitions);
+    Ok(definitions)
+}
+
+unsafe fn prepare_script(script: &Script<'_>, keep_source: bool) -> R<(Prepared, Vec<Definition>)> {
     finish();
     let mut keep_source = keep_source;
     let mut kept = vec![0u64; script.expressions.len().div_ceil(64)];
@@ -125,12 +179,11 @@ unsafe fn prepare_script(script: &Script<'_>, keep_source: bool) -> R<Prepared> 
         let Some(expression) = interp().ahead.lowered[index] else {
             continue;
         };
-        if let Some(definition) = definition(expression, false)? {
+        if let Some(definition) = definition(expression, index as u32, false)? {
             definitions.push(definition);
         }
     }
-    compile(&definitions);
-    Ok(Prepared { keep_source: kept })
+    Ok((Prepared { keep_source: kept }, definitions))
 }
 
 /// Compiles the typed functions a file that `source()` parsed defines at its top level, before
@@ -160,7 +213,7 @@ pub unsafe fn parsed_file(expressions: Sexp, env: Sexp) -> R<()> {
     let mut definitions = Vec::new();
     let mut result = Ok(());
     for index in 0..values::length(expressions) {
-        match definition(expressions.element(index), true) {
+        match definition(expressions.element(index), index as u32, true) {
             Ok(Some(definition)) => definitions.push(definition),
             Ok(None) => {}
             Err(error) => {
@@ -179,7 +232,7 @@ pub unsafe fn parsed_file(expressions: Sexp, env: Sexp) -> R<()> {
 /// The closure made ahead for `expression` when it is a definition `name <- function(...) ...`,
 /// which [`take`] gives the definition when the run reaches it. With `typed_only`, a definition
 /// of an untyped function gets none, because nothing would compile for it.
-unsafe fn definition(expression: Sexp, typed_only: bool) -> R<Option<Definition>> {
+unsafe fn definition(expression: Sexp, index: u32, typed_only: bool) -> R<Option<Definition>> {
     let Some((symbol, value)) = assignment(expression)? else {
         return Ok(None);
     };
@@ -203,7 +256,11 @@ unsafe fn definition(expression: Sexp, typed_only: bool) -> R<Option<Definition>
         values::set_attr(closure, symbols().srcref, srcref)?;
     }
     interp().ahead.waiting.insert(key, closure);
-    Ok(Some(Definition { symbol, closure }))
+    Ok(Some(Definition {
+        symbol,
+        closure,
+        index,
+    }))
 }
 
 /// Has the optimizing tier compile the typed closures among `definitions`.
@@ -307,6 +364,7 @@ unsafe fn typed_closures(namespace: Sexp) -> Vec<Definition> {
             definitions.push(Definition {
                 symbol,
                 closure: value,
+                index: 0,
             });
         }
     }

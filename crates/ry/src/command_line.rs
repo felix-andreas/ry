@@ -229,13 +229,17 @@ pub enum Command {
     /// `devtools::build()` passes: vignettes are rebuilt, data is not re-saved, and no PDF
     /// manual is made. It is written beside the package directory unless `--output` names
     /// another directory. With `--aot` the package is installed instead, as `ry install` does,
-    /// with the machine code of its typed functions compiled ahead of time.
+    /// with the machine code of its typed functions compiled ahead of time. With `--aot --exe`
+    /// the path is a script, and the output is an executable that runs it with its typed
+    /// functions compiled ahead of time.
     Build {
-        /// The package, or any path inside it
+        /// The package, or any path inside it; with `--exe`, the script
         #[arg(default_value = ".")]
         path: PathBuf,
-        /// The directory to write the tarball to (default: the package directory's parent)
-        #[arg(long, short, conflicts_with = "aot")]
+        /// The directory to write the tarball to (default: the package directory's parent);
+        /// with `--exe`, the executable to write (default: the script's name without `.R`, in
+        /// the current directory)
+        #[arg(long, short)]
         output: Option<PathBuf>,
         /// Ship the vignettes as they are instead of rebuilding them
         #[arg(long, default_value_t = false, conflicts_with = "aot")]
@@ -244,6 +248,9 @@ pub enum Command {
         /// code file, as `ry install` does
         #[arg(long, default_value_t = false)]
         aot: bool,
+        /// With `--aot`, build an executable that runs the script `path` names
+        #[arg(long, default_value_t = false, requires = "aot", conflicts_with = "library")]
+        exe: bool,
         /// The library to install into with `--aot`
         #[arg(long, short, requires = "aot")]
         library: Option<PathBuf>,

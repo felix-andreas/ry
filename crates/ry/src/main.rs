@@ -5,7 +5,7 @@ use {
         cli::{self, CommandError, Outcome},
         command_line::{Cli, Command, Debug, Keybindings, Migrate, Mode, Runtime, resolve_runtime},
         config::Config,
-        debug_adapter, load,
+        debug_adapter, executable, load,
         preflight::{self, ConsoleFilter, Erase, Preflight, Verdict},
         repl_completer::AnalysisCompleter,
         server,
@@ -138,6 +138,16 @@ fn main() -> ExitCode {
     if rcmd::front_end::invoked_as_front_end() {
         return rcmd::front_end::main(env::args().skip(1).collect());
     }
+    // Before the arguments are parsed, because an executable `ry build --aot --exe` wrote hands
+    // every argument to its script.
+    match executable::own() {
+        Ok(None) => {}
+        Ok(Some((path, payload))) => return run_executable(&path, payload),
+        Err(error) => {
+            cli::error(&error);
+            return ExitCode::from(2);
+        }
+    }
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .with(
@@ -259,17 +269,28 @@ fn main() -> ExitCode {
         output,
         no_vignettes,
         aot,
+        exe,
         library,
         runtime,
     } = &cli.command
     {
+        if *exe {
+            return build_executable(path, output.as_deref(), *runtime);
+        }
+        if *aot && output.is_some() {
+            cli::error(
+                "`ry build --aot` installs the package into a library: name it with `--library`, \
+                 or add `--exe` to build an executable from a script",
+            );
+            return ExitCode::from(2);
+        }
         if *aot {
             // A script's typed functions compile ahead when it runs; only a package has a place
             // to keep their code.
             if path.is_file() && load::package_root(path).is_err() {
                 cli::error(&format!(
-                    "{} is a script, and `ry build --aot` compiles a package: run the script \
-                     with `ry run --aot {}` to compile its typed functions before it starts",
+                    "{} is a script, and `ry build --aot` compiles a package: build an \
+                     executable from the script with `ry build --aot --exe {}`",
                     path.display(),
                     path.display()
                 ));
@@ -461,33 +482,11 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>, ahead: bool
         cli::error("`--aot` compiles with ry's runtime, which `--runtime gnu-r` does not start");
         return ExitCode::from(2);
     }
-    // R reads a script in the session's encoding, so a Latin-1 script is valid R. The check
-    // sees each invalid byte as `?`, which keeps every offset, and the elaborated program is
-    // the file's own bytes with the checker's rewrites.
-    let source = match fs::read(file) {
-        Ok(source) => source,
-        Err(error) => {
-            cli::error(&format!("cannot read {}: {error}", file.display()));
-            return ExitCode::from(2);
-        }
+    let (_, program, flags) = match checked_script(file) {
+        Ok(checked) => checked,
+        Err(status) => return status,
     };
-    let Some(mut preflight) = Preflight::discover(file, file.to_path_buf()) else {
-        return ExitCode::from(2);
-    };
-    let mut text = String::with_capacity(source.len());
-    for chunk in source.utf8_chunks() {
-        text.push_str(chunk.valid());
-        text.extend(std::iter::repeat_n('?', chunk.invalid().len()));
-    }
-    let Some(elaborations) = preflight.check_elaborations(&text) else {
-        return ExitCode::from(1);
-    };
-    let program = (!elaborations.is_empty()).then(|| preflight::elaborate(&source, &elaborations));
-    let flags = repl::RuntimeFlags {
-        ahead,
-        ..runtime_flags(preflight.config())
-    };
-    drop(preflight);
+    let flags = repl::RuntimeFlags { ahead, ..flags };
     match runtime {
         Runtime::Ry => {
             #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
@@ -514,6 +513,183 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>, ahead: bool
             ..repl::RunOptions::default()
         })),
     }
+}
+
+/// Reads and checks the script `file` as `ry run` does before it runs it: the file's bytes, the
+/// program the checker elaborated from them when it rewrote anything, and the flags the
+/// project's configuration sets. The error is the status to exit with, once reported.
+fn checked_script(file: &Path) -> Result<(Vec<u8>, Option<Vec<u8>>, repl::RuntimeFlags), ExitCode> {
+    // R reads a script in the session's encoding, so a Latin-1 script is valid R. The check
+    // sees each invalid byte as `?`, which keeps every offset, and the elaborated program is
+    // the file's own bytes with the checker's rewrites.
+    let source = fs::read(file).map_err(|error| {
+        cli::error(&format!("cannot read {}: {error}", file.display()));
+        ExitCode::from(2)
+    })?;
+    let mut preflight = Preflight::discover(file, file.to_path_buf()).ok_or(ExitCode::from(2))?;
+    let mut text = String::with_capacity(source.len());
+    for chunk in source.utf8_chunks() {
+        text.push_str(chunk.valid());
+        text.extend(std::iter::repeat_n('?', chunk.invalid().len()));
+    }
+    let elaborations = preflight
+        .check_elaborations(&text)
+        .ok_or(ExitCode::from(1))?;
+    let program = (!elaborations.is_empty()).then(|| preflight::elaborate(&source, &elaborations));
+    Ok((source, program, runtime_flags(preflight.config())))
+}
+
+/// `ry build --aot --exe`: checks the script `file` as `ry run` does, compiles its typed
+/// top-level functions into a typed code file, and writes a copy of this executable that
+/// carries the script and the code file (`executable`).
+fn build_executable(file: &Path, output: Option<&Path>, runtime: Option<Runtime>) -> ExitCode {
+    if runtime == Some(Runtime::GnuR) {
+        cli::error("`--exe` compiles with ry's runtime, which `--runtime gnu-r` does not start");
+        return ExitCode::from(2);
+    }
+    if !file.is_file() {
+        cli::error(&format!(
+            "{} is not a script: `ry build --aot --exe` builds an executable from one R script",
+            file.display()
+        ));
+        return ExitCode::from(2);
+    }
+    let output = match output {
+        Some(output) => output.to_path_buf(),
+        None => {
+            let stem = file.file_stem().unwrap_or(file.as_os_str());
+            let mut name = stem.to_owned();
+            name.push(env::consts::EXE_SUFFIX);
+            PathBuf::from(name)
+        }
+    };
+    let (source, elaborated, flags) = match checked_script(file) {
+        Ok(checked) => checked,
+        Err(status) => return status,
+    };
+    let program = elaborated.unwrap_or(source);
+    let flags = repl::RuntimeFlags {
+        ahead: true,
+        ..flags
+    };
+    let mut code_path = output.as_os_str().to_owned();
+    code_path.push(".ryt.partial");
+    let code_path = PathBuf::from(code_path);
+    let written = checking_loads()
+        .and_then(|()| repl::write_script_code_on_ry_runtime(file, &program, &code_path, flags));
+    match written {
+        Ok(0) => {}
+        Ok(status) => {
+            remove_partial(&code_path);
+            return ExitCode::from(status.clamp(1, 255) as u8);
+        }
+        Err(error) => {
+            remove_partial(&code_path);
+            cli::error(&error.to_string());
+            return ExitCode::from(2);
+        }
+    }
+    let built = fs::read(&code_path)
+        .map_err(|error| format!("cannot read {}: {error}", code_path.display()))
+        .and_then(|code| {
+            remove_partial(&code_path);
+            let (runtime, base) = repl::ry_runtime_files().map_err(|error| error.to_string())?;
+            let metadata = executable::Metadata {
+                flags: flags.bits(),
+                script: file.to_string_lossy().into_owned(),
+                source: program,
+                runtime,
+                base,
+            };
+            let ry = env::current_exe()
+                .map_err(|error| format!("cannot locate the ry executable: {error}"))?;
+            executable::write(&output, &ry, &code, &metadata)
+                .map_err(|error| format!("cannot write {}: {error}", output.display()))
+        })
+        .and_then(|()| sign(&output));
+    match built {
+        Ok(()) => {
+            println!("{}", output.display());
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            cli::error(&error);
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn remove_partial(path: &Path) {
+    if let Err(error) = fs::remove_file(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        cli::error(&format!("cannot remove {}: {error}", path.display()));
+    }
+}
+
+/// macOS refuses to run an executable whose signature no longer covers its bytes, and the
+/// appended payload invalidates the one the linker made, so the copy is signed again ad hoc.
+#[cfg(target_os = "macos")]
+fn sign(output: &Path) -> Result<(), String> {
+    let status = std::process::Command::new("codesign")
+        .args(["--sign", "-", "--force"])
+        .arg(output)
+        .status()
+        .map_err(|error| format!("cannot run codesign to sign {}: {error}", output.display()))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("codesign could not sign {}", output.display()))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sign(_: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+/// Runs the script an executable `ry build --aot --exe` wrote carries, as `ry run --aot` would,
+/// with every argument passed to the script and its typed functions attached from the
+/// executable's code file instead of compiled. The script was checked when it was built.
+fn run_executable(executable: &Path, payload: executable::Payload) -> ExitCode {
+    let arguments: Vec<String> = env::args_os()
+        .skip(1)
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect();
+    let metadata = payload.metadata;
+    for (variable, path) in [("RY_LIBR", &metadata.runtime), ("RY_BASE_R", &metadata.base)] {
+        if let Some(path) = path
+            && env::var_os(variable).is_none()
+            && path.exists()
+        {
+            // SAFETY: no other thread runs yet.
+            unsafe { env::set_var(variable, path) };
+        }
+    }
+    let flags = repl::RuntimeFlags::from_bits(metadata.flags);
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    release_executable_code();
+    runtime_exit(
+        checking_loads()
+            .and_then(|()| {
+                repl::set_script_code_on_ry_runtime(
+                    executable,
+                    payload.code_offset,
+                    payload.code_length,
+                )
+            })
+            .and_then(|()| {
+                repl::run_on_ry_runtime(
+                    Some(Path::new(&metadata.script)),
+                    Some(&metadata.source),
+                    None,
+                    &arguments,
+                    flags,
+                    None,
+                    None,
+                )
+            }),
+    )
 }
 
 fn run_console(
