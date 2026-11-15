@@ -117,3 +117,52 @@ invisible(validObject(new("Tail", n = 1, item = d)))
 setClass("UnionTail", slots = c(value = "NumberOrText"), validity = showOk)
 invisible(validObject(new("UnionTail", value = 2)))
 invisible(validObject(new("UnionTail", value = "b")))
+
+# What a validity method finds in validObject's frame, for the shapes where the slot loop ends
+# differently: a data part, no slots at all, an `ANY` slot, an S3 class, an extra attribute.
+showFrame <- function(object) {
+  frame <- parent.frame()
+  print(sort(ls(frame)))
+  for (name in c("i", "namei", "idx", "attrNames", "slotNames", "errors"))
+    if (exists(name, frame, inherits = FALSE)) { cat(name, ": "); print(get(name, frame)) }
+  TRUE
+}
+setClass("Amounts", contains = "numeric", slots = c(unit = "character"), validity = showFrame)
+amounts <- new("Amounts", c(1, 2), unit = "kg")
+invisible(validObject(amounts))
+names(amounts) <- c("a", "b")
+invisible(validObject(amounts))
+setClass("Marker", representation("VIRTUAL"))
+setClass("Bare", contains = "Marker", validity = showFrame)
+invisible(validObject(new("Bare")))
+setOldClass(c("stamp", "base"))
+setClass("Mixed", slots = c(any = "ANY", old = "stamp"), validity = showFrame)
+mixed <- new("Mixed", any = sum, old = structure(list(), class = c("stamp", "base")))
+invisible(validObject(mixed))
+attr(mixed, "extra") <- 1
+invisible(validObject(mixed))
+
+# Shapes the fast path leaves to the R body: a slot that is gone, `complete`, a basic value.
+partial <- new("Tail", n = 1, item = d)
+attr(partial, "n") <- NULL
+str(caught(validObject(partial)))
+invisible(validObject(new("Tail", n = 1, item = d), complete = TRUE))
+invisible(validObject(new("Tail", n = 1, item = d), TRUE))
+print(validObject(1L))
+
+# A superclass reached through a conditional `setIs`, whose validity method runs only when
+# the test holds.
+setClass("Target", slots = c(v = "numeric"),
+  validity = function(object) if (any(object@v < 0)) "bad Target" else TRUE)
+setClass("Source", slots = c(w = "numeric"),
+  validity = function(object) if (length(object@w) > 2) "long Source" else TRUE)
+setIs("Source", "Target", test = function(object) length(object@w) == 1,
+  coerce = function(from) new("Target", v = from@w),
+  replace = function(from, value) { from@w <- value@v; from })
+validObject(new("Source", w = 1))
+print(validObject(new("Source", w = c(1, 2))))
+source <- new("Source", w = 1)
+source@w <- -1
+str(caught(validObject(source, test = TRUE)))
+source@w <- c(-1, -2, -3)
+print(validObject(source, test = TRUE))

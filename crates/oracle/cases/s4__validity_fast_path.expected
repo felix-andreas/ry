@@ -174,9 +174,117 @@
 | [1] "SClassExtension"
 | attr(,"package")
 | [1] "methods"
+|  [1] "anyStrings"     "attrNames"      "Class"          "classDef"      
+|  [5] "classDefi"      "classi"         "complete"       "errors"        
+|  [9] "extends"        "exti"           "i"              "idx"           
+| [13] "namei"          "object"         "ok"             "sloti"         
+| [17] "slotNames"      "slotTypes"      "superClass"     "superDef"      
+| [21] "test"           "validityMethod" "where"         
+| i : [1] 3
+| namei : [1] "unit"
+| idx : [1] 1 3
+| attrNames : [1] ".Data"    ".S3Class" "unit"     "class"   
+| slotNames : [1] ".Data" "unit" 
+| errors : character(0)
+|  [1] "anyStrings"     "attrNames"      "Class"          "classDef"      
+|  [5] "classDefi"      "classi"         "complete"       "errors"        
+|  [9] "extends"        "exti"           "i"              "idx"           
+| [13] "namei"          "object"         "ok"             "sloti"         
+| [17] "slotNames"      "slotTypes"      "superClass"     "superDef"      
+| [21] "test"           "validityMethod" "where"         
+| i : [1] 3
+| namei : [1] "unit"
+| idx : [1] 1 3
+| attrNames : [1] ".Data"    ".S3Class" "unit"     "class"   
+| slotNames : [1] ".Data" "unit" 
+| errors : character(0)
+|  [1] "anyStrings"     "attrNames"      "Class"          "classDef"      
+|  [5] "classDefi"      "classi"         "complete"       "errors"        
+|  [9] "extends"        "exti"           "i"              "idx"           
+| [13] "namei"          "object"         "ok"             "sloti"         
+| [17] "slotNames"      "slotTypes"      "superClass"     "superDef"      
+| [21] "test"           "validityMethod" "where"         
+| i : [1] 3
+| namei : [1] "unit"
+| idx : [1] 1 3
+| attrNames : [1] ".Data"    ".S3Class" "unit"     "class"    "names"   
+| slotNames : [1] ".Data" "unit" 
+| errors : character(0)
+|  [1] "anyStrings"     "attrNames"      "Class"          "classDef"      
+|  [5] "complete"       "errors"         "extends"        "exti"          
+|  [9] "i"              "idx"            "object"         "slotNames"     
+| [13] "slotTypes"      "superClass"     "superDef"       "test"          
+| [17] "validityMethod" "where"         
+| i : [1] 1
+| idx : integer(0)
+| attrNames : [1] ".Data"    ".S3Class" "class"   
+| slotNames : NULL
+| errors : character(0)
+|  [1] "anyStrings"     "attrNames"      "Class"          "classDef"      
+|  [5] "classDefi"      "classi"         "complete"       "errors"        
+|  [9] "extends"        "i"              "idx"            "namei"         
+| [13] "object"         "ok"             "sloti"          "slotNames"     
+| [17] "slotTypes"      "test"           "validityMethod" "where"         
+| i : NULL
+| namei : [1] "old"
+| idx : [1] 3 4
+| attrNames : [1] ".Data"    ".S3Class" "any"      "old"      "class"   
+| slotNames : [1] "any" "old"
+| errors : character(0)
+|  [1] "anyStrings"     "attrNames"      "Class"          "classDef"      
+|  [5] "classDefi"      "classi"         "complete"       "errors"        
+|  [9] "extends"        "i"              "idx"            "namei"         
+| [13] "object"         "ok"             "sloti"          "slotNames"     
+| [17] "slotTypes"      "test"           "validityMethod" "where"         
+| i : NULL
+| namei : [1] "old"
+| idx : [1] 3 4
+| attrNames : [1] ".Data"    ".S3Class" "any"      "old"      "class"   
+| slotNames : [1] "any" "old"
+| errors : character(0)
+|  [1] "anyStrings"     "attrNames"      "Class"          "classDef"      
+|  [5] "classDefi"      "classi"         "complete"       "errors"        
+|  [9] "extends"        "i"              "idx"            "namei"         
+| [13] "object"         "ok"             "sloti"          "slotNames"     
+| [17] "slotTypes"      "test"           "validityMethod" "where"         
+| i : NULL
+| namei : [1] "old"
+| idx : [1] 3 4
+| attrNames : [1] ".Data"    ".S3Class" "any"      "old"      "class"    "extra"   
+| slotNames : [1] "any" "old"
+| errors : character(0)
+| [1] "SClassExtension"
+| attr(,"package")
+| [1] "methods"
+| List of 3
+|  $ message: chr "invalid class “Tail” object: slots in class definition but not in object: \"n\""
+|  $ class  : chr [1:3] "simpleError" "error" "condition"
+|  $ call   : chr "validObject(partial)"
+| [1] "SClassExtension"
+| attr(,"package")
+| [1] "methods"
+| Base validity on Base 
+| Derived validity on Derived 
+| [1] "SClassExtension"
+| attr(,"package")
+| [1] "methods"
+| [1] "SClassExtension"
+| attr(,"package")
+| [1] "methods"
+| [1] "SClassExtension"
+| attr(,"package")
+| [1] "methods"
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| List of 3
+|  $ message: chr "invalid class “Target” object: bad Target"
+|  $ class  : chr [1:3] "simpleError" "error" "condition"
+|  $ call   : chr "validObject(.Object)"
+| [1] "long Source"
 [messages]
 [warnings]
 [errors]
 [value]
-logical
-| TRUE
+character
+| "long Source"
