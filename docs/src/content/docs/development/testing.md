@@ -517,7 +517,7 @@ argument checker over `list(...)` (`k4`), `%in%` and `which` on a small vector (
 the fastest of `--runs` runs on each engine and the speed-up, and a kernel whose checksum differs
 from GNU R's is marked `DIFFERS` and fails the run. The packages (xts, zoo, data.table, purrr) load
 from `R_LIBS`, by default the corpus library that `just bench-packages install` fills. The file
-says which kernels are the user's code and which are reconstructions.
+says which kernels follow code a user sent and which are reconstructions.
 
 Compare peak RSS between two builds only from the same page-cache state. A freshly built `.ryc`
 or `libR.so` sits in the page cache in large folios, so one fault maps a whole block, and the same
