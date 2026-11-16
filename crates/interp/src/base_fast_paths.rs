@@ -2956,16 +2956,7 @@ unsafe fn do_ifelse(call: &Call<'_>) -> R<Sexp> {
     let Some(test) = argument(frame, symbols.test)? else {
         return decline();
     };
-    let atomic = matches!(
-        test.kind(),
-        SexpType::Logical
-            | SexpType::Integer
-            | SexpType::Real
-            | SexpType::Complex
-            | SexpType::String
-            | SexpType::Raw
-    );
-    if !atomic || test.attrib() != nil() || test.is_altrep() || length(test) != 1 {
+    if !test.kind().is_atomic() || test.attrib() != nil() || test.is_altrep() || length(test) != 1 {
         return decline();
     }
     let truth = values::as_logical_scalar(test);
@@ -2984,18 +2975,9 @@ unsafe fn do_ifelse(call: &Call<'_>) -> R<Sexp> {
         value.kind(),
         SexpType::Closure | SexpType::Builtin | SexpType::Special
     );
-    let one = function
-        || matches!(
-            value.kind(),
-            SexpType::Logical
-                | SexpType::Integer
-                | SexpType::Real
-                | SexpType::Complex
-                | SexpType::String
-                | SexpType::Raw
-                | SexpType::List
-                | SexpType::Expression
-        ) && length(value) == 1;
+    let vector =
+        value.kind().is_atomic() || matches!(value.kind(), SexpType::List | SexpType::Expression);
+    let one = function || vector && length(value) == 1;
     let attributes = value.attrib();
     let plain = attributes == nil()
         || function && attributes.tag() == symbols.srcref && attributes.cdr() == nil();
@@ -3052,6 +3034,7 @@ unsafe fn do_unlist(call: &Call<'_>) -> R<Sexp> {
     let flag = |value: Sexp| {
         value.kind() == SexpType::Logical
             && value.attrib() == nil()
+            && !value.is_altrep()
             && length(value) == 1
             && value.slice::<i32>()[0] != NA_LOGICAL
     };
