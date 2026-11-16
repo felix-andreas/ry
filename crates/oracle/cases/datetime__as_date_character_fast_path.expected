@@ -304,9 +304,35 @@
 | $class
 | [1] "Date"
 | 
+|            a            a 
+| "2024-03-15"           NA 
+|  Named num [1:2] 19797 NA
+|  - attr(*, "names")= chr [1:2] "a" "a"
+| $names
+| [1] "a" "a"
+| 
+| $class
+| [1] "Date"
+| 
+|            a            b            c            a 
+| "2024-03-15" "2024-03-16"           NA           NA 
+|  Named num [1:4] 19797 19798 NA NA
+|  - attr(*, "names")= chr [1:4] "a" "b" "c" "a"
+| $names
+| [1] "a" "b" "c" "a"
+| 
+| $class
+| [1] "Date"
+| 
+| [1] "a" ""  "a" ""  "a" "" 
+| $names
+| [1] "a" ""  "a" ""  "a" "" 
+| 
+| [1] "a" "b"
+| NULL
 [messages]
 [warnings]
 [errors]
 [value]
-list
-| list(class = "Date")
+NULL
+| NULL
