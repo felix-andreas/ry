@@ -3567,7 +3567,15 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
   - `eval(quote(next))` inside a loop reports no loop context.
 - **Top CRAN packages: what still fails** (`just top-packages`, `.corpus-top/tests/summary-installed.md`).
   The 100 most-downloaded CRAN packages outside the closure (`tools/corpus/top-packages.txt`), built
-  from source on ry: 85 have tests, GNU R passes 84, and ry passes 82 of those 84.
+  from source on ry: 86 have tests. In a container with the system libraries, GNU R passes 84 and
+  ry passes 82 of those 84. In the cloud container GNU R passes 74 and ry passes 75, 72 of them
+  where GNU R passes: units, sf, terra and ggplot2's `coord_sf` tests need system libraries
+  (udunits, GDAL) the container lacks, and lme4 and reformulas need rbibutils above the installed
+  2.3.
+  - Run the suites with `LC_ALL=C.UTF-8`, as the oracle does: in the C locale, desc reports
+    "Duplicate DESCRIPTION fields" on ry, a false failure.
+  - QuickJSR fails only when ry prints its notice about packages installed by another ry build on
+    a subprocess's stderr, which the test compares. Reinstall the library with the ry under test.
   - future, `reserved-keyword-functions.R`: GNU R byte-compiles a top-level loop before it runs
     it, and the compiler inlines base functions such as `<-` and `{`, so an override assigned
     inside the loop is never called. ry looks `<-` up on every iteration. Repro (GNU R prints
