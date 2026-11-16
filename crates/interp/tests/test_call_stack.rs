@@ -171,7 +171,7 @@ fn detached_argument_references_do_not_accumulate_roots() {
                    .Internal(vector(\"double\", 2000L))
                    x
                  }
-                 lp <- function(X, FUN) .Internal(lapply(X, FUN))",
+                 lp <- function(X, FUN, ...) .Internal(lapply(X, FUN))",
             )
             .unwrap_or_else(|failure| panic!("the setup failed: {failure}"));
             take_depths();

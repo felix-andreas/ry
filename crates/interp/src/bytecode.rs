@@ -186,9 +186,10 @@ struct Bodies {
     /// Below [`COMPILED`], the calls the body has seen; with that bit set, the index of its
     /// compiled entry in the columns below.
     states: FxHashMap<Sexp, u32>,
-    /// The compiled entries, as columns indexed by entry. `keys` holds the body, or `NULL` for
-    /// a free entry. None of the columns is traced: an entry holds its objects weakly and goes
-    /// once any of them dies, so the code lives exactly as long as a closure that runs it.
+    /// The compiled entries, as columns indexed by entry. `keys` holds the body, and `codes`
+    /// holds `NULL` for a free entry, since a body can itself be `NULL`, as `function(e) NULL`'s
+    /// is. None of the columns is traced: an entry holds its objects weakly and goes once any of
+    /// them dies, so the code lives exactly as long as a closure that runs it.
     keys: Vec<Sexp>,
     codes: Vec<Sexp>,
     formals: Vec<Sexp>,
@@ -317,10 +318,10 @@ impl Bodies {
             .retain(|&body, state| *state & COMPILED != 0 || liveness.is_live(body));
         let live = |object: Sexp| object == nil() || liveness.is_live(object);
         for entry in 0..self.keys.len() {
-            let body = self.keys[entry];
-            if body == nil() {
+            if self.codes[entry] == nil() {
                 continue;
             }
+            let body = self.keys[entry];
             if !live(body)
                 || !live(self.codes[entry])
                 || !live(self.formals[entry])
