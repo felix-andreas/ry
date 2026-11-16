@@ -88,3 +88,27 @@ thrice(function() Filter(function(x) x > 1, 1:3))
 thrice(function() Reduce(`+`, lapply(1:3, function(x) x), accumulate = TRUE))
 thrice(function() do.call(lapply, list(1:2, function(x) x + 1L)))
 thrice(function() lapply(X = 1:2, FUN = function(x) parent.frame()$X))
+
+# a builtin FUN, with extra arguments, tags, objects, errors and warnings
+length.box <- function(x) 99L
+thrice(function() vapply(c(1.26, 2.71), round, 1, digits = 1))
+thrice(function() lapply(list(1:3, letters), length))
+thrice(function() lapply(list(structure(list(), class = "box"), 1:2), length))
+thrice(function() lapply(list(1, factor("a"), Sys.Date()), is.numeric))
+thrice(function() vapply(list(NULL, 1, NULL), is.null, NA))
+thrice(function() lapply(list(a = 1:2, b = 3), sum, 10, na.rm = TRUE))
+thrice(function() { n <- 0; r <- lapply(1:3, sum, { n <- n + 1; 100 }); c(unlist(r), n) })
+thrice(function() lapply(1:2, sum, length(sys.frames())))
+thrice(function() tryCatch(lapply(list(1, "a"), sqrt), error = function(e) deparse(conditionCall(e))))
+thrice(function() tryCatch(lapply(1:2, sum, stop("lazy")), error = function(e) conditionMessage(e)))
+thrice(function() withCallingHandlers(
+  lapply(c(-1, 4), sqrt),
+  warning = function(w) { print(conditionCall(w)); invokeRestart("muffleWarning") }
+))
+thrice(function() tryCatch(lapply(1:2, c, , 3), error = function(e) conditionMessage(e)))
+thrice(function() lapply(list(1:2, 3:4), `names<-`, c("p", "q")))
+thrice(function() { l <- list(c(a = 1), c(b = 2)); r <- lapply(l, `names<-`, "z"); list(l, r) })
+thrice(function() lapply(list(quote(f(x)), quote(g(y, z))), as.list))
+thrice(function() vapply(list(1:3, 4:6), `[[`, 0L, 2L))
+thrice(function() lapply(1:2, environment))
+thrice(function() vapply(1:2, function(x) x, 1L, USE.NAMES = FALSE))
