@@ -39,13 +39,18 @@ local({
 
   # The fixtures: inputs every case may name, each built from a seed of its own the first time a
   # case names it, so a process builds only the ones its cases use and every engine builds the
-  # same values whatever order the cases run in.
+  # same values whatever order the cases run in. A large fixture is dropped again before a case
+  # that does not name it, because the time of a call that allocates depends on how much the
+  # collector holds alive, and so every case runs beside the small fixtures and its own inputs.
   fixtures <- new.env(parent = globalenv())
   builders <- environment()
+  recipes <- list()
   fixture <- function(name, seed, expression, n = NULL) {
     expression <- substitute(expression)
     if (!is.null(n)) expression <- do.call(substitute, list(expression, list(n = n)))
-    eval(call("delayedAssign", name, call("{", call("set.seed", seed), expression), builders, fixtures))
+    recipe <- call("delayedAssign", name, call("{", call("set.seed", seed), expression), builders, fixtures)
+    recipes[[name]] <<- recipe
+    eval(recipe)
   }
   words <- c("alpha", "beta", "gamma", "delta", "price", "yield", "curve", "bond", "rate", "spread",
              "the", "of", "and", "to", "in", "is", "for", "on", "with", "as")
@@ -182,6 +187,8 @@ local({
   home <- tempfile("sweep-")
   dir.create(home)
   sinks <- sink.number()
+  large_names <- grep("_1e6$|^mat_1000$", fixture_names, value = TRUE)
+  built_large <- character()
   for (id in wanted) {
     case <- cases[[id]]
     if (is.null(case)) {
@@ -191,8 +198,15 @@ local({
     options_before <- options()
     setwd(home)
     line <- tryCatch({
-      for (name in intersect(all.names(case$expression), fixture_names)) get(name, envir = fixtures)
-      for (name in intersect(all.names(case$setup), fixture_names)) get(name, envir = fixtures)
+      needed <- intersect(c(all.names(case$expression), all.names(case$setup)), fixture_names)
+      dropped <- setdiff(built_large, needed)
+      for (name in dropped) {
+        rm(list = name, envir = fixtures)
+        eval(recipes[[name]])
+      }
+      if (length(dropped) > 0L) invisible(gc())
+      built_large <- intersect(union(built_large, needed), large_names)
+      for (name in needed) get(name, envir = fixtures)
       scope <- new.env(parent = fixtures)
       set.seed(42L)
       if (!is.null(case$setup)) eval(case$setup, scope)

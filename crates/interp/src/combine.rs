@@ -55,7 +55,57 @@ unsafe fn do_c(call: &Call<'_>) -> R<Sexp> {
         .filter(|arg| arg.tag != symbols.recursive && arg.tag != symbols.use_names)
         .copied()
         .collect();
+    if recursive && args.iter().all(|arg| arg.tag == nil()) {
+        if let Some(result) = flatten_plain(&args)? {
+            return Ok(result);
+        }
+    }
     combine_items(Items::Args(&args), recursive, use_names)
+}
+
+/// `c(..., recursive = TRUE)` of untagged arguments that are each `NULL`, an atomic vector
+/// without attributes, or a list without attributes of such vectors: no names can arise, so the
+/// leaves concatenate as `direct_c` concatenates its arguments. `None` when an argument is
+/// anything else.
+unsafe fn flatten_plain(args: &[Arg]) -> R<Option<Sexp>> {
+    let plain = |value: Sexp| {
+        value == nil()
+            || (value.kind().is_atomic() && !value.is_altrep() && value.attrib() == nil())
+    };
+    let is_list = |value: Sexp| {
+        value.kind() == SexpType::List && !value.is_altrep() && value.attrib() == nil()
+    };
+    let mut kind = SexpType::Nil;
+    let mut total = 0;
+    let mut count = |value: Sexp| {
+        if value != nil() {
+            kind = coerce::higher_type(kind, value.kind());
+            total += length(value);
+        }
+    };
+    for arg in args {
+        let value = arg.value;
+        if is_list(value) {
+            for index in 0..length(value) {
+                let element = value.element(index);
+                if !plain(element) {
+                    return Ok(None);
+                }
+                count(element);
+            }
+        } else if plain(value) {
+            count(value);
+        } else {
+            return Ok(None);
+        }
+    }
+    let leaves = args.iter().flat_map(|arg| {
+        let value = arg.value;
+        let list = is_list(value);
+        let count = if list { length(value) } else { 1 };
+        (0..count).map(move |index| if list { value.element(index) } else { value })
+    });
+    concatenate(kind, total, leaves).map(Some)
 }
 
 /// `c(...)` of untagged arguments, none of which dispatches. When every argument is `NULL` or an
