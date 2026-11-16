@@ -661,11 +661,11 @@ unsafe fn slot_content(function: Sexp, header: usize, symbol: Sexp) -> Option<Se
 }
 
 /// The variable `symbol` a replacement in the running slot frame changes, read from `enclosure`
-/// because the frame's own slots do not bind it. An unbound one is an error naming no call, as
-/// in GNU R.
+/// because the frame's own slots do not bind it. GNU R evaluates the name in the enclosure, so
+/// an unbound one is reported against the call that made the enclosure, if a call did.
 pub(crate) unsafe fn enclosed_value(symbol: Sexp, enclosure: Sexp) -> R<Sexp> {
     interp().visible = true;
-    match eval_symbol_reporting(symbol, enclosure, nil) {
+    match eval_symbol(symbol, enclosure) {
         Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
         result => result,
     }
@@ -6985,9 +6985,9 @@ pub unsafe fn complex_assign(
     let lookup_env = if superassign { env.enclosure() } else { env };
     let mut base = find_var(inner, lookup_env)?;
     if base == unbound() {
-        // GNU R reports the unbound variable of an assignment against no call.
+        // GNU R evaluates the name in the enclosure, whose call the error then names.
         return Err(error_in(
-            nil(),
+            lexical_call(env.enclosure()),
             format!("object '{}' not found", symbol_name(inner)),
         ));
     }

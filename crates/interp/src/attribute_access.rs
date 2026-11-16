@@ -166,7 +166,7 @@ unsafe fn do_attr(call: &Call<'_>) -> R<Sexp> {
     if which.kind() != SexpType::String {
         return Err(call.error("'which' must be of mode character"));
     }
-    if length(which) != 1 {
+    if length(which) != 1 && crate::system::r_at_least(4, 6) {
         return Err(call.error("exactly one attribute 'which' must be given"));
     }
     let exact = present(matched[2]).is_some_and(|exact| values::as_logical_scalar(exact) == 1);
@@ -198,14 +198,14 @@ unsafe fn do_set_attr(call: &Call<'_>) -> R<Sexp> {
     let object = present(matched[0]).unwrap_or(nil());
     let which = present(matched[1]).unwrap_or(nil());
     let value = present(matched[2]).unwrap_or(nil());
-    // GNU R's `isValidString`, then its check for one name.
+    // GNU R's `isValidString`, then its check for one name, which R 4.6 added.
     if which.kind() != SexpType::String
         || length(which) == 0
         || which.element(0) == values::na_string()
     {
         return Err(call.error("'name' must be non-null character string"));
     }
-    if length(which) != 1 {
+    if length(which) != 1 && crate::system::r_at_least(4, 6) {
         return Err(call.error("'name' must be a scalar string"));
     }
     if object == nil() {

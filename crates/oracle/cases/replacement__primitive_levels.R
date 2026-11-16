@@ -252,6 +252,10 @@ failures <- function() {
   report(x[list()] <- 1)
   report(missing_variable$a <- 1)
   report(missing_variable[1] <<- 1)
+  inner <- function() {
+    missing_variable[1] <- 1
+  }
+  report(inner())
   invisible()
 }
 run(failures)
