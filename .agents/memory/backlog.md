@@ -3568,8 +3568,9 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
 - **Top CRAN packages: what still fails** (`just top-packages`, `.corpus-top/tests/summary-installed.md`).
   The 100 most-downloaded CRAN packages outside the closure (`tools/corpus/top-packages.txt`), built
   from source on ry: 86 have tests. In a container with the system libraries, GNU R passes 84 and
-  ry passes 82 of those 84. In the cloud container GNU R passes 79 and ry passes 76, all of them
-  where GNU R passes: units, sf, terra and ggplot2's `coord_sf` tests need system libraries
+  ry passes 82 of those 84 (measured while dplyr and janitor still failed). In the cloud container
+  GNU R passes 79 and ry passes 78 of them once QuickJSR's library is reinstalled with the ry under
+  test (below); sandwich is the one real failure. Of GNU R's failures there: units, sf, terra and ggplot2's `coord_sf` tests need system libraries
   (udunits, GDAL) the container lacks, and parallelly and future.apply fail on both.
   - Run the suites with `LC_ALL=C.UTF-8`, as the oracle does: in the C locale, desc reports
     "Duplicate DESCRIPTION fields" on ry, a false failure.
