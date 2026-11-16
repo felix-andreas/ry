@@ -1,6 +1,6 @@
 # Kernels modeled on a user's profiles of a package's test suite: each is one code shape that a
 # profile ranked high, cut down to a loop, with every name replaced by a neutral one. K1 to K5,
-# K12 and K13 follow shapes a user sent as code. K6 to K11, K14 and K15 are reconstructions from
+# K12 and K13 follow shapes a user sent as code. K6 to K11 and K14 are reconstructions from
 # one-line descriptions, and so are the sizes and the runner. `set.seed` and the `checks` list
 # make the data and one result per kernel comparable between GNU R and ry.
 #
@@ -139,8 +139,9 @@ fetchAll <- function(base) {
 }
 k14 <- function(n) for (i in seq_len(n)) for (base in lazyBases) fetchAll(base)
 
-# Reconstructed: "a grouped data.table `j` calling a small function, many small groups". GForce
-# cannot optimize a call to a user's function, so data.table's C code evaluates `j` once per group.
+# K15 follows no code a user sent: the profiles rank data.table's own code high, and this is the
+# shape in which its C code runs the most R code, a grouped `j` over many small groups. GForce
+# cannot optimize a call to a user's function, so `j` is evaluated once per group.
 grouped <- data.table(g = rep(1:4000, each = 5L), v = rnorm(20000), w = runif(20000))
 spread <- function(x) max(x) - min(x)
 groupSummary <- function(table) table[, .(s = spread(v), t = v[1L] + w[.N]), by = g]
