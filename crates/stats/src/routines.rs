@@ -786,7 +786,12 @@ fn complete_covariances(
 
 /// `data`, the whole column-major argument, when every row is used; otherwise the used rows of
 /// each of its `columns`, one column after another.
-fn used_rows<'a>(data: &'a [f64], columns: &[&[f64]], used: &[bool], used_count: usize) -> Cow<'a, [f64]> {
+fn used_rows<'a>(
+    data: &'a [f64],
+    columns: &[&[f64]],
+    used: &[bool],
+    used_count: usize,
+) -> Cow<'a, [f64]> {
     if used_count == used.len() {
         return Cow::Borrowed(data);
     }
@@ -806,7 +811,12 @@ fn used_rows<'a>(data: &'a [f64], columns: &[&[f64]], used: &[bool], used_count:
 
 /// Each column's mean rounded to double, as GNU R keeps it, taking a mean the caller already
 /// has; NA for a column holding a used NA.
-fn double_means(data: &[f64], rows: usize, means: &[Option<LongDouble>], missing: &[bool]) -> Vec<f64> {
+fn double_means(
+    data: &[f64],
+    rows: usize,
+    means: &[Option<LongDouble>],
+    missing: &[bool],
+) -> Vec<f64> {
     (0..means.len())
         .map(|index| {
             if missing[index] {
@@ -917,6 +927,8 @@ unsafe fn cdist(call: &NativeCall<'_>) -> R<Sexp> {
         return Err(call.error("distance(): invalid p"));
     }
     let at = |row: usize, column: usize| x[row + column * rows];
+    // GNU R warns once for each pair of coordinates the binary method skips as non-finite.
+    let skipped = std::cell::Cell::new(0usize);
     let distance = |first: usize, second: usize| -> f64 {
         let mut total = 0.0;
         let mut count = 0usize;
@@ -930,6 +942,7 @@ unsafe fn cdist(call: &NativeCall<'_>) -> R<Sexp> {
                         continue;
                     }
                     if !a.is_finite() || !b.is_finite() {
+                        skipped.set(skipped.get() + 1);
                         continue;
                     }
                     count += 1;
@@ -1011,10 +1024,44 @@ unsafe fn cdist(call: &NativeCall<'_>) -> R<Sexp> {
         }
     };
     let mut result = Vec::with_capacity(rows * rows.saturating_sub(1) / 2);
-    for second in 0..rows {
-        for first in second + 1..rows {
-            result.push(distance(first, second));
+    // With every coordinate finite no term is NaN, so no coordinate is skipped and each sum
+    // runs over all columns; such sums run on rows laid out contiguously.
+    let finite = columns > 0 && x.iter().all(|value| value.is_finite());
+    match method {
+        1 if finite => lower_triangle(
+            &x,
+            rows,
+            columns,
+            |a, b| (a - b) * (a - b),
+            f64::sqrt,
+            &mut result,
+        ),
+        3 if finite => lower_triangle(
+            &x,
+            rows,
+            columns,
+            |a, b| (a - b).abs(),
+            |total| total,
+            &mut result,
+        ),
+        6 if finite => lower_triangle(
+            &x,
+            rows,
+            columns,
+            |a, b| (a - b).abs().powf(power),
+            |total| total.powf(1.0 / power),
+            &mut result,
+        ),
+        _ => {
+            for second in 0..rows {
+                for first in second + 1..rows {
+                    result.push(distance(first, second));
+                }
+            }
         }
+    }
+    for _ in 0..skipped.get() {
+        call.warning("treating non-finite values as NA")?;
     }
     let answer = values::real_vector(&result)?;
     let names = values::names(attributes);
@@ -1028,6 +1075,50 @@ unsafe fn cdist(call: &NativeCall<'_>) -> R<Sexp> {
         }
     }
     Ok(answer)
+}
+
+/// Appends the lower triangle of `dist` for a column-major `x`, by columns, where each distance
+/// is `finish` of the sum of `term` over the columns. Each sum adds its terms in column order,
+/// as GNU R does, so the results are bit-identical; four distances are summed side by side so
+/// that their additions overlap instead of each waiting on the one before.
+fn lower_triangle(
+    x: &[f64],
+    rows: usize,
+    columns: usize,
+    term: impl Fn(f64, f64) -> f64,
+    finish: impl Fn(f64) -> f64,
+    result: &mut Vec<f64>,
+) {
+    const LANES: usize = 4;
+    let mut by_row = vec![0.0; rows * columns];
+    for (column, values) in x.chunks_exact(rows.max(1)).take(columns).enumerate() {
+        for (row, &value) in values.iter().enumerate() {
+            by_row[row * columns + column] = value;
+        }
+    }
+    let row = |index: usize| &by_row[index * columns..(index + 1) * columns];
+    for second in 0..rows {
+        let base = row(second);
+        let mut first = second + 1;
+        while first + LANES <= rows {
+            let lanes: [&[f64]; LANES] = std::array::from_fn(|lane| row(first + lane));
+            let mut totals = [0.0; LANES];
+            for (column, &b) in base.iter().enumerate() {
+                for (total, lane) in totals.iter_mut().zip(&lanes) {
+                    *total += term(lane[column], b);
+                }
+            }
+            result.extend(totals.map(&finish));
+            first += LANES;
+        }
+        for first in first..rows {
+            let total = row(first)
+                .iter()
+                .zip(base)
+                .fold(0.0, |total, (&a, &b)| total + term(a, b));
+            result.push(finish(total));
+        }
+    }
 }
 
 /// `complete.cases(...)`: which cases have no missing value in any argument.
