@@ -3,7 +3,76 @@ title: News
 description: Release announcements and project news
 ---
 
-## Unreleased
+## ry 0.5.0
+
+*Released in November 2026.*
+
+Version 0.5.0 ships typed packages with their machine code, builds a typed script into one
+executable, makes S4 objects and many base functions faster, and passes more CRAN test suites.
+Packages that ry 0.4.5 or earlier compiled must be reinstalled (below). Every figure was reported by
+the change that introduced it; none was re-measured for these notes.
+
+### Highlights
+
+- **Reinstall compiled packages.** ry refuses to load a package that an older ry compiled against
+  its C headers and says how to reinstall it, because such code can lose list elements to the
+  garbage collector. Packages installed by GNU R load unchanged.
+- **Typed packages carry their machine code.** `ry install` writes a package's compiled typed
+  functions beside its lazy-load database, so a new session runs their first calls without
+  compiling them, and installed typed code runs exactly as `ry run` runs it.
+- **`ry build --aot --exe`** turns a typed script into one executable.
+- **Faster S4.** `new()` shares the class prototype's slot values instead of deep-copying them, so
+  2,000 `new()` calls of a class whose prototype holds `runif(1e6)` take about 0.01 s where they
+  took 3.4 to 3.9 s (GNU R: about 10 s). `validObject` on a class with a validity method checks its
+  slots natively: a loop of 21,000 such objects takes 1.51 to 1.68 s against 2.45 to 2.78 s before
+  and 3.7 to 4.0 s on GNU R.
+- **Cheaper calls.** Tier 0's fast call path takes 72% of the hot suite's closure calls from compiled
+  code, up from 49%, and a call with no arguments costs 757 instructions where it cost 1,387.
+  Replacement calls (`f(x) <- v`, `x[i, j] <- v`, `x@name <- v`) and `lapply`'s element calls keep
+  the slot frame instead of giving it an environment, which cuts the hot suite's weighted
+  instructions by 2.3% to 3.0% across the three code bases.
+- **More CRAN packages pass their tests.** Of the test suites of the 100 most-downloaded CRAN
+  packages outside the benchmark set (`just top-packages`), ry passes 76 and GNU R 79 in the same
+  container, and ry passes 76 of the 79 that GNU R passes.
+
+### Faster base functions
+
+| Call | GNU R | ry 0.4.5 | ry 0.5.0 |
+| --- | ---: | ---: | ---: |
+| `parse(file, keep.source = TRUE)`, per file | 450 µs | 693 µs | 263 µs |
+| `readLines` (kernel k10) | 0.146 s | 0.203 s | 0.060 s |
+| `list.files` with a pattern (kernel k11) | 0.079 s | 0.125 s | 0.037 s |
+| `c(x, x)`, a million strings | 42.9 ms | 24.6 ms | 10.0 ms |
+| `unlist(list(x, x))`, a million strings | 22.8 ms | 33.1 ms | 14.2 ms |
+| `rep(x, 2)`, a million strings | 26.6 ms | 31.8 ms | 16.5 ms |
+| `x[perm]`, a million strings | 79.8 ms | 26.2 ms | 11.9 ms |
+| `as.Date` on strings (kernel k2) | 1.07 s | 0.532 s | 0.10 s |
+| `pmin` and `pmax` (kernel k8) | 1.55 s | 1.261 s | 0.16 s |
+
+The kernels are cut from a user's profile of a package test suite (`just bench-ci`). `ifelse`,
+`isTRUE`, `isFALSE`, `unname`, `%in%` and `unlist` run natively for the shapes they cover, which
+takes kernel k3 from 2.1x to 3.5x GNU R's speed and kernel k5 from 2.1x to 2.6x. `deparse(x, nlines
+= n)` stops after `n` lines, and loading a package's lazy-load database skips the byte code GNU R
+wrote into it.
+
+### Compatibility and fixes
+
+- `setTimeLimit()` and `setSessionTimeLimit()` raise their limits, with GNU R's errors.
+- `.S3methods()` works on ry's own namespaces.
+- A compiled `x[i, j] <- v` passes its subscripts to a dispatched method unevaluated, so data.table's
+  `DT[col == "a", "x"] <- 1` works. `Recall` forwards promises, and `$`, `@` and their replacement
+  methods receive the name as GNU R passes it.
+- `UseMethod` dispatches on the argument as passed, which removes a crash, and `x[]` drops the class
+  and `tsp`. A callee that modifies an argument forwarded through `...` copies it.
+- Fixes found by the top-CRAN suites: ALTREP arguments to `.C` and `.Fortran`, ALTREP classes across
+  attribute replacements, `Rf_setAttrib` with dimnames, NUL-trimmed C strings, `gctorture2`,
+  `cbind` and `rbind`, closed connections, `lengths`, `NextMethod` and `unlist` names.
+- The collector no longer frees the shared compiled code of a closure whose body is `NULL` (such as
+  `function(e) NULL` in `tryCatch`) while a later closure reuses it, which broke dplyr's and
+  janitor's suites.
+- Tier-0 steps that compiled code hands back no longer release handles the compiled code still
+  holds, which could free a live object.
+- `as.character` of a list deparses its elements as GNU R does.
 
 ### The profile summary counts refused compiles, and keys private names
 
