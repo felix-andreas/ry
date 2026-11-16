@@ -313,6 +313,6 @@ Editing or clarifying an existing rule is always welcome. A new rule must meet a
 2. **Repeatedly encountered**: it came up more than once (several hits in one session count).
 3. **Specific enough to act on**: a concrete instruction, not a vague principle.
 
-A rule that applies to a single crate belongs in that crate's own `AGENTS.md`, not here.
+A rule that applies to a single crate belongs in that crate's own `AGENTS.md`, not here. Before you edit a crate, read its `crates/<crate>/AGENTS.md` if it exists.
 
 Avoid architectural descriptions of a crate, such as its module layout, data flow, or key types. They go stale fast, and an agent can gather them by reading the code. A rule should mark a trap to avoid, not draw a map to follow.
