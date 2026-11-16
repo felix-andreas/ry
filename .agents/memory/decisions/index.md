@@ -200,6 +200,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Measured and not taken: a leaner `format()` on the validation workload
 - Base fast paths read formals one at a time, except `formatC()`
 - Parked: cheaper restart setup in `withRestarts` (planned)
+- Replacement calls and `lapply`/`vapply` element calls run on a slot frame's slots
 
 ## Builtins and base R
 
@@ -249,6 +250,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `%%` and `%/%` on doubles port GNU R's kernels, with a 64-bit path for whole numbers
 - `validObject` runs validity methods without its slot loop, and `new()` copies the prototype shallowly
 - Small base closures with call arguments run their bodies natively behind prologues
+- `c`, `unlist`, `rep` and positional `[` copy handle vectors a run at a time
 
 ## R compatibility
 
@@ -577,3 +579,4 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Docs information architecture: Introduction, Learn, Reference, Development
 - Landing-page and README samples are captured from the running tools
 - The decision log is one file per area, with a generated index and byte budgets
+- Source comments have length limits, enforced by a ratchet

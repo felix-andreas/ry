@@ -1234,13 +1234,11 @@ impl Space {
     }
 
     /// Takes over the pages and metadata [`Space::write_image`] wrote, in place of everything the
-    /// space held. `fill` receives each run of the image's pages that hold objects, in the space's
-    /// memory, with the offset of the run's bytes among the stored pages. The caller has checked that the space allocated exactly
-    /// what the writer's had when its image's objects began, so the objects allocated since live
-    /// where the image's copies of them go.
-    ///
-    /// `held` are objects the process holds outside the heap's tables, which must be among the
-    /// image's objects; when one is not, the space is left unchanged and the error is
+    /// space held. `fill` receives each run of the image's object pages, in the space's memory,
+    /// with the run's offset among the stored pages. The caller has checked that the space
+    /// allocated exactly what the writer's had when the image's objects began, so later objects
+    /// live where their image copies go. `held` are objects held outside the heap's tables, which
+    /// must be among the image's objects, or the space is left unchanged and the error is
     /// [`ImageError::Mismatch`].
     pub unsafe fn load_image(
         &mut self,

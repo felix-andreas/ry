@@ -421,7 +421,8 @@ pub fn elaborate_package(
     let description =
         fs::read_to_string(&description_path).map_err(|error| failed(&description_path, error))?;
     let encoding = SourceEncoding::of(&description);
-    let code_files = installed_code_files(&root.join("R")).map_err(|(path, error)| failed(&path, error))?;
+    let code_files =
+        installed_code_files(&root.join("R")).map_err(|(path, error)| failed(&path, error))?;
     let mut typed = config.check.strict;
     for path in &code_files {
         if typed {
@@ -509,7 +510,9 @@ fn installed_code_files(sources: &Path) -> Result<Vec<PathBuf>, (PathBuf, io::Er
     };
     let mut files = Vec::new();
     for entry in entries {
-        let path = entry.map_err(|error| (sources.to_path_buf(), error))?.path();
+        let path = entry
+            .map_err(|error| (sources.to_path_buf(), error))?
+            .path();
         let code = path
             .extension()
             .is_some_and(|extension| ["R", "r", "S", "q"].iter().any(|code| extension == *code));
@@ -615,19 +618,17 @@ fn findings(
     )
 }
 
-/// `input` rewritten for ry's runtime with the types the checker gave it. `elaborations` are
-/// sorted by start, outermost first, and either nest or are disjoint.
+/// `input` rewritten for ry's runtime with the types the checker gave it. `elaborations` are sorted
+/// by start, outermost first, and either nest or are disjoint. Text after a rewrite on its line
+/// moves with it.
 ///
-/// - A literal the checker typed `I64` is spelled as that `I64`: `5` and `5L` become `5i64`, and a
-///   whole `1e3` or `2.0` becomes `1000i64` or `2i64`, because the `i64` suffix takes only an
-///   integer. The conversion is exact, digit by digit, because an `f64` rounds past 2^53.
-/// - A list the runtime may build empty is passed through `.ry_items` with its item type, so
-///   `List.map(xs, f)` runs as `.ry_items(List.map(xs, f), "I64")`, and a dictionary built from
-///   no entries with its key and value types, as in `.ry_items(Dict.empty(), "Dict<Str, I64>")`.
-/// - A type in a function's signature is spelled canonically, so `x: Region` with
-///   `alias Region = :North | :South` runs as `x: :North | :South`.
-///
-/// Text after a rewrite on its line moves with it.
+/// - A literal typed `I64` is spelled as an `I64`: `5` and `5L` become `5i64`, and a whole `1e3` or
+///   `2.0` becomes `1000i64` or `2i64`, since the suffix takes only an integer. The conversion goes
+///   digit by digit, because an `f64` rounds past 2^53.
+/// - A list the runtime may build empty passes through `.ry_items` with its item type, as in
+///   `.ry_items(List.map(xs, f), "I64")`, and an empty dictionary with its key and value types.
+/// - A signature type is spelled canonically: `x: Region` with `alias Region = :North | :South`
+///   runs as `x: :North | :South`.
 pub fn elaborate(input: &[u8], elaborations: &[Elaboration]) -> Vec<u8> {
     let mut program = Vec::with_capacity(input.len() + 16 * elaborations.len());
     let mut copied = 0;

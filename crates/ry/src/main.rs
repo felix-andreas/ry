@@ -104,17 +104,16 @@ const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
 const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
 /// Eagerly committed arenas are backed by transparent huge pages, which the kernel zeroes in full
-/// on first touch. Analysis frees and reallocates far more memory than it keeps, so on Linux that
-/// zeroing cost a cold check more time than parsing did. The first arena is reserved before
-/// `main`, so the option is set from a constructor, as a default that
-/// `MIMALLOC_ARENA_EAGER_COMMIT` can still override. `libR.so` has its own allocator and sets the
-/// same option in `crates/libr/src/libr.rs`.
+/// on first touch, and analysis frees and reallocates far more memory than it keeps, so on Linux
+/// that zeroing cost a cold check more than parsing did. The first arena is reserved before `main`,
+/// so the option is set from a constructor, as a default that `MIMALLOC_ARENA_EAGER_COMMIT`
+/// overrides. `libR.so` has its own allocator and sets the same option in
+/// `crates/libr/src/libr.rs`.
 ///
-/// The purge delay drops from mimalloc v3's default of a second to 10 ms, which is v2's default
-/// (a workspace build links v2, because `libr` asks for it). A cold check runs for
-/// about a second and frees its parse trees file by file, so with the default delay none of that
-/// memory went back to the OS before the peak, which added about 15 MiB to peak RSS on a
-/// 300,000-line project at no measurable cost in time.
+/// The purge delay drops from mimalloc v3's default of a second to v2's 10 ms (a workspace build
+/// links v2, because `libr` asks for it): a cold check frees its parse trees file by file within
+/// about a second, and with the longer delay none of that memory returned to the OS before the
+/// peak, adding about 15 MiB to peak RSS on a 300,000-line project at no measurable time cost.
 #[cfg(all(feature = "mimalloc", target_os = "linux"))]
 #[used]
 #[unsafe(link_section = ".init_array")]
@@ -589,7 +588,9 @@ fn build_executable(file: &Path, output: Option<&Path>, runtime: Option<Runtime>
         ahead: true,
         ..flags
     };
-    if let Some(directory) = output.parent().filter(|directory| !directory.as_os_str().is_empty())
+    if let Some(directory) = output
+        .parent()
+        .filter(|directory| !directory.as_os_str().is_empty())
         && let Err(error) = fs::create_dir_all(directory)
     {
         cli::error(&format!("cannot create {}: {error}", directory.display()));
@@ -942,34 +943,36 @@ fn run_install(
             let staging = env::temp_dir().join(format!("ry-install-{}", std::process::id()));
             fs::create_dir_all(&staging)
                 .map_err(|error| format!("cannot create {}: {error}", staging.display()))?;
-            let result = build_tarball(runtime, &home, &root, &staging, false).and_then(|tarball| {
-                let mut command = std::process::Command::new(home.join("bin").join("R"));
-                command.args(["CMD", "INSTALL"]);
-                if let Some(library) = library {
-                    fs::create_dir_all(library)
-                        .map_err(|error| format!("cannot create {}: {error}", library.display()))?;
-                    command.arg("-l").arg(library);
-                }
-                if let Some(train) = train {
-                    let workload = match train {
-                        "tests" | "examples" | "none" => train.to_owned(),
-                        script => std::path::absolute(script)
-                            .map_err(|error| format!("cannot resolve {script}: {error}"))?
-                            .display()
-                            .to_string(),
-                    };
-                    command.arg(format!("--ry-train={workload}"));
-                }
-                let status = command
-                    .arg(&tarball)
-                    .status()
-                    .map_err(|error| format!("cannot run {command:?}: {error}"))?;
-                if status.success() {
-                    Ok(())
-                } else {
-                    Err(format!("installing {} failed", root.display()))
-                }
-            });
+            let result =
+                build_tarball(runtime, &home, &root, &staging, false).and_then(|tarball| {
+                    let mut command = std::process::Command::new(home.join("bin").join("R"));
+                    command.args(["CMD", "INSTALL"]);
+                    if let Some(library) = library {
+                        fs::create_dir_all(library).map_err(|error| {
+                            format!("cannot create {}: {error}", library.display())
+                        })?;
+                        command.arg("-l").arg(library);
+                    }
+                    if let Some(train) = train {
+                        let workload = match train {
+                            "tests" | "examples" | "none" => train.to_owned(),
+                            script => std::path::absolute(script)
+                                .map_err(|error| format!("cannot resolve {script}: {error}"))?
+                                .display()
+                                .to_string(),
+                        };
+                        command.arg(format!("--ry-train={workload}"));
+                    }
+                    let status = command
+                        .arg(&tarball)
+                        .status()
+                        .map_err(|error| format!("cannot run {command:?}: {error}"))?;
+                    if status.success() {
+                        Ok(())
+                    } else {
+                        Err(format!("installing {} failed", root.display()))
+                    }
+                });
             // The tarball is a by-product; a leftover in the temporary directory harms nothing.
             if let Err(error) = fs::remove_dir_all(&staging) {
                 tracing::debug!("cannot remove {}: {error}", staging.display());
@@ -1053,9 +1056,9 @@ fn build_tarball(
             let copy = staging.path().join(name);
             copy_package(root, &copy)?;
             for (path, program) in &elaborated {
-                let relative = path.strip_prefix(root).map_err(|_| {
-                    format!("{} is outside {}", path.display(), root.display())
-                })?;
+                let relative = path
+                    .strip_prefix(root)
+                    .map_err(|_| format!("{} is outside {}", path.display(), root.display()))?;
                 let target = copy.join(relative);
                 // `.Rbuildignore` left this file out, so the build does not read it.
                 if !target.is_file() {
@@ -1112,10 +1115,18 @@ fn copy_package(root: &Path, copy: &Path) -> Result<(), String> {
         .filter_map(|pattern| regex::Regex::new(&format!("(?i){pattern}")).ok())
         .collect();
     let canonical = |path: &Path| {
-        fs::canonicalize(path).map_err(|error| format!("cannot resolve {}: {error}", path.display()))
+        fs::canonicalize(path)
+            .map_err(|error| format!("cannot resolve {}: {error}", path.display()))
     };
     let mut ancestors = vec![canonical(root)?];
-    copy_directory(root, copy, Path::new(""), &ignored, &mut ancestors, &canonical)
+    copy_directory(
+        root,
+        copy,
+        Path::new(""),
+        &ignored,
+        &mut ancestors,
+        &canonical,
+    )
 }
 
 /// Copies the directory `relative` below `root` into `copy`. `ancestors` holds the directories
@@ -1133,8 +1144,8 @@ fn copy_directory(
     let target = copy.join(relative);
     fs::create_dir_all(&target)
         .map_err(|error| format!("cannot create {}: {error}", target.display()))?;
-    let entries =
-        fs::read_dir(&source).map_err(|error| format!("cannot read {}: {error}", source.display()))?;
+    let entries = fs::read_dir(&source)
+        .map_err(|error| format!("cannot read {}: {error}", source.display()))?;
     for entry in entries {
         let entry = entry.map_err(|error| format!("cannot read {}: {error}", source.display()))?;
         let name = entry.file_name();
@@ -1161,7 +1172,11 @@ fn copy_directory(
         } else if metadata.is_file() {
             let target = copy.join(&path);
             fs::copy(entry.path(), &target).map_err(|error| {
-                format!("cannot copy {} to {}: {error}", entry.path().display(), target.display())
+                format!(
+                    "cannot copy {} to {}: {error}",
+                    entry.path().display(),
+                    target.display()
+                )
             })?;
         }
     }

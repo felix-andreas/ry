@@ -336,21 +336,19 @@ const PACKAGE_TIERINGS: [Tiering; 2] = [
     },
 ];
 
-/// `ry run --aot` changes when typed functions compile and nothing a script can observe. Each
-/// seed writes a script of typed functions and runs it every way [`TIERINGS`] lists and as an
-/// executable `ry build --aot --exe` built, and every run must end with the same exit code,
-/// standard output and standard error. A script whose
-/// meaning does not rest on its annotations also runs with the annotations erased, which must
-/// print the same, and a script whose definitions mean the same in a package also runs with them
-/// installed as one, from a script that attaches it, and with them in a file the script sources.
+/// `ry run --aot` changes when typed functions compile and nothing a script can observe. Each seed
+/// writes a script of typed functions and runs it every way [`TIERINGS`] lists and as an `ry build
+/// --aot --exe` executable, and every run must end with the same exit code, stdout and stderr. A
+/// script whose meaning does not rest on its annotations also runs with them erased, which must
+/// print the same, and one whose definitions mean the same in a package also runs with them
+/// installed and attached, and sourced.
 ///
-/// The scripts are built from the shapes that make compiling ahead differ from compiling at a
-/// first call: a function called before its callee is defined, a name defined twice or bound to
-/// another function between calls, a definition inside a block, parameters typed by an alias, a
-/// conversion of what R returns, one whose vector is of a narrower type than the checker's or
-/// empty, one whose type changes between calls after an R call that printed, a literal that
-/// warns when it is lowered, a statement that collects garbage between its arguments, a changed
-/// `keep.source`, and a script that stops with an error partway.
+/// The scripts are built from shapes where compiling ahead differs from compiling at a first call:
+/// a call before its callee is defined, a name defined twice or rebound between calls, a definition
+/// inside a block, alias-typed parameters, a conversion of what R returns (narrower than the
+/// checker's type, empty, or changing type after an R call that printed), a literal that warns when
+/// lowered, a statement that collects garbage between its arguments, a changed `keep.source`, and a
+/// script that stops with an error partway.
 #[test]
 fn typed_scripts_agree_however_they_compile() {
     if let Some(reason) =
@@ -1120,25 +1118,24 @@ struct NativeProgram {
     source: String,
     /// Files the program reads from its working directory when it runs.
     siblings: Vec<PathBuf>,
-    /// Whether the program is written for strict mode, so it must report no error but the
-    /// `native` and `interpreted` findings of the functions its `# blocked:` header names. A program that is not
-    /// is left out when strict mode finds another error in it.
+    /// Whether the program is written for strict mode, so it must report no error but the `native`
+    /// and `interpreted` findings of the functions its `# blocked:` header names. A program that is
+    /// not is left out when strict mode finds another error in it.
     stated: bool,
 }
 
 /// `ry check` and the typed core must agree on which functions run natively. In strict mode a
-/// function whose signature is written in ry types gets a finding for whatever keeps it off
-/// native code: a `native` error for an R value, an `interpreted` warning for ry the typed core
-/// does not compile yet. A function without one must not fall back to the interpreter. Each
-/// program is checked in strict mode and run with `RY_TYPED_LOG`, and every fallback has to
-/// belong to a function that has such a finding, that the program declares a boundary
-/// function, or that `NATIVE_CHECK_EXCEPTIONS` pins.
+/// function with a signature in ry types gets a finding for whatever keeps it off native code (a
+/// `native` error for an R value, an `interpreted` warning for ry the typed core does not compile
+/// yet), and one without a finding must not fall back to the interpreter. Each program is checked
+/// in strict mode and run with `RY_TYPED_LOG`, and every fallback must belong to a function with a
+/// finding, a declared boundary function, or one `NATIVE_CHECK_EXCEPTIONS` pins.
 ///
-/// A program under `tests/native` states what it shows in its header: `# blocked: f, g` names
-/// the top-level functions that must get a finding, and `# boundary: h` the ones with
-/// an R type in their signature, which the interpreter runs. It runs without strict mode,
-/// because strict mode refuses to run a program with an error and the typed core compiles the
-/// same either way.
+/// A program under `tests/native` states in its header `# blocked: f, g` (the top-level functions
+/// that must get a finding) and `# boundary: h` (those with an R type in their signature, which the
+/// interpreter runs). It runs
+/// without strict mode, which refuses to run a program with an error, and the typed core compiles
+/// the same either way.
 #[test]
 fn native_diagnostics_agree_with_the_typed_core() {
     if let Some(reason) =
@@ -1552,19 +1549,18 @@ fn native_reads_leave_missing_arguments_to_the_interpreter() {
 }
 
 /// Two runs of the same program make the same collections: the trigger reads only the bytes the
-/// program allocated, never wall time, RSS or an address-dependent hash. The workload grows a
-/// kept list, fills hashed environments, interns fresh strings and builds closures. Instruction
-/// counts compared between builds rely on this; so does reading one process's `RY_GC_LOG`
-/// against another's.
+/// program allocated, never wall time, RSS or an address-dependent hash. Instruction counts
+/// compared between builds rely on this, and so does comparing two processes' `RY_GC_LOG`. The
+/// workload grows a kept list, fills hashed environments, interns fresh strings and builds
+/// closures.
 ///
-/// A minor collection escalates to an intermediate one only when the old generation's small
-/// objects fill the node limit to within a fifth of its minimum, about 25.6 MiB after start-up.
-/// The last eight rounds' tables are therefore held together with 10,000 small vectors each, so
-/// they outlive several minor collections and are promoted before they die. With them the old
-/// generation crosses that line about a third of the way through the loop, which leaves room
-/// for base R's start-up heap to shrink or grow. No `gc()` runs inside the loop, because a major
-/// collection would empty the old generation before it fills; the final one guarantees a major
-/// collection.
+/// A minor collection escalates only when old small objects fill the node limit to within a fifth
+/// of its minimum, about 25.6 MiB after start-up, so the last eight rounds' tables are held
+/// together with 10,000 small vectors each, so they outlive several minor collections and are
+/// promoted before they die. The old generation then crosses that line about a third of the way
+/// through the loop, leaving room for base R's start-up heap to change size. No `gc()` runs inside
+/// the loop, because a major collection would empty the old generation; the final one guarantees a
+/// major collection.
 #[test]
 fn identical_runs_make_identical_collections() {
     if let Some(reason) =
@@ -3172,7 +3168,8 @@ impl Journey {
                         "entry" => launch["stopOnEntry"] = json!(true),
                         "prelude" => launch["prelude"] = json!(value("R code")?),
                         "test" => launch["testName"] = json!(value("a test name")?),
-                        // `break 3` is a line of the program, `break R/file.R:3` one of another file.
+                        // `break 3` is a line of the program, `break R/file.R:3` one of another
+                        // file.
                         "break" => {
                             let place = value("a line")?;
                             let (file, line) = match place.rsplit_once(':') {

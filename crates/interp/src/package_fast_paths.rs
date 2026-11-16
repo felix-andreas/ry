@@ -44,8 +44,20 @@ pub const BUILTINS: &[BuiltinDef] = &[
 /// suite rather than as a silent slowdown. `RY_PRINT_FAST_PATH_HASHES=1` prints the hashes of the
 /// loaded functions.
 const FAST_PATHS: &[(&str, &str, &str, &str, u64)] = &[
-    ("compiler", "4.6.2", "compile", "ryCompilerCompile", 0x9234db8e3ce67b7b),
-    ("compiler", "4.6.2", "cmpfun", "ryCompilerCmpfun", 0xc3f352a43845fbe7),
+    (
+        "compiler",
+        "4.6.2",
+        "compile",
+        "ryCompilerCompile",
+        0x9234db8e3ce67b7b,
+    ),
+    (
+        "compiler",
+        "4.6.2",
+        "cmpfun",
+        "ryCompilerCmpfun",
+        0xc3f352a43845fbe7,
+    ),
     (
         "rlang",
         "1.3.0",

@@ -1,33 +1,31 @@
-//! Typed code files: the machine code an install compiles for a package's typed closures, which
-//! a later session maps instead of compiling.
+//! Typed code files: the machine code an install compiles for a package's typed closures, which a
+//! later session maps instead of compiling.
 //!
 //! `ry install` runs [`write`] in the process that records the package's code image. It compiles
-//! every typed closure of the package's database for the argument types its annotations
-//! declare, every version a training run compiled (`ry install --train`), and every typed
-//! function of the same database those call, and writes the code
-//! beside the database as `R/<package>.<build>.ryt` (`rcmd::images::typed_code`). The code is
-//! position independent: every word that differs between processes (a runtime helper's address,
-//! a shape's id, an R call site, a typed function of another namespace) is loaded from an offset
-//! table the loader fills, which sits just below the code.
+//! every typed closure of the package's database for its declared argument types, every version a
+//! training run compiled (`ry install --train`), and every typed function of the same database
+//! those call, and writes `R/<package>.<build>.ryt` beside the database
+//! (`rcmd::images::typed_code`). The code is position independent: every word that differs between
+//! processes (a runtime helper's address, a shape's id, an R call site, another namespace's typed
+//! function) is loaded from an offset table just below the code, which the loader fills.
 //!
-//! A session's first call of a typed closure read from such a database ([`attach`]) finds the
-//! version compiled for its argument types, checks that every lookup the code assumed still
-//! finds the same kind of function in the same binding, builds the R call sites, links the
-//! typed functions it calls, and uses the code as if it had compiled it. Anything that does not
-//! check out leaves the closure to compile as usual, so a stale or foreign file costs at most
-//! the time to find that out.
+//! A session's first call of a typed closure from such a database ([`attach`]) finds the version
+//! for its argument types, checks that every lookup the code assumed still finds the same kind of
+//! function in the same binding, builds the R call sites and links the typed callees. Anything that
+//! does not check out leaves the closure to compile as usual, so a stale or foreign file costs at
+//! most the time to find that out.
 
 use {
     crate::{
-        COMPILED, Compiled, Key, Linker, Refusal, compiled_or_refusal, earliest, lower_settled,
-        optimize, storage,
+        COMPILED, Compiled, Key, Linker, Refusal,
         backend::{
             self, Callee, Code, Entry, Helper, Slot, Slots, declare, file_frees, helper_address,
             libcall_helper,
         },
+        compiled_or_refusal, earliest,
         ir::{Item, Type},
         lower::{self, Conversion, Lowered, RArgument, RCall, RResult, Speculation},
-        shapes,
+        lower_settled, optimize, shapes, storage,
     },
     heap::{
         object::{Sexp, SexpType},
@@ -67,8 +65,11 @@ pub struct Written {
     pub skipped: BTreeMap<&'static str, usize>,
 }
 
-pub const BUILTINS: &[interp::builtins::BuiltinDef] =
-    &[interp::builtins::internal("ryTypedCodeWrite", 1, |call| unsafe { do_write(call) })];
+pub const BUILTINS: &[interp::builtins::BuiltinDef] = &[interp::builtins::internal(
+    "ryTypedCodeWrite",
+    1,
+    |call| unsafe { do_write(call) },
+)];
 
 /// `ryTypedCodeWrite(package)`: writes the typed code file of the package whose database the
 /// install under way recorded. Returns how many typed closures it has and how many versions
@@ -78,10 +79,7 @@ unsafe fn do_write(call: &interp::builtins::Call<'_>) -> interp::unwind::R<Sexp>
         .ok_or_else(|| interp::unwind::error("the package must be a string"))?
         .into_owned();
     let written = write(&package).map_err(interp::unwind::error)?;
-    let mut items = vec![
-        ("closures", written.closures),
-        ("written", written.written),
-    ];
+    let mut items = vec![("closures", written.closures), ("written", written.written)];
     for (reason, count) in &written.skipped {
         items.push((reason, *count));
     }
@@ -109,14 +107,17 @@ pub unsafe fn write(package: &str) -> Result<Written, String> {
         ));
     }
     let file_name = format!("{package}.rdb");
-    let Some(database) = code_image::recorded_databases().into_iter().find(|database| {
-        let path = Path::new(database);
-        path.file_name().is_some_and(|name| *name == *file_name)
-            && path
-                .parent()
-                .and_then(Path::file_name)
-                .is_some_and(|name| name == "R")
-    }) else {
+    let Some(database) = code_image::recorded_databases()
+        .into_iter()
+        .find(|database| {
+            let path = Path::new(database);
+            path.file_name().is_some_and(|name| *name == *file_name)
+                && path
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|name| name == "R")
+        })
+    else {
         return Ok(Written::default());
     };
     let Some(stamp) = DatabaseStamp::of(&database)? else {
@@ -137,9 +138,10 @@ pub unsafe fn write(package: &str) -> Result<Written, String> {
         compiled
             .iter()
             .filter(|(key, entry)| {
-                entry.as_ref().is_ok_and(|compiled| {
-                    compiled.guessed.is_none_or(|epoch| epoch == conversions)
-                }) && own.contains_key(&key.0)
+                entry
+                    .as_ref()
+                    .is_ok_and(|compiled| compiled.guessed.is_none_or(|epoch| epoch == conversions))
+                    && own.contains_key(&key.0)
             })
             .map(|(key, _)| key.clone())
             .collect()
@@ -161,7 +163,12 @@ pub unsafe fn write(package: &str) -> Result<Written, String> {
                 Err(_) => *written.skipped.entry("does not compile").or_default() += 1,
             },
             Err(_) if trained.contains(&closure) => {}
-            Err(_) => *written.skipped.entry("compiles with its caller").or_default() += 1,
+            Err(_) => {
+                *written
+                    .skipped
+                    .entry("compiles with its caller")
+                    .or_default() += 1
+            }
         }
     }
     let names = binding_names(package);
@@ -218,17 +225,33 @@ pub unsafe fn write_script(
             continue;
         }
         own.insert(closure, (u64::from(definition.index), 0));
-        names.insert(closure, rvalues::symbol_name(definition.symbol).into_owned());
+        names.insert(
+            closure,
+            rvalues::symbol_name(definition.symbol).into_owned(),
+        );
         written.closures += 1;
         match crate::ahead::declared_params(closure) {
             Ok(params) => match compiled_or_refusal(closure, &params) {
                 Ok(_) => roots.push((closure, params)),
                 Err(_) => *written.skipped.entry("does not compile").or_default() += 1,
             },
-            Err(_) => *written.skipped.entry("compiles with its caller").or_default() += 1,
+            Err(_) => {
+                *written
+                    .skipped
+                    .entry("compiles with its caller")
+                    .or_default() += 1
+            }
         }
     }
-    let bytes = encode(&roots, &own, &names, SCRIPT_PACKAGE, stamp, build, &mut written)?;
+    let bytes = encode(
+        &roots,
+        &own,
+        &names,
+        SCRIPT_PACKAGE,
+        stamp,
+        build,
+        &mut written,
+    )?;
     Ok((bytes, written))
 }
 
@@ -520,9 +543,8 @@ unsafe fn emit(
     if !failed.is_empty() {
         return Ok(Emission::LeftOut(failed));
     }
-    let linked = object.finish(&mut |name| {
-        libcall_helper(name).map(|helper| slots.number(Slot::Helper(helper)))
-    });
+    let linked = object
+        .finish(&mut |name| libcall_helper(name).map(|helper| slots.number(Slot::Helper(helper))));
     let offset_of = |id: FuncId| -> Option<u64> {
         linked
             .functions
@@ -1043,7 +1065,11 @@ impl Encoder<'_> {
                 .zip(&lookups)
                 .find(|(speculation, _)| {
                     speculation.function.kind() == SexpType::Closure
-                        && path_to(bytecode::closure_body(speculation.function), call, &mut steps)
+                        && path_to(
+                            bytecode::closure_body(speculation.function),
+                            call,
+                            &mut steps,
+                        )
                 })
                 .map(|(_, &lookup)| Place {
                     holder: Some(lookup),
@@ -1058,7 +1084,11 @@ impl Encoder<'_> {
         }
         let mut callees = Vec::with_capacity(version.linker.callees.len());
         for (position, session) in version.linker.callees.iter().enumerate() {
-            let key = version.linker.called.get(position).ok_or(UNNAMED_FUNCTION)?;
+            let key = version
+                .linker
+                .called
+                .get(position)
+                .ok_or(UNNAMED_FUNCTION)?;
             let lookup = identify(key.0).ok_or(UNNAMED_FUNCTION)?;
             let mut params = SmallVec::new();
             for &param in &session.params {
@@ -1081,7 +1111,10 @@ impl Encoder<'_> {
         for &param in &version.key.1 {
             params.push(self.shapes.ty(param).map_err(|_| UNNAMED_SHAPE)?);
         }
-        let result = self.shapes.ty(version.ir.result).map_err(|_| UNNAMED_SHAPE)?;
+        let result = self
+            .shapes
+            .ty(version.ir.result)
+            .map_err(|_| UNNAMED_SHAPE)?;
         let mut confirms = Vec::with_capacity(lowered.constructed.len());
         for &shape in &lowered.constructed {
             confirms.push(self.shapes.shape(shape).map_err(|_| UNNAMED_SHAPE)?);
@@ -1094,10 +1127,14 @@ impl Encoder<'_> {
                     matches.layouts.push(key);
                 }
                 for &tag in &any_tag.tags {
-                    matches.tags.push(self.shapes.tag(tag).map_err(|_| UNNAMED_SHAPE)?);
+                    matches
+                        .tags
+                        .push(self.shapes.tag(tag).map_err(|_| UNNAMED_SHAPE)?);
                 }
                 for &shape in &any_tag.tested {
-                    matches.tested.push(self.shapes.shape(shape).map_err(|_| UNNAMED_SHAPE)?);
+                    matches
+                        .tested
+                        .push(self.shapes.shape(shape).map_err(|_| UNNAMED_SHAPE)?);
                 }
                 Some(matches)
             }
@@ -2035,7 +2072,8 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, Malformed> {
         parsed.shapes.push(entry);
     }
     let shapes = &parsed.shapes;
-    let is_shape = |entry: u32| matches!(shapes.get(entry as usize), Some(ShapeEntry::Shape { .. }));
+    let is_shape =
+        |entry: u32| matches!(shapes.get(entry as usize), Some(ShapeEntry::Shape { .. }));
     let count = input.count()?;
     if count as u64 != header.slots {
         return Err(MALFORMED);
@@ -2044,18 +2082,18 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, Malformed> {
     let (mut sites_named, mut callees_named) = (0u32, 0u32);
     for _ in 0..count {
         slots.push(match input.number()? {
-            0 => Slot::Helper(
-                *Helper::ALL
-                    .get(input.number()? as usize)
-                    .ok_or(MALFORMED)?,
-            ),
+            0 => Slot::Helper(*Helper::ALL.get(input.number()? as usize).ok_or(MALFORMED)?),
             1 => Slot::Interrupt,
-            2 => Slot::Shape(input.word().and_then(|entry| {
-                is_shape(entry).then_some(entry).ok_or(MALFORMED)
-            })?),
-            3 => Slot::Constant(input.word().and_then(|entry| {
-                is_shape(entry).then_some(entry).ok_or(MALFORMED)
-            })?),
+            2 => Slot::Shape(
+                input
+                    .word()
+                    .and_then(|entry| is_shape(entry).then_some(entry).ok_or(MALFORMED))?,
+            ),
+            3 => Slot::Constant(
+                input
+                    .word()
+                    .and_then(|entry| is_shape(entry).then_some(entry).ok_or(MALFORMED))?,
+            ),
             4 => Slot::Data(input.index(header.data_length as usize)?),
             5 => {
                 let site = input.word()?;
@@ -2241,8 +2279,6 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, Malformed> {
     Ok(parsed)
 }
 
-// Loading.
-
 thread_local! {
     /// The typed code file of each database this thread attached from, with the stamp the
     /// database was read with. A file that cannot be used is kept as `None`, so it is looked at
@@ -2345,7 +2381,13 @@ unsafe fn open(note: Note) -> Option<&'static Mapped> {
         let label = String::from("the executable's code file");
         match interp::interp().ahead.code.clone() {
             Some(code) => (
-                open_file(&code.path, code.offset, Some(code.length), note, label.clone()),
+                open_file(
+                    &code.path,
+                    code.offset,
+                    Some(code.length),
+                    note,
+                    label.clone(),
+                ),
                 label,
             ),
             None => (Err(String::from("the session runs no executable")), label),
@@ -2437,7 +2479,9 @@ unsafe fn open_file(
         return Err(String::from("its code is for another processor"));
     }
     if header.stamp != note.stamp {
-        return Err(String::from("it was written for another copy of the package"));
+        return Err(String::from(
+            "it was written for another copy of the package",
+        ));
     }
     let tail = header.code_length.next_multiple_of(8) + header.data_length;
     if header.code_offset.checked_add(tail) != Some(length) {
@@ -2615,7 +2659,12 @@ unsafe fn copy_code(
     tail: usize,
 ) -> Result<(), String> {
     use std::os::unix::fs::FileExt;
-    let failed = |what: &str| format!("cannot copy its {what}: {}", std::io::Error::last_os_error());
+    let failed = |what: &str| {
+        format!(
+            "cannot copy its {what}: {}",
+            std::io::Error::last_os_error()
+        )
+    };
     // A failed fixed mapping may have released part of the range, so map it afresh.
     let writable = libc::mmap(
         code.cast(),
@@ -2670,8 +2719,10 @@ unsafe fn live_shapes(parsed: &Parsed) -> Result<Vec<u32>, String> {
                     .ok_or_else(|| String::from("a shape too large for a box"))?
             }
             ShapeEntry::Union(members) => {
-                let members: SmallVec<[u32; 4]> =
-                    members.iter().map(|&member| live[member as usize]).collect();
+                let members: SmallVec<[u32; 4]> = members
+                    .iter()
+                    .map(|&member| live[member as usize])
+                    .collect();
                 shapes::union_of(&members)
             }
             ShapeEntry::Array(item) => shapes::array_of(live_item(*item, &live)),
@@ -2819,11 +2870,12 @@ unsafe fn attach_inner(
             && conversion.guessed()
         {
             // The code was compiled for the type the conversion gave in the install's session.
-            let assumed = storage(ty).is_some_and(|(kind, _)| {
-                interp::numbers::assume_conversion(conversion.call, kind)
-            });
+            let assumed = storage(ty)
+                .is_some_and(|(kind, _)| interp::numbers::assume_conversion(conversion.call, kind));
             if !assumed {
-                return Err("a conversion it guessed the type of gave another type in this session");
+                return Err(
+                    "a conversion it guessed the type of gave another type in this session",
+                );
             }
             guessed = Some(interp::numbers::conversion_epoch());
         }
@@ -2993,8 +3045,7 @@ unsafe fn live_env(mapped: &Mapped, env: &EnvRef) -> Option<Sexp> {
         EnvRef::StandardLibrary => interp::standard_library::builtins_env()?,
         EnvRef::Namespace(package) => loaded_namespace(rvalues::install(name(package)).ok()?)?,
         EnvRef::Imports(package) => {
-            let imports =
-                loaded_namespace(rvalues::install(name(package)).ok()?)?.enclosure();
+            let imports = loaded_namespace(rvalues::install(name(package)).ok()?)?.enclosure();
             if !named(imports, &format!("imports:{}", name(package))) {
                 return None;
             }
@@ -3044,20 +3095,19 @@ unsafe fn build_site_inner(
 ) -> Result<RCall, &'static str> {
     const UNBUILT: &str = "the session cannot build an R call it makes";
     const UNPLACED: &str = "an R call it makes is not where the file says in its function's body";
-    let placed = |place: &Place,
-                  resolved: &mut FxHashMap<u32, Speculation>|
-     -> Result<Sexp, &'static str> {
-        let holder = match place.holder {
-            None => closure,
-            Some(lookup) => found(mapped, resolved, lookup)?.function,
+    let placed =
+        |place: &Place, resolved: &mut FxHashMap<u32, Speculation>| -> Result<Sexp, &'static str> {
+            let holder = match place.holder {
+                None => closure,
+                Some(lookup) => found(mapped, resolved, lookup)?.function,
+            };
+            if holder.kind() != SexpType::Closure {
+                return Err(UNPLACED);
+            }
+            follow(bytecode::closure_body(holder), &place.steps)
+                .filter(|call| call.kind() == SexpType::Language)
+                .ok_or(UNPLACED)
         };
-        if holder.kind() != SexpType::Closure {
-            return Err(UNPLACED);
-        }
-        follow(bytecode::closure_body(holder), &place.steps)
-            .filter(|call| call.kind() == SexpType::Language)
-            .ok_or(UNPLACED)
-    };
     let heap = interp::heap();
     let strings = &mapped.parsed.strings;
     // Everything the site holds lives as long as the code that may use it, which is the session.
@@ -3066,7 +3116,7 @@ unsafe fn build_site_inner(
         value
     };
     let conversion = |conversion: &FileConversion,
-                          resolved: &mut FxHashMap<u32, Speculation>|
+                      resolved: &mut FxHashMap<u32, Speculation>|
      -> Result<Conversion, &'static str> {
         let function = found(mapped, resolved, conversion.function)?.function;
         Ok(Conversion {
@@ -3094,15 +3144,17 @@ unsafe fn build_site_inner(
     }
     let result = match &site.result {
         SiteResult::Unused => RResult::Unused,
-        SiteResult::Converted(converted, ty) => {
-            RResult::Converted(conversion(converted, resolved)?, live_type(*ty, &mapped.live))
-        }
+        SiteResult::Converted(converted, ty) => RResult::Converted(
+            conversion(converted, resolved)?,
+            live_type(*ty, &mapped.live),
+        ),
         SiteResult::Table => RResult::Table,
     };
     Ok(RCall {
         function: found(mapped, resolved, site.function)?.function,
         call: placed(&site.call, resolved)?,
-        env: live_env(mapped, &site.env).ok_or("an R call it makes runs in a missing environment")?,
+        env: live_env(mapped, &site.env)
+            .ok_or("an R call it makes runs in a missing environment")?,
         arguments,
         result,
         diverges: site.diverges,
@@ -3196,8 +3248,7 @@ pub mod testing {
         super::{
             ALIGN, Argument, Class, EnvRef, Expr, FieldNames, FileCallee, FileConversion,
             HEADER_SIZE, Header, Item, LayoutKey, Lookup, Matches, Parsed, Place, ShapeEntry, Site,
-            SiteResult, Target,
-            Version, encode_header, encode_metadata, parse,
+            SiteResult, Target, Version, encode_header, encode_metadata, parse,
         },
         crate::{
             backend::{Helper, Slot},
@@ -3272,7 +3323,8 @@ pub mod testing {
         let strings = parsed.strings.len();
         for _ in 0..entropy.below(6) {
             let shapes = &parsed.shapes;
-            let records: Vec<u32> = indices(shapes, |entry| matches!(entry, ShapeEntry::Shape { .. }));
+            let records: Vec<u32> =
+                indices(shapes, |entry| matches!(entry, ShapeEntry::Shape { .. }));
             let entry = match entropy.below(3) {
                 1 if !records.is_empty() => {
                     let count = 1 + entropy.below(records.len());
@@ -3393,9 +3445,7 @@ pub mod testing {
             let slot = match entropy.below(7) {
                 0 => Slot::Helper(Helper::ALL[entropy.below(Helper::ALL.len())]),
                 2 if !records.is_empty() => Slot::Shape(records[entropy.below(records.len())]),
-                3 if !records.is_empty() => {
-                    Slot::Constant(records[entropy.below(records.len())])
-                }
+                3 if !records.is_empty() => Slot::Constant(records[entropy.below(records.len())]),
                 4 if data_length > 0 => Slot::Data(entropy.below(data_length as usize) as u32),
                 5 if !parsed.sites.is_empty() => {
                     Slot::Site(entropy.below(parsed.sites.len()) as u32)
@@ -3513,8 +3563,10 @@ pub mod testing {
             1 => Item::Dbl,
             2 => Item::Lgl,
             3 => Item::Str,
-            5 => pick(&mut below, |entry| matches!(entry, ShapeEntry::Shape { .. }))
-                .map_or(Item::I64, Item::Record),
+            5 => pick(&mut below, |entry| {
+                matches!(entry, ShapeEntry::Shape { .. })
+            })
+            .map_or(Item::I64, Item::Record),
             6 => pick(&mut below, |entry| matches!(entry, ShapeEntry::Union(_)))
                 .map_or(Item::Tag(shapes::ANY), Item::Tag),
             7 => pick(&mut below, |entry| matches!(entry, ShapeEntry::Array(_)))

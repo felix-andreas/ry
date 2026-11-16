@@ -5,6 +5,7 @@ use {
     crate::{
         apply_results::VapplyResults,
         builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
+        bytecode,
         eval::{self, define, find_var, find_var_in_frame, value_of},
         interp,
         sort::collation_order,
@@ -460,9 +461,7 @@ unsafe fn do_parent_env(call: &Call<'_>) -> R<Sexp> {
     let value = call.arg(0);
     let env = match value.kind() {
         SexpType::Environment => value,
-        SexpType::Object if value.has_gp(gp::S4_OBJECT) => {
-            get_attr(value, symbols().dot_xdata)
-        }
+        SexpType::Object if value.has_gp(gp::S4_OBJECT) => get_attr(value, symbols().dot_xdata),
         _ => nil(),
     };
     if env.kind() != SexpType::Environment {
@@ -1862,16 +1861,15 @@ unsafe fn call_function(function: Sexp, args: &[Arg], env: Sexp, call_expression
 /// `lapply(X, FUN)`: GNU R evaluates `FUN(X[[i]], ...)` in the closure's frame, so the call
 /// each iteration reports is exactly that.
 unsafe fn do_lapply(call: &Call<'_>) -> R<Sexp> {
-    let env = call.env()?;
-    let list = eval::eval_symbol(symbols().upper_x, env)?;
+    let list = call.arg(0);
     let count = length(list);
     let result = alloc(SexpType::List, count)?;
-    let mut calls = ElementCalls::new(list, env)?;
+    let mut calls = ElementCalls::new(call, list)?;
     // Each call's value is rooted in this scope until the result holds it, so the handle stack
     // stays as deep as one call however long `X` is.
     let mark = crate::heap().handle_mark();
     for index in 0..count {
-        let value = calls.call(index)?;
+        let value = calls.call(call, index)?;
         values::set_elt(result, index, value);
         crate::heap().release_handles(mark);
     }
@@ -1882,10 +1880,17 @@ unsafe fn do_lapply(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-/// The calls `FUN(X[[i]], ...)` that `lapply` and `vapply` make in the frame `env`, one per
-/// element of `X`.
+/// The calls `FUN(X[[i]], ...)` that `lapply` and `vapply` make in their closure's frame, one
+/// per element of `X`.
 struct ElementCalls {
+    /// The frame's environment, which the calls are made from; nil while they are made from
+    /// the frame's slots.
     env: Sexp,
+    /// The slot frame the calls are made from while it has no environment, and the register
+    /// that holds its `i`. A closure or builtin `FUN` over a plain `X` needs nothing of the
+    /// frame but its `...`, so the frame gets an environment only if `FUN` asks for its
+    /// caller's.
+    slots: Option<(usize, usize)>,
     index_symbol: Sexp,
     /// The integer `i` is bound to, which GNU R updates in place for each element.
     index: Sexp,
@@ -1901,7 +1906,7 @@ struct ElementCalls {
 }
 
 impl ElementCalls {
-    unsafe fn new(list: Sexp, env: Sexp) -> R<ElementCalls> {
+    unsafe fn new(call: &Call<'_>, list: Sexp) -> R<ElementCalls> {
         let symbols = symbols();
         let index_symbol = symbols.i;
         let element = values::call(symbols.bracket2, &[symbols.upper_x, index_symbol])?;
@@ -1919,25 +1924,67 @@ impl ElementCalls {
         } else {
             None
         };
-        let index = values::scalar_integer(0)?;
-        define(index_symbol, index, env)?;
-        Ok(ElementCalls {
+        let slots = match call.slot_frame() {
+            // The calls take the frame's `...` from its slot. A frame without the formal reads
+            // an enclosing function's `...`, or has none to read, which is an error.
+            Some(frame)
+                if plain.is_some()
+                    && matches!(call.arg(1).kind(), SexpType::Closure | SexpType::Builtin)
+                    && eval::slot_dots(frame).is_some() =>
+            {
+                eval::slot_register(frame, index_symbol).map(|slot| (frame, slot))
+            }
+            _ => None,
+        };
+        let env = match slots {
+            Some(_) => nil(),
+            None => call.env()?,
+        };
+        let mut calls = ElementCalls {
             env,
+            slots,
             index_symbol,
-            index,
-            bound_refcount: index.refcount(),
+            index: nil(),
+            bound_refcount: 0,
             plain,
             fun_call,
             known: atomic_elements(list),
-        })
+        };
+        calls.bind_index()?;
+        Ok(calls)
     }
 
-    unsafe fn call(&mut self, position: usize) -> R<Sexp> {
+    /// Binds `i` to a fresh integer, in the frame's slot or its environment.
+    unsafe fn bind_index(&mut self) -> R<()> {
+        self.index = values::scalar_integer(0)?;
+        match self.slots {
+            Some((_, slot)) => {
+                crate::heap().store_slot(&mut *bytecode::register_address(slot), self.index)
+            }
+            None => define(self.index_symbol, self.index, self.env)?,
+        }
+        self.bound_refcount = self.index.refcount();
+        Ok(())
+    }
+
+    /// Makes the remaining calls from the frame's environment `env`. What the frame did with
+    /// its `i` slot when it got the environment is its own business, so `i` is bound afresh.
+    unsafe fn leave_slots(&mut self, env: Sexp) -> R<()> {
+        self.env = env;
+        self.slots = None;
+        self.bind_index()
+    }
+
+    unsafe fn call(&mut self, call: &Call<'_>, position: usize) -> R<Sexp> {
         crate::scope(|| {
+            if let Some((frame, _)) = self.slots {
+                let env = interp().frames[frame].env;
+                if env != nil() {
+                    self.leave_slots(env)?;
+                }
+            }
             if self.index.refcount() != self.bound_refcount {
-                self.index = values::scalar_integer(0)?;
-                define(self.index_symbol, self.index, self.env)?;
-                self.bound_refcount = self.index.refcount();
+                self.bind_index()?;
             }
             self.index.slice_mut::<i32>()[0] = position as i32 + 1;
             let first = match self.plain {
@@ -1951,6 +1998,45 @@ impl ElementCalls {
                 }
                 None => None,
             };
+            if let Some((frame, _)) = self.slots {
+                // `FUN` is looked up for each element, and the frame's slot still holds the
+                // closure the internal was called with unless a callee rebound it.
+                let function = call.arg(1);
+                if let Some(first) = first
+                    && eval::slot_formal(frame, symbols().fun)
+                        .is_some_and(|(value, _)| value == function)
+                {
+                    if function.kind() == SexpType::Closure {
+                        return eval::force_and_call_from_slots(
+                            self.fun_call,
+                            function,
+                            frame,
+                            first,
+                            self.known.as_mut(),
+                        );
+                    }
+                    if let Some(value) =
+                        eval::call_builtin_from_slots(self.fun_call, function, frame, first)?
+                    {
+                        return Ok(value);
+                    }
+                    // Forcing `...` for the builtin may have given the frame its environment.
+                    let env = interp().frames[frame].env;
+                    if env != nil() {
+                        self.leave_slots(env)?;
+                        self.index.slice_mut::<i32>()[0] = position as i32 + 1;
+                        return eval::force_and_call_with(
+                            self.fun_call,
+                            1,
+                            self.env,
+                            Some(first),
+                            self.known.as_mut(),
+                        );
+                    }
+                }
+                self.leave_slots(call.env()?)?;
+                self.index.slice_mut::<i32>()[0] = position as i32 + 1;
+            }
             eval::force_and_call_with(self.fun_call, 1, self.env, first, self.known.as_mut())
         })
     }
@@ -1974,12 +2060,12 @@ unsafe fn do_vapply(call: &Call<'_>) -> R<Sexp> {
     let list = call.arg(0);
     let count = length(list);
     let mut results = VapplyResults::new(call.arg(2), count, call.arg(3))?;
-    let mut calls = ElementCalls::new(list, call.env()?)?;
+    let mut calls = ElementCalls::new(call, list)?;
     // As in `do_lapply`, a value's root goes once the results hold it, except the first value's:
     // the results keep its names for the answer, and only the value keeps them alive.
     let mut mark = None;
     for index in 0..count {
-        let value = calls.call(index)?;
+        let value = calls.call(call, index)?;
         results.push(index, value)?;
         match mark {
             Some(mark) => crate::heap().release_handles(mark),

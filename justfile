@@ -58,8 +58,8 @@ prune *args:
 test *args:
     cargo test {{ args }}
 
-# The pre-landing check: tests, clippy at -D warnings, fmt, the licence notices, and the memory layout.
-gate: battery clippy fmt-check (notices "--check") (readme "--check") (memory "check")
+# The pre-landing check: tests, clippy at -D warnings, fmt, the licence notices, the memory layout and comment length.
+gate: battery clippy fmt-check (notices "--check") (readme "--check") (memory "check") comments
 
 # CI's test job, step for step: .github/workflows/ci.yml runs `nix develop .#ci -c just ci`. Run it
 # in that shell, whose GNU R, compiler, glibc and locales are the ones CI has. The variables are
@@ -223,6 +223,11 @@ climb *args:
 # `index` regenerates decisions/index.md, and `check` fails on a stale index or an over-budget file.
 memory *args:
     python3 -I tools/memory.py {{ args }}
+
+# Fails when a Rust file has more over-long, banner or process-history comments than its baseline,
+# e.g. `just comments report 20` for the worst blocks or `just comments baseline` after shortening some.
+comments *args="check":
+    python3 -I tools/comments.py {{ args }}
 
 # Regenerates what the READMEs show: the benchmark blocks and chart from the committed results files,
 # and the diagnostic panels docs/public/diagnostic*.svg from real `ry check` runs on the README's examples.

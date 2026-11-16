@@ -3573,7 +3573,7 @@ fn random_read_options(rng: &mut SplitMix64, bytes: &[u8]) -> io::ReadOptions {
     }
 }
 
-/// A read that needs no columns used to panic inside Polars, which cannot parse none. Input:
+/// A read that needs no columns counts the rows, although Polars cannot parse no columns. Input:
 /// `"a,b\n1,2\n3,4\n"` with `columns: Some(vec![])`.
 #[test]
 fn a_read_of_no_columns_counts_the_rows() {

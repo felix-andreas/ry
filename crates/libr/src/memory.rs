@@ -793,8 +793,6 @@ pub unsafe extern "C" fn R_maxLength(vector: Sexp) -> R_xlen_t {
     })
 }
 
-// Protection.
-
 /// What GNU R's inline `LENGTH` calls on a long vector; tcltk links against it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_BadLongVector(_object: *mut Header, file: *const c_char, line: c_int) {
@@ -1015,8 +1013,6 @@ pub unsafe extern "C" fn R_ReleaseMSet(set: Sexp, keep_size: c_int) {
     })
 }
 
-// Collection.
-
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_gc() {
     runtime().heap.collect(Collection::Major);
@@ -1032,8 +1028,6 @@ pub unsafe extern "C" fn R_gc_running() -> c_int {
 pub unsafe extern "C" fn R_RunPendingFinalizers() {
     run_pending_finalizers();
 }
-
-// Transient and C-heap memory.
 
 unsafe fn arena_alloc(bytes: usize) -> ApiResult<*mut c_char> {
     if bytes == 0 {

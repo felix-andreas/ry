@@ -1,13 +1,12 @@
 //! Deterministic simulation of the language server (`ry::server::simulation`).
 //!
-//! Each seed drives one editor session (edits, typing bursts, saves, file-system changes with
-//! late, duplicated and reordered watcher events, requests at valid and invalid positions,
-//! abandoned requests, and edits that land while a query is in flight) and holds it against a
-//! server started from scratch on the same disk and buffers. Seeds run as `for_each_seed` runs
-//! them: `FUZZ_SEED` picks the first, `FUZZ_ITERS` how many, and a failure prints the command
-//! that replays it. `SIMULATION_SEED=<seed>` still runs just that seed and `SIMULATION_BASE`
-//! still moves the first, and `SIMULATION_ACTIONS` sets each session's length (`just simulate`
-//! runs many).
+//! Each seed drives one editor session (edits, typing bursts, saves, file-system changes with late,
+//! duplicated and reordered watcher events, requests at valid and invalid positions, abandoned
+//! requests, and edits that land while a query is in flight) and holds it against a server started
+//! from scratch on the same disk and buffers. Seeds run as `for_each_seed` runs them: `FUZZ_SEED`
+//! picks the first, `FUZZ_ITERS` how many, and a failure prints the command that replays it.
+//! `SIMULATION_SEED=<seed>` runs just that seed, `SIMULATION_BASE` moves the first, and
+//! `SIMULATION_ACTIONS` sets each session's length (`just simulate` runs many).
 
 use {
     ry::server::simulation::run_session,
