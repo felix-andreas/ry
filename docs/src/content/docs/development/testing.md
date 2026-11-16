@@ -730,7 +730,7 @@ diff's ordering rules turns it red within a few hundred seeds.
 - JSON Lines output;
 - the [exit-code contract](/reference/cli#exit-codes);
 - finding the configuration, and failing to;
-- per-file `# typing:` directives;
+- per-file `# typing:` directives and suppression comments;
 - `NAMESPACE` validation, and project stub overrides including their loader-problem reports;
 - data-masked evaluation;
 - the formatter's `--check` mode, range formatting, and literate documents;

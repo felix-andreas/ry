@@ -406,6 +406,47 @@ fn check_keeps_declared_packages_active_beside_override_stubs() {
     assert_eq!(output.code, 0, "stderr: {}", output.stderr);
 }
 
+// Every shipped overload set ends in an `Any` catch-all, so only an override reaches this.
+#[test]
+fn check_reports_no_matching_overload() {
+    let directory = project(&[
+        ("R/main.R", "answer <- pick(\"word\")\n"),
+        (
+            "stubs/project.Rtypes",
+            "pick : fn(x: integer) -> integer\npick : fn(x: double) -> double\n",
+        ),
+        ("ry.toml", "[check]\ntyping = true\n"),
+    ]);
+    let output = ry(directory.path(), &["check", "."]);
+    let rendered = &output.stderr;
+    assert_eq!(output.code, 1, "stderr: {rendered}");
+    assert!(
+        rendered.contains(
+            "no overload of `pick` matches these arguments. I tried all 2 declared signatures"
+        ),
+        "expected the no-overload finding, got: {rendered}"
+    );
+}
+
+#[test]
+fn check_namespace_imports_resolve_bare_reads() {
+    let unimported = project(&[("R/main.R", "f <- function(x) rbindlist(x)\n")]);
+    let output = ry(unimported.path(), &["check", "."]);
+    let rendered = &output.stderr;
+    assert_eq!(output.code, 1, "stderr: {rendered}");
+    assert!(
+        rendered.contains("could not resolve `rbindlist`"),
+        "expected the unresolved warning without an import, got: {rendered}"
+    );
+
+    let imported = project(&[
+        ("R/main.R", "f <- function(x) rbindlist(x)\n"),
+        ("NAMESPACE", "importFrom(data.table, rbindlist)\n"),
+    ]);
+    let output = ry(imported.path(), &["check", "."]);
+    assert_eq!(output.code, 0, "stderr: {}", output.stderr);
+}
+
 #[test]
 fn check_collate_order_decides_the_package_winner() {
     // The reader errors only when the character binding wins: path order makes `b.R`
@@ -860,6 +901,22 @@ fn check_exclude_scopes_the_walk_but_not_a_named_file() {
         "a file named on the command line is always checked: {}",
         output.stderr
     );
+
+    fs::write(
+        directory.path().join("ry.toml"),
+        "[check]\nexclude = [\"scripts/\"]\n",
+    )
+    .expect("rewrite ry.toml");
+    let output = ry(directory.path(), &["check", "."]);
+    let rendered = &output.stderr;
+    assert_eq!(output.code, 1, "stderr: {rendered}");
+    assert!(rendered.contains("top_unused"), "{rendered}");
+    assert!(
+        !rendered.contains("script_unused")
+            && !rendered.contains("deep_unused")
+            && !rendered.contains("kept_unused"),
+        "a trailing slash excludes the whole subtree: {rendered}"
+    );
 }
 
 #[test]
@@ -894,6 +951,34 @@ fn fmt_check_lists_dirty_files_and_writes_nothing() {
     );
     let content = fs::read_to_string(directory.path().join("dirty.R")).expect("read dirty.R");
     assert_eq!(content, "x<-1\n", "--check must not modify files");
+
+    let output = ry(directory.path(), &["fmt", "--check", "clean.R"]);
+    let stderr = &output.stderr;
+    assert_eq!(output.code, 0, "stderr: {stderr}");
+    assert!(
+        stderr.contains("0 files would be reformatted, 1 file already formatted"),
+        "expected a summary line, got: {stderr}"
+    );
+}
+
+// A suppression also covers the line below it, hence the blank line.
+#[test]
+fn check_suppression_comments_drop_findings() {
+    let directory = project(&[(
+        "warn.R",
+        "x = 1 # ry: allow(assignment-operator, unused)\n\ny = 2\n",
+    )]);
+    let output = ry(directory.path(), &["check", "warn.R"]);
+    let rendered = &output.stderr;
+    assert_eq!(output.code, 1, "stderr: {rendered}");
+    assert!(
+        rendered.contains("warn.R:3:1"),
+        "the unsuppressed finding remains: {rendered}"
+    );
+    assert!(
+        !rendered.contains("warn.R:1:1"),
+        "the suppressed finding must not render: {rendered}"
+    );
 }
 
 #[test]

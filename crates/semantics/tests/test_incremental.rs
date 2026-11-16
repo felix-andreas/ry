@@ -116,6 +116,11 @@ fn an_edit_rechecks_the_edited_items_and_the_readers_whose_answers_change() {
         let files = db.project(sources);
         settle(&db, &files);
         db.checked_since();
+        settle(&db, &files);
+        assert!(
+            db.checked_since().is_empty(),
+            "{name}: settling twice rechecks nothing"
+        );
         for &(text, expected) in steps {
             db.edit(files[0], text.to_owned());
             settle(&db, &files);
@@ -677,11 +682,12 @@ fn report(db: &mut ProbeDatabase, files: &[SourceFile], lints: &LintConfig) {
     }
 }
 
-/// A diagnostics-only host keeps two trees here, never one per file. Its check still parses
-/// each file once, because the pass that derives from a tree holds it and no later pass reads
-/// one, and it reports what a host that keeps every tree reports.
+/// A cold check parses each file once, both on a host that keeps every tree and on a
+/// diagnostics-only host, which keeps two trees here, never one per file. The diagnostics-only
+/// host parses once because the pass that derives from a tree holds it and no later pass reads
+/// one, and it reports what the tree-keeping host reports.
 #[test]
-fn a_diagnostics_only_check_parses_each_file_once_with_two_trees() {
+fn a_cold_check_parses_each_file_once_on_either_host() {
     let mut bounded = ProbeDatabase::diagnostics_only();
     let files = wide_project(&bounded);
     let lints = LintConfig::default();
@@ -711,8 +717,10 @@ fn a_diagnostics_only_check_parses_each_file_once_with_two_trees() {
         "the bare `setClass` call is reported"
     );
 
-    let keeping = ProbeDatabase::default();
+    let mut keeping = ProbeDatabase::default();
     let kept_files = wide_project(&keeping);
+    cold_check(&mut keeping, &kept_files, &lints);
+    assert_eq!(keeping.trees().parses(), kept_files.len() as u64);
     let expected = diagnostics_of(&keeping, &kept_files);
     assert!(!expected.is_empty(), "the project has findings to compare");
     assert_eq!(diagnostics_of(&bounded, &files), expected);

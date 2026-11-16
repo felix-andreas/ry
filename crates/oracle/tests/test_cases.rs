@@ -214,6 +214,31 @@ fn a_listed_case_fails_the_run_when_it_passes_or_crashes() {
     }
 }
 
+/// An entry that names an unknown engine, a case that does not exist, or the same case and engine
+/// twice is refused.
+#[test]
+fn a_mistyped_or_repeated_known_failure_is_refused() {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let entry = |case: &str, engine: &str| {
+        format!(
+            "[[failure]]\ncase = \"{case}\"\nengine = \"{engine}\"\narea = \"jit\"\n\
+             reason = \"differs\"\n"
+        )
+    };
+    let valid = entry("base__match_arg_native", "ry-jit");
+    assert!(parse_known_failures(&valid, directory).is_ok());
+    for refused in [
+        entry("base__match_arg_native", "ry-turbo"),
+        entry("base__no_such_case", "ry-jit"),
+        format!("{valid}{valid}"),
+    ] {
+        assert!(
+            parse_known_failures(&refused, directory).is_err(),
+            "{refused}"
+        );
+    }
+}
+
 /// An explicit `R_LIBS` comes before the corpus library, the corpus library fills in when
 /// `R_LIBS` is unset, and an empty `R_LIBS` turns it off.
 #[test]

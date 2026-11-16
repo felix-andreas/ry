@@ -2166,6 +2166,22 @@ mod tests {
         rng
     }
 
+    // Expected values are GNU R 4.3's `.Random.seed[2:6]` after `set.seed(42)`.
+    #[test]
+    fn seed_words_match_gnu_r() {
+        let rng = seeded_rng(42);
+        let (position, words) = rng.state.words();
+        let words: Vec<i32> = position
+            .into_iter()
+            .chain(words.iter().copied())
+            .map(|word| word as i32)
+            .collect();
+        assert_eq!(
+            words[..5],
+            [624, 507561766, 1260545903, 1362917092, -1772566379]
+        );
+    }
+
     /// The integer index draws must give the float path's indices and leave the generator at
     /// the same position: the twister's chunks taken from its words, and the generic path
     /// through the session state, for both sample kinds and every size of population.
