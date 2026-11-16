@@ -148,12 +148,15 @@ pub const BUILTINS: &[BuiltinDef] = &[
         let now = now_seconds();
         let local = resolve_zone("");
         let (offset, _, zone) = local.offset_at(now);
-        scalar_string(&format_broken_down(
+        let mut text = String::new();
+        format_broken_down(
             &broken_down(now + offset as f64),
             "%a %b %d %H:%M:%S %Y",
             zone.as_str(),
             offset,
-        ))
+            &mut text,
+        );
+        scalar_string(&text)
     }),
     internal("file.exists", 1, |call| unsafe {
         map_paths(call, |path| Path::new(path).exists())
@@ -1458,60 +1461,130 @@ const WEEKDAYS: [&str; 7] = [
     "Saturday",
 ];
 
-fn format_broken_down(time: &BrokenDown, format: &str, zone: &str, offset: i32) -> String {
-    let mut output = String::new();
-    let mut characters = format.chars().peekable();
-    while let Some(character) = characters.next() {
-        if character != '%' {
-            output.push(character);
-            continue;
+/// Appends `time` written by the `strftime` conversion `format` to `output`.
+fn format_broken_down(
+    time: &BrokenDown,
+    format: &str,
+    zone: &str,
+    offset: i32,
+    output: &mut String,
+) {
+    write_pieces(time, format, &compile_format(format), zone, offset, output);
+}
+
+/// One piece of a `strftime` format: text copied as it is (a range of the format), or a
+/// conversion with the GNU padding flag (`_` spaces, `0` zeros, `-` none) and field width.
+#[derive(Clone)]
+enum Piece {
+    Text(std::ops::Range<usize>),
+    /// A conversion the format ends inside, which prints as written, padded to its width.
+    Unfinished {
+        range: std::ops::Range<usize>,
+        width: usize,
+        fill: char,
+    },
+    Conversion {
+        spec: char,
+        pad: Option<char>,
+        width: Option<usize>,
+    },
+}
+
+type Pieces = SmallVec<[Piece; 8]>;
+
+/// Splits a `strftime` format into its pieces, so a vector of times reads the format once.
+fn compile_format(format: &str) -> Pieces {
+    let bytes = format.as_bytes();
+    let mut pieces = Pieces::new();
+    let mut position = 0;
+    while position < bytes.len() {
+        // `%` is ASCII, so each run of text ends on a character boundary.
+        let run = bytes[position..]
+            .iter()
+            .position(|&byte| byte == b'%')
+            .unwrap_or(bytes.len() - position);
+        if run > 0 {
+            pieces.push(Piece::Text(position..position + run));
         }
-        // The GNU extensions: a padding flag (`_` spaces, `0` zeros, `-` none) and a field width.
+        let percent = position + run;
+        position = percent + 1;
+        if position > bytes.len() {
+            break;
+        }
         let mut pad = None;
-        while let Some(flag @ ('_' | '0' | '-')) = characters.peek().copied() {
-            characters.next();
-            pad = Some(flag);
+        while let Some(&flag @ (b'_' | b'0' | b'-')) = bytes.get(position) {
+            position += 1;
+            pad = Some(char::from(flag));
         }
         let mut width = None;
-        while let Some(digit) = characters.peek().and_then(|digit| digit.to_digit(10)) {
-            characters.next();
-            width = Some(width.unwrap_or(0) * 10 + digit as usize);
+        while let Some(&digit @ b'0'..=b'9') = bytes.get(position) {
+            position += 1;
+            width = Some(width.unwrap_or(0) * 10 + usize::from(digit - b'0'));
         }
-        let Some(mut spec) = characters.next() else {
-            output.push('%');
+        let unfinished = |end: usize| Piece::Unfinished {
+            range: percent..end,
+            width: width.unwrap_or(0),
+            fill: if pad == Some('0') { '0' } else { ' ' },
+        };
+        let Some(mut spec) = format[position..].chars().next() else {
+            pieces.push(unfinished(position));
             break;
         };
+        position += spec.len_utf8();
         // The POSIX `E` and `O` modifiers ask for a locale's alternative forms, which the C
         // locale does not have, so they print the plain field. The caller has already written
         // the `%OS` that means fractional seconds.
         if spec == 'E' || spec == 'O' {
-            match characters.next() {
-                Some(base) => spec = base,
+            match format[position..].chars().next() {
+                Some(base) => {
+                    position += base.len_utf8();
+                    spec = base;
+                }
                 None => {
-                    output.push('%');
-                    output.push(spec);
+                    pieces.push(unfinished(position));
                     break;
                 }
             }
         }
+        pieces.push(Piece::Conversion { spec, pad, width });
+    }
+    pieces
+}
+
+/// Appends `time` written by the compiled `pieces` of `format` to `output`.
+fn write_pieces(
+    time: &BrokenDown,
+    format: &str,
+    pieces: &[Piece],
+    zone: &str,
+    offset: i32,
+    output: &mut String,
+) {
+    for piece in pieces {
+        let (spec, pad, width) = match piece {
+            Piece::Text(range) => {
+                output.push_str(&format[range.clone()]);
+                continue;
+            }
+            Piece::Unfinished { range, width, fill } => {
+                let text = &format[range.clone()];
+                output.extend(std::iter::repeat_n(*fill, width.saturating_sub(text.len())));
+                output.push_str(text);
+                continue;
+            }
+            &Piece::Conversion { spec, pad, width } => (spec, pad, width),
+        };
         let start = output.len();
         match spec {
-            'Y' => output.push_str(&time.year.to_string()),
-            'y' => output.push_str(&format!("{:02}", time.year.rem_euclid(100))),
-            'm' => output.push_str(&format!("{:02}", time.month)),
-            'd' => output.push_str(&format!("{:02}", time.day)),
-            'e' => output.push_str(&format!("{:2}", time.day)),
-            'H' => output.push_str(&format!("{:02}", time.hour)),
-            'I' => output.push_str(&format!(
-                "{:02}",
-                if time.hour % 12 == 0 {
-                    12
-                } else {
-                    time.hour % 12
-                }
-            )),
-            'M' => output.push_str(&format!("{:02}", time.minute)),
-            'S' => output.push_str(&format!("{:02}", time.second.floor() as i64)),
+            'Y' => push_number(output, time.year, 0, b'0'),
+            'y' => push_number(output, time.year.rem_euclid(100), 2, b'0'),
+            'm' => push_number(output, time.month, 2, b'0'),
+            'd' => push_number(output, time.day, 2, b'0'),
+            'e' => push_number(output, time.day, 2, b' '),
+            'H' => push_number(output, time.hour, 2, b'0'),
+            'I' => push_number(output, twelve_hour(time.hour), 2, b'0'),
+            'M' => push_number(output, time.minute, 2, b'0'),
+            'S' => push_number(output, time.second.floor() as i64, 2, b'0'),
             'p' => output.push_str(if time.hour < 12 { "AM" } else { "PM" }),
             'P' => output.push_str(if time.hour < 12 { "am" } else { "pm" }),
             's' => {
@@ -1521,45 +1594,33 @@ fn format_broken_down(time: &BrokenDown, format: &str, zone: &str, offset: i32) 
                     + time.minute * 60
                     + time.second.floor() as i64
                     - i64::from(offset);
-                output.push_str(&seconds.to_string());
+                push_number(output, seconds, 0, b'0');
             }
-            'j' => output.push_str(&format!("{:03}", time.yearday + 1)),
+            'j' => push_number(output, time.yearday + 1, 3, b'0'),
             'B' => output.push_str(MONTHS[(time.month - 1) as usize]),
             'b' | 'h' => output.push_str(&MONTHS[(time.month - 1) as usize][..3]),
             'A' => output.push_str(WEEKDAYS[time.weekday as usize]),
             'a' => output.push_str(&WEEKDAYS[time.weekday as usize][..3]),
-            'u' => output.push_str(&(if time.weekday == 0 { 7 } else { time.weekday }).to_string()),
-            'w' => output.push_str(&time.weekday.to_string()),
-            'U' => output.push_str(&format!("{:02}", (time.yearday + 7 - time.weekday) / 7)),
-            'W' => output.push_str(&format!(
-                "{:02}",
-                (time.yearday + 7 - (time.weekday + 6) % 7) / 7
-            )),
-            'V' => output.push_str(&format!("{:02}", iso_week(time).1)),
-            'G' => output.push_str(&iso_week(time).0.to_string()),
-            'g' => output.push_str(&format!("{:02}", iso_week(time).0.rem_euclid(100))),
-            'C' => output.push_str(&format!("{:02}", time.year.div_euclid(100))),
-            'k' => output.push_str(&format!("{:2}", time.hour)),
-            'l' => output.push_str(&format!(
-                "{:2}",
-                if time.hour % 12 == 0 {
-                    12
-                } else {
-                    time.hour % 12
-                }
-            )),
-            'x' => output.push_str(&format!(
-                "{:02}/{:02}/{:02}",
-                time.month,
-                time.day,
-                time.year.rem_euclid(100)
-            )),
-            'X' => output.push_str(&format!(
-                "{:02}:{:02}:{:02}",
-                time.hour,
-                time.minute,
-                time.second.floor() as i64
-            )),
+            'u' => push_number(
+                output,
+                if time.weekday == 0 { 7 } else { time.weekday },
+                0,
+                b'0',
+            ),
+            'w' => push_number(output, time.weekday, 0, b'0'),
+            'U' => push_number(output, (time.yearday + 7 - time.weekday) / 7, 2, b'0'),
+            'W' => push_number(
+                output,
+                (time.yearday + 7 - (time.weekday + 6) % 7) / 7,
+                2,
+                b'0',
+            ),
+            'V' => push_number(output, iso_week(time).1, 2, b'0'),
+            'G' => push_number(output, iso_week(time).0, 0, b'0'),
+            'g' => push_number(output, iso_week(time).0.rem_euclid(100), 2, b'0'),
+            'C' => push_number(output, time.year.div_euclid(100), 0, b'0'),
+            'k' => push_number(output, time.hour, 2, b' '),
+            'l' => push_number(output, twelve_hour(time.hour), 2, b' '),
             'r' => output.push_str(&format!(
                 "{:02}:{:02}:{:02} {}",
                 if time.hour % 12 == 0 {
@@ -1587,20 +1648,30 @@ fn format_broken_down(time: &BrokenDown, format: &str, zone: &str, offset: i32) 
                 let minutes = offset.unsigned_abs() / 60;
                 output.push_str(&format!("{sign}{:02}{:02}", minutes / 60, minutes % 60));
             }
-            'F' => output.push_str(&format!("{}-{:02}-{:02}", time.year, time.month, time.day)),
-            'T' => output.push_str(&format!(
-                "{:02}:{:02}:{:02}",
-                time.hour,
-                time.minute,
-                time.second.floor() as i64
-            )),
-            'D' => output.push_str(&format!(
-                "{:02}/{:02}/{:02}",
-                time.month,
-                time.day,
-                time.year.rem_euclid(100)
-            )),
-            'R' => output.push_str(&format!("{:02}:{:02}", time.hour, time.minute)),
+            'F' => push_numbers(
+                output,
+                &[(time.year, 0), (time.month, 2), (time.day, 2)],
+                '-',
+            ),
+            'T' | 'X' => push_numbers(
+                output,
+                &[
+                    (time.hour, 2),
+                    (time.minute, 2),
+                    (time.second.floor() as i64, 2),
+                ],
+                ':',
+            ),
+            'D' | 'x' => push_numbers(
+                output,
+                &[
+                    (time.month, 2),
+                    (time.day, 2),
+                    (time.year.rem_euclid(100), 2),
+                ],
+                '/',
+            ),
+            'R' => push_numbers(output, &[(time.hour, 2), (time.minute, 2)], ':'),
             'n' => output.push('\n'),
             't' => output.push('\t'),
             '%' => output.push('%'),
@@ -1640,7 +1711,64 @@ fn format_broken_down(time: &BrokenDown, format: &str, zone: &str, offset: i32) 
             }
         }
     }
-    output
+}
+
+/// Appends `value` in decimal, padded on the left with `fill` to at least `width` bytes; zeros
+/// go after the sign, as `{:0width$}` puts them, and spaces before it.
+fn push_number(output: &mut String, value: i64, width: usize, fill: u8) {
+    if width == 2 && (0..100).contains(&value) {
+        let tens = (value / 10) as u8;
+        output.push(match tens {
+            0 => char::from(fill),
+            _ => char::from(b'0' + tens),
+        });
+        output.push(char::from(b'0' + (value % 10) as u8));
+        return;
+    }
+    // The text is built backwards in one buffer, so it reaches `output` in a single append.
+    // Callers ask for widths of at most 3, far below the buffer's spare room.
+    let mut buffer = [0u8; 32];
+    let mut start = buffer.len();
+    let mut rest = value.unsigned_abs();
+    loop {
+        start -= 1;
+        buffer[start] = b'0' + (rest % 10) as u8;
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    let negative = value < 0;
+    let length = buffer.len() - start + usize::from(negative);
+    let padding = width.saturating_sub(length).min(start - 1);
+    if fill == b'0' {
+        start -= padding;
+        buffer[start..start + padding].fill(b'0');
+    }
+    if negative {
+        start -= 1;
+        buffer[start] = b'-';
+    }
+    if fill != b'0' {
+        start -= padding;
+        buffer[start..start + padding].fill(fill);
+    }
+    // The text is ASCII.
+    output.push_str(std::str::from_utf8(&buffer[start..]).unwrap_or_default());
+}
+
+/// Appends `fields`, each zero-padded to its width, between `separator`s.
+fn push_numbers(output: &mut String, fields: &[(i64, usize)], separator: char) {
+    for (index, &(value, width)) in fields.iter().enumerate() {
+        if index > 0 {
+            output.push(separator);
+        }
+        push_number(output, value, width, b'0');
+    }
+}
+
+fn twelve_hour(hour: i64) -> i64 {
+    if hour % 12 == 0 { 12 } else { hour % 12 }
 }
 
 /// The ISO 8601 week-numbering year and week: weeks start on Monday, and week 1 is the one
@@ -1816,35 +1944,79 @@ unsafe fn posixlt_zone(list: Sexp) -> R<String> {
         .unwrap_or_default())
 }
 
+/// One numeric POSIXlt component, read as doubles with recycling; a missing or empty component
+/// reads as `NA`.
+#[derive(Clone, Copy)]
+enum Column<'a> {
+    Integers(&'a [i32]),
+    Reals(&'a [f64]),
+    Missing,
+}
+
+impl Column<'_> {
+    unsafe fn of(list: Sexp, index: usize) -> Self {
+        if index >= length(list) {
+            return Column::Missing;
+        }
+        let vector = list.element(index);
+        match vector.kind() {
+            _ if length(vector) == 0 => Column::Missing,
+            SexpType::Integer | SexpType::Logical => Column::Integers(values::ints(vector)),
+            SexpType::Real => Column::Reals(values::reals(vector)),
+            _ => Column::Missing,
+        }
+    }
+
+    fn length(&self) -> usize {
+        match self {
+            Column::Integers(values) => values.len(),
+            Column::Reals(values) => values.len(),
+            Column::Missing => 0,
+        }
+    }
+
+    #[inline]
+    fn at(&self, position: usize) -> f64 {
+        // Components of a balanced POSIXlt all have the same length, so the division of
+        // recycling is rare.
+        let recycle = |length: usize| {
+            if position < length {
+                position
+            } else {
+                position % length
+            }
+        };
+        match self {
+            Column::Integers(values) => match values[recycle(values.len())] {
+                NA_INTEGER => NA_REAL,
+                value => f64::from(value),
+            },
+            Column::Reals(values) => values[recycle(values.len())],
+            Column::Missing => NA_REAL,
+        }
+    }
+}
+
 /// A POSIXlt's wall-clock fields as seconds since the epoch read as UTC.
 unsafe fn posixlt_seconds(list: Sexp) -> R<Vec<f64>> {
     require_posixlt(list)?;
     // `wday` and `yday` are derived, so only formatting needs them present.
     require_nonempty_components(list, &[0, 1, 2, 3, 4, 5, 8])?;
-    let field = |index: usize| -> Sexp {
-        if length(list) > index {
-            list.element(index)
-        } else {
-            nil()
-        }
-    };
-    let count = (0..6).map(|index| length(field(index))).max().unwrap_or(0);
-    let at = |index: usize, position: usize| -> f64 {
-        let vector = field(index);
-        let size = length(vector);
-        if size == 0 {
-            return NA_REAL;
-        }
-        crate::subset::numeric_element(vector, position % size)
-    };
+    let [second, minute, hour, day, month, year] =
+        std::array::from_fn(|index| Column::of(list, index));
+    let count = [second, minute, hour, day, month, year]
+        .iter()
+        .map(|column| column.length())
+        .max()
+        .unwrap_or(0);
     let mut seconds = Vec::with_capacity(count);
     for position in 0..count {
-        let second = at(0, position);
-        let minute = at(1, position);
-        let hour = at(2, position);
-        let day = at(3, position);
-        let month = at(4, position);
-        let year = at(5, position);
+        let second = second.at(position);
+        let minute = minute.at(position);
+        let hour = hour.at(position);
+        let day = day.at(position);
+        let month = month.at(position);
+        let year = year.at(position);
         if !second.is_finite() {
             seconds.push(second);
             continue;
@@ -2065,7 +2237,17 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
             nil()
         }
     };
-    let (isdst, zones, offsets) = (field(8), field(9), field(10));
+    let (isdst, zones, offsets) = (Column::of(list, 8), field(9), Column::of(list, 10));
+    let second_column = Column::of(list, 0);
+    let format_count = length(formats).max(1);
+    let single_format = (format_count == 1).then(|| values::string_at(formats, 0));
+    // A single format without `%OS` is the same for every element, so it compiles once.
+    let single_pieces = single_format.as_ref().and_then(|written| {
+        let written = written.as_deref().unwrap_or("%Y-%m-%d %H:%M:%S");
+        (!written.contains("%OS")).then(|| compile_format(written))
+    });
+    let mut text = String::new();
+    let mut format = String::new();
     for index in 0..count {
         let value = seconds[index % seconds.len()];
         if is_na_real(value) {
@@ -2083,78 +2265,107 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
             values::set_elt(result, index, values::mkchar(text)?);
             continue;
         }
-        let mut format = values::string_at(formats, index % length(formats).max(1))
-            .map(|text| text.into_owned())
-            .unwrap_or_else(|| "%Y-%m-%d %H:%M:%S".into());
+        let element_format;
+        let written = match &single_format {
+            Some(written) => written,
+            None => {
+                element_format = values::string_at(formats, index % format_count);
+                &element_format
+            }
+        };
+        let written = written.as_deref().unwrap_or("%Y-%m-%d %H:%M:%S");
         // GNU R writes the seconds of the first `%OS` itself, with the digits that follow it or
         // else `second_digits`, at most 6, truncated so that a second never prints as 60. With
         // no digits it becomes `%S`. Any later `%OS` is left to `strftime`, which reads it as
         // `%S`, so `"%OS3 %OS2"` prints `07.123 072`.
-        if let Some(at) = format.find("%OS") {
-            let digit = format[at + 3..]
-                .chars()
-                .next()
-                .and_then(|character| character.to_digit(10));
-            let (digits, used) = match digit {
-                Some(digit) => (digit as i32, 4),
-                None => (second_digits, 3),
-            };
-            let digits = digits.min(6);
-            let replacement = if digits > 0 {
-                let second = crate::subset::numeric_element(field(0), index % length(field(0)));
-                let scale = 10f64.powi(digits);
-                let truncated = (second * scale).trunc() / scale;
-                format!(
-                    "{truncated:0width$.digits$}",
-                    width = digits as usize + 3,
-                    digits = digits as usize
-                )
-            } else {
-                "%S".to_owned()
-            };
-            format.replace_range(at..at + used, &replacement);
-        }
-        // The element's own zone fields win; a POSIXlt without them falls back to `tzone`.
-        let dst = if length(isdst) > 0 {
-            crate::subset::numeric_element(isdst, index % length(isdst))
-        } else {
-            0.0
-        };
-        let zone = if zones.kind() == SexpType::String && length(zones) > 0 {
-            values::string_at(zones, index % length(zones))
-                .map(|text| text.into_owned())
-                .unwrap_or_default()
-        } else {
-            let slot = if dst > 0.0 { 2 } else { 1 };
-            values::string_at(tzone, slot.min(length(tzone).saturating_sub(1)))
-                .map(|text| text.into_owned())
-                .unwrap_or_default()
-        };
-        let known = if length(offsets) > 0 {
-            Some(crate::subset::numeric_element(
-                offsets,
-                index % length(offsets),
-            ))
-            .filter(|offset| !offset.is_nan())
-        } else {
-            Some(0.0)
-        };
-        // An unknown offset (strptime leaves it NA outside UTC) comes from the zone's rules at
-        // that wall-clock time, as C's `mktime` fills it in for GNU R.
-        let offset = match known {
-            Some(offset) => offset as i32,
-            None => {
-                let name = values::string_at(tzone, 0)
-                    .map(|text| text.into_owned())
-                    .unwrap_or_default();
-                let flag = if dst.is_nan() { -1 } else { dst as i32 };
-                (value - resolve_zone(&name).local_to_utc(value, flag)) as i32
+        let format = match written.find("%OS") {
+            None => written,
+            Some(at) => {
+                let digit = written[at + 3..]
+                    .chars()
+                    .next()
+                    .and_then(|character| character.to_digit(10));
+                let (digits, used) = match digit {
+                    Some(digit) => (digit as i32, 4),
+                    None => (second_digits, 3),
+                };
+                let digits = digits.min(6);
+                let replacement = if digits > 0 {
+                    let second = second_column.at(index);
+                    let scale = 10f64.powi(digits);
+                    let truncated = (second * scale).trunc() / scale;
+                    format!(
+                        "{truncated:0width$.digits$}",
+                        width = digits as usize + 3,
+                        digits = digits as usize
+                    )
+                } else {
+                    "%S".to_owned()
+                };
+                format.clear();
+                format.push_str(written);
+                format.replace_range(at..at + used, &replacement);
+                format.as_str()
             }
         };
-        let mut text = format_broken_down(&broken_down(value), &format, &zone, offset);
+        let compiled;
+        let pieces = match &single_pieces {
+            Some(pieces) => pieces,
+            None => {
+                compiled = compile_format(format);
+                &compiled
+            }
+        };
+        // Only `%Z`, `%z`, `%s` and `usetz` read the zone or the offset, and finding an unknown
+        // offset costs a zone lookup, so a format without any of them skips both.
+        let needs_zone = use_tz
+            || pieces.iter().any(|piece| {
+                matches!(
+                    piece,
+                    Piece::Conversion {
+                        spec: 'Z' | 'z' | 's',
+                        ..
+                    }
+                )
+            });
+        let (zone, offset) = if needs_zone {
+            // The element's own zone fields win; a POSIXlt without them falls back to `tzone`.
+            let dst = match isdst {
+                Column::Missing => 0.0,
+                column => column.at(index),
+            };
+            let zone = if zones.kind() == SexpType::String && length(zones) > 0 {
+                values::string_at(zones, index % length(zones))
+            } else {
+                let slot = if dst > 0.0 { 2 } else { 1 };
+                values::string_at(tzone, slot.min(length(tzone).saturating_sub(1)))
+            };
+            let known = match offsets {
+                Column::Missing => Some(0.0),
+                column => Some(column.at(index)).filter(|offset| !offset.is_nan()),
+            };
+            // An unknown offset (strptime leaves it NA outside UTC) comes from the zone's rules
+            // at that wall-clock time, as C's `mktime` fills it in for GNU R.
+            let offset = match known {
+                Some(offset) => offset as i32,
+                None => {
+                    let name = values::string_at(tzone, 0)
+                        .map(|text| text.into_owned())
+                        .unwrap_or_default();
+                    let flag = if dst.is_nan() { -1 } else { dst as i32 };
+                    (value - resolve_zone(&name).local_to_utc(value, flag)) as i32
+                }
+            };
+            (zone, offset)
+        } else {
+            (None, 0)
+        };
+        let zone = zone.as_deref().unwrap_or("");
+        text.clear();
+        write_pieces(&broken_down(value), format, pieces, zone, offset, &mut text);
         if use_tz && !zone.is_empty() {
             text.push(' ');
-            text.push_str(&zone);
+            text.push_str(zone);
         }
         values::set_elt(result, index, values::mkchar(&text)?);
     }

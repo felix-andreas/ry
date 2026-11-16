@@ -1,0 +1,10 @@
+# Every strftime conversion, padding flags, widths, modifiers and edge formats, through format.POSIXlt.
+x <- as.POSIXlt(as.POSIXct(c(946684799.25, 1709165107, -59008417200, -63451551477), origin = "1970-01-01", tz = "UTC"))
+specs <- c("%Y","%y","%m","%d","%e","%H","%I","%M","%S","%p","%P","%s","%j","%B","%b","%h","%A","%a","%u","%w","%U","%W","%V","%G","%g","%C","%k","%l","%x","%X","%r","%c","%Z","%z","%F","%T","%D","%R","%n","%t","%%","%q","%OS3","%OS","%_d","%-m","%5Y","%03e","%Ey","%Om", "x %Y-%m-%d %H:%M:%OS2 y")
+for (s in specs) print(c(s, format(x, s)))
+print(format(x, c("%Y", "%m")))
+print(format(as.POSIXlt("2020-06-01 12:00:00", tz = "America/New_York"), "%Z %z", usetz = TRUE))
+print(format(as.Date(c(a = "2020-01-02", b = NA))))
+print(format(as.POSIXct(c(1e9, NA, Inf, -Inf), origin = "1970-01-01", tz = "UTC")))
+for (s in c("%", "abc%", "%E", "%5", "%-", "%05", "%_5", "%-5", "%0", "%12", "a%3", "%5E", "%O", "%_", "100%% é %Y é")) print(c(s, format(x[1], s)))
+print(format(as.POSIXlt("0100-03-04", tz = "UTC"), "%C|%Y|%G"))
