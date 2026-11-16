@@ -48,6 +48,9 @@ the change that introduced it; none was re-measured for these notes.
 | `x[perm]`, a million strings | 79.8 ms | 26.2 ms | 11.9 ms |
 | `d[] <- dv`, 4,000 doubles | 16.0 µs | 36.8 µs | 1.4 µs |
 | `s[] <- sv`, 4,000 strings | 43.7 µs | 51.1 µs | 7.7 µs |
+| `order(m)`, ten elements | 13.4 µs | 5.4 µs | 0.62 µs |
+| `sort(m)`, ten elements | 24.6 µs | 8.7 µs | 1.04 µs |
+| `` Reduce(`+`, 1:10) `` | 5.7 µs | 6.4 µs | 2.2 µs |
 | `as.Date` on strings (kernel k2) | 1.07 s | 0.532 s | 0.10 s |
 | `pmin` and `pmax` (kernel k8) | 1.55 s | 1.261 s | 0.16 s |
 
@@ -57,7 +60,8 @@ takes kernel k3 from 2.1x to 3.5x GNU R's speed and kernel k5 from 2.1x to 2.6x.
 = n)` stops after `n` lines, and loading a package's lazy-load database skips the byte code GNU R
 wrote into it. `x[] <- value` and `x[a:b] <- value` write the value in whole copies. Compiled
 element reads and writes such as `x[[k]] <- 5`, `x$b <- k` and `y <- v[k:4L]` cost fewer instructions
-than the interpreter's.
+than the interpreter's. A complex assignment such as `f(g(x, i), j) <- v` whose replacement is a
+primitive builds no call, which frees 6.6% fewer objects on the finance code base.
 
 ### Compatibility and fixes
 

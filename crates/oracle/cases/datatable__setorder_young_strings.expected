@@ -1,7 +1,22 @@
 [stdout]
+|          k      s
+|      <int> <char>
+|   1:   300    old
+|   2:   299    old
+|   3:   298    old
+|   4:   297    old
+|   5:   296    old
+|  ---             
+| 296:     5 young5
+| 297:     4 young4
+| 298:     3 young3
+| 299:     2 young2
+| 300:     1 young1
 | young1 young2 young3 young4 young5 young6 young7 young8 young9 young10 old old 
 | 1 300 
 [messages]
+- \nAttaching package: ‘data.table’\n
+- The following object is masked from ‘package:base’:\n\n    %notin%\n
 [warnings]
 [errors]
 [value]

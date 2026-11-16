@@ -82,6 +82,7 @@ Cross-cutting traps and conventions. A trap that belongs to one crate lives in t
 ### Runtime and numerics
 
 - **Code translated from GNU R lives only in a GPL crate, under a provenance header that `just notices` reads.** A UPL crate never depends on `interp`, and `crates/libr/include` (LGPL) must not copy R's GPL-only `Rinterface.h` or `Rembedded.h` (`reference/licensing.md`).
+- **A bare `cargo test` or `cargo build` at the root builds only `crates/ry` (`default-members`), not the `libr` cdylib**, so `target/debug/libR.so` goes stale and every test that runs ry's runtime fails with "ry's runtime ... is out of date". Pass `--workspace` or build `-p libr` too.
 - **Last-digit output follows the C math library and FMA contraction.** libr test packages build with `NO_CONTRACTION`, and oracle cases that print such digits carry `# oracle: library-dependent` (`decisions/r-compat.md`, "The oracle suite names the GNU R build it was recorded with").
 
 ### Measuring
@@ -121,7 +122,7 @@ Cross-cutting traps and conventions. A trap that belongs to one crate lives in t
 - **A full disk shows up as a test-build failure** (ENOSPC, or a Bus error at link). Run `just prune` first; a cloud container's quota is about 40 GB whatever `df` says.
 - **CI is `nix develop .#ci -c just ci`.** Reproduce a failure in that shell, and change CI in the `ci` recipe or `flake.nix` (`decisions/tooling-bench-ci.md`, "CI runs in the flake's dev shell").
 - **A crash is never a known failure.** The oracle counts a case whose engine was killed by a signal as new under every engine, even when `known_failures.toml` lists it, and the file has no intermittent mark (`decisions/r-compat.md`, "A crash is never a known failure").
-- **Agent containers are provisioned by `tools/dev-setup.sh`, and `flake.nix` inputs stay `git+https`** (`decisions/tooling-bench-ci.md`, "Cloud sessions are provisioned by tools/dev-setup.sh, not the nix shell", "Flake inputs are git URLs").
+- **Agents work in the nix dev shell: start commands with `source tools/env.sh &&`.** `RY_ENV=system` plus `tools/dev-setup.sh` is for package-corpus work only, and `flake.nix` inputs stay `git+https` (`decisions/tooling-bench-ci.md`, "Agents work in the nix dev shell, loaded by tools/env.sh", "Flake inputs are git URLs").
 - **Nightly releases are GitHub pre-releases with `--latest=false`, and the Zed extension reads full releases only** (`pre_release: false`, `editors/zed/src/lib.rs`). Zed matches the flag exactly, so the two move together.
 - **BOLT's `-use-gnu-stack` overwrites libR's `PT_GNU_STACK` header, and glibc 2.41+ refuses a library without it.** `tools/layout/optimize.sh` restores it (`gnu_stack.py`), and `just package` checks.
 - **Type-check macOS and Windows from Linux before touching platform code** (`cargo clippy --target …` with a clang wrapper as `CC_<target>`; nothing links), because the release job is otherwise the first build there.

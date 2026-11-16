@@ -560,7 +560,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Benchmark suites are directories the renderers only display (built, with exceptions)
 - Four published benchmark suites, one runner (built, with exceptions)
 - Flake inputs are git URLs (built, with exceptions)
-- Cloud sessions are provisioned by tools/dev-setup.sh, not the nix shell
+- Agents work in the nix dev shell, loaded by tools/env.sh
+- tools/dev-setup.sh provisions the host for package-corpus work
 - CI runs in the flake's dev shell
 - Workspace-wide feature unification
 - Prebuilt trees come from the ry.cachix.org binary cache

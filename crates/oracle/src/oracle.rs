@@ -1,5 +1,5 @@
-//! A differential oracle for R: run one file under GNU R and under a second engine, and
-//! compare stdout, messages, warnings, errors and the last value.
+//! A differential oracle for R: run one file under GNU R and under ry's engines, and compare
+//! stdout, messages, warnings, errors and the last value.
 //!
 //! An engine is anything that implements [`Engine`]. [`ProcessEngine`] covers every engine
 //! with a command line: it is invoked as `<command…> <script> <report>`, must print the
@@ -296,6 +296,13 @@ impl ProcessEngine {
     /// Kills a run that takes longer than `timeout` and reports it as failed.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    /// Lets ry find its base R as it does on its own, rather than in the GNU R installation
+    /// [`gnu_r_home`] picks, for runs compared with the recordings instead of with that GNU R.
+    pub fn with_own_base_r(mut self) -> Self {
+        self.environment.retain(|(name, _)| name != "R_HOME");
         self
     }
 
@@ -853,35 +860,58 @@ pub fn gnu_r_build() -> Result<Build, String> {
         .get_or_init(|| {
             let program = gnu_r_program();
             let output = Command::new(&program)
-                .args(["--vanilla", "--slave", "--no-restore", "-e"])
-                .arg(
-                    "cat(R.version$major, \".\", R.version$minor, \"\\n\", \
-                     basename(extSoftVersion()[[\"BLAS\"]]), \"\\n\", \
-                     basename(La_library()), \" \", La_version(), \"\\n\", sep = \"\")",
-                )
+                .args(["--vanilla", "--slave", "--no-restore", "-e", BUILD_PROBE])
                 .env("LC_ALL", "C.UTF-8")
                 .output()
                 .map_err(|error| format!("`{program}`: {error}"))?;
-            let text = String::from_utf8_lossy(&output.stdout);
-            let mut lines = text.lines().map(str::trim);
-            match (lines.next(), lines.next(), lines.next()) {
-                (Some(release), Some(blas), Some(lapack))
-                    if output.status.success() && !release.is_empty() =>
-                {
-                    Ok(Build {
-                        release: release.to_owned(),
-                        blas: blas.to_owned(),
-                        lapack: lapack.to_owned(),
-                    })
-                }
-                _ => Err(format!(
-                    "`{program}` did not report its build ({}): {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr).trim()
-                )),
-            }
+            parse_build(&String::from_utf8_lossy(&output.stdout))
+                .filter(|_| output.status.success())
+                .ok_or_else(|| {
+                    format!(
+                        "`{program}` did not report its build ({}): {}",
+                        output.status,
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    )
+                })
         })
         .clone()
+}
+
+/// The build `engine` runs as, asked by running [`BUILD_PROBE`] under it. ry's runtime reports
+/// the release of the base R it loaded and the BLAS and LAPACK it found, so the recorded build
+/// tells whether its outcomes can be compared with the recordings.
+pub fn engine_build(engine: &dyn Engine) -> Result<Build, String> {
+    let scratch = Scratch::new(Path::new("build"))?;
+    let probe = scratch.path().join("build.R");
+    std::fs::write(&probe, BUILD_PROBE).map_err(|error| error.to_string())?;
+    let outcome = engine
+        .run(&probe)
+        .map_err(|error| format!("{}: {error}", engine.name()))?;
+    parse_build(&outcome.stdout).ok_or_else(|| {
+        format!(
+            "{} did not report its build: {} {}",
+            engine.name(),
+            outcome.stdout.trim(),
+            outcome.errors.join("; ")
+        )
+    })
+}
+
+/// Prints the release, the BLAS file and the LAPACK file and version, one per line.
+const BUILD_PROBE: &str = "cat(R.version$major, \".\", R.version$minor, \"\\n\", \
+     basename(extSoftVersion()[[\"BLAS\"]]), \"\\n\", \
+     basename(La_library()), \" \", La_version(), \"\\n\", sep = \"\")";
+
+fn parse_build(text: &str) -> Option<Build> {
+    let mut lines = text.lines().map(str::trim);
+    match (lines.next(), lines.next(), lines.next()) {
+        (Some(release), Some(blas), Some(lapack)) if !release.is_empty() => Some(Build {
+            release: release.to_owned(),
+            blas: blas.to_owned(),
+            lapack: lapack.to_owned(),
+        }),
+        _ => None,
+    }
 }
 
 /// The build file that governs `case`: the nearest one in its directory or an ancestor.
@@ -972,13 +1002,29 @@ pub fn gnu_r_available() -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
-/// The engine named by `ORACLE_ENGINE`, else ry's runtime.
-pub fn engine_from_environment() -> ProcessEngine {
-    std::env::var("ORACLE_ENGINE")
+/// The engines a comparison runs when none is named: ry's tier-0 interpreter and its JIT forced
+/// on, which between them run every case through both execution tiers.
+pub const DEFAULT_ENGINES: &str = "ry-tier0,ry-jit";
+
+/// The engines `names` lists, comma separated, else those `ORACLE_ENGINE` lists, else
+/// [`DEFAULT_ENGINES`]. Each name is one of [`ENGINES`], `gnu-r`, or a command line.
+pub fn engines_named(names: Option<&str>) -> Result<Vec<ProcessEngine>, String> {
+    let from_environment = std::env::var("ORACLE_ENGINE")
         .ok()
-        .as_deref()
-        .and_then(ProcessEngine::named)
-        .unwrap_or_else(ProcessEngine::ry)
+        .filter(|names| !names.trim().is_empty());
+    let names = names
+        .or(from_environment.as_deref())
+        .unwrap_or(DEFAULT_ENGINES);
+    let engines: Vec<ProcessEngine> = names
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| ProcessEngine::named(name).ok_or_else(|| format!("no engine `{name}`")))
+        .collect::<Result<_, _>>()?;
+    match engines.is_empty() {
+        true => Err(format!("`{names}` names no engine")),
+        false => Ok(engines),
+    }
 }
 
 /// Builds the workspace's `ry` and `libR.so` (`cargo build -p ry-lang -p libr`) unless

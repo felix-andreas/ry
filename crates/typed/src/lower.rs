@@ -244,6 +244,7 @@ pub unsafe fn lower(
 
 /// Lowers `closure` with the typed functions in `called` called, never inlined, and sets
 /// `refused` to the innermost typed function whose body was refused where it inlined.
+#[allow(clippy::too_many_arguments)]
 unsafe fn lower_calling(
     closure: Sexp,
     params: &[Type],
