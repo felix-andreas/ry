@@ -616,7 +616,11 @@ pub fn covariance(x: &[f64], x_offset: f64, y: &[f64], y_offset: f64, divisor: i
 pub fn running_sums(values: &[f64], out: &mut [f64]) {
     let count = values.len().min(out.len());
     #[cfg(all(target_arch = "x86_64", not(windows)))]
-    x87::running_sums(&values[..count], &mut out[..count]);
+    {
+        let first = values[..count].iter().position(|value| value.is_nan()).unwrap_or(count);
+        x87::running_sums(&values[..first], &mut out[..first]);
+        propagate_nan(&values[..count], &mut out[..count], first);
+    }
     #[cfg(not(all(target_arch = "x86_64", not(windows))))]
     {
         let mut total = LongDouble::ZERO;
@@ -632,7 +636,11 @@ pub fn running_sums(values: &[f64], out: &mut [f64]) {
 pub fn running_products(values: &[f64], out: &mut [f64]) {
     let count = values.len().min(out.len());
     #[cfg(all(target_arch = "x86_64", not(windows)))]
-    x87::running_products(&values[..count], &mut out[..count]);
+    {
+        let first = values[..count].iter().position(|value| value.is_nan()).unwrap_or(count);
+        x87::running_products(&values[..first], &mut out[..first]);
+        propagate_nan(&values[..count], &mut out[..count], first);
+    }
     #[cfg(not(all(target_arch = "x86_64", not(windows))))]
     {
         let mut product = LongDouble::from(1.0);
@@ -640,6 +648,36 @@ pub fn running_products(values: &[f64], out: &mut [f64]) {
             product = product * LongDouble::from(value);
             *out = product.to_f64();
         }
+    }
+}
+
+/// Continues a running sum or product from `values[first]`, the first NaN, which makes every
+/// later total NaN. The x87 unit takes a microcode assist on each NaN operand, many times the
+/// cost of the operation, so the totals are computed here by its rules for which NaN an
+/// operation returns: a NaN total meeting a number stays as it is, a signaling NaN operand
+/// (as R's `NA` is) loses to the quiet total, and of two quiet NaNs the one with the larger
+/// significand wins, the positive one on a tie. The total before `values[first]` may itself be the x87's NaN for an
+/// invalid operation (`Inf - Inf`), whose double holds it exactly.
+#[cfg(all(target_arch = "x86_64", not(windows)))]
+fn propagate_nan(values: &[f64], out: &mut [f64], first: usize) {
+    const QUIET: u64 = 1 << 51;
+    const FRACTION: u64 = (1 << 52) - 1;
+    let Some(&value) = values.get(first) else {
+        return;
+    };
+    let mut total = match first.checked_sub(1).map(|previous| out[previous]) {
+        Some(total) if total.is_nan() => total,
+        _ => f64::from_bits(value.to_bits() | QUIET),
+    };
+    for (&value, out) in values[first..].iter().zip(&mut out[first..]) {
+        let (bits, total_bits) = (value.to_bits(), total.to_bits());
+        if value.is_nan() && bits & QUIET != 0 {
+            let larger = (bits & FRACTION).cmp(&(total_bits & FRACTION));
+            if larger.is_gt() || larger.is_eq() && bits < total_bits {
+                total = value;
+            }
+        }
+        *out = total;
     }
 }
 
@@ -1461,6 +1499,55 @@ fn scale(mut value: f64, mut power: i32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The NaN totals `propagate_nan` computes are the x87 unit's, bit for bit, for runs that
+    /// mix numbers, infinities, R's `NA` and quiet and signaling NaNs of either sign.
+    #[cfg(all(target_arch = "x86_64", not(windows)))]
+    #[test]
+    fn nan_totals_match_x87() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let payloads = [0, 1, 1954, 1 << 40, (1 << 51) - 1];
+        for round in 0..2000 {
+            let length = 1 + (next() % 12) as usize;
+            let values: Vec<f64> = (0..length)
+                .map(|_| {
+                    let sign = (next() & 1) << 63;
+                    let payload = payloads[(next() % payloads.len() as u64) as usize];
+                    match next() % 6 {
+                        0 => f64::from_bits(sign | 0x7ff8_0000_0000_0000 | payload),
+                        1 => f64::from_bits(sign | 0x7ff0_0000_0000_0000 | payload.max(1)),
+                        2 => f64::from_bits(0x7ff0_0000_0000_07a2),
+                        3 => f64::from_bits(sign | 0x7ff0_0000_0000_0000),
+                        _ => (next() % 7) as f64 - 3.0,
+                    }
+                })
+                .collect();
+            for products in [false, true] {
+                let mut expected = vec![0.0; length];
+                let mut actual = vec![0.0; length];
+                if products {
+                    x87::running_products(&values, &mut expected);
+                    running_products(&values, &mut actual);
+                } else {
+                    x87::running_sums(&values, &mut expected);
+                    running_sums(&values, &mut actual);
+                }
+                let bits = |values: &[f64]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+                assert_eq!(
+                    bits(&actual),
+                    bits(&expected),
+                    "round {round}, products {products}, values {:x?}",
+                    bits(&values)
+                );
+            }
+        }
+    }
 
     /// Summation in the 64-bit significand matches x87: a huge term swallows small ones, extra
     /// bits survive until the final rounding, and an overflow shows only on conversion.
