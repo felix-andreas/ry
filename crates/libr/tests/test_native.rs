@@ -782,6 +782,10 @@ fn edge_cases_gnu_r_accepts() {
         r.strings(late),
         vec![Some("c".to_owned()), Some("d".to_owned())]
     );
+    let class_table = r
+        .call("rytest_check_class_table", &[])
+        .expect("R_check_class_etc on an empty-string-terminated table");
+    assert_eq!(r.integers(class_table), vec![-1, 1]);
     let dim_names = r.call("rytest_named_dim", &[]).expect("a named dim");
     assert_eq!(
         r.strings(dim_names),

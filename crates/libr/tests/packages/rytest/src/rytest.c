@@ -334,6 +334,21 @@ SEXP rytest_remove_dim(void)
     return ScalarInteger(length(ATTRIB(matrix)));
 }
 
+/* GNU R ends R_check_class_etc's table at its first empty string, as Matrix's tables do: the
+   entry after it is never read, so a class named only there is not found (-1). */
+SEXP rytest_check_class_table(void)
+{
+    static const char *valid[] = {"a", "b", "", "x"};
+    SEXP object = PROTECT(allocVector(INTSXP, 1));
+    setAttrib(object, R_ClassSymbol, mkString("x"));
+    SEXP found = PROTECT(allocVector(INTSXP, 2));
+    INTEGER(found)[0] = R_check_class_etc(object, valid);
+    setAttrib(object, R_ClassSymbol, mkString("b"));
+    INTEGER(found)[1] = R_check_class_etc(object, valid);
+    UNPROTECT(2);
+    return found;
+}
+
 /* GNU R installs an unreferenced dimnames list itself, so filling it afterwards shows. */
 SEXP rytest_dimnames_filled_late(void)
 {
@@ -1618,6 +1633,7 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_setcdr_any", (DL_FUNC) &rytest_setcdr_any, 0},
     {"rytest_remove_dim", (DL_FUNC) &rytest_remove_dim, 0},
     {"rytest_dimnames_filled_late", (DL_FUNC) &rytest_dimnames_filled_late, 0},
+    {"rytest_check_class_table", (DL_FUNC) &rytest_check_class_table, 0},
     {"rytest_named_dim", (DL_FUNC) &rytest_named_dim, 0},
     {"rytest_trim_in_place", (DL_FUNC) &rytest_trim_in_place, 1},
     {"rytest_destructor_count", (DL_FUNC) &rytest_destructor_count, 0},

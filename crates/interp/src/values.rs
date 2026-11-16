@@ -1006,8 +1006,13 @@ pub unsafe fn same_string(left: Sexp, right: Sexp) -> bool {
 #[inline]
 pub unsafe fn char_str<'a>(charsxp: Sexp) -> Cow<'a, str> {
     if charsxp.is_valid_utf8() && !charsxp.has_gp(gp::LATIN1 | gp::BYTES) {
-        // SAFETY: the heap validated these bytes when it interned them, and they never change.
-        return Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(charsxp.bytes()) });
+        // GNU R reads `CHAR()` as a C string, so native code that trims a string in place by
+        // writing a NUL into it (udunits' `ut_trim`, called by units) shortens the text R sees.
+        let bytes = charsxp.bytes();
+        let bytes = memchr(0, bytes).map_or(bytes, |end| &bytes[..end]);
+        // SAFETY: the heap validated these bytes when it interned them, and a prefix that ends
+        // before a NUL byte is still valid UTF-8.
+        return Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(bytes) });
     }
     unsafe { char_str_decoded(charsxp) }
 }
