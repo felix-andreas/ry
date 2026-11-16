@@ -4991,7 +4991,7 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
             continue;
         }
         let count = length(arg.value);
-        if !warned && count > 0 && (count > extent || extent % count != 0) {
+        if !warned && count > 0 && (count > extent || !extent.is_multiple_of(count)) {
             warned = true;
             let direction = if by_row { "columns" } else { "rows" };
             crate::conditions::warning_call(

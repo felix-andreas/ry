@@ -320,11 +320,7 @@ fn unbox_once(function: &mut Function) -> bool {
                     continue;
                 }
                 let group = groups.find(local) as usize;
-                let builds = match inst.op {
-                    Op::Construct(..) => true,
-                    Op::Const(Constant::Object(_)) => true,
-                    _ => false,
-                };
+                let builds = matches!(inst.op, Op::Construct(..) | Op::Const(Constant::Object(_)));
                 let copies = matches!(inst.op, Op::Copy(source) if holds_box(function, source));
                 if inst.dest != Some(local) || !(builds || copies) {
                     kept.insert(group);
