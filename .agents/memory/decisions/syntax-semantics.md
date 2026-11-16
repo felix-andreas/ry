@@ -896,9 +896,11 @@ in `standard-library.R.test`). Contract: `type-system.mdx`, "Union normalization
 - **Required formals.** A formal is optional unless the body may force it (`check::FormalUses`, in
   evaluation order): a read no write dominates forces; a loop body's or a `&&` operand's write never
   dominates, and `<<-` never assigns the local formal; `missing()`, `substitute()`, `quote()` arguments do
-  not force; reads in nested functions do; a forced default forces what it reads. Requiring every
-  defaultless formal rejected valid R. Laziness only relaxes inferred signatures; a declared one is the
-  contract.
+  not force; reads in nested functions do; a forced default forces what it reads, to a fixpoint.
+  Requiring every defaultless formal rejected valid R (`f(1)` for `function(x, unused) x`). Inferred and
+  declared types share the walk, so a declared `[name]` is legal over an unforced formal, but laziness
+  only relaxes inferred signatures: `fn(a: integer, b: character)` over `function(a, b) a` keeps `b`
+  required, because the annotation is the contract. The message names the missing formals, not a count.
 - **Partial matching.** `argument_targets` runs R's middle pass: an unclaimed name that prefixes exactly
   one unclaimed formal before `...` claims it. Case-sensitive, so `x =` goes to `lapply`'s `...`.
 - **`match.fun` strings.** A literal string at a `check::MATCH_FUN_CALLERS` base callee (never a project
@@ -919,7 +921,7 @@ past a test file's or script's top level) and the library, so `names <- toupper(
 `.Call <- NULL` work. An untyped binding the body only calls is a callback and stays the function. An
 untyped binding also read as a value (`dir <- path; dir(dir)`) next to an outer function of its name types
 the call `Unknown`. A unification probe was rejected: at the head the binding is still an open variable
-any function unifies with. A binding typed by a type parameter counts as untyped, because skipping it
+any function unifies with, and the conflict appears only at a later value use. A binding typed by a type parameter counts as untyped, because skipping it
 produces schemes the annotation grammar cannot write (`test_roundtrip.rs`). The reached binding is stored
 once in `ItemCheck.callee_targets` for the IDE. `pkg::name` never uses this lookup: a foreign package reads
 its stubs, the project's own its namespace (`GlobalEnv::namespace_scheme`).
@@ -1021,14 +1023,26 @@ as `Unknown`; a `[` or `@` step leaves its container unchanged.
 - **Lazy constants.** In a strict file a single-writer constant is bound lazily
   (`load_index::package_index`) only when every package name its initializer mentions has one earlier
   writer in collation order, or a late evaluation could read a different value; `loader::diff` rebinds it
-  when anything it reaches changes. A `<<-` in any package function (`item_super_assigned_names`) counts as
-  a writer after every top-level statement, because a locked namespace can only take it during `.onLoad`.
-- **Strictness reaches the loader** through `Loader::set_strict`; ry's runtime passes the `RUN_FLAG_STRICT`
-  bit of `ry_run`, because libR links its own copy of `loader`.
+  when anything it reaches changes, and checks every name (not only dirty items') for a laziness flip,
+  since laziness depends on other files. A `<<-` in any package function (`item_super_assigned_names`)
+  counts as a writer after every top-level statement, because a locked namespace can only take it during
+  `.onLoad` (over-approximating that call graph without building it). A replacement inside `local()` of an
+  outer name is accepted when the outer binding is a literal or `c()`/`list()` of literals
+  (`item_binds_plain_value`), since reading its inferred type would put inference on the load path.
+- **Strictness reaches the loader** through `Loader::set_strict`, because the loader cannot read
+  `ry.toml`: GNU R hosts read the planned root's config, and ry's runtime passes the `RUN_FLAG_STRICT` bit
+  of `ry_run`, because libR links its own copy of `loader`. The loader installs the stubs and
+  `ProjectFiles` only for a strict package, so non-strict loads never parse stubs. The conditional-writers
+  half of classification skips `name <- function(...)` items without naming them, so strict planning is
+  faster than a non-strict load (finance benchmark: about 0.8 s against 0.9 s).
 - **Lazy R6 generators.** `name <- R6Class(...)` is bound lazily in any file when its arguments are
   literals, names, functions, and `list()`/`c()` of them (`top_level::TopLevel::Generator`). The rule is
   syntactic because non-strict loads install no stubs, so a purity rule would differ between `ry load` and
   `ry check`; a purity rule for non-strict constants was rejected because even `toupper` reads the locale.
+  A generator counts only its immediate reads (`IndexedItem::reads`), not every mentioned name as a strict
+  constant does: its methods read the namespace when they run, and R6 evaluates `inherit` late. On the
+  finance code base all 199 generators stay promises, and an index-cache-hit load drops from about 0.4 s
+  to about 0.29 s.
 - `test_incremental.rs` pins that adding `cat()` to a pure function re-derives only it, and removing a
   marker re-classifies only its callers.
 
@@ -1049,13 +1063,16 @@ as `Unknown`; a `[` or `@` step leaves its container unchanged.
 **Status:** built, with the storage superseded: a type is an id into columns, not a pointer to an entry in a sharded table ("Types and symbols are four-byte ids into append-only columns"). Hash-consing outside salsa and the reasoning for never sweeping stand.
 
 Types and names are hash-consed in a process-global table outside salsa. salsa interning (a shard lock and
-an id-to-slot lookup per construction and per `kind` read) was the largest constant cost of item checking
-and bought nothing: types carry no revision-dependent state. A tracked function keyed by one name takes
+an id-to-slot lookup per construction and per `kind` read; `Ty::intern_id` alone was 4% of samples) was
+the largest constant cost of item checking and bought nothing: types carry no revision-dependent state.
+Two databases in one process share the table, which is harmless because entries are immutable and
+structural. A tracked function keyed by one name takes
 `QueryName`, a salsa-interned wrapper, because salsa needs a salsa struct as a single key.
 
 **Never swept**, because the type universe saturates under real editing: `TyKind` has no literal variant,
-so changing a literal builds no type. Over 5,000 server body edits RSS levels off; only edits that keep
-inventing names grow memory, by about 240 B per new name. Add revision-scoped sweeping only if a workload
+so changing a literal builds no type. Over 5,000 server body edits on the finance benchmark RSS levels
+off at about 373 MB; only edits that keep inventing names grow memory, by about 240 B per new name (about
+25 MB over 100,000 such edits). Add revision-scoped sweeping only if a workload
 shows growth past that.
 
 ## The checker presumes R code is correct where R's semantics leave the question open
@@ -1063,7 +1080,8 @@ shows growth past that.
 **Status:** built.
 
 Each rule asks what R does at run time and refuses only what R itself fails on, or a near-certain typo
-(treating every use as a demand gave thousands of false errors on CRAN-checked code):
+(treating every use as a demand gave 3,112 errors on the GNU R corpus of CRAN-checked code, essentially
+all false; these rules cut it to 624):
 
 - A formal is required only when every path forces it (`collect_branch_uses` returns the forced set,
   `join_forced` intersects branches); a same-name argument to a project function
@@ -1072,18 +1090,22 @@ Each rule asks what R does at run time and refuses only what R itself fails on, 
   adds fields later; a near-miss field is still an error. An empty `list()` reads `Unknown`, or contributes
   `NULL` inside a union (the field-by-field accumulator idiom). `NULL` was rejected for absent fields: it is
   precise only when the literal is the whole value, and otherwise spreads into false errors.
-- Logical widens under the numeric constraint (`widen_numeric_binding`). A callback called only with
-  forwarded `...` is `fn(...: Any) -> T`. `pkg::name` is accepted unattached, since `::` loads.
+- Logical widens under the numeric constraint (`widen_numeric_binding`), and a vector partner leaves the
+  flexible operand open with a `double[]` result. A callback called only with forwarded `...` is
+  `fn(...: Any) -> T`. `pkg::name` on a shipped namespace is accepted unattached, since `::` loads.
 - A call to an inferred function narrows a union parameter its return echoes to the argument's member
-  (`narrow_echoed_parameter_unions`); a list union passed to a generic callback consumer joins
-  element-wise (`joined_list_union`).
-- Arithmetic on an open operand fits any class with arithmetic methods, except a method taking `Any` and
-  inside an overload probe; untyped arithmetic does not fit an operator method's parameter
+  (`narrow_echoed_parameter_unions`); a remaining member that is a variable of the callee alone (a
+  getter-or-setter's setter value) makes the return `Unknown` rather than leak. A list union passed to a
+  generic callback consumer joins element-wise, skipping `list()` members (`joined_list_union`).
+- Arithmetic on an open operand fits any class with arithmetic methods (`Arith.matrix`, `Ops.Date`),
+  except a method taking `Any` (`Arith.data.frame`) and inside an overload probe, where it would pick
+  `sum`'s `difftime` candidate; untyped arithmetic does not fit an operator method's parameter
   (`operator_method_depth`), or `day - 2 * x` would take `-.Date`'s `difftime` candidate.
 - A `<<-` write to a top-level variable is read back only in the rest of the writing body, never in other
   items. The path that skips the write holds the top-level binding (`materialize_pre_state`), except a
   top-level `NULL`, which is a lazily filled cache's placeholder.
 
+Accepted gaps: fewer true positives on literal-only lists and on qualified typos of inactive namespaces.
 Remaining corpus findings: `backlog.md`, "what `ry check` still reports on the GNU R corpus".
 
 ## A computed function that may be `NULL` is called as the function
@@ -1102,7 +1124,10 @@ is still reported. Accepted cost: a `switch` on an unvalidated value loses its t
 **Status:** built, except the per-item `interface_group` walk and `item_interface_reads`: one walk per file finds the groups and `item_links` holds the edges ("Every host resolves names through one path, and trees live in the host's store").
 
 Group membership is a property of what an item reaches, so it must not come from a whole-project graph;
-otherwise the first check of one file names every item of the project. Every member of an item's strongly
+otherwise the first check of one file names every item of the project (on dsbench, `item_naming` ran
+56,546 times instead of 318, a one-file check took 2.3 s instead of about 0.25 s, a file opened at server
+startup settled in 490 to 620 ms instead of 170 to 240 ms, and a keystroke after a cold prime took 240 to
+290 ms instead of 60 to 74 ms). Every member of an item's strongly
 connected component lies in its reachable set, so walking only what it reaches is exact, and members come
 back in canonical order (`scc_exports` keyed by the first). `file_conditional_writers` screens items on the
 file's tree (`binds_only_own_name`): only an assignment operator, `for`, `%<-%`/`%->%`, or a
@@ -1110,7 +1135,8 @@ file's tree (`binds_only_own_name`): only an assignment operator, `for`, `%<-%`/
 its own name needs no naming query. The screen may overcount, never undercount
 (`testing::check_write_screen` asserts it in the fuzz battery). `file_global_variable_declarations` checks
 the text for `globalVariables` before walking. The server's warm-up derives only per-file folds
-(`warm_project_folds`) and names nothing.
+(`warm_project_folds`) and names nothing. `file_conditional_writers` reads the file's tree, so it re-runs on
+any edit to that file (one walk, backdating when the writers are unchanged).
 
 ## Every host keeps every tree
 
@@ -1120,7 +1146,10 @@ No salsa query has an LRU capacity. salsa records each read of an LRU query unde
 on four cores the cold check's reads of `item_syntax` and `parse` queued on those mutexes (the largest
 single wait in a gdb sample); dropping only the item-level capacities removed the saving too, because item
 subtrees are most of a file's tree. The cold check's three passes (derive from syntax, name, report) are
-plain parallel loops (`in_parallel` in `crates/ry/src/cli.rs`). Remaining waits are salsa claims on
+plain parallel loops (`in_parallel` in `crates/ry/src/cli.rs`), and tree readers stay memoized queries with
+small results, so a check never walks another file's tree. Trade-off measured: cold `ry check` went from
+about 2.2-2.5 s to 1.6-1.8 s while peak RSS rose from about 485 to 565 MB; mimalloc's remaining time is
+fresh-page setup, and its purge and huge-page options made no difference. Remaining waits are salsa claims on
 project-wide queries (`duplicate_binding_map`, `project_arithmetic_classes`, `project_type_definitions`)
 that one thread computes while others need them.
 
@@ -1130,17 +1159,19 @@ that one thread computes while others need them.
 
 - **Strictness has one decider.** `AnalysisSettings` carries `[check] strict` and `semantics::file_is_strict`
   decides a file's mode (the loader's `load_index::file_is_strict` reads the package default). The checker
-  records strict origins only when strict, since non-strict projects never read them.
+  records strict origins only when strict, since non-strict projects never read them (about 14 MiB on
+  the benchmark code bases).
 - **Empty lists cost one word.** Most per-item lists are empty, and an empty `Vec` is 24 bytes, a boxed
-  slice 16. Frozen per-item tables are `SortedMap`/`SortedSet` (`crates/semantics/src/sorted.rs`) over a
+  slice 16, which made `ItemNaming` 320 bytes and `ItemCheck` 248 across about 56,000 items. Frozen per-item tables are `SortedMap`/`SortedSet` (`crates/semantics/src/sorted.rs`) over a
   `ThinVec`, one pointer wide and allocation-free when empty; the same for check and naming lists and HIR
   side arrays.
 - `ExpressionTypes` is a palette of the item's distinct types plus one `u16` slot per expression (`u32`
   past 65,535 distinct types).
 - Interned types carry content flags (`HAS_VAR`, `HAS_RIGID`, `HAS_UNKNOWN`, `HAS_NAMED`) computed at intern
   time, so a walk skips a type with nothing to rewrite.
-- `file_binders` is keyed by `Symbol`. mimalloc's v2 build and its purge, reclaim, retention and huge-page
-  options, and a forced `mi_collect`, measured no saving.
+- `file_binders` is keyed by `Symbol`. Together these took peak RSS from 536-544 to 417-419 MiB.
+  mimalloc's v2 build (489 MiB) and its purge, reclaim, retention and huge-page options, and a forced
+  `mi_collect` at worker exit, measured no saving.
 
 ## HIR as struct-of-arrays, lowered from the green tree
 
@@ -1149,15 +1180,22 @@ that one thread computes while others need them.
 `crates/semantics/src/hir.rs`:
 
 - An `ExprId` indexes separate `kinds` and `ranges` arrays, because inference reads kinds and mostly only
-  diagnostics read ranges.
+  diagnostics read ranges; `Module::expressions` zips them for IDE scans needing both.
 - A kind holds a `Span<T>` into one side array per list type, and literal text a `Text` span, so every kind
-  is `Copy`. Literal text is not a `Symbol`, because the interner never frees and would keep every
+  is `Copy` (owned lists made readers clone to release a borrow). Children are visited with
+  `Module::for_each_child` and `Module::any_child`, not a per-kind child vector. Literal text is not a `Symbol`, because the interner never frees and would keep every
   intermediate spelling typed in the editor.
 - Lowering reads through borrowed `syntax::NodeRef` cursors, collects each list on a scratch stack, and
   runs in a per-thread scratch module that keeps its capacity; the memoized module gets exact-size copies
-  ("scratch arena, owned compact result").
-- Names at their own site are a `NameId` into `Module::name_sites`. Ids are `NonZeroU32`, so an
-  `Option<ExprId>` is four bytes. `Module` compares by value, so salsa backdating works.
+  ("scratch arena, owned compact result"). Red-cursor walking had been about 60% of `item_hir`'s samples.
+- Names at their own site (argument names, fields after `$`/`@`, loop variables, tags) are a `NameId` into
+  `Module::name_sites`, read through `Module::name`, `Module::name_range` and `Module::argument_name`. Ids
+  are `NonZeroU32`, so an `Option<ExprId>` is four bytes; an expression kind is 16 bytes and an argument 8.
+- `Symbol` hashes by a spelling hash computed at minting and orders by spelling, never by its index, which
+  depends on which thread met a spelling first and would make output order vary between runs.
+- `ExprId` allocation order is fixed, so ids, fixtures and downstream maps are stable. `Module` compares by
+  value, so salsa backdating works. The checker records expression types in a vector indexed by `ExprId`
+  (`RecordedTypes` in `check.rs`), not a hash map.
 
 ## A function literal in a call argument is typed in context
 
@@ -1170,7 +1208,8 @@ is inferred exactly once, because a probe snapshot does not reverse environment 
 
 - **All or nothing.** Hints apply only when every defaultless formal gets one: a partial hint broke
   `Reduce(function(a, b) a + b, xs)`, since `a + b` no longer tied the two together.
-- **Overloads.** A hint survives only where every candidate accepting the other arguments agrees.
+- **Overloads.** A hint survives only where every candidate accepting the other arguments agrees, so the
+  list and Array overloads of `List.map` each hint their own item type.
 - **Findings.** An operand error on a hinted formal becomes `ContextualParameter`, reported on the use.
 - **Accumulators get no hint.** A formal whose expected type shares a variable with the expected result
   (`S` in `fn(S, T) -> S`) is a fold accumulator, but only when another argument is that bare variable (the
@@ -1215,14 +1254,17 @@ project look clean while its calls did not type.
   more specific fit exists and every specific fit still fits with each unchecked argument replaced by a
   witness that only `Any` or an unconstrained type parameter accepts
   (`unchecked_arguments_decide_nothing`); without the witness, the unknown argument chose the candidate
-  (`levels(unknown)` became `character[]`). Rejected: the union of the fits' results, which turns silence
+  (`levels(unknown)` became `character[]`, `rep(unknown, 2)` a vector). The always-disagreeing catch-all
+  had been the largest strict friction. Rejected: the union of the fits' results, which turns silence
   into false operand errors (operators do not dispatch per union member).
 - When fits still disagree and no unchecked argument is an inferred `Unknown` (each is `Any` or a
   forwarded `...`), the call is `Any`, as in mypy: opting out of an argument opts out of the call. Strict
-  mode reports only `Unknown`. An unannotated parameter is a type parameter, so `t(m)` on untyped `m` is
+  mode reports only `Unknown`, so `#: fn(x: Any) -> double` over `sum(x)` and `utils::head(...)` are clean,
+  matching a single-signature stub's silent `Any` result (`nrow`). An unannotated parameter is a type parameter, so `t(m)` on untyped `m` is
   `Any`; strict mode reports the parameter itself.
-- Cost: an `Any` result hides a mismatch every candidate shares. Joining disagreeing results was
-  rejected because it fails an honest `-> double`.
+- Cost: an `Any` result hides a mismatch every candidate shares (`#: fn(x: Any) -> character` over
+  `sum(x)` is clean). Joining disagreeing results (`integer | double`) was rejected because it fails an
+  honest `-> double`. Picking a common family without a union is the refinement if hidden mismatches matter.
 
 ## A formula is the nominal `formula`, and its operands are not judged
 
@@ -1250,8 +1292,13 @@ A name being typed is a new top-level definition on every keystroke, so the proj
 winners and `duplicate_binding_map` is a tracked copy of its duplicates (empty in a healthy project, which
 keeps the per-file duplicate check firewalled). Map keys are `Symbol`, hashed by the spelling's FxHash
 computed once at interning, not by index, because index order depends on which thread interned first.
-Pinned by `a_new_definition_reprojects_the_name_maps_and_checks_only_the_new_item`. Stubs entered at
-`LOW` durability deep-verify every memo.
+`Symbol` therefore does not implement `Borrow<str>`: a lookup by text interns first (`Symbol::new`). The
+symbol table stores each spelling's character count, which the typo-suggestion scan filters on before
+reading any spelling. A new-name edit costs about 4 to 6 ms on dsbench and finbench (23 to 27 ms with two
+folds and per-item edges read from project maps). Pinned by
+`a_new_definition_reprojects_the_name_maps_and_checks_only_the_new_item` in `test_incremental.rs`.
+Measurement trap: a keystroke probe that edits a digit inside an identifier renames an item, and stubs
+entered at `LOW` durability deep-verify every memo (about 51,000 per keystroke).
 
 ## Typed checking costs per name, not per file
 
@@ -1259,7 +1306,9 @@ Pinned by `a_new_definition_reprojects_the_name_maps_and_checks_only_the_new_ite
 
 - `TypeDefinitions` (`semantics.rs`) is a `Copy` view that looks a type name up in the file (scripts, or no
   `ProjectFiles`), then in the per-name projection `project_type_definition(files, name)`, then in the
-  stubs; nothing merges the sets, because a merged map per file made typed analysis cost files times types.
+  stubs; nothing merges the sets, because a merged map per file made typed analysis cost files times types
+  (typed finbench: diagnostics 2.5 s against 0.2 s untyped; with the per-name view a typed check takes
+  about 1.9 s / 644 MiB against 1.65 s / 533 MiB untyped).
   The unknown-type check builds the full known set only to rank suggestions after a miss. An edit to one
   type definition re-verifies only that name's readers.
 - `file_comment_annotations` lowers each `#:` block once per file, keyed by start offset;
