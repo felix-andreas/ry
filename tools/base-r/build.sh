@@ -50,8 +50,8 @@ done
 
 # The recommended packages, as GNU R installs them, in dependency order. Those with Fortran code
 # (nlme, KernSmooth, and mgcv, which imports nlme) would need a Fortran runtime in the archive on
-# macOS and Windows, so there they come from GNU R's libraries instead (decisions.md, "ry's base R
-# ships the recommended packages").
+# macOS and Windows, so there they come from GNU R's libraries instead (decisions/libr-rcmd.md,
+# "ry's base R ships the recommended packages").
 recommended="MASS lattice Matrix survival boot cluster codetools foreign rpart class nnet spatial"
 case "$(uname -s)" in
 Linux) recommended="$recommended nlme KernSmooth mgcv" ;;
