@@ -20,6 +20,9 @@ report <- function(expr) {
     }
   )
 }
+message_of <- function(expr) {
+  tryCatch(expr, error = function(e) cat("error:", conditionMessage(e), "\n"))
+}
 
 # A classed list without a replacement method, by each element operator.
 classed <- function() {
@@ -246,9 +249,15 @@ failures <- function() {
   report(levels(l$a) <- NULL)
   report(f$a <- 1)
   report(f[[1]] <- 1)
-  report(x[["a", exact = TRUE]] <- "s")
-  report(x[2, drop = TRUE] <- 5L)
-  report(l[["a", exact = TRUE]] <- 5L)
+  # GNU R's compiled code drops the names of subscripts from the call it reports.
+  message_of(x[["a", exact = TRUE]] <- "s")
+  message_of(x[2, drop = TRUE] <- 5L)
+  message_of(l[["a", exact = TRUE]] <- 5L)
+  report(l[[1:2]] <- 1)
+  report(names(x)[[1:2]] <- "n")
+  m <- matrix(1:4, 2)
+  report(m[3, 1] <- 1L)
+  report(l$a[[1:2]] <- 1L)
   report(x[list()] <- 1)
   report(missing_variable$a <- 1)
   report(missing_variable[1] <<- 1)

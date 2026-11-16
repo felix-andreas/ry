@@ -7105,9 +7105,11 @@ pub unsafe fn complex_assign(
             crate::heap().root(reported);
             if primitive {
                 let frame_depth = interp().frames.len();
+                // The level's target stands for the replacement call, which only an error that
+                // names it builds (`generated_replacement_call`).
                 let outer = interp()
                     .assignment_call
-                    .replace((reported, reported, frame_depth));
+                    .replace((*getter, reported, frame_depth));
                 let level_arguments = if depth == 0 { evaluated } else { &[] };
                 let result = replace_through_primitive(
                     function,
@@ -7193,8 +7195,9 @@ pub unsafe fn complex_assign(
 /// to the call `complex_assign` builds: an `object` with a method for the replacement, which
 /// receives the promises, and a special that reads its arguments' code.
 ///
-/// Errors report against `reported`, which the caller has published as the assignment in
-/// progress ([`crate::Interp::assignment_call`]).
+/// The primitive runs with `getter` as its call, which the caller has published as the
+/// replacement call of the assignment in progress ([`crate::Interp::assignment_call`]), so its
+/// errors report against `reported`.
 unsafe fn replace_through_primitive(
     function: Sexp,
     getter: Sexp,
@@ -7227,7 +7230,7 @@ unsafe fn replace_through_primitive(
             return Ok(None);
         }
         let name = crate::subset::name_argument(rest.car())?;
-        return crate::subset::dollar_assign(object, name, value, reported).map(Some);
+        return crate::subset::dollar_assign(object, name, value, getter).map(Some);
     }
     let keep_missing = special || definition.keep_missing;
     let mut args = Args::new();
@@ -7269,7 +7272,23 @@ unsafe fn replace_through_primitive(
         tag: symbols.value,
         value,
     });
-    call_builtin(definition, reported, function, &args, env).map(Some)
+    call_builtin(definition, getter, function, &args, env).map(Some)
+}
+
+/// The call GNU R generates for one level of a complex assignment, `` `f<-`(`*tmp*`, i, value = v) ``,
+/// from the level's target `f(x, i)` and the assignment `f(x, i) <- v` it reports as.
+pub unsafe fn generated_replacement_call(target: Sexp, assignment: Sexp) -> R<Sexp> {
+    let symbols = symbols();
+    let setter = replacement_function(target.car(), assignment)?;
+    crate::heap().root(setter);
+    let mut items: SmallVec<[(Sexp, Sexp); 4]> = smallvec![(nil(), symbols.tmp)];
+    let mut rest = target.cdr().cdr();
+    while matches!(rest.kind(), SexpType::Pairlist | SexpType::Language) {
+        items.push((rest.tag(), rest.car()));
+        rest = rest.cdr();
+    }
+    items.push((symbols.value, assignment.cdr().cdr().car()));
+    values::lcons(setter, values::pairlist(&items, SexpType::Pairlist)?)
 }
 
 /// A profile summary's name for a complex assignment's target: the replacement functions from
