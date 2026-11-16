@@ -24,7 +24,7 @@ Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and be
 **Status:** superseded by "Releases are built natively per platform, with the runtime beside the binary". Kept for the reasoning about loaders, musl and allocators.
 
 - Release derivations set `allowedReferences = [ ]`, so a `/nix/store` interpreter or RUNPATH fails the build. A binary using the FHS loader cannot run its tests in the Nix sandbox.
-- **Rejected: static musl,** because a static binary cannot `dlopen` libR, losing `ry repl` and `ry run`. For whoever revisits: musl's `malloc` made `ry check` 2 to 5 times slower; zig's libc matched glibc with 13 to 23% more peak memory; jemalloc was 10 to 32% faster but builds C through `configure`; mimalloc was about 25% slower on the largest packages.
+- **Rejected: static musl,** because a static binary cannot `dlopen` libR, losing `ry repl` and `ry run`. musl's own `malloc` also made `ry check` 2 to 5 times slower.
 - **Rejected: static glibc,** whose `dlopen` runs libR against a second, uninitialized libc; and glibc plus musl downloads, because the directive is one release build per platform.
 - **Accepted cost:** no Alpine, and NixOS needs nix-ld or the flake's `default`.
 
@@ -61,7 +61,6 @@ Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and be
 - **Targets:** Linux x86_64, macOS arm64, Windows x86_64. Linux arm64 and Intel macOS were dropped because their runtimes had never run; a matrix row brings them back.
 - **Windows is `x86_64-pc-windows-gnullvm` with MSYS2's clang64,** so `ry.exe`, `R.dll` and `ry-rcmd.exe` link the UCRT as Rtools-built package DLLs do. `just package` refuses a binary importing a toolchain runtime the archive lacks.
 - **Marketplace only, by user decision** (no Open VSX; others use the release's `.vsix`). Publishing uses trusted publishing (`vsce publish --oidc`, vsce 4.1), because the Marketplace's only token is an Azure DevOps global PAT, retired December 1, 2026; packaging stays on vsce 3.6, which accepts bun's `node_modules`. `VSCE_PAT`, when set, is a fallback.
-- **One version per release** (`just bump-version`); the news page is the release record.
 - **glibc floor 2.35** (`ubuntu-22.04`), accepted for the beta; a manylinux-style container is the fix if users ask.
 - **Nix** wraps `ry` with `R_HOME` defaulting to nixpkgs' R, because a Nix-built binary cannot load another distribution's libR; `ry-unwrapped` skips the wrapper.
 
@@ -124,7 +123,7 @@ Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and be
 
 **Status:** built, except the renderer-side too-short floor and workload rule, which "Benchmark suites are directories the renderers only display" supersedes.
 
-- `docs/src/lib/benchmarks.ts` and `tools/bench/readme.py` render every number; prose names categories, never figures, so a fresh `--write` cannot contradict the text. Every rendering carries the metadata line.
+- `docs/src/lib/benchmarks.ts` and `tools/bench/readme.py` render every number; prose names categories, never figures, so a fresh `--write` cannot contradict the text.
 - **Too short is judged on GNU R's time,** because it measures the work; flagging a short ry time would drop the speed-ups being measured.
 
 ## Benchmark suites are directories the renderers only display
@@ -133,7 +132,7 @@ Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and be
 
 - A suite is `tools/bench/<suite>/` with `suite.toml` (the only source of labels) and a schema-1 `results.json`; renderers glob the directories, and a suite without results gets no row or section.
 - **The runner judges, the renderers display:** flags and geometric means come from the runner, so site and README cannot disagree. Only a GNU R time under `meta.too_short_seconds` leaves a program out of the means (`isTooShort`).
-- **One schema, no adapters;** renderers fail on anything else. The method table shows `just bench <suite> --write`, not `meta.command`, which holds the measuring machine's paths.
+- **One schema, no adapters;** renderers fail on anything else.
 
 ## Four published benchmark suites, one runner
 
@@ -142,7 +141,6 @@ Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and be
 - **One runner, `tools/bench/bench.py` (`just bench <suite>`), one schema.** A typed program is `<name>.typed.R` beside `<name>.R`, so the two forms cannot drift. `internal/` holds unpublished benchmarks, `tooling/` the generator and corpus installer.
 - **Method:** paired rounds with shuffled engine and program order; a program's ratio is the median per-round ratio with a 95% bootstrap interval. `--write` needs 10 rounds and every program, and adds rounds where an interval reaches over 10% from its median.
 - **Gates:** a crash or a checksum differing from GNU R's (relative 1e-10, since typed code may sum in another order) writes nothing. Package suites gate on neither: differing outcomes are `tests_differ`, and a crash or timeout is a recorded failure left out of the mean. A test script exiting with status 1 counts as one failed test, because that is how a script without testthat reports failure (`test.data.table()`). A `gnu_r` failure tells a broken pin from a ry gap.
-- **Kernel or application:** a kernel spends its time on arithmetic over numbers and numeric vectors; an application on lists, attributes, dispatch, strings and tables.
 
 ## Flake inputs are git URLs
 
@@ -234,10 +232,10 @@ Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and be
 - **Why:** the published suites' means disagree with the three code bases, which are the goal and take minutes per run, so no suite was fast and representative. `tools/bench/hot/` (`just bench hot`) replays 100 captured package entries; `tools/bench/tooling/hot.py` builds and checks it; `testing.md`, "The hot suite", describes it.
 - **The unit is a package entry,** a closure call from user code into package code, because there time can be attributed and the arguments are values user code built. Rejected: hot bodies anywhere, whose arguments are promises into package frames and whose times nest.
 - **User code is code evaluating in an environment whose top level is the user's, however entered** (`capture::evaluating` from promise forcing, `eval`, `Rf_eval`, `R_tryEval`, `R_ParseEvalString`); counting only user closures charged `test_that()` blocks to `testthat::test_that`.
-- **A weight is a ratio estimate:** a key's capture time times GNU R's over the capture's time for the same uniformly drawn samples, so recorder overhead cancels. The recorder (`crates/interp/src/capture.rs`) empties a reservoir slot for an oversize call rather than keep a biased earlier one, subtracts its own suspended work, records integer nanoseconds, makes a call it cannot inspect `uninspectable` instead of raising (a measurement must not change the program), and stops in a forked child via `pthread_atfork`.
+- **A weight is a ratio estimate:** a key's capture time times GNU R's over the capture's time for the same uniformly drawn samples, so recorder overhead cancels. The recorder (`crates/interp/src/capture.rs`) subtracts its own work and never raises, because a measurement must not change the program.
 - **Replays run in the code bases' session** (every imported package loaded first, `session` in `suite.toml`), because results otherwise depend on program order (`zoo::rollapply` pads differently once xts loads).
-- **Checksums** (`replay.R`, `bench.same_checksum_part`) hash everything exact (types, attributes except data.table's `.internal.selfref`, text, NA/NaN/Inf counts) and compare numeric sums with one tolerance (absolute 1e-10 or relative 1e-13), weighted by a golden-ratio sequence; rounding then hashing failed on last-bit differences. The tolerance exists for `power.t.test`. Samples that differ between two GNU R calls are `varies`.
-- **Temporary paths are relocated** under the replay's `tempdir()` (`relocate`), and the validator drops a sample that writes outside its own `TMPDIR`, leaves different files on a second call, or opens a graphics device.
+- **Checksums hash everything exact and compare numeric sums with one tolerance** (`replay.R`, `bench.same_checksum_part`), because rounding then hashing failed on last-bit differences (`power.t.test` differs by a few ulp).
+- **Captured temporary paths are relocated** under the replay's `tempdir()` (`relocate`), and the validator drops a sample that writes elsewhere.
 - **A call that changes its arguments gets a fresh copy per call** (`fresh` in `suite.toml`), unserialized outside the clock, else a data.table `:=` replays on the previous result.
 - **The deterministic metric is callgrind instructions per region** (`--instructions`, `.ry_bench_region`), because the VMs expose no hardware counters. Programs are dealt over `bench.INSTRUCTION_SHARDS` processes by position, never core count, and run on one OpenMP thread, because callgrind counts idle workers spinning.
 - **Read changes between predictions, never a prediction against a code base's time:** the suite tracks the code bases' changes closely with the same sign, but its predicted level is pessimistic for reasons still open (`backlog.md`, "Open: the hot suite"). Wall time on a shared VM cannot show a change under about 10%, so smaller changes are decided on instruction counts.
@@ -245,7 +243,7 @@ Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and be
 ## The code bases are a benchmark suite of their own, outside the headline
 
 - `tools/bench/codebases` records each code base's time as the sum of its test blocks' times, with GNU R, ry and ry without the JIT in the same rounds, shown in its own section after the package suites.
-- **No headline row,** because generated code says less about real code than the package suites; kept out by `outsideSummary` (`docs/src/lib/benchmarks.ts`) and `outside_summary` (`tools/bench/readme.py`). Reconsider after two release runs. Release runs use `--extra-rounds 0`, because a round takes about 22 minutes.
+- **No headline row,** because generated code says less about real code than the package suites; kept out by `outsideSummary` (`docs/src/lib/benchmarks.ts`) and `outside_summary` (`tools/bench/readme.py`). Release runs use `--extra-rounds 0`, because a round takes about 22 minutes.
 - **Trap:** the Posit snapshot's xts binary truncates `ATTRIB`'s result on R 4.6, so `tools/corpus/install.R` reinstalls xts from source.
 
 ## The profile summary hashes private package names with a secret key per project
