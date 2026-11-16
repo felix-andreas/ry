@@ -110,8 +110,8 @@ A failure listed in `crates/oracle/known_failures.toml` reports as known rather 
 are the ones `ORACLE_ENGINE` lists, else `ry-tier0,ry-jit`. Without GNU R, `compare` checks the
 engines against the recorded `.expected` files instead.
 
-`cargo test -p oracle` runs the same check whenever ry's runtime is built (the `ry` binary and
-`libR.so`, which `cargo test --workspace` builds): every case under `ry-tier0` and `ry-jit`, or under
+`cargo test -p oracle` runs the same check whenever ry finds a base R. It first builds the `ry` binary
+and `libR.so` (unless `ORACLE_RY` names a binary), so it never runs a stale runtime; then every case under `ry-tier0` and `ry-jit`, or under
 the engines `ORACLE_ENGINE` lists, must give its recorded outcome, sorted against the known
 failures. It needs no GNU R, since the recordings stand in for it and the GNU R replay checks them
 wherever GNU R is installed. The test asks the runtime which base R release and which BLAS and

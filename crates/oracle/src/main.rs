@@ -4,8 +4,8 @@ use {
         BUILD_FILE, Build, BuildCheck, CaseRun, Engine, EngineError, KNOWN_FAILURES_FILE,
         ProcessEngine, Verdict,
         bench::{self, Summary},
-        build_file, check_build, diff, engine_from_environment, engine_packages, expected_path,
-        fails_run, find_cases, gallery, gnu_r_available, gnu_r_build, install, installed_packages,
+        build_file, check_build, diff, engine_packages, engines_named, expected_path, fails_run,
+        find_cases, gallery, gnu_r_available, gnu_r_build, install, installed_packages,
         known_failure, known_failures, packages, parse, read_build, render, runnable_cases,
         verdict, write_build,
     },
@@ -35,11 +35,11 @@ enum Command {
     },
     /// Run files under GNU R and write their `.expected` files.
     Record { paths: Vec<PathBuf> },
-    /// Run files under GNU R and under a second engine, and compare the two.
+    /// Run files under GNU R and under ry's engines, and compare them.
     Compare {
         /// The engines compared with GNU R, comma separated: `ry`, `ry-tier0`, `ry-jit`,
         /// `ry-gctorture`, `ry-gctorture-young`, `ry-jit-gctorture`, or a command line
-        /// (default: `$ORACLE_ENGINE`, then `ry`). Unless `ORACLE_RY` names a binary, a ry
+        /// (default: `$ORACLE_ENGINE`, then `ry-tier0,ry-jit`). Unless `ORACLE_RY` names a binary, a ry
         /// engine first builds the workspace's `ry` and `libR.so`, so no run sees a stale build.
         #[arg(long)]
         engine: Option<String>,
@@ -189,7 +189,7 @@ fn main() -> ExitCode {
         eprintln!("{error}");
         return ExitCode::from(2);
     }
-    // Without GNU R, `compare` checks the second engine against the recorded outcomes, which is
+    // Without GNU R, `compare` checks ry's engines against the recorded outcomes, which is
     // how ry's runtime is tested on a machine that has only ry.
     if let Command::Compare {
         engine,
@@ -557,30 +557,20 @@ fn check_suites(cases: &[PathBuf], build: &Build, action: &str) -> Result<(), ()
     Ok(())
 }
 
-/// The engines `--engine` names, comma separated, else the one `ORACLE_ENGINE` names.
+/// The engines `--engine` names, else those [`engines_named`] falls back to.
 fn second_engines(names: Option<&str>) -> Option<Vec<Box<dyn Engine>>> {
-    let Some(names) = names else {
-        return Some(vec![Box::new(engine_from_environment())]);
-    };
-    let mut engines: Vec<Box<dyn Engine>> = Vec::new();
-    for name in names
-        .split(',')
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-    {
-        match ProcessEngine::named(name) {
-            Some(engine) => engines.push(Box::new(engine)),
-            None => {
-                eprintln!("--engine needs a command");
-                return None;
-            }
+    match engines_named(names) {
+        Ok(engines) => Some(
+            engines
+                .into_iter()
+                .map(|engine| Box::new(engine) as Box<dyn Engine>)
+                .collect(),
+        ),
+        Err(error) => {
+            eprintln!("--engine: {error}");
+            None
         }
     }
-    if engines.is_empty() {
-        eprintln!("--engine needs a command");
-        return None;
-    }
-    Some(engines)
 }
 
 /// Compares each of `engines` with GNU R, or with each case's recorded outcome when `gnu_r` is
