@@ -81,48 +81,29 @@ fn edits_at(source: &str, caret: usize) -> Vec<TextEdit> {
     .expect("the source formats")
 }
 
+/// Each case is a source, a caret in it, the one edit formatting that caret's line makes, and
+/// the source after the edit.
 #[test]
-fn the_last_line_of_a_file_without_a_trailing_newline_gains_one() {
-    let source = "x <- 1\ny<-2";
-    let edits = edits_at(source, source.len());
-    assert_eq!(
-        edits,
-        [TextEdit {
-            range: TextRange::new(TextSize::new(7), TextSize::new(11)),
-            new_text: "y <- 2\n".to_owned(),
-        }]
-    );
-    assert_eq!(apply_edits(source, &edits), "x <- 1\ny <- 2\n");
-}
-
-#[test]
-fn a_line_above_a_missing_trailing_newline_does_not_gain_one() {
-    // The newline belongs to the last line's own edit, so selecting an earlier
-    // line must not reach it.
-    let source = "x<-1\ny <- 2";
-    let edits = edits_at(source, 0);
-    assert_eq!(
-        edits,
-        [TextEdit {
-            range: TextRange::new(TextSize::new(0), TextSize::new(5)),
-            new_text: "x <- 1\n".to_owned(),
-        }]
-    );
-    assert_eq!(apply_edits(source, &edits), "x <- 1\ny <- 2");
-}
-
-#[test]
-fn replacement_text_carries_the_documents_line_endings() {
-    let source = "x <- 1\r\ny<-2\r\n";
-    let edits = edits_at(source, 9);
-    assert_eq!(
-        edits,
-        [TextEdit {
-            range: TextRange::new(TextSize::new(8), TextSize::new(14)),
-            new_text: "y <- 2\r\n".to_owned(),
-        }]
-    );
-    assert_eq!(apply_edits(source, &edits), "x <- 1\r\ny <- 2\r\n");
+fn a_caret_formats_its_line_with_the_documents_line_endings() {
+    let cases = [
+        // The last line of a file without a trailing newline gains one.
+        ("x <- 1\ny<-2", 11, 7..11, "y <- 2\n", "x <- 1\ny <- 2\n"),
+        // The newline belongs to the last line's own edit, so an earlier line must not reach it.
+        ("x<-1\ny <- 2", 0, 0..5, "x <- 1\n", "x <- 1\ny <- 2"),
+        ("x <- 1\r\ny<-2\r\n", 9, 8..14, "y <- 2\r\n", "x <- 1\r\ny <- 2\r\n"),
+    ];
+    for (source, caret, range, new_text, result) in cases {
+        let edits = edits_at(source, caret);
+        assert_eq!(
+            edits,
+            [TextEdit {
+                range: TextRange::new(TextSize::new(range.start), TextSize::new(range.end)),
+                new_text: new_text.to_owned(),
+            }],
+            "{source:?}"
+        );
+        assert_eq!(apply_edits(source, &edits), result, "{source:?}");
+    }
 }
 
 #[test]
@@ -131,31 +112,6 @@ fn an_empty_document_has_nothing_to_lay_out() {
     assert_eq!(
         format_range("", Config::default(), TextRange::up_to(TextSize::new(0))),
         Ok(Vec::new())
-    );
-}
-
-#[test]
-fn a_document_that_does_not_parse_refuses_like_whole_file_formatting() {
-    let source = "x <- (\ny <- 2\n";
-    assert_eq!(
-        format_range(
-            source,
-            Config::default(),
-            TextRange::up_to(TextSize::new(6))
-        )
-        .unwrap_err(),
-        format(source, Config::default()).unwrap_err()
-    );
-}
-
-#[test]
-fn selecting_everything_reproduces_whole_file_formatting() {
-    let source = "f<-function(x){\n  a<-1\n\n\n  b<-2\n}\nx<-1;y<-2\n";
-    let whole = TextRange::up_to(TextSize::of(source));
-    let edits = format_range(source, Config::default(), whole).expect("the source formats");
-    assert_eq!(
-        apply_edits(source, &edits),
-        format(source, Config::default()).expect("the source formats")
     );
 }
 

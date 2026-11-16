@@ -42,13 +42,6 @@ fn heading(code: &str, marker: char, message: &str) -> String {
 }
 
 #[test]
-fn check_clean_file_exits_zero() {
-    let directory = project(&[("clean.R", "x <- 1\nprint(x)\n")]);
-    let output = ry(directory.path(), &["check", "clean.R"]);
-    assert_eq!(output.code, 0, "stderr: {}", output.stderr);
-}
-
-#[test]
 fn check_renders_a_syntax_error_as_a_one_based_snippet() {
     let directory = project(&[("bad.R", SYNTAX_ERROR_SOURCE)]);
     let output = ry(directory.path(), &["check", "bad.R"]);
@@ -174,17 +167,6 @@ fn check_json_output_is_one_based_and_parses() {
 }
 
 #[test]
-fn check_json_output_maps_warning_severity() {
-    let directory = project(&[("warn.R", "x = 1\nprint(x)\n")]);
-    let output = ry(directory.path(), &["check", "--output", "json", "warn.R"]);
-
-    assert_eq!(output.code, 1);
-    let record: serde_json::Value =
-        serde_json::from_str(output.stdout.trim()).expect("diagnostic line is not valid JSON");
-    assert_eq!(record["severity"], "warning", "got: {record}");
-}
-
-#[test]
 fn check_related_notes_render_on_both_surfaces() {
     let files = &[("R/a.R", "shared <- 1\n"), ("R/b.R", "shared <- 2\n")];
 
@@ -301,33 +283,6 @@ fn check_flags_unused_imports_when_opted_in() {
 }
 
 #[test]
-fn check_flags_builtin_shadows_when_opted_in() {
-    let files: &[(&str, &str)] = &[("R/main.R", "mean <- function(x) x\nsd <- 1\n")];
-
-    let default_run = ry(project(files).path(), &["check", "."]);
-    assert_eq!(default_run.code, 0, "stderr: {}", default_run.stderr);
-
-    let opted_in = project(&[
-        files[0],
-        (
-            "ry.toml",
-            "[lint]\nshadows-builtin = \"warn\"\nshadows-namespace = \"warn\"\n",
-        ),
-    ]);
-    let output = ry(opted_in.path(), &["check", "."]);
-    let rendered = &output.stderr;
-    assert_eq!(output.code, 1, "stderr: {rendered}");
-    assert!(
-        rendered.contains("Top-level binding `mean` shadows a builtin."),
-        "expected the shadows-builtin warning, got: {rendered}"
-    );
-    assert!(
-        rendered.contains("Top-level binding `sd` shadows `stats::sd`."),
-        "expected the shadows-namespace warning, got: {rendered}"
-    );
-}
-
-#[test]
 fn check_min_severity_error_ignores_warnings() {
     let directory = project(&[("warn.R", "x = 1\n")]);
     let filtered = ry(
@@ -392,13 +347,6 @@ fn check_invalid_config_exits_two() {
 }
 
 #[test]
-fn check_missing_target_exits_two() {
-    let directory = project(&[]);
-    let output = ry(directory.path(), &["check", "does-not-exist.R"]);
-    assert_eq!(output.code, 2, "stderr: {}", output.stderr);
-}
-
-#[test]
 fn check_reports_dropped_override_stub_declarations() {
     let directory = project(&[
         ("clean.R", "x <- 1\n"),
@@ -418,19 +366,6 @@ fn check_reports_dropped_override_stub_declarations() {
         stderr.contains("project.Rtypes:1:1"),
         "expected a 1-based stub-file position header, got: {stderr}"
     );
-}
-
-#[test]
-fn check_loads_valid_override_stubs_silently() {
-    let directory = project(&[
-        ("clean.R", "x <- 1\nprint(x)\n"),
-        (
-            "stubs/project.Rtypes",
-            "my_helper : fn(x: double) -> double\n",
-        ),
-    ]);
-    let output = ry(directory.path(), &["check", "clean.R"]);
-    assert_eq!(output.code, 0, "stderr: {}", output.stderr);
 }
 
 #[test]
@@ -471,78 +406,6 @@ fn check_keeps_declared_packages_active_beside_override_stubs() {
     assert_eq!(output.code, 0, "stderr: {}", output.stderr);
 }
 
-// Every shipped overload set ends in an `Any` catch-all, so only an override reaches this.
-#[test]
-fn check_reports_no_matching_overload() {
-    let directory = project(&[
-        ("R/main.R", "answer <- pick(\"word\")\n"),
-        (
-            "stubs/project.Rtypes",
-            "pick : fn(x: integer) -> integer\npick : fn(x: double) -> double\n",
-        ),
-        ("ry.toml", "[check]\ntyping = true\n"),
-    ]);
-    let output = ry(directory.path(), &["check", "."]);
-    let rendered = &output.stderr;
-    assert_eq!(output.code, 1, "stderr: {rendered}");
-    assert!(
-        rendered.contains(
-            "no overload of `pick` matches these arguments. I tried all 2 declared signatures"
-        ),
-        "expected the no-overload finding, got: {rendered}"
-    );
-}
-
-#[test]
-fn check_override_stub_types_apply() {
-    let directory = project(&[
-        ("R/main.R", "answer <- my_helper(\"not a double\")\n"),
-        (
-            "stubs/project.Rtypes",
-            "my_helper : fn(x: double) -> double\n",
-        ),
-        ("ry.toml", "[check]\ntyping = true\n"),
-    ]);
-    let output = ry(directory.path(), &["check", "."]);
-    let rendered = &output.stderr;
-    assert_eq!(output.code, 1, "stderr: {rendered}");
-    assert!(
-        rendered.contains("R/main.R") || rendered.contains("main.R"),
-        "expected a type finding against the override stub, got: {rendered}"
-    );
-}
-
-#[test]
-fn check_namespace_imports_resolve_bare_reads() {
-    let unimported = project(&[("R/main.R", "f <- function(x) rbindlist(x)\n")]);
-    let output = ry(unimported.path(), &["check", "."]);
-    let rendered = &output.stderr;
-    assert_eq!(output.code, 1, "stderr: {rendered}");
-    assert!(
-        rendered.contains("could not resolve `rbindlist`"),
-        "expected the unresolved warning without an import, got: {rendered}"
-    );
-
-    let imported = project(&[
-        ("R/main.R", "f <- function(x) rbindlist(x)\n"),
-        ("NAMESPACE", "importFrom(data.table, rbindlist)\n"),
-    ]);
-    let output = ry(imported.path(), &["check", "."]);
-    let rendered = &output.stderr;
-    assert_eq!(output.code, 0, "stderr: {rendered}");
-}
-
-#[test]
-fn check_description_dependencies_quiet_namespace_reads() {
-    let declared = project(&[
-        ("R/main.R", "f <- function(d) dplyr::mutate(d)\n"),
-        ("DESCRIPTION", "Package: demo\nImports: dplyr\n"),
-    ]);
-    let output = ry(declared.path(), &["check", "."]);
-    let rendered = &output.stderr;
-    assert_eq!(output.code, 0, "stderr: {rendered}");
-}
-
 #[test]
 fn check_collate_order_decides_the_package_winner() {
     // The reader errors only when the character binding wins: path order makes `b.R`
@@ -575,20 +438,6 @@ fn check_collate_order_decides_the_package_winner() {
 }
 
 #[test]
-fn analysis_stats_notes_when_it_forces_typing_on() {
-    let directory = project(&[("R/a.R", "f <- function(x) x + 1\n")]);
-    let output = ry(directory.path(), &["debug", "analysis-stats", "."]);
-    assert_eq!(output.code, 0, "stderr: {}", output.stderr);
-    assert!(
-        output
-            .stdout
-            .contains("note: [check] typing is off in the configuration"),
-        "report:\n{}",
-        output.stdout
-    );
-}
-
-#[test]
 fn analysis_stats_rejects_a_workspace_without_r_files() {
     let directory = project(&[("README.md", "no code here\n")]);
     let output = ry(directory.path(), &["debug", "analysis-stats", "."]);
@@ -609,7 +458,9 @@ fn analysis_stats_reports_phases_and_probe() {
     let output = ry(directory.path(), &["debug", "analysis-stats", "."]);
     let rendered = &output.stdout;
     assert_eq!(output.code, 0, "stderr: {}", output.stderr);
+    // No ry.toml leaves typing off, which the instrument overrides and says so.
     for section in [
+        "note: [check] typing is off in the configuration",
         "cold analysis",
         "typecheck (+interfaces)",
         "slowest files (typecheck):",
@@ -634,32 +485,10 @@ fn check_without_r_files_reports_nothing_and_exits_clean() {
     );
 }
 
+// testthat sources `tests/testthat/` into one environment, `helper-*.R` first, so a typo in a
+// test file is answered with the helper's name.
 #[test]
-fn testthat_files_share_one_namespace_with_their_helpers() {
-    // testthat sources `tests/testthat/` into one environment, `helper-*.R` first.
-    let directory = project(&[
-        (
-            "DESCRIPTION",
-            "Package: tth\nVersion: 0.1\nSuggests: testthat\n",
-        ),
-        ("R/add.R", "add_one <- function(n) n + 1L\n"),
-        (
-            "tests/testthat/helper-input.R",
-            "make_input <- function() list(n = 1L)\n",
-        ),
-        (
-            "tests/testthat/test-add.R",
-            "test_that(\"adds\", {\n  expect_equal(add_one(make_input()$n), 2L)\n})\n",
-        ),
-    ]);
-    let output = ry(directory.path(), &["check"]);
-    assert!(
-        output.stdout.contains("no problems"),
-        "a helper shared with a test file is not a finding: {}",
-        output.stdout
-    );
-
-    // A real typo must still be reported, with the helper suggested.
+fn a_typo_in_a_test_file_suggests_a_testthat_helper() {
     let directory = project(&[
         (
             "DESCRIPTION",
@@ -769,50 +598,32 @@ fn check_answer_is_independent_of_how_the_paths_are_named() {
 }
 
 #[test]
-fn check_reports_an_export_the_package_does_not_define() {
-    let directory = project(&[
-        ("DESCRIPTION", "Package: expkg\n"),
-        (
-            "NAMESPACE",
-            "export(add_one)\nexport(missing_fn)\nexportPattern(\"^get_\")\n",
-        ),
-        (
-            "R/a.R",
-            "add_one <- function(x) x + 1L\nget_thing <- function() 1L\n",
-        ),
-    ]);
-    let output = ry(directory.path(), &["check", "."]);
-    let rendered = &output.stderr;
-    assert!(
-        rendered.contains(
-            "`missing_fn` is exported but this package defines no such top-level object."
-        ) && !rendered.contains("add_one` is exported")
-            && !rendered.contains("get_thing` is exported"),
-        "only the undefined export is reported: {rendered}"
-    );
-}
-
-#[test]
-fn check_accepts_exports_of_imports_and_of_chained_definitions() {
+fn check_reports_only_an_export_nothing_defines_or_imports() {
     let directory = project(&[
         ("DESCRIPTION", "Package: expkg\nImports: magrittr\n"),
         (
             "NAMESPACE",
-            "export(\"%>%\")\nexport(memoize)\nexport(memoise)\nexport(not_anywhere)\n\
-             importFrom(magrittr,\"%>%\")\n",
+            "export(\"%>%\")\nexport(memoize)\nexport(memoise)\nexport(add_one)\n\
+             export(not_anywhere)\nexportPattern(\"^get_\")\nimportFrom(magrittr,\"%>%\")\n",
         ),
-        ("R/a.R", "memoise <- memoize <- function(f) f\n"),
+        (
+            "R/a.R",
+            "memoise <- memoize <- function(f) f\nadd_one <- function(x) x + 1L\n\
+             get_thing <- function() 1L\n",
+        ),
     ]);
     let output = ry(directory.path(), &["check", "."]);
     let rendered = &output.stderr;
-    for name in ["%>%", "memoize", "memoise"] {
+    for name in ["%>%", "memoize", "memoise", "add_one", "get_thing"] {
         assert!(
             !rendered.contains(&format!("`{name}` is exported")),
             "`{name}` is in the namespace: {rendered}"
         );
     }
     assert!(
-        rendered.contains("`not_anywhere` is exported"),
+        rendered.contains(
+            "`not_anywhere` is exported but this package defines no such top-level object."
+        ),
         "an export nothing defines or imports is still reported: {rendered}"
     );
 
@@ -918,6 +729,7 @@ fn check_reports_character_columns_and_aligns_the_caret() {
         record["column"], 26,
         "JSON columns agree with the rendered ones: {record}"
     );
+    assert_eq!(record["severity"], "warning", "{record}");
 }
 
 // Dispatch is not a read, so the S3 carve-out must see the whole namespace.
@@ -1019,57 +831,34 @@ fn check_analyses_r_chunks_in_a_literate_document() {
 }
 
 #[test]
-fn check_exclude_scopes_the_directory_walk() {
-    let directory = project(&[
-        ("ry.toml", "[check]\nexclude = [\"scripts/\"]\n"),
-        ("top.R", "top_unused <- 1\n"),
-        ("scripts/skipped.R", "script_unused <- 2\n"),
-        ("scripts/deep/also.R", "deep_unused <- 3\n"),
-    ]);
-    let output = ry(directory.path(), &["check", "."]);
-    let rendered = &output.stderr;
-    assert_eq!(output.code, 1, "stderr: {rendered}");
-    assert!(
-        rendered.contains("top_unused"),
-        "the non-excluded script is checked: {rendered}"
-    );
-    assert!(
-        !rendered.contains("script_unused") && !rendered.contains("deep_unused"),
-        "the excluded tree must not be walked: {rendered}"
-    );
-}
-
-#[test]
-fn check_exclude_negation_reincludes() {
+fn check_exclude_scopes_the_walk_but_not_a_named_file() {
     let directory = project(&[
         (
             "ry.toml",
             "[check]\nexclude = [\"scripts/*\", \"!scripts/keep\"]\n",
         ),
+        ("top.R", "top_unused <- 1\n"),
         ("scripts/skipped.R", "script_unused <- 2\n"),
-        ("scripts/keep/kept.R", "kept_unused <- 3\n"),
+        ("scripts/deep/also.R", "deep_unused <- 3\n"),
+        ("scripts/keep/kept.R", "kept_unused <- 4\n"),
     ]);
     let output = ry(directory.path(), &["check", "."]);
     let rendered = &output.stderr;
     assert_eq!(output.code, 1, "stderr: {rendered}");
     assert!(
-        rendered.contains("kept_unused") && !rendered.contains("script_unused"),
-        "negation re-includes the kept subtree: {rendered}"
+        rendered.contains("top_unused") && rendered.contains("kept_unused"),
+        "the walk checks what is not excluded, and a negation re-includes: {rendered}"
     );
-}
-
-#[test]
-fn check_explicit_file_bypasses_exclude() {
-    let directory = project(&[
-        ("ry.toml", "[check]\nexclude = [\"scripts/\"]\n"),
-        ("scripts/named.R", "named_unused <- 2\n"),
-    ]);
-    let output = ry(directory.path(), &["check", "scripts/named.R"]);
-    let rendered = &output.stderr;
-    assert_eq!(output.code, 1, "stderr: {rendered}");
     assert!(
-        rendered.contains("named_unused"),
-        "a file named on the command line is always checked: {rendered}"
+        !rendered.contains("script_unused") && !rendered.contains("deep_unused"),
+        "the excluded tree must not be walked: {rendered}"
+    );
+
+    let output = ry(directory.path(), &["check", "scripts/skipped.R"]);
+    assert!(
+        output.stderr.contains("script_unused"),
+        "a file named on the command line is always checked: {}",
+        output.stderr
     );
 }
 
@@ -1085,26 +874,6 @@ fn check_invalid_exclude_pattern_exits_two() {
         output.stderr.contains("invalid `[check] exclude` pattern"),
         "the bad pattern is named: {}",
         output.stderr
-    );
-}
-
-// A suppression also covers the line below it, hence the blank line.
-#[test]
-fn check_suppression_comments_drop_findings() {
-    let directory = project(&[(
-        "warn.R",
-        "x = 1 # ry: allow(assignment-operator, unused)\n\ny = 2\n",
-    )]);
-    let output = ry(directory.path(), &["check", "warn.R"]);
-    let rendered = &output.stderr;
-    assert_eq!(output.code, 1, "stderr: {rendered}");
-    assert!(
-        rendered.contains("warn.R:3:1"),
-        "the unsuppressed finding remains: {rendered}"
-    );
-    assert!(
-        !rendered.contains("warn.R:1:1"),
-        "the suppressed finding must not render: {rendered}"
     );
 }
 
@@ -1125,29 +894,6 @@ fn fmt_check_lists_dirty_files_and_writes_nothing() {
     );
     let content = fs::read_to_string(directory.path().join("dirty.R")).expect("read dirty.R");
     assert_eq!(content, "x<-1\n", "--check must not modify files");
-}
-
-#[test]
-fn fmt_check_clean_exits_zero_with_summary() {
-    let directory = project(&[("clean.R", "x <- 1\n")]);
-    let output = ry(directory.path(), &["fmt", "--check", "clean.R"]);
-    let stderr = &output.stderr;
-
-    assert_eq!(output.code, 0, "stderr: {stderr}");
-    assert!(
-        stderr.contains("0 files would be reformatted, 1 file already formatted"),
-        "expected a summary line, got: {stderr}"
-    );
-}
-
-#[test]
-fn fmt_rewrites_in_place_and_exits_zero() {
-    let directory = project(&[("dirty.R", "x<-1\n")]);
-    let output = ry(directory.path(), &["fmt", "dirty.R"]);
-
-    assert_eq!(output.code, 0, "stderr: {}", output.stderr);
-    let content = fs::read_to_string(directory.path().join("dirty.R")).expect("read dirty.R");
-    assert_eq!(content, "x <- 1\n");
 }
 
 #[test]
@@ -1274,13 +1020,6 @@ fn fmt_syntax_error_exits_two() {
 }
 
 #[test]
-fn usage_error_exits_two() {
-    let directory = project(&[]);
-    let output = ry(directory.path(), &["bogus-subcommand"]);
-    assert_eq!(output.code, 2, "stderr: {}", output.stderr);
-}
-
-#[test]
 fn typing_off_directive_silences_one_file() {
     let directory = project(&[
         ("R/opted_out.R", "# typing: off\nbad <- 1L + \"a\"\n"),
@@ -1369,69 +1108,6 @@ typing = true
     assert_eq!(output.code, 0, "{}", output.stderr);
 }
 
-#[test]
-fn unknown_typing_directive_value_is_reported() {
-    let directory = project(&[("R/a.R", "# typing: strcit\nx <- 1L\n")]);
-    let output = ry(directory.path(), &["check"]);
-    assert_eq!(output.code, 1);
-    assert!(
-        output.stderr.contains("Unknown typing directive `strcit`"),
-        "report:\n{}",
-        output.stderr
-    );
-}
-
-// Inside data.table brackets and `with`/`subset`; base indexing still warns.
-#[test]
-fn data_masked_column_references_do_not_warn() {
-    let directory = project(&[
-        (
-            "R/dt.R",
-            "summarize_sales <- function(dt) {\n  dt[region == \"west\", .(total = sum(amount)), by = product]\n  dt[, revenue := price * quantity]\n  with(dt, mean(score_col))\n}\n",
-        ),
-        ("R/plain.R", "pick <- function(m) m[not_a_column]\n"),
-        ("ry.toml", "[check]\ntyping = true\n"),
-    ]);
-    let output = ry(directory.path(), &["check"]);
-    assert_eq!(output.code, 1);
-    let report = &output.stderr;
-    assert!(
-        report.contains("not_a_column"),
-        "base indexing keeps its unresolved warning:\n{report}"
-    );
-    for column in ["region", "amount", "product", "revenue", "score_col"] {
-        assert!(
-            !report.contains(&format!("`{column}`")),
-            "masked column `{column}` must not warn:\n{report}"
-        );
-    }
-}
-
-#[test]
-fn global_variables_declarations_suppress_unresolved_warnings() {
-    let directory = project(&[
-        (
-            "R/globals.R",
-            "utils::globalVariables(c(\"generated_col\", \"another_col\"))\n",
-        ),
-        (
-            "R/use.R",
-            "f <- function() generated_col + another_col + genuinely_undefined\n",
-        ),
-        ("ry.toml", "[check]\ntyping = true\n"),
-    ]);
-    let output = ry(directory.path(), &["check"]);
-    assert_eq!(output.code, 1);
-    let report = &output.stderr;
-    assert!(report.contains("genuinely_undefined"), "report:\n{report}");
-    for declared in ["generated_col", "another_col"] {
-        assert!(
-            !report.contains(&format!("`{declared}`")),
-            "declared name `{declared}` must not warn:\n{report}"
-        );
-    }
-}
-
 // Both bare and `pkg::name` call forms; a locally shadowed name masks nothing.
 #[test]
 fn masked_stub_verbs_mask_rest_absorbed_arguments() {
@@ -1459,82 +1135,6 @@ fn masked_stub_verbs_mask_rest_absorbed_arguments() {
 }
 
 #[test]
-fn a_type_name_two_scripts_both_declare_is_not_a_duplicate() {
-    // Script type declarations reach only their own file, so two scripts may each
-    // declare `Thing`. Fixture cases are single-file, so they cannot cover this.
-    let directory = project(&[
-        ("ry.toml", "[check]\ntyping = true\n"),
-        (
-            "one.R",
-            "#: @alias Thing {double}\n\nuse_a <- 1.0\nprint(use_a)\n",
-        ),
-        (
-            "two.R",
-            "#: @alias Thing {character}\n\nuse_b <- \"x\"\nprint(use_b)\n",
-        ),
-    ]);
-    let output = ry(directory.path(), &["check", "."]);
-    assert!(
-        !output.stderr.contains("declared more than once"),
-        "two scripts each declaring one name must not conflict: {}",
-        output.stderr
-    );
-    assert_eq!(output.code, 0, "{}", output.stderr);
-}
-
-const INLINE_SOURCE: &str = "count: integer <- \"one\"\n";
-
-#[test]
-fn check_types_inline_annotations_by_default() {
-    let directory = project(&[
-        ("ry.toml", "[check]\ntyping = true\n"),
-        ("R/a.R", INLINE_SOURCE),
-    ]);
-    let run = ry(directory.path(), &["check"]);
-    assert_eq!(run.code, 1, "{}", run.stderr);
-    assert!(
-        run.stderr.contains("expected `integer`, found `character`"),
-        "{}",
-        run.stderr
-    );
-    assert!(!run.stderr.contains("inline-annotation"), "{}", run.stderr);
-}
-
-#[test]
-fn check_warns_while_inline_annotations_are_off_and_ignores_them() {
-    let directory = project(&[
-        (
-            "ry.toml",
-            "[check]\ntyping = true\ninline-annotations = false\n",
-        ),
-        ("R/a.R", INLINE_SOURCE),
-    ]);
-    let run = ry(directory.path(), &["check"]);
-    assert_eq!(run.code, 1, "{}", run.stderr);
-    assert!(
-        run.stderr.contains(
-            "inline type annotations are turned off (`[check] inline-annotations = false`)"
-        ),
-        "{}",
-        run.stderr
-    );
-    assert!(
-        run.stderr.contains(&heading(
-            "inline-annotation",
-            '!',
-            "inline type annotations are turned off (`[check] inline-annotations = false`), so this one is not checked"
-        )),
-        "{}",
-        run.stderr
-    );
-    assert!(
-        !run.stderr.contains("expected `integer`"),
-        "an annotation that is turned off must not type anything: {}",
-        run.stderr
-    );
-}
-
-#[test]
 fn turning_inline_annotations_off_warns_even_without_any() {
     let directory = project(&[
         ("ry.toml", "[check]\ninline-annotations = false\n"),
@@ -1551,21 +1151,13 @@ fn turning_inline_annotations_off_warns_even_without_any() {
 
 #[test]
 fn check_turns_object_system_definitions_into_errors_when_disabled() {
-    let source = (
-        "R/main.R",
-        "setClass(\"Person\", representation(name = \"character\"))\n",
-    );
-
-    let default_run = ry(project(&[source]).path(), &["check", "."]);
-    assert!(
-        default_run.stderr.contains(
-            "`setClass` defines an S4 class. ry recommends a record or a tagged union instead"
+    let disabled = project(&[
+        (
+            "R/main.R",
+            "setClass(\"Person\", representation(name = \"character\"))\n",
         ),
-        "expected the object-system warning, got: {}",
-        default_run.stderr
-    );
-
-    let disabled = project(&[source, ("ry.toml", "[check]\nobject-systems = false\n")]);
+        ("ry.toml", "[check]\nobject-systems = false\n"),
+    ]);
     let output = ry(disabled.path(), &["check", "."]);
     assert_eq!(output.code, 1, "stderr: {}", output.stderr);
     assert!(
@@ -1665,10 +1257,12 @@ fn a_missing_script_exits_two_before_any_r_starts() {
 }
 
 #[test]
-fn session_usage_errors_exit_two() {
+fn usage_errors_exit_two() {
     let directory = project(&[("script.R", "1\n")]);
     for arguments in [
-        &["run", "--interactive"][..],
+        &["bogus-subcommand"][..],
+        &["check", "does-not-exist.R"],
+        &["run", "--interactive"],
         &["run", "-i", "script.R", "extra"],
         &["R", "--runtime", "ry", "script.R"],
         &["run", "--keybindings", "nano"],

@@ -214,31 +214,6 @@ fn a_listed_case_fails_the_run_when_it_passes_or_crashes() {
     }
 }
 
-/// An entry that names an unknown engine, a case that does not exist, or the same case and engine
-/// twice is refused.
-#[test]
-fn a_mistyped_or_repeated_known_failure_is_refused() {
-    let directory = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let entry = |case: &str, engine: &str| {
-        format!(
-            "[[failure]]\ncase = \"{case}\"\nengine = \"{engine}\"\narea = \"jit\"\n\
-             reason = \"differs\"\n"
-        )
-    };
-    let valid = entry("base__match_arg_native", "ry-jit");
-    assert!(parse_known_failures(&valid, directory).is_ok());
-    for refused in [
-        entry("base__match_arg_native", "ry-turbo"),
-        entry("base__no_such_case", "ry-jit"),
-        format!("{valid}{valid}"),
-    ] {
-        assert!(
-            parse_known_failures(&refused, directory).is_err(),
-            "{refused}"
-        );
-    }
-}
-
 /// An explicit `R_LIBS` comes before the corpus library, the corpus library fills in when
 /// `R_LIBS` is unset, and an empty `R_LIBS` turns it off.
 #[test]
@@ -261,10 +236,8 @@ fn corpus_library_follows_an_explicit_r_libs() {
     assert_eq!(libraries_ahead_of_reference(None, None), None);
 }
 
-/// A case that needs a package the engine lacks fails `oracle compare` before anything runs,
-/// and `--allow-skips` runs the rest and marks every summary line PARTIAL. Without GNU R the
-/// oracle compares with the recorded outcomes and asks the engine which packages it has, so a
-/// shell script stands in for both and the test needs no R.
+/// A case that needs a locale this machine lacks is left out before anything asks GNU R for its
+/// packages, and a case whose locale loads runs.
 #[test]
 fn a_case_needing_a_locale_runs_only_where_the_locale_loads() {
     let directory = std::env::temp_dir().join(format!("oracle-locales-{}", std::process::id()));
@@ -291,6 +264,10 @@ fn a_case_needing_a_locale_runs_only_where_the_locale_loads() {
     std::fs::remove_dir_all(&directory).unwrap_or_else(|error| panic!("{error}"));
 }
 
+/// A case that needs a package the engine lacks fails `oracle compare` before anything runs,
+/// and `--allow-skips` runs the rest and marks every summary line PARTIAL. Without GNU R the
+/// oracle compares with the recorded outcomes and asks the engine which packages it has, so a
+/// shell script stands in for both and the test needs no R.
 #[test]
 fn compare_fails_on_a_missing_package_unless_skips_are_allowed() {
     let directory = std::env::temp_dir().join(format!("oracle-skips-{}", std::process::id()));

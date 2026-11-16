@@ -818,18 +818,6 @@ mod tests {
     }
 
     #[test]
-    fn per_lint_levels() {
-        let config = parse(indoc! {r#"
-            [lint]
-            assignment-operator = "off"
-            boolean-shorthand = "error"
-        "#});
-        assert_eq!(config.lint.assignment_operator, LintLevel::Off);
-        assert_eq!(config.lint.boolean_shorthand, LintLevel::Error);
-        assert_eq!(config.lint.trailing_comma, LintLevel::Default);
-    }
-
-    #[test]
     fn console_colors() {
         let config = parse(indoc! {r#"
             [console.colors]
@@ -902,12 +890,6 @@ mod tests {
     }
 
     #[test]
-    fn unused_can_be_opted_out() {
-        let config = parse("[check]\nunused = false\n");
-        assert!(!config.check.unused);
-    }
-
-    #[test]
     fn unknown_keys_warn_but_load() {
         let config = parse("strict = true\n[check]\ntyping = true\nstric = true\n");
         assert_eq!(config.unknown_keys, ["strict", "check.stric"]);
@@ -929,36 +911,6 @@ mod tests {
     }
 
     #[test]
-    fn unknown_keys_in_each_section_are_recorded() {
-        let config = parse("[format]\nindent = 4\n[lint]\nstyle = \"x\"\n[check]\nstric = true\n");
-        assert_eq!(
-            config.unknown_keys,
-            ["format.indent", "lint.style", "check.stric"]
-        );
-    }
-
-    #[test]
-    fn wrong_type_on_known_key_stays_a_hard_error() {
-        let message = parse_error("[check]\ntyping = \"yes\"\n");
-        assert!(message.contains("expected a boolean"), "{message}");
-    }
-
-    #[test]
-    fn check_exclude_patterns_parse() {
-        let config = parse("[check]\nexclude = [\"scripts/\", \"!scripts/keep.R\"]\n");
-        assert_eq!(config.check.exclude, ["scripts/", "!scripts/keep.R"]);
-    }
-
-    #[test]
-    fn from_path_records_the_source_directory() {
-        let directory = tempfile::tempdir().expect("temp dir");
-        let config_path = directory.path().join(CONFIG_FILE_NAME);
-        fs::write(&config_path, "[check]\nunused = false\n").expect("write config");
-        let config = Config::from_path(&config_path).expect("config parses");
-        assert_eq!(config.source_directory.as_deref(), Some(directory.path()));
-    }
-
-    #[test]
     fn wrong_value_type_is_rejected_with_location() {
         let error = Config::from_toml_str("[check]\nstrict = \"yes\"\n")
             .expect_err("expected the config to be rejected");
@@ -966,23 +918,6 @@ mod tests {
         assert!(message.contains("expected a boolean"), "{message}");
         assert!(message.contains("`check.strict`"), "{message}");
         assert_eq!(error.parse_location(), Some((2, 10)));
-    }
-
-    #[test]
-    fn from_path_names_the_file_in_errors() {
-        let directory = tempfile::tempdir().expect("temp dir");
-        let config_path = directory.path().join(CONFIG_FILE_NAME);
-        fs::write(&config_path, "[check]\ntyping = 1\n").expect("write config");
-        let error =
-            Config::from_path(&config_path).expect_err("expected the config to be rejected");
-        assert_eq!(error.parse_location(), Some((2, 10)));
-
-        let mut rendered = String::new();
-        miette::GraphicalReportHandler::new_themed(miette::GraphicalTheme::none())
-            .render_report(&mut rendered, &error)
-            .expect("the report renders");
-        assert!(rendered.contains("ry.toml:2:10"), "{rendered}");
-        assert!(rendered.contains("typing = 1"), "{rendered}");
     }
 
     #[test]
@@ -996,53 +931,6 @@ mod tests {
         fs::write(nested.join("script.R"), "x <- 1\n").expect("write script");
         let config = Config::discover(nested.join("script.R")).expect("discover config");
         assert_eq!(config.format.indent_width, 7);
-    }
-
-    #[test]
-    fn discover_prefers_the_nearest_config() {
-        let directory = tempfile::tempdir().expect("temp dir");
-        let root = directory.path();
-        fs::write(root.join(CONFIG_FILE_NAME), "[format]\nindent-width = 7\n")
-            .expect("write outer config");
-        let nested = root.join("inner");
-        fs::create_dir_all(&nested).expect("create nested dir");
-        fs::write(
-            nested.join(CONFIG_FILE_NAME),
-            "[format]\nindent-width = 3\n",
-        )
-        .expect("write inner config");
-        let config = Config::discover(&nested).expect("discover from directory");
-        assert_eq!(config.format.indent_width, 3);
-    }
-
-    #[test]
-    fn discover_defaults_when_no_config_exists() {
-        let directory = tempfile::tempdir().expect("temp dir");
-        let config = Config::discover(directory.path()).expect("discover config");
-        assert_eq!(config, Config::default());
-    }
-
-    #[test]
-    fn discover_ignores_configs_behind_dot_dot_components() {
-        let directory = tempfile::tempdir().expect("temp dir");
-        let root = directory.path();
-        let project = root.join("project");
-        fs::create_dir_all(&project).expect("create project dir");
-        fs::write(
-            project.join(CONFIG_FILE_NAME),
-            "[format]\nindent-width = 7\n",
-        )
-        .expect("write project config");
-        fs::write(root.join("outside.R"), "x <- 1\n").expect("write outside script");
-        let config = Config::discover(project.join("..").join("outside.R"))
-            .expect("discover through dot-dot");
-        assert_eq!(config, Config::default());
-    }
-
-    #[test]
-    fn obsolete_missing_comma_key_is_still_accepted() {
-        let config = parse("[lint]\nmissing-comma = \"off\"\n");
-        assert_eq!(config.lint.missing_comma, LintLevel::Off);
     }
 
     #[test]

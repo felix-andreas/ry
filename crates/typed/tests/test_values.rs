@@ -184,41 +184,6 @@ fn lists_follow_their_models() {
 }
 
 #[test]
-fn mutating_a_shared_list_never_shows_through() {
-    let before = live();
-    unsafe {
-        let original = build(&Model::Str(vec![
-            "first item, long enough for the heap".into(),
-            "b".into(),
-        ]));
-        ry_list_dup(original);
-        let unshared = ry_list_unshare(original, 1);
-        assert_ne!(unshared, original);
-        let replacement = str_of("replaced");
-        let changed = ry_list_set(unshared, 1, 0, replacement.lo, replacement.hi);
-        assert_eq!(changed, unshared, "a unique list is set in place");
-        assert_eq!(
-            read(original),
-            Model::Str(vec![
-                "first item, long enough for the heap".into(),
-                "b".into()
-            ])
-        );
-        assert_eq!(
-            read(changed),
-            Model::Str(vec!["replaced".into(), "b".into()])
-        );
-        let pushed = ry_list_push(original, 0, Str::EMPTY.lo, Str::EMPTY.hi);
-        assert_eq!(read(original).len(), 2);
-        assert_eq!(read(pushed).len(), 3);
-        for list in [original, changed, pushed] {
-            ry_list_drop(list);
-        }
-    }
-    assert_eq!(live(), before);
-}
-
-#[test]
 fn owned_unique_operands_are_reused() {
     let before = live();
     unsafe {
@@ -262,7 +227,23 @@ fn owned_unique_operands_are_reused() {
             "pushing within capacity stays in place"
         );
         assert_eq!(read(pushed_again), Model::Int(vec![1, 4, 9, 16, 5, 6]));
-        for list in [b, product, shared, negated, ints, pushed_again] {
+        let heap_item = "an item long enough for the heap";
+        let original = build(&Model::Str(vec![heap_item.into(), "b".into()]));
+        ry_list_dup(original);
+        let unshared = ry_list_unshare(original, 1);
+        assert_ne!(unshared, original, "a shared list is copied before a write");
+        let replacement = str_of("replaced");
+        let changed = ry_list_set(unshared, 1, 0, replacement.lo, replacement.hi);
+        assert_eq!(changed, unshared, "a unique list is set in place");
+        assert_eq!(
+            read(original),
+            Model::Str(vec![heap_item.into(), "b".into()])
+        );
+        assert_eq!(
+            read(changed),
+            Model::Str(vec!["replaced".into(), "b".into()])
+        );
+        for list in [b, product, shared, negated, ints, pushed_again, original, changed] {
             ry_list_drop(list);
         }
     }

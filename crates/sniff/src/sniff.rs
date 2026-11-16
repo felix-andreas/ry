@@ -562,44 +562,151 @@ impl<'a> Records<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use {
+        super::*,
+        ColumnType::{Character, Double, Integer, Logical},
+    };
 
-    fn layout(text: &str) -> (char, bool, Vec<(String, &'static str)>) {
-        let layout = sniff(text.as_bytes());
-        (
-            layout.separator as char,
-            layout.header,
-            layout
-                .columns
-                .into_iter()
-                .map(|column| (column.name, column.kind.name()))
-                .collect(),
-        )
-    }
-
-    fn columns(text: &str) -> Vec<(String, &'static str)> {
-        layout(text).2
-    }
-
-    fn named(pairs: &[(&str, &'static str)]) -> Vec<(String, &'static str)> {
-        pairs
-            .iter()
-            .map(|(name, kind)| (name.to_string(), *kind))
+    fn columns(layout: Layout) -> Vec<(String, ColumnType)> {
+        layout
+            .columns
+            .into_iter()
+            .map(|column| (column.name, column.kind))
             .collect()
     }
 
+    /// Each file's separator (`None` where it has one column, so any byte that is not in it
+    /// will do), whether its first record is a header, and its columns.
     #[test]
-    fn fields_take_the_narrowest_type_that_reads_them() {
-        assert_eq!(
-            columns("a,b,c,d,e\n1,1.5,TRUE,x,NA\n2,3,FALSE,y,\n"),
-            named(&[
-                ("a", "integer[]"),
-                ("b", "double[]"),
-                ("c", "logical[]"),
-                ("d", "character[]"),
-                ("e", "logical[]"),
-            ])
-        );
+    fn files_sniff_as_fread_reads_them() {
+        let cases: [(&str, Option<char>, bool, &[(&str, ColumnType)]); 17] = [
+            // Each field takes the narrowest type that reads it, and a column of nothing but
+            // missing values is logical.
+            (
+                "a,b,c,d,e\n1,1.5,TRUE,x,NA\n2,3,FALSE,y,\n",
+                Some(','),
+                true,
+                &[
+                    ("a", Integer),
+                    ("b", Double),
+                    ("c", Logical),
+                    ("d", Character),
+                    ("e", Logical),
+                ],
+            ),
+            // Logical spellings do not mix, and do not meet numbers.
+            (
+                "a,b,c\nTRUE,true,TRUE\nFALSE,False,1\n",
+                Some(','),
+                true,
+                &[("a", Logical), ("b", Character), ("c", Character)],
+            ),
+            // The first record is a header if it holds text above a typed column.
+            (
+                "1,2\n3,4\n",
+                Some(','),
+                false,
+                &[("V1", Integer), ("V2", Integer)],
+            ),
+            (
+                "x,y\na,b\n",
+                Some(','),
+                true,
+                &[("x", Character), ("y", Character)],
+            ),
+            (
+                "1,y\n1.5,2\n",
+                Some(','),
+                true,
+                &[("1", Double), ("y", Integer)],
+            ),
+            ("a,b\n", Some(','), true, &[("a", Logical), ("b", Logical)]),
+            // Data in the first record widens its columns.
+            (
+                "1.5,x\n2,y\n",
+                Some(','),
+                false,
+                &[("V1", Double), ("V2", Character)],
+            ),
+            // Missing and repeated names are made unique.
+            (
+                "a,,a,a.1,a\n1,2,3,4,5\n",
+                Some(','),
+                true,
+                &[
+                    ("a", Integer),
+                    ("V2", Integer),
+                    ("a.2", Integer),
+                    ("a.1", Integer),
+                    ("a.3", Integer),
+                ],
+            ),
+            // The separator is the one that splits records consistently.
+            (
+                "a\tb\n1\t2,5\n",
+                Some('\t'),
+                true,
+                &[("a", Integer), ("b", Character)],
+            ),
+            (
+                "a|b|c\n1|2|3\n",
+                Some('|'),
+                true,
+                &[("a", Integer), ("b", Integer), ("c", Integer)],
+            ),
+            (
+                "a;b\n1;2\n",
+                Some(';'),
+                true,
+                &[("a", Integer), ("b", Integer)],
+            ),
+            (
+                "a b\n1 2\n",
+                Some(' '),
+                true,
+                &[("a", Integer), ("b", Integer)],
+            ),
+            (
+                "a,b\n\"1,5\",2\n",
+                Some(','),
+                true,
+                &[("a", Character), ("b", Integer)],
+            ),
+            ("price\n1.5\n2\n", None, true, &[("price", Double)]),
+            // Quoted fields hold separators, line breaks and doubled quotes.
+            (
+                "id,note\n1,\"a, b\"\n2,\"line\nbreak\"\n3,\"say \"\"hi\"\"\"\n\"4\",x\n",
+                Some(','),
+                true,
+                &[("id", Integer), ("note", Character)],
+            ),
+            (
+                "\"say \"\"hi\"\"\",\"\"\r\n1,2\r\n",
+                Some(','),
+                true,
+                &[("say \"hi\"", Integer), ("V2", Integer)],
+            ),
+            // Blank lines, carriage returns and a byte order mark are ignored.
+            (
+                "\u{feff}a,b\r\n\r\n1,x\r\n2,y\r\n",
+                Some(','),
+                true,
+                &[("a", Integer), ("b", Character)],
+            ),
+        ];
+        for (text, separator, header, expected) in cases {
+            let layout = sniff(text.as_bytes());
+            match separator {
+                Some(separator) => assert_eq!(layout.separator as char, separator, "{text:?}"),
+                None => assert!(!text.as_bytes().contains(&layout.separator), "{text:?}"),
+            }
+            assert_eq!(layout.header, header, "{text:?}");
+            let expected: Vec<(String, ColumnType)> = expected
+                .iter()
+                .map(|(name, kind)| (name.to_string(), *kind))
+                .collect();
+            assert_eq!(columns(layout), expected, "{text:?}");
+        }
     }
 
     #[test]
@@ -629,107 +736,6 @@ mod tests {
     }
 
     #[test]
-    fn logical_spellings_do_not_mix_and_do_not_meet_numbers() {
-        assert_eq!(
-            columns("a,b,c\nTRUE,true,TRUE\nFALSE,False,1\n"),
-            named(&[
-                ("a", "logical[]"),
-                ("b", "character[]"),
-                ("c", "character[]"),
-            ])
-        );
-    }
-
-    #[test]
-    fn the_first_record_is_a_header_if_it_holds_text_above_a_typed_column() {
-        assert_eq!(
-            layout("1,2\n3,4\n"),
-            (
-                ',',
-                false,
-                named(&[("V1", "integer[]"), ("V2", "integer[]")])
-            )
-        );
-        assert_eq!(
-            layout("x,y\na,b\n"),
-            (
-                ',',
-                true,
-                named(&[("x", "character[]"), ("y", "character[]")])
-            )
-        );
-        assert_eq!(
-            layout("1,y\n1.5,2\n"),
-            (',', true, named(&[("1", "double[]"), ("y", "integer[]")]))
-        );
-        assert_eq!(
-            layout("a,b\n"),
-            (',', true, named(&[("a", "logical[]"), ("b", "logical[]")]))
-        );
-    }
-
-    #[test]
-    fn data_in_the_first_record_widens_its_columns() {
-        assert_eq!(
-            layout("1.5,x\n2,y\n"),
-            (
-                ',',
-                false,
-                named(&[("V1", "double[]"), ("V2", "character[]")])
-            )
-        );
-    }
-
-    #[test]
-    fn missing_and_repeated_names_are_made_unique() {
-        assert_eq!(
-            columns("a,,a,a.1,a\n1,2,3,4,5\n")
-                .into_iter()
-                .map(|(name, _)| name)
-                .collect::<Vec<_>>(),
-            ["a", "V2", "a.2", "a.1", "a.3"]
-        );
-    }
-
-    #[test]
-    fn the_separator_is_the_one_that_splits_records_consistently() {
-        assert_eq!(layout("a\tb\n1\t2,5\n").0, '\t');
-        assert_eq!(layout("a|b|c\n1|2|3\n").0, '|');
-        assert_eq!(layout("a;b\n1;2\n").0, ';');
-        assert_eq!(layout("a b\n1 2\n").0, ' ');
-        assert_eq!(layout("a,b\n\"1,5\",2\n").0, ',');
-    }
-
-    #[test]
-    fn a_file_without_a_separator_is_one_column() {
-        let layout = sniff(b"price\n1.5\n2\n");
-        assert_eq!(layout.columns.len(), 1);
-        assert_eq!(layout.columns[0].name, "price");
-        assert_eq!(layout.columns[0].kind, ColumnType::Double);
-        assert!(!b"price\n1.5\n2\n".contains(&layout.separator));
-    }
-
-    #[test]
-    fn quoted_fields_hold_separators_line_breaks_and_quotes() {
-        assert_eq!(
-            columns("id,note\n1,\"a, b\"\n2,\"line\nbreak\"\n3,\"say \"\"hi\"\"\"\n\"4\",x\n"),
-            named(&[("id", "integer[]"), ("note", "character[]")])
-        );
-        let mut fields = Vec::new();
-        let mut records = Records::new(b"\"say \"\"hi\"\"\",\"\"\r\n", 0, b',');
-        assert!(records.next_record(&mut fields));
-        assert_eq!(fields, ["say \"hi\"", ""]);
-    }
-
-    #[test]
-    fn blank_lines_carriage_returns_and_a_byte_order_mark_are_ignored() {
-        assert_eq!(
-            columns("\u{feff}a,b\r\n\r\n1,x\r\n2,y\r\n"),
-            named(&[("a", "integer[]"), ("b", "character[]")])
-        );
-    }
-
-    #[test]
     fn jump_points_find_a_type_that_widens_deep_in_the_file() {
         let mut text = String::from("id,value,note\n");
         for row in 0..40_000 {
@@ -746,16 +752,16 @@ mod tests {
             text.push_str(&format!("{row},{value},{note}\n"));
         }
         assert_eq!(
-            columns(&text),
-            named(&[
-                ("id", "integer[]"),
-                ("value", "double[]"),
-                ("note", "character[]")
-            ])
+            columns(sniff(text.as_bytes())),
+            [
+                ("id".to_string(), Integer),
+                ("value".to_string(), Double),
+                ("note".to_string(), Character)
+            ]
         );
         assert_eq!(
             sniff_head(&text.as_bytes()[..4096]).columns[1].kind,
-            ColumnType::Integer
+            Integer
         );
     }
 
@@ -763,7 +769,7 @@ mod tests {
     fn the_head_ignores_a_line_cut_short() {
         assert_eq!(
             sniff_head(b"a,b\n1,2\n3,x").columns[1].kind,
-            ColumnType::Integer
+            Integer
         );
     }
 }

@@ -46,6 +46,15 @@ value: Person
 == R/a.R
 == scripts/local.R
 
+#---- two_scripts_can_reuse_type_name
+#~~~~ one.R
+#: @alias Thing {double}
+use_a: Thing <- 1.0
+#~~~~ two.R
+#: @alias Thing {character}
+use_b: Thing <- "x"
+#++++
+
 #==== script_typing
 #---- script_self_reference_typechecks_sequentially
 #~~~~ R/pkg.R

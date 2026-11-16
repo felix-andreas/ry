@@ -3053,74 +3053,53 @@ SHLIB_OPENMP_CFLAGS =
         assert_eq!(toolchain.lapack_libs, "-llapack");
     }
 
+    /// What `make_assignments` and `expand_make` give each expression in each makefile, with
+    /// `a.mk` and `self.mk` there to include. The rows from the differential harness against
+    /// GNU make are pinned here: `:=` expands once, `+=` on it expands the appended text at once,
+    /// `$$` survives a simple assignment, `$A` names the one-letter variable `A`, an empty append
+    /// adds no space, a run of continuation lines collapses to one space, and a trailing `$`
+    /// stays.
     #[test]
-    fn make_expansion_appends_and_stops_on_self_reference() {
-        let variables = make_assignments(
-            "A = x\nA += y\nB ?= $(A) ${C}\nB ?= no\nLOOP = $(LOOP)\n",
-            "/r",
-            &mut |_| None,
-        );
-        assert_eq!(expand_make("$(B)", &variables), "x y ");
-        assert_eq!(expand_make("$(LOOP) $$ $(R_HOME)", &variables), " $ /r");
-    }
-
-    #[test]
-    fn make_expansion_nests_keeps_quoted_spaces_and_trailing_blanks() {
-        let variables = make_assignments(
-            "STD = 17\nCXX17 = clang++\nPADDED = 17 # the blank before # stays\n",
-            "/My R",
-            &mut |_| None,
-        );
-        assert_eq!(expand_make("$(CXX$(STD))", &variables), "clang++");
-        assert_eq!(expand_make("$(CXX$(PADDED))", &variables), "");
-        assert_eq!(
-            expand_make("-L\"$(R_HOME)/lib\"", &variables),
-            "-L\"/My R/lib\""
-        );
-    }
-
-    /// Pinned from the differential harness against GNU make: `:=` expands once, `+=` on it
-    /// expands the appended text at once, `$$` survives a simple assignment, and `$A` names
-    /// the one-letter variable `A`.
-    #[test]
-    fn make_expansion_follows_simple_assignments() {
-        let variables = make_assignments(
-            "A = x # c\nB = $(A)y\nS := $(B) $$Q\nB = changed\nT := $(S)\nT += $(B)\n\
-             U += u\nU := $(U)v\nR_HOME = ignored\n",
-            "/r",
-            &mut |_| None,
-        );
-        assert_eq!(
-            expand_make("[$(S)] [$(T)] [$(U)]", &variables),
-            "[x y $Q] [x y $Q changed] [uv]"
-        );
-        assert_eq!(expand_make("[$Ax] [$(R_HOME)]", &variables), "[x x] [/r]");
-    }
-
-    /// Pinned from the differential harness against GNU make: an empty append adds no
-    /// space, a run of continuation lines collapses to one space, and a trailing `$` stays.
-    #[test]
-    fn make_expansion_joins_like_gnu_make() {
-        let variables = make_assignments(
-            "A := x\nA += $(NONE)\nB = $$ \\\n    \\\n   \nB := $B17\nC := x$$$\n",
-            "/r",
-            &mut |_| None,
-        );
-        assert_eq!(
-            expand_make("[$(A)] [$(B)] [$(C)]", &variables),
-            "[x] [$ 17] [x$$]"
-        );
-    }
-
-    /// Each self-reference expands to nothing once, so a value that repeats one is linear in
-    /// its length rather than exponential.
-    #[test]
-    fn make_expansion_of_a_repeated_self_reference_ends() {
-        let variables =
-            make_assignments("A = $(A)$(A)$(A)$(A)$(A)$(A)$(A)$(A)\n", "/r", &mut |_| {
-                None
+    fn make_expansion_follows_gnu_make() {
+        const SELF_INCLUDING: &str = "A += x\ninclude self.mk\n";
+        let appends = "A = x\nA += y\nB ?= $(A) ${C}\nB ?= no\nLOOP = $(LOOP)\n";
+        let nested = "STD = 17\nCXX17 = clang++\nPADDED = 17 # the blank before # stays\n";
+        let simple = "A = x # c\nB = $(A)y\nS := $(B) $$Q\nB = changed\nT := $(S)\nT += $(B)\n\
+                      U += u\nU := $(U)v\nR_HOME = ignored\n";
+        // A file that includes itself ends at the depth bound instead of recursing forever.
+        let depth_bound = ["x"; 33].join(" ");
+        let cases = [
+            (appends, "$(B)", "x y "),
+            (appends, "$(LOOP) $$ $(R_HOME)", " $ /My R"),
+            (nested, "$(CXX$(STD))", "clang++"),
+            (nested, "$(CXX$(PADDED))", ""),
+            (nested, "-L\"$(R_HOME)/lib\"", "-L\"/My R/lib\""),
+            (simple, "[$(S)] [$(T)] [$(U)]", "[x y $Q] [x y $Q changed] [uv]"),
+            (simple, "[$Ax] [$(R_HOME)]", "[x x] [/My R]"),
+            (
+                "A := x\nA += $(NONE)\nB = $$ \\\n    \\\n   \nB := $B17\nC := x$$$\n",
+                "[$(A)] [$(B)] [$(C)]",
+                "[x] [$ 17] [x$$]",
+            ),
+            // Each self-reference expands to nothing once, so a value that repeats one is linear
+            // in its length rather than exponential.
+            ("A = $(A)$(A)$(A)$(A)$(A)$(A)$(A)$(A)\n", "$(A)", ""),
+            // An `=` in the comment after an `include` does not make the line an assignment.
+            ("include a.mk # sets A=1\n", "$(A)", "1"),
+            (SELF_INCLUDING, "$(A)", depth_bound.as_str()),
+        ];
+        for (makefile, expression, expected) in cases {
+            let variables = make_assignments(makefile, "/My R", &mut |name| match name {
+                "a.mk" => Some("A = 1\n".to_owned()),
+                "self.mk" => Some(SELF_INCLUDING.to_owned()),
+                _ => None,
             });
-        assert_eq!(expand_make("$(A)", &variables), "");
+            assert_eq!(
+                expand_make(expression, &variables),
+                expected,
+                "{expression} in\n{makefile}"
+            );
+        }
     }
 
     /// The variable names the generated makefiles assign. None is one of make's built-in
@@ -3236,25 +3215,6 @@ SHLIB_OPENMP_CFLAGS =
         )
         .expect("make reads GNU R's Makeconf");
         assert_eq!(ours, theirs);
-    }
-
-    /// An `=` in the comment after an `include` does not turn the line into an assignment.
-    #[test]
-    fn an_include_with_an_assignment_in_its_comment_still_includes() {
-        let text = "include a.mk # sets A=1\n";
-        let variables = make_assignments(text, "/r", &mut |name| {
-            (name == "a.mk").then(|| "A = 1\n".to_owned())
-        });
-        assert_eq!(expand_make("$(A)", &variables), "1");
-    }
-
-    /// A file that includes itself ends at the depth bound instead of recursing forever.
-    #[test]
-    fn a_makefile_that_includes_itself_ends() {
-        let text = "A += x\ninclude self.mk\n";
-        let variables = make_assignments(text, "/r", &mut |_| Some(text.to_owned()));
-        let expanded = expand_make("$(A)", &variables);
-        assert_eq!(expanded.split_whitespace().count(), 33);
     }
 
     /// Arbitrary text never panics the parser or the expander, and expansion ends.

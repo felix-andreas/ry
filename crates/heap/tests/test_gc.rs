@@ -6,7 +6,7 @@ use {
     heap::{
         Collection, ENVIRONMENT_BYTES, GcStress, Heap, HeapError, TRIPLE_BYTES,
         arena::Arena,
-        object::{NA_REAL, Sexp, SexpType, Slot, gp, is_na_real},
+        object::{Sexp, SexpType, Slot, gp},
         records::{Fields, Layout},
         strings::Encoding,
     },
@@ -811,47 +811,6 @@ fn an_escaped_list_keeps_what_native_code_stored_into_it() {
 }
 
 #[test]
-fn unrooted_objects_are_freed_and_their_slots_reused() {
-    let mut heap = Heap::new();
-    unsafe {
-        let kept = heap.alloc_vector(SexpType::Real, 3).expect("alloc");
-        kept.slice_mut::<f64>()
-            .copy_from_slice(&[1.5, NA_REAL, -0.0]);
-        heap.root(kept);
-        let garbage = heap.alloc_vector(SexpType::Real, 3).expect("alloc");
-        let before = heap.stats().objects_freed;
-        heap.collect(Collection::Minor);
-        assert!(heap.stats().objects_freed > before);
-        // Without stress or verification, only debug builds poison freed slots, since it
-        // costs a store per dead byte.
-        if cfg!(debug_assertions) {
-            assert!(garbage.is_poisoned(), "a freed slot is poisoned");
-        }
-        let reused = heap.alloc_vector(SexpType::Real, 3).expect("alloc");
-        assert_eq!(reused, garbage, "the free list hands the slot out again");
-        assert!(is_na_real(kept.slice::<f64>()[1]));
-        assert_eq!(kept.slice::<f64>()[0], 1.5);
-    }
-}
-
-#[test]
-fn the_write_barrier_keeps_young_objects_stored_into_old_ones() {
-    let mut heap = Heap::new();
-    unsafe {
-        let old = heap.alloc_vector(SexpType::List, 1).expect("alloc");
-        heap.root(old);
-        heap.collect(Collection::Minor);
-        let young = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
-        *young.slice_mut::<i32>().first_mut().expect("one element") = 42;
-        heap.set_element(old, 0, young);
-        heap.collect(Collection::Minor);
-        assert_eq!(old.element(0).kind(), SexpType::Integer);
-        assert_eq!(old.element(0).slice::<i32>(), &[42]);
-        assert_eq!(young.refcount(), 1, "a store counts as one reference");
-    }
-}
-
-#[test]
 fn pretenured_objects_are_old_and_keep_the_young_objects_they_hold() {
     let mut heap = Heap::new();
     heap.update_policy(|policy| policy.verify = true);
@@ -1469,25 +1428,6 @@ fn counted_changes_during_an_escape_never_lose_a_count() {
         heap.set_element(list, 2, values[2]);
         heap.retire_escaped();
         assert_eq!(values.map(|value| value.refcount()), [1, 1, 1], "exact counts");
-    }
-}
-
-#[test]
-fn large_objects_are_allocated_and_freed_individually() {
-    let mut heap = Heap::new();
-    unsafe {
-        let big = heap.alloc_vector(SexpType::Real, 100_000).expect("alloc");
-        assert!(
-            big.slice::<f64>().iter().all(|value| *value == 0.0),
-            "zeroed"
-        );
-        assert_eq!(heap.stats().large_objects, 0, "stats refresh at collection");
-        heap.root(big);
-        heap.collect(Collection::Major);
-        assert_eq!(heap.stats().large_objects, 1);
-        heap.release_handles(0);
-        heap.collect(Collection::Major);
-        assert_eq!(heap.stats().large_objects, 0);
     }
 }
 

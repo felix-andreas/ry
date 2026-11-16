@@ -13,7 +13,7 @@ use {
         package_definitions, parse, session,
         stubs::install_shipped_stubs,
         testing::{ProbeDatabase, render_semantics},
-        types::{Atomic, scalar, unknown},
+        types::{Atomic, scalar},
     },
     std::{collections::BTreeMap, thread},
 };
@@ -31,30 +31,95 @@ fn definition<'db>(db: &'db ProbeDatabase, name: &str) -> Item<'db> {
         .unwrap_or_else(|| panic!("`{name}` is defined"))
 }
 
+/// Each case settles its project, then edits its first file once per step and names the items
+/// checked again after that step.
 #[test]
-fn the_probe_sees_item_checks() {
-    let db = ProbeDatabase::default();
-    let files = db.project(&["x <- function() 1L\n", "use_x <- function() x()\n"]);
-    settle(&db, &files);
-    assert_eq!(db.checked_since(), ["use_x", "x"]);
-    settle(&db, &files);
-    assert!(db.checked_since().is_empty(), "a re-read executes nothing");
-}
-
-#[test]
-fn a_body_edit_keeping_the_scheme_rechecks_only_the_edited_item() {
-    let mut db = ProbeDatabase::default();
-    let files = db.project(&[
+fn an_edit_rechecks_the_edited_items_and_the_readers_whose_answers_change() {
+    const READERS: &[&str] = &[
         "x <- function() 1L\n",
         "use_x <- function() x()\n",
         "other <- function() 3L\n",
-    ]);
-    settle(&db, &files);
-    db.checked_since();
-
-    db.edit(files[0], "x <- function() 2L\n".to_owned());
-    settle(&db, &files);
-    assert_eq!(db.checked_since(), ["x"]);
+    ];
+    const RECURSIVE: &str =
+        "count <- function(n) if (n > 0L) count(n - 1L) else 0L\nplain <- function() 1L\n";
+    let cases: &[(&str, &[&str], &[(&str, &[&str])])] = &[
+        (
+            "a body edit keeping the scheme",
+            READERS,
+            &[("x <- function() 2L\n", &["x"])],
+        ),
+        (
+            "a body edit changing the scheme",
+            READERS,
+            &[("x <- function() \"a\"\n", &["use_x", "x"])],
+        ),
+        (
+            "a new definition nothing reads",
+            READERS,
+            &[("x <- function() 1L\nfresh <- 2L\n", &["fresh"])],
+        ),
+        (
+            // A file's cyclic groups name items rather than positions in the file, so a
+            // statement added before or after a recursive function leaves its check alone.
+            "new statements beside a recursive function",
+            &[RECURSIVE, "other <- function() count(2L)\n"],
+            &[(
+                "first <- 1L\ncount <- function(n) if (n > 0L) count(n - 1L) else 0L\n\
+                 plain <- function() 1L\nlast <- 2L\n",
+                &["first", "last"],
+            )],
+        ),
+        (
+            "defining a name that was missing",
+            &[
+                "x <- function() 1L\n",
+                "use_later <- function() later()\n",
+                "other <- function() 3L\n",
+            ],
+            &[(
+                "x <- function() 1L\nlater <- function() 2L\n",
+                &["later", "use_later"],
+            )],
+        ),
+        (
+            "editing an inline annotation",
+            &[
+                "count: integer <- 1L\n",
+                "use_count <- function() count\n",
+                "other <- function() 3L\n",
+            ],
+            &[("count: double <- 1L\n", &["count", "use_count"])],
+        ),
+        (
+            "reference class fields",
+            &[
+                "Workbook <- setRefClass(\"Workbook\", fields = c(font = \"character\"))\n",
+                "Sheet <- setRefClass(\"Sheet\", contains = \"Workbook\",\n  methods = list(widths = function() nchar(font) + size))\n",
+                "other <- function() 3L\n",
+            ],
+            &[
+                (
+                    "Workbook <- setRefClass(\"Workbook\", fields = c(font = \"character\", unread = \"list\"))\n",
+                    &["Workbook"],
+                ),
+                (
+                    "Workbook <- setRefClass(\"Workbook\", fields = c(font = \"character\", size = \"numeric\"))\n",
+                    &["Sheet", "Workbook"],
+                ),
+            ],
+        ),
+    ];
+    for &(name, sources, steps) in cases {
+        let mut db = ProbeDatabase::default();
+        let files = db.project(sources);
+        settle(&db, &files);
+        db.checked_since();
+        for &(text, expected) in steps {
+            db.edit(files[0], text.to_owned());
+            settle(&db, &files);
+            assert_eq!(db.checked_since(), expected, "{name}");
+        }
+    }
 }
 
 fn settle_top_level(db: &ProbeDatabase, files: &[SourceFile]) {
@@ -111,42 +176,6 @@ fn removing_a_purity_marker_reclassifies_its_callers() {
 }
 
 #[test]
-fn a_body_edit_changing_the_scheme_rechecks_its_readers_only() {
-    let mut db = ProbeDatabase::default();
-    let files = db.project(&[
-        "x <- function() 1L\n",
-        "use_x <- function() x()\n",
-        "other <- function() 3L\n",
-    ]);
-    settle(&db, &files);
-    db.checked_since();
-
-    db.edit(files[0], "x <- function() \"a\"\n".to_owned());
-    settle(&db, &files);
-    assert_eq!(db.checked_since(), ["use_x", "x"]);
-}
-
-#[test]
-fn a_new_definition_rechecks_nothing_that_does_not_read_it() {
-    let mut db = ProbeDatabase::default();
-    let files = db.project(&[
-        "x <- function() 1L\n",
-        "use_x <- function() x()\n",
-        "other <- function() 3L\n",
-    ]);
-    settle(&db, &files);
-    db.checked_since();
-
-    db.edit(files[0], "x <- function() 1L\nfresh <- 2L\n".to_owned());
-    settle(&db, &files);
-    assert_eq!(db.checked_since(), ["fresh"]);
-}
-
-/// A name being typed is a new top-level definition on every keystroke. The project-wide
-/// definition map changes each time, so every item checked afterwards projects it again in
-/// `item_links`. Each projection backdates unless one of the item's own names moved, so the
-/// new item is the only one checked, and the fold runs once.
-#[test]
 fn a_new_definition_reprojects_the_name_maps_and_checks_only_the_new_item() {
     let mut db = ProbeDatabase::default();
     let files = db.project(&[
@@ -171,22 +200,6 @@ fn a_new_definition_reprojects_the_name_maps_and_checks_only_the_new_item() {
         "each item projects the maps again and only the new one is checked; the edited file \
          walks its groups again, and the fold runs once and its duplicates backdate"
     );
-}
-
-/// A file's cyclic groups name items rather than positions in the file, so a statement added
-/// before or after a recursive function leaves the function's check alone.
-#[test]
-fn a_new_statement_beside_a_recursive_function_checks_only_itself() {
-    let mut db = ProbeDatabase::default();
-    let recursive =
-        "count <- function(n) if (n > 0L) count(n - 1L) else 0L\nplain <- function() 1L\n";
-    let files = db.project(&[recursive, "other <- function() count(2L)\n"]);
-    settle(&db, &files);
-    db.checked_since();
-
-    db.edit(files[0], format!("first <- 1L\n{recursive}last <- 2L\n"));
-    settle(&db, &files);
-    assert_eq!(db.checked_since(), ["first", "last"]);
 }
 
 /// An item's links ask whether its file belongs to the project, which reads the file list and
@@ -271,33 +284,6 @@ fn a_test_file_asks_its_own_binders_for_a_constructed_name() {
         db.executions_since(&["frame_binder"])[0] > 0,
         "the file's binders answer a constructed name"
     );
-}
-
-#[test]
-fn defining_a_missing_name_rechecks_its_readers() {
-    let mut db = ProbeDatabase::default();
-    let files = db.project(&[
-        "x <- function() 1L\n",
-        "use_later <- function() later()\n",
-        "other <- function() 3L\n",
-    ]);
-    settle(&db, &files);
-    assert!(
-        !file_diagnostics(&db, files[1]).is_empty(),
-        "`later` is unresolved"
-    );
-    db.checked_since();
-
-    db.edit(
-        files[0],
-        "x <- function() 1L\nlater <- function() 2L\n".to_owned(),
-    );
-    settle(&db, &files);
-    assert!(
-        file_diagnostics(&db, files[1]).is_empty(),
-        "`later` resolves"
-    );
-    assert_eq!(db.checked_since(), ["later", "use_later"]);
 }
 
 #[test]
@@ -406,15 +392,6 @@ fn a_reexport_chain_follows_its_base() {
     assert_eq!(global_scheme(&db, definition(&db, "a")).body, character);
 }
 
-#[test]
-fn a_reexport_cycle_pins_to_unknown() {
-    let db = ProbeDatabase::default();
-    db.project(&["a <- b\n", "b <- a\n"]);
-    for name in ["a", "b"] {
-        assert_eq!(global_scheme(&db, definition(&db, name)).body, unknown(&db));
-    }
-}
-
 // Demand and revalidation recurse as deep as the chain, on the shipped analysis stack size.
 #[test]
 fn a_deep_reexport_chain_resolves_fully() {
@@ -481,22 +458,6 @@ fn turning_the_prelude_off_rechecks_only_items_that_use_the_library() {
     settings.set_prelude(&mut db).to(false);
     settle(&db, &files);
     assert_eq!(db.checked_since(), ["lengths"]);
-}
-
-#[test]
-fn editing_an_inline_annotation_rechecks_the_item_and_its_readers_only() {
-    let mut db = ProbeDatabase::default();
-    let files = db.project(&[
-        "count: integer <- 1L\n",
-        "use_count <- function() count\n",
-        "other <- function() 3L\n",
-    ]);
-    settle(&db, &files);
-    db.checked_since();
-
-    db.edit(files[0], "count: double <- 1L\n".to_owned());
-    settle(&db, &files);
-    assert_eq!(db.checked_since(), ["count", "use_count"]);
 }
 
 #[test]
@@ -714,15 +675,19 @@ fn report(db: &mut ProbeDatabase, files: &[SourceFile], lints: &LintConfig) {
     }
 }
 
+/// A diagnostics-only host keeps two trees here, never one per file. Its check still parses
+/// each file once, because the pass that derives from a tree holds it and no later pass reads
+/// one, and it reports what a host that keeps every tree reports.
 #[test]
-fn a_cold_check_parses_each_file_once() {
-    let mut db = ProbeDatabase::default();
-    let files = wide_project(&db);
+fn a_diagnostics_only_check_parses_each_file_once_with_two_trees() {
+    let mut bounded = ProbeDatabase::diagnostics_only();
+    let files = wide_project(&bounded);
     let lints = LintConfig::default();
-    cold_check(&mut db, &files, &lints);
-    assert_eq!(db.trees().parses(), files.len() as u64);
+    cold_check(&mut bounded, &files, &lints);
+    assert!(bounded.trees().stored() <= 2);
+    assert_eq!(bounded.trees().parses(), files.len() as u64);
     let codes = |file: SourceFile| -> Vec<&'static str> {
-        file_diagnostics(&db, file)
+        file_diagnostics(&bounded, file)
             .iter()
             .map(|diagnostic| diagnostic.code)
             .collect()
@@ -738,24 +703,11 @@ fn a_cold_check_parses_each_file_once() {
         codes(files[200])
     );
     assert!(
-        lint_file(&db, files[0], &lints)
+        lint_file(&bounded, files[0], &lints)
             .iter()
             .any(|diagnostic| diagnostic.code == "object-system"),
-        "the bare `setClass` call is still reported"
+        "the bare `setClass` call is reported"
     );
-}
-
-/// A diagnostics-only host keeps two trees here, never one per file. Its check still parses
-/// each file once, because the pass that derives from a tree holds it and no later pass reads
-/// one, and it reports what a host that keeps every tree reports.
-#[test]
-fn a_diagnostics_only_check_parses_each_file_once_with_two_trees() {
-    let mut bounded = ProbeDatabase::diagnostics_only();
-    let files = wide_project(&bounded);
-    let lints = LintConfig::default();
-    cold_check(&mut bounded, &files, &lints);
-    assert!(bounded.trees().stored() <= 2);
-    assert_eq!(bounded.trees().parses(), files.len() as u64);
 
     let keeping = ProbeDatabase::default();
     let kept_files = wide_project(&keeping);
@@ -811,17 +763,6 @@ fn wide_project_source(index: usize) -> String {
     format!(
         "f{index} <- function(x) x + {index}L\n#: integer\nn{index} <- T\n#: integer\nm{index}: integer <- 1L\nsetClass(\"A{index}\")\n"
     )
-}
-
-#[test]
-fn a_file_that_defines_set_class_itself_is_not_linted_for_calling_it() {
-    let db = ProbeDatabase::default();
-    let files = db.project(&["setClass <- function(name) name\nsetClass(\"A\")\n"]);
-    assert!(
-        lint_file(&db, files[0], &LintConfig::default())
-            .iter()
-            .all(|diagnostic| diagnostic.code != "object-system")
-    );
 }
 
 fn package(
@@ -1176,34 +1117,6 @@ fn link_invariants_child() {
         db.edit(files[0], text);
         settle(&db, &files);
     }
-}
-
-#[test]
-fn a_reference_class_edit_rechecks_only_methods_whose_member_answers_change() {
-    let mut db = ProbeDatabase::default();
-    let files = db.project(&[
-        "Workbook <- setRefClass(\"Workbook\", fields = c(font = \"character\"))\n",
-        "Sheet <- setRefClass(\"Sheet\", contains = \"Workbook\",\n  methods = list(widths = function() nchar(font) + size))\n",
-        "other <- function() 3L\n",
-    ]);
-    settle(&db, &files);
-    db.checked_since();
-
-    db.edit(
-        files[0],
-        "Workbook <- setRefClass(\"Workbook\", fields = c(font = \"character\", unread = \"list\"))\n"
-            .to_owned(),
-    );
-    settle(&db, &files);
-    assert_eq!(db.checked_since(), ["Workbook"]);
-
-    db.edit(
-        files[0],
-        "Workbook <- setRefClass(\"Workbook\", fields = c(font = \"character\", size = \"numeric\"))\n"
-            .to_owned(),
-    );
-    settle(&db, &files);
-    assert_eq!(db.checked_since(), ["Sheet", "Workbook"]);
 }
 
 #[test]

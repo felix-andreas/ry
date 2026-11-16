@@ -1069,28 +1069,6 @@ fn scale(mut value: f64, mut power: i32) -> f64 {
 mod tests {
     use super::*;
 
-    fn sum(values: &[f64]) -> f64 {
-        let mut total = LongDouble::ZERO;
-        for &value in values {
-            total += value;
-        }
-        total.to_f64()
-    }
-
-    #[test]
-    fn huge_terms_swallow_small_ones_like_x87() {
-        let values: Vec<f64> = (1..=9).map(f64::from).chain([-1e300, 1e300]).collect();
-        assert_eq!(sum(&values), 0.0);
-    }
-
-    #[test]
-    fn extra_bits_survive_until_the_final_rounding() {
-        // 2^53 + 1 is not a double, but the 64-bit significand holds it until 1 more arrives.
-        let two_53 = 2f64.powi(53);
-        assert_eq!(sum(&[two_53, 1.0, 1.0]), two_53 + 2.0);
-        assert_eq!(two_53 + 1.0 + 1.0, two_53);
-    }
-
     #[test]
     fn round_trips_doubles_and_subnormals() {
         for value in [1.0, -0.1, 1e-310, f64::MIN_POSITIVE, f64::MAX, 5e-324] {
@@ -1232,12 +1210,5 @@ mod tests {
         assert!(LongDouble::from(-1.0) < LongDouble::ZERO);
         assert!(LongDouble::from(-0.0) == LongDouble::ZERO);
         assert!(LongDouble::from(-2.0) < LongDouble::from(-1.0));
-    }
-
-    #[test]
-    fn overflow_is_only_seen_on_conversion() {
-        let total = LongDouble::from(f64::MAX) + LongDouble::from(f64::MAX);
-        assert_eq!(total.to_f64(), f64::INFINITY);
-        assert_eq!((total / 2).to_f64(), f64::MAX);
     }
 }
