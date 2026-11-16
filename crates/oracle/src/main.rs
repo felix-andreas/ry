@@ -27,20 +27,29 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run files under GNU R and compare with their recorded `.expected` files.
-    Verify { paths: Vec<PathBuf> },
+    Verify {
+        /// List every passing case, not only the failures.
+        #[arg(long)]
+        verbose: bool,
+        paths: Vec<PathBuf>,
+    },
     /// Run files under GNU R and write their `.expected` files.
     Record { paths: Vec<PathBuf> },
     /// Run files under GNU R and under a second engine, and compare the two.
     Compare {
         /// The engines compared with GNU R, comma separated: `ry`, `ry-tier0`, `ry-jit`,
         /// `ry-gctorture`, `ry-gctorture-young`, `ry-jit-gctorture`, or a command line
-        /// (default: `$ORACLE_ENGINE`, then the stub).
+        /// (default: `$ORACLE_ENGINE`, then `ry`). Unless `ORACLE_RY` names a binary, a ry
+        /// engine first builds the workspace's `ry` and `libR.so`, so no run sees a stale build.
         #[arg(long)]
         engine: Option<String>,
         /// Run even when cases need packages that are not installed, skip those cases, and
         /// mark the summary PARTIAL. Without it, such a run fails before it starts.
         #[arg(long)]
         allow_skips: bool,
+        /// List every passing and known failing case, not only what needs attention.
+        #[arg(long)]
+        verbose: bool,
         paths: Vec<PathBuf>,
     },
     /// Print the outcome of one file under GNU R.
@@ -174,11 +183,18 @@ fn main() -> ExitCode {
         print!("{}", oracle::fuzz::program(seed));
         return ExitCode::SUCCESS;
     }
+    if uses_workspace_ry(&cli.command)
+        && let Err(error) = oracle::build_workspace_ry()
+    {
+        eprintln!("{error}");
+        return ExitCode::from(2);
+    }
     // Without GNU R, `compare` checks the second engine against the recorded outcomes, which is
     // how ry's runtime is tested on a machine that has only ry.
     if let Command::Compare {
         engine,
         allow_skips,
+        verbose,
         paths,
     } = &cli.command
         && !gnu_r_available()
@@ -188,7 +204,7 @@ fn main() -> ExitCode {
         };
         eprintln!("GNU R was not found, so the engines are compared with the recorded outcomes");
         let selection = cases(paths.clone(), || engine_packages(engines[0].as_ref()));
-        return compare(None, &engines, &selection, *allow_skips);
+        return compare(None, &engines, &selection, *allow_skips, *verbose);
     }
     if !gnu_r_available() {
         eprintln!("GNU R was not found; install R or set ORACLE_R to its path");
@@ -196,11 +212,14 @@ fn main() -> ExitCode {
     }
     let gnu_r = ProcessEngine::gnu_r();
     match cli.command {
-        Command::Verify { paths } => verify(&gnu_r, &cases(paths, installed_packages)),
+        Command::Verify { verbose, paths } => {
+            verify(&gnu_r, &cases(paths, installed_packages), verbose)
+        }
         Command::Record { paths } => record(&gnu_r, &cases(paths, installed_packages)),
         Command::Compare {
             engine,
             allow_skips,
+            verbose,
             paths,
         } => {
             let Some(engines) = second_engines(engine.as_deref()) else {
@@ -211,6 +230,7 @@ fn main() -> ExitCode {
                 &engines,
                 &cases(paths, installed_packages),
                 allow_skips,
+                verbose,
             )
         }
         Command::Bench {
@@ -303,6 +323,21 @@ fn main() -> ExitCode {
     }
 }
 
+/// Whether the command runs the workspace's own debug `ry`, which then has to be built first.
+fn uses_workspace_ry(command: &Command) -> bool {
+    let names_ry = |names: &str| names.split(',').any(|name| name.trim().starts_with("ry"));
+    match command {
+        Command::Compare { engine, .. } => match engine {
+            Some(names) => names_ry(names),
+            None => std::env::var("ORACLE_ENGINE").map_or(true, |names| names_ry(&names)),
+        },
+        Command::Fuzz { engines, .. } => names_ry(engines),
+        Command::Gallery { .. } => true,
+        Command::Bench { ry, .. } => ry.is_none(),
+        _ => false,
+    }
+}
+
 fn run_gallery(options: gallery::Options) -> ExitCode {
     if !oracle::ry_runtime_available() {
         eprintln!("ry's runtime is not built; run `cargo build -p ry-lang -p libr`");
@@ -362,7 +397,8 @@ fn cases(paths: Vec<PathBuf>, installed: impl FnOnce() -> Option<Vec<String>>) -
     }
 }
 
-fn verify(gnu_r: &ProcessEngine, selection: &Selection) -> ExitCode {
+/// Runs the cases on one worker per core and reports the failures in case order.
+fn verify(gnu_r: &ProcessEngine, selection: &Selection, verbose: bool) -> ExitCode {
     let cases = &selection.runnable;
     let Some(build) = announce_build() else {
         return ExitCode::from(2);
@@ -370,20 +406,24 @@ fn verify(gnu_r: &ProcessEngine, selection: &Selection) -> ExitCode {
     if check_suites(cases, &build, "verify").is_err() {
         return ExitCode::from(2);
     }
-    let mut failures = 0;
-    let mut crashed = Vec::new();
-    for case in cases {
+    let runs = oracle::in_parallel(cases, |case| {
         let expected = std::fs::read_to_string(expected_path(case))
             .ok()
             .and_then(|text| parse(&text));
-        let Some(expected) = expected else {
+        expected.map(|expected| (expected, gnu_r.run(case)))
+    });
+    let mut failures = 0;
+    let mut crashed = Vec::new();
+    for (case, run) in cases.iter().zip(runs) {
+        let Some((expected, actual)) = run else {
             println!("MISSING {}", case.display());
             failures += 1;
             continue;
         };
-        match gnu_r.run(case) {
+        match actual {
             Ok(actual) => match diff("expected", &expected, "GNU R", &actual) {
-                None => println!("ok      {}", case.display()),
+                None if verbose => println!("ok      {}", case.display()),
+                None => {}
                 Some(difference) => {
                     println!("DIFFERS {}\n{difference}", case.display());
                     failures += 1;
@@ -512,7 +552,7 @@ fn check_suites(cases: &[PathBuf], build: &Build, action: &str) -> Result<(), ()
 /// The engines `--engine` names, comma separated, else the one `ORACLE_ENGINE` names.
 fn second_engines(names: Option<&str>) -> Option<Vec<Box<dyn Engine>>> {
     let Some(names) = names else {
-        return Some(vec![engine_from_environment()]);
+        return Some(vec![Box::new(engine_from_environment())]);
     };
     let mut engines: Vec<Box<dyn Engine>> = Vec::new();
     for name in names
@@ -539,11 +579,16 @@ fn second_engines(names: Option<&str>) -> Option<Vec<Box<dyn Engine>>> {
 /// `None`, and sorts every failure into known (listed in `known_failures.toml`, so main fails it
 /// too) or new. The run fails on a new failure, and on a listed case that passes, so the change
 /// that fixes a case also deletes its entry.
+///
+/// The cases run on one worker per core. The report lists what needs attention (new failures,
+/// crashes, listed cases that pass) in case order and ends with one summary line per engine;
+/// `verbose` adds a line for every passing and every known failing case.
 fn compare(
     gnu_r: Option<&ProcessEngine>,
     engines: &[Box<dyn Engine>],
     selection: &Selection,
     allow_skips: bool,
+    verbose: bool,
 ) -> ExitCode {
     let known = match known_failures() {
         Ok(known) => known,
@@ -586,24 +631,18 @@ fn compare(
             }
         }
     }
+    let runs = oracle::in_parallel(cases, |case| run_case(gnu_r, engines, case));
     let mut tallies = vec![Tally::default(); engines.len()];
     let mut crashed = Vec::new();
-    for case in cases {
-        let expected = match gnu_r {
-            Some(gnu_r) => gnu_r.run(case),
-            None => std::fs::read_to_string(expected_path(case))
-                .ok()
-                .and_then(|text| parse(&text))
-                .ok_or_else(|| EngineError::Failed("no recorded outcome".to_string())),
-        };
-        let expected = match expected {
-            Ok(outcome) => outcome,
-            Err(EngineError::Crashed(error)) => {
+    for (case, runs) in cases.iter().zip(runs) {
+        let runs = match runs {
+            CaseRuns::Compared(runs) => runs,
+            CaseRuns::GnuRCrashed(error) => {
                 println!("skip    {}: this GNU R crashed: {error}", case.display());
                 crashed.push(case.as_path());
                 continue;
             }
-            Err(error) => {
+            CaseRuns::NoExpectation(error) => {
                 println!("ERROR   {}: {error}", case.display());
                 for tally in &mut tallies {
                     tally.new += 1;
@@ -612,35 +651,25 @@ fn compare(
                 continue;
             }
         };
-        for (engine, tally) in engines.iter().zip(&mut tallies) {
+        for ((engine, tally), run) in engines.iter().zip(&mut tallies).zip(runs) {
             let name = engine.name();
             let shown = match engines.len() {
                 1 => case.display().to_string(),
                 _ => format!("{} [{name}]", case.display()),
             };
-            let (run, failure) = match engine.run(case) {
-                Ok(actual) => match diff("GNU R", &expected, &name, &actual) {
-                    Some(difference) => (
-                        CaseRun::Failed,
-                        Some(format!("DIFFERS {shown}\n{difference}")),
-                    ),
-                    None => (CaseRun::Passed, None),
-                },
-                Err(EngineError::Unavailable(_)) => {
-                    tally.unavailable += 1;
-                    continue;
-                }
-                Err(EngineError::Crashed(error)) => {
-                    (CaseRun::Crashed, Some(format!("CRASHED {shown}: {error}")))
-                }
-                Err(error) => (CaseRun::Failed, Some(format!("ERROR   {shown}: {error}"))),
+            let Some((run, failure)) = run else {
+                tally.unavailable += 1;
+                continue;
             };
+            let failure = failure.map(|(label, detail)| format!("{label} {shown}{detail}"));
             let entry = known_failure(&known, case, &name);
             let verdict = verdict(run, entry);
             tally.fails |= fails_run(verdict);
             match verdict {
                 Verdict::Passed => {
-                    println!("ok      {shown}");
+                    if verbose {
+                        println!("ok      {shown}");
+                    }
                     tally.passed += 1;
                 }
                 Verdict::ListedButPassing => {
@@ -651,7 +680,9 @@ fn compare(
                     tally.listed_but_passing += 1;
                 }
                 Verdict::Known => {
-                    if let Some(entry) = entry {
+                    if let Some(entry) = entry
+                        && verbose
+                    {
                         let mut notes = vec![format!("area {}", entry.area)];
                         if entry.provisional {
                             notes.push("provisional".to_string());
@@ -730,10 +761,58 @@ fn compare(
     for case in &crashed {
         println!("  GNU R crashed: {}", case.display());
     }
+    if failed && !verbose {
+        println!("pass --verbose to list every passing and known failing case too");
+    }
     match failed || (!ran && !crashed.is_empty() && crashed.len() < cases.len()) {
         true => ExitCode::FAILURE,
         false => ExitCode::SUCCESS,
     }
+}
+
+/// What one case gave: the reference outcome's failure, or each engine's run (`None` when the
+/// engine is unavailable) with a label and detail to print when it fails.
+enum CaseRuns {
+    Compared(Vec<Option<EngineRun>>),
+    GnuRCrashed(String),
+    NoExpectation(String),
+}
+
+/// One engine's run of a case, and the label and detail printed when it fails.
+type EngineRun = (CaseRun, Option<(&'static str, String)>);
+
+/// Runs one case under GNU R (or reads its recorded outcome) and under every engine.
+fn run_case(gnu_r: Option<&ProcessEngine>, engines: &[Box<dyn Engine>], case: &Path) -> CaseRuns {
+    let expected = match gnu_r {
+        Some(gnu_r) => gnu_r.run(case),
+        None => std::fs::read_to_string(expected_path(case))
+            .ok()
+            .and_then(|text| parse(&text))
+            .ok_or_else(|| EngineError::Failed("no recorded outcome".to_string())),
+    };
+    let expected = match expected {
+        Ok(outcome) => outcome,
+        Err(EngineError::Crashed(error)) => return CaseRuns::GnuRCrashed(error),
+        Err(error) => return CaseRuns::NoExpectation(error.to_string()),
+    };
+    let runs = engines
+        .iter()
+        .map(|engine| match engine.run(case) {
+            Ok(actual) => Some(match diff("GNU R", &expected, &engine.name(), &actual) {
+                Some(difference) => (
+                    CaseRun::Failed,
+                    Some(("DIFFERS", format!("\n{difference}"))),
+                ),
+                None => (CaseRun::Passed, None),
+            }),
+            Err(EngineError::Unavailable(_)) => None,
+            Err(EngineError::Crashed(error)) => {
+                Some((CaseRun::Crashed, Some(("CRASHED", format!(": {error}")))))
+            }
+            Err(error) => Some((CaseRun::Failed, Some(("ERROR  ", format!(": {error}"))))),
+        })
+        .collect();
+    CaseRuns::Compared(runs)
 }
 
 /// One engine's results in a `compare` run.

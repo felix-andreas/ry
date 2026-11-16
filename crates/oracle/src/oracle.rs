@@ -4,7 +4,7 @@
 //! An engine is anything that implements [`Engine`]. [`ProcessEngine`] covers every engine
 //! with a command line: it is invoked as `<command…> <script> <report>`, must print the
 //! script's own output to stdout, and must write the JSON report that `driver.R` defines.
-//! GNU R is one such engine, and ry's runtime will be another.
+//! GNU R is one such engine, and ry's runtime is another.
 
 pub mod bench;
 pub mod fuzz;
@@ -31,7 +31,8 @@ pub mod packages;
 
 const DRIVER: &str = include_str!("driver.R");
 
-pub trait Engine {
+/// `Sync`, because a run hands every engine to one worker per core.
+pub trait Engine: Sync {
     fn name(&self) -> String;
     fn run(&self, script: &Path) -> Result<Outcome, EngineError>;
 }
@@ -234,21 +235,6 @@ pub fn known_failure<'a>(
     known
         .iter()
         .find(|entry| entry.case == name && entry.engine == engine)
-}
-
-/// The stand-in until ry's runtime exists. It reports itself as unavailable for every file.
-pub struct StubEngine;
-
-impl Engine for StubEngine {
-    fn name(&self) -> String {
-        "stub".to_string()
-    }
-
-    fn run(&self, _script: &Path) -> Result<Outcome, EngineError> {
-        Err(EngineError::Unavailable(
-            "the ry runtime does not exist yet".to_string(),
-        ))
-    }
 }
 
 pub struct ProcessEngine {
@@ -976,16 +962,67 @@ pub fn gnu_r_available() -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
-/// The engine named by `ORACLE_ENGINE`, or the stub.
-pub fn engine_from_environment() -> Box<dyn Engine> {
-    match std::env::var("ORACLE_ENGINE")
+/// The engine named by `ORACLE_ENGINE`, else ry's runtime.
+pub fn engine_from_environment() -> ProcessEngine {
+    std::env::var("ORACLE_ENGINE")
         .ok()
         .as_deref()
         .and_then(ProcessEngine::named)
-    {
-        Some(engine) => Box::new(engine),
-        None => Box::new(StubEngine),
+        .unwrap_or_else(ProcessEngine::ry)
+}
+
+/// Builds the workspace's `ry` and `libR.so` (`cargo build -p ry-lang -p libr`) unless
+/// `ORACLE_RY` names another binary, so that a run never compares a build older than the
+/// sources. Cargo does nothing when both are current, which takes about a second.
+pub fn build_workspace_ry() -> Result<(), String> {
+    if std::env::var_os("ORACLE_RY").is_some() {
+        return Ok(());
     }
+    let profile_directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug");
+    let status = syntax::testing::cargo_build(&profile_directory)
+        .args(["-p", "ry-lang", "-p", "libr"])
+        .status()
+        .map_err(|error| format!("cargo build -p ry-lang -p libr: {error}"))?;
+    match status.success() {
+        true => Ok(()),
+        false => Err("cargo build -p ry-lang -p libr failed".to_string()),
+    }
+}
+
+/// `work` applied to every item, one worker per core, in the order of `items` whichever worker
+/// finished first. Each case runs in its own processes and scratch directory, so the order they
+/// run in changes no outcome.
+pub fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let next = AtomicUsize::new(0);
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |count| count.get())
+        .min(items.len().max(1));
+    let mut results: Vec<(usize, R)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(item) = items.get(index) else {
+                            return done;
+                        };
+                        done.push((index, work(item)));
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    });
+    results.sort_by_key(|(index, _)| *index);
+    results.into_iter().map(|(_, result)| result).collect()
 }
 
 /// Every `.R` file under `root`, sorted. A file argument yields itself.
