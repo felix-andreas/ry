@@ -10,7 +10,8 @@ A violation is one of:
 
 - a `//` or `///` block longer than 12 lines, or a `//!` module doc longer than 25;
 - a comment that names process history (a phase, a milestone, a commit hash, a pull request);
-- a banner or separator comment such as `// -----` or `// === Section ===`.
+- a banner or separator comment such as `// -----` or `// === Section ===`;
+- a section heading: a `//` line of at most six words between blank lines, such as `// Parsing.`.
 
 The baseline holds per-file counts and may only shrink: a file over its count fails, and a file
 under it asks for `baseline` so the lower count is locked in. A license header at the top of a
@@ -33,6 +34,7 @@ PROCESS = re.compile(
 )
 BANNER = re.compile(r"^//[/!]?\s*(?:[-=*#~_/]{4,}|.*\s[-=*#~]{3,}\s*$)")
 COMMENT = re.compile(r"^\s*(//!|///(?!/)|//)(.*)$")
+SECTION = re.compile(r"^\s*// [A-Z][\w'-]*( [\w'`-]+){0,5}\.?$")
 
 
 def main():
@@ -79,6 +81,10 @@ def scan():
             stripped = line.strip()
             if BANNER.match(stripped):
                 hits.append((number, "banner", 1, len(line)))
+            elif SECTION.match(line) and 1 < number < len(lines) and not (
+                lines[number - 2].strip() or lines[number].strip()
+            ):
+                hits.append((number, "section", 1, len(line)))
             elif PROCESS.search(match.group(2)):
                 hits.append((number, "process", 1, len(line)))
         if not hits:

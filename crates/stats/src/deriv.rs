@@ -376,8 +376,6 @@ unsafe fn names_call(names: &[String]) -> R<Sexp> {
     values::call(values::install("c")?, &items)
 }
 
-// The derivative and its simplification.
-
 unsafe fn constant(value: f64) -> R<Sexp> {
     values::scalar_real(value)
 }

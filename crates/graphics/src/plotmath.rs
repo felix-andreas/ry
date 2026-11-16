@@ -404,8 +404,6 @@ impl Layout {
         }
     }
 
-    // Dispatch.
-
     unsafe fn element(&mut self, expression: Sexp, draw: bool) -> R<BBox> {
         if expression.kind() == SexpType::Language {
             self.formula(expression, draw)
@@ -499,8 +497,6 @@ impl Layout {
             self.function_call(expression, draw)
         }
     }
-
-    // Atoms.
 
     unsafe fn atom(&mut self, expression: Sexp, draw: bool) -> R<BBox> {
         match expression.kind() {
@@ -679,8 +675,6 @@ impl Layout {
         result.simple = true;
         Ok(result)
     }
-
-    // Operators.
 
     unsafe fn space(&mut self, expression: Sexp, draw: bool) -> R<BBox> {
         match length(expression) {
@@ -885,8 +879,6 @@ impl Layout {
         self.set_style(style);
         Ok(body_bbox)
     }
-
-    // Accents.
 
     unsafe fn wide_tilde(&mut self, expression: Sexp, draw: bool) -> R<BBox> {
         let (saved_x, saved_y) = (self.current_x, self.current_y);
@@ -1099,8 +1091,6 @@ impl Layout {
         Ok(bbox.enlarge(0.0, gap, 0.0))
     }
 
-    // Groups and delimiters.
-
     unsafe fn delimiter(&mut self, code: c_int, draw: bool) -> R<BBox> {
         let saved_cex = self.gc.cex;
         self.gc.cex *= DELIMITER_MAGNIFICATION;
@@ -1240,8 +1230,6 @@ impl Layout {
         let bbox = self.italic_correction(bbox, draw);
         Ok(bbox.combine(self.delimiter(PAREN_RIGHT, draw)?))
     }
-
-    // Big operators.
 
     unsafe fn integral_symbol(&mut self, draw: bool) -> R<BBox> {
         let (saved_x, saved_y) = (self.current_x, self.current_y);
@@ -1392,8 +1380,6 @@ impl Layout {
         Ok(operator.combine(body))
     }
 
-    // Radicals.
-
     unsafe fn script(&mut self, expression: Sexp, draw: bool) -> R<BBox> {
         let style = self.style;
         self.set_sup_style(style);
@@ -1534,8 +1520,6 @@ impl Layout {
         Ok(bbox)
     }
 
-    // Juxtaposition and lists.
-
     unsafe fn concatenate(&mut self, expression: Sexp, draw: bool) -> R<BBox> {
         let mut bbox = BBox::default();
         let mut cell = expression.cdr();
@@ -1589,8 +1573,6 @@ impl Layout {
         Ok(bbox.combine(self.delimiter(PAREN_RIGHT, draw)?))
     }
 
-    // Boxes and movement.
-
     fn italic_correction(&mut self, mut bbox: BBox, draw: bool) -> BBox {
         if bbox.italic > 0.0 {
             if draw {
@@ -1641,8 +1623,6 @@ impl Layout {
         self.gc.lwd = saved_lwd;
         outcome
     }
-
-    // Glyphs and text.
 
     /// `GlyphBBox`: a glyph's box. A device that wants the symbol font in UTF-8 measures the
     /// glyph by its Unicode code point.
@@ -1697,8 +1677,6 @@ impl Layout {
     fn using_italics(&self) -> bool {
         self.gc.fontface == ITALIC || self.gc.fontface == BOLD_ITALIC
     }
-
-    // Styles.
 
     fn set_style(&mut self, style: Style) {
         self.gc.cex = match style {

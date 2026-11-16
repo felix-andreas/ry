@@ -266,8 +266,6 @@ pub fn explain(plan: Plan) -> Result<String> {
     Ok(text)
 }
 
-// Optimization.
-
 /// Rewrites the plan into one that computes the same table with less work.
 pub fn optimize(plan: Plan) -> Result<Plan> {
     let Plan { mut source, steps } = plan;
@@ -552,8 +550,6 @@ fn needed_columns(source_schema: &Schema, steps: &[Step]) -> Vec<PlSmallStr> {
         .collect()
 }
 
-// Typing.
-
 fn source_schema(source: &Source) -> Result<Schema> {
     match source {
         Source::Table(table) => Ok(table.schema()),
@@ -720,8 +716,6 @@ fn with_columns(schema: &Schema, columns: &[(PlSmallStr, Expr)]) -> Vec<(PlSmall
     }
     selected
 }
-
-// Execution.
 
 fn run(plan: Plan) -> Result<Collected> {
     let mut warnings = Vec::new();
@@ -932,8 +926,6 @@ fn join(
         }
     }
 }
-
-// Display.
 
 fn write_plan(text: &mut String, plan: &Plan, depth: usize) {
     let mut depth = depth;

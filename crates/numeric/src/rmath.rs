@@ -380,8 +380,6 @@ pub fn finite(x: f64) -> bool {
     x.is_finite()
 }
 
-// Small utilities.
-
 pub fn fmax2(x: f64, y: f64) -> f64 {
     if x.is_nan() || y.is_nan() {
         return x + y;
@@ -1018,8 +1016,6 @@ pub fn lgamma1p(a: f64) -> f64 {
     }
     (a * lgam - EULER) * a - log1pmx(a)
 }
-
-// The gamma function and its relatives.
 
 /// Evaluates `c[0]/2 + sum c[k] T_k(x)` by Clenshaw's recurrence.
 fn chebyshev_eval(x: f64, coefficients: &[f64]) -> f64 {
@@ -2457,8 +2453,6 @@ pub fn choose(n: f64, k: f64) -> f64 {
     lfastchoose(n, k).exp()
 }
 
-// The polygamma functions.
-
 /// The Bernoulli numbers `B_2, B_4, ..., B_30`.
 const BERNOULLI: [f64; 15] = [
     1.0 / 6.0,
@@ -2681,8 +2675,6 @@ pub fn tetragamma(x: f64) -> f64 {
 pub fn pentagamma(x: f64) -> f64 {
     polygamma(x, 3, 6.0)
 }
-
-// The normal distribution.
 
 pub fn dnorm(x: f64, mu: f64, sigma: f64, log: bool) -> f64 {
     if x.is_nan() || mu.is_nan() || sigma.is_nan() {
@@ -3354,8 +3346,6 @@ fn qnorm_central(q: f64) -> f64 {
             * r
             + 1.0)
 }
-
-// The uniform distribution.
 
 pub fn dunif(x: f64, a: f64, b: f64, log: bool) -> f64 {
     if x.is_nan() || a.is_nan() || b.is_nan() {
@@ -7239,8 +7229,6 @@ pub fn qpois(p: f64, lambda: f64, lower: bool, log: bool) -> f64 {
     })
 }
 
-// Student's t and Fisher's F.
-
 pub fn dt(x: f64, n: f64, log: bool) -> f64 {
     if x.is_nan() || n.is_nan() {
         return x + n;
@@ -7599,8 +7587,6 @@ pub fn qf(p: f64, df1: f64, df2: f64, lower: bool, log: bool) -> f64 {
     let value = (1.0 / qbeta(p, df2 / 2.0, df1 / 2.0, !lower, log) - 1.0) * (df2 / df1);
     if value.is_nan() { f64::NAN } else { value }
 }
-
-// Non-central distributions.
 
 /// The noncentral chi-squared density, the Poisson mixture `sum_i w_i(ncp / 2) f(x; df + 2i)`
 /// of central chi-squared densities (Johnson, Kotz and Balakrishnan (1995), chapter 29).

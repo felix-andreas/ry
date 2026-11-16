@@ -1131,8 +1131,6 @@ impl Sexp {
         unsafe { self.payload::<TripleObject>().third.set(value) }
     }
 
-    // Environments.
-
     pub(crate) unsafe fn frame_ptr(self) -> *mut Frame {
         unsafe { self.payload::<EnvironmentObject>().frame.get() }
     }
@@ -1148,8 +1146,6 @@ impl Sexp {
     pub(crate) unsafe fn set_enclosure_unbarriered(self, value: Sexp) {
         unsafe { self.payload::<EnvironmentObject>().enclosure.set(value) }
     }
-
-    // External pointers.
 
     pub unsafe fn external_address(self) -> *mut c_void {
         unsafe { self.payload::<ExternalPtrObject>().address.get() }
@@ -1175,8 +1171,6 @@ impl Sexp {
         unsafe { self.payload::<ExternalPtrObject>().protected.set(value) }
     }
 
-    // Weak references.
-
     pub unsafe fn weak_key(self) -> Sexp {
         unsafe { self.payload::<WeakRefObject>().key.get() }
     }
@@ -1200,8 +1194,6 @@ impl Sexp {
     pub(crate) unsafe fn weak_payload<'a>(self) -> &'a WeakRefObject {
         unsafe { self.payload::<WeakRefObject>() }
     }
-
-    // Primitives.
 
     pub unsafe fn primitive_index(self) -> u32 {
         unsafe { self.payload::<PrimitiveObject>().index.get() }

@@ -341,8 +341,6 @@ pub struct StreamHeader {
     pub native_encoding: Option<String>,
 }
 
-// Writing.
-
 /// Serializes `object` into a byte vector.
 pub unsafe fn to_bytes(object: Sexp, format: Format, version: c_int) -> ApiResult<Vec<u8>> {
     let mut bytes = Vec::new();
@@ -940,8 +938,6 @@ unsafe fn package_name(env: Sexp) -> Option<Sexp> {
 /// deeply nested object never overflows the thread's stack.
 const STACK_RED_ZONE: usize = 128 * 1024;
 const STACK_GROWTH: usize = 4 * 1024 * 1024;
-
-// Reading.
 
 /// Where a stream's bytes come from.
 pub trait Source {
@@ -2144,8 +2140,6 @@ fn parse_hex_magnitude(text: &str) -> Option<f64> {
     Some(mantissa as f64 * 2f64.powi(half) * 2f64.powi(scale - half))
 }
 
-// Compressed files and lazy-load databases.
-
 /// The bytes inside a file written by `saveRDS` or `save`, which may be gzip, bzip2 or xz
 /// compressed, or not compressed at all.
 pub fn decompress(bytes: &[u8]) -> ApiResult<Cow<'_, [u8]>> {
@@ -2227,8 +2221,6 @@ pub fn lazyload_decompress(
     };
     interp::serialize::decompress_record(entry, kind).map(Cow::Owned)
 }
-
-// The C API.
 
 pub type OutCharFn = unsafe extern "C" fn(*mut R_outpstream_st, c_int);
 pub type OutBytesFn = unsafe extern "C" fn(*mut R_outpstream_st, *mut c_void, c_int);

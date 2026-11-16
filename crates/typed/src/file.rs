@@ -2241,8 +2241,6 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, Malformed> {
     Ok(parsed)
 }
 
-// Loading.
-
 thread_local! {
     /// The typed code file of each database this thread attached from, with the stamp the
     /// database was read with. A file that cannot be used is kept as `None`, so it is looked at

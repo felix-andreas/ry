@@ -341,8 +341,6 @@ fn recorded_cases_match_gnu_r() {
     );
 }
 
-// Random objects.
-
 struct Generator {
     rng: SplitMix64,
     symbols: Vec<Sexp>,

@@ -1524,8 +1524,6 @@ fn dict_order_survives_removal_reinsertion_and_compaction() {
     assert_eq!(live(), before);
 }
 
-// Models and helpers.
-
 #[derive(Clone, Debug)]
 enum Model {
     Int(Vec<i32>),

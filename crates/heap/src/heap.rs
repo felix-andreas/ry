@@ -1316,8 +1316,6 @@ impl Heap {
         self.stats.live_vector_cells += cells;
     }
 
-    // Allocation.
-
     /// A vector of `length` elements. Atomic elements start zeroed, character elements as `""`
     /// and list elements as `NULL`, as in GNU R.
     /// A vector of plain numbers whose elements are not initialized, for a kernel that writes
@@ -2590,8 +2588,6 @@ impl Heap {
         self.escaped = escaped;
     }
 
-    // Environments.
-
     fn is_symbol_frame(&self, env: Sexp) -> bool {
         env == self.known.base_env || env == self.known.base_namespace
     }
@@ -3361,8 +3357,6 @@ impl Heap {
         (*env.frame_ptr()).mark_formals();
     }
 
-    // Roots.
-
     /// Keeps `object` alive until the current handle scope ends.
     #[inline]
     pub fn root(&mut self, object: Sexp) {
@@ -3459,8 +3453,6 @@ impl Heap {
         payload.finalizer.set(nil);
         payload.c_finalizer.set(0);
     }
-
-    // Collection.
 
     #[inline(always)]
     unsafe fn allocate(&mut self, kind: SexpType, size: usize, keep: &[Sexp]) -> HeapResult<Sexp> {

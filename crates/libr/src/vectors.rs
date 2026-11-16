@@ -1006,8 +1006,6 @@ unsafe fn identical_attributes(
     Ok(true)
 }
 
-// The exported API.
-
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn TYPEOF(object: Sexp) -> c_int {
     object.kind() as c_int
