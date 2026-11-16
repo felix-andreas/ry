@@ -3576,6 +3576,15 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
     "Duplicate DESCRIPTION fields" on ry, a false failure.
   - QuickJSR fails only when ry prints its notice about packages installed by another ry build on
     a subprocess's stderr, which the test compares. Reinstall the library with the ry under test.
+  - sandwich, `vcovPL.R` (runs since plm loads): collapse reaches into GNU R's object layout
+    through its own `internal/R_defn.h`, writing a vector's data at `(SEXPREC_ALIGN *) x + 1`
+    and its attributes and object bit through `x->attrib` and `x->sxpinfo.obj`. ry's vectors
+    keep their data elsewhere, so `collapse::gsplit` writes past its results and reads back
+    zeros or crashes. Repro: `str(collapse::gsplit(1:9, collapse::GRP(rep(1:3, c(2, 3, 4)))))`
+    gives `1 2`, `3 4 5`, `6 7 8 9` on GNU R and `0 0`, then a SIGSEGV, on ry. plm's `vcovSCC`
+    then fails with "'names' attribute [500] must be the same length as the vector [496]".
+  - `oracle packages` reuses a GNU R result recorded for the same package version, so a changed
+    dependency (an upgrade by the constraint pass) needs `--rerun-gnu-r`.
   - ggplot2, `test-geom-smooth.R:92` ("Failed to fit group 1" expected): GNU R's loess on fewer
     points than degrees of freedom warns "span too small. fewer data values than degrees of
     freedom.", "pseudoinverse used at ...", "all data on boundary of neighborhood. make span
