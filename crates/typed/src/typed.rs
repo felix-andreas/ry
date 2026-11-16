@@ -1417,19 +1417,17 @@ unsafe fn to_r(ty: Type, out: [u64; 2]) -> Result<Sexp, Unwind> {
 }
 
 /// Makes the R call `site` for compiled code, with the argument words at `words`, and writes the
-/// words of its converted value to `out`. 0 when the call returned; 1 when it raised an error,
-/// which [`call`] raises once the code has given up, or when a conversion the code guessed the
-/// type of gave another type ([`FAILED_GUESS`]), after which [`call`] runs the call again in
-/// the interpreter.
-///
-/// A call that may have done something visible is recorded ([`replay::record`]), so that the
-/// interpreter does not make it a second time if the code gives up later. While the interpreter
-/// runs such a call again, a call the code makes that was recorded gives its recorded value.
+/// words of its converted value to `out`. Returns 0 when the call returned, and 1 when it raised an
+/// error (which [`call`] raises once the code has given up) or when a conversion whose type the
+/// code guessed gave another type ([`FAILED_GUESS`]), after which [`call`] reruns it in the
+/// interpreter. A call that may have done something visible is recorded ([`replay::record`]), and
+/// while the interpreter reruns, a recorded call gives its recorded value instead of happening
+/// twice.
 ///
 /// # Safety
 ///
-/// `site` is a site the code was compiled with, `words` holds the words of its arguments, and
-/// `out` has room for the words of its result.
+/// `site` is a site the code was compiled with, `words` holds the words of its arguments, and `out`
+/// has room for the words of its result.
 pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *mut u64) -> i32 {
     let site = &*site;
     let replayed = replay::replayed(site.call);

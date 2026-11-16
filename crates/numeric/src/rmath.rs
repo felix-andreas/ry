@@ -7750,19 +7750,17 @@ pub fn pnchisq(x: f64, df: f64, ncp: f64, lower: bool, log: bool) -> f64 {
     mixture_tail(lower_sum, upper_sum, lower, log)
 }
 
-/// Both tails of a Poisson mixture `sum_k w_k(rate) F_k` whose component distribution
-/// functions fall by `F_k - F_(k+1) = g_k`, given the tails of `F_mode` at the Poisson mode,
-/// `ln g_mode`, and `ln(g_(k+1) / g_k)` as `log_ratio(k)`. This is the summation of Lenth
-/// (1987) AS 226, with the remainders bounded by the Poisson tails as in Frick (1990) AS R84.
+/// Both tails of a Poisson mixture `sum_k w_k(rate) F_k` whose component distribution functions
+/// fall by `F_k - F_(k+1) = g_k`, given the tails of `F_mode` at the Poisson mode, `ln g_mode`, and
+/// `ln(g_(k+1) / g_k)` as `log_ratio(k)`: Lenth's (1987) AS 226 summation, with the remainders
+/// bounded by the Poisson tails as in Frick (1990) AS R84.
 ///
-/// The sum runs outward from the mode, where the weights are largest. Each tail is
-/// accumulated in both directions, which means that in one direction its recurrence
-/// subtracts; there its rounding error stays below that of the starting value at the mode,
-/// whose term alone is a fixed share of the sum. Both tails are therefore summed directly,
-/// rather than one being the complement of the other, and a small tail keeps its relative
-/// accuracy. The weights beyond index `k` sum to at most `w_(k+1) / (1 - rate / (k + 2))`, and
-/// those below it to at most `w_(k-1) / (1 - (k - 1) / rate)`; a component's tail lies in
-/// [0, 1] and only grows away from the mode on the side being bounded.
+/// The sum runs outward from the mode, where the weights are largest. A tail's recurrence subtracts
+/// in one direction, but its rounding error there stays below that of the mode's term, which is a
+/// fixed share of the sum, so both tails are summed directly instead of one being the other's
+/// complement, and a small tail keeps its relative accuracy. The weights beyond index `k` sum to at
+/// most `w_(k+1) / (1 - rate / (k + 2))`, and those below it to at most `w_(k-1) / (1 - (k - 1) /
+/// rate)`; a component's tail lies in [0, 1] and only grows away from the mode on the bounded side.
 fn poisson_mixture_tails(
     rate: f64,
     mode: f64,

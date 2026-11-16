@@ -7675,17 +7675,14 @@ type Edge = (usize, usize, EdgeKind);
 
 /// The lines of one level, in the order and direction GNU R gives them.
 ///
-/// A grid value equal to the level counts as a thousandth of the value range above it. Each
-/// grid cell the level passes through holds one segment, from the first of its crossed edges
-/// to the second, taking them as bottom, left, right, top. A saddle holds two: top to right
-/// and left to bottom, or bottom to right and left to top when the saddle point of the
-/// bilinear surface through the corners lies strictly on the same side of the level as the
-/// lower-left corner. A cell with one missing corner is
-/// the triangle of the other three, whose edges count in the order vertical, horizontal,
-/// diagonal; a cell with more is skipped.
-///
-/// A line starts at the first unused segment, taking cells by x and then by y, and follows the
-/// neighbouring cells' segments forwards and then backwards until it reaches the boundary or
+/// A grid value equal to the level counts as a thousandth of the value range above it. Each grid
+/// cell the level passes through holds one segment, from the first of its crossed edges to the
+/// second, taking them as bottom, left, right, top. A saddle holds two: top to right and left to
+/// bottom, or bottom to right and left to top when the saddle point of the bilinear surface through
+/// the corners lies strictly on the lower-left corner's side of the level. A cell with one missing
+/// corner is the triangle of the other three, whose edges count as vertical, horizontal, diagonal;
+/// a cell with more is skipped. A line starts at the first unused segment, by x and then by y, and
+/// follows neighbouring segments forwards and then backwards until it reaches the boundary or
 /// closes, in which case its first point is repeated at the end.
 fn contour_level(grid: &Grid<'_>, level: f64) -> Vec<Vec<(f64, f64)>> {
     let columns = grid.x.len();

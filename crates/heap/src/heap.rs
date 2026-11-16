@@ -2386,20 +2386,17 @@ impl Heap {
         }
     }
 
-    /// Replaces `env`'s enclosure. A cached lookup is keyed by the environment its walk starts
-    /// from, which is a closure's environment or an environment's enclosure and so carries
-    /// [`gp::ENCLOSING`], and symbol stamps cover that environment and its ancestors.
+    /// Replaces `env`'s enclosure. Cached lookups are keyed by the environment a walk starts from,
+    /// which carries [`gp::ENCLOSING`], and symbol stamps cover it and its ancestors. Only symbols
+    /// bound in a frame the old and new chains do not share can resolve differently, so only their
+    /// stamps move ([`Heap::bump_symbols_between`]): lazy loading sets the parent of every closure
+    /// environment a package serialized, and moving every stamp each time made every lookup cache
+    /// miss once.
     ///
-    /// When the walk through `env` changes from the old chain of enclosures to the new one,
-    /// only symbols bound in a frame the two chains do not share can resolve differently, so
-    /// the stamps of those symbols move instead of every stamp (see
-    /// [`Heap::bump_symbols_between`]). Lazy loading makes an environment and sets its parent
-    /// for every closure environment a package serialized, and moving every stamp each time
-    /// made every lookup cache in the process miss once. An environment outside every cached
-    /// chain moves nothing: one without the bit, or an empty frame whose enclosure is the empty
-    /// environment (a walk that reached it found nothing there or beyond), as long as it is
-    /// neither a function frame nor a top environment (the global environment, or one with
-    /// bindings or attributes, such as a namespace or a package environment).
+    /// An environment outside every cached chain moves nothing: one without the bit, or an empty
+    /// frame enclosed by the empty environment (a walk that reached it found nothing there or
+    /// beyond), unless it is a function frame or a top environment (the global environment, or one
+    /// with bindings or attributes, such as a namespace or a package environment).
     pub unsafe fn set_enclosure(&mut self, env: Sexp, value: Sexp) {
         let unobserved = !env.has_gp(gp::FUNCTION_FRAME)
             && (!env.has_gp(gp::ENCLOSING) || env.enclosure() == self.known.empty_env)
@@ -2534,21 +2531,17 @@ impl Heap {
         }
     }
 
-    /// Ends every escape once the outermost native call returns. Native code may store through
-    /// an element pointer only while the call that took it runs (GNU R's collector never sees
-    /// those stores at all), so an escaped vector that is old and may hold younger children is
-    /// remembered with every card dirty instead: the next minor collection rescans it once,
-    /// catching wherever native code moved or stored them, and from then on it is an ordinary
-    /// object whose stores go through the barrier. Without this a column a package touched once
-    /// would be rescanned by every minor collection for the rest of the session.
+    /// Ends every escape once the outermost native call returns. Native code may store through an
+    /// element pointer only while the call that took it runs, unseen by any barrier, so an escaped
+    /// old vector that may hold younger children is remembered with every card dirty: the next
+    /// minor collection rescans it once, and later stores go through the barrier. Otherwise a
+    /// column a package touched once would be rescanned by every minor collection.
     ///
-    /// A vector may hold younger children when it is remembered, which covers the ones it held
-    /// before the escape, the ones stored since through the barrier, and any writable escape;
-    /// and when a collection ran during the escape, which may have aged its children without
-    /// remembering it, since an escaped vector's children are all marked. Any other old vector held only
-    /// old children throughout, and permuting them through a read-only pointer cannot change
-    /// that, so it costs no rescan: data.table reads most columns through `DATAPTR_RO` and
-    /// `STRING_PTR_RO` without changing them.
+    /// A vector may hold younger children when it is remembered (its children before the escape,
+    /// stores since, any writable escape), or when a collection ran during the escape and aged its
+    /// children without remembering it. Any other old vector held only old children, and a
+    /// read-only pointer cannot change that, so it costs no rescan: data.table reads most columns
+    /// through `DATAPTR_RO`.
     pub unsafe fn retire_escaped(&mut self) {
         // Most native calls hand out no data pointer, and this runs after every one of them.
         if self.escaped_lists.is_empty() && self.escaped.is_empty() {
@@ -2873,23 +2866,18 @@ impl Heap {
         Ok(())
     }
 
-    /// GNU R's `R_CleanupEnvir`: when a closure call returns `result`, the call's frame `env`
-    /// gives up its bindings if nothing counts a reference to it but its own closures and
-    /// promises (the cycles that a helper defined in the body or a default argument make).
-    /// Counted stores release what the bindings held, so a large vector bound only there is
-    /// freed at the next reconcile instead of waiting for a collection, which by then may have
-    /// tenured it. The bindings give up `result` too, when it is a binding's value: the call's
-    /// handle scope roots it for the caller, and a reconcile frees nothing a handle holds.
+    /// GNU R's `R_CleanupEnvir`: when a closure call returns `result`, its frame `env` gives up its
+    /// bindings if only its own closures and promises count a reference to it. Counted stores
+    /// release what the bindings held, so a large vector bound only there is freed at the next
+    /// reconcile instead of being tenured. A binding whose value is `result` gives it up too: the
+    /// call's handle scope roots it for the caller, and a reconcile frees nothing a handle holds.
     ///
-    /// Every reference to an environment from another object counts: bindings, list elements,
-    /// attributes, a closure's or promise's environment, an enclosure and a weak reference's
-    /// fields. Interpreter frames and handles do not, but none outlives the returned call.
-    ///
-    /// `closures` are the closures the call created in `env`. One that nothing counts may still
-    /// be held by a root the counts do not see, such as a handle or a native call's protect
-    /// stack, so a frame whose release needs it dead waits for the next reconcile, which checks
-    /// the roots (`Heap::release_returned`). So does a frame the frames of calls it made still
-    /// held through their promises when it returned, because those wait too.
+    /// Every reference to an environment from another object counts; interpreter frames and handles
+    /// do not, but none outlives the returned call. `closures` are the closures the call created in
+    /// `env`. One that nothing counts may still be held by an uncounted root (a handle, a native
+    /// protect stack), so a frame whose release needs it dead waits for the next reconcile, which
+    /// checks the roots (`Heap::release_returned`). So does a frame that the frames of its own
+    /// calls still held through promises when it returned.
     pub unsafe fn release_frame(&mut self, env: Sexp, result: Sexp, closures: &[Sexp]) {
         let count = env.refcount();
         if env == result
@@ -3730,25 +3718,18 @@ impl Heap {
         }
     }
 
-    /// A minor collection keeps every old object, so the temporaries it found live and promoted
-    /// stay until a deeper one. Escalate, as GNU R does, when what is left would not hold the
-    /// request and a fifth of the smallest limit: to an intermediate collection, which frees the
-    /// objects promoted since the last deeper one without tracing the tenured heap, and if that
-    /// leaves the heap still full, to a major one. Without the margin, every large vector
-    /// allocated just below the limit would run a collection that frees nothing, and only a
-    /// major one moves the limit.
+    /// A minor collection keeps every old object, so the temporaries it promoted stay until a
+    /// deeper one. As GNU R does, escalate when what is left would not hold the request plus a
+    /// fifth of the smallest limit (without the margin, a large vector allocated just below the
+    /// limit would run a collection that frees nothing): to an intermediate collection (what was
+    /// promoted since the last deeper one, without tracing the tenured heap), then to a major one.
     ///
-    /// An intermediate collection that cannot free enough only adds its tracing to the major
-    /// collection after it, which happens whenever the objects promoted since the last deeper
-    /// collection are a structure the program is still building. The share of them the last
-    /// intermediate collection found dead predicts what one would free now, and when that is
-    /// short of what the small objects need, the escalation goes straight to a major
-    /// collection. Only an intermediate collection measures that share: tenured objects that
-    /// died keep their younger children alive through the remembered set until a major
-    /// collection, so a major one finds most of the younger generation dead where an
-    /// intermediate one frees almost nothing. Every few predicted major collections an
-    /// intermediate one runs anyway, so a program that starts making short-lived objects
-    /// again gets cheap collections back.
+    /// An intermediate collection that cannot free enough only adds its tracing to the major one,
+    /// so the share of promoted objects the last one found dead predicts this one, and a short
+    /// prediction goes straight to a major collection. Only an intermediate collection measures
+    /// that share, since dead tenured objects keep younger children alive until a major one. Every
+    /// few predicted major collections an intermediate one runs anyway, so cheap collections come
+    /// back.
     unsafe fn escalate_if_full(&mut self, keep: &[Sexp], request: usize) {
         let mut kind = Collection::Intermediate;
         loop {
@@ -3832,20 +3813,16 @@ impl Heap {
             .sum()
     }
 
-    /// Frees what the zero-count table proves dead without waiting for a collection, the way
-    /// GNU R's reference counts would if it freed on them, which it does not.
+    /// Frees what the zero-count table proves dead without waiting for a collection (GNU R keeps
+    /// reference counts but never frees on them).
     ///
-    /// An entry with no counted reference can still be held through a reference the counts do
-    /// not see: a root (the protect stack, the precious set, a native call's handouts, an
-    /// interpreter frame), the fields of an untracked object, an escaped list's elements, a weak
-    /// reference, or the allocation's own `keep`. Those references are gathered shallowly and
-    /// flagged, which costs one pass over the roots rather than a trace of the heap. Every other
-    /// reference to a heap object is a counted field, so an entry at count zero that no root
-    /// names is unreachable.
-    ///
-    /// A dead list gives up its elements, which may cascade to their own last references, and
-    /// stays for the sweep with its fields cleared; a dead large atomic vector is freed at once,
-    /// which is what returns a temporary's pages before the next collection would.
+    /// An entry at count zero can still be held through a reference the counts do not see: a root
+    /// (the protect stack, the precious set, a native call's handouts, an interpreter frame), an
+    /// untracked object's fields, an escaped list's elements, a weak reference, or the allocation's
+    /// `keep`. One shallow pass over the roots flags those; every other reference is a counted
+    /// field, so an unflagged zero-count entry is unreachable. A dead list gives up its elements,
+    /// which may cascade, and stays for the sweep with its fields cleared; a dead large atomic
+    /// vector is freed at once.
     unsafe fn reconcile(&mut self, keep: &[Sexp]) {
         if self.inhibit > 0 || (self.zero_count.is_empty() && self.returned.is_empty()) {
             return;
@@ -4671,20 +4648,18 @@ impl Heap {
         has_younger
     }
 
-    /// Marks the strings of a character vector and says whether one of them is younger and
-    /// whether one of them repeated a string the table holds. A character vector usually
-    /// repeats a few strings, like a column of categories, and marking one again only finds it
-    /// marked, so `table` skips the strings this vector already marked. Strings hold no
-    /// references, so a skipped repeat loses nothing but its age, which the table keeps: a
-    /// string cannot age between two of its marks, because the first one aged it.
+    /// Marks the strings of a character vector and says whether one is younger and whether one
+    /// repeated a string the table holds. A character vector usually repeats a few strings (a
+    /// column of categories), so `table` skips strings this vector already marked. A skipped repeat
+    /// loses nothing: strings hold no references, and a string cannot age between two marks because
+    /// the first aged it.
     ///
-    /// The table is cheaper than any mark test. A repeat costs a hash of the address and one
-    /// load from a table that stays in L1, about 6 instructions; a mark test must find the
-    /// string's page, size class, word and bit and read the mark and tenured bitmaps, about 25.
-    /// A flat bitmap over a space of strings alone would still need the range check, the shift
-    /// and both bitmap reads, and a mark bit in the string's own header would cost a cache miss
-    /// per element. A string the table misses costs about 11 instructions more than a plain
-    /// mark, which is why a caller stops using it on a vector without repeats.
+    /// The table is cheaper than any mark test: a repeat costs an address hash and one L1 load
+    /// (about 6 instructions), where a mark test finds the page, size class, word and bit and reads
+    /// the mark and tenured bitmaps (about 25). A flat bitmap over strings alone still needs the
+    /// range check and both reads, and a mark bit in the header costs a cache miss per element. A
+    /// table miss costs about 11 instructions over a plain mark, so a caller stops using the table
+    /// on a vector without repeats.
     #[inline(always)]
     unsafe fn mark_strings<const TENURED: bool>(
         &mut self,

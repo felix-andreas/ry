@@ -215,19 +215,15 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Mapped<A> {
     }
 }
 
-/// Asks the kernel for huge pages on the blocks [`Mapped`] maps while the returned guard lives,
-/// on every thread. A table operation holds one: it fills buffers as long as its columns and
-/// frees them when it returns, so every operation maps them afresh. With 4 KiB pages a 400 MB
-/// buffer takes a hundred thousand page faults before it is full, and with 2 MiB pages two
-/// hundred. A gather through random row indices also stops missing the TLB on every read.
+/// Asks the kernel for huge pages on the blocks [`Mapped`] maps while the returned guard lives, on
+/// every thread. A table operation holds one, because it maps column-sized buffers afresh each
+/// time: a 400 MB buffer takes a hundred thousand page faults with 4 KiB pages and two hundred with
+/// 2 MiB ones, and a gather through random row indices stops missing the TLB.
 ///
-/// The advice is scoped to the operation because the block's size cannot tell such a buffer from
-/// one that is reserved and filled only in part, which is what the interpreter's large blocks
-/// are: a hash table that doubled, a list that grows, a stack. On huge pages each of those
-/// commits its last, partly used 2 MiB in full. Outside a guard a block gets small pages.
-///
-/// Guards nest, and a block keeps the pages it was mapped with after its guard is gone. Growing
-/// it inside a later guard advises the whole block.
+/// The advice is scoped because size cannot tell such a buffer from a reserved, partly filled one
+/// (a doubled hash table, a growing list, a stack), which on huge pages commits its last 2 MiB in
+/// full. Guards nest, and a block keeps the pages it was mapped with; growing it inside a later
+/// guard advises the whole block.
 pub fn huge_pages() -> HugePages {
     HUGE_PAGE_SCOPES.fetch_add(1, Ordering::Relaxed);
     HugePages(())

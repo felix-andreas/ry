@@ -6,35 +6,23 @@
 //! totals <- List.walk(people, Dict.empty(), add_score)
 //! ```
 //!
-//! lowers to three counted loops and two lists. The second loop only reads `parsed` item by
-//! item, and the third only reads `people`, so each item can go straight from the loop that
-//! makes it to the loop that uses it: the three bodies run one after the other in one loop,
-//! and neither list exists. Once no list holds them, the results and records the items were
-//! boxed in never leave the function, and [`crate::unbox`] replaces them with their fields.
+//! lowers to three counted loops and two lists, but the bodies can run in one loop with neither
+//! list, after which [`crate::unbox`] replaces the items' boxes. A list is fused away when:
 //!
-//! A list is fused away when all of this holds:
+//! - One counted loop, the producer, fills it once per iteration: a `Push` onto a list that starts
+//!   empty, or a `Set` at its own counter into a list as long as the one it counts over. Making the
+//!   list cannot fail (a capacity is known not to be negative); a `NaN` stored in a list of doubles
+//!   gives up the call, and that test stays where the store was.
+//! - Another counted loop, the consumer, reads it from first to last without leaving early.
+//!   Nothing else reads the list but its length.
+//! - The consumer follows the producer on one straight path whose only branches give up the call.
+//! - Neither loop assigns a variable the other reads or assigns, and neither they nor that path
+//!   call a function, so running the consumer's body earlier can only change which of two
+//!   failures gives up the call, and every failure gives it up the same way.
 //!
-//! - One counted loop, the producer, fills it: with a `Push` onto a list that starts empty,
-//!   or with a `Set` at the loop's own counter into a list as long as the one the loop
-//!   counts over, once per iteration. Making the list cannot fail, so its capacity, if it
-//!   has one, is known not to be negative. Storing a `NaN` in a ry list of doubles gives up
-//!   the call, and that test stays where the store was.
-//! - Another counted loop, the consumer, reads it from the first position to the last, and
-//!   never leaves early. Nothing else reads the list but its length.
-//! - The consumer comes after the producer on one straight path, on which the only branches
-//!   are tests that give up the whole call.
-//! - Neither loop nor that path calls a function, so the only thing running the consumer's
-//!   body earlier can change is which of two failures gives up the call, and every failure
-//!   gives it up the same way.
-//! - Moving the consumer's body into the producer changes no value either of them reads:
-//!   neither assigns a variable the other reads or assigns.
-//!
-//! What the consumer needs before its first iteration, such as its own empty result list or a
-//! starting state, moves to the end of the block that enters the producer. The list's length
-//! becomes a counter, so a later `List.len` still has its answer.
-//!
-//! The pass runs before the reference counts are inserted, while a list is still a value and
-//! `Push` and `Set` still return a new one.
+//! The consumer's setup (its empty result, a starting state) moves to the end of the block entering
+//! the producer, and the list's length becomes a counter for a later `List.len`. The pass runs
+//! before reference counts exist, while `Push` and `Set` return a new list.
 
 use {
     crate::{

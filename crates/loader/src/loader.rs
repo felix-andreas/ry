@@ -268,34 +268,18 @@ pub fn parse_namespace_conditions(encoded: &str) -> NamespaceConditions {
     conditions
 }
 
-/// A package's S4 definitions when all of them can wait for first use: running them later,
-/// all together and in order, defines the same classes, generics and methods as running them
-/// at load, provided nothing reaches one of them in between. A backend that defers them binds
-/// [`DeferredS4::names`] to promises that run them, and runs them too when code looks up one of
-/// the classes or generics by name, which is how every other route to them starts: `new()`,
-/// `is()` and `validObject()` look up the class, and `getMethod()`, `existsMethod()` and
-/// `showMethods()` look up the generic. Every name the definitions read is written once,
-/// before them, so a later run reads the same values.
-///
-/// Only a fresh load defers, and only when every S4 definition qualifies:
-///
-/// - `setClass`, `setGeneric` with its own definition, `setMethod`, `setReplaceMethod`,
-///   `setValidity`, `setClassUnion` and `setAs`, each with literal names, as [`S4Definition`]
-///   describes. Any other S4 registration, such as `setRefClass`, keeps them all eager.
-/// - A class union is held back, even one that names other packages' classes, as
-///   `c("Quantity", "NULL")` and `c("numeric", "NULL")` do: code that asks whether `NULL`
-///   belongs to it names the union, whose lookup runs the definitions. Until then, the
-///   process-wide class cache does not list the union among what `NULL` extends. A coercion
-///   that names none of the held-back classes is not held back but runs in place.
-/// - Each method belongs to a generic the package defines, so nothing reaches it except
-///   through that generic, or its signature names a class the package defines, so it applies
-///   only to objects of that class. A method of the second kind on another package's generic,
-///   such as `show`, `length`, `as.list` or the `coerce` method `setAs` defines, is listed in
-///   [`DeferredS4::foreign_methods`]: the backend must run the definitions before that method
-///   can be found, and keeps them eager when it cannot tell when that happens. Such a method
-///   for a union that names another package's class keeps them all eager, because dispatch on
-///   an object of that class would not look for it.
-/// - Each validity method is for a class the package defines.
+/// A package's S4 definitions, all of which can wait for first use: run later, together and in
+/// order, they define the same classes, generics and methods if nothing reaches them first, and
+/// every name they read is written once, before them. A backend that defers binds
+/// [`DeferredS4::names`] to promises that run them, and runs them on a by-name lookup of a class or
+/// generic, which every route to them starts with. Only a fresh load defers, when every definition
+/// is a literal-named `setClass`, `setGeneric` with a definition, `setMethod`, `setReplaceMethod`,
+/// `setValidity`, `setClassUnion` or `setAs` ([`S4Definition`]) whose generic, signature class or
+/// validity class is the package's. A union naming other packages' classes (`c("numeric", "NULL")`)
+/// is held back too, as asking whether `NULL` belongs to it looks it up; a coercion naming no
+/// held-back class runs in place. A method on another package's generic (`show`) is in
+/// [`DeferredS4::foreign_methods`], before whose lookup the backend runs the definitions, or else
+/// keeps them eager, as it must when that method is for a union naming another package's class.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeferredS4 {
     /// Positions in [`Plan::run`], in collation order.

@@ -116,9 +116,9 @@ const SEED_HIGH: u64 = 0x1319_8A2E_0370_7344;
 const ONES: u64 = 0x0101_0101_0101_0101;
 const HIGHS: u64 = 0x8080_8080_8080_8080;
 
-/// Reads the bytes once, a word at a time, for the NUL test, the ASCII test and the hash
-/// together. Re-interning a string that is already in the table costs little more than this pass
-/// and one probe, so the three used to be separate passes and are now one.
+/// Reads the bytes once, a word at a time, for the NUL test, the ASCII test and the hash together:
+/// re-interning a string that is already in the table costs little more than this pass and one
+/// probe, so separate passes would dominate it.
 #[inline]
 pub(crate) fn scan(bytes: &[u8]) -> Scan {
     let length = bytes.len();

@@ -1,43 +1,26 @@
-//! The range of values each whole-number local can hold, so the backend can leave out a check
-//! that cannot fire.
+//! The range of values each whole-number local can hold, so the backend can leave out a check that
+//! cannot fire. In `for (i in List.range(1, n)) quantity <- i %% 7 + 1` the counter starts at 1 and
+//! only counts up, so `i %% 7` needs no correction for a negative dividend and lies in `0..=6`, and
+//! adding 1 to it needs no overflow test.
 //!
-//! ```r
-//! for (i in List.range(1, n)) {
-//!     quantity <- i %% 7 + 1
-//! }
-//! ```
+//! A range covers every value any assignment gives the local anywhere in the function. The ranges
+//! are the smallest that agree with every assignment, grown from nothing until nothing changes; a
+//! bound that keeps growing, such as a counter's upper end, jumps to its type's limit after a few
+//! rounds, which bounds the work.
 //!
-//! The counter starts at 1 and only counts up, so it is never negative, which means `i %% 7`
-//! needs no correction for a negative dividend and lies in `0..=6`. Adding 1 to that cannot
-//! overflow, so the sum needs no overflow test either.
+//! A test narrows a range for the code it guards: in `fib <- function(n: I64) -> I64 if (n < 2) n
+//! else fib(n - 1) + fib(n - 2)`, `n` is at least 2 in the `else` branch, so neither subtraction
+//! can overflow. A test counts when a block ends by branching on a comparison of two `I64` locals
+//! made in that block, each local is assigned at most once in the function, and the branch is the
+//! only way into its target. The comparison then holds in every block the target dominates, because
+//! a local assigned once changes only when that assignment runs again, and the way back leads
+//! through the comparison and the branch.
 //!
-//! A range covers every value any assignment gives the local, anywhere in the function. Each
-//! assignment's range follows from the ranges of its operands, and the ranges are the smallest
-//! that agree with every assignment, found by starting from nothing and growing until nothing
-//! changes. A bound that keeps growing, such as a counter's upper end, jumps to the limit of
-//! its type after a few rounds, which bounds the work.
-//!
-//! A test narrows a range for the code it guards. In
-//!
-//! ```r
-//! fib <- function(n: I64) -> I64 if (n < 2) n else fib(n - 1) + fib(n - 2)
-//! ```
-//!
-//! `n` is at least 2 in the `else` branch, so neither subtraction can overflow. A test counts
-//! when a block ends by branching on a comparison of two `I64` locals made in that block, each
-//! local is assigned at most once in the function, and the branch is the only way into its
-//! target. The comparison then still describes both locals in every block the target
-//! dominates: a local assigned once changes only when its one assignment runs again, and the
-//! way from there back into such a block leads through the comparison and the branch.
-//!
-//! The machine code starts every local that is not a parameter at zero, so a local that some
-//! path reads before assigning it has 0 in its range as well.
-//!
-//! The types set the widest range: all of `i64` for an `I64`, and all of `i32` for an integer
-//! or a logical, where the lowest value is `NA`. One whose range starts above the lowest `i32`
-//! is therefore never `NA`. A `Bool` is never `NA`, and that is all its type says: a logical
-//! vector that a package's C code filled can hold a true value other than 1, and a truth test
-//! passes it on as it is.
+//! Machine code starts every local that is not a parameter at zero, so a local some path reads
+//! before assigning it has 0 in its range. The types set the widest range: all of `i64` for an
+//! `I64`, and all of `i32` for an integer or a logical, whose lowest value is `NA`, so a range that
+//! starts above it is never `NA`. A `Bool` is never `NA`, and that is all its type says: a logical
+//! that a package's C code filled can hold a true value other than 1, which a truth test passes on.
 
 use {
     crate::{
