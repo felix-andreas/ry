@@ -423,3 +423,12 @@ GNU R finalizes an object at the first full `gc()` after its last reference goes
 - **Rule.** A handler stack replaced while a calling handler, `R_ToplevelExec`, `R_tryEval` or `on.exit` code runs must stay traced: a handler closure `.addCondHands` received is referenced by its entry alone, and a Rust local or thread-local is never traced.
 - **Shape.** `conditions::set_aside(handlers, restarts)` pushes the stacks onto `Interp::suspended_handlers`, which the root scan traces, and returns a guard that truncates the list to its earlier length on drop. Every site that hides a stack uses it: the three signalling loops, `run_on_exit`, the help server, libr's `try_eval`, and `ry_handlers_enter`, whose context entry owns the guard until `ry_handlers_leave`. Truncation rather than pop keeps the list consistent when an error drops a guard or a C context is left out of order.
 - Cost: one `Vec` push and truncate per signal, no allocation once the list has grown. Pinned by `caught_twice` in `YOUNG_STRESSED`, `crates/interp/tests/test_rust_allocations.rs` (young stress reproduces the bug every time).
+
+## A list of inert elements skips its children when it dies
+
+**Status:** built.
+
+- **Rule.** A list carries `INERT_ELEMENTS` (flag bit 6, shared with the string-only `VALID_UTF8`) while every element is inert: nil, a symbol, a `CHARSXP`, a character vector, or a small or ALTREP atomic vector (`object::is_inert`). Giving up such references can free nothing and release no frame, so `reconcile` and `release_swept_lists` skip a dead list with the bit, as GNU R's sweep skips every dead object's children.
+- **Maintenance.** Allocation sets the bit; `set_element`, `copy_elements`, `move_elements` and `count_written_elements` clear it when a non-inert element arrives; `escape` clears it, since native code may store anything through the pointer. `count_written_elements` derives it in the same pass that counts the elements (`increment_refcount_inert`, one header read per element, branch-free).
+- **Safety.** A set bit leaves the elements' counts overcounted, which is safe because counts only overcount; a clear bit only costs a walk. A large atomic element is not inert, because its release returns pages early.
+- Measured on a shallow copy of a shared 1,000-element list of doubles, freed each iteration: 3.2 µs per copy without the bit, 2.7 µs with it.

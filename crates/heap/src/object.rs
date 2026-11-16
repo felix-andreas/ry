@@ -496,6 +496,11 @@ pub(crate) mod flag_bits {
     /// Interned bytes never change, and C code cannot reach this byte, so unlike the `ASCII`
     /// general-purpose bit it is a fact rather than a hint.
     pub const VALID_UTF8: u8 = 1 << 6;
+    /// A list whose every element is inert (`crate::heap::inert_element`): giving up its
+    /// references can free nothing and release no frame, so a dead list with the bit skips its
+    /// elements, as GNU R's sweep skips every dead object's. A set bit leaves those counts
+    /// overcounted, which is safe, since counts only overcount; a clear bit only costs a walk.
+    pub const INERT_ELEMENTS: u8 = 1 << 6;
     /// Held by `R_PreserveObject` (the heap's precious set), so a frame release can tell from
     /// the header it already holds that the frame must stay.
     pub const PRECIOUS: u8 = 1 << 7;
@@ -715,6 +720,25 @@ const _: () = assert!(RECORD_DATA_OFFSET == 32);
 /// The size class of an object too large for the small-object pages, which gets an allocation
 /// of its own.
 pub(crate) const LARGE_CLASS: u8 = u8::MAX;
+
+/// Whether an object of this kind, flags and size class is inert (`crate::heap::inert_element`):
+/// `NULL`, a symbol or a string of either kind, or an atomic vector that is ALTREP or small.
+#[inline(always)]
+pub(crate) fn is_inert(kind: u8, flags: u8, size_class: u8) -> bool {
+    const LEAF_KINDS: u64 = 1 << SexpType::Nil as u8
+        | 1 << SexpType::Symbol as u8
+        | 1 << SexpType::Char as u8
+        | 1 << SexpType::String as u8;
+    const ATOMIC_KINDS: u64 = 1 << SexpType::Logical as u8
+        | 1 << SexpType::Integer as u8
+        | 1 << SexpType::Real as u8
+        | 1 << SexpType::Complex as u8
+        | 1 << SexpType::Raw as u8;
+    let bit = 1u64 << (kind & 63);
+    (LEAF_KINDS & bit != 0)
+        | ((ATOMIC_KINDS & bit != 0)
+            & ((size_class != LARGE_CLASS) | (flags & flag_bits::ALTREP != 0)))
+}
 const LARGEST_SMALL_BYTES: usize = 2048;
 
 /// The elements one card of a large handle vector covers. A large character vector, list or
@@ -872,6 +896,11 @@ impl Sexp {
         unsafe { self.header().flags.get() & flag_bits::VALID_UTF8 != 0 }
     }
 
+    /// Whether this list holds only leaves (`flag_bits::INERT_ELEMENTS`).
+    pub(crate) unsafe fn has_inert_elements(self) -> bool {
+        unsafe { self.header().flags.get() & flag_bits::INERT_ELEMENTS != 0 }
+    }
+
     pub unsafe fn is_array(self) -> bool {
         unsafe { self.header().flags.get() & flag_bits::ARRAY != 0 }
     }
@@ -946,6 +975,25 @@ impl Sexp {
             if count.get() != REFCOUNT_MAX {
                 count.set(count.get() + 1);
             }
+        }
+    }
+
+    /// Counts one more reference, as [`Sexp::increment_refcount`] does, and says whether the
+    /// object is inert (`crate::heap::inert_element`), from one read of the header: copying a
+    /// list counts every element, and branches here cost more than the copy itself.
+    #[inline(always)]
+    pub(crate) unsafe fn increment_refcount_inert(self) -> bool {
+        unsafe {
+            let header = self.header();
+            let count = header.refcount.get();
+            header
+                .refcount
+                .set(count + u16::from(count != REFCOUNT_MAX));
+            is_inert(
+                header.kind.get(),
+                header.flags.get(),
+                header.size_class.get(),
+            )
         }
     }
 
