@@ -2,6 +2,8 @@
 //! semantics (join layout, rolling matches, group order, `NA` handling) was read from data.table
 //! 1.17 under GNU R on the same inputs.
 
+mod lazy;
+
 use {
     syntax::testing::{SplitMix64, for_each_seed},
     table::{

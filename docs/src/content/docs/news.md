@@ -46,6 +46,8 @@ the change that introduced it; none was re-measured for these notes.
 | `unlist(list(x, x))`, a million strings | 22.8 ms | 33.1 ms | 14.2 ms |
 | `rep(x, 2)`, a million strings | 26.6 ms | 31.8 ms | 16.5 ms |
 | `x[perm]`, a million strings | 79.8 ms | 26.2 ms | 11.9 ms |
+| `d[] <- dv`, 4,000 doubles | 16.0 µs | 36.8 µs | 1.4 µs |
+| `s[] <- sv`, 4,000 strings | 43.7 µs | 51.1 µs | 7.7 µs |
 | `as.Date` on strings (kernel k2) | 1.07 s | 0.532 s | 0.10 s |
 | `pmin` and `pmax` (kernel k8) | 1.55 s | 1.261 s | 0.16 s |
 
@@ -53,7 +55,9 @@ The kernels are cut from a user's profile of a package test suite (`just bench-c
 `isTRUE`, `isFALSE`, `unname`, `%in%` and `unlist` run natively for the shapes they cover, which
 takes kernel k3 from 2.1x to 3.5x GNU R's speed and kernel k5 from 2.1x to 2.6x. `deparse(x, nlines
 = n)` stops after `n` lines, and loading a package's lazy-load database skips the byte code GNU R
-wrote into it.
+wrote into it. `x[] <- value` and `x[a:b] <- value` write the value in whole copies. Compiled
+element reads and writes such as `x[[k]] <- 5`, `x$b <- k` and `y <- v[k:4L]` cost fewer instructions
+than the interpreter's.
 
 ### Compatibility and fixes
 

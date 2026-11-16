@@ -1249,9 +1249,11 @@ version = "0.5.0"
 dependencies = [
  "heap",
  "interp",
+ "libc",
  "libmimalloc-sys",
  "rustc-hash",
  "serde_json",
+ "syntax",
  "table",
 ]
 
@@ -1854,7 +1856,6 @@ dependencies = [
  "encoding_rs",
  "fancy-regex",
  "flate2",
- "frames",
  "getrandom 0.3.4",
  "glob",
  "heap",
@@ -2557,6 +2558,7 @@ dependencies = [
  "clap",
  "libc",
  "png",
+ "rcmd",
  "serde",
  "serde_json",
  "similar",
