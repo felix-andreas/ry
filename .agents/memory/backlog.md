@@ -417,7 +417,7 @@ User directive: go through the whole code base and delete low-signal tests. The 
 - **Old runtimes stay in the cache after an upgrade.** Each release extracts its runtime into a new `ry/runtime/<key>/` (tens of MB), and nothing removes the previous release's directory. R homes are pruned already (`rcmd::cached_home` removes stale homes no process holds); runtimes need the same treatment, without removing one a running session still maps.
 - **Measured state at the full benchmark size** (`generate.py --lines 300000 --files 500`, about 306,000 lines each; the `codebases` suite, one round, release build). With the dependency closure installed except `polars`, `Rblpapi` and `esgtoolkit`, ry matches GNU R on every test (finbench 9,592, dsbench 9,416, biobench 8,927) and the suite times are 1.48x, 1.59x and 1.53x faster than GNU R's (135.3 s against 199.6 s, 63.0 s against 99.9 s, 73.8 s against 113.2 s); per-test geometric means are 1.44x, 1.59x and 1.57x. The JIT is within 3% of `RY_JIT=off` (131.5 s, 62.6 s, 73.5 s), because profitability gates keep it from compiling bodies that would mostly hand back to tier 0 (`decisions.md`, "Bodies that would mostly hand back to tier 0 compile only for loops"). The earlier figure of 1.21x to 1.35x slower, from a run with 10,000 or more tests per suite, predates these and is not reproduced; whether the cause is the library, the test set or the interpreter work since is not isolated.
 - **The scoreboard** is the `codebases` suite (`tools/bench/codebases/`, `just bench codebases`; it needs `cargo build --release -p oracle` and the library from `just corpus`, read from `RY_CORPUS_DIR` or `.corpus/library`). `--profile-summary` splits time by the entry count of the innermost closure body; `big-levers.md`, "Where the full-size code bases spend their time", has the three splits. Snapshot code that calls an entry point R 4.6's headers no longer declare (`ATTRIB`, `Rf_findVar`, `Rf_findVarInFrame`) truncates the returned pointer to an `int` and aborts under GNU R 4.6.2 too (xts's `x[2:4]`, Matrix's `Cholesky`), so `tools/corpus/install.R` reinstalls every package whose shared object imports such a function from the newest CRAN source (`MEMORY.md`, Long-term, "Testing").
-- **Corpus packages that still fail to load under GNU R 4.6.2.** Missing system libraries: udunits2, proj, gsl, netcdf, Magick++, mysqlclient, protobuf and tesseract (add them to `tools/corpus/system-packages.txt`), plus rJava. The snapshot's rbibutils 2.3 is older than the `> 2.4` its installed Rdpack 2.6.6 requires, which breaks lme4, ergm, glmmTMB, mice and other Rdpack users in `.corpus-top`; spatstat.random's newest source needs spatstat.data >= 3.1.9.
+- **Corpus packages that still fail to load under GNU R 4.6.2.** Missing system libraries: udunits2, proj, gsl, netcdf, Magick++, mysqlclient, protobuf and tesseract (add them to `tools/corpus/system-packages.txt`), plus rJava. spatstat.random's newest source needs spatstat.data >= 3.1.9. `tools/corpus/install.R` upgrades a dependency that fails an installed package's version constraint from CRAN, but it does not rebuild the packages already compiled against the old version of an upgraded `LinkingTo` dependency.
 - **Next.** Re-measure on the release archive (`--write`), then run `ry check` over the generated code and treat every finding as a possible false report.
 
 ### Why the code bases run at 1.5x, ranked
@@ -3576,17 +3576,6 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
     "Duplicate DESCRIPTION fields" on ry, a false failure.
   - QuickJSR fails only when ry prints its notice about packages installed by another ry build on
     a subprocess's stderr, which the test compares. Reinstall the library with the ry under test.
-  - future, `test-timeouts.R`: `setTimeLimit()` and `setSessionTimeLimit()` are no-ops
-    (`crates/interp/src/system.rs`), so a future with a timeout runs to completion. GNU R checks
-    the limits where it checks for a user interrupt and raises "reached elapsed time limit" or
-    "reached CPU time limit"; a transient limit resets at top level. ry's evaluator polls only
-    the interrupt request flag (`unwind::poll_interrupt`), so a limit needs something that
-    raises that flag at the deadline. Repro (GNU R prints the error message, ry prints 42):
-    ```r
-    sleep <- function(d) { until <- Sys.time() + d; while (Sys.time() < until) Sys.sleep(0.01) }
-    tryCatch({ setTimeLimit(elapsed = 0.2, transient = TRUE); sleep(1); 42 },
-      error = conditionMessage)
-    ```
   - ggplot2, `test-geom-smooth.R:92` ("Failed to fit group 1" expected): GNU R's loess on fewer
     points than degrees of freedom warns "span too small. fewer data values than degrees of
     freedom.", "pseudoinverse used at ...", "all data on boundary of neighborhood. make span
