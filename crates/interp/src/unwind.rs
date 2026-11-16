@@ -60,7 +60,9 @@ pub fn poll_interrupt() -> R<()> {
 #[cold]
 fn attend() -> R<()> {
     take_requests()?;
-    if INTERRUPTS_PENDING.load(Ordering::Relaxed) == 0 {
+    if INTERRUPTS_PENDING.load(Ordering::Relaxed) == 0
+        && !crate::time_limits::DUE.load(Ordering::Relaxed)
+    {
         return Ok(());
     }
     let interp = interp();
@@ -72,8 +74,9 @@ fn attend() -> R<()> {
     check_user_interrupt()
 }
 
-/// GNU R's `R_CheckUserInterrupt`: delivers a pending user interrupt now, unless interrupts are
-/// suspended. Native code and the builtins that check as they work call it.
+/// GNU R's `R_CheckUserInterrupt`: raises a time limit that has passed and delivers a pending
+/// user interrupt now, unless interrupts are suspended. Native code and the builtins that check
+/// as they work call it.
 pub fn check_user_interrupt() -> R<()> {
     if INTERRUPTS_SUSPENDED.load(Ordering::Relaxed) != 0 {
         return Ok(());
@@ -81,6 +84,7 @@ pub fn check_user_interrupt() -> R<()> {
     if INTERRUPT_REQUESTED.load(Ordering::Relaxed) {
         take_requests()?;
     }
+    crate::time_limits::check()?;
     if INTERRUPTS_PENDING.load(Ordering::Relaxed) != 0 {
         return onintr();
     }
@@ -119,10 +123,11 @@ fn deliver_interrupt() -> Unwind {
 }
 
 /// Clears [`INTERRUPT_REQUESTED`], answers an editor's request and raises a parked unwind. A
-/// pending user interrupt keeps the flag raised until it is delivered.
+/// pending user interrupt or a passed time limit keeps the flag raised until it is delivered.
 fn take_requests() -> R<()> {
     INTERRUPT_REQUESTED.store(
-        INTERRUPTS_PENDING.load(Ordering::Relaxed) != 0,
+        INTERRUPTS_PENDING.load(Ordering::Relaxed) != 0
+            || crate::time_limits::DUE.load(Ordering::Relaxed),
         Ordering::Relaxed,
     );
     if crate::console_server::SERVICE_REQUESTED.swap(false, Ordering::Relaxed) {

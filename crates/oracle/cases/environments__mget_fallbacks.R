@@ -1,0 +1,10 @@
+# `ifnotfound` may be any vector, not only a list, and recycles when it has length one.
+e <- new.env()
+assign("a", 1, envir = e)
+print(mget(c("a", "b"), envir = e, ifnotfound = NA))
+print(mget(c("b", "c"), envir = e, ifnotfound = c("first", "second")))
+print(mget("b", envir = e, ifnotfound = list(function(name) paste("no", name))))
+print(mget("b", envir = e, ifnotfound = list(NULL)))
+print(tryCatch(mget(c("b", "c", "d"), envir = e, ifnotfound = 1:2), error = conditionMessage))
+print(tryCatch(mget("b", envir = e), error = conditionMessage))
+print(mget(character(), envir = e))

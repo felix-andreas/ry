@@ -417,7 +417,7 @@ User directive: go through the whole code base and delete low-signal tests. The 
 - **Old runtimes stay in the cache after an upgrade.** Each release extracts its runtime into a new `ry/runtime/<key>/` (tens of MB), and nothing removes the previous release's directory. R homes are pruned already (`rcmd::cached_home` removes stale homes no process holds); runtimes need the same treatment, without removing one a running session still maps.
 - **Measured state at the full benchmark size** (`generate.py --lines 300000 --files 500`, about 306,000 lines each; the `codebases` suite, one round, release build). With the dependency closure installed except `polars`, `Rblpapi` and `esgtoolkit`, ry matches GNU R on every test (finbench 9,592, dsbench 9,416, biobench 8,927) and the suite times are 1.48x, 1.59x and 1.53x faster than GNU R's (135.3 s against 199.6 s, 63.0 s against 99.9 s, 73.8 s against 113.2 s); per-test geometric means are 1.44x, 1.59x and 1.57x. The JIT is within 3% of `RY_JIT=off` (131.5 s, 62.6 s, 73.5 s), because profitability gates keep it from compiling bodies that would mostly hand back to tier 0 (`decisions.md`, "Bodies that would mostly hand back to tier 0 compile only for loops"). The earlier figure of 1.21x to 1.35x slower, from a run with 10,000 or more tests per suite, predates these and is not reproduced; whether the cause is the library, the test set or the interpreter work since is not isolated.
 - **The scoreboard** is the `codebases` suite (`tools/bench/codebases/`, `just bench codebases`; it needs `cargo build --release -p oracle` and the library from `just corpus`, read from `RY_CORPUS_DIR` or `.corpus/library`). `--profile-summary` splits time by the entry count of the innermost closure body; `big-levers.md`, "Where the full-size code bases spend their time", has the three splits. Snapshot code that calls an entry point R 4.6's headers no longer declare (`ATTRIB`, `Rf_findVar`, `Rf_findVarInFrame`) truncates the returned pointer to an `int` and aborts under GNU R 4.6.2 too (xts's `x[2:4]`, Matrix's `Cholesky`), so `tools/corpus/install.R` reinstalls every package whose shared object imports such a function from the newest CRAN source (`MEMORY.md`, Long-term, "Testing").
-- **Corpus packages that still fail to load under GNU R 4.6.2.** Missing system libraries: udunits2, proj, gsl, netcdf, Magick++, mysqlclient, protobuf and tesseract (add them to `tools/corpus/system-packages.txt`), plus rJava. The snapshot's rbibutils 2.3 is older than the `> 2.4` its installed Rdpack 2.6.6 requires, which breaks lme4, ergm, glmmTMB, mice and other Rdpack users in `.corpus-top`; spatstat.random's newest source needs spatstat.data >= 3.1.9.
+- **Corpus packages that still fail to load under GNU R 4.6.2.** Missing system libraries: udunits2, proj, gsl, netcdf, Magick++, mysqlclient, protobuf and tesseract (add them to `tools/corpus/system-packages.txt`), plus rJava. spatstat.random's newest source needs spatstat.data >= 3.1.9. `tools/corpus/install.R` upgrades a dependency that fails an installed package's version constraint from CRAN, but it does not rebuild the packages already compiled against the old version of an upgraded `LinkingTo` dependency.
 - **Next.** Re-measure on the release archive (`--write`), then run `ry check` over the generated code and treat every finding as a possible false report.
 
 ### Why the code bases run at 1.5x, ranked
@@ -3573,6 +3573,45 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
   - pkgbuild's "warnings can be turned into errors": GNU R's `R CMD build` script on ry does not
     turn a build warning into an error.
   - `eval(quote(next))` inside a loop reports no loop context.
+- **Top CRAN packages: what still fails** (`just top-packages`, `.corpus-top/tests/summary-installed.md`).
+  The 100 most-downloaded CRAN packages outside the closure (`tools/corpus/top-packages.txt`), built
+  from source on ry: 86 have tests. In a container with the system libraries, GNU R passes 84 and
+  ry passes 82 of those 84 (measured while dplyr and janitor still failed). In the cloud container
+  GNU R passes 79 and ry passes 78 of them once QuickJSR's library is reinstalled with the ry under
+  test (below); sandwich is the one real failure. Of GNU R's failures there: units, sf, terra and ggplot2's `coord_sf` tests need system libraries
+  (udunits, GDAL) the container lacks, and parallelly and future.apply fail on both.
+  - Run the suites with `LC_ALL=C.UTF-8`, as the oracle does: in the C locale, desc reports
+    "Duplicate DESCRIPTION fields" on ry, a false failure.
+  - QuickJSR fails only when ry prints its notice about packages installed by another ry build on
+    a subprocess's stderr, which the test compares. Reinstall the library with the ry under test.
+  - sandwich, `vcovPL.R` (runs since plm loads): collapse reaches into GNU R's object layout
+    through its own `internal/R_defn.h`, writing a vector's data at `(SEXPREC_ALIGN *) x + 1`
+    and its attributes and object bit through `x->attrib` and `x->sxpinfo.obj`. ry's vectors
+    keep their data elsewhere, so `collapse::gsplit` writes past its results and reads back
+    zeros or crashes. Repro: `str(collapse::gsplit(1:9, collapse::GRP(rep(1:3, c(2, 3, 4)))))`
+    gives `1 2`, `3 4 5`, `6 7 8 9` on GNU R and `0 0`, then a SIGSEGV, on ry. plm's `vcovSCC`
+    then fails with "'names' attribute [500] must be the same length as the vector [496]".
+  - `oracle packages` reuses a GNU R result recorded for the same package version, so a changed
+    dependency (an upgrade by the constraint pass) needs `--rerun-gnu-r`.
+  - ggplot2, `test-geom-smooth.R:92` ("Failed to fit group 1" expected): GNU R's loess on fewer
+    points than degrees of freedom warns "span too small. fewer data values than degrees of
+    freedom.", "pseudoinverse used at ...", "all data on boundary of neighborhood. make span
+    bigger" and more, and returns NaN fits, so `predict` then errors. ry's
+    `crates/stats/src/loess.rs` fits the points exactly. Port the netlib `lowesd`/`ehg`
+    checks and their `ehg182` warnings. Repro:
+    `fitted(loess(y ~ x, data.frame(x = c(1, 2), y = c(1, 3))))` gives `NaN NaN` and 13 warnings
+    on GNU R, `1 3` on ry.
+  - BiocManager's `test_install.R:166` fails under GNU R too (it needs a writable site library),
+    so it does not count.
+  - Not run: StanHeaders, rstan and shinystan (Stan's C++ takes hours to build), arrow (needs the
+    Arrow C++ library), V8 (needs libv8) and pak (builds its own dependency tree). quantreg
+    passes, but its rgl tests skip because rgl needs libGLU.
+  - `read.dcf` marks a non-ASCII value as UTF-8 where GNU R leaves it "unknown": in a UTF-8
+    locale, `Encoding(read.dcf(textConnection("A: M\u00fcller"))[, 1])` is "unknown" on GNU R
+    and "UTF-8" on ry. Comparisons agree, so nothing fails on it yet.
+  - `oracle packages` reports the first error in a `.Rout`, which can be one `try()` caught; the
+    error that ended the run is the one just before "Execution halted"
+    (`crates/oracle/src/packages.rs`).
 - **The oracle starter corpus does not fully pass yet.** `oracle compare --engine ry` lists the
   differing cases; most remaining ones need stats routines (`builtin_libraries.rs` names each
   unimplemented one when it is called) or printer details (complex numbers, wide matrices).

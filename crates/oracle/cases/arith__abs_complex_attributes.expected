@@ -1,0 +1,17 @@
+[stdout]
+| [1] 3 1
+| [1] 3 1
+| [1] 3 1
+| [1] 3 1
+| [1] 3 1
+| [1] 3 1
+| [1] 3 1
+| [1] 3 1
+| a b 
+| 5 1 
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| c(a = 5, b = 1)

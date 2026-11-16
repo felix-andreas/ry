@@ -1,0 +1,28 @@
+[stdout]
+| $a
+| [1] 1
+| 
+| $b
+| [1] NA
+| 
+| $b
+| [1] "first"
+| 
+| $c
+| [1] "second"
+| 
+| $b
+| [1] "no b"
+| 
+| $b
+| NULL
+| 
+| [1] "wrong length for 'ifnotfound' argument"
+| [1] "value for ‘b’ not found"
+| named list()
+[messages]
+[warnings]
+[errors]
+[value]
+list
+| structure(list(), names = character(0))

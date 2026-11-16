@@ -80,22 +80,7 @@ pub unsafe fn duplicate(object: Sexp, deep: bool) -> ApiResult<Sexp> {
         if let Some(copy) = crate::altrep::duplicate(object, deep)? {
             return Ok(copy);
         }
-        let mut copy = crate::altrep::materialize(object)?;
-        // The materialized vector may be storage the object keeps, such as a compact
-        // sequence's expansion, and the caller may write into its duplicate.
-        if copy.refcount() > 0 {
-            runtime().heap.root(copy);
-            copy = duplicate(copy, false)?;
-        }
-        runtime().heap.root(copy);
-        if deep && matches!(object.kind(), SexpType::List | SexpType::Expression) {
-            for index in 0..copy.length() as usize {
-                let element = duplicate(copy.element(index), true)?;
-                runtime().heap.set_element(copy, index, element);
-            }
-        }
-        copy_attributes(copy, object, deep)?;
-        return Ok(copy);
+        return materialized_duplicate(object, deep);
     }
     let copy = match object.kind() {
         SexpType::Nil
@@ -175,6 +160,36 @@ pub unsafe fn duplicate(object: Sexp, deep: bool) -> ApiResult<Sexp> {
             copy
         }
     };
+    copy_attributes(copy, object, deep)?;
+    Ok(copy)
+}
+
+/// A duplicate that is an ordinary vector even when `object` is ALTREP. An ALTREP class's
+/// `Duplicate` method may return another ALTREP object (a wrapper duplicates into a wrapper), so
+/// a caller that hands the copy's storage to native code, as `.C` does, uses this instead.
+pub unsafe fn plain_duplicate(object: Sexp, deep: bool) -> ApiResult<Sexp> {
+    if object.is_altrep() {
+        runtime().heap.root(object);
+        return materialized_duplicate(object, deep);
+    }
+    duplicate(object, deep)
+}
+
+unsafe fn materialized_duplicate(object: Sexp, deep: bool) -> ApiResult<Sexp> {
+    let mut copy = crate::altrep::materialize(object)?;
+    // The materialized vector may be storage the object keeps, such as a compact
+    // sequence's expansion, and the caller may write into its duplicate.
+    if copy.refcount() > 0 {
+        runtime().heap.root(copy);
+        copy = duplicate(copy, false)?;
+    }
+    runtime().heap.root(copy);
+    if deep && matches!(object.kind(), SexpType::List | SexpType::Expression) {
+        for index in 0..copy.length() as usize {
+            let element = duplicate(copy.element(index), true)?;
+            runtime().heap.set_element(copy, index, element);
+        }
+    }
     copy_attributes(copy, object, deep)?;
     Ok(copy)
 }

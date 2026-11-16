@@ -455,7 +455,13 @@ unsafe fn do_set_substr(call: &Call<'_>) -> R<Sexp> {
         return Ok(result);
     }
     let starts = integer_argument(call.arg(1))?;
-    let stops = integer_argument(call.arg(2))?;
+    // From R 4.5 on, `substring(x, first) <- value` passes a NULL stop, which means the end of
+    // each string.
+    let stops = if call.arg(2) == nil() {
+        vec![i32::MAX]
+    } else {
+        integer_argument(call.arg(2))?
+    };
     if starts.is_empty() || stops.is_empty() {
         return Err(error("invalid substring arguments"));
     }
@@ -4258,7 +4264,14 @@ unsafe fn character_vector(x: Sexp) -> R<Sexp> {
 unsafe fn copy_shape(from: Sexp, to: Sexp) -> R<()> {
     let symbols = symbols();
     for symbol in [symbols.names, symbols.dim, symbols.dimnames] {
-        let value = get_attr(from, symbol);
+        // GNU R reads the names through `getAttrib`, which turns a pairlist's tags into names.
+        let value = if symbol == symbols.names
+            && matches!(from.kind(), SexpType::Pairlist | SexpType::Language)
+        {
+            values::names(from)
+        } else {
+            get_attr(from, symbol)
+        };
         if value != nil() {
             set_attr(to, symbol, value)?;
         }

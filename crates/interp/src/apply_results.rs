@@ -178,15 +178,21 @@ impl VapplyResults {
         if names == nil() && self.row_names == nil() {
             return Ok(self.result);
         }
-        let dimnames = if self.array_dims.is_some() && self.row_names != nil() {
-            if self.row_names.kind() != SexpType::List || length(self.row_names) != rank {
+        // An array answer names every dimension: the template's leading ones stay NULL when
+        // neither it nor the first result has dimnames.
+        let dimnames = if self.array_dims.is_some() {
+            if self.row_names != nil()
+                && (self.row_names.kind() != SexpType::List || length(self.row_names) != rank)
+            {
                 return Err(error(format!(
                     "dimnames(<value>) is neither NULL nor list of length {rank}"
                 )));
             }
             let dimnames = alloc(SexpType::List, rank + 1)?;
-            for position in 0..rank {
-                values::set_elt(dimnames, position, self.row_names.element(position));
+            if self.row_names != nil() {
+                for position in 0..rank {
+                    values::set_elt(dimnames, position, self.row_names.element(position));
+                }
             }
             values::set_elt(dimnames, rank, names);
             dimnames
