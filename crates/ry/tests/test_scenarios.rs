@@ -27,6 +27,7 @@ use {
         process::{Child, ChildStdin, Command, Stdio},
         sync::{
             OnceLock,
+            atomic::{AtomicUsize, Ordering},
             mpsc::{self, Receiver},
         },
         time::{Duration, Instant},
@@ -65,16 +66,65 @@ fn scenarios_hold() {
     let scenarios = select_scenarios(scenarios, std::env::var("SCENARIO").ok().as_deref())
         .unwrap_or_else(|message| panic!("{message}"));
     corpus_library();
+    // Each scenario works in its own directory under CARGO_TARGET_TMPDIR and its own processes,
+    // so they run on one worker per core; the report follows the sorted order all the same.
+    let outcomes = in_parallel(&scenarios, |(name, path)| {
+        fs::read_to_string(path)
+            .map_err(|error| format!("reading {}: {error}", path.display()))
+            .and_then(|text| run_scenario(name, &text))
+    });
     let mut failures = Vec::new();
-    for (name, path) in scenarios {
-        let text = fs::read_to_string(&path).expect("a scenario reads");
-        match run_scenario(&name, &text) {
-            Ok(Outcome::Passed(steps)) => eprintln!("scenario {name}: {steps} steps passed"),
+    let mut passed = 0;
+    for ((name, _), outcome) in scenarios.iter().zip(outcomes) {
+        match outcome {
+            Ok(Outcome::Passed) => passed += 1,
             Ok(Outcome::Skipped(reason)) => eprintln!("scenario {name}: skipped, {reason}"),
-            Err(failure) => failures.push(format!("scenario {name}: {failure}")),
+            Err(failure) => failures.push(format!(
+                "scenario {name}: {failure}\n    rerun: SCENARIO={name} cargo test -p ry-lang --test \
+                 test_scenarios scenarios_hold"
+            )),
         }
     }
+    eprintln!(
+        "{passed} of {} scenario(s) passed, {} failed",
+        scenarios.len(),
+        failures.len()
+    );
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// `work` applied to every item on one worker per core, returned in the order of `items`.
+fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let next = AtomicUsize::new(0);
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |count| count.get())
+        .min(items.len().max(1));
+    let mut results: Vec<(usize, R)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(item) = items.get(index) else {
+                            return done;
+                        };
+                        done.push((index, work(item)));
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    });
+    results.sort_by_key(|(index, _)| *index);
+    results.into_iter().map(|(_, result)| result).collect()
 }
 
 /// The scenarios `SCENARIO` selects. Unset or empty (`just scenarios` with no name) selects them
@@ -454,8 +504,11 @@ fn typed_scripts_agree_however_they_compile() {
             .expect("write DESCRIPTION");
             fs::write(package.join("NAMESPACE"), "exportPattern(\"^[^.]\")\n")
                 .expect("write NAMESPACE");
-            fs::write(package.join("R").join("program.R"), definitions.join("\n") + "\n")
-                .expect("write the definitions");
+            fs::write(
+                package.join("R").join("program.R"),
+                definitions.join("\n") + "\n",
+            )
+            .expect("write the definitions");
             let library = directory.path().join(format!("library_{seed}"));
             let install = Command::new(env!("CARGO_BIN_EXE_ry"))
                 .arg("install")
@@ -474,7 +527,10 @@ fn typed_scripts_agree_however_they_compile() {
             let user = directory.path().join(format!("use_{seed}.R"));
             fs::write(
                 &user,
-                format!("library({name}, lib.loc = {library:?})\n{}\n", rest.join("\n")),
+                format!(
+                    "library({name}, lib.loc = {library:?})\n{}\n",
+                    rest.join("\n")
+                ),
             )
             .expect("write the script that uses the package");
             // The install wrote the package's typed code file, so the first run attaches its
@@ -504,11 +560,8 @@ fn typed_scripts_agree_however_they_compile() {
             let sourced = directory.path().join(format!("definitions_{seed}.R"));
             fs::write(&sourced, definitions.join("\n") + "\n").expect("write the definitions");
             let user = directory.path().join(format!("source_{seed}.R"));
-            fs::write(
-                &user,
-                format!("source({sourced:?})\n{}\n", rest.join("\n")),
-            )
-            .expect("write the script that sources the definitions");
+            fs::write(&user, format!("source({sourced:?})\n{}\n", rest.join("\n")))
+                .expect("write the script that sources the definitions");
             for tiering in [&TIERINGS[2], &TIERINGS[3]] {
                 let (sourced_code, sourced_stdout, sourced_stderr, log) = run(&user, tiering);
                 assert_eq!(
@@ -626,11 +679,22 @@ fn fuzz_typed_code_file() {
         .status()
         .expect("run cp");
     assert!(copied.success());
-    fs::write(root.join("write.R"), include_str!("../../rcmd/src/code-image.R"))
-        .expect("write the driver");
+    fs::write(
+        root.join("write.R"),
+        include_str!("../../rcmd/src/code-image.R"),
+    )
+    .expect("write the driver");
     let second = root.join("second").display().to_string();
     let rewritten = ry(&[
-        "run", "--runtime", "ry", "write.R", "typedfile", &second, "pkg", "none", "no-image",
+        "run",
+        "--runtime",
+        "ry",
+        "write.R",
+        "typedfile",
+        &second,
+        "pkg",
+        "none",
+        "no-image",
         "typed",
     ]);
     assert!(
@@ -662,7 +726,11 @@ fn fuzz_typed_code_file() {
         // fifth word), and the code and data from the 64 KiB boundary on, not the padding.
         let word = |index: usize| {
             let start = 12 + 8 * index;
-            u64::from_le_bytes(original[start..start + 8].try_into().expect("a header word"))
+            u64::from_le_bytes(
+                original[start..start + 8]
+                    .try_into()
+                    .expect("a header word"),
+            )
         };
         let metadata_end = 116 + word(4);
         let code_offset = word(6);
@@ -720,15 +788,16 @@ fn package_parts(statements: &[String]) -> Option<(Vec<String>, Vec<String>)> {
         let code = code_of(statement);
         code.starts_with("alias ")
             || code.starts_with("type ")
-            || code
-                .split_once(" <- ")
-                .is_some_and(|(name, value)| {
-                    name.chars().all(|character| character.is_alphanumeric() || character == '_')
-                        && value.starts_with("function(")
-                })
+            || code.split_once(" <- ").is_some_and(|(name, value)| {
+                name.chars()
+                    .all(|character| character.is_alphanumeric() || character == '_')
+                    && value.starts_with("function(")
+            })
     };
-    let (definitions, rest): (Vec<String>, Vec<String>) =
-        statements.iter().cloned().partition(|statement| is_definition(statement));
+    let (definitions, rest): (Vec<String>, Vec<String>) = statements
+        .iter()
+        .cloned()
+        .partition(|statement| is_definition(statement));
     let mut names: Vec<String> = definitions
         .iter()
         .filter_map(|definition| {
@@ -759,7 +828,9 @@ fn a_script_with_more_definitions_than_the_closure_limit_compiles_them_all_ahead
     let directory = tempfile::tempdir().expect("temporary directory");
     let mut text = String::new();
     for index in 0..4200 {
-        text.push_str(&format!("f{index} <- function(x: F64) -> F64 x + {index}.5\n"));
+        text.push_str(&format!(
+            "f{index} <- function(x: F64) -> F64 x + {index}.5\n"
+        ));
     }
     text.push_str("hot <- function(x: F64) -> F64 x * 2.5\nprint(hot(1))\nprint(f4199(1))\n");
     let script = directory.path().join("many.R");
@@ -775,11 +846,23 @@ fn a_script_with_more_definitions_than_the_closure_limit_compiles_them_all_ahead
         .output()
         .expect("run ry");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "[1] 2.5\n[1] 4200.5\n", "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "[1] 2.5\n[1] 4200.5\n",
+        "{stderr}"
+    );
     let (_, after) = stderr
         .split_once("typed: compiled 4201 functions ahead of time in ")
-        .unwrap_or_else(|| panic!("not every definition compiled ahead:\n{}", last_lines(&stderr)));
-    assert!(!after.contains("typed: "), "the run compiled or refused later:\n{after}");
+        .unwrap_or_else(|| {
+            panic!(
+                "not every definition compiled ahead:\n{}",
+                last_lines(&stderr)
+            )
+        });
+    assert!(
+        !after.contains("typed: "),
+        "the run compiled or refused later:\n{after}"
+    );
 }
 
 fn last_lines(text: &str) -> String {
@@ -1171,13 +1254,14 @@ fn native_diagnostics_agree_with_the_typed_core() {
     let mut pinned = vec![false; NATIVE_CHECK_EXCEPTIONS.len()];
     // The standard library functions a function of the corpus calls and then runs natively.
     let mut exercised = vec![false; COMPILED_STD.len()];
-    for program in &programs {
-        let name = &program.name;
+    // Each program checks and runs in its own projects, so the processes run on one worker per
+    // core and the findings are read in program order afterwards.
+    let outputs = in_parallel(&programs, |program| {
         let project = |strict: bool| {
             let project = directory
                 .path()
                 .join(if strict { "check" } else { "run" })
-                .join(name);
+                .join(&program.name);
             fs::create_dir_all(&project).expect("create the project");
             fs::write(
                 project.join("ry.toml"),
@@ -1187,6 +1271,29 @@ fn native_diagnostics_agree_with_the_typed_core() {
             fs::write(project.join("main.R"), &program.source).expect("write the program");
             project
         };
+        let check = Command::new(env!("CARGO_BIN_EXE_ry"))
+            .args(["check", "--output", "json", "main.R"])
+            .current_dir(project(true))
+            .env("XDG_CACHE_HOME", directory.path().join(".cache"))
+            .output()
+            .expect("run ry check");
+        let run_project = project(false);
+        for sibling in &program.siblings {
+            let file_name = sibling.file_name().expect("a sibling file name");
+            fs::copy(sibling, run_project.join(file_name)).expect("copy the sibling");
+        }
+        let run = Command::new(env!("CARGO_BIN_EXE_ry"))
+            .args(["run", "--runtime", "ry", "main.R"])
+            .current_dir(run_project)
+            .env("RY_TYPED_LOG", "1")
+            .env("RY_BENCH_REPEAT", "1")
+            .env("XDG_CACHE_HOME", directory.path().join(".cache"))
+            .output()
+            .expect("run ry");
+        (check, run)
+    });
+    for (program, (check, run)) in programs.iter().zip(outputs) {
+        let name = &program.name;
         let lines: Vec<&str> = program.source.lines().collect();
         // A definition at the start of a line owns the lines up to the next top-level statement.
         let mut owner = None;
@@ -1215,12 +1322,6 @@ fn native_diagnostics_agree_with_the_typed_core() {
         let boundary = listed("# boundary:");
         let stated_blocked = listed("# blocked:");
 
-        let check = Command::new(env!("CARGO_BIN_EXE_ry"))
-            .args(["check", "--output", "json", "main.R"])
-            .current_dir(project(true))
-            .env("XDG_CACHE_HOME", directory.path().join(".cache"))
-            .output()
-            .expect("run ry check");
         let mut blocked: Vec<&str> = Vec::new();
         let mut other_errors = Vec::new();
         for line in String::from_utf8_lossy(&check.stdout).lines() {
@@ -1268,19 +1369,6 @@ fn native_diagnostics_agree_with_the_typed_core() {
             }
         }
 
-        let run_project = project(false);
-        for sibling in &program.siblings {
-            let file_name = sibling.file_name().expect("a sibling file name");
-            fs::copy(sibling, run_project.join(file_name)).expect("copy the sibling");
-        }
-        let run = Command::new(env!("CARGO_BIN_EXE_ry"))
-            .args(["run", "--runtime", "ry", "main.R"])
-            .current_dir(run_project)
-            .env("RY_TYPED_LOG", "1")
-            .env("RY_BENCH_REPEAT", "1")
-            .env("XDG_CACHE_HOME", directory.path().join(".cache"))
-            .output()
-            .expect("run ry");
         let stderr = String::from_utf8_lossy(&run.stderr);
         if !run.status.success() {
             failures.push(format!("{name} failed:\n{stderr}"));
@@ -1628,7 +1716,7 @@ fn summary_count(summary: &str, event: &str) -> u64 {
 }
 
 enum Outcome {
-    Passed(usize),
+    Passed,
     Skipped(String),
 }
 
@@ -1684,7 +1772,7 @@ fn run_scenario(name: &str, text: &str) -> Result<Outcome, String> {
         verify_against_fresh_start(editor, &journey.root, journey.options, &journey.open)
             .map_err(|problem| format!("at the end of the journey: {problem}"))?;
     }
-    Ok(Outcome::Passed(steps.len()))
+    Ok(Outcome::Passed)
 }
 
 /// Splits the scenario into steps: one command per line, `#` comments, and `|` lines that
