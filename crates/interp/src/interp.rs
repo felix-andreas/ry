@@ -107,6 +107,7 @@ pub mod strings;
 pub mod subset;
 pub mod system;
 pub mod testing;
+pub mod time_limits;
 pub mod tools;
 pub mod unwind;
 pub mod utils;
@@ -766,6 +767,8 @@ pub struct Interp {
     /// The evaluator polls left before the next one that delivers a pending user interrupt
     /// (see [`crate::unwind::poll_interrupt`]).
     pub interrupt_countdown: u32,
+    /// `setTimeLimit()` and `setSessionTimeLimit()`.
+    pub time_limits: time_limits::State,
     /// Closure calls the session has made, wrapping: the JIT's measure of how much work ran
     /// between two calls of a body, which does not change when a call allocates less.
     pub calls_ever: u32,
@@ -953,6 +956,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         parked_unwind: None,
         held_unwinds: Vec::new(),
         interrupt_countdown: crate::unwind::INTERRUPT_CHECK_INTERVAL,
+        time_limits: time_limits::State::default(),
         calls_ever: 0,
         #[cfg(unix)]
         forks: fork::Forks::default(),

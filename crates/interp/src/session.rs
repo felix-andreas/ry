@@ -927,6 +927,7 @@ pub unsafe fn finish() {
 pub unsafe fn run_toplevel(expression: Sexp) -> bool {
     let mark = crate::heap().handle_mark();
     interp().visible = true;
+    crate::time_limits::reset();
     let mut value = nil();
     let result = eval::eval(expression, global_env()).and_then(|result| {
         // An unwind parked after the last poll belongs to this command, not the next.

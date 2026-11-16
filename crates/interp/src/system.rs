@@ -259,8 +259,23 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("quit", 3, do_quit),
     internal("system", -1, do_system).keep_visibility(),
     internal("Cstack_info", 0, |_| unsafe { cstack_info() }),
-    internal("setTimeLimit", 3, |_| Ok(nil())).invisible(),
-    internal("setSessionTimeLimit", 2, |_| Ok(nil())).invisible(),
+    internal("setTimeLimit", 3, |call| unsafe {
+        crate::time_limits::set_time_limit(
+            values::as_real_scalar(call.arg(0)),
+            values::as_real_scalar(call.arg(1)),
+            values::as_logical_scalar(call.arg(2)) == 1,
+        );
+        Ok(nil())
+    })
+    .invisible(),
+    internal("setSessionTimeLimit", 2, |call| unsafe {
+        crate::time_limits::set_session_time_limit(
+            values::as_real_scalar(call.arg(0)),
+            values::as_real_scalar(call.arg(1)),
+        );
+        Ok(nil())
+    })
+    .invisible(),
     internal("reg.finalizer", 3, do_reg_finalizer),
     internal("traceback", 1, |call| unsafe {
         crate::conditions::traceback_calls(values::as_integer_scalar(call.arg(0)).max(0) as usize)
