@@ -475,3 +475,12 @@ GNU R finalizes an object at the first full `gc()` after its last reference goes
 - **Shapes the same measurement fixed.** A wrapper called from a very large function is `#[inline(always)]`, because LLVM declines `#[inline]` there. An attribute list is walked through the `attribute_cells` iterator, never collected first. A rooted allocation has one out-of-line body with the allocator inlined into it (`Heap::alloc_vector_rooted`, `values::alloc`). Text kept for the length of a call goes to a stack buffer, since `Cow::into_owned` is a `malloc` and a `free`.
 - **Rejected: a string's bytes for the whole scope** (`Local<Chars>` to `Gc<'s, Chars>`). Rooting keeps the string alive, but native code writes into a string in place (a package trims one by storing a NUL), so a slice that outlives the context borrow can change under its reader. `sub` and `gsub` copy the replacement text instead.
 - **Impact.** Performance: the table in `memory-safety.md`, "Cost"; the migrated rows are equal to or faster than the raw forms except a few that pay about ten instructions in their entry. Correctness: an entry cannot return a value read before a collection. Simplicity: an entry has no mark, root or release to balance by hand.
+
+## A list of inert elements skips its children when it dies
+
+**Status:** built.
+
+- **Rule.** A list carries `INERT_ELEMENTS` (flag bit 6, shared with the string-only `VALID_UTF8`) while every element is inert: nil, a symbol, a `CHARSXP`, a character vector, or a small or ALTREP atomic vector (`object::is_inert`). Giving up such references can free nothing and release no frame, so `reconcile` and `release_swept_lists` skip a dead list with the bit, as GNU R's sweep skips every dead object's children.
+- **Maintenance.** Allocation sets the bit; `set_element`, `copy_elements`, `move_elements` and `count_written_elements` clear it when a non-inert element arrives; `escape` clears it, since native code may store anything through the pointer. `count_written_elements` derives it in the same pass that counts the elements (`increment_refcount_inert`, one header read per element, branch-free).
+- **Safety.** A set bit leaves the elements' counts overcounted, which is safe because counts only overcount; a clear bit only costs a walk. A large atomic element is not inert, because its release returns pages early.
+- Measured on a shallow copy of a shared 1,000-element list of doubles, freed each iteration: 3.2 µs per copy without the bit, 2.7 µs with it.
