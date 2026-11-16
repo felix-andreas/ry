@@ -30,6 +30,7 @@ h <- function(d) aggregate(d)
 #++++
 f: <T, U> fn(x: T, y: U) -> Unknown
 g: <T> fn(path: T) -> Unknown
+h: <T> fn(d: T) -> Unknown
 
 #---- qualified_only_namespace_resolves
 extension <- function(path) tools::file_ext(path)
@@ -41,6 +42,7 @@ measurements <- function() iris
 states <- function() state.x77
 #++++
 measurements: fn() -> data.frame
+states: fn() -> Unknown
 
 #---- overload_picks_specific
 f <- function() cumsum(1L)
