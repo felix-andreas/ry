@@ -357,6 +357,10 @@ impl Model {
 fn random_reads_and_pushback_follow_a_byte_model() {
     let r = r_with_base();
     ryconn(&r);
+    // `rawConnection` names the connection by deparsing its argument, and a long literal deparses
+    // to several lines, which GNU R rejects as a description too.
+    r.eval_text("raw_connection <- function(bytes) rawConnection(bytes)")
+        .expect("raw_connection");
     for_each_seed(60, |seed| {
         let mut rng = SplitMix64(0x5eed_c0de ^ seed);
         let mark = r.protected.get();
@@ -379,7 +383,7 @@ fn random_reads_and_pushback_follow_a_byte_model() {
         let blocking = rng.chance(1, 2);
         let con = match kind {
             0 => r
-                .eval("rawConnection", &[(None, raw)])
+                .eval("raw_connection", &[(None, raw)])
                 .expect("rawConnection"),
             1 => {
                 let path = temporary_file(&format!("fuzz-{seed}.bin"));
