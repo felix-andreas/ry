@@ -112,12 +112,12 @@ pub unsafe fn modifiable(object: Sexp) -> R<Sexp> {
 }
 
 /// [`modifiable`] for a builtin that changes only attributes, as GNU R's `names<-`,
-/// `dimnames<-` and `attributes<-` are: a shared long vector is copied under a wrapper, so its
-/// data is not copied at all.
+/// `dimnames<-`, `attributes<-` and `class<-` are: a shared long vector is copied under a
+/// wrapper, so its data is not copied at all, and an ALTREP instance keeps its class.
 pub unsafe fn modifiable_attributes(object: Sexp) -> R<Sexp> {
     crate::moves::modifying(object)?;
     if values::maybe_shared(object) {
-        values::shallow_duplicate_attr(object)
+        values::replacement_copy(object)
     } else {
         Ok(object)
     }
@@ -2425,7 +2425,10 @@ unsafe fn selects_nothing(object: Sexp, indices: &[Sexp], value: Sexp) -> bool {
     };
     let empty = match index.kind() {
         SexpType::Nil => true,
-        SexpType::Logical => values::ints(index).iter().all(|&flag| flag == 0),
+        // A longer logical index stretches the vector even when it selects nothing.
+        SexpType::Logical => {
+            length(index) <= length(object) && values::ints(index).iter().all(|&flag| flag == 0)
+        }
         SexpType::Integer | SexpType::Real | SexpType::String => length(index) == 0,
         _ => false,
     };
@@ -4666,7 +4669,11 @@ unsafe fn do_drop(call: &Call<'_>) -> R<Sexp> {
             if dimension_names != nil() {
                 let kept_names = alloc(SexpType::String, kept.len())?;
                 for (index, &dimension) in kept.iter().enumerate() {
-                    crate::heap().set_element(kept_names, index, dimension_names.element(dimension));
+                    crate::heap().set_element(
+                        kept_names,
+                        index,
+                        dimension_names.element(dimension),
+                    );
                 }
                 values::set_attr(list, symbols().names, kept_names)?;
             }

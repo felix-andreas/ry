@@ -6861,7 +6861,7 @@ pub unsafe fn complex_assign(
         // the data until the replacement writes to it; a replacement that only changes
         // attributes, or writes nothing, as `x[FALSE] <- 1` does, never copies it.
         base = if !superassign && local_cell.is_some() && values::maybe_shared(base) {
-            values::shallow_duplicate_attr(base)?
+            values::replacement_copy(base)?
         } else {
             values::shallow_duplicate(base)?
         };

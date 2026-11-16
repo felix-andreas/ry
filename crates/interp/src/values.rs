@@ -1495,6 +1495,31 @@ pub unsafe fn shallow_duplicate_attr(object: Sexp) -> R<Sexp> {
     Ok(copy)
 }
 
+/// The copy a replacement function such as `attr<-` or `[<-` works on when its target is shared:
+/// [`shallow_duplicate_attr`], except that an ALTREP instance becomes a new instance of its class
+/// over the same data. Every instance counts as shared, so that an element write copies it into
+/// ordinary storage, which means GNU R's in-place change of an unshared instance's attributes is
+/// a copy here; a copy into ordinary storage would drop the class, and with it methods such as
+/// `Serialized_state`. A caller that writes elements into the copy itself must use
+/// [`shallow_duplicate_attr`].
+pub unsafe fn replacement_copy(object: Sexp) -> R<Sexp> {
+    if !object.is_altrep() {
+        return shallow_duplicate_attr(object);
+    }
+    let heap = crate::heap();
+    heap.root(object);
+    let copy = heap.alloc_altrep(object.kind(), object.tag(), object.car(), object.cdr())?;
+    copy.mark_not_mutable();
+    heap.root(copy);
+    if object.attrib() != nil() {
+        let attributes = duplicate_with(object.attrib(), false)?;
+        heap.set_attrib(copy, attributes);
+    }
+    copy.set_object(object.is_object());
+    copy.set_gp(object.gp() & gp::S4_OBJECT);
+    Ok(copy)
+}
+
 /// The length, first element and increment of a compact integer or double sequence, or `None`
 /// for any other vector. The class's first data slot is GNU R's `c(n, n1, inc)`, which
 /// serialization writes too, so reading it here saves the call into the host on hot paths.

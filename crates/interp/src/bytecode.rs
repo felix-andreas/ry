@@ -12965,7 +12965,7 @@ unsafe fn replace_variable(
     };
     if shared || args[1..].contains(&target) {
         let was_array = target.is_array();
-        target = values::shallow_duplicate_attr(target)?;
+        target = values::replacement_copy(target)?;
         target.set_array(was_array);
     }
     heap.root(target);
