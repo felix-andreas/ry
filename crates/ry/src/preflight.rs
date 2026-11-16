@@ -421,7 +421,8 @@ pub fn elaborate_package(
     let description =
         fs::read_to_string(&description_path).map_err(|error| failed(&description_path, error))?;
     let encoding = SourceEncoding::of(&description);
-    let code_files = installed_code_files(&root.join("R")).map_err(|(path, error)| failed(&path, error))?;
+    let code_files =
+        installed_code_files(&root.join("R")).map_err(|(path, error)| failed(&path, error))?;
     let mut typed = config.check.strict;
     for path in &code_files {
         if typed {
@@ -509,7 +510,9 @@ fn installed_code_files(sources: &Path) -> Result<Vec<PathBuf>, (PathBuf, io::Er
     };
     let mut files = Vec::new();
     for entry in entries {
-        let path = entry.map_err(|error| (sources.to_path_buf(), error))?.path();
+        let path = entry
+            .map_err(|error| (sources.to_path_buf(), error))?
+            .path();
         let code = path
             .extension()
             .is_some_and(|extension| ["R", "r", "S", "q"].iter().any(|code| extension == *code));

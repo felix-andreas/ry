@@ -293,7 +293,7 @@ database that changed, not an attacker.
 |---|---|
 | `typed_scripts_agree_however_they_compile` installs every generated typed script as a package and runs it with its file, then with `RY_AHEAD_MISS=1` | file code prints what every other tiering prints, and the fallback does too |
 | `install-typed-package.scenario` | the attach line; `RY_GC_STRESS` and the copy path over attached code; `ry build --aot`; a file from another build under `ry run --aot`; a `match` over a closed union, a record parameter and a sort comparator attached after the process interned other shapes; a closure copied at run time; a reinstall in a running session |
-| `fuzz_typed_code_parse` (`crates/typed/tests/test_file.rs`, `cargo fuzz` target `typed_code_parse`) | random valid metadata reads back as written, and truncated or bit-flipped bytes never panic the parser |
+| `fuzz_typed_code_parse` (`crates/typed/tests/test_typed/file.rs`, `cargo fuzz` target `typed_code_parse`) | random valid metadata reads back as written, and truncated or bit-flipped bytes never panic the parser |
 | `fuzz_typed_code_file` (`crates/ry/tests/test_scenarios.rs`) | an installed file damaged in its header, metadata or code never attaches, and a second write against one install gives the same bytes |
 | `build-exe.scenario` | an executable prints what `ry run --aot` prints for the same arguments, attaches every function and compiles none, and compiles at first calls under `RY_AHEAD_MISS=1` |
 | `typed_scripts_agree_however_they_compile` with executables | every generated typed script built with `ry build --aot --exe` prints what the interpreter prints, and at least half of them attach from the executable |

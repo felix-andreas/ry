@@ -272,19 +272,18 @@ pub unsafe fn call(
                 return Some(Err(unwind));
             }
             STOPS.set(STOPS.get() + 1);
-            decline(|| format!("{}, and the interpreter ran the call again", stop_reason(guess)));
+            decline(|| {
+                format!(
+                    "{}, and the interpreter ran the call again",
+                    stop_reason(guess)
+                )
+            });
             return None;
         }
         // The code called R before it stopped, so the interpreter runs the call again with
         // what those calls returned, which their records keep alive.
         STOPS.set(STOPS.get() + 1);
-        let replayed = replay::replay(
-            segment,
-            typed.call,
-            function,
-            typed.args,
-            typed.sys_parent,
-        );
+        let replayed = replay::replay(segment, typed.call, function, typed.args, typed.sys_parent);
         let Some(result) = replayed else {
             heap.release_handles(mark);
             return Some(Err(interp::unwind::error(format!(
@@ -569,9 +568,9 @@ unsafe fn generate(params: &[Type], lowered: Lowered, linker: Linker) -> Result<
             .r_calls
             .iter()
             .any(|site| !site.diverges && !site.effect_free);
-    let guesses = lowered.r_calls.iter().any(|site| {
-        matches!(site.result, RResult::Converted(conversion, _) if conversion.guessed())
-    });
+    let guesses = lowered.r_calls.iter().any(
+        |site| matches!(site.result, RResult::Converted(conversion, _) if conversion.guessed()),
+    );
     let guessed = earliest(
         guesses.then(interp::numbers::conversion_epoch),
         linker.guessed,

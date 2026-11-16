@@ -7,6 +7,7 @@ publish = false
 build = "build.rs"
 
 [lib]
+doctest = false
 path = "src/repl.rs"
 
 [dependencies]

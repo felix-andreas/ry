@@ -12,6 +12,91 @@ Record a known gap explicitly, in `.agents/memory/backlog.md` or as a case pinne
 wrong-but-current output with a comment that says so, because an unrecorded gap looks intentional to
 the next reader.
 
+## The fast loop
+
+Run `source tools/env.sh` once per shell. It puts the reference GNU R (`/opt/R/<version>/bin`) on
+`PATH` when no `R` is there, links Linux builds with mold when it runs on Linux and mold is installed
+(through `RUSTC_WRAPPER=tools/mold-rustc`, which cargo leaves out of its fingerprints, so switching it
+rebuilds nothing), and reports whether ry's base R (`target/base-r`) is built:
+
+```text
+$ source tools/env.sh
+ry env: GNU R 4.6.2 at /opt/R/4.6.2/bin; base R built; mold linker
+```
+
+Every command below is plain cargo, so it works without `just`. A passing run prints only cargo's
+summary, and a failure prints a rerun command for just the failing case.
+
+### Edited X, run Y
+
+The time is from touching one source file of the crate to the result, on 4 cores in a debug build
+with mold, GNU R on `PATH` and base R built.
+
+| You edited | Run | Time |
+| --- | --- | --- |
+| the parser (`syntax`) | `cargo test -p syntax --test test_syntax_fixtures`; the whole crate, `cargo test -p syntax`, takes 18 s, 15 of them in `fuzz_edit_stream` | 1 s |
+| the checker (`semantics`) | `cargo test -p semantics --test test_typing_fixtures` | 10 s |
+| the formatter (`format`) | `cargo test -p format --test test_format_fixtures` | 1 s |
+| an editor feature (`ide`) | `cargo test -p ide --test test_ide_fixtures` | 4 s |
+| the interpreter, to run R | `cargo build -p ry-lang -p libr && target/debug/ry run --runtime ry x.R` | 13 s |
+| the interpreter, its tests | `cargo test -p interp --test test_<area>` | 4 s |
+| the interpreter, against GNU R | `cargo run -p oracle -- compare crates/oracle/cases/<case>.R` | 10 s |
+| the interpreter, a sample of the oracle | `cargo test -p oracle --test test_cases second_engine_matches_gnu_r` | 15 s |
+| the typed core (`typed`) | `cargo test -p typed` | 4 s |
+| the CLI or the server (`ry`) | `cargo test -p ry-lang --test test_cli`, or one journey: `SCENARIO=<name> cargo test -p ry-lang --test test_scenarios scenarios_hold` | 6 s |
+
+`cargo build -p ry-lang` does not build the runtime: `ry` loads `libR.so` at run time, so an
+interpreter edit needs `-p libr` too. Tests and `oracle compare` that run ry's runtime build both
+themselves (a no-op build takes 0.4 s), so they never run a stale `libR.so`.
+
+### Environment variables
+
+| Variable | Read by | Effect |
+| --- | --- | --- |
+| `FIXTURE_FILTER` | every fixture suite | runs the cases whose `group__case` id contains the value (`pipes__` runs a group) |
+| `RY_BLESS=1` | fixture suites, `test_docs`, oracle `test_cases` | rewrites the expected output from the actual output |
+| `FUZZ_SEED`, `FUZZ_ITERS`, `FUZZ_DEPTH` | every seeded fuzzer and simulator | replays one seed; sets the iteration count; multiplies the default count |
+| `SCENARIO` | `test_scenarios` `scenarios_hold` | runs the one scenario of that name, and fails if it skips |
+| `RY_TEST_WORKERS` | fixture suites, oracle, scenarios, `test_format_range` | the worker count; failures print the count the run used |
+| `DOCS_PAGE` | `test_docs` | runs the examples of pages whose path contains the value |
+| `ORACLE_ENGINE` | oracle `test_cases` | compares that engine (`ry`, `ry-jit`, `ry-gctorture`, ...) on every case instead of ry on a sample, and fails if base R is not built |
+| `ORACLE_RY` | the oracle | the `ry` binary to run, which the oracle then does not build |
+| `ORACLE_R`, `ORACLE_RSCRIPT` | the oracle | the GNU R to compare with (default: `R` and `Rscript` on `PATH`) |
+| `RY_BASE_R` | `ry` | the base R tree; a debug `ry` otherwise finds `target/base-r` |
+| `R_HOME` | `ry`, scenarios | a GNU R installation whose base R ry emulates |
+| `RY_LIBR` | `ry` | the `libR.so` to load instead of the one beside the binary |
+| `R_LIBS`, `RY_CORPUS_DIR` | oracle, scenarios | the package library cases and journeys load from (default: `.corpus/library`) |
+| `RY_SKIP_GNU_R=1` | libr tests | skips the parts that need GNU R even when it is installed |
+| `RUSTC_WRAPPER` | cargo | `tools/mold-rustc` links Linux targets with mold; `tools/env.sh` sets it on Linux |
+
+A test that cannot run here (no GNU R, no base R, a missing package) passes and says why on
+standard error, which cargo shows only for a failing test or with `-- --nocapture`. Stable Rust has
+no way for a test to report itself skipped at run time, so a green run of the default oracle sample
+or of the scenarios may have checked less than it looks. A run you ask for by name does not pass
+that way: `SCENARIO=<name>` fails when the scenario skips, and `ORACLE_ENGINE=<engine>` fails when
+the engine is ry and base R is not built.
+
+The parallel harnesses deal items out statically, so worker `w` of `n` takes items `w`, `w + n`,
+and so on. A fixture suite reuses one analysis database per worker, so a failure that depends on
+what rendered before it on the same worker replays with the whole suite and the same count, which
+the failure message prints as `RY_TEST_WORKERS=<n>`.
+
+### What is slow and why
+
+Whole test binaries, run only (already built), 4 cores, debug, GNU R on `PATH`:
+
+| Binary | Time | Why |
+| --- | --- | --- |
+| `jit` `test_tiers` | 160 s | four seeded fuzzers (150 to 400 seeds each) run 115 to 125 s apiece in parallel; the binary is CPU-bound |
+| `ry-lang` `test_scenarios` | 120 s | 80 journeys and the typed benchmark programs, each spawning `ry` processes; parallel inside each test, CPU-bound |
+| `oracle` `test_cases` | 180 s with GNU R, 25 s without | every case under GNU R against its recording, and the collection-stress replays; without GNU R, 5 s of it is the 24-case ry sample and the rest the three stress replays |
+| `frames` `test_standard_library` | 82 s | `standard_library_at_runtime` evaluates every case in one process: the interpreter is a process-wide singleton, so it cannot run in parallel |
+| `table` `test_table` | 42 s | engine model fuzzers |
+| `format` `test_format_range` | 35 s | the range-format battery over every fixture and corpus source, in parallel |
+
+`cargo run -p oracle -- compare` runs the whole oracle in 118 s against the recorded outcomes and
+184 s against a live GNU R, one case per core, printing only the cases that need attention.
+
 ## Fixture format
 
 Every suite in the shipping crates runs through one harness, `syntax::testing::run_fixture_suite`,
@@ -36,17 +121,25 @@ which `syntax`, `semantics`, `format`, and `ide` all share. A `.test` file holds
 
 ### Running one case
 
-To run a single case, set `FIXTURE_FILTER` and pick the suite's test target:
+To run a single case, set `FIXTURE_FILTER` and pick the suite's test target. The filter selects
+every case whose `group__case` id contains it, so `pipes__` runs a whole group:
 
 ```sh
-FIXTURE_FILTER=group__case cargo test -p semantics --test test_typing_fixtures -- --nocapture
-FIXTURE_FILTER=group__case cargo test -p format --test test_format_fixtures -- --nocapture
-FIXTURE_FILTER=group__case cargo test -p ide --test test_ide_fixtures -- --nocapture
+FIXTURE_FILTER=group__case cargo test -p semantics --test test_typing_fixtures
+FIXTURE_FILTER=group__case cargo test -p format --test test_format_fixtures
+FIXTURE_FILTER=group__case cargo test -p ide --test test_ide_fixtures
 ```
 
-One test target can drive several suites, so a suite that does not hold the case skips it quietly.
+One test target can drive several suites, so a suite that holds no matching case skips quietly.
 But a filter that matches no case in *any* suite fails: that is almost certainly a typo, and a run of
 zero cases would otherwise report a pass.
+
+A suite renders its cases on one thread per core and reports the failures in file order, each
+ending with the command that reruns it:
+
+```text
+    rerun: FIXTURE_FILTER=annotation_compact__atomic cargo test -p format --test test_format_fixtures format_fixtures -- --exact
+```
 
 While iterating, `cargo test -p semantics` is the default command, since it covers analysis
 behavior. `just gate` runs every test plus clippy and a formatting check.
@@ -380,9 +473,9 @@ meant to fail. Behavior that needs base R, such as a warning handler watching a 
 goes in the oracle case `bytecode__hot_loops.R`. `crates/interp/tests/test_linalg.rs` pins base R's linear
 algebra to GNU R's results bit for bit. The matrix products are ry's own kernels, so their bits hold
 on every machine; the LAPACK cases hold only on the reference libraries, so on another BLAS (such as
-OpenBLAS) the test compares them with a GNU R on the same libraries, and skips them without one. `crates/table/tests/test_table.rs` checks the table engine
-against values read from data.table, `test_lazy.rs` there checks the Polars-style verbs, and
-`crates/libr/tests/test_frame_altrep.rs` checks the columns as ALTREP vectors. `crates/interp/tests/test_records.rs`, `test_arrays.rs` and `test_standard_library.rs` cover ry's
+OpenBLAS) the test compares them with a GNU R on the same libraries, and skips them without one. `crates/table/tests/test_table/main.rs` checks the table engine
+against values read from data.table, `lazy.rs` beside it checks the Polars-style verbs, and
+`crates/libr/tests/test_frame_altrep.rs` checks the columns as ALTREP vectors. `crates/interp/tests/test_records.rs` and `test_arrays.rs` and `crates/frames/tests/test_standard_library.rs` cover ry's
 own values at run time, the last one also holding the runtime's function table against the
 declarations in `types/std.Rtypes`. `crates/libr/tests/test_rmath.rs`, `test_numerics.rs` and
 `test_linpack.rs` compare the C API's numerics with answers recorded from GNU R, so they run
@@ -425,7 +518,7 @@ programs run under both torture engines. `RY_GC_STRESS=1` stresses from the scri
 `RY_GC_STRESS=startup` from the first allocation, which takes about seven seconds on an empty script
 in a debug build ([Robustness](/development/robustness) lists the modes).
 
-`crates/interp/tests/test_debugger.rs` drives the debug adapter (`interp::debugger`) in-process.
+`crates/frames/tests/test_debugger.rs` drives the debug adapter (`interp::debugger`) in-process.
 Scripted sessions pin breakpoints, stepping, the stack, variables, `evaluate`, `browser()` and
 uncaught errors as transcripts, and a seeded simulator plays a client that sends random, sometimes
 invalid, requests at every stop. Every request must get exactly one response, the session must end,

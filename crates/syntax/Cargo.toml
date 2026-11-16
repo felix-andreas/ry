@@ -6,6 +6,7 @@ version.workspace = true
 publish = false
 
 [lib]
+doctest = false
 path = "src/syntax.rs"
 
 [dependencies]

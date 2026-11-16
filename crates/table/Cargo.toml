@@ -9,6 +9,7 @@ publish = false
 autobenches = false
 
 [lib]
+doctest = false
 path = "src/table.rs"
 
 [dependencies]

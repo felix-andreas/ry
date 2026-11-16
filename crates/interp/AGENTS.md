@@ -39,3 +39,5 @@ Read this before you change the R interpreter. Cross-cutting traps live in `.age
 - **An `interp` test runs its body inside `interp::testing::with_interpreter`**, which takes the lock on the process-global interpreter. A symbol's name is `symbol.car().bytes()`, not `Sexp::bytes()` on the symbol.
 - **A session that sources a user profile never loads the start-up image**, so a test about start-up points `HOME` and the working directory away from any `.Rprofile` (`test_start_image.rs`).
 - **Tell a prologue difference from a kernel difference by stripping the prologue** (`body(f) <- body(f)[[3]]`) and running ry again. Writing a prologue's oracle case is often how a kernel bug surfaces.
+- **A test that links `frames` belongs in `crates/frames/tests`.** In `interp/tests` it links Polars into the test binary, which makes it 1.2 GB and doubles the build after an edit.
+- **Do not merge interp's test binaries into one.** The interpreter is one per process, so merged tests would share its state and run one at a time behind its lock.
