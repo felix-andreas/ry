@@ -671,13 +671,20 @@ unsafe fn scoped<T>(body: impl FnOnce() -> T) -> T {
     let mark = heap().handle_mark();
     let value = body();
     let heap = heap();
-    assert!(
-        heap.handle_mark() >= mark,
-        "a helper released handles compiled code holds: the handle stack fell from {mark} to {}",
-        heap.handle_mark()
-    );
+    if heap.handle_mark() < mark {
+        handles_released_below(mark);
+    }
     heap.release_handles(mark);
     value
+}
+
+#[cold]
+#[inline(never)]
+fn handles_released_below(mark: usize) -> ! {
+    panic!(
+        "a helper released handles compiled code holds: the handle stack fell from {mark} to {}",
+        heap().handle_mark()
+    )
 }
 
 /// Holds `unwind` until compiled code hands the activation back. The collector traces it there
@@ -757,9 +764,12 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
             } else {
                 0
             };
-            let stepped = scoped(|| {
-                step_unsignalled(activation, || bytecode::step_one(machine, pc as usize))
-            });
+            let mark = heap.handle_mark();
+            let stepped = step_unsignalled(activation, || bytecode::step_one(machine, pc as usize));
+            if heap.handle_mark() < mark {
+                handles_released_below(mark);
+            }
+            heap.release_handles(mark);
             match stepped {
                 None => outcome::FAILED,
                 Some(Err(unwind)) => {
