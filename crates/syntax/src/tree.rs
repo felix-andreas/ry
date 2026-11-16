@@ -1348,6 +1348,13 @@ fn token_ref(tree: &Tree, index: u32) -> TokenRef<'_> {
 }
 
 impl<'a> TokenRef<'a> {
+    /// Where the token sits among its tree's elements in preorder, which tells two tokens of one
+    /// tree apart without comparing their text.
+    #[inline]
+    pub fn position(self) -> u32 {
+        self.index
+    }
+
     #[inline]
     pub fn kind(self) -> SyntaxKind {
         self.tree.kind(self.index)

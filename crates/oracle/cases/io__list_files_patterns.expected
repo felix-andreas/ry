@@ -1,0 +1,50 @@
+[stdout]
+|  [1] "a.R"       "a+b.R"     "b.r"       "c.Rmd"     "d.txt"     "empty"    
+|  [7] "link"      "R"         "sub"       "UPPER.TXT"
+| [1] "a.R"   "a+b.R" "b.r"  
+| [1] "a.R"           "a+b.R"         "b.r"           "link/deep/g.R"
+| [5] "link/e.R"      "sub/deep/g.R"  "sub/e.R"      
+| [1] ".dot.R"        ".hidden/h.R"   "a.R"           "a+b.R"        
+| [5] "b.r"           "link/deep/g.R" "link/e.R"      "sub/deep/g.R" 
+| [9] "sub/e.R"      
+| [1] "a.R"   "a+b.R" "b.r"   "c.Rmd"
+| [1] "d.txt"      "link/f.txt" "sub/f.txt"  "UPPER.TXT" 
+| [1] "a+b.R"
+| character(0)
+| [1] "a+b.R"
+| [1] "a.R"   "a+b.R" "c.Rmd"
+| [1] "UPPER.TXT"
+| [1] "R"
+| [1] "empty"         "link/deep"     "link/deep/g.R" "link/e.R"     
+| [5] "sub/deep"      "sub/deep/g.R"  "sub/e.R"      
+|  [1] "a.R"           "a+b.R"         "b.r"           "c.Rmd"        
+|  [5] "d.txt"         "empty"         "link"          "link/deep"    
+|  [9] "link/deep/g.R" "link/e.R"      "link/f.txt"    "R"            
+| [13] "sub"           "sub/deep"      "sub/deep/g.R"  "sub/e.R"      
+| [17] "sub/f.txt"     "UPPER.TXT"    
+|  [1] "."         ".."        ".dot.R"    ".hidden"   "a.R"       "a+b.R"    
+|  [7] "b.r"       "c.Rmd"     "d.txt"     "empty"     "link"      "R"        
+| [13] "sub"       "UPPER.TXT"
+|  [1] ".dot.R"    ".hidden"   "a.R"       "a+b.R"     "b.r"       "c.Rmd"    
+|  [7] "d.txt"     "empty"     "link"      "R"         "sub"       "UPPER.TXT"
+| [1] "."       ".."      ".dot.R"  ".hidden"
+| [1] ".dot.R"    "a.R"       "a+b.R"     "c.Rmd"     "R"         "UPPER.TXT"
+| [1] "<root>/."  "<root>/.."
+| character(0)
+| [1] "<root>/a.R"           "<root>/a+b.R"         "<root>/link/deep/g.R"
+| [4] "<root>/link/e.R"      "<root>/sub/deep/g.R"  "<root>/sub/e.R"      
+| [1] "e.R"   "empty" "f.txt"
+| character(0)
+| character(0)
+| [1] "invalid 'pattern' regular expression"
+| [1] "invalid 'pattern' regular expression"
+| [1] "a.R"   "a+b.R" "b.r"  
+| [1] ""          ".hidden"   "empty"     "link"      "link/deep" "sub"      
+| [7] "sub/deep" 
+| [1] ".hidden" "empty"   "link"    "sub"    
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 0L
