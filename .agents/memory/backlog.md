@@ -22,9 +22,6 @@ The quality bar is four things.
   and `just perf` runs it.
 - **No input kills the server.** There is no `unwrap` panic on a protocol-legal message.
 
-## Open: broken on main
-
-- **`RY_JIT=force` aborts on `jit__inlined_frames_free_variables.R` in a debug build**: `assertion failed: (*child).machine.mark == heap().handle_mark()` in `jit_enter_frame` (`crates/jit/src/runtime.rs`), so some helper between two starts of an inlined frame leaves the handle stack changed. It needs a free variable of the inlined callee rebound to a `delayedAssign` promise in the global environment mid-loop (the case's `on_global`/`poke_global`/`weigh` part, run on its own). `oracle compare --engine ry-jit` passes the case, so find what the oracle engine sets that hides it. Release builds skip the check, but a leaked handle keeps a value alive until the frame ends.
 
 ## Open: the evaluator's edit loop
 

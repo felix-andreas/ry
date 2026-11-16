@@ -971,11 +971,11 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
         for index in 0..count {
             (&raw mut (*children.add(index)).activation.compiled).write(std::ptr::null());
         }
-        // Tier 0 releases the handle stack down to the frame's mark, and an instruction compiled
-        // code hands to tier 0 runs against this frame. Below where the stack stands now lie
-        // handles compiled code holds, such as those under an inlined call's activation and
-        // those the instruction that entered this body still needs, so the frame's mark rises
-        // to here while the body runs.
+        // Tier 0 releases down to `machine.mark`, and the instructions compiled code hands back
+        // run on this machine. An inlined call's activation records the stack height at its
+        // first start, and every later start expects to find it there, so while the body runs
+        // the mark is the height at entry. Whatever lies between the two marks stays rooted until
+        // the body returns, which only delays its release.
         let frame_mark = machine.mark;
         machine.mark = heap().handle_mark();
         let mut activation = Activation {

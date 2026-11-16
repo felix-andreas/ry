@@ -663,9 +663,10 @@ unsafe fn guarded<T>(
 /// before it allocates again.
 ///
 /// `body` must not release below the mark either, because compiled code holds the handles
-/// beneath it: an inlined call's activation is written at its first start against the stack
-/// as it stands then. The check is one compare on a path that already calls out, so it stays
-/// on in release builds, where the oracle's compiled-code engine runs.
+/// beneath it: an inlined call's activation records the stack height at its first start. The
+/// check is one compare on a path that already calls out, so it is on in release builds too. It
+/// also means a helper outside `scoped` must leave no handles behind, or the next checked
+/// helper aborts.
 unsafe fn scoped<T>(body: impl FnOnce() -> T) -> T {
     let mark = heap().handle_mark();
     let value = body();
@@ -788,10 +789,8 @@ pub unsafe extern "C" fn jit_fast_step(activation: *mut Activation, pc: i64) -> 
 pub unsafe extern "C" fn jit_quiet_step(activation: *mut Activation, pc: i64) -> i32 {
     unsafe {
         checked(activation, quiet::FAILED, |activation| {
-            let stepped = scoped(|| {
-                step_unsignalled(activation, || {
-                    bytecode::quiet_step(machine(activation), pc as usize)
-                })
+            let stepped = step_unsignalled(activation, || {
+                bytecode::quiet_step(machine(activation), pc as usize)
             });
             match stepped {
                 Some(None) => quiet::DECLINED,
