@@ -734,7 +734,7 @@ fuzz-differential seed="0" count="200" engines="ry-tier0,ry-jit":
 # object only a Rust local holds, and `just gc-torture seeded` collects at random gaps with the
 # write barrier checked (`RY_GC_STRESS=seed:N`, `RY_GC_VERIFY`), which finds a store that skipped
 # the barrier; `FUZZ_SEED` picks its gaps. `ORACLE_ENGINE=ry-gctorture cargo test -p oracle`
-# compares the cases with GNU R instead.
+# compares the cases with their recorded outcomes instead.
 gc-torture mode="plain":
     cargo build -q -p ry-lang -p libr -p rcmd
     FUZZ_ITERS=1000000 cargo test -p oracle --test test_cases \

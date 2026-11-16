@@ -415,7 +415,7 @@ GNU R's `tests/*.R` pin behaviors that come from its machine or implementation, 
 
 - `crates/oracle/known_failures.toml` lists each case and engine main fails, with the area and a
   one-line reason (`provisional` while seen only on a branch). `oracle compare` (a comma-separated
-  engine list, one summary line per engine) and `second_engine_matches_gnu_r` report a listed
+  engine list, one summary line per engine) and `ry_matches_recorded_outcomes` report a listed
   failure as known and fail on an unlisted failure and on a listed case that passes, so a
   fix and its entry's deletion land together. Unknown engines, missing cases and duplicates are
   refused. `ry-jit-gctorture` (`RY_JIT=force` plus `RY_GC_STRESS=1`) is its own engine because a

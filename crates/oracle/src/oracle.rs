@@ -4,7 +4,7 @@
 //! An engine is anything that implements [`Engine`]. [`ProcessEngine`] covers every engine
 //! with a command line: it is invoked as `<command…> <script> <report>`, must print the
 //! script's own output to stdout, and must write the JSON report that `driver.R` defines.
-//! GNU R is one such engine, and ry's runtime will be another.
+//! GNU R is one such engine, and each mode of ry's runtime is another.
 
 pub mod bench;
 pub mod fuzz;
@@ -38,7 +38,7 @@ pub trait Engine {
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
-    /// The engine does not exist yet, or cannot run here. A comparison skips the case.
+    /// The engine cannot run here. A comparison skips the case.
     #[error("{0}")]
     Unavailable(String),
     /// The engine started but produced no usable report.
@@ -234,21 +234,6 @@ pub fn known_failure<'a>(
     known
         .iter()
         .find(|entry| entry.case == name && entry.engine == engine)
-}
-
-/// The stand-in until ry's runtime exists. It reports itself as unavailable for every file.
-pub struct StubEngine;
-
-impl Engine for StubEngine {
-    fn name(&self) -> String {
-        "stub".to_string()
-    }
-
-    fn run(&self, _script: &Path) -> Result<Outcome, EngineError> {
-        Err(EngineError::Unavailable(
-            "the ry runtime does not exist yet".to_string(),
-        ))
-    }
 }
 
 pub struct ProcessEngine {
@@ -857,35 +842,58 @@ pub fn gnu_r_build() -> Result<Build, String> {
         .get_or_init(|| {
             let program = gnu_r_program();
             let output = Command::new(&program)
-                .args(["--vanilla", "--slave", "--no-restore", "-e"])
-                .arg(
-                    "cat(R.version$major, \".\", R.version$minor, \"\\n\", \
-                     basename(extSoftVersion()[[\"BLAS\"]]), \"\\n\", \
-                     basename(La_library()), \" \", La_version(), \"\\n\", sep = \"\")",
-                )
+                .args(["--vanilla", "--slave", "--no-restore", "-e", BUILD_PROBE])
                 .env("LC_ALL", "C.UTF-8")
                 .output()
                 .map_err(|error| format!("`{program}`: {error}"))?;
-            let text = String::from_utf8_lossy(&output.stdout);
-            let mut lines = text.lines().map(str::trim);
-            match (lines.next(), lines.next(), lines.next()) {
-                (Some(release), Some(blas), Some(lapack))
-                    if output.status.success() && !release.is_empty() =>
-                {
-                    Ok(Build {
-                        release: release.to_owned(),
-                        blas: blas.to_owned(),
-                        lapack: lapack.to_owned(),
-                    })
-                }
-                _ => Err(format!(
-                    "`{program}` did not report its build ({}): {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr).trim()
-                )),
-            }
+            parse_build(&String::from_utf8_lossy(&output.stdout))
+                .filter(|_| output.status.success())
+                .ok_or_else(|| {
+                    format!(
+                        "`{program}` did not report its build ({}): {}",
+                        output.status,
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    )
+                })
         })
         .clone()
+}
+
+/// The build `engine` runs as, asked by running [`BUILD_PROBE`] under it. ry's runtime reports
+/// the release of the base R it loaded and the BLAS and LAPACK it found, so the recorded build
+/// tells whether its outcomes can be compared with the recordings.
+pub fn engine_build(engine: &dyn Engine) -> Result<Build, String> {
+    let scratch = Scratch::new(Path::new("build"))?;
+    let probe = scratch.path().join("build.R");
+    std::fs::write(&probe, BUILD_PROBE).map_err(|error| error.to_string())?;
+    let outcome = engine
+        .run(&probe)
+        .map_err(|error| format!("{}: {error}", engine.name()))?;
+    parse_build(&outcome.stdout).ok_or_else(|| {
+        format!(
+            "{} did not report its build: {}{}",
+            engine.name(),
+            outcome.stdout.trim(),
+            outcome.errors.join("; ")
+        )
+    })
+}
+
+/// Prints the release, the BLAS file and the LAPACK file and version, one per line.
+const BUILD_PROBE: &str = "cat(R.version$major, \".\", R.version$minor, \"\\n\", \
+     basename(extSoftVersion()[[\"BLAS\"]]), \"\\n\", \
+     basename(La_library()), \" \", La_version(), \"\\n\", sep = \"\")";
+
+fn parse_build(text: &str) -> Option<Build> {
+    let mut lines = text.lines().map(str::trim);
+    match (lines.next(), lines.next(), lines.next()) {
+        (Some(release), Some(blas), Some(lapack)) if !release.is_empty() => Some(Build {
+            release: release.to_owned(),
+            blas: blas.to_owned(),
+            lapack: lapack.to_owned(),
+        }),
+        _ => None,
+    }
 }
 
 /// The build file that governs `case`: the nearest one in its directory or an ancestor.
@@ -976,15 +984,26 @@ pub fn gnu_r_available() -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
-/// The engine named by `ORACLE_ENGINE`, or the stub.
-pub fn engine_from_environment() -> Box<dyn Engine> {
-    match std::env::var("ORACLE_ENGINE")
-        .ok()
-        .as_deref()
-        .and_then(ProcessEngine::named)
-    {
-        Some(engine) => Box::new(engine),
-        None => Box::new(StubEngine),
+/// The engines a comparison runs when none is named: ry's tier-0 interpreter and its JIT forced
+/// on, which between them run every case through both execution tiers.
+pub const DEFAULT_ENGINES: &str = "ry-tier0,ry-jit";
+
+/// The engines `names` lists, comma separated, else those `ORACLE_ENGINE` lists, else
+/// [`DEFAULT_ENGINES`]. Each name is one of [`ENGINES`], `gnu-r`, or a command line.
+pub fn engines_named(names: Option<&str>) -> Result<Vec<ProcessEngine>, String> {
+    let from_environment = std::env::var("ORACLE_ENGINE").ok();
+    let names = names
+        .or(from_environment.as_deref())
+        .unwrap_or(DEFAULT_ENGINES);
+    let engines: Vec<ProcessEngine> = names
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| ProcessEngine::named(name).ok_or_else(|| format!("no engine `{name}`")))
+        .collect::<Result<_, _>>()?;
+    match engines.is_empty() {
+        true => Err(format!("`{names}` names no engine")),
+        false => Ok(engines),
     }
 }
 

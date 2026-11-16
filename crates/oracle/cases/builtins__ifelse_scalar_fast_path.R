@@ -36,7 +36,7 @@ show(tryCatch(ifelse(sum, 1, 2), error = conditionMessage))
 setClass("Truth", representation("logical"))
 attempt(ifelse(new("Truth", TRUE), 1, 2))
 show(ifelse(Sys.Date() > as.Date("2000-01-01"), "later", "earlier"))
-attempt(ifelse(TRUE, Sys.Date(), 0))
+attempt(ifelse(TRUE, as.Date("2026-01-01"), 0))
 
 # Branches with attributes, names, functions, NULL and zero length.
 show(ifelse(TRUE, c(a = 1), 2))
