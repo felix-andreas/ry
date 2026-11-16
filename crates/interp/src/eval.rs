@@ -7334,7 +7334,7 @@ unsafe fn assignment_shape(getters: &[Sexp], base: Sexp, superassign: bool, env:
             && let Some(function) =
                 crate::builtins::primitive(&format!("{}<-", symbol_name(head)))
             && let Ok(definition) = builtin_def(function)
-            && definition.generic == Generic::Internal
+            && (definition.generic == Generic::Internal || function.kind() == SexpType::Special)
             && dispatch::has_internal_method(definition, function, base, dispatch::Caller::Env(env))
                 .unwrap_or(false)
         {
