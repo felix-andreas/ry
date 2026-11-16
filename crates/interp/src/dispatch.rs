@@ -1192,7 +1192,10 @@ unsafe fn dispatch_argument(function: Sexp, args: &[Arg]) -> R<Sexp> {
             }
         }
         if chosen.is_none() {
-            chosen = args.iter().find(|arg| arg.tag == nil()).map(|arg| arg.value);
+            chosen = args
+                .iter()
+                .find(|arg| arg.tag == nil())
+                .map(|arg| arg.value);
         }
     }
     // GNU R takes the first argument even when it was left empty, and dispatches on the empty

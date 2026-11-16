@@ -199,7 +199,7 @@ bench-builtins command *args:
 # of the sweep, which fails when a function that tools/bench/builtins/slower.txt does not list is slower than GNU R.
 builtins-ci:
     just base-r release
-    cargo build --release -p ry-lang
+    cargo build --release -p ry-lang -p libr -p rcmd
     python3 -I tools/bench/builtins/sweep.py check
     python3 -I tools/bench/builtins/sweep.py ratchet --ci
 

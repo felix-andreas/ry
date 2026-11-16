@@ -16,10 +16,12 @@ Usage:
                                       sorted, naming known functions, and no longer than on main
   sweep.py compare [--filter REGEX] [--rounds N] [--jit-off] [--ry PATH]
                                       time the cases on GNU R and ry and print the ratios, worst first
-  sweep.py ratchet [--ci] [--update] [--tolerance T] [--ry PATH]
+  sweep.py ratchet [--ci] [--update] [--seed] [--tolerance T] [--ry PATH]
                                       time the sweep and fail when a function not in slower.txt is
                                       slower than GNU R by more than the tolerance; --update removes
-                                      the listed functions that are no longer slower
+                                      the listed functions that are no longer slower; --seed rewrites
+                                      the list as every function slower now, which only a change to
+                                      the cases justifies (`check` refuses a list that grew)
   sweep.py validate [--filter REGEX] [--with-ry]
                                       run the cases once on GNU R, quickly, and report the cases that
                                       fail, warn or take over a second per call; with --with-ry, also
@@ -408,6 +410,12 @@ def command_ratchet(args):
             improved.append(name)
         elif name not in listed and (ratio is None or ratio < floor):
             failing.append((name, ratio, case, engine))
+    if args.seed:
+        slower = sorted(name for name, (ratio, _, _) in worst.items()
+                        if ratio is None or ratio < floor or (name in listed and ratio < 1))
+        write_list(slower)
+        print(f"wrote {len(slower)} functions to {SLOWER.relative_to(root)}")
+        return 0
     for name, ratio, case, engine in failing:
         what = "fails" if ratio is None else f"runs at {ratio:.2f}x"
         print(f"SLOWER: {name} {what} on {engine} in {case}, and slower.txt does not list it")
@@ -494,6 +502,8 @@ def main():
     parser.add_argument("--jit-off", action="store_true", help="also time ry with RY_JIT=off")
     parser.add_argument("--ci", action="store_true", help="the cases without a 1e6 input, in short batches")
     parser.add_argument("--update", action="store_true", help="ratchet: remove functions that are no longer slower")
+    parser.add_argument("--seed", action="store_true",
+                        help="ratchet: rewrite slower.txt as every function that is slower now")
     parser.add_argument("--tolerance", type=float, default=0.1,
                         help="ratchet: how much slower than GNU R an unlisted function may measure before it fails")
     parser.add_argument("--confirm", type=int, default=2, help="ratchet: more rounds for functions that look slower")

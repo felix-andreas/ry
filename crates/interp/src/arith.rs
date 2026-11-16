@@ -5016,7 +5016,10 @@ unsafe fn which_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
             let ints = values::ints(operand);
             // NA is `i32::MIN`, which the maximum passes over unless every value is NA.
             let extreme = if is_max {
-                ints.iter().copied().max().filter(|&best| best != NA_INTEGER)
+                ints.iter()
+                    .copied()
+                    .max()
+                    .filter(|&best| best != NA_INTEGER)
             } else {
                 ints.iter()
                     .map(|&value| if value == NA_INTEGER { i32::MAX } else { value })
@@ -5029,7 +5032,13 @@ unsafe fn which_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
             for index in 0..length(operand) {
                 let value = real_at(operand, index);
                 let better = !value.is_nan()
-                    && best.is_none_or(|(_, current)| if is_max { value > current } else { value < current });
+                    && best.is_none_or(|(_, current)| {
+                        if is_max {
+                            value > current
+                        } else {
+                            value < current
+                        }
+                    });
                 if better {
                     best = Some((index, value));
                 }

@@ -425,7 +425,10 @@ unsafe fn do_psort(call: &Call<'_>) -> R<Sexp> {
     let mut positions = Vec::with_capacity(length(partial));
     for &position in values::reals(partial) {
         if !(position >= 1.0 && position <= count as f64) {
-            return Err(error(format!("'partial' index {} outside bounds", position as i64)));
+            return Err(error(format!(
+                "'partial' index {} outside bounds",
+                position as i64
+            )));
         }
         positions.push(position as usize - 1);
     }
@@ -434,25 +437,25 @@ unsafe fn do_psort(call: &Call<'_>) -> R<Sexp> {
     // other and after every number, as `rcmp(nalast = TRUE)` orders them.
     match x.kind() {
         SexpType::Real => {
-            let mut items = values::reals(x).to_vec();
+            let result = values::alloc_uninit(SexpType::Real, count)?;
+            let items = values::reals_mut(result);
+            items.copy_from_slice(values::reals(x));
             let compare = |left: f64, right: f64| match (left.is_nan(), right.is_nan()) {
                 (false, false) => left.partial_cmp(&right).unwrap_or(Ordering::Equal),
                 (true, true) => Ordering::Equal,
                 (true, false) => Ordering::Greater,
                 (false, true) => Ordering::Less,
             };
-            partial_sort(&mut items, 0, count as isize - 1, &positions, &compare);
-            let result = values::alloc_uninit(SexpType::Real, count)?;
-            values::reals_mut(result).copy_from_slice(&items);
+            partial_sort(items, 0, count as isize - 1, &positions, &compare);
             return Ok(result);
         }
         SexpType::Integer | SexpType::Logical => {
-            let mut items = values::ints(x).to_vec();
+            let result = values::alloc_uninit(x.kind(), count)?;
+            let items = values::ints_mut(result);
+            items.copy_from_slice(values::ints(x));
             // `NA_integer_` is the smallest `i32`, so flipping it above every number orders it last.
             let compare = |left: i32, right: i32| left.wrapping_sub(1).cmp(&right.wrapping_sub(1));
-            partial_sort(&mut items, 0, count as isize - 1, &positions, &compare);
-            let result = values::alloc_uninit(x.kind(), count)?;
-            values::ints_mut(result).copy_from_slice(&items);
+            partial_sort(items, 0, count as isize - 1, &positions, &compare);
             return Ok(result);
         }
         _ => {}

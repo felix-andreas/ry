@@ -493,7 +493,9 @@ fn typed_stamp(database: u32) -> Option<DatabaseStamp> {
     let recorded = state.databases.recorded[index / 64] & (1 << (index % 64)) != 0;
     let found = (!state.build.is_empty()
         && !recorded
-        && Path::new(&*path).file_name().is_some_and(|name| name != "sysdata.rdb")
+        && Path::new(&*path)
+            .file_name()
+            .is_some_and(|name| name != "sysdata.rdb")
         && rcmd::images::typed_code(Path::new(&*path), state.build).is_file())
     .then(|| DatabaseStamp::of(&path).ok().flatten())
     .flatten();
@@ -571,7 +573,11 @@ pub unsafe fn recorded_closures(database: &str) -> Vec<(u64, u32, Sexp)> {
     let mut closures = Vec::new();
     for (&offset, recorded) in records {
         for position in 0..length(recorded.closures) / 2 {
-            closures.push((offset, position as u32, recorded.closures.element(position * 2)));
+            closures.push((
+                offset,
+                position as u32,
+                recorded.closures.element(position * 2),
+            ));
         }
     }
     closures

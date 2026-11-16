@@ -1322,11 +1322,16 @@ pub fn real_extreme_position(values: &[f64], is_max: bool) -> Option<usize> {
         lane_extreme(values, f64::INFINITY, |value, best| value < best)
     };
     const BLOCK: usize = 64;
-    let block = values
-        .chunks(BLOCK)
-        .position(|block| block.iter().fold(false, |found, &value| found | (value == extreme)))?;
+    let block = values.chunks(BLOCK).position(|block| {
+        block
+            .iter()
+            .fold(false, |found, &value| found | (value == extreme))
+    })?;
     let start = block * BLOCK;
-    values[start..].iter().position(|&value| value == extreme).map(|offset| start + offset)
+    values[start..]
+        .iter()
+        .position(|&value| value == extreme)
+        .map(|offset| start + offset)
 }
 
 fn lane_extreme(values: &[f64], start: f64, better: impl Fn(f64, f64) -> bool) -> f64 {
@@ -1338,10 +1343,10 @@ fn lane_extreme(values: &[f64], start: f64, better: impl Fn(f64, f64) -> bool) -
             *lane = if better(value, *lane) { value } else { *lane };
         }
     }
-    lanes
-        .iter()
-        .chain(rest)
-        .fold(start, |best, &value| if better(value, best) { value } else { best })
+    lanes.iter().chain(rest).fold(
+        start,
+        |best, &value| if better(value, best) { value } else { best },
+    )
 }
 
 /// The first NaN or NA in `values`. Blocks are tested whole, so the test vectorizes and a vector
@@ -1349,7 +1354,11 @@ fn lane_extreme(values: &[f64], start: f64, better: impl Fn(f64, f64) -> bool) -
 pub fn first_nan(values: &[f64]) -> Option<f64> {
     values
         .chunks(64)
-        .find(|block| block.iter().fold(false, |found, value| found | value.is_nan()))
+        .find(|block| {
+            block
+                .iter()
+                .fold(false, |found, value| found | value.is_nan())
+        })
         .and_then(|block| block.iter().copied().find(|value| value.is_nan()))
 }
 

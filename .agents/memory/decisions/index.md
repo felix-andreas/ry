@@ -566,6 +566,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The hot suite replays the package entries the code bases spend their time in
 - The code bases are a benchmark suite of their own, outside the headline
 - The profile summary hashes private package names with a secret key per project
+- The builtins sweep times every export of base, stats and utils, behind a shrinking ratchet
 
 ## Docs, process and positioning
 
