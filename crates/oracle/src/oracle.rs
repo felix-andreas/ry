@@ -30,6 +30,12 @@ use {
 pub mod packages;
 
 const DRIVER: &str = include_str!("driver.R");
+const OBSERVER: &str = include_str!("observe.R");
+
+/// `driver.R` with the deep observer spliced into its local scope.
+fn driver_text() -> String {
+    DRIVER.replacen("  # <observe.R>\n", OBSERVER, 1)
+}
 
 /// `Sync`, because a run hands every engine to one worker per core.
 pub trait Engine: Sync {
@@ -60,6 +66,9 @@ pub struct Outcome {
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
     pub value: Option<Value>,
+    /// The deep observer's dump of every top-level value, and the classes of every condition, in
+    /// the order they happened. Empty unless the engine observes ([`ProcessEngine::observing`]).
+    pub observed: Vec<String>,
     /// `R_LIBS` as the script saw it, when the engine reports it. It is not part of the
     /// behavior: [`diff`] refuses to compare runs that searched different libraries, because a
     /// package installed by one engine makes the other warn that it was built under another R.
@@ -75,6 +84,7 @@ impl PartialEq for Outcome {
             && self.warnings == other.warnings
             && self.errors == other.errors
             && self.value == other.value
+            && self.observed == other.observed
     }
 }
 
@@ -94,6 +104,8 @@ struct Report {
     value: Option<Value>,
     #[serde(default)]
     libraries: Option<String>,
+    #[serde(default)]
+    observed: Vec<String>,
 }
 
 /// The modes of ry's runtime that `--engine` names, which [`KnownFailure::engine`] must be one of.
@@ -299,6 +311,15 @@ impl ProcessEngine {
         self
     }
 
+    /// Makes the driver report the deep observer's dump of every top-level value
+    /// ([`Outcome::observed`]), which shows what printing and deparsing hide: encoding marks,
+    /// attribute order, NA kinds, negative zero, and the object and S4 bits.
+    pub fn observing(mut self) -> Self {
+        self.environment
+            .push(("ORACLE_OBSERVE".to_string(), "1".to_string()));
+        self
+    }
+
     /// Lets ry find its base R as it does on its own, rather than in the GNU R installation
     /// [`gnu_r_home`] picks, for runs compared with the recordings instead of with that GNU R.
     pub fn with_own_base_r(mut self) -> Self {
@@ -480,7 +501,7 @@ impl Engine for ProcessEngine {
         command.args(&self.arguments);
         if let Some(driver) = self.driver {
             let driver_path = scratch.path().join("driver.R");
-            std::fs::write(&driver_path, DRIVER)
+            std::fs::write(&driver_path, driver_text())
                 .map_err(|error| EngineError::Failed(error.to_string()))?;
             match driver {
                 Driver::GnuR => {
@@ -539,6 +560,7 @@ impl Engine for ProcessEngine {
             warnings: report.warnings,
             errors: report.errors,
             value: report.value,
+            observed: report.observed,
             libraries: report.libraries,
         })
     }
@@ -1222,6 +1244,17 @@ pub fn render(outcome: &Outcome) -> String {
             text.push_str(&format!("| {line}\n"));
         }
     }
+    // Recorded outcomes come from engines that do not observe, so the section is written
+    // only when there is something in it.
+    if !outcome.observed.is_empty() {
+        text.push_str("[observed]\n");
+        for (index, entry) in outcome.observed.iter().enumerate() {
+            text.push_str(&format!("#{}\n", index + 1));
+            for line in entry.split('\n') {
+                text.push_str(&format!("| {line}\n"));
+            }
+        }
+    }
     text
 }
 
@@ -1241,8 +1274,20 @@ pub fn parse(text: &str) -> Option<Outcome> {
                 "warnings" => "warnings",
                 "errors" => "errors",
                 "value" => "value",
+                "observed" => "observed",
                 _ => return None,
             };
+        } else if section == "observed" {
+            match line.strip_prefix("| ") {
+                Some(content) => {
+                    let entry = outcome.observed.last_mut()?;
+                    if !entry.is_empty() {
+                        entry.push('\n');
+                    }
+                    entry.push_str(content);
+                }
+                None => outcome.observed.push(String::new()),
+            }
         } else if line == "\\ no newline at end of output" {
             if outcome.stdout.ends_with('\n') {
                 outcome.stdout.pop();
