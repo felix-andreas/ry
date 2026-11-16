@@ -22,9 +22,6 @@ The quality bar is four things.
   and `just perf` runs it.
 - **No input kills the server.** There is no `unwrap` panic on a protocol-legal message.
 
-## Open: broken on main
-
-- **`RY_JIT=force` aborts on `jit__inlined_frames_free_variables.R` in a debug build**: `assertion failed: (*child).machine.mark == heap().handle_mark()` in `jit_enter_frame` (`crates/jit/src/runtime.rs`), so some helper between two starts of an inlined frame leaves the handle stack changed. It needs a free variable of the inlined callee rebound to a `delayedAssign` promise in the global environment mid-loop (the case's `on_global`/`poke_global`/`weigh` part, run on its own). `oracle compare --engine ry-jit` passes the case, so find what the oracle engine sets that hides it. Release builds skip the check, but a leaked handle keeps a value alive until the frame ends.
 
 ## Open: the evaluator's edit loop
 
@@ -210,7 +207,7 @@ With the JIT on, thirteen of the fifteen `just bench applications` programs run 
 
 ## Open: tier 1 only ties tier 0 on small builtin calls with an element store
 
-`element_ops_cost_no_more_than_tier_zero` (`crates/jit/tests/test_tiers.rs`) allows two shapes 8% over tier 0 instead of the strict bound. Tier 0 runs a bound base call without checking the binding, and tier 1 checks the same bindings once at entry, so for these shapes compiled code takes the same runtime steps as tier 0 and only ties it. The fix is a call-free tier-1 path for small builtin calls (`list`, `c`) and the element store; once it lands, drop the allowance. The allowance has no margin, so the test fails intermittently: the counts move by one instruction per iteration between runs of the same binary, and `x[k] <- list(5)` measures 881 or 882 in tier 0 against 951 or 952 compiled, where 881 against 952 is one instruction over the bound (881 + 70). Three of six runs failed that way. Ir per iteration under `--profile iterate`:
+`element_ops_cost_no_more_than_tier_zero` (`crates/jit/tests/test_tiers.rs`) allows two shapes 8% over tier 0 instead of the strict bound. Tier 0 runs a bound base call without checking the binding, and tier 1 checks the same bindings once at entry, so for these shapes compiled code takes the same runtime steps as tier 0 and only ties it. The fix is a call-free tier-1 path for small builtin calls (`list`, `c`) and the element store; once it lands, drop the allowance. The test fails on main: in a release build `x[k] <- list(5)` measures 860 instructions per iteration in tier 0 against 989 compiled, 15% over. Ir per iteration under `--profile iterate`:
 
 | shape | tier 0 / compiled with guarded base calls | tier 0 / compiled with bound base calls |
 |---|---|---|
