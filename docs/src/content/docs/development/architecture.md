@@ -840,7 +840,7 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
   the heap half-built, so the start fails.
 - **The base tree only.** Installed packages have no image. Lazy loading already fetches a small
   fraction of a namespace's objects, so their cost is setup work (S4 metadata, S3 registration,
-  `.onLoad`), which runs natively behind hash-guarded prologues instead (`decisions.md`,
+  `.onLoad`), which runs natively behind hash-guarded prologues instead (`decisions/libr-rcmd.md`,
   "Installed packages load through native fast paths, not an image").
 
 Interpreter state outside the heap is saved beside it: methods' dispatch globals, templates and

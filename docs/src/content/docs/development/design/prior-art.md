@@ -173,7 +173,7 @@ refers to its steps.
 | Escape analysis, inspired by Bend's share inference | Bend | **Adopt, scoped** | Temporaries in compiled code that native code never sees |
 | Call-site specialization of known closures, inspired by lambda sets | Roc | **Adopt, scoped** | `lapply`, `vapply`, `Map`, `Reduce` in compiled code |
 | One IR feeding several backends | Roc | **Adopt** | Bytecode feeds the interpreter and the Cranelift tier |
-| A fast dev backend beside an optimizing one | Roc | **Built, measured and removed** | A Sparkplug-style baseline tier ran more instructions than tier 0, because tier 0's dispatch is only about 3% of the time (`decisions.md`, "No baseline tier, and code images hold bytecode only") |
+| A fast dev backend beside an optimizing one | Roc | **Built, measured and removed** | A Sparkplug-style baseline tier ran more instructions than tier 0, because tier 0's dispatch is only about 3% of the time (`decisions/jit-ssa.md`, "No baseline tier, and code images hold bytecode only") |
 | Static dispatch only | Roc | **Reject** | S3, S4 and R6 are dynamic; ry speculates on the class instead |
 | A top level that cannot perform effects | Roc | **Adopt, planned for strict mode** | A strict library file's top level holds only definitions and pure constants |
 | Purity inference: effectful types use `=>`, effectful names end in `!` | Roc | **Reject** | Freedom from effects stays a runtime body fact the JIT reads, outside the type |
@@ -195,7 +195,7 @@ refers to its steps.
 | Whole-program value tracking | Bun | **Adopt per namespace** | The typed core of a locked namespace or strict file; untyped code keeps profiles |
 | Closed bindings per locked namespace: the bindings are closed though their values are not | Bun | **Adopt** (step 2) | Direct calls to sibling namespace functions and imports, invalidated by `unlockBinding` and `assignInNamespace` |
 | Freezing built-ins instead of deoptimizing | Bun | **Adopt for ry's standard library only** | R bindings get invalidation on `unlockBinding`, because mocking rebinds them |
-| Ahead-of-time machine code from whole-program facts, no profiles, values tested once where they enter | Bun (`--aot`) | **Adopt for strict typed code only** | Untyped package closures measured neutral and were removed (`decisions.md`, "No baseline tier, and code images hold bytecode only"); typed closures are the open target |
+| Ahead-of-time machine code from whole-program facts, no profiles, values tested once where they enter | Bun (`--aot`) | **Adopt for strict typed code only** | Untyped package closures measured neutral and were removed (`decisions/jit-ssa.md`, "No baseline tier, and code images hold bytecode only"); typed closures are the open target |
 | Machine code mapped read-only from the file and shared between processes | Bun | **Adopt** | Typed code files in installed packages and executables |
 | Mapped images shared across worker processes | Bun | **Adopt, planned** (step 5) | callr, parallel and doParallel workers map the same package images; measured as resident memory per worker |
 | A report of code compiled to a slow path, worst first, with fixes | Bun | **Adopt, planned** | For strict typed code, beside its ahead-of-time compiler |
@@ -280,7 +280,7 @@ into the host through the C ABI.
   the boundary to untyped code boxes them. Records, tuples and tags travel as pointers whose field
   types come from an allocation-site profile, and `match` compiles to a branch on the layout id. This
   is Roc's specialization applied at runtime, where R loads code: the cache key is the closure and
-  the argument types seen, not a whole-program instantiation (`decisions.md`, "Typed closures run as
+  the argument types seen, not a whole-program instantiation (`decisions/typed-stdlib.md`, "Typed closures run as
   native functions over records, tags and match").
 - **Precise counts in compiled code.** The interpreter keeps R's count updates at every binding,
   which is what native code observes. The JIT tracks counts precisely inside a compiled function and
@@ -620,7 +620,7 @@ that apply Bun's closed-world reasoning to untyped packages:
   closures the idea was built and measured: scalar numeric functions compiled at install covered
   5 to 11% of closures and left the testthat workload unchanged, and baseline code for every body
   could save at most about 3% of its instructions, so code images hold bytecode only
-  (`decisions.md`, "No baseline tier, and code images hold bytecode only").
+  (`decisions/jit-ssa.md`, "No baseline tier, and code images hold bytecode only").
 - **The test matrix** for typed differential tests and the typed fuzzer.
 
 **What ry rejects.**
@@ -658,7 +658,7 @@ it to machine code, and untyped code outside an installed package's numeric func
 JIT at run time. The typed core has Bun's split
 between facts and predictions: inside typed code a type is a fact, and an R value is checked and
 converted once where it enters. ry's boundary is stricter, because an R list never becomes a record
-without `as.record()` (`decisions.md`). Both compiled paths fall back to the interpreter where Bun
+without `as.record()` (`decisions/typed-stdlib.md`). Both compiled paths fall back to the interpreter where Bun
 runs a compiled slow second version of the function.
 
 **Ideas for ry,** not decisions (the adopted ones are listed above):
@@ -750,7 +750,7 @@ its hot builtins in Zig and C++.[^bun]
   a method name, not about the site, so S3 dispatch keeps it once per name: the method symbol
   carries the index of a row that holds the binding found from the top environment on, valid
   under the symbol's lookup stamp (`MethodRows` in `crates/interp/src/dispatch.rs`;
-  `decisions.md`, "S3 methods are found through one row per method symbol"). The JIT can guard
+  `decisions/interp.md`, "S3 methods are found through one row per method symbol"). The JIT can guard
   an inlined method on that stamp, as it does for global function lookups. **Rejected** in the
   per-site form.
 - **Value profiling, extended.** Tier 0 records a bit set of eleven value kinds per instruction
@@ -877,7 +877,7 @@ only once the function has run a few times.[^v8-lite]
   instruction's tier 0 handler with its operands as immediates and its branches as native jumps,
   sharing tier 0's register window. It removes only decoding and dispatch, which are about 3.1% of
   `testthat_full`, and it ran 6.7% more instructions than tier 0 there, so it was removed
-  (`decisions.md`, "No baseline tier, and code images hold bytecode only"). The time is in the op
+  (`decisions/jit-ssa.md`, "No baseline tier, and code images hold bytecode only"). The time is in the op
   bodies (allocations, guards and frame searches), which the other roadmap steps attack.
   **Rejected after measurement.**
 
@@ -956,7 +956,7 @@ railsbench.[^yjit]
 
 **What ry adopts.** Nothing yet. Block versioning was planned as the second stage of a baseline
 tier, which was measured and removed: a call-threaded baseline ran more instructions than tier 0
-(`decisions.md`, "No baseline tier, and code images hold bytecode only"). The idea that survives is
+(`decisions/jit-ssa.md`, "No baseline tier, and code images hold bytecode only"). The idea that survives is
 the one versioning shares with tier 1's speculation, a check at a block's entry instead of one in
 every instruction, and tier 1 already specializes on tier 0's value-kind feedback.
 

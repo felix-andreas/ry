@@ -661,11 +661,30 @@ unsafe fn guarded<T>(
 /// each interpreter constructor roots its result. Anything still needed is held by a register
 /// or the environment by then: compiled code stores a helper's result in the register window
 /// before it allocates again.
+///
+/// `body` must not release below the mark either, because compiled code holds the handles
+/// beneath it: an inlined call's activation records the stack height at its first start. The
+/// check is one compare on a path that already calls out, so it is on in release builds too. It
+/// also means a helper outside `scoped` must leave no handles behind, or the next checked
+/// helper aborts.
 unsafe fn scoped<T>(body: impl FnOnce() -> T) -> T {
     let mark = heap().handle_mark();
     let value = body();
-    heap().release_handles(mark);
+    let heap = heap();
+    if heap.handle_mark() < mark {
+        handles_released_below(mark);
+    }
+    heap.release_handles(mark);
     value
+}
+
+#[cold]
+#[inline(never)]
+fn handles_released_below(mark: usize) -> ! {
+    panic!(
+        "a helper released handles compiled code holds: the handle stack fell from {mark} to {}",
+        heap().handle_mark()
+    )
 }
 
 /// Holds `unwind` until compiled code hands the activation back. The collector traces it there
@@ -747,6 +766,9 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
             };
             let mark = heap.handle_mark();
             let stepped = step_unsignalled(activation, || bytecode::step_one(machine, pc as usize));
+            if heap.handle_mark() < mark {
+                handles_released_below(mark);
+            }
             heap.release_handles(mark);
             match stepped {
                 None => outcome::FAILED,

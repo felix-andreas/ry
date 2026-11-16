@@ -357,6 +357,14 @@ only when the slot alone holds it (`slot_owns`: a reference count of one and no 
 register holding it); otherwise the slot gets a copy, so `y <- x; x[1] <- 0` leaves `y` alone.
 An object target goes through `eval::complex_assign` in the frame's environment, because a
 replacement method may look at the frame, and that moves the assigned variable into a cell.
+A method or a replacement closure receives the subscripts as promises of their code, so when a
+subscript may run code or fail, the compiled code reads the target (and, for `f(x, i) <- v`, looks
+up `f<-`) before any subscript runs, and an object target or a closure setter branches to
+`Op::ComplexAssign`, which runs the whole assignment with the subscripts unevaluated. In
+`x[i] <- v`, `x[[i]] <- v` and `x[i, j] <- v`, a subscript that is a constant, or a local variable
+known to be bound (the variable of an enclosing `for`, or one an earlier statement of an
+enclosing block assigned), skips that read: evaluating it runs nothing and cannot fail, and the
+method receives the forced promise of its code.
 `x$name` reads on a non-object likewise skip the environment.
 
 ## Argument references
@@ -559,7 +567,7 @@ that are left are in `backlog.md`, "The call path after slot frames bind on dema
 
 ## Prior decision
 
-`decisions.md` ("Step 2 of the untyped roadmap") rejected slot frames when a plain call cost 3,968
+`decisions/jit-ssa.md` ("Step 2 of the untyped roadmap") rejected slot frames when a plain call cost 3,968
 instructions and binding cells about 420 of them. That estimate covered values held inline with
 cells on demand, not frames without an environment, and it predates the testthat profile above,
 where frame work is about 2.2k instructions per call.

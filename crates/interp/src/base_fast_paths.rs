@@ -61,6 +61,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryDoWithOneRestart", 0, do_do_with_one_restart).prologue(),
     internal("ryTryInvokeRestart", 0, do_try_invoke_restart).prologue(),
     internal("ryInvokeRestart", 0, do_invoke_restart_named).prologue(),
+    internal("ryIfelse", 0, do_ifelse).prologue(),
+    internal("ryIsTrue", 0, do_is_true).prologue(),
+    internal("ryIsFalse", 0, do_is_false).prologue(),
+    internal("ryUnname", 0, do_unname).prologue(),
+    internal("ryIn", 0, do_in).prologue(),
+    internal("ryUnlist", 0, do_unlist).prologue(),
 ];
 
 /// The base functions that get a fast path, with the internal their prologue calls and the
@@ -98,6 +104,14 @@ const FAST_PATHS: &[(&str, &str, u64)] = &[
     ("withRestarts", "ryWithRestarts", 0xcebb374dbd62409d),
     ("tryInvokeRestart", "ryTryInvokeRestart", 0xe95eb95ec8453f49),
     ("invokeRestart", "ryInvokeRestart", 0x76da20c2e48ae6a6),
+    ("ifelse", "ryIfelse", 0x6601afdecce51fb7),
+    // The closures below also have a native entry, which runs a call whose arguments are values
+    // already; the prologue runs the same code once the frame has forced the argument.
+    ("isTRUE", "ryIsTrue", 0x092932cb0d38b378),
+    ("isFALSE", "ryIsFalse", 0x02a0aba295284434),
+    ("unname", "ryUnname", 0x25d7de9ce594cb9f),
+    ("%in%", "ryIn", 0x2fb6d82723e3191f),
+    ("unlist", "ryUnlist", 0xced9c04c23fb5721),
 ];
 
 /// The closures that a base function defines in its own body and that get a fast path: the
@@ -284,33 +298,35 @@ unsafe fn without_nested_prologues(body: Sexp) -> R<Sexp> {
         let mut rest = code;
         while rest.kind() == SexpType::Pairlist || rest.kind() == SexpType::Language {
             let item = rest.car();
-            if let Some(original) = nested_original(item) {
+            if let Some(original) = prologue_original(item) {
                 crate::heap().set_car(rest, original);
             }
             strip(rest.car());
             rest = rest.cdr();
         }
     }
-    /// The original body of a `{ .Internal(ryX()); original }` block.
-    unsafe fn nested_original(code: Sexp) -> Option<Sexp> {
-        if code.kind() != SexpType::Language
-            || code.car() != symbols().brace
-            || values::pairlist_length(code.cdr()) != 2
-        {
-            return None;
-        }
-        let first = code.cdr().car();
-        let is_prologue = first.kind() == SexpType::Language
-            && first.car() == symbols().dot_internal
-            && first.cdr().car().kind() == SexpType::Language
-            && first.cdr().car().car().kind() == SexpType::Symbol
-            && values::symbol_name(first.cdr().car().car()).starts_with("ry");
-        is_prologue.then(|| code.cdr().cdr().car())
-    }
     let copy = values::duplicate(body)?;
     crate::heap().root(copy);
     strip(copy);
     Ok(copy)
+}
+
+/// The original body of a `{ .Internal(ryX()); original }` block, the shape a fast path's
+/// prologue gives a body.
+unsafe fn prologue_original(code: Sexp) -> Option<Sexp> {
+    if code.kind() != SexpType::Language
+        || code.car() != symbols().brace
+        || values::pairlist_length(code.cdr()) != 2
+    {
+        return None;
+    }
+    let first = code.cdr().car();
+    let is_prologue = first.kind() == SexpType::Language
+        && first.car() == symbols().dot_internal
+        && first.cdr().car().kind() == SexpType::Language
+        && first.cdr().car().car().kind() == SexpType::Symbol
+        && values::symbol_name(first.cdr().car().car()).starts_with("ry");
+    is_prologue.then(|| code.cdr().cdr().car())
 }
 
 /// `Sys.which`'s `body` as ry's bundled base R has it. GNU R's configure writes the path of the
@@ -441,6 +457,7 @@ const NATIVE_ENTRIES: &[(&str, u64, NativeEntry, bool)] = &[
     ("identical", 0x53ecb73e41a5f29e, native_identical, true),
     ("isTRUE", 0x092932cb0d38b378, native_is_true, false),
     ("isFALSE", 0x02a0aba295284434, native_is_false, false),
+    ("unname", 0x25d7de9ce594cb9f, native_unname, false),
     ("nrow", 0xaf2f11bd0294734b, native_nrow, false),
     ("ncol", 0xcf3f0da3fff33d98, native_ncol, false),
     ("match", 0x8dee99370571e93c, native_match, true),
@@ -487,9 +504,12 @@ pub unsafe fn register_native_entries(namespace: Sexp) -> R<()> {
             missed.push(name);
             continue;
         }
+        // A closure with a native entry may also have a prologue, for the calls whose
+        // arguments are not values yet, and the entry stands for the R body behind it.
+        let body = crate::bytecode::closure_body(function);
         let mut hash = FNV_OFFSET;
         stable_hash(function.car(), &mut hash);
-        stable_hash(crate::bytecode::closure_body(function), &mut hash);
+        stable_hash(prologue_original(body).unwrap_or(body), &mut hash);
         if print {
             eprintln!("{name} {hash:#018x}");
         }
@@ -968,13 +988,17 @@ unsafe fn native_identical(args: &[Arg]) -> R<Option<Sexp>> {
     values::scalar_logical(same as i32).map(Some)
 }
 
-/// The one element of a logical scalar `x` that is not an object, whose `length()` and
-/// `is.na()` therefore do not dispatch; `None` for an object, which runs the R body.
+/// The one element of a logical scalar `x`, or `Some(None)` when `x` is not one. `is.logical()`
+/// does not dispatch, so any other type answers without looking further, but a logical object
+/// answers `None` and runs the R body, whose `length()` and `is.na()` could dispatch on it.
 unsafe fn logical_scalar(x: Sexp) -> Option<Option<i32>> {
+    if x.kind() != SexpType::Logical {
+        return Some(None);
+    }
     if x.is_object() || x.is_altrep() {
         return None;
     }
-    Some((x.kind() == SexpType::Logical && x.length() == 1).then(|| x.slice::<i32>()[0]))
+    Some((x.length() == 1).then(|| x.slice::<i32>()[0]))
 }
 
 /// `isTRUE(x)`: `is.logical(x) && length(x) == 1L && !is.na(x) && x`.
@@ -998,6 +1022,56 @@ unsafe fn native_is_false(args: &[Arg]) -> R<Option<Sexp>> {
         return Ok(None);
     };
     values::scalar_logical((element == Some(0)) as i32).map(Some)
+}
+
+/// `unname(obj)` for a vector or `NULL` that is not an object, so that neither `names()` nor
+/// `dimnames()` nor their replacement functions dispatch. A value without names or dimnames is
+/// returned as it is, as the R body returns it; otherwise the copy that `names(obj) <- NULL` and
+/// `dimnames(obj) <- NULL` make, without those two attributes.
+unsafe fn native_unname(args: &[Arg]) -> R<Option<Sexp>> {
+    let Some([obj]) = resolved_all::<1>(args)? else {
+        return Ok(None);
+    };
+    unnamed(obj)
+}
+
+unsafe fn unnamed(obj: Sexp) -> R<Option<Sexp>> {
+    let vector = matches!(
+        obj.kind(),
+        SexpType::Nil
+            | SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::String
+            | SexpType::Raw
+            | SexpType::List
+            | SexpType::Expression
+    );
+    if !vector || obj.is_object() || obj.has_gp(gp::S4_OBJECT) {
+        return Ok(None);
+    }
+    let symbols = symbols();
+    let (mut names, mut dimnames) = (false, false);
+    let mut cell = obj.attrib();
+    while cell != nil() {
+        let tag = cell.tag();
+        names |= tag == symbols.names;
+        dimnames |= tag == symbols.dimnames;
+        // `names()` of a one-dimensional array reads its dimnames, and `names<-` writes them.
+        if tag == symbols.dim && length(cell.car()) == 1 {
+            return Ok(None);
+        }
+        cell = cell.cdr();
+    }
+    if !names && !dimnames {
+        return Ok(Some(obj));
+    }
+    let copy = values::shallow_duplicate(obj)?;
+    crate::heap().root(copy);
+    values::remove_attr(copy, symbols.names);
+    values::remove_attr(copy, symbols.dimnames);
+    Ok(Some(copy))
 }
 
 /// `dim(x)[position]` for an `x` that is not an object, so `dim()` does not dispatch: `NULL`
@@ -2873,6 +2947,158 @@ unsafe fn decimal_mark_is_point(formal: Formal) -> R<bool> {
         Formal::Given(value) => force_given(value)?,
     };
     Ok(string_scalar(value).as_deref() == Some("."))
+}
+
+/// `ifelse(test, yes, no)` when the R body takes its quick return: `test` is an atomic value of
+/// one element without attributes, which `storage.mode(test) <- "logical"` coerces without a
+/// warning (a string that is not a logical spelling becomes `NA`), and the branch it picks has
+/// one element and no attributes, or is a function whose only attribute is its `srcref`. Only
+/// that branch is forced, as in the R body; whatever else declines after it, and the R body
+/// reads the forced promise.
+unsafe fn do_ifelse(call: &Call<'_>) -> R<Sexp> {
+    let frame = ClosureFrame::of(call);
+    let symbols = symbols();
+    let Some(test) = argument(frame, symbols.test)? else {
+        return decline();
+    };
+    if !test.kind().is_atomic() || test.attrib() != nil() || test.is_altrep() || length(test) != 1 {
+        return decline();
+    }
+    let truth = values::as_logical_scalar(test);
+    if truth == NA_LOGICAL {
+        let na = values::scalar_logical(NA_LOGICAL)?;
+        return finish(frame, na, true);
+    }
+    let branch = if truth != 0 { symbols.yes } else { symbols.no };
+    let Some(value) = argument(frame, branch)? else {
+        return decline();
+    };
+    if value.is_object() || value.has_gp(gp::S4_OBJECT) {
+        return decline();
+    }
+    let function = matches!(
+        value.kind(),
+        SexpType::Closure | SexpType::Builtin | SexpType::Special
+    );
+    let vector =
+        value.kind().is_atomic() || matches!(value.kind(), SexpType::List | SexpType::Expression);
+    let one = function || vector && length(value) == 1;
+    let attributes = value.attrib();
+    let plain = attributes == nil()
+        || function && attributes.tag() == symbols.srcref && attributes.cdr() == nil();
+    if !one || !plain {
+        return decline();
+    }
+    finish(frame, value, true)
+}
+
+/// `isTRUE(x)` once the frame has forced `x`, for a call whose argument is not a value yet.
+unsafe fn do_is_true(call: &Call<'_>) -> R<Sexp> {
+    with_forced_x(call, native_is_true)
+}
+
+/// `isFALSE(x)` once the frame has forced `x`.
+unsafe fn do_is_false(call: &Call<'_>) -> R<Sexp> {
+    with_forced_x(call, native_is_false)
+}
+
+/// `x %in% table` once the frame has forced `x` and then `table`. The compiler inlines the
+/// body's call of `match()` as its `.Internal`, so GNU R forces both in this frame too.
+unsafe fn do_in(call: &Call<'_>) -> R<Sexp> {
+    let frame = ClosureFrame::of(call);
+    let symbols = symbols();
+    let Some(x) = argument(frame, symbols.x)? else {
+        return decline();
+    };
+    let Some(table) = argument(frame, symbols.table)? else {
+        return decline();
+    };
+    let args = [
+        Arg {
+            tag: nil(),
+            value: x,
+        },
+        Arg {
+            tag: nil(),
+            value: table,
+        },
+    ];
+    match native_in(&args)? {
+        Some(value) => finish(frame, value, true),
+        None => decline(),
+    }
+}
+
+/// `unlist(x, recursive, use.names)` for an `x` that is no object, so the internal does not
+/// dispatch, and is not a list of factors, forcing `recursive`, `x` and `use.names` in the
+/// order the R body does. A `recursive` or `use.names` that is not `TRUE` or `FALSE` declines,
+/// leaving the R body's checks to report it.
+unsafe fn do_unlist(call: &Call<'_>) -> R<Sexp> {
+    let frame = ClosureFrame::of(call);
+    let symbols = symbols();
+    let flag = |value: Sexp| {
+        value.kind() == SexpType::Logical
+            && value.attrib() == nil()
+            && !value.is_altrep()
+            && length(value) == 1
+            && value.slice::<i32>()[0] != NA_LOGICAL
+    };
+    let Some(recursive) = argument(frame, symbols.recursive)? else {
+        return decline();
+    };
+    if !flag(recursive) {
+        return decline();
+    }
+    let Some(x) = argument(frame, symbols.x)? else {
+        return decline();
+    };
+    if x.is_object() {
+        return decline();
+    }
+    let factors = kernel(crate::subset::do_is_list_factor, &[x, recursive], frame)?;
+    if values::as_logical_scalar(factors) != 0 {
+        return decline();
+    }
+    let Some(use_names) = argument(frame, symbols.use_names)? else {
+        return decline();
+    };
+    if !flag(use_names) {
+        return decline();
+    }
+    let value = kernel(crate::combine::do_unlist, &[x, recursive, use_names], frame)?;
+    finish(frame, value, true)
+}
+
+/// Finishes the call with what the native entry `code` answers for the frame's `x`, forced as
+/// the R body forces it first.
+unsafe fn with_forced_x(call: &Call<'_>, code: NativeEntry) -> R<Sexp> {
+    let frame = ClosureFrame::of(call);
+    let Some(x) = argument(frame, symbols().x)? else {
+        return decline();
+    };
+    match code(&[Arg {
+        tag: nil(),
+        value: x,
+    }])? {
+        Some(value) => finish(frame, value, true),
+        None => decline(),
+    }
+}
+
+/// `unname(obj, force)` once the frame has forced `obj`, with `force` left at its default.
+unsafe fn do_unname(call: &Call<'_>) -> R<Sexp> {
+    let frame = ClosureFrame::of(call);
+    let symbols = symbols();
+    if !is_default(frame, symbols.force)? {
+        return decline();
+    }
+    let Some(obj) = argument(frame, symbols.obj)? else {
+        return decline();
+    };
+    match unnamed(obj)? {
+        Some(value) => finish(frame, value, true),
+        None => decline(),
+    }
 }
 
 /// `pmin(..., na.rm)`; see [`parallel_extreme`].
