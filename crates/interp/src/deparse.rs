@@ -87,8 +87,7 @@ unsafe fn deparse_warning(
     backtick: bool,
     max_lines: usize,
 ) -> R<Vec<String>> {
-    let (lines, incomplete, failure) =
-        deparse_checked(object, cutoff, opts, backtick, max_lines);
+    let (lines, incomplete, failure) = deparse_checked(object, cutoff, opts, backtick, max_lines);
     if let Some(failure) = failure {
         return Err(failure);
     }
@@ -121,8 +120,7 @@ pub unsafe fn deparse_unused_argument(object: Sexp) -> String {
 /// option but the names: integers lose their `L`, a missing value is a plain `NA`, and the lines
 /// of a function or a block are joined by newlines. It raises deparse's errors.
 pub unsafe fn deparse_for_coercion(object: Sexp) -> R<String> {
-    let (lines, _, failure) =
-        deparse_checked(object, 500, options::NICE_NAMES, true, usize::MAX);
+    let (lines, _, failure) = deparse_checked(object, 500, options::NICE_NAMES, true, usize::MAX);
     match failure {
         Some(failure) => Err(failure),
         None => Ok(lines.join("\n")),
@@ -1891,7 +1889,11 @@ pub(crate) unsafe fn do_deparse(call: &Call<'_>) -> R<Sexp> {
     let opts = values::as_integer_scalar(call.arg(3)).max(0) as u32;
     let nlines = values::as_integer_scalar(call.arg(4));
     let backtick = values::as_logical_scalar(call.arg(2)) == 1;
-    let max_lines = if nlines > 0 { nlines as usize } else { usize::MAX };
+    let max_lines = if nlines > 0 {
+        nlines as usize
+    } else {
+        usize::MAX
+    };
     let lines = deparse_warning(object, cutoff, opts, backtick, max_lines)?;
     values::string_vector(&lines)
 }

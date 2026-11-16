@@ -156,7 +156,9 @@ pub unsafe fn browser() -> R<()> {
     let state = interp();
     if state.debugger.is_none() && crate::console_server::interactive() {
         let terminal = Box::new(crate::console_server::Browse::default());
-        state.debugger.set(Some(Box::new(Adapter::for_console(terminal))));
+        state
+            .debugger
+            .set(Some(Box::new(Adapter::for_console(terminal))));
     }
     with_adapter(|adapter| adapter.at_statement(Some("breakpoint")))
 }
