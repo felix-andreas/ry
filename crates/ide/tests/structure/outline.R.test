@@ -189,6 +189,22 @@ lens references "area"
 #: <T> fn(x: T) -> T
 id <- function(x) x
 #++++
+symbol id (Function fn(x)) at "id"
+token "<" Operator
+token "T" TypeParameter
+token ">" Operator
+token "fn" Keyword
+token "(" Operator
+token "x" Parameter
+token ":" Operator
+token "T" TypeParameter
+token ")" Operator
+token "->" Operator
+token "T" TypeParameter
+token "id" Function
+token "x" Parameter
+token "x" Parameter
+lens references "id"
 
 #==== folding
 #---- blocks_keep_closing_line
