@@ -1,0 +1,8 @@
+#!/bin/sh
+# A rustc wrapper (RUSTC_WRAPPER) that links with mold instead of the toolchain's rust-lld: the
+# last -fuse-ld wins, and rustc ignores link arguments for a crate it does not link. Cargo leaves
+# the wrapper out of its fingerprints, so switching it on or off relinks without recompiling,
+# which a linker set through CARGO_TARGET_<triple>_LINKER would not. tools/env.sh selects it.
+rustc=$1
+shift
+exec "$rustc" "$@" -Clink-arg=-fuse-ld=mold
