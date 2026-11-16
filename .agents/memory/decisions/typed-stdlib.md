@@ -114,7 +114,7 @@ ry's runtime checks a function's inline parameter and return types at its bounda
 - **Register rule.** Registers hold uncounted references, so an update from outside the body (`eval.parent()`, a forced promise) could change a value a register is about to use. `gp::COMPILED_FRAME` marks an environment while a compiled body runs on it, and `reuse_permitted(env, value)` allows an update when the flag is clear, when the innermost frame is that environment's own compiled closure (whose updates the compiler orders with `may_modify_in_place`), or when no live register holds the value. A stale register only costs a copy. This applies to `complex_assign` too, so it fixes plain R as well.
 - **Record fields.** `r <- (..r, field = f(r$field, ...))` lowers to `.ry_update(r, ...)`, which `rebind_update` evaluates with `r$field` as a nested target. That needs records to count holders: interpreter-made plain records are counted (`records::allocate`, `set_record_slot`), tuples and tags stay saturated. Fields after the updating one must be constants, because their code could otherwise see the field half-updated. In a slot frame the compiler leaves such an update to `CallRebinding` (`eval::updates_own_field`).
 - **Collection storage stays as it is**: a dictionary or set is already struct-of-arrays in the collector's heap, which a `SEXP`-holding value must be. Hashing and probing were at most about 15% of a call; the rest was call overhead.
-- Value semantics are pinned in `crates/interp/tests/test_standard_library.rs`.
+- Value semantics are pinned in `crates/frames/tests/test_standard_library.rs`.
 
 ## Library leaves resolve at compile time
 
@@ -391,7 +391,7 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 - **Decision.** The ownership rule for R lists (`owned`: refcount 0, or the reusable binding with refcount 1) applies to a non-empty Array, so `List.append`, `List.set`, `List.concat` and `List.swap` update in place with amortized constant time, as the standard-library page promises. An update checks the new item against the storage without allocating (`arrays::holds_item`), then stores (`arrays::store_item`) or appends into spare capacity, doubling when full (`append_owned`). A misfit item takes the copying path, which reports the error and never sees a half-updated Array. An empty Array is `logical(0)` until its first item decides storage. The moves journal (`crates/interp/src/moves.rs`) records replaced items so a failing helper restores the original.
 - **Rejected: a separate List representation.** An Array is already the one storage of a ry list in the interpreter and typed code; the problem was ownership.
 - **Reserved room.** `List.with_capacity`/`List.reserve` of an empty Array give an empty resizable `logical` Array whose capacity is the room; the first append keeps it, and `.ry_items` keeps it when retyping. Typed code lowers `.ry_items(List.with_capacity(n), "I64")` (written by the preflight, since only the checker knows the item type) to `Op::EmptyList`.
-- **Pinned by** the Array growth and `move_undo` cases in `crates/interp/tests/test_standard_library.rs`.
+- **Pinned by** the Array growth and `move_undo` cases in `crates/frames/tests/test_standard_library.rs`.
 
 ## A ry list is one item word
 

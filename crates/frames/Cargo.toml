@@ -17,3 +17,9 @@ table = { path = "../table" }
 libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
 rustc-hash.workspace = true
 serde_json.workspace = true
+
+# The interpreter tests that need the data viewer or DataFrame live here rather than in interp,
+# so that interp's own test binaries do not link Polars.
+[dev-dependencies]
+syntax = { path = "../syntax" }
+libc = "0.2"

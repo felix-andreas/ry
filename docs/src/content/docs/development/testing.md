@@ -382,7 +382,7 @@ algebra to GNU R's results bit for bit. The matrix products are ry's own kernels
 on every machine; the LAPACK cases hold only on the reference libraries, so on another BLAS (such as
 OpenBLAS) the test compares them with a GNU R on the same libraries, and skips them without one. `crates/table/tests/test_table.rs` checks the table engine
 against values read from data.table, `test_lazy.rs` there checks the Polars-style verbs, and
-`crates/libr/tests/test_frame_altrep.rs` checks the columns as ALTREP vectors. `crates/interp/tests/test_records.rs`, `test_arrays.rs` and `test_standard_library.rs` cover ry's
+`crates/libr/tests/test_frame_altrep.rs` checks the columns as ALTREP vectors. `crates/interp/tests/test_records.rs` and `test_arrays.rs` and `crates/frames/tests/test_standard_library.rs` cover ry's
 own values at run time, the last one also holding the runtime's function table against the
 declarations in `types/std.Rtypes`. `crates/libr/tests/test_rmath.rs`, `test_numerics.rs` and
 `test_linpack.rs` compare the C API's numerics with answers recorded from GNU R, so they run
@@ -425,7 +425,7 @@ programs run under both torture engines. `RY_GC_STRESS=1` stresses from the scri
 `RY_GC_STRESS=startup` from the first allocation, which takes about seven seconds on an empty script
 in a debug build ([Robustness](/development/robustness) lists the modes).
 
-`crates/interp/tests/test_debugger.rs` drives the debug adapter (`interp::debugger`) in-process.
+`crates/frames/tests/test_debugger.rs` drives the debug adapter (`interp::debugger`) in-process.
 Scripted sessions pin breakpoints, stepping, the stack, variables, `evaluate`, `browser()` and
 uncaught errors as transcripts, and a seeded simulator plays a client that sends random, sometimes
 invalid, requests at every stop. Every request must get exactly one response, the session must end,
