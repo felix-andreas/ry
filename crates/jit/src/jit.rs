@@ -220,8 +220,9 @@ unsafe fn enter(machine: &mut Machine<'_>) -> Option<TierExit> {
     }
 }
 
-/// The code compiled for the activation's own enclosure, which almost every entry of a compiled
-/// body finds: [`compiled_for`]'s answer without the cases that change the body's state.
+/// The code compiled for the activation's own enclosure, or portable code last proven for it,
+/// which almost every entry of a compiled body finds: [`compiled_for`]'s answer without the
+/// cases that change the body's state.
 #[inline(always)]
 unsafe fn specialized<'a>(machine: &Machine<'_>) -> Option<&'a Compiled> {
     unsafe {
@@ -231,12 +232,18 @@ unsafe fn specialized<'a>(machine: &Machine<'_>) -> Option<&'a Compiled> {
             return None;
         }
         let address = tier1.external_address() as *const Compiled;
-        // A dead enclosure's address may be reused by the live one, so the weak key decides.
-        if address.is_null()
-            || (*address).portable
-            || (*address).enclosure != machine.enclosure()
-            || tier1.external_protected().weak_key() == values::nil()
-        {
+        if address.is_null() {
+            return None;
+        }
+        let enclosure = machine.enclosure();
+        let entered = if (*address).portable {
+            (*address).checked.get().weak_key() == enclosure
+        } else {
+            // A dead enclosure's address may be reused by the live one, so the weak key decides.
+            (*address).enclosure == enclosure
+                && tier1.external_protected().weak_key() != values::nil()
+        };
+        if !entered {
             return None;
         }
         let state = values::ints(constants.element(PROFILE))[profile::TIER_STATE];

@@ -2511,8 +2511,15 @@ impl<'a> Builder<'a> {
                         state,
                     ));
                 }
-                match self.speculate(symbol) {
-                    Some(function) if !self.bound_locally(symbol) => {
+                // A name the frame may bind is not speculated on: the speculation would fail
+                // whenever the frame binds a function to it, and invalidate the code.
+                let speculated = if self.bound_locally(symbol) {
+                    None
+                } else {
+                    self.speculate(symbol)
+                };
+                match speculated {
+                    Some(function) => {
                         state.registers[operand(0)] = Ty::Fun(function);
                         Action::GetFun {
                             dst: operand(0),
