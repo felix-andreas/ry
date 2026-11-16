@@ -1057,3 +1057,42 @@ without cells, promise forcing in the loop, and one observer word on the general
   `y[g(), , 1] <- 2`, reaches the same message as a constant one.
 - `islistfactor` refuses an `NA` for `recursive` from R 4.5 on, which earlier releases took as true.
 - Pinned by the oracle case `replacement__subscript_count_errors`.
+
+## A call site that passes `...` keeps a plan for what `...` held
+
+**Status:** built.
+
+- **Previous source of truth.** A call site's plan says which argument fills which of the callee's
+  slots, and it is made once from the site's own arguments. A site that passes `...` had the plan
+  `MATCH_PER_CALL` instead: every call collected its arguments with `...` spread out, matched them
+  against the formals (`matched_sources`), and entered the callee through the generic handler.
+- **What was weak.** Matching reads only the formals and the arguments' count and names, and a
+  wrapper is called with the same shape of `...` again and again, so each call derived the same
+  sources as the one before. The mechanism row "call: forwards `...`" cost DOTS_BEFORE
+  instructions against about 1,170 for a call with three arguments, and 4.7% of the hot suite's
+  closure calls matched per call.
+- **Chosen shape.** A site that passes `...` once keeps a spread plan (`PLAN_SPREAD`,
+  `spread_plan` in `bytecode.rs`): the sources matched for one call, and beside them how many
+  arguments `...` held and their names. A call for which that holds binds like any planned call.
+  From a frame on its slots it takes `call_fast::<false, true>`, which compares the chain in the
+  frame's `...` slot with the plan and writes the chain's items where the site has `...`. Those
+  items are the caller's promises and values and pass on unchanged.
+- **When the plan does not hold.** A call whose `...` holds another count or other names replans
+  the site, which counts as a miss, and after `PLAN_MISSES` misses the site keeps its last plan and
+  matches every other call per call. An empty argument in `...` is never planned for, because it
+  takes a formal's default where a value would not. A site that passes `...` twice, or whose
+  arguments carry a name that is no symbol, matches per call.
+- **Why a plan per site and not a table per shape.** A site with several shapes of `...` could
+  keep one plan for each. The sampled sites showed one shape per site for nearly all calls, so
+  the single plan with a miss count is the smaller design, and a site with alternating shapes
+  pays what it paid before.
+- **Kept apart from the common call.** `call_fast` takes `SPREAD` as a constant parameter, so the
+  path of a site without `...` carries none of its tests (`crates/interp/AGENTS.md`, the trap
+  about rare branches in the call handlers). `call_generic_by_name` tries the spread path for a
+  frame on its slots after the plain one declined.
+- **Checked by.** With invariants on, every use of a spread plan is compared with matching the
+  call afresh, in both the generic handler and `call_fast`. The oracle case
+  `calls__dots_spread_plans` pins the shapes that change a plan: a count or a name that differs,
+  an empty argument, `..N`, `...` twice, an empty `...`, a callee that reads `...length()`,
+  `match.call()` and `sys.call()`, and a site past its miss limit.
+- **Measured.** MEASURED_NUMBERS
