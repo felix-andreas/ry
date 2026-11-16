@@ -67,6 +67,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryUnname", 0, do_unname).prologue(),
     internal("ryIn", 0, do_in).prologue(),
     internal("ryUnlist", 0, do_unlist).prologue(),
+    internal("ryOrder", 0, do_order_prologue).prologue(),
+    internal("rySortInt", 0, do_sort_int).prologue(),
+    internal("rySortDefault", 0, do_sort_default).prologue(),
 ];
 
 /// The base functions that get a fast path, with the internal their prologue calls and the
@@ -105,6 +108,9 @@ const FAST_PATHS: &[(&str, &str, u64)] = &[
     ("tryInvokeRestart", "ryTryInvokeRestart", 0xe95eb95ec8453f49),
     ("invokeRestart", "ryInvokeRestart", 0x76da20c2e48ae6a6),
     ("ifelse", "ryIfelse", 0x6601afdecce51fb7),
+    ("order", "ryOrder", 0xb50da83a644da97f),
+    ("sort.int", "rySortInt", 0xa29f914f84517bb8),
+    ("sort.default", "rySortDefault", 0xfec0937a6bad0205),
     // The closures below also have a native entry, which runs a call whose arguments are values
     // already; the prologue runs the same code once the frame has forced the argument.
     ("isTRUE", "ryIsTrue", 0x092932cb0d38b378),
@@ -4431,4 +4437,535 @@ unsafe fn do_try_invoke_restart(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_invoke_restart_named(call: &Call<'_>) -> R<Sexp> {
     invoke_restart_by_name(call, false)
+}
+
+/// The algorithm `match.arg(method)` picks in `order` and `sort.int`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SortMethod {
+    Auto,
+    Shell,
+    Quick,
+    Radix,
+}
+
+/// `order(..., na.last, decreasing, method)` for keys that are no objects, in the branches the
+/// R body hands to `.Internal(radixsort())` or `.Internal(order())`. The body checks every key
+/// with two `vapply()` calls over closures and calls `match.arg`; here the checks are loops.
+/// Arguments are forced as the body forces them: the keys, `decreasing`, `na.last` where the
+/// sortedness pass reads it, then `na.last` before the internal. `method` is forced inside
+/// `match.arg`'s frame, so it must be left out or read without running code. An `na.last = NA`
+/// outside the radix sort, a `decreasing` the internals would reject, keys of differing lengths
+/// or of a type a kernel reports, and any kernel error decline, so the body reports them.
+unsafe fn do_order_prologue(call: &Call<'_>) -> R<Sexp> {
+    if !fast_paths_enabled() {
+        return decline();
+    }
+    let frame = ClosureFrame::of(call);
+    let symbols = symbols();
+    let Some(items) = dots(frame)? else {
+        return decline();
+    };
+    let mut keys: SmallVec<[Sexp; 4]> = SmallVec::new();
+    for (_, item) in items {
+        let value = eval::value_of(item)?;
+        crate::heap().root(value);
+        keys.push(value);
+    }
+    let Some(decreasing) = argument(frame, symbols.decreasing)? else {
+        return decline();
+    };
+    let Some(directions) = plain_logicals(decreasing) else {
+        return decline();
+    };
+    let numeric = |key: Sexp| matches!(key.kind(), SexpType::Integer | SexpType::Real);
+    let mut na_last = None;
+    if keys.len() == 1 && numeric(keys[0]) && !keys[0].is_object() && length(keys[0]) > 0 {
+        na_last = argument(frame, symbols.na_last)?;
+        if na_last.is_none() {
+            return decline();
+        }
+    }
+    let Some(method) = sort_method(frame)? else {
+        return decline();
+    };
+    if keys.iter().any(|key| key.is_object()) {
+        return decline();
+    }
+    let radix = match method {
+        SortMethod::Radix => true,
+        SortMethod::Auto => keys.iter().all(|&key| {
+            (numeric(key) || key.kind() == SexpType::Logical) && length(key) <= i32::MAX as usize
+        }),
+        SortMethod::Shell | SortMethod::Quick => false,
+    };
+    let na_last = match na_last {
+        Some(value) => value,
+        None => match argument(frame, symbols.na_last)? {
+            Some(value) => value,
+            None => return decline(),
+        },
+    };
+    let Some(na_last_flag) = plain_flag_or_na(na_last) else {
+        return decline();
+    };
+    let readable = |key: Sexp| match key.kind() {
+        SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::String => true,
+        SexpType::Complex => !radix,
+        _ => false,
+    };
+    if !keys.iter().all(|&key| readable(key))
+        || keys.iter().any(|&key| length(key) != length(keys[0]))
+    {
+        return decline();
+    }
+    let mut args: SmallVec<[Sexp; 8]> = SmallVec::new();
+    let value = if radix {
+        // `rep_len(decreasing, length(z))` pads an empty `decreasing` with NA.
+        if directions.is_empty() && !keys.is_empty() {
+            return decline();
+        }
+        let recycled: SmallVec<[i32; 4]> = (0..keys.len())
+            .map(|position| directions[position % directions.len()])
+            .collect();
+        if recycled.contains(&NA_LOGICAL) {
+            return decline();
+        }
+        let recycled = values::logical_vector(&recycled)?;
+        args.extend([
+            na_last,
+            recycled,
+            values::scalar_bool(false)?,
+            values::scalar_bool(true)?,
+        ]);
+        args.extend(keys.iter().copied());
+        kernel(sort::do_radixsort, &args, frame)
+    } else {
+        if na_last_flag == NA_LOGICAL || directions != [0] && directions != [1] {
+            return decline();
+        }
+        args.extend([na_last, decreasing]);
+        args.extend(keys.iter().copied());
+        kernel(sort::do_order, &args, frame)
+    };
+    match value {
+        Ok(value) => finish(frame, value, true),
+        Err(Unwind::Error(_)) => decline(),
+        Err(other) => Err(other),
+    }
+}
+
+/// `sort.int(x, partial, na.last, decreasing, method, index.return)` for a plain vector `x`; see
+/// [`sorted_vector`]. The body forces `decreasing`, `partial`, `index.return` and `x` in that
+/// order, `method` inside `match.arg`, and `na.last` in its own frame except on the radix path
+/// of a vector that is not numeric without `index.return`, where `order()` forces it.
+unsafe fn do_sort_int(call: &Call<'_>) -> R<Sexp> {
+    if !fast_paths_enabled() {
+        return decline();
+    }
+    let frame = ClosureFrame::of(call);
+    let symbols = symbols();
+    let Some(decreasing) = argument(frame, symbols.decreasing)? else {
+        return decline();
+    };
+    let Some(decreasing) = plain_flag(decreasing) else {
+        return decline();
+    };
+    if argument(frame, symbols.partial)? != Some(nil()) {
+        return decline();
+    }
+    let Some(index_return) = argument(frame, symbols.index_return)? else {
+        return decline();
+    };
+    let Some(index_return) = plain_flag(index_return) else {
+        return decline();
+    };
+    let Some(method) = sort_method(frame)? else {
+        return decline();
+    };
+    if !matches!(method, SortMethod::Auto | SortMethod::Radix) {
+        return decline();
+    }
+    // With `index.return` and an explicit radix method, `is.na(na.last)` comes before `x`.
+    let mut na_last = None;
+    if index_return && method == SortMethod::Radix {
+        na_last = argument(frame, symbols.na_last)?;
+        if na_last.is_none() {
+            return decline();
+        }
+    }
+    let Some(x) = argument(frame, symbols.x)? else {
+        return decline();
+    };
+    if x == nil() && method == SortMethod::Auto {
+        return finish(frame, nil(), true);
+    }
+    if !is_sortable_vector(x) {
+        return decline();
+    }
+    let numeric = matches!(x.kind(), SexpType::Integer | SexpType::Real);
+    let na_last = match na_last {
+        Some(value) => Some(value),
+        None if index_return || numeric || method_is_shell(method, x) => {
+            argument(frame, symbols.na_last)?
+        }
+        None => quiet_formal(frame, symbols.na_last, || {
+            values::scalar_logical(NA_LOGICAL)
+        })?,
+    };
+    let Some(na_last) = na_last.and_then(|value| plain_flag_or_na(value)) else {
+        return decline();
+    };
+    match sorted_vector(frame, x, decreasing, na_last, method, index_return)? {
+        Some(value) => finish(frame, value, true),
+        None => decline(),
+    }
+}
+
+/// `sort.default(x, decreasing, na.last, ...)` for an `x` that is no object, which the body
+/// passes to `sort.int()` with its other arguments; see [`sorted_vector`]. `sort.int` forces
+/// them in its own frame, so each must be left out or read without running code, and `...`
+/// may name only `partial` (as `NULL`), `method` and `index.return`, each once and in full.
+unsafe fn do_sort_default(call: &Call<'_>) -> R<Sexp> {
+    if !fast_paths_enabled() {
+        return decline();
+    }
+    let frame = ClosureFrame::of(call);
+    let symbols = symbols();
+    let Some(x) = argument(frame, symbols.x)? else {
+        return decline();
+    };
+    if x.is_object() {
+        return decline();
+    }
+    let decreasing = quiet_formal(frame, symbols.decreasing, || values::scalar_bool(false))?;
+    let Some(decreasing) = decreasing.and_then(|value| plain_flag(value)) else {
+        return decline();
+    };
+    let na_last = quiet_formal(frame, symbols.na_last, || {
+        values::scalar_logical(NA_LOGICAL)
+    })?;
+    let Some(na_last) = na_last.and_then(|value| plain_flag_or_na(value)) else {
+        return decline();
+    };
+    let Some(items) = dots(frame)? else {
+        return decline();
+    };
+    let (mut method, mut index_return, mut partial) = (None, None, false);
+    for (tag, item) in items {
+        let Some(value) = quiet_value(item)? else {
+            return decline();
+        };
+        if tag == symbols.method && method.is_none() {
+            method = Some(method_choice(value));
+        } else if tag == symbols.index_return && index_return.is_none() {
+            index_return = Some(plain_flag(value));
+        } else if tag == symbols.partial && !partial && value == nil() {
+            partial = true;
+        } else {
+            return decline();
+        }
+    }
+    let Some(method) = method.unwrap_or(Some(SortMethod::Auto)) else {
+        return decline();
+    };
+    let Some(index_return) = index_return.unwrap_or(Some(false)) else {
+        return decline();
+    };
+    if x == nil() && method == SortMethod::Auto {
+        return finish(frame, nil(), true);
+    }
+    if !matches!(method, SortMethod::Auto | SortMethod::Radix) || !is_sortable_vector(x) {
+        return decline();
+    }
+    match sorted_vector(frame, x, decreasing, na_last, method, index_return)? {
+        Some(value) => finish(frame, value, true),
+        None => decline(),
+    }
+}
+
+/// What `sort.int` returns for a plain vector `x` (see [`is_sortable_vector`]) with `partial`
+/// left `NULL` and `method` `"auto"` or `"radix"`. On the radix path that is `x[order(x, ...)]`.
+/// On the shell path (strings and complex numbers under `"auto"`) it is the values without NAs
+/// sorted by `.Internal(sort())`, or with names `x[order(x)]`, and then the NAs where `na.last`
+/// puts them. Only names survive either way. `None` where the body would report an error, and
+/// for `index.return` on the shell path.
+unsafe fn sorted_vector(
+    frame: ClosureFrame,
+    x: Sexp,
+    decreasing: bool,
+    na_last: i32,
+    method: SortMethod,
+    index_return: bool,
+) -> R<Option<Sexp>> {
+    let attempt = |result: R<Sexp>| match result {
+        Ok(value) => Ok(Some(value)),
+        Err(Unwind::Error(_)) => Ok(None),
+        Err(other) => Err(other),
+    };
+    if !method_is_shell(method, x) {
+        if x.kind() == SexpType::Complex {
+            return Ok(None);
+        }
+        // `x[!is.na(x)]` with `na.last = TRUE`, so that `ix` indexes the vector without NAs.
+        let (source, na_last) = if index_return && na_last == NA_LOGICAL {
+            let missing = na_positions(x)?;
+            if missing.is_empty() {
+                (x, 1)
+            } else {
+                (take(x, &without(length(x), &missing))?, 1)
+            }
+        } else {
+            (x, na_last)
+        };
+        let args = [
+            values::scalar_logical(na_last)?,
+            values::logical_vector(&[decreasing as i32])?,
+            values::scalar_bool(false)?,
+            values::scalar_bool(true)?,
+            source,
+        ];
+        let Some(order) = attempt(kernel(sort::do_radixsort, &args, frame))? else {
+            return Ok(None);
+        };
+        let positions: Vec<usize> = values::ints(order)
+            .iter()
+            .map(|&position| position as usize - 1)
+            .collect();
+        let sorted = take(source, &positions)?;
+        if !index_return {
+            return Ok(Some(sorted));
+        }
+        let result = values::list_vector(&[sorted, order])?;
+        values::set_attr(
+            result,
+            symbols().names,
+            values::string_vector(&["x", "ix"])?,
+        )?;
+        return Ok(Some(result));
+    }
+    if index_return {
+        return Ok(None);
+    }
+    let missing = na_positions(x)?;
+    let present = without(length(x), &missing);
+    let rest = if missing.is_empty() {
+        x
+    } else {
+        take(x, &present)?
+    };
+    let decreasing = values::scalar_bool(decreasing)?;
+    if values::names(x) != nil() {
+        let yes = values::scalar_bool(true)?;
+        let Some(order) = attempt(kernel(sort::do_order, &[yes, decreasing, rest], frame))? else {
+            return Ok(None);
+        };
+        let mut positions: Vec<usize> = values::ints(order)
+            .iter()
+            .map(|&position| present[position as usize - 1])
+            .collect();
+        match na_last {
+            NA_LOGICAL => {}
+            0 => {
+                positions.splice(0..0, missing.iter().copied());
+            }
+            _ => positions.extend(missing.iter().copied()),
+        }
+        return take(x, &positions).map(Some);
+    }
+    let Some(sorted) = attempt(kernel(sort::do_sort, &[rest, decreasing], frame))? else {
+        return Ok(None);
+    };
+    if missing.is_empty() || na_last == NA_LOGICAL {
+        return Ok(Some(sorted));
+    }
+    let missing = take(x, &missing)?;
+    let (first, second) = if na_last == 0 {
+        (missing, sorted)
+    } else {
+        (sorted, missing)
+    };
+    let combined = values::alloc(x.kind(), length(first) + length(second))?;
+    for index in 0..length(first) {
+        copy_element(first, index, combined, index);
+    }
+    for index in 0..length(second) {
+        copy_element(second, index, combined, length(first) + index);
+    }
+    Ok(Some(combined))
+}
+
+/// Whether `sort.int` takes the shell path for `x` under `method`: `"auto"` for a vector that is
+/// neither numeric nor logical.
+unsafe fn method_is_shell(method: SortMethod, x: Sexp) -> bool {
+    method == SortMethod::Auto
+        && !matches!(
+            x.kind(),
+            SexpType::Logical | SexpType::Integer | SexpType::Real
+        )
+}
+
+/// A vector `sort.int` sorts without dispatch or a step the port leaves to the body: atomic of
+/// a sortable type, no object, no attribute but names, and of a length `is.integer(length(x))`
+/// accepts.
+unsafe fn is_sortable_vector(x: Sexp) -> bool {
+    if !matches!(
+        x.kind(),
+        SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::String
+            | SexpType::Complex
+    ) || x.is_object()
+        || length(x) > i32::MAX as usize
+    {
+        return false;
+    }
+    let attributes = x.attrib();
+    attributes == nil() || (attributes.tag() == symbols().names && attributes.cdr() == nil())
+}
+
+/// The zero-based positions where `is.na(x)` is true, in order.
+unsafe fn na_positions(x: Sexp) -> R<Vec<usize>> {
+    let x = values::materialize(x)?;
+    let positions = match x.kind() {
+        SexpType::Logical | SexpType::Integer => values::ints(x)
+            .iter()
+            .enumerate()
+            .filter_map(|(position, &value)| (value == NA_INTEGER).then_some(position))
+            .collect(),
+        SexpType::Real => values::reals(x)
+            .iter()
+            .enumerate()
+            .filter_map(|(position, value)| value.is_nan().then_some(position))
+            .collect(),
+        SexpType::Complex => values::complexes(x)
+            .iter()
+            .enumerate()
+            .filter_map(|(position, value)| {
+                (value.r.is_nan() || value.i.is_nan()).then_some(position)
+            })
+            .collect(),
+        SexpType::String => (0..length(x))
+            .filter(|&position| x.element(position) == values::na_string())
+            .collect(),
+        _ => Vec::new(),
+    };
+    Ok(positions)
+}
+
+/// The positions below `count` that are not in the sorted `excluded`.
+fn without(count: usize, excluded: &[usize]) -> Vec<usize> {
+    (0..count)
+        .filter(|position| excluded.binary_search(position).is_err())
+        .collect()
+}
+
+/// `x[positions + 1]` for in-range positions: the elements and, when `x` has them, their names.
+unsafe fn take(x: Sexp, positions: &[usize]) -> R<Sexp> {
+    let result = crate::subset::select_elements(x, positions)?;
+    crate::heap().root(result);
+    let names = values::names(x);
+    if names != nil() {
+        let selected = crate::subset::select_elements(names, positions)?;
+        values::set_attr(result, symbols().names, selected)?;
+    }
+    Ok(result)
+}
+
+/// Copies element `index` of `source` into slot `slot` of `target`, a fresh vector of the same
+/// atomic type.
+unsafe fn copy_element(source: Sexp, index: usize, target: Sexp, slot: usize) {
+    match source.kind() {
+        SexpType::Logical | SexpType::Integer => {
+            values::ints_mut(target)[slot] = values::ints(source)[index];
+        }
+        SexpType::Real => values::reals_mut(target)[slot] = values::reals(source)[index],
+        SexpType::Complex => {
+            values::complexes_mut(target)[slot] = values::complexes(source)[index];
+        }
+        _ => values::set_elt(target, slot, source.element(index)),
+    }
+}
+
+/// The `method` formal as `match.arg` resolves it, when the call left it out or gave one of the
+/// choices in full in a value read without running code; `None` otherwise.
+unsafe fn sort_method(frame: ClosureFrame) -> R<Option<SortMethod>> {
+    let method = symbols().method;
+    match formals(frame, [method]) {
+        Some([Formal::Default(_)]) => Ok(Some(SortMethod::Auto)),
+        Some([Formal::Given(_)]) => {
+            Ok(given_without_code(frame, method)?.and_then(|value| method_choice(value)))
+        }
+        None => Ok(None),
+    }
+}
+
+/// The method a string names in full; `None` for anything `match.arg` would complete, reject
+/// or take as the whole vector of choices.
+unsafe fn method_choice(value: Sexp) -> Option<SortMethod> {
+    if value.kind() != SexpType::String
+        || value.attrib() != nil()
+        || length(value) != 1
+        || value.element(0) == values::na_string()
+    {
+        return None;
+    }
+    match value.element(0).bytes() {
+        b"auto" => Some(SortMethod::Auto),
+        b"shell" => Some(SortMethod::Shell),
+        b"quick" => Some(SortMethod::Quick),
+        b"radix" => Some(SortMethod::Radix),
+        _ => None,
+    }
+}
+
+/// The formal `symbol` when the body forces it inside a closure it calls: `default()` when the
+/// call left it out, else its value when reading it runs no code; `None` otherwise.
+unsafe fn quiet_formal(
+    frame: ClosureFrame,
+    symbol: Sexp,
+    default: impl FnOnce() -> R<Sexp>,
+) -> R<Option<Sexp>> {
+    match formals(frame, [symbol]) {
+        Some([Formal::Default(_)]) => default().map(Some),
+        Some([Formal::Given(_)]) => given_without_code(frame, symbol),
+        None => Ok(None),
+    }
+}
+
+/// The value of a `...` element when reading it runs no code.
+unsafe fn quiet_value(item: Sexp) -> R<Option<Sexp>> {
+    if item.kind() != SexpType::Promise {
+        return Ok(Some(item));
+    }
+    if item.car() != values::unbound() {
+        return Ok(Some(item.car()));
+    }
+    let settled = eval::settled_without_code(item)?;
+    if let Some(settled) = settled {
+        crate::heap().root(settled);
+    }
+    Ok(settled)
+}
+
+/// The elements of a logical vector without attributes, as `as.logical()` leaves it.
+unsafe fn plain_logicals<'a>(value: Sexp) -> Option<&'a [i32]> {
+    (value.kind() == SexpType::Logical && value.attrib() == nil() && !value.is_altrep())
+        .then(|| values::ints(value))
+}
+
+/// `TRUE` or `FALSE` as a logical vector of length one without attributes.
+unsafe fn plain_flag(value: Sexp) -> Option<bool> {
+    match plain_flag_or_na(value)? {
+        NA_LOGICAL => None,
+        flag => Some(flag != 0),
+    }
+}
+
+/// `TRUE`, `FALSE` or `NA` as a logical vector of length one without attributes.
+unsafe fn plain_flag_or_na(value: Sexp) -> Option<i32> {
+    match plain_logicals(value)? {
+        [flag] => Some(*flag),
+        _ => None,
+    }
 }

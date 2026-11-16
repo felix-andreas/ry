@@ -261,6 +261,11 @@ symbol_table! {
     inherits = "inherits",
     try_invoke_restart = "tryInvokeRestart",
     w = "w",
+    decreasing = "decreasing",
+    na_last = "na.last",
+    method = "method",
+    partial = "partial",
+    index_return = "index.return",
 }
 
 /// Session-wide objects the builtins keep. Each is rooted for the life of the session.

@@ -1,0 +1,417 @@
+[stdout]
+|  logi [1:4] FALSE FALSE TRUE TRUE
+| NULL
+|  logi [1:4] TRUE TRUE FALSE FALSE
+| NULL
+|  logi [1:5] FALSE FALSE TRUE TRUE NA
+| NULL
+|  logi [1:5] NA FALSE FALSE TRUE TRUE
+| NULL
+|  logi [1:5] TRUE TRUE FALSE FALSE NA
+| NULL
+|  logi [1:4] FALSE FALSE TRUE TRUE
+| NULL
+|  logi [1:5] NA TRUE TRUE FALSE FALSE
+| NULL
+|  logi [1:4] FALSE FALSE TRUE TRUE
+| NULL
+| List of 2
+|  $ x : logi [1:4] FALSE FALSE TRUE TRUE
+|  $ ix: int [1:4] 2 4 1 3
+| $names
+| [1] "x"  "ix"
+| 
+| List of 2
+|  $ x : logi [1:5] FALSE FALSE TRUE TRUE NA
+|  $ ix: int [1:5] 3 5 1 4 2
+| $names
+| [1] "x"  "ix"
+| 
+| List of 2
+|  $ x : logi [1:4] FALSE FALSE TRUE TRUE
+|  $ ix: int [1:4] 2 4 1 3
+| $names
+| [1] "x"  "ix"
+| 
+|  logi [1:4] FALSE FALSE TRUE TRUE
+| NULL
+|  logi [1:5] TRUE TRUE FALSE FALSE NA
+| NULL
+|  logi [1:5] NA FALSE FALSE TRUE TRUE
+| NULL
+|  int [1:5] 1 1 2 3 10
+| NULL
+|  int [1:5] 10 3 2 1 1
+| NULL
+|  int [1:6] 1 1 2 3 10 NA
+| NULL
+|  int [1:6] NA 1 1 2 3 10
+| NULL
+|  int [1:6] 10 3 2 1 1 NA
+| NULL
+|  int [1:5] 1 1 2 3 10
+| NULL
+|  int [1:6] NA 10 3 2 1 1
+| NULL
+|  int [1:5] 1 1 2 3 10
+| NULL
+| List of 2
+|  $ x : int [1:5] 1 1 2 3 10
+|  $ ix: int [1:5] 2 5 3 1 4
+| $names
+| [1] "x"  "ix"
+| 
+| List of 2
+|  $ x : int [1:6] 1 1 2 3 10 NA
+|  $ ix: int [1:6] 2 6 4 1 5 3
+| $names
+| [1] "x"  "ix"
+| 
+| List of 2
+|  $ x : int [1:5] 1 1 2 3 10
+|  $ ix: int [1:5] 2 5 3 1 4
+| $names
+| [1] "x"  "ix"
+| 
+|  int [1:5] 1 1 2 3 10
+| NULL
+|  int [1:6] 10 3 2 1 1 NA
+| NULL
+|  int [1:6] NA 1 1 2 3 10
+| NULL
+|  num [1:7] -Inf 0 0 1 2.5 ...
+| NULL
+|  num [1:7] Inf 2.5 2.5 1 0 ...
+| NULL
+|  num [1:9] -Inf 0 0 1 2.5 ...
+| NULL
+|  num [1:9] NA NaN -Inf 0 0 ...
+| NULL
+|  num [1:9] Inf 2.5 2.5 1 0 ...
+| NULL
+|  num [1:7] -Inf 0 0 1 2.5 ...
+| NULL
+|  num [1:9] NA NaN Inf 2.5 2.5 ...
+| NULL
+|  num [1:7] -Inf 0 0 1 2.5 ...
+| NULL
+| List of 2
+|  $ x : num [1:7] -Inf 0 0 1 2.5 ...
+|  $ ix: int [1:7] 2 3 4 6 1 7 5
+| $names
+| [1] "x"  "ix"
+| 
+| List of 2
+|  $ x : num [1:9] -Inf 0 0 1 2.5 ...
+|  $ ix: int [1:9] 3 5 6 8 1 9 7 2 4
+| $names
+| [1] "x"  "ix"
+| 
+| List of 2
+|  $ x : num [1:7] -Inf 0 0 1 2.5 ...
+|  $ ix: int [1:7] 2 3 4 6 1 7 5
+| $names
+| [1] "x"  "ix"
+| 
+|  num [1:7] -Inf 0 0 1 2.5 ...
+| NULL
+|  num [1:9] Inf 2.5 2.5 1 0 ...
+| NULL
+|  num [1:9] NA NaN -Inf 0 0 ...
+| NULL
+|  chr [1:7] "" "apple" "apple" "Apple" "éclair" "pear" "zoo"
+| NULL
+|  chr [1:7] "zoo" "pear" "éclair" "Apple" "apple" "apple" ""
+| NULL
+|  chr [1:8] "" "apple" "apple" "Apple" "éclair" "pear" "zoo" NA
+| NULL
+|  chr [1:8] NA "" "apple" "apple" "Apple" "éclair" "pear" "zoo"
+| NULL
+|  chr [1:8] "zoo" "pear" "éclair" "Apple" "apple" "apple" "" NA
+| NULL
+|  chr [1:7] "" "Apple" "apple" "apple" "pear" "zoo" "éclair"
+| NULL
+|  chr [1:8] NA "éclair" "zoo" "pear" "apple" "apple" "Apple" ""
+| NULL
+|  chr [1:7] "" "apple" "apple" "Apple" "éclair" "pear" "zoo"
+| NULL
+| List of 2
+|  $ x : chr [1:7] "" "apple" "apple" "Apple" ...
+|  $ ix: int [1:7] 6 2 7 3 4 1 5
+| $names
+| [1] "x"  "ix"
+| 
+|  chr "Error in sort.int(x, na.last = na.last, decreasing = decreasing, ...) : 'index.return' only for 'na.last = NA'"
+| NULL
+| List of 2
+|  $ x : chr [1:7] "" "Apple" "apple" "apple" ...
+|  $ ix: int [1:7] 6 3 2 7 1 5 4
+| $names
+| [1] "x"  "ix"
+| 
+|  chr [1:7] "" "apple" "apple" "Apple" "éclair" "pear" "zoo"
+| NULL
+|  chr [1:8] "zoo" "pear" "éclair" "Apple" "apple" "apple" "" NA
+| NULL
+|  chr [1:8] NA "" "apple" "apple" "Apple" "éclair" "pear" "zoo"
+| NULL
+|  cplx [1:4] 1-1i 1+0i 2+1i ...
+| NULL
+|  cplx [1:4] 2+1i 2+1i 1+0i ...
+| NULL
+|  cplx [1:5] 1-1i 1+0i 2+1i ...
+| NULL
+|  cplx [1:5] NA 1-1i 1+0i ...
+| NULL
+|  cplx [1:5] 2+1i 2+1i 1+0i ...
+| NULL
+|  chr "Error in order(x, na.last = na.last, decreasing = decreasing, method = \"radix\") : First arg is type 'complex'"| __truncated__
+| NULL
+|  chr "Error in order(x, na.last = na.last, decreasing = decreasing, method = \"radix\") : First arg is type 'complex'"| __truncated__
+| NULL
+|  cplx [1:4] 1-1i 1+0i 2+1i ...
+| NULL
+| List of 2
+|  $ x : cplx [1:4] 1-1i 1+0i 2+1i ...
+|  $ ix: int [1:4] 2 3 1 4
+| $names
+| [1] "x"  "ix"
+| 
+|  chr "Error in sort.int(x, na.last = na.last, decreasing = decreasing, ...) : 'index.return' only for 'na.last = NA'"
+| NULL
+|  chr "Error in order(x, na.last = na.last, decreasing = decreasing, method = \"radix\") : First arg is type 'complex'"| __truncated__
+| NULL
+|  cplx [1:4] 1-1i 1+0i 2+1i ...
+| NULL
+|  cplx [1:5] 2+1i 2+1i 1+0i ...
+| NULL
+|  cplx [1:5] NA 1-1i 1+0i ...
+| NULL
+|  num [1:4] Inf -Inf Inf -Inf
+| NULL
+|  num [1:2] -Inf Inf
+| NULL
+|  num [1:3] 1 2 3
+| NULL
+|  num [1:3] 1 2 3
+| NULL
+|  chr "Error in sort.int(x, na.last = na.last, decreasing = decreasing, ...) : 'partial' sorting not supported by radix method"
+| NULL
+|  Named int [1:3] 0 1 2
+|  - attr(*, "names")= chr [1:3] "d" "a" "b"
+| $names
+| [1] "d" "a" "b"
+| 
+|  Named int [1:4] 0 1 2 NA
+|  - attr(*, "names")= chr [1:4] "d" "a" "b" "c"
+| $names
+| [1] "d" "a" "b" "c"
+| 
+|  Named num [1:3] NA 2 1
+|  - attr(*, "names")= chr [1:3] "c" "b" "a"
+| $names
+| [1] "c" "b" "a"
+| 
+|  Named chr [1:3] NA "a" "x"
+|  - attr(*, "names")= chr [1:3] "a" "c" "b"
+| $names
+| [1] "a" "c" "b"
+| 
+|  Named chr [1:4] "x" "x" "a" NA
+|  - attr(*, "names")= chr [1:4] "b" "d" "c" "a"
+| $names
+| [1] "b" "d" "c" "a"
+| 
+|  Named cplx [1:3] 1+0i 2+0i NA
+|  - attr(*, "names")= chr [1:3] "r" "p" "q"
+| $names
+| [1] "r" "p" "q"
+| 
+| List of 2
+|  $ x : Named num [1:2] 1 2
+|   ..- attr(*, "names")= chr [1:2] "a" "b"
+|  $ ix: int [1:2] 2 1
+| $names
+| [1] "x"  "ix"
+| 
+|  num [1:3] 1 2 3
+| NULL
+|  Named chr [1:2] "a" "c"
+|  - attr(*, "names")= chr [1:2] "q" "p"
+| $names
+| [1] "q" "p"
+| 
+|  Named int [1:2] 1 3
+|  - attr(*, "names")= chr [1:2] "y" "z"
+| $names
+| [1] "y" "z"
+| 
+|  num [1:4] 1 2 3 4
+| NULL
+|  chr [1:4] "a" "b" "c" "d"
+| NULL
+|  int [1:4] 4 3 2 1
+| NULL
+|  int(0) 
+| NULL
+|  chr(0) 
+| NULL
+| List of 2
+|  $ x : num(0) 
+|  $ ix: int(0) 
+| $names
+| [1] "x"  "ix"
+| 
+|  num 5
+| NULL
+|  logi(0) 
+| NULL
+|  logi(0) 
+| NULL
+|  chr NA
+| NULL
+|  int [1:10] 1 2 3 4 5 6 7 8 9 10
+| NULL
+|  int [1:10] 1 2 3 4 5 6 7 8 9 10
+| NULL
+|  int [1:6] 6 5 4 3 2 1
+| NULL
+|  NULL
+| NULL
+|  NULL
+| NULL
+|  chr "Error in order(x, na.last = na.last, decreasing = decreasing, method = \"radix\") : argument 1 is not a vector"
+| NULL
+|  logi FALSE
+| NULL
+|  logi TRUE
+| NULL
+|  logi TRUE
+| NULL
+|  Factor w/ 3 levels "c","b","a": 1 2 3 3
+| $levels
+| [1] "c" "b" "a"
+| 
+| $class
+| [1] "factor"
+| 
+|  Factor w/ 3 levels "c","b","a": 3 3 2 1 NA
+| $levels
+| [1] "c" "b" "a"
+| 
+| $class
+| [1] "factor"
+| 
+|  Factor w/ 3 levels "c","b","a": 1 2 3 3
+| $levels
+| [1] "c" "b" "a"
+| 
+| $class
+| [1] "factor"
+| 
+|  Ord.factor w/ 3 levels "lo"<"mid"<"hi": 1 2 3
+| $levels
+| [1] "lo"  "mid" "hi" 
+| 
+| $class
+| [1] "ordered" "factor" 
+| 
+|  Date[1:3], format: "2023-01-05" "2024-01-01" "2024-03-01"
+| $class
+| [1] "Date"
+| 
+|  Date[1:2], format: "2024-03-01" "2023-01-05"
+| $class
+| [1] "Date"
+| 
+|  POSIXct[1:3], format: "1970-01-01 00:00:01" "1970-01-01 00:00:03" "1970-01-01 00:00:05"
+| $class
+| [1] "POSIXct" "POSIXt" 
+| 
+| $tzone
+| [1] "UTC"
+| 
+|  num [1:4] 1 1 2 2
+| NULL
+|  chr [1:4] "b" "b" "a" "a"
+| NULL
+|  chr "sort.myclass"
+| NULL
+|  'backwards' num [1:3] 3 2 1
+| $class
+| [1] "backwards"
+| 
+|  chr "sort.numeric"
+| NULL
+|  chr "sort.numeric"
+| NULL
+|  chr [1:2] "a" "b"
+| NULL
+|  num [1:3] 1 2 3
+| NULL
+|  chr "Error in sort.int(x, na.last = na.last, decreasing = decreasing, ...) : 'x' must be atomic"
+| NULL
+|  chr "Error in sort.int(x, na.last = na.last, decreasing = decreasing, ...) : raw vectors cannot be sorted"
+| NULL
+|  chr "Error in order(x, na.last = na.last, decreasing = decreasing, method = \"radix\") : 'decreasing' elements must "| __truncated__
+| NULL
+|  chr "Error in sort(c(3, 1), decreasing = c(TRUE, FALSE)) : 'decreasing' must be a length-1 logical vector.\nDid you "| __truncated__
+| NULL
+|  chr "Error in sort(c(3, 1), decreasing = \"yes\") : 'decreasing' must be a length-1 logical vector.\nDid you intend "| __truncated__
+| NULL
+|  chr "Error in order(x, na.last = na.last, decreasing = decreasing, method = \"radix\") : 'decreasing' elements must "| __truncated__
+| NULL
+|  chr "Error in if (is.null(partial) && !index.return && is.numeric(x)) { : missing value where TRUE/FALSE needed"
+| NULL
+|  chr "Error in sort.int(x, na.last = na.last, decreasing = decreasing, ...) : 'index.return' only for 'na.last = NA'"
+| NULL
+|  chr "Error in sort.int(x, na.last = na.last, decreasing = decreasing, ...) : 'partial' sorting not supported by radix method"
+| NULL
+|  chr "Error in order(x, na.last = na.last, decreasing = decreasing, method = \"radix\") : First arg is type 'complex'"| __truncated__
+| NULL
+|  chr "Error in match.arg(method) : 'arg' should be one of “auto”, “shell”, “quick”, “radix”"
+| NULL
+|  chr "Error in is.na(na.last) || na.last : invalid 'y' type in 'x || y'"
+| NULL
+|  chr "Error in sort.default() : argument \"x\" is missing, with no default"
+| NULL
+|  chr "Error in sort.int() : argument \"x\" is missing, with no default"
+| NULL
+|  num [1:2] 1 2
+| NULL
+|  chr [1:3] "decreasing" "x" "na.last"
+| NULL
+|  chr [1:2] "b" "a"
+| NULL
+|  chr [1:4] "decreasing" "index.return" "x" "na.last"
+| NULL
+| List of 2
+|  $ x : logi [1:2] FALSE TRUE
+|  $ ix: int [1:2] 2 1
+| $names
+| [1] "x"  "ix"
+| 
+|  chr [1:3] "index.return" "na.last" "x"
+| NULL
+|  chr "boom"
+| NULL
+|  num 20101
+| NULL
+|  int [1:3] 9 5 3
+| NULL
+|  int [1:3] 3 2 1
+| NULL
+|  int [1:3] 1 2 3
+| NULL
+|  logi TRUE
+| NULL
+|  int [1:3] 10 2 3
+| NULL
+[messages]
+[warnings]
+- NAs introduced by coercion (in sort.int(x, na.last = na.last, decreasing = decreasing, ...))
+- NAs introduced by coercion (in order(x, na.last = na.last, decreasing = decreasing, method = "radix"))
+[errors]
+[value]
+NULL
+| NULL

@@ -8,7 +8,7 @@
 use {
     crate::{
         builtins::{BuiltinDef, Call, internal},
-        coerce::{coerce_vector, factor_as_character},
+        coerce::{CoercionWarnings, coerce_vector, factor_as_character, parse_real, real_to_int},
         conditions::warning,
         eval, records, standard_library,
         subset::select_elements,
@@ -51,9 +51,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("rowsum_df", 5, do_rowsum_data_frame),
     internal("split", 2, do_split),
     internal("identical", 9, do_identical),
-    // No vector carries sortedness metadata, so the fast pass never applies and the caller
-    // sorts; the answer is the same either way.
-    internal("sorted_fpass", 3, |_| unsafe { values::scalar_bool(false) }),
+    internal("sorted_fpass", 3, do_sorted_fpass),
     // The libR host replaces this with a real wrapper for package code.
     internal("wrap_meta", 3, |call| Ok(call.arg(0))),
 ];
@@ -341,7 +339,7 @@ pub unsafe fn identical(x: Sexp, y: Sexp, flags: &IdenticalFlags) -> bool {
     identical_skipping(x, y, flags, &[])
 }
 
-unsafe fn do_sort(call: &Call<'_>) -> R<Sexp> {
+pub(crate) unsafe fn do_sort(call: &Call<'_>) -> R<Sexp> {
     let x = call.arg(0);
     let decreasing = flag(call.arg(1), "'decreasing' must be TRUE or FALSE")?;
     if x == nil() {
@@ -493,9 +491,41 @@ unsafe fn do_qsort(call: &Call<'_>) -> R<Sexp> {
     values::named_list(&[("x", result), ("ix", index)])
 }
 
+/// `sorted_fpass(x, decreasing, na.last)`: no vector carries sortedness metadata, so the fast
+/// pass never applies and the caller sorts. The flags still go through GNU R's `asInteger`,
+/// whose coercion warnings `sort.int` reports.
+unsafe fn do_sorted_fpass(call: &Call<'_>) -> R<Sexp> {
+    for flag in [call.arg(1), call.arg(2)] {
+        let mut warnings = CoercionWarnings::default();
+        if length(flag) > 0 {
+            match flag.kind() {
+                SexpType::String => {
+                    if let Some(text) = string_at(flag, 0)
+                        && !text.trim_ascii().is_empty()
+                    {
+                        match parse_real(&text) {
+                            None => warnings.na = true,
+                            Some(value) => warnings.integer_range = real_to_int(value).1,
+                        }
+                    }
+                }
+                SexpType::Real => warnings.integer_range = real_to_int(values::reals(flag)[0]).1,
+                SexpType::Complex => {
+                    let value = values::complexes(flag)[0];
+                    warnings.integer_range = real_to_int(value.r).1;
+                    warnings.imaginary = !is_na_real(value.r) && value.i != 0.0;
+                }
+                _ => {}
+            }
+        }
+        warnings.report()?;
+    }
+    values::scalar_bool(false)
+}
+
 /// `order(na.last, decreasing, ...)`: the stable permutation that sorts the keys
 /// lexicographically.
-unsafe fn do_order(call: &Call<'_>) -> R<Sexp> {
+pub(crate) unsafe fn do_order(call: &Call<'_>) -> R<Sexp> {
     let na_last = match as_logical_scalar(call.arg(0)) {
         NA_LOGICAL => return Err(error("invalid 'na.last' value")),
         value => value != 0,
@@ -506,8 +536,13 @@ unsafe fn do_order(call: &Call<'_>) -> R<Sexp> {
         return Ok(nil());
     };
     let count = length(first);
-    if keys.iter().any(|&key| length(key) != count) {
-        return Err(error("argument lengths differ"));
+    for (position, &key) in keys.iter().enumerate() {
+        if key == nil() {
+            return Err(error(format!("argument {} is not a vector", position + 1)));
+        }
+        if length(key) != count {
+            return Err(error("argument lengths differ"));
+        }
     }
     let keys = keys
         .iter()
@@ -570,7 +605,7 @@ unsafe fn do_order(call: &Call<'_>) -> R<Sexp> {
 /// `radixsort(na.last, decreasing, retgrp, sortstr, ...)`, which `order(method = "radix")` and
 /// `sort(method = "radix")` call. `na.last = NA` drops the rows with an NA in any key, and
 /// `retgrp` adds the group boundaries of equal rows.
-unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
+pub(crate) unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
     let na_last = as_logical_scalar(call.arg(0));
     let return_groups = as_logical_scalar(call.arg(2)) == 1;
     let sort_strings = as_logical_scalar(call.arg(3)) != 0;
