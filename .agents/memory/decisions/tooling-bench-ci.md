@@ -288,3 +288,21 @@ Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and be
 - **Nested `cargo build` calls in tests stay,** because a no-op build costs 0.35 s once per process (`syntax::testing::cargo_build`) and is the only freshness guarantee. Caching `build_package` across processes would save about 2 s, not worth a staleness risk.
 - **Tests that link `frames` live in `crates/frames/tests`,** so interp's test binaries link no Polars (each moved binary was 748 MB).
 - **interp's integration tests stay separate binaries,** because the interpreter is a process-wide singleton (`interp::install`) and tests sharing one process would share its state. typed's tests are one binary (`tests/test_typed/`), table's engine tests one (`tests/test_table/`); `test_memory` keeps its own `#[global_allocator]`.
+
+## The interpreter stays one crate, because the edit loop is bound by links
+
+**Status:** built (a decision not to split).
+
+- **Measured** (4 cores, debug, one-line body edit, then `cargo build -p ry-lang -p libr`): interp 11.0 s, heap 11.5 s, jit 11.7 s, semantics 14.4 s, ry 9.9 s; `cargo check -p <crate>` 0.8 to 3.9 s. A clean build is 56 s for `ry-lang` and 145 s more for `libr`, whose critical path is polars-core, polars-ops, table, frames, libr.
+- **Where the time goes.** After an interp edit, interp's rustc takes 3.4 s with 1 of 256 codegen units recompiled; the rest is fixed front-end cost. The `libR.so` link alone takes 3.6 s, and the binary was 1.38 GB, 905 MB of it symbol names.
+- **Rejected: splitting `interp`.** 58 of its 69 modules form one dependency cycle through `use crate::`, which a split would have to break first, for an estimated 1 to 2 s of a 10 to 15 s loop.
+- **Rejected by measurement.** The Cranelift codegen backend cannot build interp's explicit tail calls or the variadic `f64` calls in `numeric` and `stats`, was no faster with those three on LLVM, and broke unwinding for salsa cancellation in 9 language-server tests. `-Zthreads=4`, `debug = 0` and `split-debuginfo = "unpacked"` changed nothing. GNU `bfd` took 30 s per `libR.so` link.
+- **Not tried.** sccache: containers are fresh and have no persistent cache, so it would need a remote backend and would help only clean builds.
+- **What was done instead.** Legacy mangling in the dev profile, mold where installed, and keeping Polars out of interp's test links (the entries on those in this file).
+
+## Agent-written notes are not mass-rewritten for brevity
+
+**Status:** built (a process rule).
+
+- **What happened.** A terse rewrite of the decision log by agents that had not written it halved its size and dropped a load-bearing fact (a number behind a decision, a rejected alternative, a trap, a code pointer) from about 421 of 509 entries; an entry-by-entry comparison against the old text put them back. A rewrite of long source comments lost invariants and the reasons behind constants in about a dozen blocks while saving 20 KB of 3.26 MB.
+- **Rule.** Cut context cost by structure (area files, an index of headings, byte budgets, a comment lint that ratchets) and by deleting what is superseded, not by rewording dense notes. A rewording pass needs an entry-by-entry comparison against the original, which costs more than it saves.

@@ -569,6 +569,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The code bases are a benchmark suite of their own, outside the headline
 - The profile summary hashes private package names with a secret key per project
 - The edit-to-signal loop is tuned for agents
+- The interpreter stays one crate, because the edit loop is bound by links
+- Agent-written notes are not mass-rewritten for brevity
 
 ## Docs, process and positioning
 
