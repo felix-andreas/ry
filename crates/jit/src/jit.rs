@@ -971,6 +971,13 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
         for index in 0..count {
             (&raw mut (*children.add(index)).activation.compiled).write(std::ptr::null());
         }
+        // Tier 0 releases down to `machine.mark`, and the instructions compiled code hands back
+        // run on this machine. An inlined call's activation records the stack height at its
+        // first start, and every later start expects to find it there, so while the body runs
+        // the mark is the height at entry. Whatever lies between the two marks stays rooted until
+        // the body returns, which only delays its release.
+        let frame_mark = machine.mark;
+        machine.mark = heap().handle_mark();
         let mut activation = Activation {
             registers: bytecode::register_address(machine.base),
             loops: loops.as_mut_ptr(),
@@ -993,6 +1000,7 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
         let pending = std::ptr::addr_of!((*parked).pending);
         interp().held_unwinds.push(pending);
         let result: *mut Header = (compiled.entry)(activation_address);
+        machine.mark = frame_mark;
         let held = interp().held_unwinds.pop();
         debug_assert_eq!(held, Some(pending), "compiled code entries nest");
         drop(running);
