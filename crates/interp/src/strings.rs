@@ -30,7 +30,7 @@ use {
         object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp, is_na_real},
         strings::Encoding,
     },
-    memchr::memmem,
+    memchr::{memchr, memmem},
     regex_automata::{Anchored, Input, MatchKind, meta, util::syntax},
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::{SmallVec, smallvec},
@@ -2367,9 +2367,23 @@ unsafe fn grep(call: &Call<'_>, logical: bool) -> R<Sexp> {
     let matcher = Matcher::compile(
         &pattern,
         options,
-        CompileErrors::for_text(&pattern, text, use_bytes),
+        CompileErrors::ForText { text, use_bytes },
     )?;
+    let literal = match &matcher {
+        Matcher::Literal(finder) if !use_bytes => Some(finder.as_ref()),
+        _ => None,
+    };
     let hit = |index: usize| -> R<bool> {
+        if let Some(finder) = literal {
+            let charsxp = text.element(index);
+            // The bytes of a string the heap validated as UTF-8 are its text, so a fixed pattern
+            // searches them in place.
+            if charsxp.is_valid_utf8() && !charsxp.has_gp(gp::LATIN1 | gp::BYTES) {
+                let found =
+                    charsxp != na_string() && find_literal_bytes(finder, charsxp.bytes()).is_some();
+                return Ok(found != invert);
+            }
+        }
         let found = match subject_at(text, index, use_bytes) {
             Some(_) if !valid_subject(text, index, use_bytes, options, false)? => false,
             Some(element) => matcher.find_at(&element, 0)?.is_some(),
@@ -2384,11 +2398,18 @@ unsafe fn grep(call: &Call<'_>, logical: bool) -> R<Sexp> {
         }
         return Ok(result);
     }
-    let hits = (0..count).map(hit).collect::<R<Vec<bool>>>()?;
-    let selected: Vec<usize> = (0..count).filter(|&index| hits[index]).collect();
+    let mut selected = Vec::new();
+    for index in 0..count {
+        if hit(index)? {
+            selected.push(index);
+        }
+    }
     if !value {
-        let indices: Vec<i32> = selected.iter().map(|&index| index as i32 + 1).collect();
-        return values::integer_vector(&indices);
+        let result = values::alloc_uninit(SexpType::Integer, selected.len())?;
+        for (slot, &index) in values::ints_mut(result).iter_mut().zip(&selected) {
+            *slot = index as i32 + 1;
+        }
+        return Ok(result);
     }
     let result = alloc(SexpType::String, selected.len())?;
     for (position, &index) in selected.iter().enumerate() {
@@ -2614,7 +2635,7 @@ unsafe fn regexpr(call: &Call<'_>, global: bool) -> R<Sexp> {
     let matcher = Matcher::compile(
         &pattern,
         options,
-        CompileErrors::for_text(&pattern, text, use_bytes),
+        CompileErrors::ForText { text, use_bytes },
     )?;
     let report = MatchReport::new(&pattern, text, use_bytes);
     let groups = if options.perl {
@@ -3112,10 +3133,19 @@ enum CompileErrors {
     Quoted,
     Wide,
     Regexec,
+    /// `Wide` when the pattern or an element of `text` is not ASCII (and `use_bytes` is off),
+    /// else `Quoted`. It is resolved only when a pattern fails, since it scans every text.
+    ForText {
+        text: Sexp,
+        use_bytes: bool,
+    },
 }
 
 impl CompileErrors {
-    unsafe fn for_text(pattern: &str, text: Sexp, use_bytes: bool) -> CompileErrors {
+    unsafe fn resolve(self, pattern: &str) -> CompileErrors {
+        let CompileErrors::ForText { text, use_bytes } = self else {
+            return self;
+        };
         let wide = !use_bytes
             && (!pattern.is_ascii()
                 || (text.kind() == SexpType::String
@@ -3126,6 +3156,39 @@ impl CompileErrors {
             CompileErrors::Quoted
         }
     }
+}
+
+/// Where `finder`'s needle first starts in `haystack`.
+fn find_literal(finder: &memmem::Finder<'_>, haystack: &[u8]) -> Option<usize> {
+    let needle = finder.needle();
+    // R strings are mostly short, where the searcher's setup outweighs its scan, and finding
+    // each candidate first byte with `memchr` is several times faster.
+    if haystack.len() >= 64 {
+        return finder.find(haystack);
+    }
+    let Some((&first, rest)) = needle.split_first() else {
+        return Some(0);
+    };
+    let mut from = 0;
+    while let Some(offset) = memchr(first, &haystack[from..]) {
+        let start = from + offset;
+        if haystack
+            .get(start + 1..start + needle.len())
+            .is_some_and(|tail| tail == rest)
+        {
+            return Some(start);
+        }
+        from = start + 1;
+    }
+    None
+}
+
+/// [`find_literal`] on a string's bytes, which GNU R reads as a C string: a match that reaches
+/// past a NUL written into the string is no match.
+fn find_literal_bytes(finder: &memmem::Finder<'_>, bytes: &[u8]) -> Option<usize> {
+    let start = find_literal(finder, bytes)?;
+    let end = start + finder.needle().len();
+    memchr(0, &bytes[..end]).is_none().then_some(start)
 }
 
 #[derive(Clone)]
@@ -3295,7 +3358,7 @@ impl Matcher {
         }
         let translated = translate(pattern);
         let failure = |reason: String| -> crate::unwind::Unwind {
-            match errors {
+            match unsafe { errors.resolve(pattern) } {
                 CompileErrors::Quoted => {
                     if let Err(unwind) =
                         warning(format!("TRE pattern compilation error '{reason}'"))
@@ -3306,7 +3369,7 @@ impl Matcher {
                         "invalid regular expression '{pattern}', reason '{reason}'"
                     ))
                 }
-                CompileErrors::Wide => {
+                CompileErrors::Wide | CompileErrors::ForText { .. } => {
                     error(format!("invalid regular expression, reason '{reason}'"))
                 }
                 CompileErrors::Regexec => error(format!("regcomp error: '{reason}'")),
@@ -3372,26 +3435,8 @@ impl Matcher {
         }
         match self {
             Matcher::Literal(finder) => {
-                let haystack = &text.as_bytes()[from..];
-                let needle = finder.needle();
-                // R strings are mostly short, where the searcher's setup outweighs its scan and
-                // comparing at each candidate first byte is several times faster.
-                let start = if haystack.len() < 64 {
-                    match needle.split_first() {
-                        Some((&first, rest)) => {
-                            haystack.iter().enumerate().position(|(start, &byte)| {
-                                byte == first
-                                    && haystack
-                                        .get(start + 1..start + needle.len())
-                                        .is_some_and(|tail| tail == rest)
-                            })
-                        }
-                        None => Some(0),
-                    }
-                } else {
-                    finder.find(haystack)
-                };
-                Ok(start.map(|start| (from + start, from + start + needle.len())))
+                let start = find_literal(finder, &text.as_bytes()[from..]);
+                Ok(start.map(|start| (from + start, from + start + finder.needle().len())))
             }
             Matcher::Pattern { regex, .. } => regex
                 .find_from_pos(text, from)
