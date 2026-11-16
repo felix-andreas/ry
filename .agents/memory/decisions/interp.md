@@ -1068,9 +1068,9 @@ without cells, promise forcing in the loop, and one observer word on the general
   against the formals (`matched_sources`), and entered the callee through the generic handler.
 - **What was weak.** Matching reads only the formals and the arguments' count and names, and a
   wrapper is called with the same shape of `...` again and again, so each call derived the same
-  sources as the one before. The mechanism row "call: forwards `...`" cost DOTS_BEFORE
-  instructions against about 1,170 for a call with three arguments, and 4.7% of the hot suite's
-  closure calls matched per call.
+  sources as the one before. The mechanism row "call: forwards `...`" cost 3,531 instructions
+  against 1,213 for a call with three arguments, and 4.7% of the hot suite's closure calls
+  matched per call.
 - **Chosen shape.** A site that passes `...` once keeps a spread plan (`PLAN_SPREAD`,
   `spread_plan` in `bytecode.rs`): the sources matched for one call, and beside them how many
   arguments `...` held and their names. A call for which that holds binds like any planned call.
@@ -1078,14 +1078,25 @@ without cells, promise forcing in the loop, and one observer word on the general
   frame's `...` slot with the plan and writes the chain's items where the site has `...`. Those
   items are the caller's promises and values and pass on unchanged.
 - **When the plan does not hold.** A call whose `...` holds another count or other names replans
-  the site, which counts as a miss, and after `PLAN_MISSES` misses the site keeps its last plan and
-  matches every other call per call. An empty argument in `...` is never planned for, because it
-  takes a formal's default where a value would not. A site that passes `...` twice, or whose
-  arguments carry a name that is no symbol, matches per call.
+  the site, which counts as a miss on the count that a callee with other formals or body also
+  uses, and after `PLAN_MISSES` misses the site keeps its last plan and matches every other call
+  per call. A call with an empty argument, in `...` or beside it, is never planned for and never
+  uses a plan, because matching gives an empty argument's formal its default: `call_fast` keeps
+  an eager argument whose value is the empty argument as a reference for the same reason. A site
+  that passes `...` twice, or whose `...` holds a name that is no symbol, matches per call.
+- **An unset `...` slot is not an empty `...`.** A function without the formal that assigns
+  `...` somewhere has a `...` slot, and while it is unset the function's `...` is an enclosing
+  function's. The slot paths (`forwardable_dots`, `slot_builtin_call`, `call_fast`) leave such a
+  call to the generic path, which looks `...` up. Taking the unset slot as empty passed no
+  arguments where GNU R passes the enclosing function's.
 - **Why a plan per site and not a table per shape.** A site with several shapes of `...` could
-  keep one plan for each. The sampled sites showed one shape per site for nearly all calls, so
-  the single plan with a miss count is the smaller design, and a site with alternating shapes
-  pays what it paid before.
+  keep one plan for each. How many sites alternate between shapes is not measured. The single
+  plan with a miss count is the smaller design, and a site with alternating shapes replans up
+  to the miss limit and then matches per call whatever its last plan does not hold for.
+- **One representation for both tiers.** Tier 1 does not inline a call that passes `...`. The
+  row is what such inlining is to read: the count, the names and the sources, copied at compile
+  time and guarded by the chain's shape and the callee, because a plan can be replaced or freed
+  while compiled code lives.
 - **Kept apart from the common call.** `call_fast` takes `SPREAD` as a constant parameter, so the
   path of a site without `...` carries none of its tests (`crates/interp/AGENTS.md`, the trap
   about rare branches in the call handlers). `call_generic_by_name` tries the spread path for a
@@ -1094,5 +1105,11 @@ without cells, promise forcing in the loop, and one observer word on the general
   call afresh, in both the generic handler and `call_fast`. The oracle case
   `calls__dots_spread_plans` pins the shapes that change a plan: a count or a name that differs,
   an empty argument, `..N`, `...` twice, an empty `...`, a callee that reads `...length()`,
-  `match.call()` and `sys.call()`, and a site past its miss limit.
-- **Measured.** MEASURED_NUMBERS
+  `match.call()` and `sys.call()`, a site past its miss limit, partial names, a frame that
+  leaves its slots between two calls, an unset and an assigned `...`, changed formals, `do.call`
+  and S3 dispatch behind two wrappers. `check_argument_reference_agreement` generates forwarding
+  calls of varying counts and names with invariants on.
+- **Measured** (`profiling` builds, like for like). "call: forwards `...`" 3,531 to 2,036
+  instructions; no other `call:` row moved by more than 0.8%. `just bench hot` weighted
+  instructions: finbench -2.1%, dsbench -2.6%, biobench -2.3%. The code-base suites' seconds
+  did not move beyond their run-to-run noise (finbench 107.9 and 108.0).
