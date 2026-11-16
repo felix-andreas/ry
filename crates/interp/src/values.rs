@@ -12,6 +12,7 @@ use {
         records::NativeKind,
         strings::Encoding,
     },
+    memchr::memchr,
     rustc_hash::FxHashMap,
     std::borrow::Cow,
 };
@@ -1010,8 +1011,13 @@ pub unsafe fn same_string(left: Sexp, right: Sexp) -> bool {
 #[inline]
 pub unsafe fn char_str<'a>(charsxp: Sexp) -> Cow<'a, str> {
     if charsxp.is_valid_utf8() && !charsxp.has_gp(gp::LATIN1 | gp::BYTES) {
-        // SAFETY: the heap validated these bytes when it interned them, and they never change.
-        return Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(charsxp.bytes()) });
+        // GNU R reads `CHAR()` as a C string, so native code that trims a string in place by
+        // writing a NUL into it (udunits' `ut_trim`, called by units) shortens the text R sees.
+        let bytes = charsxp.bytes();
+        let bytes = memchr(0, bytes).map_or(bytes, |end| &bytes[..end]);
+        // SAFETY: the heap validated these bytes when it interned them, and a prefix that ends
+        // before a NUL byte is still valid UTF-8.
+        return Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(bytes) });
     }
     unsafe { char_str_decoded(charsxp) }
 }
@@ -1020,6 +1026,9 @@ pub unsafe fn char_str<'a>(charsxp: Sexp) -> Cow<'a, str> {
 #[cold]
 unsafe fn char_str_decoded<'a>(charsxp: Sexp) -> Cow<'a, str> {
     let bytes = charsxp.bytes();
+    // GNU R reads `CHAR()` as a C string, so native code that trims a string in place by
+    // writing a NUL into it (udunits' `ut_trim`, called by units) shortens the text R sees.
+    let bytes = memchr(0, bytes).map_or(bytes, |end| &bytes[..end]);
     // Strict validation runs a word at a time over ASCII, where the lossy decoder steps through
     // chunks. The bit is only a hint, since native code can set any of a string's flags.
     if charsxp.has_gp(gp::ASCII)
@@ -1488,6 +1497,31 @@ pub unsafe fn shallow_duplicate_attr(object: Sexp) -> R<Sexp> {
     if copy.is_array() {
         copy.set_array(false);
     }
+    Ok(copy)
+}
+
+/// The copy a replacement function such as `attr<-` or `[<-` works on when its target is shared:
+/// [`shallow_duplicate_attr`], except that an ALTREP instance becomes a new instance of its class
+/// over the same data. Every instance counts as shared, so that an element write copies it into
+/// ordinary storage, which means GNU R's in-place change of an unshared instance's attributes is
+/// a copy here; a copy into ordinary storage would drop the class, and with it methods such as
+/// `Serialized_state`. A caller that writes elements into the copy itself must use
+/// [`shallow_duplicate_attr`].
+pub unsafe fn replacement_copy(object: Sexp) -> R<Sexp> {
+    if !object.is_altrep() {
+        return shallow_duplicate_attr(object);
+    }
+    let heap = crate::heap();
+    heap.root(object);
+    let copy = heap.alloc_altrep(object.kind(), object.tag(), object.car(), object.cdr())?;
+    copy.mark_not_mutable();
+    heap.root(copy);
+    if object.attrib() != nil() {
+        let attributes = duplicate_with(object.attrib(), false)?;
+        heap.set_attrib(copy, attributes);
+    }
+    copy.set_object(object.is_object());
+    copy.set_gp(object.gp() & gp::S4_OBJECT);
     Ok(copy)
 }
 

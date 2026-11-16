@@ -511,6 +511,8 @@ local({{
   ns <- new.env(hash = TRUE, parent = .BaseNamespaceEnv)
   info <- new.env(hash = TRUE, parent = baseenv())
   assign(".__NAMESPACE__.", info, envir = ns)
+  # `.S3methods()` lists every loaded namespace's table, so one without it fails `ls()`.
+  assign(".__S3MethodsTable__.", new.env(hash = TRUE, parent = baseenv()), envir = ns)
   info$spec <- c(name = "{name}", version = "0.0.0")
   # `packageDescription()`, which `sessionInfo()` calls for every loaded namespace, reads a
   # DESCRIPTION from the namespace's path. ry has no installed package directory, so the path

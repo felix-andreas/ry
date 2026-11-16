@@ -70,6 +70,8 @@ typedef struct RyState {
 
 extern void ry_state_save(RyState *state);
 extern void ry_state_restore(const RyState *state);
+/* A call of R_UnboundValue stands for the innermost closure call, which is what `Rf_error` and
+ * `Rf_warning` report; `Rf_errorcall(R_NilValue, ...)` reports no call at all. */
 extern void ry_record_error(SEXP call, const char *message);
 extern void ry_record_warning(SEXP call, const char *message, int immediate);
 extern void ry_write_console(const char *text, size_t length, int is_error);
@@ -450,7 +452,7 @@ RY_EXPORT void Rf_error(const char *format, ...)
     va_start(arguments, format);
     vsnprintf(buffer, sizeof buffer, format, arguments);
     va_end(arguments);
-    ry_record_error(R_NilValue, buffer);
+    ry_record_error(R_UnboundValue, buffer);
     ry_jump();
 }
 
@@ -472,7 +474,7 @@ RY_EXPORT void Rf_warning(const char *format, ...)
     va_start(arguments, format);
     vsnprintf(buffer, sizeof buffer, format, arguments);
     va_end(arguments);
-    ry_record_warning(R_NilValue, buffer, 0);
+    ry_record_warning(R_UnboundValue, buffer, 0);
 }
 
 RY_EXPORT void Rf_warningcall(SEXP call, const char *format, ...)

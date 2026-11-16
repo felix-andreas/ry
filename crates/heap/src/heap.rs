@@ -53,6 +53,7 @@ use {
         ffi::c_void,
         fmt,
         io::Write,
+        num::NonZeroU32,
         ptr::NonNull,
         rc::Rc,
         time::{Duration, Instant},
@@ -235,6 +236,9 @@ pub struct Heap {
     pretenure_young_bytes: usize,
     pretenure_young_large: usize,
     stress_counter: u64,
+    /// Allocations left before the next stressed collection, counting down from
+    /// [`GcPolicy::stress_gap`].
+    stress_wait: u32,
     /// [`GcStress::Seeded`]'s generator state, and the allocations left until its next
     /// collection.
     stress_rng: u64,
@@ -628,6 +632,9 @@ pub struct GcPolicy {
     pub min_node_limit: usize,
     pub growth: HeapGrowth,
     pub stress: GcStress,
+    /// Under stress, collect before every `stress_gap`-th allocation, as GNU R's
+    /// `gctorture2(step)` does; a gap of one is `gctorture(TRUE)`.
+    pub stress_gap: NonZeroU32,
     /// Checks the write barrier's invariant before every minor collection, and replaces each
     /// reconcile's frees with a full collection that panics if it reaches one of them
     /// (`RY_GC_VERIFY`).
@@ -983,6 +990,7 @@ impl Heap {
             pretenure_young_bytes: 0,
             pretenure_young_large: 0,
             stress_counter: 0,
+            stress_wait: 1,
             stress_rng,
             stress_countdown: 0,
             keep_untenured: false,
@@ -1110,16 +1118,25 @@ impl Heap {
     /// Changes the collection policy. The allocation fast path reads a budget derived from it,
     /// which this recomputes, so the policy has no other mutable access.
     pub fn update_policy(&mut self, change: impl FnOnce(&mut GcPolicy)) {
-        let before = self.policy.stress;
+        let before = (self.policy.stress, self.policy.stress_gap);
         change(&mut self.policy);
+        if (self.policy.stress, self.policy.stress_gap) != before {
+            self.stress_wait = self.policy.stress_gap.get();
+        }
         if let GcStress::Seeded { seed } = self.policy.stress
-            && self.policy.stress != before
+            && self.policy.stress != before.0
         {
             self.stress_rng = seed;
             self.stress_countdown = 0;
         }
         self.refresh_small_trigger();
         self.refresh_quarantine();
+    }
+
+    /// Delays the next stressed collection until `allocations` more allocations, like the
+    /// `wait` of GNU R's `gctorture2`; later ones follow every [`GcPolicy::stress_gap`].
+    pub fn delay_stress(&mut self, allocations: NonZeroU32) {
+        self.stress_wait = allocations.get();
     }
 
     /// Quarantines freed objects exactly while collection stress or verification is on: a
@@ -3627,6 +3644,19 @@ impl Heap {
         {
             self.reconcile(keep);
         }
+        if self.policy.stress != GcStress::Off {
+            self.stress_wait = self.stress_wait.saturating_sub(1);
+            if self.stress_wait > 0 {
+                // GNU R collects on its ordinary threshold between stressed collections too, so
+                // a long `gctorture2` step must not let the heap outgrow its budget.
+                if self.over_budget(request, large) {
+                    self.collect_keeping(Collection::Minor, keep, request);
+                    self.escalate_if_full(keep, request);
+                }
+                return;
+            }
+            self.stress_wait = self.policy.stress_gap.get();
+        }
         match self.policy.stress {
             GcStress::EveryAllocation => {
                 // A major collection marks the whole heap, so running one every few allocations
@@ -5342,6 +5372,7 @@ impl Default for GcPolicy {
                 Some((GcStressStart::Startup, stress)) => stress,
                 _ => GcStress::Off,
             },
+            stress_gap: NonZeroU32::MIN,
             verify: std::env::var_os("RY_GC_VERIFY").is_some(),
             timing: false,
             reporter: None,

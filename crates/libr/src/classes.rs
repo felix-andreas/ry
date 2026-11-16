@@ -290,15 +290,16 @@ pub unsafe extern "C" fn Rf_asS4(object: Sexp, flag: Rboolean, complete: c_int) 
     })
 }
 
-/// `R_check_class_etc(x, valid)`: the index into the null-terminated array `valid` of the
-/// first class of `x` it names, or -1. For an S4 object whose own class is not listed, the
-/// superclasses `methods` reports are tried in order.
+/// `R_check_class_etc(x, valid)`: the index into the array `valid` of the first class of `x`
+/// it names, or -1. GNU R ends `valid` at its first empty string (Matrix's tables end with
+/// `""`, not a null pointer), and a null pointer ends it too. For an S4 object whose own class
+/// is not listed, the superclasses `methods` reports are tried in order.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_check_class_etc(object: Sexp, valid: *const *const c_char) -> c_int {
     enter(|| {
         let mut names = Vec::new();
         let mut cursor = valid;
-        while !(*cursor).is_null() {
+        while !(*cursor).is_null() && **cursor != 0 {
             names.push(c_bytes(*cursor));
             cursor = cursor.add(1);
         }

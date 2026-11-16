@@ -228,12 +228,23 @@ pub unsafe extern "C" fn Rf_translateChar(object: Sexp) -> *const c_char {
 pub unsafe extern "C" fn Rf_translateCharUTF8(object: Sexp) -> *const c_char {
     enter(|| {
         let translated = translate(object, "translateCharUTF8")?;
-        // Outside a UTF-8 locale a native string's non-ASCII bytes are not valid input to the
-        // conversion, and GNU R writes each as `<xx>`, which data.table's sorting relies on.
+        // In the C locale a native string's non-ASCII bytes are not valid input to the
+        // conversion, and GNU R writes each as `<xx>`, which data.table's sorting relies on. In
+        // any other locale ry keeps native strings as UTF-8 (`enc2native` converts nothing), so
+        // valid UTF-8 passes through: escaping it would make a native copy of a name differ from
+        // its UTF-8 original (dplyr's data mask under a Latin-1 locale).
         if object == runtime().heap.known().na_string
             || object.has_gp(gp::LATIN1 | gp::UTF8 | gp::BYTES)
             || object.bytes().is_ascii()
-            || interp::platform::native_codeset().eq_ignore_ascii_case("UTF-8")
+        {
+            return Ok(translated);
+        }
+        let codeset = interp::platform::native_codeset();
+        let ascii_locale = ["ANSI_X3.4-1968", "ASCII", "US-ASCII"]
+            .iter()
+            .any(|name| codeset.eq_ignore_ascii_case(name));
+        if codeset.eq_ignore_ascii_case("UTF-8")
+            || (!ascii_locale && std::str::from_utf8(object.bytes()).is_ok())
         {
             return Ok(translated);
         }

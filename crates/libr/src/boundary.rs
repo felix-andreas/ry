@@ -718,9 +718,9 @@ pub struct ContextState {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ry_record_error(call: Sexp, message: *const c_char) {
     let message = CStr::from_ptr(message).to_string_lossy().into_owned();
-    // `Rf_error` passes no call; GNU R reports the innermost closure call for it.
-    let call = if call == runtime().nil() && interp::is_installed() {
-        runtime().heap.known().unbound
+    // `Rf_error` passes the unbound marker, which stands for the innermost closure call.
+    let call = if call == runtime().heap.known().unbound && !interp::is_installed() {
+        runtime().nil()
     } else {
         call
     };
@@ -743,11 +743,6 @@ pub unsafe extern "C" fn ry_record_warning(call: Sexp, message: *const c_char, i
     }
     // A handler may leave through a jump (`tryCatch(warning = )`), which continues from the
     // native call's context, as GNU R's warning does.
-    let call = if call == runtime().nil() {
-        runtime().heap.known().unbound
-    } else {
-        call
-    };
     let result = interp::conditions::warning_call(call, message);
     if let Err(unwind) = result {
         raise(unwind);

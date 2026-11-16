@@ -1,0 +1,31 @@
+[stdout]
+| after try: try-error 'UseMethod' used in an inappropriate fashion 
+| [1] "end"
+| [1] "f.default"
+| [1] 30 40
+| [1] "generic 'function' is not a function"
+| [1] "k3.default"
+| [1] "k4.default"
+| [1] "'UseMethod' used in an inappropriate fashion"
+| [1] "k5.NULL"
+| [1] "k6.default" "factor"    
+| [1] "k7.k" "5"   
+| [1] "k8.k"
+| [1] "k9.default" "7"         
+| [1] "'UseMethod' used in an inappropriate fashion"
+| [1] "'UseMethod' used in an inappropriate fashion"
+| [1] "'UseMethod' used in an inappropriate fashion"
+| [1] 1 1
+| [1] 1 1
+| [1] "k15.k"
+| [1] "k15.k"
+| [1] "formal argument \"x\" matched by multiple actual arguments"
+| [1] "character" "after"    
+| [1] "b.default"
+| [1] "g4.name"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "g4.name"
