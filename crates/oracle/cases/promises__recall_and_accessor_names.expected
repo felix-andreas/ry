@@ -1,0 +1,60 @@
+[stdout]
+| [1] 1
+| [1] 0
+| List of 2
+|  $ : chr "a"
+|  $ : chr "a"
+| [1] "a" "0" "a" "0" "a" "0"
+| [1] "a" "0" "a" "0" "a" "0"
+| [1] "a" "0" "a" "0" "a" "0"
+| [1]   1   1   2   6  24 120 720
+|  [1]  0  1  1  2  3  5  8 13 21 34 55
+| [1] 0
+| [1] 2 4 5
+| [1] TRUE
+| List of 2
+|  $ : chr "\"abc\""
+|  $ : chr "abc"
+| List of 2
+|  $ : chr "\"abc\""
+|  $ : chr "abc"
+| List of 3
+|  $ : chr "\"abc\""
+|  $ : chr "abc"
+|  $ : chr "v"
+| List of 2
+|  $ : chr "\"abc\""
+|  $ : chr "abc"
+| List of 2
+|  $ : chr "\"abc\""
+|  $ : chr "abc"
+| List of 2
+|  $ :List of 2
+|   ..$ : chr "\"abc\""
+|   ..$ : chr "abc"
+|  $ :List of 3
+|   ..$ : chr "\"def\""
+|   ..$ : chr "def"
+|   ..$ : chr "v"
+| List of 2
+|  $ :List of 2
+|   ..$ : chr "\"abc\""
+|   ..$ : chr "abc"
+|  $ :List of 3
+|   ..$ : chr "\"def\""
+|   ..$ : chr "def"
+|   ..$ : chr "v"
+| List of 2
+|  $ :List of 2
+|   ..$ : chr "\"abc\""
+|   ..$ : chr "abc"
+|  $ :List of 3
+|   ..$ : chr "\"def\""
+|   ..$ : chr "def"
+|   ..$ : chr "v"
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

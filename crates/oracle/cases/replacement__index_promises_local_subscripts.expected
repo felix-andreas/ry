@@ -1,0 +1,52 @@
+[stdout]
+| sub: k missing i: FALSE nargs: 3 
+| `[<-.loc`(`*tmp*`, k, value = 5)
+| sub2: k 
+| sub: k k missing i: FALSE nargs: 4 
+| `[<-.loc`(`*tmp*`, k, k, value = 5)
+| sub: i missing i: FALSE nargs: 3 
+| `[<-.loc`(`*tmp*`, i, value = 3)
+| sub: i missing i: FALSE nargs: 3 
+| `[<-.loc`(`*tmp*`, i, value = 3)
+| List of 2
+|  $ : num 1
+|  $ : num 2
+| sub: k missing i: FALSE nargs: 3 
+| `[<-.loc`(`*tmp*`, k, value = 5)
+| sub2: k 
+| sub: k k missing i: FALSE nargs: 4 
+| `[<-.loc`(`*tmp*`, k, k, value = 5)
+| sub: i missing i: FALSE nargs: 3 
+| `[<-.loc`(`*tmp*`, i, value = 3)
+| sub: i missing i: FALSE nargs: 3 
+| `[<-.loc`(`*tmp*`, i, value = 3)
+| List of 2
+|  $ : num 1
+|  $ : num 2
+| sub: k missing i: FALSE nargs: 3 
+| `[<-.loc`(`*tmp*`, k, value = 5)
+| sub2: k 
+| sub: k k missing i: FALSE nargs: 4 
+| `[<-.loc`(`*tmp*`, k, k, value = 5)
+| sub: i missing i: FALSE nargs: 3 
+| `[<-.loc`(`*tmp*`, i, value = 3)
+| sub: i missing i: FALSE nargs: 3 
+| `[<-.loc`(`*tmp*`, i, value = 3)
+| List of 2
+|  $ : num 1
+|  $ : num 2
+| sub: late missing i: FALSE nargs: 3 
+| `[<-.loc`(`*tmp*`, late, value = 1)
+| [1] "ok"
+| sub: late missing i: FALSE nargs: 3 
+| `[<-.loc`(`*tmp*`, late, value = 1)
+| [1] "ok"
+| sub: late missing i: FALSE nargs: 3 
+| `[<-.loc`(`*tmp*`, late, value = 1)
+| [1] "ok"
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL
