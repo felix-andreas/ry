@@ -116,6 +116,9 @@ line 1: this line is not a declaration (`name : TYPE`).
 @type structural { a: integer }
 mk : fn() -> structural
 #++++
+mk : fn() -> structural
+line 2: this type declaration does not load: write `@alias NAME<T> {TYPE}`, `@type NAME {TYPE}` or `@type NAME<T>`.
+line 3: this declaration does not load: I do not know the type `structural`.
 
 #==== purity
 #---- pure_marker_declares_the_name_pure

@@ -342,6 +342,7 @@ f <- function() {
   p$b
 }
 #++++
+f: fn() -> logical
 
 #---- computed_key_builds_a_map
 f <- function(key) {
