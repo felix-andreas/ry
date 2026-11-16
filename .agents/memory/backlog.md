@@ -91,7 +91,7 @@ per-item and per-file tables after the type store".
 
 ## Open: the kernels of a package test suite's profile
 
-`just bench-ci` runs thirteen kernels from a user's profiles of a large package's test suite on ry 0.4.5 (`tools/bench/internal/ci/kernels.R`; `development/testing.md` describes them). In the profile tier 0 held 32% of the time, builtins 32%, native code 17% and closure call setup 10%, and tier 1 ran 0.1%. Speed-up over GNU R per kernel: `k1` 1.6x, `k2` 1.9x, `k3` 2.4x, `k4` 2.8x, `k5` 2.7x, `k6` 1.7x, `k7` 1.8x, `k8` 1.4x, `k9` 0.62x, `k10` 0.70x, `k11` 0.64x, `k12` 10x, `k13` 2.6x.
+`just bench-ci` runs thirteen kernels from a user's profiles of a large package's test suite on ry 0.4.5 (`tools/bench/internal/ci/kernels.R`; `development/testing.md` describes them). In the profile tier 0 held 32% of the time, builtins 32%, native code 17% and closure call setup 10%, and tier 1 ran 0.1%. Speed-up over GNU R per kernel: `k1` 1.6x, `k2` 1.9x, `k3` 3.2x, `k4` 2.8x, `k5` 2.7x, `k6` 1.7x, `k7` 1.8x, `k8` 1.4x, `k9` 0.62x, `k10` 0.70x, `k11` 0.64x, `k12` 10x, `k13` 2.6x.
 
 - `k4` (an argument checker over `list(...)` with `delayedAssign`) and `k7` (a data.table grown by `rbind`) have no work planned. `k4` and `k5` are tier-0 closure calls: see "Open: JIT on against JIT off".
 - `new()` deep-copies the class prototype (`new_object` in `methods_core.rs`), so `k13`, whose prototype holds a million doubles, costs 1.9 ms per object. A shallow copy is sound where every slot write checks for sharing; `R_do_new_object` must keep the deep copy, because package C code writes slot values in place.
