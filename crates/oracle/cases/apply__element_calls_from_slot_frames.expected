@@ -1169,6 +1169,18 @@
 | [[2]]
 | c(1, , 3)
 | 
+| [1] 2.000000 3.169925
+| [1] 2.000000 3.169925
+| [1] 2.000000 3.169925
+| [1] 2.000000 3.169925
+| [1] 11 12
+| [1] 11 12
+| [1] 11 12
+| [1] 11 12
+| [1] "'...' used in an incorrect context"
+| [1] "'...' used in an incorrect context"
+| [1] "'...' used in an incorrect context"
+| [1] "'...' used in an incorrect context"
 [messages]
 [warnings]
 [errors]
