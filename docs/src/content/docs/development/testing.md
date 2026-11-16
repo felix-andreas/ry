@@ -528,6 +528,30 @@ JIT, closures, S3 dispatch, conditions and `on.exit`, environments, attributes, 
 and about one program in eight ends on a deliberate error. `cargo run -p oracle -- fuzz --seed N
 --count K --engines ry-tier0,ry-jit,ry-gctorture` runs any range, prints each divergent program and
 its replay command, and `just fuzz-differential` and `just gc-torture` are the long runs.
+
+A divergent program is 50 to 300 lines, so a finding is reduced before it becomes an oracle case.
+`oracle reduce FILE --engine NAME` (`just fuzz-reduce FILE ENGINE`, or `oracle fuzz --reduce` for
+every diverging seed) shrinks it by delta debugging over the syntax tree: it removes statements,
+block items, arguments and parameters in halving chunks, replaces a construct by one of its parts
+(an `if` by a branch, a call by an argument, a loop by its body), replaces compound expressions by
+`NULL`, `0`, `1L`, `""` or `TRUE`, and shrinks string and number literals. A candidate counts only
+when GNU R parses it, GNU R runs it to completion if it ran the original to completion, and the
+engine still diverges with the same signature: the same crash signal, a timeout, or the first of
+errors, warnings, messages, stdout, value and the deep observer's dump that differs. Both engines
+run with the observer on. For example, a segfault of `ry-tier0` in a replacement on a matrix,
+buried in a 130-line fuzz program, reduces in about 300 candidates (a few minutes in a debug build)
+to:
+
+```r
+f <- function(m) { m[1, 1] <- 0; m }
+f(matrix())
+f(matrix(0, 8, 8))
+```
+
+The command prints the reduced program, its signature and a replay command (with
+`ORACLE_OBSERVE=1` when only the observer's dump differs), and `--output` writes it. `--budget`
+caps the candidates (2000 by default), and the reduction is deterministic.
+`oracle::reduce::reduce` takes any predicate, so its unit tests run without an engine.
 `crates/oracle/tests/test_gallery.rs` renders a seeded sample of the plot gallery under both
 engines and compares the images ([Corpus and oracle](/development/corpus-and-oracle)).
 `just gc-torture` runs every oracle case on every core and takes about ten minutes on four cores

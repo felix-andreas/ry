@@ -747,6 +747,12 @@ fuzz-differential seed="0" count="200" engines="ry-tier0,ry-jit":
     cargo build -q -p ry-lang -p libr -p rcmd -p oracle
     ./target/debug/oracle fuzz --seed {{ seed }} --count {{ count }} --engines {{ engines }}
 
+# Shrink a program on which an engine diverges from GNU R to a minimal one that diverges the same
+# way, e.g. `just fuzz-reduce fuzz_7.R ry-jit`; the result goes to `reduced.R`.
+fuzz-reduce file engine="ry-tier0":
+    cargo build -q -p ry-lang -p libr -p rcmd -p oracle
+    ./target/debug/oracle reduce --engine {{ engine }} --output reduced.R {{ file }}
+
 # Every oracle case under collection stress (`RY_GC_STRESS`), compared with ry unstressed;
 # `just gc-torture young` keeps survivors collectable (`RY_GC_STRESS=young`), which finds an
 # object only a Rust local holds, and `just gc-torture seeded` collects at random gaps with the

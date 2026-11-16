@@ -6,8 +6,9 @@ use {
         bench::{self, Summary},
         build_file, check_build, diff, engine_packages, engines_named, expected_path, fails_run,
         find_cases, gallery, gnu_r_available, gnu_r_build, install, installed_packages,
-        known_failure, known_failures, packages, parse, read_build, render, runnable_cases,
-        verdict, write_build,
+        known_failure, known_failures, packages, parse, read_build,
+        reduce::{Signature, reduce_divergence},
+        render, runnable_cases, verdict, write_build,
     },
     packages::{PackageOutcome, Runtime, Settings},
     std::{
@@ -97,6 +98,27 @@ enum Command {
         /// Print the program for `--seed` and exit, without running anything.
         #[arg(long)]
         print: bool,
+        /// Reduce every diverging program against the first engine that diverges on it, and
+        /// print the reduced program under the divergence.
+        #[arg(long)]
+        reduce: bool,
+    },
+    /// Shrink a program on which an engine diverges from GNU R to a small one on which it
+    /// diverges the same way, and print it with the command that replays it.
+    Reduce {
+        file: PathBuf,
+        /// The engine that diverges, named as for `fuzz --engines`.
+        #[arg(long)]
+        engine: String,
+        /// Seconds one engine may take on one candidate.
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
+        /// The most candidates to run.
+        #[arg(long, default_value_t = 2000)]
+        budget: usize,
+        /// Where to write the reduced program.
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
     /// Run packages' testthat suites under GNU R and ry's runtime (both through `ry load`) and
     /// compare them test by test.
@@ -295,7 +317,21 @@ fn main() -> ExitCode {
             engines,
             timeout,
             print: _,
-        } => run_fuzz(seed, count, &engines, Duration::from_secs(timeout)),
+            reduce,
+        } => run_fuzz(seed, count, &engines, Duration::from_secs(timeout), reduce),
+        Command::Reduce {
+            file,
+            engine,
+            timeout,
+            budget,
+            output,
+        } => run_reduce(
+            &file,
+            &engine,
+            Duration::from_secs(timeout),
+            budget,
+            output.as_deref(),
+        ),
         Command::Gallery {
             seed,
             count,
@@ -336,6 +372,7 @@ fn uses_workspace_ry(command: &Command) -> bool {
                 .is_none_or(|names| names_ry(&names)),
         },
         Command::Fuzz { engines, .. } => names_ry(engines),
+        Command::Reduce { engine, .. } => names_ry(engine),
         Command::Gallery { .. } => true,
         Command::Bench { ry, .. } => ry.is_none(),
         _ => false,
@@ -837,7 +874,7 @@ struct Tally {
     fails: bool,
 }
 
-fn run_fuzz(first: u64, count: u64, engines: &str, timeout: Duration) -> ExitCode {
+fn run_fuzz(first: u64, count: u64, engines: &str, timeout: Duration, reduce: bool) -> ExitCode {
     let mut parsed = Vec::new();
     for name in engines
         .split(',')
@@ -876,6 +913,9 @@ fn run_fuzz(first: u64, count: u64, engines: &str, timeout: Duration) -> ExitCod
                 } else {
                     println!("DIFFERS {}", oracle::fuzz::render_divergences(&report));
                     diverging.push(seed);
+                    if reduce {
+                        reduce_seed(&report, &parsed, timeout, &directory);
+                    }
                 }
                 if !report.unavailable.is_empty() && report.unavailable.len() == engines.len() {
                     eprintln!("no engine besides GNU R can run here");
@@ -902,6 +942,99 @@ fn run_fuzz(first: u64, count: u64, engines: &str, timeout: Duration) -> ExitCod
         println!("diverging seeds: {diverging:?}");
         ExitCode::FAILURE
     }
+}
+
+/// Reduces a diverging seed's program against the first engine that diverges on it.
+fn reduce_seed(
+    report: &oracle::fuzz::SeedReport,
+    engines: &[ProcessEngine],
+    timeout: Duration,
+    directory: &Path,
+) {
+    let Some(engine) = report.divergences.first().and_then(|divergence| {
+        engines
+            .iter()
+            .find(|engine| engine.name() == divergence.engine)
+    }) else {
+        return;
+    };
+    let gnu_r = ProcessEngine::gnu_r().with_timeout(timeout).observing();
+    let observing = engine.clone().observing();
+    match reduce_divergence(&report.program, &gnu_r, &observing, directory, 2000) {
+        Ok(reduction) => print!(
+            "--- reduced under {} ({}, {} candidates) ---\n{}",
+            engine.name(),
+            reduction.signature,
+            reduction.calls,
+            reduction.program
+        ),
+        Err(error) => println!("--- not reduced: {error} ---"),
+    }
+}
+
+/// Reduces `file` against the engine `name`, prints the result and the command that replays it,
+/// and writes it to `output`.
+fn run_reduce(
+    file: &Path,
+    name: &str,
+    timeout: Duration,
+    budget: usize,
+    output: Option<&Path>,
+) -> ExitCode {
+    let Some(engine) = ProcessEngine::named(name) else {
+        eprintln!("unknown engine `{name}`");
+        return ExitCode::from(2);
+    };
+    let engine = engine.with_timeout(timeout).observing();
+    let gnu_r = ProcessEngine::gnu_r().with_timeout(timeout).observing();
+    let program = match std::fs::read_to_string(file) {
+        Ok(program) => program,
+        Err(error) => {
+            eprintln!("{}: {error}", file.display());
+            return ExitCode::from(2);
+        }
+    };
+    let directory = std::env::temp_dir().join(format!("ry-oracle-reduce-{}", std::process::id()));
+    if let Err(error) = std::fs::create_dir_all(&directory) {
+        eprintln!("{}: {error}", directory.display());
+        return ExitCode::FAILURE;
+    }
+    let started = std::time::Instant::now();
+    let reduction = reduce_divergence(&program, &gnu_r, &engine, &directory, budget);
+    if let Err(error) = std::fs::remove_dir_all(&directory) {
+        eprintln!("could not remove {}: {error}", directory.display());
+    }
+    let reduction = match reduction {
+        Ok(reduction) => reduction,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    print!("{}", reduction.program);
+    println!(
+        "--- {name} {}: {} to {} bytes, {} candidates in {:.1} s ---",
+        reduction.signature,
+        reduction.bytes_before,
+        reduction.bytes_after,
+        reduction.calls,
+        started.elapsed().as_secs_f64()
+    );
+    if let Some(output) = output
+        && let Err(error) = std::fs::write(output, &reduction.program)
+    {
+        eprintln!("{}: {error}", output.display());
+        return ExitCode::FAILURE;
+    }
+    let observe = match reduction.signature {
+        Signature::ObservedDiffers => "ORACLE_OBSERVE=1 ",
+        _ => "",
+    };
+    println!(
+        "replay: {observe}cargo run -q -p oracle -- compare --engine {name} {}",
+        output.unwrap_or(Path::new("reduced.R")).display()
+    );
+    ExitCode::SUCCESS
 }
 
 fn corpus_directory(corpus: Option<PathBuf>) -> PathBuf {
