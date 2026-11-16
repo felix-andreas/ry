@@ -296,7 +296,7 @@ your code and no data. It lists:
   generic call protocol: the call ran natively or in a slot frame that never made its
   environment, and no argument was a promise;
 - slot frames turned into environments, by what asked for the environment;
-- complex assignments such as `names(x)[2] <- v` that built the calls of their target, by the
+- complex assignments such as `names(x)[2] <- v` that built a call for their target, by the
   replacement functions and what the variable held. A replacement function that base R does not
   define is printed as "(a function)", and a class outside a short list of widely used ones
   (`data.frame`, `factor`, `Date`, `xts` and the like) as "an object";

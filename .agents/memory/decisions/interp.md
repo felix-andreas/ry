@@ -973,12 +973,15 @@ without cells, promise forcing in the loop, and one observer word on the general
 - **Chosen shape.** A level whose replacement function is a primitive goes to
   `replace_through_primitive` (`crates/interp/src/eval.rs`), which pushes the object, the level's
   other arguments evaluated once, and the value into the primitive's argument vector and calls it
-  (`call_builtin`, or `subset::dollar_assign` for `$<-`). It declines, and the level builds its call
-  as before, when the object has a method for the replacement (the method receives the promises),
-  when the primitive is a special that reads its arguments' code, and when an argument compiled
-  code already evaluated is `...` or code. A closure replacement always gets the built call. Getter
-  levels (`g(`*tmp*`, i)` for the inner levels of a nested target) are built and evaluated as
-  before.
+  (`call_builtin`, or `subset::dollar_assign` for `$<-`, wrapped as a builtin call is: its error is
+  signalled while the assignment is the call in progress, and a profile counts it). It declines,
+  and the level builds its call as before, when the object has a method for the replacement (the
+  method receives the promises), when the primitive is a group generic (`` `add<-` <- `+` ``
+  dispatches on the value's class too), when it is a special that reads its arguments' code, when
+  the name of a `$<-` is neither a symbol nor a string, and when an argument compiled code already
+  evaluated is `...` or code. The last test scans every argument before one is read, so a declined
+  level reads no variable twice. A closure replacement always gets the built call. Getter levels
+  (`g(`*tmp*`, i)` for the inner levels of a nested target) are built and evaluated as before.
 - **The call an error names.** `Interp::assignment_call` holds the replacement call of the
   assignment in progress and the assignment it reports as, so `unwind::resolve_call` turns one into
   the other. On the direct path no replacement call exists, so the level's target (`f(x, j)`, a
@@ -993,8 +996,12 @@ without cells, promise forcing in the loop, and one observer word on the general
   call out as a copy (`envir::call_with_srcref`).
 - **GNU R behavior fixed alongside** (each pinned by `replacement__primitive_levels`): `exact` and
   `drop` have no meaning to `[<-` and `[[<-` and count as subscripts; `attr<-` with a name vector
-  longer than one is an error from R 4.6.0; an unbound target of a replacement in a slot frame is
-  reported against the call that made the enclosure.
+  longer than one is an error from R 4.6.0; an unbound target is reported against the call of the
+  frame that owns the enclosure of the assigning environment, and against no call when no frame
+  owns it (an assignment in a promise that top-level code made); a nested assignment whose value
+  is the variable or one of its levels (`x$a$b <- x`, `z$a$b$c <- z$a`) copies that level first,
+  because the value on the operand stack counts no reference and the write would otherwise close
+  a cycle.
 - **Left unmatched.** GNU R's compiled code drops the names of subscripts from the assignment it
   reports (`x[["a", exact = TRUE]] <- "s"` reports as `x[["a", TRUE]] <- "s"`), and its AST
   evaluator keeps them. ry keeps them in every tier, so the oracle case prints only the message
@@ -1013,8 +1020,9 @@ without cells, promise forcing in the loop, and one observer word on the general
   object without a method is the next step (`backlog.md`, "Replacement calls that still build
   their calls").
 - **Pinned by** the oracle cases `replacement__primitive_levels` (classed lists with and without
-  methods, calls and pairlists, environments, `<<-`, nested targets, evaluation order, empty and
-  named subscripts, a locked binding, the reported calls, S4 slots, data frames and factors) and
+  methods, calls and pairlists, environments, `<<-`, nested targets, a value that is the target,
+  evaluation order, empty and named subscripts, a locked binding and a locked environment, the
+  reported calls, a group generic as the replacement, S4 slots, data frames and factors) and
   `apply__element_call_is_never_changed`.
 
 ## An empty named argument leaves its formal to a positional argument

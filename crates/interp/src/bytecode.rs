@@ -10846,6 +10846,8 @@ unsafe fn assign_slot_element(
             crate::subset::dollar_assign(object, index.element(0), value, setter_call)
         }
     };
+    // An error is signalled while the assignment is the call it reports.
+    let result = result.map_err(|unwind| eval::builtin_failure(unbound(), unwind));
     interp().assignment_call = outer;
     let result = result?;
     let result = values::unwrap_assigned(result, current == result);

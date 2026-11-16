@@ -1971,7 +1971,7 @@ unsafe fn run_builtin(
 /// primitive's call as `errorcall` does.
 #[cold]
 #[inline(never)]
-unsafe fn builtin_failure(blame: Sexp, unwind: Unwind) -> Unwind {
+pub(crate) unsafe fn builtin_failure(blame: Sexp, unwind: Unwind) -> Unwind {
     match unwind {
         Unwind::Error(mut failure) => {
             if failure.call == unbound() {

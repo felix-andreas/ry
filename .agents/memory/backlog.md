@@ -1504,6 +1504,34 @@ overhead, not allocation.
 - `lapply`'s element calls read the `X` the internal was called with, so a `FUN` that rebinds `X` in `lapply`'s frame through `parent.frame()` changes nothing (`ElementCalls::plain`, `envir.rs`), where GNU R reads the new `X` for the next element. Removing `FUN` there, a non-function `FUN`, and a warning from a special `FUN` report the call `FUN(X[[i]], ...)` where GNU R reports the `lapply(...)` call.
 - `` lapply(list(1, 2), `repeat`) `` loops forever where GNU R raises an arity error, and `` `(`(x, ...) `` with an empty `...` raises "2 arguments passed to '('".
 - `m[3e10, 1] <- 5` on a matrix is "subscript out of bounds" where GNU R warns and assigns nothing.
+- A subscript of a nested assignment that takes a reference to the target lets a later level
+  change the alias: `x <- c(a = 1, b = 2); names(x)[{ keep <- x; 2 }] <- "z"` leaves `keep` with
+  the names `a z` on ry and `a b` on GNU R, and `levels(x)[{ keep <- x; 1 }] <- "z"` does the
+  same to a factor. `eval::complex_assign` decides whether to copy the variable before the
+  subscripts run; GNU R's replacement primitives test the reference count when they write.
+- `<<-` through a replacement into a locked binding changes the value before the assignment
+  fails: with `g <- c(1, 2); lockBinding("g", globalenv())`, `(function() g[1] <<- 5)()` fails
+  on both engines but leaves `g` as `5 2` on ry. `complex_assign` reads `locked` from the local
+  frame's cell, not from the binding `<<-` writes. Base's bindings are not locked either:
+  `(function() T[2] <<- FALSE)()` succeeds where GNU R fails with "cannot change value of locked
+  binding for 'T'".
+- S3 replacement methods defined as locals of the function that assigns are never called:
+  with `` `[<-.k` ``, `` `$<-.k` ``, `` `[[<-.k` `` and `` `names<-.k` `` assigned in `f`'s body,
+  `x[1] <- 2`, `x$a <- 3`, `x[[1]] <- 4` and `names(x) <- "q"` on a `k` object in `f` run the
+  builtins on ry and the four methods on GNU R.
+- Smaller differences in complex assignments, each the same in every tier: `exists("*tmp*")` in
+  a subscript is `FALSE` (GNU R binds `*tmp*` for the length of the assignment); `x[c(TRUE, NA)]
+  <- 1:2` warns and assigns where GNU R fails with "NAs are not allowed in subscripted
+  assignments"; `m[[1, TRUE]] <- 0L` on a 2 x 2 matrix writes the whole first row where GNU R
+  writes one element; `names(m)[2] <- "a"` on a matrix leaves it without names; a formal nobody
+  passed as the target (`f <- function(a) { a[1] <- 1 }; f()`) fails with "object of type
+  'symbol' is not subsettable" where GNU R says `argument "a" is missing, with no default`;
+  `..1[1] <- 1` fails with "object '..1' not found" where GNU R says "..1 used in an incorrect
+  context"; `p$v <- 1` on an S4 object without a method says "no '$<-' method for this S4
+  class" where GNU R says "no method for assigning subsets of this S4 class" against the
+  generated call; `body(x)[[1]] <- 1` on a number makes a closure where GNU R fails; and
+  `storage.mode(x)[2] <- "double"` fails with "invalid 'value' argument" where GNU R leaves
+  `x` unchanged.
 - Closures over equal but distinct body copies compile again. `Bodies` (`crates/interp/src/bytecode.rs`) shares code by body identity, but a lambda inside a testthat `expect_*()` argument is a fresh copy of its expression at each evaluation, so `testthat_full` compiles about 43 bodies per warm iteration (about 4M Ir of its 629M). GNU R's JIT cache hashes the structure and confirms with `identical`, so it shares them. A structural lookup at the compile decision, confirming with a deep compare of body, formals and srcref, would close it.
 - `readChar` reads one byte per device call: an 11 MB file takes 150 ms against GNU R's 29 ms (`readChar(f, file.size(f))`). Its ceiling on measured workloads is 0%, since `testthat_full`, the strings app and the report app never call it, so a bulk read (one device read per string) waits for a workload that does.
 - A missing argument forwarded through two calls is reported on the wrong call: with `leaf <- function(x) x; mid <- function(a) leaf(a * 2); wrap <- function(q) mid(q)`, `wrap()` fails with `argument "q" is missing, with no default` on both engines, but GNU R's condition call is `wrap()` and ry's is `leaf(a * 2)`. The same in every tier.

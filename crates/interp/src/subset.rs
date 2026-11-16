@@ -3621,7 +3621,13 @@ unsafe fn missing_subscript(call: Sexp, fields: &[(&str, Sexp)]) -> Unwind {
 
 unsafe fn do_dollar_assign(call: &Call<'_>) -> R<Sexp> {
     let object = eval::eval(call.arg(0), call.env()?)?;
-    let name = name_argument(call.arg(1))?;
+    // GNU R reports a name that is none against the replacement call itself.
+    let name = name_argument(call.arg(1)).map_err(|unwind| match unwind {
+        Unwind::Error(failure) if failure.call == unbound() => {
+            crate::unwind::errorcall(call.call, failure.message)
+        }
+        unwind => unwind,
+    })?;
     let value = eval::eval(call.arg(2), call.env()?)?;
     if object.is_object() {
         let name_string = values::scalar_string_charsxp(name)?;
