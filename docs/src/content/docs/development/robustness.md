@@ -309,6 +309,7 @@ object, while plain `RY_GC_STRESS=1` passed 3 of 3, since it tenures the object 
 | `just simulate COUNT ACTIONS BASE` | The language-server simulator over `COUNT` seeds from `BASE`. |
 | `just scenarios [NAME]` | Every scenario, or one. |
 | `just fuzz-differential SEED COUNT ENGINES` | Generated programs under GNU R and ry's engines. |
+| `just fuzz-reduce FILE ENGINE` | One diverging program shrunk to a minimal one that diverges the same way (`oracle reduce`), the form a finding takes as an oracle case. |
 | `just gc-torture [young\|seeded]` | Every oracle case under collection stress, under `RY_GC_STRESS=young`, or under `RY_GC_STRESS=seed:N` with the barrier checked. |
 | `just fuzz-deep [MINUTES] [BASE] [DEPTH]` | Every seeded harness at a deep budget until the time limit, described below. |
 | `just fuzz-run TARGET` | One `cargo fuzz` target under libFuzzer. |

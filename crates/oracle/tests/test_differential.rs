@@ -14,7 +14,9 @@ use {
             ProgramKind, SeedReport, check_seed, format_numbers_program, native_helpers_program,
             parse_data_program, program, render_divergences, sprintf_program, trace_back_program,
         },
-        gnu_r_available, ry_runtime_available,
+        gnu_r_available,
+        reduce::{Signature, reduce_divergence},
+        ry_runtime_available,
     },
     std::{
         path::PathBuf,
@@ -190,6 +192,41 @@ fn fuzz_native_helpers_match_their_r_bodies() {
         }
     }
     std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
+}
+
+/// The reducer keeps a crash while GNU R still runs every candidate to completion. The crashing
+/// engine is a shell script that kills itself with SIGSEGV when the program mentions `boom`, so
+/// the test needs GNU R but not ry.
+#[cfg(unix)]
+#[test]
+fn reduction_keeps_a_crash_on_a_program_gnu_r_completes() {
+    use std::os::unix::fs::PermissionsExt;
+    if !gnu_r_available() {
+        eprintln!("skipped: GNU R is not installed");
+        return;
+    }
+    let directory = scratch_directory();
+    let script = directory.join("crashes-on-boom.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\ngrep -q boom \"$1\" && kill -SEGV $$\nexit 1\n",
+    )
+    .expect("write the crashing engine");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+        .expect("make the crashing engine executable");
+    let engine = ProcessEngine::from_command(&script.display().to_string())
+        .expect("a command line names an engine");
+    let gnu_r = ProcessEngine::gnu_r().with_timeout(TIMEOUT);
+    let program = "x <- 1:10\nprint(sum(x))\nboom <- function(n) n * 2\ny <- boom(3)\nprint(y)\nz <- paste(\"a\", \"b\")\n";
+    let reduction = reduce_divergence(program, &gnu_r, &engine, &directory, 200)
+        .unwrap_or_else(|error| panic!("the reduction failed: {error}"));
+    std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
+    assert_eq!(
+        reduction.signature,
+        Signature::Crashed("signal: 11 (SIGSEGV)".to_string())
+    );
+    assert_eq!(reduction.program, "boom <- NULL\n");
+    assert_eq!(reduction.bytes_after, reduction.program.len());
 }
 
 fn scratch_directory() -> PathBuf {

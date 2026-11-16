@@ -8,6 +8,7 @@
 
 pub mod bench;
 pub mod fuzz;
+pub mod reduce;
 pub mod gallery;
 pub mod install;
 pub mod metamorphic;
@@ -250,6 +251,7 @@ pub fn known_failure<'a>(
         .find(|entry| entry.case == name && entry.engine == engine)
 }
 
+#[derive(Clone)]
 pub struct ProcessEngine {
     name: String,
     program: String,
