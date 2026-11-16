@@ -3015,6 +3015,19 @@ impl Heap {
         true
     }
 
+    /// [`Heap::store_slot`] for a value whose reference the caller hands over to the slot, so
+    /// the store counts no new one.
+    #[inline(always)]
+    pub unsafe fn hand_over_slot(&mut self, slot: &mut Sexp, value: Sexp) {
+        let old = *slot;
+        *slot = value;
+        if old.release_reference()
+            && (old.kind() == SexpType::List || old.size_class() == LARGE_CLASS)
+        {
+            self.note_zero(old);
+        }
+    }
+
     /// Gives up the references a returning call's slot frame holds, as [`Heap::clear_frame`]
     /// does for a frame's bindings: an argument's promise that only its slot holds gives up its
     /// value and environment too.

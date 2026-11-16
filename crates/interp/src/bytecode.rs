@@ -613,6 +613,13 @@ impl Machine<'_> {
         self.clear_missing(slot);
     }
 
+    /// [`Machine::store_slot`] for a value whose reference the caller hands over to the slot.
+    #[inline]
+    pub unsafe fn hand_over_slot(&self, slot: *mut Sexp, value: Sexp) {
+        crate::heap().hand_over_slot(&mut *slot, value);
+        self.clear_missing(slot);
+    }
+
     /// Assigns the scalar `element` of `kind` to `symbol` by storing it into the value the
     /// variable is bound to, when that is a plain scalar of `kind` that nothing else references.
     /// Returns that value, or `None` when the assignment needs a new one.
@@ -6869,7 +6876,8 @@ pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<Option<Sexp>> 
 /// what tier 0's handler costs.
 #[inline(always)]
 pub unsafe fn call_builtin_step(machine: &mut Machine<'_>, pc: usize) -> R<()> {
-    let mut state = activation(machine, true);
+    // The compiled code checks the result's type and records it itself when the check fails.
+    let mut state = activation(machine, false);
     let instruction = Instruction {
         code: state.code,
         at: pc,

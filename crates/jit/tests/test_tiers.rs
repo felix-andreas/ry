@@ -5136,21 +5136,9 @@ fn element_ops_cost_no_more_than_tier_zero() {
         .map(|(body, (off, force))| format!("{body}: tier 0 {off}, compiled {force}"))
         .collect();
     eprintln!("{}", report.join("\n"));
-    // Tier 0 runs a base call that compiled code bound without checking the binding, and tier 1
-    // checks the same bindings once, when it enters. The compiled code for these two shapes calls
-    // a small builtin (`list`, `c`) and stores the element through the same runtime steps tier 0
-    // takes, so it only ties tier 0. Compiled code measures up to about 8% over tier 0, and the
-    // count moves by an instruction from run to run, so the bound allows 10%. A call-free tier-1
-    // path for small builtin calls and the element store would restore the strict bound for them.
-    const TIED: &[&str] = &["x[k] <- list(5)", "w <- c(1, 2); w[[3L]] <- k"];
     for (body, (off, force)) in ELEMENT_OPS.iter().zip(&measured) {
-        let bound = if TIED.contains(body) {
-            off + off / 10
-        } else {
-            *off
-        };
         assert!(
-            *force <= bound,
+            force <= off,
             "`{body}` costs {force} instructions per iteration compiled but {off} in tier 0"
         );
     }

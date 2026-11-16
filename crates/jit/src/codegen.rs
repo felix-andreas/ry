@@ -2156,10 +2156,9 @@ impl<'p> Translator<'p> {
             .checked_sub(1)
             .and_then(|at| self.frame.plan.insts.get(at))
         {
-            // Tier 0 resumes after the instruction, and the callee's code may never record
-            // again, so the type that broke the speculation is recorded here for the
-            // recompile to see.
-            Some(inst) if self.frame.call.is_some() => {
+            // Tier 0 resumes after the instruction and may have stopped recording, so the type
+            // that broke the speculation is recorded here for the recompile to see.
+            Some(inst) => {
                 let fitting = self.builder.create_block();
                 let record = self.builder.create_block();
                 self.builder.set_cold_block(record);

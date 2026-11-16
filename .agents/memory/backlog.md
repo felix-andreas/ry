@@ -204,15 +204,6 @@ With the JIT on, thirteen of the fifteen `just bench applications` programs run 
 
 - **Tier 1 costs more wall time than its instruction count suggests**, because it adds mispredicted branches that callgrind's instruction count does not show. Closing the gap needs cheaper tier-1 compiles, not a change of the entry threshold (`decisions/jit-ssa.md`, "Tier 1 keeps the 3000-entry threshold"). With the inline frame probe, `functional` runs 1.8% fewer instructions with the JIT on than off, and `testthat_full` runs 1.2% more, mostly in tier 0's own functions.
 
-## Open: tier 1 only ties tier 0 on small builtin calls with an element store
-
-`element_ops_cost_no_more_than_tier_zero` (`crates/jit/tests/test_tiers.rs`) allows two shapes 8% over tier 0 instead of the strict bound. Tier 0 runs a bound base call without checking the binding, and tier 1 checks the same bindings once at entry, so for these shapes compiled code takes the same runtime steps as tier 0 and only ties it. The fix is a call-free tier-1 path for small builtin calls (`list`, `c`) and the element store; once it lands, drop the allowance. The test fails on main: in a release build `x[k] <- list(5)` measures 860 instructions per iteration in tier 0 against 989 compiled, 15% over. Ir per iteration under `--profile iterate`:
-
-| shape | tier 0 / compiled with guarded base calls | tier 0 / compiled with bound base calls |
-|---|---|---|
-| `x[k] <- list(5)` | 1043 / 1006 | 956 / 1003 |
-| `w <- c(1, 2); w[[3L]] <- k` | 2116 / 2108 | 1999 / 2108 |
-
 ## Open: console input in ry's runtime
 
 - Ctrl-C during the script `ry run` queues before its console is not reported to the preflight, because the script goes to R as one unit: the console session keeps the bindings of the script's unrun rest.
@@ -1477,7 +1468,6 @@ overhead, not allocation.
 - The dispatch branch of a compiled replacement reads the target twice, once to probe it and once in `complex_assign`, so an active binding as the target runs its function twice where GNU R runs it once.
 - When `base_primitive` cannot settle that `[<-` or `[[<-` is base's (an unforced promise or an active binding on the way, `bytecode.rs`, `replacement`), the compiled replacement takes the `BranchUnlessBuiltin` path, which runs the eager `Replace` for base's builtin even on an object target, so a method would see forced subscripts. Suspected from the code, not reproduced.
 - `y <- list(); y[g(), , 1] <- 2` fails with "incorrect number of subscripts on matrix" where GNU R says "incorrect number of subscripts".
-- `jit`'s `element_ops_cost_no_more_than_tier_zero` (`crates/jit/tests/test_tiers.rs`) fails on main: `x[k] <- list(5)` costs about 1,015 instructions an iteration compiled against 880 in tier 0, and `w <- c(1, 2); w[[3L]] <- k` 2,210 against 1,964. The compiled code and the costs are the same with and without the replacement probe, so the cause is in how tier 1 runs these two stores (a list `[<-` with a list value, and a `[[<-` that grows a fresh vector).
 - Closures over equal but distinct body copies compile again. `Bodies` (`crates/interp/src/bytecode.rs`) shares code by body identity, but a lambda inside a testthat `expect_*()` argument is a fresh copy of its expression at each evaluation, so `testthat_full` compiles about 43 bodies per warm iteration (about 4M Ir of its 629M). GNU R's JIT cache hashes the structure and confirms with `identical`, so it shares them. A structural lookup at the compile decision, confirming with a deep compare of body, formals and srcref, would close it.
 - `readChar` reads one byte per device call: an 11 MB file takes 150 ms against GNU R's 29 ms (`readChar(f, file.size(f))`). Its ceiling on measured workloads is 0%, since `testthat_full`, the strings app and the report app never call it, so a bulk read (one device read per string) waits for a workload that does.
 - A missing argument forwarded through two calls is reported on the wrong call: with `leaf <- function(x) x; mid <- function(a) leaf(a * 2); wrap <- function(q) mid(q)`, `wrap()` fails with `argument "q" is missing, with no default` on both engines, but GNU R's condition call is `wrap()` and ry's is `leaf(a * 2)`. The same in every tier.

@@ -2050,8 +2050,7 @@ pub unsafe extern "C" fn jit_flush(
             let machine = machine(activation);
             if let Some(frame) = frame_slot(activation, machine, slot) {
                 let value = *slot_cell(activation, slot);
-                machine.store_slot(frame, value);
-                value.decrement_refcount();
+                machine.hand_over_slot(frame, value);
                 return 1;
             }
         }
