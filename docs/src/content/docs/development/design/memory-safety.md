@@ -149,15 +149,15 @@ match cx.reals(value)? {                              // one test of the kind an
     Reals::Sequence { first, step, len } => closed_form(first, step, len),
     Reals::Lazy(alt) => each(cx, alt),                // alt.get(cx, i) takes &mut Cx
 }
-let dense = cx.dense_reals(value)?;                   // &mut Cx: expands or asks the class once
+let dense = cx.dense_reals(value)?;                   // &mut Cx: Local<Real>, materialized once
 let slice: &[f64] = dense.as_slice(cx);               // borrows cx, so no safepoint while it lives
 ```
 
-`dense_*` returns the standard vector itself, or the one a wrapper wraps, or the one a compact
-sequence or deferred string vector expands into and keeps. For a class a package registers, whose
-`Dataptr` memory is not a heap object, it returns the pointer the class gave, kept together with
-the rooted object. A loop that only reads a few elements uses the `Lazy` arm, so a class's `Elt`
-method runs for the elements asked for and a long sequence is not expanded.
+`dense_*` always returns a standard vector, as `values::materialize` does: the vector itself, the
+one a wrapper wraps, the one a compact sequence or deferred string vector expands into and keeps,
+or a copy for a class a package registers. No slice ever points at memory a class owns. A loop
+that only reads a few elements uses the `Lazy` arm, so a class's `Elt` method runs for the
+elements asked for and a long sequence is not expanded.
 
 This replaces a test of the ALTREP bit on every `Sexp::element` call with one test per vector,
 and it is the rule that removes the write into an object without storage: element writes exist
@@ -325,7 +325,7 @@ between it and the object, and native code needs the object's address.
 | Each `unsafe impl Trace` marks every field | a missed field is an unrooted value in the interpreter's state | seeded stress with verification over the oracle cases, each run twice in one process |
 | An ownership check is right before it calls `assume_exclusive` | the fact depends on counts, registers and frames | the replacement contract in `interp` `test_fuzz`, `assignment__dollar_in_place` and its siblings |
 | An expression register is written only by its own activation | a property of the bytecode the compiler emits | the tier differential, seeded stress |
-| Native code keeps the C API's rules, including that an ALTREP class's `Dataptr` stays valid while its object is reachable | foreign code can do anything | nothing in ry: GNU R's own C code relies on the same rule |
+| Native code keeps the C API's rules | foreign code can do anything | `libr` `test_fuzz_native` for ry's side of the boundary; nothing checks a package's C code |
 | A `libr` entry point adopts what C gave it correctly | C can pass anything | `libr` `test_fuzz_native`, the `PROTECT` balance check |
 | Generated code keeps its values in the register window across helpers | machine code has no types | `ry-jit-gctorture`, the tier differential |
 | A frame's slots agree with its environment | a relation between two structures | the replacement and shadowing contracts in `interp` `test_fuzz`, the differential fuzzer's repeated calls |
@@ -355,8 +355,6 @@ rises, and a change that lowers one lowers the budget with it, so the count only
 - Whether the bytecode loop's register access measures the same with bounds checks.
 - Which form of the context parameter measures best on the call path: a pointer in a register, a
   field of the activation, or a zero-sized token.
-- Whether R's documentation states the `Dataptr` stability rule the dense form of a package's
-  ALTREP class relies on. If it does not, that form copies into a standard vector instead.
 - How `Held<T>` fields in structures that native code also reaches (the precious list, external
   pointer protection) share one definition with `libr`.
 - The spelling for linking a pairlist cell after it is visible to other code, which the evaluator
