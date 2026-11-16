@@ -339,4 +339,6 @@ pub extern "C" fn wilcox_free() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn signrank_free() {}
+pub extern "C" fn signrank_free() {
+    interp::rmath::signrank_free();
+}

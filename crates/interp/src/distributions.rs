@@ -113,7 +113,10 @@ macro_rules! distributions {
                 signalled(random_vector::<$sampler>(call.args, Interface::Stats, distributions!(@integer $shape), Conditions::Signal))
             }),)*
             ("rmultinom", |call| unsafe { rmultinom_routine(call.arg(0), call.arg(1), call.arg(2)) }),
-            ("signrank_free", |_| Ok(nil())),
+            ("signrank_free", |_| {
+                signrank_free();
+                Ok(nil())
+            }),
             ("wilcox_free", |_| {
                 wilcox_free();
                 Ok(nil())
