@@ -58,8 +58,8 @@ prune *args:
 test *args:
     cargo test -- --nocapture {{ args }}
 
-# The pre-landing check: tests, clippy at -D warnings, fmt, and the licence notices.
-gate: battery clippy fmt-check (notices "--check") (readme "--check")
+# The pre-landing check: tests, clippy at -D warnings, fmt, the licence notices, and the memory layout.
+gate: battery clippy fmt-check (notices "--check") (readme "--check") (memory "check")
 
 # CI's test job, step for step: .github/workflows/ci.yml runs `nix develop .#ci -c just ci`. Run it
 # in that shell, whose GNU R, compiler, glibc and locales are the ones CI has. The variables are
@@ -217,6 +217,11 @@ bench-check *args:
 climb *args:
     cargo build --release -p ry-lang -p libr
     python3 -I tools/climb/run.py {{ args }}
+
+# Keeps .agents/memory navigable: `split` moves a legacy decisions.md into decisions/<area>.md,
+# `index` regenerates decisions/index.md, and `check` fails on a stale index or an over-budget file.
+memory *args:
+    python3 -I tools/memory.py {{ args }}
 
 # Regenerates what the READMEs show: the benchmark blocks and chart from the committed results files,
 # and the diagnostic panels docs/public/diagnostic*.svg from real `ry check` runs on the README's examples.
