@@ -212,6 +212,7 @@ f <- function(flag) {
   x + 1L
 }
 #++++
+f: fn(flag: logical) -> character | integer
 
 #==== guards
 #---- a_test_that_two_values_differ_in_being_null_correlates_them

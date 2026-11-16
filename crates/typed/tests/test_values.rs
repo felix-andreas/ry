@@ -243,7 +243,7 @@ fn owned_unique_operands_are_reused() {
             read(changed),
             Model::Str(vec!["replaced".into(), "b".into()])
         );
-        for list in [b, product, shared, negated, ints, pushed_again, original, changed] {
+        for list in [b, product, shared, negated, pushed_again, original, changed] {
             ry_list_drop(list);
         }
     }
