@@ -1990,7 +1990,7 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, Malformed> {
     let metadata_end = (HEADER_SIZE as u64)
         .checked_add(header.metadata_length)
         .ok_or(MALFORMED)?;
-    if header.code_offset % ALIGN != 0
+    if !header.code_offset.is_multiple_of(ALIGN)
         || header.code_offset < metadata_end
         || header.shared_start > header.code_length
         || header.code_length > u64::from(u32::MAX)
@@ -2442,7 +2442,7 @@ unsafe fn open_file(
         return Err(String::from("the runtime has no build identity"));
     }
     // The code maps straight from the file, at an offset the system's page size divides.
-    if start % ALIGN != 0 {
+    if !start.is_multiple_of(ALIGN) {
         return Err(String::from(MALFORMED));
     }
     let mut file = std::fs::File::open(path)

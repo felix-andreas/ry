@@ -2610,12 +2610,7 @@ fn super_smooth(
     );
     let mut blended = std::mem::take(&mut columns[3]);
     for j in 0..n {
-        if spans[j] <= SUPSMU_SPANS[0] {
-            spans[j] = SUPSMU_SPANS[0];
-        }
-        if spans[j] >= SUPSMU_SPANS[2] {
-            spans[j] = SUPSMU_SPANS[2];
-        }
+        spans[j] = spans[j].clamp(SUPSMU_SPANS[0], SUPSMU_SPANS[2]);
         let f = spans[j] - SUPSMU_SPANS[1];
         blended[j] = if f < 0.0 {
             let f = -f / (SUPSMU_SPANS[1] - SUPSMU_SPANS[0]);

@@ -102,10 +102,13 @@ fn counts_in_a_row_share_one_pass_and_their_common_steps() {
     assert_eq!(list_operations(&function), 0);
 }
 
+/// Why two counts must not share a pass, and a builder of a function that computes them.
+type SeparateCounts = (&'static str, fn() -> Function);
+
 /// Each case builds two counts that one pass must not compute together, and says why.
 #[test]
 fn counts_that_cannot_share_a_pass_keep_their_own() {
-    let cases: [(&str, fn() -> Function); 5] = [
+    let cases: [SeparateCounts; 5] = [
         ("the two lists may differ in length", || {
             let mut builder = Builder::new(String::from("test"), &[WHOLES, WHOLES, Type::I64]);
             let (wins, losses, bound) = (Local(0), Local(1), Local(2));
