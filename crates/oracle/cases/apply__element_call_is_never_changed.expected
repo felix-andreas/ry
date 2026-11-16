@@ -1,0 +1,34 @@
+[stdout]
+| edited : list(list(renamed(X[[99L]], ...), Y[i]), list(renamed(X[[99L]],      ...), Y[i])) 
+| call : list(FUN(X[[i]], ...), FUN(X[[i]], ...)) 
+| code : c("X[[i]]", "X[[i]]") 
+| matched : list(FUN(x = X[[i]], extra = ..1), FUN(x = X[[i]], extra = ..1)) 
+| edited : list(list(renamed(X[[99L]], ...), Y[i]), list(renamed(X[[99L]],      ...), Y[i])) 
+| call : list(FUN(X[[i]], ...), FUN(X[[i]], ...)) 
+| code : c("X[[i]]", "X[[i]]") 
+| matched : list(FUN(x = X[[i]], extra = ..1), FUN(x = X[[i]], extra = ..1)) 
+| edited : list(list(renamed(X[[99L]], ...), Y[i]), list(renamed(X[[99L]],      ...), Y[i])) 
+| call : list(FUN(X[[i]], ...), FUN(X[[i]], ...)) 
+| code : c("X[[i]]", "X[[i]]") 
+| matched : list(FUN(x = X[[i]], extra = ..1), FUN(x = X[[i]], extra = ..1)) 
+| error call edited : changed(...) 
+| error call : FUN(X[[i]], ...) 
+| error call edited : changed(...) 
+| error call : FUN(X[[i]], ...) 
+| error call edited : changed(...) 
+| error call : FUN(X[[i]], ...) 
+| tagged : list(list(note = "mine"), list(note = "mine")) 
+| untagged : list(NULL, NULL) 
+| kept : list(X[[j]], X[[i]]) 
+| after : list(X[[i]], X[[i]]) 
+| nested : list(c("FUN(X[[i]], ...)", "FUN(X[[i]], ...)"), c("FUN(X[[i]], ...)",  "FUN(X[[i]], ...)")) 
+| calls : list(list(c("local({", "eval.parent(substitute(eval(quote(expr), envir)))",  "eval(expr, p)", "eval(expr, p)", "eval(quote({", "eval(quote({",  "withCallingHandlers(tryCatch({", "tryCatch({", "tryCatchList(expr, classes, parentenv, handlers)",  "tryCatchOne(expr, names, parentenv, handlers[[1L]])", "doTryCatch(return(expr), name, parentenv, handler)",  "withVisible(eval(expression, globalenv()))", "eval(expression, globalenv())",  "eval(expression, globalenv())", "show(\"calls\", lapply(1, function(a) lapply(1, function(b) vapply(sys.calls(), ",  "cat(label, \":\", deparse(value), \"\\n\")", "deparse(value)",  "lapply(1, function(a) lapply(1, function(b) vapply(sys.calls(), ",  "FUN(X[[i]], ...)", "lapply(1, function(b) vapply(sys.calls(), function(call) deparse(call)[1], ",  "FUN(X[[i]], ...)"))) 
+| sapply : c("FUN(X[[i]], ...)", "FUN(X[[i]], ...)") 
+| filter : 2:3 
+| after all : list(FUN(X[[i]], ...), FUN(X[[i]], ...)) 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

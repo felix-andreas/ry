@@ -27,7 +27,7 @@ use {
         object::{NA_INTEGER, Sexp, SexpType, gp},
     },
     smallvec::{SmallVec, smallvec},
-    std::mem::MaybeUninit,
+    std::{cell::Cell, mem::MaybeUninit},
     thin_vec::ThinVec,
 };
 
@@ -6992,14 +6992,16 @@ pub unsafe fn complex_assign(
     if base.kind() == SexpType::Promise {
         base = force_promise(base)?;
     }
-    if activity::enabled() {
-        activity::count_general_assignment(activity::label(&assignment_shape(
-            &getters,
-            base,
-            superassign,
-            env,
-        )));
-    }
+    // A profile summary counts the assignment once, when its first level builds a call.
+    let counted = Cell::new(!activity::enabled());
+    let original = base;
+    let count_built = || {
+        if !counted.replace(true) {
+            activity::count_general_assignment(activity::label(&unsafe {
+                assignment_shape(&getters, original, superassign, env)
+            }));
+        }
+    };
     let heap = crate::heap();
     let local_cell = heap.frame_cell(env, inner);
     // A locked binding rejects the final assignment, so the replacement must not have modified
@@ -7051,6 +7053,7 @@ pub unsafe fn complex_assign(
         let tmp_symbol = symbols.tmp;
         let mut shared = false;
         for getter in getters.iter().skip(1).rev() {
+            count_built();
             let previous = *levels.last().unwrap_or(&base);
             let promise = forced_promise(tmp_symbol, previous)?;
             crate::heap().untrack_references(promise);
@@ -7082,6 +7085,39 @@ pub unsafe fn complex_assign(
         for (depth, getter) in getters.iter().enumerate() {
             let object = levels[levels.len() - 1 - depth];
             let setter = replacement_function(getter.car(), whole)?;
+            let function = call_head_function(setter, env)?;
+            // A closure reports its errors against its own call, `` `f<-`(`*tmp*`, value = v) ``,
+            // as GNU R's does, so only a primitive replacement names the assignment. A level
+            // past the first reports as GNU R does, against the assignment of that level's
+            // target, such as `` names(x) <- `*vtmp*` `` in `names(x)[2] <- "b"`.
+            let primitive = function.kind() != SexpType::Closure;
+            let reported = if !primitive || depth == 0 {
+                whole
+            } else {
+                values::call(whole.car(), &[*getter, symbols.vtmp])?
+            };
+            crate::heap().root(reported);
+            if primitive {
+                let frame_depth = interp().frames.len();
+                let outer = interp()
+                    .assignment_call
+                    .replace((reported, reported, frame_depth));
+                let level_arguments = if depth == 0 { evaluated } else { &[] };
+                let result = replace_through_primitive(
+                    function,
+                    *getter,
+                    (object, replacement),
+                    reported,
+                    env,
+                    level_arguments,
+                );
+                interp().assignment_call = outer;
+                if let Some(result) = result? {
+                    replacement = result;
+                    continue;
+                }
+            }
+            count_built();
             // The object promise is the `*tmp*` GNU R binds: it must not count as a reference, or
             // the replacement function would always see its target as shared and copy it.
             let object_promise = forced_promise(tmp_symbol, object)?;
@@ -7119,21 +7155,10 @@ pub unsafe fn complex_assign(
                 tail
             };
             let arguments = values::cons(object_promise, argument_tail)?;
-            let function = call_head_function(setter, env)?;
-            // A closure reports its errors against its own call, `` `f<-`(`*tmp*`, value = v) ``,
-            // as GNU R's does, so only a builtin replacement names the assignment.
-            if function.kind() == SexpType::Closure {
+            if !primitive {
                 replacement = apply_call(setter_call, function, arguments, env)?;
                 continue;
             }
-            // A level past the first reports its errors as GNU R does, against the assignment of
-            // that level's target, such as `` names(x) <- `*vtmp*` `` in `names(x)[2] <- "b"`.
-            let reported = if depth == 0 {
-                whole
-            } else {
-                values::call(whole.car(), &[*getter, symbols.vtmp])?
-            };
-            crate::heap().root(reported);
             let frame_depth = interp().frames.len();
             let outer = interp()
                 .assignment_call
@@ -7153,6 +7178,92 @@ pub unsafe fn complex_assign(
         replaced = values::unwrap_assigned(replaced, bound);
     }
     assign_symbol(inner, replaced, env, superassign)
+}
+
+/// One level of a complex assignment through the replacement primitive `function` itself:
+/// `object` and `value` go to the primitive as they are, with the level's other arguments
+/// evaluated between them, so the level builds no `*tmp*` and value promises and no argument
+/// list. `evaluated` is [`complex_assign`]'s, for the outermost level. `None` leaves the level
+/// to the call `complex_assign` builds: an `object` with a method for the replacement, which
+/// receives the promises, and a special that reads its arguments' code.
+///
+/// Errors report against `reported`, which the caller has published as the assignment in
+/// progress ([`crate::Interp::assignment_call`]).
+unsafe fn replace_through_primitive(
+    function: Sexp,
+    getter: Sexp,
+    (object, value): (Sexp, Sexp),
+    reported: Sexp,
+    env: Sexp,
+    evaluated: &[Sexp],
+) -> R<Option<Sexp>> {
+    let definition = builtin_def(function)?;
+    let symbols = symbols();
+    let special = function.kind() == SexpType::Special;
+    let dollar = definition.symbol == Some(symbols.dollar_assign);
+    // Of the specials, `[<-` and `[[<-` evaluate every argument, and `$<-` all but the name.
+    if special && !dollar && !definition.is_dispatch_or_eval() {
+        return Ok(None);
+    }
+    if object.is_object() {
+        let internal = special || definition.generic == Generic::Internal;
+        if !internal && definition.generic != Generic::None {
+            return Ok(None);
+        }
+        let caller = dispatch::Caller::Env(env);
+        if internal && dispatch::has_internal_method(definition, function, object, caller)? {
+            return Ok(None);
+        }
+    }
+    let rest = getter.cdr().cdr();
+    if dollar {
+        if rest.kind() != SexpType::Pairlist || rest.cdr() != nil() || rest.tag() != nil() {
+            return Ok(None);
+        }
+        let name = crate::subset::name_argument(rest.car())?;
+        return crate::subset::dollar_assign(object, name, value, reported).map(Some);
+    }
+    let keep_missing = special || definition.keep_missing;
+    let mut args = Args::new();
+    args.push(Arg {
+        tag: nil(),
+        value: object,
+    });
+    if evaluated.is_empty() || evaluated.len() != values::pairlist_length(rest) {
+        evaluate_args_into(rest, env, keep_missing, reported, &mut args)?;
+    } else {
+        let mut item = rest;
+        for &argument in evaluated {
+            // A forced promise holds the value compiled code evaluated. Anything else is the
+            // argument's code: a constant, an empty argument, or a formal left for this lookup.
+            let value = match argument.kind() {
+                SexpType::Promise => value_of(argument)?,
+                SexpType::Symbol if argument == symbols.dots => return Ok(None),
+                SexpType::Symbol if argument == missing_arg() && !keep_missing => return Ok(None),
+                SexpType::Symbol if argument == missing_arg() => argument,
+                SexpType::Symbol if keep_missing && argument_is_missing(argument, env)? => {
+                    missing_arg()
+                }
+                SexpType::Symbol => {
+                    let value = eval_symbol(argument, env)?;
+                    crate::heap().root(value);
+                    value
+                }
+                SexpType::Language | SexpType::Bytecode => return Ok(None),
+                _ => argument,
+            };
+            args.push(Arg {
+                tag: item.tag(),
+                value,
+            });
+            item = item.cdr();
+        }
+    }
+    args.push(Arg {
+        tag: symbols.value,
+        value,
+    });
+    call_builtin(definition, reported, function, &args, env).map(Some)
 }
 
 /// A profile summary's name for a complex assignment's target: the replacement functions from

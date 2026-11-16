@@ -2016,7 +2016,7 @@ unsafe fn out_of_bounds(call: Sexp, message: &str, bounds: Bounds, index: Sexp) 
 // `$` and `@`.
 
 /// The name argument of `$` and `@`: a symbol or string, never evaluated.
-unsafe fn name_argument(value: Sexp) -> R<Sexp> {
+pub(crate) unsafe fn name_argument(value: Sexp) -> R<Sexp> {
     // A promise comes from `NextMethod` and stands for the name the method received.
     let value = eval::value_of(value)?;
     match value.kind() {
