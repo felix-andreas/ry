@@ -1,0 +1,55 @@
+[stdout]
+|  1  2  3  4  5  6  7  8  9 10 11 12 
+|  4  4  4  4  4  4  4  4  4  4  4  4 
+|  1  2  3  4  5  6  7  8  9 10 11 12 
+|  5  5  5  5  5  5  5  5  5  5  5  5 
+| [[1]]
+| [1] 10
+| 
+| [[2]]
+| [1] 20
+| 
+| [[3]]
+| [1] 30
+| 
+| [[4]]
+| [1] 40
+| 
+| [1]  8.5 14.5 18.5 20.5 20.5 18.5 14.5  8.5
+| [1] "a1" "b2" "c3" "d4" "e5" "f6"
+| [1] 2036
+| [1] 1 2 3
+|  [1]  4  7 10 13 16 19 22 25 28 31
+|  [1]  1  2  3  4  5  6  7  8  9 10
+|  [1] "2"    "3"    "4"    "5"    "105"  "106"  "107"  "800"  "900"  "900" 
+| [11] "1000" "1100"
+| List of 4
+|  $ :List of 2
+|   ..$ call  : chr "where()"
+|   ..$ parent: logi TRUE
+|  $ :List of 2
+|   ..$ call  : chr "where()"
+|   ..$ parent: logi TRUE
+|  $ :List of 2
+|   ..$ call  : chr "where()"
+|   ..$ parent: logi TRUE
+|  $ :List of 2
+|   ..$ call  : chr "where()"
+|   ..$ parent: logi TRUE
+| $value
+| [1] 5
+| 
+| $visible
+| [1] FALSE
+| 
+| error: x is 7 | call: rlang::eval_bare(e, environment()) 
+| warning: x is 7 | call: rlang::eval_bare(e, environment()) 
+| warning: x is 8 | call: rlang::eval_bare(e, environment()) 
+| [1] TRUE
+| [1] 45150
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 45150

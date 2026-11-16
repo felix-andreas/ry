@@ -3464,6 +3464,16 @@ impl Heap {
         payload.c_finalizer.set(0);
     }
 
+    /// Replaces the value of a live weak reference. It needs no write barrier, because every
+    /// collection traces a weak reference's value from the registered references, whatever
+    /// their age, when it finds the key live.
+    pub unsafe fn set_weak_value(&mut self, weak: Sexp, value: Sexp) {
+        let payload = weak.weak_payload();
+        value.increment_refcount();
+        payload.value.get().decrement_refcount();
+        payload.value.set(value);
+    }
+
     #[inline(always)]
     unsafe fn allocate(&mut self, kind: SexpType, size: usize, keep: &[Sexp]) -> HeapResult<Sexp> {
         self.allocate_with(kind, size, keep, size)

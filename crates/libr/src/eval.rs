@@ -199,7 +199,7 @@ impl Evaluator for Interpreter {
     }
 
     unsafe fn force_and_call(&self, call: Sexp, count: c_int, env: Sexp) -> ApiResult<Sexp> {
-        normalize_argument_cells(call)?;
+        interp::bytecode::normalize_argument_cells(call)?;
         let function = call.car();
         let function = if function.kind() == SexpType::Symbol {
             interp::eval::find_fun(function, env)?
@@ -419,28 +419,10 @@ unsafe fn paste(args: &[Arg]) -> ApiResult<String> {
 }
 
 pub unsafe fn eval(expression: Sexp, env: Sexp) -> ApiResult<Sexp> {
-    normalize_argument_cells(expression)?;
+    if expression.kind() == SexpType::Language {
+        return interp::bytecode::run_call(expression, env);
+    }
     interp::eval::eval(expression, env)
-}
-
-/// Retypes the argument cells of every call in `expression` to pairlist cells. Native code
-/// often builds a call as `LCONS(fun, LCONS(arg, R_NilValue))`, whose argument cells are
-/// LANGSXP; GNU R walks any cons cell there, while the interpreter walks pairlist cells only,
-/// so it would see no arguments at all.
-unsafe fn normalize_argument_cells(expression: Sexp) -> ApiResult<()> {
-    if expression.kind() != SexpType::Language {
-        return Ok(());
-    }
-    normalize_argument_cells(expression.car())?;
-    let mut cell = expression.cdr();
-    while matches!(cell.kind(), SexpType::Pairlist | SexpType::Language) {
-        if cell.kind() == SexpType::Language {
-            runtime().heap.retype(cell, SexpType::Pairlist)?;
-        }
-        normalize_argument_cells(cell.car())?;
-        cell = cell.cdr();
-    }
-    Ok(())
 }
 
 pub unsafe fn force_promise(promise: Sexp) -> ApiResult<Sexp> {

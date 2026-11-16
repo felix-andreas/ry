@@ -10,7 +10,7 @@ Read this before you change R's C API as an ABI-compatible `libR`. Cross-cutting
 - **ry's headers declare and `libR` exports every name in `crates/libr/tests/headers/r_api_names.txt`** (`.agents/memory/decisions/libr-rcmd.md`, "GNU R's public C API is a checked list, not a measured subset"). A libr test package must also build under gcc 14 and load into GNU R 4.6, so its C declares a non-API entry itself, with a parenthesized name (`SEXP (ATTRIB)(SEXP x);`).
 - **`LEVELS` reports growability as GNU R's gp bit `0x20`** (`gp::GROWABLE`): packages built before R 4.6, data.table among them, test the bit and otherwise fail with "attempt to resize a non-resizable vector".
 - **An ALTREP header holds no length**: read it with `libr::altrep::length`, never `Sexp::length`, which returns garbage.
-- **Native code builds calls with `LCONS`, so argument cells are `LANGSXP`**; `libr::eval::normalize_argument_cells` retypes them before the interpreter walks a call.
+- **Native code builds calls with `LCONS`, so argument cells are `LANGSXP`**; `interp::bytecode::normalize_argument_cells` retypes them before the interpreter walks or compiles a call.
 - **libR's mimalloc needs `local_dynamic_tls` (the default TLS model fails `dlopen`) and the `v2` allocator** (v3 crashes when a second thread allocates after the first exits).
 - **GNU R's default-package libraries (`methods.so`, `stats.so`) can never load on ry's heap**, because they inline R's object layout. Their routines are Rust (`builtin_libraries.rs`).
 - **On macOS `dyn.load` opens a re-signed copy of a package binary, rebound to ry's libR** (`macho.rs`; `.agents/memory/decisions/libr-rcmd.md`, "macOS packages bind to ry's libR").

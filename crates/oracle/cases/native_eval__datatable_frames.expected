@@ -1,0 +1,29 @@
+[stdout]
+| List of 6
+|  $ call        : chr "calls(v * 2)"
+|  $ matched     : chr "calls(x = v * 2)"
+|  $ substituted : chr "v * 2"
+|  $ missing     : logi TRUE
+|  $ parent_has_v: logi TRUE
+|  $ own         : chr "R_GlobalEnv"
+| List of 6
+|  $ call        : chr "calls(v, y = .N)"
+|  $ matched     : chr "calls(x = v, y = .N)"
+|  $ substituted : chr "v"
+|  $ missing     : logi FALSE
+|  $ parent_has_v: logi TRUE
+|  $ own         : chr "R_GlobalEnv"
+| error: group 10 failed | call: `[.data.table`(DT, , if (.GRP == 10L) stop("group ", .GRP, " failed") else sum(v),      by = g) 
+| warning: sum 96 is large | call: checked(v) 
+| warning: sum 105 is large | call: checked(v) 
+|  [1]   6  15  24  33  42  51  60  69  78  87  96 105
+| error: subscript out of bounds 
+|  [1]  6 15 24 33 42 -1 -1 -1 -1 -1 -1 -1
+[messages]
+- \nAttaching package: ‘data.table’\n
+- The following object is masked from ‘package:base’:\n\n    %notin%\n
+[warnings]
+[errors]
+[value]
+double
+| c(6, 15, 24, 33, 42, -1, -1, -1, -1, -1, -1, -1)
