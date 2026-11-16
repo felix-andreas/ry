@@ -82,6 +82,7 @@ Cross-cutting traps and conventions. A trap that belongs to one crate lives in t
 ### Runtime and numerics
 
 - **Code translated from GNU R lives only in a GPL crate, under a provenance header that `just notices` reads.** A UPL crate never depends on `interp`, and `crates/libr/include` (LGPL) must not copy R's GPL-only `Rinterface.h` or `Rembedded.h` (`reference/licensing.md`).
+- **A bare `cargo test` or `cargo build` at the root builds only `crates/ry` (`default-members`), not the `libr` cdylib**, so `target/debug/libR.so` goes stale and every test that runs ry's runtime fails with "ry's runtime ... is out of date". Pass `--workspace` or build `-p libr` too.
 - **Last-digit output follows the C math library and FMA contraction.** libr test packages build with `NO_CONTRACTION`, and oracle cases that print such digits carry `# oracle: library-dependent` (`decisions/r-compat.md`, "The oracle suite names the GNU R build it was recorded with").
 
 ### Measuring
