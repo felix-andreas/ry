@@ -140,3 +140,102 @@ for (round in 1:5) {
   show("defaults two", through(round, 10))
   show("defaults skip", through(round, c = 0))
 }
+
+# A name in `...` matches a formal partially, and a formal after `...` only exactly.
+partial <- function(value, ..., verbose = FALSE, width = 1L) {
+  list(value = value, rest = list(...), verbose = verbose, width = width)
+}
+abbreviate <- function(...) partial(...)
+for (round in 1:5) {
+  show("partial", abbreviate(val = round, 2L))
+  show("after dots", abbreviate(round, verb = TRUE, width = 3L))
+  show("exact after dots", abbreviate(round, verbose = TRUE, wid = 3L))
+}
+
+# The calling frame leaves its slots before the call, and between two calls of one site.
+looks <- function(...) { first <- 1L; get("first"); target(...) }
+assigns <- function(...) { assign("made", 2L); target(..., y = made) }
+leaves <- function(...) {
+  result <- integer()
+  for (round in 1:4) {
+    result <- c(result, target(...))
+    if (round == 2L) environment()
+  }
+  result
+}
+for (round in 1:4) {
+  show("looks", looks(round, 3L))
+  show("assigns", assigns(round))
+  show("leaves", leaves(round, z = 0L))
+}
+
+# `...` that is no argument list, and the `...` of an enclosing function.
+assigned <- function() { ... <- 5; attempt(target(...)) }
+count <- function(...) ...length()
+enclosing <- function(...) { inner <- function() count(...); inner() }
+unset <- function(...) { inner <- function() { if (FALSE) ... <- 1; count(...) }; inner() }
+unset_builtin <- function(...) { inner <- function() { if (FALSE) ... <- 1; c(...) }; inner() }
+for (round in 1:5) {
+  show("assigned", assigned())
+  show("enclosing", enclosing(round, 2))
+  show("unset", unset(round, 2))
+  show("unset builtin", unset_builtin(round, 2))
+}
+
+# An argument beside `...` whose value is the empty argument.
+choose <- function(a = 5, ...) if (missing(a)) "default" else "given"
+forced <- function(x, ...) { force(x); choose(x, ...) }
+for (round in 1:5) show("given", forced(round, 2))
+show("empty value", attempt(forced(quote(expr = ), 2)))
+for (round in 1:3) show("given again", forced(round, 2))
+unforced <- function(x, ...) choose(x, ...)
+for (round in 1:5) show("variable", unforced(round, 2))
+for (round in 1:3) show("missing variable", unforced())
+missing_through <- function(x) forward(x)
+for (round in 1:3) show("missing forwarded", attempt(missing_through()))
+
+# A forwarding call inside an argument and inside a default.
+inside <- function(...) identity(target(...))
+default <- function(..., value = target(...)) value
+for (round in 1:5) {
+  show("inside", inside(round, 6L))
+  show("default", default(round, y = 0L))
+}
+
+# The function changes after the site stopped replanning, and its formals change.
+callees <- list(
+  function(a, b) c(a, b), function(b, a) c(a, b), function(a, ...) c(a, ...length()),
+  function(..., a) c(a, ...length()), function(a, b = 0) a + b, function(b = 0, a) a - b,
+  function(x, a) c(x, a), function(a, x) c(x, a), function(a, bb) a * bb,
+  function(a, b) a / b
+)
+many <- function(callee, ...) callee(...)
+for (round in 1:2) {
+  for (callee in callees) show("callee", many(callee, a = 8, 2))
+}
+changing <- function(x, y = 1) c(x, y)
+relays <- function(...) changing(...)
+for (round in 1:4) show("before", relays(round))
+formals(changing) <- alist(y = 1, x = )
+for (round in 1:4) show("after", relays(round))
+formals(changing)$y <- 9
+for (round in 1:4) show("default changed", relays(x = round))
+
+# `do.call` builds the arguments.
+for (round in 1:4) {
+  show("do.call", do.call(forward, list(round, y = 2L)))
+  show("do.call names", do.call(forward, list(z = 0L, x = round)))
+}
+
+# Two forwarding functions into a generic, its method and the next method.
+describe <- function(x, ...) UseMethod("describe")
+describe.default <- function(x, digits = 1L, ...) c(kind = "default", digits = digits, rest = ...length())
+describe.special <- function(x, ..., digits = 4L) c(kind = "special", NextMethod(digits = digits))
+outer_wrapper <- function(...) inner_wrapper(...)
+inner_wrapper <- function(...) describe(...)
+special <- structure(1, class = "special")
+for (round in 1:5) {
+  show("plain", outer_wrapper(round, 2L))
+  show("special", outer_wrapper(special, round))
+  show("special named", outer_wrapper(special, digits = round, extra = 0))
+}

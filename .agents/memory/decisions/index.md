@@ -204,6 +204,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A complex assignment calls a primitive replacement with its values
 - An empty named argument leaves its formal to a positional argument
 - `[[<-` reports a wrong subscript count in GNU R's order
+- A call site that passes `...` keeps a plan for what `...` held
 
 ## Builtins and base R
 

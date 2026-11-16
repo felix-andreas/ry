@@ -8062,19 +8062,6 @@ unsafe fn call_fast<const BY_NAME: bool, const SPREAD: bool>(
     }
     let call_index = *code.add(at + 3) as usize;
     let references = interp.references_used;
-    // The same test as the generic path's, with the callee's answer kept in the plan's row.
-    let eager = pool_constant(state, call_index + 2) != nil
-        && !conditions::calling_established(&interp.handlers)
-        && if (*row).effects_env == function.tag()
-            && (*row).effects_epoch == (*heap).binding_epoch()
-        {
-            (*row).flags & PLAN_EFFECT_FREE != 0
-        } else {
-            match site_effect_free(row, function) {
-                Ok(holds) => holds,
-                Err(unwind) => return Some(failed::<false>(state, at, unwind)),
-            }
-        };
     let site_count = (*row).arguments as usize;
     let pool = interp.bytecode.call_plans.pool.as_ptr();
     let sources = pool.add((*row).sources_at as usize);
@@ -8095,16 +8082,29 @@ unsafe fn call_fast<const BY_NAME: bool, const SPREAD: bool>(
             }
             item = item.cdr();
         }
-        // Past the plan's arguments the chain ends, and an empty `...` is unset or missing.
-        if item.kind() == SexpType::Dots
-            || (dots_count == 0 && item != missing_value && item != unbound)
-        {
+        // Past the plan's arguments the chain ends, and an empty `...` is the missing
+        // argument. A slot that was never set belongs to a function without the formal, whose
+        // `...` is an enclosing function's.
+        if item.kind() == SexpType::Dots || (dots_count == 0 && item != missing_value) {
             return None;
         }
         (dots, dots_count)
     } else {
         (nil, 0)
     };
+    // The same test as the generic path's, with the callee's answer kept in the plan's row.
+    let eager = pool_constant(state, call_index + 2) != nil
+        && !conditions::calling_established(&interp.handlers)
+        && if (*row).effects_env == function.tag()
+            && (*row).effects_epoch == (*heap).binding_epoch()
+        {
+            (*row).flags & PLAN_EFFECT_FREE != 0
+        } else {
+            match site_effect_free(row, function) {
+                Ok(holds) => holds,
+                Err(unwind) => return Some(failed::<false>(state, at, unwind)),
+            }
+        };
     let count = site_count - usize::from(SPREAD) + dots_count;
     let args_start = interp.frame_args.len();
     interp.frame_args.reserve(count);
@@ -8158,7 +8158,9 @@ unsafe fn call_fast<const BY_NAME: bool, const SPREAD: bool>(
             } else {
                 effects::eager_argument(expression, state.machine.function.tag())
             };
-            match eager_value {
+            // A spread plan was matched for arguments that are all given, and a variable
+            // whose value is the empty argument reads as left out unless it stays a reference.
+            match eager_value.filter(|&value| !SPREAD || value != missing_value) {
                 Some(value) => value,
                 None => {
                     let reference = if BY_NAME {
@@ -9735,9 +9737,9 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
 /// call of `function` with `args`, the call's `arguments` with `...` spread out: the site's plan
 /// when it holds for them, and otherwise a plan matched for them, which the site keeps for its
 /// next calls. `None` when the call matches per call instead: the arguments do not match, a
-/// default does not fit a slot, the site passes `...` twice, an argument has a name that is no
-/// symbol, `...` held an empty argument, or the site replanned [`PLAN_MISSES`] times already,
-/// as a site does whose callers pass it ever different arguments.
+/// default does not fit a slot, the site passes `...` twice, an argument in `...` has a name
+/// that is no symbol, an argument is empty, or the site replanned [`PLAN_MISSES`] times
+/// already, as a site does whose callers pass it ever different arguments.
 unsafe fn spread_plan<'plans>(
     state: &Activation<'_, '_>,
     instruction: Instruction,
@@ -9781,10 +9783,13 @@ unsafe fn spread_plan<'plans>(
         let Some(dots_count) = (args.len() + 1).checked_sub(site_count) else {
             return Ok(None);
         };
-        let mut spread: SmallVec<[i32; 16]> =
-            smallvec![dots_at as i32, -1, dots_count as i32];
+        let mut spread: SmallVec<[i32; 16]> = smallvec![dots_at as i32, -1, dots_count as i32];
+        // Matching reads which arguments are empty, and an eager argument can turn out to be.
+        if args.iter().any(|arg| arg.value == missing) {
+            return Ok(None);
+        }
         for arg in &args[dots_at..dots_at + dots_count] {
-            if arg.value == missing || !(arg.tag == nil() || arg.tag.kind() == SexpType::Symbol) {
+            if !(arg.tag == nil() || arg.tag.kind() == SexpType::Symbol) {
                 return Ok(None);
             }
             spread.extend(tag_words(arg.tag));
@@ -9901,9 +9906,10 @@ unsafe fn closure_arguments(
 }
 
 /// How many times a call site may fail to plan, by meeting a closure with other formals or
-/// body than its plan's or one it cannot plan for, before it stops planning and always takes
-/// the generic call path: a site that calls a new closure on every call would otherwise pay
-/// for matching each time.
+/// body than its plan's, one it cannot plan for, or a `...` that holds other arguments than its
+/// spread plan's ([`PLAN_SPREAD`]), before it stops planning and always takes the generic call
+/// path: a site that calls a new closure on every call would otherwise pay for matching each
+/// time. A site has one count for all three.
 const PLAN_MISSES: i32 = 8;
 
 /// The direct-call plan of a call site for `function` (see [`eval::call_with_plan`]): which
@@ -10202,16 +10208,17 @@ impl CallPlans {
 
     /// Whether the spread plan `id` holds for `args`, a call's arguments with `...` spread
     /// out: `...` held as many arguments as the plan was made for, with the same names, and
-    /// none of them is the empty argument, which would take a formal's default.
+    /// no argument is the empty one, which would take a formal's default.
     unsafe fn spread_holds(&self, id: usize, args: &[Arg]) -> bool {
         let spread = self.spread(id);
         let (at, count) = (spread[SPREAD_AT] as usize, spread[SPREAD_COUNT] as usize);
         let missing = missing_arg();
         args.len() + 1 == self.rows[id].arguments as usize + count
+            && args.iter().all(|arg| arg.value != missing)
             && args[at..at + count]
                 .iter()
                 .zip(spread[SPREAD_TAGS..].chunks_exact(2))
-                .all(|(arg, words)| arg.value != missing && tag_words(arg.tag)[..] == *words)
+                .all(|(arg, words)| tag_words(arg.tag)[..] == *words)
     }
 
     /// Frees every plan with a dead key.
@@ -10914,7 +10921,11 @@ unsafe fn slot_builtin_call(
         let expression = cell.car();
         let fits = match expression.kind() {
             _ if expression == missing => true,
-            SexpType::Symbol if expression == dots => slot_named(state, dots).is_some(),
+            // An unset `...` slot is a local the function never assigned, and the `...` it
+            // passes is an enclosing function's.
+            SexpType::Symbol if expression == dots => {
+                slot_named(state, dots).is_some_and(|slot| *slot != unbound())
+            }
             SexpType::Symbol => {
                 eval::dot_dot_index(expression).is_none()
                     && slot_named(state, expression).is_some_and(|slot| {
@@ -11311,9 +11322,10 @@ unsafe fn slot_promises_into(
 }
 
 /// Whether a `...` slot holding `value` passes on as it is: the arguments it collected, or
-/// none. Anything else is the error a heap frame reports.
+/// none. A slot that was never set is the local of a function without the formal, which reads
+/// an enclosing function's `...`, and anything else is the error a heap frame reports.
 unsafe fn forwardable_dots(value: Sexp) -> bool {
-    value.kind() == SexpType::Dots || value == missing_arg() || value == unbound()
+    value.kind() == SexpType::Dots || value == missing_arg()
 }
 
 /// Appends the arguments the slot frame's `...` collected, which are its caller's promises and
