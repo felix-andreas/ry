@@ -1,0 +1,361 @@
+[stdout]
+|     a     b 
+| FALSE  TRUE 
+|     a     b 
+| FALSE  TRUE 
+|     a     b 
+|  TRUE FALSE 
+|     a     b 
+| FALSE  TRUE 
+|     a     b 
+|  TRUE FALSE 
+|    a    b 
+| TRUE TRUE 
+|    a    b 
+| TRUE TRUE 
+|    a    b 
+| TRUE TRUE 
+|     a     b 
+| FALSE FALSE 
+| [1] "error: formal argument \"a\" matched by multiple actual arguments | call: f(a = , a = 1)"
+| $a
+| [1] FALSE
+| 
+| $b
+| [1] FALSE
+| 
+| $n
+| [1] 0
+| 
+| $a
+| [1] FALSE
+| 
+| $b
+| [1] FALSE
+| 
+| $n
+| [1] 0
+| 
+| $a
+| [1] FALSE
+| 
+| $b
+| [1] FALSE
+| 
+| $n
+| [1] 1
+| 
+| $a
+| [1] FALSE
+| 
+| $b
+| [1] FALSE
+| 
+| $n
+| [1] 1
+| 
+| [1] 6
+| [1] 6
+| [1] 3
+| [1] "error: argument \"second\" is missing, with no default | call: k(first = , 3)"
+| [1] "error: argument \"second\" is missing, with no default | call: k(second = , 3)"
+| [1] FALSE  TRUE
+| [1] FALSE  TRUE
+|    n last 
+|    1    1 
+|     a     b 
+| FALSE  TRUE 
+|     a     b 
+| FALSE  TRUE 
+|     a     b 
+|  TRUE FALSE 
+|     a     b 
+| FALSE  TRUE 
+|     a     b 
+|  TRUE FALSE 
+|    a    b 
+| TRUE TRUE 
+|    a    b 
+| TRUE TRUE 
+|    a    b 
+| TRUE TRUE 
+|     a     b 
+| FALSE FALSE 
+| [1] "error: formal argument \"a\" matched by multiple actual arguments | call: f(a = , a = 1)"
+| $a
+| [1] FALSE
+| 
+| $b
+| [1] FALSE
+| 
+| $n
+| [1] 0
+| 
+| $a
+| [1] FALSE
+| 
+| $b
+| [1] FALSE
+| 
+| $n
+| [1] 0
+| 
+| $a
+| [1] FALSE
+| 
+| $b
+| [1] FALSE
+| 
+| $n
+| [1] 1
+| 
+| $a
+| [1] FALSE
+| 
+| $b
+| [1] FALSE
+| 
+| $n
+| [1] 1
+| 
+| [1] 6
+| [1] 6
+| [1] 3
+| [1] "error: argument \"second\" is missing, with no default | call: k(first = , 3)"
+| [1] "error: argument \"second\" is missing, with no default | call: k(second = , 3)"
+| [1] FALSE  TRUE
+| [1] FALSE  TRUE
+|    n last 
+|    1    1 
+|     a     b 
+| FALSE  TRUE 
+|     a     b 
+| FALSE  TRUE 
+|     a     b 
+|  TRUE FALSE 
+|     a     b 
+| FALSE  TRUE 
+|     a     b 
+|  TRUE FALSE 
+|    a    b 
+| TRUE TRUE 
+|    a    b 
+| TRUE TRUE 
+|    a    b 
+| TRUE TRUE 
+|     a     b 
+| FALSE FALSE 
+| [1] "error: formal argument \"a\" matched by multiple actual arguments | call: f(a = , a = 1)"
+| $a
+| [1] FALSE
+| 
+| $b
+| [1] FALSE
+| 
+| $n
+| [1] 0
+| 
+| $a
+| [1] FALSE
+| 
+| $b
+| [1] FALSE
+| 
+| $n
+| [1] 0
+| 
+| $a
+| [1] FALSE
+| 
+| $b
+| [1] FALSE
+| 
+| $n
+| [1] 1
+| 
+| $a
+| [1] FALSE
+| 
+| $b
+| [1] FALSE
+| 
+| $n
+| [1] 1
+| 
+| [1] 6
+| [1] 6
+| [1] 3
+| [1] "error: argument \"second\" is missing, with no default | call: k(first = , 3)"
+| [1] "error: argument \"second\" is missing, with no default | call: k(second = , 3)"
+| [1] FALSE  TRUE
+| [1] FALSE  TRUE
+|    n last 
+|    1    1 
+|     a     b 
+| FALSE  TRUE 
+|     a     b 
+| FALSE  TRUE 
+|     a     b 
+|  TRUE FALSE 
+|     a     b 
+| FALSE  TRUE 
+|     a     b 
+|  TRUE FALSE 
+|    a    b 
+| TRUE TRUE 
+|    a    b 
+| TRUE TRUE 
+|    a    b 
+| TRUE TRUE 
+|     a     b 
+| FALSE FALSE 
+| [1] "error: formal argument \"a\" matched by multiple actual arguments | call: f(a = , a = 1)"
+| $a
+| [1] FALSE
+| 
+| $b
+| [1] FALSE
+| 
+| $n
+| [1] 0
+| 
+| $a
+| [1] FALSE
+| 
+| $b
+| [1] FALSE
+| 
+| $n
+| [1] 0
+| 
+| $a
+| [1] FALSE
+| 
+| $b
+| [1] FALSE
+| 
+| $n
+| [1] 1
+| 
+| $a
+| [1] FALSE
+| 
+| $b
+| [1] FALSE
+| 
+| $n
+| [1] 1
+| 
+| [1] 6
+| [1] 6
+| [1] 3
+| [1] "error: argument \"second\" is missing, with no default | call: k(first = , 3)"
+| [1] "error: argument \"second\" is missing, with no default | call: k(second = , 3)"
+| [1] FALSE  TRUE
+| [1] FALSE  TRUE
+|    n last 
+|    1    1 
+|     a     b 
+| FALSE  TRUE 
+|     a     b 
+| FALSE  TRUE 
+|     a     b 
+| FALSE FALSE 
+| $a
+| [1] FALSE
+| 
+| $b
+| [1] FALSE
+| 
+| $n
+| [1] 0
+| 
+|     a     b 
+| FALSE  TRUE 
+| [1] 6
+|     a     b 
+| FALSE  TRUE 
+|     a     b 
+| FALSE  TRUE 
+|     a     b 
+| FALSE FALSE 
+| $a
+| [1] FALSE
+| 
+| $b
+| [1] FALSE
+| 
+| $n
+| [1] 0
+| 
+|     a     b 
+| FALSE  TRUE 
+| [1] 6
+|     a     b 
+| FALSE  TRUE 
+|     a     b 
+| FALSE  TRUE 
+|     a     b 
+| FALSE FALSE 
+| $a
+| [1] FALSE
+| 
+| $b
+| [1] FALSE
+| 
+| $n
+| [1] 0
+| 
+|     a     b 
+| FALSE  TRUE 
+| [1] 6
+|     a     b 
+| FALSE  TRUE 
+|     a     b 
+| FALSE  TRUE 
+|     a     b 
+| FALSE FALSE 
+| $a
+| [1] FALSE
+| 
+| $b
+| [1] FALSE
+| 
+| $n
+| [1] 0
+| 
+|     a     b 
+| FALSE  TRUE 
+| [1] 6
+| x y n 
+| 0 0 0 
+| x y n 
+| 0 0 0 
+| x y n 
+| 0 0 0 
+| x y n 
+| 0 0 0 
+| x y n 
+| 0 0 0 
+| x y n 
+| 0 0 0 
+| [1] 2
+| [1] 2
+| [1] "a b"
+| [1] 2 4
+| [1] 3
+| [1] "error: unused argument (4) | call: two(1L, 2L, 4L)"
+| [1] "error: unused argument (w = 4) | call: two(1L, w = 4L)"
+| [1] "error: unused arguments (4, \"s\") | call: two(...)"
+| [1] "error: NA in coercion to boolean | call: islistfactor(x, recursive)"
+| [1] "error: NA in coercion to boolean | call: islistfactor(x, recursive)"
+| [1] "error: NA in coercion to boolean | call: islistfactor(x, recursive)"
+| [1] "error: 'recursive' is NA | call: unlist(list(a = 1), NA)"
+| [1] "error: NA in coercion to boolean | call: islistfactor(list(a = 1), NA)"
+| [1] TRUE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| TRUE
