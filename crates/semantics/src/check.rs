@@ -462,14 +462,12 @@ pub struct ItemCheck<'db> {
     /// `double` whatever the checker decided, so the code ry's runtime runs spells each one with
     /// its suffix (`preflight` in the `ry` crate); without it, `-> I64` could return a `double`.
     pub i64_literals: ThinVec<ExprId>,
-    /// The expressions whose types only this check knows and the runtime needs: an empty `[]`, a
-    /// call to a library function whose result items come from a callback rather than from a
-    /// list it was given (`List.map`), a library call that builds a dictionary from no entries
-    /// (`Dict.empty()`), and a `Num.from_r`. An empty list is stored by its items' storage, and
-    /// one built from no items is `logical`, typed code lays a dictionary out by its key and
-    /// value types, and the number a `Num.from_r` gives otherwise depends on the R value, so the
-    /// code ry's runtime runs passes each of these through `.ry_items` with the type
-    /// (`preflight` in the `ry` crate). In id order.
+    /// The expressions whose types only this check knows and the runtime needs, in id order: an
+    /// empty `[]` (stored by its items' storage, `logical` when there are none), a library call
+    /// whose result items come from a callback (`List.map`), one building a dictionary from no
+    /// entries (`Dict.empty()`, laid out by key and value types), and `Num.from_r`, whose number
+    /// otherwise depends on the R value. The runtime receives each through `.ry_items` (`preflight`
+    /// in `ry`).
     pub checked_types: ThinVec<(ExprId, CheckedType)>,
     /// What only editor features read, absent when the host asked for no editor facts, so a
     /// command's check keeps no per-item slots for them.
@@ -6799,15 +6797,13 @@ impl<'db, 'a> Checker<'db, 'a> {
         module.for_each_child(id, |child| self.collect_formal_uses(child, uses));
     }
 
-    /// For each argument of a call to the project function `name`, whether it binds a
-    /// parameter the callee may leave unread: optional without a default, or one the callee
-    /// tests with `missing()`. A missing formal passed on does not take the callee's default,
-    /// so a defaulted parameter that the callee reads without testing it still errors, while
-    /// knitr's `kable_format(format = NULL)` tests `missing(format)`. Names match exactly, and the remaining
-    /// arguments fill the unclaimed formals before `...` in order. An unknown callee yields no
-    /// optional targets, so its arguments stay forced. A local function the enclosing body
-    /// has already bound counts as well, as callr's `format_advice(x)` hands `x` to a local
-    /// helper that never reads it.
+    /// For each argument of a call to the project function `name`, whether it binds a parameter the
+    /// callee may leave unread: optional without a default, or tested with `missing()` (knitr's
+    /// `kable_format(format = NULL)`). A missing formal passed on does not take the callee's
+    /// default, so a defaulted parameter read without a test still errors. Names match exactly, the
+    /// rest fill the unclaimed formals before `...` in order, and an unknown callee yields none. A
+    /// local function already bound counts too (callr's `format_advice(x)` hands `x` to a helper
+    /// that never reads it).
     fn optional_argument_targets(
         &self,
         callee: ExprId,
@@ -9432,12 +9428,11 @@ impl<'db, 'a> Checker<'db, 'a> {
             let whole_literal = self.is_whole_double(operand);
             let inferred = self.infer(operand);
             let resolved = self.structural(inferred);
-            // R takes a logical endpoint as a number, and a vector endpoint by its first element.
-            // A vector type carries no length, so only a literal `c()` of several elements is
-            // known to be too long. An endpoint read from a list field that is only sometimes
-            // `NULL` is used where the code has ruled that out: mgcv's basis fills `off` only
-            // when a `penalty` flag is set, and callers read `b$off[i]:...` only after passing
-            // it. A local, an element read straight from a value, and a field of a parameter,
+            // R takes a logical endpoint as a number and a vector endpoint by its first element; a
+            // vector type carries no length, so only a literal `c()` of several elements is known
+            // to be too long. A list field that is only sometimes `NULL` is read where the code has
+            // ruled that out (mgcv reads `b$off[i]:...` only after testing the flag that fills
+            // `off`). A local, an element read straight from a value, and a field of a parameter,
             // whose `NULL` the declaration admits, stay checked.
             let field_read = {
                 let mut expression = operand;
@@ -11010,13 +11005,11 @@ impl<'db, 'a> Checker<'db, 'a> {
         walk(db, resolved, &unconstrained)
     }
 
-    /// A variable whose every visible write is `NULL`, such as `msg <- NULL # trick R CMD
-    /// check` before `msg %<~% ...`, or a top-level `.flag = NULL` that `assign()` fills in, is
-    /// a placeholder for a value written where the checker cannot see. Correct R never tests
-    /// or passes on a value that is always `NULL` where `NULL` fails, so such a read is not
-    /// reported there. A parameter's `NULL` is what the caller passed, and stays checked.
-    /// A local whose every visible write is a bare `NA` (`pattern.end = NA` before a closure
-    /// fills it with `<<-`) is the same placeholder, spelled as a missing value.
+    /// A variable whose every visible write is `NULL` (`msg <- NULL # trick R CMD check` before
+    /// `msg %<~% ...`, or a top-level `.flag = NULL` that `assign()` fills) or, for a local, a bare
+    /// `NA` (filled later with `<<-`) is a placeholder for a write the checker cannot see. Correct
+    /// R never uses an always-`NULL` value where `NULL` fails, so such a read is not reported
+    /// there. A parameter's `NULL` is what the caller passed, and stays checked.
     fn reads_null_placeholder(&self, value: ExprId, ty: Ty<'db>) -> bool {
         let mut value = value;
         while let ExpressionKind::Paren(inner) = self.module.kind(value) {
@@ -13675,13 +13668,11 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
         }
 
-        // Report the overload-set finding unless one answer exists: every candidate failed
-        // for the same reason, or the candidates that got furthest into the call (their first
-        // blamed argument is the deepest; a whole-call verdict blames none) all failed for the
-        // same reason.
-        // The standard library declares an Array twin before each `List` signature. When the
-        // argument is not an Array at all, that twin's failure explains nothing, so the finding
-        // comes from the remaining candidates.
+        // Report the overload-set finding unless one answer exists: every candidate failed for the
+        // same reason, or the candidates that got furthest (deepest first blamed argument; a
+        // whole-call verdict blames none) did. The standard library declares an Array twin before
+        // each `List` signature, and when the argument is no Array that twin's failure explains
+        // nothing, so it is left out.
         let candidate_count = schemes.len();
         let (candidate_errors, candidate_count) = if candidate_errors.len() == candidate_count {
             let relevant: Vec<TypeError<'db>> = candidate_errors
@@ -13892,13 +13883,11 @@ impl<'db, 'a> Checker<'db, 'a> {
         self.infer_call_arguments_against(range, arguments, &[])
     }
 
-    /// Infers a call's arguments, typing an unannotated function literal last and in context:
-    /// its formals take the parameter types of the function the callee expects at its
-    /// position, once the other arguments have bound the callee's type variables. In
-    /// `List.map(xs, \(x) c(x, x))`, `x` is the item type of `xs` before the body infers, so
-    /// `c(x, x)` types concretely instead of over an open variable. `callees` are the
-    /// instantiated candidate signatures; a hint is used only where every candidate that
-    /// accepts the other arguments agrees on it.
+    /// Infers a call's arguments, typing an unannotated function literal last: its formals take the
+    /// parameter types the callee expects there once the other arguments bound the type variables,
+    /// so in `List.map(xs, \(x) c(x, x))` the body types over `xs`'s item type, not an open
+    /// variable. `callees` are the instantiated candidates; a hint is used only where every
+    /// candidate accepting the other arguments agrees on it.
     fn infer_call_arguments_against(
         &mut self,
         range: TextRange,
@@ -15179,17 +15168,13 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
-    /// Binds a type variable that two or more parameters share (`<T> fn(first: T, second: T)`,
-    /// or `list[T]` and `Array<T>` items) to the join of what the arguments pass, before any
-    /// argument is checked. Checking argument by argument would bind `T` to the first argument
-    /// and reject a wider second one, so `Bool.is_eq(:Red, light)` with `light: :Red | :Green`
-    /// would fail where the reversed call passes. Joining first is order-independent and stays
-    /// sound: every argument fits the join, and a parameter that uses the variable
-    /// contravariantly (`f: fn(T) -> U`) is still checked against the joined type.
-    ///
-    /// Tags join to their union and numbers to the type R's arithmetic promotes them to. Any
-    /// other pair is left to the argument checks, because two unrelated types such as `integer`
-    /// and `character` passed to one variable are a real mistake.
+    /// Binds a type variable that several parameters share (`<T> fn(first: T, second: T)`, or
+    /// `list[T]` and `Array<T>` items) to the join of the arguments before any is checked. Checking
+    /// in order would bind `T` to the first and reject a wider second, so `Bool.is_eq(:Red, light)`
+    /// with `light: :Red | :Green` would fail where the reversed call passes. The join stays sound:
+    /// every argument fits it, and a contravariant use (`f: fn(T) -> U`) is still checked against
+    /// it. Tags join to their union and numbers to R's arithmetic promotion; any other pair, such
+    /// as `integer` and `character`, is a real mistake left to the argument checks.
     fn join_shared_parameters(
         &mut self,
         function: &FunctionType<'db>,
@@ -15434,13 +15419,12 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
-    /// A variable the body assigns, from a `switch` without a default, an `if` without `else`
-    /// or a helper that returns `NULL` on some path, is `NULL` only where the code presumably
-    /// does not pass it on: rlang's `type <- switch(type, ...)` feeds `sprintf(type, kind)`
-    /// after every type has an arm. So an argument naming such a variable drops its `NULL`
-    /// when the parameter's type is settled, or bounded, and admits no `NULL`. The `NULL` of an
-    /// undeclared formal, from a `NULL` default or an `is.null()` test, is the same kind of
-    /// placeholder. The `NULL` of a declared parameter, or of an annotated assignment, stays.
+    /// A variable assigned from a `switch` without a default, an `if` without `else` or a helper
+    /// that returns `NULL` on some path is presumably not `NULL` where it is passed on (rlang's
+    /// `type <- switch(type, ...)` feeds `sprintf(type, kind)`). So such an argument drops its
+    /// `NULL` when the parameter's type is settled or bounded and admits none, as does an
+    /// undeclared formal's `NULL` from a `NULL` default or an `is.null()` test. A declared
+    /// parameter's or annotated assignment's `NULL` stays.
     fn without_inferred_null(&self, expected: Ty<'db>, ty: Ty<'db>) -> Ty<'db> {
         let expected = self.table.resolve(self.db, expected);
         let admits_null = |ty: Ty<'db>| match ty.kind(self.db) {
@@ -17168,15 +17152,13 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
-    /// `Reduce(f, x)` with a function that is not overloaded, named directly or picked by an
-    /// `if`, such as `Reduce(if (reals) merge_reals else merge_sets, x)`. R hands `f` the
-    /// accumulator and each element in turn, and the accumulator takes whatever `f` returned, so
-    /// its type is the join of the start and every return: `function(x, y) if (identical(x, y))
-    /// x` folds to `T | NULL`. The stub's `fn(U, T) -> U` cannot widen, so the fold is iterated
-    /// here until the accumulator stops growing. A step that fails is reported as it is, and only
-    /// the last step's findings are kept otherwise.
-    /// A function that closes over the enclosing function's open variables keeps the stub's
-    /// typing, because calling it repeatedly would pin those variables to every step at once.
+    /// `Reduce(f, x)` with a non-overloaded function, named or picked by an `if`. The accumulator
+    /// takes whatever `f` returns, so its type is the join of the start and every return
+    /// (`function(x, y) if (identical(x, y)) x` folds to `T | NULL`); the stub's `fn(U, T) -> U`
+    /// cannot widen, so the fold iterates until the accumulator stops growing. A failing step is
+    /// reported as is, otherwise only the last step's findings are kept. A function closing over
+    /// the enclosing function's open variables keeps the stub's typing, since iterating would pin
+    /// them to every step.
     fn infer_reduce_fold(
         &mut self,
         id: ExprId,
@@ -17430,13 +17412,12 @@ impl<'db, 'a> Checker<'db, 'a> {
         frame_of(Some(columns))
     }
 
-    /// `j` as `y := v`, `c("a", "b") := list(v, w)`, or `` `:=`(a = v, b = w) ``: the
-    /// queried frame with each named column set to its value's vector type, or removed
-    /// by `NULL`. A left side naming columns some other way widens to unknown columns.
-    /// data.table coerces a value written into an existing column to the column's type, so the
-    /// column keeps its type unless the value replaces it whole: with `partial` (an `i` or a
-    /// `by` is present) or a literal value, the type stays. Only a literal is certainly one value;
-    /// a scalar-like type is not, because `as.character(x)` is scalar-like too.
+    /// `j` as `y := v`, `c("a", "b") := list(v, w)` or `` `:=`(a = v, b = w) ``: the frame with
+    /// each named column set to its value's vector type, or removed by `NULL`; other left sides
+    /// widen to unknown columns. data.table coerces a value into an existing column's type, so the
+    /// type stays unless the value replaces the column whole, which it does not with `partial` (an
+    /// `i` or `by`) or a literal. Only a literal is certainly one value: `as.character(x)` is
+    /// scalar-like too.
     fn column_update(
         &mut self,
         arguments: &[Argument],
@@ -18219,13 +18200,11 @@ impl<'db, 'a> Checker<'db, 'a> {
             } else {
                 right_resolved
             };
-            // Only an unconstrained variable is protected: pinning an already-restricted one
-            // adds no new requirement and lets recursion converge. One nested in a list is
-            // protected too, so sessioninfo's `if (identical(dp, FALSE)) list(character(),
-            // character()) else list(dp, dp)` leaves `dp` open.
-            // A bounded one is protected from a type outside the atomic scalars and vectors its
-            // bound describes: mgcv's `if (is.null(L)) rho + rho0 else L %*% rho + rho0` must
-            // not make every caller pass a matrix `rho`.
+            // Only an unconstrained variable is protected, so recursion converges, including one
+            // nested in a list (sessioninfo's `if (identical(dp, FALSE)) list(character(),
+            // character()) else list(dp, dp)` leaves `dp` open). A bounded one is protected from
+            // types outside its bound's atomic scalars and vectors: mgcv's `if (is.null(L)) rho +
+            // rho0 else L %*% rho + rho0` must not demand a matrix `rho`.
             let closed = if left_open {
                 right_resolved
             } else {

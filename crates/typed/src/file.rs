@@ -1,21 +1,19 @@
-//! Typed code files: the machine code an install compiles for a package's typed closures, which
-//! a later session maps instead of compiling.
+//! Typed code files: the machine code an install compiles for a package's typed closures, which a
+//! later session maps instead of compiling.
 //!
 //! `ry install` runs [`write`] in the process that records the package's code image. It compiles
-//! every typed closure of the package's database for the argument types its annotations
-//! declare, every version a training run compiled (`ry install --train`), and every typed
-//! function of the same database those call, and writes the code
-//! beside the database as `R/<package>.<build>.ryt` (`rcmd::images::typed_code`). The code is
-//! position independent: every word that differs between processes (a runtime helper's address,
-//! a shape's id, an R call site, a typed function of another namespace) is loaded from an offset
-//! table the loader fills, which sits just below the code.
+//! every typed closure of the package's database for its declared argument types, every version a
+//! training run compiled (`ry install --train`), and every typed function of the same database
+//! those call, and writes `R/<package>.<build>.ryt` beside the database
+//! (`rcmd::images::typed_code`). The code is position independent: every word that differs between
+//! processes (a runtime helper's address, a shape's id, an R call site, another namespace's typed
+//! function) is loaded from an offset table just below the code, which the loader fills.
 //!
-//! A session's first call of a typed closure read from such a database ([`attach`]) finds the
-//! version compiled for its argument types, checks that every lookup the code assumed still
-//! finds the same kind of function in the same binding, builds the R call sites, links the
-//! typed functions it calls, and uses the code as if it had compiled it. Anything that does not
-//! check out leaves the closure to compile as usual, so a stale or foreign file costs at most
-//! the time to find that out.
+//! A session's first call of a typed closure from such a database ([`attach`]) finds the version
+//! for its argument types, checks that every lookup the code assumed still finds the same kind of
+//! function in the same binding, builds the R call sites and links the typed callees. Anything that
+//! does not check out leaves the closure to compile as usual, so a stale or foreign file costs at
+//! most the time to find that out.
 
 use {
     crate::{

@@ -2,17 +2,15 @@
 //! allocator, and the kernels compiled code calls by address.
 //!
 //! Every `ry_*` function is part of a fixed ABI with the code generator. Values are immutable to
-//! the program and acyclic, so a reference count is exact and nothing here traces. The compiler
-//! inserts the dups and drops (Perceus style), and an operation handed an owned, uniquely held
-//! buffer writes its result into that buffer instead of allocating.
+//! the program and acyclic, so a reference count is exact and nothing traces. The compiler inserts
+//! the dups and drops (Perceus style), and an operation handed an owned, uniquely held buffer
+//! writes its result into it. Everything runs on the interpreter's thread, so counts are plain
+//! integers and the allocator state is thread-local.
 //!
-//! Every function runs on the R interpreter's thread, so counts are plain integers and the
-//! allocator state is thread-local.
-//!
-//! Ownership flags: a nonzero `owned` argument passes the caller's reference to the function,
-//! which either reuses the buffer or drops it, failure included. A zero flag borrows it. Results
-//! are always owned. A function that fails returns null (or its documented status) after
-//! consuming its owned arguments, so the caller reruns the whole operation in the interpreter.
+//! A nonzero `owned` argument passes the caller's reference, which the function reuses or drops,
+//! failure included; a zero flag borrows it. Results are always owned. A failing function returns
+//! null (or its documented status) after consuming its owned arguments, and the caller reruns the
+//! whole operation in the interpreter.
 
 // Every function dereferences raw pointers handed over by compiled code, so the module is an
 // FFI-style unsafe layer and an `unsafe` block inside each `unsafe fn` would only add noise.

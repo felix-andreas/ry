@@ -1,14 +1,13 @@
 //! ry's typed core: native values (`values`) and the compiler that turns a strict typed closure
 //! into machine code over them.
 //!
-//! A call of a typed closure from R reaches [`call`], which reads the argument values' types,
-//! compiles the closure for them once (lowering its body to the IR, inserting the reference
-//! counts and generating code), converts the arguments to native values, runs the code and
-//! converts its value back. Whatever the compiler cannot handle, and every call whose code gives
-//! up partway, runs in the interpreter instead, which the caller does when [`call`] returns
-//! `None`. Code gives up before anything it did is visible, so running the call again from the
-//! start is correct, with one exception: code that called an R function ([`ry_call_r`]) may have
-//! done something visible, so once it has, giving up is an error instead of a second run.
+//! A call of a typed closure from R reaches [`call`], which compiles the closure once for the
+//! argument values' types, converts the arguments to native values, runs the code and converts its
+//! value back. What the compiler cannot handle, and every call whose code gives up partway, runs in
+//! the interpreter when [`call`] returns `None`. Code gives up before anything it did is visible,
+//! so rerunning from the start is correct, except after it called an R function ([`ry_call_r`]),
+//! which may have done something visible: from then on, giving up is an error instead of a second
+//! run.
 
 #![allow(unsafe_op_in_unsafe_fn)]
 // Every `unsafe fn` here has one contract: the handles it takes are live objects of this heap.
