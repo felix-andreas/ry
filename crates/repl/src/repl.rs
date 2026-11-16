@@ -15,6 +15,7 @@ use std::{
     hint::black_box,
     io::{self, IsTerminal},
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 #[derive(Debug)]
@@ -173,6 +174,58 @@ pub fn run_on_ry_runtime(
     })
 }
 
+/// Makes the next [`run_on_ry_runtime`] attach its script's typed code from the typed code file
+/// `length` bytes long at `offset` of `path` instead of compiling it. The script's `source` must
+/// be the text [`write_script_code_on_ry_runtime`] compiled.
+pub fn set_script_code_on_ry_runtime(path: &Path, offset: u64, length: u64) -> Result<(), ReplError> {
+    use std::ffi::{CString, c_char};
+    let library = ry_runtime()?;
+    type SetCode = unsafe extern "C" fn(*const c_char, u64, u64);
+    let set_code = runtime_entry::<SetCode>(library, "ry_set_script_code")?;
+    let path = CString::new(path.to_string_lossy().as_bytes())
+        .map_err(|_| ReplError("the executable's path contains a NUL byte".into()))?;
+    // SAFETY: the entry point has this signature in every runtime of this build.
+    unsafe { set_code(path.as_ptr(), offset, length) };
+    Ok(())
+}
+
+/// Compiles the typed top-level functions of the script `file`, whose text is `source`, and
+/// writes their typed code file to `output`, for a script that runs with `flags`. Nothing of
+/// the script runs. Returns the runtime's status: 0 once written, 1 after it reported why not.
+pub fn write_script_code_on_ry_runtime(
+    file: &Path,
+    source: &[u8],
+    output: &Path,
+    flags: RuntimeFlags,
+) -> Result<i32, ReplError> {
+    use std::ffi::{CString, c_char, c_int};
+    let library = ry_runtime()?;
+    type SetSource = unsafe extern "C" fn(*const c_char);
+    type Write = unsafe extern "C" fn(*const c_char, *const c_char, c_int) -> c_int;
+    let set_source = runtime_entry::<SetSource>(library, "ry_set_script_source")?;
+    let write = runtime_entry::<Write>(library, "ry_write_script_code")?;
+    let source =
+        CString::new(source).map_err(|_| ReplError("the script contains a NUL byte".into()))?;
+    let file = CString::new(file.to_string_lossy().as_bytes())
+        .map_err(|_| ReplError("the script path contains a NUL byte".into()))?;
+    let output = CString::new(output.to_string_lossy().as_bytes())
+        .map_err(|_| ReplError("the output path contains a NUL byte".into()))?;
+    // SAFETY: the entry points have these signatures in every runtime of this build.
+    Ok(unsafe {
+        set_source(source.as_ptr());
+        write(file.as_ptr(), output.as_ptr(), flags.bits())
+    })
+}
+
+/// Where ry's runtime library and base R tree live outside this executable: `None` for each one
+/// a release extracts from itself. An executable `ry build --aot --exe` writes records them, so
+/// that a copy of a development build finds the ones its build uses wherever it is moved.
+pub fn ry_runtime_files() -> Result<(Option<PathBuf>, Option<PathBuf>), ReplError> {
+    let (library, extracted) = ry_runtime_library()?;
+    let library = (!extracted).then(|| std::fs::canonicalize(&library).unwrap_or(library));
+    Ok((library, rcmd::base::installed()))
+}
+
 /// Asked by the package loader of ry's runtime about a package, given its root as a
 /// NUL-terminated path. The strict query returns 1 when the package's configuration turns strict
 /// mode on. The check runs before a load of a strict package runs anything: 0 lets the load run,
@@ -222,6 +275,17 @@ impl RuntimeFlags {
             | (std::ffi::c_int::from(self.strict) << 2)
             | (std::ffi::c_int::from(!self.prelude) << 5)
             | (std::ffi::c_int::from(self.ahead) << 6)
+    }
+
+    /// The flags [`RuntimeFlags::bits`] made `bits` from.
+    pub fn from_bits(bits: std::ffi::c_int) -> RuntimeFlags {
+        RuntimeFlags {
+            annotation_checks: bits & 1 != 0,
+            object_systems: bits & (1 << 1) != 0,
+            strict: bits & (1 << 2) != 0,
+            prelude: bits & (1 << 5) == 0,
+            ahead: bits & (1 << 6) != 0,
+        }
     }
 }
 
@@ -449,7 +513,11 @@ pub fn base_r() -> Result<PathBuf, ReplError> {
 /// ry's own base R tree: one installed outside the executable (`rcmd::base::installed`), else
 /// the copy a release embeds, extracted into the user's cache ([`extract_base`]).
 pub fn bundled_base() -> Result<PathBuf, ReplError> {
-    if let Some(base) = rcmd::base::installed() {
+    let recorded = std::env::var_os("RY_BASE_R")
+        .is_none_or(|path| path.is_empty())
+        .then(|| recorded_file(|files| &files.1))
+        .flatten();
+    if let Some(base) = recorded.or_else(rcmd::base::installed) {
         if !rcmd::base::holds_base_r(&base) {
             return Err(ReplError(format!(
                 "ry's base R at {} is incomplete (no library/base/R/base); rebuild it with \
@@ -487,12 +555,40 @@ fn export_r_home() -> Result<(), ReplError> {
     Ok(())
 }
 
+/// The runtime library and base R tree an executable `ry build --aot --exe` wrote recorded
+/// from the development build that wrote it ([`use_runtime_files`]).
+static RECORDED_FILES: OnceLock<(Option<PathBuf>, Option<PathBuf>)> = OnceLock::new();
+
+/// Makes this process prefer `library` and `base`, where they exist, to the runtime library and
+/// base R tree it would find beside its executable. `RY_LIBR` and `RY_BASE_R` still win. Unlike
+/// setting those variables, this does not reach the processes the script starts, which may be
+/// another build of ry.
+pub fn use_runtime_files(library: Option<PathBuf>, base: Option<PathBuf>) {
+    if RECORDED_FILES.set((library, base)).is_err() {
+        panic!("the runtime files are recorded once, before the runtime starts");
+    }
+}
+
+/// The recorded file `pick` selects, when it exists.
+fn recorded_file(
+    pick: fn(&(Option<PathBuf>, Option<PathBuf>)) -> &Option<PathBuf>,
+) -> Option<PathBuf> {
+    RECORDED_FILES
+        .get()
+        .and_then(|files| pick(files).clone())
+        .filter(|path| path.exists())
+}
+
 /// ry's runtime library, and whether it was extracted from this executable. `RY_LIBR` wins,
-/// then a library beside the executable, in `deps/` or in `../lib/ry/` (a development build or
-/// a distribution's package), and last the copy a release embeds ([`extract_runtime`]).
+/// then one an executable recorded ([`use_runtime_files`]), then a library beside the
+/// executable, in `deps/` or in `../lib/ry/` (a development build or a distribution's package),
+/// and last the copy a release embeds ([`extract_runtime`]).
 fn ry_runtime_library() -> Result<(PathBuf, bool), ReplError> {
     if let Some(path) = std::env::var_os("RY_LIBR") {
         return Ok((PathBuf::from(path), false));
+    }
+    if let Some(path) = recorded_file(|files| &files.0) {
+        return Ok((path, false));
     }
     let executable = std::env::current_exe()
         .map_err(|error| ReplError(format!("cannot locate the ry executable: {error}")))?;

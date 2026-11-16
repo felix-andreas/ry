@@ -598,14 +598,20 @@ pub unsafe fn exec_method(method: Sexp, generic_env: Sexp) -> R<Sexp> {
     )
 }
 
-/// `R_do_new_object`: a new object of the class `class_def` defines, a copy of its prototype,
-/// marked as S4 when the prototype is a plain S4 object or the class comes from a package.
+/// `R_do_new_object`: a new object of the class `class_def` defines, a deep copy of its
+/// prototype, marked as S4 when the prototype is a plain S4 object or the class comes from a
+/// package. Native code may write into a slot of the object it gets without checking whether
+/// the slot's value is shared, so it gets a deep copy, as GNU R makes.
 pub unsafe fn new_object(class_def: Sexp) -> R<Sexp> {
     new_object_copying(class_def, true)
 }
 
-/// `new_object` with a shallow copy of the prototype when `deep` is false, for a value that is
-/// only stored, never modified in place, so sharing the prototype's elements is not observable.
+/// `new_object` with a shallow copy of the prototype when `deep` is false: the object, its
+/// attribute list and a list prototype's spine are new, and the slot values and list elements
+/// are the prototype's. Interpreted code changes a value in place only when it holds the only
+/// reference, and the prototype holds one more, so a change to a slot of the new object copies
+/// that value first and the prototype never sees it. `new()` and `C_new_object` copy this way,
+/// which keeps a large prototype slot from being copied for every object.
 pub unsafe fn new_object_copying(class_def: Sexp, deep: bool) -> R<Sexp> {
     if class_def == nil() {
         return Err(error(
@@ -1443,7 +1449,7 @@ unsafe fn primitive_name(call: &NativeCall<'_>) -> R<Sexp> {
 }
 
 unsafe fn new_object_routine(call: &NativeCall<'_>) -> R<Sexp> {
-    new_object(call.arg(0))
+    new_object_copying(call.arg(0), false)
 }
 
 // Helpers.

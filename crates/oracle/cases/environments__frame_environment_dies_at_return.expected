@@ -1,0 +1,24 @@
+[stdout]
+| List of 3
+|  $ : int 2415
+|  $ : int 60
+|  $ : chr [1:2] "local_value" "x"
+| [1] 30
+| [1]  2 30 60
+| [1] "local_value" "x"          
+| [1] 630
+| [1] 61
+| [1] 40
+| [1] 42
+| List of 3
+|  $ : int 20
+|  $ : int 20
+|  $ : int 20
+| left 11 
+| left 12 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

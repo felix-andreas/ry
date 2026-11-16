@@ -1319,6 +1319,107 @@ pub unsafe extern "C" fn ry_set_script_source(source: *const c_char) {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(text);
 }
 
+/// Where the code file of [`ry_run`]'s script lies, set by [`ry_set_script_code`]: the file
+/// holding it, and the code file's offset and length in that file.
+static SCRIPT_CODE: std::sync::Mutex<Option<(std::path::PathBuf, u64, u64)>> =
+    std::sync::Mutex::new(None);
+
+/// Makes the next [`ry_run`] attach the code of its script's typed top-level functions from the
+/// typed code file `length` bytes long at `offset` of the file at the NUL-terminated `path`,
+/// instead of compiling them. An executable `ry build --aot --exe` wrote passes itself. The
+/// script's source must be the one [`ry_write_script_code`] compiled, set with
+/// [`ry_set_script_source`]; a file written for any other text is not used.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ry_set_script_code(path: *const c_char, offset: u64, length: u64) {
+    let path = std::path::PathBuf::from(
+        std::ffi::CStr::from_ptr(path)
+            .to_string_lossy()
+            .into_owned(),
+    );
+    *SCRIPT_CODE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((path, offset, length));
+}
+
+/// The stamp a script's code file carries: the length and the hash of the script's text, which
+/// is what the code's closures were made from.
+fn script_stamp(source: &str) -> interp::code_image::DatabaseStamp {
+    interp::code_image::DatabaseStamp {
+        length: source.len() as u64,
+        modified: interp::code_image::stream_hash(source.as_bytes()),
+    }
+}
+
+/// Compiles the typed top-level functions of the script the NUL-terminated `path` names, whose
+/// text [`ry_set_script_source`] set, and writes their typed code file to the NUL-terminated
+/// `output`. `flags` are the [`RUN_FLAGS`] the script will run with. Nothing of the script
+/// runs. Returns 0 once written, after printing how many functions it holds, and 1 after
+/// reporting why it was not. `ry build --aot --exe` calls this.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ry_write_script_code(
+    path: *const c_char,
+    output: *const c_char,
+    flags: c_int,
+) -> c_int {
+    apply_flags(flags);
+    let path = String::from_utf8_lossy(crate::strings::c_bytes(path)).into_owned();
+    let output = std::path::PathBuf::from(
+        std::ffi::CStr::from_ptr(output)
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let Some(source) = SCRIPT_SOURCE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    else {
+        crate::boundary::write_console(b"ry: no script source to compile\n", true);
+        return 1;
+    };
+    let command_args = vec!["ry".to_owned(), format!("--file={path}"), "--args".to_owned()];
+    if !start_script_session(command_args, flags) {
+        return 1;
+    }
+    let keep_source = interp::session::keep_source();
+    let written = interp::ahead::compile_script(&source, keep_source)
+        .map_err(|unwind| {
+            interp::session::report_toplevel(unwind);
+            String::from("the script does not parse")
+        })
+        .and_then(|definitions| typed::file::write_script(&definitions, script_stamp(&source)))
+        .and_then(|(bytes, written)| {
+            std::fs::write(&output, bytes)
+                .map_err(|failure| format!("cannot write {}: {failure}", output.display()))?;
+            Ok(written)
+        });
+    interp::ahead::finish();
+    finish_script_session();
+    match written {
+        Ok(written) => {
+            let mut summary = format!(
+                "typed code: closures={} written={}",
+                written.closures, written.written
+            );
+            if !written.skipped.is_empty() {
+                let left_out: Vec<String> = written
+                    .skipped
+                    .iter()
+                    .map(|(reason, count)| format!("{reason} ({count})"))
+                    .collect();
+                summary.push_str(&format!(" (left out: {})", left_out.join(", ")));
+            }
+            summary.push('\n');
+            crate::boundary::write_console(summary.as_bytes(), false);
+            0
+        }
+        Err(reason) => {
+            let message = format!("ry: the typed code was not written: {reason}\n");
+            crate::boundary::write_console(message.as_bytes(), true);
+            1
+        }
+    }
+}
+
 /// Runs R on ry's runtime the way `Rscript` does: starts the session (base R and the default
 /// packages from the GNU R installation), attaches the package loader as `tools:ry`, evaluates
 /// `input` and then the file at `path` (either may be null, and with both null it reads R code
@@ -1350,6 +1451,26 @@ pub unsafe extern "C" fn ry_run(
     }
     if !start_script_session(command_args, flags) {
         return 2;
+    }
+    let code = SCRIPT_CODE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some((code_path, offset, length)) = code {
+        let source = SCRIPT_SOURCE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_deref()
+            .map(script_stamp);
+        // Without the source it was compiled from, the code has nothing to attach to.
+        if let Some(stamp) = source {
+            interp::interp().ahead.code = Some(interp::ahead::ScriptCode {
+                path: code_path,
+                offset,
+                length,
+                stamp,
+            });
+        }
     }
     let mut outcome = interp::session::Outcome::Completed;
     if let Some(input) = &input {

@@ -322,8 +322,9 @@ const PACKAGE_TIERINGS: [Tiering; 2] = [
 ];
 
 /// `ry run --aot` changes when typed functions compile and nothing a script can observe. Each
-/// seed writes a script of typed functions and runs it every way [`TIERINGS`] lists, and every
-/// run must end with the same exit code, standard output and standard error. A script whose
+/// seed writes a script of typed functions and runs it every way [`TIERINGS`] lists and as an
+/// executable `ry build --aot --exe` built, and every run must end with the same exit code,
+/// standard output and standard error. A script whose
 /// meaning does not rest on its annotations also runs with the annotations erased, which must
 /// print the same, and a script whose definitions mean the same in a package also runs with them
 /// installed as one, from a script that attaches it, and with them in a file the script sources.
@@ -371,8 +372,27 @@ fn typed_scripts_agree_however_they_compile() {
             log.join("\n"),
         )
     };
+    let run_executable = |executable: &Path| {
+        let output = Command::new(executable)
+            .current_dir(directory.path())
+            .env("RY_TYPED_LOG", "1")
+            .env_remove("RY_JIT")
+            .env_remove("RY_AHEAD_MISS")
+            .env("XDG_CACHE_HOME", directory.path().join(".cache"))
+            .output()
+            .expect("run the executable");
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let (log, errors): (Vec<&str>, Vec<&str>) =
+            stderr.lines().partition(|line| line.starts_with("typed: "));
+        (
+            status_code(output.status),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            errors.join("\n"),
+            log.join("\n"),
+        )
+    };
     let (mut scripts, mut ahead, mut nothing_late, mut packaged, mut attached) = (0, 0, 0, 0, 0);
-    let mut sourced_ahead = 0;
+    let (mut sourced_ahead, mut from_executable) = (0, 0);
     for_each_seed(16, |seed| {
         let (text, erasable) = typed_script(&mut SplitMix64(seed));
         let script = directory.path().join(format!("script_{seed}.R"));
@@ -395,6 +415,32 @@ fn typed_scripts_agree_however_they_compile() {
                 nothing_late += usize::from(!after.contains("typed: compiled for"));
             }
         }
+        // Built into an executable, the script attaches the code its build compiled.
+        let executable = directory.path().join(format!("executable_{seed}"));
+        let build = Command::new(env!("CARGO_BIN_EXE_ry"))
+            .args(["build", "--aot", "--exe"])
+            .arg(&script)
+            .arg("-o")
+            .arg(&executable)
+            .current_dir(directory.path())
+            .env_remove("RY_JIT")
+            .env_remove("RY_AHEAD_MISS")
+            .env("XDG_CACHE_HOME", directory.path().join(".cache"))
+            .output()
+            .expect("run ry build");
+        assert!(
+            build.status.success(),
+            "seed {seed}: building the executable failed:\n{}\n{text}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let (exe_code, exe_stdout, exe_stderr, log) = run_executable(&executable);
+        assert_eq!(
+            (code, &stdout, &stderr),
+            (exe_code, &exe_stdout, &exe_stderr),
+            "seed {seed}: the executable differs from {}:\n{text}",
+            TIERINGS[0].name
+        );
+        from_executable += usize::from(log.contains("from the executable's code file"));
         if let Some((definitions, rest)) = package_parts(&statements_of(&text)) {
             let name = format!("typedseed{seed}");
             let package = directory.path().join(&name);
@@ -510,10 +556,12 @@ fn typed_scripts_agree_however_they_compile() {
                 && nothing_late > 0
                 && packaged > 0
                 && attached > 0
-                && sourced_ahead > 0),
+                && sourced_ahead > 0
+                && from_executable * 2 >= scripts),
         "of {scripts} scripts, {ahead} compiled functions ahead, {nothing_late} compiled \
          nothing later, {packaged} ran as an installed package, {attached} attached code \
-         from its typed code file and {sourced_ahead} compiled a sourced file's functions ahead"
+         from its typed code file, {sourced_ahead} compiled a sourced file's functions ahead \
+         and {from_executable} attached code from its executable"
     );
 }
 
@@ -2814,9 +2862,14 @@ impl Journey {
                     Err(format!("{path} lacks `{needle}`:\n{text}"))
                 }
             }
-            ["run", program @ ("ry" | "single-ry"), arguments @ ..] => {
+            ["run", program, arguments @ ..]
+                if matches!(*program, "ry" | "single-ry") || program.starts_with("./") =>
+            {
                 let executable = if *program == "single-ry" {
                     single_ry()?.clone()
+                } else if program.starts_with("./") {
+                    // An executable the scenario built, such as `ry build --aot --exe` writes.
+                    self.root.join(program)
                 } else {
                     // `ry build` and `ry install` find `ry-rcmd` beside libR, and cargo test
                     // only builds it for the scenario's R home.

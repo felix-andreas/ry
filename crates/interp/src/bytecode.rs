@@ -102,7 +102,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
 pub(crate) unsafe fn close_compiled(formals: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
     let closure = eval::make_closure(formals, body, nil(), env)?;
     crate::heap().root(closure);
-    if worth_compiling(closure.cdr()) {
+    if compilable(closure.cdr()) {
         let code = compile(closure.cdr(), closure, true)?;
         crate::heap().set_cdr(closure, code);
     }
@@ -155,7 +155,6 @@ impl State {
         for &register in &self.registers {
             marker.mark(register);
         }
-        self.call_plans.trace(marker);
     }
 
     pub(crate) unsafe fn clear_dead(&mut self, liveness: &Liveness<'_>) {
@@ -722,7 +721,7 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
     if body.kind() == SexpType::Bytecode {
         return run(function, body, env);
     }
-    if !worth_compiling(body) {
+    if !compilable(body) {
         return eval::eval(body, env);
     }
     let bodies = &mut interp().bytecode.bodies;
@@ -896,7 +895,7 @@ unsafe fn calls_return(expression: Sexp) -> bool {
 /// call that does not compile.
 pub unsafe fn compile_before_call(function: Sexp) -> R<Sexp> {
     let body = function.cdr();
-    if !worth_compiling(body) {
+    if !compilable(body) {
         return Ok(body);
     }
     let binds = match interp().bytecode.bodies.tier(function, body) {
@@ -956,7 +955,7 @@ pub(crate) unsafe fn inner_closure(
         return eval::make_closure(formals, body, srcref, env);
     };
     let closure = eval::make_closure(formals, shared, srcref, env)?;
-    if shared.kind() != SexpType::Bytecode && worth_compiling(shared) {
+    if shared.kind() != SexpType::Bytecode && compilable(shared) {
         heap.root(closure);
         // Code that binds its base functions compiled its nested functions with it, so this
         // outer code guards them, and binding here would miss its locals; a namespace's code
@@ -986,7 +985,7 @@ pub unsafe fn compiled_body(function: Sexp) -> R<Result<Sexp, Uncompilable>> {
     if body.kind() == SexpType::Bytecode {
         return Ok(Ok(body));
     }
-    if !worth_compiling(body) {
+    if !compilable(body) {
         return Ok(Err(Uncompilable::NotACall));
     }
     let binds = match interp().bytecode.bodies.tier(function, body) {
@@ -1004,7 +1003,7 @@ pub unsafe fn compiled_body(function: Sexp) -> R<Result<Sexp, Uncompilable>> {
 /// not compiled is copied as the expression, and the copies count their calls together.
 pub unsafe fn body_to_copy(function: Sexp) -> R<Sexp> {
     let body = function.cdr();
-    if body.kind() == SexpType::Bytecode || !worth_compiling(body) {
+    if body.kind() == SexpType::Bytecode || !compilable(body) {
         return Ok(body);
     }
     match interp().bytecode.bodies.tier(function, body) {
@@ -1053,7 +1052,7 @@ pub unsafe fn compile_namespaces_for_image() -> R<Vec<Sexp>> {
     let mut fresh = Vec::new();
     for function in closures {
         let body = closure_body(function);
-        if !worth_compiling(body) {
+        if !compilable(body) {
             continue;
         }
         // An error is the compiler's way of rejecting a body (a `break` outside a loop, say), so
@@ -1092,7 +1091,7 @@ pub unsafe fn compile_nested_functions(code: Sexp, env: Sexp) -> R<()> {
             let source = constants.element(body);
             let nested = if source.kind() == SexpType::Bytecode {
                 Some(source)
-            } else if worth_compiling(source) {
+            } else if compilable(source) {
                 let closure = eval::make_closure(
                     constants.element(formals),
                     source,
@@ -1734,9 +1733,19 @@ unsafe fn compiles_as_promise(expression: Sexp) -> bool {
             || free_of_control(expression, LOOP_SEARCH_DEPTH))
 }
 
-/// A body is worth compiling when it does more than evaluate one constant or symbol.
-unsafe fn worth_compiling(body: Sexp) -> bool {
-    body.kind() == SexpType::Language
+/// Whether `body` compiles: a call, a variable or a constant. A body that is one variable or
+/// one constant compiles too, because a call of compiled code can take the fast call path
+/// ([`call_fast`]), which costs less than binding the arguments in an environment for the AST
+/// evaluator. The objects that evaluate as something other than themselves and are no
+/// expression the compiler knows stay with the evaluator.
+unsafe fn compilable(body: Sexp) -> bool {
+    match body.kind() {
+        SexpType::Promise | SexpType::Bytecode | SexpType::Dots => false,
+        SexpType::Symbol => {
+            body != symbols().dots && body != missing_arg() && eval::dot_dot_index(body).is_none()
+        }
+        _ => true,
+    }
 }
 
 // Instructions. Each opcode is followed by its operands; registers, constant indices, cache
@@ -5632,7 +5641,7 @@ impl Compiler {
         let Some(frames) = &self.binding else {
             return Ok(self.constant(body));
         };
-        if !worth_compiling(body) {
+        if !compilable(body) {
             return Ok(self.constant(body));
         }
         let heap = crate::heap();
@@ -6793,7 +6802,12 @@ pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<Option<Sexp>> 
     if op_of(*state.code.add(pc) as u32) == Some(Op::CallGeneric) {
         state.resume_base = (*state.interp).bytecode.resumes.len();
         state.stepping = true;
-        match call_fast(&mut state, pc) {
+        let entered = if *state.header == (*state.heap).known().nil {
+            call_fast::<false>(&mut state, pc)
+        } else {
+            call_fast::<true>(&mut state, pc)
+        };
+        match entered {
             Some(STOP) => {}
             Some(next) => {
                 (*RUN_HANDLERS.as_ptr().add(op_index(state.code, next)))(&mut state, next)
@@ -6943,6 +6957,8 @@ pub unsafe fn passes_missing_argument(machine: &mut Machine<'_>, pc: usize) -> R
     Ok(missing)
 }
 
+/// Loads the variable the `GetVar` at `pc` reads, with whether the frame owns the value: it
+/// binds it directly rather than through a promise, whose value the caller may hold too.
 pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)> {
     let code = machine.code;
     let words = values::ints(code.car());
@@ -6986,7 +7002,7 @@ pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)>
                 } else {
                     value.car()
                 };
-                (forced, true)
+                (forced, false)
             } else if value == missing_arg() {
                 let env = machine.reify(Reify::Site("missing argument lookup"))?;
                 (
@@ -7012,7 +7028,9 @@ pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)>
         }
         None => {
             let env = machine.env();
-            let local = crate::heap().frame_cell(env, symbol).is_some();
+            let local = crate::heap()
+                .frame_cell(env, symbol)
+                .is_some_and(|cell| cell.cdr().kind() != SexpType::Promise);
             (
                 lookup_variable(symbol, env, LookupCache::of(code), cache, 0..0)?,
                 local,
@@ -7752,6 +7770,7 @@ macro_rules! fast_paths {
         const fn fast_path_table(mut table: [Handler; HANDLER_COUNT]) -> [Handler; HANDLER_COUNT] {
             $(table[Op::$op as usize] = $name;)*
             table[Op::CallGeneric as usize] = fast_call_generic;
+            table[Op::Return as usize] = fast_return;
             table
         }
     };
@@ -7773,14 +7792,32 @@ fast_paths! {
     fast_call_builtin: CallBuiltin, call_builtin_fast;
     fast_sub_assign: SubAssign, sub_assign_fast;
     fast_field: Field, field_fast;
-    fast_return: Return, return_fast;
 }
 
 /// The fast handler of `CallGeneric`. Unlike the other fast paths, [`call_fast`] can end the
 /// activation the loop started with: an error the callee's entry raised, or the optimizing
 /// tier running the body whole and finishing it, answers [`STOP`].
+///
+/// The handler holds the path for a caller on its slots only. What that path leaves goes on
+/// in [`call_generic_by_name`], a tail call, so the rarer path adds no saved register to this
+/// one.
 unsafe fn fast_call_generic(state: &mut Activation<'_, '_>, at: usize) {
-    if let Some(next) = call_fast(state, at) {
+    if let Some(next) = call_fast::<false>(state, at) {
+        if next == STOP {
+            return;
+        }
+        dispatch!(state, next);
+    }
+    become call_generic_by_name(state, at)
+}
+
+/// `CallGeneric` from a frame that reads its variables by name, through [`call_fast`] when it
+/// takes the call, and the generic handler for every call that neither path took.
+#[inline(never)]
+unsafe fn call_generic_by_name(state: &mut Activation<'_, '_>, at: usize) {
+    if *state.header != (*state.heap).known().nil
+        && let Some(next) = call_fast::<true>(state, at)
+    {
         if next == STOP {
             return;
         }
@@ -7789,33 +7826,73 @@ unsafe fn fast_call_generic(state: &mut Activation<'_, '_>, at: usize) {
     become GENERIC_HANDLERS[Op::CallGeneric as usize](state, at)
 }
 
-/// `CallGeneric` of a closure whose site has a prepared plan ([`prepare_plan`]), from a slot
-/// frame, while nothing observes calls: the arguments are written once, onto the frame
-/// argument stack, the slots are filled from them by the plan's sources, the call's frame is
-/// pushed, and the dispatch loop goes on in the callee's body. Nothing is matched, no Rust
-/// frame is entered, and nothing is allocated unless the argument reference pool grows or the
-/// callee collects arguments in `...`.
+/// The fast handler of `Return`: [`return_fast`] for a frame that handed out no environment,
+/// and otherwise [`return_discarding`], a tail call for the reason [`fast_call_generic`] gives.
+unsafe fn fast_return(state: &mut Activation<'_, '_>, at: usize) {
+    if let Some(next) = return_fast::<false>(state, at) {
+        dispatch!(state, next);
+    }
+    become return_discarding(state, at)
+}
+
+/// `Return` from a frame that handed out an environment nothing holds any more, through
+/// [`return_fast`], and the generic handler for every return that neither path took.
+#[inline(never)]
+unsafe fn return_discarding(state: &mut Activation<'_, '_>, at: usize) {
+    if let Some(next) = return_fast::<true>(state, at) {
+        dispatch!(state, next);
+    }
+    become GENERIC_HANDLERS[Op::Return as usize](state, at)
+}
+
+/// `CallGeneric` of a closure whose site has a prepared plan ([`prepare_plan`]), while nothing
+/// observes calls: the arguments are written once, onto the frame argument stack, the slots
+/// are filled from them by the plan's sources, the call's frame is pushed, and the dispatch
+/// loop goes on in the callee's body. Nothing is matched, no Rust frame is entered, and
+/// nothing is allocated unless the argument reference pool grows or the callee collects
+/// arguments in `...`.
 ///
-/// It does what [`op_call_generic`] does for the same call through [`slot_promises_into`],
+/// `BY_NAME` says where the arguments are read, and it must agree with the calling frame's
+/// header register. While the register is `NULL` the caller's code runs on its slots, an
+/// argument is a reference to a slot or to code compiled against the slots, and the callee
+/// finds its caller as the frame below its own. Otherwise the register holds the environment
+/// the caller reads by name (a slot frame that left its slots, or a body run in a heap
+/// frame), every argument is a reference over that environment, and the environment is the
+/// callee's caller. A call from the other kind of frame is left alone. The two are compiled
+/// apart so that the path from slots carries none of the other's tests.
+///
+/// It does what [`op_call_generic`] does for the same call through [`slot_promises_into`] or
+/// [`eval::referenced_args_into`], then
 /// [`eval::bind_plan`], [`eval::enter`] and [`enter_in_place`], and leaves every call that
 /// needs anything else to them: a debugger, a profile, a tracked move or a refused object
 /// system ([`activity::hooks`]), a closure flagged for debugging or with a native entry, the
 /// namespace loader, `do.call`, a frame stack or register file that is full.
 #[inline(always)]
-unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+unsafe fn call_fast<const BY_NAME: bool>(
+    state: &mut Activation<'_, '_>,
+    at: usize,
+) -> Option<usize> {
     let interp = &mut *state.interp;
     let heap = state.heap;
     let known = (*heap).known();
     let (nil, unbound, missing_value) = (known.nil, known.unbound, known.missing_arg);
     let code = state.code;
     let feedback = pool_entry(state.constants, FEEDBACK);
+    // The environment the calling frame reads by name, which is then where the arguments are
+    // read and the callee's caller.
+    let caller_env = if BY_NAME { *state.header } else { nil };
     if at + 1 >= feedback.length() as usize
         || state.resume_base == NO_RESUMES
-        || *state.header != nil
+        || BY_NAME != (*state.header != nil)
         || activity::hooks() != 0
     {
         return None;
     }
+    let fast = if BY_NAME {
+        PLAN_FAST_BY_NAME
+    } else {
+        PLAN_FAST
+    };
     let word = *feedback.data().cast::<i32>().add(at + 1);
     let function = *state.registers.add(*code.add(at + 2) as usize);
     let plans = &mut interp.bytecode.call_plans;
@@ -7833,7 +7910,7 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
         || (*row).site as usize != at
         || (*row).formals != function.car()
         || (*row).body != body
-        || (*row).flags & PLAN_FAST == 0
+        || (*row).flags & fast == 0
         || function
             .has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE | gp::NATIVE_ENTRY)
         || function == interp.namespace_loader
@@ -7893,8 +7970,10 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
         let value = if kind == ARGUMENT_VALUE {
             expression
         } else {
-            let eager_value = if !eager || kind == ARGUMENT_CODE {
+            let eager_value = if !eager || kind <= ARGUMENT_CODE {
                 None
+            } else if BY_NAME {
+                effects::eager_argument(expression, caller_env)
             } else if kind >= 0 {
                 let value = *state.header.add(1 + kind as usize);
                 if value == missing_value {
@@ -7912,7 +7991,13 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
             match eager_value {
                 Some(value) => value,
                 None => {
-                    let reference = if kind == ARGUMENT_CODE {
+                    let reference = if BY_NAME {
+                        if expression.kind() == SexpType::Bytecode {
+                            eval::env_code_reference(caller_env, expression)
+                        } else {
+                            eval::env_reference(caller_env, expression)
+                        }
+                    } else if kind == ARGUMENT_CODE {
                         eval::code_reference(owner, expression)
                     } else {
                         let slot = if kind >= 0 {
@@ -7988,12 +8073,12 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
         window.add(index).write(nil);
     }
     interp.calls_ever = interp.calls_ever.wrapping_add(1);
-    let caller = interp.slot_owner;
+    let previous_owner = interp.slot_owner;
     let frame = Frame {
         call,
         function,
         env: nil,
-        sys_parent: nil,
+        sys_parent: caller_env,
         args: args_start as u32,
         on_exit: ThinVec::new(),
         handlers: interp.handlers.clone(),
@@ -8003,12 +8088,16 @@ unsafe fn call_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
         closures: interp.frame_closures.len() as u32,
         slots: header as u32,
         missing,
-        caller,
+        caller: if BY_NAME {
+            crate::NO_SLOTS
+        } else {
+            previous_owner
+        },
         pending: nil,
         inlined: false,
         reified_by: crate::NOT_REIFIED,
         handle_mark: (*heap).handle_mark() as u32,
-        previous_owner: caller,
+        previous_owner,
         references: interp.references_used,
     };
     interp.frames.push_with(|| frame);
@@ -8077,14 +8166,23 @@ unsafe fn call_fast_left(
 }
 
 /// `Return` from a body the dispatch loop entered in place, when the frame has nothing to run
-/// or keep on the way out: no environment, no pending environment, no `on.exit`, and nothing
-/// observing calls. It does what [`finished`] does through [`eval::leave`] for such a frame
-/// and goes on after the caller's call instruction.
+/// or keep on the way out: its code is still on the slots, no `on.exit`, nothing observing
+/// calls, and nothing left that names the environment it may have handed out. It does what
+/// [`finished`] does through [`eval::leave`] for such a frame and goes on after the caller's
+/// call instruction.
+///
+/// Without `DISCARD` it takes the frames that handed out no environment. With it, it takes
+/// the ones that did while their code stayed on the slots (a callee asked for its parent
+/// frame, or a promise or a closure was made over the frame): when nothing counts a reference
+/// to that environment any more it dies here, as [`eval::leave`] would find.
 ///
 /// The value needs no root between the callee's registers and the caller's: giving up the
 /// slots' references frees nothing by itself, and nothing here allocates.
 #[inline(always)]
-unsafe fn return_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+unsafe fn return_fast<const DISCARD: bool>(
+    state: &mut Activation<'_, '_>,
+    at: usize,
+) -> Option<usize> {
     let interp = &mut *state.interp;
     let heap = &mut *state.heap;
     let nil = heap.known().nil;
@@ -8100,14 +8198,22 @@ unsafe fn return_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize
     if depth != interp.frames.len() || crate::annotations::checks_pending() {
         return None;
     }
-    // A frame that made closures over its environment has that environment, so the frames
-    // that return here have none to check.
     let frame = &interp.frames[depth - 1];
-    if frame.pending != nil || !frame.on_exit.is_empty() {
+    let pending = frame.pending;
+    if !frame.on_exit.is_empty() || DISCARD == (pending == nil) {
         return None;
     }
     debug_assert!(frame.env == nil && frame.slots as usize == state.machine.header);
     let value = *state.registers.add(*state.code.add(at + 1) as usize);
+    if DISCARD {
+        if pending.refcount() != 0 || value == pending || heap.is_preserved(pending) {
+            return None;
+        }
+        crate::forget_pending_closures(interp, depth - 1);
+        heap.discard_frame(pending, value);
+        pending.set_gp_bits(gp::COMPILED_FRAME, false);
+    }
+    let frame = &interp.frames[depth - 1];
     let (args, method_vars, closures) = (frame.args, frame.method_vars, frame.closures);
     heap.release_handles(frame.handle_mark as usize);
     interp.slot_owner = frame.previous_owner;
@@ -9277,28 +9383,17 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         let per_call = plan.is_some_and(|id| plans.sources(id) == [eval::MATCH_PER_CALL]);
         if let Some(id) = plan
             && !per_call
-            && (function == (*state.interp).do_call || plans.pins[id as usize] != nil())
         {
-            // Copied out of the table, which the call may grow.
-            let sources: SmallVec<[i32; 8]> = SmallVec::from_slice(plans.sources(id));
-            if let Some(value) = match call_do_call(state, function, call, &sources)? {
-                Some(value) => Some(value),
-                None => call_wrapper(state, function, call, id, &sources)?,
-            } {
-                state.record(instruction.at, value);
-                instruction.output(0, value);
-                return Ok(Flow::Next);
-            }
-        }
-        if let Some(id) = plan
-            && !per_call
-            && state.in_slots()
-            && function != (*state.interp).do_call
-        {
-            let plans = &(*state.interp).bytecode.call_plans;
-            // The site's compiled arguments are settled once it has run on a slot frame.
-            if plans.rows[id as usize].flags & PLAN_PREPARED == 0
-                && plans.pins[id as usize] == nil()
+            if function == (*state.interp).do_call {
+                // Copied out of the table, which the call may grow.
+                let sources: SmallVec<[i32; 8]> = SmallVec::from_slice(plans.sources(id));
+                if let Some(value) = call_do_call(state, function, call, &sources)? {
+                    state.record(instruction.at, value);
+                    instruction.output(0, value);
+                    return Ok(Flow::Next);
+                }
+            } else if plans.rows[id as usize].flags & PLAN_PREPARED == 0
+                // The site's compiled arguments are settled once it has run for a function.
                 && state.constants.element(instruction.operand(2) + 1) != unbound()
             {
                 prepare_plan(state, id, arguments);
@@ -9547,8 +9642,7 @@ unsafe fn direct_plan(
     if misses >= PLAN_MISSES {
         return Ok(None);
     }
-    // A closure without formals has nothing to plan.
-    let plan = eval::direct_sources(function, call)?.filter(|(_, sources)| !sources.is_empty());
+    let plan = eval::direct_sources(function, call)?;
     let plans = &mut (*state.interp).bytecode.call_plans;
     // Matching allocates, and a collection frees a plan whose closure died.
     let existing = existing.and_then(|id| plans.owned(id as u32, owner, instruction.at));
@@ -9599,10 +9693,6 @@ pub struct CallPlans {
     /// How many words of [`CallPlans::pool`] the plan's range holds, so a site that plans again
     /// reuses it.
     capacities: Vec<u32>,
-    /// The site's pin of a wrapper's lookups ([`WrapperPin`]): unbound until the site calls the
-    /// wrapper, `NULL` for a closure that is not one. The one heap object a plan refers to
-    /// strongly.
-    pins: Vec<Sexp>,
     pool: Vec<i32>,
     free: Vec<u32>,
     /// Moves whenever a plan is stored or freed, so a site that read its plan before running
@@ -9642,10 +9732,14 @@ struct PlanRow {
 
 /// The [`PlanRow::flags`] bit set once the kinds of the site's arguments are worked out.
 const PLAN_PREPARED: u8 = 1;
-/// The [`PlanRow::flags`] bit set when [`call_fast`] may take the site's calls.
+/// The [`PlanRow::flags`] bit set when [`call_fast`] may take the site's calls from a frame
+/// whose code runs on its slots.
 const PLAN_FAST: u8 = 2;
 /// The [`PlanRow::flags`] bit holding the answer [`PlanRow::effects_env`] is kept for.
 const PLAN_EFFECT_FREE: u8 = 4;
+/// The [`PlanRow::flags`] bit set when [`call_fast`] may take the site's calls from a frame
+/// that reads its variables by name, in its environment.
+const PLAN_FAST_BY_NAME: u8 = 8;
 
 /// The kind of an argument a site passes as it is written: a constant, or the empty argument.
 const ARGUMENT_VALUE: i32 = -1;
@@ -9654,6 +9748,9 @@ const ARGUMENT_VALUE: i32 = -1;
 const ARGUMENT_OUTSIDE: i32 = -2;
 /// The kind of an argument that is code compiled to run on the calling frame's slots.
 const ARGUMENT_CODE: i32 = -3;
+/// The kind of an argument that is code only a frame with an environment can run: the
+/// compiler rejected it, or compiled it for a frame that has no slot table.
+const ARGUMENT_BY_NAME: i32 = -4;
 
 impl CallPlans {
     /// The plan `id` when it belongs to the site at `at` in the code whose constants are
@@ -9731,11 +9828,9 @@ impl CallPlans {
                 });
                 self.misses.push(0);
                 self.capacities.push(0);
-                self.pins.push(nil());
                 self.rows.len() - 1
             }
         };
-        self.pins[id] = unbound();
         let length = sources.len() + arguments;
         let mut sources_at = self.rows[id].sources_at;
         if length > self.capacities[id] as usize {
@@ -9764,16 +9859,7 @@ impl CallPlans {
         id
     }
 
-    unsafe fn trace(&self, marker: &mut Marker<'_>) {
-        for &pin in &self.pins {
-            marker.mark(pin);
-        }
-    }
-
-    /// Frees every plan with a dead key. A major collection also drops every pin: a pin holds
-    /// the closure's environment, which can reach the very code and body that key the plan,
-    /// and would otherwise keep the plan alive forever. A site whose pin is dropped decides
-    /// again whether its callee is a wrapper, so its calls leave the fast path until it has.
+    /// Frees every plan with a dead key.
     pub unsafe fn clear_dead(&mut self, liveness: &Liveness<'_>) {
         let live = |object: Sexp| object == nil() || liveness.is_live(object);
         for id in 0..self.rows.len() {
@@ -9787,25 +9873,24 @@ impl CallPlans {
                 row.formals = nil();
                 row.body = nil();
                 row.flags = 0;
-                self.pins[id] = nil();
                 self.free.push(id as u32);
                 self.generation = self.generation.wrapping_add(1);
-            } else if liveness.is_major() {
-                row.flags = 0;
-                self.pins[id] = unbound();
             }
         }
     }
 }
 
-/// Works out, once the site at `at` knows its callee is no wrapper, how each of the site's
-/// `arguments` binds ([`ARGUMENT_VALUE`] and the kinds beside it), and whether [`call_fast`]
-/// may take the site's calls: every argument is a constant, the empty argument, a variable or
-/// code compiled against the calling frame's slots. `...`, `..N` and code that needs the
-/// frame's environment leave the site to the generic path.
+/// Works out how each of the `arguments` of the site with plan `id` binds ([`ARGUMENT_VALUE`]
+/// and the kinds beside it), and from which frames [`call_fast`] may take the site's calls. A
+/// frame whose code runs on its slots passes a constant, the empty argument, a variable, or
+/// code compiled against its slots ([`PLAN_FAST`]). A frame that reads by name also passes
+/// code that needs its environment ([`PLAN_FAST_BY_NAME`]). `...` and `..N` leave the site to
+/// the generic path.
 unsafe fn prepare_plan(state: &Activation<'_, '_>, id: u32, arguments: Sexp) {
     let mut kinds: SmallVec<[i32; 8]> = SmallVec::new();
-    let mut fast = true;
+    // Code compiled without a slot table never runs on slots.
+    let slotted = state.constants.element(SLOTS) != nil();
+    let (mut on_slots, mut by_name) = (slotted, true);
     let mut cell = arguments;
     while cell.kind() == SexpType::Pairlist {
         let expression = cell.car();
@@ -9814,15 +9899,20 @@ unsafe fn prepare_plan(state: &Activation<'_, '_>, id: u32, arguments: Sexp) {
             SexpType::Symbol
                 if expression == symbols().dots || eval::dot_dot_index(expression).is_some() =>
             {
-                fast = false;
+                (on_slots, by_name) = (false, false);
                 break;
             }
-            SexpType::Symbol => {
+            SexpType::Symbol if slotted => {
                 slot_index(state, expression).map_or(ARGUMENT_OUTSIDE, |slot| slot as i32)
             }
+            SexpType::Symbol => ARGUMENT_OUTSIDE,
             SexpType::Bytecode if expression.cdr().element(SLOTS) != nil() => ARGUMENT_CODE,
-            SexpType::Bytecode | SexpType::Language | SexpType::Promise => {
-                fast = false;
+            SexpType::Bytecode | SexpType::Language => {
+                on_slots = false;
+                ARGUMENT_BY_NAME
+            }
+            SexpType::Promise => {
+                (on_slots, by_name) = (false, false);
                 break;
             }
             _ => ARGUMENT_VALUE,
@@ -9832,144 +9922,12 @@ unsafe fn prepare_plan(state: &Activation<'_, '_>, id: u32, arguments: Sexp) {
     let plans = &mut (*state.interp).bytecode.call_plans;
     let row = &mut plans.rows[id as usize];
     row.flags |= PLAN_PREPARED;
-    if !fast || kinds.len() != row.arguments as usize || row.loops == u16::MAX {
+    if !(on_slots || by_name) || kinds.len() != row.arguments as usize || row.loops == u16::MAX {
         return;
     }
     let start = (row.sources_at + row.sources_len) as usize;
-    row.flags |= PLAN_FAST;
+    row.flags |= if on_slots { PLAN_FAST } else { 0 } | if by_name { PLAN_FAST_BY_NAME } else { 0 };
     plans.pool[start..start + kinds.len()].copy_from_slice(&kinds);
-}
-
-/// Runs a planned call of `function` with [`eval::run_wrapper`] when the closure is a wrapper,
-/// a body that is one call of a builtin whose arguments are formals, literals and variables
-/// bound outside any function frame, and each argument of the call reads without running R
-/// code. `None` leaves the call to the generic path, with nothing changed.
-///
-/// The site pins what the body's lookups found in its plan ([`WrapperPin`]),
-/// and a pin holds while the stamps of its symbols do: a binding of one appearing or going
-/// away anywhere outside a function frame, or any enclosure changing, moves a stamp, while a
-/// value assigned to a pinned binding is read from its cell on every call.
-unsafe fn call_wrapper(
-    state: &mut Activation<'_, '_>,
-    function: Sexp,
-    call: Sexp,
-    plan: u32,
-    sources: &[i32],
-) -> R<Option<Sexp>> {
-    let interp = &*state.interp;
-    if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE)
-        || interp.debugger.is_some()
-        || !interp.object_systems
-        || crate::moves::tracking()
-    {
-        return Ok(None);
-    }
-    let mut pin = interp.bytecode.call_plans.pins[plan as usize];
-    if pin == nil() {
-        return Ok(None);
-    }
-    if pin == unbound() || !pin_holds(pin, function) {
-        pin = pin_wrapper(function)?;
-        (&mut (*state.interp).bytecode.call_plans.pins)[plan as usize] = pin;
-        if pin == nil() {
-            return Ok(None);
-        }
-    }
-    let Some(builtin) = cell_value(pin.element(WrapperPin::CELLS).element(0)) else {
-        return Ok(None);
-    };
-    if builtin.kind() != SexpType::Builtin {
-        return Ok(None);
-    }
-    let mut supplied: SmallVec<[Arg; 4]> = SmallVec::new();
-    let mut cell = call.cdr();
-    while cell.kind() == SexpType::Pairlist {
-        let Some(value) = wrapper_argument(state, cell.car())? else {
-            return Ok(None);
-        };
-        supplied.push(Arg {
-            tag: cell.tag(),
-            value,
-        });
-        cell = cell.cdr();
-    }
-    if sources.iter().filter(|&&source| source >= 0).count() != supplied.len() {
-        return Ok(None);
-    }
-    let mut formal_values: SmallVec<[Sexp; 8]> = SmallVec::new();
-    let mut missing = 0u64;
-    let mut formal = function.car();
-    for (index, &source) in sources.iter().enumerate() {
-        let value = match supplied.get(source as usize) {
-            Some(arg) if source >= 0 => arg.value,
-            _ => {
-                let default = formal.car();
-                if default == missing_arg() {
-                    return Ok(None);
-                }
-                missing |= 1 << index;
-                default
-            }
-        };
-        formal_values.push(value);
-        formal = formal.cdr();
-    }
-    let kinds = values::ints(pin.element(WrapperPin::KINDS));
-    let payload = pin.element(WrapperPin::PAYLOAD);
-    let body = wrapper_call(source_body(function));
-    let mut builtin_args: SmallVec<[Arg; 4]> = SmallVec::new();
-    let mut cell = body.cdr();
-    for (index, &kind) in kinds.iter().enumerate() {
-        let value = match kind {
-            WrapperPin::LITERAL => payload.element(index),
-            WrapperPin::FREE => match cell_value(payload.element(index)) {
-                Some(value) => value,
-                None => return Ok(None),
-            },
-            formal => match formal_values.get(formal as usize) {
-                Some(&value) => value,
-                None => return Ok(None),
-            },
-        };
-        builtin_args.push(Arg {
-            tag: cell.tag(),
-            value,
-        });
-        cell = cell.cdr();
-    }
-    let count = length(function.cdr().cdr().element(SLOTS).element(1));
-    let header = (*state.interp).bytecode.registers.len();
-    reserve_registers(header + 1 + count)?;
-    let window = register_address(header);
-    for index in 0..count {
-        let value = formal_values.get(index).copied().unwrap_or_else(unbound);
-        value.increment_refcount();
-        *window.add(1 + index) = value;
-    }
-    let sys_parent = if state.in_slots() {
-        nil()
-    } else {
-        state.env(Reify::Site("wrapper call"))?
-    };
-    activity::count(Counter::WrappersInlined);
-    eval::run_inlined(
-        call,
-        function,
-        header as u32,
-        missing,
-        sys_parent,
-        &supplied,
-        |frame| {
-            let definition = eval::builtin_def(builtin)?;
-            let state = crate::interp();
-            let owner = state.slot_owner;
-            state.slot_owner = frame;
-            let result = call_builtin(definition, body, builtin, &builtin_args, nil());
-            crate::interp().slot_owner = owner;
-            result
-        },
-    )
-    .map(Some)
 }
 
 /// Runs a call of base R's `do.call(what, args)` from the call site, without the closure's
@@ -10011,7 +9969,7 @@ unsafe fn call_do_call(
     let mut supplied: SmallVec<[Arg; 2]> = SmallVec::new();
     let mut cell = call.cdr();
     while cell.kind() == SexpType::Pairlist {
-        let Some(value) = wrapper_argument(state, cell.car())? else {
+        let Some(value) = settled_argument(state, cell.car())? else {
             return Ok(None);
         };
         supplied.push(Arg {
@@ -10125,182 +10083,10 @@ unsafe fn call_do_call(
     .map(Some)
 }
 
-/// The call a wrapper's body makes: the body itself, or the one call inside `{ }`.
-unsafe fn wrapper_call(body: Sexp) -> Sexp {
-    if body.kind() == SexpType::Language
-        && body.car() == symbols().brace
-        && body.cdr().kind() == SexpType::Pairlist
-        && body.cdr().cdr() == nil()
-        && body.cdr().car().kind() == SexpType::Language
-    {
-        body.cdr().car()
-    } else {
-        body
-    }
-}
-
-/// The layout of a call site's pin of a wrapper's lookups (see [`call_wrapper`]), a list.
-struct WrapperPin;
-
-impl WrapperPin {
-    /// The closure environment the lookups started from.
-    const ENCLOSURE: usize = 0;
-    /// Per argument of the body's builtin call, the formal it passes (its index), or
-    /// [`WrapperPin::LITERAL`] or [`WrapperPin::FREE`].
-    const KINDS: usize = 1;
-    /// Per argument, the literal, the cell of the free variable, or `NULL` for a formal.
-    const PAYLOAD: usize = 2;
-    /// The pinned symbols, the builtin's name first.
-    const SYMBOLS: usize = 3;
-    /// The cell each pinned symbol resolved to.
-    const CELLS: usize = 4;
-    /// The stamp of each pinned symbol when it was resolved, as the bits of a double.
-    const STAMPS: usize = 5;
-    const LENGTH: usize = 6;
-    const LITERAL: i32 = -1;
-    const FREE: i32 = -2;
-}
-
-/// Whether `pin` still describes `function`'s lookups: the closure has the same environment
-/// and no pinned symbol's stamp moved.
-#[inline]
-unsafe fn pin_holds(pin: Sexp, function: Sexp) -> bool {
-    if pin.element(WrapperPin::ENCLOSURE) != function.tag() {
-        return false;
-    }
-    let heap = crate::heap();
-    let symbols = pin.element(WrapperPin::SYMBOLS);
-    let stamps = values::reals(pin.element(WrapperPin::STAMPS));
-    stamps
-        .iter()
-        .enumerate()
-        .all(|(index, stamp)| stamp.to_bits() == heap.lookup_stamp(symbols.element(index)))
-}
-
-/// The pin of `function`'s lookups when the closure is a wrapper, or `NULL`. A wrapper's body
-/// is one call whose function is a name bound outside any function frame and whose arguments
-/// are formals, literals, or other such names, and it has no `...` formal.
-unsafe fn pin_wrapper(function: Sexp) -> R<Sexp> {
-    let source = source_body(function);
-    let body = wrapper_call(source);
-    let enclosure = function.tag();
-    let constants = function.cdr().cdr();
-    if body.kind() != SexpType::Language
-        || body.car().kind() != SexpType::Symbol
-        || constants.element(SLOTS) == nil()
-    {
-        return Ok(nil());
-    }
-    let mut formals: SmallVec<[Sexp; 8]> = SmallVec::new();
-    let mut formal = function.car();
-    while formal.kind() == SexpType::Pairlist {
-        if formal.tag() == symbols().dots || formals.len() >= MAX_SLOT_FORMALS {
-            return Ok(nil());
-        }
-        let default = formal.car();
-        if !(default == missing_arg() || default == nil() || default.kind().is_atomic()) {
-            return Ok(nil());
-        }
-        formals.push(formal.tag());
-        formal = formal.cdr();
-    }
-    let mut pinned: SmallVec<[(Sexp, Sexp); 4]> = SmallVec::new();
-    let head = body.car();
-    if formals.contains(&head) {
-        return Ok(nil());
-    }
-    // Only a builtin head runs without a body, so any other head (`{` with several statements,
-    // a closure) settles the site on the generic path for good instead of pinning lookups that
-    // every call would check and then discard.
-    let Some(cell) = resolve(head, enclosure, false)? else {
-        return Ok(nil());
-    };
-    if cell_value(cell).is_none_or(|value| value.kind() != SexpType::Builtin) {
-        return Ok(nil());
-    }
-    pinned.push((head, cell));
-    // `{ f(x) }` runs as `f(x)` only while `{` is base R's.
-    if body != source {
-        let brace = symbols().brace;
-        let Some(cell) = resolve(brace, enclosure, false)? else {
-            return Ok(nil());
-        };
-        match cell_value(cell) {
-            Some(value)
-                if value.kind() == SexpType::Special && values::primitive_name(value) == "{" => {}
-            _ => return Ok(nil()),
-        }
-        pinned.push((brace, cell));
-    }
-    let mut kinds: SmallVec<[i32; 8]> = SmallVec::new();
-    let mut payload: SmallVec<[Sexp; 8]> = SmallVec::new();
-    let mut argument = body.cdr();
-    while argument.kind() == SexpType::Pairlist {
-        let expression = argument.car();
-        match expression.kind() {
-            SexpType::Symbol => {
-                if expression == missing_arg() || expression == symbols().dots {
-                    return Ok(nil());
-                }
-                if let Some(index) = formals.iter().position(|&name| name == expression) {
-                    kinds.push(index as i32);
-                    payload.push(nil());
-                } else {
-                    let Some(cell) = resolve(expression, enclosure, false)? else {
-                        return Ok(nil());
-                    };
-                    kinds.push(WrapperPin::FREE);
-                    payload.push(cell);
-                    pinned.push((expression, cell));
-                }
-            }
-            SexpType::Language | SexpType::Promise | SexpType::Bytecode => return Ok(nil()),
-            _ => {
-                kinds.push(WrapperPin::LITERAL);
-                payload.push(expression);
-            }
-        }
-        argument = argument.cdr();
-    }
-    let heap = crate::heap();
-    let pin = values::alloc(SexpType::List, WrapperPin::LENGTH)?;
-    heap.root(pin);
-    heap.set_element(pin, WrapperPin::ENCLOSURE, enclosure);
-    heap.set_element(pin, WrapperPin::KINDS, values::integer_vector(&kinds)?);
-    let list = values::alloc(SexpType::List, payload.len())?;
-    heap.set_element(pin, WrapperPin::PAYLOAD, list);
-    for (index, &value) in payload.iter().enumerate() {
-        heap.set_element(list, index, value);
-    }
-    let names = values::alloc(SexpType::List, pinned.len())?;
-    heap.set_element(pin, WrapperPin::SYMBOLS, names);
-    let cells = values::alloc(SexpType::List, pinned.len())?;
-    heap.set_element(pin, WrapperPin::CELLS, cells);
-    let stamps = values::alloc(SexpType::Real, pinned.len())?;
-    heap.set_element(pin, WrapperPin::STAMPS, stamps);
-    let stamp_values = values::reals_mut(stamps);
-    for (index, &(symbol, cell)) in pinned.iter().enumerate() {
-        heap.set_element(names, index, symbol);
-        heap.set_element(cells, index, cell);
-        stamp_values[index] = f64::from_bits(heap.lookup_stamp(symbol));
-    }
-    Ok(pin)
-}
-
-/// The value a pinned cell holds when reading it runs no R code.
-#[inline]
-unsafe fn cell_value(cell: Sexp) -> Option<Sexp> {
-    let value = cell.cdr();
-    if value.kind() != SexpType::Promise {
-        return (value != unbound() && value != missing_arg()).then_some(value);
-    }
-    (value.car() != unbound()).then(|| value.car())
-}
-
 /// The value of a call's argument `expression` when reading it runs no R code: a literal, or a
 /// variable bound to a value or to a promise that reading settles without running code.
 #[inline]
-unsafe fn wrapper_argument(state: &Activation<'_, '_>, expression: Sexp) -> R<Option<Sexp>> {
+unsafe fn settled_argument(state: &Activation<'_, '_>, expression: Sexp) -> R<Option<Sexp>> {
     let value = match expression.kind() {
         SexpType::Symbol => {
             if expression == missing_arg() || expression == symbols().dots {
@@ -10309,7 +10095,7 @@ unsafe fn wrapper_argument(state: &Activation<'_, '_>, expression: Sexp) -> R<Op
             let found = if state.in_slots() {
                 slot_eager_argument(state, expression)
             } else {
-                effects::eager_argument(expression, state.env(Reify::Site("wrapper argument"))?)
+                effects::eager_argument(expression, state.env(Reify::Site("do.call argument"))?)
             };
             match found {
                 Some(value) => value,
@@ -10721,16 +10507,8 @@ unsafe fn slot_use_method(
     {
         return Ok(None);
     }
-    let formals = state.machine.function.car();
-    let first = if formals.kind() == SexpType::Pairlist {
-        match slot_named(state, formals.tag()) {
-            Some(slot) => slot,
-            None => return Ok(None),
-        }
-    } else {
-        std::ptr::null_mut()
-    };
     // Through R 4.3 the method sees the generic's locals, which only an environment can show.
+    let formals = state.machine.function.car();
     let names = state.constants.element(SLOTS).element(1);
     let locals =
         (length(formals)..length(names)).any(|index| *state.header.add(1 + index) != unbound());
@@ -10738,7 +10516,7 @@ unsafe fn slot_use_method(
         return Ok(None);
     }
     let owner = (*state.interp).slot_owner as usize;
-    dispatch::use_method_in_slots(generic, owner, first, object)
+    dispatch::use_method_in_slots(generic, owner, object)
 }
 
 /// A builtin call from a slot frame whose arguments the slots answer: `...`, a constant, or a
@@ -12414,7 +12192,7 @@ unsafe fn op_closure(state: &mut Activation<'_, '_>, instruction: Instruction) -
     // created anew on each call (a `vapply` callback, say) on the AST evaluator, or recompile it
     // every other call. The code depends on the formals and body only: its inline caches and the
     // optimizing tier both check the enclosure they were filled for.
-    if body.kind() != SexpType::Bytecode && worth_compiling(body) {
+    if body.kind() != SexpType::Bytecode && compilable(body) {
         let code = compile(body, closure, false)?;
         (*state.heap).set_element(state.constants, instruction.operand(2), code);
         (*state.heap).set_cdr(closure, code);

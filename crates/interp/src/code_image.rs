@@ -527,8 +527,31 @@ unsafe fn note_typed(database: u32, offset: u64, closures: &[Sexp]) {
     }
 }
 
+/// The database number of a note for a closure an executable's script defines
+/// ([`note_script_closure`]), which no database read from disk has.
+pub const SCRIPT_DATABASE: u32 = u32::MAX;
+
+/// Notes the typed closure `closure`, made for the definition at `index` among the top-level
+/// expressions of the script an executable carries, so its first call attaches the code the
+/// executable holds for it. `stamp` names the script.
+pub unsafe fn note_script_closure(closure: Sexp, index: u32, stamp: DatabaseStamp) {
+    if !crate::annotations::is_typed(closure) {
+        return;
+    }
+    let note = Note {
+        database: SCRIPT_DATABASE,
+        offset: u64::from(index),
+        position: 0,
+        stamp,
+    };
+    if interp().code_image.notes.insert(closure, note).is_none() {
+        crate::heap().preserve(closure);
+    }
+}
+
 /// Where the typed closure `closure` was read from, when it came from a database with a typed
-/// code file. A copy of the closure made at run time has no note.
+/// code file or is a definition of an executable's script. A copy of the closure made at run
+/// time has no note.
 pub fn typed_note(closure: Sexp) -> Option<Note> {
     interp().code_image.notes.get(&closure).copied()
 }

@@ -1,0 +1,48 @@
+[stdout]
+| List of 5
+|  $ : int 825
+|  $ : chr "label"
+|  $ : chr "e"
+|  $ : language call_of()
+|  $ : int 4
+|  int 336
+| [1] 3000
+| [1] "argument \"x\" is missing, with no default"
+| [1] "default forced" "with_default()"
+| [1] "object 'no_such_variable' not found" "unbound_body()"                     
+| [1] "a"  "b"  "24" "a"  "b" 
+| List of 2
+|  $ value  : int 12
+|  $ visible: logi FALSE
+| List of 2
+|  $ value  : int 7
+|  $ visible: logi TRUE
+| [1] 7
+| [1] 7
+| [1] TRUE
+| [1] "invalid body for function"
+|   expression(1 + 2, x)
+| List of 2
+|  $ : num 1
+|  $ : chr "a"
+|  [1]   1   1   1   1   1   1   1   1   1   1   1   1   1   1   2   2   2   2   2
+| [20]   2   2   2   2   2 100 100 100 100 100 100
+| [1] "read 100"
+| [1] TRUE
+| [1] "the ... list contains fewer than 2 elements"
+| [1] "forced" "1"     
+| [1] "plain"
+|  int 1
+| [1] 1 2 3
+| [1] "function (f = sys.function()) " "f"                             
+| matched(x = i + 1L)
+| [1] "invalid body argument for 'function'"
+| [1] "invalid body argument for 'function'"
+| [1] "invalid body argument for 'function'"
+| [1] 0+1i
+[messages]
+[warnings]
+[errors]
+[value]
+complex
+| 0+1i

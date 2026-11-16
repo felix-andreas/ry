@@ -140,7 +140,7 @@ expect stderr "typed: attached `total` for [I64, Dbl] -> Dbl from typedpkg's cod
 
 run ry build --aot use.R
 expect exit 2
-expect stderr "use.R is a script, and `ry build --aot` compiles a package: run the script with `ry run --aot use.R`"
+expect stderr "use.R is a script, and `ry build --aot` compiles a package: build an executable from the script with `ry build --aot --exe use.R`"
 
 # Under `ry run --aot`, a package whose typed code file is another build's compiles its typed
 # functions as its namespace loads, and the run says to reinstall it.
@@ -248,7 +248,7 @@ file reinstall.R
 run ry run --runtime ry reinstall.R
 expect exit 0
 expect stdout "14i64"
-expect stderr "typed: shapepkg's typed code file is not used: it was written for another copy of the package"
+expect stderr "typed: shapepkg's code file is not used: it was written for another copy of the package"
 expect stderr "typed: compiled for [I64] -> I64"
 
 # A function left out of the file takes the functions that call it with it, and the rest of the

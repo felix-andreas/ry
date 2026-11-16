@@ -277,8 +277,9 @@ pub unsafe fn slot_binding(env: Sexp, symbol: Sexp, forcing: bool) -> Option<Sex
         return None;
     }
     let frame = &interp().frames[pending_owner(env)];
-    // An inlined wrapper's slot holds the value where a cell would hold the forced promise of
-    // the caller's variable ([`box_slots`]), which a reader of the binding itself expects.
+    // A slot of a frame run without its body ([`run_inlined`]) holds the value where a cell
+    // would hold the forced promise of the caller's variable ([`box_slots`]), which a reader
+    // of the binding itself expects.
     if frame.inlined && !forcing {
         return None;
     }
@@ -796,9 +797,10 @@ unsafe fn box_slots(owner: usize, slots: std::ops::Range<usize>) -> R<()> {
         frame.missing,
         frame.pending,
     );
-    // A variable the caller passed to an inlined wrapper sits in its slot as the value; the
-    // generic path would have bound a promise of the variable, forced by the builtin call, and
-    // `substitute` reads the variable from it. Constants bind as themselves either way.
+    // A variable the caller passed to a frame run without its body ([`run_inlined`]) sits in
+    // its slot as the value; the generic path would have bound a promise of the variable,
+    // forced by the body, and `substitute` reads the variable from it. Constants bind as
+    // themselves either way.
     let sources = if frame.inlined {
         direct_sources(function, frame.call)?
     } else {
@@ -5424,6 +5426,12 @@ pub unsafe fn make_closure(formals: Sexp, body: Sexp, srcref: Sexp, env: Sexp) -
     if !matches!(formals.kind(), SexpType::Nil | SexpType::Pairlist) {
         return Err(error("invalid formal argument list for \"function\""));
     }
+    if matches!(
+        body.kind(),
+        SexpType::Closure | SexpType::Builtin | SexpType::Special
+    ) {
+        return Err(error("invalid body argument for 'function'"));
+    }
     let closure = match crate::ahead::take(formals, body, env) {
         Some(closure) => closure,
         None => {
@@ -6825,6 +6833,10 @@ pub unsafe fn complex_assign(
             format!("object '{}' not found", symbol_name(inner)),
         ));
     }
+    // A promise that another reference also holds, as the caller's `...` list does for an
+    // argument passed on through `...`, shares its value with that holder. GNU R wraps each such
+    // argument in a promise of its own, whose value then counts a second reference.
+    let shared_promise = base.kind() == SexpType::Promise && values::maybe_shared(base);
     if base.kind() == SexpType::Promise {
         base = force_promise(base)?;
     }
@@ -6849,6 +6861,7 @@ pub unsafe fn complex_assign(
     // must come before any level changes in place, since an inner level is an element of it.
     crate::moves::modifying(base)?;
     if values::maybe_shared(base)
+        || shared_promise
         || locked
         || index_assigns
         || (!superassign && local_cell.is_none())

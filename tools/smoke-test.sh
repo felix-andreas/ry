@@ -115,8 +115,10 @@ else
 	fail "ry run base R: $output"
 fi
 # A matrix product runs in ry's own kernels, and solve() goes through LAPACK and the BLAS it calls:
-# the system's on Linux, Accelerate on macOS. Windows has no system LAPACK, so there it runs with
-# R_HOME naming GNU R, whose Rlapack.dll and Rblas.dll bind to ry's R.dll.
+# the system's on Linux, Accelerate on macOS. Windows has no system LAPACK, so the first check there
+# points R_HOME at the GNU R on PATH, when there is one. The second check runs on every platform
+# with R_HOME unset, so ry uses its own base R home, whose bin/x64 holds Rblas.dll and Rlapack.dll
+# on Windows.
 printf 'cat(sum(matrix(1:6, 2) %%*%% matrix(1:6, 3)), solve(matrix(c(2, 1, 1, 3), 2), c(1, 2)), "\\n")\n' >linalg.R
 case "$ry" in
 *.exe) [ -z "${R_HOME:-}" ] && command -v R >/dev/null 2>&1 && R_HOME=$(R RHOME) && export R_HOME
@@ -124,6 +126,8 @@ case "$ry" in
 *) output=$(run_ry run linalg.R 2>&1 | tr -d '\r') || true ;;
 esac
 if [ "$output" = "163 0.2 0.6 " ]; then pass "ry run calls BLAS and LAPACK"; else fail "ry run linear algebra: $output"; fi
+output=$(run_ry run linalg.R 2>&1 | tr -d '\r') || true
+if [ "$output" = "163 0.2 0.6 " ]; then pass "ry run calls BLAS and LAPACK without R_HOME"; else fail "ry run linear algebra without R_HOME: $output"; fi
 # A Linux without a system BLAS and LAPACK, such as NixOS, uses the reference libRblas and
 # libRlapack that ry carries beside its runtime. A user and mount namespace hides the system's by
 # mounting /dev/null over each file the loader cache names.

@@ -164,11 +164,89 @@ pub unsafe fn write(package: &str) -> Result<Written, String> {
             Err(_) => *written.skipped.entry("compiles with its caller").or_default() += 1,
         }
     }
+    let names = binding_names(package);
+    let bytes = encode(&roots, &own, &names, package, stamp, build, &mut written)?;
+    let path = rcmd::images::typed_code(Path::new(&database), build);
+    let temporary = path.with_extension("ryt.partial");
+    let saved = std::fs::write(&temporary, &bytes)
+        .and_then(|()| std::fs::rename(&temporary, &path))
+        .map_err(|failure| format!("cannot write {}: {failure}", path.display()));
+    if saved.is_err() && temporary.exists() {
+        std::fs::remove_file(&temporary)
+            .map_err(|failure| format!("cannot remove {}: {failure}", temporary.display()))?;
+    }
+    saved.map(|()| written)
+}
+
+/// The package name a script's code file gives its functions, which no package can have.
+const SCRIPT_PACKAGE: &str = "";
+
+/// Compiles the typed closures of a script's top-level definitions, which
+/// `interp::ahead::compile_script` made, and returns the bytes of their typed code file, in which
+/// each closure is named by its definition's index among the script's expressions. `stamp`
+/// names the script the closures were made from. `ry build --aot --exe` appends the file to
+/// the executable.
+pub unsafe fn write_script(
+    definitions: &[interp::ahead::Definition],
+    stamp: DatabaseStamp,
+) -> Result<(Vec<u8>, Written), String> {
+    let build = interp::interp().code_image.build;
+    if build.is_empty() {
+        return Err(String::from(
+            "this runtime has no build identity to stamp a typed code file with",
+        ));
+    }
+    // The code is compiled before the script runs, so its lookups of the script's functions
+    // found no binding. Binding each name to its first definition, as running the script up to
+    // its first call would, gives the lookups the bindings an executable checks again when it
+    // attaches the code.
+    let global = rvalues::global_env();
+    let heap = interp::heap();
+    for definition in definitions {
+        if heap.frame_cell(global, definition.symbol).is_none() {
+            interp::eval::define(definition.symbol, definition.closure, global)
+                .map_err(|_| String::from("cannot bind the script's functions"))?;
+        }
+    }
+    let mut written = Written::default();
+    let mut own: FxHashMap<Sexp, (u64, u32)> = FxHashMap::default();
+    let mut names: FxHashMap<Sexp, String> = FxHashMap::default();
+    let mut roots: Vec<Key> = Vec::new();
+    for definition in definitions {
+        let closure = definition.closure;
+        if !annotations::is_typed(closure) || own.contains_key(&closure) {
+            continue;
+        }
+        own.insert(closure, (u64::from(definition.index), 0));
+        names.insert(closure, rvalues::symbol_name(definition.symbol).into_owned());
+        written.closures += 1;
+        match crate::ahead::declared_params(closure) {
+            Ok(params) => match compiled_or_refusal(closure, &params) {
+                Ok(_) => roots.push((closure, params)),
+                Err(_) => *written.skipped.entry("does not compile").or_default() += 1,
+            },
+            Err(_) => *written.skipped.entry("compiles with its caller").or_default() += 1,
+        }
+    }
+    let bytes = encode(&roots, &own, &names, SCRIPT_PACKAGE, stamp, build, &mut written)?;
+    Ok((bytes, written))
+}
+
+/// The typed code file of the versions `roots` reach, among the closures `own` names.
+unsafe fn encode(
+    roots: &[Key],
+    own: &FxHashMap<Sexp, (u64, u32)>,
+    names: &FxHashMap<Sexp, String>,
+    package: &str,
+    stamp: DatabaseStamp,
+    build: &str,
+    written: &mut Written,
+) -> Result<Vec<u8>, String> {
     // As for code compiled ahead of a script: a later function may confirm a shape that a
     // `match` in an earlier one must test for.
     for _ in 0..4 {
         let epoch = shapes::epoch();
-        for (closure, params) in &roots {
+        for (closure, params) in roots {
             if compiled_or_refusal(*closure, params).is_err() {
                 continue;
             }
@@ -177,23 +255,19 @@ pub unsafe fn write(package: &str) -> Result<Written, String> {
             break;
         }
     }
-    let names = binding_names(package);
-    let mut versions = collect(&roots, &own, &mut written);
+    let mut versions = collect(roots, own, written);
     versions.sort_by_cached_key(|version| {
         let (offset, position) = own.get(&version.key.0).copied().unwrap_or_default();
         (offset, position, format!("{:?}", version.key.1))
     });
-    let result = build_file(
-        &versions, &own, &names, package, stamp, build, &database, &mut written,
-    );
+    let result = build_file(&versions, own, names, package, stamp, build, written);
     let heap = interp::heap();
     for version in &versions {
         for &object in &version.preserved {
             heap.release(object);
         }
     }
-    result?;
-    Ok(written)
+    result
 }
 
 /// A version to write: a closure lowered for one list of argument types.
@@ -290,7 +364,7 @@ unsafe fn binding_names(package: &str) -> FxHashMap<Sexp, String> {
 
 const LEFT_OUT_CALLEE: &str = "calls a function left out of the file";
 
-#[allow(clippy::too_many_arguments)]
+/// The bytes of the file of `versions`, leaving out each that cannot be written.
 unsafe fn build_file(
     versions: &[Pending],
     own: &FxHashMap<Sexp, (u64, u32)>,
@@ -298,9 +372,8 @@ unsafe fn build_file(
     package: &str,
     stamp: DatabaseStamp,
     build: &str,
-    database: &str,
     written: &mut Written,
-) -> Result<(), String> {
+) -> Result<Vec<u8>, String> {
     // A version left out takes every version that calls it directly with it. Each emission that
     // leaves a version out starts again over the versions that remain, so the tables, the slots
     // and the code hold only what the written versions name.
@@ -321,18 +394,9 @@ unsafe fn build_file(
     }
     written.written += left_out.iter().filter(|reason| reason.is_none()).count();
     // The loader's parser is the definition of a well-formed file, so a file it would refuse is a
-    // bug in the writer and fails the install instead of being refused in every session.
+    // bug in the writer and fails the build instead of being refused in every session.
     parse(&bytes).map_err(|_| String::from("ry wrote a typed code file it cannot read"))?;
-    let path = rcmd::images::typed_code(Path::new(database), build);
-    let temporary = path.with_extension("ryt.partial");
-    let saved = std::fs::write(&temporary, &bytes)
-        .and_then(|()| std::fs::rename(&temporary, &path))
-        .map_err(|failure| format!("cannot write {}: {failure}", path.display()));
-    if saved.is_err() && temporary.exists() {
-        std::fs::remove_file(&temporary)
-            .map_err(|failure| format!("cannot remove {}: {failure}", temporary.display()))?;
-    }
-    saved
+    Ok(bytes)
 }
 
 /// Leaves out every version that calls a left-out version of the file directly, transitively.
@@ -1107,10 +1171,9 @@ impl Encoder<'_> {
                 }
             } else {
                 let note = code_image::typed_note(function)?;
-                let path = code_image::database_path(note.database);
-                let package = Path::new(&*path).file_stem()?.to_str()?;
+                let package = note_package(&note)?;
                 Class::File {
-                    package: self.shapes.strings.id(package),
+                    package: self.shapes.strings.id(&package),
                     offset: note.offset,
                     position: note.position,
                     stamp: note.stamp,
@@ -2199,7 +2262,8 @@ pub(crate) fn attached() -> usize {
 /// A typed code file mapped into this process.
 struct Mapped {
     parsed: Parsed,
-    package: String,
+    /// What the log calls the file, such as `pkg's code file`.
+    label: String,
     database: u32,
     /// Where the code starts. The offset table lies below it.
     base: usize,
@@ -2254,6 +2318,19 @@ fn misses() -> bool {
     *MISSES.get_or_init(|| std::env::var_os("RY_AHEAD_MISS").is_some())
 }
 
+/// The name of the package whose code file holds the code of the closure `note` names, or
+/// [`SCRIPT_PACKAGE`] for a definition of an executable's script.
+fn note_package(note: &Note) -> Option<std::rc::Rc<str>> {
+    if note.database == code_image::SCRIPT_DATABASE {
+        return Some(std::rc::Rc::from(SCRIPT_PACKAGE));
+    }
+    let path = code_image::database_path(note.database);
+    Path::new(&*path)
+        .file_stem()?
+        .to_str()
+        .map(std::rc::Rc::from)
+}
+
 unsafe fn open(note: Note) -> Option<&'static Mapped> {
     let known = FILES.with_borrow(|files| {
         files
@@ -2264,17 +2341,31 @@ unsafe fn open(note: Note) -> Option<&'static Mapped> {
     if let Some(mapped) = known {
         return mapped;
     }
-    let path = code_image::database_path(note.database);
-    let package = Path::new(&*path)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or_default()
-        .to_owned();
-    let mapped = match open_file(&path, note, package.clone()) {
-        Ok(mapped) => Some(&*Box::leak(Box::new(mapped))),
-        Err(reason) => {
+    let opened = if note.database == code_image::SCRIPT_DATABASE {
+        let label = String::from("the executable's code file");
+        match interp::interp().ahead.code.clone() {
+            Some(code) => (
+                open_file(&code.path, code.offset, Some(code.length), note, label.clone()),
+                label,
+            ),
+            None => (Err(String::from("the session runs no executable")), label),
+        }
+    } else {
+        let database = code_image::database_path(note.database);
+        let package = Path::new(&*database)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or_default();
+        let label = format!("{package}'s code file");
+        let build = interp::interp().code_image.build;
+        let path = rcmd::images::typed_code(Path::new(&*database), build);
+        (open_file(&path, 0, None, note, label.clone()), label)
+    };
+    let mapped = match opened {
+        (Ok(mapped), _) => Some(&*Box::leak(Box::new(mapped))),
+        (Err(reason), label) => {
             if annotations::typed_logging() {
-                eprintln!("typed: {package}'s typed code file is not used: {reason}");
+                eprintln!("typed: {label} is not used: {reason}");
             }
             None
         }
@@ -2293,18 +2384,38 @@ fn target_hash() -> Option<u64> {
     })
 }
 
-unsafe fn open_file(database: &str, note: Note, package: String) -> Result<Mapped, String> {
+/// Opens the typed code file at `start` of the file at `path`, `length` bytes long or reaching
+/// to the end of the file, for the closures of the database `note` names. `label` names the
+/// file in the log.
+unsafe fn open_file(
+    path: &Path,
+    start: u64,
+    length: Option<u64>,
+    note: Note,
+    label: String,
+) -> Result<Mapped, String> {
+    use std::io::{Seek, SeekFrom};
     let build = interp::interp().code_image.build;
     if build.is_empty() {
         return Err(String::from("the runtime has no build identity"));
     }
-    let path = rcmd::images::typed_code(Path::new(database), build);
-    let mut file = std::fs::File::open(&path)
+    // The code maps straight from the file, at an offset the system's page size divides.
+    if start % ALIGN != 0 {
+        return Err(String::from(MALFORMED));
+    }
+    let mut file = std::fs::File::open(path)
         .map_err(|failure| format!("cannot open {}: {failure}", path.display()))?;
-    let length = file
+    let whole = file
         .metadata()
         .map_err(|failure| format!("cannot read {}: {failure}", path.display()))?
         .len();
+    let length = match length {
+        Some(length) if start.checked_add(length).is_some_and(|end| end <= whole) => length,
+        Some(_) => return Err(String::from(MALFORMED)),
+        None => whole.checked_sub(start).ok_or(MALFORMED)?,
+    };
+    file.seek(SeekFrom::Start(start))
+        .map_err(|failure| format!("cannot read {}: {failure}", path.display()))?;
     let mut bytes = vec![0; HEADER_SIZE];
     file.read_exact(&mut bytes).map_err(|_| MALFORMED)?;
     let metadata_length = bytes
@@ -2336,7 +2447,7 @@ unsafe fn open_file(database: &str, note: Note, package: String) -> Result<Mappe
         return Err(String::from("it holds no code"));
     }
     let live = live_shapes(&parsed)?;
-    let base = map(&file, &header)?;
+    let base = map(&file, start, &header)?;
     // SAFETY: `map` mapped `tail` bytes of the file at `base`.
     let shared = std::slice::from_raw_parts(
         (base + header.shared_start as usize) as *const u8,
@@ -2403,7 +2514,7 @@ unsafe fn open_file(database: &str, note: Note, package: String) -> Result<Mappe
     let states = RefCell::new(vec![State::Unattached; parsed.functions.len()]);
     Ok(Mapped {
         parsed,
-        package,
+        label,
         database: note.database,
         base,
         live,
@@ -2427,7 +2538,7 @@ unsafe fn open_file(database: &str, note: Note, package: String) -> Result<Mappe
 /// to run file pages, such as macOS), the code is copied into the same range instead, which
 /// keeps the table at its fixed distance and gives up only the sharing.
 #[cfg(unix)]
-unsafe fn map(file: &std::fs::File, header: &Header) -> Result<usize, String> {
+unsafe fn map(file: &std::fs::File, start: u64, header: &Header) -> Result<usize, String> {
     let (table, tail, span) = mapped_span(header);
     let failed = |what: &str| format!("cannot map its {what}: {}", std::io::Error::last_os_error());
     let reserved = libc::mmap(
@@ -2456,13 +2567,13 @@ unsafe fn map(file: &std::fs::File, header: &Header) -> Result<usize, String> {
             libc::PROT_READ | libc::PROT_EXEC,
             libc::MAP_PRIVATE | libc::MAP_FIXED,
             file.as_raw_fd(),
-            header.code_offset as libc::off_t,
+            (start + header.code_offset) as libc::off_t,
         );
         if mapped != libc::MAP_FAILED {
             return Ok(code as usize);
         }
     }
-    copy_code(file, header, code, tail).inspect_err(|_| {
+    copy_code(file, start + header.code_offset, code, tail).inspect_err(|_| {
         libc::munmap(reserved, span);
     })?;
     Ok(code as usize)
@@ -2499,7 +2610,7 @@ fn copies() -> bool {
 #[cfg(unix)]
 unsafe fn copy_code(
     file: &std::fs::File,
-    header: &Header,
+    offset: u64,
     code: *mut u8,
     tail: usize,
 ) -> Result<(), String> {
@@ -2519,7 +2630,7 @@ unsafe fn copy_code(
     }
     // SAFETY: the range was just mapped writable with `tail` bytes.
     let bytes = std::slice::from_raw_parts_mut(code, tail);
-    file.read_exact_at(bytes, header.code_offset)
+    file.read_exact_at(bytes, offset)
         .map_err(|failure| format!("cannot copy its code: {failure}"))?;
     if libc::mprotect(code.cast(), tail, libc::PROT_READ | libc::PROT_EXEC) != 0 {
         return Err(failed("code"));
@@ -2534,7 +2645,7 @@ unsafe fn copy_code(
 }
 
 #[cfg(not(unix))]
-unsafe fn map(_: &std::fs::File, _: &Header) -> Result<usize, String> {
+unsafe fn map(_: &std::fs::File, _: u64, _: &Header) -> Result<usize, String> {
     Err(String::from("this system does not map typed code files"))
 }
 
@@ -2662,8 +2773,8 @@ unsafe fn attach_version(
             mapped.states.borrow_mut()[index as usize] = State::Failed;
             if annotations::typed_logging() {
                 eprintln!(
-                    "typed: `{name}` for {params:?} is not attached from {}'s code file: {reason}",
-                    mapped.package
+                    "typed: `{name}` for {params:?} is not attached from {}: {reason}",
+                    mapped.label
                 );
             }
             return None;
@@ -2675,8 +2786,8 @@ unsafe fn attach_version(
     ATTACHED.set(ATTACHED.get() + 1);
     if annotations::typed_logging() {
         eprintln!(
-            "typed: attached `{name}` for {params:?} -> {:?} from {}'s code file",
-            compiled.result, mapped.package
+            "typed: attached `{name}` for {params:?} -> {:?} from {}",
+            compiled.result, mapped.label
         );
     }
     Some(compiled)
@@ -2856,13 +2967,11 @@ unsafe fn resolve(mapped: &Mapped, index: u32) -> Option<Speculation> {
         } => {
             annotations::is_typed(function)
                 && code_image::typed_note(function).is_some_and(|note| {
-                    let path = code_image::database_path(note.database);
                     note.offset == *offset
                         && note.position == *position
                         && note.stamp == *stamp
-                        && Path::new(&*path)
-                            .file_stem()
-                            .is_some_and(|stem| *stem == *strings[*package as usize])
+                        && note_package(&note)
+                            .is_some_and(|name| *name == *strings[*package as usize])
                 })
         }
         Class::Other => rvalues::is_function(function) && !annotations::is_typed(function),
