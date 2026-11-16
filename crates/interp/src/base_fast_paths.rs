@@ -1879,7 +1879,7 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
             | SexpType::Raw
             | SexpType::List
     ) && !x.is_object()
-        && !x.is_altrep()
+        && (x.kind() != SexpType::List || !x.is_altrep())
         && only_names(x);
     let count = length(x);
     if !plain || count == 0 {
