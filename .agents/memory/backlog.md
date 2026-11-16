@@ -1517,10 +1517,6 @@ overhead, not allocation.
   frame's cell, not from the binding `<<-` writes. Base's bindings are not locked either:
   `(function() T[2] <<- FALSE)()` succeeds where GNU R fails with "cannot change value of locked
   binding for 'T'".
-- S3 replacement methods defined as locals of the function that assigns are never called:
-  with `` `[<-.k` ``, `` `$<-.k` ``, `` `[[<-.k` `` and `` `names<-.k` `` assigned in `f`'s body,
-  `x[1] <- 2`, `x$a <- 3`, `x[[1]] <- 4` and `names(x) <- "q"` on a `k` object in `f` run the
-  builtins on ry and the four methods on GNU R.
 - Smaller differences in complex assignments, each the same in every tier: `exists("*tmp*")` in
   a subscript is `FALSE` (GNU R binds `*tmp*` for the length of the assignment); `x[c(TRUE, NA)]
   <- 1:2` warns and assigns where GNU R fails with "NAs are not allowed in subscripted

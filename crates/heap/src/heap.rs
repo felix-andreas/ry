@@ -2630,8 +2630,16 @@ impl Heap {
     /// only for one of those names or a dispatch variable it expects
     /// ([`Heap::expect_dispatch_variables`]), and passes `env` for any other. The frame's
     /// function must hold `names`, which keeps the list alive while the frame runs.
+    ///
+    /// The slot names count as the frame's bindings for [`gp::BOUND_ELSEWHERE`], since a lookup
+    /// through `env` finds them as if it bound them all: an S3 method defined as a local of an
+    /// attached closure must not resolve from base.
     pub unsafe fn set_slot_owner(&mut self, env: Sexp, owner: Option<(usize, Sexp)>) {
-        (*env.frame_ptr()).set_slot_owner(owner);
+        let frame = &mut *env.frame_ptr();
+        frame.set_slot_owner(owner);
+        if owner.is_some() && !env.has_gp(gp::DETACHED) {
+            frame.mark_bound_elsewhere();
+        }
     }
 
     /// Tells a method's slot frame environment the names of its dispatch variables, which it
