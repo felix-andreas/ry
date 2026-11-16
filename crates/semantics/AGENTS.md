@@ -2,6 +2,14 @@
 
 Read this before you change the salsa analysis core and the type checker. Cross-cutting traps live in `.agents/memory/MEMORY.md`.
 
+## Incremental analysis
+
+The analysis core is incremental. `semantics` is a salsa database, so queries are memoized and an edit cooperatively cancels analysis that is still in flight. Per-item interface firewalls keep an edit inside one item from invalidating the rest of the project, and the LSP server publishes a fast diagnostics wave first and schedules the slower semantic wave for idle time.
+
+The architecture page at `docs/src/content/docs/development/architecture.md` is the contract. Read it before you touch the analysis core or the server's scheduling, and keep it accurate. Deferred performance work lives in `.agents/memory/backlog.md`.
+
+A check must never read a project-wide map directly, because then every edit anywhere would invalidate it. Go through a per-name or per-item tracked projection instead, and pin the property in `crates/semantics/tests/test_incremental.rs`.
+
 ## Traps
 
 - **A per-item query never scans a per-file or per-project list**: compute once per file in a memoized query and probe per item (`item_spans` is the one source of item identity). Vary both items and names when measuring.

@@ -2,6 +2,10 @@
 
 Read this before you change the language server and the CLI. Cross-cutting traps live in `.agents/memory/MEMORY.md`.
 
+## Document sync failures panic
+
+A document-sync or analysis-sync failure in the LSP path is unrecoverable: panic instead of keeping the server alive in a bad state. If syncing an open document into analysis state fails during `did_open`, `did_change`, or `did_save`, do not fall back to stale state or settle for best-effort logging. Call `panic!`.
+
 ## Traps
 
 - **Server inputs are `Durability::MEDIUM`, except open documents and `ProjectFiles` (`LOW`), and every setter names its durability.** One `LOW` input that most memos read turns each keystroke into a project-wide verification (`.agents/memory/decisions/ide-server.md`, "Decision record: editor responsiveness at 300,000 lines").
