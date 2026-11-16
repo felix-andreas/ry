@@ -1401,11 +1401,14 @@ fn report(
         writeln!(out, "\n## Complex assignments that built their calls\n")?;
         writeln!(
             out,
-            "Each of these {total} assignments built the getter and replacement calls of its \
-             target and a promise per value. A row names the replacement functions from the \
-             outside in, then what the variable held.\n"
+            "Each of these {total} assignments built at least one getter or replacement call of \
+             its target, with a promise per value passed. A row names the replacement functions \
+             from the outside in, then what the variable held.\n"
         )?;
-        writeln!(out, "| target | assignments | share |\n| --- | ---: | ---: |")?;
+        writeln!(
+            out,
+            "| target | assignments | share |\n| --- | ---: | ---: |"
+        )?;
         for (shape, count) in assignments.into_iter().take(40) {
             writeln!(
                 out,

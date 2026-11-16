@@ -166,7 +166,7 @@ unsafe fn do_attr(call: &Call<'_>) -> R<Sexp> {
     if which.kind() != SexpType::String {
         return Err(call.error("'which' must be of mode character"));
     }
-    if length(which) != 1 && crate::system::r_at_least(4, 6) {
+    if length(which) != 1 {
         return Err(call.error("exactly one attribute 'which' must be given"));
     }
     let exact = present(matched[2]).is_some_and(|exact| values::as_logical_scalar(exact) == 1);

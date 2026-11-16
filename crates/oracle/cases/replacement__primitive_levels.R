@@ -222,6 +222,18 @@ self <- function() {
 }
 print(run(self))
 
+# A nested target whose value is the variable, or a level of it, builds no cycle.
+nested_self <- function() {
+  x <- list(a = list(b = 1))
+  x$a$b <- x
+  y <- list(a = list(b = 1))
+  y[["a"]][["b"]] <- y
+  z <- list(a = list(b = list(c = 1)))
+  z$a$b$c <- z$a
+  list(x, y, z)
+}
+print(run(nested_self))
+
 # A locked binding keeps its value.
 locked <- function() {
   x <- c(1, 2)
@@ -246,6 +258,7 @@ failures <- function() {
   report(dim(x) <- c(2, 2))
   report(l$a$b$c <- 1)
   report(attr(x, c("a", "b")) <- 1)
+  report(attr(x, c("a", "b")))
   report(levels(l$a) <- NULL)
   report(f$a <- 1)
   report(f[[1]] <- 1)
@@ -268,6 +281,45 @@ failures <- function() {
   invisible()
 }
 run(failures)
+
+# An unbound target in a promise that top-level code made names no call.
+caught <- function(expr) tryCatch(expr, error = function(e) conditionCall(e))
+print(caught(missing_variable[1] <- 1))
+print(caught(missing_variable$a$b <- 1))
+
+# An environment that takes no new binding fails under `$<-` at any level, naming the
+# assignment of that level, and a name that is no name the generated call.
+sealed <- function() {
+  e <- new.env()
+  assign("z", 1, envir = e)
+  lockBinding("z", e)
+  lockEnvironment(e)
+  l <- list(e = e)
+  report(e$a <- 1)
+  report(e$z <- 2)
+  report(l$e$a <- 1)
+  report(l$e$a[2] <- 1)
+  x <- list(1)
+  report(`$`(x, 2) <- 2)
+  invisible()
+}
+run(sealed)
+top <- new.env()
+lockEnvironment(top)
+report(top$a <- 1)
+
+# A replacement that is an arithmetic primitive dispatches on the value's class too.
+`add<-` <- `+`
+Ops.money <- function(e1, e2) {
+  cat("Ops.money", .Generic, "\n")
+  structure(unclass(e1) + unclass(e2), class = "money")
+}
+group <- function() {
+  x <- 1
+  add(x) <- structure(2, class = "money")
+  x
+}
+print(run(group))
 
 # A handler sees the call while the replacement runs.
 handler_call <- function() {
