@@ -714,14 +714,15 @@ unsafe fn checked<T>(
 }
 
 /// The frame slot that holds `slot`'s variable, while the activation runs in a slot frame
-/// without an environment.
+/// without an environment. A helper may call this outside its panic guard, so it does not index.
 unsafe fn frame_slot(
     activation: &Activation,
     machine: &Machine<'_>,
     slot: i64,
 ) -> Option<*mut Sexp> {
     unsafe {
-        layout(activation).frame[slot as usize].and_then(|position| machine.frame_slot(position))
+        let position = (*layout(activation).frame.get(slot as usize)?)?;
+        machine.frame_slot(position)
     }
 }
 
@@ -811,19 +812,23 @@ pub unsafe extern "C" fn jit_call_builtin(activation: *mut Activation, pc: i64) 
     }
 }
 
-/// Runs the element read or store at `pc` through tier 0's fast handler for it when `fast` is
-/// set, then through its generic handler where that runs no R code
-/// ([`bytecode::element_step`]), so nothing needs validating: one of [`element`]'s outcomes.
+/// Runs the element read or store at `pc` through tier 0's fast handler for it
+/// ([`bytecode::fast_step`]) when `fast` is set, then through its generic handler where that
+/// runs no R code ([`bytecode::quiet_step`]), so nothing needs validating: one of [`element`]'s
+/// outcomes. The fast handler runs no R code, so it runs outside the panic guard, which would
+/// cost every hit a stack frame.
 pub unsafe extern "C" fn jit_element_step(activation: *mut Activation, pc: i64, fast: i32) -> i32 {
     unsafe {
+        if fast != 0 && bytecode::fast_step(machine(&*activation), pc as usize) {
+            return element::HANDLED;
+        }
         checked(activation, element::FAILED, |activation| {
             let stepped = step_unsignalled(activation, || {
-                bytecode::element_step(machine(activation), pc as usize, fast != 0)
+                bytecode::quiet_step(machine(activation), pc as usize)
             });
             match stepped {
-                Some(Some(Ok(true))) => element::HANDLED,
-                Some(Some(Ok(false))) => element::STEPPED,
                 Some(None) => element::DECLINED,
+                Some(Some(Ok(()))) => element::STEPPED,
                 Some(Some(Err(unwind))) => {
                     park(activation, unwind);
                     element::FAILED
@@ -2039,25 +2044,32 @@ pub unsafe extern "C" fn jit_flush(
     bits: i64,
 ) -> i32 {
     unsafe {
+        // A boxed value into a slot frame is a store that allocates nothing and cannot fail, so
+        // it needs neither the panic guard nor a handle scope, which cost more than the store.
+        if kind == representation::BOXED && (*(*activation).parked).panic.is_none() {
+            let activation = &*activation;
+            let machine = machine(activation);
+            if let Some(frame) = frame_slot(activation, machine, slot) {
+                let value = *slot_cell(activation, slot);
+                machine.store_slot(frame, value);
+                value.decrement_refcount();
+                return 1;
+            }
+        }
+        flush_guarded(activation, slot, kind, bits)
+    }
+}
+
+/// [`jit_flush`] for every write-back but a boxed value into a slot frame. Kept out of line so
+/// that the store's path saves no registers for it.
+#[inline(never)]
+unsafe fn flush_guarded(activation: *mut Activation, slot: i64, kind: i32, bits: i64) -> i32 {
+    unsafe {
         guarded(activation, 0, |activation| {
             let machine = machine(activation);
             let symbol = layout(activation).slots[slot as usize];
             let cell = slot_cell(activation, slot);
             let frame = frame_slot(activation, machine, slot);
-            // A boxed value into a slot frame allocates nothing, so it needs no handle scope.
-            if kind == representation::BOXED && frame.is_some() {
-                let value = *cell;
-                return match machine.assign(frame, symbol, value) {
-                    Ok(()) => {
-                        value.decrement_refcount();
-                        1
-                    }
-                    Err(unwind) => {
-                        park(activation, unwind);
-                        0
-                    }
-                };
-            }
             let element = match kind {
                 representation::INTEGER => Some((SexpType::Integer, f64::from(bits as i32))),
                 representation::LOGICAL => Some((SexpType::Logical, f64::from(bits as i32))),

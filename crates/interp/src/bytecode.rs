@@ -595,17 +595,22 @@ impl Machine<'_> {
     /// `slot` is [`Machine::slot_of`] the symbol.
     pub unsafe fn assign(&self, slot: Option<*mut Sexp>, symbol: Sexp, value: Sexp) -> R<()> {
         if let Some(slot) = slot {
-            // As `SetVar`'s fast handler stores, leaving an old value a reconcile could reclaim
-            // to the collector rather than noting it now.
-            let heap = crate::heap();
-            if !heap.try_store_slot(&mut *slot, value) {
-                heap.store_slot(&mut *slot, value);
-            }
-            self.clear_missing(slot);
+            self.store_slot(slot, value);
             return Ok(());
         }
         let env = self.reify(Reify::Site("assignment"))?;
         eval::assign_symbol(symbol, value, env, false)
+    }
+
+    /// Binds the slot frame's slot `slot` to `value`, as `SetVar`'s fast handler stores, leaving
+    /// an old value a reconcile could reclaim to the collector rather than noting it now.
+    #[inline]
+    pub unsafe fn store_slot(&self, slot: *mut Sexp, value: Sexp) {
+        let heap = crate::heap();
+        if !heap.try_store_slot(&mut *slot, value) {
+            heap.store_slot(&mut *slot, value);
+        }
+        self.clear_missing(slot);
     }
 
     /// Assigns the scalar `element` of `kind` to `symbol` by storing it into the value the
@@ -637,6 +642,7 @@ impl Machine<'_> {
         overwrite_scalar(current, kind, element).then_some(current)
     }
 
+    #[inline]
     unsafe fn clear_missing(&self, slot: *mut Sexp) {
         let formal = slot.offset_from(register_address(self.header)) as usize - 1;
         if formal < 64
@@ -6861,6 +6867,7 @@ pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<Option<Sexp>> 
 /// handler is established. The handler's body runs here directly rather than through the step
 /// table, so only the parts of the activation the call reads are loaded, and the call costs
 /// what tier 0's handler costs.
+#[inline(always)]
 pub unsafe fn call_builtin_step(machine: &mut Machine<'_>, pc: usize) -> R<()> {
     let mut state = activation(machine, true);
     let instruction = Instruction {
@@ -6871,31 +6878,35 @@ pub unsafe fn call_builtin_step(machine: &mut Machine<'_>, pc: usize) -> R<()> {
     op_call_builtin(&mut state, instruction).map(|_| ())
 }
 
-/// Runs the element read or store at `pc` for the optimizing tier: through tier 0's fast handler
-/// for it when `fast` says it may apply, then through its generic handler where that runs no R
-/// code, so that no frame needs writing back. `Some(Ok(true))` says the fast handler applied:
-/// it read and wrote only the instruction's registers, recorded its feedback and, for
-/// `SubAssign`, wrote the element of its variable's vector in place. `Some(Ok(false))` says the
-/// generic handler ran, which may rebind `SubAssign`'s variable. `None` says the generic handler
-/// might run R code, and nothing ran: a calling handler is established, which a warning would
-/// run, or an operand is an object, an ALTREP vector, an environment or a promise, whose
-/// methods, active bindings or forcing could.
-pub unsafe fn element_step(machine: &mut Machine<'_>, pc: usize, fast: bool) -> Option<R<bool>> {
+/// Runs the element read or store at `pc` through tier 0's fast handler for it, for the
+/// optimizing tier, and says whether the handler applied: it then read and wrote only the
+/// instruction's registers, recorded its feedback and, for `SubAssign`, wrote the element of
+/// its variable's vector in place. The fast handlers read few of the activation's fields, so
+/// the activation stays in registers; [`quiet_step`] builds its own rather than receive this
+/// one, which would then be stored to memory on every hit.
+pub unsafe fn fast_step(machine: &mut Machine<'_>, pc: usize) -> bool {
+    let mut state = activation(machine, true);
+    let applied = match op_of(*state.code.add(pc) as u32) {
+        Some(Op::CallBuiltin) => call_builtin_fast(&mut state, pc),
+        Some(Op::SubAssign) => sub_assign_fast(&mut state, pc),
+        Some(Op::Field) => field_fast(&mut state, pc),
+        _ => None,
+    };
+    applied.is_some()
+}
+
+/// Runs the element read or store at `pc` through its generic handler when that runs no R code,
+/// for the optimizing tier where [`fast_step`] declined, so that no frame needs writing back. It
+/// may rebind `SubAssign`'s variable. `None` when the handler might run R code, and nothing
+/// ran: a calling handler is established, which a warning would run, or an operand is an
+/// object, an ALTREP vector, an environment or a promise, whose methods, active bindings or
+/// forcing could.
+#[inline(always)]
+pub unsafe fn quiet_step(machine: &mut Machine<'_>, pc: usize) -> Option<R<()>> {
     let mut state = activation(machine, true);
     // A specialized or fused opcode steps as the instruction it starts from, so the step
     // table is indexed by that base op, never by the specialized handler index.
     let op = op_of(*state.code.add(pc) as u32)?;
-    if fast {
-        let applied = match op {
-            Op::CallBuiltin => call_builtin_fast(&mut state, pc),
-            Op::SubAssign => sub_assign_fast(&mut state, pc),
-            Op::Field => field_fast(&mut state, pc),
-            _ => None,
-        };
-        if applied.is_some() {
-            return Some(Ok(true));
-        }
-    }
     if !runs_no_r_code(&state, op, pc) {
         return None;
     }
@@ -6903,7 +6914,7 @@ pub unsafe fn element_step(machine: &mut Machine<'_>, pc: usize, fast: bool) -> 
     let mark = (*heap).handle_mark();
     (*STEP_HANDLERS.as_ptr().add(op as usize))(&mut state, pc);
     (*heap).release_handles(mark);
-    Some(state.exit.map(|_| false))
+    Some(state.exit.map(|_| ()))
 }
 
 #[inline(always)]
