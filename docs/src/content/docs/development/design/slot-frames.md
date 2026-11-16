@@ -116,20 +116,24 @@ it.
   call instruction's first operand, so a site without a plan costs nothing. The table holds its
   keys (the site's code, the closure's formals and body) weakly: after marking, the collector calls
   `RootSource::clear_dead`, which frees every plan with a dead key before its address can be
-  reused. A closure without formals has a plan without sources. The plan is refused for a `..N` argument or a left-out formal whose
-  default is not a literal, and those calls bind through `bind_slots`. `call_with_plan` checks per call what can change after planning (machine code for the
-  body, the debugger, move tracking), and takes the generic path when any holds.
+  reused. A closure without formals has a plan without sources. The plan is refused for a `..N`
+  argument or a left-out formal whose default is not a literal, and those calls bind through
+  `bind_slots`. `call_with_plan` checks per call what can change after planning (machine code
+  for the body, the debugger, move tracking), and takes the generic path when any holds.
 - **Spread plans.** Which argument of a call that passes `...` fills which slot depends on
-  what `...` holds, so such a site starts with a plan of one entry, `MATCH_PER_CALL`. Its next
-  call matches its arguments with `...` spread out (`matched_sources`), and the site keeps the
-  result as a spread plan (`spread_plan`, `PLAN_SPREAD`) together with how many arguments `...`
-  held and their names. Matching reads only the formals and the arguments' count and names, so
-  the plan holds for every call whose `...` holds as many arguments with the same names, none
-  of them the empty argument (which would take a formal's default). A call checks that and
-  then binds like any planned call. A call whose `...` holds something else replans, which
-  counts as a miss. After eight misses the site keeps its last plan, and a call it does not hold
-  for matches per call (`call_matching`), as does every call of a site that passes `...` twice.
-  With invariants on, each use of a spread plan is compared with matching the call afresh.
+  what `...` holds, so the plan such a site is given first has one entry, `MATCH_PER_CALL`. The
+  call that makes it goes on to match its arguments with `...` spread out (`matched_sources`),
+  and the site keeps the result as a spread plan (`spread_plan`, `PLAN_SPREAD`) together with
+  how many arguments `...` held and their names. Matching reads only the formals, the
+  arguments' count and names, and which arguments are empty, so the plan holds for every call
+  whose `...` holds as many arguments with the same names and that passes no empty argument
+  (which would take a formal's default). A call checks that and then binds like any planned
+  call. A call whose `...` holds something else replans, which counts as a miss, on the same
+  count as a miss for a closure with other formals or body. After eight misses the site keeps
+  its last plan, and a call it does not hold for matches per call (`call_matching`), as does
+  every call of a site that passes `...` twice, a call with an empty argument, and a call
+  whose `...` holds an argument named by something other than a symbol. With invariants on,
+  each use of a spread plan is compared with matching the call afresh.
 - **Call shape.** Each plan row also holds the callee's `CallShape`: its formal count and its
   slot and register counts, 6 bytes. A formal the site leaves out gets `LITERAL_DEFAULT` or
   `PROMISED_DEFAULT` as its source when it has a default, so the sources say which defaults the
@@ -505,7 +509,9 @@ Rust frame, matches nothing, and allocates nothing unless the argument reference
   slot with the plan's count and names, then writes the chain's items, which are the frame's
   caller's promises and values, where the site has `...`. An argument that is `..N` or a
   promise leaves the site to the generic path, and so does `...` without a spread plan that
-  holds, or passed from a frame that reads its variables by name.
+  holds, or passed from a frame that reads its variables by name. A `...` slot that was never
+  set is not an empty `...`: it is the local of a function without the formal, whose `...` is
+  an enclosing function's, so the call goes to the generic path, which looks it up.
 - **Which callers.** A frame whose code runs on its slots passes its arguments as references to
   the slots or to code compiled against them, and the callee finds its caller as the frame below
   its own (`PLAN_FAST`). A frame that reads its variables by name passes references over its

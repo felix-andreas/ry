@@ -229,6 +229,138 @@
 | defaults one : c(5, 10, 11) 
 | defaults two : c(5, 10, 11) 
 | defaults skip : c(5, 10, 0) 
+| partial : list(value = 1L, rest = list(2L), verbose = FALSE, width = 1L) 
+| after dots : list(value = 1L, rest = list(verb = TRUE), verbose = FALSE, width = 3L) 
+| exact after dots : list(value = 1L, rest = list(wid = 3L), verbose = TRUE, width = 1L) 
+| partial : list(value = 2L, rest = list(2L), verbose = FALSE, width = 1L) 
+| after dots : list(value = 2L, rest = list(verb = TRUE), verbose = FALSE, width = 3L) 
+| exact after dots : list(value = 2L, rest = list(wid = 3L), verbose = TRUE, width = 1L) 
+| partial : list(value = 3L, rest = list(2L), verbose = FALSE, width = 1L) 
+| after dots : list(value = 3L, rest = list(verb = TRUE), verbose = FALSE, width = 3L) 
+| exact after dots : list(value = 3L, rest = list(wid = 3L), verbose = TRUE, width = 1L) 
+| partial : list(value = 4L, rest = list(2L), verbose = FALSE, width = 1L) 
+| after dots : list(value = 4L, rest = list(verb = TRUE), verbose = FALSE, width = 3L) 
+| exact after dots : list(value = 4L, rest = list(wid = 3L), verbose = TRUE, width = 1L) 
+| partial : list(value = 5L, rest = list(2L), verbose = FALSE, width = 1L) 
+| after dots : list(value = 5L, rest = list(verb = TRUE), verbose = FALSE, width = 3L) 
+| exact after dots : list(value = 5L, rest = list(wid = 3L), verbose = TRUE, width = 1L) 
+| looks : c(x = 1L, y = 3L, z = 4L) 
+| assigns : structure(1:3, names = c("x", "y", "z")) 
+| leaves : c(x = 1L, y = 2L, z = 0L, x = 1L, y = 2L, z = 0L, x = 1L, y = 2L,  z = 0L, x = 1L, y = 2L, z = 0L) 
+| looks : c(x = 2L, y = 3L, z = 5L) 
+| assigns : c(x = 2L, y = 2L, z = 4L) 
+| leaves : c(x = 2L, y = 2L, z = 0L, x = 2L, y = 2L, z = 0L, x = 2L, y = 2L,  z = 0L, x = 2L, y = 2L, z = 0L) 
+| looks : c(x = 3L, y = 3L, z = 6L) 
+| assigns : c(x = 3L, y = 2L, z = 5L) 
+| leaves : c(x = 3L, y = 2L, z = 0L, x = 3L, y = 2L, z = 0L, x = 3L, y = 2L,  z = 0L, x = 3L, y = 2L, z = 0L) 
+| looks : c(x = 4L, y = 3L, z = 7L) 
+| assigns : c(x = 4L, y = 2L, z = 6L) 
+| leaves : c(x = 4L, y = 2L, z = 0L, x = 4L, y = 2L, z = 0L, x = 4L, y = 2L,  z = 0L, x = 4L, y = 2L, z = 0L) 
+| assigned : "'...' used in an incorrect context" 
+| enclosing : 2L 
+| unset : 2L 
+| unset builtin : c(1, 2) 
+| assigned : "'...' used in an incorrect context" 
+| enclosing : 2L 
+| unset : 2L 
+| unset builtin : c(2, 2) 
+| assigned : "'...' used in an incorrect context" 
+| enclosing : 2L 
+| unset : 2L 
+| unset builtin : c(3, 2) 
+| assigned : "'...' used in an incorrect context" 
+| enclosing : 2L 
+| unset : 2L 
+| unset builtin : c(4, 2) 
+| assigned : "'...' used in an incorrect context" 
+| enclosing : 2L 
+| unset : 2L 
+| unset builtin : c(5, 2) 
+| given : "given" 
+| given : "given" 
+| given : "given" 
+| given : "given" 
+| given : "given" 
+| empty value : "given" 
+| given again : "given" 
+| given again : "given" 
+| given again : "given" 
+| variable : "given" 
+| variable : "given" 
+| variable : "given" 
+| variable : "given" 
+| variable : "given" 
+| missing variable : "default" 
+| missing variable : "default" 
+| missing variable : "default" 
+| missing forwarded : "argument \"x\" is missing, with no default" 
+| missing forwarded : "argument \"x\" is missing, with no default" 
+| missing forwarded : "argument \"x\" is missing, with no default" 
+| inside : c(x = 1L, y = 6L, z = 7L) 
+| default : c(x = 1L, y = 0L, z = 1L) 
+| inside : c(x = 2L, y = 6L, z = 8L) 
+| default : c(x = 2L, y = 0L, z = 2L) 
+| inside : c(x = 3L, y = 6L, z = 9L) 
+| default : c(x = 3L, y = 0L, z = 3L) 
+| inside : c(x = 4L, y = 6L, z = 10L) 
+| default : c(x = 4L, y = 0L, z = 4L) 
+| inside : c(x = 5L, y = 6L, z = 11L) 
+| default : c(x = 5L, y = 0L, z = 5L) 
+| callee : c(8, 2) 
+| callee : c(8, 2) 
+| callee : c(8, 1) 
+| callee : c(8, 1) 
+| callee : 10 
+| callee : 6 
+| callee : c(2, 8) 
+| callee : c(2, 8) 
+| callee : 16 
+| callee : 4 
+| callee : c(8, 2) 
+| callee : c(8, 2) 
+| callee : c(8, 1) 
+| callee : c(8, 1) 
+| callee : 10 
+| callee : 6 
+| callee : c(2, 8) 
+| callee : c(2, 8) 
+| callee : 16 
+| callee : 4 
+| before : c(1, 1) 
+| before : c(2, 1) 
+| before : c(3, 1) 
+| before : c(4, 1) 
+| after : c(1, 1) 
+| after : c(1, 2) 
+| after : c(1, 3) 
+| after : c(1, 4) 
+| default changed : c(1, 9) 
+| default changed : c(2, 9) 
+| default changed : c(3, 9) 
+| default changed : c(4, 9) 
+| do.call : structure(1:3, names = c("x", "y", "z")) 
+| do.call names : c(x = 1L, y = 2L, z = 0L) 
+| do.call : c(x = 2L, y = 2L, z = 4L) 
+| do.call names : c(x = 2L, y = 2L, z = 0L) 
+| do.call : c(x = 3L, y = 2L, z = 5L) 
+| do.call names : c(x = 3L, y = 2L, z = 0L) 
+| do.call : c(x = 4L, y = 2L, z = 6L) 
+| do.call names : c(x = 4L, y = 2L, z = 0L) 
+| plain : c(kind = "default", digits = "2", rest = "0") 
+| special : c(kind = "special", kind = "default", digits = "4", rest = "1" ) 
+| special named : c(kind = "special", kind = "default", digits = "1", rest = "1" ) 
+| plain : c(kind = "default", digits = "2", rest = "0") 
+| special : c(kind = "special", kind = "default", digits = "4", rest = "1" ) 
+| special named : c(kind = "special", kind = "default", digits = "2", rest = "1" ) 
+| plain : c(kind = "default", digits = "2", rest = "0") 
+| special : c(kind = "special", kind = "default", digits = "4", rest = "1" ) 
+| special named : c(kind = "special", kind = "default", digits = "3", rest = "1" ) 
+| plain : c(kind = "default", digits = "2", rest = "0") 
+| special : c(kind = "special", kind = "default", digits = "4", rest = "1" ) 
+| special named : c(kind = "special", kind = "default", digits = "4", rest = "1" ) 
+| plain : c(kind = "default", digits = "2", rest = "0") 
+| special : c(kind = "special", kind = "default", digits = "4", rest = "1" ) 
+| special named : c(kind = "special", kind = "default", digits = "5", rest = "1" ) 
 [messages]
 [warnings]
 [errors]

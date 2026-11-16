@@ -216,7 +216,7 @@ for (round in 1:2) {
 changing <- function(x, y = 1) c(x, y)
 relays <- function(...) changing(...)
 for (round in 1:4) show("before", relays(round))
-formals(changing) <- alist(y = 1, x = )
+formals(changing) <- alist(y = , x = 1)
 for (round in 1:4) show("after", relays(round))
 formals(changing)$y <- 9
 for (round in 1:4) show("default changed", relays(x = round))

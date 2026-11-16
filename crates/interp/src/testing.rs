@@ -329,7 +329,9 @@ pub fn check_fused_agreement(entropy: &mut impl Entropy) {
 /// evaluator, whose calls make ordinary promises. The callees force their arguments late or not at
 /// all, write the caller's variable through `parent.frame` before forcing, keep an argument in a
 /// closure that outlives the call, and pass `...` on whole or as `..1` and `..2`, which a slot
-/// frame cannot express as references, so building the call's arguments gives up part way. Each
+/// frame cannot express as references, so building the call's arguments gives up part way. The
+/// forwarding sites meet a `...` of ever different counts and names, some of which do not match
+/// the callee, so each site's plan for what `...` held is made, checked, refused and remade. Each
 /// call's references go back to the pool when it returns, so later calls reuse references that
 /// earlier ones forced, and the runs before and after the frame gets its environment check
 /// references made both ways.
@@ -339,7 +341,7 @@ pub fn check_argument_reference_agreement(entropy: &mut impl Entropy) {
     let mut statements = vec!["x <- a".to_owned(), "y <- b".to_owned()];
     for _ in 0..1 + entropy.below(5) {
         let target = ["x", "y"][entropy.below(2)];
-        let statement = match entropy.below(4) {
+        let statement = match entropy.below(5) {
             0 => format!(
                 "kept <- keep({}); {target} <- {target} + 1L; {target} <- kept()",
                 reference_argument(entropy, 1)
@@ -350,6 +352,19 @@ pub fn check_argument_reference_agreement(entropy: &mut impl Entropy) {
                 reference_argument(entropy, 1),
                 reference_argument(entropy, 1)
             ),
+            2 => {
+                let arguments: Vec<String> = (0..entropy.below(4))
+                    .map(|_| {
+                        let name = ["", "", "p = ", "q = "][entropy.below(4)];
+                        format!("{name}{}", reference_argument(entropy, 1))
+                    })
+                    .collect();
+                format!(
+                    "{target} <- {}({})",
+                    ["forward", "around"][entropy.below(2)],
+                    arguments.join(", ")
+                )
+            }
             _ => format!("{target} <- {}", reference_call(entropy, 2)),
         };
         statements.push(statement);
@@ -369,6 +384,7 @@ pub fn check_argument_reference_agreement(entropy: &mut impl Entropy) {
             run("keep <- function(p) function() p");
             run("dots <- function(...) late(..2, ..1)");
             run("forward <- function(...) late(...)");
+            run("around <- function(first, ...) lazy(..., q = first)");
             run("x <- 0L; y <- 0L");
             outcomes(&body, a, b)
         };
