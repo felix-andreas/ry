@@ -12,7 +12,8 @@ the loader parses only declarations. `.Rtypes` avoids R's `.Rd`/`.Rmd`/`.Rda`/`.
 rejected. An ad-hoc overload uses an ordered overload set; a genuinely parametric higher-order function
 (`lapply`, `Map`, `Reduce`, `identity`) gets a real `<T> fn(...)` type, never `Any`. Stub highlighting
 goes through LSP semantic tokens, so one implementation colours both `#:` annotations and stubs in
-every client. Contract: `development/authoring-stubs.md`.
+every client. Contract for the format, the overload rules and the export manifests:
+`development/authoring-stubs.md`.
 
 ## The beta semantics
 
@@ -79,10 +80,15 @@ or generates code before checking, including annotation-driven generation inside
 makes a file's meaning depend on code run before checking: every check pays for expansion, an item's
 names can no longer be read from its syntax, and a macro edit invalidates every expansion site,
 defeating the per-item firewalls. (Vx confines `macro_rules` to a phase before name resolution for this
-reason; Roc, Bend and goose have none.)
+reason, citing rustc, where expansion and name resolution are still serial; Roc and goose describe
+none, and Bend allows only compile-time templates.)
 
-R's own non-standard evaluation keeps working as ordinary calls; ry builds nothing on it. Code
-generation is an external script writing ordinary files (as `scripts/export-manifests.R` does).
+R's own non-standard evaluation (`quote`, `substitute`, `bquote`, `eval`, tidy evaluation, data masks)
+keeps working as ordinary calls (`eval()` returns `Any`); ry builds nothing on it. Common macro uses are
+replaced: derived printing and equality come from structural types (`print((x = 1, y = 2))`,
+`identical()` by value), repeated boilerplate from generics and higher-order functions, code generation
+from an external script writing ordinary files (as `scripts/export-manifests.R` does), and precomputed
+values from pure top-level constants under strict mode's definitions-only top level.
 
 ## Beta semantics: An overload set is a bounded, ordered probe
 
@@ -95,8 +101,12 @@ Only a name whose declarations come from `.Rtypes` can be overloaded (`overloads
 `crates/semantics/src/semantics.rs` returns `None` once a script or package binding shadows it); a
 project's R code cannot declare one, for the Hindley-Milner reason above, but a project override stub can.
 
-Overloads are the escape hatch: a rising count of atomic-promotion or shape-dispatch sets is the signal to
-build those two Hindley-Milner-compatible features (`backlog.md`), never traits.
+Overloads are the escape hatch, and the corpus is the gauge. Of its 35 sets, about a dozen are
+atomic-family promotion (`abs`, `min`, `sum`, `cum*`, a numeric constraint in disguise), about a dozen
+are shape dispatch (`head`, `rev`, `Filter`, `lapply`, standing in for a shape-mirroring return), nine
+are S3 operator method tables (`+.Date`, `Arith.difftime`, which stay under any design), and two are
+genuine two-form functions. A rising count of promotion or shape sets is the signal to build those two
+Hindley-Milner-compatible features (`backlog.md`), never traits.
 
 Call-site rules (`try_overloaded_call` in `crates/semantics/src/check.rs`):
 
@@ -109,27 +119,37 @@ Call-site rules (`try_overloaded_call` in `crates/semantics/src/check.rs`):
 - **A strict round, then a courtesy round.** Reading a whole-number literal as integer is off first, so
   `sum(1, 2)` picks the double candidate as R does; it is on in a second round only if nothing matched.
 
-Last-fitting-wins was rejected: it forced most-general-first declaration, contradicting the value-use
-rule (a non-call use resolves to the last declaration).
+Last-fitting-wins was tried and removed: the fact rule already stops the narrow commit (a general `Any`
+fallback accepts without binding, so it is a fact and outranks guesses), and last-wins forced
+most-general-first declaration (`lapply`, where a lambda makes every candidate a guess), contradicting
+the corpus convention and the value-use rule (a non-call use resolves to the last declaration).
 
-On total failure, `NoMatchingOverload` is reported only when candidates disagree; when all fail
-identically, or one gets strictly further (by the first blamed argument), that candidate's own error is
-reported at its argument range.
+On total failure, `NoMatchingOverload` (naming the number of signatures tried, with the first
+candidate's failure as a hint) is reported only when candidates disagree, as `pick("word")` against
+`fn(integer)` and `fn(double)`. When all fail identically, or one gets strictly further (by the index of
+the first blamed argument, where a whole-call verdict such as arity counts as no progress), that
+candidate's own error is reported at its argument range: a two-parameter callback to `lapply` is the
+finding.
 
 ## Beta semantics: The boundary for R's object systems is dispatch, not Hindley-Milner
 
 **Status:** built, except point 2: a `setClass` or `R6Class` declaration produces no nominal, so `new(...)` and `$new(...)` are `Unknown`.
 
 S3, S4 and R6 declarations map onto nominals, field projection and ordered overload sets, and S3
-operator dispatch on a nominal already runs in inference; the gap is a lowering pass, not type theory.
-Three things keep dispatch out:
+operator dispatch on a nominal (`+.Class`, `Arith.Class`, `Ops.Class`) already runs in inference. S4 is
+the most declared: `setClass` is a record with literal slot types, `new(...)` a named-argument
+constructor, `x@slot` a field projection, `setMethod(signature = ...)` an overload candidate, and a
+hand-written `@type` plus a constructor carrying `@new` already checks slots and arity. The gap is a
+lowering pass, not type theory. Three things keep dispatch out:
 
 - **Dispatch needs a class known at the call site**; on an open variable the only sound answer is
   `Unknown`.
 - **Inheritance is subtyping, and there is none.** `Named` types match by exact name; `contains=` and
   `inherit=` need a nominal-subtyping axis in `compatible` and joins, the one real soundness risk.
 - **A generic's method set is global mutable state.** Any file may add `print.foo`; making it an input
-  to every call invalidates every call site. It needs a memoized per-generic method-set query.
+  to every call invalidates every call site, a full revalidation at 300,000 lines. It needs a memoized
+  per-generic method-set query, so adding a method invalidates only that generic's calls and editing a
+  method body invalidates nothing.
 
 Decisions: (1) a false positive (a project's `setGeneric` generic reporting `unresolved`, an unknown `R6`
 namespace) is a bug, fixed independently; (2) `setClass` and `R6Class(public = list(...))` may become
@@ -178,9 +198,11 @@ is still a variable is not unified with scalar `logical` (as `!`'s is), because 
 **Status:** built, except the `&&` limit: the right conjunct of `!is.null(x) && x > 0` sees the refinement.
 
 Narrowing is branch-edge entry refinement on the slot model, not a separate flow analysis.
-`guard_edges` writes each edge's refined type as an ordinary undo-logged environment write, so rollback
-and joins need no new machinery. A branch that never falls through contributes nothing to the join, so
-the surviving refinement persists after the `if`.
+`recognize_guard` (`crates/semantics/src/check.rs`) accepts `is.null(x)`, an `is.*` family member or a
+negation, and `guard_edges` writes each edge's refined type as an ordinary undo-logged environment
+write, so rollback and joins need no new machinery. A branch that never falls through (it ends in
+`return`, `stop`, `break` or `next`, or a block ending in one) contributes nothing to the join, so the
+surviving edge's refinement persists after the `if`.
 
 Deliberate limits, for zero false positives:
 
@@ -189,7 +211,8 @@ Deliberate limits, for zero false positives:
   true edge on `Any`/`Unknown`, which becomes `NULL`.
 - **A statically undecidable member stays on both edges** (a variable, a flexible-element vector, an
   opaque nominal: `is.list(data.frame)` is true).
-- **Only a local slot narrows**, not a package global or `x$field`.
+- **Only a local slot narrows** (a parameter, function local or script local), not a package global,
+  which keeps winner semantics, or `x$field`.
 - The guarded key resolves exactly as a read resolves, so fixtures and production share one path.
 
 ## Beta semantics: The expanded parameter directive is `@param name {TYPE}`
@@ -213,7 +236,9 @@ index and flood dependents with unresolved names.
 - A well-formed statement always lowers; a broken one contributes no names, reads or cascading
   diagnostics, only its syntax error (contract: the syntax-errors section of `reference/type-system.mdx`).
 - Inside a broken region, an error node's well-formed `Assign` children lower, and a broken assignment
-  with an intact name side keeps its definition with an `ExpressionKind::Missing` value.
+  with an intact name side keeps its definition with an `ExpressionKind::Missing` value. A well-formed
+  non-assignment fragment sharing a line with a following error sibling is dropped as the split half of
+  the broken statement.
 - `Missing` and `Unsupported` both type `Unknown`, but only `Unsupported` is a strict origin (the syntax
   error already covers `Missing`).
 - An annotated definition with a `Missing` value binds its declared type unchecked, so callers keep the
@@ -251,11 +276,14 @@ recognized structurally in naming, and the diagnostic is suppressed at the emiss
   arguments after the data.
 - A masked read that fails lexical resolution goes to `ItemNaming.quiet_reads` as well as `non_locals`,
   so it still resolves stubs (`sum` in `j` keeps its scheme); unresolved emitters skip quiet reads.
+  Keeping masked reads out of `non_locals` was tried and lost stub typing.
 - The recognized bracket (`NamingExtras.masked_subsets`) types as a silent `Unknown` before the base
   index-arity rules, which must not judge `[.data.table` shapes.
 - `:=` lowers as an ordinary binary call, so its operands stay visible to naming, hover and the mask.
 
-Strict mode stays silent on a masked column read, a recognized construct rather than an unmodelled hole.
+Not silenced: anything that resolves (locals, stubs, globals) keeps full checking inside a mask, and
+base indexing keeps lexical resolution and its warnings. Strict mode stays silent on a masked column
+read, a recognized construct rather than an unmodelled hole.
 
 ## Recursion in a function-valued assignment is monomorphic
 
@@ -270,7 +298,9 @@ Trap: the top-level package-winner path must overwrite the placeholder in the pe
 well as the global one, or a cross-file consumer reads a dangling variable as `Unknown`.
 
 Limits: recursion through `<<-` stays a silent `Unknown` (the enclosing-slot join makes a placeholder
-ambiguous); letrec visibility is per binding, not per block. Top-level mutual recursion resolves through
+ambiguous); letrec visibility is per binding, not per block (a block letrec is a possible extension).
+The rule runs on the local-assignment path in both context and context-less inference, and the fixture
+driver pre-binds the global slot. Top-level mutual recursion resolves through
 the interface fixpoint, which pins a genuinely cyclic scheme to `Unknown`.
 
 ## Bare-name resolution is not gated on NAMESPACE imports
@@ -297,9 +327,11 @@ risks.
 **Status:** built.
 
 The tree-sitter stack had four structural limits, each already mitigated in place: tree-sitter capped
-error quality (opaque ERROR nodes), cost about 8 µs per line, built trees about sixty times the source,
-and could not see `#:` annotations; the analysis unit was the whole file, making whole-file re-inference
-the keystroke floor; `CoreType` was a deep-cloned enum whose churn capped inference near 6 µs per line;
+error quality (opaque ERROR nodes), cost about 8 µs per line (about 2.5 s of a 3.7 s cold pass at 302k
+lines was parsing), built trees about sixty times the source (forcing rope-only input and a parse LRU),
+and could not see `#:` annotations (forcing a re-lexing subsystem); the analysis unit was the whole file,
+making whole-file re-inference the keystroke floor and file-granular edges manufacture cluster SCCs;
+`CoreType` was a deep-cloned enum whose churn capped inference near 6 µs per line;
 and the engine was single-threaded. They rank in that order of impact after granularity: file-granular
 analysis, type churn, parse cost and size, threads (only a division by core count). The ultimate ceiling
 is R's dynamic semantics.
@@ -315,9 +347,13 @@ The parser is hand-written and emits a lossless concrete syntax tree, not a span
 - **Error resilience.** Error nodes are local to the break.
 - **Position independence.** An item's subtree compares with item-relative offsets, so it stays equal after
   an edit elsewhere; absolute spans would kill sub-file incrementality.
+- **Cheap splicing.** A statement-splice reparse copies the untouched top-level runs of the previous tree
+  and parses only the edited middle.
 
-The checker runs on per-item HIR, never the dynamically kinded tree, and correctness never depends on
-splicing. Layout: "The syntax tree is ry's own flat preorder arena".
+Cutoffs use value equality (kinds, subtree ends, item-relative offsets), never pointer identity, as
+rust-analyzer's `ItemTree` and `AstIdMap` barriers do. The checker runs on per-item HIR, never the
+dynamically kinded tree, which serves the IDE, formatter and refactorings; parse is a pure per-file
+query and correctness never depends on splicing. Layout: "The syntax tree is ry's own flat preorder arena".
 
 ## Shipping stack: Why salsa rather than an in-house engine
 
@@ -330,7 +366,8 @@ first-class fixpoint cycles (proven in rust-analyzer and Astral's `ty`). Managed
   is the exit.
 - **Fixpoint non-convergence panics at 200 iterations.** The pin-to-`Unknown` rule lives in the cycle
   function; reaching the cap is a bug, never a fallback.
-- **Interned-value GC is young** (rust-analyzer used about four times the memory until it tuned `lru`).
+- **Interned-value GC is young** (rust-analyzer used about four times the memory until it tuned `lru`,
+  and `ty` hit multi-gigabyte blowups).
   Per-query `lru` and interned GC are the first levers when memory regresses.
 - **Parallel iteration over a fixpoint had hang bugs** upstream; a parallel-cycle stress test covers it.
 
@@ -379,14 +416,25 @@ type grammar's own functions on R's token stream, so there is one type grammar.
 - **Trivia.** `Parser::deferred_trivia` keeps trailing whitespace and comments outside the type node.
 - **One meaning.** An inline site lowers to the same `Annotation` as a `#:` block
   (`lower_inline_annotation`); signature resolution is shared with the runtime (see "A function has one
-  signature, resolved in `syntax::annotation`"). Disagreement between spellings is judged in
-  `annotation_agreement_diagnostics` after alias expansion and union sorting.
+  signature, resolved in `syntax::annotation`"). A signature attaches to the statement assigning its
+  function (merging with its `#:` block, exporting a declared scheme at an item root), or else to the
+  function expression, which is how a lambda argument is checked; a binding's own `: TYPE` is checked
+  against the function's result (`check_item_with_annotation`).
+- **Both spellings on one statement** merge per slot (value, parameter, rest, return), type parameters
+  pairing by position, the inline side winning; a coercion (`@trust`, `@if-unknown`, `@new`) governs
+  the value wherever it is written, the inline one winning if both have one (`merge_annotations`).
+  Disagreement is judged separately in `annotation_agreement_diagnostics`, on file-absolute ranges after
+  alias expansion and union sorting, so the warning points at both written types.
 - **Turning it off** is a salsa input (`AnalysisSettings`), because it changes what types mean; it is read
-  only where an inline site exists (`test_incremental.rs`). Off, each site warns (`inline-annotation`).
+  only where an inline site exists (`test_incremental.rs`). Off, sites type nothing and each warns
+  (`inline-annotation`), and hosts warn once per load.
 - **Strict mode reports untyped parameters** (`noImplicitAny`-style): an unannotated parameter typed
   `Unknown`, or a fresh unconstrained variable of its own function's level that nothing else mentions (a
-  rule on `Unknown` alone never fires, since unifying with `Unknown` binds nothing). Lambda arguments are
-  skipped because the call types them; returns and bindings get no finding of their own.
+  rule on `Unknown` alone never fires, since unifying with `Unknown` binds nothing). The level check keeps
+  a closure parameter tied to an enclosing function clean; lambda arguments are skipped because the call
+  types them only after inference. Returns and bindings get no finding of their own, since each
+  undetermined one traces to an origin, a type error or a definition ("one undetermined value, one
+  finding").
 - **Optionality** of an inline-only parameter comes from the formals (`Annotation::inline_parameters`),
   since inline has no `[name]`; a parameter a `#:` block names keeps the comment's `[name]`.
 - **Known gap.** A generic lambda argument keeps its binders rigid, so
@@ -400,8 +448,10 @@ Syntax and docs: `reference/type-system.mdx#inline-annotation-syntax` (`type Nam
 `alias Name = TYPE`, `x: @trust T <- v`, `@Name(value)`).
 
 - **Unambiguous.** Two names in a row and a leading `@` are not valid R. `type` and `alias` are
-  contextual, so `type <- 1` and `alias(type)` work. At a line start `@Name` is a constructor only before
-  `(` or `<`, so `obj` newline `@slot` keeps R's error. Rejected: `@type Name = T` (collides with the
+  contextual (recognized only at a statement start with the defined name on the same line), so
+  `type <- 1` and `alias(type)` work. At a line start `@Name` is a constructor only before `(` or `<`, so
+  `obj` newline `@slot` keeps R's error; after an operator a bare `@Name` is one, so completion works
+  while typing. A nested definition is an `annotation` error, because a type's scope is the file. Rejected: `@type Name = T` (collides with the
   constructor) and `newtype` (a second keyword for no new meaning).
 - **Leading `|`.** A union may open with `|`, and inline a union continues onto a line starting with `|`;
   no R statement starts with `|`.
@@ -409,9 +459,12 @@ Syntax and docs: `reference/type-system.mdx#inline-annotation-syntax` (`type Nam
   `file_type_definitions`. A `#:` definition directly above a same-named inline one is one definition
   written twice (`paired_comment_definition`): inline on, the inline one wins and any disagreement warns
   `annotation-mismatch`; inline off, the comment applies, and an unpaired inline definition declares its
-  name with an `Unknown` body.
-- **Erasure.** A definition erases line for line to its `#:` comment, so it must end its line.
-  `@Name(value)` erases to `(value)`; a nominal has no run-time representation.
+  name with an `Unknown` body, so its uses do not add unknown-type errors to the `inline-annotation`
+  warning.
+- **Erasure.** A definition erases line for line to its `#:` comment, so it must end its line; a paired
+  one erases to nothing (two copies would be a duplicate). `@Name(value)` erases to `(value)` and a
+  coercing binding's `: @trust T` is dropped. The runtime skips definitions; a nominal has no run-time
+  representation.
 
 ## Shipping stack: Testing doctrine for `syntax`
 
@@ -457,7 +510,8 @@ golden error-message suite pins the wording.
 
 `InferenceTable::resolve` (`infer.rs`) walks the type graph with explicit cycle detection and resolves a
 shared subtree once per call. A depth-capped recursive walk was rejected: it re-resolved shared subtrees
-per occurrence and silently left deep types unexpanded, a position-dependent semantics.
+per occurrence (397 million inner steps on a 507k-line corpus, against 4.2 million for the graph walk)
+and silently left types past depth 64 unexpanded, a position-dependent semantics no cache can sit on.
 
 - **A cycle cuts to `Unknown`.** A `visiting` stack of variables under expansion detects an infinite type,
   matching the pin-to-`Unknown` rule of the fixpoint cap and loop widening. Alias expansion keeps a depth
@@ -465,8 +519,12 @@ per occurrence and silently left deep types unexpanded, a position-dependent sem
 - **Only a clean subtree is kept**, keyed by interned type, once a walk has taken 64 steps, and only if no
   cycle cut lies beneath it (a node containing a variable under expansion resolves differently at top
   level). Steps are counted, not read from the type's size, because a variable has size one whatever it
-  binds (`a_subtree_shared_through_variables_resolves_once`).
-- **Nothing outlives the call**, since bindings change between calls.
+  binds: variables each binding a tuple holding the next twice walk 2^depth steps without the table
+  (`infer::tests::a_subtree_shared_through_variables_resolves_once`). Most calls end within a few steps,
+  where a table costs more than the walk.
+- **Nothing outlives the call**, since bindings change between calls and a longer-lived table needs an
+  invalidation rule. A type whose id says it holds no variable and applies no alias returns without a
+  walk, which covers most repeated calls.
 
 `RESOLVE_CALLS` stays as an instrument: a near-linear step count is an invariant the performance harness
 watches.
@@ -477,17 +535,25 @@ watches.
 
 With dynamic salsa cycle recovery alone, whichever member was queried first became the cycle head, so
 which items pinned to `Unknown` at the round cap depended on query order (hover-then-check and
-check-then-hover disagreed). A cyclic interface group therefore resolves through an explicit canonical
-fixpoint in `crates/semantics/src/semantics.rs`:
+check-then-hover disagreed; on the corpus, pre-forcing per-file phases gave 64852 findings against 64835
+for direct forcing, stable across thread counts, so it was query-order semantics, not a race). A cyclic
+interface group therefore resolves through an explicit canonical fixpoint in
+`crates/semantics/src/semantics.rs`:
 
-- The graph has exactly the edges a check follows, resolved by the check's own binder; only cyclic groups
-  are recorded.
+- The graph has exactly the edges a check follows, resolved by the check's own binder (nearest earlier
+  writer, a script's last writer, the test layer, the package winner, conditional writers up to the join
+  cap), condensed in canonical order (file order, then item order); only cyclic groups (more than one
+  member, or a self-edge) are recorded. A winner-only graph that missed statement items, earlier writers,
+  script and test files and conditional writers was the bug that surfaced this rule.
 - `scc_exports` runs Jacobi iteration: all members start at `Unknown` and each round re-checks every member
-  against the previous round's table, so order cannot matter. A group still changing at the round cap pins
-  all members to `Unknown`. Member checks run through `SalsaGlobals`, so no salsa cycle forms.
+  against the previous round's table, so order cannot matter. A group still changing at the round cap
+  (`SCHEME_ROUND_CAP`, 16, shared with the backstop) pins all members to `Unknown`. Member checks run
+  through `SalsaGlobals`, so no salsa cycle forms.
+- `item_check` adopts the canonical exports as a member's scheme, and `global_scheme` reads only
+  `item_check`, so there is one source of truth.
 - Salsa cycle recovery (`item_check_recover`, `global_scheme_recover`) is a backstop, and reaching it is a
   bug: salsa never backdates a cycle member, so restoring a recovered cycle panics
-  (`removing_a_cross_file_cycle_and_restoring_it_revalidates`).
+  (`removing_a_cross_file_cycle_and_restoring_it_revalidates` in `test_incremental.rs`).
 
 Pinned by `cyclic_group_answers_are_forcing_order_independent` in `crates/semantics/tests/test_parallel.rs`.
 
@@ -537,13 +603,20 @@ A script's top level is one frame run top-down, with one rule per kind of read:
 - **An immediate read** resolves to the nearest earlier top-level binding, before package globals and
   stubs. A use before every definition is unresolved, including `x <- x + 1L` with no earlier `x`.
 - **A deferred read** (inside a nested function) resolves against the whole document, because the closure
-  runs after the frame settled: the last binding wins (the `deferred` flag on the checker's lookups).
+  runs after the frame settled: the last binding wins (the `deferred` flag on the checker's lookups),
+  including the enclosing statement's own, so self-recursion types through the cycle fixpoint
+  (`a <- function() a()` exports `fn() -> Unknown`).
 - **A conditional top-level write** (in a top-level `if`, `for`, `while`, `repeat`) creates the document's
   slot, and a later read resolves to it.
 - **A quiet read** (data masking, an opaque operator) is never reported unresolved but counts as a use and
   navigates, because at run time it falls back to the enclosing binding.
 - **Unused check.** A deferred read keeps every binding alive; an immediate read marks definers backward
-  through conditional ones, since a conditional rebinding does not end an earlier binding's liveness.
+  through conditional ones, since a conditional rebinding does not end an earlier binding's liveness. A
+  loop that reads its carried variable keeps both its own write and the earlier binding alive, because
+  the first iteration reads the outer one.
+
+A duplicate `@type` or `@alias` name errors at every site. The per-file slot order is
+`frame_slot_positions` in `crates/semantics/src/diagnostics.rs`.
 
 ## An undeclared type name errors once at the reference and compares like `Unknown`
 
@@ -571,14 +644,17 @@ the positive list silently skipped `Named`, `Record` and `Tuple`, letting `#: Po
   parameters, applied binders, `@new` payload shape, nesting caps, vector-element atomicity, attachment)
   keeps only its errors (`Annotation::errors`, `typing_errors`); `lower_annotation` drops the declared
   type, definitions, `@new`, `@strict` and nominal references, so one mistake gives one error. Consumers
-  observe the absent payload, not a validity flag.
+  observe the absent payload, not a validity flag: an inlay hint gates on a surviving declared type,
+  `@new` or trust, so a refused binding hints its inferred type again.
 - **Attachment is single-sourced.** `statement_annotations` (`crates/syntax/src/annotation.rs`) classifies
   each block as attached, blank-line-separated or dangling; `item_annotation_syntax` and the
   dangling-annotation diagnostics both read it. A blank line or interposed comment detaches.
 - **Two classes gate differently.** Past 160 nesting levels the shape is refused and always reported; past
   128 the type is refused for checking, a typing-class finding that `# typing: off` hides. Vector-element
-  atomicity is judged later with the project vocabulary (`Annotation::vector_elements`) and does not strip
-  the payload, because lowering lacks the vocabulary.
+  atomicity is judged later with the project vocabulary (`Annotation::vector_elements`: an alias expands,
+  a nominal refuses, an undeclared name is left to the unknown-type error) in the typing class at the use
+  site, and does not strip the payload, because lowering lacks the vocabulary. The accepted difference is
+  visible only in exported schemes.
 - **A definition is top-level only.** A nested `@type`/`@alias` errors and does not enter the vocabulary
   (`file_type_definitions` reads top-level children only).
 
@@ -629,7 +705,8 @@ per-slot `captured_slots` marking.
   of them lost bounds such as `invoke(mirror)`'s numeric one. Instantiation is per reader, matching R's
   call-by-call semantics for immutable closures.
 - **`missing()` flows through the environment** as `EnvEntry::MissingFormal` on the true edge of
-  `missing(name)`: reading it errors, any write supplies it, and at a join possibly-missing reads as the
+  `missing(name)` for a formal with no default, riding the existing branch mark, rollback and join
+  discipline rather than a parallel liveness structure: reading it errors, any write supplies it, and at a join possibly-missing reads as the
   supplied type, so only a definite failure reports.
 
 ## NAMESPACE and DESCRIPTION metadata feed resolution
@@ -643,7 +720,8 @@ server refreshes it on NAMESPACE buffer syncs and NAMESPACE/DESCRIPTION watcher 
 facts so a formatting edit invalidates nothing.
 
 Consumption is predicates at the diagnostic edges only: `imported_by_name` and `imports_every_name` quiet
-an unresolved bare read, `declared_dependency` quiets the unknown-namespace warning on `pkg::`. Typing is
+an unresolved bare read, `declared_dependency` quiets the unknown-namespace warning on `pkg::`. They run
+only after every cheaper skip fails, so only on a genuinely unresolved name. Typing is
 untouched (an imported but undescribed read is `Unknown` with the usual strict origin). An `import(pkg)` of
 a namespace without stubs quiets every unresolved bare read in the package, because its export set is
 unknowable and guessing breaks the zero-false-positive mandate; stubs for `pkg` restore exact gating.
@@ -657,8 +735,13 @@ Metadata only widens the resolved universe. Pinned by the `typing-imports` fixtu
   and the high-traffic declarations, and joins `stub_library`'s fold only when
   `metadata::namespace_active` says the project uses the package: a DESCRIPTION dependency, a NAMESPACE
   import, or a literal `library()`/`require()`/`requireNamespace()`/`loadNamespace()` in any file
-  (`metadata::file_attached_namespaces`). Gating at assembly gives every consumer one universe. Activation
+  (`metadata::file_attached_namespaces`, a per-file syntax scan hosts union into
+  `PackageMetadata.attached`: the CLI once after load, the server per synced file plus the idle prime,
+  never a per-keystroke sweep). Gating at assembly gives every consumer (bare resolution, `pkg::`
+  validation, nominals, completion, shadow lints, typo suggestions, masked verbs) one universe; while
+  inactive, data.table is an undescribed package, so its names cannot steal a typo warning. Activation
   keys only on inputs, never on a naming or item query, which breaks the naming-to-stubs-to-naming cycle.
+  A flip rebuilds the stub library.
 - **A result-shape classifier in `infer_index`.** A bracket whose subject is the `data.table` nominal
   (shipped or project `@type`) keeps the subject's class for a missing or empty `j`, a `:=`, `.()` or
   `list()` call, or any `j` with `by =`/`keyby =`; another `j` shape is a sound refusal (`Unknown` with a
@@ -702,15 +785,22 @@ shadowing.
 **Status:** built.
 
 Every namespace R ships pairs with a generated `types/<ns>.exports` manifest of its full export list
-(`scripts/export-manifests.R`), because chasing completeness with typed declarations does not scale.
-Manifest names resolve everywhere a typed name does but type `Unknown` (`known_exports`, consulted by
-`package_scheme_exists` after schemes and nominals).
+(`scripts/export-manifests.R`, run in a live R session; the header records the R version), because
+chasing completeness with typed declarations does not scale: the typed corpus had about 530 declarations
+against about 2,500 real exports (base alone exports about 1,400). `datasets` uses the search-path
+listing, because its objects are lazy data, not namespace exports. Manifest names join
+`exports_by_namespace` (so `pkg::name` validation and shadow lints see them) and `known_exports`
+(consulted by `package_scheme_exists` after schemes and nominals); they resolve everywhere a typed name
+does, including completion and typo suggestions, but type `Unknown`. A non-syntactic name is excluded
+from bare completion and backtick-quoted after `pkg::`.
 
 Three tiers mirror R: default-attached namespaces (including `datasets`) are bare-visible
 unconditionally; shipped but unattached ones (`QUALIFIED_ONLY_NAMESPACES`: tools, parallel, compiler,
 grid, splines, stats4, tcltk) validate `::` but gate bare visibility on an attach or declaration; a
 conditional CRAN namespace gates both, with its stubs. A unit test asserts every `.Rtypes` value
-declaration is a real export of its namespace (`@type` nominals exempt).
+declaration is a real export of its namespace (`@type` nominals exempt, and a conditional namespace may
+override a base name, as data.table's class-preserving `merge` does). An agent container can install
+real R (apt plus the CRAN repository, minutes), so manifest regeneration runs in-container.
 
 ## One source of truth for where an item spells its name
 
@@ -736,7 +826,9 @@ conditional writers) and `frame_binder(item, name, deferred)` (the file-local bi
 script read sees; a package function body never consults it). `SalsaGlobals` holds no map. `item_check`
 grows its stack on demand through `stacker`, because demand recursion is as deep as the longest chain of
 definitions that read the next. `crates/semantics/tests/test_incremental.rs` pins that a new definition
-re-checks only its readers. Open gap (`backlog.md`): a salsa-level cycle through statement items
+re-checks only its readers and an inserted statement only the reads it intercepts; the keystroke probe
+cannot see this loss, because it edits one file and demands only that file. Cost: resident memory 3.5%
+higher at 794K lines (1,270 to 1,314 bytes per line), cold time unchanged. Open gap (`backlog.md`): a salsa-level cycle through statement items
 re-iterates on every structural edit.
 
 ## Cold-pass memory and time: interned names, compact HIR, parallel setup
@@ -745,9 +837,11 @@ re-iterates on every structural edit.
 
 - `hir::Symbol` is a process-wide interned name, a `Copy` 4-byte index, carried by HIR, naming and the
   check output, because a name like `x` appears hundreds of thousands of times.
+- `ItemCheck.expression_types` is a dense table indexed by `ExprId`, since ids are dense within an item.
 - `ry check` forgets the database instead of dropping it (`std::mem::forget` in `crates/ry/src/cli.rs`):
   the drop only walks every allocation before exit.
-- massif sees only the system allocator, so profile memory with `--no-default-features` (no mimalloc).
+- The binary uses mimalloc as a default feature; massif sees only the system allocator, so profile memory
+  with `--no-default-features`.
 
 ## Syntax trees are evicted, and only small syntax facts are memoized
 
@@ -762,8 +856,9 @@ re-iterates on every structural edit.
 - `diagnostics::derive_from_syntax` lists every tree-derived fact a later pass reads; a new tree reader
   must be added there, or the cold check re-parses (the one-parse test in `test_incremental.rs` catches it).
 - Source text lives once, in `SourceFile`; the CLI reads it through `ProjectAnalysis::source`.
-- The server enters workspace files at `Durability::MEDIUM` and lowers a file to `LOW` on its first edit,
-  so memos over untouched files verify without walking their dependencies.
+- The server enters workspace files at `Durability::MEDIUM` and lowers a file to `LOW` on its first edit
+  (restored on close), so memos over untouched files verify without walking their dependencies; settled
+  re-check time had been two thirds salsa memo verification.
 
 ## A call's result drops unconstrained type-parameter members of a union
 
@@ -784,7 +879,8 @@ in `standard-library.R.test`). Contract: `type-system.mdx`, "Union normalization
 
 - `syntax::matching_nodes` filters with borrowed `NodeRef` cursors and makes owned nodes only for matches;
   `NodeRef::tokens` reads token text without owned cursors (`testing::check_parse_invariants` pins both to
-  the owned walks). `map_child_types` returns the input type when no child changed.
+  the owned walks). With the flat tree an owned cursor is only a refcount bump, so the gain is small.
+  `map_child_types` returns the input type when no child changed.
 - `SalsaGlobals` caches global lookups per `item_check` execution in `RefCell` maps. This is safe for salsa
   because the first read in a query records the edge and repeats only dedupe; the cache never outlives or
   leaves one execution.
