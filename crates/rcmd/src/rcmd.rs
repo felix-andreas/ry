@@ -871,7 +871,12 @@ fn hold(lock: File) {
 /// taken. A home from an older ry has no lock file, and the first process to use it adds one.
 fn lock_home(home: &Path) -> Result<Option<File>> {
     let path = home.join(LOCK_FILE);
-    let lock = match File::options().create(true).write(true).open(&path) {
+    let lock = match File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+    {
         Ok(lock) => lock,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(Error::Io(path, error)),
@@ -887,6 +892,7 @@ fn lock_cache(cache: &Path) -> Result<File> {
     let path = cache.join(LOCK_FILE);
     let lock = File::options()
         .create(true)
+        .truncate(false)
         .write(true)
         .open(&path)
         .map_err(io_error(&path))?;
@@ -2449,8 +2455,18 @@ fn write_code_image(
                 staged_library.display().to_string(),
                 build.display().to_string(),
                 training,
-                if options.code_image { "image" } else { "no-image" }.to_owned(),
-                if options.typed_code { "typed" } else { "no-typed" }.to_owned(),
+                if options.code_image {
+                    "image"
+                } else {
+                    "no-image"
+                }
+                .to_owned(),
+                if options.typed_code {
+                    "typed"
+                } else {
+                    "no-typed"
+                }
+                .to_owned(),
             ],
             r_libs,
         )

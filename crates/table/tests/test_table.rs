@@ -492,12 +492,7 @@ fn filters_order_and_positions_select_rows() {
 /// Row-wise operators, each on its own small frame, evaluated as a bare `j`, which gives a vector.
 #[test]
 fn row_wise_operators_follow_r() {
-    let integers = || {
-        vec![
-            ("x", ints(&[i32::MAX, 7, -7])),
-            ("y", ints(&[1, 2, 2])),
-        ]
-    };
+    let integers = || vec![("x", ints(&[i32::MAX, 7, -7])), ("y", ints(&[1, 2, 2]))];
     let numbers_as_logicals = || vec![("a", ints(&[0, 2])), ("b", ints(&[2, 0]))];
     let cases = [
         (

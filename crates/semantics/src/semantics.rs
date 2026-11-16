@@ -1526,7 +1526,14 @@ fn canonical_type<'db>(
     let mut table = InferenceTable::default();
     table.definitions = Some(definitions);
     let mut budget = UNFOLD_BUDGET;
-    let ty = unfold_nominal(db, definitions, &mut table, ty, &mut Vec::new(), &mut budget);
+    let ty = unfold_nominal(
+        db,
+        definitions,
+        &mut table,
+        ty,
+        &mut Vec::new(),
+        &mut budget,
+    );
     (budget > 0 && is_closed(db, definitions, ty)).then_some(ty)
 }
 
@@ -4109,5 +4116,4 @@ mod tests {
             thin_vec::thin_vec![(hir::Symbol::new("value"), unknown)]
         );
     }
-
 }

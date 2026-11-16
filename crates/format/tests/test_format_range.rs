@@ -90,7 +90,13 @@ fn a_caret_formats_its_line_with_the_documents_line_endings() {
         ("x <- 1\ny<-2", 11, 7..11, "y <- 2\n", "x <- 1\ny <- 2\n"),
         // The newline belongs to the last line's own edit, so an earlier line must not reach it.
         ("x<-1\ny <- 2", 0, 0..5, "x <- 1\n", "x <- 1\ny <- 2"),
-        ("x <- 1\r\ny<-2\r\n", 9, 8..14, "y <- 2\r\n", "x <- 1\r\ny <- 2\r\n"),
+        (
+            "x <- 1\r\ny<-2\r\n",
+            9,
+            8..14,
+            "y <- 2\r\n",
+            "x <- 1\r\ny <- 2\r\n",
+        ),
     ];
     for (source, caret, range, new_text, result) in cases {
         let edits = edits_at(source, caret);

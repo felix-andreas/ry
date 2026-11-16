@@ -1388,7 +1388,10 @@ fn counted_changes_during_an_escape_never_lose_a_count() {
         heap.set_element(list, 1, nil);
         assert!(shared.refcount() >= 1, "during the escape");
         heap.retire_escaped();
-        assert!(shared.refcount() >= 1, "another list holds the duplicated value");
+        assert!(
+            shared.refcount() >= 1,
+            "another list holds the duplicated value"
+        );
 
         // A value from another list stored through a read-only pointer, then overwritten.
         let mut heap = Heap::new();
@@ -1402,7 +1405,10 @@ fn counted_changes_during_an_escape_never_lose_a_count() {
         heap.set_element(list, 0, nil);
         assert!(foreign.refcount() >= 1, "during the escape");
         heap.retire_escaped();
-        assert!(foreign.refcount() >= 1, "another list holds the foreign value");
+        assert!(
+            foreign.refcount() >= 1,
+            "another list holds the foreign value"
+        );
 
         // A shrink drops a slot behind a writable pointer.
         let mut heap = Heap::new();
@@ -1427,7 +1433,11 @@ fn counted_changes_during_an_escape_never_lose_a_count() {
         heap.resize_vector(list, 3).expect("grow");
         heap.set_element(list, 2, values[2]);
         heap.retire_escaped();
-        assert_eq!(values.map(|value| value.refcount()), [1, 1, 1], "exact counts");
+        assert_eq!(
+            values.map(|value| value.refcount()),
+            [1, 1, 1],
+            "exact counts"
+        );
     }
 }
 

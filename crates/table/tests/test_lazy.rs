@@ -459,7 +459,9 @@ fn a_date_rejects_arithmetic_and_comparisons_it_has_no_meaning_for() {
         let plan = Plan::new(Source::Table(table)).with(step);
         let error = lazy::collect(plan).err().map(|error| error.to_string());
         assert!(
-            error.as_deref().is_some_and(|error| error.contains(expected)),
+            error
+                .as_deref()
+                .is_some_and(|error| error.contains(expected)),
             "{expected}: {error:?}"
         );
     }

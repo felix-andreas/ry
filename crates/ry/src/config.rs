@@ -962,7 +962,11 @@ mod tests {
                 .format
                 .indent_width
         };
-        assert_eq!(indent_width(nested.join("script.R")), 7, "a file's ancestors");
+        assert_eq!(
+            indent_width(nested.join("script.R")),
+            7,
+            "a file's ancestors"
+        );
         assert_eq!(indent_width(inner), 3, "the nearest config wins");
         assert_eq!(
             Config::discover(root).expect("discover config"),

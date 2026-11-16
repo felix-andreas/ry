@@ -7768,7 +7768,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   alone, `project_ref_classes` unions them, and `item_naming` asks
   `project_ref_class_binds(files, class, member)`, so a class edit re-runs only the methods whose
   answers change (`test_incremental`,
-  `a_reference_class_edit_rechecks_only_methods_whose_member_answers_change`). The index reads
+  `an_edit_rechecks_the_edited_items_and_the_readers_whose_answers_change`). The index reads
   `item_hir` only, never naming, so there is no cycle.
 - **Unknown classes bind everything.** A superclass the project does not define, or a generator the
   project does not bind to `setRefClass`, hides the members, so every name binds rather than
