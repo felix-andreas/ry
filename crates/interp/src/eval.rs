@@ -4406,16 +4406,27 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> 
 }
 
 /// Which formal each argument binds to: an argument that `...` collects maps to the position of
-/// `...`. The plan depends only on the formals and the argument names, so a call site that
-/// passes the same names to the same function reuses it ([`match_args_cached`]).
+/// `...`, and an argument that binds nothing to [`BINDS_NOTHING`]. The plan depends only on the
+/// formals, the argument names and which named arguments are empty, so a call site that passes
+/// the same names to the same function reuses it while no named argument is empty
+/// ([`match_args_cached`]).
 type Plan = SmallVec<[u32; 8]>;
+
+/// The plan entry of an empty named argument whose formal a positional argument took: GNU R
+/// matches `f(a = , 1)` for `function(a, b)` as `f(a = 1)`, because its positional pass tells
+/// a formal matched by name from its value, and an empty argument leaves none.
+const BINDS_NOTHING: u32 = u32::MAX;
 
 /// [`match_args`] for a call of the compiled closure `function`, reusing the plan of the last
 /// call of its body when it had the same formals and argument names. The cache holds one entry
 /// in the body's `MATCHES` constant: a list of the formals, the plan, and the argument tags.
 unsafe fn match_args_cached(function: Sexp, formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> {
     let code = function.cdr();
-    if code.kind() != SexpType::Bytecode || !args.iter().any(is_named) {
+    let missing = missing_arg();
+    if code.kind() != SexpType::Bytecode
+        || !args.iter().any(is_named)
+        || args.iter().any(|arg| arg.value == missing)
+    {
         return match_args(formals, args, call);
     }
     let constants = code.cdr();
@@ -4469,6 +4480,9 @@ unsafe fn match_plan(formals: Sexp, args: &[Arg], call: Sexp) -> R<Plan> {
     }
     let count = formal_symbols.len();
     let mut matched: SmallVec<[bool; 8]> = smallvec![false; count];
+    // The empty argument that matched each formal by name, which a positional argument replaces.
+    let mut empty_match: SmallVec<[Option<usize>; 8]> = smallvec![None; count];
+    let missing = missing_arg();
     let mut plan: Plan = smallvec![0; args.len()];
     let mut used: SmallVec<[bool; 8]> = smallvec![false; args.len()];
     let dots_position = formal_symbols
@@ -4507,6 +4521,9 @@ unsafe fn match_plan(formals: Sexp, args: &[Arg], call: Sexp) -> R<Plan> {
                 matched[formal_index] = true;
                 plan[arg_index] = formal_index as u32;
                 used[arg_index] = true;
+                if args[arg_index].value == missing {
+                    empty_match[formal_index] = Some(arg_index);
+                }
             }
         }
     }
@@ -4549,6 +4566,9 @@ unsafe fn match_plan(formals: Sexp, args: &[Arg], call: Sexp) -> R<Plan> {
                 plan[arg_index] = formal_index as u32;
                 used[arg_index] = true;
                 partial_owner[arg_index] = Some(formal_index);
+                if args[arg_index].value == missing {
+                    empty_match[formal_index] = Some(arg_index);
+                }
             }
         }
     }
@@ -4570,10 +4590,14 @@ unsafe fn match_plan(formals: Sexp, args: &[Arg], call: Sexp) -> R<Plan> {
         while formal_index < count
             && formal_symbols[formal_index] != dots_symbol
             && matched[formal_index]
+            && empty_match[formal_index].is_none()
         {
             formal_index += 1;
         }
         if formal_index < count && formal_symbols[formal_index] != dots_symbol {
+            if let Some(empty) = empty_match[formal_index] {
+                plan[empty] = BINDS_NOTHING;
+            }
             matched[formal_index] = true;
             plan[arg_index] = formal_index as u32;
             formal_index += 1;

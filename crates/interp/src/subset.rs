@@ -2676,12 +2676,16 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         1
     };
     if indices.len() >= 2 {
-        let Some(dims) = values::dims(result) else {
-            return Err(error_in(call, "incorrect number of subscripts on matrix"));
+        let Some(dims) = values::dims(result).filter(|dims| dims.len() == indices.len()) else {
+            return Err(error_in(
+                call,
+                if indices.len() == 2 {
+                    "incorrect number of subscripts on matrix"
+                } else {
+                    "incorrect number of subscripts"
+                },
+            ));
         };
-        if dims.len() != indices.len() {
-            return Err(error_in(call, "incorrect number of subscripts"));
-        }
         if value != result
             && let Some(fixed) = slab(indices, &dims, result, value)
         {
@@ -3178,35 +3182,34 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
     if let [index] = indices {
         return subassign2_one(object, *index, value, call, 1);
     }
-    if let Some(dims) = values::dims(object)
-        && dims.len() == indices.len()
-    {
-        // `m[[i, j]] <- value` names one cell, which must exist.
-        let dimnames = get_attr(object, symbols().dimnames);
-        for (dimension, (&index, &extent)) in indices.iter().zip(dims.iter()).enumerate() {
-            let names = if dimnames.kind() == SexpType::List {
-                dimnames.element(dimension)
-            } else {
-                nil()
+    let Some(dims) = values::dims(object).filter(|dims| dims.len() == indices.len()) else {
+        return Err(error_in(call, "[[ ]] improper number of subscripts"));
+    };
+    // `m[[i, j]] <- value` names one cell, which must exist.
+    let dimnames = get_attr(object, symbols().dimnames);
+    for (dimension, (&index, &extent)) in indices.iter().zip(dims.iter()).enumerate() {
+        let names = if dimnames.kind() == SexpType::List {
+            dimnames.element(dimension)
+        } else {
+            nil()
+        };
+        // A subscript GNU R rejects for another reason is left to the assignment below.
+        let inside = match one_index(extent, names, index) {
+            Ok(Slot::At(position)) => position < extent,
+            Ok(_) => false,
+            Err(_) => true,
+        };
+        if !inside {
+            let bounds = Bounds {
+                dimension: Some(dimension),
+                ..Bounds::of(object)
             };
-            // A subscript GNU R rejects for another reason is left to the assignment below.
-            let inside = match one_index(extent, names, index) {
-                Ok(Slot::At(position)) => position < extent,
-                Ok(_) => false,
-                Err(_) => true,
-            };
-            if !inside {
-                let bounds = Bounds {
-                    dimension: Some(dimension),
-                    ..Bounds::of(object)
-                };
-                return Err(out_of_bounds(
-                    unbound(),
-                    "[[ ]] subscript out of bounds",
-                    bounds,
-                    index,
-                ));
-            }
+            return Err(out_of_bounds(
+                unbound(),
+                "[[ ]] subscript out of bounds",
+                bounds,
+                index,
+            ));
         }
     }
     let is_list = matches!(object.kind(), SexpType::List | SexpType::Expression);
@@ -5051,7 +5054,10 @@ unsafe fn do_rev(call: &Call<'_>) -> R<Sexp> {
 
 pub(crate) unsafe fn do_is_list_factor(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
-    let recursive = values::as_logical_scalar(call.arg(1)) == 1;
+    let recursive = match values::as_logical_scalar(call.arg(1)) {
+        NA_LOGICAL => return Err(call.error("NA in coercion to boolean")),
+        recursive => recursive != 0,
+    };
     unsafe fn check(object: Sexp, recursive: bool) -> Option<bool> {
         if object.kind() != SexpType::List {
             return Some(values::inherits(object, "factor"));
