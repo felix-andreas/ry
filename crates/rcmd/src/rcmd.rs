@@ -1512,8 +1512,8 @@ pub fn makeconf(root: &Path, toolchain: &Toolchain, platform: Platform) -> Strin
     } = toolchain;
     // On macOS a package records no libR at all and resolves R's API with a flat lookup when
     // it loads, from the libR already in the process, so the same build loads under ry's
-    // runtime and under GNU R (`decisions.md`, "macOS packages bind to ry's libR"). On Linux the
-    // `libR.so` dependency is satisfied by soname from whichever libR is loaded.
+    // runtime and under GNU R (`decisions/libr-rcmd.md`, "macOS packages bind to ry's libR"). On
+    // Linux the `libR.so` dependency is satisfied by soname from whichever libR is loaded.
     // On Windows every DLL names the DLLs it imports from, so packages link R.dll's import
     // library, and position-independent code is the default there.
     let (dylib_ext, shlib_ldflags, libr, pic) = match platform {

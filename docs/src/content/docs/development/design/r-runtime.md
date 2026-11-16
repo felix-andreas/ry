@@ -11,7 +11,7 @@ a first Cranelift JIT in `crates/jit` (section 5, "What tier 1 does today"), and
 `crates/table`. Not built are compiled-to-compiled calls of general (non-scalar) functions, ry's own base R (base R's R
 code still comes from a GNU R installation), and the table type's use from the interpreter. `ry run`
 runs on ry's runtime, and `ry R` drives GNU R. The C API measurements in section 2 are real and
-reproducible. Where section 4 describes something built, `.agents/memory/decisions.md` ("the runtime's object model, collector and native
+reproducible. Where section 4 describes something built, `.agents/memory/decisions/heap-gc.md` ("the runtime's object model, collector and native
 boundary") records the settled details.
 
 ## 1. The recommendations
@@ -613,7 +613,7 @@ mirrors the original's surroundings with links: the copy's directory links to ev
 the original, and when a load command or rpath climbs (`@loader_path/../lib`), as many ancestor
 directories are mirrored as it climbs, each linking to the original's entries. Packages
 that `rcmd` builds on macOS link with `-undefined dynamic_lookup` and record no `libR` at all, so
-the same build loads under ry and under GNU R. `decisions.md` ("macOS packages bind to ry's libR")
+the same build loads under ry and under GNU R. `decisions/libr-rcmd.md` ("macOS packages bind to ry's libR")
 has the reasoning.
 
 Windows needs no rewriting. A package DLL that Rtools built imports from `R.dll` by module name,
@@ -743,8 +743,8 @@ and the call that would compile the closure (its second, or its first when the b
 decodes that code instead. Decoding costs about as much as compiling, so the image does not move
 compilation earlier: a namespace fetches many closures it never calls, such as every S3 method it
 registers, and calls many others only once. What the image adds is what compiling cannot produce,
-the trained profile below. An image holds no machine code (`decisions.md`, "Code images hold
-bytecode only").
+the trained profile below. An image holds no machine code (`decisions/jit-ssa.md`, "No baseline tier, and code
+images hold bytecode only").
 
 - **Identity.** A record is identified by its offset and length in the database, and a closure
   within the record by the order the stream reader creates closures. The image is stamped with the
@@ -1021,7 +1021,7 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   assembler. It ran 6.7% more instructions than tier 0 on `testthat_full` at run time and 3.1%
   more with its compile excluded, while tier 0's whole dispatch is about 3.1% of that workload,
   which bounds what any baseline could save. It was deleted, together with writing its code into
-  the code image (`decisions.md`, "No baseline tier, and code images hold bytecode only").
+  the code image (`decisions/jit-ssa.md`, "No baseline tier, and code images hold bytecode only").
 - **Not yet built:** calls from compiled code straight into the callee's compiled code (a direct
   call still enters through tier 0's call path and allocates a frame and forced promises), result
   types for multi-index subscripts such as `m[i, ]`, and freeing the machine code of invalidated
@@ -1052,7 +1052,7 @@ a gap that size, so shrinking the op count and the cost per op (step 3) comes fo
 geometric mean over the application workloads (`just bench applications`) and over the package
 test suites (`just bench packages`). The milestones are 1.5x and then 3x; `benchmarks.mdx` has
 where both suites stand. Parallelism
-is deferred: the architecture keeps it possible (`decisions.md`, "Single-thread first"), but the
+is deferred: the architecture keeps it possible (`decisions/interp.md`, "Single-thread first, parallel-ready architecture (user directive)"), but the
 target does not count on it.
 
 **Where the time goes.** `ry run --profile-summary` splits a run into the buckets below. R code is
@@ -1087,7 +1087,7 @@ of that removes single files, such as the `verify_exec_*` files testthat writes 
 snapshot test in `cli`, which cost GNU R the same system call. Removing a directory tree costs
 more, because `rmdir` waits on the ext4 journal (0.1 ms on an idle disk, 2 to 4 ms under writes),
 and GNU R pays that wait too: a testthat-shaped tree takes about 0.35 ms on both idle and 2.6 ms on
-both under write load (`decisions.md`, "unlink() follows GNU R's R_unlink"). The waiting is the suites' own `Sys.sleep`
+both under write load (`decisions/builtins.md`, "unlink() follows GNU R's R_unlink, with directory descriptors"). The waiting is the suites' own `Sys.sleep`
 (`foreach` 77%, `lgr` 22%, `cachem` 10%), which GNU R pays too. Child R processes started through
 `callr` and `processx` run ry, because `R.home()`'s `bin/R` and `bin/Rscript` start ry, and
 `Rscript -e` starts in 32 ms against GNU R's 140 ms. Start-up dominates the smallest suites
@@ -1130,9 +1130,9 @@ native code are small. The lowest per-suite ceilings are `lgr`'s 7.7x (its `Sys.
 | Target row | Status | What it needs |
 | --- | --- | --- |
 | (a) Builtins several times faster than GNU R's C: no allocation on the fast path, SIMD kernels, fused element-wise temporaries | in progress | builtins from 28% (workloads and corpus) to 10x faster; the top of the ranking above first. Built: `attributes`, `c`, `[[` and `[[<-` with constant subscripts, `forceAndCall`, a builtin `FUN` in the apply family, `Reduce`, the one-argument builtins `!`, `length`, `is.null`, `is.na`, `is.character`, `is.logical` and `is.function` in compiled calls, and native entries for `identical`, `isTRUE`, `isFALSE`, `nrow`, `ncol`, `match`, `%in%` and `%||%` (the "Builtin fast paths" rows below), compiled call sites that force the strict arguments of `typeof`, `identical`, `inherits`, `is.vector` and `match` as GNU R's compiler does, so an argument that is still an unforced promise over R code (a caller's `g(k + 1L)`) takes the native entry too (per call, JIT off: `typeof` through two wrapper layers 9,232 to 6,317 instructions, GNU R 5,834; `typeof(k + 1L)` 6,729 to 4,162, GNU R 3,244), a tier-0 op for `missing()`, `lapply` and `vapply` that reuse `i` and read `X[[i]]` directly per element, `structure()` that sets attributes in place, tier-0 `%%` and `%/%`, element assignments indexed by `$` and `[[` reads, a `.Call` that resolves its routine from the address pointer, `x[i] <- v` written in place, direct entries for `[`, `.Call` and `round` (the entry takes the call, so builtins that name it in errors qualify), names appended in place by `$<-` and `[[<-`, `m[, j] <- v` as contiguous block copies, array reads such as `X[, , k]` that walk the selected offsets without listing them (1.7x to 2.5x faster than before on a 1000 x 1000 x 20 double array, ahead of GNU R), scalar `-x`, a native `Reduce(accumulate = TRUE)`, element assignments that stay in slot frames, element stores with computed subscripts that stay in bytecode and append at `length(x) + 1` with amortized growth (tier 0, per iteration: `x[length(x) + 1L] <- k` 1,557 instructions, GNU R 2,550; `x[[length(x) + 1L]] <- k` on a list 1,622, GNU R 5,445), character element reads, `c()` of lists as one copy per argument, and negative subscripts and builtin argument matching without allocation. Under the JIT, `x[[i]]`, `x[[i]] <- v` and `x[i] <- v` run at a tenth of GNU R's instructions or less; at tier 0 the scalar reads and stores, list stores included, cost less than GNU R's net of the loop (`x[2L]` 4% more), through fast handlers for the ops around the builtin (the fourth table under "Builtin fast paths"). Per call, `[` with a negative, logical or character subscript, `round`, `m[, j] <- v`, name appends and `Reduce` match or beat GNU R (the second table under "Builtin fast paths"). Next: what is left is closure frame setup inside `structure()`, `format.default` and `Reduce`'s callee, which is the frames and call convention of row (c), and `.Call`'s loop and JIT call sequence |
-| (b) Automatic parallelism for effect-free apply-family calls and long element-wise operations, deterministic, with bit-identical reductions | deferred, architecture-ready | the effect-free fact per function and the invariants in `decisions.md`; package native code stays single-threaded. Deferred because the target users already run their test suites in parallel across processes and are CPU bound, so every core is busy and threads inside one process would only compete with the other workers. Single-core speed is the goal, and every cost paid per process (warm-up, compile time, package loading, resident memory) is paid once per worker |
+| (b) Automatic parallelism for effect-free apply-family calls and long element-wise operations, deterministic, with bit-identical reductions | deferred, architecture-ready | the effect-free fact per function and the invariants in `decisions/interp.md`; package native code stays single-threaded. Deferred because the target users already run their test suites in parallel across processes and are CPU bound, so every core is busy and threads inside one process would only compete with the other workers. Single-core speed is the goal, and every cost paid per process (warm-up, compile time, package loading, resident memory) is paid once per worker |
 | (c) Tier-1 compilation of most R-level time | planned | R code from 56% (workloads) to 30x faster; tier 1 today runs under 3% of the time on eight of nine workloads |
-| (d) Native code shrinks only through faster ry ports or parallelism; third-party C is not replaced | in progress | ry's own ports are ry's to speed up; third-party C stays: `data.table` and `xts` on the workloads, `data.table` and `rlang` on the corpus. Built: vector kernels for the d/p/q functions, batched samplers, and AVX2 twister, tempering and inversion lanes, bit-identical to GNU R ("Distribution functions and the RNG run as vector kernels and batched samplers" in `decisions.md`). `rnorm` costs 67 instructions per normal (164 before); per element at length 1e6 `rnorm` is 3.2x GNU R, `runif` 5.7x, `qnorm` 3.0x, `pnorm` 1.7x and `rpois` 1.1x. The native bucket of `simulation` fell from 0.53 s (53%) to 0.30 s (40%), and the workload runs 1.26x faster (1.15 to 1.43 over 9 rounds). `sample` draws its indices in integers: per element at length 1e6, `sample(1e6)` is 2.7x GNU R and `sample(1e6, replace = TRUE)` 3.7x. Stats closures of the form `.Call(C_routine, ...)` enter their routine directly, without a frame, and decline to the R body on any warning or error ("Stats distribution closures enter their routine directly" in `decisions.md`): per call, `dnorm(x)` and `pnorm(x)` take about 0.46 µs (GNU R 1.0 and 1.1 µs) and `rnorm(1)` 0.68 µs (GNU R 2.8 µs). `pnorm`'s exponentials and the `qnorm` tail logarithms run on the exact vector ports of glibc's FMA `exp` and `log` that the fused element-wise kernels use: per element at length 1e6, `pnorm` is 1.80x GNU R (1.19x over the scalar loop) and `qnorm` on tail probabilities 2.09x (1.19x). `sample.int(N, n)` with `N / 128 <= n` tracks drawn values in a bitset, 2.64x GNU R at `sample.int(1e8, 1e6)` (1.21x over the hash set) |
+| (d) Native code shrinks only through faster ry ports or parallelism; third-party C is not replaced | in progress | ry's own ports are ry's to speed up; third-party C stays: `data.table` and `xts` on the workloads, `data.table` and `rlang` on the corpus. Built: vector kernels for the d/p/q functions, batched samplers, and AVX2 twister, tempering and inversion lanes, bit-identical to GNU R ("Distribution functions and the RNG run as vector kernels and batched samplers" in `decisions/builtins.md`). `rnorm` costs 67 instructions per normal (164 before); per element at length 1e6 `rnorm` is 3.2x GNU R, `runif` 5.7x, `qnorm` 3.0x, `pnorm` 1.7x and `rpois` 1.1x. The native bucket of `simulation` fell from 0.53 s (53%) to 0.30 s (40%), and the workload runs 1.26x faster (1.15 to 1.43 over 9 rounds). `sample` draws its indices in integers: per element at length 1e6, `sample(1e6)` is 2.7x GNU R and `sample(1e6, replace = TRUE)` 3.7x. Stats closures of the form `.Call(C_routine, ...)` enter their routine directly, without a frame, and decline to the R body on any warning or error ("Stats distribution closures enter their routine directly" in `decisions/builtins.md`): per call, `dnorm(x)` and `pnorm(x)` take about 0.46 µs (GNU R 1.0 and 1.1 µs) and `rnorm(1)` 0.68 µs (GNU R 2.8 µs). `pnorm`'s exponentials and the `qnorm` tail logarithms run on the exact vector ports of glibc's FMA `exp` and `log` that the fused element-wise kernels use: per element at length 1e6, `pnorm` is 1.80x GNU R (1.19x over the scalar loop) and `qnorm` on tail probabilities 2.09x (1.19x). `sample.int(N, n)` with `N / 128 <= n` tracks drawn values in a bitset, 2.64x GNU R at `sample.int(1e8, 1e6)` (1.21x over the hash set) |
 
 | Idea | Source engine | Status | Measured gap it targets | Code |
 | --- | --- | --- | --- | --- |
@@ -1179,7 +1179,7 @@ native code are small. The lowest per-suite ceilings are `lgr`'s 7.7x (its `Sys.
 | One kernel layer for vector builtins: vectorized slice kernels, results written into dead temporaries, and an `Op::Fused` superinstruction that evaluates an element-wise tree in 512-element chunks or declines before anything observable happens | pqR (`R_allocOrReuseVector`, task merging), Riposte | in progress | builtins 51% of `simulation`; one allocation and one pass per operator. `y <- exp(-x^2/2) * k` runs at 1.4 to 1.6 ns per element against GNU R's 6.3 (4x), `x * k + 1` at 0.3 against 1.8 | `crates/interp/src/kernels.rs`, `vector_math.rs` |
 | **4. Optimizing tiers** | | | | |
 | Per-argument-type native functions for scalar closures | Julia | built | recursive scalar functions | `crates/jit/src/native.rs` |
-| Baseline compiler from bytecode, no optimization | V8 Sparkplug | built, measured and removed | warm code under the 3000-entry threshold. It compiled in a median of 28 µs per body, but ran 6.7% more instructions than tier 0 on `testthat_full` (3.1% with its compile excluded), while tier 0's whole dispatch is 2.66% of that workload (about 3.1% with pc bookkeeping), so no call-threaded baseline can pay off | `decisions.md`, "No baseline tier, and code images hold bytecode only" |
+| Baseline compiler from bytecode, no optimization | V8 Sparkplug | built, measured and removed | warm code under the 3000-entry threshold. It compiled in a median of 28 µs per body, but ran 6.7% more instructions than tier 0 on `testthat_full` (3.1% with its compile excluded), while tier 0's whole dispatch is 2.66% of that workload (about 3.1% with pc bookkeeping), so no call-threaded baseline can pay off | `decisions/jit-ssa.md`, "No baseline tier, and code images hold bytecode only" |
 | A lower Cranelift threshold | HotSpot, .NET tiering | measured, kept at 3000 entries; large bodies wait in proportion to their size, and a loop-free body compiles only when its call rate over the recording window (its share of the session's closure calls) promises enough calls to repay the compile | tier 1 under 3% of the time on eight of nine workloads. Callgrind geomean against JIT off: 1000 entries 1.015, 2000 1.016, 3000 1.013, 6000 1.010, 10,000 1.010, so the threshold does not decide on against off. The rate check took testthat's JIT-on cost over JIT off from 17.6M to 5.6M instructions and kept every functional callback compiling | `SIZE_WAIT_WORDS` and `repays` in `crates/jit/src/jit.rs` |
 | Cross-closure inlining with deoptimization | Ř (PIR) | partly built: effect-free closures, single-expression or block bodies, guarded on callee identity; a failed guard reruns the whole call in tier 0. Callees with effects, which need frame materialization, are planned | calls from compiled code re-enter tier 0 | `inline`, `lower_block` in `crates/jit/src/analysis.rs` |
 | Escape analysis, scalar replacement, vector fusion | Graal, goose | planned | scalar and intermediate vector allocation | |
@@ -1192,7 +1192,7 @@ native code are small. The lowest per-suite ceilings are `lgr`'s 7.7x (its `Sys.
 | Card marking for remembered old objects | V8, HotSpot | planned | minor collections during a load cost about 24M instructions each, mostly re-marking namespace frames being filled | |
 | A buffered `unserializeFromConn` | GNU R | planned | it reads a few bytes per call: 93M instructions of the 11-package `library()` | |
 | Per-package code images written at install time, beside the lazy-load database | Bun | built, no speedup yet | package load and warm-up; decoding a closure costs about what compiling it does, so untrained images cost 1.3% more instructions on `library(survival)` | `crates/interp/src/code_image.rs` |
-| Install-time machine code from whole-program facts (checker types, closed namespace bindings, effect-free functions), values from outside tested once where they enter, no profiles | Bun (`--aot`) | built for scalar numeric closures, measured neutral, removed (`decisions.md`, "No baseline tier, and code images hold bytecode only") | testthat workload 7.850G against 7.834G instructions with images off, because few package functions are scalar numeric | |
+| Install-time machine code from whole-program facts (checker types, closed namespace bindings, effect-free functions), values from outside tested once where they enter, no profiles | Bun (`--aot`) | built for scalar numeric closures, measured neutral, removed (`decisions/jit-ssa.md`, "No baseline tier, and code images hold bytecode only") | testthat workload 7.850G against 7.834G instructions with images off, because few package functions are scalar numeric | |
 | One SSA IR for tier 1 and the typed core: typed facts unguarded, untyped speculations guarded with deoptimization exits; install-time code through the typed AOT pipeline, with its deoptimization metadata and watched bindings in the code file | Ř (PIR), Graal | IR built; install-time code planned | two SSA forms and two lowerings to Cranelift | `crates/ssa` |
 | Profiles from a training run (the package's tests and examples) stored in the per-package image | HHVM Jump-Start, Project Leyden | built, no speedup yet: loops tier up within their first call anyway, and a training run on other types makes the JIT refuse to recompile | hot closures that never reach tier 1's thresholds | |
 | Images shared across worker processes | Bun | planned | resident memory per `parallel` worker | |
@@ -1294,7 +1294,7 @@ written, and compiling ahead decides which of these facts are known before the f
 | Slot frames, environments made on demand and filled one variable at a time | built (`slot-frames.md`) | frames |
 | A direct calling convention between closures | built from tier 0 to tier 0; machine to machine planned | frames (tier 0), JIT (machine code) |
 | Unboxed length-1 doubles, integers and logicals in compiled code | built inside tier 1 and native functions; across calls planned | JIT |
-| Whole-package compilation at install, with entry guards and deoptimization to tier 0 | measured and removed for untyped closures (`decisions.md`, "No baseline tier, and code images hold bytecode only"); strict typed closures planned | JIT |
+| Whole-package compilation at install, with entry guards and deoptimization to tier 0 | measured and removed for untyped closures (`decisions/jit-ssa.md`, "No baseline tier, and code images hold bytecode only"); strict typed closures planned | JIT |
 
 The targets are at least 80% of closures in rlang, cli and testthat running as machine code (5 to
 11% today), 30% fewer instructions on the testthat workload, and the application workloads at twice GNU R's
@@ -1887,7 +1887,7 @@ most of the gap in `make_events`, `fetch_prices` and `enrol`; `visits_per_month`
 ### The inline syntax
 
 Three drafts and decisions bear on this, and the mandate settles what they left open.
-`decisions.md` ("An annotation is one concept with pluggable spellings") makes the surface spelling
+`decisions/syntax-semantics.md` ("An annotation is one concept with pluggable spellings") makes the surface spelling
 pluggable at lowering, names a valid-R inline form through R 4.4's `declare()` primitive as the route
 that keeps every file ordinary R, and leaves a superset dialect as a product decision.
 `development/design/inline-type-syntax.md` costed that superset as a dialect compiled to plain R, in
@@ -1928,7 +1928,7 @@ that already fail. The rest follows from the mandate:
   ([untyped parameters](/reference/type-system#untyped-parameters)): a parameter nothing constrains
   is reported, while an undetermined return or binding is reported once, at the origin it traces to.
 
-This settles the question `decisions.md` left open, and the decision is recorded there ("The inline
+This settles the question `decisions/syntax-semantics.md` left open, and the decision is recorded there ("The inline
 annotation syntax is a superset of R").
 
 ### One type model
@@ -2202,7 +2202,7 @@ Settled: **licensing.** The runtime is GPL-2.0-or-later, as GNU R is, because pa
 translate R's C sources ([licensing](/reference/licensing/)). ry still loads base R's R sources
 at runtime from the user's own GNU R installation instead of vendoring them, which keeps ry small
 and lets it behave like the R version it finds; the reasoning is in
-`.agents/memory/decisions.md` ("licensing").
+`.agents/memory/decisions/docs-process.md` ("licensing").
 
 ## Sources
 
