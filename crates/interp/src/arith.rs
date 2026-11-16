@@ -3305,34 +3305,32 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
                 let mut total = 0.0;
                 let mut na = false;
                 for &item in &items {
-                    let finite = if item.kind() == SexpType::Real {
-                        long_double::add_all(
-                            LongDouble::ZERO,
-                            values::reals(values::materialize(item)?),
-                        )
-                        .finite()
-                    } else {
-                        None
-                    };
-                    if let Some(item_total) = finite {
-                        total += item_total.to_f64();
+                    // An integer or logical argument's total is exact in i64, as it is in GNU R's
+                    // long double, so both round to double once.
+                    if matches!(item.kind(), SexpType::Integer | SexpType::Logical) {
+                        let item_sum = match kernels::sum_integers(values::ints(item), na_rm) {
+                            Some(item_total) => item_total as f64,
+                            None => NA_REAL,
+                        };
+                        na |= is_na_real(item_sum);
+                        total += item_sum;
                         continue;
                     }
-                    let mut item_total = LongDouble::ZERO;
-                    let mut first_nan = None;
-                    if item.kind() == SexpType::Real {
-                        let mut rest = values::reals(values::materialize(item)?);
-                        while let Some(at) = rest.iter().position(|value| value.is_nan()) {
-                            item_total = long_double::add_all(item_total, &rest[..at]);
-                            if !na_rm {
-                                first_nan = Some(rest[at]);
-                                rest = &[];
-                                break;
+                    // The x87 unit is never handed a NaN: an operation on one takes a microcode
+                    // assist of about 150 cycles.
+                    let item_sum = if item.kind() == SexpType::Real {
+                        let reals = values::reals(values::materialize(item)?);
+                        if na_rm {
+                            long_double::add_all_numbers(LongDouble::ZERO, reals).to_f64()
+                        } else {
+                            match kernels::first_nan(reals) {
+                                Some(value) => value,
+                                None => long_double::add_all(LongDouble::ZERO, reals).to_f64(),
                             }
-                            rest = &rest[at + 1..];
                         }
-                        item_total = long_double::add_all(item_total, rest);
                     } else {
+                        let mut item_total = LongDouble::ZERO;
+                        let mut first_nan = None;
                         for index in 0..length(item) {
                             let value = real_at(item, index);
                             if value.is_nan() {
@@ -3344,8 +3342,8 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
                             }
                             item_total += value;
                         }
-                    }
-                    let item_sum = first_nan.unwrap_or_else(|| item_total.to_f64());
+                        first_nan.unwrap_or_else(|| item_total.to_f64())
+                    };
                     na |= is_na_real(item_sum);
                     total += item_sum;
                 }
@@ -5010,29 +5008,38 @@ unsafe fn do_which(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn which_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
     let operand = values::materialize(call.arg(0))?;
-    let mut best: Option<(usize, f64)> = None;
-    for index in 0..length(operand) {
-        let value = real_at(operand, index);
-        if value.is_nan() {
-            continue;
+    // GNU R keeps the first of equal values, so the extreme is found in one pass that vectorizes
+    // and its first position in a second.
+    let found = match operand.kind() {
+        SexpType::Real => kernels::real_extreme_position(values::reals(operand), is_max),
+        SexpType::Integer | SexpType::Logical => {
+            let ints = values::ints(operand);
+            // NA is `i32::MIN`, which the maximum passes over unless every value is NA.
+            let extreme = if is_max {
+                ints.iter().copied().max().filter(|&best| best != NA_INTEGER)
+            } else {
+                ints.iter()
+                    .map(|&value| if value == NA_INTEGER { i32::MAX } else { value })
+                    .min()
+            };
+            extreme.and_then(|extreme| ints.iter().position(|&value| value == extreme))
         }
-        let better = match best {
-            None => true,
-            Some((_, current)) => {
-                if is_max {
-                    value > current
-                } else {
-                    value < current
+        _ => {
+            let mut best: Option<(usize, f64)> = None;
+            for index in 0..length(operand) {
+                let value = real_at(operand, index);
+                let better = !value.is_nan()
+                    && best.is_none_or(|(_, current)| if is_max { value > current } else { value < current });
+                if better {
+                    best = Some((index, value));
                 }
             }
-        };
-        if better {
-            best = Some((index, value));
+            best.map(|(index, _)| index)
         }
-    }
-    match best {
+    };
+    match found {
         None => alloc(SexpType::Integer, 0),
-        Some((index, _)) => {
+        Some(index) => {
             let result = values::integer_vector(&[index as i32 + 1])?;
             let names = values::names(operand);
             if names != nil() {

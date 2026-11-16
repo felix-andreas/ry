@@ -476,6 +476,19 @@ pub fn add_all(total: LongDouble, values: &[f64]) -> LongDouble {
         .fold(total, |total, &value| total + LongDouble::from(value))
 }
 
+/// `total` plus every value that is not NaN or NA, in order, as GNU R's `sum(x, na.rm = TRUE)`
+/// loop adds them.
+pub fn add_all_numbers(total: LongDouble, values: &[f64]) -> LongDouble {
+    #[cfg(all(target_arch = "x86_64", not(windows)))]
+    if let Some(start) = to_x87(total) {
+        return from_x87(x87::add_all_numbers(start, values));
+    }
+    values
+        .iter()
+        .filter(|value| !value.is_nan())
+        .fold(total, |total, &value| total + LongDouble::from(value))
+}
+
 /// `total` plus every `value - offset` in order, rounding after each subtraction and addition,
 /// as GNU R's second pass over the deviations from a mean does.
 pub fn add_differences(total: LongDouble, values: &[f64], offset: LongDouble) -> LongDouble {
@@ -506,6 +519,20 @@ pub fn add_products(
     }
     x.iter().zip(y).fold(total, |total, (&x, &y)| {
         total + (LongDouble::from(x) - x_offset) * (LongDouble::from(y) - y_offset)
+    })
+}
+
+/// `total` plus every `x[i] * y[i]`, each product taken in long double precision, as GNU R's
+/// complete-observation covariance loop adds `(LDOUBLE)(x - mx) * (y - my)` of deviations it
+/// has already rounded to double. The slices must have the same length.
+pub fn add_double_products(total: LongDouble, x: &[f64], y: &[f64]) -> LongDouble {
+    assert_eq!(x.len(), y.len(), "covariance columns differ in length");
+    #[cfg(all(target_arch = "x86_64", not(windows)))]
+    if let Some(start) = to_x87(total) {
+        return from_x87(x87::add_double_products(start, x, y));
+    }
+    x.iter().zip(y).fold(total, |total, (&x, &y)| {
+        total + LongDouble::from(x) * LongDouble::from(y)
     })
 }
 
@@ -724,6 +751,37 @@ mod x87 {
         total
     }
 
+    pub fn add_all_numbers(mut total: [u8; 10], values: &[f64]) -> [u8; 10] {
+        // SAFETY: as in `add_all`; a NaN compares unordered with itself, so `jp` skips it before
+        // the x87 unit sees it.
+        unsafe {
+            asm!(
+                "fld tbyte ptr [{total}]",
+                "test {count}, {count}",
+                "jz 3f",
+                "2:",
+                "movsd {value}, qword ptr [{data}]",
+                "ucomisd {value}, {value}",
+                "jp 4f",
+                "fadd qword ptr [{data}]",
+                "4:",
+                "add {data}, 8",
+                "dec {count}",
+                "jnz 2b",
+                "3:",
+                "fstp tbyte ptr [{total}]",
+                total = in(reg) total.as_mut_ptr(),
+                data = inout(reg) values.as_ptr() => _,
+                count = inout(reg) values.len() => _,
+                value = out(xmm_reg) _,
+                out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
+                out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
+                options(nostack),
+            );
+        }
+        total
+    }
+
     pub fn add_products(
         mut total: [u8; 10],
         x: &[f64],
@@ -757,6 +815,35 @@ mod x87 {
                 total = in(reg) total.as_mut_ptr(),
                 x_offset = in(reg) x_offset.as_ptr(),
                 y_offset = in(reg) y_offset.as_ptr(),
+                x = inout(reg) x.as_ptr() => _,
+                y = inout(reg) y.as_ptr() => _,
+                count = inout(reg) x.len() => _,
+                out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
+                out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
+                options(nostack),
+            );
+        }
+        total
+    }
+
+    pub fn add_double_products(mut total: [u8; 10], x: &[f64], y: &[f64]) -> [u8; 10] {
+        // SAFETY: as in `add_all`; the caller checked that `y` is as long as `x`.
+        unsafe {
+            asm!(
+                "fld tbyte ptr [{total}]",
+                "test {count}, {count}",
+                "jz 3f",
+                "2:",
+                "fld qword ptr [{x}]",
+                "fmul qword ptr [{y}]",
+                "faddp st(1), st(0)",
+                "add {x}, 8",
+                "add {y}, 8",
+                "dec {count}",
+                "jnz 2b",
+                "3:",
+                "fstp tbyte ptr [{total}]",
+                total = in(reg) total.as_mut_ptr(),
                 x = inout(reg) x.as_ptr() => _,
                 y = inout(reg) y.as_ptr() => _,
                 count = inout(reg) x.len() => _,
@@ -1159,6 +1246,11 @@ mod tests {
                 total + (LongDouble::from(x) - third) * (LongDouble::from(y) - seven)
             });
             let fast = add_products(third, values, &reversed, third, seven);
+            assert_eq!(format!("{fast:?}"), format!("{model:?}"), "{values:?}");
+            let model = values.iter().zip(&reversed).fold(third, |total, (&x, &y)| {
+                total + LongDouble::from(x) * LongDouble::from(y)
+            });
+            let fast = add_double_products(third, values, &reversed);
             assert_eq!(format!("{fast:?}"), format!("{model:?}"), "{values:?}");
         }
         let pseudo: Vec<f64> = (1..2000u32)

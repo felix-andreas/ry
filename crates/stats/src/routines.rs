@@ -557,33 +557,75 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
         let missing_y: Vec<bool> = y_summary.iter().map(|summary| summary.0).collect();
         let x_means: Vec<Option<LongDouble>> = x_summary.iter().map(|summary| summary.1).collect();
         let y_means: Vec<Option<LongDouble>> = y_summary.iter().map(|summary| summary.1).collect();
+        // GNU R subtracts each column's mean in double precision once, multiplies the rounded
+        // deviations in long double, and with one argument fills only one triangle.
+        let x_deviations = (!kendall)
+            .then(|| centered_columns(&x_data, &used, used_count, &x_means, &missing_x));
+        let y_deviations = if has_y {
+            (!kendall).then(|| centered_columns(&y_data, &used, used_count, &y_means, &missing_y))
+        } else {
+            None
+        };
+        let deviation_covariance = |x: &[f64], y: &[f64]| -> LongDouble {
+            if used_count < 2 {
+                LongDouble::from(NA_REAL)
+            } else {
+                long_double::add_double_products(LongDouble::ZERO, x, y) / (used_count - 1)
+            }
+        };
         for i in 0..x_columns {
-            for j in 0..y_columns {
-                if !missing_x[i] && !missing_y[j] {
-                    result[i + j * x_columns] = complete_covariance(
+            let last = if has_y || kendall { y_columns } else { i + 1 };
+            for j in 0..last {
+                if missing_x[i] || missing_y[j] {
+                    continue;
+                }
+                let value = match (&x_deviations, &y_deviations) {
+                    (Some(x_deviations), Some(y_deviations)) => {
+                        deviation_covariance(column(x_deviations, i, used_count), column(y_deviations, j, used_count))
+                    }
+                    (Some(x_deviations), None) => {
+                        deviation_covariance(column(x_deviations, i, used_count), column(x_deviations, j, used_count))
+                    }
+                    _ => complete_covariance(
                         x_data[i],
                         y_data[j],
                         &used,
                         kendall,
                         [x_means[i], y_means[j]],
-                    )
-                    .to_f64();
+                    ),
+                }
+                .to_f64();
+                result[i + j * x_columns] = value;
+                if !has_y {
+                    result[j + i * x_columns] = value;
                 }
             }
         }
         if correlate {
-            let scales = |data: &[&[f64]], missing: &[bool], means: &[Option<LongDouble>]| {
-                data.iter()
-                    .zip(missing)
-                    .zip(means)
-                    .map(|((column, &absent), &mean)| {
-                        if absent {
-                            NA_REAL
-                        } else {
-                            complete_covariance(column, column, &used, kendall, [mean, mean])
-                                .sqrt()
-                                .to_f64()
+            let scales = |data: &[&[f64]],
+                          deviations: Option<&Vec<f64>>,
+                          missing: &[bool],
+                          means: &[Option<LongDouble>]| {
+                (0..data.len())
+                    .map(|index| {
+                        if missing[index] {
+                            return NA_REAL;
                         }
+                        match deviations {
+                            Some(deviations) => {
+                                let column = column(deviations, index, used_count);
+                                deviation_covariance(column, column)
+                            }
+                            None => complete_covariance(
+                                data[index],
+                                data[index],
+                                &used,
+                                kendall,
+                                [means[index], means[index]],
+                            ),
+                        }
+                        .sqrt()
+                        .to_f64()
                     })
                     .collect::<Vec<f64>>()
             };
@@ -593,8 +635,8 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
             // diagonal of the covariance matrix.
             let (x_scale, y_scale) = if has_y {
                 (
-                    scales(&x_data, &missing_x, &x_means),
-                    scales(&y_data, &missing_y, &y_means),
+                    scales(&x_data, x_deviations.as_ref(), &missing_x, &x_means),
+                    scales(&y_data, y_deviations.as_ref(), &missing_y, &y_means),
                 )
             } else {
                 let deviations: Vec<f64> = (0..x_columns)
@@ -699,6 +741,41 @@ fn complete_covariance(
         LongDouble::from(mean.to_f64())
     });
     long_double::add_products(sum, &x, &y, x_mean, y_mean) / (count - 1)
+}
+
+/// The used rows of each column minus the column's mean rounded to double, column after
+/// column, `used_count` values each. A column holding a used NA gets NA deviations; the caller
+/// skips it.
+fn centered_columns(
+    columns: &[&[f64]],
+    used: &[bool],
+    used_count: usize,
+    means: &[Option<LongDouble>],
+    missing: &[bool],
+) -> Vec<f64> {
+    let mut deviations = Vec::with_capacity(columns.len() * used_count);
+    let mut values = Vec::new();
+    for ((&data, &mean), &absent) in columns.iter().zip(means).zip(missing) {
+        if absent {
+            deviations.resize(deviations.len() + used_count, NA_REAL);
+            continue;
+        }
+        let data = if used_count == data.len() {
+            data
+        } else {
+            values.clear();
+            values.extend(data.iter().zip(used).filter(|(_, flag)| **flag).map(|(value, _)| *value));
+            &values[..]
+        };
+        let mean = mean.unwrap_or_else(|| arith::long_double_mean(data)).to_f64();
+        deviations.extend(data.iter().map(|value| value - mean));
+    }
+    deviations
+}
+
+/// Column `index` of the deviations `centered_columns` lays out, `rows` values each.
+fn column(deviations: &[f64], index: usize, rows: usize) -> &[f64] {
+    &deviations[index * rows..(index + 1) * rows]
 }
 
 fn used_values(data: &[f64], used: &[bool]) -> Vec<f64> {

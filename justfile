@@ -186,6 +186,23 @@ bench suite *args:
     case " {{ args }} " in *" --release "*|*" --ry "*) ;; *) cargo build --release -p ry-lang -p libr -p rcmd ;; esac
     python3 -I tools/bench/bench.py {{ suite }} {{ args }}
 
+# The builtins sweep, every exported function of base, stats and utils timed on GNU R and ry (tools/bench/builtins/sweep.py):
+# `just bench-builtins check` (coverage and slower.txt, seconds), `just bench-builtins ratchet --ci` (the CI subset, minutes),
+# `just bench-builtins compare --filter '^base::paste'`, `just bench-builtins validate --filter '^stats::' --with-ry`.
+bench-builtins command *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case {{ quote(command) }} in list | check | weights) ;; *) cargo build --release -p ry-lang -p libr -p rcmd ;; esac
+    python3 -I tools/bench/builtins/sweep.py {{ command }} {{ args }}
+
+# The builtins ratchet as .github/workflows/builtins.yml runs it: a release build with its base R, then the CI subset
+# of the sweep, which fails when a function that tools/bench/builtins/slower.txt does not list is slower than GNU R.
+builtins-ci:
+    just base-r release
+    cargo build --release -p ry-lang
+    python3 -I tools/bench/builtins/sweep.py check
+    python3 -I tools/bench/builtins/sweep.py ratchet --ci
+
 # Generates the hot suite (tools/bench/hot/suite.toml and samples/) from the code bases that tooling/generate.py wrote
 # to DIR: captures their package calls on ry, validates and calibrates the samples under GNU R, then selects and weighs
 # the programs, e.g. `just bench-hot-capture /tmp/codebases`. CAPTURES keeps the raw capture for another selection.

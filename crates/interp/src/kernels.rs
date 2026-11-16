@@ -1311,6 +1311,48 @@ pub fn sum_integers(values: &[i32], na_rm: bool) -> Option<i64> {
     (na_rm || !missing).then_some(total)
 }
 
+/// The position of the first largest (`is_max`) or smallest value that is not NaN or NA, as
+/// `which.max` and `which.min` give it. Eight running extremes kept by a compare and select (which
+/// a NaN never wins) compile to packed `maxpd`/`minpd`; a second pass finds the first position of
+/// the extreme a block at a time.
+pub fn real_extreme_position(values: &[f64], is_max: bool) -> Option<usize> {
+    let extreme = if is_max {
+        lane_extreme(values, f64::NEG_INFINITY, |value, best| value > best)
+    } else {
+        lane_extreme(values, f64::INFINITY, |value, best| value < best)
+    };
+    const BLOCK: usize = 64;
+    let block = values
+        .chunks(BLOCK)
+        .position(|block| block.iter().fold(false, |found, &value| found | (value == extreme)))?;
+    let start = block * BLOCK;
+    values[start..].iter().position(|&value| value == extreme).map(|offset| start + offset)
+}
+
+fn lane_extreme(values: &[f64], start: f64, better: impl Fn(f64, f64) -> bool) -> f64 {
+    let mut lanes = [start; 8];
+    let blocks = values.chunks_exact(8);
+    let rest = blocks.remainder();
+    for block in blocks {
+        for (lane, &value) in lanes.iter_mut().zip(block) {
+            *lane = if better(value, *lane) { value } else { *lane };
+        }
+    }
+    lanes
+        .iter()
+        .chain(rest)
+        .fold(start, |best, &value| if better(value, best) { value } else { best })
+}
+
+/// The first NaN or NA in `values`. Blocks are tested whole, so the test vectorizes and a vector
+/// without one is read at memory speed.
+pub fn first_nan(values: &[f64]) -> Option<f64> {
+    values
+        .chunks(64)
+        .find(|block| block.iter().fold(false, |found, value| found | value.is_nan()))
+        .and_then(|block| block.iter().copied().find(|value| value.is_nan()))
+}
+
 /// The input length below which [`any_all`] scans element by element and stops at the first
 /// decisive value, instead of a block at a time.
 const SHORT: usize = 16;

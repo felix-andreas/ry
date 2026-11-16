@@ -89,7 +89,7 @@ def load_suites():
     return sorted(suites, key=rank)
 
 # Suites that the benchmarks page shows in a section of their own, outside the summary.
-outside_summary = ["codebases"]
+outside_summary = ["codebases", "builtins"]
 
 def against_gnu_r(suites):
     """The suites whose ratios are speed-ups over GNU R and that belong in the summary. A results
