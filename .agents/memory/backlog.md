@@ -3568,10 +3568,14 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
 - **Top CRAN packages: what still fails** (`just top-packages`, `.corpus-top/tests/summary-installed.md`).
   The 100 most-downloaded CRAN packages outside the closure (`tools/corpus/top-packages.txt`), built
   from source on ry: 86 have tests. In a container with the system libraries, GNU R passes 84 and
-  ry passes 82 of those 84. In the cloud container GNU R passes 74 and ry passes 75, 72 of them
+  ry passes 82 of those 84. In the cloud container GNU R passes 79 and ry passes 76, all of them
   where GNU R passes: units, sf, terra and ggplot2's `coord_sf` tests need system libraries
-  (udunits, GDAL) the container lacks, and lme4 and reformulas need rbibutils above the installed
-  2.3.
+  (udunits, GDAL) the container lacks, and parallelly and future.apply fail on both.
+  - dplyr (`test-select-helpers.R:14`) and janitor (`test-adorn-ns.R:27`): in the full suite,
+    `select_at(gf, vars(group_cols()))` fails with "no applicable method for 'group_vars' applied
+    to an object of class \"list\"" (or "pairlist"): tidyselect's peeked data is the wrong object.
+    The file alone passes, so an earlier test file sets it up; run `testthat::test_dir` over
+    dplyr's tests to reproduce, then bisect the files.
   - Run the suites with `LC_ALL=C.UTF-8`, as the oracle does: in the C locale, desc reports
     "Duplicate DESCRIPTION fields" on ry, a false failure.
   - QuickJSR fails only when ry prints its notice about packages installed by another ry build on
