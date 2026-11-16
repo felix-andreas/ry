@@ -1967,8 +1967,14 @@ fn sort_by_key<K: RadixKey>(
     }
     let span = high - low;
     // Past about a million buckets the counting passes miss cache on every row, and the radix
-    // sort's sequential scatters win.
-    if count > SHORT_SORT && span < (count.max(1 << 16) as u64).min(1 << 20) {
+    // sort's sequential scatters win. A short slice counts only while its buckets are few
+    // beside its rows, since zeroing them would cost more than the comparison sort.
+    let counting_limit = if count > SHORT_SORT {
+        (count.max(1 << 16) as u64).min(1 << 20)
+    } else {
+        4 * count as u64
+    };
+    if span < counting_limit {
         // Positions fit `u32` like the rows do, and the narrower buckets halve the memory the
         // counting pass touches at random.
         let mut starts = vec![0u32; span as usize + 2];
