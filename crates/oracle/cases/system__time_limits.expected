@@ -1,0 +1,25 @@
+[stdout]
+| [1] "reached elapsed time limit"
+| [1] "no limit"
+| [1] "reached CPU time limit"
+| [[1]]
+| [1] "reached elapsed time limit"
+| 
+| [[2]]
+| [1] "simpleError" "error"       "condition"  
+| 
+| [1] "no limit"
+| [1] "no limit"
+| [1] "no limit"
+| [1] "no limit"
+| [1] "no limit"
+| [1] "reached elapsed time limit"
+| [1] "no limit"
+| [1] "reached session elapsed time limit"
+| [1] "no limit"
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

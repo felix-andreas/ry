@@ -59,6 +59,15 @@ package whose shared object imports such a function (unless its prototype under
 `logs/install.log` names any package that imports one after the rebuild: either it declares the
 function itself (S7 does, and is correct), or its newest source failed to install.
 
+A package newer than the snapshot, from the retry against the newest snapshot or from that
+rebuild, can need a newer version of a dependency the snapshot already installed, and
+`install.packages()` never upgrades an installed dependency. Rdpack 2.6.6, for example, imports
+rbibutils (> 2.4) while the snapshot holds 2.3, so every Rdpack user failed to load. The script
+therefore checks the version constraints in every installed package's `Depends`, `Imports` and
+`LinkingTo`, reinstalls each dependency that fails one from the newest CRAN source, and repeats
+until all hold (at most three rounds). `logs/install.log` lists each unmet constraint it found and
+any that still fails.
+
 ## The differential oracle
 
 ```sh

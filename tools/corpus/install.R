@@ -187,6 +187,47 @@ if (length(calls) > 0) {
   }
 }
 
+# A package newer than the snapshot (from the retry against the newest snapshot, or rebuilt above)
+# can need a newer version of a dependency the snapshot already installed, and install.packages()
+# never upgrades an installed dependency, so the package fails to load: Rdpack 2.6.6 imports
+# rbibutils (> 2.4) while the snapshot holds 2.3. Each dependency that fails a version constraint is
+# reinstalled from the newest CRAN source, and the check repeats because a newer dependency can
+# need newer dependencies of its own.
+unmet_constraints <- function() {
+  fields <- c("Depends", "Imports", "LinkingTo")
+  db <- installed.packages(lib.loc = c(library_dir, .Library), fields = fields, noCache = TRUE)
+  db <- db[!duplicated(rownames(db)), , drop = FALSE]
+  versions <- db[, "Version"]
+  unmet <- list()
+  for (package in rownames(db)) {
+    entries <- trimws(unlist(strsplit(paste(db[package, fields][!is.na(db[package, fields])], collapse = ","), ",")))
+    parts <- regmatches(entries, regexec("^([A-Za-z][A-Za-z0-9.]*)\\s*\\(\\s*([<>=]+)\\s*([^)]+?)\\s*\\)$", entries))
+    for (part in parts[lengths(parts) == 4]) {
+      dependency <- part[2]
+      if (dependency == "R" || !dependency %in% names(versions) || !part[3] %in% c(">=", ">", "<=", "<", "==")) next
+      holds <- do.call(part[3], list(package_version(versions[[dependency]]), package_version(part[4])))
+      if (!holds) unmet[[length(unmet) + 1]] <- sprintf("%s needs %s (%s %s), found %s", package, dependency, part[3], part[4], versions[[dependency]])
+      if (!holds) names(unmet)[length(unmet)] <- dependency
+    }
+  }
+  unmet
+}
+# Each dependency is upgraded once: an upper bound or a package CRAN lacks stays unmet however
+# often it is rebuilt.
+upgraded <- character()
+for (round in 1:3) {
+  unmet <- unmet_constraints()
+  upgrade <- setdiff(unique(names(unmet)), upgraded)
+  if (length(upgrade) == 0) break
+  cat(sprintf("unmet version constraint: %s\n", unlist(unmet)), sep = "")
+  with_warnings(install.packages(
+    upgrade, lib = library_dir, repos = c(CRAN = "https://cloud.r-project.org"), type = "source"
+  ))
+  upgraded <- c(upgraded, upgrade)
+}
+unmet <- unmet_constraints()
+if (length(unmet) > 0) cat(sprintf("still unmet: %s\n", unlist(unmet)), sep = "")
+
 # Record the outcome per package: every root and remote, with its reason when missing.
 have <- rownames(installed.packages(noCache = TRUE))
 targets <- c(roots, vapply(remotes, `[[`, "", "name"))
