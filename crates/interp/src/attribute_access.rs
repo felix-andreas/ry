@@ -142,12 +142,8 @@ pub unsafe fn expand_row_names(value: Sexp) -> R<Sexp> {
         // GNU R's `getAttrib` gives `1:n` as a compact sequence, so reading the row names of a
         // long data frame allocates nothing.
         if count > 0
-            && let Some(sequence) = (crate::interp().hooks.compact_sequence)(
-                SexpType::Integer,
-                count,
-                1.0,
-                1.0,
-            )?
+            && let Some(sequence) =
+                (crate::interp().hooks.compact_sequence)(SexpType::Integer, count, 1.0, 1.0)?
         {
             return Ok(sequence);
         }

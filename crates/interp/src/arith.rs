@@ -3343,8 +3343,9 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
                                     continue;
                                 }
                                 let made = match chunk.iter().position(|value| value.is_nan()) {
-                                    Some(index) => long_double::add_all(before, &chunk[..index])
-                                        .to_f64(),
+                                    Some(index) => {
+                                        long_double::add_all(before, &chunk[..index]).to_f64()
+                                    }
                                     None => total.to_f64(),
                                 };
                                 answer = Some(match chunk.iter().find(|value| value.is_nan()) {
@@ -4792,7 +4793,7 @@ unsafe fn math2(call: &Call<'_>, function: fn(f64, f64) -> f64) -> R<Sexp> {
     Ok(result)
 }
 
-unsafe fn bitwise(call: &Call<'_>, function: fn(i32, i32) -> i32) -> R<Sexp> {
+unsafe fn bitwise(call: &Call<'_>, function: impl Fn(i32, i32) -> i32) -> R<Sexp> {
     let left = coerce_vector(call.arg(0), SexpType::Integer)?;
     let right = coerce_vector(call.arg(1), SexpType::Integer)?;
     let left_length = length(left);
@@ -4802,15 +4803,17 @@ unsafe fn bitwise(call: &Call<'_>, function: fn(i32, i32) -> i32) -> R<Sexp> {
     } else {
         left_length.max(right_length)
     };
-    let result = alloc(SexpType::Integer, count)?;
-    for index in 0..count {
-        let a = values::ints(left)[index % left_length];
-        let b = values::ints(right)[index % right_length];
-        values::ints_mut(result)[index] = if a == NA_INTEGER || b == NA_INTEGER {
-            NA_INTEGER
-        } else {
-            function(a, b)
-        };
+    let result = values::alloc_uninit(SexpType::Integer, count)?;
+    let out = values::ints_mut(result);
+    if count > 0 {
+        fold_items(out, values::ints(left), true, |_, value| value);
+        fold_items(out, values::ints(right), false, |a, b| {
+            if a == NA_INTEGER || b == NA_INTEGER {
+                NA_INTEGER
+            } else {
+                function(a, b)
+            }
+        });
     }
     Ok(result)
 }
@@ -4818,10 +4821,12 @@ unsafe fn bitwise(call: &Call<'_>, function: fn(i32, i32) -> i32) -> R<Sexp> {
 unsafe fn do_bitw_not(call: &Call<'_>) -> R<Sexp> {
     let operand = coerce_vector(call.arg(0), SexpType::Integer)?;
     let count = length(operand);
-    let result = alloc(SexpType::Integer, count)?;
-    for index in 0..count {
-        let value = values::ints(operand)[index];
-        values::ints_mut(result)[index] = if value == NA_INTEGER {
+    let result = values::alloc_uninit(SexpType::Integer, count)?;
+    for (slot, &value) in values::ints_mut(result)
+        .iter_mut()
+        .zip(values::ints(operand))
+    {
+        *slot = if value == NA_INTEGER {
             NA_INTEGER
         } else {
             !value
@@ -4979,7 +4984,9 @@ unsafe fn parallel_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
                         || (value != NA_INTEGER && (value > current) == is_max && value != current)
                 } else {
                     value == NA_INTEGER
-                        || (current != NA_INTEGER && (value > current) == is_max && value != current)
+                        || (current != NA_INTEGER
+                            && (value > current) == is_max
+                            && value != current)
                 };
                 if replace { value } else { current }
             });
@@ -4991,7 +4998,11 @@ unsafe fn parallel_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
         let item = coerce_vector(item, SexpType::Real)?;
         let out = values::reals_mut(result);
         fold_items(out, values::reals(item), position == 0, |current, value| {
-            let better = if is_max { value > current } else { value < current };
+            let better = if is_max {
+                value > current
+            } else {
+                value < current
+            };
             let replace = if na_rm {
                 current.is_nan() || better
             } else {

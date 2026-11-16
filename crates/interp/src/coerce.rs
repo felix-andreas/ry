@@ -382,7 +382,10 @@ pub unsafe fn coerce_atomic(
     match (source, kind) {
         (SexpType::Real, SexpType::Integer) => {
             let mut out_of_range = false;
-            for (slot, &value) in values::ints_mut(result).iter_mut().zip(values::reals(object)) {
+            for (slot, &value) in values::ints_mut(result)
+                .iter_mut()
+                .zip(values::reals(object))
+            {
                 // `as i32` saturates and maps NaN to 0, so range and NaN are decided first.
                 *slot = if value.is_nan() {
                     NA_INTEGER
@@ -401,7 +404,10 @@ pub unsafe fn coerce_atomic(
             return Ok(result);
         }
         (SexpType::Integer | SexpType::Logical, SexpType::Real) => {
-            for (slot, &value) in values::reals_mut(result).iter_mut().zip(values::ints(object)) {
+            for (slot, &value) in values::reals_mut(result)
+                .iter_mut()
+                .zip(values::ints(object))
+            {
                 *slot = if value == NA_INTEGER {
                     NA_REAL
                 } else {
@@ -588,7 +594,11 @@ pub unsafe fn coerce_atomic(
             let true_text = values::mkchar("TRUE")?;
             let false_text = values::mkchar("FALSE")?;
             let missing = na_string();
-            for (slot, &value) in result.slice_mut::<Sexp>().iter_mut().zip(values::ints(object)) {
+            for (slot, &value) in result
+                .slice_mut::<Sexp>()
+                .iter_mut()
+                .zip(values::ints(object))
+            {
                 *slot = match value {
                     NA_LOGICAL => missing,
                     0 => false_text,

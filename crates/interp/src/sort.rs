@@ -399,7 +399,7 @@ unsafe fn do_sort(call: &Call<'_>) -> R<Sexp> {
             // Sorting the strings' collation ranks compares each distinct string once. `NA`
             // sorts last, or first when decreasing, as the reversed comparison put it.
             let source = values::materialize(x)?;
-            let ranks = Column::Ranks(string_ranks(source, collate));
+            let ranks = Column::Ranks(string_ranks(source, TextOrder::Collation));
             let Some(keys) = sort_keys(&ranks, decreasing, !decreasing) else {
                 unreachable!("string ranks always have radix keys");
             };
@@ -524,7 +524,7 @@ unsafe fn do_order(call: &Call<'_>) -> R<Sexp> {
         .iter()
         .map(|&key| match key.kind() {
             SexpType::Raw => None,
-            SexpType::String => Some(Column::Ranks(string_ranks(key, collate))),
+            SexpType::String => Some(Column::Ranks(string_ranks(key, TextOrder::Collation))),
             _ => column(key),
         })
         .collect();
@@ -1309,7 +1309,7 @@ unsafe fn radix_column<'a>(vector: Sexp, sort_strings: bool) -> Option<Column<'a
                 .collect();
             Some(Column::Grouped(codes))
         }
-        SexpType::String => Some(Column::Ranks(string_ranks(vector, Ord::cmp))),
+        SexpType::String => Some(Column::Ranks(string_ranks(vector, TextOrder::Bytes))),
         _ => column(vector),
     }
 }
@@ -1319,7 +1319,9 @@ unsafe fn radix_column<'a>(vector: Sexp, sort_strings: bool) -> Option<Column<'a
 /// met, with the number negated in its truelength as data.table's C marks strings, which costs
 /// one load per row and no table. The saved truelengths are put back before anything else can
 /// run.
-unsafe fn string_ranks(vector: Sexp, compare: fn(&str, &str) -> Ordering) -> Vec<u32> {
+unsafe fn string_ranks(vector: Sexp, order: TextOrder) -> Vec<u32> {
+    let bytewise = matches!(order, TextOrder::Bytes) || c_collation();
+    let compare: fn(&str, &str) -> Ordering = if bytewise { Ord::cmp } else { collate };
     let na = na_string();
     let rows = length(vector);
     let mut ranks: Vec<u32> = Vec::with_capacity(rows);
@@ -1358,11 +1360,49 @@ unsafe fn string_ranks(vector: Sexp, compare: fn(&str, &str) -> Ordering) -> Vec
     if stale {
         return string_ranks_by_text(vector, compare);
     }
-    // Strings intern by encoding, so one text can be several CHARSXPs, which share a rank.
-    let texts: Vec<Cow<'_, str>> = saved
-        .iter()
-        .map(|&(charsxp, _)| char_str(charsxp))
-        .collect();
+    let rank_of_code = match order {
+        // GNU R's radix sort compares `CHAR()` bytes untranslated, so a latin1 string and its
+        // UTF-8 twin rank apart.
+        TextOrder::Bytes => {
+            let texts: Vec<&[u8]> = saved
+                .iter()
+                .map(|&(charsxp, _)| {
+                    let bytes = charsxp.bytes();
+                    memchr::memchr(0, bytes).map_or(bytes, |end| &bytes[..end])
+                })
+                .collect();
+            byte_ranks(&texts)
+        }
+        // Strings intern by encoding, so one text can be several CHARSXPs, which share a rank.
+        TextOrder::Collation => {
+            let texts: Vec<Cow<'_, str>> = saved
+                .iter()
+                .map(|&(charsxp, _)| char_str(charsxp))
+                .collect();
+            if bytewise {
+                let texts: Vec<&[u8]> = texts.iter().map(|text| text.as_bytes()).collect();
+                byte_ranks(&texts)
+            } else {
+                collation_ranks(&texts, compare)
+            }
+        }
+    };
+    for slot in ranks.iter_mut().filter(|slot| **slot != 0) {
+        *slot = rank_of_code[*slot as usize - 1];
+    }
+    ranks
+}
+
+/// How [`string_ranks`] orders texts: by their stored bytes, as the radix sort does whatever
+/// the locale, or by the session's collation.
+#[derive(Clone, Copy)]
+enum TextOrder {
+    Bytes,
+    Collation,
+}
+
+/// The rank of each text (from 1) in collation order, through a comparison sort.
+fn collation_ranks(texts: &[Cow<'_, str>], compare: fn(&str, &str) -> Ordering) -> Vec<u32> {
     let mut by_text: Vec<u32> = (0..texts.len() as u32).collect();
     by_text
         .sort_unstable_by(|&left, &right| compare(&texts[left as usize], &texts[right as usize]));
@@ -1380,10 +1420,123 @@ unsafe fn string_ranks(vector: Sexp, compare: fn(&str, &str) -> Ordering) -> Vec
         }
         rank_of_code[code as usize] = rank;
     }
-    for slot in ranks.iter_mut().filter(|slot| **slot != 0) {
-        *slot = rank_of_code[*slot as usize - 1];
+    rank_of_code
+}
+
+/// The rank of each text (from 1) in byte order. Eight bytes of each text, zero-padded, form a
+/// big-endian key that orders like the bytes themselves, because no R string holds a NUL. The
+/// keys start past the prefix every text shares, are sorted as integers, and a run of equal
+/// keys is sorted again on the next eight bytes, so a text's bytes are read once per eight
+/// rather than once per comparison.
+fn byte_ranks(texts: &[&[u8]]) -> Vec<u32> {
+    let mut rank_of_code = vec![0u32; texts.len()];
+    let Some(&first) = texts.first() else {
+        return rank_of_code;
+    };
+    let mut entries: Vec<(u64, u32)> = Vec::with_capacity(texts.len());
+    let mut common = first.len();
+    for (code, &text) in texts.iter().enumerate() {
+        common = common.min(
+            first[..common.min(text.len())]
+                .iter()
+                .zip(text)
+                .take_while(|(left, right)| left == right)
+                .count(),
+        );
+        entries.push((0, code as u32));
     }
-    ranks
+    let mut scratch = Vec::new();
+    let mut rank = 0;
+    // Runs still to rank, in reverse order, each with the offset its keys start at; `None`
+    // marks a run of equal texts.
+    let mut pending: Vec<(usize, usize, Option<usize>)> = vec![(0, entries.len(), Some(common))];
+    while let Some((start, end, offset)) = pending.pop() {
+        let run = &mut entries[start..end];
+        let Some(offset) = offset else {
+            rank += 1;
+            for &(_, code) in run.iter() {
+                rank_of_code[code as usize] = rank;
+            }
+            continue;
+        };
+        for entry in run.iter_mut() {
+            entry.0 = byte_key(texts[entry.1 as usize], offset);
+        }
+        sort_by_key_bytes(run, &mut scratch);
+        let mut runs = Vec::new();
+        let mut at = 0;
+        while at < run.len() {
+            let key = run[at].0;
+            let length = run[at..].iter().take_while(|entry| entry.0 == key).count();
+            let longer = length > 1
+                && run[at..at + length]
+                    .iter()
+                    .any(|&(_, code)| texts[code as usize].len() > offset + KEY_BYTES);
+            runs.push((
+                start + at,
+                start + at + length,
+                longer.then_some(offset + KEY_BYTES),
+            ));
+            at += length;
+        }
+        pending.extend(runs.into_iter().rev());
+    }
+    rank_of_code
+}
+
+const KEY_BYTES: usize = 8;
+
+/// The bytes of `text` from `offset`, eight of them zero-padded, as a big-endian integer.
+fn byte_key(text: &[u8], offset: usize) -> u64 {
+    let mut bytes = [0u8; KEY_BYTES];
+    if let Some(rest) = text.get(offset..) {
+        let length = rest.len().min(KEY_BYTES);
+        bytes[..length].copy_from_slice(&rest[..length]);
+    }
+    u64::from_be_bytes(bytes)
+}
+
+/// Sorts `entries` by key: a short run by comparison, a long one by an LSD radix sort that
+/// skips each byte every key shares.
+fn sort_by_key_bytes(entries: &mut [(u64, u32)], scratch: &mut Vec<(u64, u32)>) {
+    if entries.len() < 256 {
+        entries.sort_unstable_by_key(|entry| entry.0);
+        return;
+    }
+    let mut counts = [[0usize; 256]; KEY_BYTES];
+    for &(key, _) in entries.iter() {
+        for (byte, histogram) in counts.iter_mut().enumerate() {
+            histogram[(key >> (8 * byte)) as usize & 0xff] += 1;
+        }
+    }
+    scratch.clear();
+    scratch.resize(entries.len(), (0, 0));
+    let mut in_scratch = false;
+    for (byte, histogram) in counts.iter_mut().enumerate() {
+        if histogram.iter().any(|&count| count == entries.len()) {
+            continue;
+        }
+        let mut offset = 0;
+        for count in histogram.iter_mut() {
+            let size = *count;
+            *count = offset;
+            offset += size;
+        }
+        let (source, target) = if in_scratch {
+            (&scratch[..], &mut *entries)
+        } else {
+            (&*entries, &mut scratch[..])
+        };
+        for &entry in source {
+            let bucket = (entry.0 >> (8 * byte)) as usize & 0xff;
+            target[histogram[bucket]] = entry;
+            histogram[bucket] += 1;
+        }
+        in_scratch = !in_scratch;
+    }
+    if in_scratch {
+        entries.copy_from_slice(scratch);
+    }
 }
 
 /// [`string_ranks`] through a table of the texts, for a vector whose strings carry truelength

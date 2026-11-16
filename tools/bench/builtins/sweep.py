@@ -381,7 +381,7 @@ def command_ratchet(args):
     ids = selected_ids(listing, args.filter, args.ci)
     table = engines(args.ry, args.rscript, jit_off=not args.ci or args.jit_off)
     batch, batches = (0.004, 3) if args.ci else (args.batch, args.batches)
-    measured = measure(ids, table, args.rounds, batch, batches)
+    measured = measure(ids, table, args.rounds, batch, batches, parallel=args.parallel)
     ratios, broken = case_ratios(measured, ids)
     if broken:
         for case, reason in broken.items():
@@ -397,7 +397,7 @@ def command_ratchet(args):
         # function that looks slower is timed again before it fails the ratchet.
         print(f"{len(suspects)} cases of unlisted functions look slower; timing them {args.confirm} more rounds",
               file=sys.stderr)
-        again = measure(suspects, table, args.confirm, batch, batches)
+        again = measure(suspects, table, args.confirm, batch, batches, parallel=args.parallel)
         for engine in measured:
             measured[engine].extend({case: round_[case] for case in suspects if case in round_} for round_ in again[engine])
         ratios.update(case_ratios({engine: [round_ for round_ in rounds if all(case in round_ for case in suspects)]

@@ -4274,7 +4274,12 @@ unsafe fn place_elements(result: Sexp, data: Sexp, rows: usize, by_row: bool) ->
         ),
         SexpType::Raw => place(values::raws_mut(result), values::raws(data), rows, by_row),
         SexpType::String | SexpType::List | SexpType::Expression => {
-            place(result.slice_mut::<Sexp>(), data.slice::<Sexp>(), rows, by_row);
+            place(
+                result.slice_mut::<Sexp>(),
+                data.slice::<Sexp>(),
+                rows,
+                by_row,
+            );
             crate::heap().count_written_elements(result);
         }
         _ => return false,

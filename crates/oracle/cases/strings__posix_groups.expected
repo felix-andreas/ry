@@ -1,0 +1,38 @@
+[stdout]
+| a*(a*)                             aa       aa|
+| (a*)(a*)                           aaa      aaa|aaa|
+| .*_(\d+)                           x_1_23   x_1_23|23
+| (.*)_(.*)                          a_b_c    a_b_c|a_b|c
+| x*(x?)y                            xxy      xxy|
+| (a+)(a+)                           aaaa     aaaa|aaa|a
+| ([a-z]*)([a-z]*)z                  abz      abz|ab|
+| a?(ab)?                            ab       ab|ab
+| (.?)(.*)                           abc      abc|a|bc
+| [0-9]*([0-9])                      123      123|3
+| ^(a*)(b?)b*$                       aabbb    aabbb|aa|b
+| ((a*)b*)(b*)                       aabb     aabb|aabb|aa|
+| (a|ab)(c|bcd)                      abcd     abcd|a|bcd
+| (a*)(ab)*b                         aabab    aab|aa|
+| id([0-9]+)_([a-z])                 xid00042_q id00042_q|00042|q
+| (x*)(y*)                           zzz      ||
+| ([[:alpha:]]+)([[:digit:]]{2,3})   abc12345 abc123|abc|123
+| (A+)(a*)                           AAaa     AAaa|AA|aa
+| [1] "q-00042"  "z-7"      "nope"     NA         "a-1 b-22"
+| [1] "<aaa|>" "<|>baa" "<|>"   
+| [1] "[ab,12][cd,3]"
+| [[1]]
+| [1] 2 2 6
+| attr(,"match.length")
+| [1] 4 4 0
+| attr(,"index.type")
+| [1] "chars"
+| attr(,"useBytes")
+| [1] TRUE
+| 
+| [1] "gz"    "noext"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("gz", "noext")

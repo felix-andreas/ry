@@ -3311,7 +3311,9 @@ unsafe fn encode_binary<'a>(
         BinaryType::Double => {
             let out = buffer(count * size)?;
             if size == 4 {
-                encode(out, object.slice::<f64>(), swap, |value| (value as f32).to_ne_bytes());
+                encode(out, object.slice::<f64>(), swap, |value| {
+                    (value as f32).to_ne_bytes()
+                });
             } else {
                 encode(out, object.slice::<f64>(), swap, f64::to_ne_bytes);
             }

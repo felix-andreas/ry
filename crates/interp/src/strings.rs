@@ -3170,6 +3170,9 @@ struct LazyAutomata {
 struct Automata {
     first: meta::Regex,
     longest: meta::Regex,
+    /// Whether `first`'s capture groups are TRE's whenever its match spans as far as the
+    /// longest one; see [`greedy_single_width`].
+    greedy_groups: bool,
 }
 
 impl LazyAutomata {
@@ -3187,13 +3190,74 @@ impl LazyAutomata {
                         .build(&self.pattern)
                         .ok()
                 };
+                let greedy_groups = regex_syntax::ParserBuilder::new()
+                    .case_insensitive(self.ignore_case)
+                    .build()
+                    .parse(&self.pattern)
+                    .is_ok_and(|hir| greedy_single_width(&hir));
                 Some(Automata {
                     first: build(MatchKind::LeftmostFirst)?,
                     longest: build(MatchKind::All)?,
+                    greedy_groups,
                 })
             })
             .as_ref()
     }
+}
+
+/// Whether every repetition in `hir` is greedy and repeats a single character, with no
+/// alternation anywhere. A backtracking match of such a pattern makes each repetition, in
+/// pattern order, as long as the rest of the pattern allows, so when it ends where the longest
+/// match ends its groups are the POSIX ones TRE reports. A repeated group or an alternation
+/// breaks this: `(a)?(ab)?b*` on `"abb"` spans the same text either way, but TRE gives the
+/// second group `"ab"` and a backtracker gives the first one `"a"`.
+fn greedy_single_width(hir: &regex_syntax::hir::Hir) -> bool {
+    use regex_syntax::hir::HirKind;
+    match hir.kind() {
+        HirKind::Empty | HirKind::Literal(_) | HirKind::Class(_) | HirKind::Look(_) => true,
+        HirKind::Repetition(repetition) => {
+            repetition.greedy
+                && match repetition.sub.kind() {
+                    HirKind::Class(_) => true,
+                    HirKind::Literal(literal) => {
+                        std::str::from_utf8(&literal.0).is_ok_and(|text| text.chars().count() == 1)
+                    }
+                    _ => false,
+                }
+        }
+        HirKind::Capture(capture) => greedy_single_width(&capture.sub),
+        HirKind::Concat(items) => items.iter().all(greedy_single_width),
+        HirKind::Alternation(_) => false,
+    }
+}
+
+/// The groups of the leftmost match from `first`, or `None` (inner) when there is no match;
+/// `None` (outer) when the match ends before the longest one does, so only the backtracker
+/// can tell TRE's groups.
+fn greedy_captures(
+    first: &meta::Regex,
+    longest: &meta::Regex,
+    text: &str,
+    from: usize,
+) -> Option<Option<Groups>> {
+    let mut captures = first.create_captures();
+    first.search_captures(&Input::new(text).range(from..), &mut captures);
+    let Some(found) = captures.get_match() else {
+        return Some(None);
+    };
+    let anchored = Input::new(text)
+        .range(found.start()..)
+        .anchored(Anchored::Yes);
+    let end = longest
+        .search(&anchored)
+        .map_or(found.end(), |longest| longest.end());
+    (end == found.end()).then(|| {
+        Some(
+            (0..captures.group_len())
+                .map(|group| captures.get_group(group).map(|span| (span.start, span.end)))
+                .collect(),
+        )
+    })
 }
 
 /// How many compiled patterns [`Matcher::compile`] keeps. R code calls `grepl` and `sub` with the
@@ -3339,7 +3403,7 @@ impl Matcher {
                 shortest,
                 ..
             } => {
-                let Some(Automata { first, longest }) = automata.get() else {
+                let Some(Automata { first, longest, .. }) = automata.get() else {
                     return regex
                         .find_from_pos(text, from)
                         .map(|found| found.map(|found| (found.start(), found.end())))
@@ -3398,6 +3462,19 @@ impl Matcher {
                         .map(|group| captures.get_group(group).map(|span| (span.start, span.end)))
                         .collect(),
                 ))
+            }
+            Matcher::Automaton {
+                automata,
+                shortest: false,
+                ..
+            } if let Some(Automata {
+                first,
+                longest,
+                greedy_groups: true,
+            }) = automata.get()
+                && let Some(groups) = greedy_captures(first, longest, text, from) =>
+            {
+                Ok(groups)
             }
             Matcher::Pattern { regex, .. } | Matcher::Automaton { regex, .. } => {
                 let Some(captures) = regex
