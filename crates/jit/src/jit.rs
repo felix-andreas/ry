@@ -279,31 +279,14 @@ unsafe fn worth_recording(machine: &Machine<'_>) -> bool {
 /// at [`ENTRY_COST`]: zero when handing instructions back costs more than the native work
 /// saves.
 fn saving(work: Work) -> u64 {
-    let [_, step, native, call] = experiment_costs();
-    (native * work.native as u64 + call * work.calls as u64)
-        .saturating_sub(step * work.steps as u64)
-}
-
-// EXPERIMENT: remove before landing.
-fn experiment_costs() -> [u64; 4] {
-    static COSTS: std::sync::OnceLock<[u64; 4]> = std::sync::OnceLock::new();
-    *COSTS.get_or_init(|| {
-        let mut costs = [ENTRY_COST, STEP_COST, SAVING_PER_NATIVE, SAVING_PER_CALL];
-        if let Ok(text) = std::env::var("RY_JIT_COSTS") {
-            for (cost, part) in costs.iter_mut().zip(text.split(',')) {
-                if let Ok(value) = part.parse() {
-                    *cost = value;
-                }
-            }
-        }
-        costs
-    })
+    (SAVING_PER_NATIVE * work.native as u64 + SAVING_PER_CALL * work.calls as u64)
+        .saturating_sub(STEP_COST * work.steps as u64)
 }
 
 /// What one call of a body is expected to save when tier 0 enters its compiled code: zero when
 /// entering costs more than the body's work saves.
 fn saving_per_call(work: Work) -> u64 {
-    saving(work).saturating_sub(experiment_costs()[0])
+    saving(work).saturating_sub(ENTRY_COST)
 }
 
 /// Whether a loop-free body that just turned hot is expected to repay its compilation, by the
