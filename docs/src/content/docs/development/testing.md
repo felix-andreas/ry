@@ -552,6 +552,25 @@ The command prints the reduced program, its signature and a replay command (with
 `ORACLE_OBSERVE=1` when only the observer's dump differs), and `--output` writes it. `--budget`
 caps the candidates (2000 by default), and the reduction is deterministic.
 `oracle::reduce::reduce` takes any predicate, so its unit tests run without an engine.
+
+A grammar only covers what its author thought of, so a second source of programs is real R code,
+mutated (`oracle::corpus`, `oracle::mutate`). The corpus is extracted at run time into
+`target/fuzz-corpus` and never committed: the examples of every base package's help pages
+(`tools::Rd2ex`), the `tests/*.R` of the R source for the installed release (downloaded from CRAN
+once by `oracle fuzz --corpus`), the oracle cases, and the tests of corpus packages that ship
+them. Each file splits into snippets, runs of top-level expressions cut at blank lines, without
+the paragraphs that touch graphics, files, the clock, the environment, addresses or unseeded
+random numbers. A seed picks a snippet and applies one to four mutations on the syntax tree:
+boundary values for literals, materialized `a:b`, named, reversed or emptied `c()`, a statement
+wrapped in a closure, `local`, `identity`, a serialization round trip or `eval(quote())`,
+repeated calls, swapped, dropped or duplicated arguments, and neighboring operators. Every engine
+runs under the deep observer. The unmutated snippet runs first: an engine that already differs on
+it is a plain compatibility gap, listed in `target/fuzz-corpus/base-differs.txt`, and only a
+mutant that diverges while its snippet agrees is a finding. A diverging mutant runs under GNU R a
+second time and is dropped when GNU R disagrees with itself. `oracle fuzz --corpus --seed N
+--print` prints a seed's program, `just fuzz-corpus SEED COUNT ENGINES` is the long run, and
+`fuzz_corpus_mutants_agree_with_gnu_r` is the bounded pass.
+
 `crates/oracle/tests/test_gallery.rs` renders a seeded sample of the plot gallery under both
 engines and compares the images ([Corpus and oracle](/development/corpus-and-oracle)).
 `just gc-torture` runs every oracle case on every core and takes about ten minutes on four cores

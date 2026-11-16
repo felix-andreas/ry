@@ -10,6 +10,7 @@
 use {
     oracle::{
         Engine, ProcessEngine,
+        corpus::{check_corpus_seed, load_corpus, render_corpus_divergences},
         fuzz::{
             ProgramKind, SeedReport, check_seed, format_numbers_program, native_helpers_program,
             parse_data_program, program, render_divergences, sprintf_program, trace_back_program,
@@ -407,4 +408,35 @@ fn fuzz_sprintf_matches_gnu_r() {
         );
     }
     std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
+}
+
+/// Mutants of real R code (help examples, R's regression tests when downloaded, the oracle's
+/// cases) must agree with GNU R at tier 0 under the deep observer, wherever the unmutated
+/// snippet does. A snippet that already differs is a compatibility gap the oracle cases track,
+/// so it is skipped rather than reported.
+#[test]
+fn fuzz_corpus_mutants_agree_with_gnu_r() {
+    if !gnu_r_available() || !ry_runtime_available() {
+        eprintln!("skipped: GNU R or ry's runtime is not available");
+        return;
+    }
+    let corpus = load_corpus(false).expect("extract the fuzz corpus");
+    let gnu_r = ProcessEngine::gnu_r().with_timeout(TIMEOUT).observing();
+    let tier0 = ProcessEngine::ry_tier0().with_timeout(TIMEOUT).observing();
+    let directory = scratch_directory();
+    let mut failures = Vec::new();
+    for seed in fuzz_seeds(4) {
+        let report = check_corpus_seed(seed, &corpus.snippets, &gnu_r, &[&tier0], &directory)
+            .unwrap_or_else(|error| panic!("seed {seed}: GNU R failed: {error}"));
+        if !report.divergences.is_empty() {
+            failures.push(render_corpus_divergences(&report));
+        }
+    }
+    std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
+    assert!(
+        failures.is_empty(),
+        "{} corpus mutants diverged:\n{}\nreplay with FUZZ_SEED=<seed> cargo test -p oracle --test test_differential fuzz_corpus",
+        failures.len(),
+        failures.join("\n")
+    );
 }

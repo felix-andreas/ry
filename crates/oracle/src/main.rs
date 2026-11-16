@@ -124,6 +124,11 @@ enum Command {
         /// print the reduced program under the divergence.
         #[arg(long)]
         reduce: bool,
+        /// Mutate snippets of real R code (`oracle::corpus`) instead of generating programs.
+        /// A snippet GNU R and an engine already disagree on is listed in
+        /// `fuzz-corpus/base-differs.txt` in the target directory, not reported as a finding.
+        #[arg(long)]
+        corpus: bool,
     },
     /// Shrink a program on which an engine diverges from GNU R to a small one on which it
     /// diverges the same way, and print it with the command that replays it.
@@ -225,9 +230,13 @@ fn main() -> ExitCode {
         seed,
         print: true,
         kind,
+        corpus,
         ..
     } = &cli.command
     {
+        if *corpus {
+            return print_corpus_program(*seed);
+        }
         return match fuzz_kinds(kind).as_deref() {
             Some([kind]) => {
                 print!("{}", kind.program(*seed));
@@ -356,7 +365,10 @@ fn main() -> ExitCode {
             minutes,
             findings,
             reduce,
-        } => run_fuzz(FuzzRun {
+            corpus,
+        } => if corpus {
+            run_corpus_fuzz(seed, count, &engines, Duration::from_secs(timeout))
+        } else { run_fuzz(FuzzRun {
             first: seed,
             count,
             engines: &engines,
@@ -367,7 +379,7 @@ fn main() -> ExitCode {
             budget: minutes.map(|minutes| Duration::from_secs(minutes * 60)),
             findings,
             reduce,
-        }),
+        }) },
         Command::Reduce {
             file,
             engine,
@@ -954,27 +966,10 @@ fn run_fuzz(run: FuzzRun) -> ExitCode {
         );
         return ExitCode::from(2);
     };
-    let prepare = |engine: ProcessEngine| {
-        let engine = engine.with_timeout(run.timeout);
-        if run.observe { engine.observing() } else { engine }
+    let Some((gnu_r, parsed)) = fuzz_engines(run.engines, run.timeout, run.observe) else {
+        return ExitCode::from(2);
     };
-    let mut parsed = Vec::new();
-    for name in run
-        .engines
-        .split(',')
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-    {
-        match ProcessEngine::named(name) {
-            Some(engine) => parsed.push(prepare(engine)),
-            None => {
-                eprintln!("unknown engine `{name}`");
-                return ExitCode::from(2);
-            }
-        }
-    }
     let engines: Vec<&dyn Engine> = parsed.iter().map(|engine| engine as &dyn Engine).collect();
-    let gnu_r = prepare(ProcessEngine::gnu_r());
     let directory = std::env::temp_dir().join(format!("ry-oracle-fuzz-{}", std::process::id()));
     if let Err(error) = std::fs::create_dir_all(&directory) {
         eprintln!("{}: {error}", directory.display());
@@ -1107,6 +1102,149 @@ fn run_fuzz(run: FuzzRun) -> ExitCode {
         println!("diverging: {}", listed.join(" "));
         let kinds: Vec<String> = tally.kinds.iter().map(|(name, count)| format!("{name} {count}")).collect();
         println!("by kind: {}", kinds.join(", "));
+        ExitCode::FAILURE
+    }
+}
+
+/// GNU R and the engines a comma-separated `--engines` names, each with the timeout and, when
+/// `observe`, the deep observer. `None` after naming an unknown engine on standard error.
+fn fuzz_engines(names: &str, timeout: Duration, observe: bool) -> Option<(ProcessEngine, Vec<ProcessEngine>)> {
+    let prepare = |engine: ProcessEngine| {
+        let engine = engine.with_timeout(timeout);
+        if observe { engine.observing() } else { engine }
+    };
+    let mut engines = Vec::new();
+    for name in names.split(',').map(str::trim).filter(|name| !name.is_empty()) {
+        match ProcessEngine::named(name) {
+            Some(engine) => engines.push(prepare(engine)),
+            None => {
+                eprintln!("unknown engine `{name}`");
+                return None;
+            }
+        }
+    }
+    Some((prepare(ProcessEngine::gnu_r()), engines))
+}
+
+fn print_corpus_program(seed: u64) -> ExitCode {
+    let corpus = match oracle::corpus::load_corpus(true) {
+        Ok(corpus) => corpus,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match oracle::corpus::corpus_program(&corpus.snippets, seed) {
+        Some((snippet, mutant)) => {
+            print!("# from {}\n{mutant}", snippet.name);
+            ExitCode::SUCCESS
+        }
+        None => {
+            eprintln!("the fuzz corpus is empty");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `run_fuzz` over mutated snippets of real R code, with the engines and GNU R observing.
+fn run_corpus_fuzz(first: u64, count: u64, engines: &str, timeout: Duration) -> ExitCode {
+    let Some((gnu_r, parsed)) = fuzz_engines(engines, timeout, true) else {
+        return ExitCode::from(2);
+    };
+    let engines: Vec<&dyn Engine> = parsed.iter().map(|engine| engine as &dyn Engine).collect();
+    let corpus = match oracle::corpus::load_corpus(true) {
+        Ok(corpus) => corpus,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    for note in &corpus.notes {
+        eprintln!("{note}");
+    }
+    for (source, snippets) in oracle::corpus::source_counts(&corpus.snippets) {
+        println!("corpus: {snippets} snippets from {source}");
+    }
+    let directory = std::env::temp_dir().join(format!("ry-oracle-corpus-{}", std::process::id()));
+    if let Err(error) = std::fs::create_dir_all(&directory) {
+        eprintln!("{}: {error}", directory.display());
+        return ExitCode::FAILURE;
+    }
+    let started = std::time::Instant::now();
+    let differs_file = oracle::corpus::corpus_directory().join("base-differs.txt");
+    let mut base_differs = std::collections::BTreeSet::new();
+    let (mut agreed, mut base_count, mut noisy, mut unchanged) = (0, 0, 0, 0);
+    let mut findings = Vec::new();
+    for seed in first..first.saturating_add(count) {
+        match oracle::corpus::check_corpus_seed(
+            seed,
+            &corpus.snippets,
+            &gnu_r,
+            &engines,
+            &directory,
+        ) {
+            Ok(report) => {
+                for reason in &report.unavailable {
+                    eprintln!("unavailable: {reason}");
+                }
+                for divergence in &report.base_differs {
+                    base_differs.insert(format!("{}\t{}", divergence.engine, report.source));
+                }
+                if !report.base_differs.is_empty() {
+                    base_count += 1;
+                }
+                if !report.divergences.is_empty() {
+                    println!(
+                        "DIFFERS {}",
+                        oracle::corpus::render_corpus_divergences(&report)
+                    );
+                    findings.push(seed);
+                } else if report.noisy {
+                    println!(
+                        "noisy   seed {seed} ({}): GNU R disagrees with itself",
+                        report.source
+                    );
+                    noisy += 1;
+                } else if report.base_differs.len() == engines.len() {
+                    println!("base    seed {seed} ({}) differs unmutated", report.source);
+                } else if report.unchanged {
+                    println!(
+                        "same    seed {seed} ({}): no mutation applied",
+                        report.source
+                    );
+                    unchanged += 1;
+                } else {
+                    println!("ok      seed {seed} ({})", report.source);
+                    agreed += 1;
+                }
+            }
+            Err(error) => println!("ERROR   seed {seed}: GNU R: {error}"),
+        }
+    }
+    if let Err(error) = std::fs::remove_dir_all(&directory) {
+        eprintln!("could not remove {}: {error}", directory.display());
+    }
+    // Read last, so runs that end at about the same time keep each other's entries.
+    if let Ok(text) = std::fs::read_to_string(&differs_file) {
+        base_differs.extend(text.lines().map(str::to_string));
+    }
+    let listing: String = base_differs
+        .iter()
+        .map(|line| format!("{line}\n"))
+        .collect();
+    if let Err(error) = std::fs::write(&differs_file, listing) {
+        eprintln!("{}: {error}", differs_file.display());
+    }
+    println!(
+        "{agreed} of {count} mutants agree; {base_count} seeds' snippets differ unmutated (listed in {}); {noisy} noisy, {unchanged} unmutated, {} findings in {:.1} s",
+        differs_file.display(),
+        findings.len(),
+        started.elapsed().as_secs_f64()
+    );
+    if findings.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        println!("diverging seeds: {findings:?}");
         ExitCode::FAILURE
     }
 }

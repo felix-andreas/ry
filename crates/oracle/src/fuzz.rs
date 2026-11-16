@@ -1244,19 +1244,44 @@ pub fn check_seed(
     std::fs::write(&path, &source)
         .map_err(|error| EngineError::Failed(format!("{}: {error}", path.display())))?;
     let reference_outcome = reference.run(&path)?;
-    let top_level = top_level_expressions(&source);
+    let (divergences, unavailable) =
+        compare_engines(&source, reference, &reference_outcome, engines, &path);
+    if let Err(error) = std::fs::remove_file(&path) {
+        eprintln!("could not remove {}: {error}", path.display());
+    }
+    Ok(SeedReport {
+        kind,
+        seed,
+        program: source,
+        reference: reference_outcome,
+        divergences,
+        unavailable,
+    })
+}
+
+/// Runs the program `source`, stored at `path`, under each of `engines` and compares every
+/// outcome with the reference's. Returns the engines that differ and the reasons of the engines
+/// that cannot run here.
+pub fn compare_engines(
+    source: &str,
+    reference: &dyn Engine,
+    reference_outcome: &Outcome,
+    engines: &[&dyn Engine],
+    path: &Path,
+) -> (Vec<Divergence>, Vec<String>) {
+    let top_level = top_level_expressions(source);
     let mut divergences = Vec::new();
     let mut unavailable = Vec::new();
     for engine in engines {
-        match engine.run(&path) {
+        match engine.run(path) {
             Ok(outcome) => {
                 if let Some(detail) = diff(
                     &reference.name(),
-                    &reference_outcome,
+                    reference_outcome,
                     &engine.name(),
                     &outcome,
                 ) {
-                    let expressions = differing_expressions(&reference_outcome, &outcome)
+                    let expressions = differing_expressions(reference_outcome, &outcome)
                         .iter()
                         .take(8)
                         .filter_map(|difference| {
@@ -1289,17 +1314,7 @@ pub fn check_seed(
             }
         }
     }
-    if let Err(error) = std::fs::remove_file(&path) {
-        eprintln!("could not remove {}: {error}", path.display());
-    }
-    Ok(SeedReport {
-        kind,
-        seed,
-        program: source,
-        reference: reference_outcome,
-        divergences,
-        unavailable,
-    })
+    (divergences, unavailable)
 }
 
 /// The failure report for one seed: the program, every engine's difference, and the commands
@@ -1318,19 +1333,26 @@ pub fn render_divergences(report: &SeedReport) -> String {
         report.program
     );
     for divergence in &report.divergences {
-        text.push_str(&format!("--- {} ---\n", divergence.engine));
-        if divergence.ran && divergence.expressions.is_empty() {
-            text.push_str("differs (printed): the values and conditions agree, the printed text does not\n");
-        }
-        for expression in &divergence.expressions {
-            text.push_str(&format!(
-                "differs ({}): {}\n",
-                expression.difference.name(),
-                expression.source
-            ));
-        }
-        text.push_str(&format!("{}\n", divergence.detail));
+        text.push_str(&render_divergence(divergence));
     }
+    text
+}
+
+/// One engine's section of a failure report: the expressions that differ and how, then the
+/// diff or the reason the engine produced no outcome.
+pub fn render_divergence(divergence: &Divergence) -> String {
+    let mut text = format!("--- {} ---\n", divergence.engine);
+    if divergence.ran && divergence.expressions.is_empty() {
+        text.push_str("differs (printed): the values and conditions agree, the printed text does not\n");
+    }
+    for expression in &divergence.expressions {
+        text.push_str(&format!(
+            "differs ({}): {}\n",
+            expression.difference.name(),
+            expression.source
+        ));
+    }
+    text.push_str(&format!("{}\n", divergence.detail));
     text
 }
 
