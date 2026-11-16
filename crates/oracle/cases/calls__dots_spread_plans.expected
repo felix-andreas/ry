@@ -1,0 +1,237 @@
+[stdout]
+| same : c(x = 1L, y = 3L, z = 4L) 
+| same : c(x = 2L, y = 3L, z = 5L) 
+| same : c(x = 3L, y = 3L, z = 6L) 
+| same : c(x = 4L, y = 3L, z = 7L) 
+| same : c(x = 5L, y = 3L, z = 8L) 
+| same : c(x = 6L, y = 3L, z = 9L) 
+| one : structure(1:3, names = c("x", "y", "z")) 
+| two : c(x = 1L, y = 5L, z = 6L) 
+| named : c(x = 1L, y = 2L, z = 7L) 
+| other name : c(x = 1L, y = 7L, z = 8L) 
+| partial name : c(x = 1L, y = 9L, z = 10L) 
+| reordered : c(x = 1L, y = 1L, z = 2L) 
+| three : c(x = 1L, y = 5L, z = 6L) 
+| one : c(x = 2L, y = 2L, z = 4L) 
+| two : c(x = 2L, y = 5L, z = 7L) 
+| named : c(x = 2L, y = 2L, z = 7L) 
+| other name : c(x = 2L, y = 7L, z = 9L) 
+| partial name : c(x = 2L, y = 9L, z = 11L) 
+| reordered : c(x = 2L, y = 1L, z = 3L) 
+| three : c(x = 2L, y = 5L, z = 6L) 
+| one : c(x = 3L, y = 2L, z = 5L) 
+| two : c(x = 3L, y = 5L, z = 8L) 
+| named : c(x = 3L, y = 2L, z = 7L) 
+| other name : c(x = 3L, y = 7L, z = 10L) 
+| partial name : c(x = 3L, y = 9L, z = 12L) 
+| reordered : c(x = 3L, y = 1L, z = 4L) 
+| three : c(x = 3L, y = 5L, z = 6L) 
+| one : c(x = 4L, y = 2L, z = 6L) 
+| two : c(x = 4L, y = 5L, z = 9L) 
+| named : c(x = 4L, y = 2L, z = 7L) 
+| other name : c(x = 4L, y = 7L, z = 11L) 
+| partial name : c(x = 4L, y = 9L, z = 13L) 
+| reordered : c(x = 4L, y = 1L, z = 5L) 
+| three : structure(4:6, names = c("x", "y", "z")) 
+| around : structure(1:3, names = c("x", "y", "z")) 
+| around two : c(x = 1L, y = 4L, z = 5L) 
+| around named : c(x = 1L, y = 2L, z = 0L) 
+| after : c(x = 1L, y = 2L, z = 1L) 
+| after two : c(x = 1L, y = 2L, z = 1L) 
+| around : c(x = 2L, y = 2L, z = 4L) 
+| around two : c(x = 2L, y = 4L, z = 6L) 
+| around named : c(x = 2L, y = 2L, z = 0L) 
+| after : c(x = 1L, y = 2L, z = 2L) 
+| after two : c(x = 1L, y = 2L, z = 2L) 
+| around : c(x = 3L, y = 2L, z = 5L) 
+| around two : c(x = 3L, y = 4L, z = 7L) 
+| around named : c(x = 3L, y = 2L, z = 0L) 
+| after : structure(1:3, names = c("x", "y", "z")) 
+| after two : structure(1:3, names = c("x", "y", "z")) 
+| around : c(x = 4L, y = 2L, z = 6L) 
+| around two : c(x = 4L, y = 4L, z = 8L) 
+| around named : c(x = 4L, y = 2L, z = 0L) 
+| after : c(x = 1L, y = 2L, z = 4L) 
+| after two : c(x = 1L, y = 2L, z = 4L) 
+| around : c(x = 5L, y = 2L, z = 7L) 
+| around two : c(x = 5L, y = 4L, z = 9L) 
+| around named : c(x = 5L, y = 2L, z = 0L) 
+| after : c(x = 1L, y = 2L, z = 5L) 
+| after two : c(x = 1L, y = 2L, z = 5L) 
+| too many : "unused argument (4)" 
+| unknown name : "unused argument (w = 2)" 
+| matched twice : "formal argument \"x\" matched by multiple actual arguments" 
+| name second : c(x = 2L, y = 1L, z = 3L) 
+| after twice : "formal argument \"z\" matched by multiple actual arguments" 
+| fine : structure(1:3, names = c("x", "y", "z")) 
+| too many : "unused argument (4)" 
+| unknown name : "unused argument (w = 2)" 
+| matched twice : "formal argument \"x\" matched by multiple actual arguments" 
+| name second : c(x = 2L, y = 1L, z = 3L) 
+| after twice : "formal argument \"z\" matched by multiple actual arguments" 
+| fine : c(x = 2L, y = 2L, z = 4L) 
+| too many : "unused argument (4)" 
+| unknown name : "unused argument (w = 2)" 
+| matched twice : "formal argument \"x\" matched by multiple actual arguments" 
+| name second : c(x = 2L, y = 1L, z = 3L) 
+| after twice : "formal argument \"z\" matched by multiple actual arguments" 
+| fine : c(x = 3L, y = 2L, z = 5L) 
+| too many : "unused argument (4)" 
+| unknown name : "unused argument (w = 2)" 
+| matched twice : "formal argument \"x\" matched by multiple actual arguments" 
+| name second : c(x = 2L, y = 1L, z = 3L) 
+| after twice : "formal argument \"z\" matched by multiple actual arguments" 
+| fine : c(x = 4L, y = 2L, z = 6L) 
+| empty : "default other" 
+| empty first : "default given" 
+| empty second : "given other" 
+| both : "one two" 
+| empty : "default other" 
+| empty first : "default given" 
+| empty second : "given other" 
+| both : "one two" 
+| empty : "default other" 
+| empty first : "default given" 
+| empty second : "given other" 
+| both : "one two" 
+| empty : "default other" 
+| empty first : "default given" 
+| empty second : "given other" 
+| both : "one two" 
+| empty : "default other" 
+| empty first : "default given" 
+| empty second : "given other" 
+| both : "one two" 
+| collect one : list(head = 1L, rest = list(), count = 0L) 
+| collect three : list(head = 1L, rest = list(tag = "t", 2), count = 2L) 
+| collect named head : list(head = 1L, rest = list(extra = 1), count = 1L) 
+| collect one : list(head = 2L, rest = list(), count = 0L) 
+| collect three : list(head = 2L, rest = list(tag = "t", 4), count = 2L) 
+| collect named head : list(head = 2L, rest = list(extra = 1), count = 1L) 
+| collect one : list(head = 3L, rest = list(), count = 0L) 
+| collect three : list(head = 3L, rest = list(tag = "t", 6), count = 2L) 
+| collect named head : list(head = 3L, rest = list(extra = 1), count = 1L) 
+| collect one : list(head = 4L, rest = list(), count = 0L) 
+| collect three : list(head = 4L, rest = list(tag = "t", 8), count = 2L) 
+| collect named head : list(head = 4L, rest = list(extra = 1), count = 1L) 
+| collect one : list(head = 5L, rest = list(), count = 0L) 
+| collect three : list(head = 5L, rest = list(tag = "t", 10), count = 2L) 
+| collect named head : list(head = 5L, rest = list(extra = 1), count = 1L) 
+| inspect : list(code = round + 1, given = TRUE, count = 2L, call = inspect(...),      matched = inspect(x = ..1, extra = ..2)) 
+| inspect none : list(code = , given = FALSE, count = 0L, call = inspect(...),      matched = inspect()) 
+| inspect : list(code = round + 1, given = TRUE, count = 2L, call = inspect(...),      matched = inspect(x = ..1, extra = ..2)) 
+| inspect none : list(code = , given = FALSE, count = 0L, call = inspect(...),      matched = inspect()) 
+| inspect : list(code = round + 1, given = TRUE, count = 2L, call = inspect(...),      matched = inspect(x = ..1, extra = ..2)) 
+| inspect none : list(code = , given = FALSE, count = 0L, call = inspect(...),      matched = inspect()) 
+| inspect : list(code = round + 1, given = TRUE, count = 2L, call = inspect(...),      matched = inspect(x = ..1, extra = ..2)) 
+| inspect none : list(code = , given = FALSE, count = 0L, call = inspect(...),      matched = inspect()) 
+| lazy : "b a" 
+| lazy : "b a" 
+| lazy : "b a" 
+| lazy : "b a" 
+| lazy : "b a" 
+| log : c("body", "b", "a", "body", "b", "a", "body", "b", "a", "body",  "b", "a", "body", "b", "a") 
+| unforced : "b is never forced" 
+| unforced : "b is never forced" 
+| unforced : "b is never forced" 
+| unforced : "b is never forced" 
+| unforced : "b is never forced" 
+| first : 9 
+| second : -9 
+| builtin : 11 
+| first : 8 
+| second : -8 
+| builtin : 12 
+| first : 7 
+| second : -7 
+| builtin : 13 
+| first : 6 
+| second : -6 
+| builtin : 14 
+| first : 5 
+| second : -5 
+| builtin : 15 
+| first : 4 
+| second : -4 
+| builtin : 16 
+| shape a : c("none", "a", "1") 
+| shape b : c("none", "b", "1") 
+| shape c : c("none", "c", "1") 
+| shape d : c("none", "d", "1") 
+| shape e : c("none", "e", "1") 
+| shape f : c(1, 0) 
+| shape g : c("none", "g", "1") 
+| shape h : c("none", "h", "1") 
+| shape i : c("none", "i", "1") 
+| shape j : c("2", "j", "1") 
+| shape k : c(1, 2) 
+| shape a : c("none", "a", "1") 
+| shape b : c("none", "b", "1") 
+| shape c : c("none", "c", "1") 
+| shape d : c("none", "d", "1") 
+| shape e : c("none", "e", "1") 
+| shape f : c(1, 0) 
+| shape g : c("none", "g", "1") 
+| shape h : c("none", "h", "1") 
+| shape i : c("none", "i", "1") 
+| shape j : c("2", "j", "1") 
+| shape k : c(1, 2) 
+| shape a : c("none", "a", "1") 
+| shape b : c("none", "b", "1") 
+| shape c : c("none", "c", "1") 
+| shape d : c("none", "d", "1") 
+| shape e : c("none", "e", "1") 
+| shape f : c(1, 0) 
+| shape g : c("none", "g", "1") 
+| shape h : c("none", "h", "1") 
+| shape i : c("none", "i", "1") 
+| shape j : c("2", "j", "1") 
+| shape k : c(1, 2) 
+| environment : c(x = 1L, y = 2L, z = 1L) 
+| eval : c(x = 1L, y = 4L, z = 5L) 
+| environment : c(x = 2L, y = 2L, z = 1L) 
+| eval : c(x = 2L, y = 4L, z = 6L) 
+| environment : structure(3:1, names = c("x", "y", "z")) 
+| eval : c(x = 3L, y = 4L, z = 7L) 
+| environment : c(x = 4L, y = 2L, z = 1L) 
+| eval : c(x = 4L, y = 4L, z = 8L) 
+| environment : c(x = 5L, y = 2L, z = 1L) 
+| eval : c(x = 5L, y = 4L, z = 9L) 
+| twice : c(4L, 8L) 
+| element : c(x = 1L, y = 1L, z = 2L) 
+| element two : c(x = 1L, y = 1L, z = 3L) 
+| twice : c(4L, 8L) 
+| element : c(x = 2L, y = 2L, z = 4L) 
+| element two : c(x = 2L, y = 2L, z = 3L) 
+| twice : c(4L, 8L) 
+| element : c(x = 3L, y = 3L, z = 6L) 
+| element two : c(x = 3L, y = 3L, z = 3L) 
+| twice : c(4L, 8L) 
+| element : c(x = 4L, y = 4L, z = 8L) 
+| element two : c(x = 4L, y = 4L, z = 3L) 
+| twice : c(4L, 8L) 
+| element : c(x = 5L, y = 5L, z = 10L) 
+| element two : c(x = 5L, y = 5L, z = 3L) 
+| countdown : list(5L, 4L, 3L, 2L, 1L) 
+| countdown named : list(start = TRUE, 3L, 2L, 1L) 
+| defaults one : c(1, 2, 3) 
+| defaults two : c(1, 10, 11) 
+| defaults skip : c(1, 2, 0) 
+| defaults one : c(2, 4, 5) 
+| defaults two : c(2, 10, 11) 
+| defaults skip : c(2, 4, 0) 
+| defaults one : c(3, 6, 7) 
+| defaults two : c(3, 10, 11) 
+| defaults skip : c(3, 6, 0) 
+| defaults one : c(4, 8, 9) 
+| defaults two : c(4, 10, 11) 
+| defaults skip : c(4, 8, 0) 
+| defaults one : c(5, 10, 11) 
+| defaults two : c(5, 10, 11) 
+| defaults skip : c(5, 10, 0) 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL
