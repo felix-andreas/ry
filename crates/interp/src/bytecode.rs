@@ -12672,10 +12672,12 @@ unsafe fn assign_element(
         && index.kind() == SexpType::String
     {
         let symbol = heap.install_char(index.element(0))?;
-        let writable = match heap.frame_cell(target, symbol) {
-            Some(cell) => !cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED),
-            None => !target.has_gp(gp::FRAME_LOCKED),
-        };
+        // The empty environment refuses every binding, and the `*tmp*` call names the error.
+        let writable = target != heap.known().empty_env
+            && match heap.frame_cell(target, symbol) {
+                Some(cell) => !cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED),
+                None => !target.has_gp(gp::FRAME_LOCKED),
+            };
         if !writable {
             return Ok(None);
         }

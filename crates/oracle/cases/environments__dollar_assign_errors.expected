@@ -1,0 +1,17 @@
+[stdout]
+| g$y <- 2
+| g$y <- 2
+| g$y <- 2
+| [1] "cannot change value of locked binding for 'a'"
+| [1] "cannot change value of locked binding for 'a'"
+| [1] "cannot change value of locked binding for 'a'"
+| [1] "cannot add bindings to a locked environment"
+| [1] "cannot add bindings to a locked environment"
+| [1] "cannot add bindings to a locked environment"
+| [1] 5
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 5L

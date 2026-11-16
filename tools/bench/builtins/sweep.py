@@ -240,6 +240,16 @@ def case_ratios(measured, ids):
     return ratios, broken
 
 
+def checksums_differ(measured, case):
+    """Whether any ry round of `case` returned a different result from GNU R's in the same round."""
+    return any(
+        engine_round[case]["checksum"] != gnu_round[case]["checksum"]
+        for engine, rounds in measured.items() if engine != "gnu_r"
+        for gnu_round, engine_round in zip(measured["gnu_r"], rounds)
+        if case in engine_round and case in gnu_round
+    )
+
+
 def function_ratios(ratios):
     """`{function: (worst ratio or None for a failure, the case and engine it comes from)}`."""
     worst = {}
@@ -299,7 +309,7 @@ def command_check(args):
     problems += [f"slower.txt names {name}, which has no case" for name in lines if name not in benched]
     previous = list_on_main()
     if previous is None:
-        print("note: no origin/main to compare slower.txt with")
+        print("note: origin/main has no slower.txt (or there is no origin/main), so the list length is not compared")
     else:
         problems += [f"slower.txt adds {name}, which main does not list; make it faster instead"
                      for name in sorted(set(lines) - set(previous))]
@@ -312,8 +322,8 @@ def command_check(args):
 
 
 def list_on_main():
-    """slower.txt as main has it, or None when there is no origin/main. A main without the file
-    lists nothing, which only the commit that adds the file may differ from."""
+    """slower.txt as main has it, or None when there is no origin/main or main has no list yet
+    (the change that adds the file), in which case there is nothing to compare against."""
     relative = SLOWER.relative_to(root).as_posix()
     known = subprocess.run(["git", "rev-parse", "--verify", "-q", "origin/main"], cwd=root, capture_output=True, text=True)
     if known.returncode != 0:
@@ -379,7 +389,7 @@ def command_ratchet(args):
     if listing["missing"] or listing["unknown"] or listing["broken"]:
         sys.exit("error: the sweep does not cover every export; run `sweep.py list`")
     ids = selected_ids(listing, args.filter, args.ci)
-    table = engines(args.ry, args.rscript, jit_off=not args.ci or args.jit_off)
+    table = engines(args.ry, args.rscript, jit_off=True)
     batch, batches = (0.004, 3) if args.ci else (args.batch, args.batches)
     measured = measure(ids, table, args.rounds, batch, batches, parallel=args.parallel)
     ratios, broken = case_ratios(measured, ids)
@@ -403,10 +413,13 @@ def command_ratchet(args):
         ratios.update(case_ratios({engine: [round_ for round_ in rounds if all(case in round_ for case in suspects)]
                                    for engine, rounds in measured.items()}, suspects)[0])
         worst = function_ratios(ratios)
+    # A listed function leaves the list only when its results match GNU R's, so a fast wrong
+    # answer never counts as a fix.
+    differs = {function_of(case) for case in ratios if checksums_differ(measured, case)}
     failing, improved = [], []
     for name, (ratio, case, engine) in sorted(worst.items()):
         slower = ratio is None or ratio < 1
-        if name in listed and not slower:
+        if name in listed and not slower and name not in differs:
             improved.append(name)
         elif name not in listed and (ratio is None or ratio < floor):
             failing.append((name, ratio, case, engine))
@@ -499,7 +512,7 @@ def main():
     parser.add_argument("--rounds", type=int, default=1)
     parser.add_argument("--batch", type=float, default=0.01, help="seconds per timed batch")
     parser.add_argument("--batches", type=int, default=5)
-    parser.add_argument("--jit-off", action="store_true", help="also time ry with RY_JIT=off")
+    parser.add_argument("--jit-off", action="store_true", help="compare: also time ry with RY_JIT=off (ratchet always does)")
     parser.add_argument("--ci", action="store_true", help="the cases without a 1e6 input, in short batches")
     parser.add_argument("--update", action="store_true", help="ratchet: remove functions that are no longer slower")
     parser.add_argument("--seed", action="store_true",

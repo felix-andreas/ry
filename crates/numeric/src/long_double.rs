@@ -490,19 +490,25 @@ pub fn add_all_numbers(total: LongDouble, values: &[f64]) -> LongDouble {
 }
 
 /// `total` times every value in order, rounding after each multiplication, as GNU R's `prod`
-/// loop on a `long double` does, or the first NaN or NA when one comes first.
+/// loop on a `long double` does, or the first NaN or NA when one comes first. A product that is
+/// already NaN (`Inf * 0`) when the first NaN input arrives wins over it, because the x87 unit
+/// keeps its register NaN against a signaling NA from memory.
 pub fn multiply_all(total: LongDouble, values: &[f64]) -> Result<LongDouble, f64> {
+    let stop = |product: LongDouble, value: f64| {
+        let product = product.to_f64();
+        if product.is_nan() { product } else { value }
+    };
     #[cfg(all(target_arch = "x86_64", not(windows)))]
     if let Some(start) = to_x87(total) {
         let (product, unread) = x87::multiply_all(start, values);
         return match unread {
             0 => Ok(from_x87(product)),
-            _ => Err(values[values.len() - unread]),
+            _ => Err(stop(from_x87(product), values[values.len() - unread])),
         };
     }
     values.iter().try_fold(total, |total, &value| {
         if value.is_nan() {
-            Err(value)
+            Err(stop(total, value))
         } else {
             Ok(total * LongDouble::from(value))
         }

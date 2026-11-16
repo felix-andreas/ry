@@ -458,10 +458,16 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     internal("bitwiseNot", 1, do_bitw_not),
     internal("bitwiseShiftL", 2, |call| unsafe {
-        bitwise(call, |a, b| ((a as u32) << (b & 31)) as i32)
+        bitwise(call, |a, b| match u32::try_from(b) {
+            Ok(shift) if shift <= 31 => ((a as u32) << shift) as i32,
+            _ => NA_INTEGER,
+        })
     }),
     internal("bitwiseShiftR", 2, |call| unsafe {
-        bitwise(call, |a, b| ((a as u32) >> (b & 31)) as i32)
+        bitwise(call, |a, b| match u32::try_from(b) {
+            Ok(shift) if shift <= 31 => ((a as u32) >> shift) as i32,
+            _ => NA_INTEGER,
+        })
     }),
     builtin("xtfrm", 1, |call| unsafe {
         // GNU R's `xtfrm.default` ranks a raw vector, and `rank` refuses a bare one.

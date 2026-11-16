@@ -52,6 +52,25 @@ local({
     recipes[[name]] <<- recipe
     eval(recipe)
   }
+  # The statements of a setup block that a variant needs: a plain `name <- value` that reads a
+  # large fixture runs only when the expression or a later kept statement names it, so a variant
+  # on 1e3 inputs never builds the 1e6 inputs its siblings assign. Every other statement runs,
+  # because it may have an effect the case relies on.
+  used_setup <- function(setup, expression, large) {
+    if (is.null(setup) || !is.call(setup) || !identical(setup[[1L]], as.name("{"))) return(setup)
+    statements <- as.list(setup)[-1L]
+    used <- all.names(expression)
+    keep <- logical(length(statements))
+    for (index in rev(seq_along(statements))) {
+      statement <- statements[[index]]
+      plain <- is.call(statement) && length(statement) == 3L && is.name(statement[[2L]]) &&
+        (identical(statement[[1L]], as.name("<-")) || identical(statement[[1L]], as.name("=")))
+      keep[index] <- !plain || as.character(statement[[2L]]) %in% used ||
+        !any(all.names(statement[[3L]]) %in% large)
+      if (keep[index]) used <- c(used, all.names(statement))
+    }
+    as.call(c(as.name("{"), statements[keep]))
+  }
   words <- c("alpha", "beta", "gamma", "delta", "price", "yield", "curve", "bond", "rate", "spread",
              "the", "of", "and", "to", "in", "is", "for", "on", "with", "as")
   sentence <- function(n) {
@@ -198,7 +217,8 @@ local({
     options_before <- options()
     setwd(home)
     line <- tryCatch({
-      needed <- intersect(c(all.names(case$expression), all.names(case$setup)), fixture_names)
+      setup <- used_setup(case$setup, case$expression, large_names)
+      needed <- intersect(c(all.names(case$expression), all.names(setup)), fixture_names)
       dropped <- setdiff(built_large, needed)
       for (name in dropped) {
         rm(list = name, envir = fixtures)
@@ -209,7 +229,7 @@ local({
       for (name in needed) get(name, envir = fixtures)
       scope <- new.env(parent = fixtures)
       set.seed(42L)
-      if (!is.null(case$setup)) eval(case$setup, scope)
+      if (!is.null(setup)) eval(setup, scope)
       # The case's calls run in a loop inside a closure, which GNU R compiles at its first call
       # and ry's JIT may compile once the loop is hot. The result of the last call is kept, so
       # neither engine can drop the calls as dead code.

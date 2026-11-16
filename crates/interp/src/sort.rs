@@ -1350,8 +1350,8 @@ unsafe fn radix_column<'a>(vector: Sexp, sort_strings: bool) -> Option<Column<'a
     }
 }
 
-/// Each element's rank in [`Column::Ranks`], with texts ordered by `compare`. R interns its strings, so equal strings are one
-/// CHARSXP, and only the distinct CHARSXPs are sorted: each is numbered the first time it is
+/// Each element's rank in [`Column::Ranks`], with texts ordered as `order` says. R interns its
+/// strings, so equal strings are one CHARSXP, and only the distinct CHARSXPs are sorted: each is numbered the first time it is
 /// met, with the number negated in its truelength as data.table's C marks strings, which costs
 /// one load per row and no table. The saved truelengths are put back before anything else can
 /// run.
@@ -1394,7 +1394,7 @@ unsafe fn string_ranks(vector: Sexp, order: TextOrder) -> Vec<u32> {
         charsxp.set_char_truelength(*mark);
     }
     if stale {
-        return string_ranks_by_text(vector, compare);
+        return string_ranks_by_text(vector, order, compare);
     }
     let rank_of_code = match order {
         // GNU R's radix sort compares `CHAR()` bytes untranslated, so a latin1 string and its
@@ -1577,7 +1577,32 @@ fn sort_by_key_bytes(entries: &mut [(u64, u32)], scratch: &mut Vec<(u64, u32)>) 
 
 /// [`string_ranks`] through a table of the texts, for a vector whose strings carry truelength
 /// marks the CHARSXP numbering cannot use.
-unsafe fn string_ranks_by_text(vector: Sexp, compare: fn(&str, &str) -> Ordering) -> Vec<u32> {
+unsafe fn string_ranks_by_text(
+    vector: Sexp,
+    order: TextOrder,
+    compare: fn(&str, &str) -> Ordering,
+) -> Vec<u32> {
+    if let TextOrder::Bytes = order {
+        let na = na_string();
+        let bytes_at = |index: usize| {
+            let charsxp = vector.element(index);
+            (charsxp != na).then(|| {
+                let bytes = charsxp.bytes();
+                memchr::memchr(0, bytes).map_or(bytes, |end| &bytes[..end])
+            })
+        };
+        let mut sorted: Vec<&[u8]> = (0..length(vector)).filter_map(bytes_at).collect();
+        sorted.sort_unstable();
+        sorted.dedup();
+        let rank_of: FxHashMap<&[u8], u32> = sorted
+            .iter()
+            .zip(1..)
+            .map(|(&text, rank)| (text, rank))
+            .collect();
+        return (0..length(vector))
+            .map(|index| bytes_at(index).map_or(0, |text| rank_of[text]))
+            .collect();
+    }
     let mut distinct: FxHashMap<Cow<'_, str>, u32> = FxHashMap::default();
     for index in 0..length(vector) {
         if let Some(text) = string_at(vector, index) {
