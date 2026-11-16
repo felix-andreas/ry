@@ -203,6 +203,9 @@ fn thresholds_override() -> Option<(i32, i32)> {
 
 unsafe fn enter(machine: &mut Machine<'_>) -> Option<TierExit> {
     unsafe {
+        if let Some(compiled) = specialized(machine) {
+            return run(machine, compiled, 0);
+        }
         let counters = values::ints(machine.code.cdr().element(PROFILE));
         let entries = counters[profile::ENTRIES];
         let threshold = bytecode::tier().map_or(i32::MAX, |tier| tier.entry_threshold);
@@ -214,6 +217,40 @@ unsafe fn enter(machine: &mut Machine<'_>) -> Option<TierExit> {
             compiled_for(machine, false, false)?
         };
         run(machine, compiled, 0)
+    }
+}
+
+/// The code compiled for the activation's own enclosure, or portable code last proven for it,
+/// which almost every entry of a compiled body finds: [`compiled_for`]'s answer without the
+/// cases that change the body's state.
+#[inline(always)]
+unsafe fn specialized<'a>(machine: &Machine<'_>) -> Option<&'a Compiled> {
+    unsafe {
+        let constants = machine.code.cdr();
+        let tier1 = constants.element(TIER1);
+        if tier1 == values::nil() {
+            return None;
+        }
+        let address = tier1.external_address() as *const Compiled;
+        if address.is_null() {
+            return None;
+        }
+        let enclosure = machine.enclosure();
+        let entered = if (*address).portable {
+            (*address).checked.get().weak_key() == enclosure
+        } else {
+            // A dead enclosure's address may be reused by the live one, so the weak key decides.
+            (*address).enclosure == enclosure
+                && tier1.external_protected().weak_key() != values::nil()
+        };
+        if !entered {
+            return None;
+        }
+        let state = values::ints(constants.element(PROFILE))[profile::TIER_STATE];
+        if state >= 0 && state & runtime::LOOPS_ONLY != 0 {
+            return None;
+        }
+        Some(&*address)
     }
 }
 
@@ -625,7 +662,7 @@ unsafe fn compile_in<'a>(
         // glues tier 0's steps together.
         // Entering a body with loops at the top or at a loop costs about the same, so what
         // decides between the two is the work around the loops alone.
-        let work = plan.work();
+        let work = plan.work(values::ints(machine.code.cdr().element(FEEDBACK)));
         if !forced {
             let reason = if !plan.runs_natively() {
                 Some(analysis::NOTHING_NATIVE)

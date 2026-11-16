@@ -6933,6 +6933,35 @@ pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<Option<Sexp>> 
 /// otherwise only while tier 0 profiles.
 #[inline(always)]
 pub unsafe fn call_builtin_step(machine: &mut Machine<'_>, pc: usize, record: bool) -> R<()> {
+    let code = machine.code.car().data().cast::<i32>().cast_const();
+    // A positional call of a builtin with a direct entry reads only its registers, so it runs
+    // without the activation, which costs as much to build as the call itself. Under a hook a
+    // declined entry would be observed twice, so the full path takes it.
+    if *code.add(pc) as u32 == POSITIONAL_CALL_BUILTIN_WORD && activity::hooks() == 0 {
+        let constants = machine.code.cdr();
+        let registers = register_address(machine.base);
+        let operand = |index: usize| *code.add(pc + 1 + index) as usize;
+        let definition = eval::builtin_def(*registers.add(operand(1)))?;
+        let values = std::slice::from_raw_parts(registers.add(operand(3)), operand(4));
+        let value = if let [value] = values
+            && let Some(unary) = definition.unary
+            && let Some(value) = unary(*value)?
+        {
+            interp().visible = true;
+            Some(value)
+        } else if definition.direct.is_some() && !definition.checks.replacement {
+            eval::call_direct(definition, pool_entry(constants, operand(2)), values)?
+        } else {
+            None
+        };
+        if let Some(value) = value {
+            if record || *pool_ints(constants, PROFILE).add(profile::RECORDING) != 0 {
+                *pool_ints(constants, FEEDBACK).add(pc) |= value_kind(value) as i32;
+            }
+            *registers.add(operand(0)) = value;
+            return Ok(());
+        }
+    }
     let mut state = activation(machine, record);
     let instruction = Instruction {
         code: state.code,
@@ -7548,15 +7577,26 @@ unsafe fn scheduled_entry_in_place(state: &mut Activation<'_, '_>, entries: i32)
     // next compiled body in place, so a deep recursion nests here without passing through a
     // closure call's own stack check.
     let event = eval::on_large_stack(|| entry_event(state.machine, entries));
-    // The tier may have started or stopped the body's recording.
-    reload(state);
+    // A finished activation's exit reads only what the tier leaves alone (the register file
+    // never moves), and reloads for the caller, so only a body that goes on in tier 0 reloads:
+    // the tier may have started or stopped its recording.
     match event {
+        Some(TierExit::Finished(Ok(value))) => leave_fast::<false, false>(state, value)
+            .or_else(|| leave_fast::<true, false>(state, value))
+            .or_else(|| (state.stepping && leave_stepped(state, value)).then_some(STOP))
+            .unwrap_or_else(|| finished(state, Ok(value))),
         Some(TierExit::Finished(result)) => finished(state, result),
-        Some(TierExit::Resume { pc, pending }) => match pending {
-            Some(unwind) => failed::<false>(state, pc, unwind),
-            None => pc,
-        },
-        None => 0,
+        Some(TierExit::Resume { pc, pending }) => {
+            reload(state);
+            match pending {
+                Some(unwind) => failed::<false>(state, pc, unwind),
+                None => pc,
+            }
+        }
+        None => {
+            reload(state);
+            0
+        }
     }
 }
 
@@ -7967,7 +8007,26 @@ unsafe fn return_discarding(state: &mut Activation<'_, '_>, at: usize) {
     if let Some(next) = return_fast::<true>(state, at) {
         dispatch!(state, next);
     }
+    if state.stepping && return_stepped(state, at) {
+        return;
+    }
     become GENERIC_HANDLERS[Op::Return as usize](state, at)
+}
+
+/// `Return` from the callee of a call the optimizing tier stepped ([`step_one`]), which hands
+/// the result back to compiled code: the exit [`return_fast`] takes, without [`eval::leave`].
+#[inline(never)]
+unsafe fn return_stepped(state: &mut Activation<'_, '_>, at: usize) -> bool {
+    let value = *state.registers.add(*state.code.add(at + 1) as usize);
+    leave_stepped(state, value)
+}
+
+/// Ends a stepped call's callee with `value` when the lean exit applies, as [`leave_fast`] does.
+#[inline(always)]
+unsafe fn leave_stepped(state: &mut Activation<'_, '_>, value: Sexp) -> bool {
+    leave_fast::<false, true>(state, value)
+        .or_else(|| leave_fast::<true, true>(state, value))
+        .is_some()
 }
 
 /// `CallGeneric` of a closure whose site has a prepared plan ([`prepare_plan`]), while nothing
@@ -8367,12 +8426,30 @@ unsafe fn return_fast<const DISCARD: bool>(
     state: &mut Activation<'_, '_>,
     at: usize,
 ) -> Option<usize> {
+    let value = *state.registers.add(*state.code.add(at + 1) as usize);
+    leave_fast::<DISCARD, false>(state, value)
+}
+
+/// Ends the running activation, which a call instruction entered in place, with `value`, and
+/// answers the caller's next instruction: [`return_fast`]'s exit, which compiled code that ran
+/// the activation takes too. `None` when the exit needs [`eval::leave`].
+///
+/// With `STEPPED` it takes only the callee of a call the optimizing tier stepped, and answers
+/// [`STOP`] with the step's outcome in [`Activation::exit`] and [`Activation::stepped`], as
+/// [`resume_caller`] leaves them; without it, never that callee.
+#[inline(always)]
+unsafe fn leave_fast<const DISCARD: bool, const STEPPED: bool>(
+    state: &mut Activation<'_, '_>,
+    value: Sexp,
+) -> Option<usize> {
     let interp = &mut *state.interp;
     let heap = &mut *state.heap;
     let nil = heap.known().nil;
     let count = interp.bytecode.resumes.len();
     // A stepped call's callee returns to the optimizing tier, not to the caller's code.
-    if count <= state.resume_base + usize::from(state.stepping)
+    let returns_to_tier = state.stepping && count == state.resume_base + 1;
+    if count <= state.resume_base
+        || returns_to_tier != STEPPED
         || *state.header != nil
         || activity::hooks() != 0
     {
@@ -8388,7 +8465,6 @@ unsafe fn return_fast<const DISCARD: bool>(
         return None;
     }
     debug_assert!(frame.env == nil && frame.slots as usize == state.machine.header);
-    let value = *state.registers.add(*state.code.add(at + 1) as usize);
     if DISCARD {
         if pending.refcount() != 0 || value == pending || heap.is_preserved(pending) {
             return None;
@@ -8434,10 +8510,20 @@ unsafe fn return_fast<const DISCARD: bool>(
         eval::release_references(resume.references);
     }
     let call_at = resume.call_at;
+    if STEPPED {
+        // As in `resume_caller`: a failed speculation on the stepped call saw this result.
+        state.feedback = pool_ints(state.constants, FEEDBACK);
+    }
     state.record(call_at, value);
     *state.registers.add(*state.code.add(call_at + 1) as usize) = value;
     release(state);
-    Some(after_instruction(state.code, call_at))
+    let next = after_instruction(state.code, call_at);
+    if STEPPED {
+        state.exit = Ok(nil);
+        state.stepped = next;
+        return Some(STOP);
+    }
+    Some(next)
 }
 
 /// The constant `index` of the activation's constant pool, read without the ALTREP check of

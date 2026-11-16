@@ -513,7 +513,10 @@ Why one body compiled up to four times, each fixed at its source:
 - **A refused body keeps its feedback**, so a compiled caller still inlines it as a frame, which is where a one-line closure pays.
 - **Allocator by size.** Loop-free bodies up to `SINGLE_PASS_FROM` (2000) SSA instructions use the backtracking allocator, because single-pass spilled every value (compiled `x^2` was 100 instructions); above it single-pass keeps compiles cheap.
 - **Rejected: trimming the entry chain first.** Even a 200-instruction entry leaves a one-operation body even with tier 0, so the model is needed either way.
-- **Not built.** A lean entry (code pointer in the code header, window pre-sized, unboxed scalar return); cheaper steps. Recalibrate the constants when either lands.
+- **A call handed to tier 0 that never returned a value counts as no work** (`Plan::work` reads the feedback): a `stop()` under a check costs nothing until it runs and charges no `STEP_COST` against a small body.
+- **Entry looks up the code before the counters** (`specialized`, `jit.rs`): an entry whose enclosure the compiled code was made or last checked for runs it without `compiled_for`'s state cases.
+- **The constants hold.** Admitting every body (`ENTRY_COST` and `STEP_COST` zero) ran 4.9% more instructions on the finbench hot suite: a compiled thin wrapper costs more than tier 0 (a loop calling two builtins, 2,395 instructions per iteration compiled against 1,627: about 400 for entry and 80 more per builtin call).
+- **Not built.** A lean entry (code pointer in the code header, window pre-sized, unboxed scalar return, about 400 instructions to save); cheaper steps. Recalibrate the constants when either lands (backlog, "JIT on against JIT off").
 - Pinned by `a_body_that_could_run_nothing_natively_never_records`, `a_hot_body_that_runs_rarely_waits_to_compile`, `fully_typed_closure_compiles_at_its_first_call`. No test pins the constants; they are calibrated on the application programs and kernels (`array_sum` is the kernel a wrong loop weight refuses; `vasicek`'s loop steps eleven instructions, is refused, and runs as fast in tier 0).
 
 ## A compiled return writes locals back only when something can still read the frame
@@ -533,6 +536,9 @@ Why one body compiled up to four times, each fixed at its source:
 - **Shape.** A stepped closure call enters the callee in place (`enter_in_place`, `bytecode.rs`) in the loop the step started, with a `Resume` record on `State::resumes`; `return_fast` leaves that record to `resume_caller`, so a tier-0 callee never runs on into the compiled caller's instructions. Compiled code entered this way grows the native stack as a closure call does, or deep recursion through compiled bodies overflows (`recursion__and_recall` on `ry-jit`).
 - **A formal passed as a subscript is the `Argument` instruction**: the empty argument for a missing formal, else `GetVar`. It records `feedback::MISSING`, and tier 1 compiles it as a load unless that bit is set, handing off to tier 0 when a compiled load meets a missing formal.
 - **A local a join needs as an object is forgotten, not written back**, because writing it back replaced a formal's promise and cleared its missing bit, changing `substitute(x)` and `missing(x)`.
+- **A stepped callee returns as tier 0's own return does** (`leave_fast::<_, STEPPED>`, `bytecode.rs`): the result goes into the caller's register and the activation stops with the next instruction, without `eval::leave`. A compiled body that tier 0 entered in place leaves the same way.
+- **A positional `CallBuiltin` step runs without an activation** (`call_builtin_step`): the unary or direct entry reads only the registers, so building the activation cost as much as the call.
+- **A `GetFun` of a name the frame may bind is not speculated on** (`bound_locally`, `analysis.rs`): a frame binding a function there (an argument named like a global) failed the speculation and invalidated the code at every call (`a_loop_calling_an_argument_named_like_a_global_compiles_once`).
 - Pinned by `jit__stepped_calls_reach_the_caller` and `jit__inlined_frames_defaults`.
 
 ## A native recursive function's depth budget shrinks with the interpreter depth
