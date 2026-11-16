@@ -41,7 +41,7 @@ BUDGETS = {
 }
 # One cap for every decisions area file. The log only grows, since a settled decision is not pruned,
 # so the cap exists to keep each file small enough to read: an area that reaches it is split in two.
-AREA_CAP = 260_000
+AREA_CAP = 160_000
 # Longest line each file may hold. A log that is meant to be one line per entry stays that way.
 LINE_LIMITS = {
     ".agents/orchestrator.md": 2048,
@@ -576,7 +576,7 @@ Settled architecture decisions and the reasons behind them, one file per area. E
 - **planned**: the design is settled and not fully implemented. The line says what exists so far.
 - **superseded**: another entry replaced this one. The line names it and says what the text is kept for. A superseded entry with nothing left to teach is deleted.
 
-A new entry gets its status line when it is written, and the line changes in the same change that builds or replaces the design. A new entry is an H2 section appended to the area file it belongs to; then run `python3 tools/memory.py index` to regenerate this file, which `python3 tools/memory.py check` (part of `just gate`) keeps honest.
+An entry listed here without a status is built. To read one, search its heading in the area file. A new entry gets its status line when it is written, and the line changes in the same change that builds or replaces the design. A new entry is an H2 section appended to the area file it belongs to; then run `python3 tools/memory.py index` to regenerate this file, which `python3 tools/memory.py check` (part of `just gate`) keeps honest.
 """
 
 
@@ -782,14 +782,12 @@ def render_index():
     for name, title, blurb in AREAS:
         entries = read_area(name)
         lines.append(f"\n## {title}\n\n[`{name}.md`]({name}.md): {blurb}\n\n")
-        slugs = collections.Counter()
+        # A bare heading per entry, with no link: an agent greps the heading in the area file, and
+        # an anchor repeats every heading and doubles the bytes this file costs to read.
         for entry in entries:
-            slug = github_slug(entry.heading)
-            anchor = slug if not slugs[slug] else f"{slug}-{slugs[slug]}"
-            slugs[slug] += 1
             status = status_of(entry.body)
-            suffix = f" ({status})" if status else ""
-            lines.append(f"- [{escape_link(entry.heading)}]({name}.md#{anchor}){suffix}\n")
+            suffix = f" ({status})" if status and status != "built" else ""
+            lines.append(f"- {entry.heading}{suffix}\n")
     return "".join(lines)
 
 
@@ -810,16 +808,6 @@ def status_of(body):
             rest = text[word.end():]
             return word.group(0) + (", with exceptions" if rest.startswith(", except") else "")
     return None
-
-
-def github_slug(heading):
-    text = heading.lower()
-    text = re.sub(r"[^\w\- ]", "", text)
-    return text.replace(" ", "-")
-
-
-def escape_link(text):
-    return text.replace("[", "\\[").replace("]", "\\]")
 
 
 def check():
