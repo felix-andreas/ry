@@ -1311,7 +1311,6 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   (Debian's `ldpaths` otherwise puts the OpenBLAS alternative first), or make those cases print
   rounded values. The `datatable__*` cases also need data.table in GNU R's library.
 
-- **Compiled code misses a write that an argument promise makes to its caller's variable (`RY_JIT=force`).** With `twice <- function(x) { x; x }` and `run_once <- function() { n <- 0; twice({ n <- n + 1; n }); n }`, the compiled `run_once` returns 0, where GNU R and tier 0 return 1. `crates/oracle/cases/environments__code_argument_references.R` fails in force mode until this is fixed, and `crates/oracle/known_failures.toml` has no entry for it, so re-run the case under `RY_JIT=force` before ranking the work. The JIT owns the fix: a compiled body must write its register-held variables back before a promise that names them runs.
 - **`x <- f(x, ...)` compiles to `CallRebinding`, and tier 1 inlines it only when `x` is proven plain** (`crates/jit/src/analysis.rs`, `crates/interp/src/bytecode.rs`). A rebinding call on a value whose plainness is unknown runs slower than the same call without the rebinding, which is a regression for update loops.
 
 ## Open: data-oriented layouts and explicit allocators

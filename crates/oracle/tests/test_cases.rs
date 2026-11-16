@@ -121,12 +121,13 @@ fn recorded_outcomes_match_gnu_r() {
 /// Every case gives its recorded outcome under ry's tier-0 interpreter and under its JIT (or under
 /// the engines `ORACLE_ENGINE` lists), sorted against the known failures. The recordings stand in
 /// for GNU R, which [`recorded_outcomes_match_gnu_r`] checks them against wherever it is
-/// installed, so this test needs only ry. A runtime that loads another release of base R than the
+/// installed, so this test needs only ry. It runs the `ry` and `libR.so` on disk, which
+/// `cargo test -p oracle` does not rebuild: build them first. A runtime that loads another release of base R than the
 /// recordings' skips, and on other BLAS or LAPACK libraries a difference in a library-dependent
 /// case is a warning.
 #[test]
 fn ry_matches_recorded_outcomes() {
-    if !ry_runtime_available() {
+    if std::env::var_os("ORACLE_ENGINE").is_none() && !ry_runtime_available() {
         eprintln!("skipped: ry's runtime is not built; run `cargo build -p ry-lang -p libr`");
         return;
     }
@@ -165,6 +166,7 @@ fn ry_matches_recorded_outcomes() {
     for (case, needs) in &missing {
         eprintln!("skipped {}: needs {}", case.display(), needs.join(", "));
     }
+    assert!(!cases.is_empty(), "no oracle cases to run");
     let started = Instant::now();
     // Every run is its own process, so the cases spread over every core; the failures are
     // reported in case order, whichever thread finished first.
@@ -192,25 +194,29 @@ fn ry_matches_recorded_outcomes() {
                         };
                         for engine in &engines {
                             let name = engine.name();
-                            let (run, failure) = match engine.run(case) {
+                            // Only a difference in the output follows the libraries; a timeout
+                            // or an engine error fails whatever the libraries are.
+                            let (run, failure, differs) = match engine.run(case) {
                                 Ok(actual) => match diff("recorded", &expected, &name, &actual) {
                                     Some(difference) => (
                                         CaseRun::Failed,
                                         format!("{} [{name}]\n{difference}", case.display()),
+                                        true,
                                     ),
-                                    None => (CaseRun::Passed, String::new()),
+                                    None => (CaseRun::Passed, String::new(), false),
                                 },
                                 Err(EngineError::Crashed(error)) => (
                                     CaseRun::Crashed,
                                     format!("{} [{name}] crashed: {error}", case.display()),
+                                    false,
                                 ),
                                 Err(error) => (
                                     CaseRun::Failed,
                                     format!("{} [{name}]: {error}", case.display()),
+                                    false,
                                 ),
                             };
-                            if run == CaseRun::Failed && other_libraries && library_dependent(case)
-                            {
+                            if differs && other_libraries && library_dependent(case) {
                                 eprintln!("warning: {failure}");
                                 continue;
                             }

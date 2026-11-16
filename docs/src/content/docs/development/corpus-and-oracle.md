@@ -89,7 +89,7 @@ device list, text metrics), grid and the graphics engine (the `grid__*` cases, w
 
 The driver differs from `Rscript` in four ways that the cases avoid: it parses the whole file first, so a syntax error hides the output of the lines before it; its own frames show in `sys.nframe()` and `sys.calls()` (so data.table prints the table after a top-level `:=`, which it skips at a real prompt); `commandArgs(TRUE)` holds the two paths; and `quit()` ends the run without a report.
 
-The second engine is anything that implements the `Engine` trait. `ProcessEngine` covers a
+An engine compared with GNU R is anything that implements the `Engine` trait. `ProcessEngine` covers a
 command line: it is invoked as `<command…> <script> <report>`, must print the script's output
 to stdout, and must write the JSON report that `crates/oracle/src/driver.R` defines (`messages`,
 `warnings`, `errors`, and `value` with `kind` and `deparsed`). ry's runtime is `--engine ry`:
@@ -369,7 +369,7 @@ On a machine whose `PATH` has another release, set `ORACLE_R` to a 4.6.2 build. 
 to a new release, delete `gnu-r.txt` and record every case. A GNU R killed by a signal before it
 writes its report skips the case with `skip ... this GNU R crashed`, because some hardened builds
 abort with "buffer overflow detected" in graphics cases that the reference build runs; a crash of
-the second engine stays a failure.
+ry's engines stays a failure.
 
 Record with `ORACLE_R=<that R> oracle record crates/oracle/cases` and review every changed
 `.expected` file.

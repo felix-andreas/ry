@@ -1,5 +1,5 @@
-//! A differential oracle for R: run one file under GNU R and under a second engine, and
-//! compare stdout, messages, warnings, errors and the last value.
+//! A differential oracle for R: run one file under GNU R and under ry's engines, and compare
+//! stdout, messages, warnings, errors and the last value.
 //!
 //! An engine is anything that implements [`Engine`]. [`ProcessEngine`] covers every engine
 //! with a command line: it is invoked as `<command…> <script> <report>`, must print the
@@ -871,7 +871,7 @@ pub fn engine_build(engine: &dyn Engine) -> Result<Build, String> {
         .map_err(|error| format!("{}: {error}", engine.name()))?;
     parse_build(&outcome.stdout).ok_or_else(|| {
         format!(
-            "{} did not report its build: {}{}",
+            "{} did not report its build: {} {}",
             engine.name(),
             outcome.stdout.trim(),
             outcome.errors.join("; ")

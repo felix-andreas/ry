@@ -175,7 +175,7 @@ fn main() -> ExitCode {
         print!("{}", oracle::fuzz::program(seed));
         return ExitCode::SUCCESS;
     }
-    // Without GNU R, `compare` checks the second engine against the recorded outcomes, which is
+    // Without GNU R, `compare` checks the engines against the recorded outcomes, which is
     // how ry's runtime is tested on a machine that has only ry.
     if let Command::Compare {
         engine,
