@@ -1,6 +1,6 @@
 ---
 title: Structure
-description: What each source file holds in the syntax, semantics, ide, format, loader, oracle, ry, repl, heap, numeric, interp, stats, graphics, frames, services, jit, typed, libr, sniff, table, and rcmd crates
+description: What each source file holds in the syntax, semantics, ide, rdb, format, loader, oracle, ry, repl, heap, numeric, interp, stats, graphics, frames, services, jit, typed, ssa, libr, sniff, table, rcmd and crash crates
 ---
 
 This page lists what each source file in ry's crates is responsible for. How the crates depend on
@@ -87,6 +87,17 @@ parameter names), signature help, completion, code actions with their fixes (`di
 navigation to annotation types and S4 definitions.
 Definition, references, and rename share one occurrence engine, and completion uses the shared
 smart-case matcher.
+
+## `rdb`
+
+The crate root is `src/rdb.rs`. It reads installed R packages for editor navigation into packages
+without ry type stubs, without an R runtime: the library directories, a package's R code as
+browsable source, and the help page behind a topic. `ry` links it.
+
+- **`unserialize.rs`**: R's serialization format (versions 2 and 3, XDR and native binary) read
+  into a plain tree, and the compressed containers of the lazy-load database (`.rdx`, `.rdb`).
+- **`deparse.rs`**: values from that tree turned back into R source that parses.
+- **`rd.rs`**: a parsed Rd help page rendered to compact Markdown for hovers.
 
 ## `format`
 
@@ -320,6 +331,14 @@ back.
 - **`values.rs`**: the native values (`Str`, `List`, `Dict`) and the runtime functions compiled
   code calls.
 
+## `ssa`
+
+The crate root is `src/ssa.rs`: the one mid-level SSA IR that `jit` and `typed` both lower to,
+its builder, and the frame states an untyped speculation exits through.
+
+- **`lower.rs`**: the one lowering from the IR to machine code through Cranelift, and the code
+  module every compiled function lives in.
+
 ## `libr`
 
 The crate root is `src/libr.rs`, and the crate builds `libR.so` as well as an rlib. It holds the
@@ -424,6 +443,13 @@ front ends are copies of `ry-rcmd.exe` named `R.exe`, `Rscript.exe`, `Rcmd.exe` 
 and because Windows has no `bin/` scripts, the front end itself starts the R session behind
 `R CMD build`, `check`, `Rprof`, `Rdconv`, `Sweave` and `Stangle`, as GNU R's `Rcmd.exe` does. The package
 uses `crates/ry/build.rs` as its build script, for the Windows stack size and manifest.
+
+## `crash`
+
+The whole crate is one file, `crash.rs`: the report a fatal signal (SIGSEGV, SIGBUS or SIGABRT)
+prints to standard error before the process dies by the same signal, with the ry version, the
+signal, the R call stack when a runtime registered its printer (`set_traceback`), and the native
+stack. `ry` and `repl` install it.
 
 ## `features`
 

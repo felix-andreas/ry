@@ -70,8 +70,8 @@ the oracle's packages from the binary cache in seconds and needs no nix store.
 
 The workspace builds on the dated nightly that `rust-toolchain.toml` pins, because std's allocator
 API and other unstable features are worth having before they stabilize (the policy is in
-`.agents/memory/decisions/docs-process.md`, "Data-oriented design and explicit allocators"). With rustup, cargo
-downloads that toolchain, with clippy and rustfmt, on the first build. The Zed extension is the
+`.agents/memory/decisions/docs-process.md`, "Data-oriented design and explicit allocators").
+With rustup, cargo downloads that toolchain, with clippy and rustfmt, on the first build. The Zed extension is the
 exception: `editors/zed/rust-toolchain.toml` pins a stable toolchain, because the nightly's
 `wasm32-wasip2` std imports a WASI function that Zed's host does not provide yet.
 The nix dev shell reads the same file. Nightly rustfmt also applies the import settings in
@@ -241,6 +241,16 @@ comment, so the formatter walks the concrete children token by token and decides
 token level. The parser attaches a trailing comment *inside* an expression node, so a decision about
 where a closing token goes has to look at tokens, never at whole elements. See
 `crates/format/src/format.rs` and the fixtures under `crates/format/tests/format/`.
+
+## Agent memory layout
+
+Settled decisions live in `.agents/memory/decisions/`, one file per area (`syntax-semantics.md`,
+`interp.md`, `jit-ssa.md` and nine more), and `decisions/index.md` lists every entry with a link
+and its status. A new decision is an H2 section with a `**Status:**` line, appended to the area
+file it belongs to, after which `just memory index` regenerates the index. `just memory check`,
+part of `just gate`, fails when a single `decisions.md` reappears, when the index is stale, or when
+a memory file outgrows its byte budget in `tools/memory.py`; `just memory split` moves the entries
+of a stray `decisions.md` into the area files.
 
 ## References
 
