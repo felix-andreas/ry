@@ -15,7 +15,7 @@ use {
         process::Command,
         sync::{
             Arc,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
     },
 };
@@ -67,7 +67,13 @@ pub fn cargo_build(profile_directory: &Path) -> Command {
     command
 }
 
-pub fn run_fixture_suite(suite_dir: &Path, render: &dyn Fn(&str) -> String) {
+/// Runs every case of the suite under `suite_dir` through `render` and compares the output with
+/// its expectation. The cases render in parallel, one worker per core, and the report lists the
+/// failures in file order whichever worker finished first, each with the command that reruns it.
+///
+/// `FIXTURE_FILTER` keeps the cases whose `group__case` id contains it, so `group__` runs a whole
+/// group and a full id runs one case (and any case whose id extends it).
+pub fn run_fixture_suite(suite_dir: &Path, render: &(dyn Fn(&str) -> String + Sync)) {
     let files = parse_fixture_files(suite_dir);
     assert!(
         !files.is_empty(),
@@ -75,62 +81,83 @@ pub fn run_fixture_suite(suite_dir: &Path, render: &dyn Fn(&str) -> String) {
         suite_dir.display()
     );
 
-    let filter = env::var("FIXTURE_FILTER").ok();
+    let filter = env::var("FIXTURE_FILTER").ok().filter(|filter| !filter.is_empty());
     let bless = env_var("BLESS").is_some_and(|value| value == "1");
     let mut seen_ids = HashSet::new();
+    for case in files.iter().flat_map(|file| &file.cases) {
+        assert!(
+            seen_ids.insert(case.id.as_str()),
+            "duplicate fixture id `{}` (fixture ids must be unique across the suite)",
+            case.id
+        );
+    }
+
+    let selected: Vec<(usize, &FixtureCase)> = files
+        .iter()
+        .enumerate()
+        .flat_map(|(index, file)| file.cases.iter().map(move |case| (index, case)))
+        .filter(|(_, case)| {
+            filter
+                .as_deref()
+                .is_none_or(|filter| case.id.contains(filter))
+        })
+        .collect();
+    let outcomes = render_in_parallel(&selected, render);
+    let matched = !selected.is_empty();
+
     let mut failures = Vec::new();
-    let mut matched = 0usize;
-
-    for file in files {
-        for case in &file.cases {
-            assert!(
-                seen_ids.insert(case.id.clone()),
-                "duplicate fixture id `{}` (fixture ids must be unique across the suite)",
-                case.id
-            );
-        }
-
-        let mut blessed_edits: Vec<(Range<usize>, String)> = Vec::new();
-        for case in &file.cases {
-            if filter.as_deref().is_some_and(|filter| filter != case.id) {
-                continue;
-            }
-            matched += 1;
-            let rendered = normalize(&render(&case.source));
-            let expected = normalize(&case.expected);
-            if rendered == expected {
-                continue;
-            }
-            if bless {
-                blessed_edits.push((case.expected_span.clone(), rendered));
-            } else {
+    let mut blessed_edits: Vec<Vec<(Range<usize>, String)>> = vec![Vec::new(); files.len()];
+    for ((file_index, case), outcome) in selected.iter().zip(outcomes) {
+        let file = &files[*file_index];
+        let rendered = match outcome {
+            Ok(rendered) => normalize(&rendered),
+            Err(message) => {
                 failures.push(format!(
-                    "fixture `{}` ({})\n---- expected ----\n{expected}\n---- actual ----\n{rendered}\n",
+                    "fixture `{}` ({}) panicked: {message}\n    rerun: {}\n",
                     case.id,
-                    file.path.display()
+                    file.path.display(),
+                    fixture_replay_command(&case.id)
                 ));
+                continue;
             }
+        };
+        let expected = normalize(&case.expected);
+        if rendered == expected {
+            continue;
         }
+        if bless {
+            blessed_edits[*file_index].push((case.expected_span.clone(), rendered));
+        } else {
+            failures.push(format!(
+                "fixture `{}` ({})\n---- expected ----\n{expected}\n---- actual ----\n{rendered}\n    rerun: {}\n",
+                case.id,
+                file.path.display(),
+                fixture_replay_command(&case.id)
+            ));
+        }
+    }
 
-        if !blessed_edits.is_empty() {
-            let mut new_text = file.text;
-            for (span, rendered) in blessed_edits.into_iter().rev() {
-                let separator = if span.end == new_text.len() {
-                    "\n"
-                } else {
-                    "\n\n"
-                };
-                new_text.replace_range(span, &format!("{rendered}{separator}"));
-            }
-            fs::write(&file.path, new_text)
-                .unwrap_or_else(|error| panic!("cannot bless {}: {error}", file.path.display()));
+    for (file, edits) in files.into_iter().zip(blessed_edits) {
+        if edits.is_empty() {
+            continue;
         }
+        let mut new_text = file.text;
+        for (span, rendered) in edits.into_iter().rev() {
+            let separator = if span.end == new_text.len() {
+                "\n"
+            } else {
+                "\n\n"
+            };
+            new_text.replace_range(span, &format!("{rendered}{separator}"));
+        }
+        fs::write(&file.path, new_text)
+            .unwrap_or_else(|error| panic!("cannot bless {}: {error}", file.path.display()));
     }
 
     if let Some(filter) = &filter {
         assert!(
-            matched > 0 || sibling_suite_holds(suite_dir, filter),
-            "FIXTURE_FILTER=`{filter}` names no fixture case in any suite. Check the id.\n\
+            matched || sibling_suite_holds(suite_dir, filter),
+            "FIXTURE_FILTER=`{filter}` matches no fixture case in any suite. Check the id.\n\
              A filter that matches nothing would otherwise run zero cases and report a pass."
         );
     }
@@ -141,6 +168,60 @@ pub fn run_fixture_suite(suite_dir: &Path, render: &dyn Fn(&str) -> String) {
         failures.len(),
         failures.join("\n")
     );
+}
+
+/// Each case's rendering, or its panic message, in the order of `cases`. Every case renders from
+/// its own source alone, so the order the workers take them in cannot change any result.
+fn render_in_parallel(
+    cases: &[(usize, &FixtureCase)],
+    render: &(dyn Fn(&str) -> String + Sync),
+) -> Vec<Result<String, String>> {
+    let next = AtomicUsize::new(0);
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |count| count.get())
+        .min(cases.len().max(1));
+    let mut outcomes: Vec<(usize, Result<String, String>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    loop {
+                        let position = next.fetch_add(1, Ordering::Relaxed);
+                        let Some((_, case)) = cases.get(position) else {
+                            return done;
+                        };
+                        let outcome =
+                            panic::catch_unwind(AssertUnwindSafe(|| render(&case.source)))
+                                .map_err(|payload| panic_message(payload.as_ref()));
+                        done.push((position, outcome));
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|payload| panic::resume_unwind(payload))
+            })
+            .collect()
+    });
+    outcomes.sort_by_key(|(position, _)| *position);
+    outcomes.into_iter().map(|(_, outcome)| outcome).collect()
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic without a message".to_owned())
+}
+
+/// `FIXTURE_FILTER=<id> cargo test -p <package> --test <binary> <test> -- --exact`.
+fn fixture_replay_command(id: &str) -> String {
+    format!("FIXTURE_FILTER={id} {}", cargo_test_command())
 }
 
 pub fn fixture_case_sources() -> Vec<(String, String)> {
@@ -449,9 +530,14 @@ fn variable(name: &str) -> Option<u64> {
     env::var(name).ok().and_then(|value| value.parse().ok())
 }
 
-/// `FUZZ_SEED=<seed> cargo test -p <package> --test <binary> <test> -- --exact`, from what cargo
-/// and the test harness tell the running test about itself.
+/// `FUZZ_SEED=<seed> cargo test -p <package> --test <binary> <test> -- --exact`.
 pub fn replay_command(seed: u64) -> String {
+    format!("FUZZ_SEED={seed} {}", cargo_test_command())
+}
+
+/// `cargo test -p <package> --test <binary> <test> -- --exact` for the running test, from what
+/// cargo and the test harness tell it about itself.
+fn cargo_test_command() -> String {
     let package = env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "<package>".to_owned());
     let binary = env::current_exe()
         .ok()
@@ -480,7 +566,7 @@ pub fn replay_command(seed: u64) -> String {
         "--lib".to_owned()
     };
     let test = std::thread::current().name().unwrap_or("").to_owned();
-    format!("FUZZ_SEED={seed} cargo test -p {package} {target} {test} -- --exact")
+    format!("cargo test -p {package} {target} {test} -- --exact")
 }
 
 /// A harness's budget: `FUZZ_ITERS` when set, else `default` times `FUZZ_DEPTH` when that is
@@ -708,7 +794,7 @@ fn parse_fixture_file(path: PathBuf, text: String) -> FixtureFile {
 
 /// One test binary drives several suites, so a focused filter legitimately
 /// matches nothing here when the case lives in a sibling suite.
-fn sibling_suite_holds(suite_dir: &Path, id: &str) -> bool {
+fn sibling_suite_holds(suite_dir: &Path, filter: &str) -> bool {
     let Some(parent) = suite_dir.parent() else {
         return false;
     };
@@ -721,7 +807,7 @@ fn sibling_suite_holds(suite_dir: &Path, id: &str) -> bool {
             && path != suite_dir
             && parse_fixture_files(&path)
                 .iter()
-                .any(|file| file.cases.iter().any(|case| case.id == id))
+                .any(|file| file.cases.iter().any(|case| case.id.contains(filter)))
     })
 }
 
