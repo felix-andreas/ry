@@ -1,26 +1,20 @@
-//! The object model. Every R value is a heap object behind a [`Sexp`] handle, which is the raw,
-//! non-moving pointer that native code receives as a C `SEXP`.
+//! The object model. Every R value is a heap object behind a [`Sexp`] handle, the raw, non-moving
+//! pointer native code receives as a C `SEXP`. Every object starts with a [`Header`], followed by:
 //!
-//! Every object starts with a [`Header`]. What follows depends on the object's shape:
+//! - for a vector (`CHARSXP`, the atomic vectors, `STRSXP`, `VECSXP`, `EXPRSXP`), its length, its
+//!   capacity and its elements inline, so `INTEGER(x)` is an interior pointer;
+//! - for a triple (pairlists, calls, closures, promises, symbols, binding cells, ALTREP instances),
+//!   three handles, which are `CAR`, `CDR` and `TAG` for a pairlist;
+//! - for an environment, its frame and enclosure; for an external pointer, its address, tag and
+//!   protected value; for a weak reference, its key, value and finalizer; for a primitive, its
+//!   index;
+//! - for a ry record, tuple or tag, its interned layout id, its slot count, a mask of the slots
+//!   that hold raw numbers, and its eight-byte slots.
 //!
-//! - a vector (`CHARSXP`, the atomic vectors, `STRSXP`, `VECSXP`, `EXPRSXP`) stores its length,
-//!   its capacity and then its elements inline, so `INTEGER(x)` is an interior pointer;
-//! - a triple (pairlists, calls, closures, promises, symbols, binding cells, ALTREP instances)
-//!   stores three handles, which are `CAR`, `CDR` and `TAG` for a pairlist;
-//! - an environment stores its frame and its enclosure;
-//! - an external pointer stores its address, tag and protected value;
-//! - a weak reference stores its key, value and finalizer;
-//! - a primitive stores its index in the primitive table;
-//! - a ry record, tuple or tag stores its interned layout id, its slot count, a mask of the
-//!   slots that hold raw numbers, and then its eight-byte slots.
-//!
-//! A ry `I64` is a vector of its own type ([`SexpType::I64`]) with `REALSXP`'s layout: eight bytes
-//! per item, inline after the length and capacity. A single `I64` is a length-one vector, and a
-//! `List<I64>` is the same object at any length with the Array flag set.
-//!
-//! The accessors are `unsafe` because a handle is only valid while its object is reachable from a
-//! root. Holding one across an allocation without rooting it is a bug, and the GC stress tests
-//! exist to catch it.
+//! A ry `I64` is a vector of its own type ([`SexpType::I64`]) with `REALSXP`'s layout, so a single
+//! `I64` is a length-one vector and a `List<I64>` is the same object with the Array flag set. The
+//! accessors are `unsafe` because a handle is valid only while its object is reachable from a root;
+//! holding one unrooted across an allocation is a bug the GC stress tests exist to catch.
 
 use {
     crate::env::Frame,
@@ -362,12 +356,10 @@ pub mod gp {
     /// time, so they do not move the heap's binding epoch, and cached lookups never resolve
     /// through one.
     pub const FUNCTION_FRAME: u16 = 1 << 8;
-    /// An environment that some closure or other environment names as its
-    /// environment or enclosure, or that a cached lookup started from, so a cached lookup may
-    /// have walked through it. Replacing the
-    /// enclosure of an environment without the bit, such as `parent.env(e) <- p` right after
-    /// `e <- new.env()`, cannot change what any cached lookup found (see
-    /// `Heap::set_enclosure`).
+    /// An environment that a closure or another environment names as its environment or enclosure,
+    /// or that a cached lookup started from, so a cached lookup may have walked through it.
+    /// Replacing the enclosure of one without the bit, as `parent.env(e) <- p` right after `e <-
+    /// new.env()` does, cannot change what a cached lookup found (`Heap::set_enclosure`).
     pub const ENCLOSING: u16 = 1 << 0;
     /// An environment a compiled closure body is running on. The body keeps values in registers
     /// that do not count as references, which code running on the environment from elsewhere
@@ -720,11 +712,10 @@ pub(crate) const LARGE_CLASS: u8 = u8::MAX;
 const LARGEST_SMALL_BYTES: usize = 2048;
 
 /// The elements one card of a large handle vector covers. A large character vector, list or
-/// expression vector keeps one card byte per this many elements after its data, and a store of
-/// a younger child into it while it is old marks the child's card dirty. A minor collection then
-/// rescans only the dirty cards of a remembered vector instead of all its elements: a list grown
-/// one element per iteration to a million elements is remembered on every iteration's store,
-/// and rescanning it whole made each minor collection cost time proportional to the old list.
+/// expression vector keeps a card byte per this many elements after its data, and storing a younger
+/// child into it while old dirties the child's card, so a minor collection rescans only dirty
+/// cards: a list grown to a million elements, remembered on every store, otherwise cost each minor
+/// collection time proportional to the whole list.
 pub(crate) const CARD_ELEMENTS: usize = 128;
 /// A card whose elements are no younger than its vector.
 pub(crate) const CARD_CLEAN: u8 = 0;

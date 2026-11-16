@@ -73,11 +73,9 @@ pub enum PendingAccess {
 }
 
 /// What using the bindings of a slot frame's environment runs first. A slot frame keeps its
-/// variables in registers, and the environment that stands for it binds only what something
-/// has read by name; the interpreter installs a resolver that moves a variable from its slot
-/// into a cell of the environment when a lookup asks for it. Routing every bindings read
-/// through [`bindings`] or [`bindings_for`] means no reader can miss a variable that is still
-/// in a slot.
+/// variables in registers and its environment binds only what was read by name; the interpreter's
+/// resolver moves a variable from its slot into a cell when a lookup asks for it. Routing every
+/// bindings read through [`bindings`] or [`bindings_for`] means no reader misses a slot variable.
 static PENDING_RESOLVER: std::sync::OnceLock<unsafe fn(Sexp, PendingAccess)> =
     std::sync::OnceLock::new();
 
@@ -313,12 +311,11 @@ enum Counted {
     /// them allocated until then, because one may have left the list.
     Snapshot(Vec<Sexp>),
     /// For a read-only pointer: an order-independent digest of the elements ([`element_digest`]).
-    /// Native code writing through a read-only pointer only permutes the elements, which leaves
-    /// the counts right and the digest equal, so this costs no copy. A digest that changed means
-    /// it stored something else, so every element is counted once more, which errs toward
-    /// keeping objects. The first counted change to the list turns the digest into a snapshot
-    /// ([`Heap::escaped_snapshot`]): a counted store releases what the slot held, which native
-    /// code may have put there uncounted, and no digest can say what it was.
+    /// Native code writing through a read-only pointer only permutes the elements, which keeps the
+    /// counts right and the digest equal, so this costs no copy; a changed digest means it stored
+    /// something else, so every element is counted once more, erring toward keeping objects. The
+    /// first counted change to the list turns this into a snapshot ([`Heap::escaped_snapshot`]),
+    /// because a counted store releases what the slot held, which no digest can name.
     Digest(u64),
 }
 
@@ -363,12 +360,10 @@ pub struct Roots {
     globals: RootStack,
 }
 
-/// The multiset behind `R_PreserveObject`: each preserved object once, with the releases it
-/// still needs. Membership is the object's `PRECIOUS` flag, which a frame release tests on every
-/// call from a header it already has in cache. A release finds its entry by scanning from the
-/// end, where the most recent preserve is, as GNU R's precious list is searched from its newest
-/// entry; code that preserves many objects at once keeps its own list under one preserve, as
-/// Rcpp and cpp11 do.
+/// The multiset behind `R_PreserveObject`: each preserved object once, with the releases it still
+/// needs. Membership is the object's `PRECIOUS` flag, which a frame release tests from a header
+/// already in cache. A release scans from the newest entry, as GNU R searches its precious list;
+/// code that preserves many objects keeps its own list under one preserve, as Rcpp and cpp11 do.
 #[derive(Default)]
 pub(crate) struct Precious {
     pub(crate) objects: Vec<Sexp>,
@@ -503,21 +498,18 @@ pub enum GcStress {
     /// Collect before every allocation. Every eighth collection is a major one while the heap
     /// is small; past that, one per sixteenth of the live objects.
     EveryAllocation,
-    /// Collect before every allocation, as [`GcStress::EveryAllocation`] does, but keep the
-    /// survivors collectable: each collection unmarks and traces again every object outside the
-    /// oldest generation and ages none into it, so an object that survived earlier collections
-    /// is freed as soon as only a Rust local holds it, as it would be while still young. Plain
-    /// stress promotes an object at its first collection, after which only a major collection
-    /// can free it. Every 64th collection tenures the survivors, so the objects traced again
-    /// stay few, and major collections are spaced as for `EveryAllocation`.
+    /// Collect before every allocation, as [`GcStress::EveryAllocation`] does, but keep survivors
+    /// collectable: each collection unmarks and retraces every object outside the oldest generation
+    /// and ages none into it, so an object is freed as soon as only a Rust local holds it, where
+    /// plain stress promotes it at its first collection and only a major one can free it. Every
+    /// 64th collection tenures the survivors, so the retraced objects stay few.
     Young,
-    /// Collect at random allocations drawn from `seed`: the gaps between collections follow a
-    /// heavy-tailed distribution from one allocation to a few thousand, and most collections
-    /// are minor. Collecting at every allocation promotes each object before the operation
-    /// that made it is done with it, so a store that skips the write barrier on a young object
-    /// goes unnoticed; here objects routinely stay young across whole operations, such as a
-    /// native call that permutes a list, and a missed barrier frees them. A major collection
-    /// runs once per as many allocations as there are live objects.
+    /// Collect at random allocations drawn from `seed`, with heavy-tailed gaps from one allocation
+    /// to a few thousand, mostly minor. Collecting at every allocation promotes each object before
+    /// its operation is done with it, hiding a store that skips the barrier on a young object; here
+    /// objects stay young across whole operations (a native call permuting a list), so a missed
+    /// barrier frees them. A major collection runs once per as many allocations as there are live
+    /// objects.
     Seeded {
         seed: u64,
     },
@@ -1204,16 +1196,12 @@ impl Heap {
         self.inhibit = self.inhibit.saturating_sub(1);
     }
 
-    /// Allocates every object in the old generation until the matching
-    /// [`Heap::end_pretenuring`], for a reader that builds objects which live as long as the
-    /// session, such as a lazy-load fetch's closures. A minor collection would trace each of
-    /// them only to promote it.
-    ///
-    /// Collection waits until pretenuring ends. Pretenured bytes stay out of the nursery's
-    /// budget, which bounds young garbage, and count toward the old generation's limit once
-    /// flushed. The next collection flushes the pretenured objects: it marks them old and
-    /// remembers each one that points at a young object, which keeps the write barrier exact
-    /// without a barrier on the stores that built them.
+    /// Allocates every object in the old generation until the matching [`Heap::end_pretenuring`],
+    /// for a reader whose objects live as long as the session (a lazy-load fetch's closures), which
+    /// a minor collection would trace only to promote. Collection waits until pretenuring ends, and
+    /// pretenured bytes stay out of the nursery's budget. The next collection flushes them: it
+    /// marks them old and remembers each that points at a young object, which keeps the barrier
+    /// exact without a barrier on the stores that built them.
     pub fn begin_pretenuring(&mut self) {
         self.pretenure_depth += 1;
         if self.pretenure_depth == 1 {
@@ -1316,11 +1304,8 @@ impl Heap {
         self.stats.live_vector_cells += cells;
     }
 
-    /// A vector of `length` elements. Atomic elements start zeroed, character elements as `""`
-    /// and list elements as `NULL`, as in GNU R.
-    /// A vector of plain numbers whose elements are not initialized, for a kernel that writes
-    /// every element before anything reads the vector. Skipping the zeroing matters for the
-    /// large results of whole-vector arithmetic.
+    /// A vector of plain numbers whose elements are not initialized, for a kernel that writes every
+    /// element before anything reads it: skipping the zeroing matters for whole-vector arithmetic.
     ///
     /// # Safety
     /// The caller must write every element before the vector is read.
@@ -1487,6 +1472,8 @@ impl Heap {
         Ok(object)
     }
 
+    /// A vector of `length` elements: atomic elements start zeroed, character elements as `""` and
+    /// list elements as `NULL`, as in GNU R.
     #[inline(never)]
     unsafe fn alloc_vector_general(&mut self, kind: SexpType, length: isize) -> HeapResult<Sexp> {
         if !kind.is_vector() {
@@ -1591,13 +1578,12 @@ impl Heap {
         ) && !settled_later
         {
             // A table over-allocates its column list and names by a thousand or so slots and
-            // shrinks them to the columns it has, so most dropped slots still hold the value
-            // they were allocated with. Chunks holding only that value are skipped: comparing
-            // against one value is an xor and an or per slot, which vectorizes on any x86-64,
-            // where the 64-bit equality a second value would need does not. A skipped slot keeps
-            // its value (the blank string in a character vector, where a released one holds
-            // nil), which is sound only because nothing reads past the length: a grow refills
-            // every slot it exposes, and the collector and card scans stop at the length.
+            // shrinks them, so most dropped slots still hold their initial value, and chunks
+            // holding only that are skipped: comparing against one value vectorizes on any x86-64,
+            // where a second value's 64-bit equality does not. A skipped slot keeps its value (the
+            // blank string where a released one holds nil), which is sound only because nothing
+            // reads past the length: a grow refills every slot it exposes, and the collector and
+            // card scans stop at the length.
             let empty = if vector.kind() == SexpType::String {
                 self.known.blank_string
             } else {
@@ -1725,15 +1711,12 @@ impl Heap {
         Ok(object)
     }
 
-    /// Runs the collection check for `bytes` of small objects at once, keeping `keep` alive
-    /// across the collection it may run. The `_uncollected` allocators never collect, so a
-    /// caller that builds a known batch of objects, such as a closure call's environment,
-    /// binding cells and promises, pays for one check instead of one per object, and the
-    /// objects it builds need no root until its next allocation that can collect.
-    ///
-    /// The reservation is a budget, not memory set aside: allocating past it is allowed and
-    /// only moves the next collection earlier. Size it with [`TRIPLE_BYTES`] and
-    /// [`ENVIRONMENT_BYTES`].
+    /// Runs the collection check for `bytes` of small objects at once, keeping `keep` alive across
+    /// the collection it may run. The `_uncollected` allocators never collect, so a caller building
+    /// a known batch (a closure call's environment, binding cells and promises) pays one check, and
+    /// its objects need no root until its next collecting allocation. The reservation is a budget,
+    /// not memory: allocating past it only moves the next collection earlier. Size it with
+    /// [`TRIPLE_BYTES`] and [`ENVIRONMENT_BYTES`].
     #[inline]
     pub unsafe fn reserve(&mut self, bytes: usize, keep: &[Sexp]) {
         if self.young_bytes + bytes > self.small_trigger {
@@ -2311,12 +2294,9 @@ impl Heap {
     }
 
     /// Moves every element of `from` to the start of `to` and leaves `from` empty. The references
-    /// `from` held pass to `to` uncounted, so growing a list by copying it costs one store per
-    /// element instead of counting each element into the copy and, when the collector sweeps
-    /// the original, back out of it.
-    ///
-    /// A list whose pointer escaped is copied instead, because its retirement settles its counts
-    /// from what it holds then.
+    /// pass uncounted, so growing a list by copying costs one store per element instead of counting
+    /// each into the copy and back out when the original is swept. A list whose pointer escaped is
+    /// copied instead, because its retirement settles its counts from what it holds then.
     ///
     /// # Safety
     /// `to` and `from` are distinct, non-ALTREP vectors of one handle kind, `to` has room for
@@ -2442,16 +2422,15 @@ impl Heap {
 
     /// Records that native code received a pointer to `vector`'s handle elements, so its stores
     /// bypass the barrier and every collection scans it whole until [`Heap::retire_escaped`] (a
-    /// minor collection marks every young string instead of scanning an old character vector).
-    /// An escaped list also gets an [`EscapedList`] entry, from which the retirement settles the
-    /// counts that native stores through the pointer bypassed.
+    /// minor collection marks every young string instead of scanning an old character vector). An
+    /// escaped list also gets an [`EscapedList`] entry, from which the retirement settles the
+    /// counts native stores bypassed.
     ///
-    /// A read-only pointer escapes too, because packages write through `DATAPTR_RO`: data.table's
-    /// `setcolorder` permutes a table's columns with `memcpy`. A permutation adds no child, so
-    /// GNU R, which remembers a whole object, never needs to see it, but the barrier remembers a
-    /// carded vector per card, and a permutation can move a young child onto a clean card.
-    /// Native code may store a new child through a `writable` pointer, so an old vector that
-    /// receives one is remembered at once, which makes the retirement rescan it.
+    /// A read-only pointer escapes too, because packages write through `DATAPTR_RO` (data.table's
+    /// `setcolorder` permutes columns with `memcpy`). A permutation adds no child, so GNU R, which
+    /// remembers whole objects, never needs to see it, but the barrier remembers a carded vector
+    /// per card, and a permutation can move a young child onto a clean card. An old vector that
+    /// receives a `writable` pointer is remembered at once, so the retirement rescans it.
     pub unsafe fn escape(&mut self, vector: Sexp, writable: bool) {
         let bits = vector.gc_bits();
         if writable && bits & gc_bits::OLD != 0 {
@@ -2484,15 +2463,12 @@ impl Heap {
         });
     }
 
-    /// Counts `value` into `list` when an escape of `list` is pending, and says whether it did.
-    /// The retirement counts what the list then holds and releases what the snapshot names, so
-    /// the value counts now, which keeps copy-on-modify right while native code runs, and joins
-    /// the snapshot to be released once. The value it replaces is not released now: if the
-    /// counts ever counted it, the snapshot names it and the retirement releases it, and if
-    /// native code stored it uncounted, nothing may.
-    ///
-    /// Only element stores come here: the retirement settles a list's elements, never its
-    /// attributes.
+    /// Counts `value` into `list` when an escape of `list` is pending, and says whether it did. The
+    /// retirement counts what the list then holds and releases what the snapshot names, so the
+    /// value counts now, keeping copy-on-modify right while native code runs, and joins the
+    /// snapshot to be released once. The replaced value is not released: if it was ever counted,
+    /// the snapshot names it, and if native code stored it uncounted, nothing may. Only element
+    /// stores come here, since the retirement never settles attributes.
     #[cold]
     #[inline(never)]
     unsafe fn count_escaped_store(&mut self, list: Sexp, value: Sexp) -> bool {
@@ -2633,11 +2609,10 @@ impl Heap {
     }
 
     /// Records which live slot frame `env` stands for ([`Heap::slot_owner`]) and `names`, the
-    /// list of symbols that frame keeps in slots, or with `None` that it stands for none any
-    /// more. A lookup through `env` asks the interpreter to move a variable out of the frame
-    /// only for one of those names or a dispatch variable it expects
-    /// ([`Heap::expect_dispatch_variables`]), and passes `env` for any other. The frame's
-    /// function must hold `names`, which keeps the list alive while the frame runs.
+    /// symbols that frame keeps in slots, or with `None` that it stands for none. A lookup through
+    /// `env` asks the interpreter to move a variable out only for one of those names or an expected
+    /// dispatch variable ([`Heap::expect_dispatch_variables`]). The frame's function must hold
+    /// `names` to keep it alive.
     pub unsafe fn set_slot_owner(&mut self, env: Sexp, owner: Option<(usize, Sexp)>) {
         (*env.frame_ptr()).set_slot_owner(owner);
     }
@@ -2961,12 +2936,10 @@ impl Heap {
         self.drop_enclosure(env);
     }
 
-    /// Gives up what the environment `env` of a returning slot frame holds, once the frame has
-    /// found that nothing outlives it through the environment: the values of the cells it
-    /// gained and its enclosure, as [`Heap::release_frame`] releases a frame nothing
-    /// references. The enclosure matters most: an environment that kept it would count a
-    /// reference to the frame of the function that defined the callee for as long as it waits
-    /// to be collected, and that frame could not be dropped in turn.
+    /// Gives up what the environment `env` of a returning slot frame holds once nothing outlives
+    /// the frame through it: the values of the cells it gained, and its enclosure, as
+    /// [`Heap::release_frame`] does. The enclosure matters most: kept, it would count a reference
+    /// to the defining function's frame for as long as this environment waits to be collected.
     pub unsafe fn discard_frame(&mut self, env: Sexp, result: Sexp) {
         self.clear_frame(env, |_, dots| dots == result);
     }
@@ -3166,13 +3139,12 @@ impl Heap {
         cell.set_cdr_unbarriered(unbound);
     }
 
-    /// Moves the stamp of every symbol bound in a frame on one of the enclosure chains from
-    /// `old` and from `new`, `env`'s enclosure before and after, but not on both, which are the only symbols a walk that switches
-    /// from one chain to the other can resolve differently. Fails, moving nothing a caller can
-    /// rely on, when such a frame keeps its bindings outside the stamps (a function frame, or a
-    /// base frame whose bindings live on the symbols), a chain passes `env` itself (so the
-    /// chains after the change are not the ones walked here), or the chains are too long or
-    /// bind too many symbols for this to beat moving every stamp.
+    /// Moves the stamp of every symbol bound in a frame on exactly one of the enclosure chains from
+    /// `old` and `new` (`env`'s enclosure before and after), the only symbols a walk switching
+    /// chains can resolve differently. Fails, moving nothing a caller can rely on, when such a
+    /// frame keeps bindings outside the stamps (a function frame, or a base frame whose bindings
+    /// live on the symbols), a chain passes `env` itself, or the chains are too long or bind too
+    /// many symbols to beat moving every stamp.
     unsafe fn bump_symbols_between(&mut self, env: Sexp, old: Sexp, new: Sexp) -> bool {
         const MAX_CHAIN: usize = 64;
         const MAX_SYMBOLS: usize = 1 << 14;
@@ -3247,13 +3219,11 @@ impl Heap {
         share.set(epoch);
     }
 
-    /// The first binding of `symbol` on the search path, from the global environment to the
-    /// base environment. GNU R keeps the same cache, because every free variable of top-level
-    /// code and of functions defined there resolves along the search path, which in a session
-    /// with many attached packages means many large frames to probe.
-    ///
-    /// The flag says whether the cell may be cached under the symbol's stamp: it may not when
-    /// the walk passed a function frame, whose bindings come and go without moving the stamp.
+    /// The first binding of `symbol` on the search path, from the global environment to base. GNU R
+    /// keeps the same cache, because every free variable of top-level code and of functions defined
+    /// there resolves along the search path, which may mean many large frames. The flag says
+    /// whether the cell may be cached under the symbol's stamp: not when the walk passed a function
+    /// frame, whose bindings change without moving the stamp.
     pub unsafe fn global_cell(&self, symbol: Sexp) -> Option<(Sexp, bool)> {
         let payload = symbol.symbol_payload();
         let stamp = self.lookup_stamp(symbol);
@@ -3639,14 +3609,12 @@ impl Heap {
         }
         match self.policy.stress {
             GcStress::EveryAllocation => {
-                // A major collection marks the whole heap, so running one every few allocations
-                // makes stress quadratic in the heap's size: base R's loading never finished in a
-                // debug build. Spacing majors by a sixteenth of the live objects bounds their
-                // marking at about sixteen objects per allocation while still running them often
-                // enough to free an old object whose last reference was dropped.
-                // The spacing counts objects, so a loop of a few huge vectors would promote
-                // them for thousands of allocations; the byte escalation below bounds that the
-                // same way it bounds the ordinary schedule.
+                // A major collection marks the whole heap, so one every few allocations makes
+                // stress quadratic in the heap's size (base R never finished loading in a debug
+                // build). Spacing majors by a sixteenth of the live objects bounds their marking at
+                // about sixteen objects per allocation, while still freeing an old object soon
+                // after its last reference drops. The spacing counts objects, so the byte
+                // escalation below bounds a loop of a few huge vectors.
                 self.stress_counter += 1;
                 let spacing = (self.stats.live_objects / 16).max(8);
                 if self.stress_counter >= spacing {
@@ -4056,12 +4024,11 @@ impl Heap {
     }
 
     /// Frees a large atomic vector a reconcile found dead. A young vector's bytes stay counted
-    /// until the next minor collection, so a reconcile returns pages early without putting that
-    /// collection off: the dead temporaries only a collection finds, such as a forced promise's
-    /// value, would pile up meanwhile, and a loop of `y <- rep(runif(1e6), 10)` then peaked a
-    /// quarter higher. An old vector's bytes are uncounted at once, because only the deeper
-    /// collections recount the old generation, and the stale bytes made every minor collection
-    /// of a vector loop escalate to a full one that found nothing more to free.
+    /// until the next minor collection, so returning pages early does not put that collection off
+    /// and let the temporaries only a collection finds pile up (a `y <- rep(runif(1e6), 10)` loop
+    /// peaked a quarter higher). An old vector's bytes are uncounted at once, because only deeper
+    /// collections recount the old generation, and stale bytes escalated every minor collection of
+    /// a vector loop to a full one.
     unsafe fn free_released(&mut self, object: Sexp) {
         if object.gc_bits() & gc_bits::MARK == 0 {
             if let Some(position) = self.young_large.iter().rposition(|&young| young == object) {
@@ -4178,12 +4145,11 @@ impl Heap {
         }
         self.escaped_lists = escaped_lists;
         if kind == Collection::Intermediate {
-            // A tenured object stays marked, so tracing stops at it; the ones that may point at
-            // younger objects are exactly the remembered and escaped ones, so tracing starts
-            // from them too. The others are unmarked now, and traced if anything reaches them.
-            // Tracing remembers again each tenured parent still left pointing at a younger child.
-            // A carded parent is rescanned only where its cards are dirty, and those cards are
-            // derived again from what the rescan finds still younger.
+            // A tenured object stays marked, so tracing stops at it, and the ones that may point at
+            // younger objects are exactly the remembered and escaped ones, so tracing starts from
+            // them too. Tracing remembers again each tenured parent still pointing at a younger
+            // child; a carded parent is rescanned only on dirty cards, which are derived again from
+            // what the rescan finds.
             for parent in std::mem::take(&mut self.remembered) {
                 parent.set_gc_bit(gc_bits::REMEMBERED, false);
                 if parent.gc_bits() & gc_bits::TENURED == 0 {
@@ -4327,12 +4293,11 @@ impl Heap {
                 // survived, so an explicit `gc()` between two large operations does not drop it
                 // below the next one's peak and buy a full collection in the middle of it.
                 let policy = &mut self.policy;
-                // A full heap that forces a major collection before the program allocated a
-                // limit's worth of vectors since the last one means the limit is too close to
-                // what the program keeps in flight between collections: each such major
-                // collection tenures that working set, which only the next major collection
-                // can free. The survivors alone cannot show it, so the limit grows as if they
-                // filled it.
+                // A full heap that forces a major collection before a limit's worth of vectors was
+                // allocated since the last one means the limit is too close to the working set the
+                // program keeps between collections, which each such collection tenures for the
+                // next major one to free. The survivors cannot show that, so the limit grows as if
+                // they filled it.
                 let thrashing =
                     self.escalating && self.large_allocated_since_major < policy.heap_limit;
                 self.large_allocated_since_major = 0;
@@ -4549,24 +4514,22 @@ impl Heap {
             Shape::Vector => {
                 if object.flags() & flag_bits::WEAK_PAIRS != 0 {
                     // Tracing marks no pair, so it learns nothing about younger children, yet a
-                    // tenured list must stay remembered while it holds one. The next intermediate
-                    // collection traces a tenured list only from the remembered set, and that
-                    // trace is what clears a pair whose key or value died; without it the
-                    // collection frees the child and leaves the pair pointing at it. Keeping the
-                    // list remembered never marks a pair strongly, because a minor collection
-                    // that rescans it comes back to this branch.
+                    // tenured list must stay remembered while it holds one: the next intermediate
+                    // collection traces it only from the remembered set, and that trace clears a
+                    // pair whose key or value died, without which the child is freed under the
+                    // pair. Staying remembered never marks a pair strongly, because a minor
+                    // collection that rescans the list comes back to this branch.
                     if TENURED {
                         has_younger |= (0..object.length() as usize)
                             .any(|index| younger(object, object.stored_element(index)));
                     }
                     self.weak_pairs.push(object);
                 } else if TENURED && object.is_carded() {
-                    // A deeper collection derives each card of a tenured vector from scratch:
-                    // dirty exactly where an element is younger than the vector. A card past
-                    // the length (the capacity keeps cards too) holds nothing and comes out clean.
-                    // A card of strings without a single repeat says the vector holds distinct
-                    // strings, like a column of identifiers, where the table only adds its cost
-                    // to every mark, so the cards after it are marked plainly.
+                    // A deeper collection derives each card of a tenured vector from scratch, dirty
+                    // exactly where an element is younger than the vector; a card past the length
+                    // holds nothing and comes out clean. A card of strings without a repeat
+                    // suggests distinct strings (a column of identifiers), where the table only
+                    // adds cost, so the cards after it are marked plainly.
                     let mut strings = object.kind() == SexpType::String;
                     let mut table = RepeatTable::default();
                     let elements = object.slice::<Sexp>();
@@ -4675,13 +4638,11 @@ impl Heap {
         (has_younger, marked < strings.len())
     }
 
-    /// Marks the elements in the dirty cards of a remembered carded vector that `kind` of
-    /// collection must read, and says whether any of them is still younger than the vector.
-    ///
-    /// A minor collection reads the young cards only. Their children survive it in the younger
-    /// old generation, so a tenured vector's card turns untenured and an untenured vector's turns
-    /// clean. An intermediate collection reads every dirty card of a tenured vector and derives
-    /// it again: untenured where a child is still younger than the vector, clean elsewhere.
+    /// Marks the elements in the dirty cards of a remembered carded vector that `kind` must read,
+    /// and says whether any is still younger than the vector. A minor collection reads only young
+    /// cards, whose children survive into the younger old generation, so a tenured vector's card
+    /// turns untenured and an untenured vector's turns clean. An intermediate collection reads
+    /// every dirty card of a tenured vector and derives it again.
     unsafe fn scan_cards(&mut self, vector: Sexp, kind: Collection) -> bool {
         let (threshold, after_minor) = match kind {
             Collection::Minor if vector.gc_bits() & gc_bits::TENURED != 0 => {
@@ -4717,12 +4678,11 @@ impl Heap {
         any
     }
 
-    /// Ephemeron semantics: a weak reference's value and finalizer are reachable only while its
-    /// key is, so the values are marked to a fixpoint before any key is declared dead. Every
-    /// reference with a dead key is then taken off at once: one with a finalizer is revived with
-    /// its key, value and finalizer until the finalizer has run, and one without is cleared.
-    /// Because all dying references leave together, what the revived finalizers reach cannot
-    /// revive another, so one pass suffices.
+    /// Ephemeron semantics: a weak reference's value and finalizer are reachable only while its key
+    /// is, so values are marked to a fixpoint before any key is declared dead. Then every reference
+    /// with a dead key leaves at once: one with a finalizer is revived with its key, value and
+    /// finalizer until the finalizer has run, one without is cleared. Because they all leave
+    /// together, what the revived finalizers reach cannot revive another, so one pass suffices.
     unsafe fn process_weak_refs(&mut self) {
         self.mark_live_weak_values();
         let mut dying = Vec::new();
@@ -5523,11 +5483,10 @@ const _: () = assert!(VECTOR_DATA_OFFSET.is_multiple_of(16));
 const _: () = assert!(REFCOUNT_MAX == u16::MAX);
 
 /// Physical memory plus swap on Linux, where the allocator reserves address space without
-/// committing it, so a vector far larger than the machine would be handed out and fail only when
-/// touched. GNU R gets its "cannot allocate vector" error from the kernel's overcommit heuristic
-/// refusing such a request, and this bound gives the same answer before asking. With
-/// `vm.overcommit_memory` set to 1 the kernel grants any request, and so does GNU R, so there is
-/// no bound; macOS and Windows also grant oversized requests to GNU R, so they have none either.
+/// committing it, so an impossibly large vector would fail only when touched. GNU R's "cannot
+/// allocate vector" comes from the kernel's overcommit heuristic, and this bound answers the same
+/// before asking. With `vm.overcommit_memory` set to 1 the kernel and GNU R grant any request, as
+/// on macOS and Windows, so there is no bound.
 #[cfg(target_os = "linux")]
 fn memory_ceiling() -> usize {
     let always_overcommit =

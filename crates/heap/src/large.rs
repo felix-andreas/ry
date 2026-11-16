@@ -1,13 +1,10 @@
-//! Memory for large vectors: each vector of at least [`MAPPED_BYTES`] gets an anonymous mapping
-//! of its own, which goes back to the kernel when the vector dies, as GNU R's large vectors do
-//! through glibc's `mmap` and `munmap`. A general-purpose allocator keeps freed memory resident
-//! for reuse instead: libR's mimalloc returns it only on `gc()`, so in a loop whose temporaries
-//! differ in size, the freed blocks it could not reuse stayed resident on top of the live data.
-//!
-//! Freed mappings, at most [`MappedPool::limit`] bytes, are kept and resized with `mremap`
-//! for the next large vector, because a fresh mapping costs a page fault per page touched. A loop
-//! that allocates temporaries of the same size then reuses resident pages instead of faulting in
-//! new ones.
+//! Memory for large vectors: each vector of at least [`MAPPED_BYTES`] gets an anonymous mapping of
+//! its own, which goes back to the kernel when the vector dies, as GNU R's large vectors do through
+//! glibc. A general-purpose allocator keeps freed memory resident instead (libR's mimalloc returns
+//! it only on `gc()`), so a loop whose temporaries differ in size kept the blocks it could not
+//! reuse on top of the live data. Freed mappings up to [`MappedPool::limit`] bytes are kept and
+//! resized with `mremap` for the next large vector, because a fresh mapping costs a page fault per
+//! page.
 
 use std::{
     alloc::{GlobalAlloc, Layout},
@@ -24,14 +21,12 @@ pub(crate) const MAPPED_BYTES: usize = 1 << 20;
 pub(crate) struct MappedPool {
     mappings: Vec<Mapping>,
     bytes: usize,
-    /// The most bytes kept, which [`crate::Heap`] keeps at its vector limit. The pool maps
-    /// nothing while it holds a mapping, so what it keeps never lifts the peak above the most
-    /// bytes the large vectors took at once; its limit only bounds the memory left idle after
-    /// such a peak. A smaller limit costs time without lowering the peak: at half the vector
-    /// limit, with a minimum of 32 MB, the 40 MB `1:n` a `for` loop over ten million elements
-    /// expands was unmapped after every call and faulted in again by the next, and a loop of
-    /// 8 MB vector arithmetic, which frees four temporaries between allocations, kept only two
-    /// at a quarter.
+    /// The most bytes kept, which [`crate::Heap`] keeps at its vector limit. The pool maps nothing
+    /// while it holds a mapping, so what it keeps never lifts the peak above the most bytes large
+    /// vectors took at once; the limit only bounds idle memory after a peak. A smaller limit costs
+    /// time without lowering the peak: at half the vector limit, the 40 MB `1:n` of a
+    /// ten-million-element `for` loop was unmapped after every call and faulted in again by the
+    /// next.
     pub limit: usize,
 }
 
@@ -147,12 +142,11 @@ impl Drop for MappedPool {
     }
 }
 
-/// A global allocator that serves every block of at least [`MAPPED_BYTES`] from an anonymous
-/// mapping of its own and everything smaller from `A`, as glibc's malloc does above its `mmap`
-/// threshold. The buffers a builtin fills before it copies them into a vector are as large as
-/// the vector, and an allocator that keeps freed memory resident for reuse would hold them on
-/// top of the vectors, which come from mappings the allocator cannot reuse. Growing a mapped
-/// block moves its pages with `mremap` instead of copying them.
+/// A global allocator that serves every block of at least [`MAPPED_BYTES`] from a mapping of its
+/// own and everything smaller from `A`, as glibc's malloc does above its `mmap` threshold. A
+/// builtin's buffers are as large as the vector it copies them into, and an allocator keeping freed
+/// memory resident would hold them on top of the mapped vectors, which it cannot reuse. Growing a
+/// mapped block moves its pages with `mremap`.
 pub struct Mapped<A>(pub A);
 
 unsafe impl<A: GlobalAlloc> GlobalAlloc for Mapped<A> {
@@ -306,15 +300,11 @@ unsafe fn remap(address: NonNull<u8>, length: usize, new_length: usize) -> Optio
 #[cfg(target_os = "linux")]
 const HUGE_PAGE_BYTES: usize = 2 << 20;
 
-/// Asks the kernel to back one of the global allocator's blocks with huge pages if a
-/// [`huge_pages`] guard is alive.
-///
-/// Large vectors never ask for huge pages. [`MappedPool`] resizes a kept mapping to each new
-/// vector's length, and with huge pages a loop of subsets of differing lengths spent several
-/// times the system time on zeroing and compaction.
-///
-/// The call is advice: a kernel without transparent huge pages refuses it and the block keeps
-/// small pages, so its result is not checked.
+/// Asks the kernel to back one of the global allocator's blocks with huge pages if a [`huge_pages`]
+/// guard is alive. Large vectors never ask: [`MappedPool`] resizes a kept mapping to each vector's
+/// length, and with huge pages a loop of subsets of differing lengths spent several times the
+/// system time zeroing and compacting. The call is advice a kernel without transparent huge pages
+/// refuses, so its result is not checked.
 #[cfg(target_os = "linux")]
 unsafe fn advise_huge(address: NonNull<u8>, length: usize) -> NonNull<u8> {
     if length >= HUGE_PAGE_BYTES && HUGE_PAGE_SCOPES.load(Ordering::Relaxed) > 0 {

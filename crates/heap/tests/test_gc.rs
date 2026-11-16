@@ -1213,14 +1213,14 @@ fn stores_through_an_escaped_pointer_survive_minor_collections() {
     }
 }
 
-/// Native code permutes a large list and stores into it through element pointers, read-only and
-/// writable, as data.table's `setcolorder` permutes columns through `DATAPTR_RO`, while
-/// collections of every kind run at random points, some during the escape. The barrier check
-/// runs before each collection short of a major one, and every element must hold what the model
-/// says. The list spans several 128-element cards, so a permutation moves young elements between
-/// dirty and clean cards. Whenever no escape is pending, each element's reference count must equal
-/// the number of slots holding it, in the list and in a second list that never escapes, because a
-/// barriered store into an escaped list must not be counted again when the escape retires.
+/// Native code permutes a large list and stores into it through read-only and writable element
+/// pointers, as data.table's `setcolorder` permutes columns through `DATAPTR_RO`, while collections
+/// of every kind run at random points, some during the escape. The barrier check runs before each
+/// non-major collection, and every element must hold what the model says. The list spans several
+/// cards, so a permutation moves young elements between dirty and clean cards. With no escape
+/// pending, each element's reference count must equal the slots holding it (in the list and in one
+/// that never escapes), so a barriered store into an escaped list is not counted again at
+/// retirement.
 #[test]
 fn element_pointer_permutations_keep_the_write_barrier() {
     for_each_seed(200, |seed| {

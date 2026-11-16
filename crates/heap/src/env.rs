@@ -1,19 +1,15 @@
-//! Environment frames. A frame maps symbols to binding cells, which are heap objects of their own
-//! (`SexpType::Binding`, a triple of symbol, value and spare slot). A cell has a stable address for
-//! as long as anything references it, which is what lets compiled code watch a binding for
-//! redefinition, and it outlives its removal from the frame if compiled code still holds it.
+//! Environment frames. A frame maps symbols to binding cells (`SexpType::Binding`, a triple of
+//! symbol, value and spare slot), which are heap objects with stable addresses, so compiled code
+//! can watch a binding for redefinition, and a cell outlives its removal while compiled code holds
+//! it. The frame keeps each cell's symbol beside it, so a lookup scans one contiguous array instead
+//! of taking a cache miss per binding.
 //!
-//! The frame keeps each cell's symbol beside it, so a lookup scans one contiguous array inside the
-//! environment object instead of loading every cell, which would cost a cache miss per binding.
-//!
-//! The cells are kept in insertion order, and [`Frame::listed_cells`] derives from it the order
-//! GNU R lists a frame in (`ls(sorted = FALSE)`, `as.list`, `eapply`), which packages such as R6
-//! depend on. An unhashed frame is a cons list there, so it lists the newest binding first, after
-//! which come a closure's formals in their own order. A hashed one lists its buckets in index
-//! order, each newest first, with the buckets fixed by GNU R's PJW string hash and its growth rule.
-//!
-//! The base environment and the base namespace have no `Frame`: their cells hang off the symbols
-//! themselves, so a lookup of a base function is one load from the interned symbol.
+//! Cells are kept in insertion order, from which [`Frame::listed_cells`] derives GNU R's listing
+//! order (`ls(sorted = FALSE)`, `as.list`, `eapply`), which packages such as R6 depend on: an
+//! unhashed frame lists the newest binding first, then a closure's formals in their own order, and
+//! a hashed one lists its buckets in index order, each newest first, with buckets fixed by GNU R's
+//! PJW string hash and growth rule. The base environment and the base namespace have no `Frame`:
+//! their cells hang off the symbols, so a lookup of a base function is one load.
 
 use {
     crate::{
@@ -82,12 +78,11 @@ pub struct Frame {
     /// The top bit is [`SHADOWED`], kept here because a field of its own would push the
     /// environment object out of its size class.
     formals: u32,
-    /// How many slots hold [`REMOVED`]. The environment of a live slot frame keeps the
-    /// position of that frame on the interpreter's frame stack here instead, under
-    /// [`SLOT_OWNER`], so a lookup through the environment reaches the frame without searching
-    /// the stack. Such an environment removes nothing: it takes all of its frame's variables
-    /// and gives the position up before a binding is removed. The position shares the field
-    /// because a field of its own would push the environment object out of its size class.
+    /// How many slots hold [`REMOVED`], or, under [`SLOT_OWNER`] for the environment of a live slot
+    /// frame, that frame's position on the interpreter's frame stack, so a lookup reaches it
+    /// without a search. Such an environment takes all its frame's variables and gives the position
+    /// up before removing a binding. The position shares the field because its own would push the
+    /// environment out of its size class.
     removed: u32,
     /// One bit per symbol ever bound here, at [`filter_bit`]. Most lookups probe frames that do
     /// not bind the symbol (a call to `length` from a function body asks the function's frame
@@ -95,12 +90,11 @@ pub struct Frame {
     /// A live slot frame's environment also sets the bits of the names its frame keeps in
     /// slots ([`Frame::expect`]).
     filter: u64,
-    /// The names a live slot frame keeps in slots, for its environment: a list of symbols that
-    /// the frame's function holds, and so keeps alive for as long as the frame runs. A lookup
-    /// that passes the filter but finds no cell asks the interpreter to move the variable out of
-    /// its slot only when the name is in this list or is a dispatch variable
-    /// ([`gp::DISPATCH_VARIABLE`]). The filter alone would ask again on every lookup of a name
-    /// whose bit it shares with a slot name, and nothing would ever move.
+    /// The names a live slot frame keeps in slots: a list of symbols the frame's function holds
+    /// alive. A lookup that passes the filter but finds no cell asks the interpreter to move the
+    /// variable out of its slot only for a name in this list or a dispatch variable
+    /// ([`gp::DISPATCH_VARIABLE`]); the filter alone would ask again on every lookup of a name
+    /// sharing a bit with a slot name.
     expected: Option<Sexp>,
 }
 
@@ -111,12 +105,12 @@ fn filter_bit(symbol: Sexp) -> u64 {
     1 << ((symbol.as_ptr() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 58)
 }
 
-/// Every binding a frame gains passes here, which is what makes [`gp::BOUND_ELSEWHERE`] sound:
-/// the base frames keep their bindings on the symbols and never insert. A detached frame (see
-/// [`gp::DETACHED`]) marks nothing, because no lookup from an attached environment passes it, and
-/// it marks its whole frame once it is attached ([`Frame::mark_bound_elsewhere`]). That keeps
-/// `.ArgsEnv`, `.GenericArgsEnv` and other tables under the empty environment from marking every
-/// primitive. The test before the store keeps a symbol's header clean when the bit is set.
+/// Every binding a frame gains passes here, which makes [`gp::BOUND_ELSEWHERE`] sound, since the
+/// base frames keep their bindings on the symbols and never insert. A detached frame
+/// ([`gp::DETACHED`]) marks nothing, because no lookup from an attached environment passes it, and
+/// marks its whole frame once attached ([`Frame::mark_bound_elsewhere`]), so `.ArgsEnv` and other
+/// tables under the empty environment do not mark every primitive. Testing before the store keeps a
+/// set header clean.
 #[inline(always)]
 fn mark_bound_elsewhere(symbol: Sexp) {
     // SAFETY: a frame holds only interned symbols, which live as long as the heap.
@@ -379,11 +373,9 @@ impl DerefMut for Bindings {
 }
 
 impl Frame {
-    /// Initializes an empty frame at `frame` with room for `bindings` bindings.
-    ///
-    /// The frame is written field by field where it lives: a closure call creates one, and
-    /// building it on the stack and moving it copied the whole inline binding buffer (about a
-    /// twentieth of a tier-0 call).
+    /// Initializes an empty frame at `frame` with room for `bindings` bindings, field by field in
+    /// place, because building it on the stack and moving it copied the whole inline binding buffer
+    /// on every closure call.
     ///
     /// # Safety
     /// `frame` must be valid for writes and must not hold a live frame.
@@ -930,15 +922,12 @@ impl Frame {
     }
 }
 
-/// A large frame's lookup index: an open-addressing table with linear probing over the frame's
-/// slot positions. Each entry packs the upper half of the symbol's hash above its position plus
-/// one, so zero marks an empty entry, a probe that meets another symbol mostly fails on the
-/// packed hash without loading that binding, and growing or deleting rehashes from the entries
-/// alone. The table is at most half full, so a probe for a symbol the frame does not bind,
-/// which is what most lookups through a namespace ask, ends after about one entry.
-///
-/// One allocation holds the capacity and the count ahead of the entries, so the frame keeps a
-/// single thin pointer to it.
+/// A large frame's lookup index: an open-addressing table with linear probing over the frame's slot
+/// positions. An entry packs the symbol hash's upper half above its position plus one, so zero is
+/// empty, a probe meeting another symbol mostly fails without loading that binding, and growing or
+/// deleting rehashes from the entries alone. At most half full, so a probe for an unbound symbol
+/// (most lookups through a namespace) ends after about one entry. One allocation holds the capacity
+/// and count ahead of the entries, so the frame keeps one thin pointer.
 struct SlotIndex {
     header: NonNull<u64>,
 }

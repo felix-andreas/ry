@@ -1,28 +1,23 @@
-//! Heap images: a heap's pages as they stand once a session has started, written out so that
-//! another process of the same build takes them over in place instead of rebuilding the objects.
+//! Heap images: a started session's heap pages, written out so another process of the same build
+//! takes them over in place instead of rebuilding the objects.
 //!
-//! The small-object space of the first heap in a process starts at a fixed address
-//! ([`crate::space::IMAGE_BASE`]), and its large objects move to a second fixed address when an
-//! image is written. Every handle in the image is therefore the address the object has in the
-//! loading process too, so the loader copies or maps the pages and patches nothing in them. Two
-//! things make that sound:
+//! The first heap's small-object space starts at a fixed address ([`crate::space::IMAGE_BASE`]) and
+//! its large objects move to a second one when an image is written, so every handle in the image is
+//! the object's address in the loading process too, and the loader patches nothing in the pages.
+//! That is sound because:
 //!
-//! - **The same starting state.** The writer records a digest of its heap's allocation state at
-//!   the moment its session began to start ([`Heap::image_precondition`]), and the loader compares
-//!   it with its own heap's before it takes anything. Equal digests mean that every object the
-//!   loading heap holds was allocated at the address where the image holds the same object, so
-//!   the image's pages replace them without leaving a dangling handle.
-//! - **No process-local addresses in the pages.** The few fields that hold one are cleared in the
-//!   written pages and listed in the metadata, and the loader sets them for its own process: a
-//!   frame's spilled bindings, an external pointer's address, and the contents of the fixed
-//!   objects that hold native addresses (the ALTREP class tables), which keep the loader's.
+//! - **The starting state is the same.** The writer records a digest of its heap's allocation state
+//!   when its session began to start ([`Heap::image_precondition`]), and the loader compares it
+//!   with its own first. Equal digests mean every object the loading heap holds sits where the
+//!   image holds the same object, so the pages replace them without leaving a dangling handle.
+//! - **The pages hold no process-local address.** The few fields that would (a frame's spilled
+//!   bindings, an external pointer's address, the ALTREP class tables in the fixed objects) are
+//!   cleared in the written pages, listed in the metadata, and set by the loader.
 //!
-//! The metadata also carries the heap's state outside the pages: the intern table's slots, the
-//! symbol table, the precious set, the global roots, the weak references and the counters.
-//!
-//! A string that names a path under a directory the writer saw elsewhere can be moved under the
-//! loader's directory with a [`Relocation`]. Such a string is listed with the fields that refer
-//! to it, and the loader allocates the moved string and points those fields at it.
+//! The metadata also carries the intern table's slots, the symbol table, the precious set, the
+//! global roots, the weak references and the counters. A string naming a path under a directory the
+//! writer saw can move under the loader's with a [`Relocation`]: it is listed with the fields that
+//! refer to it, and the loader allocates the moved string and points them at it.
 
 use {
     crate::{

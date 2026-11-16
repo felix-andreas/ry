@@ -1,11 +1,8 @@
-//! Heap images against the heap they were written from. A generator builds a random object graph
-//! in one heap, binds parts of it in the global and base environments, and writes an image; the
-//! heap is dropped, a fresh one loads the image at the same addresses, and the loaded graph must
-//! describe the same as the original, with interned strings and symbols shared and every binding
-//! where it was. `FUZZ_ITERS` scales the budget.
-//!
-//! Only the first heap a process holds at a time starts at the image address, so the tests take
-//! turns, and each drops one heap before it makes the next.
+//! Heap images against the heap they were written from. A generator builds a random object graph,
+//! binds parts of it in the global and base environments and writes an image; a fresh heap loads it
+//! at the same addresses, and the graph must describe the same, with interned strings and symbols
+//! shared and every binding in place. `FUZZ_ITERS` scales the budget. Only a process's first heap
+//! starts at the image address, so the tests take turns, each dropping one heap before the next.
 
 use {
     heap::{

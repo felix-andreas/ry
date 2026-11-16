@@ -61,13 +61,11 @@ impl Encoding {
     }
 }
 
-/// The intern table, open-addressed with linear probing over one dense array of 8-byte slots.
-///
-/// A slot packs a string's address and a tag of its hash, so a probe reads one cache line and
-/// dereferences only a string whose tag matches. A lookup that finds its string costs two
-/// dependent memory reads (the slot and the string), and one that misses costs one, however
-/// many strings are live. A chained or control-byte table would add a third read, which in a
-/// table of millions of strings is a cache miss on every call to `mk_char`.
+/// The intern table, open-addressed with linear probing over one dense array of 8-byte slots. A
+/// slot packs a string's address and a tag of its hash, so a probe reads one cache line and
+/// dereferences only a string whose tag matches: a hit costs two dependent reads and a miss one,
+/// however many strings are live, where a chained or control-byte table would add a third read, a
+/// cache miss on every `mk_char` in a table of millions of strings.
 pub(crate) struct StringTable {
     /// A power-of-two count of slots: 0 for empty, [`TOMBSTONE`] for a removed entry, and
     /// otherwise a string's address over 8 in the low [`ADDRESS_BITS`] with the low
@@ -425,11 +423,10 @@ impl StringTable {
 
     /// Re-places every live entry into the smallest power-of-two table they fill to at most 5/8,
     /// which drops the tombstones. Growth at 7/8 then keeps the table between 5/16 and 7/8 full,
-    /// close to GNU R's chained table, which grows at 0.85. Near the top of that range a probe
-    /// for an absent string scans a few consecutive cache lines, but it compares only the tags in
-    /// them; a sparser table would double the slots' memory, 32 MB at four million strings, and
-    /// a growth step taken while the old slots are still live briefly costs both. Each entry's
-    /// hash is read from its string, in slot order, so the reads are independent and overlap.
+    /// close to GNU R's chained table, which grows at 0.85. A probe for an absent string near the
+    /// top scans a few cache lines but compares only tags; a sparser table would double the slots'
+    /// memory (32 MB at four million strings). Hashes are read from the strings in slot order, so
+    /// the reads overlap.
     unsafe fn rebuild(&mut self) {
         let old = std::mem::take(&mut self.slots);
         unsafe {
