@@ -202,6 +202,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Parked: cheaper restart setup in `withRestarts` (planned)
 - Replacement calls and `lapply`/`vapply` element calls run on a slot frame's slots
 - A complex assignment calls a primitive replacement with its values
+- An empty named argument leaves its formal to a positional argument
+- `[[<-` reports a wrong subscript count in GNU R's order
 
 ## Builtins and base R
 

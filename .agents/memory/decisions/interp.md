@@ -1016,3 +1016,36 @@ without cells, promise forcing in the loop, and one observer word on the general
   methods, calls and pairlists, environments, `<<-`, nested targets, evaluation order, empty and
   named subscripts, a locked binding, the reported calls, S4 slots, data frames and factors) and
   `apply__element_call_is_never_changed`.
+
+## An empty named argument leaves its formal to a positional argument
+
+**Status:** built
+
+- GNU R's positional pass tells a formal that a name matched from the value it holds, and an empty
+  argument leaves none. So `f(a = , 1)` for `function(a, b)` binds `a` to 1, and
+  `ifelse(test = , 1, 2)` is 2.
+- `eval::match_plan` records the empty argument that matched each formal by name. A positional
+  argument takes such a formal, and the empty argument's plan entry becomes `BINDS_NOTHING`, which
+  every reader of a plan skips because it indexes no formal.
+- A plan therefore depends on which named arguments are empty, so `match_args_cached`, whose key
+  is the names alone, matches a call with an empty argument afresh. A call site's own plan is
+  built from that site's arguments, whose empties never change.
+- `match_builtin_args` follows the same rule for a builtin that matches by name. `log`, `rep` and
+  `NextMethod` differ from GNU R with an empty named argument, which `backlog.md` describes.
+- An "unused argument" message deparses the argument with no option, as GNU R does, so an integer
+  loses its `L` and a vector its names (`deparse::deparse_unused_argument`).
+- Pinned by the oracle case `calls__empty_named_argument`.
+
+## `[[<-` reports a wrong subscript count in GNU R's order
+
+**Status:** built
+
+- With a subscript count that fits neither a vector nor the target's dimensions, GNU R's
+  `do_subassign2_dflt` reports the first of: a target that is no vector ("object of type ... is
+  not subsettable"), for an atomic target a value of the wrong length ("replacement has length
+  zero", "more elements supplied than there are to replace", or the "long vectors not supported
+  yet" message for a value with no length), and only then "[[ ]] improper number of subscripts".
+  `subset::subassign2` checks in that order, so a subscript that is itself a call, as in
+  `y[g(), , 1] <- 2`, reaches the same message as a constant one.
+- `islistfactor` refuses an `NA` for `recursive` from R 4.5 on, which earlier releases took as true.
+- Pinned by the oracle case `replacement__subscript_count_errors`.
