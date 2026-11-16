@@ -7548,6 +7548,9 @@ unsafe fn scheduled_entry_in_place(state: &mut Activation<'_, '_>, entries: i32)
     // The tier may have started or stopped the body's recording.
     reload(state);
     match event {
+        Some(TierExit::Finished(Ok(value))) => leave_fast::<false>(state, value)
+            .or_else(|| leave_fast::<true>(state, value))
+            .unwrap_or_else(|| finished(state, Ok(value))),
         Some(TierExit::Finished(result)) => finished(state, result),
         Some(TierExit::Resume { pc, pending }) => match pending {
             Some(unwind) => failed::<false>(state, pc, unwind),
@@ -8301,6 +8304,18 @@ unsafe fn return_fast<const DISCARD: bool>(
     state: &mut Activation<'_, '_>,
     at: usize,
 ) -> Option<usize> {
+    let value = *state.registers.add(*state.code.add(at + 1) as usize);
+    leave_fast::<DISCARD>(state, value)
+}
+
+/// Ends the running activation, which a call instruction entered in place, with `value`, and
+/// answers the caller's next instruction: [`return_fast`]'s exit, which compiled code that ran
+/// the activation takes too. `None` when the exit needs [`eval::leave`].
+#[inline(always)]
+unsafe fn leave_fast<const DISCARD: bool>(
+    state: &mut Activation<'_, '_>,
+    value: Sexp,
+) -> Option<usize> {
     let interp = &mut *state.interp;
     let heap = &mut *state.heap;
     let nil = heap.known().nil;
@@ -8322,7 +8337,6 @@ unsafe fn return_fast<const DISCARD: bool>(
         return None;
     }
     debug_assert!(frame.env == nil && frame.slots as usize == state.machine.header);
-    let value = *state.registers.add(*state.code.add(at + 1) as usize);
     if DISCARD {
         if pending.refcount() != 0 || value == pending || heap.is_preserved(pending) {
             return None;
