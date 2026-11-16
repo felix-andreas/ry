@@ -1504,11 +1504,25 @@ protocol 9%, `parent.frame` 5%, `standardGeneric` 3%.
 What is open, largest first. Each is worth 0.1 to 0.5% of run time on its own, because call
 setup is about a tenth of the run, so take them for the objects they remove:
 
-- **Replacement calls.** `complex_assign` builds the getter call, the setter call, their argument
-  cells and a promise per value for every `f(x) <- v`: about nine objects for a one-level call,
-  roughly 25 million objects on finbench, and a tenth of the frames that switch to by-name
-  reads. Run the getter and the setter on the slot window with argument references, as an
-  ordinary call does, and build the call object only when `sys.call` or `match.call` asks.
+- **Replacement calls that still take `complex_assign`.** A one-level replacement on a slot
+  frame's variable runs on the slots (`slot-frames.md`, "Subassignment and replacement in slots";
+  `decisions.md`, "Replacement calls and `lapply`/`vapply` element calls run on a slot frame's
+  slots"). Three shapes still build the getter call, the setter call, their argument cells and a
+  promise per value, about nine objects a level, and give the frame its environment:
+  - A nested target (`names(x)[2] <- v`, `l$b$c <- v`, `substr(names(x)[1], 1, 1) <- "Z"`), which
+    the compiler leaves to the `<-` special: 3,193 of the 59,700 frames given an environment on
+    the testthat workload (profile row `<-`). Lower it to getter and setter register code when
+    every subscript is free of side effects (the general assignment evaluates a nested subscript
+    twice), branch to `Op::ComplexAssign` when any level is an object with a method or has a
+    getter or setter that is not a builtin, and reuse `complex_assign`'s rules for changing a
+    value in place.
+  - A target that is an object without a method, behind a computed subscript
+    (`s3[[names(x)[1]]] <- 2`): the probe before the subscripts (`Op::BranchIfObject`) branches
+    on any object. A probe that asks for the method (`dispatch::has_internal_method`) keeps
+    these in slots, and it has to be taught to tier 1 as well (`jit/src/analysis.rs`,
+    `codegen.rs`).
+  - A closure setter with computed arguments, and a setter whose body needs an environment
+    (`diag<-` calls `.Internal`, `body<-` is an S4 generic).
 - **Environments that only stand for a frame.** Three quarters of all environments come from
   `pending_env`, and most are never looked into. Its callers in a 225-test slice of finbench
   (667k calls): the generic call protocol 100k, `slot_promises_into` 105k, a builtin that
@@ -1517,10 +1531,6 @@ setup is about a tenth of the run, so take them for the objects they remove:
   reference 25k. A caller that only passes the environment on (the generic protocol, `$`, a
   builtin that dispatches) could pass the frame's index and make the object when the callee
   reads it.
-- **`lapply` and `vapply`.** A quarter of the by-name frames are the frames of the two
-  functions themselves, because their `.Internal` evaluates `FUN(X[[i]], ...)`
-  (`ElementCalls::new`) in that frame. Calling `FUN` with the element as a value and the frame's
-  `...` as argument references keeps the frame in slots.
 - **Detached references.** `detach_reference` makes a fifth of the promises left: an argument
   reference becomes a promise object when the callee keeps the argument past the call or hands
   it on as a promise (S4 dispatch, `NextMethod`, a method that does not take the generic's slots).

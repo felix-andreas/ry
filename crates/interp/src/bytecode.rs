@@ -10725,8 +10725,8 @@ unsafe fn slot_owns(state: &Activation<'_, '_>, value: Sexp) -> bool {
 }
 
 /// `x[i] <- value`, `x[[i]] <- value` or `x$name <- value` on a slot frame's slot, without
-/// making its environment, for any `x` that is not an object (an object dispatches, and its
-/// method may look at the frame). The compiler guarded the replacement function as the base
+/// making its environment, for any `x` that has no method for the replacement (a method may
+/// look at the frame). The compiler guarded the replacement function as the base
 /// primitive, so its own code runs here directly, reporting against the whole assignment as the
 /// complex assignment does. The slot's value changes in place when the slot alone holds it, as
 /// `complex_assign` updates a binding's; a value anything else holds, such as another
@@ -10902,13 +10902,16 @@ unsafe fn slot_builtin_args(
     let dots = symbols().dots;
     let missing = missing_arg();
     let heap = crate::heap();
-    let mut push = |args: &mut eval::Args, tag: Sexp, item: Sexp| -> R<()> {
+    let mut push = |args: &mut eval::Args, tag: Sexp, item: Sexp, passed_on: bool| -> R<()> {
         let value = if item == missing {
             if !keep_missing {
-                return Err(error_in(
-                    call,
-                    format!("argument {} is empty", args.len() + 1),
-                ));
+                // An empty item of `...` is the passing frame's error, as GNU R evaluates it
+                // as a symbol there; an empty argument written in the call is the call's.
+                return Err(if passed_on {
+                    error("argument is missing, with no default")
+                } else {
+                    error_in(call, format!("argument {} is empty", args.len() + 1))
+                });
             }
             missing
         } else {
@@ -10932,7 +10935,7 @@ unsafe fn slot_builtin_args(
                 return Err(error("'...' used in an incorrect context"));
             }
             while item.kind() == SexpType::Dots {
-                push(args, item.tag(), item.car())?;
+                push(args, item.tag(), item.car(), true)?;
                 if !state.in_slots() {
                     return Ok(());
                 }
@@ -10942,9 +10945,9 @@ unsafe fn slot_builtin_args(
             let Some(slot) = slot_named(state, expression) else {
                 panic!("a slot frame lost a slot it was checked to have");
             };
-            push(args, cell.tag(), *slot)?;
+            push(args, cell.tag(), *slot, false)?;
         } else {
-            push(args, cell.tag(), expression)?;
+            push(args, cell.tag(), expression, false)?;
         }
         if !state.in_slots() {
             return Ok(());
@@ -12807,14 +12810,15 @@ enum Home {
 }
 
 /// [`Op::Replace`]'s one-level update of a local variable, as `complex_assign` runs it, through
-/// a builtin replacement or a closure that takes only the target and the value: `false`
-/// leaves the assignment to `complex_assign`. `args` are the call's argument registers, the
-/// first for the variable's value and the last holding the value assigned.
+/// a builtin replacement, a special's direct entry, or a closure whose other arguments are
+/// constants: `false` leaves the assignment to `complex_assign`, as does a target with a
+/// method for the replacement. `args` are the call's argument registers, the first for the
+/// variable's value and the last holding the value assigned.
 ///
-/// A variable in a slot (`env` is `NULL`) is updated without making the frame's environment
-/// when the replacement is a builtin and the target is not an object, since then nothing can
-/// look at the frame. Its value changes in place only when the slot alone holds it, which keeps
-/// `y <- x; names(x) <- v` from changing `y`.
+/// A variable in a slot (`env` is `NULL`) is updated without making the frame's environment,
+/// which a closure replacement's frame finds below its own if it asks. Its value changes in
+/// place only when the slot alone holds it, which keeps `y <- x; names(x) <- v` from changing
+/// `y`.
 unsafe fn replace_variable(
     state: &Activation<'_, '_>,
     env: Sexp,

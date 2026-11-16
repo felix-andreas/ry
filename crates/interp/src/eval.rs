@@ -2167,10 +2167,9 @@ unsafe fn collect_evaluated_args(
                     let item = cell.car();
                     let evaluated = if item == missing {
                         if !keep_missing {
-                            return Err(error_in(
-                                call,
-                                format!("argument {} is empty", args.len() + 1),
-                            ));
+                            // GNU R evaluates the empty item as a symbol, in the frame that
+                            // passes `...` on, so the error is that frame's, not the call's.
+                            return Err(error("argument is missing, with no default"));
                         }
                         missing
                     } else {

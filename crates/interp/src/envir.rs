@@ -1889,8 +1889,9 @@ struct ElementCalls {
     /// the frame's slots.
     env: Sexp,
     /// The slot frame the calls are made from while it has no environment, and the register
-    /// that holds its `i`. A closure `FUN` over a plain `X` needs nothing of the frame but its
-    /// `...`, so the frame gets an environment only if `FUN` asks for its caller's.
+    /// that holds its `i`. A closure or builtin `FUN` over a plain `X` needs nothing of the
+    /// frame but its `...`, so the frame gets an environment only if `FUN` asks for its
+    /// caller's.
     slots: Option<(usize, usize)>,
     index_symbol: Sexp,
     /// The integer `i` is bound to, which GNU R updates in place for each element.

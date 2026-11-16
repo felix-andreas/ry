@@ -383,15 +383,25 @@ method receives the forced promise of its code.
 `lapply` and `vapply` are closures whose bodies call `.Internal(lapply(X, FUN))`, and the builtin
 calls `FUN(X[[i]], ...)` once per element with `i` bound in the closure's frame. That frame stays
 a slot frame: a body with such a call gets a slot for `i` (`binds_element_index` in
-`bytecode.rs`), the builtin stores each index there (`ElementCalls` in `envir.rs`), and a closure
-`FUN` is called from the slots with the element as a forced argument reference and the items of
-the frame's `...` slot appended (`eval::force_and_call_from_slots`). `FUN` sees the call
-`FUN(X[[i]], ...)` and the same promises as before, and `parent.frame()` in `FUN` gives the
-frame its environment, after which the remaining elements are called through it.
+`bytecode.rs`), and the builtin stores each index there (`ElementCalls` in `envir.rs`). What
+happens next depends on `FUN`.
 
-The element call is evaluated in the frame's environment instead when `X` has a class or
-dimensions or is not a vector (`X[[i]]` may dispatch, so it is evaluated as written), when `FUN`
-is not a closure, when the element is the empty argument, and once a callee has rebound `FUN`.
+| `FUN` | How the element call runs |
+|---|---|
+| a closure | From the slots, with the element as a forced argument reference and the items of the frame's `...` slot appended (`eval::force_and_call_from_slots`). `FUN` sees the call `FUN(X[[i]], ...)` and the same promises as a call evaluated in the environment. |
+| a builtin | From the slots, with the element and the forced values of the `...` items (`eval::call_builtin_from_slots`). |
+| a special | In the frame's environment. |
+
+`parent.frame()` in `FUN` gives the frame its environment, after which the remaining elements are
+called through it.
+
+The element call is evaluated in the frame's environment instead in these cases:
+
+- `X` has a class or dimensions or is not a vector, because `X[[i]]` may dispatch and is evaluated
+  as written.
+- The element is the empty argument, or a callee has rebound `FUN`.
+- `FUN` is a builtin and an item of `...` is the empty argument, or `FUN` is a generic builtin and
+  an argument is an object, because dispatch needs an environment to look methods up from.
 
 ## Argument references
 
