@@ -468,3 +468,52 @@ at_loop <- function(a, n) {
   a@balance
 }
 print(run(at_loop, account, 10))
+
+# A replacement function written in R reads its target and its value as shared, so
+# unclass() of either copies and the class is still there afterward.
+`seen<-` <- function(x, value) {
+  bare <- unclass(value)
+  attr(x, "seen") <- class(value)
+  x
+}
+dated <- function() structure(1, class = "Date")
+value_fresh <- function(x) { seen(x) <- dated(); attr(x, "seen") }
+value_fresh_env <- function(x) { environment(); seen(x) <- dated(); attr(x, "seen") }
+value_variable <- function(x) { v <- dated(); seen(x) <- v; c(attr(x, "seen"), class(v)) }
+value_builtin <- function(x) { seen(x) <- structure(1, class = "Date"); attr(x, "seen") }
+for (k in 1:3) print(c(value_fresh(1), value_fresh_env(1), value_variable(1), value_builtin(1)))
+top_level <- 1
+for (k in 1:3) { seen(top_level) <- dated(); print(attr(top_level, "seen")) }
+`bare<-` <- function(x, value) { u <- unclass(x); attr(u, "was") <- class(x); u }
+target_shared <- function(x) { y <- x; bare(x) <- 1; c(attr(x, "was"), class(y)) }
+for (k in 1:3) print(target_shared(structure(list(1), class = "foo")))
+target_own <- function() { x <- structure(list(1), class = "foo"); bare(x) <- 1; attr(x, "was") }
+for (k in 1:3) print(target_own())
+`stamp<-` <- function(x, value) UseMethod("stamp<-")
+`stamp<-.foo` <- function(x, value) { n <- unclass(value); attr(x, "stamp") <- class(value); x }
+stamped <- function(x) { stamp(x) <- dated(); attr(x, "stamp") }
+for (k in 1:3) print(stamped(structure(1, class = "foo")))
+
+# A replacement function that keeps its frame keeps the target it was called with, whatever
+# the caller does to the variable afterward.
+saved <- NULL
+`keep<-` <- function(x, value) { saved <<- function() x; x }
+kept_element <- function(a) { a <- a + 0; keep(a) <- 7; a[[1]] <- 99; list(a, saved()) }
+kept_names <- function(a) { a <- a + 0; keep(a) <- 7; names(a) <- c("p", "q"); list(a, saved()) }
+kept_attr <- function(a) { a <- a + 0; keep(a) <- 7; attr(a, "k") <- 1; list(a, saved()) }
+kept_matrix <- function(a) { a <- a + 0; keep(a) <- 7; a[1, 1] <- 99; list(a, saved()) }
+for (k in 1:4) {
+  print(kept_element(c(1, 2)))
+  print(kept_names(c(1, 2)))
+  print(kept_attr(c(1, 2)))
+  print(kept_matrix(matrix(1, 2, 2)))
+}
+`keep_env<-` <- function(x, value) { saved <<- environment(); x }
+kept_env <- function(a) { a <- a + 0; keep_env(a) <- 7; a[[1]] <- 99; list(a, saved$x) }
+for (k in 1:4) print(kept_env(c(1, 2)))
+kept_cell <- function(a) { environment(); a <- a + 0; keep(a) <- 7; a[[1]] <- 99; list(a, saved()) }
+for (k in 1:4) print(kept_cell(c(1, 2)))
+# The update after a replacement function that kept nothing still changes the variable.
+`plain<-` <- function(x, value) x
+unkept <- function(a) { a <- a + 0; plain(a) <- 7; a[[1]] <- 99; a }
+for (k in 1:4) print(unkept(c(1, 2)))

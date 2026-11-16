@@ -126,3 +126,18 @@ thrice(function() failure(pass_paste(1, , 3)))
 thrice(function() failure(lapply(1:2, c, , 3)))
 thrice(function() failure(vapply(1:2, sum, 0, , 3)))
 thrice(function() failure(c(1, , 3)))
+
+# The internal called from a function without `...` of its own: the `...` of FUN(X[[i]], ...)
+# is an enclosing function's, or an error.
+dotless <- function(...) {
+  g <- function(X, FUN) { FUN <- match.fun(FUN); .Internal(lapply(X, FUN)) }
+  g(c(4, 9), log)
+}
+for (k in 1:4) print(unlist(dotless(2)))
+dotless_closure <- function(...) {
+  g <- function(X, FUN) { FUN <- match.fun(FUN); .Internal(lapply(X, FUN)) }
+  g(1:2, function(v, w = 100) v + w)
+}
+for (k in 1:4) print(unlist(dotless_closure(10)))
+no_dots <- function(X, FUN) { FUN <- match.fun(FUN); .Internal(lapply(X, FUN)) }
+for (k in 1:4) print(tryCatch(no_dots(1:2, sqrt), error = conditionMessage))
