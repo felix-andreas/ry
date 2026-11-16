@@ -251,6 +251,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `validObject` runs validity methods without its slot loop, and `new()` copies the prototype shallowly
 - Small base closures with call arguments run their bodies natively behind prologues
 - `c`, `unlist`, `rep` and positional `[` copy handle vectors a run at a time
+- `x[] <- value` and `x[a:b] <- value` write whole copies of the value
 
 ## R compatibility
 
