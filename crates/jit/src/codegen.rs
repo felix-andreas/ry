@@ -1538,11 +1538,14 @@ impl<'p> Translator<'p> {
                 // A builtin call that runs no R code needs none of the step's write-back,
                 // validation and reload, so it runs tier 0's handler body directly.
                 let call = op == Op::CallBuiltin;
+                // `refine` records the result's type when its check fails, but it checks no
+                // unrefined type, so then the step records it.
+                let record = dst.is_some_and(|(_, ty)| !refined(ty));
                 if inlined {
                     let unobserved = self.builder.ins().icmp_imm_s(IntCC::Equal, any, 0);
                     self.hand_off_unless(position, before, unobserved);
                     if call {
-                        self.call_builtin_quietly(pc, failed)?;
+                        self.call_builtin_quietly(pc, record, failed)?;
                         self.builder.ins().jump(refining, &[]);
                         None
                     } else {
@@ -1553,7 +1556,7 @@ impl<'p> Translator<'p> {
                     let dispatching = self.builder.create_block();
                     self.builder.ins().brif(any, dispatching, &[], quiet, &[]);
                     self.builder.switch_to_block(quiet);
-                    self.call_builtin_quietly(pc, failed)?;
+                    self.call_builtin_quietly(pc, record, failed)?;
                     self.builder.ins().jump(refining, &[]);
                     self.builder.switch_to_block(dispatching);
                     self.flush_all(before, failed);
@@ -2145,8 +2148,7 @@ impl<'p> Translator<'p> {
         after: (StateId, Option<usize>),
         live: usize,
     ) {
-        // A closure an instruction just made has its type by construction.
-        if matches!(ty, Ty::Boxed | Ty::Bottom | Ty::Closure(..)) {
+        if !refined(ty) {
             return;
         }
         let value = self.load_register(register);
@@ -5779,15 +5781,21 @@ impl<'p> Translator<'p> {
     }
 
     /// Runs the builtin call at `pc` through [`runtime::jit_call_builtin`], where it runs no R
-    /// code. An error leaves through `failed`.
-    fn call_builtin_quietly(&mut self, pc: usize, failed: Label) -> Result<(), Refusal> {
+    /// code, recording the result's type when `record` is set. An error leaves through `failed`.
+    fn call_builtin_quietly(
+        &mut self,
+        pc: usize,
+        record: bool,
+        failed: Label,
+    ) -> Result<(), Refusal> {
         let pc = iconst(&mut self.builder, pc);
+        let record = self.builder.ins().iconst(I32, i64::from(record));
         let result = self
             .call(
                 runtime::jit_call_builtin as *const () as usize,
-                &[I64, I64],
+                &[I64, I64, I32],
                 Some(I32),
-                &[self.frame.activation, pc],
+                &[self.frame.activation, pc, record],
             )
             .ok_or(Refusal("a helper without a result"))?;
         let ok = self
@@ -5845,6 +5853,12 @@ fn converts(from: Ty, to: Ty) -> bool {
         return matches!(from, Ty::Int | Ty::Dbl);
     }
     from.in_variables() && to != Ty::Bottom && !to.in_variables()
+}
+
+/// Whether [`Translator::refine`] checks a value of type `ty`. A closure an instruction just made
+/// has its type by construction.
+fn refined(ty: Ty) -> bool {
+    !matches!(ty, Ty::Boxed | Ty::Bottom | Ty::Closure(..))
 }
 
 fn iconst(builder: &mut Builder, value: usize) -> Value {

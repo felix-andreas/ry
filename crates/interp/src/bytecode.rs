@@ -597,25 +597,21 @@ impl Machine<'_> {
     /// `slot` is [`Machine::slot_of`] the symbol.
     pub unsafe fn assign(&self, slot: Option<*mut Sexp>, symbol: Sexp, value: Sexp) -> R<()> {
         if let Some(slot) = slot {
-            self.store_slot(slot, value);
+            // As `SetVar`'s fast handler stores, leaving an old value a reconcile could reclaim
+            // to the collector rather than noting it now.
+            let heap = crate::heap();
+            if !heap.try_store_slot(&mut *slot, value) {
+                heap.store_slot(&mut *slot, value);
+            }
+            self.clear_missing(slot);
             return Ok(());
         }
         let env = self.reify(Reify::Site("assignment"))?;
         eval::assign_symbol(symbol, value, env, false)
     }
 
-    /// Binds the slot frame's slot `slot` to `value`, as `SetVar`'s fast handler stores, leaving
-    /// an old value a reconcile could reclaim to the collector rather than noting it now.
-    #[inline]
-    pub unsafe fn store_slot(&self, slot: *mut Sexp, value: Sexp) {
-        let heap = crate::heap();
-        if !heap.try_store_slot(&mut *slot, value) {
-            heap.store_slot(&mut *slot, value);
-        }
-        self.clear_missing(slot);
-    }
-
-    /// [`Machine::store_slot`] for a value whose reference the caller hands over to the slot.
+    /// Binds the slot frame's slot `slot` to `value`, whose reference the caller hands over to
+    /// the slot, clearing a formal's missing bit.
     #[inline]
     pub unsafe fn hand_over_slot(&self, slot: *mut Sexp, value: Sexp) {
         crate::heap().hand_over_slot(&mut *slot, value);
@@ -6930,11 +6926,11 @@ pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<Option<Sexp>> 
 /// runs no R code: the builtin is one that calls none, no argument dispatches, and no calling
 /// handler is established. The handler's body runs here directly rather than through the step
 /// table, so only the parts of the activation the call reads are loaded, and the call costs
-/// what tier 0's handler costs.
+/// what tier 0's handler costs. It records the result's type when `record` is set, and
+/// otherwise only while tier 0 profiles.
 #[inline(always)]
-pub unsafe fn call_builtin_step(machine: &mut Machine<'_>, pc: usize) -> R<()> {
-    // The compiled code checks the result's type and records it itself when the check fails.
-    let mut state = activation(machine, false);
+pub unsafe fn call_builtin_step(machine: &mut Machine<'_>, pc: usize, record: bool) -> R<()> {
+    let mut state = activation(machine, record);
     let instruction = Instruction {
         code: state.code,
         at: pc,

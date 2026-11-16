@@ -5056,7 +5056,7 @@ fn a_parked_return_value_survives_its_exit() {
 /// same shape. The machine has no hardware counters to read, so each shape runs in a child of
 /// this test binary under cachegrind, which counts instructions exactly; the cost of one
 /// iteration is the difference between two loop lengths, which cancels startup. Without
-/// valgrind the test has nothing to measure with and passes with a note.
+/// valgrind, or in a debug build, the test has nothing to measure and passes with a note.
 #[test]
 fn element_ops_cost_no_more_than_tier_zero() {
     const NAME: &str = "element_ops_cost_no_more_than_tier_zero";
@@ -5081,6 +5081,11 @@ fn element_ops_cost_no_more_than_tier_zero() {
             assert_eq!(run(&format!("f({iterations}L)")), "0");
             jit::install_mode(Mode::Off);
         });
+        return;
+    }
+    // Unoptimized code's instruction counts measure the Rust compiler's output, not the design.
+    if cfg!(debug_assertions) {
+        eprintln!("{NAME}: a debug build measures nothing; run it with --release");
         return;
     }
     if std::process::Command::new("valgrind")

@@ -792,12 +792,14 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
 
 /// Runs the builtin call at `pc` ([`bytecode::call_builtin_step`]), which compiled code calls
 /// only where the call runs no R code, so nothing needs validating: [`outcome::OK`] or
-/// [`outcome::FAILED`].
-pub unsafe extern "C" fn jit_call_builtin(activation: *mut Activation, pc: i64) -> i32 {
+/// [`outcome::FAILED`]. A nonzero `record` records the result's type.
+pub unsafe extern "C" fn jit_call_builtin(activation: *mut Activation, pc: i64, record: i32) -> i32 {
     unsafe {
         checked(activation, outcome::FAILED, |activation| {
             let called = step_unsignalled(activation, || {
-                scoped(|| bytecode::call_builtin_step(machine(activation), pc as usize))
+                scoped(|| {
+                    bytecode::call_builtin_step(machine(activation), pc as usize, record != 0)
+                })
             });
             match called {
                 Some(Ok(())) => outcome::OK,
