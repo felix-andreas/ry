@@ -499,6 +499,9 @@ pub struct Hooks {
     /// when the class has none. A class may expand into storage it keeps, as compact sequences
     /// do, so repeated reads do not copy the vector each time.
     pub altrep_dataptr: unsafe fn(Sexp) -> R<Option<*const u8>>,
+    /// GNU R's `DATAPTR_OR_NULL`: an ALTREP vector's data when its class holds it already, as a
+    /// wrapper does, without expanding or copying anything, or `None`.
+    pub altrep_dataptr_or_null: unsafe fn(Sexp) -> R<Option<*const u8>>,
     /// Element `index` of an integer or logical ALTREP vector, from its class's `Elt` method,
     /// so that reading a few elements of a compact sequence never expands it.
     pub altrep_int_elt: unsafe fn(Sexp, usize) -> R<i32>,
@@ -1000,6 +1003,7 @@ pub fn default_hooks() -> Hooks {
         altrep_length: |_| Err(unwind::error("ALTREP objects need the libR host")),
         compact_sequence: |_, _, _, _| Ok(None),
         altrep_dataptr: |_| Ok(None),
+        altrep_dataptr_or_null: |_| Ok(None),
         altrep_int_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_real_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_string_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
