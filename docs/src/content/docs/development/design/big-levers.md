@@ -6,7 +6,7 @@ description: "An independent review of where ry's largest wins are: five ranked 
 This draft is a critical review of ry's plan, written from outside the tracks that carry it out. It
 ranks the few changes that could move ry by an order of magnitude, names the work that cannot, and
 says what to measure before committing to any of them. It is an opinion backed by measurements and
-citations, not a settled design, and it disagrees with `decisions.md` and `r-runtime.md` in places.
+citations, not a settled design, and it disagrees with `decisions/` and `r-runtime.md` in places.
 
 ## The short version
 
@@ -54,7 +54,7 @@ generator does not change the second figure.
 The evidence comes from three places, in decreasing order of trust:
 
 - **Published results of other systems**, cited inline with links.
-- **ry's own records**: the results files behind `benchmarks.mdx`, `decisions.md`, `backlog.md` and
+- **ry's own records**: the results files behind `benchmarks.mdx`, `decisions/`, `backlog.md` and
   `MEMORY.md`.
 - **Measurements made for this review** on the release binary `nightly.20261110.1955.a15ce0`
   (ry 0.4.3-beta, profile-guided and BOLT-laid-out) against GNU R 4.6.2 on a shared 4-core Xeon
@@ -206,7 +206,7 @@ Cold bodies hold little of the time: bodies entered fewer than 100 times, the on
 optimizer would compile ahead of use, hold 3% to 7%, and every body below the threshold together
 16% to 24%. The hot bodies (620 to 860 per code base) hold 76% to 84%, but their time stays in
 tier 0, builtins and call setup, and tier 1 runs 0.1% to 0.9% of the total, because the
-profitability gates leave nearly all of those bodies in tier 0 (`decisions.md`, "Bodies that would
+profitability gates leave nearly all of those bodies in tier 0 (`decisions/jit-ssa.md`, "Bodies that would
 mostly hand back to tier 0 compile only for loops"). More compilation of hot bodies is therefore
 where the time is, and it needs call setup and builtin dispatch to get cheaper, since bodies full of
 calls into `base` are what is hot. Counting entries per body is `--profile-summary`'s "Time by how
@@ -331,8 +331,8 @@ ry's own types and scalars. If that is right, the feature the mandate is built a
 on the mandate's benchmark, and closing the gap means building and tightening what is already
 decided:
 
-- **Build the ahead-of-time compiler.** `decisions.md` records the shape as chosen ("Typed code
-  compiles ahead of time, and `ry build --exe` writes an executable"), and `backlog.md` files the
+- **Build the ahead-of-time compiler.** `decisions/typed-stdlib.md` records the shape as chosen ("Typed code
+  compiles ahead of time, and `ry build --aot --exe` writes an executable"), and `backlog.md` files the
   work as "mid priority" while the typed core compiles a closure at its first call. This is the
   top runtime item, not a middle one.
 - **Turn the slow-path report into a guarantee.** `typed-runtime.md` designs `ry check --explain`,
@@ -344,7 +344,7 @@ decided:
   mypyc works this way: a module compiles or the build fails. No JIT can offer that, and ry has the
   checker to do it.
 - **Give typed sums one fixed order in plain doubles.** `List.sum` over `F64` adds its items in
-  order in double precision, in the interpreter and in compiled code (`decisions.md`, "`List.sum`
+  order in double precision, in the interpreter and in compiled code (`decisions/typed-stdlib.md`, "`List.sum`
   adds doubles in order in double precision"). A fixed vectorized summation order that every path
   implements would be faster again and is open.
 - **Score against Rust on every step.** The hill climb's fitness function is typed ry over Rust,
@@ -450,7 +450,7 @@ The second is the right kind of target. The first is not, because native is not 
 
 So judge the track by what a call no longer does. On the testthat workload a closure call costs
 about 8,100 instructions and frees 7 to 8 objects, 1.2 to 1.4 of them promises (`r-runtime.md`,
-`backlog.md`). The end shape in the `decisions.md` entry "Closure call setup: the 10x end shape"
+`backlog.md`). The end shape in the `decisions/interp.md` entry "Closure call setup: the 10x end shape"
 takes call setup from about 2,100 instructions to about 200 and from 7 objects to none on a
 two-function microbenchmark.
 Report those per-call counts on the workload after each merge, with the share of dynamic calls that
@@ -476,7 +476,7 @@ estimate. The 30x in the roadmap's R-code row does not.
 **Cost.** Very large; it is the bulk of the runtime effort for months.
 
 **Depends on.** Slot frames in compiled code (`slot-frames.md`) and the enter and leave contract
-of the `decisions.md` entry "Closure call setup: the 10x end shape".
+of the `decisions/interp.md` entry "Closure call setup: the 10x end shape".
 
 **Biggest risk.** Deoptimization that must rebuild what R's reflection can observe (`sys.call`,
 `parent.frame`, `substitute`, `on.exit`), and months of the largest effort spent on a result
@@ -769,13 +769,13 @@ compile an estimated 2x to 3x faster. Its code would be 1.6x slower by TPDE's fi
 6.6x that Cranelift's single-pass allocator costs `loop_sum` is the upper bound. Typed code would
 then need tiers and a way to switch between them, where today it runs at full speed from its
 first call. ry has paid for a backend of its own once, on the untyped side: the baseline tier has
-an assembler for two instruction sets and compiles a body in a median of 28 µs, and `decisions.md`
+an assembler for two instruction sets and compiles a body in a median of 28 µs, and `decisions/jit-ssa.md`
 records that it does not beat tier 0. That tier calls tier 0's steps and does not compile typed
 values, so it says what an assembler costs to keep and nothing about a typed emitter's code. The
 stronger reason to wait is that a direct emitter's cost grows with the IR's volume as Cranelift's
 does, so shrinking the IR comes first whichever backend follows.
 
-**Copy-and-patch.** `decisions.md` rejects it for the baseline tier because the stencils need a
+**Copy-and-patch.** `decisions/jit-ssa.md` rejects it for the baseline tier because the stencils need a
 Clang build step and the gain over a good interpreter is modest. The numbers support that for
 typed code too. The [original paper](https://arxiv.org/abs/2011.13127) reports code 14% faster
 than LLVM `-O0` and compilation two orders of magnitude faster, but it keeps locals in memory
@@ -824,7 +824,7 @@ pipeline that ends in a count or a sum belongs in such a kernel.
    the table below.
 
 This agrees with "One SSA IR and one install-time pipeline for typed and untyped compiled code"
-and with the rejection of copy-and-patch in `decisions.md`. It adds one thing to them: the
+and with the rejection of copy-and-patch in `decisions/jit-ssa.md`. It adds one thing to them: the
 instruction count that reaches Cranelift is a number to track, because both tiers pay 1.8 µs for
 each one.
 

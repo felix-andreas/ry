@@ -70,7 +70,7 @@ the oracle's packages from the binary cache in seconds and needs no nix store.
 
 The workspace builds on the dated nightly that `rust-toolchain.toml` pins, because std's allocator
 API and other unstable features are worth having before they stabilize (the policy is in
-`.agents/memory/decisions.md`, "Data-oriented design and explicit allocators"). With rustup, cargo
+`.agents/memory/decisions/docs-process.md`, "Data-oriented design and explicit allocators"). With rustup, cargo
 downloads that toolchain, with clippy and rustfmt, on the first build. The Zed extension is the
 exception: `editors/zed/rust-toolchain.toml` pins a stable toolchain, because the nightly's
 `wasm32-wasip2` std imports a WASI function that Zed's host does not provide yet.

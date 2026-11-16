@@ -559,7 +559,7 @@ that are left are in `backlog.md`, "The call path after slot frames bind on dema
 
 ## Prior decision
 
-`decisions.md` ("Step 2 of the untyped roadmap") rejected slot frames when a plain call cost 3,968
+`decisions/jit-ssa.md` ("Step 2 of the untyped roadmap") rejected slot frames when a plain call cost 3,968
 instructions and binding cells about 420 of them. That estimate covered values held inline with
 cells on demand, not frames without an environment, and it predates the testthat profile above,
 where frame work is about 2.2k instructions per call.

@@ -240,7 +240,7 @@ That is the opposite of the position here, where renaming a file is the whole of
 Its type reasoning runs on Prolog, a required install alongside R. Whether that could answer at
 editor latency is not something this survey can judge: its documentation site could not be read, and
 its own README calls it an early prototype. Either way, the shape of the bet is the opposite of the
-fast-to-check rule in `decisions.md`.
+fast-to-check rule in `decisions/syntax-semantics.md`.
 
 **The compile-to-host lineage** (TypeScript, Sorbet's `.rbi`, and Python's stub files) converged on
 the same split this project already has: declarations for foreign code go in a separate file, and

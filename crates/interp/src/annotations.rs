@@ -1,9 +1,10 @@
 //! Type annotations at run time. The lowering erases every annotation from the language
 //! objects (`body()`, `formals()` and `deparse()` show the plain R program), and a function's
-//! parameter and return types become checks at its boundary instead (`decisions.md`, "runtime
-//! annotation checks"). A function's signature is the one `syntax::annotation` resolves, which
-//! the checker resolves the same way, so a type counts whether it is written on the function, on
-//! the name it is assigned to, or in a `#:` block above it.
+//! parameter and return types become checks at its boundary instead
+//! (`decisions/typed-stdlib.md`, "Inline annotations at run time"). A function's signature is the
+//! one `syntax::annotation` resolves, which the checker resolves the same way, so a type counts
+//! whether it is written on the function, on the name it is assigned to, or in a `#:` block above
+//! it.
 //!
 //! A check is first-order: it tests the value's storage type against the set of `typeof`s the
 //! annotation admits, following the typing reference's promotion order, so `double` admits

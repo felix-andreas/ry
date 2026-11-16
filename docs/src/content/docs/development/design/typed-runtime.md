@@ -11,7 +11,7 @@ checks, no tracing collector, and no allocation the program did not ask for.
 
 The contract gives `List<F64>`, `List<Bool>` and `List<Str>` R's vector layouts, so that they
 pass to C without a copy, and makes a `Str` a `CHARSXP`. That assumes typed values live on the R
-heap. This draft makes them native values freed by reference counts (`decisions.md`, "Typed values
+heap. This draft makes them native values freed by reference counts (`decisions/typed-stdlib.md`, "Typed values
 are native, immutable, acyclic and freed by reference counts"), so every list crosses to R by a
 copy, and the contract is amended to match.
 
@@ -39,7 +39,7 @@ entry stub handles the R value it is given (see "Facts and guesses") and calls a
 
 ## Why the native path is not the end shape
 
-Typed closures run as native functions from their first call (`decisions.md`, "Typed closures run
+Typed closures run as native functions from their first call (`decisions/typed-stdlib.md`, "Typed closures run
 as native functions over records, tags and match"), and typed `orders` and `expr_tree` run 13 and
 80 times faster than GNU R. That path compiles R syntax with types it infers from the first call's
 argument values, and it treats those types as speculation:
@@ -69,7 +69,7 @@ them. Reference-count operations are inserted into the IR (see "Memory"), so the
 as ordinary instructions it can move and cancel.
 
 **Where the IR lives.** The runtime cannot link the analysis: the loader runs inside `libR` on ry's
-runtime (`decisions.md`, "A strict reload re-checks through a persistent salsa database"), and the
+runtime (`decisions/libr-rcmd.md`, "A strict reload re-checks through a persistent salsa database"), and the
 JIT never reads the checker's structures (`r-runtime.md`, section 5). So the IR is a serialized
 per-function summary that the analysis computes, as a salsa query per function, and stores with the
 function's bytecode. A generic function's summary is its generic IR, which the runtime instantiates
@@ -303,7 +303,7 @@ and a call from typed code to an R function converts the arguments to their R fo
 interpreter, and checks the result against the call's declared type. The typed core has no lazy
 evaluation, so an entry stub forces each argument promise at entry, in order, and checks it once
 as "Facts and guesses" describes. This differs from checking an annotated argument when it is
-forced, which is the rule for typed R code, and the change is recorded in `decisions.md` when it
+forced, which is the rule for typed R code, and the change is recorded in `decisions/typed-stdlib.md` when it
 is built. A function-typed parameter cannot be checked at entry: an untyped closure passed to it
 gets a wrapper that checks each call's arguments and result, and a typed closure passes as its
 code pointer and captures.
@@ -372,7 +372,7 @@ over a work list,
 
 **Reuse.** `xs[[i]] <- v`, `List.set`, `List.append`, `Dict.insert`, `Str.concat` and a record update
 `(..r, x = 1)` update their argument in place when its count is one, and copy it otherwise, as
-the contract requires (`decisions.md`, "Standard library updates reuse a uniquely held value").
+the contract requires (`decisions/typed-stdlib.md`, "Standard library updates reuse a uniquely held value").
 Beyond those, a slot that dies at a point where a value of the same type or variant is built is
 reused for the new value without going through the free stack: a `match` arm that takes a `:Neg`
 apart and builds a `:Neg` writes into the old slot. This is Perceus's reuse analysis, which Roc applies the
@@ -519,7 +519,7 @@ this draft in five ways:
   code knows each box's *shape*, its layout plus the item type of every field, and a tag type is
   a union of shapes. A tag field is any tag, so a recursive type has finitely many shapes. A
   `match` over any tag (a tag from R, or a tag field) tests the shapes the process has confirmed,
-  and the code compiles again once another shape is confirmed (`decisions.md`, "Typed boxes have
+  and the code compiles again once another shape is confirmed (`decisions/typed-stdlib.md`, "Typed boxes have
   shapes, and a tag type is a union of them").
 - A script's code lives in memory for the process. An installed package's typed code is compiled
   by `ry install` into a code file that each process maps and attaches per function at its first
@@ -539,7 +539,7 @@ code compiled before the script ran valid once it runs:
   conversion has a type before any call has run. On every call the conversion turns what R gives
   into a list of that type: it widens `Bool` and `I64` items as R coerces, because a vector R
   types as `double` may hold integers, and it stops with an error on any other type. The
-  interpreter and compiled code convert through one function (`decisions.md`, "`ry run --aot`
+  interpreter and compiled code convert through one function (`decisions/typed-stdlib.md`, "`ry run --aot`
   compiles a script's typed code before it starts").
 - A function a loaded namespace binds lazily is read from the package database when the code
   compiles.

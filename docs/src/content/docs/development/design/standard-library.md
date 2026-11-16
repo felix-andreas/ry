@@ -277,7 +277,7 @@ double when full, so a loop of `d <- Dict.insert(d, k, v)` costs amortized const
 insert. Any other holder (a second binding, a list, a closure's environment) makes the function
 copy first, so value semantics never change.
 
-Two extensions widen the `x <- f(x, ...)` form (`decisions.md`, "In-place updates through nested
+Two extensions widen the `x <- f(x, ...)` form (`decisions/typed-stdlib.md`, "In-place updates through nested
 targets"):
 
 - A nested target, `state$seen <- Dict.insert(state$seen, k, v)`, reuses when the target is a chain

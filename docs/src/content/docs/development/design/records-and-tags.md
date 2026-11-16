@@ -41,7 +41,7 @@ non-exhaustive-match
 - **Plain R stays plain R.** Every new form is text that R's own parser rejects, so no working R
   program changes meaning. The constructs are part of ry's inline syntax, next to inline
   annotations.
-- **Hindley-Milner only** (`decisions.md`, "The type system is Hindley-Milner"). Tags are
+- **Hindley-Milner only** (`decisions/syntax-semantics.md`, "The type system is Hindley-Milner"). Tags are
   structural, and a tag union is an ordinary union, so nothing here adds subtyping, row
   unification, or a new inference algorithm.
 - **ry's own values, not R's.** Records, tuples and tags are a feature on top of R, like the
@@ -144,7 +144,7 @@ and a tag outside it is rejected. A union that ends in `..` is *open*: `:Ok(inte
 `match` over it needs a catch-all arm. `:Ok(character)` still does not fit, because the union does
 list `:Ok`. In Roc, an open union carries a type variable for the remaining tags (`[Ok a]r`), which
 lets a function pass unknown tags through with their types. ry does not have row variables, because
-a union never unifies with a variable (`decisions.md`, "A multi-member union is for joins and
+a union never unifies with a variable (`decisions/syntax-semantics.md`, "A multi-member union is for joins and
 annotations"), and adding row unification is a new algorithm. `..` is the part of open unions that
 needs no new algorithm, and pass-through typing is recorded as an open question.
 
@@ -250,7 +250,7 @@ An arm with a guard counts for reachability but not for coverage. Two findings c
 A pattern that cannot match the scrutinee's type is a `type-mismatch` at the pattern, such as a tag
 the closed union does not list, a payload of the wrong length, or a field the record lacks. A
 scrutinee whose type is still an unbound inference variable takes its shape from the patterns, as
-`is.null` shapes an unannotated parameter (`decisions.md`): the arms' tags form a closed union. A
+`is.null` shapes an unannotated parameter (`decisions/syntax-semantics.md`): the arms' tags form a closed union. A
 catch-all arm accepts a value of any type, so with one the patterns do not shape the scrutinee. So an unannotated `function(r) match (r) { :Ok(v) => v; :Err(e)
 => 0 }` infers `fn(r: :Ok(T) | :Err(U)) -> T | double`.
 

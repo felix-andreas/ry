@@ -1,7 +1,7 @@
 {
   # Inputs are git URLs, not `github:`, because cloud agent sessions reach GitHub through a proxy
   # that serves git clones of public repositories but refuses the archive tarballs `github:`
-  # fetches (.agents/memory/decisions.md, "Flake inputs are git URLs").
+  # fetches (.agents/memory/decisions/tooling-bench-ci.md, "Flake inputs are git URLs").
   inputs = {
     systems.url = "git+https://github.com/nix-systems/default?shallow=1";
     nixpkgs.url = "git+https://github.com/NixOS/nixpkgs?ref=nixos-unstable&shallow=1";
@@ -52,7 +52,8 @@
         # GNU R as the oracle recorded it (crates/oracle/cases/gnu-r.txt): the release ry bundles,
         # built as tools/reference-r.sh builds it on Ubuntu 24.04, so that every digit matches.
         # nixpkgs ships another release with another BLAS, compiler and glibc, and each of those
-        # moves digits (.agents/memory/decisions.md, "CI runs in the flake's dev shell").
+        # moves digits (.agents/memory/decisions/tooling-bench-ci.md, "CI runs in the flake's dev
+        # shell").
         gnuR =
           pkgs:
           let

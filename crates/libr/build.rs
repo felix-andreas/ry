@@ -98,7 +98,7 @@ fn link_linux(out_dir: &Path, exported: &[String]) {
 /// what `dynload::load_library` rewrites a GNU R package binary's libR reference to: dyld
 /// satisfies a load command from an already loaded image whose install name matches it, so
 /// the package binds to ry's runtime and GNU R's libR is never loaded beside it
-/// (`decisions.md`, "macOS packages bind to ry's libR").
+/// (`decisions/libr-rcmd.md`, "macOS packages bind to ry's libR").
 fn link_macos(out_dir: &Path, exported: &[String]) {
     let list = out_dir.join("exports.list");
     let body: String = exported.iter().map(|name| format!("_{name}\n")).collect();
