@@ -45,12 +45,12 @@ The goal, the mandate and the benchmark are in `AGENTS.md`. On top of them:
 
 ## In flight
 
-Release: the next release may be cut without asking once call setup and the source-files work are merged and the oracle is green (#589 is merged; user). `.github/pending/` is not required for it.
+Release: the next release may be cut without asking once the call-setup slot-frames PR is merged and the oracle is green (#589, source files, the JIT abort are merged; user). `.github/pending/` is not required for it.
 
 - session_0111kWqC7RFhwr7cUXCLb1kD (Fable high, call setup): closure call setup end shape; #579 merged. Resumed after its weekly limit; replacement-call reification forwarded to it.
 - session_0111kWqEuykBqAFmDRUX18Uv (Fable high + up to 2 Opus high subagents, a user's package-suite kernels k1-k14): #584, #586, #587, #590, #595 (parse), #597 (base closure prologues), #598 (lazy-load fetch) merged. Next: data.table under testthat, k2/k8.
-- session_0111kWqBMmAzH7BQL9wcvEQ4 (Opus high, broken on main): #588 and #589 (replacement-call promises) merged; `jit`'s `element_ops_cost_no_more_than_tier_zero` fails on main (backlog, "Open: untyped R against GNU R").
-- session_0111kWqAnTx97virE5EiXtV1 (Opus high): the JIT abort; also #523 (scan each package `.so` for implicit declarations, reinstall hits from source), close #312.
+- session_0111kWqBMmAzH7BQL9wcvEQ4 (Opus high, broken on main): done (#588, #589 merged); idle.
+- session_0111kWqAnTx97virE5EiXtV1 (Opus high): #523, #591, #592, #593, #596 (JIT handle-mark abort) merged. Now: make compiled element ops cheaper than tier 0 (test_tiers `element_ops_cost_no_more_than_tier_zero`, 986 vs 860 instructions per iteration).
 - session_0111kWqB22GkB9yjpoxGpSxo (Fable, low-signal test cut): PR #594.
 - session_0111kWqBDx8gHzkTxw2tx3iw (developer experience): agent memory layout and context cost (`dx/memory-structure`).
 
@@ -58,7 +58,7 @@ User-only items (never ask; note in the final report): the Marketplace trusted-p
 
 ## Open asks to the user
 
-Unanswered (do not re-ask; note in the final report): deploy the docs site, pre-release the nightly, the data.table name arms in `check.rs`. A history rewrite to drop an old customer-project name from git history awaits the user.
+Unanswered (do not re-ask; note in the final report): the data.table name arms in `check.rs`. Answered 2026-11-16: docs deploy go (dispatched), no nightly, release without asking. A history rewrite to drop an old customer-project name from git history awaits the user.
 
 ## Unverified reports
 
@@ -70,6 +70,7 @@ Open: `tools/loader-bench/s4_package.py` hangs for seed 2 and fails for seeds 7 
 
 ## Log
 
+- 2026-11-16 11:45Z: #596 (JIT handle-mark abort) and #600 (memory layout: AGENTS.md 38 to 28 KB, decisions.md split into decisions/<area>.md) merged. DX session (session_0111kWqBDx8gHzkTxw2tx3iw) started by the user.
 - 2026-11-16: #589 (replacement-call promises), #595 (parse speed), #597 (base closure prologues), #598 (lazy-load fetch) merged.
 - 2026-11-16 10:54Z: #590 merged (readLines 0.70x to 2.43x, list.files 0.64x to 2.14x of GNU R; oracle 529/529).
 - 2026-11-16 10:52Z: user: go for the low-signal test cut and the docs deploy (docs.yml dispatched on main); release rule above.
