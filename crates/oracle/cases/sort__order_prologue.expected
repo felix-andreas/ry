@@ -121,9 +121,22 @@
 | [1] 2 1 3 3 1 2 2 1 3
 | [1] TRUE
 | [1] TRUE
+| [1] "Error in match.arg(method) : 'arg' should be one of “auto”, “shell”, “radix”"
+| [1] "Error in match.arg(method) : 'arg' should be one of “auto”, “shell”, “radix”"
+| [1] "Error in match.arg(method) : 'arg' should be one of “auto”, “shell”, “radix”"
+| [1] "Error in order(sum) : argument 1 is not a vector"
+| [1] "Error in order(quote(a)) : argument 1 is not a vector"
+| [1] "Error in order(new.env()) : argument 1 is not a vector"
+| [1] "Error in order(1:2, new.env()) : argument 2 is not a vector"
+| [1] "Error in order(1:2, NULL) : argument 2 is not a vector"
+| [1] "Error in order(1:2, method = \"shell\", new.env()) : argument 2 is not a vector"
+| [1] "Error in order(1:2, method = \"shell\", function(x) x) : argument 2 is not a vector"
+| [1] "Error in order(list(1, 2)) : unimplemented type 'list' in 'orderVector1'\n"
+| [1] "Error in order(1:2, list(1, 2, 3)) : argument lengths differ"
+| [1] "Error in order(expression(a, b), method = \"shell\") : unimplemented type 'expression' in 'orderVector1'\n"
 [messages]
 [warnings]
 [errors]
 [value]
-logical
-| TRUE
+character
+| "Error in order(expression(a, b), method = \"shell\") : unimplemented type 'expression' in 'orderVector1'\n"

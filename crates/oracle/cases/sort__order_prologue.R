@@ -115,3 +115,18 @@ h <- function(v) { out <- integer(); for (k in 1:3) out <- c(out, order(v, decre
 show(h(c(5, 3, 9)))
 show(identical(order(c(3L, 1L, 2L)), c(2L, 3L, 1L)))
 show(withVisible(order(3:1))$visible)
+
+# `order` has no quick sort, and a key that is no vector is reported before the lengths are.
+show(order(c(3, 1, 2), method = "quick"))
+show(order(c(3, 1, 2), 1:3, method = "quick"))
+show(order(c("b", "a"), method = "quick"))
+show(order(sum))
+show(order(quote(a)))
+show(order(new.env()))
+show(order(1:2, new.env()))
+show(order(1:2, NULL))
+show(order(1:2, method = "shell", new.env()))
+show(order(1:2, method = "shell", function(x) x))
+show(order(list(1, 2)))
+show(order(1:2, list(1, 2, 3)))
+show(order(expression(a, b), method = "shell"))

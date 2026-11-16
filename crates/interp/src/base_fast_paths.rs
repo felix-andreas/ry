@@ -4496,7 +4496,9 @@ unsafe fn do_order_prologue(call: &Call<'_>) -> R<Sexp> {
         SortMethod::Auto => keys.iter().all(|&key| {
             (numeric(key) || key.kind() == SexpType::Logical) && length(key) <= i32::MAX as usize
         }),
-        SortMethod::Shell | SortMethod::Quick => false,
+        SortMethod::Shell => false,
+        // `order` has no quick sort, so `match.arg` reports the choice.
+        SortMethod::Quick => return decline(),
     };
     let na_last = match na_last {
         Some(value) => value,
@@ -4531,6 +4533,7 @@ unsafe fn do_order_prologue(call: &Call<'_>) -> R<Sexp> {
             return decline();
         }
         let recycled = values::logical_vector(&recycled)?;
+        crate::heap().root(recycled);
         args.extend([
             na_last,
             recycled,
@@ -4719,7 +4722,7 @@ unsafe fn sorted_vector(
         };
         let args = [
             values::scalar_logical(na_last)?,
-            values::logical_vector(&[decreasing as i32])?,
+            values::scalar_bool(decreasing)?,
             values::scalar_bool(false)?,
             values::scalar_bool(true)?,
             source,
@@ -4736,6 +4739,7 @@ unsafe fn sorted_vector(
             return Ok(Some(sorted));
         }
         let result = values::list_vector(&[sorted, order])?;
+        crate::heap().root(result);
         values::set_attr(
             result,
             symbols().names,

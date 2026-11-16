@@ -537,7 +537,8 @@ pub(crate) unsafe fn do_order(call: &Call<'_>) -> R<Sexp> {
     };
     let count = length(first);
     for (position, &key) in keys.iter().enumerate() {
-        if key == nil() {
+        if !(key.kind().is_atomic() || matches!(key.kind(), SexpType::List | SexpType::Expression))
+        {
             return Err(error(format!("argument {} is not a vector", position + 1)));
         }
         if length(key) != count {
