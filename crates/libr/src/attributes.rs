@@ -613,6 +613,21 @@ unsafe fn dimnames_direct(runtime: &mut Runtime, object: Sexp, value: Sexp) -> O
             return None;
         }
     }
+    // An unreferenced list of the right length is installed itself, as GNU R's `dimnamesgets`
+    // does, so C code that sets the attribute and then fills the list sees its writes kept.
+    if components.len() == extents.len() && value.refcount() == 0 {
+        for index in 0..components.len() {
+            let component = value.slice::<Sexp>()[index];
+            if component != nil && component.length() == 0 {
+                runtime.heap.set_element(value, index, nil);
+            }
+        }
+        let mark = runtime.heap.handle_mark();
+        runtime.heap.root(value);
+        let attached = attach(runtime, object, R_DimNamesSymbol.get(), value);
+        runtime.heap.release_handles(mark);
+        return attached.map(|()| Reachable(value));
+    }
     let mark = runtime.heap.handle_mark();
     runtime.heap.root(object);
     runtime.heap.root(value);
