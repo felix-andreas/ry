@@ -249,6 +249,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `%%` and `%/%` on doubles port GNU R's kernels, with a 64-bit path for whole numbers
 - `validObject` runs validity methods without its slot loop, and `new()` copies the prototype shallowly
 - Small base closures with call arguments run their bodies natively behind prologues
+- `c`, `unlist`, `rep` and positional `[` copy handle vectors a run at a time
 
 ## R compatibility
 
