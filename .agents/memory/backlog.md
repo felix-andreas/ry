@@ -1396,8 +1396,9 @@ setup is about a tenth of the run, so take them for the objects they remove:
   slots"). Three shapes still build the getter call, the setter call, their argument cells and a
   promise per value, about nine objects a level, and give the frame its environment:
   - A nested target (`names(x)[2] <- v`, `l$b$c <- v`, `substr(names(x)[1], 1, 1) <- "Z"`), which
-    the compiler leaves to the `<-` special: 3,193 of the 59,700 frames given an environment on
-    the testthat workload (profile row `<-`). Lower it to getter and setter register code when
+    the compiler leaves to the `<-` special: 113,492 of the 1.63M slot frames that move to reading
+    by name on the finbench suite (profile row `<-`), and the largest caller of `complex_assign`
+    there (about 5M pairlist cells a suite run). Lower it to getter and setter register code when
     every subscript is free of side effects (the general assignment evaluates a nested subscript
     twice), branch to `Op::ComplexAssign` when any level is an object with a method or has a
     getter or setter that is not a builtin, and reuse `complex_assign`'s rules for changing a
@@ -1406,9 +1407,10 @@ setup is about a tenth of the run, so take them for the objects they remove:
     (`s3[[names(x)[1]]] <- 2`): the probe before the subscripts (`Op::BranchIfObject`) branches
     on any object. A probe that asks for the method (`dispatch::has_internal_method`) keeps
     these in slots, and it has to be taught to tier 1 as well (`jit/src/analysis.rs`,
-    `codegen.rs`).
+    `codegen.rs`). Profile row `subassignment`: 75,333 frames on finbench.
   - A closure setter with computed arguments, and a setter whose body needs an environment
-    (`diag<-` calls `.Internal`, `body<-` is an S4 generic).
+    (`diag<-` calls `.Internal`, `body<-` is an S4 generic). Profile row `replacement call`:
+    38,391 frames on finbench.
 - **Environments that only stand for a frame.** Three quarters of all environments come from
   `pending_env`, and most are never looked into. Its callers in a 225-test slice of finbench
   (667k calls): the generic call protocol 100k, `slot_promises_into` 105k, a builtin that
