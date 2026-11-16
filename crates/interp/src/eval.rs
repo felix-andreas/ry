@@ -2064,7 +2064,7 @@ unsafe fn check_argument_names(definition: &BuiltinDef, call: Sexp, args: &[Arg]
             [formal] => format!("supplied argument name '{name}' does not match '{formal}'"),
             _ => format!(
                 "unused argument ({name} = {})",
-                crate::deparse::deparse_one_line(arg.value)
+                crate::deparse::deparse_unused_argument(arg.value)
             ),
         };
         return Err(error_in(call, message));
@@ -4617,7 +4617,7 @@ unsafe fn match_plan(formals: Sexp, args: &[Arg], call: Sexp) -> R<Plan> {
                 } else {
                     arg.value
                 };
-                let text = deparse::deparse_one_line(code);
+                let text = deparse::deparse_unused_argument(code);
                 match arg_names[index] {
                     Some(name) => format!("{} = {text}", String::from_utf8_lossy(name)),
                     None => text,

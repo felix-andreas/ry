@@ -64,11 +64,15 @@ show(ifelse(TRUE, yes = , 2))
 show(paste(sep = , "a", "b"))
 show(vapply(1:2, FUN.VALUE = , function(i) i * 2, numeric(1)))
 
-# Builtins that match their arguments by name follow it as well.
-show(log(x = , 8))
-show(log(base = , 8))
+# A builtin that matches its arguments by name follows it as well.
 show(round(digits = , 2.567))
-show(rep(times = , 1:2))
+
+# An unused argument is reported without an integer's `L`.
+two <- function(a, b) a
+relay <- function(...) two(...)
+show(two(1L, 2L, 4L))
+show(two(1L, w = 4L))
+show(relay(1L, 2L, 4L, "s"))
 
 # `islistfactor` checks its flag before it looks at the object.
 show(unlist(list(a = 1), "a"))

@@ -702,7 +702,7 @@ pub unsafe fn match_builtin_args(
                 format!(
                     "unused argument ({} = {})",
                     names[arg_index].as_deref().unwrap_or(""),
-                    crate::deparse::deparse_one_line(arg.value)
+                    crate::deparse::deparse_unused_argument(arg.value)
                 ),
             ));
         }
@@ -726,7 +726,7 @@ pub unsafe fn match_builtin_args(
                 call,
                 format!(
                     "unused argument ({})",
-                    crate::deparse::deparse_one_line(arg.value)
+                    crate::deparse::deparse_unused_argument(arg.value)
                 ),
             ));
         }
