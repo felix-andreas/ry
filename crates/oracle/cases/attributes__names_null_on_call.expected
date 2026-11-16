@@ -1,0 +1,11 @@
+[stdout]
+| f(a, 1, 2)
+| NULL
+| g(1, 2)
+| NULL
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

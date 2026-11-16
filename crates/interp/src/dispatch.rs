@@ -10,6 +10,7 @@ use {
         builtins::{Arg, BuiltinDef, Call, Generic, Kind, builtin, internal, special},
         eval::{self, Args, apply_closure, call_builtin, forced_promise, value_of},
         interp,
+        subset::modifiable_attributes,
         unwind::{R, error},
         values::{
             self, char_str, get_attr, length, missing_arg, nil, scalar_string, string_vector,
@@ -1427,10 +1428,13 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
             if let Some(method) = lookup_in_scope(default, &mut scope)? {
                 (method, default, class_count)
             } else {
+                // A closure generic such as `rep_len` wraps an internal generic, and GNU R's
+                // `NextMethod` falls back to that `.Internal` function.
                 let function = eval::find_fun(generic_symbol, values::base_env())
                     .ok()
                     .filter(|function| function.kind() != SexpType::Closure)
-                    .or_else(|| crate::builtins::primitive(&char_str(generic_string)));
+                    .or_else(|| crate::builtins::primitive(&char_str(generic_string)))
+                    .or_else(|| crate::builtins::internal_function(generic_symbol));
                 match function {
                     Some(function) => (function, generic_symbol, class_count),
                     None => {
@@ -2158,7 +2162,14 @@ unsafe fn group_dispatch(
             entry.1 = method_vector;
         }
     }
-    let promised = promised_args(call, args)?;
+    let mut promised = promised_args(call, args)?;
+    // GNU R drops the operands' names for the operator groups, so `get("*")(x = a, y = 2)`
+    // reaches `Ops.class(e1, e2)` positionally.
+    if binary {
+        for arg in &mut promised {
+            arg.tag = nil();
+        }
+    }
     let new_call = renamed_call(call, found_method.method_name)?;
     apply_method(new_call, found_method.method, &promised, env, &vars, true).map(Some)
 }
@@ -2471,16 +2482,8 @@ unsafe fn do_set_s4_object(call: &Call<'_>) -> R<Sexp> {
 
 // The class builtins.
 
-unsafe fn modifiable(object: Sexp) -> R<Sexp> {
-    if values::maybe_shared(object) {
-        values::shallow_duplicate(object)
-    } else {
-        Ok(object)
-    }
-}
-
 unsafe fn do_set_old_class(call: &Call<'_>) -> R<Sexp> {
-    let object = modifiable(call.arg(0))?;
+    let object = modifiable_attributes(call.arg(0))?;
     let value = call.arg(1);
     if value != nil() && value.kind() != SexpType::String {
         return Err(call.error("attempt to set invalid 'class' attribute"));
@@ -2511,7 +2514,7 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
         }
         return Err(call.error("attempt to set an attribute on NULL"));
     }
-    let object = modifiable(object)?;
+    let object = modifiable_attributes(object)?;
     if value == nil() || length(value) == 0 {
         set_class_attribute(object, nil())?;
         return Ok(object);

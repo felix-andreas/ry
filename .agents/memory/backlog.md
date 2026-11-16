@@ -3565,6 +3565,47 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
   - pkgbuild's "warnings can be turned into errors": GNU R's `R CMD build` script on ry does not
     turn a build warning into an error.
   - `eval(quote(next))` inside a loop reports no loop context.
+- **Top CRAN packages: what still fails** (`just top-packages`, `.corpus-top/tests/summary-installed.md`).
+  The 100 most-downloaded CRAN packages outside the closure (`tools/corpus/top-packages.txt`), built
+  from source on ry: 86 have tests. In a container with the system libraries, GNU R passes 84 and
+  ry passes 82 of those 84. In the cloud container GNU R passes 74 and ry passes 75, 72 of them
+  where GNU R passes: units, sf, terra and ggplot2's `coord_sf` tests need system libraries
+  (udunits, GDAL) the container lacks, and lme4 and reformulas need rbibutils above the installed
+  2.3.
+  - Run the suites with `LC_ALL=C.UTF-8`, as the oracle does: in the C locale, desc reports
+    "Duplicate DESCRIPTION fields" on ry, a false failure.
+  - QuickJSR fails only when ry prints its notice about packages installed by another ry build on
+    a subprocess's stderr, which the test compares. Reinstall the library with the ry under test.
+  - future, `test-timeouts.R`: `setTimeLimit()` and `setSessionTimeLimit()` are no-ops
+    (`crates/interp/src/system.rs`), so a future with a timeout runs to completion. GNU R checks
+    the limits where it checks for a user interrupt and raises "reached elapsed time limit" or
+    "reached CPU time limit"; a transient limit resets at top level. ry's evaluator polls only
+    the interrupt request flag (`unwind::poll_interrupt`), so a limit needs something that
+    raises that flag at the deadline. Repro (GNU R prints the error message, ry prints 42):
+    ```r
+    sleep <- function(d) { until <- Sys.time() + d; while (Sys.time() < until) Sys.sleep(0.01) }
+    tryCatch({ setTimeLimit(elapsed = 0.2, transient = TRUE); sleep(1); 42 },
+      error = conditionMessage)
+    ```
+  - ggplot2, `test-geom-smooth.R:92` ("Failed to fit group 1" expected): GNU R's loess on fewer
+    points than degrees of freedom warns "span too small. fewer data values than degrees of
+    freedom.", "pseudoinverse used at ...", "all data on boundary of neighborhood. make span
+    bigger" and more, and returns NaN fits, so `predict` then errors. ry's
+    `crates/stats/src/loess.rs` fits the points exactly. Port the netlib `lowesd`/`ehg`
+    checks and their `ehg182` warnings. Repro:
+    `fitted(loess(y ~ x, data.frame(x = c(1, 2), y = c(1, 3))))` gives `NaN NaN` and 13 warnings
+    on GNU R, `1 3` on ry.
+  - BiocManager's `test_install.R:166` fails under GNU R too (it needs a writable site library),
+    so it does not count.
+  - Not run: StanHeaders, rstan and shinystan (Stan's C++ takes hours to build), arrow (needs the
+    Arrow C++ library), V8 (needs libv8) and pak (builds its own dependency tree). quantreg
+    passes, but its rgl tests skip because rgl needs libGLU.
+  - `read.dcf` marks a non-ASCII value as UTF-8 where GNU R leaves it "unknown": in a UTF-8
+    locale, `Encoding(read.dcf(textConnection("A: M\u00fcller"))[, 1])` is "unknown" on GNU R
+    and "UTF-8" on ry. Comparisons agree, so nothing fails on it yet.
+  - `oracle packages` reports the first error in a `.Rout`, which can be one `try()` caught; the
+    error that ended the run is the one just before "Execution halted"
+    (`crates/oracle/src/packages.rs`).
 - **The oracle starter corpus does not fully pass yet.** `oracle compare --engine ry` lists the
   differing cases; most remaining ones need stats routines (`builtin_libraries.rs` names each
   unimplemented one when it is called) or printer details (complex numbers, wide matrices).

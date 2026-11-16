@@ -755,6 +755,11 @@ impl Reader<'_> {
                 let info = self.item()?;
                 let state = self.item()?;
                 let attributes = self.attributes()?;
+                if let Some(object) = (crate::interp().hooks.unserialize_altrep)(
+                    info, state, attributes, levels, is_object,
+                )? {
+                    return Ok(object);
+                }
                 let object = altrep_unserialize(info, state)?;
                 if attributes != nil() {
                     crate::heap().set_attrib(object, attributes);
@@ -1064,8 +1069,8 @@ unsafe fn fill_frame(env: Sexp, mut frame: Sexp) -> R<()> {
     Ok(())
 }
 
-/// Materializes the ALTREP classes GNU R serializes: compact sequences, deferred strings and
-/// wrappers.
+/// Materializes the ALTREP classes GNU R serializes (compact sequences, deferred strings and
+/// wrappers) when the host has no class registry of its own.
 unsafe fn altrep_unserialize(info: Sexp, state: Sexp) -> R<Sexp> {
     let class = if info.kind() == SexpType::Pairlist && named_symbol(info.car()) {
         values::symbol_name(info.car()).into_owned()

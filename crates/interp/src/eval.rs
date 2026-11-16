@@ -2145,7 +2145,7 @@ unsafe fn collect_evaluated_args(
                     counted_push(args);
                     cell = cell.cdr();
                 }
-            } else if value != missing && value != unbound() && value != nil() {
+            } else if value != missing && value != nil() {
                 return Err(error("'...' used in an incorrect context"));
             }
         } else if expression == missing {
@@ -2266,7 +2266,7 @@ unsafe fn closure_args_into<const MODE: u8>(
                     });
                     cell = cell.cdr();
                 }
-            } else if value != missing_arg() && value != unbound() && value != nil() {
+            } else if value != missing_arg() && value != nil() {
                 return Err(error("'...' used in an incorrect context"));
             }
         } else {
@@ -6275,6 +6275,10 @@ unsafe fn do_substitute(call: &Call<'_>) -> R<Sexp> {
     let env = match env.kind() {
         SexpType::Environment => env,
         SexpType::List => crate::envir::list_to_env(env, values::empty_env())?,
+        SexpType::Pairlist => crate::envir::list_to_env(
+            crate::coerce::coerce_vector(env, SexpType::List)?,
+            values::empty_env(),
+        )?,
         SexpType::Nil => values::empty_env(),
         _ => return Err(call.error("invalid environment specified")),
     };
@@ -6870,7 +6874,7 @@ pub unsafe fn complex_assign(
         // the data until the replacement writes to it; a replacement that only changes
         // attributes, or writes nothing, as `x[FALSE] <- 1` does, never copies it.
         base = if !superassign && local_cell.is_some() && values::maybe_shared(base) {
-            values::shallow_duplicate_attr(base)?
+            values::replacement_copy(base)?
         } else {
             values::shallow_duplicate(base)?
         };

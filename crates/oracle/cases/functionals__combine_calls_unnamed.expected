@@ -1,0 +1,14 @@
+[stdout]
+| list(s(log(d), k = 4))
+| list(f(a = 1), g(b = 2))
+| c(a = 1)
+| list(1, f(a = 1))
+| list(x = f(a = 1))
+| list(f(a = 1))
+| c(1, a = 1, 2)
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| c(1, a = 1, 2)
