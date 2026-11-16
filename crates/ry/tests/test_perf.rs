@@ -1,16 +1,15 @@
-//! Budgets that need a release build, so they are ignored by default: the cold check of the
-//! three synthetic benchmark code bases, which generates about 900,000 lines, and the peak memory
-//! and speed of scripts on ry's runtime against GNU R's (including the typed `array_dot`
-//! benchmark's peak), which need `libR` built beside the
-//! binary and a GNU R installation, and skip without either:
+//! Budgets that need a release build, so they are ignored by default: the cold check of the three
+//! synthetic benchmark code bases (about 900,000 generated lines), and the peak memory and speed of
+//! scripts on ry's runtime against GNU R's (including the typed `array_dot` benchmark's peak),
+//! which need `libR` built beside the binary and a GNU R installation, and skip without either:
 //!
 //! ```sh
 //! cargo build --release -p ry-lang -p libr
 //! cargo test -p ry-lang --release --test test_perf -- --ignored --nocapture
 //! ```
 //!
-//! One test runs by default: two builds sharing a base R tree keep their own images in it, and
-//! the benchmark runner fails a start that could not use its images. It skips without `libR` and
+//! One test runs by default: two builds sharing a base R tree keep their own images in it, and the
+//! benchmark runner fails a start that could not use its images. It skips without `libR` and
 //! `ry-rcmd` beside the binary or a built base R tree.
 
 #![cfg(unix)]

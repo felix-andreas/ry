@@ -99,7 +99,8 @@ type store".
 - Loading packages held about 7% of a 6 s test run in a second profile: the loader's plan (90 ms in one call), running and forcing its entries, `lazyLoadDBfetch` (104 ms over 3,889 calls), `dyn.load` (26 ms over 35 calls) and `unz` (19 ms over 438 calls). Each measured part is faster than GNU R already. A lazy-load fetch (`k14`) takes about 0.6 times GNU R's time: inflating the record is about 30% of it (see "Measured and not taken: libdeflate for lazy-load records") and the reader about 22%. The reader skips a byte-code record's code vector and its numeric constants (`Reader::discard_item` in `serialize.rs`); the calls among the constants are still built and dropped, because reading them fills the reference tables that later items index. Reading a zip entry through `unz` takes 40 to 50 µs against GNU R's 350. The loader's plan is linear in the package's files: on generated packages of 300 to 2,400 files of about 130 lines, about 0.4 ms per file without the index cache and 0.1 ms with it, on four loaded cores. A fresh CI container has no index cache, so its first plan is the uncached one. Where that time goes inside the analysis is not measured: a release build has no symbols, so it needs a build with them.
 - Two differences from GNU R found while pinning the prologues of `ifelse` and `unlist`, both in the R bodies' own paths. A named empty argument claims its formal: `f(a = , 1)` for `f <- function(a, b)` leaves `a` missing and binds `b`, where GNU R binds `a`, so `ifelse(test = , 1, 2)` is an error here and 2 there. And `unlist(list(a = 1), "a")` reports its "NA in coercion to boolean" error with the call `unlist(x, recursive, use.names)`, where GNU R names `islistfactor(x, recursive)`.
 - Builtin unit costs the same profile ranked: `sys.calls` 6.4 µs per call, `grepl` 5 µs, the deparse behind `all.names` and `traceback`, and the reset of the gettext cache that withr asks for (9 µs). No kernel covers them.
-- data.table's own code held 17% of that run's self time. It is a normal package, so only the runtime under it can get faster.
+- data.table's own code held 17% of that run's self time. It is a normal package, so only the runtime under it can get faster, and at the sizes a test suite uses it already is: on 200-row tables fourteen operations (`rbindlist`, a filter, `setkey`, `copy`, `forderv`, `unique`, `setDT` and others) run 1.1x to 1.7x faster than on GNU R, and testthat expectations over tables 1.3x to 10x faster. What is below GNU R is on tables of 300,000 to a million rows with few strings alive: `rbindlist` of character or integer columns (0.7x), a row subset of a list column (0.5x), `melt` of character columns (0.7x), `fread` (0.8x). Two costs are left per element there. `SET_STRING_ELT` takes about 48 instructions a call, comparable with GNU R's. And each result column is a young large vector that is still alive when the next column's allocation starts a minor collection, so it is marked (about 28 instructions per element) and its cards are scanned (11). No kernel covers these sizes.
+- Time a single large allocation with `system.time(for (i in 1:k) f(), gcFirst = FALSE)`. `system.time()` runs `gc()` first, and `gc()` returns the freed mappings of vectors of 1 MB and more to the system (`MappedPool`, `crates/heap/src/large.rs`), so every timed call pays the page faults again and ry looks two to four times slower than it is in a loop.
 
 ## Open: JIT on against JIT off
 
@@ -355,13 +356,14 @@ Unverified until a Windows release smoke test runs:
 
 - **No crash report on Windows.** `crates/crash` installs signal handlers on Unix only. A Windows build needs `SetUnhandledExceptionFilter` plus `RtlCaptureStackBackTrace`/`SymFromAddr`, with the exception code and address in place of `si_code`, and a stack-overflow case (the filter runs on the overflowed stack unless a thread reserves guarantee space with `SetThreadStackGuarantee`). `interp::crash::write_traceback` is already platform neutral.
 
-## Open: cut low-signal tests
+## Open: Windows base R and package installs
 
-User directive: go through the whole code base and delete low-signal tests. The deliverable is fewer, stronger tests. Fuzzing, scenario tests, simulations and well-structured fixture suites are high signal and stay.
-
-- **Low signal means** a test that restates the implementation; one assertion per trivial getter; a duplicate of what a fixture, oracle case or fuzz target already covers; a snapshot of incidental output; a test of a helper with no behavior; a test that has never failed and cannot fail for a plausible bug.
-- **Fold, do not just delete.** Where a group of small unit tests covers one behavior, replace it with one fixture, table test or property test.
-- **The rule to write down:** a test must pin a contract from the docs or a bug that once happened. Once the cut is done, add it to `docs/src/content/docs/development/testing.md` and `robustness.md`.
+- **lattice's vignettes failed to install (fix landed, unverified on Windows).** The install driver spliced the install directory into the `inst/` paths with `sub("^inst", instdir, ...)`, and a regular-expression replacement drops the backslashes of a Windows path, so the `doc` directory was made in the wrong place and `file(con, "w")` on `doc/index.html` failed. The driver now concatenates, `list.dirs` and `list.files` return `/`-separated names on every platform as GNU R does, and recursive `dir.create` splits on both separators on Windows (`test_system`).
+- **The base code images were not written on Windows (fix landed, unverified).** The Windows front end took a stray `R` first argument; `r_arguments` in `crates/rcmd/src/base.rs` now adds it on Unix only.
+- **Windows findings after lattice (fixes landed, smoke test unverified).** The embedded base archive now keeps file modification times, because a code image is valid only for the lazy-load database's length and mtime and extraction used to reset them. Windows package DLLs link `-lintl -liconv` (`LIBINTL` in the Windows Makeconf), because a package that includes `libintl.h` gets `libintl_vsnprintf`, which GNU R's `R.dll` exports and ry's libR does not. Lock files open with write access (`LockFileEx` rejects append-only handles), and a new home's lock is released before the staging directory is renamed into place and retaken on the final path, because Windows cannot rename a directory holding an open file.
+- Drop `cli.md`'s Windows `R_HOME` note for linear algebra once the no-`R_HOME` smoke check passes on a Windows release.
+- **ry's own base R has never run on Windows.** Earlier Windows releases ran on GNU R's base, so the smoke test after a green base build is the first run of the bundled base there. Behind lattice wait 11 more recommended packages, the archive, and the smoke test.
+- **Landed:** the `fork` module is Unix-only again (a moved `#[cfg(unix)]` broke the Windows compile); the `Sys.which` fast path is Unix-only, because Windows base R defines its own `Sys.which`; the base tree carries GNU R's `Rblas.dll` and `Rlapack.dll`; it writes `etc/Rcmd_environ` and base's `Rprofile` with the lines GNU R's installer uncomments, so Rtools comes first on `PATH`; `shlib` runs `make` on the `PATH` that `Rcmd_environ` sets, which got grid and splines compiling (`shlib_runs_make_on_the_path_rcmd_environ_sets`).
 
 ## Open: one Renviron reader
 
@@ -1396,8 +1398,9 @@ setup is about a tenth of the run, so take them for the objects they remove:
   slots"). Three shapes still build the getter call, the setter call, their argument cells and a
   promise per value, about nine objects a level, and give the frame its environment:
   - A nested target (`names(x)[2] <- v`, `l$b$c <- v`, `substr(names(x)[1], 1, 1) <- "Z"`), which
-    the compiler leaves to the `<-` special: 3,193 of the 59,700 frames given an environment on
-    the testthat workload (profile row `<-`). Lower it to getter and setter register code when
+    the compiler leaves to the `<-` special: 113,492 of the 1.63M slot frames that move to reading
+    by name on the finbench suite (profile row `<-`), and the largest caller of `complex_assign`
+    there (about 5M pairlist cells a suite run). Lower it to getter and setter register code when
     every subscript is free of side effects (the general assignment evaluates a nested subscript
     twice), branch to `Op::ComplexAssign` when any level is an object with a method or has a
     getter or setter that is not a builtin, and reuse `complex_assign`'s rules for changing a
@@ -1406,9 +1409,10 @@ setup is about a tenth of the run, so take them for the objects they remove:
     (`s3[[names(x)[1]]] <- 2`): the probe before the subscripts (`Op::BranchIfObject`) branches
     on any object. A probe that asks for the method (`dispatch::has_internal_method`) keeps
     these in slots, and it has to be taught to tier 1 as well (`jit/src/analysis.rs`,
-    `codegen.rs`).
+    `codegen.rs`). Profile row `subassignment`: 75,333 frames on finbench.
   - A closure setter with computed arguments, and a setter whose body needs an environment
-    (`diag<-` calls `.Internal`, `body<-` is an S4 generic).
+    (`diag<-` calls `.Internal`, `body<-` is an S4 generic). Profile row `replacement call`:
+    38,391 frames on finbench.
 - **Environments that only stand for a frame.** Three quarters of all environments come from
   `pending_env`, and most are never looked into. Its callers in a 225-test slice of finbench
   (667k calls): the generic call protocol 100k, `slot_promises_into` 105k, a builtin that

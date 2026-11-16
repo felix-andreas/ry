@@ -1,14 +1,12 @@
 //! What the R thread is doing right now, for the profile summary (`ry run --profile-summary`).
 //!
-//! The runtime publishes its current activity as one word: an [`Activity`] in the low byte and a
-//! detail (a builtin's index, a native library's label) above it. A sampling thread reads the word
-//! at a fixed interval and counts each value, so the summary's time split costs the R thread only a
-//! store on entry to an activity and one on exit. Every hook first checks [`enabled`], which is
-//! false unless a summary was asked for, so a normal run pays one predictable branch per hook.
-//!
-//! Counters count events (closure calls, promises forced, dispatches) on the R thread. They are
-//! plain relaxed loads and stores rather than read-modify-write atomics, because only the R thread
-//! writes them and a locked add costs as much as the work some of them count.
+//! The runtime publishes its activity as one word, an [`Activity`] in the low byte and a detail (a
+//! builtin's index, a native library's label) above it, which a sampling thread reads and counts at
+//! a fixed interval, so the R thread pays one store on entry and one on exit. Every hook first
+//! checks [`enabled`], so a run without a summary pays one predictable branch per hook. Counters of
+//! events (closure calls, promises forced, dispatches) are relaxed loads and stores rather than
+//! read-modify-write atomics, because only the R thread writes them and a locked add costs as much
+//! as some of the work they count.
 
 use std::sync::{
     Mutex,
@@ -266,10 +264,10 @@ pub const LABEL_SLOTS: usize = 1024;
 /// What makes a call leave its fast path, one bit each: [`SUMMARY`] while anything needs every
 /// closure call to pass the profiling hooks (a profile summary, benchmark regions, the
 /// boundary-call recorder), [`CAPTURE`] while boundary calls are recorded, [`PROFILE_TICK`] once
-/// per `Rprof` sampling interval, and the interpreter's own observers of calls ([`DEBUGGER`], [`MOVES`], [`NO_OBJECT_SYSTEMS`]). They share one byte so
-/// a call tests all of them with a single load ([`hooks`]). The byte is atomic because `Rprof`'s
-/// timer thread sets its bit; every other bit is written by the R thread, by whatever changes
-/// the state the bit stands for ([`set_hook`]).
+/// per `Rprof` sampling interval, and the interpreter's own observers of calls ([`DEBUGGER`],
+/// [`MOVES`], [`NO_OBJECT_SYSTEMS`]). They share one byte so a call tests all of them with a single
+/// load ([`hooks`]). The byte is atomic because `Rprof`'s timer thread sets its bit; every other
+/// bit is written by the R thread, by whatever changes the state the bit stands for ([`set_hook`]).
 static HOOKS: AtomicU8 = AtomicU8::new(0);
 /// The [`HOOKS`] bit [`enabled`] reads.
 pub const SUMMARY: u8 = 1;
@@ -514,13 +512,11 @@ pub struct FrameScope {
 }
 
 /// Publishes a closure call for the sampler: `owner` is a [`label`] for the package (or other top
-/// level) the closure belongs to, and `name` is the address of the symbol the call used, which is
-/// never freed, or 0 for an anonymous function. `body` is the address of the closure's body, which
-/// tells closures of one name apart and counts a body's entries however many closures share it.
-///
-/// The sampler reads the stack without synchronizing with the R thread, so a sample taken during
-/// a push or pop can see one frame too many or too few. That is noise of one sample, and it keeps
-/// the push to three stores.
+/// level) the closure belongs to, `name` the never-freed address of the symbol the call used (0 for
+/// an anonymous function), and `body` the address of the closure's body, which tells closures of
+/// one name apart and counts a body's entries across closures sharing it. The sampler reads the
+/// stack unsynchronized, so a sample during a push or pop may see one frame too many or too few;
+/// that noise of one sample keeps the push to three stores.
 #[inline(always)]
 pub fn push_frame(owner: u32, name: usize, body: usize) -> FrameScope {
     let depth = FRAME_DEPTH.load(Ordering::Relaxed);

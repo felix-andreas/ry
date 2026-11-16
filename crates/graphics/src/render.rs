@@ -679,8 +679,6 @@ fn gradient_stops(stops: &[Stop], extend: Extend) -> Vec<Stop> {
     sorted
 }
 
-// PDF.
-
 const POINTS_PER_INCH: f64 = 72.0;
 
 /// The PDF base fonts for R's font faces 1 to 5. The first four use WinAnsiEncoding.
@@ -1441,8 +1439,6 @@ fn pdf_string(text: &str) -> String {
     out
 }
 
-// PostScript.
-
 /// Procedures named after the PDF content operators that [`PdfWriter`] writes, so that a page's
 /// PDF content stream is also a PostScript program. PDF keeps separate stroke and fill colours
 /// where PostScript has one current colour, so `RG` and `rg` store theirs and each painting
@@ -1649,8 +1645,6 @@ fn postscript_document(
     out.push_str("%%EOF\n");
     out.into_bytes()
 }
-
-// SVG.
 
 /// An SVG document of one page, in points with y growing downwards. The definitions the page
 /// uses are written once each into the document's `<defs>`.
@@ -2233,8 +2227,6 @@ fn xml_escape(text: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
 }
-
-// Rasters.
 
 /// Draws a page into pixels at `resolution` pixels per inch.
 fn rasterize(
@@ -3221,8 +3213,6 @@ fn jpeg(pixmap: &tiny_skia::Pixmap, resolution: f64, quality: u8) -> std::io::Re
         .map_err(|failure| std::io::Error::other(failure.to_string()))?;
     Ok(out)
 }
-
-// The built-in devices.
 
 /// What a built-in device is opened with.
 pub struct DeviceSpec {

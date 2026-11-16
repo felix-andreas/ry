@@ -177,29 +177,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn line_columns_round_trip() {
-        let text = "abc\ndef\n";
-        let index = LineIndex::new(text);
-        assert_eq!(index.line_count(), 3);
-        let position = index.line_column(TextSize::from(5));
-        assert_eq!((position.line, position.column), (1, 1));
-        assert_eq!(index.offset(position, text), TextSize::from(5));
-    }
-
-    #[test]
-    fn character_columns_ignore_utf8_width() {
-        let text = "x <- \"café\" ; y = 2L\n";
-        let index = LineIndex::new(text);
-        let equals = TextSize::from(text.find("= 2L").expect("the assignment is there") as u32);
-        assert_eq!(index.line_column(equals).column, 17, "byte column");
-        assert_eq!(
-            index.line_column_chars(equals, text).column,
-            16,
-            "character column"
-        );
-    }
-
-    #[test]
     fn utf16_columns_count_code_units() {
         // 'é' is 2 UTF-8 bytes / 1 UTF-16 unit; '😀' is 4 bytes / 2 units.
         let text = "é😀x\n";

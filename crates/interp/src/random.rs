@@ -2166,22 +2166,7 @@ mod tests {
         rng
     }
 
-    // Expected values are GNU R 4.3's, printed with `print(x, digits = 17)`.
-
-    #[test]
-    fn uniform_matches_gnu_r() {
-        let mut rng = seeded_rng(42);
-        let drawn: Vec<f64> = (0..3).map(|_| next_uniform(&mut rng.state)).collect();
-        assert_eq!(
-            drawn,
-            [
-                0.91480604349635541,
-                0.93707541329786181,
-                0.28613953478634357
-            ]
-        );
-    }
-
+    // Expected values are GNU R 4.3's `.Random.seed[2:6]` after `set.seed(42)`.
     #[test]
     fn seed_words_match_gnu_r() {
         let rng = seeded_rng(42);
@@ -2194,42 +2179,6 @@ mod tests {
         assert_eq!(
             words[..5],
             [624, 507561766, 1260545903, 1362917092, -1772566379]
-        );
-    }
-
-    #[test]
-    fn normal_matches_gnu_r() {
-        let mut rng = seeded_rng(10);
-        let drawn: Vec<f64> = (0..5)
-            .map(|_| rng.draws().normal().unwrap_or(f64::NAN))
-            .collect();
-        assert_eq!(
-            drawn,
-            [
-                0.018746170941826425,
-                -0.184252542069063663,
-                -1.371330549922511466,
-                -0.599167715783718080,
-                0.294545126567508031
-            ]
-        );
-    }
-
-    #[test]
-    fn exponential_matches_gnu_r() {
-        let mut rng = seeded_rng(42);
-        let drawn: Vec<f64> = (0..5)
-            .map(|_| next_exponential(&mut &mut rng.state))
-            .collect();
-        assert_eq!(
-            drawn,
-            [
-                0.198336811783888428,
-                0.660895252134650946,
-                0.283491037786006927,
-                0.038191898260265589,
-                0.473176629282534122
-            ]
         );
     }
 

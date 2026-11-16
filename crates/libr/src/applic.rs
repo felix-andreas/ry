@@ -1062,8 +1062,6 @@ impl Integrand for CallbackIntegrand {
     }
 }
 
-// Interval search.
-
 /// The index `i` of the interval of the sorted `xt[0..n]` holding `x`: `xt[i-1] <= x <
 /// xt[i]` in 1-based terms, or with the inequalities flipped when `left_open`. `mflag` is -1
 /// left of the knots, 1 right of them and 0 inside. The hint `ilo` only speeds GNU R's search,

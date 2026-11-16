@@ -581,8 +581,8 @@ impl RowIndex {
             let codes = Codes::of(column)?;
             let (radix, validity) = (u32::try_from(levels.len()).ok()?, codes.validity.as_ref());
             let buckets = match &codes.values {
-                CodeValues::U8(values) => bucket(values, validity, radix, |code| u32::from(code)),
-                CodeValues::U16(values) => bucket(values, validity, radix, |code| u32::from(code)),
+                CodeValues::U8(values) => bucket(values, validity, radix, u32::from),
+                CodeValues::U16(values) => bucket(values, validity, radix, u32::from),
                 CodeValues::U32(values) => bucket(values, validity, radix, |code| code),
             };
             return Some(RowIndex { low: 0, buckets });

@@ -110,6 +110,16 @@ length : fn(x: Any) -> integer
 pi : double
 line 1: this line is not a declaration (`name : TYPE`).
 
+#---- a_structural_representation_is_refused_and_so_is_its_use
+# The use reports too, so an author who reads only the second problem is not
+# sent to a correct line.
+@type structural { a: integer }
+mk : fn() -> structural
+#++++
+mk : fn() -> structural
+line 2: this type declaration does not load: write `@alias NAME<T> {TYPE}`, `@type NAME {TYPE}` or `@type NAME<T>`.
+line 3: this declaration does not load: I do not know the type `structural`.
+
 #==== purity
 #---- pure_marker_declares_the_name_pure
 nchar : @pure fn(x: Any) -> integer

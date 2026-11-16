@@ -433,38 +433,38 @@ fn dates_shift_by_days_and_subtract_to_days() {
     assert_eq!(column_values(&result, "since"), ints(&[68]));
 }
 
+/// A date takes only `+` and `-` of days and comparisons with another date. Without the second
+/// check, a date against a number would meet at character and compare as text.
 #[test]
-fn a_date_only_adds_days() {
-    let table = frame(vec![("day", RVector::Date(vec![19753.0]))]);
-    let plan = Plan::new(Source::Table(table)).with(Step::Select(vec![named(
-        "twice",
-        binary(BinaryOp::Multiply, column("day"), Expr::Integer(2)),
-    )]));
-    let error = lazy::collect(plan).err().map(|error| error.to_string());
-    assert!(
-        error
-            .as_deref()
-            .is_some_and(|error| error.contains("a date only takes `+` and `-`")),
-        "{error:?}"
-    );
-}
-
-/// Without the check, a date against a number would meet at character and compare as text.
-#[test]
-fn a_date_compares_only_with_a_date() {
-    let table = frame(vec![("day", RVector::Date(vec![19753.0]))]);
-    let plan = Plan::new(Source::Table(table)).with(Step::Filter(binary(
-        BinaryOp::Greater,
-        column("day"),
-        Expr::Integer(19000),
-    )));
-    let error = lazy::collect(plan).err().map(|error| error.to_string());
-    assert!(
-        error.as_deref().is_some_and(
-            |error| error.contains("a Date compares only with a Date, not with integer[]")
+fn a_date_rejects_arithmetic_and_comparisons_it_has_no_meaning_for() {
+    let cases = [
+        (
+            Step::Select(vec![named(
+                "twice",
+                binary(BinaryOp::Multiply, column("day"), Expr::Integer(2)),
+            )]),
+            "a date only takes `+` and `-`",
         ),
-        "{error:?}"
-    );
+        (
+            Step::Filter(binary(
+                BinaryOp::Greater,
+                column("day"),
+                Expr::Integer(19000),
+            )),
+            "a Date compares only with a Date, not with integer[]",
+        ),
+    ];
+    for (step, expected) in cases {
+        let table = frame(vec![("day", RVector::Date(vec![19753.0]))]);
+        let plan = Plan::new(Source::Table(table)).with(step);
+        let error = lazy::collect(plan).err().map(|error| error.to_string());
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|error| error.contains(expected)),
+            "{expected}: {error:?}"
+        );
+    }
 }
 
 /// A filter that reads which rows come first must not move below the sort that orders them.
