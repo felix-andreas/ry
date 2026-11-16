@@ -104,7 +104,7 @@ A new entry gets its status line when it is written, and the line changes in the
 - [The item check's working maps live in a pooled bump arena](syntax-semantics.md#the-item-checks-working-maps-live-in-a-pooled-bump-arena) (built, with exceptions)
 - [`$` fields resolve through the values that built the receiver](syntax-semantics.md#-fields-resolve-through-the-values-that-built-the-receiver) (built)
 - [Packages without stubs are read from the R library by the host, lazily](syntax-semantics.md#packages-without-stubs-are-read-from-the-r-library-by-the-host-lazily) (built)
-- [One-shot checks record coarse dependencies](syntax-semantics.md#one-shot-checks-record-coarse-dependencies) (superseded by "Decision record: every host resolves names through one path, and trees live in the host's store")
+- [One-shot checks record coarse dependencies](syntax-semantics.md#one-shot-checks-record-coarse-dependencies) (superseded by "Every host resolves names through one path, and trees live in the host's store")
 - [Inferred signatures carry body facts that a call reads](syntax-semantics.md#inferred-signatures-carry-body-facts-that-a-call-reads) (built)
 - [`Reduce` folds a named function instead of matching `fn(U, T) -> U`](syntax-semantics.md#reduce-folds-a-named-function-instead-of-matching-fnu-t---u) (built)
 - [References are checked against an independent resolver, and a replacement copy is its source](syntax-semantics.md#references-are-checked-against-an-independent-resolver-and-a-replacement-copy-is-its-source) (built)
@@ -248,6 +248,7 @@ A new entry gets its status line when it is written, and the line changes in the
 - [A warning reaches `suppressWarnings` and `tryCatch` without running R](builtins.md#a-warning-reaches-suppresswarnings-and-trycatch-without-running-r) (built)
 - [`%%` and `%/%` on doubles port GNU R's kernels, with a 64-bit path for whole numbers](builtins.md#-and--on-doubles-port-gnu-rs-kernels-with-a-64-bit-path-for-whole-numbers)
 - [`validObject` runs validity methods without its slot loop, and `new()` copies the prototype shallowly](builtins.md#validobject-runs-validity-methods-without-its-slot-loop-and-new-copies-the-prototype-shallowly) (built)
+- [Small base closures with call arguments run their bodies natively behind prologues](builtins.md#small-base-closures-with-call-arguments-run-their-bodies-natively-behind-prologues) (built)
 
 ## R compatibility
 
@@ -328,6 +329,7 @@ A new entry gets its status line when it is written, and the line changes in the
 - [A call compiled code cannot inline enters the callee in tier 0's dispatch loop](jit-ssa.md#a-call-compiled-code-cannot-inline-enters-the-callee-in-tier-0s-dispatch-loop) (built)
 - [A native recursive function's depth budget shrinks with the interpreter depth](jit-ssa.md#a-native-recursive-functions-depth-budget-shrinks-with-the-interpreter-depth) (built)
 - [Parked: cheaper global bindings in top-level loops (tier 0)](jit-ssa.md#parked-cheaper-global-bindings-in-top-level-loops-tier-0) (planned)
+- [A compiled replacement probes the target before any subscript runs](jit-ssa.md#a-compiled-replacement-probes-the-target-before-any-subscript-runs) (built)
 
 ## Heap and collector
 

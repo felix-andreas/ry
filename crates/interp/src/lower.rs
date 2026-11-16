@@ -20,9 +20,10 @@ use {
         strings::Encoding,
     },
     smallvec::SmallVec,
+    std::borrow::Cow,
     syntax::{
-        NodeRef, NumberType, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange,
-        TextSize, Unexpected, split_number_suffix,
+        ElementRef, NodeOrToken, NodeRef, NumberType, SyntaxElement, SyntaxKind, SyntaxNode,
+        SyntaxToken, TextRange, TextSize, TokenRef, Unexpected, split_number_suffix,
     },
 };
 
@@ -62,10 +63,19 @@ pub unsafe fn parse_with_srcfile(text: &str, source_name: &str, srcfile: Sexp) -
         Some(_) => alloc(SexpType::List, count)?,
         None => nil(),
     };
+    // A function's signature can come from a `#:` block beside its statement, so the whole
+    // tree decides whether any function needs one looked up.
+    let typed = script.root.node_ref().any_kind(is_type_syntax);
     for (index, node) in script.expressions.iter().enumerate() {
-        values::set_elt(result, index, lower(node, source.as_ref())?);
+        let context = Lowering {
+            source: source.as_ref(),
+            owner: node,
+            typed,
+        };
+        let cursor = node.node_ref();
+        values::set_elt(result, index, lower(cursor, context)?);
         if let Some(source) = &source {
-            values::set_elt(srcrefs, index, srcref(source, significant_range(node))?);
+            values::set_elt(srcrefs, index, srcref(source, significant_range(cursor))?);
         }
     }
     if let Some(source) = &source {
@@ -80,7 +90,7 @@ pub unsafe fn parse_with_srcfile(text: &str, source_name: &str, srcfile: Sexp) -
         // the parse itself on a large file.
         let keep_data = crate::envir::get_option("keep.parse.data");
         if (keep_data == nil() || values::as_logical_scalar(keep_data) == 1)
-            && let Some(data) = crate::parse_data::parse_data(&script.root, source)?
+            && let Some(data) = crate::parse_data::parse_data(script.root.node_ref(), source)?
         {
             crate::heap().define(srcfile, install("parseData")?, data)?;
         }
@@ -205,12 +215,15 @@ pub unsafe fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailu
         (None, escape) => escape.map(|(_, escape)| escape),
         (grammar, _) => grammar,
     };
-    let may_hold_placeholder = text.contains('_');
-    let may_hold_formals = text.contains("function") || text.contains('\\');
-    let may_hold_pipe = text.contains("|>");
+    // Most files hold no pipe and no placeholder, and `_` and `function` are common in names
+    // and comments, so the kind column answers both questions in one scan each.
+    let tree = root.node_ref();
+    let may_hold_placeholder = tree.any_kind(|kind| kind == SyntaxKind::UNDERSCORE);
+    let may_fail_action =
+        tree.any_kind(|kind| matches!(kind, SyntaxKind::PARAMETER_LIST | SyntaxKind::PIPE_GREATER));
     let mut expressions = Vec::new();
     for child in root.children() {
-        if is_skipped(&child) {
+        if is_skipped(child.kind()) {
             continue;
         }
         let start = usize::from(child.text_range().start()).min(text.len());
@@ -222,13 +235,11 @@ pub unsafe fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailu
                 break;
             }
         }
-        if (may_hold_formals || may_hold_pipe)
-            && let Some(found) = grammar_action_failure(&child)
-        {
+        if may_fail_action && let Some(found) = grammar_action_failure(&child) {
             failure = Some(found);
             break;
         }
-        if may_hold_placeholder && has_stray_placeholder(&child) {
+        if may_hold_placeholder && has_stray_placeholder(child.node_ref()) {
             failure = Some(SyntaxFailure {
                 unexpected: None,
                 offset: start,
@@ -526,7 +537,7 @@ unsafe fn signal_parse_condition(
     column: usize,
 ) -> R<()> {
     let call = match &condition.call {
-        Some(node) => quote_placeholders(lower(node, None)?)?,
+        Some(node) => quote_placeholders(lower(node.node_ref(), Lowering::new(node, None))?)?,
         None => nil(),
     };
     let value = match &condition.value {
@@ -650,32 +661,29 @@ unsafe fn grammar_action_failure(node: &SyntaxNode) -> Option<SyntaxFailure> {
         (range.end(), std::cmp::Reverse(range.start()))
     });
     candidates.into_iter().find_map(|candidate| {
-        let candidate = node.at(candidate);
         if candidate.kind() == SyntaxKind::PARAMETER_LIST {
-            repeated_formal(&candidate)
+            repeated_formal(candidate)
         } else {
-            pipe_failure(&candidate)
+            pipe_failure(&node.at(candidate))
         }
     })
 }
 
-fn repeated_formal(parameters: &SyntaxNode) -> Option<SyntaxFailure> {
-    let mut seen: SmallVec<[String; 8]> = SmallVec::new();
+fn repeated_formal(parameters: NodeRef<'_>) -> Option<SyntaxFailure> {
+    let mut seen: SmallVec<[Cow<'_, str>; 8]> = SmallVec::new();
     for parameter in parameters
-        .children()
+        .child_nodes()
         .filter(|child| child.kind() == SyntaxKind::PARAMETER)
     {
-        let name = parameter
-            .children_with_tokens()
-            .find(|element| match element {
-                SyntaxElement::Token(token) => !token.kind().is_trivia(),
-                SyntaxElement::Node(node) => !is_skipped(node),
-            })?;
-        let (text, range) = match &name {
-            SyntaxElement::Token(token) => (token.text().to_owned(), token.text_range()),
-            SyntaxElement::Node(node) => (node.text().to_string(), significant_range(node)),
+        let name = parameter.children().find(|element| match element {
+            NodeOrToken::Token(token) => !token.kind().is_trivia(),
+            NodeOrToken::Node(node) => !is_skipped(node.kind()),
+        })?;
+        let (text, range) = match name {
+            NodeOrToken::Token(token) => (token.text(), token.range()),
+            NodeOrToken::Node(node) => (node.text(), significant_range(node)),
         };
-        let name = identifier(&text);
+        let name = identifier_name(text);
         if seen.contains(&name) {
             let last = text.chars().next_back().map_or(0, char::len_utf8);
             return Some(SyntaxFailure {
@@ -684,7 +692,7 @@ fn repeated_formal(parameters: &SyntaxNode) -> Option<SyntaxFailure> {
                 message: format!("repeated formal argument '{name}'"),
                 condition: Some(ParseCondition {
                     class: "repeatedFormal",
-                    value: ConditionValue::Text(name),
+                    value: ConditionValue::Text(name.into_owned()),
                     call: None,
                 }),
             });
@@ -697,8 +705,8 @@ fn repeated_formal(parameters: &SyntaxNode) -> Option<SyntaxFailure> {
 /// GNU R's checks on a pipe's right side, which must be a call to an ordinary function with at
 /// most one placeholder, passed by name.
 unsafe fn pipe_failure(node: &SyntaxNode) -> Option<SyntaxFailure> {
-    let right = expression_children(node).into_iter().nth(1)?;
-    let offset = usize::from(significant_range(&right).start());
+    let right = node.at(*expression_children(node.node_ref()).get(1)?);
+    let offset = usize::from(significant_range(right.node_ref()).start());
     let failure = |message: String, class, value, call: bool| {
         Some(SyntaxFailure {
             unexpected: None,
@@ -713,7 +721,7 @@ unsafe fn pipe_failure(node: &SyntaxNode) -> Option<SyntaxFailure> {
     };
     // A right-hand side that fails to lower fails again, with its own error, when the whole
     // expression is lowered after these grammar checks, so the checks defer to that error.
-    let value = lower(&right, None).ok()?;
+    let value = lower(right.node_ref(), Lowering::new(&right, None)).ok()?;
     if value.kind() != SexpType::Language {
         return failure(
             "The pipe operator requires a function call as RHS".to_owned(),
@@ -840,10 +848,10 @@ pub unsafe fn lower_script_expression(
     keep_source: bool,
 ) -> R<Sexp> {
     if !keep_source {
-        return lower(node, None);
+        return lower(node.node_ref(), Lowering::new(node, None));
     }
     let text = script.text;
-    let range = significant_range(node);
+    let range = significant_range(node.node_ref());
     let start = text[..usize::from(range.start())]
         .rfind('\n')
         .map_or(0, |newline| newline + 1);
@@ -867,7 +875,7 @@ pub unsafe fn lower_script_expression(
     )?;
     let first_line = text[..start].matches('\n').count();
     let source = SourceMap::new(text, first_line as isize, srcfile)?;
-    lower(node, Some(&source))
+    lower(node.node_ref(), Lowering::new(node, Some(&source)))
 }
 
 /// What the lowering needs to build source references: the text with an index of its line
@@ -1011,25 +1019,25 @@ pub(crate) fn position_near(
 
 /// The range of a node from its first to its last token of R code, without the comments and
 /// whitespace around it or `#:` annotations at its edges.
-fn significant_range(node: &SyntaxNode) -> TextRange {
-    let range = node.text_range();
-    let significant = |token: &SyntaxToken| {
-        !token.kind().is_trivia()
-            && !token
-                .parent_ancestors()
-                .take_while(|ancestor| ancestor != node)
-                .any(|ancestor| is_skipped(&ancestor))
-    };
-    let first = std::iter::successors(node.first_token(), SyntaxToken::next_token)
-        .take_while(|token| range.contains_range(token.text_range()))
-        .find(significant);
-    let last = std::iter::successors(node.last_token(), SyntaxToken::prev_token)
-        .take_while(|token| range.contains_range(token.text_range()))
-        .find(significant);
+fn significant_range(node: NodeRef<'_>) -> TextRange {
+    let range = node.range();
+    let first = node
+        .tokens_outside(is_skipped, |kind| !kind.is_trivia())
+        .next();
+    // A token under a skipped node is not R code, and a backward walk meets a token before the
+    // nodes above it, so each candidate checks its ancestors up to `node`.
+    let last = node
+        .descendants_with_tokens()
+        .rev()
+        .filter_map(ElementRef::into_token)
+        .find(|token| {
+            !token.kind().is_trivia()
+                && !std::iter::successors(token.parent(), |ancestor| ancestor.parent())
+                    .take_while(|ancestor| *ancestor != node)
+                    .any(|ancestor| is_skipped(ancestor.kind()))
+        });
     match (first, last) {
-        (Some(first), Some(last)) => {
-            TextRange::new(first.text_range().start(), last.text_range().end())
-        }
+        (Some(first), Some(last)) => TextRange::new(first.range().start(), last.range().end()),
         _ => range,
     }
 }
@@ -1037,7 +1045,7 @@ fn significant_range(node: &SyntaxNode) -> TextRange {
 /// Lowers one expression node of a tree that parsed without errors, such as a top-level item
 /// of a file the analysis already parsed, so a host that holds the tree needs no second parse.
 pub unsafe fn lower_node(node: &SyntaxNode) -> R<Sexp> {
-    lower(node, None)
+    lower(node.node_ref(), Lowering::new(node, None))
 }
 
 /// Lowers `node` like [`lower_node`], keeping source references against `srcfile`. `text` is
@@ -1051,7 +1059,7 @@ pub unsafe fn lower_node_at_line(
     srcfile: Sexp,
 ) -> R<Sexp> {
     let source = SourceMap::new(text, 1 - line as isize, srcfile)?;
-    lower(node, Some(&source))
+    lower(node.node_ref(), Lowering::new(node, Some(&source)))
 }
 
 /// A srcfile environment for the whole of a file, as GNU R's `srcfilecopy` makes one, so source
@@ -1071,9 +1079,9 @@ pub unsafe fn file_srcfile(path: &str, text: &str) -> R<Sexp> {
     Ok(srcfile)
 }
 
-pub(crate) fn is_skipped(node: &SyntaxNode) -> bool {
+pub(crate) fn is_skipped(kind: SyntaxKind) -> bool {
     matches!(
-        node.kind(),
+        kind,
         SyntaxKind::ANNOTATION
             | SyntaxKind::TYPE_ASCRIPTION
             | SyntaxKind::RETURN_TYPE
@@ -1084,97 +1092,124 @@ pub(crate) fn is_skipped(node: &SyntaxNode) -> bool {
     )
 }
 
-/// The expression children of a node, without trivia, tokens or annotations.
-fn expression_children(node: &SyntaxNode) -> Vec<SyntaxNode> {
-    node.children().filter(|child| !is_skipped(child)).collect()
+/// What the lowering of one tree carries along: the source map when it keeps source references,
+/// and an owned handle on the tree for registering a typed function's signature, which a tree
+/// without any type syntax does not need.
+#[derive(Clone, Copy)]
+struct Lowering<'a> {
+    source: Option<&'a SourceMap<'a>>,
+    owner: &'a SyntaxNode,
+    typed: bool,
 }
 
-fn significant_tokens(node: &SyntaxNode) -> Vec<SyntaxToken> {
-    node.children_with_tokens()
-        .filter_map(SyntaxElement::into_token)
-        .filter(|token| !token.kind().is_trivia())
+impl<'a> Lowering<'a> {
+    fn new(owner: &'a SyntaxNode, source: Option<&'a SourceMap<'a>>) -> Lowering<'a> {
+        Lowering {
+            source,
+            owner,
+            typed: true,
+        }
+    }
+}
+
+/// Whether `kind` can make a function typed: a function's signature is written only in `#:`
+/// blocks, type ascriptions and return types.
+fn is_type_syntax(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::ANNOTATION | SyntaxKind::TYPE_ASCRIPTION | SyntaxKind::RETURN_TYPE
+    )
+}
+
+/// The expression children of a node, without trivia, tokens or annotations.
+fn expression_children(node: NodeRef<'_>) -> SmallVec<[NodeRef<'_>; 4]> {
+    node.child_nodes()
+        .filter(|child| !is_skipped(child.kind()))
         .collect()
 }
 
-unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
+fn significant_tokens(node: NodeRef<'_>) -> impl DoubleEndedIterator<Item = TokenRef<'_>> {
+    node.child_tokens()
+        .filter(|token| !token.kind().is_trivia())
+}
+
+unsafe fn lower(node: NodeRef<'_>, context: Lowering<'_>) -> R<Sexp> {
     match node.kind() {
         SyntaxKind::NAME => name_symbol(node),
         SyntaxKind::LITERAL => {
             let token = significant_tokens(node)
-                .into_iter()
                 .next()
                 .ok_or_else(|| error("empty literal"))?;
-            literal(&token)
+            literal(token)
         }
         SyntaxKind::PAREN_EXPR => {
-            let inner = expression_children(node);
-            let value = match inner.first() {
-                Some(inner) => lower(inner, source)?,
+            let value = match expression_children(node).first() {
+                Some(&inner) => lower(inner, context)?,
                 None => return Err(error("unexpected ')'")),
             };
             values::call(symbols().paren, &[value])
         }
         // `@Name(value)` runs as its `(value)`: the nominal type exists only for the checker.
         SyntaxKind::NEW_EXPR => match expression_children(node).first() {
-            Some(inner) => lower(inner, source),
+            Some(&inner) => lower(inner, context),
             None => Err(error("expected `(` after the nominal type")),
         },
         SyntaxKind::BRACE_EXPR => {
-            let mut items = vec![(nil(), symbols().brace)];
             let statements = expression_children(node);
-            for child in &statements {
-                items.push((nil(), lower(child, source)?));
+            let mut items: SmallVec<[(Sexp, Sexp); 8]> = SmallVec::new();
+            items.push((nil(), symbols().brace));
+            for &child in &statements {
+                items.push((nil(), lower(child, context)?));
             }
             let call = values::pairlist(&items, SexpType::Language)?;
-            if let Some(source) = source {
+            if let Some(source) = context.source {
                 block_srcrefs(call, node, &statements, source)?;
             }
             Ok(call)
         }
-        SyntaxKind::BINARY_EXPR => binary(node, source),
+        SyntaxKind::BINARY_EXPR => binary(node, context),
         SyntaxKind::UNARY_EXPR => {
             let operator = significant_tokens(node)
-                .into_iter()
                 .next()
                 .ok_or_else(|| error("missing operator"))?;
-            let operand = expression_children(node)
-                .into_iter()
-                .next()
+            let operand = *expression_children(node)
+                .first()
                 .ok_or_else(|| error("missing operand"))?;
             // `-` written before a suffixed literal is part of it, so `-128i8` is the `I8` it
             // denotes rather than `128i8`, which does not fit, negated.
             if operator.text() == "-"
                 && operand.kind() == SyntaxKind::LITERAL
-                && let Some(token) = significant_tokens(&operand).into_iter().next()
+                && let Some(token) = significant_tokens(operand).next()
                 && token.kind() == SyntaxKind::SUFFIXED_NUMBER
             {
                 return suffixed_number_value(token.text(), true);
             }
-            let operand = lower(&operand, source)?;
+            let operand = lower(operand, context)?;
             let symbol = install(operator.text())?;
             values::call(symbol, &[operand])
         }
         SyntaxKind::CALL_EXPR => {
             let children = expression_children(node);
             let (function, arguments) = match children.as_slice() {
-                [function, arguments, ..] if arguments.kind() == SyntaxKind::ARGUMENT_LIST => {
+                &[function, arguments, ..] if arguments.kind() == SyntaxKind::ARGUMENT_LIST => {
                     (function, arguments)
                 }
                 _ => return Err(error("malformed call")),
             };
-            let mut function = lower(function, source)?;
+            let mut function = lower(function, context)?;
             // R's parser turns a string in function position into a symbol: `"f<-"(x)`.
             if function.kind() == SexpType::String && values::length(function) == 1 {
                 function = values::install_charsxp(function.element(0))?;
             }
-            let mut items = vec![(nil(), function)];
-            items.extend(argument_list(arguments, source)?);
+            let mut items: Items = SmallVec::new();
+            items.push((nil(), function));
+            argument_list(arguments, context, &mut items)?;
             values::pairlist(&items, SexpType::Language)
         }
         SyntaxKind::SUBSET_EXPR | SyntaxKind::SUBSET2_EXPR => {
             let children = expression_children(node);
             let (object, arguments) = match children.as_slice() {
-                [object, arguments, ..] => (object, arguments),
+                &[object, arguments, ..] => (object, arguments),
                 _ => return Err(error("malformed subset")),
             };
             let operator = if node.kind() == SyntaxKind::SUBSET_EXPR {
@@ -1182,20 +1217,19 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
             } else {
                 symbols().bracket2
             };
-            let mut items = vec![(nil(), operator), (nil(), lower(object, source)?)];
-            let subscripts = argument_list(arguments, source)?;
+            let mut items: Items = SmallVec::new();
+            items.extend([(nil(), operator), (nil(), lower(object, context)?)]);
+            argument_list(arguments, context, &mut items)?;
             // R's grammar gives `x[]` and `x[[]]` one empty subscript, unlike `f()`, so
             // `nargs()` in a `[<-` method counts it (`[<-.data.frame` relies on that).
-            if subscripts.is_empty() {
+            if items.len() == 2 {
                 items.push((nil(), missing_arg()));
             }
-            items.extend(subscripts);
             values::pairlist(&items, SexpType::Language)
         }
         SyntaxKind::DOLLAR_EXPR | SyntaxKind::AT_EXPR | SyntaxKind::NAMESPACE_EXPR => {
             let children = expression_children(node);
             let operator = significant_tokens(node)
-                .into_iter()
                 .find(|token| {
                     matches!(
                         token.kind(),
@@ -1207,64 +1241,35 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
                 })
                 .ok_or_else(|| error("missing operator"))?;
             let (left, right) = match children.as_slice() {
-                [left, right, ..] => (lower(left, source)?, lower(right, source)?),
-                [left] => {
+                &[left, right, ..] => (lower(left, context)?, lower(right, context)?),
+                &[left] => {
                     // A keyword or string on the right is a token, not a node.
                     let token = significant_tokens(node)
-                        .into_iter()
-                        .last()
+                        .next_back()
                         .ok_or_else(|| error("missing name"))?;
-                    (lower(left, source)?, literal(&token)?)
+                    (lower(left, context)?, literal(token)?)
                 }
                 _ => return Err(error("malformed extraction")),
             };
             let symbol = install(operator.text())?;
             values::call(symbol, &[left, right])
         }
-        SyntaxKind::FUNCTION_DEF => function_definition(node, source),
-        SyntaxKind::IF_EXPR => {
-            let children = expression_children(node);
-            let mut items = vec![(nil(), symbols().if_)];
-            for child in &children {
-                items.push((nil(), lower(child, source)?));
-            }
-            values::pairlist(&items, SexpType::Language)
-        }
-        SyntaxKind::FOR_EXPR => {
-            let children = expression_children(node);
-            let mut items = vec![(nil(), symbols().for_)];
-            for child in &children {
-                items.push((nil(), lower(child, source)?));
-            }
-            values::pairlist(&items, SexpType::Language)
-        }
-        SyntaxKind::WHILE_EXPR => {
-            let children = expression_children(node);
-            let mut items = vec![(nil(), symbols().while_)];
-            for child in &children {
-                items.push((nil(), lower(child, source)?));
-            }
-            values::pairlist(&items, SexpType::Language)
-        }
-        SyntaxKind::REPEAT_EXPR => {
-            let children = expression_children(node);
-            let mut items = vec![(nil(), symbols().repeat)];
-            for child in &children {
-                items.push((nil(), lower(child, source)?));
-            }
-            values::pairlist(&items, SexpType::Language)
-        }
-        SyntaxKind::FSTRING => format_string(node, source),
+        SyntaxKind::FUNCTION_DEF => function_definition(node, context),
+        SyntaxKind::IF_EXPR => keyword_call(symbols().if_, node, context),
+        SyntaxKind::FOR_EXPR => keyword_call(symbols().for_, node, context),
+        SyntaxKind::WHILE_EXPR => keyword_call(symbols().while_, node, context),
+        SyntaxKind::REPEAT_EXPR => keyword_call(symbols().repeat, node, context),
+        SyntaxKind::FSTRING => format_string(node, context),
         SyntaxKind::TRY_EXPR => match expression_children(node).first() {
-            Some(operand) => values::call(install(".ry_try")?, &[lower(operand, source)?]),
+            Some(&operand) => values::call(install(".ry_try")?, &[lower(operand, context)?]),
             None => Err(error("expected an expression after `try`")),
         },
         SyntaxKind::RECORD_EXPR | SyntaxKind::TUPLE_EXPR => {
             if let Some(arguments) = child_of_kind(node, SyntaxKind::ARGUMENT_LIST)
-                && let Some(spread) = child_of_kind(&arguments, SyntaxKind::RECORD_SPREAD)
+                && let Some(spread) = child_of_kind(arguments, SyntaxKind::RECORD_SPREAD)
             {
-                let text = spread.text().to_string();
-                let base = text
+                let base = spread
+                    .text()
                     .trim()
                     .strip_prefix("..")
                     .filter(|name| !name.is_empty())
@@ -1273,7 +1278,7 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
                     (nil(), install(".ry_update")?),
                     (nil(), install(&identifier(base))?),
                 ];
-                items.extend(literal_items(&arguments, source)?);
+                items.extend(literal_items(arguments, context)?);
                 return values::pairlist(&items, SexpType::Language);
             }
             let head = if node.kind() == SyntaxKind::RECORD_EXPR {
@@ -1283,27 +1288,27 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
             };
             let mut items = vec![(nil(), install(head)?)];
             if let Some(arguments) = child_of_kind(node, SyntaxKind::ARGUMENT_LIST) {
-                items.extend(literal_items(&arguments, source)?);
+                items.extend(literal_items(arguments, context)?);
             }
             values::pairlist(&items, SexpType::Language)
         }
         SyntaxKind::ARRAY_EXPR => {
             let mut items = vec![(nil(), install(".ry_array")?)];
             if let Some(arguments) = child_of_kind(node, SyntaxKind::ARGUMENT_LIST) {
-                items.extend(literal_items(&arguments, source)?);
+                items.extend(literal_items(arguments, context)?);
             }
             values::pairlist(&items, SexpType::Language)
         }
         SyntaxKind::TAG_EXPR => {
             let name =
                 child_of_kind(node, SyntaxKind::NAME).ok_or_else(|| error("a tag needs a name"))?;
-            let mut items = vec![(nil(), install(".ry_tag")?), (nil(), tag_name(&name)?)];
+            let mut items = vec![(nil(), install(".ry_tag")?), (nil(), tag_name(name)?)];
             if let Some(arguments) = child_of_kind(node, SyntaxKind::ARGUMENT_LIST) {
-                items.extend(literal_items(&arguments, source)?);
+                items.extend(literal_items(arguments, context)?);
             }
             values::pairlist(&items, SexpType::Language)
         }
-        SyntaxKind::MATCH_EXPR => match_expression(node, source),
+        SyntaxKind::MATCH_EXPR => match_expression(node, context),
         SyntaxKind::BREAK_EXPR => values::call(symbols().break_, &[]),
         SyntaxKind::NEXT_EXPR => values::call(symbols().next, &[]),
         SyntaxKind::ERROR => Err(error(format!("unexpected '{}'", node.text()))),
@@ -1311,19 +1316,32 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
     }
 }
 
+/// A call's items: its head, then each argument with its tag. Most calls have few arguments.
+type Items = SmallVec<[(Sexp, Sexp); 6]>;
+
+/// `if`, `for`, `while` or `repeat`: the keyword's function applied to the expression children.
+unsafe fn keyword_call(head: Sexp, node: NodeRef<'_>, context: Lowering<'_>) -> R<Sexp> {
+    let mut items: Items = SmallVec::new();
+    items.push((nil(), head));
+    for child in node.child_nodes().filter(|child| !is_skipped(child.kind())) {
+        items.push((nil(), lower(child, context)?));
+    }
+    values::pairlist(&items, SexpType::Language)
+}
+
 /// Attaches a `{` call's source references: a `srcref` list of the brace itself and then each
 /// statement, the srcfile, and a `wholeSrcref` from the start of the srcfile to the closing brace.
 unsafe fn block_srcrefs(
     call: Sexp,
-    node: &SyntaxNode,
-    statements: &[SyntaxNode],
+    node: NodeRef<'_>,
+    statements: &[NodeRef<'_>],
     source: &SourceMap,
 ) -> R<()> {
     let range = significant_range(node);
     let srcrefs = alloc(SexpType::List, statements.len() + 1)?;
     let open = TextRange::at(range.start(), 1.into());
     values::set_elt(srcrefs, 0, srcref(source, open)?);
-    for (index, statement) in statements.iter().enumerate() {
+    for (index, &statement) in statements.iter().enumerate() {
         values::set_elt(
             srcrefs,
             index + 1,
@@ -1343,30 +1361,29 @@ unsafe fn block_srcrefs(
     Ok(())
 }
 
-unsafe fn binary(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
+unsafe fn binary(node: NodeRef<'_>, context: Lowering<'_>) -> R<Sexp> {
     let children = expression_children(node);
     let operator = significant_tokens(node)
-        .into_iter()
         .find(|token| !matches!(token.kind(), SyntaxKind::L_PAREN | SyntaxKind::R_PAREN))
         .ok_or_else(|| error("missing operator"))?;
     let (left, right) = match children.as_slice() {
-        [left, right, ..] => (left, Some(right)),
-        [left] => (left, None),
+        &[left, right, ..] => (left, Some(right)),
+        &[left] => (left, None),
         _ => return Err(error("malformed binary expression")),
     };
-    let left_value = lower(left, source)?;
+    let left_value = lower(left, context)?;
     let Some(right) = right else {
         // A formula with only a left side is `~` applied to it.
         let symbol = install(operator.text())?;
         return values::call(symbol, &[left_value]);
     };
-    let mut right_value = lower(right, source)?;
+    let mut right_value = lower(right, context)?;
     if matches!(
         operator.kind(),
         SyntaxKind::LESS_MINUS | SyntaxKind::LESS2_MINUS | SyntaxKind::EQ
     ) && let Some(ascription) = child_of_kind(node, SyntaxKind::TYPE_ASCRIPTION)
     {
-        right_value = with_annotated_literals(&ascription, right, right_value)?;
+        right_value = with_annotated_literals(ascription, right, right_value)?;
     }
     match operator.kind() {
         SyntaxKind::MINUS_GREATER => values::call(symbols().assign, &[right_value, left_value]),
@@ -1386,24 +1403,24 @@ unsafe fn binary(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
 /// later; so are the items of a list literal bound to a `List<I64>`, as in
 /// `xs: List<I64> <- [1, 2]`. Any other value runs unchanged, as bindings are not checked.
 unsafe fn with_annotated_literals(
-    ascription: &SyntaxNode,
-    node: &SyntaxNode,
+    ascription: NodeRef<'_>,
+    node: NodeRef<'_>,
     value: Sexp,
 ) -> R<Sexp> {
-    let Some(annotation) = ascription.children().next() else {
+    let Some(annotation) = ascription.child_nodes().next() else {
         return Ok(value);
     };
     match annotation.kind() {
-        SyntaxKind::TYPE_REF => match (names_i64(&annotation), number_literal_text(node)) {
+        SyntaxKind::TYPE_REF => match (names_i64(annotation), number_literal_text(node)) {
             (true, Some(text)) => crate::numbers::from_text(&text),
             _ => Ok(value),
         },
         SyntaxKind::TYPE_APPLY if node.kind() == SyntaxKind::ARRAY_EXPR => {
-            let is_list = child_of_kind(&annotation, SyntaxKind::NAME)
+            let is_list = child_of_kind(annotation, SyntaxKind::NAME)
                 .is_some_and(|name| name.text() == "List");
-            let item = child_of_kind(&annotation, SyntaxKind::TYPE_ARG_LIST)
-                .and_then(|arguments| child_of_kind(&arguments, SyntaxKind::TYPE_REF))
-                .is_some_and(|item| names_i64(&item));
+            let item = child_of_kind(annotation, SyntaxKind::TYPE_ARG_LIST)
+                .and_then(|arguments| child_of_kind(arguments, SyntaxKind::TYPE_REF))
+                .is_some_and(names_i64);
             if !(is_list && item) {
                 return Ok(value);
             };
@@ -1413,14 +1430,14 @@ unsafe fn with_annotated_literals(
             // The lowered call holds one cell per argument, after its head.
             let mut cell = value.cdr();
             for argument in arguments
-                .children()
+                .child_nodes()
                 .filter(|child| child.kind() == SyntaxKind::ARGUMENT)
             {
                 if cell == nil() {
                     break;
                 }
-                let text = match expression_children(&argument).as_slice() {
-                    [item] => number_literal_text(item),
+                let text = match expression_children(argument).as_slice() {
+                    &[item] => number_literal_text(item),
                     _ => None,
                 };
                 if let Some(text) = text {
@@ -1435,16 +1452,16 @@ unsafe fn with_annotated_literals(
 }
 
 /// Whether a type reference names `I64`, the one ry number that is not R's `double` at run time.
-fn names_i64(annotation: &SyntaxNode) -> bool {
-    annotation.text().to_string().trim() == "I64"
+fn names_i64(annotation: NodeRef<'_>) -> bool {
+    annotation.text().trim() == "I64"
 }
 
 /// The text of an unsuffixed integer or double literal, with its sign when a `-` is written
 /// directly before it, and without an `L` suffix.
-fn number_literal_text(node: &SyntaxNode) -> Option<String> {
+fn number_literal_text(node: NodeRef<'_>) -> Option<String> {
     match node.kind() {
         SyntaxKind::LITERAL => {
-            let token = significant_tokens(node).into_iter().next()?;
+            let token = significant_tokens(node).next()?;
             match token.kind() {
                 SyntaxKind::INTEGER => Some(token.text().trim_end_matches('L').to_owned()),
                 SyntaxKind::DOUBLE => Some(token.text().to_owned()),
@@ -1452,9 +1469,9 @@ fn number_literal_text(node: &SyntaxNode) -> Option<String> {
             }
         }
         SyntaxKind::UNARY_EXPR => {
-            let operator = significant_tokens(node).into_iter().next()?;
+            let operator = significant_tokens(node).next()?;
             match (operator.kind(), expression_children(node).as_slice()) {
-                (SyntaxKind::MINUS, [operand]) => {
+                (SyntaxKind::MINUS, &[operand]) => {
                     number_literal_text(operand).map(|text| format!("-{text}"))
                 }
                 _ => None,
@@ -1497,75 +1514,72 @@ unsafe fn pipe(left: Sexp, right: Sexp, placeholder: Option<Sexp>) -> R<Sexp> {
 
 /// The placeholder argument of a pipe's right side: the first named argument of the call whose
 /// value is a bare `_`. A backquoted `` `_` `` is an ordinary name, so only the token counts.
-fn placeholder_argument(right: &SyntaxNode) -> Option<SyntaxNode> {
+fn placeholder_argument(right: NodeRef<'_>) -> Option<NodeRef<'_>> {
     if right.kind() != SyntaxKind::CALL_EXPR {
         return None;
     }
-    let arguments = right
-        .children()
-        .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)?;
+    let arguments = child_of_kind(right, SyntaxKind::ARGUMENT_LIST)?;
     arguments
-        .children()
+        .child_nodes()
         .filter(|child| child.kind() == SyntaxKind::ARGUMENT)
         .find(|argument| {
             let mut after_equals = false;
-            argument
-                .children_with_tokens()
-                .any(|element| match element {
-                    SyntaxElement::Token(token) => {
-                        after_equals |= token.kind() == SyntaxKind::EQ;
-                        false
-                    }
-                    SyntaxElement::Node(value) => after_equals && is_bare_placeholder(&value),
-                })
+            argument.children().any(|element| match element {
+                NodeOrToken::Token(token) => {
+                    after_equals |= token.kind() == SyntaxKind::EQ;
+                    false
+                }
+                NodeOrToken::Node(value) => after_equals && is_bare_placeholder(value),
+            })
         })
 }
 
-unsafe fn placeholder_name(right: &SyntaxNode) -> R<Option<Sexp>> {
+unsafe fn placeholder_name(right: NodeRef<'_>) -> R<Option<Sexp>> {
     let Some(argument) = placeholder_argument(right) else {
         return Ok(None);
     };
-    match argument.children().next() {
-        Some(name) => tag_from_node(&name).map(Some),
+    match argument.child_nodes().next() {
+        Some(name) => tag_from_node(name).map(Some),
         None => Ok(None),
     }
 }
 
-fn is_bare_placeholder(node: &SyntaxNode) -> bool {
+fn is_bare_placeholder(node: NodeRef<'_>) -> bool {
     node.kind() == SyntaxKind::NAME
         && significant_tokens(node)
-            .first()
+            .next()
             .is_some_and(|token| token.kind() == SyntaxKind::UNDERSCORE)
 }
 
 /// Whether a `_` in `node` is not the placeholder argument of a pipe, which R rejects.
-fn has_stray_placeholder(node: &SyntaxNode) -> bool {
-    if !node
-        .node_ref()
-        .any_kind(|kind| kind == SyntaxKind::UNDERSCORE)
-    {
+fn has_stray_placeholder(node: NodeRef<'_>) -> bool {
+    if !node.any_kind(|kind| kind == SyntaxKind::UNDERSCORE) {
         return false;
     }
-    let placeholders = node.descendants().filter(is_bare_placeholder).count();
+    let placeholders = node
+        .descendants()
+        .filter(|&node| is_bare_placeholder(node))
+        .count();
     let consumed = node
         .descendants()
         .filter(|expression| {
             expression.kind() == SyntaxKind::BINARY_EXPR
-                && significant_tokens(expression)
-                    .iter()
+                && significant_tokens(*expression)
                     .any(|token| token.kind() == SyntaxKind::PIPE_GREATER)
-                && expression_children(expression).get(1).is_some_and(|right| {
-                    placeholder_argument(right).is_some()
-                        || extraction_chain_heads_with_placeholder(right)
-                })
+                && expression_children(*expression)
+                    .get(1)
+                    .is_some_and(|&right| {
+                        placeholder_argument(right).is_some()
+                            || extraction_chain_heads_with_placeholder(right)
+                    })
         })
         .count();
     placeholders > consumed
 }
 
 /// Whether `node` is a chain of extractions whose innermost object is the placeholder.
-fn extraction_chain_heads_with_placeholder(node: &SyntaxNode) -> bool {
-    let mut node = node.clone();
+fn extraction_chain_heads_with_placeholder(node: NodeRef<'_>) -> bool {
+    let mut node = node;
     while matches!(
         node.kind(),
         SyntaxKind::SUBSET_EXPR
@@ -1573,10 +1587,10 @@ fn extraction_chain_heads_with_placeholder(node: &SyntaxNode) -> bool {
             | SyntaxKind::DOLLAR_EXPR
             | SyntaxKind::AT_EXPR
     ) {
-        let Some(object) = expression_children(&node).into_iter().next() else {
+        let Some(&object) = expression_children(node).first() else {
             return false;
         };
-        if is_bare_placeholder(&object) {
+        if is_bare_placeholder(object) {
             return true;
         }
         node = object;
@@ -1584,27 +1598,27 @@ fn extraction_chain_heads_with_placeholder(node: &SyntaxNode) -> bool {
     false
 }
 
-fn child_of_kind(node: &SyntaxNode, kind: SyntaxKind) -> Option<SyntaxNode> {
-    node.children().find(|child| child.kind() == kind)
+fn child_of_kind(node: NodeRef<'_>, kind: SyntaxKind) -> Option<NodeRef<'_>> {
+    node.child_nodes().find(|child| child.kind() == kind)
 }
 
 /// The items of a record, tuple or tag payload. Unlike a call's arguments, a trailing comma adds
 /// no empty item: `(1L,)` has one.
-unsafe fn literal_items(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Vec<(Sexp, Sexp)>> {
-    node.children()
+unsafe fn literal_items(node: NodeRef<'_>, context: Lowering<'_>) -> R<Vec<(Sexp, Sexp)>> {
+    node.child_nodes()
         .filter(|child| child.kind() == SyntaxKind::ARGUMENT)
-        .map(|argument| argument_value(&argument, source))
+        .map(|argument| argument_value(argument, context))
         .collect()
 }
 
 /// `f"a{x}b"` runs as `paste0("a", .ry_text(x), "b")`. A text run has its escapes decoded
 /// and its doubled braces halved.
-unsafe fn format_string(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
+unsafe fn format_string(node: NodeRef<'_>, context: Lowering<'_>) -> R<Sexp> {
     let text = install(".ry_text")?;
     let mut items = vec![(nil(), install("paste0")?)];
-    for child in node.children_with_tokens() {
+    for child in node.children() {
         match child {
-            SyntaxElement::Token(token) if token.kind() == SyntaxKind::FSTRING_TEXT => {
+            NodeOrToken::Token(token) if token.kind() == SyntaxKind::FSTRING_TEXT => {
                 let text = token.text().replace("{{", "{").replace("}}", "}");
                 let (bytes, high_byte) =
                     unescape_bytes(&text).map_err(|failure| error(failure.message))?;
@@ -1617,14 +1631,13 @@ unsafe fn format_string(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp
                 values::set_elt(piece, 0, values::mkchar_bytes(&bytes, encoding)?);
                 items.push((nil(), piece));
             }
-            SyntaxElement::Node(interpolation)
+            NodeOrToken::Node(interpolation)
                 if interpolation.kind() == SyntaxKind::FSTRING_INTERPOLATION =>
             {
-                let inner = expression_children(&interpolation);
-                let inner = inner
+                let inner = *expression_children(interpolation)
                     .first()
                     .ok_or_else(|| error("this interpolation is empty"))?;
-                let value = lower(inner, source)?;
+                let value = lower(inner, context)?;
                 items.push((nil(), values::call(text, &[value])?));
             }
             _ => {}
@@ -1637,9 +1650,8 @@ unsafe fn format_string(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp
 }
 
 /// A tag's name as the string `.ry_tag` takes first.
-unsafe fn tag_name(name: &SyntaxNode) -> R<Sexp> {
+unsafe fn tag_name(name: NodeRef<'_>) -> R<Sexp> {
     let token = significant_tokens(name)
-        .into_iter()
         .next()
         .ok_or_else(|| error("empty tag name"))?;
     values::scalar_string(&identifier(token.text()))
@@ -1648,44 +1660,40 @@ unsafe fn tag_name(name: &SyntaxNode) -> R<Sexp> {
 /// `match (x) { arms }` becomes `.ry_match(x, `=>`(pattern, body), `=>`(pattern, guard, body))`.
 /// A parenthesized scrutinee lowers to its inner expression, because the parentheses belong to
 /// the `match` syntax, as they do for `if`.
-unsafe fn match_expression(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
+unsafe fn match_expression(node: NodeRef<'_>, context: Lowering<'_>) -> R<Sexp> {
     let children = expression_children(node);
-    let (scrutinee, arms) = children
+    let (&scrutinee, arms) = children
         .split_first()
         .ok_or_else(|| error("a `match` needs a value"))?;
     let scrutinee = if scrutinee.kind() == SyntaxKind::PAREN_EXPR {
-        let inner = expression_children(scrutinee);
-        lower(
-            inner
-                .first()
-                .ok_or_else(|| error("a `match` needs a value"))?,
-            source,
-        )?
+        let inner = *expression_children(scrutinee)
+            .first()
+            .ok_or_else(|| error("a `match` needs a value"))?;
+        lower(inner, context)?
     } else {
-        lower(scrutinee, source)?
+        lower(scrutinee, context)?
     };
     let arrow = install("=>")?;
     let mut items = vec![(nil(), install(".ry_match")?), (nil(), scrutinee)];
-    for arm in arms
+    for &arm in arms
         .iter()
         .filter(|arm| arm.kind() == SyntaxKind::MATCH_ARM)
     {
         let parts = expression_children(arm);
         let mut arm_items = vec![(nil(), arrow)];
         let mut parts = parts.iter();
-        let pattern_node = parts
+        let &pattern_node = parts
             .next()
             .ok_or_else(|| error("a `match` arm needs a pattern"))?;
         arm_items.push((nil(), pattern(pattern_node)?));
-        for part in parts {
+        for &part in parts {
             if part.kind() == SyntaxKind::MATCH_GUARD {
-                let condition = expression_children(part);
-                let condition = condition
+                let condition = *expression_children(part)
                     .first()
                     .ok_or_else(|| error("an arm guard needs a condition"))?;
-                arm_items.push((nil(), lower(condition, source)?));
+                arm_items.push((nil(), lower(condition, context)?));
             } else {
-                arm_items.push((nil(), lower(part, source)?));
+                arm_items.push((nil(), lower(part, context)?));
             }
         }
         if arm_items.len() < 3 {
@@ -1700,34 +1708,31 @@ unsafe fn match_expression(node: &SyntaxNode, source: Option<&SourceMap>) -> R<S
 /// binding are symbols, a literal is its constant (a negative number folded), and tag, tuple
 /// and record patterns are `.ry_tag`, `.ry_tuple` and `.ry_record` calls, with the symbol `..`
 /// for the rest and `|` and `(` calls for alternatives and grouping.
-unsafe fn pattern(node: &SyntaxNode) -> R<Sexp> {
+unsafe fn pattern(node: NodeRef<'_>) -> R<Sexp> {
     match node.kind() {
         SyntaxKind::PATTERN_WILDCARD => install("_"),
         SyntaxKind::PATTERN_REST if node.text() == ".." => install(".."),
         SyntaxKind::PATTERN_BIND => {
             let name = child_of_kind(node, SyntaxKind::NAME)
                 .ok_or_else(|| error("empty binding pattern"))?;
-            name_symbol(&name)
+            name_symbol(name)
         }
         SyntaxKind::PATTERN_LITERAL => {
-            let negative = significant_tokens(node)
-                .iter()
-                .any(|token| token.kind() == SyntaxKind::MINUS);
+            let negative = significant_tokens(node).any(|token| token.kind() == SyntaxKind::MINUS);
             let literal_node = child_of_kind(node, SyntaxKind::LITERAL)
                 .ok_or_else(|| error("empty literal pattern"))?;
-            let token = significant_tokens(&literal_node)
-                .into_iter()
+            let token = significant_tokens(literal_node)
                 .next()
                 .ok_or_else(|| error("empty literal pattern"))?;
-            let value = literal(&token)?;
+            let value = literal(token)?;
             if negative { negate(value) } else { Ok(value) }
         }
         SyntaxKind::PATTERN_TAG => {
             let name = child_of_kind(node, SyntaxKind::NAME)
                 .ok_or_else(|| error("a tag pattern needs a name"))?;
-            let mut items = vec![(nil(), install(".ry_tag")?), (nil(), tag_name(&name)?)];
+            let mut items = vec![(nil(), install(".ry_tag")?), (nil(), tag_name(name)?)];
             if let Some(list) = child_of_kind(node, SyntaxKind::PATTERN_LIST) {
-                items.extend(pattern_items(&list)?);
+                items.extend(pattern_items(list)?);
             }
             values::pairlist(&items, SexpType::Language)
         }
@@ -1740,7 +1745,7 @@ unsafe fn pattern(node: &SyntaxNode) -> R<Sexp> {
             values::pairlist(&items, SexpType::Language)
         }
         SyntaxKind::PATTERN_OR => {
-            let mut alternatives = node.children().map(|child| pattern(&child));
+            let mut alternatives = node.child_nodes().map(|child| pattern(child));
             let mut result = alternatives
                 .next()
                 .ok_or_else(|| error("empty alternative pattern"))??;
@@ -1750,53 +1755,50 @@ unsafe fn pattern(node: &SyntaxNode) -> R<Sexp> {
             }
             Ok(result)
         }
-        SyntaxKind::PATTERN_REST => {
-            let text = node.text().to_string();
-            install(&identifier(text.trim()))
-        }
+        SyntaxKind::PATTERN_REST => install(&identifier(node.text().trim())),
         SyntaxKind::PATTERN_ARRAY => {
             let mut items = vec![(nil(), install(".ry_array")?)];
-            for child in node.children() {
-                items.push((nil(), pattern(&child)?));
+            for child in node.child_nodes() {
+                items.push((nil(), pattern(child)?));
             }
             values::pairlist(&items, SexpType::Language)
         }
         SyntaxKind::PATTERN_AS => {
             let inner = node
-                .children()
+                .child_nodes()
                 .find(|child| child.kind() != SyntaxKind::NAME)
                 .ok_or_else(|| error("`as` needs a pattern before it"))?;
             let name = node
-                .children()
+                .child_nodes()
                 .filter(|child| child.kind() == SyntaxKind::NAME)
                 .last()
                 .ok_or_else(|| error("`as` needs a name after it"))?;
-            values::call(install(".ry_as")?, &[pattern(&inner)?, name_symbol(&name)?])
+            values::call(install(".ry_as")?, &[pattern(inner)?, name_symbol(name)?])
         }
         SyntaxKind::PATTERN_PAREN => {
             let inner = node
-                .children()
+                .child_nodes()
                 .next()
                 .ok_or_else(|| error("empty pattern group"))?;
-            values::call(symbols().paren, &[pattern(&inner)?])
+            values::call(symbols().paren, &[pattern(inner)?])
         }
         _ => Err(error(format!("unexpected '{}' in a pattern", node.text()))),
     }
 }
 
-unsafe fn pattern_items(list: &SyntaxNode) -> R<Vec<(Sexp, Sexp)>> {
+unsafe fn pattern_items(list: NodeRef<'_>) -> R<Vec<(Sexp, Sexp)>> {
     let mut items = Vec::new();
-    for child in list.children() {
+    for child in list.child_nodes() {
         if child.kind() == SyntaxKind::PATTERN_FIELD {
-            let name = child_of_kind(&child, SyntaxKind::NAME)
+            let name = child_of_kind(child, SyntaxKind::NAME)
                 .ok_or_else(|| error("a field pattern needs a name"))?;
             let value = child
-                .children()
+                .child_nodes()
                 .find(|part| part.kind() != SyntaxKind::NAME)
                 .ok_or_else(|| error("a field pattern needs a pattern"))?;
-            items.push((name_symbol(&name)?, pattern(&value)?));
+            items.push((name_symbol(name)?, pattern(value)?));
         } else {
-            items.push((nil(), pattern(&child)?));
+            items.push((nil(), pattern(child)?));
         }
     }
     Ok(items)
@@ -1826,91 +1828,83 @@ unsafe fn negate(value: Sexp) -> R<Sexp> {
     }
 }
 
-/// The arguments of a call or subset, with empty arguments as `R_MissingArg`.
-unsafe fn argument_list(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Vec<(Sexp, Sexp)>> {
-    // An argument slot sits between separators; R keeps empty slots (`x[1, ]`).
-    let mut slots: Vec<Option<SyntaxNode>> = vec![None];
+/// Appends the arguments of a call or subset to `items`, with empty arguments as
+/// `R_MissingArg`. An argument slot sits between separators, and R keeps empty slots
+/// (`x[1, ]`), but a list with neither an argument nor a comma has no slot at all.
+unsafe fn argument_list(node: NodeRef<'_>, context: Lowering<'_>, items: &mut Items) -> R<()> {
+    let mut slot: Option<NodeRef<'_>> = None;
     let mut saw_any = false;
-    for element in node.children_with_tokens() {
+    for element in node.children() {
         match element {
-            SyntaxElement::Token(token) if token.kind() == SyntaxKind::COMMA => {
-                slots.push(None);
+            NodeOrToken::Token(token) if token.kind() == SyntaxKind::COMMA => {
+                items.push(match slot.take() {
+                    None => (nil(), missing_arg()),
+                    Some(argument) => argument_value(argument, context)?,
+                });
                 saw_any = true;
             }
-            SyntaxElement::Node(child) if child.kind() == SyntaxKind::ARGUMENT => {
-                if let Some(slot) = slots.last_mut() {
-                    *slot = Some(child);
-                }
+            NodeOrToken::Node(child) if child.kind() == SyntaxKind::ARGUMENT => {
+                slot = Some(child);
                 saw_any = true;
             }
             _ => {}
         }
     }
-    if !saw_any {
-        return Ok(Vec::new());
+    if saw_any {
+        items.push(match slot {
+            None => (nil(), missing_arg()),
+            Some(argument) => argument_value(argument, context)?,
+        });
     }
-    let mut arguments = Vec::new();
-    for slot in slots {
-        match slot {
-            None => arguments.push((nil(), missing_arg())),
-            Some(argument) => arguments.push(argument_value(&argument, source)?),
-        }
-    }
-    Ok(arguments)
+    Ok(())
 }
 
-unsafe fn argument_value(node: &SyntaxNode, source: Option<&SourceMap>) -> R<(Sexp, Sexp)> {
-    let has_equals = significant_tokens(node)
-        .iter()
-        .any(|token| token.kind() == SyntaxKind::EQ);
-    let mut elements = node
-        .children_with_tokens()
-        .filter(|element| !element.kind().is_trivia());
+unsafe fn argument_value(node: NodeRef<'_>, context: Lowering<'_>) -> R<(Sexp, Sexp)> {
+    let has_equals = significant_tokens(node).any(|token| token.kind() == SyntaxKind::EQ);
     if !has_equals {
-        return match elements.next() {
-            Some(SyntaxElement::Node(child)) => Ok((nil(), lower(&child, source)?)),
-            Some(SyntaxElement::Token(token)) => Ok((nil(), literal(&token)?)),
+        return match node.children().find(|element| !element.kind().is_trivia()) {
+            Some(NodeOrToken::Node(child)) => Ok((nil(), lower(child, context)?)),
+            Some(NodeOrToken::Token(token)) => Ok((nil(), literal(token)?)),
             None => Ok((nil(), missing_arg())),
         };
     }
     let mut tag = nil();
     let mut value = missing_arg();
     let mut after_equals = false;
-    for element in node.children_with_tokens() {
+    for element in node.children() {
         match element {
-            SyntaxElement::Token(token) if token.kind() == SyntaxKind::EQ && !after_equals => {
+            NodeOrToken::Token(token) if token.kind() == SyntaxKind::EQ && !after_equals => {
                 after_equals = true;
             }
-            SyntaxElement::Token(token) if token.kind().is_trivia() => {}
-            SyntaxElement::Node(child) if !after_equals => {
-                tag = tag_from_node(&child)?;
+            NodeOrToken::Token(token) if token.kind().is_trivia() => {}
+            NodeOrToken::Node(child) if !after_equals => {
+                tag = tag_from_node(child)?;
             }
-            SyntaxElement::Token(token) if !after_equals => {
-                tag = install(&token_name(&token)?)?;
+            NodeOrToken::Token(token) if !after_equals => {
+                tag = install(&token_name(token)?)?;
             }
-            SyntaxElement::Node(child) => value = lower(&child, source)?,
-            SyntaxElement::Token(token) => value = literal(&token)?,
+            NodeOrToken::Node(child) => value = lower(child, context)?,
+            NodeOrToken::Token(token) => value = literal(token)?,
         }
     }
     Ok((tag, value))
 }
 
 /// The tag of a named argument or parameter: a name, a string, or `NULL`.
-unsafe fn tag_from_node(node: &SyntaxNode) -> R<Sexp> {
+unsafe fn tag_from_node(node: NodeRef<'_>) -> R<Sexp> {
     match node.kind() {
         SyntaxKind::NAME => name_symbol(node),
         SyntaxKind::LITERAL => {
             let token = significant_tokens(node)
-                .into_iter()
                 .next()
                 .ok_or_else(|| error("empty literal"))?;
-            install(&token_name(&token)?)
+            install(&token_name(token)?)
         }
         _ => Err(error("invalid argument name")),
     }
 }
 
-unsafe fn token_name(token: &SyntaxToken) -> R<String> {
+unsafe fn token_name(token: TokenRef<'_>) -> R<String> {
     match token.kind() {
         SyntaxKind::STRING => string_literal(token.text()),
         SyntaxKind::RAW_STRING => Ok(raw_string(token.text())),
@@ -1919,15 +1913,23 @@ unsafe fn token_name(token: &SyntaxToken) -> R<String> {
     }
 }
 
-unsafe fn name_symbol(node: &SyntaxNode) -> R<Sexp> {
+unsafe fn name_symbol(node: NodeRef<'_>) -> R<Sexp> {
     let token = significant_tokens(node)
-        .into_iter()
         .next()
         .ok_or_else(|| error("empty name"))?;
     match token.kind() {
-        SyntaxKind::IDENT => install(&identifier(token.text())),
+        SyntaxKind::IDENT => install(&identifier_name(token.text())),
         SyntaxKind::DOTS => Ok(symbols().dots),
         _ => install(token.text()),
+    }
+}
+
+/// An identifier's name, without backticks, borrowed unless backticks need removing.
+fn identifier_name(text: &str) -> Cow<'_, str> {
+    if text.starts_with('`') {
+        Cow::Owned(identifier(text))
+    } else {
+        Cow::Borrowed(text)
     }
 }
 
@@ -1942,24 +1944,26 @@ fn identifier(text: &str) -> String {
     }
 }
 
-unsafe fn function_definition(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
-    let mut formals = Vec::new();
+unsafe fn function_definition(node: NodeRef<'_>, context: Lowering<'_>) -> R<Sexp> {
+    let mut formals: Items = SmallVec::new();
     let mut body = None;
-    for child in expression_children(node) {
+    for child in node.child_nodes().filter(|child| !is_skipped(child.kind())) {
         if child.kind() == SyntaxKind::PARAMETER_LIST {
-            for parameter in child.children() {
+            for parameter in child.child_nodes() {
                 if parameter.kind() == SyntaxKind::PARAMETER {
-                    formals.push(parameter_value(&parameter, source)?);
+                    formals.push(parameter_value(parameter, context)?);
                 }
             }
         } else {
-            body = Some(lower(&child, source)?);
+            body = Some(lower(child, context)?);
         }
     }
     let formals = values::pairlist(&formals, SexpType::Pairlist)?;
     let body = body.unwrap_or(nil());
-    crate::annotations::register_definition(node, formals, body)?;
-    let srcref = match source {
+    if context.typed {
+        crate::annotations::register_definition(&context.owner.at(node), formals, body)?;
+    }
+    let srcref = match context.source {
         Some(source) => srcref(source, significant_range(node))?,
         None => nil(),
     };
@@ -1972,30 +1976,30 @@ unsafe fn function_definition(node: &SyntaxNode, source: Option<&SourceMap>) -> 
     values::pairlist(&items, SexpType::Language)
 }
 
-unsafe fn parameter_value(node: &SyntaxNode, source: Option<&SourceMap>) -> R<(Sexp, Sexp)> {
+unsafe fn parameter_value(node: NodeRef<'_>, context: Lowering<'_>) -> R<(Sexp, Sexp)> {
     let mut tag = nil();
     let mut default = missing_arg();
     let mut after_equals = false;
-    for element in node.children_with_tokens() {
+    for element in node.children() {
         match element {
-            SyntaxElement::Token(token) if token.kind().is_trivia() => {}
-            SyntaxElement::Token(token) if token.kind() == SyntaxKind::EQ => after_equals = true,
-            SyntaxElement::Token(token) if !after_equals => {
+            NodeOrToken::Token(token) if token.kind().is_trivia() => {}
+            NodeOrToken::Token(token) if token.kind() == SyntaxKind::EQ => after_equals = true,
+            NodeOrToken::Token(token) if !after_equals => {
                 tag = match token.kind() {
                     SyntaxKind::DOTS => symbols().dots,
-                    _ => install(&token_name(&token)?)?,
+                    _ => install(&token_name(token)?)?,
                 };
             }
-            SyntaxElement::Node(child) if is_skipped(&child) => {}
-            SyntaxElement::Node(child) if !after_equals => tag = tag_from_node(&child)?,
-            SyntaxElement::Node(child) => default = lower(&child, source)?,
-            SyntaxElement::Token(token) => default = literal(&token)?,
+            NodeOrToken::Node(child) if is_skipped(child.kind()) => {}
+            NodeOrToken::Node(child) if !after_equals => tag = tag_from_node(child)?,
+            NodeOrToken::Node(child) => default = lower(child, context)?,
+            NodeOrToken::Token(token) => default = literal(token)?,
         }
     }
     Ok((tag, default))
 }
 
-unsafe fn literal(token: &SyntaxToken) -> R<Sexp> {
+unsafe fn literal(token: TokenRef<'_>) -> R<Sexp> {
     let text = token.text();
     let known = crate::heap().known();
     match token.kind() {
@@ -2065,7 +2069,7 @@ unsafe fn literal(token: &SyntaxToken) -> R<Sexp> {
         }),
         SyntaxKind::INF_KW => values::scalar_real(f64::INFINITY),
         SyntaxKind::NAN_KW => values::scalar_real(f64::NAN),
-        SyntaxKind::IDENT => install(&identifier(text)),
+        SyntaxKind::IDENT => install(&identifier_name(text)),
         SyntaxKind::DOTS => Ok(symbols().dots),
         SyntaxKind::DOTDOTI => install(text),
         _ => install(text),

@@ -9,7 +9,7 @@ use {
         annotations::Entry,
         builtins::{
             Arg, BuiltinDef, Call, Generic, Kind, NativeArgs, Visibility, builtin, internal,
-            special,
+            internal_special, special,
         },
         bytecode,
         coerce::{CoercionWarnings, real_to_int},
@@ -4854,7 +4854,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     special("declare", -1, |_| Ok(nil())).invisible(),
     internal("eval", 3, do_eval).keep_visibility(),
     internal("withVisible", 1, do_with_visible),
-    internal("Recall", -1, do_recall).keep_visibility(),
+    internal_special("Recall", -1, do_recall).keep_visibility(),
     builtin(".Primitive", 1, do_primitive),
     internal("identity", 1, |call| Ok(call.arg(0))),
     special("~", -1, do_tilde),
@@ -6184,8 +6184,10 @@ unsafe fn do_with_visible(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// `Recall(...)`: calls the function that called `Recall` again, with that call's call and its
-/// caller as the new frame's parent, as GNU R does. Neither frame needs an environment, so a
-/// slot frame hands out its pending one.
+/// caller as the new frame's parent, as GNU R does. The arguments are the promises the `Recall`
+/// closure itself received, unforced, so the function decides afresh whether to evaluate each
+/// one, and `substitute` in it sees the code `Recall` was called with. Neither frame needs an
+/// environment, so a slot frame hands out its pending one.
 unsafe fn do_recall(call: &Call<'_>) -> R<Sexp> {
     let outside = || call.error("'Recall' called from outside a closure");
     let own = call.frame_index().ok_or_else(outside)?;
@@ -6194,10 +6196,12 @@ unsafe fn do_recall(call: &Call<'_>) -> R<Sexp> {
         interp().frames[caller].call,
         interp().frames[caller].function,
     );
+    materialize_references(own)?;
+    let args: Args = crate::frame_args(interp(), own).iter().copied().collect();
     apply(
         caller_call,
         function,
-        call.args,
+        &args,
         frame_sys_parent(caller, Reify::Site("parent.frame"))?,
     )
 }

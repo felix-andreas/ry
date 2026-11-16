@@ -48,7 +48,7 @@ Most important first. Each line names the open item, and the detail is at its po
 - JIT: tier 1 compiles a body only when its native work covers what compiled code costs (an entry is about 570 machine instructions, a step back to tier 0 about 300; `decisions/jit-ssa.md`, "A body compiles only when its native work covers what compiled code costs"), so most application and code-base bodies stay in tier 0 and JIT on is within 0.6% of JIT off except where a compiled loop inlines a closure (`orders`, `bond_book`). Closure calls are inlined without a frame only into the bodies tier 1 compiles and only when every argument the callee reads is computed before the call as an unboxed scalar, `x <- f(x, ...)` is inlined only when `x` is proven plain, and invalidated machine code is never freed ("Open: JIT on against JIT off", "Open: the JIT"). The next three tier-1 steps have their designs there: inlined frames in shared code (planner half on the branch `perf/tier1-shared-frames`, which does not compile), the inline back-edge count, and wider frames.
 - Collector: some builder peaks sit above GNU R's, and the collector's share of the three benchmark suites is unmeasured ("Open: collector throughput on the benchmark suites").
 - Kernels slower than GNU R: "Open: base R kernels against GNU R" (`just bench-base`) and "Open: standard library rows slower than GNU R" (`just bench-stdlib`).
-- A user's package-test profiles as thirteen kernels: "Open: the kernels of a package test suite's profile" (`just bench-ci`).
+- A user's package-test profiles as fourteen kernels: "Open: the kernels of a package test suite's profile" (`just bench-ci`).
 
 **Typed ry**
 
@@ -131,7 +131,7 @@ Cross-cutting traps and conventions. A trap that belongs to one crate lives in t
 
 ### Docs and conventions
 
-- **The landing page and `guide.mdx` share the four migration step names**, and the tagline outside the user-owned hero is "A type checker and a fast runtime for R, written in Rust." (`decisions/docs-process.md`, "Decision record: positioning").
+- **The landing page and `guide.mdx` share the four migration step names**, and the tagline outside the user-owned hero is "A type checker and a fast runtime for R, written in Rust." (`decisions/docs-process.md`, "Positioning").
 - **Docs content:** explain a thing once where it is introduced, and never use a capability before the page introduces it. A new user topic joins a guide step as an H3. Fixed terms: finding, diagnostic code, annotation, check (the command), code analysis (the capability), the language server, project.
 - **A contradiction between two sections of one spec is invisible to every gate**, so read a page end to end when you touch it.
 - **Docs output blocks are tests** (`development/testing.md`, "Docs examples"): a `text ry check typing` fence pairs with the code before it. Keep marker words free of `/`, quotes and braces, which Expressive Code reads as highlight markers.

@@ -917,13 +917,14 @@ impl Reader<'_> {
         Ok(())
     }
 
-    /// A GNU R byte-code object. Only its source expression (the first constant) is kept.
+    /// A GNU R byte-code object, which reads as its source expression, the first constant. ry
+    /// compiles from that expression, so the code vector and the other constants are read past
+    /// without being built where their size is known up front.
     unsafe fn bytecode(&mut self, reps: Sexp) -> R<Sexp> {
-        // The code vector: ry recompiles from the source expression instead.
-        self.item()?;
+        self.discard_item()?;
         let count = self.count()?;
         self.expect_elements(count, ITEM_BYTES)?;
-        let constants = alloc(SexpType::List, count)?;
+        let mut expression = nil();
         for index in 0..count {
             let kind = self.integer()? as u32;
             let value = match kind {
@@ -931,17 +932,46 @@ impl Reader<'_> {
                 6 | 2 | BCREPDEF | BCREPREF | ATTRLANGSXP | ATTRLISTSXP => {
                     self.bytecode_language(kind, reps)?
                 }
-                _ => self.item()?,
+                _ if index == 0 => self.item()?,
+                _ => {
+                    self.discard_item()?;
+                    continue;
+                }
             };
-            values::set_elt(constants, index, value);
+            if index == 0 {
+                crate::heap().root(value);
+                expression = value;
+            }
         }
-        // A byte-code object reads as its source expression.
-        let expression = if count > 0 {
-            constants.element(0)
-        } else {
-            nil()
-        };
         Ok(expression)
+    }
+
+    /// Reads one item whose value nobody keeps. A vector of numbers or bytes in a binary format
+    /// is skipped by its length, which saves allocating and filling it. Every other item is read
+    /// as usual, because reading it can add to the reference table that later items index.
+    unsafe fn discard_item(&mut self) -> R<()> {
+        let flags = self.integer()? as u32;
+        let width = match flags & 0xFF {
+            _ if self.format == Format::Ascii => 0,
+            10 | 13 => 4,
+            14 => 8,
+            15 => 16,
+            24 => 1,
+            _ => 0,
+        };
+        if width == 0 {
+            on_large_stack(|| unsafe { self.item_with(flags) })?;
+            return Ok(());
+        }
+        let count = self.length()?;
+        let bytes = count
+            .checked_mul(width)
+            .ok_or_else(|| error("ReadItem: unexpected end of serialized data"))?;
+        self.take(bytes)?;
+        if flags & HAS_ATTR != 0 {
+            self.attributes()?;
+        }
+        Ok(())
     }
 
     unsafe fn bytecode_language(&mut self, kind: u32, reps: Sexp) -> R<Sexp> {
