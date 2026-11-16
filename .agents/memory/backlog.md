@@ -1394,11 +1394,27 @@ protocol 9%, `parent.frame` 5%, `standardGeneric` 3%.
 What is open, largest first. Each is worth 0.1 to 0.5% of run time on its own, because call
 setup is about a tenth of the run, so take them for the objects they remove:
 
-- **Replacement calls.** `complex_assign` builds the getter call, the setter call, their argument
-  cells and a promise per value for every `f(x) <- v`: about nine objects for a one-level call,
-  roughly 25 million objects on finbench, and a tenth of the frames that switch to by-name
-  reads. Run the getter and the setter on the slot window with argument references, as an
-  ordinary call does, and build the call object only when `sys.call` or `match.call` asks.
+- **Replacement calls that still take `complex_assign`.** A one-level replacement on a slot
+  frame's variable runs on the slots (`slot-frames.md`, "Subassignment and replacement in slots";
+  `decisions/interp.md`, "Replacement calls and `lapply`/`vapply` element calls run on a slot frame's
+  slots"). Three shapes still build the getter call, the setter call, their argument cells and a
+  promise per value, about nine objects a level, and give the frame its environment:
+  - A nested target (`names(x)[2] <- v`, `l$b$c <- v`, `substr(names(x)[1], 1, 1) <- "Z"`), which
+    the compiler leaves to the `<-` special: 113,492 of the 1.63M slot frames that move to reading
+    by name on the finbench suite (profile row `<-`), and the largest caller of `complex_assign`
+    there (about 5M pairlist cells a suite run). Lower it to getter and setter register code when
+    every subscript is free of side effects (the general assignment evaluates a nested subscript
+    twice), branch to `Op::ComplexAssign` when any level is an object with a method or has a
+    getter or setter that is not a builtin, and reuse `complex_assign`'s rules for changing a
+    value in place.
+  - A target that is an object without a method, behind a computed subscript
+    (`s3[[names(x)[1]]] <- 2`): the probe before the subscripts (`Op::BranchIfObject`) branches
+    on any object. A probe that asks for the method (`dispatch::has_internal_method`) keeps
+    these in slots, and it has to be taught to tier 1 as well (`jit/src/analysis.rs`,
+    `codegen.rs`). Profile row `subassignment`: 75,333 frames on finbench.
+  - A closure setter with computed arguments, and a setter whose body needs an environment
+    (`diag<-` calls `.Internal`, `body<-` is an S4 generic). Profile row `replacement call`:
+    38,391 frames on finbench.
 - **Environments that only stand for a frame.** Three quarters of all environments come from
   `pending_env`, and most are never looked into. Its callers in a 225-test slice of finbench
   (667k calls): the generic call protocol 100k, `slot_promises_into` 105k, a builtin that
@@ -1407,10 +1423,6 @@ setup is about a tenth of the run, so take them for the objects they remove:
   reference 25k. A caller that only passes the environment on (the generic protocol, `$`, a
   builtin that dispatches) could pass the frame's index and make the object when the callee
   reads it.
-- **`lapply` and `vapply`.** A quarter of the by-name frames are the frames of the two
-  functions themselves, because their `.Internal` evaluates `FUN(X[[i]], ...)`
-  (`ElementCalls::new`) in that frame. Calling `FUN` with the element as a value and the frame's
-  `...` as argument references keeps the frame in slots.
 - **Detached references.** `detach_reference` makes a fifth of the promises left: an argument
   reference becomes a promise object when the callee keeps the argument past the call or hands
   it on as a promise (S4 dispatch, `NextMethod`, a method that does not take the generic's slots).
@@ -1481,6 +1493,11 @@ overhead, not allocation.
 - The dispatch branch of a compiled replacement reads the target twice, once to probe it and once in `complex_assign`, so an active binding as the target runs its function twice where GNU R runs it once.
 - When `base_primitive` cannot settle that `[<-` or `[[<-` is base's (an unforced promise or an active binding on the way, `bytecode.rs`, `replacement`), the compiled replacement takes the `BranchUnlessBuiltin` path, which runs the eager `Replace` for base's builtin even on an object target, so a method would see forced subscripts. Suspected from the code, not reproduced.
 - `y <- list(); y[g(), , 1] <- 2` fails with "incorrect number of subscripts on matrix" where GNU R says "incorrect number of subscripts".
+- A subscript that is a formal is forced before a compiled `x[i] <- v`, `x[[i]] <- v` or `x[i, j] <- v` reads its target (`slot_subscript` and `subscript_value` in `bytecode.rs`), on a slot frame and on one with an environment. A default that assigns the target therefore runs first: `o <- function(x, i = { x[1] <- 100; 2 }) { x[i] <- 0; x }` gives `100 0 3` for `o(c(1, 2, 3))` from the second call on, where GNU R gives `1 0 3`. `slot-frames.md` names the gap.
+- A closure that keeps the value promise of a replacement call run by `eval::complex_assign` sees the caller's later change of the variable: with `` `cb<-` <- function(x, value) { x$cb <- function() value; x } ``, `f <- function() { obj <- list(); v <- c(5, 6); cb(obj, 1 + 1) <- v; v[1] <- 99; obj$cb() }` gives `99 6`. GNU R's byte code gives `5 6` and its AST evaluator `99 6`. Compiled, a setter with constant arguments (`cb(obj) <- v`) runs through `replace_with_closure`, whose promises count, and gives `5 6`.
+- `lapply`'s element calls read the `X` the internal was called with, so a `FUN` that rebinds `X` in `lapply`'s frame through `parent.frame()` changes nothing (`ElementCalls::plain`, `envir.rs`), where GNU R reads the new `X` for the next element. Removing `FUN` there, a non-function `FUN`, and a warning from a special `FUN` report the call `FUN(X[[i]], ...)` where GNU R reports the `lapply(...)` call.
+- `` lapply(list(1, 2), `repeat`) `` loops forever where GNU R raises an arity error, and `` `(`(x, ...) `` with an empty `...` raises "2 arguments passed to '('".
+- `m[3e10, 1] <- 5` on a matrix is "subscript out of bounds" where GNU R warns and assigns nothing.
 - `jit`'s `element_ops_cost_no_more_than_tier_zero` (`crates/jit/tests/test_tiers.rs`) fails on main: `x[k] <- list(5)` costs about 1,015 instructions an iteration compiled against 880 in tier 0, and `w <- c(1, 2); w[[3L]] <- k` 2,210 against 1,964. The compiled code and the costs are the same with and without the replacement probe, so the cause is in how tier 1 runs these two stores (a list `[<-` with a list value, and a `[[<-` that grows a fresh vector).
 - Closures over equal but distinct body copies compile again. `Bodies` (`crates/interp/src/bytecode.rs`) shares code by body identity, but a lambda inside a testthat `expect_*()` argument is a fresh copy of its expression at each evaluation, so `testthat_full` compiles about 43 bodies per warm iteration (about 4M Ir of its 629M). GNU R's JIT cache hashes the structure and confirms with `identical`, so it shares them. A structural lookup at the compile decision, confirming with a deep compare of body, formals and srcref, would close it.
 - `readChar` reads one byte per device call: an 11 MB file takes 150 ms against GNU R's 29 ms (`readChar(f, file.size(f))`). Its ceiling on measured workloads is 0%, since `testthat_full`, the strings app and the report app never call it, so a bulk read (one device read per string) waits for a workload that does.

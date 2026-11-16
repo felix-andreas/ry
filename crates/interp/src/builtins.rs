@@ -90,6 +90,15 @@ impl Call<'_> {
         crate::eval::frame_env(self.frame as usize, crate::eval::Reify::Builtin(self.op))
     }
 
+    /// The position in the frame stack of the slot frame the call was made from, while that
+    /// frame has no environment.
+    pub unsafe fn slot_frame(&self) -> Option<usize> {
+        (self.rho == nil()
+            && self.frame != crate::NO_SLOTS
+            && crate::interp().frames[self.frame as usize].env == nil())
+        .then_some(self.frame as usize)
+    }
+
     /// What the calling slot frame's `...` slot holds, when the call was made from a slot frame
     /// that has no environment and a `...` formal; `None` otherwise, and then the caller's
     /// environment answers.

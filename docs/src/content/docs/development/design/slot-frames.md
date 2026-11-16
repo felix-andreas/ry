@@ -135,9 +135,10 @@ it.
 - **Forwarding `...`.** A call that passes `...` appends the items the frame's `...` slot holds,
   to a closure (`slot_dots_into`) or, forced, to a builtin (`slot_builtin_call`, when every other
   argument is a constant or a slotted local), so `f(x, ...)`, `list(...)` and `c(x, ...)` leave the
-  frame without an environment. A call evaluated in the frame's environment that passes `...` on,
-  such as the element call `FUN(X[[i]], ...)` of `lapply`, `vapply` and `Map`, reads the slot in
-  place (`eval::dots_binding`).
+  frame without an environment. The element call `FUN(X[[i]], ...)` of `lapply` and `vapply`
+  appends the same items when it calls a closure from the slots (see "Element calls from slots"
+  below). A call evaluated in the frame's environment that passes `...` on, such as the element
+  call of `Map`, reads the slot in place (`eval::dots_binding`).
 - **Not built.** Slot access from the JIT's tiers ([the native execution model](/development/design/r-runtime/#the-native-execution-model)).
 
 ## The environment of a slot frame
@@ -202,7 +203,7 @@ compile-time probe (`Heap::probe`), the walk it emits (`codegen.rs`) and `jit_en
 | S4 dispatch reading the generic's frame | partial | `standardGeneric`, which reads the signature arguments from the generic's frame (`do_standard_generic`), `exec_method` and `callNextMethod` (`methods.rs`) |
 | Condition handlers and restarts that record a frame | empty | `.addCondHands`, `.addRestart` (`conditions.rs`) |
 | The C API | empty, then whatever the native code reads | `R_GetCurrentEnv`, `PRENV` on a promise over the frame, `.External` and `.External2` (which pass the environment) |
-| Subassignment, a replacement call or `x$name` on an object, which may dispatch to a method | partial, for the variable assigned | `op_sub_assign`, `op_replace`, `op_field` in `bytecode.rs` |
+| Subassignment or a replacement call whose target has a method for it, or whose setter is a closure that cannot run on slots, and `x$name` on an object | partial, for the variable assigned | `op_sub_assign`, `op_replace`, `op_complex_assign`, `op_field` in `bytecode.rs` |
 | A method `UseMethod` dispatches to while the generic has locals to forward (the R < 4.4 behavior) | complete | `do_usemethod` in `dispatch.rs` runs the method in a heap frame |
 | A promise, a closure or the environment itself held past the frame's return | complete | `finish_frame`, `outliving_cause` |
 
@@ -348,15 +349,25 @@ empty environment and no binding cell.
 
 ## Subassignment and replacement in slots
 
-`x[i] <- v`, `x[[i]] <- v`, `x$name <- v` and one-level replacement calls with a builtin setter,
-such as `names(x) <- v`, update a slot without an environment when `x` is not an object
+`x[i] <- v`, `x[[i]] <- v`, `x$name <- v`, `x@name <- v` and one-level replacement calls such as
+`names(x) <- v` update a slot without an environment unless a method must run
 (`assign_slot_element`, `replace_variable` in `bytecode.rs`). The primitive's own code runs with
 the replacement call `` `[<-`(`*tmp*`, i, value = v) `` that the compiler stores beside the
 instruction, so errors name the same call as the general assignment's. The value changes in place
 only when the slot alone holds it (`slot_owns`: a reference count of one and no expression
 register holding it); otherwise the slot gets a copy, so `y <- x; x[1] <- 0` leaves `y` alone.
-An object target goes through `eval::complex_assign` in the frame's environment, because a
-replacement method may look at the frame, and that moves the assigned variable into a cell.
+
+| Target and setter | Where the assignment runs |
+|---|---|
+| Not an object, builtin setter | In the slot. A special such as `[<-`, `attr<-` or `@<-` runs through its direct entry (`BuiltinDef::direct`), which takes evaluated arguments. |
+| An object whose class has no method for the setter | In the slot. The method lookup starts from the frame's enclosure (`dispatch::has_internal_method` with `Caller::SlotFrame`), because a slot frame defines no functions a lookup could find first. |
+| An S4 object, `x@name <- v` | In the slot, with the validity check `do_at_assign` makes (`direct_at_assign`). |
+| A closure setter whose other arguments are constants, `f(x) <- v` or `f(x, "a") <- v` | The closure is called from the slot frame with forced promises for `*tmp*` and the value (`replace_with_closure`). Each promise counts a reference to what it holds while the closure's frame holds the promise, so the closure reads both as shared, and a frame that outlives the call keeps the caller from changing the target in place. The caller's frame gets an environment only if the closure asks for its caller's. |
+| An object with a method for the setter, a closure setter with computed arguments, a nested target such as `names(x)[2] <- v` | `eval::complex_assign` in the frame's environment, which moves the assigned variable into a cell. |
+
+A name the frame has not bound yet is read from the enclosure first (`eval::enclosed_value`), so
+`x[1] <- 0` on an outer `x` binds the changed copy in the slot.
+
 A method or a replacement closure receives the subscripts as promises of their code, so when a
 subscript may run code or fail, the compiled code reads the target (and, for `f(x, i) <- v`, looks
 up `f<-`) before any subscript runs, and an object target or a closure setter branches to
@@ -365,7 +376,39 @@ up `f<-`) before any subscript runs, and an object target or a closure setter br
 known to be bound (the variable of an enclosing `for`, or one an earlier statement of an
 enclosing block assigned), skips that read: evaluating it runs nothing and cannot fail, and the
 method receives the forced promise of its code.
+A subscript that is a formal is forced before the target is read. This differs from GNU R in one
+case: a formal's default that assigns the target, as in
+`function(x, i = { x[1] <- 100; 2 }) { x[i] <- 0; x }`, runs first, so the assignment starts from
+the changed `x` where GNU R's starts from the value `x` had before.
 `x$name` reads on a non-object likewise skip the environment.
+
+## Element calls from slots
+
+`lapply` and `vapply` are closures whose bodies call `.Internal(lapply(X, FUN))`, and the builtin
+calls `FUN(X[[i]], ...)` once per element with `i` bound in the closure's frame. That frame stays
+a slot frame: a body with such a call gets a slot for `i` (`binds_element_index` in
+`bytecode.rs`), and the builtin stores each index there (`ElementCalls` in `envir.rs`). What
+happens next depends on `FUN`.
+
+| `FUN` | How the element call runs |
+|---|---|
+| a closure | From the slots, with the element as a forced argument reference and the items of the frame's `...` slot appended (`eval::force_and_call_from_slots`). `FUN` sees the call `FUN(X[[i]], ...)` and the same promises as a call evaluated in the environment. |
+| a builtin | From the slots, with the element and the forced values of the `...` items (`eval::call_builtin_from_slots`). |
+| a special | In the frame's environment. |
+
+`parent.frame()` in `FUN` gives the frame its environment, after which the remaining elements are
+called through it.
+
+The element call is evaluated in the frame's environment instead in these cases:
+
+- `X` has a class or dimensions or is not a vector, because `X[[i]]` may dispatch and is evaluated
+  as written.
+- The closure's own formals have no `...`, as when the internal is called from another function
+  than base's `lapply` or `vapply`: `...` in `FUN(X[[i]], ...)` is then an enclosing function's,
+  or an error.
+- The element is the empty argument, or a callee has rebound `FUN`.
+- `FUN` is a builtin and an item of `...` is the empty argument, or `FUN` is a generic builtin and
+  an argument is an object, because dispatch needs an environment to look methods up from.
 
 ## Argument references
 
@@ -428,9 +471,10 @@ code.
 - **Scope.** Every argument to a planned callee becomes a reference except a `..N` symbol and a
   value that is already a promise, and compiled code passes constants as they are. A frame's own
   defaults are references of the frame to itself (see "Defaults" above). The element call that
-  `lapply`, `vapply` and `Map` make, `FUN(X[[i]])`, passes its first argument as a reference into
-  the builtin's environment whose value is already the element, so the callee allocates no
-  promise for it. A call that passes `..N` gets no plan, so its other arguments become promises.
+  `lapply`, `vapply` and `Map` make, `FUN(X[[i]])`, passes its first argument as a reference
+  whose value is already the element (see "Element calls from slots" above), so the callee
+  allocates no promise for it. A call that passes `..N` gets no plan, so its other arguments
+  become promises.
   When per-call matching of a call that passes `...` fails (an unused argument, a default that is
   not a literal), the call takes the generic path, which detaches its references.
 
@@ -581,7 +625,10 @@ where frame work is about 2.2k instructions per call.
   that moves into a cell switches all of the frame's code to reading by name, and each variable it
   then reads moves too. Keeping the code on slots would need every slot instruction, and the JIT's
   code, to test per variable where it lives.
-- Nested replacement and replacement on an object (`eval::complex_assign`) build a forced promise
-  for the object and one for the value at each level, plus the call and its argument list. GNU R's
-  byte code keeps the call as a constant with `*vtmp*` for the value, which would remove most of
-  them.
+- Nested replacement (`names(x)[2] <- v`, `l$a$b <- v`) and replacement through a method
+  (`eval::complex_assign`) build a forced promise for the object and one for the value at each
+  level, plus the call and its argument list, in the frame's environment. GNU R's byte code keeps
+  the call as a constant with `*vtmp*` for the value, which would remove most of them. Compiled
+  getter and setter steps on registers would keep a nested target in its slot when every
+  subscript is free of side effects, since the general assignment evaluates each nested subscript
+  twice, once for the getter and once for the setter.
