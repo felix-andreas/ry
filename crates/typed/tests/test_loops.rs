@@ -626,25 +626,20 @@ fn walk_of(input: usize) -> Stage {
 
 #[test]
 fn a_map_a_filter_and_a_walk_become_one_loop() {
-    let fused = assert_fuses_all(&Pipeline {
-        stages: vec![map_of(0), keep_of(1), walk_of(2)],
-        ..Pipeline::default()
-    });
-    // The one read left is of the list the pipeline starts from.
-    assert_eq!(
-        count(&fused, |op| matches!(op, Op::ItemAt(..))),
-        1,
-        "{fused}"
-    );
-}
-
-#[test]
-fn the_length_of_a_fused_list_is_still_known() {
-    assert_fuses_all(&Pipeline {
-        stages: vec![map_of(0), keep_of(1), walk_of(2)],
-        lengths: true,
-        ..Pipeline::default()
-    });
+    // Reading the lengths of the fused lists must not bring the lists back.
+    for lengths in [false, true] {
+        let fused = assert_fuses_all(&Pipeline {
+            stages: vec![map_of(0), keep_of(1), walk_of(2)],
+            lengths,
+            ..Pipeline::default()
+        });
+        // The one read left is of the list the pipeline starts from.
+        assert_eq!(
+            count(&fused, |op| matches!(op, Op::ItemAt(..))),
+            1,
+            "{fused}"
+        );
+    }
 }
 
 #[test]

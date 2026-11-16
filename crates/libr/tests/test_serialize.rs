@@ -606,7 +606,7 @@ fn random_objects_round_trip() {
         if seed % 16 == 15 {
             runtime()
                 .heap
-                .update_policy(|policy| policy.stress = GcStress::EVERY_ALLOCATION);
+                .update_policy(|policy| policy.stress = GcStress::EveryAllocation);
         }
         let object = unsafe { generator.object(4) };
         for (format, version) in FORMATS {
@@ -864,7 +864,7 @@ fn corrupted_streams_fail_cleanly() {
         if seed % 64 == 63 {
             runtime()
                 .heap
-                .update_policy(|policy| policy.stress = GcStress::EVERY_ALLOCATION);
+                .update_policy(|policy| policy.stress = GcStress::EveryAllocation);
         }
         let outcome = std::panic::catch_unwind(|| unsafe { check_unserialize_input(&bytes) });
         runtime()

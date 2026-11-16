@@ -318,14 +318,13 @@ fn fresh_copy(path: &str, generation: usize) -> ApiResult<(std::path::PathBuf, S
 ///
 /// The copy is cached under the rewrite's version and the original's path, size and modification
 /// time, so a package is rewritten and re-signed once, a reinstall gets a new copy, and a cache hit
-/// costs two `stat` calls; a library that needs no rewrite leaves an empty marker, so it is not
-/// read again either. The copy keeps
-/// the original's file name, so dyld's messages name the library the user loaded. Links around it
-/// mirror the original's surroundings as far up as its `@loader_path` references and rpaths climb
-/// ([`mirror_surroundings`]), so dependencies found relative to the library are found from the
-/// copy; `.target` in the cache directory names the copy's place in that mirror. A path that cannot
-/// be read here (a bare name dyld searches for, or a library only in dyld's shared cache) is left
-/// to `dlopen`, which reports its own error.
+/// costs two `stat` calls; a library that needs no rewrite leaves an empty marker so it is not read
+/// again. The copy keeps the original's file name, so dyld's messages name the library the user
+/// loaded. Links around it mirror the original's surroundings as far up as its `@loader_path`
+/// references and rpaths climb ([`mirror_surroundings`]), so dependencies relative to the library
+/// resolve from the copy; `.target` in the cache directory names the copy's place in that mirror. A
+/// path that cannot be read here (a bare name dyld searches for, or a library only in dyld's shared
+/// cache) is left to `dlopen`, which reports its own error.
 #[cfg(target_os = "macos")]
 fn rebound_copy(path: &str) -> ApiResult<Option<String>> {
     use std::{hash::Hasher, os::unix::fs::MetadataExt, path::Path};

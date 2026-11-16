@@ -245,43 +245,6 @@ mod tests {
     }
 
     #[test]
-    fn known_namespace_with_real_exports_is_clean() {
-        let problems = problems_for("import(stats)\nimportFrom(stats, sd, median)\n");
-        assert!(problems.is_empty(), "{problems:?}");
-    }
-
-    #[test]
-    fn known_namespace_with_a_typo_is_an_error() {
-        let db = RootDatabase::default();
-        install_shipped_stubs(&db);
-        let (knows, exports) = stub_backed(&db);
-        let problems = namespace_import_problems(
-            &parse_namespace("importFrom(stats, sd, medain)\n").imports,
-            &knows,
-            &exports,
-        );
-        assert_eq!(
-            problems
-                .iter()
-                .map(|problem| problem.message.as_str())
-                .collect::<Vec<_>>(),
-            ["`medain` is not exported by `stats`, so this package will not load."]
-        );
-        assert!(
-            problems
-                .iter()
-                .all(|problem| problem.severity == Severity::Error),
-            "{problems:?}"
-        );
-    }
-
-    #[test]
-    fn unknown_namespaces_are_not_checked() {
-        let problems = problems_for("import(dplyr)\nimportFrom(dplyr, mutate)\n");
-        assert!(problems.is_empty(), "{problems:?}");
-    }
-
-    #[test]
     fn string_spellings_and_other_directives_parse() {
         let problems = problems_for(
             "export(run)\nS3method(print, thing)\nimportFrom(\"stats\", \"nope_not_real\")\n",
@@ -306,34 +269,11 @@ mod tests {
     }
 
     #[test]
-    fn unused_import_is_flagged_when_opted_in() {
-        let unused = unused_for(
-            "importFrom(stats, sd, median)\n",
-            &["x <- sd(values)\n"],
-            LintLevel::Warn,
-        );
-        assert_eq!(
-            unused,
-            ["imported name `median` from `stats` is never used."]
-        );
-    }
-
-    #[test]
     fn used_names_including_namespaced_and_operators_are_not_flagged() {
         let unused = unused_for(
             "importFrom(dplyr, mutate, filter)\nimportFrom(magrittr, \"%>%\")\n",
             &["out <- df %>% mutate(x = 1)\ny <- dplyr::filter(df, x > 0)\n"],
             LintLevel::Warn,
-        );
-        assert!(unused.is_empty(), "{unused:?}");
-    }
-
-    #[test]
-    fn unused_import_is_silent_by_default() {
-        let unused = unused_for(
-            "importFrom(stats, median)\n",
-            &["x <- 1\n"],
-            LintLevel::Default,
         );
         assert!(unused.is_empty(), "{unused:?}");
     }

@@ -185,6 +185,27 @@ lens run file at line 9
 lens references "deposit"
 lens references "area"
 
+#---- annotation_body_tokens
+#: <T> fn(x: T) -> T
+id <- function(x) x
+#++++
+symbol id (Function fn(x)) at "id"
+token "<" Operator
+token "T" TypeParameter
+token ">" Operator
+token "fn" Keyword
+token "(" Operator
+token "x" Parameter
+token ":" Operator
+token "T" TypeParameter
+token ")" Operator
+token "->" Operator
+token "T" TypeParameter
+token "id" Function
+token "x" Parameter
+token "x" Parameter
+lens references "id"
+
 #==== folding
 #---- blocks_keep_closing_line
 f <- function(
@@ -345,6 +366,134 @@ symbol x (Value) at "x"
 symbol y (Value) at "y"
 symbol z (Value) at "z"
 fold 2..=3 Comment
+
+#---- s4_generics_and_methods_in_every_signature_form
+setClass("Person", representation(name = "character"))
+setGeneric("greet", function(object) standardGeneric("greet"))
+setMethod("greet", "Person", function(object) object@name)
+plain <- function(x, ...) x
+setMethod(f = "baz", signature = "Person", definition = function(x) x)
+setMethod("qux", c("Person", "Other"), function(x, y) x)
+setMethod(f = "foo", signature = list(x = "Person", y = "Other"), definition = function(x, y) x)
+setMethod("bar", signature("Person", y = "Other"), function(x, y) x)
+#++++
+symbol Person (S4Class) at "Person"
+symbol   name (S4Slot character) at "name"
+symbol greet (S4Generic) at "greet"
+symbol greet (S4Method Person) at "greet"
+symbol plain (Function fn(x, ...)) at "plain"
+symbol baz (S4Method Person) at "baz"
+symbol qux (S4Method Person, Other) at "qux"
+symbol foo (S4Method Person, Other) at "foo"
+symbol bar (S4Method Person, Other) at "bar"
+token "setClass" LibraryFunction
+token "representation" LibraryFunction
+token "name" Property
+token "setGeneric" LibraryFunction
+token "object" Parameter
+token "standardGeneric" LibraryFunction
+token "setMethod" LibraryFunction
+token "object" Parameter
+token "object" Parameter
+token "name" Property
+token "plain" Function
+token "x" Parameter
+token "x" Parameter
+token "setMethod" LibraryFunction
+token "f" Parameter
+token "signature" Parameter
+token "definition" Parameter
+token "x" Parameter
+token "x" Parameter
+token "setMethod" LibraryFunction
+token "c" LibraryFunction
+token "x" Parameter
+token "y" Parameter
+token "x" Parameter
+token "setMethod" LibraryFunction
+token "f" Parameter
+token "signature" Parameter
+token "list" LibraryFunction
+token "x" Parameter
+token "y" Parameter
+token "definition" Parameter
+token "x" Parameter
+token "y" Parameter
+token "x" Parameter
+token "setMethod" LibraryFunction
+token "signature" LibraryFunction
+token "y" Parameter
+token "x" Parameter
+token "y" Parameter
+token "x" Parameter
+lens run file at line 0
+lens references "greet"
+lens references "plain"
+
+#---- r6_members_of_every_section
+Account <- R6Class("Account",
+  public = list(
+    balance = 0,
+    deposit = function(amount) invisible(self)
+  ),
+  private = list(audit = function() NULL),
+  active = list(status = function() "open")
+)
+#++++
+symbol Account (R6Class) at "Account"
+symbol   balance (R6Field) at "balance"
+symbol   deposit (R6Method fn(amount)) at "deposit"
+symbol   audit (R6Method fn()) at "audit"
+symbol   status (R6Field fn()) at "status"
+fold 0..=6 Block
+fold 1..=3 Block
+token "R6Class" Function
+token "public" Parameter
+token "list" LibraryFunction
+token "balance" Property
+token "deposit" Method
+token "amount" Parameter
+token "invisible" LibraryFunction
+token "private" Parameter
+token "list" LibraryFunction
+token "audit" Method
+token "active" Parameter
+token "list" LibraryFunction
+token "status" Property
+fix Qualify as `R6::R6Class`: "" -> "R6::"
+
+#---- type_definitions_of_every_form
+#: @type Money {double}
+type UserId = integer
+alias Box<T> = list{value: T}
+id <- @UserId(1L)
+#++++
+symbol Money (TypeDefinition @type) at "Money"
+symbol UserId (TypeDefinition type) at "UserId"
+symbol Box (AliasDefinition alias) at "Box"
+symbol id (Value) at "id"
+token "@" Decorator
+token "type" Decorator
+token "Money" Decorator
+token "{" Operator
+token "double" Type
+token "}" Operator
+token "type" Keyword
+token "UserId" Type
+token "integer" Type
+token "alias" Keyword
+token "Box" Type
+token "<" Operator
+token "T" TypeParameter
+token ">" Operator
+token "list" Type
+token "{" Operator
+token "value" Parameter
+token ":" Operator
+token "T" TypeParameter
+token "}" Operator
+token "@" Decorator
+token "UserId" Type
 
 #==== code_lenses
 #---- tests_and_run_file
