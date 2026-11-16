@@ -362,7 +362,7 @@ register holding it); otherwise the slot gets a copy, so `y <- x; x[1] <- 0` lea
 | Not an object, builtin setter | In the slot. A special such as `[<-`, `attr<-` or `@<-` runs through its direct entry (`BuiltinDef::direct`), which takes evaluated arguments. |
 | An object whose class has no method for the setter | In the slot. The method lookup starts from the frame's enclosure (`dispatch::has_internal_method` with `Caller::SlotFrame`), because a slot frame defines no functions a lookup could find first. |
 | An S4 object, `x@name <- v` | In the slot, with the validity check `do_at_assign` makes (`direct_at_assign`). |
-| A closure setter whose other arguments are constants, `f(x) <- v` or `f(x, "a") <- v` | The closure is called from the slot frame with the `*tmp*` and value promises `complex_assign` builds (`replace_with_closure`). The frame gets an environment only if the closure asks for its caller's. |
+| A closure setter whose other arguments are constants, `f(x) <- v` or `f(x, "a") <- v` | The closure is called from the slot frame with forced promises for `*tmp*` and the value (`replace_with_closure`). Each promise counts a reference to what it holds while the closure's frame holds the promise, so the closure reads both as shared, and a frame that outlives the call keeps the caller from changing the target in place. The caller's frame gets an environment only if the closure asks for its caller's. |
 | An object with a method for the setter, a closure setter with computed arguments, a nested target such as `names(x)[2] <- v` | `eval::complex_assign` in the frame's environment, which moves the assigned variable into a cell. |
 
 A name the frame has not bound yet is read from the enclosure first (`eval::enclosed_value`), so
@@ -376,6 +376,10 @@ up `f<-`) before any subscript runs, and an object target or a closure setter br
 known to be bound (the variable of an enclosing `for`, or one an earlier statement of an
 enclosing block assigned), skips that read: evaluating it runs nothing and cannot fail, and the
 method receives the forced promise of its code.
+A subscript that is a formal is forced before the target is read. This differs from GNU R in one
+case: a formal's default that assigns the target, as in
+`function(x, i = { x[1] <- 100; 2 }) { x[i] <- 0; x }`, runs first, so the assignment starts from
+the changed `x` where GNU R's starts from the value `x` had before.
 `x$name` reads on a non-object likewise skip the environment.
 
 ## Element calls from slots
@@ -399,6 +403,9 @@ The element call is evaluated in the frame's environment instead in these cases:
 
 - `X` has a class or dimensions or is not a vector, because `X[[i]]` may dispatch and is evaluated
   as written.
+- The closure's own formals have no `...`, as when the internal is called from another function
+  than base's `lapply` or `vapply`: `...` in `FUN(X[[i]], ...)` is then an enclosing function's,
+  or an error.
 - The element is the empty argument, or a callee has rebound `FUN`.
 - `FUN` is a builtin and an item of `...` is the empty argument, or `FUN` is a generic builtin and
   an argument is an object, because dispatch needs an environment to look methods up from.

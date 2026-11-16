@@ -1,0 +1,43 @@
+[stdout]
+| [1] 116
+| [1] 34402
+| [1] 34402
+| [1] "yes"
+| [1] "yes"
+|   a b.c 
+|   1   2 
+| a 
+| 1 
+| $a
+| [1] 1
+| 
+| $b.c
+| [1] 2
+| 
+| [1] "yes"
+| [1] NA
+| [1] TRUE
+| [1] 1
+| a b 
+| 1 2 
+| [1] FALSE
+| [1] TRUE
+| error: attempt to replicate an object of type 'S4' 
+| [1] TRUE
+| $comment
+| [1] "kept"
+| 
+| $tsp
+| [1] 1 2 1
+| 
+| [1] TRUE
+| [1] TRUE
+|  [1] FALSE FALSE  TRUE  TRUE  TRUE FALSE FALSE FALSE FALSE FALSE
+| [1] FALSE
+| [1] FALSE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| FALSE

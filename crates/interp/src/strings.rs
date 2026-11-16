@@ -5,7 +5,7 @@
 //!
 //! `perl = TRUE` patterns run on PCRE2, compiled as GNU R compiles them. POSIX extended patterns
 //! (R's default, which GNU R runs on TRE) run on `fancy-regex` and `regex-automata` after a
-//! translation into their syntax ([`translate_regex`]), because TRE disagrees with them on
+//! translation into their syntax ([`translate`]), because TRE disagrees with them on
 //! bracket expressions, on what `\w` and `[[:alpha:]]` match, and on which characters are special.
 
 use {
@@ -82,13 +82,36 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("regexec", 5, do_regexec),
 ];
 
-/// Translates a POSIX extended regular expression, as TRE reads it (R's default), into the
-/// syntax of the `regex` crate, which `fancy-regex` extends.
-///
-/// The translation never fails: a construct with no equivalent is passed through, so that
-/// compiling the result reports it.
-pub fn translate_regex(pattern: &str) -> String {
-    translate(pattern).pattern
+/// The pattern `list.files` filters names by: an extended regular expression, or the literal
+/// text when `fixed`. It is compiled as `grepl` compiles its pattern and kept the same way,
+/// because a session lists directories with the same pattern over and over.
+pub(crate) struct NamePattern(Matcher);
+
+impl NamePattern {
+    pub(crate) unsafe fn compile(pattern: &str, ignore_case: bool, fixed: bool) -> R<NamePattern> {
+        let invalid = |_| error("invalid 'pattern' regular expression");
+        let compiled = if fixed && ignore_case {
+            // A literal has no case-insensitive search, so the escaped text is a pattern.
+            let options = PatternOptions {
+                ignore_case,
+                perl: false,
+                fixed: false,
+            };
+            Matcher::compile(&regex::escape(pattern), options, CompileErrors::Wide)
+        } else {
+            let options = PatternOptions {
+                ignore_case,
+                perl: false,
+                fixed,
+            };
+            Matcher::compile(pattern, options, CompileErrors::Wide)
+        };
+        compiled.map(NamePattern).map_err(invalid)
+    }
+
+    pub(crate) fn matches(&self, name: &str) -> R<bool> {
+        Ok(self.0.find_at(name, 0)?.is_some())
+    }
 }
 
 unsafe fn do_paste(call: &Call<'_>) -> R<Sexp> {
