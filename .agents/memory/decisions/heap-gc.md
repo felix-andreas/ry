@@ -69,6 +69,9 @@ Code: `crates/heap` and `crates/libr` (C half in `src/native.c`, headers in `inc
 **Finalizers run at safe points, never inside a collection**: ready ones run when a native call returns, on `R_gc` and on `R_RunPendingFinalizers`, as if at top level.
 
 **ry presents the version of the base R it runs** (revision at least 89194, which keeps data.table on its modern branches) with UTF-8 as native encoding (`decisions/libr-rcmd.md`, "The presented R version comes from the base package the runtime runs").
+- **`switch` arms test numbers by identity**: testing them with `MatchLiteral` (reading both scalars by kind) cost 9% of expr_tree's warm instructions; the identity test cut expr_tree by 11%.
+- **PGO and BOLT measured** (testthat_full, plain / PGO / PGO + BOLT): test phase 0.252 / 0.228 / 0.219 s, process wall 1.68 / 1.51 / 1.44 s, callgrind 2.60G / 2.22G / 2.21G. BOLT grows libR from 107 to 136 MB (the original text stays in the file) without raising peak RSS. An earlier attempt that profiled only `interp`, `heap`, `libr` and trained on oracle cases alone ran 1.4 to 1.9x slower, for an unconfirmed reason.
+- **Rejected for peak memory:** `mmap`ing large vector bodies and unmapping them when unused lowered no peak (rowSums rose from 168 to 173 MB), and `MIMALLOC_PURGE_DELAY=0` lowered the setup peak by only 4 MB.
 
 ## An escape lasts until the outermost native call returns
 
@@ -234,6 +237,7 @@ GNU R finalizes an object at the first full `gc()` after its last reference goes
   - **No process-local addresses in the pages**: spilled frames, builtin-routine pointers and native payloads of fixed objects are cleared and restored from metadata.
 - The header is checksummed, the pages are not, since reading them would fault every page in and undo sharing. The file is replaced by rename, because truncating a mapped file raises SIGBUS.
 - **Mapping, not reading**: a private mapping faults lazily and shares unwritten pages across parallel test workers. Image objects are tenured, so marking writes no small-object header and collections leave those pages clean.
+- **Mapping beat reading** on an empty run: 29.2 against 33.3 ms median, and 87 against 131 MB Pss over 4 concurrent workers, because reading into huge-page memory zeroes then copies each page and makes every page private.
 
 ## Code images: compiled code beside the lazy-load database
 
@@ -288,6 +292,7 @@ GNU R finalizes an object at the first full `gc()` after its last reference goes
 - **Finalizable frames only when they own memory.** `Frame::owns_memory` (spilled bindings, an index or a hash table) sets the finalizable bit at allocation, at image restore, and when `define`, `define_formals` or `set_frame_hashed` makes a frame own memory; nothing else gives a frame heap memory (the JIT only reads frames). Most closure frames fit their inline slots, so the sweep no longer reads every dead call frame.
 - **Method caches log writes.** `MethodCache::written` logs the key of each entry stored into either method cache since the last collection (`dispatch::Written`). A minor collection marks the entries those keys still name (`Marker::is_minor`); any other walks every entry. The log is cleared only when `Marker::is_collecting`, because a reconcile also traces sources. It holds keys, not objects: logging objects marked entries replaced before the collection, and with only minor collections whatever they mark is promoted and never freed. Past 65,536 keys the log is dropped and the next collection walks everything.
 - Freed-by-type counting is its own pass (`Space::count_dead_by_kind`), run only while profiling, so `--profile-summary` does not charge it to collection.
+- **Left open** (`backlog.md`, "collector throughput"): minor collections during `library(testthat)` trace each load survivor once (about 10 ms), dead returned frames are cleared one cell at a time (about 7 ms), and the sweep visits every touched page. Before the write log, the S3/S4 method-cache walk grew from 12 µs to 1.2 ms per minor collection over the testthat run.
 
 ## Pretenuring lazy-load fetches
 
@@ -326,6 +331,7 @@ GNU R finalizes an object at the first full `gc()` after its last reference goes
 - **Shape.** `bytecode::compile_namespaces_for_image` compiles every closure bound in a loaded namespace afresh, never runs it, and installs it as the body; the image keeps exactly that set and stores any other code object as its source. Code that ran during start-up carries the writer's inline caches, feedback, counters and slot hints, so it cannot be imaged as is. Inline caches are weak-pair lists, written empty anyway; `PROFILE[RECORDING]` follows whether the writer had a tier, and a process without one clears it at first entry. Unforced lazy-load bindings stay promises (`backlog.md`, "Unforced base bindings still compile at run time").
 - **Why the heap image and not base `.ryc` code.** Decoding costs about what compiling does ("Code images: compiled code beside the lazy-load database"); heap pages are mapped as they are, and pages of never-called code stay in the page cache.
 - **Rejected layouts:** own pages plus `MADV_RANDOM` (each touched page becomes its own read, so cold starts slowed); own pages without advice (no RSS gain, holes); ordering only the fresh code (start-up also reads objects allocated while compiling cold closures).
+- Allocating the fresh code after start-up, where it filled start-up's free slots, cost the empty run 1.6 MB of peak RSS.
 
 ## The start image is compacted in touch order at write time
 

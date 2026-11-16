@@ -66,8 +66,9 @@ backtracking search over a program-wide constraint set.
 
 The one exception is `.Rtypes` stubs, which may use ad-hoc overloading. It is bounded because the stub
 surface is a fixed maintained corpus, and the need comes from R's coercion table: `abs(TRUE)` is an
-`integer`, so `<T: numeric> fn(x: T) -> T` is wrong for `logical`, and `min` accepts `character`. A user's
-`#:` annotation stays pure Hindley-Milner.
+`integer`, so `<T: numeric> fn(x: T) -> T` is wrong for `logical`, and `min` accepts `character`. Never say
+these functions have no principal scheme: a gradual checker that cannot describe the standard library is
+not usable. A user's `#:` annotation stays pure Hindley-Milner.
 
 ## Beta semantics: ry has no macros
 
@@ -224,6 +225,9 @@ Pinned by `crates/semantics/tests/lowering/error-tolerance.R.test` and `error_to
 ## `is.null` shapes an unconstrained inference variable
 
 **Status:** built, except the finding on unguarded use after the test: `if (is.null(x)) 0L else 1L; x + 1L` is accepted.
+
+The type model never invents a union for a variable (that keeps inference fast); this rule is the one
+place a union is introduced, and only for a variable nothing else constrains.
 
 In `guard_edges`, when the predicate is `is.null` and the guarded local slot is a completely
 unconstrained inference variable `A` (entry `Unbound`, constraint `Unconstrained`), `A` is bound to

@@ -162,6 +162,7 @@ Facts that do not change between calls are computed once, not per instruction (`
 - **Single source of truth:** the "Untyped performance roadmap" table in `development/design/r-runtime.md`, one row per idea with status and the measured gap it targets. `prior-art.md` holds per-engine reasoning; `backlog.md` keeps only raw measurements.
 - **Order rationale.** Call setup and lookup come before optimizing tiers because `--profile-summary` puts closure call setup at 12 to 24% and S3 lookup up to 17% of real workloads against tier 1 under 3%: the code that matters runs a few thousand times and never reaches tier 1.
 - **Rejected: a separate call plan for `run_closure`**, which would save under 1% of a call; the rest is frame push/pop that slot frames replace.
+- **Rejected: copy-and-patch** (CPython's PEP 744): its gain over a good interpreter is modest, and its stencils need a Clang build step that a Rust workspace does not have.
 
 ## Step 2 of the untyped roadmap: slot frames rejected on measurement, setters compiled, step 3 pulled forward
 
