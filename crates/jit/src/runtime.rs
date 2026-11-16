@@ -1716,7 +1716,7 @@ unsafe fn count_handoff(compiled: &Compiled, inlined: &Inlined) {
         let counters = values::ints_mut(inlined.code.cdr().element(PROFILE));
         let state = counters[profile::TIER_STATE];
         counters[profile::TIER_STATE] = match state {
-            profile::TIER_OFF => state,
+            _ if state == profile::TIER_OFF => state,
             ..0 => NEVER_ELIDED,
             _ => state | NO_ELISION,
         };
