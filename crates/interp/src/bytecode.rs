@@ -6856,32 +6856,46 @@ pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<Option<Sexp>> 
     }
 }
 
-/// Runs the element read or store at `pc` through tier 0's fast handler for it, for the
-/// optimizing tier, and says whether the handler applied: it then read and wrote only the
-/// instruction's registers, recorded its feedback and, for `SubAssign`, wrote the element of
-/// its variable's vector in place.
-pub unsafe fn fast_step(machine: &mut Machine<'_>, pc: usize) -> bool {
+/// Runs the builtin call at `pc` for the optimizing tier, which calls it only where the call
+/// runs no R code: the builtin is one that calls none, no argument dispatches, and no calling
+/// handler is established. The handler's body runs here directly rather than through the step
+/// table, so only the parts of the activation the call reads are loaded, and the call costs
+/// what tier 0's handler costs.
+pub unsafe fn call_builtin_step(machine: &mut Machine<'_>, pc: usize) -> R<()> {
     let mut state = activation(machine, true);
-    let applied = match op_of(*state.code.add(pc) as u32) {
-        Some(Op::CallBuiltin) => call_builtin_fast(&mut state, pc),
-        Some(Op::SubAssign) => sub_assign_fast(&mut state, pc),
-        Some(Op::Field) => field_fast(&mut state, pc),
-        _ => None,
+    let instruction = Instruction {
+        code: state.code,
+        at: pc,
+        registers: state.registers,
     };
-    applied.is_some()
+    op_call_builtin(&mut state, instruction).map(|_| ())
 }
 
-/// Runs the element read or store at `pc` through its generic handler when that runs no R code,
-/// for the optimizing tier where [`fast_step`] declined, so that no frame needs writing back. It
-/// may rebind `SubAssign`'s variable. `None` when the handler might run R code, and nothing
-/// ran: a calling handler is established, which a warning would run, or an operand is an
-/// object, an ALTREP vector, an environment or a promise, whose methods, active bindings or
-/// forcing could.
-pub unsafe fn quiet_step(machine: &mut Machine<'_>, pc: usize) -> Option<R<()>> {
+/// Runs the element read or store at `pc` for the optimizing tier: through tier 0's fast handler
+/// for it when `fast` says it may apply, then through its generic handler where that runs no R
+/// code, so that no frame needs writing back. `Some(Ok(true))` says the fast handler applied:
+/// it read and wrote only the instruction's registers, recorded its feedback and, for
+/// `SubAssign`, wrote the element of its variable's vector in place. `Some(Ok(false))` says the
+/// generic handler ran, which may rebind `SubAssign`'s variable. `None` says the generic handler
+/// might run R code, and nothing ran: a calling handler is established, which a warning would
+/// run, or an operand is an object, an ALTREP vector, an environment or a promise, whose
+/// methods, active bindings or forcing could.
+pub unsafe fn element_step(machine: &mut Machine<'_>, pc: usize, fast: bool) -> Option<R<bool>> {
     let mut state = activation(machine, true);
     // A specialized or fused opcode steps as the instruction it starts from, so the step
     // table is indexed by that base op, never by the specialized handler index.
     let op = op_of(*state.code.add(pc) as u32)?;
+    if fast {
+        let applied = match op {
+            Op::CallBuiltin => call_builtin_fast(&mut state, pc),
+            Op::SubAssign => sub_assign_fast(&mut state, pc),
+            Op::Field => field_fast(&mut state, pc),
+            _ => None,
+        };
+        if applied.is_some() {
+            return Some(Ok(true));
+        }
+    }
     if !runs_no_r_code(&state, op, pc) {
         return None;
     }
@@ -6889,7 +6903,7 @@ pub unsafe fn quiet_step(machine: &mut Machine<'_>, pc: usize) -> Option<R<()>> 
     let mark = (*heap).handle_mark();
     (*STEP_HANDLERS.as_ptr().add(op as usize))(&mut state, pc);
     (*heap).release_handles(mark);
-    Some(state.exit.map(|_| ()))
+    Some(state.exit.map(|_| false))
 }
 
 #[inline(always)]

@@ -168,15 +168,17 @@ pub mod outcome {
     pub const LOAD_INVALIDATED: i32 = 4;
 }
 
-/// What [`jit_quiet_step`] did with an element read or store.
-pub mod quiet {
+/// What [`jit_element_step`] did with an element read or store.
+pub mod element {
+    /// Tier 0's fast handler ran the instruction, which stores in place.
+    pub const HANDLED: i32 = 0;
     /// The generic handler ran the instruction, which may have rebound a store's variable.
-    pub const STEPPED: i32 = 0;
+    pub const STEPPED: i32 = 1;
     /// Nothing ran: the generic handler might run R code, so compiled code steps the
     /// instruction with the frame written back.
-    pub const DECLINED: i32 = 1;
+    pub const DECLINED: i32 = 2;
     /// The generic handler raised an error, which is parked.
-    pub const FAILED: i32 = 2;
+    pub const FAILED: i32 = 3;
 }
 
 /// A compiled body. Owned by an external pointer in the code's `TIER1` constant, which keeps
@@ -788,28 +790,45 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
     }
 }
 
-/// Runs the element read or store at `pc` through tier 0's fast handler for it
-/// ([`bytecode::fast_step`]), which runs no R code: nonzero when the handler applied.
-pub unsafe extern "C" fn jit_fast_step(activation: *mut Activation, pc: i64) -> i32 {
-    unsafe { i32::from(bytecode::fast_step(machine(&*activation), pc as usize)) }
+/// Runs the builtin call at `pc` ([`bytecode::call_builtin_step`]), which compiled code calls
+/// only where the call runs no R code, so nothing needs validating: [`outcome::OK`] or
+/// [`outcome::FAILED`].
+pub unsafe extern "C" fn jit_call_builtin(activation: *mut Activation, pc: i64) -> i32 {
+    unsafe {
+        checked(activation, outcome::FAILED, |activation| {
+            let called = step_unsignalled(activation, || {
+                scoped(|| bytecode::call_builtin_step(machine(activation), pc as usize))
+            });
+            match called {
+                Some(Ok(())) => outcome::OK,
+                Some(Err(unwind)) => {
+                    park(activation, unwind);
+                    outcome::FAILED
+                }
+                None => outcome::FAILED,
+            }
+        })
+    }
 }
 
-/// Runs the element read or store at `pc` through its generic handler where that runs no R
-/// code ([`bytecode::quiet_step`]), so nothing needs validating: one of [`quiet`]'s outcomes.
-pub unsafe extern "C" fn jit_quiet_step(activation: *mut Activation, pc: i64) -> i32 {
+/// Runs the element read or store at `pc` through tier 0's fast handler for it when `fast` is
+/// set, then through its generic handler where that runs no R code
+/// ([`bytecode::element_step`]), so nothing needs validating: one of [`element`]'s outcomes.
+pub unsafe extern "C" fn jit_element_step(activation: *mut Activation, pc: i64, fast: i32) -> i32 {
     unsafe {
-        checked(activation, quiet::FAILED, |activation| {
+        checked(activation, element::FAILED, |activation| {
             let stepped = step_unsignalled(activation, || {
-                bytecode::quiet_step(machine(activation), pc as usize)
+                bytecode::element_step(machine(activation), pc as usize, fast != 0)
             });
             match stepped {
-                Some(None) => quiet::DECLINED,
-                Some(Some(Ok(()))) => quiet::STEPPED,
+                Some(Some(Ok(true))) => element::HANDLED,
+                Some(Some(Ok(false))) => element::STEPPED,
+                Some(None) => element::DECLINED,
                 Some(Some(Err(unwind))) => {
                     park(activation, unwind);
-                    quiet::FAILED
+                    element::FAILED
                 }
-                None => quiet::FAILED,
+                None => element::FAILED,
             }
         })
     }

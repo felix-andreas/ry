@@ -22,7 +22,7 @@ use {
         },
         native,
         runtime::{
-            self, Activation, ArgumentSource, Exit, Inlined, Layout, offset, outcome, quiet,
+            self, Activation, ArgumentSource, Exit, Inlined, Layout, element, offset, outcome,
             reason, representation,
         },
     },
@@ -1498,10 +1498,10 @@ impl<'p> Translator<'p> {
             self.builder.switch_to_block(generic);
         }
         let validate = match effect {
-            Effect::Pure => self.builder.ins().iconst(I32, 0),
+            Effect::Pure => Some(self.builder.ins().iconst(I32, 0)),
             Effect::Opaque => {
                 self.flush_all(before, failed);
-                self.builder.ins().iconst(I32, 1)
+                Some(self.builder.ins().iconst(I32, 1))
             }
             Effect::PureUnlessObserved => {
                 // No calling handler is established while an inlined call has no frame, so
@@ -1535,10 +1535,29 @@ impl<'p> Translator<'p> {
                     any = self.builder.ins().bor(any, environment);
                 }
                 let zero = self.builder.ins().iconst(I32, 0);
+                // A builtin call that runs no R code needs none of the step's write-back,
+                // validation and reload, so it runs tier 0's handler body directly.
+                let call = op == Op::CallBuiltin;
                 if inlined {
                     let unobserved = self.builder.ins().icmp_imm_s(IntCC::Equal, any, 0);
                     self.hand_off_unless(position, before, unobserved);
-                    zero
+                    if call {
+                        self.call_builtin_quietly(pc, failed)?;
+                        self.builder.ins().jump(refining, &[]);
+                        None
+                    } else {
+                        Some(zero)
+                    }
+                } else if call {
+                    let quiet = self.builder.create_block();
+                    let dispatching = self.builder.create_block();
+                    self.builder.ins().brif(any, dispatching, &[], quiet, &[]);
+                    self.builder.switch_to_block(quiet);
+                    self.call_builtin_quietly(pc, failed)?;
+                    self.builder.ins().jump(refining, &[]);
+                    self.builder.switch_to_block(dispatching);
+                    self.flush_all(before, failed);
+                    Some(self.builder.ins().iconst(I32, 1))
                 } else {
                     let dispatching = self.builder.create_block();
                     let join = self.builder.create_block();
@@ -1551,37 +1570,41 @@ impl<'p> Translator<'p> {
                     let one = self.builder.ins().iconst(I32, 1);
                     self.builder.ins().jump(join, &[one]);
                     self.builder.switch_to_block(join);
-                    self.builder.block_params(join)[0]
+                    Some(self.builder.block_params(join)[0])
                 }
             }
         };
-        let result = self.call_step(pc, validate)?;
-        let after = self.after_with_boxed(position, dst.map(|(register, _)| register))?;
-        let next = self.next_pc(position)?;
-        let invalidated = self.deopt(next, after.0, after.1, position + 1, reason::SPECULATION);
-        let continued = self.builder.create_block();
-        self.branch_on_outcome(result, continued, failed, invalidated);
-        self.builder.switch_to_block(continued);
-        match effect {
-            Effect::Pure => {}
-            Effect::Opaque => self.forget_slots(before),
-            Effect::PureUnlessObserved if inlined => {}
-            Effect::PureUnlessObserved => {
-                let forgetting = self.builder.create_block();
-                let joined = self.builder.create_block();
-                self.builder.set_cold_block(forgetting);
-                self.builder
-                    .ins()
-                    .brif(validate, forgetting, &[], joined, &[]);
-                self.builder.switch_to_block(forgetting);
-                self.forget_slots(before);
-                self.builder.ins().jump(joined, &[]);
-                self.builder.switch_to_block(joined);
+        if let Some(validate) = validate {
+            let result = self.call_step(pc, validate)?;
+            let after = self.after_with_boxed(position, dst.map(|(register, _)| register))?;
+            let next = self.next_pc(position)?;
+            let invalidated = self.deopt(next, after.0, after.1, position + 1, reason::SPECULATION);
+            let continued = self.builder.create_block();
+            self.branch_on_outcome(result, continued, failed, invalidated);
+            self.builder.switch_to_block(continued);
+            match effect {
+                Effect::Pure => {}
+                Effect::Opaque => self.forget_slots(before),
+                Effect::PureUnlessObserved if inlined => {}
+                Effect::PureUnlessObserved => {
+                    let forgetting = self.builder.create_block();
+                    let joined = self.builder.create_block();
+                    self.builder.set_cold_block(forgetting);
+                    self.builder
+                        .ins()
+                        .brif(validate, forgetting, &[], joined, &[]);
+                    self.builder.switch_to_block(forgetting);
+                    self.forget_slots(before);
+                    self.builder.ins().jump(joined, &[]);
+                    self.builder.switch_to_block(joined);
+                }
             }
+            self.builder.ins().jump(refining, &[]);
         }
-        self.builder.ins().jump(refining, &[]);
         self.builder.switch_to_block(refining);
         if let Some((register, ty)) = dst {
+            let next = self.next_pc(position)?;
+            let after = self.after_with_boxed(position, Some(register))?;
             self.refine(register, ty, next, after, position + 1);
         }
         Ok(false)
@@ -5718,49 +5741,62 @@ impl<'p> Translator<'p> {
             .istore16(flags(), new_count, value, REFCOUNT);
     }
 
-    /// Calls [`runtime::jit_fast_step`] for the element op at `pc` when `fast` says tier 0's
-    /// fast handler may apply, then [`runtime::jit_quiet_step`] where it did not, and branches
-    /// on what they did, to the returned blocks: where the fast handler ran the op, where the
-    /// generic handler did, and where neither did. An error leaves through `failed`.
+    /// Calls [`runtime::jit_element_step`] for the element op at `pc`, which offers it to tier 0's
+    /// fast handler when `fast` says that may apply and to the generic handler where it did not,
+    /// and branches on what it did, to the returned blocks: where the fast handler ran the op,
+    /// where the generic handler did, and where neither did. An error leaves through `failed`.
     fn fast_step(&mut self, pc: usize, fast: bool, failed: Label) -> Result<[Label; 3], Refusal> {
         let pc = iconst(&mut self.builder, pc);
-        let [handled, quiet, stepped, declining, declined] =
+        let fast = self.builder.ins().iconst(I32, i64::from(fast));
+        let [handled, generic, stepped, declining, declined] =
             std::array::from_fn(|_| self.builder.create_block());
-        if fast {
-            let applied = self
-                .call(
-                    runtime::jit_fast_step as *const () as usize,
-                    &[I64, I64],
-                    Some(I32),
-                    &[self.frame.activation, pc],
-                )
-                .ok_or(Refusal("a helper without a result"))?;
-            self.builder.ins().brif(applied, handled, &[], quiet, &[]);
-        } else {
-            self.builder.ins().jump(quiet, &[]);
-        }
-        self.builder.switch_to_block(quiet);
         let result = self
             .call(
-                runtime::jit_quiet_step as *const () as usize,
-                &[I64, I64],
+                runtime::jit_element_step as *const () as usize,
+                &[I64, I64, I32],
                 Some(I32),
-                &[self.frame.activation, pc],
+                &[self.frame.activation, pc, fast],
             )
             .ok_or(Refusal("a helper without a result"))?;
+        let applied = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, result, element::HANDLED as i64);
+        self.builder.ins().brif(applied, handled, &[], generic, &[]);
+        self.builder.switch_to_block(generic);
         let ran = self
             .builder
             .ins()
-            .icmp_imm_s(IntCC::Equal, result, quiet::STEPPED as i64);
+            .icmp_imm_s(IntCC::Equal, result, element::STEPPED as i64);
         self.builder.ins().brif(ran, stepped, &[], declining, &[]);
         self.builder.switch_to_block(declining);
         let nothing = self
             .builder
             .ins()
-            .icmp_imm_s(IntCC::Equal, result, quiet::DECLINED as i64);
+            .icmp_imm_s(IntCC::Equal, result, element::DECLINED as i64);
         self.guard(nothing, failed);
         self.builder.ins().jump(declined, &[]);
         Ok([handled, stepped, declined])
+    }
+
+    /// Runs the builtin call at `pc` through [`runtime::jit_call_builtin`], where it runs no R
+    /// code. An error leaves through `failed`.
+    fn call_builtin_quietly(&mut self, pc: usize, failed: Label) -> Result<(), Refusal> {
+        let pc = iconst(&mut self.builder, pc);
+        let result = self
+            .call(
+                runtime::jit_call_builtin as *const () as usize,
+                &[I64, I64],
+                Some(I32),
+                &[self.frame.activation, pc],
+            )
+            .ok_or(Refusal("a helper without a result"))?;
+        let ok = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, result, outcome::OK as i64);
+        self.guard(ok, failed);
+        Ok(())
     }
 
     /// Runs the tier-0 instruction at `pc` through [`runtime::jit_step`].
