@@ -1452,25 +1452,7 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     let mut args = promargs;
     let mut made = MadePromises(SmallVec::new());
     if function.kind() == SexpType::Closure {
-        let matched = eval::match_args(function.car(), &args, frame_call)?;
-        let mut formal = function.car();
-        for value in matched.iter() {
-            if formal.kind() != SexpType::Pairlist {
-                break;
-            }
-            let symbol = formal.tag();
-            formal = formal.cdr();
-            if symbol == symbols.dots || *value == missing_arg() {
-                continue;
-            }
-            if let Some(arg) = args.iter_mut().find(|arg| arg.value == *value) {
-                arg.value = eval::make_promise(symbol, method_env)?;
-                if method_env.has_gp(gp::SLOT_FRAME) {
-                    arg.value.increment_refcount();
-                    made.0.push(arg.value);
-                }
-            }
-        }
+        patch_args_by_actuals(function.car(), &mut args, method_env, &mut made)?;
     }
     // Named arguments passed to NextMethod replace or extend the method's arguments.
     for extra in call.args.iter().skip(2) {
@@ -1544,6 +1526,117 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     };
     interp().slot_owner = previous_owner;
     result
+}
+
+/// How [`patch_args_by_actuals`] found a formal matched.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FormalMatch {
+    Unmatched,
+    /// By an argument that is not empty.
+    Present,
+    /// By an empty argument, and the formal is still missing in the method's frame.
+    Missing,
+    /// By an empty argument, but the method's frame binds the formal: the positional argument
+    /// that filled it is passed on empty, so the value is not supplied twice.
+    Local,
+}
+
+/// GNU R's `patchArgsByActuals`: matches the method's arguments `args` to its `formals` again,
+/// as the call did, and replaces each matched argument by a promise of its formal in
+/// `method_env`, so the next method sees what the method changed. An empty argument matched by
+/// name stays empty while its formal is missing, and otherwise reads the formal, which leaves
+/// the positional argument that filled the formal empty.
+unsafe fn patch_args_by_actuals(
+    formals: Sexp,
+    args: &mut [Arg],
+    method_env: Sexp,
+    made: &mut MadePromises,
+) -> R<()> {
+    let dots = symbols().dots;
+    let mut names: SmallVec<[Sexp; 8]> = SmallVec::new();
+    let mut formal = formals;
+    while formal.kind() == SexpType::Pairlist {
+        names.push(formal.tag());
+        formal = formal.cdr();
+    }
+    let mut found: SmallVec<[FormalMatch; 8]> =
+        SmallVec::from_elem(FormalMatch::Unmatched, names.len());
+    // 0 unused, 1 matched by a partial name or position, 2 matched by its exact name.
+    let mut used: SmallVec<[u8; 8]> = SmallVec::from_elem(0, args.len());
+    let tagged = |arg: &Arg| arg.tag != nil() && arg.tag.car().length() > 0;
+    let mut patch = |arg: &mut Arg, name: Sexp| -> R<FormalMatch> {
+        let found = if arg.value == missing_arg() {
+            let value = if method_env.has_gp(gp::SLOT_FRAME)
+                && let Some(value) = eval::slot_binding(method_env, name, false)
+            {
+                value
+            } else {
+                eval::find_var_in_frame(name, method_env)?
+            };
+            if value == missing_arg() {
+                return Ok(FormalMatch::Missing);
+            }
+            FormalMatch::Local
+        } else {
+            FormalMatch::Present
+        };
+        arg.value = eval::make_promise(name, method_env)?;
+        if method_env.has_gp(gp::SLOT_FRAME) {
+            arg.value.increment_refcount();
+            made.0.push(arg.value);
+        }
+        Ok(found)
+    };
+    for (index, &name) in names.iter().enumerate() {
+        if name == dots {
+            continue;
+        }
+        if let Some(position) = args.iter().position(|arg| arg.tag == name) {
+            found[index] = patch(&mut args[position], name)?;
+            used[position] = 2;
+        }
+    }
+    let mut seen_dots = false;
+    for (index, &name) in names.iter().enumerate() {
+        if found[index] != FormalMatch::Unmatched {
+            continue;
+        }
+        if name == dots && !seen_dots {
+            seen_dots = true;
+            continue;
+        }
+        let formal = name.car().bytes();
+        let position = args.iter().enumerate().position(|(position, arg)| {
+            used[position] == 0
+                && tagged(arg)
+                && (arg.tag == name || !seen_dots && formal.starts_with(arg.tag.car().bytes()))
+        });
+        if let Some(position) = position {
+            found[index] = patch(&mut args[position], name)?;
+            used[position] = 1;
+        }
+    }
+    let (mut formal, mut position) = (0, 0);
+    while formal < names.len() && position < args.len() {
+        if names[formal] == dots {
+            break;
+        }
+        if found[formal] == FormalMatch::Present {
+            formal += 1;
+        } else if used[position] != 0 || tagged(&args[position]) {
+            position += 1;
+        } else {
+            if found[formal] == FormalMatch::Local {
+                args[position].value = missing_arg();
+            } else {
+                patch(&mut args[position], names[formal])?;
+            }
+            used[position] = 1;
+            position += 1;
+            formal += 1;
+        }
+    }
+    Ok(())
 }
 
 /// The promises NextMethod made over the environment of a method that runs in slots, each held

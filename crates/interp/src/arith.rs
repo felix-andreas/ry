@@ -30,9 +30,10 @@ use {
         long_double::{self, LongDouble},
         rmath,
         system::r_at_least,
-        unwind::{R, error},
+        unwind::{R, error, error_in},
         values::{
-            self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real, symbols,
+            self, alloc, get_attr, length, missing_arg, nil, scalar_bool, scalar_integer,
+            scalar_real, symbols,
         },
         vector_math,
     },
@@ -367,7 +368,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("trigamma", 1, |call| unsafe { math1(call, Math::Trigamma) })
         .generic(Generic::Math)
         .reusing_first_argument(),
-    builtin("log", -1, do_log).generic(Generic::Math),
+    builtin("log", -1, do_log)
+        .generic(Generic::Math)
+        .keep_missing(),
     builtin("round", -1, |call| unsafe { round_like(call, false) })
         .generic(Generic::Math)
         .keep_missing()
@@ -4367,6 +4370,18 @@ fn finite_term(from: f64, index: f64, by: f64) -> f64 {
 
 /// `rep(x, times, each, length.out)`.
 unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
+    // GNU R evaluates the first argument to dispatch on it, whatever its name, and evaluating
+    // an empty one is the error of the frame `rep` was called from.
+    if call
+        .args
+        .first()
+        .is_some_and(|arg| arg.value == missing_arg())
+    {
+        let lexical = call
+            .frame_index()
+            .map_or(nil(), |frame| interp().frames[frame].call);
+        return Err(error_in(lexical, "argument is missing, with no default"));
+    }
     let (matched, _) = call.match_args(&["x", "times", "length.out", "each", "..."])?;
     let object = present(matched[0]).unwrap_or(nil());
     let times = match present(matched[1]) {

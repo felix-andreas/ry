@@ -700,9 +700,8 @@ pub unsafe fn match_builtin_args(
             return Err(error_in(
                 call,
                 format!(
-                    "unused argument ({} = {})",
-                    names[arg_index].as_deref().unwrap_or(""),
-                    crate::deparse::deparse_unused_argument(arg.value)
+                    "unused argument {}",
+                    crate::deparse::unused_arguments(&[(names[arg_index].as_deref(), arg.value)])
                 ),
             ));
         }
@@ -725,8 +724,8 @@ pub unsafe fn match_builtin_args(
             return Err(error_in(
                 call,
                 format!(
-                    "unused argument ({})",
-                    crate::deparse::deparse_unused_argument(arg.value)
+                    "unused argument {}",
+                    crate::deparse::unused_arguments(&[(None, arg.value)])
                 ),
             ));
         }

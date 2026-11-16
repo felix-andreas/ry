@@ -27,7 +27,7 @@ use {
         object::{NA_INTEGER, Sexp, SexpType, gp},
     },
     smallvec::{SmallVec, smallvec},
-    std::{cell::Cell, mem::MaybeUninit},
+    std::{borrow::Cow, cell::Cell, mem::MaybeUninit},
     thin_vec::ThinVec,
 };
 
@@ -2068,8 +2068,8 @@ unsafe fn check_argument_names(definition: &BuiltinDef, call: Sexp, args: &[Arg]
             ),
             [formal] => format!("supplied argument name '{name}' does not match '{formal}'"),
             _ => format!(
-                "unused argument ({name} = {})",
-                crate::deparse::deparse_unused_argument(arg.value)
+                "unused argument {}",
+                crate::deparse::unused_arguments(&[(Some(&name), arg.value)])
             ),
         };
         return Err(error_in(call, message));
@@ -4613,28 +4613,29 @@ unsafe fn match_plan(formals: Sexp, args: &[Arg], call: Sexp) -> R<Plan> {
         }
     }
     if !unused.is_empty() {
-        let texts: Vec<String> = unused
+        let names: Vec<Option<Cow<'_, str>>> = unused
             .iter()
-            .map(|&index| {
-                let arg = &args[index];
-                let code = if arg.value.kind() == SexpType::Promise {
-                    arg.value.cdr()
+            .map(|&index| arg_names[index].map(String::from_utf8_lossy))
+            .collect();
+        let arguments: Vec<(Option<&str>, Sexp)> = unused
+            .iter()
+            .zip(&names)
+            .map(|(&index, name)| {
+                let value = args[index].value;
+                let code = if value.kind() == SexpType::Promise {
+                    value.cdr()
                 } else {
-                    arg.value
+                    value
                 };
-                let text = deparse::deparse_unused_argument(code);
-                match arg_names[index] {
-                    Some(name) => format!("{} = {text}", String::from_utf8_lossy(name)),
-                    None => text,
-                }
+                (name.as_deref(), code)
             })
             .collect();
         return Err(error_in(
             call,
             format!(
-                "unused argument{} ({})",
-                if texts.len() == 1 { "" } else { "s" },
-                texts.join(", ")
+                "unused argument{} {}",
+                if unused.len() == 1 { "" } else { "s" },
+                deparse::unused_arguments(&arguments)
             ),
         ));
     }
