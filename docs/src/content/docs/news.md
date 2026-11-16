@@ -3,6 +3,25 @@ title: News
 description: Release announcements and project news
 ---
 
+## ry 0.5.1
+
+*Released in November 2026.*
+
+Version 0.5.1 fixes a crash that 0.5.0 introduced, fixes name lookups with non-ASCII names, and
+makes crash reports name the functions on the native stack.
+
+- **Element stores into a long argument no longer crash.** A function that stores into its matrix
+  or vector argument of 64 or more elements, such as `f <- function(m) { m[1, 1] <- 1; m[2, 2] <- 1;
+  m }`, crashed or corrupted memory from its second call on, once its body ran compiled. The
+  compiled store wrote into a copy that holds no elements of its own; it now writes into a full
+  copy.
+- **Non-ASCII names match.** `x["aä"]`, `x[["aä"]]`, `l$aä` and their replacement forms find a name
+  whatever its encoding mark, `names(c("aä" = 1))` is marked UTF-8 as in GNU R, and a latin1 name
+  matches its UTF-8 spelling.
+- **Crash reports name functions.** The Linux archive keeps the symbol table of `ry` and its
+  runtime, so the native stack of a crash report shows each frame's function, demangled, instead
+  of the nearest exported symbol.
+
 ## ry 0.5.0
 
 *Released in November 2026.*
