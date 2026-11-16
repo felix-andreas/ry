@@ -156,13 +156,23 @@ Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and be
 
 - Every input is `git+https://github.com/owner/repo?shallow=1` (nixpkgs with `ref=nixos-unstable`), because the cloud sessions' proxy serves git clones but answers `github:` tarball URLs with 403, so `nix develop` could not start. Only the git form pins a commit, and a shallow nixpkgs clone took 16 s against 29 s for the tarball; `flake.lock` keeps the same revs and narHashes, so pinned trees are byte-identical. **Do not switch back to `github:` inputs.**
 
-## Cloud sessions are provisioned by tools/dev-setup.sh, not the nix shell
+## Agents work in the nix dev shell, loaded by tools/env.sh
 
 **Status:** built.
 
+- **Previous shape:** cloud containers ran `tools/dev-setup.sh` (apt, `just` from PyPI, GNU R restored into `/opt/R`), and mold needed a further environment setup script. Two provisioning paths described the same toolchain, and the container one drifted from CI's.
+- **Chosen shape:** every cloud container has nix, so `source tools/env.sh` loads the flake's `default` shell, which carries the toolchain, the reference GNU R, `just` and mold (`pkgs.mold`, the wrapped linker, which sees the shell's library paths). No environment setup script.
+- **Why sourced, not `nix develop -c`:** an agent's commands each start a new shell. `nix develop -c` costs 4.7 s per command; sourcing the saved `nix print-dev-env` (`target/nix-dev-env.sh`) costs 0.06 s.
+- **Measured, 4 cores:** first load 98 s and 8.8 GB of store, nothing built (both binary caches cover it); first debug build in the shell 5 min 20 s.
+- **Limits:** shell builds link nix's glibc, so a target directory is either shell-built or host-built. The package corpus links Ubuntu libraries the shell lacks, so that work uses `RY_ENV=system` and `tools/dev-setup.sh` (unverified in the shell).
+
+## tools/dev-setup.sh provisions the host for package-corpus work
+
+**Status:** built. Superseded as the default for agents by the entry above.
+
 - `tools/dev-setup.sh` (idempotent) installs apt libraries, `just` 1.59.0 from PyPI, and through `tools/reference-r.sh` the reference GNU R 4.6.2 in `/opt/R/4.6.2` with the oracle's packages (rlang 1.3.0); `just doctor` (`tools/doctor.py`) checks each, plus binary freshness by recomputing the runtime identity, and names the fix.
 - **`--enable-R-shlib` is required:** without `libR.so` ry's GNU R console cannot load that R and Posit's binary packages cannot link. **Posit's mirror serves binaries only to a user agent starting `R/<version>`,** which R's default lacks (about 10 s for the set against 5 minutes compiling).
-- **Why not nix here:** the binary cache restores the prebuilt R in seconds without a nix store in the container's 40 GB quota. CI uses the flake's `ci` shell, whose R is built the same way.
+- CI uses the flake's `ci` shell, whose R is built the same way.
 
 ## CI runs in the flake's dev shell
 

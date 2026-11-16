@@ -14,15 +14,33 @@ the next reader.
 
 ## The fast loop
 
-Run `source tools/env.sh` once per shell. It puts the reference GNU R (`/opt/R/<version>/bin`) on
-`PATH` when no `R` is there, links Linux builds with mold when it runs on Linux and mold is installed
-(through `RUSTC_WRAPPER=tools/mold-rustc`, which cargo leaves out of its fingerprints, so switching it
-rebuilds nothing), and reports whether ry's base R (`target/base-r`) is built:
+Start every command with `source tools/env.sh &&`. Where nix is installed, which includes every
+Claude cloud container, it loads the flake's `default` dev shell: the Rust toolchain, the reference
+GNU R, `just` and mold, the same versions CI tests with. It then selects mold for Linux links
+(through `RUSTC_WRAPPER=tools/mold-rustc`, which cargo leaves out of its fingerprints) and reports
+whether ry's base R (`target/base-r`) is built:
 
 ```text
 $ source tools/env.sh
-ry env: GNU R 4.6.2 at /opt/R/4.6.2/bin; base R built; mold linker
+ry env: nix dev shell; GNU R 4.6.2 at /nix/store/...-gnu-r-4.6.2/bin; base R built; mold linker
 ```
+
+| Step | Time on a 4-core cloud container |
+| --- | --- |
+| First `source tools/env.sh` in a fresh container | 98 s, 8.8 GB downloaded into `/nix/store`, nothing built |
+| Every later `source tools/env.sh` | 0.06 s |
+| `nix develop -c <command>`, for comparison | 4.7 s per command |
+| First debug build of `ry`, `libR` and `ry-rcmd` in the shell | 5 min 20 s |
+
+The script saves `nix print-dev-env` in `target/nix-dev-env.sh` and sources that file, which is why
+later runs are fast; it rewrites the file when `flake.nix`, `flake.lock` or `rust-toolchain.toml` is
+newer. Binaries built in the shell link nix's glibc, so do not mix shell and host builds in one
+target directory: cargo rebuilds everything when you switch.
+
+`RY_ENV=system source tools/env.sh` skips nix and uses the host's tools, with the reference GNU R
+from `/opt/R/<version>/bin`. Use it for the package corpus (`just bench-packages`), whose packages
+link the Ubuntu libraries that `sudo tools/dev-setup.sh` installs and the shell does not carry.
+Without nix the script behaves the same way.
 
 Every command below is plain cargo, so it works without `just`. A passing run prints only cargo's
 summary, and a failure prints a rerun command for just the failing case.

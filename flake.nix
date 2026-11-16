@@ -458,9 +458,8 @@
           default = makeShell (self.lib.rustToolchain pkgs) (
             with pkgs;
             [
-              # tools/env.sh links debug builds with it. The wrapped one passes the shell's
-              # library paths, which a bare mold run through `-fuse-ld` never sees.
-              mold-wrapped
+              # tools/env.sh links debug builds with it.
+              mold
               evcxr
               # radian runs the shell's GNU R, with renv and devtools built for it on its own
               # library path, so `R` and `Rscript` stay the ones CI runs.
