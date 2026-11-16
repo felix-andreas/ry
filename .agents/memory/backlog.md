@@ -1366,44 +1366,58 @@ are bitsets. Left: give `precious` the dense layout of row 11 (B2).
 **The call path after slot frames bind on demand: what still allocates.** A slot frame's
 environment binds a variable only when a lookup asks for it (`decisions/interp.md`, "A slot frame's
 environment binds a variable only when a lookup asks for it"; `development/design/slot-frames.md`).
-On finbench's tests (JIT on, 53.0 million closure calls) the run frees 264 million objects: 63.4
-million pairlist cells, 22.8 million binding cells, 21.1 million promises, 18.7 million language
-objects, 14.1 million environments and 6.0 million `...` objects. 81.5% of package calls run in
-slots with no argument promise and no environment. 10.1 million slot frames make an environment
-that binds nothing, 3.4 million go on to read their variables by name, 7.7 million variables move
-into a cell, and 1.26 million frames take every variable. Sampled allocation call paths
+On finbench's tests (JIT on, 49.4 million closure calls) the run frees 217 million objects: 47.0
+million pairlist cells, 19.4 million binding cells, 13.9 million language objects, 13.4 million
+promises, 10.5 million environments and 5.7 million `...` objects. 83.5% of package calls run in
+slots with no argument promise and no environment. 6.6 million slot frames make an environment
+that binds nothing, 1.63 million go on to read their variables by name, 5.3 million variables move
+into a cell, and 0.94 million frames take every variable. Sampled allocation call paths
 (`RY_ALLOC_SITES=2048` beside a profile summary) name the sources, as a share of each kind:
 
 | Kind | Sources |
 | --- | --- |
-| pairlist | `complex_assign` 26%, `Rf_setAttrib` 8%, `copy_attributes` and `attributes` 7%, `ElementCalls::new` (`lapply`, `vapply`) 5%, `Rf_shallow_duplicate` 5%, `call_with_srcref` (`sys.call`) 3% |
-| language | the renamed call of an S3 dispatch (`use_method_in_slots`) 17%, `complex_assign` 15%, `ElementCalls::new` 9%, `Rf_shallow_duplicate` 8%, `apply_internal_method` 8% |
-| promise | `complex_assign` 27%, `detach_reference` 20%, `closure_args_into` 16%, `slot_promises_into` 10%, `promised_args` 6%, `evaluated_arguments` 5% |
-| environment | `pending_env` 73%, heap frames (`frame_environment`) 14%, `apply_internal_method` 10% |
+| pairlist | an attribute set on an object (`set_attr`, `attach`) 37%, the attribute list of a copied object (`duplicate_with`, `duplicate`) 35%, calls built by C code (`Rf_lang2`, `Rf_cons`) 6%, `values::call` 4% |
+| language | the renamed call of an S3 dispatch (`renamed_call`) 34%, copies (`duplicate`, `duplicate_with`) 21%, calls built by C code 11%, `do_force_and_call` 5% |
+| promise | `closure_args_into` 21%, `detach_reference` 20%, `slot_promise` 15%, the `tryCatch` prologues 14%, `promised_args` 9%, `evaluated_arguments` 4%, `replace_with_closure` 4% |
+| environment | `pending_env` 61%, heap frames (`frame_environment`) 21%, environments R code makes (`new.env`, `alloc_environment_with_capacity`) 18% |
 | binding cell | `define_formals_uncollected` 61%, `define_unbound` 39% |
-| `...` | `bind_plan` 75% |
+| `...` | `bind_plan` 72%, `matched_from_plan` 20%, `match_positional_args` 8% |
 
-The frames that go on to read by name do so for these reasons (share of the 3.4 million): a
-promise or environment outliving the frame 19%, `vapply` 14%, `lapply` 12%, subassignment 11%, a
-closure outliving the frame 11%, a replacement call 11%, a special called through the generic
-protocol 9%, `parent.frame` 5%, `standardGeneric` 3%.
+Most pairlist cells are attribute cells: the 37% made when an attribute is set, and most of the 35%
+made when an object with attributes is copied (the rest of those are the argument cells of a
+copied call). Attributes are a pairlist because R's C API hands the list out
+(`ATTRIB`), so removing these cells means keeping an object's attributes in a compact record and
+building the pairlist only for C code that asks for it. That is an object-model change in `heap`
+and `libr` and has no design yet.
+
+The frames that go on to read by name do so for these reasons (share of the 1.63 million): a
+promise or environment outliving the frame 23%, a closure outliving the frame 22%, `parent.frame`
+9%, `substitute` 8%, a nested or `<<-` assignment (the `<-` special) 7%, `standardGeneric` 6%, an
+`.Internal` that receives the environment 5%, subassignment 5%, `.External2` 3%.
 
 What is open, largest first. Each is worth 0.1 to 0.5% of run time on its own, because call
 setup is about a tenth of the run, so take them for the objects they remove:
 
-- **Replacement calls that still take `complex_assign`.** A one-level replacement on a slot
-  frame's variable runs on the slots (`slot-frames.md`, "Subassignment and replacement in slots";
-  `decisions/interp.md`, "Replacement calls and `lapply`/`vapply` element calls run on a slot frame's
-  slots"). Three shapes still build the getter call, the setter call, their argument cells and a
-  promise per value, about nine objects a level, and give the frame its environment:
-  - A nested target (`names(x)[2] <- v`, `l$b$c <- v`, `substr(names(x)[1], 1, 1) <- "Z"`), which
-    the compiler leaves to the `<-` special: 113,492 of the 1.63M slot frames that move to reading
-    by name on the finbench suite (profile row `<-`), and the largest caller of `complex_assign`
-    there (about 5M pairlist cells a suite run). Lower it to getter and setter register code when
-    every subscript is free of side effects (the general assignment evaluates a nested subscript
-    twice), branch to `Op::ComplexAssign` when any level is an object with a method or has a
-    getter or setter that is not a builtin, and reuse `complex_assign`'s rules for changing a
-    value in place.
+- **Replacement calls that still build their calls.** A one-level replacement on a slot frame's
+  variable runs on the slots, and `complex_assign` calls a primitive replacement with its values
+  (`decisions/interp.md`, "Replacement calls and `lapply`/`vapply` element calls run on a slot
+  frame's slots" and "A complex assignment calls a primitive replacement with its values"). What
+  still builds a getter or setter call, its argument cells and a promise per value is 256,523
+  assignments a finbench suite run (profile section "Complex assignments that built their calls"):
+  - A nested target's getter levels (`attr(attr(x, a), b) <- v` on an xts object 97,915,
+    `names(l$a) <- v` 33,060, `l[[i]][j] <- v` 8,551). Call a primitive getter on an object
+    without a method with its evaluated arguments, as `replace_through_primitive` does for the
+    setter. An error names the getter call with `*tmp*` (`` `*tmp*`[[5]] ``), so publish the
+    target for `unwind::resolve_call` to build that call from, as `Interp::assignment_call` does
+    for the setter.
+  - An object with a method for the replacement (`dimnames<-` and `[<-` on xts, `[[<-`, `$<-` and
+    `[<-` on a data frame: about 55,000). The method needs the promises, so the gain there is a
+    cheaper method call, not a skipped one.
+  - A nested target also gives a slot frame its environment, because the compiler leaves it to
+    the `<-` special: 113,502 of the 1.63M slot frames that move to reading by name. Lower it to
+    getter and setter register code when every subscript is free of side effects (the general
+    assignment evaluates a nested subscript twice), and branch to `Op::ComplexAssign` when any
+    level is an object with a method or has a getter or setter that is not a builtin.
   - A target that is an object without a method, behind a computed subscript
     (`s3[[names(x)[1]]] <- 2`): the probe before the subscripts (`Op::BranchIfObject`) branches
     on any object. A probe that asks for the method (`dispatch::has_internal_method`) keeps
@@ -1493,6 +1507,34 @@ overhead, not allocation.
 - `lapply`'s element calls read the `X` the internal was called with, so a `FUN` that rebinds `X` in `lapply`'s frame through `parent.frame()` changes nothing (`ElementCalls::plain`, `envir.rs`), where GNU R reads the new `X` for the next element. Removing `FUN` there, a non-function `FUN`, and a warning from a special `FUN` report the call `FUN(X[[i]], ...)` where GNU R reports the `lapply(...)` call.
 - `` lapply(list(1, 2), `repeat`) `` loops forever where GNU R raises an arity error, and `` `(`(x, ...) `` with an empty `...` raises "2 arguments passed to '('".
 - `m[3e10, 1] <- 5` on a matrix is "subscript out of bounds" where GNU R warns and assigns nothing.
+- A subscript of a nested assignment that takes a reference to the target lets a later level
+  change the alias: `x <- c(a = 1, b = 2); names(x)[{ keep <- x; 2 }] <- "z"` leaves `keep` with
+  the names `a z` on ry and `a b` on GNU R, and `levels(x)[{ keep <- x; 1 }] <- "z"` does the
+  same to a factor. `eval::complex_assign` decides whether to copy the variable before the
+  subscripts run; GNU R's replacement primitives test the reference count when they write.
+- `<<-` through a replacement into a locked binding changes the value before the assignment
+  fails: with `g <- c(1, 2); lockBinding("g", globalenv())`, `(function() g[1] <<- 5)()` fails
+  on both engines but leaves `g` as `5 2` on ry. `complex_assign` reads `locked` from the local
+  frame's cell, not from the binding `<<-` writes. Base's bindings are not locked either:
+  `(function() T[2] <<- FALSE)()` succeeds where GNU R fails with "cannot change value of locked
+  binding for 'T'".
+- S3 replacement methods defined as locals of the function that assigns are never called:
+  with `` `[<-.k` ``, `` `$<-.k` ``, `` `[[<-.k` `` and `` `names<-.k` `` assigned in `f`'s body,
+  `x[1] <- 2`, `x$a <- 3`, `x[[1]] <- 4` and `names(x) <- "q"` on a `k` object in `f` run the
+  builtins on ry and the four methods on GNU R.
+- Smaller differences in complex assignments, each the same in every tier: `exists("*tmp*")` in
+  a subscript is `FALSE` (GNU R binds `*tmp*` for the length of the assignment); `x[c(TRUE, NA)]
+  <- 1:2` warns and assigns where GNU R fails with "NAs are not allowed in subscripted
+  assignments"; `m[[1, TRUE]] <- 0L` on a 2 x 2 matrix writes the whole first row where GNU R
+  writes one element; `names(m)[2] <- "a"` on a matrix leaves it without names; a formal nobody
+  passed as the target (`f <- function(a) { a[1] <- 1 }; f()`) fails with "object of type
+  'symbol' is not subsettable" where GNU R says `argument "a" is missing, with no default`;
+  `..1[1] <- 1` fails with "object '..1' not found" where GNU R says "..1 used in an incorrect
+  context"; `p$v <- 1` on an S4 object without a method says "no '$<-' method for this S4
+  class" where GNU R says "no method for assigning subsets of this S4 class" against the
+  generated call; `body(x)[[1]] <- 1` on a number makes a closure where GNU R fails; and
+  `storage.mode(x)[2] <- "double"` fails with "invalid 'value' argument" where GNU R leaves
+  `x` unchanged.
 - Closures over equal but distinct body copies compile again. `Bodies` (`crates/interp/src/bytecode.rs`) shares code by body identity, but a lambda inside a testthat `expect_*()` argument is a fresh copy of its expression at each evaluation, so `testthat_full` compiles about 43 bodies per warm iteration (about 4M Ir of its 629M). GNU R's JIT cache hashes the structure and confirms with `identical`, so it shares them. A structural lookup at the compile decision, confirming with a deep compare of body, formals and srcref, would close it.
 - `readChar` reads one byte per device call: an 11 MB file takes 150 ms against GNU R's 29 ms (`readChar(f, file.size(f))`). Its ceiling on measured workloads is 0%, since `testthat_full`, the strings app and the report app never call it, so a bulk read (one device read per string) waits for a workload that does.
 - A missing argument forwarded through two calls is reported on the wrong call: with `leaf <- function(x) x; mid <- function(a) leaf(a * 2); wrap <- function(q) mid(q)`, `wrap()` fails with `argument "q" is missing, with no default` on both engines, but GNU R's condition call is `wrap()` and ry's is `leaf(a * 2)`. The same in every tier.

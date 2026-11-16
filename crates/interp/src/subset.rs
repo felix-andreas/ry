@@ -2016,7 +2016,7 @@ unsafe fn out_of_bounds(call: Sexp, message: &str, bounds: Bounds, index: Sexp) 
 // `$` and `@`.
 
 /// The name argument of `$` and `@`: a symbol or string, never evaluated.
-unsafe fn name_argument(value: Sexp) -> R<Sexp> {
+pub(crate) unsafe fn name_argument(value: Sexp) -> R<Sexp> {
     // A promise comes from `NextMethod` and stands for the name the method received.
     let value = eval::value_of(value)?;
     match value.kind() {
@@ -2442,16 +2442,13 @@ unsafe fn do_subassign(call: &Call<'_>) -> R<Sexp> {
     let Some((value_arg, rest)) = call.args.split_last() else {
         return Err(call.error("SubAssignArgs: invalid number of arguments"));
     };
-    let mut object = nil();
-    let mut indices: SmallVec<[Sexp; 4]> = SmallVec::new();
-    for (position, arg) in rest.iter().enumerate() {
-        if position == 0 {
-            object = arg.value;
-        } else if arg.tag != symbols().exact && arg.tag != symbols().drop {
-            indices.push(arg.value);
-        }
-    }
-    subassign(object, &indices, value_arg.value, call.call)
+    // Every argument between the object and the value is a subscript, whatever its name: GNU R
+    // gives `drop` and `exact` no meaning in an assignment.
+    let Some((object, indices)) = rest.split_first() else {
+        return subassign(nil(), &[], value_arg.value, call.call);
+    };
+    let indices: SmallVec<[Sexp; 4]> = indices.iter().map(|arg| arg.value).collect();
+    subassign(object.value, &indices, value_arg.value, call.call)
 }
 
 /// Whether `x[i] <- value` leaves the atomic vector `object` exactly as it is: the subscript
@@ -3194,16 +3191,11 @@ unsafe fn do_subassign2(call: &Call<'_>) -> R<Sexp> {
     let Some((value_arg, rest)) = call.args.split_last() else {
         return Err(call.error("SubAssignArgs: invalid number of arguments"));
     };
-    let mut object = nil();
-    let mut indices: SmallVec<[Sexp; 4]> = SmallVec::new();
-    for (position, arg) in rest.iter().enumerate() {
-        if position == 0 {
-            object = arg.value;
-        } else if arg.tag != symbols().exact {
-            indices.push(arg.value);
-        }
-    }
-    subassign2(object, &indices, value_arg.value, call.call)
+    let Some((object, indices)) = rest.split_first() else {
+        return subassign2(nil(), &[], value_arg.value, call.call);
+    };
+    let indices: SmallVec<[Sexp; 4]> = indices.iter().map(|arg| arg.value).collect();
+    subassign2(object.value, &indices, value_arg.value, call.call)
 }
 
 /// `x[[i]] <- value`.
@@ -3629,7 +3621,13 @@ unsafe fn missing_subscript(call: Sexp, fields: &[(&str, Sexp)]) -> Unwind {
 
 unsafe fn do_dollar_assign(call: &Call<'_>) -> R<Sexp> {
     let object = eval::eval(call.arg(0), call.env()?)?;
-    let name = name_argument(call.arg(1))?;
+    // GNU R reports a name that is none against the replacement call itself.
+    let name = name_argument(call.arg(1)).map_err(|unwind| match unwind {
+        Unwind::Error(failure) if failure.call == unbound() => {
+            crate::unwind::errorcall(call.call, failure.message)
+        }
+        unwind => unwind,
+    })?;
     let value = eval::eval(call.arg(2), call.env()?)?;
     if object.is_object() {
         let name_string = values::scalar_string_charsxp(name)?;
