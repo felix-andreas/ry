@@ -1788,8 +1788,8 @@ unsafe fn promised_args(call: Sexp, args: &[Arg]) -> R<Args> {
     Ok(result)
 }
 
-/// S3 dispatch for a builtin that evaluated its own arguments (`$`, `$<-`). A call named
-/// `<generic>.default` comes from `NextMethod` and runs the builtin's own code.
+/// S3 dispatch for a builtin that evaluated its own arguments (`$`, `$<-`, `@`, `@<-`). A call
+/// named `<generic>.default` comes from `NextMethod` and runs the builtin's own code.
 pub unsafe fn dispatch_builtin(
     generic: Sexp,
     call: Sexp,
@@ -1810,7 +1810,24 @@ pub unsafe fn dispatch_builtin(
     {
         return Ok(Some(value));
     }
-    internal_dispatch(generic, call, args, env)
+    let Some(object) = args.first() else {
+        return Ok(None);
+    };
+    let Some(found) = find_s3_method(generic, object.value, env, values::base_namespace())? else {
+        return Ok(None);
+    };
+    activity::count(Counter::S3Dispatches);
+    let mut promised = promised_args(call, args)?;
+    // GNU R's `$` and `@` hand a method the name as a string that is also the code of its
+    // promise, so `substitute(name)` is `"abc"` for `x$abc`, not the symbol. Only a found
+    // method pays for that promise, because `self$field` on an object without one is common.
+    if let (Some(name), Some(&Arg { value, .. })) = (promised.get_mut(1), args.get(1))
+        && value.kind() == SexpType::String
+    {
+        name.value = forced_promise(value, value)?;
+        crate::heap().root(name.value);
+    }
+    apply_internal_method(call, found, &promised, env).map(Some)
 }
 
 /// GNU R's `DispatchOrEval`, for a [`BuiltinDef::dispatch_or_eval`] special called with the
