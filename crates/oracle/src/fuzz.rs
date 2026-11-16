@@ -1088,8 +1088,47 @@ impl Generator {
     }
 }
 
+/// A family of generated programs. Each maps a seed to one program.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ProgramKind {
+    /// [`program`]: several blocks from a grammar of language features.
+    Grammar,
+    /// [`metamorphic::program`](crate::metamorphic::program): a value from the zoo, a body that
+    /// mutates it, and the forms the body must agree in.
+    Metamorphic,
+    /// [`metamorphic::builtins_program`](crate::metamorphic::builtins_program): builtins called
+    /// on values from the zoo.
+    Builtins,
+}
+
+pub const KINDS: [ProgramKind; 3] = [ProgramKind::Grammar, ProgramKind::Metamorphic, ProgramKind::Builtins];
+
+impl ProgramKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            ProgramKind::Grammar => "grammar",
+            ProgramKind::Metamorphic => "metamorphic",
+            ProgramKind::Builtins => "builtins",
+        }
+    }
+
+    pub fn named(name: &str) -> Option<ProgramKind> {
+        KINDS.into_iter().find(|kind| kind.name() == name)
+    }
+
+    /// The program of this kind for `seed`.
+    pub fn program(self, seed: u64) -> String {
+        match self {
+            ProgramKind::Grammar => program(seed),
+            ProgramKind::Metamorphic => crate::metamorphic::program(seed),
+            ProgramKind::Builtins => crate::metamorphic::builtins_program(seed),
+        }
+    }
+}
+
 /// What one seed's program did under the reference engine and every other engine.
 pub struct SeedReport {
+    pub kind: ProgramKind,
     pub seed: u64,
     pub program: String,
     /// GNU R's outcome, against which every other engine is compared.
@@ -1109,13 +1148,14 @@ pub struct Divergence {
 /// Runs `seed`'s program under `reference` and under each of `engines`, in a file written to
 /// `directory`, and compares every engine with the reference.
 pub fn check_seed(
+    kind: ProgramKind,
     seed: u64,
     reference: &dyn Engine,
     engines: &[&dyn Engine],
     directory: &Path,
 ) -> Result<SeedReport, EngineError> {
-    let source = program(seed);
-    let path = directory.join(format!("fuzz_{seed}.R"));
+    let source = kind.program(seed);
+    let path = directory.join(format!("{}_{seed}.R", kind.name()));
     std::fs::write(&path, &source)
         .map_err(|error| EngineError::Failed(format!("{}: {error}", path.display())))?;
     let reference_outcome = reference.run(&path)?;
@@ -1151,6 +1191,7 @@ pub fn check_seed(
         eprintln!("could not remove {}: {error}", path.display());
     }
     Ok(SeedReport {
+        kind,
         seed,
         program: source,
         reference: reference_outcome,
@@ -1167,14 +1208,11 @@ pub fn render_divergences(report: &SeedReport) -> String {
         .iter()
         .map(|divergence| divergence.engine.as_str())
         .collect();
+    let (kind, seed) = (report.kind.name(), report.seed);
     let mut text = format!(
-        "seed {} diverges under {}\nreproduce: cargo run -q -p oracle -- fuzz --seed {} --engines {}\nprogram:   cargo run -q -p oracle -- fuzz --seed {} --print > fuzz_{}.R\n--- program ---\n{}",
-        report.seed,
+        "{kind} seed {seed} diverges under {}\nreproduce: cargo run -q -p oracle -- fuzz --kind {kind} --seed {seed} --engines {}\nprogram:   cargo run -q -p oracle -- fuzz --kind {kind} --seed {seed} --print > {kind}_{seed}.R\n--- program ---\n{}",
         engines.join(", "),
-        report.seed,
         engines.join(","),
-        report.seed,
-        report.seed,
         report.program
     );
     for divergence in &report.divergences {

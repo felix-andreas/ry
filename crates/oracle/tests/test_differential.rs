@@ -11,7 +11,7 @@ use {
     oracle::{
         Engine, ProcessEngine,
         fuzz::{
-            SeedReport, check_seed, format_numbers_program, native_helpers_program,
+            ProgramKind, SeedReport, check_seed, format_numbers_program, native_helpers_program,
             parse_data_program, program, render_divergences, sprintf_program, trace_back_program,
         },
         gnu_r_available, ry_runtime_available,
@@ -73,7 +73,7 @@ fn fuzz_programs_agree_across_tiers() {
     let directory = scratch_directory();
     for &seed in REGRESSION_SEEDS {
         reports.push(
-            check_seed(seed, &gnu_r, &[&tier0, &jit], &directory)
+            check_seed(ProgramKind::Grammar, seed, &gnu_r, &[&tier0, &jit], &directory)
                 .unwrap_or_else(|error| panic!("seed {seed}: {} failed: {error}", gnu_r.name())),
         );
     }
@@ -96,7 +96,7 @@ fn fuzz_programs_survive_gc_torture() {
     let directory = scratch_directory();
     for &seed in REGRESSION_SEEDS {
         reports.push(
-            check_seed(seed, &ry, &[&torture, &young], &directory)
+            check_seed(ProgramKind::Grammar, seed, &ry, &[&torture, &young], &directory)
                 .unwrap_or_else(|error| panic!("seed {seed}: {} failed: {error}", ry.name())),
         );
     }
@@ -113,7 +113,7 @@ fn run_seeds(reference: &dyn Engine, engines: &[&dyn Engine], count: usize) -> V
     let started = Instant::now();
     let reports: Vec<SeedReport> = (first..first + count as u64)
         .map(|seed| {
-            check_seed(seed, reference, engines, &directory)
+            check_seed(ProgramKind::Grammar, seed, reference, engines, &directory)
                 .unwrap_or_else(|error| panic!("seed {seed}: {} failed: {error}", reference.name()))
         })
         .collect();

@@ -13,6 +13,10 @@ use {
     std::{
         path::{Path, PathBuf},
         process::ExitCode,
+        sync::{
+            Mutex,
+            atomic::{AtomicU64, Ordering},
+        },
         time::Duration,
     },
 };
@@ -97,6 +101,24 @@ enum Command {
         /// Print the program for `--seed` and exit, without running anything.
         #[arg(long)]
         print: bool,
+        /// The programs to generate: `grammar` (blocks of language features), `metamorphic`
+        /// (one value, one body, and the forms that must agree), `builtins` (builtins on a
+        /// zoo of values), or `all` for each of them on every seed.
+        #[arg(long, default_value = "grammar")]
+        kind: String,
+        /// Compare only what a program prints, without the deep observer's dump of every
+        /// top-level value.
+        #[arg(long)]
+        no_observe: bool,
+        /// How many programs run at once (default: one per core).
+        #[arg(long)]
+        jobs: Option<usize>,
+        /// Keep running consecutive seeds for this many minutes instead of `--count` seeds.
+        #[arg(long)]
+        minutes: Option<u64>,
+        /// A directory that receives each diverging program and its report.
+        #[arg(long)]
+        findings: Option<PathBuf>,
     },
     /// Run packages' testthat suites under GNU R and ry's runtime (both through `ry load`) and
     /// compare them test by test.
@@ -178,11 +200,22 @@ enum Command {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     if let Command::Fuzz {
-        seed, print: true, ..
-    } = cli.command
+        seed,
+        print: true,
+        kind,
+        ..
+    } = &cli.command
     {
-        print!("{}", oracle::fuzz::program(seed));
-        return ExitCode::SUCCESS;
+        return match fuzz_kinds(kind).as_deref() {
+            Some([kind]) => {
+                print!("{}", kind.program(*seed));
+                ExitCode::SUCCESS
+            }
+            _ => {
+                eprintln!("--print takes one --kind: grammar, metamorphic or builtins");
+                ExitCode::from(2)
+            }
+        };
     }
     if uses_workspace_ry(&cli.command)
         && let Err(error) = oracle::build_workspace_ry()
@@ -295,7 +328,22 @@ fn main() -> ExitCode {
             engines,
             timeout,
             print: _,
-        } => run_fuzz(seed, count, &engines, Duration::from_secs(timeout)),
+            kind,
+            no_observe,
+            jobs,
+            minutes,
+            findings,
+        } => run_fuzz(FuzzRun {
+            first: seed,
+            count,
+            engines: &engines,
+            timeout: Duration::from_secs(timeout),
+            kind: &kind,
+            observe: !no_observe,
+            jobs,
+            budget: minutes.map(|minutes| Duration::from_secs(minutes * 60)),
+            findings,
+        }),
         Command::Gallery {
             seed,
             count,
@@ -837,15 +885,49 @@ struct Tally {
     fails: bool,
 }
 
-fn run_fuzz(first: u64, count: u64, engines: &str, timeout: Duration) -> ExitCode {
+struct FuzzRun<'a> {
+    first: u64,
+    count: u64,
+    engines: &'a str,
+    timeout: Duration,
+    kind: &'a str,
+    observe: bool,
+    jobs: Option<usize>,
+    budget: Option<Duration>,
+    findings: Option<PathBuf>,
+}
+
+/// The kinds `--kind` names, or `None` for a name that is none of them.
+fn fuzz_kinds(name: &str) -> Option<Vec<oracle::fuzz::ProgramKind>> {
+    if name == "all" {
+        return Some(oracle::fuzz::KINDS.to_vec());
+    }
+    name.split(',')
+        .map(|name| oracle::fuzz::ProgramKind::named(name.trim()))
+        .collect()
+}
+
+fn run_fuzz(run: FuzzRun) -> ExitCode {
+    let Some(kinds) = fuzz_kinds(run.kind) else {
+        eprintln!(
+            "unknown --kind `{}`: grammar, metamorphic, builtins or all",
+            run.kind
+        );
+        return ExitCode::from(2);
+    };
+    let prepare = |engine: ProcessEngine| {
+        let engine = engine.with_timeout(run.timeout);
+        if run.observe { engine.observing() } else { engine }
+    };
     let mut parsed = Vec::new();
-    for name in engines
+    for name in run
+        .engines
         .split(',')
         .map(str::trim)
         .filter(|name| !name.is_empty())
     {
         match ProcessEngine::named(name) {
-            Some(engine) => parsed.push(engine.with_timeout(timeout)),
+            Some(engine) => parsed.push(prepare(engine)),
             None => {
                 eprintln!("unknown engine `{name}`");
                 return ExitCode::from(2);
@@ -853,55 +935,130 @@ fn run_fuzz(first: u64, count: u64, engines: &str, timeout: Duration) -> ExitCod
         }
     }
     let engines: Vec<&dyn Engine> = parsed.iter().map(|engine| engine as &dyn Engine).collect();
-    let gnu_r = ProcessEngine::gnu_r().with_timeout(timeout);
+    let gnu_r = prepare(ProcessEngine::gnu_r());
     let directory = std::env::temp_dir().join(format!("ry-oracle-fuzz-{}", std::process::id()));
     if let Err(error) = std::fs::create_dir_all(&directory) {
         eprintln!("{}: {error}", directory.display());
         return ExitCode::FAILURE;
     }
-    let started = std::time::Instant::now();
-    let mut diverging = Vec::new();
-    let mut ended_in_error = 0;
-    for seed in first..first.saturating_add(count) {
-        match oracle::fuzz::check_seed(seed, &gnu_r, &engines, &directory) {
-            Ok(report) => {
-                if !report.reference.errors.is_empty() {
-                    ended_in_error += 1;
-                }
-                for reason in &report.unavailable {
-                    eprintln!("unavailable: {reason}");
-                }
-                if report.divergences.is_empty() {
-                    println!("ok      seed {seed}");
-                } else {
-                    println!("DIFFERS {}", oracle::fuzz::render_divergences(&report));
-                    diverging.push(seed);
-                }
-                if !report.unavailable.is_empty() && report.unavailable.len() == engines.len() {
-                    eprintln!("no engine besides GNU R can run here");
-                    return ExitCode::from(2);
-                }
-            }
-            Err(error) => {
-                println!("ERROR   seed {seed}: GNU R: {error}");
-                diverging.push(seed);
-            }
-        }
+    if let Some(findings) = &run.findings
+        && let Err(error) = std::fs::create_dir_all(findings)
+    {
+        eprintln!("{}: {error}", findings.display());
+        return ExitCode::FAILURE;
     }
+    let started = std::time::Instant::now();
+    let jobs = run
+        .jobs
+        .or_else(|| std::thread::available_parallelism().ok().map(usize::from))
+        .unwrap_or(1)
+        .max(1);
+    // Workers take the next (seed, kind) pair from one counter, so a run with a time budget
+    // covers a prefix of the seeds whatever the number of workers.
+    let next = AtomicU64::new(0);
+    let total = match run.budget {
+        Some(_) => u64::MAX,
+        None => run.count.saturating_mul(kinds.len() as u64),
+    };
+    let state = Mutex::new(FuzzTally::default());
+    std::thread::scope(|scope| {
+        for _ in 0..jobs {
+            scope.spawn(|| {
+                loop {
+                    if run.budget.is_some_and(|budget| started.elapsed() >= budget) {
+                        return;
+                    }
+                    let position = next.fetch_add(1, Ordering::Relaxed);
+                    if position >= total {
+                        return;
+                    }
+                    let kind = kinds[(position % kinds.len() as u64) as usize];
+                    let seed = run.first.saturating_add(position / kinds.len() as u64);
+                    let result = oracle::fuzz::check_seed(kind, seed, &gnu_r, &engines, &directory);
+                    let mut tally = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    tally.ran += 1;
+                    let label = format!("{} seed {seed}", kind.name());
+                    match result {
+                        Ok(report) => {
+                            if let Some(error) = report.reference.errors.first() {
+                                tally.ended_in_error += 1;
+                                // A generated program catches its own errors, so one that
+                                // stops GNU R says the generator wrote something it did not mean.
+                                if kind != oracle::fuzz::ProgramKind::Grammar {
+                                    println!("STOPS   {label} under GNU R: {error}");
+                                }
+                            }
+                            for reason in &report.unavailable {
+                                eprintln!("unavailable: {reason}");
+                            }
+                            if !report.unavailable.is_empty()
+                                && report.unavailable.len() == engines.len()
+                            {
+                                tally.unavailable = true;
+                                next.store(u64::MAX / 2, Ordering::Relaxed);
+                            } else if report.divergences.is_empty() {
+                                println!("ok      {label}");
+                            } else {
+                                let rendered = oracle::fuzz::render_divergences(&report);
+                                println!("DIFFERS {rendered}");
+                                if let Some(findings) = &run.findings {
+                                    let stem = format!("{}_{seed}", kind.name());
+                                    for (extension, text) in
+                                        [("R", &report.program), ("report", &rendered)]
+                                    {
+                                        let path = findings.join(format!("{stem}.{extension}"));
+                                        if let Err(error) = std::fs::write(&path, text) {
+                                            eprintln!("{}: {error}", path.display());
+                                        }
+                                    }
+                                }
+                                tally.diverging.push((kind, seed));
+                            }
+                        }
+                        Err(error) => {
+                            println!("ERROR   {label}: GNU R: {error}");
+                            tally.diverging.push((kind, seed));
+                        }
+                    }
+                }
+            });
+        }
+    });
+    let mut tally = state.into_inner().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Err(error) = std::fs::remove_dir_all(&directory) {
         eprintln!("could not remove {}: {error}", directory.display());
     }
+    if tally.unavailable {
+        eprintln!("no engine besides GNU R can run here");
+        return ExitCode::from(2);
+    }
     println!(
-        "{} of {count} seeds agree ({ended_in_error} ended in an error under GNU R) in {:.1} s",
-        count as usize - diverging.len(),
+        "{} of {} programs agree ({} ended in an error under GNU R) in {:.1} s",
+        tally.ran - tally.diverging.len(),
+        tally.ran,
+        tally.ended_in_error,
         started.elapsed().as_secs_f64()
     );
-    if diverging.is_empty() {
+    if tally.diverging.is_empty() {
         ExitCode::SUCCESS
     } else {
-        println!("diverging seeds: {diverging:?}");
+        tally.diverging.sort_by_key(|(kind, seed)| (kind.name(), *seed));
+        let listed: Vec<String> = tally
+            .diverging
+            .iter()
+            .map(|(kind, seed)| format!("{}:{seed}", kind.name()))
+            .collect();
+        println!("diverging: {}", listed.join(" "));
         ExitCode::FAILURE
     }
+}
+
+#[derive(Default)]
+struct FuzzTally {
+    ran: usize,
+    ended_in_error: usize,
+    diverging: Vec<(oracle::fuzz::ProgramKind, u64)>,
+    unavailable: bool,
 }
 
 fn corpus_directory(corpus: Option<PathBuf>) -> PathBuf {

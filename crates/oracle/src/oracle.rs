@@ -10,6 +10,7 @@ pub mod bench;
 pub mod fuzz;
 pub mod gallery;
 pub mod install;
+pub mod metamorphic;
 
 use {
     serde::Deserialize,

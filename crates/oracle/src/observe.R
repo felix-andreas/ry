@@ -3,7 +3,10 @@
 #
 #   - the type, the length, and the object and S4 bits;
 #   - every element: doubles as `NA`, `NaN` or their bits (so `-0` differs from `0`), strings as
-#     their encoding mark (`U` UTF-8, `L` latin1, `B` bytes, `-` none) and their bytes;
+#     their encoding mark (`U` UTF-8, `L` latin1, `B` bytes, `-` none) and their bytes. A
+#     non-ASCII string that is valid UTF-8 shows `u` whether it is marked UTF-8 or unmarked,
+#     because the two mean the same text in the UTF-8 session the harness runs, and which of
+#     them a builtin returns is `Encoding()` trivia; `ORACLE_OBSERVE=strict` tells them apart;
 #   - the attributes in the order `attributes()` gives them, each dumped the same way, and a data
 #     frame's row names in their stored form;
 #   - calls, pairlists and closures element by element, with a closure's formals, body and
@@ -14,6 +17,7 @@
 # Vectors longer than `.oracle_observe_limit` show their ends and a summary of the middle.
 # The dump uses only base functions, so it reads the same under any engine that runs base R.
 .oracle_observe_limit <- 96L
+.oracle_observe_strict <- identical(Sys.getenv("ORACLE_OBSERVE"), "strict")
 
 .oracle_observe <- function(value) {
   lines <- character()
@@ -26,7 +30,9 @@
     mark <- switch(Encoding(text), "UTF-8" = "U", latin1 = "L", bytes = "B", "-")
     bytes <- charToRaw(text)
     plain <- all(bytes >= as.raw(0x20) & bytes < as.raw(0x7f)) && !any(bytes == as.raw(0x22) | bytes == as.raw(0x5c))
-    if (plain) paste0(mark, "\"", rawToChar(bytes), "\"") else paste0(mark, "<", hex(bytes), ">")
+    if (plain) return(paste0(mark, "\"", rawToChar(bytes), "\""))
+    if (!.oracle_observe_strict && mark %in% c("U", "-") && validUTF8(text)) mark <- "u"
+    paste0(mark, "<", hex(bytes), ">")
   }
 
   double_tokens <- function(x) {
