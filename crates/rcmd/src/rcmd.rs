@@ -3074,7 +3074,11 @@ SHLIB_OPENMP_CFLAGS =
             (nested, "$(CXX$(STD))", "clang++"),
             (nested, "$(CXX$(PADDED))", ""),
             (nested, "-L\"$(R_HOME)/lib\"", "-L\"/My R/lib\""),
-            (simple, "[$(S)] [$(T)] [$(U)]", "[x y $Q] [x y $Q changed] [uv]"),
+            (
+                simple,
+                "[$(S)] [$(T)] [$(U)]",
+                "[x y $Q] [x y $Q changed] [uv]",
+            ),
             (simple, "[$Ax] [$(R_HOME)]", "[x x] [/My R]"),
             (
                 "A := x\nA += $(NONE)\nB = $$ \\\n    \\\n   \nB := $B17\nC := x$$$\n",
