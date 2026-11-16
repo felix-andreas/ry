@@ -323,7 +323,11 @@ unsafe fn do_set_names(call: &Call<'_>) -> R<Sexp> {
         }
         return Err(call.error("attempt to set an attribute on NULL"));
     }
-    if names == nil() && get_attr(object, symbols().names) == nil() {
+    // A call or pairlist keeps its names as tags, not as a `names` attribute.
+    if names == nil()
+        && get_attr(object, symbols().names) == nil()
+        && !matches!(object.kind(), SexpType::Pairlist | SexpType::Language)
+    {
         return Ok(object);
     }
     if object.kind() == SexpType::Object {

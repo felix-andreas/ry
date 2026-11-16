@@ -131,6 +131,10 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
                 interp::values::nil(),
             )
         },
+        unserialize_altrep: |info, state, attributes, levels, is_object| unsafe {
+            crate::serialize::unserialize_altrep(info, state, attributes, levels, is_object)
+                .map(Some)
+        },
     };
     interp::install(&mut runtime.heap, hooks);
     heap::object::install_altrep_elements(heap::object::AltrepElements {

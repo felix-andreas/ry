@@ -550,6 +550,11 @@ pub struct Hooks {
     /// evaluating R code: the boundary-call recorder serializes inputs of the program it
     /// records, and an error it raised through `eval` would reach that program's handlers.
     pub serialize: unsafe fn(Sexp) -> R<Vec<u8>>,
+    /// An ALTREP object read back from a stream: its class information, serialized state,
+    /// attributes, levels and object bit. The host's class registry holds the classes packages
+    /// register (s2's geographies), so it rebuilds the object, or `None` leaves the interpreter
+    /// to materialize base R's classes itself.
+    pub unserialize_altrep: unsafe fn(Sexp, Sexp, Sexp, u16, bool) -> R<Option<Sexp>>,
 }
 
 /// The ALTREP summary methods `sum`, `min` and `max` consult.
@@ -1018,6 +1023,7 @@ pub fn default_hooks() -> Hooks {
         connection_vfprintf: None,
         find_native_symbol: |_| None,
         serialize: |_| Err(unwind::error("serialization needs the libR host")),
+        unserialize_altrep: |_, _, _, _, _| Ok(None),
     }
 }
 
