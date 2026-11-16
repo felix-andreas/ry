@@ -15,7 +15,7 @@ use {
         process::Command,
         sync::{
             Arc,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
+            atomic::{AtomicBool, Ordering},
         },
     },
 };
@@ -68,8 +68,8 @@ pub fn cargo_build(profile_directory: &Path) -> Command {
 }
 
 /// Runs every case of the suite under `suite_dir` through `render` and compares the output with
-/// its expectation. The cases render in parallel, one worker per core, and the report lists the
-/// failures in file order whichever worker finished first, each with the command that reruns it.
+/// its expectation. The cases render in parallel through [`in_parallel`], and the report lists the
+/// failures in file order, each with the command that reruns it.
 ///
 /// `FIXTURE_FILTER` keeps the cases whose `group__case` id contains it, so `group__` runs a whole
 /// group and a full id runs one case (and any case whose id extends it).
@@ -104,10 +104,7 @@ pub fn run_fixture_suite(suite_dir: &Path, render: &(dyn Fn(&str) -> String + Sy
                 .is_none_or(|filter| case.id.contains(filter))
         })
         .collect();
-    let outcomes = in_parallel(&selected, |(_, case)| {
-        panic::catch_unwind(AssertUnwindSafe(|| render(&case.source)))
-            .map_err(|payload| panic_message(payload.as_ref()))
-    });
+    let outcomes = in_parallel(&selected, |(_, case)| render(&case.source));
     let matched = !selected.is_empty();
 
     let mut failures = Vec::new();
@@ -169,32 +166,42 @@ pub fn run_fixture_suite(suite_dir: &Path, render: &(dyn Fn(&str) -> String + Sy
 
     assert!(
         failures.is_empty(),
-        "{} fixture failure(s):\n\n{}\n(set RY_BLESS=1 to accept the new output)",
+        "{} fixture failure(s):\n\n{}\n(the run used {}: a case rendered after others on the \
+         same worker, so replaying a whole-suite failure needs the same count; set RY_BLESS=1 to \
+         accept the new output)",
         failures.len(),
-        failures.join("\n")
+        failures.join("\n"),
+        workers_replay()
     );
 }
 
-/// `work` applied to every item on one worker per core, returned in the order of `items` whichever
-/// worker finished first. Callers hand it work whose result depends on its item alone (a fixture
-/// rendering, a case run in its own process and directory), so the result is deterministic.
-pub fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
-    let next = AtomicUsize::new(0);
-    let workers = std::thread::available_parallelism()
-        .map_or(1, |count| count.get())
-        .min(items.len().max(1));
-    let mut results: Vec<(usize, R)> = std::thread::scope(|scope| {
+/// `work` applied to every item, returned in the order of `items` with a panic caught per item
+/// and returned as its message, so one panicking item neither hides which item it was nor
+/// discards the other results.
+///
+/// The items are dealt out statically: worker `w` of `n` takes items `w`, `w + n`, `w + 2n` and
+/// so on, in that order. Work that keeps per-thread state between items (the fixture renderers
+/// reuse one analysis database per thread) therefore sees the same history on every run with the
+/// same worker count, which [`test_workers`] reads and [`workers_replay`] prints.
+pub fn in_parallel<T: Sync, R: Send>(
+    items: &[T],
+    work: impl Fn(&T) -> R + Sync,
+) -> Vec<Result<R, String>> {
+    let workers = test_workers().min(items.len().max(1));
+    let work = &work;
+    let mut results: Vec<(usize, Result<R, String>)> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..workers)
-            .map(|_| {
-                scope.spawn(|| {
-                    let mut done = Vec::new();
-                    loop {
-                        let position = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(item) = items.get(position) else {
-                            return done;
-                        };
-                        done.push((position, work(item)));
-                    }
+            .map(|worker| {
+                scope.spawn(move || {
+                    (worker..items.len())
+                        .step_by(workers)
+                        .map(|position| {
+                            let outcome =
+                                panic::catch_unwind(AssertUnwindSafe(|| work(&items[position])))
+                                    .map_err(|payload| panic_message(payload.as_ref()));
+                            (position, outcome)
+                        })
+                        .collect::<Vec<_>>()
                 })
             })
             .collect();
@@ -209,6 +216,20 @@ pub fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync)
     });
     results.sort_by_key(|(position, _)| *position);
     results.into_iter().map(|(_, result)| result).collect()
+}
+
+/// The worker count [`in_parallel`] uses: `RY_TEST_WORKERS` when set to a positive number, and
+/// one per core otherwise.
+pub fn test_workers() -> usize {
+    env_var("TEST_WORKERS")
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|count| *count > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |count| count.get()))
+}
+
+/// The variable assignment that replays a run with the partition this run used.
+pub fn workers_replay() -> String {
+    format!("RY_TEST_WORKERS={}", test_workers())
 }
 
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {

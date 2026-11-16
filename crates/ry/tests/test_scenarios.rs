@@ -26,7 +26,7 @@ use {
         path::{Path, PathBuf},
         process::{Child, ChildStdin, Command, Stdio},
         sync::{
-            OnceLock,
+            Arc, Mutex, OnceLock,
             mpsc::{self, Receiver},
         },
         time::{Duration, Instant},
@@ -62,22 +62,30 @@ fn scenarios_hold() {
             (name, path)
         })
         .collect();
-    let scenarios = select_scenarios(scenarios, std::env::var("SCENARIO").ok().as_deref())
+    let selected = std::env::var("SCENARIO")
+        .ok()
+        .filter(|only| !only.is_empty());
+    let scenarios = select_scenarios(scenarios, selected.as_deref())
         .unwrap_or_else(|message| panic!("{message}"));
     corpus_library();
     // Each scenario works in its own directory under CARGO_TARGET_TMPDIR and its own processes,
-    // so they run on one worker per core; the report follows the sorted order all the same.
+    // so they run in parallel; the report follows the sorted order all the same.
     let outcomes = in_parallel(&scenarios, |(name, path)| {
         fs::read_to_string(path)
             .map_err(|error| format!("reading {}: {error}", path.display()))
             .and_then(|text| run_scenario(name, &text))
     });
     let mut failures = Vec::new();
+    let mut skips = Vec::new();
     let mut passed = 0;
     for ((name, _), outcome) in scenarios.iter().zip(outcomes) {
+        let outcome = outcome.unwrap_or_else(|message| Err(format!("panicked: {message}")));
         match outcome {
             Ok(Outcome::Passed) => passed += 1,
-            Ok(Outcome::Skipped(reason)) => eprintln!("scenario {name}: skipped, {reason}"),
+            Ok(Outcome::Skipped(reason)) => {
+                eprintln!("scenario {name}: skipped, {reason}");
+                skips.push(format!("scenario {name}: skipped, {reason}"));
+            }
             Err(failure) => failures.push(format!(
                 "scenario {name}: {failure}\n    rerun: SCENARIO={name} cargo test -p ry-lang --test \
                  test_scenarios scenarios_hold"
@@ -90,6 +98,14 @@ fn scenarios_hold() {
         failures.len()
     );
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    // A scenario asked for by name that only skipped checked nothing, and a pass would hide that.
+    if let Some(only) = selected {
+        assert!(
+            passed > 0,
+            "SCENARIO={only} ran nothing:\n{}",
+            skips.join("\n")
+        );
+    }
 }
 
 /// The scenarios `SCENARIO` selects. Unset or empty (`just scenarios` with no name) selects them
@@ -1216,8 +1232,8 @@ fn native_diagnostics_agree_with_the_typed_core() {
     let mut pinned = vec![false; NATIVE_CHECK_EXCEPTIONS.len()];
     // The standard library functions a function of the corpus calls and then runs natively.
     let mut exercised = vec![false; COMPILED_STD.len()];
-    // Each program checks and runs in its own projects, so the processes run on one worker per
-    // core and the findings are read in program order afterwards.
+    // Each program checks and runs in its own projects, so the processes run in parallel and the
+    // findings are read in program order afterwards.
     let outputs = in_parallel(&programs, |program| {
         let project = |strict: bool| {
             let project = directory
@@ -1254,8 +1270,15 @@ fn native_diagnostics_agree_with_the_typed_core() {
             .expect("run ry");
         (check, run)
     });
-    for (program, (check, run)) in programs.iter().zip(outputs) {
+    for (program, outputs) in programs.iter().zip(outputs) {
         let name = &program.name;
+        let (check, run) = match outputs {
+            Ok(outputs) => outputs,
+            Err(message) => {
+                failures.push(format!("{name}: panicked: {message}"));
+                continue;
+            }
+        };
         let lines: Vec<&str> = program.source.lines().collect();
         // A definition at the start of a line owns the lines up to the next top-level statement.
         let mut owner = None;
@@ -1904,11 +1927,65 @@ fn is_version(version: &str) -> bool {
 /// checked with that runtime itself: ry's for `ry-runtime`, and for `gnu-r` the GNU R that
 /// `--runtime gnu-r` picks. A library built by one R version may not load in another, so asking
 /// any other R could pass a package the scenario then fails to load, or skip one it can.
+///
+/// Scenarios run in parallel and many need the same package, so each distinct probe runs once and
+/// the others wait for its answer, and each writes its script to a directory of its own.
 fn missing_package(
     package: &str,
     minimum: Option<&str>,
     requirements: &[String],
     library: Option<&Path>,
+) -> Result<Option<String>, String> {
+    type Probe = Arc<OnceLock<Result<Option<String>, String>>>;
+    static PROBES: Mutex<BTreeMap<ProbeKey, (usize, Probe)>> = Mutex::new(BTreeMap::new());
+    let requires = |runtime: &str| {
+        requirements
+            .iter()
+            .any(|requirement| requirement == runtime)
+    };
+    let key = ProbeKey {
+        package: package.to_owned(),
+        minimum: minimum.map(str::to_owned),
+        ry_runtime: requires("ry-runtime"),
+        gnu_r: requires("gnu-r"),
+        library: library.map(Path::to_path_buf),
+    };
+    let (index, probe) = {
+        let mut probes = PROBES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let next = probes.len();
+        probes
+            .entry(key)
+            .or_insert_with(|| (next, Arc::default()))
+            .clone()
+    };
+    probe
+        .get_or_init(|| {
+            let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+                .join("package-probe")
+                .join(index.to_string());
+            probe_package(package, minimum, requirements, library, &directory)
+        })
+        .clone()
+}
+
+/// What makes two package probes the same probe.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct ProbeKey {
+    package: String,
+    minimum: Option<String>,
+    ry_runtime: bool,
+    gnu_r: bool,
+    library: Option<PathBuf>,
+}
+
+fn probe_package(
+    package: &str,
+    minimum: Option<&str>,
+    requirements: &[String],
+    library: Option<&Path>,
+    directory: &Path,
 ) -> Result<Option<String>, String> {
     // A package older than `minimum` prints a marker line with its version and exits cleanly, so
     // the probe cannot mistake a failing `ry run` or `Rscript`, whatever its exit status, for an
@@ -1925,9 +2002,8 @@ fn missing_package(
         .iter()
         .any(|requirement| requirement == "ry-runtime")
     {
-        let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("package-probe");
         let script = directory.join("probe.R");
-        if let Err(error) = fs::create_dir_all(&directory).and_then(|()| fs::write(&script, &probe))
+        if let Err(error) = fs::create_dir_all(directory).and_then(|()| fs::write(&script, &probe))
         {
             return Err(format!(
                 "writing the package probe {}: {error}",
@@ -1938,7 +2014,7 @@ fn missing_package(
         command
             .args(["run", "--runtime", "ry"])
             .arg(&script)
-            .current_dir(&directory)
+            .current_dir(directory)
             .env("XDG_CACHE_HOME", directory.join(".cache"))
             .env_remove("RY_LIBR")
             .env_remove("RY_IMAGE")

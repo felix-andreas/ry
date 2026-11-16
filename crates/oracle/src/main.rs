@@ -415,6 +415,14 @@ fn verify(gnu_r: &ProcessEngine, selection: &Selection, verbose: bool) -> ExitCo
     let mut failures = 0;
     let mut crashed = Vec::new();
     for (case, run) in cases.iter().zip(runs) {
+        let run = match run {
+            Ok(run) => run,
+            Err(message) => {
+                println!("PANICKED {}: {message}", case.display());
+                failures += 1;
+                continue;
+            }
+        };
         let Some((expected, actual)) = run else {
             println!("MISSING {}", case.display());
             failures += 1;
@@ -636,13 +644,21 @@ fn compare(
     let mut crashed = Vec::new();
     for (case, runs) in cases.iter().zip(runs) {
         let runs = match runs {
-            CaseRuns::Compared(runs) => runs,
-            CaseRuns::GnuRCrashed(error) => {
+            Ok(CaseRuns::Compared(runs)) => runs,
+            Err(message) => {
+                println!("PANICKED {}: {message}", case.display());
+                for tally in &mut tallies {
+                    tally.new += 1;
+                    tally.fails = true;
+                }
+                continue;
+            }
+            Ok(CaseRuns::GnuRCrashed(error)) => {
                 println!("skip    {}: this GNU R crashed: {error}", case.display());
                 crashed.push(case.as_path());
                 continue;
             }
-            CaseRuns::NoExpectation(error) => {
+            Ok(CaseRuns::NoExpectation(error)) => {
                 println!("ERROR   {}: {error}", case.display());
                 for tally in &mut tallies {
                     tally.new += 1;
@@ -1099,7 +1115,7 @@ fn plural(count: usize, one: &str, many: &str) -> String {
 
 fn default_ry() -> PathBuf {
     std::env::var_os("ORACLE_RY").map_or_else(
-        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ry"),
+        || oracle::target_directory().join("debug/ry"),
         PathBuf::from,
     )
 }

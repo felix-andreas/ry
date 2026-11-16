@@ -1,8 +1,31 @@
 #!/bin/sh
-# A rustc wrapper (RUSTC_WRAPPER) that links with mold instead of the toolchain's rust-lld: the
-# last -fuse-ld wins, and rustc ignores link arguments for a crate it does not link. Cargo leaves
-# the wrapper out of its fingerprints, so switching it on or off relinks without recompiling,
-# which a linker set through CARGO_TARGET_<triple>_LINKER would not. tools/env.sh selects it.
+# A rustc wrapper (RUSTC_WRAPPER) that links Linux targets with mold instead of the toolchain's
+# rust-lld: the last -fuse-ld wins, and rustc ignores link arguments for a crate it does not link.
+# A compile for any other target (wasm, macOS, Windows) passes through unchanged, and so does any
+# compile on a host that is not Linux unless `--target` names a Linux triple. Cargo leaves the
+# wrapper out of its fingerprints, so turning it on or off rebuilds nothing: the next link that
+# happens for other reasons is the first to use the other linker. tools/env.sh selects it.
 rustc=$1
 shift
-exec "$rustc" "$@" -Clink-arg=-fuse-ld=mold
+target=
+target_follows=
+for argument in "$@"; do
+	if [ -n "$target_follows" ]; then
+		target=$argument
+		target_follows=
+		continue
+	fi
+	case $argument in
+	--target) target_follows=1 ;;
+	--target=*) target=${argument#--target=} ;;
+	esac
+done
+case $target in
+'') [ "$(uname -s)" = Linux ] && linux=1 || linux= ;;
+*-linux-*) linux=1 ;;
+*) linux= ;;
+esac
+if [ -n "$linux" ]; then
+	exec "$rustc" "$@" -Clink-arg=-fuse-ld=mold
+fi
+exec "$rustc" "$@"

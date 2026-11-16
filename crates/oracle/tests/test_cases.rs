@@ -15,13 +15,13 @@ use {
         Verdict, build_workspace_ry, check_build, diff, engine_from_environment, engine_packages,
         expected_path, fails_run, find_cases, gnu_r_available, gnu_r_build, installed_packages,
         known_failure, known_failures, libraries_ahead_of_reference, library_dependent, parse,
-        parse_known_failures, render, runnable_cases, ry_runtime_available, verdict, write_build,
+        parse_known_failures, render, runnable_cases, ry_runtime_available, target_directory,
+        verdict, write_build,
     },
     std::{
         ffi::OsStr,
         path::{Path, PathBuf},
         process::Command,
-        sync::atomic::{AtomicUsize, Ordering},
         time::{Duration, Instant},
     },
     syntax::testing::{SplitMix64, fuzz_iterations, in_parallel},
@@ -96,6 +96,13 @@ fn recorded_outcomes_match_gnu_r() {
     let runs = in_parallel(&chosen, |case| gnu_r.run(case));
     let mut failures = Vec::new();
     for (case, run) in chosen.iter().zip(runs) {
+        let run = match run {
+            Ok(run) => run,
+            Err(message) => {
+                failures.push(format!("{} panicked: {message}", case.display()));
+                continue;
+            }
+        };
         let actual = match run {
             Ok(actual) => actual,
             Err(EngineError::Crashed(error)) => {
@@ -189,7 +196,14 @@ fn second_engine_matches_gnu_r() {
         (expected, second.run(case))
     });
     let mut failures = Vec::new();
-    for (case, (expected, actual)) in chosen.iter().zip(runs) {
+    for (case, run) in chosen.iter().zip(runs) {
+        let (expected, actual) = match run {
+            Ok(run) => run,
+            Err(message) => {
+                failures.push(format!("{} panicked: {message}", case.display()));
+                continue;
+            }
+        };
         let (run, failure) = match actual {
             Err(EngineError::Unavailable(error)) => panic!("{name} is unavailable: {error}"),
             Err(EngineError::Crashed(error)) => (
@@ -253,7 +267,7 @@ fn workspace_ry_has_base_r() -> bool {
     if let Some(base) = set("RY_BASE_R") {
         return rcmd::base::holds_base_r(Path::new(&base));
     }
-    let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+    let target = target_directory();
     [target.join("debug/base-r"), target.join("base-r")]
         .iter()
         .any(|candidate| rcmd::base::is_complete(candidate))
@@ -523,57 +537,29 @@ fn cases_survive(torture: fn(u64) -> ProcessEngine, focus: &[&str], focused: usi
     let ry = ProcessEngine::ry().with_timeout(timeout);
     let torture = torture.with_timeout(timeout);
     let started = Instant::now();
-    // Each case is two independent processes, so the cases run on every core; the failures are
-    // reported in the order the seed chose the cases, whichever thread finished first.
-    let next = AtomicUsize::new(0);
-    let workers = std::thread::available_parallelism().map_or(1, |count| count.get());
-    let mut failures: Vec<(usize, String)> = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..workers)
-            .map(|_| {
-                scope.spawn(|| {
-                    let mut found = Vec::new();
-                    loop {
-                        let index = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(case) = chosen.get(index) else {
-                            return found;
-                        };
-                        let unstressed = match ry.run(case) {
-                            Ok(outcome) => outcome,
-                            // A case ry cannot run at all is the plain oracle's finding, not
-                            // torture's.
-                            Err(error) => {
-                                eprintln!("{}: ry: {error}", case.display());
-                                continue;
-                            }
-                        };
-                        match torture.run(case) {
-                            Ok(stressed) => {
-                                if let Some(difference) =
-                                    diff("ry", &unstressed, &torture.name(), &stressed)
-                                {
-                                    found
-                                        .push((index, format!("{}\n{difference}", case.display())));
-                                }
-                            }
-                            Err(error) => {
-                                found.push((index, format!("{}: {error}", case.display())))
-                            }
-                        }
-                    }
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|handle| {
-                handle
-                    .join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-            })
-            .collect()
-    });
-    failures.sort_by_key(|(index, _)| *index);
-    let failures: Vec<String> = failures.into_iter().map(|(_, failure)| failure).collect();
+    // Each case is two independent processes, so the cases run in parallel; the failures are
+    // reported in the order the seed chose the cases.
+    let failures: Vec<String> = in_parallel(&chosen, |case| {
+        let unstressed = match ry.run(case) {
+            Ok(outcome) => outcome,
+            // A case ry cannot run at all is the plain oracle's finding, not torture's.
+            Err(error) => {
+                eprintln!("{}: ry: {error}", case.display());
+                return None;
+            }
+        };
+        match torture.run(case) {
+            Ok(stressed) => diff("ry", &unstressed, &torture.name(), &stressed)
+                .map(|difference| format!("{}\n{difference}", case.display())),
+            Err(error) => Some(format!("{}: {error}", case.display())),
+        }
+    })
+    .into_iter()
+    .zip(&chosen)
+    .filter_map(|(outcome, case)| {
+        outcome.unwrap_or_else(|message| Some(format!("{} panicked: {message}", case.display())))
+    })
+    .collect();
     eprintln!(
         "{} case(s) from seed {seed} under {} in {:.1} s",
         chosen.len(),

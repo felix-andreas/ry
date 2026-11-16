@@ -8,7 +8,10 @@ use {
         Config, TextEdit, apply_edits, check_range_format_invariants as check_invariants, format,
         format_range,
     },
-    syntax::{TextRange, TextSize, testing::in_parallel},
+    syntax::{
+        TextRange, TextSize,
+        testing::{in_parallel, workers_replay},
+    },
 };
 
 #[test]
@@ -28,21 +31,24 @@ fn program_corpus_holds_range_invariants() {
     hold_invariants(&sources, |id| format!("program corpus case `{id}`"));
 }
 
-/// Checks the battery on every source, one worker per core, and fails naming each source that
-/// broke an invariant (the battery's own panic message precedes the list).
+/// Checks the battery on every source in parallel and fails naming each source that broke an
+/// invariant, with the invariant's own message.
 fn hold_invariants(sources: &[(String, String)], describe: impl Fn(&str) -> String + Sync) {
-    let broken: Vec<String> = in_parallel(sources, |(id, source)| {
-        std::panic::catch_unwind(|| check_invariants(source))
-            .err()
-            .map(|_| describe(id))
-    })
-    .into_iter()
-    .flatten()
-    .collect();
+    let broken: Vec<String> = in_parallel(sources, |(_, source)| check_invariants(source))
+        .into_iter()
+        .zip(sources)
+        .filter_map(|(outcome, (id, _))| {
+            outcome
+                .err()
+                .map(|message| format!("{}: {message}", describe(id)))
+        })
+        .collect();
     assert!(
         broken.is_empty(),
-        "{} broke a range-format invariant",
-        broken.join(", ")
+        "{} source(s) broke a range-format invariant (the run used {}):\n\n{}",
+        broken.len(),
+        workers_replay(),
+        broken.join("\n\n")
     );
 }
 

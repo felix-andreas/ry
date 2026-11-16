@@ -15,9 +15,9 @@ the next reader.
 ## The fast loop
 
 Run `source tools/env.sh` once per shell. It puts the reference GNU R (`/opt/R/<version>/bin`) on
-`PATH` when no `R` is there, links debug builds with mold when mold is installed (through
-`RUSTC_WRAPPER=tools/mold-rustc`, which cargo leaves out of its fingerprints, so switching it never
-recompiles anything), and reports whether ry's base R (`target/base-r`) is built:
+`PATH` when no `R` is there, links Linux builds with mold when it runs on Linux and mold is installed
+(through `RUSTC_WRAPPER=tools/mold-rustc`, which cargo leaves out of its fingerprints, so switching it
+rebuilds nothing), and reports whether ry's base R (`target/base-r`) is built:
 
 ```text
 $ source tools/env.sh
@@ -56,9 +56,10 @@ themselves (a no-op build takes 0.4 s), so they never run a stale `libR.so`.
 | `FIXTURE_FILTER` | every fixture suite | runs the cases whose `group__case` id contains the value (`pipes__` runs a group) |
 | `RY_BLESS=1` | fixture suites, `test_docs`, oracle `test_cases` | rewrites the expected output from the actual output |
 | `FUZZ_SEED`, `FUZZ_ITERS`, `FUZZ_DEPTH` | every seeded fuzzer and simulator | replays one seed; sets the iteration count; multiplies the default count |
-| `SCENARIO` | `test_scenarios` `scenarios_hold` | runs the one scenario of that name |
+| `SCENARIO` | `test_scenarios` `scenarios_hold` | runs the one scenario of that name, and fails if it skips |
+| `RY_TEST_WORKERS` | fixture suites, oracle, scenarios, `test_format_range` | the worker count; failures print the count the run used |
 | `DOCS_PAGE` | `test_docs` | runs the examples of pages whose path contains the value |
-| `ORACLE_ENGINE` | oracle `test_cases` | compares that engine (`ry`, `ry-jit`, `ry-gctorture`, ...) on every case instead of ry on a sample |
+| `ORACLE_ENGINE` | oracle `test_cases` | compares that engine (`ry`, `ry-jit`, `ry-gctorture`, ...) on every case instead of ry on a sample, and fails if base R is not built |
 | `ORACLE_RY` | the oracle | the `ry` binary to run, which the oracle then does not build |
 | `ORACLE_R`, `ORACLE_RSCRIPT` | the oracle | the GNU R to compare with (default: `R` and `Rscript` on `PATH`) |
 | `RY_BASE_R` | `ry` | the base R tree; a debug `ry` otherwise finds `target/base-r` |
@@ -66,7 +67,19 @@ themselves (a no-op build takes 0.4 s), so they never run a stale `libR.so`.
 | `RY_LIBR` | `ry` | the `libR.so` to load instead of the one beside the binary |
 | `R_LIBS`, `RY_CORPUS_DIR` | oracle, scenarios | the package library cases and journeys load from (default: `.corpus/library`) |
 | `RY_SKIP_GNU_R=1` | libr tests | skips the parts that need GNU R even when it is installed |
-| `RUSTC_WRAPPER` | cargo | `tools/mold-rustc` links with mold; `tools/env.sh` sets it |
+| `RUSTC_WRAPPER` | cargo | `tools/mold-rustc` links Linux targets with mold; `tools/env.sh` sets it on Linux |
+
+A test that cannot run here (no GNU R, no base R, a missing package) passes and says why on
+standard error, which cargo shows only for a failing test or with `-- --nocapture`. Stable Rust has
+no way for a test to report itself skipped at run time, so a green run of the default oracle sample
+or of the scenarios may have checked less than it looks. A run you ask for by name does not pass
+that way: `SCENARIO=<name>` fails when the scenario skips, and `ORACLE_ENGINE=<engine>` fails when
+the engine is ry and base R is not built.
+
+The parallel harnesses deal items out statically, so worker `w` of `n` takes items `w`, `w + n`,
+and so on. A fixture suite reuses one analysis database per worker, so a failure that depends on
+what rendered before it on the same worker replays with the whole suite and the same count, which
+the failure message prints as `RY_TEST_WORKERS=<n>`.
 
 ### What is slow and why
 
@@ -76,7 +89,7 @@ Whole test binaries, run only (already built), 4 cores, debug, GNU R on `PATH`:
 | --- | --- | --- |
 | `jit` `test_tiers` | 160 s | four seeded fuzzers (150 to 400 seeds each) run 115 to 125 s apiece in parallel; the binary is CPU-bound |
 | `ry-lang` `test_scenarios` | 120 s | 80 journeys and the typed benchmark programs, each spawning `ry` processes; parallel inside each test, CPU-bound |
-| `oracle` `test_cases` | 180 s with GNU R, 28 s without | every case under GNU R against its recording, and the collection-stress replays |
+| `oracle` `test_cases` | 180 s with GNU R, 25 s without | every case under GNU R against its recording, and the collection-stress replays; without GNU R, 5 s of it is the 24-case ry sample and the rest the three stress replays |
 | `frames` `test_standard_library` | 82 s | `standard_library_at_runtime` evaluates every case in one process: the interpreter is a process-wide singleton, so it cannot run in parallel |
 | `table` `test_table` | 42 s | engine model fuzzers |
 | `format` `test_format_range` | 35 s | the range-format battery over every fixture and corpus source, in parallel |

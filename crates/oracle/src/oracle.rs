@@ -409,13 +409,23 @@ impl ProcessEngine {
     }
 }
 
+/// The workspace's cargo target directory: `CARGO_TARGET_DIR` when set, resolved against the
+/// workspace root (where [`build_workspace_ry`] runs cargo), else `target` there.
+pub fn target_directory() -> PathBuf {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    match std::env::var_os("CARGO_TARGET_DIR").filter(|value| !value.is_empty()) {
+        Some(directory) => workspace.join(directory),
+        None => workspace.join("target"),
+    }
+}
+
 /// The `ry` binary: `$ORACLE_RY`, else the workspace's debug build.
 /// A relative `ORACLE_RY` resolves against the current directory, because the engines run
 /// each case from the case's own directory.
 pub fn ry_program() -> String {
     let program = std::env::var("ORACLE_RY")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ry"));
+        .unwrap_or_else(|_| target_directory().join("debug/ry"));
     std::fs::canonicalize(&program)
         .unwrap_or(program)
         .display()
@@ -978,9 +988,9 @@ pub fn build_workspace_ry() -> Result<(), String> {
     if std::env::var_os("ORACLE_RY").is_some() {
         return Ok(());
     }
-    let profile_directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug");
-    let status = syntax::testing::cargo_build(&profile_directory)
+    let status = syntax::testing::cargo_build(&target_directory().join("debug"))
         .args(["-p", "ry-lang", "-p", "libr"])
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .status()
         .map_err(|error| format!("cargo build -p ry-lang -p libr: {error}"))?;
     match status.success() {
