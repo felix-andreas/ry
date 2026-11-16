@@ -527,7 +527,7 @@ impl Calls {
     }
 
     /// Drops the code of `entry`, whose call keeps changing, and leaves the call to the AST
-    /// evaluator. The weak reference holds nothing from here on and goes when the call dies.
+    /// evaluator. The weak reference is left holding nothing and goes when the call dies.
     unsafe fn give_up(&mut self, entry: usize) {
         crate::heap().set_weak_value(self.weaks[entry], nil());
         self.states.insert(self.keys[entry], NEVER_COMPILES);
@@ -1033,14 +1033,18 @@ pub unsafe fn run_loop(call: Sexp, sequence: Option<Sexp>, env: Sexp) -> R<Optio
 /// Native code and R code may change a call between evaluations, so each evaluation of compiled
 /// code first compares the call's [`call_shape`] with the one it compiled from. A call that
 /// changed compiles again, from the live object, and one that changed [`MAX_RECOMPILES`] times
-/// stays with the AST evaluator, as does a call that [`compiles_as_promise`] rejects.
+/// runs on the AST evaluator for good, as does a call that [`compiles_as_promise`] rejects.
+///
+/// Compiled code runs a closure the call invokes without native recursion, so this entry is
+/// the one place a call that evaluates itself through native code asks for stack.
 pub unsafe fn run_call(call: Sexp, env: Sexp) -> R<Sexp> {
     let calls = &mut interp().bytecode.calls;
     let state = calls.states.get(&call).copied().unwrap_or(0);
     if state & COMPILED != 0 {
         let entry = (state & !COMPILED) as usize;
         if call_shape(call) == calls.shapes[entry] && runs_compiled(env) {
-            return run_promise(calls.codes[entry], env);
+            let code = calls.codes[entry];
+            return eval::on_large_stack(|| run_promise(code, env));
         }
         return run_changed_call(call, env, entry);
     }
@@ -1058,11 +1062,11 @@ pub unsafe fn run_call(call: Sexp, env: Sexp) -> R<Sexp> {
     }
     let code = compile_call(call, env)?;
     interp().bytecode.calls.add(call, code, call_shape(call))?;
-    run_promise(code, env)
+    eval::on_large_stack(|| run_promise(code, env))
 }
 
-/// [`run_call`] for a compiled call whose shape no longer matches its code, or whose
-/// environment the code cannot run in.
+/// [`run_call`] for a compiled call whose shape differs from the one its code compiled from, or
+/// whose environment the code cannot run in.
 #[cold]
 #[inline(never)]
 unsafe fn run_changed_call(call: Sexp, env: Sexp, entry: usize) -> R<Sexp> {
@@ -1075,7 +1079,8 @@ unsafe fn run_changed_call(call: Sexp, env: Sexp, entry: usize) -> R<Sexp> {
     let shape = call_shape(call);
     let calls = &mut interp().bytecode.calls;
     if shape == calls.shapes[entry] {
-        return run_promise(calls.codes[entry], env);
+        let code = calls.codes[entry];
+        return eval::on_large_stack(|| run_promise(code, env));
     }
     if calls.recompiles[entry] >= MAX_RECOMPILES || !compiles_as_promise(call) {
         calls.give_up(entry);
@@ -1084,10 +1089,10 @@ unsafe fn run_changed_call(call: Sexp, env: Sexp, entry: usize) -> R<Sexp> {
     // The caller holds the call, so no collection while compiling frees its entry.
     let code = compile_call(call, env)?;
     interp().bytecode.calls.replace(entry, code, shape);
-    run_promise(code, env)
+    eval::on_large_stack(|| run_promise(code, env))
 }
 
-/// Whether compiled code can evaluate a call in `env` now: an environment that is not a slot
+/// Whether compiled code can evaluate a call in `env`: an environment that is not a slot
 /// frame's stand-in, with no debugger that may stop at a statement of the call.
 #[inline(always)]
 unsafe fn runs_compiled(env: Sexp) -> bool {

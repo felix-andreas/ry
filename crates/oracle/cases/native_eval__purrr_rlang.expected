@@ -45,9 +45,11 @@
 | error: x is 7 | call: rlang::eval_bare(e, environment()) 
 | warning: x is 7 | call: rlang::eval_bare(e, environment()) 
 | warning: x is 8 | call: rlang::eval_bare(e, environment()) 
+| [1] TRUE
+| [1] 45150
 [messages]
 [warnings]
 [errors]
 [value]
-NULL
-| NULL
+double
+| 45150

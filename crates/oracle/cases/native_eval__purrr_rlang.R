@@ -57,3 +57,10 @@ withCallingHandlers(
     invokeRestart("muffleWarning")
   }
 )
+# An expression that evaluates itself through native code without end raises an error that
+# `tryCatch` catches, also when the expression runs compiled.
+runaway <- quote(rlang::eval_bare(runaway, rlang::env(runaway = runaway)))
+inherits(tryCatch(rlang::eval_bare(runaway, rlang::env(runaway = runaway)), error = function(err) err), "error")
+# The same recursion with an end returns its value.
+countdown <- quote(if (n <= 0) 0 else n + rlang::eval_bare(countdown, rlang::env(n = n - 1, countdown = countdown)))
+rlang::eval_bare(countdown, rlang::env(n = 300, countdown = countdown))

@@ -535,26 +535,31 @@ fn fuzz_native_code_reevaluates_a_changing_call() {
         let mut rng = SplitMix64(0xe7a1 ^ seed);
         let mark = r.protected.get();
         r.stress(seed % 10 == 9);
-        let call = random_call(&r, &mut rng, 3);
-        for step in 0..40 {
-            change_call(&r, &mut rng, call);
-            for _ in 0..1 + rng.below(4) {
-                let fresh = r.keep(unsafe { (r.api().Rf_duplicate)(call) });
-                let expected = r.eval_expression(fresh);
-                let actual = r.eval_expression(call);
-                let agree = match (&expected, &actual) {
-                    (Ok(expected), Ok(actual)) => unsafe {
-                        (r.api().R_compute_identical)(*expected, *actual, 16) != 0
-                    },
-                    (Err(expected), Err(actual)) => expected == actual,
-                    _ => false,
-                };
-                assert!(
-                    agree,
-                    "seed {seed}, step {step}: the walker gave {} and the evaluated call {}",
-                    describe(&r, &expected),
-                    describe(&r, &actual)
-                );
+        // A call that changed shape three times runs on the walker for good, so each seed takes
+        // several calls through a few steps each, and most steps leave the shape alone.
+        for round in 0..6 {
+            let call = random_call(&r, &mut rng, 3);
+            for step in 0..8 {
+                change_call(&r, &mut rng, call);
+                for _ in 0..1 + rng.below(4) {
+                    let fresh = r.keep(unsafe { (r.api().Rf_duplicate)(call) });
+                    let expected = r.eval_expression(fresh);
+                    let actual = r.eval_expression(call);
+                    let agree = match (&expected, &actual) {
+                        (Ok(expected), Ok(actual)) => unsafe {
+                            (r.api().R_compute_identical)(*expected, *actual, 16) != 0
+                        },
+                        (Err(expected), Err(actual)) => expected == actual,
+                        _ => false,
+                    };
+                    assert!(
+                        agree,
+                        "seed {seed}, call {round}, step {step}: the walker gave {} and the \
+                         evaluated call {}",
+                        describe(&r, &expected),
+                        describe(&r, &actual)
+                    );
+                }
             }
         }
         r.stress(false);
@@ -571,7 +576,7 @@ fn change_call(r: &R, rng: &mut SplitMix64, call: Sexp) {
     let cells = argument_cells(r, call);
     let cell = cells[rng.below(cells.len())];
     let value = unsafe { (api.CAR)(cell) };
-    match rng.below(8) {
+    match rng.below(16) {
         0 => {
             let leaf = random_leaf(r, rng);
             unsafe { (api.SETCAR)(cell, leaf) };
@@ -580,17 +585,17 @@ fn change_call(r: &R, rng: &mut SplitMix64, call: Sexp) {
             let nested = random_call(r, rng, 1);
             unsafe { (api.SETCAR)(cell, nested) };
         }
-        2 if unsafe { (api.TYPEOF)(value) } == INTSXP => {
+        2..=4 if unsafe { (api.TYPEOF)(value) } == INTSXP => {
             let length = unsafe { (api.XLENGTH)(value) } as usize;
             let index = rng.below(length);
             unsafe { *(api.INTEGER)(value).add(index) = rng.below(50) as c_int };
         }
-        3 => unsafe { (api.SET_TYPEOF)(cell, LANGSXP as u32) },
-        4 => {
+        5 => unsafe { (api.SET_TYPEOF)(cell, LANGSXP as u32) },
+        6 => {
             let function = r.symbol(FUNCTIONS[rng.below(FUNCTIONS.len())]);
             unsafe { (api.SETCAR)(call, function) };
         }
-        5 => {
+        7..=10 => {
             let name = r.symbol("native_eval_a");
             let value = r.integer(rng.below(20) as c_int);
             let assignment = r.call_expression("<-", &[(None, name), (None, value)]);

@@ -31,7 +31,7 @@ copied[, share := v / sum(v), by = g]
 round(copied$share[1:10], 6)
 copied[, rank_in := frank(v, ties.method = "first"), by = k]
 copied$rank_in[c(1L, 41L, 81L, 120L)]
-# A `j` with a loop or `return` stays on the tree walker.
+# A `j` with a loop or `return` runs on the tree walker at every evaluation.
 DT[, { total <- 0; for (x in v) total <- total + x; total }, by = g][1:5]
 first_big <- function(x) { for (value in x) if (value > 10) return(value); NA_real_ }
 DT[, first_big(v), by = g][1:5]

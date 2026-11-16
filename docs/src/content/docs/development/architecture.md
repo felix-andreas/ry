@@ -73,7 +73,7 @@ illegal dependency unrepresentable.
   ([`design/top-level-loops.md`](/development/design/top-level-loops/)). A call object that
   native code evaluates with `Rf_eval` compiles to tier 0 at its third evaluation, keyed by the
   object, so data.table's per-group `j` runs compiled; an in-place change to the call recompiles
-  it, and a call tier 0 cannot run as a promise (a loop, `return`) stays on the tree walker.
+  it, and a call tier 0 cannot run as a promise (a loop, `return`) runs on the tree walker every time.
 - **`numeric`** holds the numeric kernels that take and return plain numbers: R's nmath library,
   extended-precision sums, the vectorized elementary functions, the FFT, LINPACK and C's number
   formats. It sits below `interp`, so an edit to the interpreter recompiles none of it.
