@@ -661,10 +661,21 @@ unsafe fn guarded<T>(
 /// each interpreter constructor roots its result. Anything still needed is held by a register
 /// or the environment by then: compiled code stores a helper's result in the register window
 /// before it allocates again.
+///
+/// `body` must not release below the mark either, because compiled code holds the handles
+/// beneath it: an inlined call's activation is written at its first start against the stack
+/// as it stands then. The check is one compare on a path that already calls out, so it stays
+/// on in release builds, where the oracle's compiled-code engine runs.
 unsafe fn scoped<T>(body: impl FnOnce() -> T) -> T {
     let mark = heap().handle_mark();
     let value = body();
-    heap().release_handles(mark);
+    let heap = heap();
+    assert!(
+        heap.handle_mark() >= mark,
+        "a helper released handles compiled code holds: the handle stack fell from {mark} to {}",
+        heap.handle_mark()
+    );
+    heap.release_handles(mark);
     value
 }
 
@@ -745,9 +756,9 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
             } else {
                 0
             };
-            let mark = heap.handle_mark();
-            let stepped = step_unsignalled(activation, || bytecode::step_one(machine, pc as usize));
-            heap.release_handles(mark);
+            let stepped = scoped(|| {
+                step_unsignalled(activation, || bytecode::step_one(machine, pc as usize))
+            });
             match stepped {
                 None => outcome::FAILED,
                 Some(Err(unwind)) => {
@@ -777,8 +788,10 @@ pub unsafe extern "C" fn jit_fast_step(activation: *mut Activation, pc: i64) -> 
 pub unsafe extern "C" fn jit_quiet_step(activation: *mut Activation, pc: i64) -> i32 {
     unsafe {
         checked(activation, quiet::FAILED, |activation| {
-            let stepped = step_unsignalled(activation, || {
-                bytecode::quiet_step(machine(activation), pc as usize)
+            let stepped = scoped(|| {
+                step_unsignalled(activation, || {
+                    bytecode::quiet_step(machine(activation), pc as usize)
+                })
             });
             match stepped {
                 Some(None) => quiet::DECLINED,
