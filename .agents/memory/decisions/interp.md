@@ -970,3 +970,17 @@ without cells, promise forcing in the loop, and one observer word on the general
 - An "unused argument" message deparses the argument with no option, as GNU R does, so an integer
   loses its `L` and a vector its names (`deparse::deparse_unused_argument`).
 - Pinned by the oracle case `calls__empty_named_argument`.
+
+## `[[<-` reports a wrong subscript count in GNU R's order
+
+**Status:** built
+
+- With a subscript count that fits neither a vector nor the target's dimensions, GNU R's
+  `do_subassign2_dflt` reports the first of: a target that is no vector ("object of type ... is
+  not subsettable"), for an atomic target a value of the wrong length ("replacement has length
+  zero", "more elements supplied than there are to replace", or the "long vectors not supported
+  yet" message for a value with no length), and only then "[[ ]] improper number of subscripts".
+  `subset::subassign2` checks in that order, so a subscript that is itself a call, as in
+  `y[g(), , 1] <- 2`, reaches the same message as a constant one.
+- `islistfactor` refuses an `NA` for `recursive` from R 4.5 on, which earlier releases took as true.
+- Pinned by the oracle case `replacement__subscript_count_errors`.
