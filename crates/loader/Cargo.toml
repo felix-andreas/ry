@@ -8,6 +8,7 @@ publish = false
 build = "build.rs"
 
 [lib]
+doctest = false
 path = "src/loader.rs"
 
 [dependencies]

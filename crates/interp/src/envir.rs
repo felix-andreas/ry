@@ -461,9 +461,7 @@ unsafe fn do_parent_env(call: &Call<'_>) -> R<Sexp> {
     let value = call.arg(0);
     let env = match value.kind() {
         SexpType::Environment => value,
-        SexpType::Object if value.has_gp(gp::S4_OBJECT) => {
-            get_attr(value, symbols().dot_xdata)
-        }
+        SexpType::Object if value.has_gp(gp::S4_OBJECT) => get_attr(value, symbols().dot_xdata),
         _ => nil(),
     };
     if env.kind() != SexpType::Environment {

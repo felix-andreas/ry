@@ -6,6 +6,7 @@ version.workspace = true
 publish = false
 
 [lib]
+doctest = false
 path = "src/oracle.rs"
 
 [[bin]]
@@ -24,3 +25,6 @@ thiserror.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+rcmd = { path = "../rcmd" }

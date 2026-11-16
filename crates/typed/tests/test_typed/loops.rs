@@ -964,7 +964,7 @@ impl Drop for Rng {
     fn drop(&mut self) {
         if std::thread::panicking() {
             eprintln!(
-                "replay: FUZZ_SEED={} cargo test -p typed --test test_loops",
+                "replay: FUZZ_SEED={} cargo test -p typed --test test_typed loops::",
                 self.seed
             );
         }

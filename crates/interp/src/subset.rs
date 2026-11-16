@@ -2821,14 +2821,14 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
     Ok(result)
 }
 
-/// `target[index] <- value` written straight from an attribute-free integer or double subscript
-/// whose positions all lie inside `target`, when `value` already has `target`'s type and its
-/// length divides the number of positions. Returns false, having written nothing, for every
-/// other shape, which the general path handles with GNU R's full rules.
+/// `target[index] <- value` written straight from an empty subscript or an attribute-free
+/// integer or double one whose positions all lie inside `target`, when `value` already has
+/// `target`'s type and its length divides the number of positions. Returns false, having written
+/// nothing, for every other shape, which the general path handles with GNU R's full rules.
 unsafe fn scatter_plain(target: Sexp, index: Sexp, value: Sexp, value_count: usize) -> R<bool> {
     let kind = target.kind();
-    if index == missing_arg()
-        || values::has_attributes(index)
+    if values::has_attributes(index)
+        || value == target
         || value.kind() != kind
         || target.is_altrep()
         || value.is_altrep()
@@ -2845,6 +2845,23 @@ unsafe fn scatter_plain(target: Sexp, index: Sexp, value: Sexp, value_count: usi
         return Ok(false);
     }
     let count = length(target);
+    if index == missing_arg() {
+        return Ok(scatter_run(target, 0, count, value, value_count));
+    }
+    if let Some((run, first, increment)) = values::compact_sequence(index)
+        && increment == 1.0
+        && first >= 1.0
+        && first.fract() == 0.0
+        && first as usize - 1 + run <= count
+    {
+        return Ok(scatter_run(
+            target,
+            first as usize - 1,
+            run,
+            value,
+            value_count,
+        ));
+    }
     if let Some((highest, offsets)) = sequence_offsets(index) {
         return Ok(highest < count && scatter_offsets(target, offsets, value, value_count));
     }
@@ -2885,6 +2902,65 @@ unsafe fn scatter_plain(target: Sexp, index: Sexp, value: Sexp, value_count: usi
         value,
         value_count,
     ))
+}
+
+/// Writes `value`, recycled, to the `run` elements of `target` from `start`, which lie inside it,
+/// a whole copy of `value` at a time. `value` has `target`'s type and is another vector. False,
+/// having written nothing, unless `run` is a multiple of `value_count`.
+unsafe fn scatter_run(
+    target: Sexp,
+    start: usize,
+    run: usize,
+    value: Sexp,
+    value_count: usize,
+) -> bool {
+    if !run.is_multiple_of(value_count) {
+        return false;
+    }
+    if run == 0 {
+        return true;
+    }
+    match target.kind() {
+        SexpType::Real => fill_run(
+            &mut values::reals_mut(target)[start..start + run],
+            values::reals(value),
+        ),
+        SexpType::Logical | SexpType::Integer => fill_run(
+            &mut values::ints_mut(target)[start..start + run],
+            values::ints(value),
+        ),
+        _ => {
+            // The written part is copied onto the part after it, so a short value costs a
+            // barrier decision per doubling, not per copy.
+            let heap = crate::heap();
+            heap.copy_elements(target, start, value, 0, value_count);
+            let mut filled = value_count;
+            while filled < run {
+                let step = filled.min(run - filled);
+                heap.copy_elements(target, start + filled, target, start, step);
+                filled += step;
+            }
+        }
+    }
+    true
+}
+
+/// Fills `target`, whose length is a multiple of `source`'s, with copies of `source`.
+fn fill_run<T: Copy>(target: &mut [T], source: &[T]) {
+    if let [single] = source {
+        target.fill(*single);
+        return;
+    }
+    let Some(first) = target.get_mut(..source.len()) else {
+        return;
+    };
+    first.copy_from_slice(source);
+    let mut filled = source.len();
+    while filled < target.len() {
+        let step = filled.min(target.len() - filled);
+        target.copy_within(..step, filled);
+        filled += step;
+    }
 }
 
 /// Writes `value`, recycled, to `offsets` of `target`, which share its type and lie inside it.

@@ -1,0 +1,686 @@
+[stdout]
+| [1] 2
+|  int 2
+| NULL
+| [1]  1  3 NA
+|  num [1:3] 1 3 NA
+| NULL
+| [1] 1 3 3
+|  num [1:3] 1 3 3
+| NULL
+| [1]  0  0 NA
+|  int [1:3] 0 0 NA
+| NULL
+| [1] 0.5
+|  num 0.5
+| NULL
+| [1] NaN  NA  NA
+|  num [1:3] NaN NA NA
+| NULL
+| [1] NaN  NA   1
+|  num [1:3] NaN NA 1
+| NULL
+| [1] "a" "a" NA 
+|  chr [1:3] "a" "a" NA
+| NULL
+| [1] "a" "a" "a"
+|  chr [1:3] "a" "a" "a"
+| NULL
+| [1] 1 2 2 3 2 3
+|  int [1:6] 1 2 2 3 2 3
+| NULL
+|       c1    c2     c3
+| a -0.626  0.00  0.000
+| b  0.000 -0.82 -0.305
+| c -0.836  0.00  0.000
+| d  0.000  0.00  0.000
+|  num [1:4, 1:3] -0.626 0 -0.836 0 0 -0.82 0 0 0 -0.305 ...
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:4] "a" "b" "c" "d"
+|   ..$ : chr [1:3] "c1" "c2" "c3"
+| $dim
+| [1] 4 3
+| 
+| $dimnames
+| $dimnames[[1]]
+| [1] "a" "b" "c" "d"
+| 
+| $dimnames[[2]]
+| [1] "c1" "c2" "c3"
+| 
+| 
+|  [1] -0.626  0.000 -0.836  0.000  0.000 -0.820  0.000  0.000  0.000 -0.305
+| [11]  0.000  0.000
+|  num [1:12] -0.626 0 -0.836 0 0 -0.82 0 0 0 -0.305 ...
+| NULL
+|       c1     c2     c3
+| a -0.626 -0.626 -0.626
+| b  0.184 -0.820 -0.305
+| c -0.836  0.487  0.576
+| d  0.184  0.184  0.184
+|  num [1:4, 1:3] -0.626 0.184 -0.836 0.184 -0.626 -0.82 0.487 0.184 -0.626 -0.305 ...
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:4] "a" "b" "c" "d"
+|   ..$ : chr [1:3] "c1" "c2" "c3"
+| $dim
+| [1] 4 3
+| 
+| $dimnames
+| $dimnames[[1]]
+| [1] "a" "b" "c" "d"
+| 
+| $dimnames[[2]]
+| [1] "c1" "c2" "c3"
+| 
+| 
+|  [1] -0.626  0.184 -0.836  1.595  0.330 -0.820  0.487  0.738  0.576 -0.305
+| [11]  1.512  0.390 -0.626  0.184 -0.836  1.595  0.330 -0.820  0.487  0.738
+| [21]  0.576 -0.305  1.512  0.390
+|  num [1:24] -0.626 0.184 -0.836 1.595 0.33 ...
+| NULL
+|        c1     c2
+| a -0.3586  0.300
+| b -0.6176 -1.207
+| c -0.4326  0.300
+| d  0.3000  0.300
+|  num [1:4, 1:2] -0.359 -0.618 -0.433 0.3 0.3 ...
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:4] "a" "b" "c" "d"
+|   ..$ : chr [1:2] "c1" "c2"
+| $dim
+| [1] 4 2
+| 
+| $dimnames
+| $dimnames[[1]]
+| [1] "a" "b" "c" "d"
+| 
+| $dimnames[[2]]
+| [1] "c1" "c2"
+| 
+| 
+|       c1     c2
+| a -0.626  0.330
+| b -0.305 -0.820
+| c -0.836  0.487
+| d  0.390  0.390
+|  num [1:4, 1:2] -0.626 -0.305 -0.836 0.39 0.33 -0.82 0.487 0.39
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:4] "a" "b" "c" "d"
+|   ..$ : chr [1:2] "c1" "c2"
+| $dim
+| [1] 4 2
+| 
+| $dimnames
+| $dimnames[[1]]
+| [1] "a" "b" "c" "d"
+| 
+| $dimnames[[2]]
+| [1] "c1" "c2"
+| 
+| 
+|      [,1] [,2] [,3]
+| [1,]    1    3    3
+| [2,]    2    3    3
+|  int [1:2, 1:3] 1 2 3 3 3 3
+| $dim
+| [1] 2 3
+| 
+|    [,1] [,2] [,3]
+| r1    1    3    3
+| r2    2    3    3
+|  int [1:2, 1:3] 1 2 3 3 3 3
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:2] "r1" "r2"
+|   ..$ : NULL
+| $dim
+| [1] 2 3
+| 
+| $dimnames
+| $dimnames[[1]]
+| [1] "r1" "r2"
+| 
+| $dimnames[[2]]
+| NULL
+| 
+| 
+| , , p
+| 
+|      x y
+| [1,] 1 3
+| [2,] 2 4
+| 
+| , , q
+| 
+|      x y
+| [1,] 4 4
+| [2,] 4 4
+| 
+|  num [1:2, 1:2, 1:2] 1 2 3 4 4 4 4 4
+|  - attr(*, "dimnames")=List of 3
+|   ..$ : NULL
+|   ..$ : chr [1:2] "x" "y"
+|   ..$ : chr [1:2] "p" "q"
+| $dim
+| [1] 2 2 2
+| 
+| $dimnames
+| $dimnames[[1]]
+| NULL
+| 
+| $dimnames[[2]]
+| [1] "x" "y"
+| 
+| $dimnames[[3]]
+| [1] "p" "q"
+| 
+| 
+| a b c 
+| 1 2 2 
+|  Named num [1:3] 1 2 2
+|  - attr(*, "names")= chr [1:3] "a" "b" "c"
+| $names
+| [1] "a" "b" "c"
+| 
+| [1] 1 2 1 4
+|  num [1:4] 1 2 1 4
+| NULL
+| [1] 1 2
+|  num [1:2] 1 2
+| NULL
+| [1] 1 2 2
+| attr(,"foo")
+| [1] "bar"
+| attr(,"baz")
+| [1] 1 2
+|  int [1:3] 1 2 2
+|  - attr(*, "foo")= chr "bar"
+|  - attr(*, "baz")= int [1:2] 1 2
+| $foo
+| [1] "bar"
+| 
+| $baz
+| [1] 1 2
+| 
+| [1] 1 2 2
+|  int [1:3] 1 2 2
+|  - attr(*, "comment")= chr "note"
+| $comment
+| [1] "note"
+| 
+| a b 
+| 0 2 
+| attr(,"extra")
+| [1] TRUE
+|  Named num [1:2] 0 2
+|  - attr(*, "extra")= logi TRUE
+|  - attr(*, "names")= chr [1:2] "a" "b"
+| $extra
+| [1] TRUE
+| 
+| $names
+| [1] "a" "b"
+| 
+| numeric(0)
+|  num(0) 
+| NULL
+| numeric(0)
+|  num(0) 
+| NULL
+|      [,1] [,2] [,3]
+|  num[0 , 1:3] 
+| $dim
+| [1] 0 3
+| 
+| integer(0)
+|  int(0) 
+| NULL
+| integer(0)
+|  int(0) 
+| NULL
+| numeric(0)
+|  num(0) 
+| NULL
+| warning: an argument will be fractionally recycled | call: f(1:3, 1:2) 
+| [1] 1 2 1
+|  int [1:3] 1 2 1
+| NULL
+| warning: an argument will be fractionally recycled | call: f(m, 1:5) 
+|       c1     c2     c3
+| a -0.626  0.330  0.576
+| b  0.184 -0.820 -0.305
+| c -0.836  0.487  1.000
+| d  1.595  0.738  0.390
+|  num [1:4, 1:3] -0.626 0.184 -0.836 1.595 0.33 ...
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:4] "a" "b" "c" "d"
+|   ..$ : chr [1:3] "c1" "c2" "c3"
+| $dim
+| [1] 4 3
+| 
+| $dimnames
+| $dimnames[[1]]
+| [1] "a" "b" "c" "d"
+| 
+| $dimnames[[2]]
+| [1] "c1" "c2" "c3"
+| 
+| 
+| error: no arguments | call: f() 
+| error: invalid 'na.rm' value | call: f(1, na.rm = NA) 
+| error: invalid 'na.rm' value | call: f(1, na.rm = "yes") 
+| error: invalid input type | call: f(1 + (0+2i), 1) 
+| error: invalid input type | call: f(as.raw(1), as.raw(2)) 
+| [1] "2024-03-15" "2024-03-16" "2024-03-16"
+|  Date[1:3], format: "2024-03-15" "2024-03-16" "2024-03-16"
+| $class
+| [1] "Date"
+| 
+| [1] a a
+| Levels: a < b
+|  Ord.factor w/ 2 levels "a"<"b": 1 1
+| $levels
+| [1] "a" "b"
+| 
+| $class
+| [1] "ordered" "factor" 
+| 
+| Time Series:
+| Start = 2000 
+| End = 2003 
+| Frequency = 1 
+| [1] 1 2 2 2
+|  Time-Series [1:4] from 2000 to 2003: 1 2 2 2
+| $tsp
+| [1] 2000 2003    1
+| 
+| $class
+| [1] "ts"
+| 
+| [1] 1 2 2 2
+| attr(,"tsp")
+| [1] 1 4 1
+|  int [1:4] 1 2 2 2
+|  - attr(*, "tsp")= num [1:3] 1 4 1
+| $tsp
+| [1] 1 4 1
+| 
+| [1] "2024-03-15 00:00:00 UTC" "2024-03-15 12:00:00 UTC"
+|  POSIXct[1:2], format: "2024-03-15 00:00:00" "2024-03-15 12:00:00"
+| $class
+| [1] "POSIXct" "POSIXt" 
+| 
+| $tzone
+| [1] "UTC"
+| 
+| [1] 1 3
+| attr(,"class")
+| [1] "myNumber"
+|  'myNumber' num [1:2] 1 3
+| $class
+| [1] "myNumber"
+| 
+| [1] 1 2 2
+|  int [1:3] 1 2 2
+| NULL
+| [1] 1 2 2
+|  num [1:3] 1 2 2
+| NULL
+| [1] 1 2 2
+|  num [1:3] 1 2 2
+| NULL
+| [1] 3
+|  int 3
+| NULL
+| [1]  3  5 NA
+|  num [1:3] 3 5 NA
+| NULL
+| [1] 3 5 3
+|  num [1:3] 3 5 3
+| NULL
+| [1]  1  0 NA
+|  int [1:3] 1 0 NA
+| NULL
+| [1] 1
+|  num 1
+| NULL
+| [1] NaN  NA  NA
+|  num [1:3] NaN NA NA
+| NULL
+| [1] NaN  NA   1
+|  num [1:3] NaN NA 1
+| NULL
+| [1] "b" "c" NA 
+|  chr [1:3] "b" "c" NA
+| NULL
+| [1] "b" "a" "a"
+|  chr [1:3] "b" "a" "a"
+| NULL
+| [1] 2 3 3 4 5 6
+|  int [1:6] 2 3 3 4 5 6
+| NULL
+|      c1    c2    c3
+| a 0.000 0.330 0.576
+| b 0.184 0.000 0.000
+| c 0.000 0.487 1.512
+| d 1.595 0.738 0.390
+|  num [1:4, 1:3] 0 0.184 0 1.595 0.33 ...
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:4] "a" "b" "c" "d"
+|   ..$ : chr [1:3] "c1" "c2" "c3"
+| $dim
+| [1] 4 3
+| 
+| $dimnames
+| $dimnames[[1]]
+| [1] "a" "b" "c" "d"
+| 
+| $dimnames[[2]]
+| [1] "c1" "c2" "c3"
+| 
+| 
+|  [1] 0.000 0.184 0.000 1.595 0.330 0.000 0.487 0.738 0.576 0.000 1.512 0.390
+|  num [1:12] 0 0.184 0 1.595 0.33 ...
+| NULL
+|       c1    c2    c3
+| a -0.626 0.330 0.576
+| b  0.330 0.330 0.330
+| c  0.576 0.576 1.512
+| d  1.595 0.738 0.390
+|  num [1:4, 1:3] -0.626 0.33 0.576 1.595 0.33 ...
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:4] "a" "b" "c" "d"
+|   ..$ : chr [1:3] "c1" "c2" "c3"
+| $dim
+| [1] 4 3
+| 
+| $dimnames
+| $dimnames[[1]]
+| [1] "a" "b" "c" "d"
+| 
+| $dimnames[[2]]
+| [1] "c1" "c2" "c3"
+| 
+| 
+|  [1]  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24
+|  num [1:24] 1 2 3 4 5 6 7 8 9 10 ...
+| NULL
+|       c1     c2
+| a 0.3000 0.9390
+| b 0.3000 0.3000
+| c 0.3000 2.0477
+| d 2.4925 1.2018
+|  num [1:4, 1:2] 0.3 0.3 0.3 2.493 0.939 ...
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:4] "a" "b" "c" "d"
+|   ..$ : chr [1:2] "c1" "c2"
+| $dim
+| [1] 4 2
+| 
+| $dimnames
+| $dimnames[[1]]
+| [1] "a" "b" "c" "d"
+| 
+| $dimnames[[2]]
+| [1] "c1" "c2"
+| 
+| 
+|      c1     c2
+| a 0.576  0.576
+| b 0.184 -0.305
+| c 1.512  1.512
+| d 1.595  0.738
+|  num [1:4, 1:2] 0.576 0.184 1.512 1.595 0.576 ...
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:4] "a" "b" "c" "d"
+|   ..$ : chr [1:2] "c1" "c2"
+| $dim
+| [1] 4 2
+| 
+| $dimnames
+| $dimnames[[1]]
+| [1] "a" "b" "c" "d"
+| 
+| $dimnames[[2]]
+| [1] "c1" "c2"
+| 
+| 
+|      [,1] [,2] [,3]
+| [1,]    3    3    5
+| [2,]    3    4    6
+|  int [1:2, 1:3] 3 3 3 4 5 6
+| $dim
+| [1] 2 3
+| 
+|    [,1] [,2] [,3]
+| r1    3    3    5
+| r2    3    4    6
+|  int [1:2, 1:3] 3 3 3 4 5 6
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:2] "r1" "r2"
+|   ..$ : NULL
+| $dim
+| [1] 2 3
+| 
+| $dimnames
+| $dimnames[[1]]
+| [1] "r1" "r2"
+| 
+| $dimnames[[2]]
+| NULL
+| 
+| 
+| , , p
+| 
+|      x y
+| [1,] 4 4
+| [2,] 4 4
+| 
+| , , q
+| 
+|      x y
+| [1,] 5 7
+| [2,] 6 8
+| 
+|  num [1:2, 1:2, 1:2] 4 4 4 4 5 6 7 8
+|  - attr(*, "dimnames")=List of 3
+|   ..$ : NULL
+|   ..$ : chr [1:2] "x" "y"
+|   ..$ : chr [1:2] "p" "q"
+| $dim
+| [1] 2 2 2
+| 
+| $dimnames
+| $dimnames[[1]]
+| NULL
+| 
+| $dimnames[[2]]
+| [1] "x" "y"
+| 
+| $dimnames[[3]]
+| [1] "p" "q"
+| 
+| 
+| a b c 
+| 2 5 3 
+|  Named num [1:3] 2 5 3
+|  - attr(*, "names")= chr [1:3] "a" "b" "c"
+| $names
+| [1] "a" "b" "c"
+| 
+| [1] 1 5 3 5
+|  num [1:4] 1 5 3 5
+| NULL
+| [1] 2 5
+|  num [1:2] 2 5
+| NULL
+| [1] 2 2 3
+| attr(,"foo")
+| [1] "bar"
+| attr(,"baz")
+| [1] 1 2
+|  int [1:3] 2 2 3
+|  - attr(*, "foo")= chr "bar"
+|  - attr(*, "baz")= int [1:2] 1 2
+| $foo
+| [1] "bar"
+| 
+| $baz
+| [1] 1 2
+| 
+| [1] 2 2 3
+|  int [1:3] 2 2 3
+|  - attr(*, "comment")= chr "note"
+| $comment
+| [1] "note"
+| 
+| a b 
+| 1 3 
+| attr(,"extra")
+| [1] TRUE
+|  Named num [1:2] 1 3
+|  - attr(*, "extra")= logi TRUE
+|  - attr(*, "names")= chr [1:2] "a" "b"
+| $extra
+| [1] TRUE
+| 
+| $names
+| [1] "a" "b"
+| 
+| numeric(0)
+|  num(0) 
+| NULL
+| numeric(0)
+|  num(0) 
+| NULL
+|      [,1] [,2] [,3]
+|  num[0 , 1:3] 
+| $dim
+| [1] 0 3
+| 
+| integer(0)
+|  int(0) 
+| NULL
+| integer(0)
+|  int(0) 
+| NULL
+| numeric(0)
+|  num(0) 
+| NULL
+| warning: an argument will be fractionally recycled | call: f(1:3, 1:2) 
+| [1] 1 2 3
+|  int [1:3] 1 2 3
+| NULL
+| warning: an argument will be fractionally recycled | call: f(m, 1:5) 
+|   c1 c2    c3
+| a  1  5 4.000
+| b  2  1 5.000
+| c  3  2 1.512
+| d  4  3 2.000
+|  num [1:4, 1:3] 1 2 3 4 5 1 2 3 4 5 ...
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:4] "a" "b" "c" "d"
+|   ..$ : chr [1:3] "c1" "c2" "c3"
+| $dim
+| [1] 4 3
+| 
+| $dimnames
+| $dimnames[[1]]
+| [1] "a" "b" "c" "d"
+| 
+| $dimnames[[2]]
+| [1] "c1" "c2" "c3"
+| 
+| 
+| error: no arguments | call: f() 
+| error: invalid 'na.rm' value | call: f(1, na.rm = NA) 
+| error: invalid 'na.rm' value | call: f(1, na.rm = "yes") 
+| error: invalid input type | call: f(1 + (0+2i), 1) 
+| error: invalid input type | call: f(as.raw(1), as.raw(2)) 
+| [1] "2024-03-16" "2024-03-16" "2024-03-17"
+|  Date[1:3], format: "2024-03-16" "2024-03-16" "2024-03-17"
+| $class
+| [1] "Date"
+| 
+| [1] a b
+| Levels: a < b
+|  Ord.factor w/ 2 levels "a"<"b": 1 2
+| $levels
+| [1] "a" "b"
+| 
+| $class
+| [1] "ordered" "factor" 
+| 
+| Time Series:
+| Start = 2000 
+| End = 2003 
+| Frequency = 1 
+| [1] 2 2 3 4
+|  Time-Series [1:4] from 2000 to 2003: 2 2 3 4
+| $tsp
+| [1] 2000 2003    1
+| 
+| $class
+| [1] "ts"
+| 
+| [1] 2 2 3 4
+| attr(,"tsp")
+| [1] 1 4 1
+|  int [1:4] 2 2 3 4
+|  - attr(*, "tsp")= num [1:3] 1 4 1
+| $tsp
+| [1] 1 4 1
+| 
+| [1] "2024-03-15 12:00:00 UTC" "2024-03-16 00:00:00 UTC"
+|  POSIXct[1:2], format: "2024-03-15 12:00:00" "2024-03-16 00:00:00"
+| $class
+| [1] "POSIXct" "POSIXt" 
+| 
+| $tzone
+| [1] "UTC"
+| 
+| [1] 3 5
+| attr(,"class")
+| [1] "myNumber"
+|  'myNumber' num [1:2] 3 5
+| $class
+| [1] "myNumber"
+| 
+| [1] 2 2 3
+|  int [1:3] 2 2 3
+| NULL
+| [1] 2 2 3
+|  num [1:3] 2 2 3
+| NULL
+| [1] 2 2 3
+|  num [1:3] 2 2 3
+| NULL
+| [1] 2 2 3
+|  num [1:3] 2 2 3
+| NULL
+|       c1    c2     c3
+| a -0.626  0.00  0.000
+| b  0.000 -0.82 -0.305
+| c -0.836  0.00  0.000
+| d  0.000  0.00  0.000
+|  num [1:4, 1:3] -0.626 0 -0.836 0 0 -0.82 0 0 0 -0.305 ...
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:4] "a" "b" "c" "d"
+|   ..$ : chr [1:3] "c1" "c2" "c3"
+| $dim
+| [1] 4 3
+| 
+| $dimnames
+| $dimnames[[1]]
+| [1] "a" "b" "c" "d"
+| 
+| $dimnames[[2]]
+| [1] "c1" "c2" "c3"
+| 
+| 
+| [1] "a"     "b"     "na.rm" "c"     "d"     "na.rm"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("a", "b", "na.rm", "c", "d", "na.rm")

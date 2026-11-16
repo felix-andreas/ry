@@ -251,6 +251,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `validObject` runs validity methods without its slot loop, and `new()` copies the prototype shallowly
 - Small base closures with call arguments run their bodies natively behind prologues
 - `c`, `unlist`, `rep` and positional `[` copy handle vectors a run at a time
+- `x[] <- value` and `x[a:b] <- value` write whole copies of the value
 
 ## R compatibility
 
@@ -567,6 +568,9 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The hot suite replays the package entries the code bases spend their time in
 - The code bases are a benchmark suite of their own, outside the headline
 - The profile summary hashes private package names with a secret key per project
+- The edit-to-signal loop is tuned for agents
+- The interpreter stays one crate, because the edit loop is bound by links
+- Agent-written notes are not mass-rewritten for brevity
 
 ## Docs, process and positioning
 
@@ -579,3 +583,4 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Landing-page and README samples are captured from the running tools
 - The decision log is one file per area, with a generated index and byte budgets
 - Source comments have length limits, enforced by a ratchet
+- Each crate's `AGENTS.md` loads through a one-line `CLAUDE.md` beside it

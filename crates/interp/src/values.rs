@@ -231,6 +231,7 @@ symbol_table! {
     control = "control",
     nlines = "nlines",
     format = "format",
+    try_formats = "tryFormats",
     flag = "flag",
     preserve_width = "preserve.width",
     deparse_options = "..deparseOpts",

@@ -8,8 +8,8 @@ use {
         Frame, Signalling,
         annotations::Entry,
         builtins::{
-            Arg, BuiltinDef, Call, DirectFn, Generic, Kind, NativeArgs, Visibility, builtin, internal,
-            internal_special, special,
+            Arg, BuiltinDef, Call, DirectFn, Generic, Kind, NativeArgs, Visibility, builtin,
+            internal, internal_special, special,
         },
         bytecode,
         coerce::{CoercionWarnings, real_to_int},
