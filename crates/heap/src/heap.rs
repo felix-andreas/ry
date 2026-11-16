@@ -2105,13 +2105,19 @@ impl Heap {
     /// GNU R finds a symbol by its text, so a UTF-8 name and the unmarked name with the same
     /// bytes are one symbol, whose print name is the string that installed it first: names from
     /// `c("a\u00e4" = 1)` are marked UTF-8, and those from `c(a\u00e4 = 1)` are not. The table
-    /// holds only that print name, so the other spelling finds the symbol through its twin.
+    /// holds only that print name, so the other spelling finds the symbol through its twin. A
+    /// latin1 name is translated to UTF-8 first, as `installTrChar` translates it.
     pub unsafe fn install_char(&mut self, name: Sexp) -> HeapResult<Sexp> {
         if name == self.known.na_string {
             return self.install(b"NA");
         }
         if let Some(&symbol) = self.symbols.get(&name) {
             return Ok(symbol);
+        }
+        if name.gp() & (gp::LATIN1 | gp::ASCII) == gp::LATIN1 {
+            let text: String = name.bytes().iter().map(|&byte| char::from(byte)).collect();
+            let translated = self.mk_char(text.as_bytes(), Encoding::Native)?;
+            return self.install_char(translated);
         }
         if let Some(symbol) = self.symbol_of_twin(name) {
             return Ok(symbol);
@@ -2133,7 +2139,12 @@ impl Heap {
     /// The interned symbol named `name`, if one exists, without installing it.
     pub unsafe fn find_symbol(&self, name: &[u8]) -> Option<Sexp> {
         match self.find_interned(name, 0) {
-            Some(name) => self.symbols.get(&name).copied().or_else(|| self.symbol_of_twin(name)),
+            Some(name) => self
+                .symbols
+                .get(&name)
+                .copied()
+                .or_else(|| self.symbol_of_twin(name)),
+            None if name.is_ascii() => None,
             None => {
                 let name = self.find_interned(name, gp::UTF8)?;
                 self.symbols.get(&name).copied()

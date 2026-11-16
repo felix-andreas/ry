@@ -11441,10 +11441,8 @@ unsafe fn assign_slot_element(
     let object = if environment || (current == target && slot_owns(state, target)) {
         target
     } else {
-        // The replacement writes elements into the copy, so it must own its storage: a long
-        // vector's `shallow_duplicate_attr` is a wrapper with none.
         let was_array = target.is_array();
-        let copy = values::shallow_duplicate(target)?;
+        let copy = values::shallow_duplicate_attr(target)?;
         copy.set_array(was_array);
         heap.root(copy);
         copy

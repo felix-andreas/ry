@@ -200,7 +200,9 @@ fn a_fault_while_printing_the_traceback_still_prints_the_native_stack() {
 fn the_native_stack_names_functions_without_their_hash() {
     let crashed = crash("named");
     assert!(
-        crashed.stderr.contains("(test_crash::a_named_faulting_function+0x"),
+        crashed
+            .stderr
+            .contains("(test_crash::a_named_faulting_function+0x"),
         "{}",
         crashed.stderr
     );

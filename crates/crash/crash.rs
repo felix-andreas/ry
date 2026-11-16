@@ -69,6 +69,7 @@ mod unix {
     static STAGE: AtomicU8 = AtomicU8::new(STAGE_IDLE);
     const STAGE_IDLE: u8 = 0;
     const STAGE_HEADER_AND_R: u8 = 1;
+    const STAGE_NATIVE: u8 = 2;
     const STAGE_DONE: u8 = 3;
     /// The read and write ends of the pipe that probes memory.
     static PROBE: [AtomicI32; 2] = [AtomicI32::new(-1), AtomicI32::new(-1)];
@@ -167,17 +168,28 @@ mod unix {
                 write_header(&mut out, signal, info);
                 out.flush();
                 write_r_stack();
-                STAGE.store(STAGE_DONE, Ordering::SeqCst);
+                STAGE.store(STAGE_NATIVE, Ordering::SeqCst);
                 write_native_stack(&mut out);
+                STAGE.store(STAGE_DONE, Ordering::SeqCst);
                 chain(signal, info, context);
             }
             STAGE_HEADER_AND_R => {
                 // The fault happened while printing the R call stack, whose memory was not
                 // what it claimed to be.
-                STAGE.store(STAGE_DONE, Ordering::SeqCst);
+                STAGE.store(STAGE_NATIVE, Ordering::SeqCst);
                 let mut out = Out::new();
                 out.text("(the R call stack could not be read to the end)\n");
                 write_native_stack(&mut out);
+                STAGE.store(STAGE_DONE, Ordering::SeqCst);
+            }
+            STAGE_NATIVE => {
+                // Naming the frames reads mapped files, which can fault when a file changed on
+                // disk; the unnamed frames still help.
+                STAGE.store(STAGE_DONE, Ordering::SeqCst);
+                let mut out = Out::new();
+                out.text("(the native stack could not be named to the end)\n");
+                out.flush();
+                write_raw_native_stack();
             }
             _ => {}
         }
@@ -331,16 +343,22 @@ mod unix {
         let mut files = symbols::Files::new();
         for (index, frame) in frames.iter().take(count.max(0) as usize).enumerate() {
             symbols::write_frame(out, &mut files, *frame as usize, index > 0);
+            out.flush();
         }
-        out.flush();
         files.close();
     }
 
     #[cfg(target_os = "macos")]
     fn write_native_stack(out: &mut Out) {
-        let mut frames = [ptr::null_mut(); NATIVE_FRAMES];
         out.text("\nNative stack, innermost first, starting in the crash handler (module(symbol+offset) [address]):\n");
         out.flush();
+        write_raw_native_stack();
+    }
+
+    /// The native stack as the C library names it, from the dynamic symbols only.
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    fn write_raw_native_stack() {
+        let mut frames = [ptr::null_mut(); NATIVE_FRAMES];
         // SAFETY: the buffer has room for the count it is told, and `backtrace_symbols_fd`
         // writes without allocating.
         unsafe {
@@ -354,6 +372,9 @@ mod unix {
         out.text("\nNative stack: not available on this platform\n");
         out.flush();
     }
+
+    #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
+    fn write_raw_native_stack() {}
 
     fn write_all(mut bytes: &[u8]) {
         while !bytes.is_empty() {
@@ -494,7 +515,9 @@ mod unix {
 
         impl Files {
             pub(super) fn new() -> Self {
-                Self { files: [None; FILES] }
+                Self {
+                    files: [None; FILES],
+                }
             }
 
             pub(super) fn close(&mut self) {
@@ -506,10 +529,19 @@ mod unix {
         }
 
         /// Writes `module(function+0xoffset) [0xaddress]` for the return address `address`.
-        pub(super) fn write_frame(out: &mut Out, files: &mut Files, address: usize, returned: bool) {
+        pub(super) fn write_frame(
+            out: &mut Out,
+            files: &mut Files,
+            address: usize,
+            returned: bool,
+        ) {
             // A return address may already belong to the next function, so a frame that
             // returns is looked up one byte before it.
-            let lookup = if returned { address.wrapping_sub(1) } else { address };
+            let lookup = if returned {
+                address.wrapping_sub(1)
+            } else {
+                address
+            };
             // SAFETY: dladdr writes `info`, whose name pointers stay valid while the object is
             // loaded.
             let mut info: libc::Dl_info = unsafe { mem::zeroed() };
@@ -530,7 +562,10 @@ mod unix {
             let symbol = found.or_else(|| {
                 // SAFETY: a non-null `dli_sname` is a NUL-terminated string.
                 (!info.dli_sname.is_null()).then(|| {
-                    (unsafe { CStr::from_ptr(info.dli_sname) }.to_bytes(), info.dli_saddr as usize)
+                    (
+                        unsafe { CStr::from_ptr(info.dli_sname) }.to_bytes(),
+                        info.dli_saddr as usize,
+                    )
                 })
             });
             match symbol {
@@ -561,7 +596,11 @@ mod unix {
         }
 
         fn lookup_file(files: &mut Files, base: usize, name: *const libc::c_char) -> Option<File> {
-            let free = match files.files.iter().position(|file| file.is_none_or(|file| file.base == base)) {
+            let free = match files
+                .files
+                .iter()
+                .position(|file| file.is_none_or(|file| file.base == base))
+            {
                 Some(index) => index,
                 None => return None,
             };
@@ -569,7 +608,11 @@ mod unix {
                 return Some(file);
             }
             let executable = EXECUTABLE_BASE.load(Ordering::SeqCst);
-            let path = if base == executable && executable != 0 { c"/proc/self/exe".as_ptr() } else { name };
+            let path = if base == executable && executable != 0 {
+                c"/proc/self/exe".as_ptr()
+            } else {
+                name
+            };
             let file = open(path, base)?;
             files.files[free] = Some(file);
             Some(file)
@@ -590,7 +633,14 @@ mod unix {
                 };
                 let map = match length {
                     0 => libc::MAP_FAILED,
-                    _ => libc::mmap(ptr::null_mut(), length, libc::PROT_READ, libc::MAP_PRIVATE, descriptor, 0),
+                    _ => libc::mmap(
+                        ptr::null_mut(),
+                        length,
+                        libc::PROT_READ,
+                        libc::MAP_PRIVATE,
+                        descriptor,
+                        0,
+                    ),
                 };
                 libc::close(descriptor);
                 if map == libc::MAP_FAILED {
@@ -598,7 +648,14 @@ mod unix {
                 }
                 (map as *const u8, length)
             };
-            let mut file = File { base, map, length, symbols: (0, 0), strings: (0, 0), bias: 0 };
+            let mut file = File {
+                base,
+                map,
+                length,
+                symbols: (0, 0),
+                strings: (0, 0),
+                bias: 0,
+            };
             // SAFETY: the mapping holds `length` readable bytes until `Files::close`.
             let bytes = unsafe { std::slice::from_raw_parts(map, length) };
             if let Some((symbols, strings, bias)) = layout(bytes, base) {
@@ -607,43 +664,63 @@ mod unix {
             Some(file)
         }
 
-        /// The symbol table, string table and load bias of a 64-bit little-endian ELF file.
+        /// The symbol table, string table and load bias of a 64-bit little-endian ELF file. Every
+        /// offset is checked, because the file on disk may not be the one that was loaded.
         fn layout(bytes: &[u8], base: usize) -> Option<((usize, usize), (usize, usize), usize)> {
             if bytes.get(..6)? != b"\x7fELF\x02\x01" {
                 return None;
             }
             let kind = u16_at(bytes, 16)?;
-            let (program_headers, program_size, program_count) =
-                (u64_at(bytes, 32)? as usize, u16_at(bytes, 54)? as usize, u16_at(bytes, 56)? as usize);
-            let (section_headers, section_size, section_count) =
-                (u64_at(bytes, 40)? as usize, u16_at(bytes, 58)? as usize, u16_at(bytes, 60)? as usize);
+            let program_headers = u64_at(bytes, 32)? as usize;
+            let program_size = u16_at(bytes, 54)? as usize;
+            let program_count = u16_at(bytes, 56)? as usize;
+            let section_headers = u64_at(bytes, 40)? as usize;
+            let section_size = u16_at(bytes, 58)? as usize;
+            let section_count = u16_at(bytes, 60)? as usize;
+            let entry = |table: usize, size: usize, index: usize, field: usize| {
+                table
+                    .checked_add(size.checked_mul(index)?)?
+                    .checked_add(field)
+            };
             // A shared object or position-independent executable is loaded at `base` less its
             // first segment's page-aligned address; anything else is loaded where it says.
             let bias = match kind {
                 ET_DYN => {
-                    let lowest = (0..program_count)
-                        .map(|index| program_headers + index * program_size)
-                        .filter(|&header| u32_at(bytes, header) == Some(PT_LOAD))
-                        .filter_map(|header| u64_at(bytes, header + 16))
-                        .min()
-                        .unwrap_or(0) as usize;
-                    base.wrapping_sub(lowest & !0xfff)
+                    let mut lowest = u64::MAX;
+                    for index in 0..program_count {
+                        let header = entry(program_headers, program_size, index, 0)?;
+                        if u32_at(bytes, header)? == PT_LOAD {
+                            lowest = lowest.min(u64_at(bytes, header.checked_add(16)?)?);
+                        }
+                    }
+                    match lowest {
+                        u64::MAX => 0,
+                        lowest => base.wrapping_sub(lowest as usize & !0xfff),
+                    }
                 }
                 _ => 0,
             };
             for index in 0..section_count {
-                let header = section_headers + index * section_size;
-                if u32_at(bytes, header + 4)? != SHT_SYMTAB {
+                if u32_at(bytes, entry(section_headers, section_size, index, 4)?)? != SHT_SYMTAB {
                     continue;
                 }
-                let (offset, size, entry) =
-                    (u64_at(bytes, header + 24)? as usize, u64_at(bytes, header + 32)? as usize, u64_at(bytes, header + 56)? as usize);
-                let link = section_headers + u32_at(bytes, header + 40)? as usize * section_size;
-                let strings = (u64_at(bytes, link + 24)? as usize, u64_at(bytes, link + 32)? as usize);
-                if entry != 24 || offset.checked_add(size)? > bytes.len() || strings.0.checked_add(strings.1)? > bytes.len() {
+                let offset = u64_at(bytes, entry(section_headers, section_size, index, 24)?)?;
+                let size = u64_at(bytes, entry(section_headers, section_size, index, 32)?)?;
+                let symbol_size = u64_at(bytes, entry(section_headers, section_size, index, 56)?)?;
+                let link =
+                    u32_at(bytes, entry(section_headers, section_size, index, 40)?)? as usize;
+                let strings = (
+                    u64_at(bytes, entry(section_headers, section_size, link, 24)?)? as usize,
+                    u64_at(bytes, entry(section_headers, section_size, link, 32)?)? as usize,
+                );
+                let (offset, size) = (offset as usize, size as usize);
+                if symbol_size != 24
+                    || offset.checked_add(size)? > bytes.len()
+                    || strings.0.checked_add(strings.1)? > bytes.len()
+                {
                     return None;
                 }
-                return Some(((offset, size / entry), strings, bias));
+                return Some(((offset, size / 24), strings, bias));
             }
             None
         }
@@ -658,10 +735,14 @@ mod unix {
             let mut best: Option<(u64, u32, bool)> = None;
             for index in 0..count {
                 let entry = table + index * 24;
-                let Some(&info) = bytes.get(entry + 4) else { break };
-                let (Some(value), Some(size), Some(name)) =
-                    (u64_at(bytes, entry + 8), u64_at(bytes, entry + 16), u32_at(bytes, entry))
-                else {
+                let Some(&info) = bytes.get(entry + 4) else {
+                    break;
+                };
+                let (Some(value), Some(size), Some(name)) = (
+                    u64_at(bytes, entry + 8),
+                    u64_at(bytes, entry + 16),
+                    u32_at(bytes, entry),
+                ) else {
                     break;
                 };
                 if info & 0xf != STT_FUNC || value == 0 || value > target {
@@ -670,28 +751,37 @@ mod unix {
                 let holds = target < value.saturating_add(size);
                 if match best {
                     None => true,
-                    Some((start, _, best_holds)) => (holds && !best_holds) || (holds == best_holds && value > start),
+                    Some((start, _, best_holds)) => {
+                        (holds && !best_holds) || (holds == best_holds && value > start)
+                    }
                 } {
                     best = Some((value, name, holds));
                 }
             }
             let (start, name, _) = best?;
             let (strings, length) = file.strings;
-            let name = bytes.get(strings + name as usize..strings + length)?;
+            let name =
+                bytes.get(strings.checked_add(name as usize)?..strings.checked_add(length)?)?;
             let name = &name[..name.iter().position(|&byte| byte == 0)?];
             Some((name, (start as usize).wrapping_add(file.bias)))
         }
 
         fn u16_at(bytes: &[u8], at: usize) -> Option<u16> {
-            Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
+            Some(u16::from_le_bytes(
+                bytes.get(at..at.checked_add(2)?)?.try_into().ok()?,
+            ))
         }
 
         fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
-            Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+            Some(u32::from_le_bytes(
+                bytes.get(at..at.checked_add(4)?)?.try_into().ok()?,
+            ))
         }
 
         fn u64_at(bytes: &[u8], at: usize) -> Option<u64> {
-            Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
+            Some(u64::from_le_bytes(
+                bytes.get(at..at.checked_add(8)?)?.try_into().ok()?,
+            ))
         }
     }
 }

@@ -802,11 +802,9 @@ unsafe fn resolve(
                     Some(found) => positions.push(found),
                     None => {
                         if assigning {
-                            let existing = appended
-                                .iter()
-                                .position(|&name| {
-                                    wanted != na_string() && values::same_string(name, wanted)
-                                });
+                            let existing = appended.iter().position(|&name| {
+                                wanted != na_string() && values::same_string(name, wanted)
+                            });
                             let slot = match existing {
                                 Some(existing) => extent + existing,
                                 None => {
@@ -1636,8 +1634,8 @@ pub(crate) unsafe fn s4_data_part(object: Sexp) -> Sexp {
 
 /// The position the `CHARSXP` `name` matches among `names`: exactly, or with `exact ==
 /// Some(false)` (or `None`, which also warns) by a unique partial match. Names compare as text, so
-/// a latin1-marked name matches its UTF-8 spelling, and `NA` matches nothing, as in GNU R's
-/// `get1index`.
+/// a latin1-marked name matches its UTF-8 spelling, and an `NA` name matches nothing. GNU R's
+/// `get1index` agrees for `[[`, but its `$` matches an `NA` name as the text "NA" (`backlog.md`).
 unsafe fn match_name(names: Sexp, name: Sexp, exact: Option<bool>) -> R<Option<usize>> {
     if names == nil() || name == na_string() {
         return Ok(None);
@@ -4740,11 +4738,9 @@ unsafe fn do_aperm(call: &Call<'_>) -> R<Sexp> {
             }
             for index in 0..rank {
                 let wanted = permutation.element(index);
-                let Some(found) =
-                    (0..rank).find(|&candidate| {
-                        values::same_string(dimnames_names.element(candidate), wanted)
-                    })
-                else {
+                let Some(found) = (0..rank).find(|&candidate| {
+                    values::same_string(dimnames_names.element(candidate), wanted)
+                }) else {
                     return Err(call.error(format!(
                         "'perm[{}]' does not match a dimension name",
                         index + 1
