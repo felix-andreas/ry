@@ -80,3 +80,31 @@ show(sums)
 triangle <- function(n) Reduce(function(a, b) a + b, seq_len(n), accumulate = TRUE)
 show(triangle(8L))
 show(vapply(1:5, function(n) Reduce(`*`, 1:n), 1))
+
+# `simplify` is read only when every accumulated value has length one.
+show(Reduce(`+`, 1:4, accumulate = TRUE, simplify = FALSE))
+show(Reduce(`+`, c(1L, 2L, 3L), accumulate = TRUE, simplify = FALSE))
+show(Reduce(`+`, 1:4, 10L, accumulate = TRUE, right = TRUE, simplify = FALSE))
+show(Reduce(`+`, list(1, 2, 3), accumulate = TRUE, simplify = FALSE))
+show(Reduce(function(a, b) c(a, b), 1:3, accumulate = TRUE, simplify = FALSE))
+show(Reduce(`+`, 1:4, simplify = FALSE))
+show(Reduce(`+`, 1:3, accumulate = TRUE, simplify = 1))
+show(Reduce(`+`, 1:3, accumulate = TRUE, simplify = 0))
+show(tryCatch(Reduce(`+`, 1:3, accumulate = TRUE, simplify = NA), error = function(e) conditionMessage(e)))
+show(tryCatch(Reduce(`+`, 1:3, accumulate = TRUE, simplify = "yes"), error = function(e) conditionMessage(e)))
+show(tryCatch(Reduce(`+`, 1:3, accumulate = TRUE, simplify = stop("forced")), error = function(e) conditionMessage(e)))
+show(Reduce(function(a, b) c(a, b), 1:3, accumulate = TRUE, simplify = stop("not forced")))
+show(Reduce(`+`, 1:3, simplify = stop("not forced")))
+
+# A function that rebinds or removes `x` in the frame of `Reduce` changes the next element read.
+show(Reduce(function(a, b) { assign("x", 11:14, envir = parent.frame()); a + b }, 1:4))
+show(tryCatch(Reduce(function(a, b) { assign("x", 7:9, envir = parent.frame()); a + b }, 1:4),
+              error = function(e) conditionMessage(e)))
+show(Reduce(function(a, b) { assign("x", list(0, 0, "c", "d"), envir = parent.frame()); paste(a, b) },
+            list("p", "q", "r", "s")))
+show(Reduce(function(a, b) { assign("x", c(0, 20, 30), envir = parent.frame()); a + b },
+            c(1, 2, 3), accumulate = TRUE))
+without <- function() {
+  Reduce(function(a, b) { rm("x", envir = parent.frame()); a + b }, 1:3)
+}
+show(tryCatch(suppressWarnings(without()), error = function(e) conditionMessage(e)))

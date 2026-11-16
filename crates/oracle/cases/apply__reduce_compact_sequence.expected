@@ -114,6 +114,66 @@
 | c(1L, 3L, 6L, 10L, 15L, 21L, 28L, 36L) 
 |  num [1:5] 1 2 6 24 120
 | c(1, 2, 6, 24, 120) 
+| List of 4
+|  $ : int 1
+|  $ : int 3
+|  $ : int 6
+|  $ : int 10
+| list(1L, 3L, 6L, 10L) 
+| List of 3
+|  $ : int 1
+|  $ : int 3
+|  $ : int 6
+| list(1L, 3L, 6L) 
+| List of 5
+|  $ : int 20
+|  $ : int 19
+|  $ : int 17
+|  $ : int 14
+|  $ : int 10
+| list(20L, 19L, 17L, 14L, 10L) 
+| List of 3
+|  $ : num 1
+|  $ : num 3
+|  $ : num 6
+| list(1, 3, 6) 
+| List of 3
+|  $ : int 1
+|  $ : int [1:2] 1 2
+|  $ : int [1:3] 1 2 3
+| list(1L, 1:2, 1:3) 
+|  int 10
+| 10L 
+|  int [1:3] 1 3 6
+| c(1L, 3L, 6L) 
+| List of 3
+|  $ : int 1
+|  $ : int 3
+|  $ : int 6
+| list(1L, 3L, 6L) 
+|  chr "missing value where TRUE/FALSE needed"
+| "missing value where TRUE/FALSE needed" 
+|  chr "invalid 'y' type in 'x && y'"
+| "invalid 'y' type in 'x && y'" 
+|  chr "forced"
+| "forced" 
+| List of 3
+|  $ : int 1
+|  $ : int [1:2] 1 2
+|  $ : int [1:3] 1 2 3
+| list(1L, 1:2, 1:3) 
+|  int 6
+| 6L 
+|  int 30
+| 30L 
+|  chr "subscript out of bounds"
+| "subscript out of bounds" 
+|  chr "p q c d"
+| "p q c d" 
+|  num [1:3] 1 3 33
+| c(1, 3, 33) 
+|  chr "object 'x' not found"
+| "object 'x' not found" 
 [messages]
 [warnings]
 - NAs produced by integer overflow (in f(init, x[[i]]))

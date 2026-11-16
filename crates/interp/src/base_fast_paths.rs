@@ -1914,6 +1914,7 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
     };
     let symbols = symbols();
     let heap = crate::heap();
+    heap.root(x);
     let init_symbol = symbols.init;
     let i_symbol = symbols.i;
     eval::define(
@@ -1996,7 +1997,11 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
             bound_refcount = index.refcount();
         }
         index.slice_mut::<i32>()[0] = position as i32 + 1;
-        let element = if x.kind() == SexpType::List {
+        // `f` can rebind or remove `x` in this frame, and the body reads `x[[i]]` on every step.
+        let bound = eval::find_var_in_frame(symbols.x, frame)?;
+        let element = if bound == values::unbound() || eval::value_of(bound)? != x {
+            eval::eval(element_call, frame)?
+        } else if x.kind() == SexpType::List {
             x.element(position)
         } else {
             crate::subset::subset2(x, &[index], Some(true), element_call)?
@@ -2038,17 +2043,13 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
         store(slots)?;
     }
     let out = eval::value_of(eval::find_var_in_frame(out_symbol, frame)?)?;
-    // `if (all(lengths(out) == 1L)) out <- unlist(out, recursive = FALSE)`: with no element an
-    // object (whose `length` and `unlist` could dispatch) the test reads lengths directly.
-    let plain = out.kind() == SexpType::List
-        && !out.is_object()
-        && (0..length(out)).all(|position| {
-            let element = out.element(position);
-            (element.kind().is_atomic() || element.kind() == SexpType::List) && !element.is_object()
-        });
-    if !plain {
+    // `if (all(lengths(out) == 1L) && simplify) out <- unlist(out, recursive = FALSE)`: with no
+    // element an object (whose `length` and `unlist` could dispatch) the test reads lengths
+    // directly, and `simplify` is forced only when every length is one, as `&&` does.
+    let simplify_symbol = values::install("simplify")?;
+    let tail = |frame: Sexp| -> R<Sexp> {
         let tail = crate::lower::parse_text(
-            "if (all(lengths(out) == 1L)) out <- unlist(out, recursive = FALSE)\nout",
+            "if (all(lengths(out) == 1L) && simplify) out <- unlist(out, recursive = FALSE)\nout",
             "<Reduce>",
         )?;
         crate::heap().root(tail);
@@ -2056,9 +2057,23 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
         for position in 0..length(tail) {
             value = eval::eval(tail.element(position), frame)?;
         }
-        return finish(ClosureFrame::Env(frame), value, true);
+        Ok(value)
+    };
+    let plain = out.kind() == SexpType::List
+        && !out.is_object()
+        && (0..length(out)).all(|position| {
+            let element = out.element(position);
+            (element.kind().is_atomic() || element.kind() == SexpType::List) && !element.is_object()
+        });
+    if !plain {
+        return finish(ClosureFrame::Env(frame), tail(frame)?, true);
     }
     if (0..length(out)).all(|position| length(out.element(position)) == 1) {
+        match flag(ClosureFrame::Env(frame), simplify_symbol)? {
+            Some(true) => {}
+            Some(false) => return finish(ClosureFrame::Env(frame), out, true),
+            None => return finish(ClosureFrame::Env(frame), tail(frame)?, true),
+        }
         let no = values::scalar_bool(false)?;
         crate::heap().root(no);
         let yes = values::scalar_bool(true)?;
