@@ -791,6 +791,15 @@ fn edge_cases_gnu_r_accepts() {
         r.strings(dim_names),
         vec![Some("x".to_owned()), Some("y".to_owned())]
     );
+    let kept = r
+        .call("rytest_dim_keeps_names", &[])
+        .expect("names after setting dim");
+    assert_eq!(
+        r.strings(kept),
+        ["a", "b", "c", "d"]
+            .map(|name| Some(name.to_owned()))
+            .to_vec()
+    );
     // GNU R reads a string up to its first NUL, so text trimmed in place reads shorter.
     let trimmed = r
         .call("rytest_trim_in_place", &[r.string(" m / s ")])

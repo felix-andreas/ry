@@ -364,6 +364,26 @@ SEXP rytest_dimnames_filled_late(void)
 }
 
 /* GNU R installs the dim vector itself, so its names survive, as stars' C++ code expects. */
+/* GNU R's dimgets removes only dimnames, so the object keeps its names, whatever the type of
+   the dim vector. */
+SEXP rytest_dim_keeps_names(void)
+{
+    SEXP vector = PROTECT(allocVector(REALSXP, 4));
+    SEXP names = PROTECT(allocVector(STRSXP, 4));
+    for (int i = 0; i < 4; i++) {
+        REAL(vector)[i] = i;
+        char name[2] = {(char) ('a' + i), 0};
+        SET_STRING_ELT(names, i, mkChar(name));
+    }
+    setAttrib(vector, R_NamesSymbol, names);
+    SEXP dim = PROTECT(allocVector(INTSXP, 2));
+    INTEGER(dim)[0] = 2;
+    INTEGER(dim)[1] = 2;
+    setAttrib(vector, R_DimSymbol, dim);
+    UNPROTECT(3);
+    return getAttrib(vector, R_NamesSymbol);
+}
+
 SEXP rytest_named_dim(void)
 {
     SEXP array = PROTECT(allocVector(REALSXP, 6));
@@ -1635,6 +1655,7 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_dimnames_filled_late", (DL_FUNC) &rytest_dimnames_filled_late, 0},
     {"rytest_check_class_table", (DL_FUNC) &rytest_check_class_table, 0},
     {"rytest_named_dim", (DL_FUNC) &rytest_named_dim, 0},
+    {"rytest_dim_keeps_names", (DL_FUNC) &rytest_dim_keeps_names, 0},
     {"rytest_trim_in_place", (DL_FUNC) &rytest_trim_in_place, 1},
     {"rytest_destructor_count", (DL_FUNC) &rytest_destructor_count, 0},
     {"rytest_api_extras", (DL_FUNC) &rytest_api_extras, 0},

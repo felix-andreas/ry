@@ -3576,18 +3576,17 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
     "Duplicate DESCRIPTION fields" on ry, a false failure.
   - QuickJSR fails only when ry prints its notice about packages installed by another ry build on
     a subprocess's stderr, which the test compares. Reinstall the library with the ry under test.
-  - future, `reserved-keyword-functions.R`: GNU R byte-compiles a top-level loop before it runs
-    it, and the compiler inlines base functions such as `<-` and `{`, so an override assigned
-    inside the loop is never called. ry looks `<-` up on every iteration. Repro (GNU R prints
-    `[1] 1`, ry fails with "Boom!"):
+  - future, `test-timeouts.R`: `setTimeLimit()` and `setSessionTimeLimit()` are no-ops
+    (`crates/interp/src/system.rs`), so a future with a timeout runs to completion. GNU R checks
+    the limits where it checks for a user interrupt and raises "reached elapsed time limit" or
+    "reached CPU time limit"; a transient limit resets at top level. ry's evaluator polls only
+    the interrupt request flag (`unwind::poll_interrupt`), so a limit needs something that
+    raises that flag at the deadline. Repro (GNU R prints the error message, ry prints 42):
     ```r
-    boom <- function(...) stop("Boom!")
-    for (kk in 1:2) { name <- c("{", "<-")[kk]; assign(name, boom); res <- 1; base::rm(list = name) }
-    print(res)
+    sleep <- function(d) { until <- Sys.time() + d; while (Sys.time() < until) Sys.sleep(0.01) }
+    tryCatch({ setTimeLimit(elapsed = 0.2, transient = TRUE); sleep(1); 42 },
+      error = conditionMessage)
     ```
-    GNU R does not inline when the loop body names the override literally
-    (`assign("<-", boom)` fails there too), so matching it means following the compiler's rules
-    for when a base binding counts as shadowed.
   - ggplot2, `test-geom-smooth.R:92` ("Failed to fit group 1" expected): GNU R's loess on fewer
     points than degrees of freedom warns "span too small. fewer data values than degrees of
     freedom.", "pseudoinverse used at ...", "all data on boundary of neighborhood. make span

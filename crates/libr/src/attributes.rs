@@ -558,13 +558,14 @@ unsafe fn dim_direct(runtime: &mut Runtime, object: Sexp, value: Sexp) -> Option
         return None;
     }
     attach(runtime, object, R_DimSymbol.get(), value)?;
-    // New extents invalidate the names and dimnames, which one walk unlinks together.
-    let (names, dimnames) = (R_NamesSymbol.get(), R_DimNamesSymbol.get());
+    // New extents invalidate the dimnames. GNU R's `dimgets` keeps the names, which only the
+    // R-level `dim<-` drops.
+    let dimnames = R_DimNamesSymbol.get();
     let mut previous: Option<Sexp> = None;
     let mut cell = object.attrib();
     while cell.kind() == SexpType::Pairlist {
         let next = cell.cdr();
-        if cell.tag() == names || cell.tag() == dimnames {
+        if cell.tag() == dimnames {
             match previous {
                 Some(previous) => runtime.heap.set_cdr(previous, next),
                 None => runtime.heap.set_attrib(object, next),

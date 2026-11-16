@@ -2639,14 +2639,14 @@ unsafe fn close_slot(slot: usize) -> R<c_int> {
         None
     };
     if let Some((inner, inner_builtin)) = wrapped {
-        // The wrapped connection shares the wrapper's `conn_id`, which is cleared below.
+        // The wrapped connection shares the wrapper's `conn_id`.
         let destroyed = method_destroy(inner);
         free_rconn(inner, inner_builtin);
         destroyed?;
     }
-    if let Some(id) = Sexp::from_raw((*con).ex_ptr.cast()) {
-        id.set_external_address(null_mut());
-    }
+    // GNU R leaves a destroyed connection's `conn_id` address in place: future reads a null
+    // address as a connection that came back from `unserialize()`, and so would wait forever
+    // on a worker whose connection was closed under it.
     free_rconn(con, builtin);
     closed?;
     destroyed?;

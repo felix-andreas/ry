@@ -51,9 +51,9 @@ use {
         cell::Cell,
         collections::VecDeque,
         ffi::c_void,
-        num::NonZeroU32,
         fmt,
         io::Write,
+        num::NonZeroU32,
         ptr::NonNull,
         rc::Rc,
         time::{Duration, Instant},
@@ -3647,6 +3647,12 @@ impl Heap {
         if self.policy.stress != GcStress::Off {
             self.stress_wait = self.stress_wait.saturating_sub(1);
             if self.stress_wait > 0 {
+                // GNU R collects on its ordinary threshold between stressed collections too, so
+                // a long `gctorture2` step must not let the heap outgrow its budget.
+                if self.over_budget(request, large) {
+                    self.collect_keeping(Collection::Minor, keep, request);
+                    self.escalate_if_full(keep, request);
+                }
                 return;
             }
             self.stress_wait = self.policy.stress_gap.get();
