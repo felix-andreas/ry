@@ -771,9 +771,9 @@ unsafe fn do_qsort(call: &Call<'_>) -> R<Sexp> {
     values::named_list(&[("x", result), ("ix", index)])
 }
 
-/// `sorted_fpass(x, decreasing, na.last)`: no vector carries sortedness metadata, so the fast
-/// pass never applies and the caller sorts. The flags still go through GNU R's `asInteger`,
-/// whose coercion warnings `sort.int` reports.
+/// `sorted_fpass(x, decreasing, na.last)`: whether `x` is known to be in the wanted order, so
+/// `sort.int`, `order` and `sort.list` return it (or `seq_along(x)`) without sorting. The flags
+/// go through GNU R's `asInteger`, whose coercion warnings `sort.int` reports.
 unsafe fn do_sorted_fpass(call: &Call<'_>) -> R<Sexp> {
     for flag in [call.arg(1), call.arg(2)] {
         let mut warnings = CoercionWarnings::default();
@@ -800,7 +800,92 @@ unsafe fn do_sorted_fpass(call: &Call<'_>) -> R<Sexp> {
         }
         warnings.report()?;
     }
-    values::scalar_bool(false)
+    let decreasing = values::as_integer_scalar(call.arg(1));
+    let na_last = values::as_integer_scalar(call.arg(2));
+    let wanted = match (decreasing, na_last) {
+        (NA_INTEGER, _) => return values::scalar_bool(false),
+        (0, 0) => SORTED_INCR_NA_FIRST,
+        (0, _) => SORTED_INCR,
+        (_, 0) => SORTED_DECR_NA_FIRST,
+        _ => SORTED_DECR,
+    };
+    values::scalar_bool(known_sorted(call.arg(0), wanted)?)
+}
+
+/// Whether a plain integer or double vector without missing values is non-decreasing, or
+/// non-increasing when `decreasing`.
+unsafe fn in_order(x: Sexp, decreasing: bool) -> bool {
+    if x.is_altrep() {
+        return false;
+    }
+    match x.kind() {
+        SexpType::Integer => {
+            let values = x.slice::<i32>();
+            !values.contains(&NA_INTEGER)
+                && if decreasing {
+                    values.is_sorted_by(|left, right| left >= right)
+                } else {
+                    values.is_sorted()
+                }
+        }
+        SexpType::Real => {
+            // `is_sorted_by` fails on a NaN anywhere but alone, so a lone one is refused too.
+            let values = x.slice::<f64>();
+            !values.first().is_some_and(|value| value.is_nan())
+                && if decreasing {
+                    values.is_sorted_by(|left, right| left >= right)
+                } else {
+                    values.is_sorted_by(|left, right| left <= right)
+                }
+        }
+        _ => false,
+    }
+}
+
+const SORTED_DECR_NA_FIRST: i32 = -2;
+const SORTED_DECR: i32 = -1;
+const SORTED_INCR: i32 = 1;
+const SORTED_INCR_NA_FIRST: i32 = 2;
+
+/// GNU R's `fastpass_sortcheck`: an ALTREP vector answers from its sortedness metadata, and a
+/// plain integer vector wanted increasing is scanned for non-decreasing order without `NA`.
+///
+/// GNU R's `sort` and `order` put that metadata on every numeric result, which ry's do not,
+/// because a wrapper makes every later read from R code slower. So ry scans the other plain
+/// vectors too, but only for strict order: with distinct values every sorting method gives the
+/// identity permutation, where a tie could come out of `method = "quick"` permuted.
+unsafe fn known_sorted(x: Sexp, wanted: i32) -> R<bool> {
+    if !matches!(x.kind(), SexpType::Integer | SexpType::Real) || length(x) == 0 {
+        return Ok(false);
+    }
+    if x.is_altrep() {
+        let (sorted, no_na) = (crate::interp().hooks.altrep_sortedness)(x)?;
+        let known = matches!(sorted, -2 | -1 | 1 | 2);
+        return Ok(known && (sorted == wanted || (no_na && sorted * wanted > 0)));
+    }
+    Ok(match x.kind() {
+        SexpType::Integer => {
+            let values = x.slice::<i32>();
+            if values.contains(&NA_INTEGER) {
+                false
+            } else if wanted > 0 {
+                values.is_sorted()
+            } else {
+                values.windows(2).all(|pair| pair[0] > pair[1])
+            }
+        }
+        _ => {
+            // A NaN fails every comparison, so only a lone one could pass as sorted.
+            let values = x.slice::<f64>();
+            if values.len() == 1 {
+                !values[0].is_nan()
+            } else if wanted > 0 {
+                values.windows(2).all(|pair| pair[0] < pair[1])
+            } else {
+                values.windows(2).all(|pair| pair[0] > pair[1])
+            }
+        }
+    })
 }
 
 /// `order(na.last, decreasing, ...)`: the stable permutation that sorts the keys
@@ -918,6 +1003,18 @@ pub(crate) unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
             value => Ok(value != 0),
         })
         .collect::<R<Vec<bool>>>()?;
+    // Input already in order, as `order(sort(x))` gives it, is the identity permutation, since
+    // the radix sort is stable and keeps signed zeros as ties.
+    if let [key] = materialized[..]
+        && !return_groups
+        && in_order(key, directions[0])
+    {
+        let permutation = alloc(SexpType::Integer, count)?;
+        for (slot, row) in values::ints_mut(permutation).iter_mut().zip(1..) {
+            *slot = row;
+        }
+        return Ok(permutation);
+    }
     let columns: Vec<Option<Column<'_>>> = materialized
         .iter()
         .map(|&key| radix_column(key, sort_strings))

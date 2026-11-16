@@ -127,7 +127,7 @@ use {
     },
     heap::{
         Heap, Liveness, Marker, RootSource, activity,
-        object::{Sexp, SexpType},
+        object::{NA_INTEGER, Sexp, SexpType},
     },
     rustc_hash::FxHashMap,
     std::{cell::UnsafeCell, rc::Rc},
@@ -514,6 +514,9 @@ pub struct Hooks {
     /// An integer or double ALTREP vector's `sum`, `min` or `max` with the given `na.rm`, from
     /// its class's `Sum`, `Min` or `Max` method, or `None` when the class has no answer.
     pub altrep_summary: unsafe fn(Sexp, AltrepSummary, bool) -> R<Option<Sexp>>,
+    /// An ALTREP vector's `*_IS_SORTED` and `*_NO_NA` metadata, GNU R's sortedness enum
+    /// (`NA_INTEGER` when unknown) and whether it knows the vector holds no missing value.
+    pub altrep_sortedness: unsafe fn(Sexp) -> R<(i32, bool)>,
     /// `as.character` of an integer or double vector without attributes as a vector that
     /// converts each element when it is read, or `None` when the host has no such class.
     pub defer_strings: unsafe fn(Sexp) -> R<Option<Sexp>>,
@@ -1009,6 +1012,7 @@ pub fn default_hooks() -> Hooks {
         altrep_real_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_string_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_summary: |_, _, _| Ok(None),
+        altrep_sortedness: |_| Ok((NA_INTEGER, false)),
         defer_strings: |_| Ok(None),
         altrep_wrap: |object| unsafe { values::shallow_duplicate(object) },
         altrep_unwrap: |object| object,

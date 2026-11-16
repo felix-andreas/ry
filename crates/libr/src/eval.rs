@@ -106,6 +106,12 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
         defer_strings: |object| unsafe { Ok(Some(crate::altrep::deferred_string(object)?)) },
         altrep_wrap: |object| unsafe { crate::altrep::try_wrap(object) },
         altrep_unwrap: |object| unsafe { crate::altrep::try_unwrap(object) },
+        altrep_sortedness: |object| unsafe {
+            Ok((
+                crate::altrep::is_sorted(object)?,
+                crate::altrep::no_na(object)? != 0,
+            ))
+        },
         altrep_summary: |object, method, remove_na| unsafe {
             Ok(match method {
                 AltrepSummary::Sum => crate::altrep::sum(object, remove_na)?,
