@@ -1,0 +1,19 @@
+[stdout]
+| [1] NaN
+| [1] NA
+| [1] NaN
+| [1] NaN
+| [1] NA
+| [1] TRUE
+| [1] NaN
+| [1]         NA          1          2 1073741824         NA         NA         NA
+| [8]         NA
+| [1]         NA         -1 2147483647          1         NA
+| [1] NA
+| [1]  4  8 12
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| c(4L, 8L, 12L)

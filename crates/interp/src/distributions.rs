@@ -655,6 +655,16 @@ trait Sampler {
         }
         Ok(())
     }
+
+    /// Fills `slots` with draws whose parameters recycle from `values`, exactly as
+    /// [`draw_all`]'s loop would, or declines with `false` without drawing.
+    fn fill_recycled<D: Deviates>(
+        _deviates: &mut D,
+        _values: &[&[f64]],
+        _slots: &mut [f64],
+    ) -> R<bool> {
+        Ok(false)
+    }
 }
 
 /// GNU R's `random1` to `random3`: `n` is a count, or the length of a longer vector, and the
@@ -743,6 +753,9 @@ fn draw_all<S: Sampler, D: Deviates>(
     }
     if values.iter().all(|operand| operand.len() == 1) {
         return S::prepare(&arguments).fill(deviates, slots);
+    }
+    if S::fill_recycled(deviates, values, slots)? {
+        return Ok(());
     }
     let mut sampler = S::prepare(&arguments);
     let mut prepared = arguments.map(f64::to_bits);
@@ -939,6 +952,29 @@ impl Sampler for NormalSampler {
         }
         Ok(())
     }
+
+    fn fill_recycled<D: Deviates>(
+        deviates: &mut D,
+        values: &[&[f64]],
+        slots: &mut [f64],
+    ) -> R<bool> {
+        let [means, deviations] = values else {
+            return Ok(false);
+        };
+        if !means.iter().all(|mu| mu.is_finite())
+            || !deviations
+                .iter()
+                .all(|sigma| sigma.is_finite() && *sigma > 0.0)
+        {
+            return Ok(false);
+        }
+        deviates.fill_normal(slots)?;
+        let parameters = means.iter().cycle().zip(deviations.iter().cycle());
+        for (slot, (mu, sigma)) in slots.iter_mut().zip(parameters) {
+            *slot = mu + sigma * *slot;
+        }
+        Ok(true)
+    }
 }
 
 /// `runif` for a batch, which draws all the uniforms in one pass when the generator is known
@@ -974,6 +1010,28 @@ impl Sampler for UniformSampler {
             *slot = runif(deviates, a, b)?;
         }
         Ok(())
+    }
+
+    fn fill_recycled<D: Deviates>(
+        deviates: &mut D,
+        values: &[&[f64]],
+        slots: &mut [f64],
+    ) -> R<bool> {
+        let [lows, highs] = values else {
+            return Ok(false);
+        };
+        // Every pair of bounds the recycling meets must draw a deviate.
+        let count = slots.len();
+        let pairs = || lows.iter().cycle().zip(highs.iter().cycle()).take(count);
+        if !pairs().all(|(a, b)| a.is_finite() && b.is_finite() && b > a)
+            || !deviates.fill_uniform(slots)?
+        {
+            return Ok(false);
+        }
+        for (slot, (a, b)) in slots.iter_mut().zip(pairs()) {
+            *slot = a + (b - a) * *slot;
+        }
+        Ok(true)
     }
 }
 

@@ -1,0 +1,43 @@
+# The builtins ratchet: every exported function of base, stats and utils that tools/bench/builtins/slower.txt does
+# not list must stay at least as fast on ry as on GNU R. The job runs `just builtins-ci` in the flake's `ci` dev
+# shell, whose GNU R is the one the oracle records; to change what it runs, edit that recipe. It times the sweep's
+# cases without a 1e6 input, in short batches, and times a function that looks slower again before it fails.
+# It runs when started by hand, like ci.yml.
+name: Builtins
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ratchet:
+    name: builtins ratchet
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `sweep.py check` compares slower.txt with main's copy.
+          fetch-depth: 0
+      - name: free disk space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: cachix/install-nix-action@v31
+      - uses: cachix/cachix-action@v17
+        with:
+          name: ry
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          pushFilter: "-ry-deps-|-rust-|-rustc-|-cargo-|-clippy-|-rustfmt-|-llvm-tools-"
+      - name: toolchain on PATH
+        run: nix develop .#ci -c bash -c 'dirname "$(command -v cargo)"' >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+      - name: just builtins-ci
+        run: nix develop .#ci -c just builtins-ci

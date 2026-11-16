@@ -1986,11 +1986,20 @@ unsafe fn do_write_bin(call: &Call<'_>) -> R<Sexp> {
     let target = call.arg(1);
     let size = size_argument(call.arg(2))?;
     let swap = values::require_flag(call.arg(3), "swap")?;
-    let bytes = encode_binary(object, size, swap)?;
     if target.kind() == SexpType::Raw {
         interp().visible = true;
-        return raw_vector(&bytes);
+        let mut result = nil();
+        encode_binary(object, size, swap, |total| {
+            result = values::alloc_uninit(SexpType::Raw, total)?;
+            Ok(values::raws_mut(result))
+        })?;
+        return Ok(result);
     }
+    let mut bytes = Vec::new();
+    encode_binary(object, size, swap, |total| {
+        bytes.resize(total, 0);
+        Ok(bytes.as_mut_slice())
+    })?;
     let con = resolve_con(target)?.1;
     with_open(con, "wb", || {
         if (*con).canwrite == 0 {
@@ -3244,60 +3253,95 @@ unsafe fn decode_binary(
 }
 
 /// The bytes `writeBin(object, size, endian)` writes. `object` must not be ALTREP.
-unsafe fn encode_binary(object: Sexp, size: Option<usize>, swap: bool) -> R<Vec<u8>> {
+/// Encodes what `writeBin` writes for `object` into the buffer `buffer` gives for the byte
+/// count: each element in `size` bytes, byte-reversed when `swap`, or for a character vector
+/// each string followed by a NUL.
+unsafe fn encode_binary<'a>(
+    object: Sexp,
+    size: Option<usize>,
+    swap: bool,
+    buffer: impl FnOnce(usize) -> R<&'a mut [u8]>,
+) -> R<()> {
     let kind = match object.kind() {
         SexpType::Integer => BinaryType::Integer,
         SexpType::Logical => BinaryType::Logical,
         SexpType::Real => BinaryType::Double,
         SexpType::Complex => BinaryType::Complex,
-        SexpType::Raw => return Ok(values::raws(object).to_vec()),
+        SexpType::Raw => {
+            let raws = values::raws(object);
+            buffer(raws.len())?.copy_from_slice(raws);
+            return Ok(());
+        }
         SexpType::String => {
-            let mut bytes = Vec::new();
-            for element in values::strings(object) {
-                bytes.extend_from_slice(element.as_deref().unwrap_or("NA").as_bytes());
-                bytes.push(0);
+            let text = |index: usize| {
+                let charsxp = object.element(index);
+                if charsxp == values::na_string() {
+                    Cow::Borrowed("NA")
+                } else {
+                    values::char_str(charsxp)
+                }
+            };
+            let count = object.length() as usize;
+            let total = (0..count).map(|index| text(index).len() + 1).sum();
+            let out = buffer(total)?;
+            let mut position = 0;
+            for index in 0..count {
+                let text = text(index);
+                let end = position + text.len();
+                out[position..end].copy_from_slice(text.as_bytes());
+                out[end] = 0;
+                position = end + 1;
             }
-            return Ok(bytes);
+            return Ok(());
         }
         _ => return Err(error("can only write vector objects")),
     };
     let size = binary_size(kind, size)?;
-    let mut bytes = Vec::with_capacity(object.length() as usize * size);
-    let mut push = |mut element: Vec<u8>| {
-        if swap {
-            element.reverse();
-        }
-        bytes.extend_from_slice(&element);
-    };
+    let count = object.length() as usize;
     match kind {
         BinaryType::Integer | BinaryType::Logical => {
-            for &value in object.slice::<i32>() {
-                push(match size {
-                    1 => vec![value as u8],
-                    2 => (value as i16).to_ne_bytes().to_vec(),
-                    8 => (value as i64).to_ne_bytes().to_vec(),
-                    _ => value.to_ne_bytes().to_vec(),
-                });
+            let ints = object.slice::<i32>();
+            let out = buffer(count * size)?;
+            match size {
+                1 => encode(out, ints, swap, |value| [value as u8]),
+                2 => encode(out, ints, swap, |value| (value as i16).to_ne_bytes()),
+                8 => encode(out, ints, swap, |value| i64::from(value).to_ne_bytes()),
+                _ => encode(out, ints, swap, i32::to_ne_bytes),
             }
         }
         BinaryType::Double => {
-            for &value in object.slice::<f64>() {
-                push(if size == 4 {
-                    (value as f32).to_ne_bytes().to_vec()
-                } else {
-                    value.to_ne_bytes().to_vec()
+            let out = buffer(count * size)?;
+            if size == 4 {
+                encode(out, object.slice::<f64>(), swap, |value| {
+                    (value as f32).to_ne_bytes()
                 });
+            } else {
+                encode(out, object.slice::<f64>(), swap, f64::to_ne_bytes);
             }
         }
         BinaryType::Complex => {
-            for value in object.slice::<Rcomplex>() {
-                push(value.r.to_ne_bytes().to_vec());
-                push(value.i.to_ne_bytes().to_vec());
-            }
+            // Each part is written, and swapped, as its own double.
+            let parts = std::slice::from_raw_parts(object.data() as *const f64, 2 * count);
+            encode(buffer(2 * count * 8)?, parts, swap, f64::to_ne_bytes);
         }
         BinaryType::Raw | BinaryType::Character => {}
     }
-    Ok(bytes)
+    Ok(())
+}
+
+fn encode<T: Copy, const N: usize>(
+    out: &mut [u8],
+    values: &[T],
+    swap: bool,
+    bytes: impl Fn(T) -> [u8; N],
+) {
+    for (chunk, &value) in out.chunks_exact_mut(N).zip(values) {
+        let mut element = bytes(value);
+        if swap {
+            element.reverse();
+        }
+        chunk.copy_from_slice(&element);
+    }
 }
 
 // Method dispatch. A method pointer that is ry's own runs its device directly; any other is

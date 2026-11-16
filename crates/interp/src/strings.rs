@@ -1682,24 +1682,64 @@ unsafe fn starts_or_ends_with(call: &Call<'_>, starts: bool) -> R<Sexp> {
     } else {
         text_count.max(affix_count)
     };
-    let result = alloc(SexpType::Logical, count)?;
-    for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
-        *slot = match (
-            string_at(x, index % text_count),
-            string_at(affix, index % affix_count),
-        ) {
-            (Some(text), Some(affix)) => {
-                let found = if starts {
-                    text.starts_with(affix.as_ref())
+    let x = values::materialize(x)?;
+    let affix = values::materialize(affix)?;
+    let result = values::alloc_uninit(SexpType::Logical, count)?;
+    let missing = na_string();
+    let texts = x.slice::<Sexp>();
+    let affixes: Vec<Option<&[u8]>> = affix
+        .slice::<Sexp>()
+        .iter()
+        .map(|&charsxp| (charsxp != missing).then(|| utf8_bytes(charsxp)).flatten())
+        .collect();
+    let test = |text: Sexp, affix_index: usize| -> i32 {
+        let affix_charsxp = affix.slice::<Sexp>()[affix_index];
+        if text == missing || affix_charsxp == missing {
+            return NA_LOGICAL;
+        }
+        // Valid UTF-8 matches a prefix or suffix byte for byte exactly when it matches
+        // character for character. An affix without NUL matches a text's prefix exactly when it
+        // matches the text cut at its first NUL, as `char_str` reads it, but a suffix match
+        // must check the text holds no NUL.
+        if let (Some(affix), true) = (affixes[affix_index], text.is_valid_utf8()) {
+            if !text.has_gp(gp::LATIN1 | gp::BYTES) {
+                let bytes = text.bytes();
+                return if starts {
+                    bytes.starts_with(affix) as i32
                 } else {
-                    text.ends_with(affix.as_ref())
+                    (bytes.ends_with(affix) && memchr::memchr(0, bytes).is_none()) as i32
                 };
-                found as i32
             }
-            _ => NA_LOGICAL,
-        };
+        }
+        let (text, affix) = (values::char_str(text), values::char_str(affix_charsxp));
+        if starts {
+            text.starts_with(affix.as_ref()) as i32
+        } else {
+            text.ends_with(affix.as_ref()) as i32
+        }
+    };
+    let out = values::ints_mut(result);
+    if affixes.len() == 1 && texts.len() == count {
+        for (slot, &text) in out.iter_mut().zip(texts) {
+            *slot = test(text, 0);
+        }
+    } else {
+        let (text_count, affix_count) = (texts.len(), affixes.len());
+        for (index, slot) in out.iter_mut().enumerate() {
+            *slot = test(texts[index % text_count], index % affix_count);
+        }
     }
     Ok(result)
+}
+
+/// The bytes of `charsxp` when they are its text as UTF-8 as they stand: valid UTF-8 not
+/// declared Latin-1 or bytes, and without the NUL that [`values::char_str`] would end the text at.
+unsafe fn utf8_bytes<'a>(charsxp: Sexp) -> Option<&'a [u8]> {
+    if !charsxp.is_valid_utf8() || charsxp.has_gp(gp::LATIN1 | gp::BYTES) {
+        return None;
+    }
+    let bytes = charsxp.bytes();
+    memchr::memchr(0, bytes).is_none().then_some(bytes)
 }
 
 unsafe fn do_strrep(call: &Call<'_>) -> R<Sexp> {
@@ -3130,6 +3170,9 @@ struct LazyAutomata {
 struct Automata {
     first: meta::Regex,
     longest: meta::Regex,
+    /// Whether `first`'s capture groups are TRE's whenever its match spans as far as the
+    /// longest one; see [`greedy_single_width`].
+    greedy_groups: bool,
 }
 
 impl LazyAutomata {
@@ -3147,13 +3190,74 @@ impl LazyAutomata {
                         .build(&self.pattern)
                         .ok()
                 };
+                let greedy_groups = regex_syntax::ParserBuilder::new()
+                    .case_insensitive(self.ignore_case)
+                    .build()
+                    .parse(&self.pattern)
+                    .is_ok_and(|hir| greedy_single_width(&hir));
                 Some(Automata {
                     first: build(MatchKind::LeftmostFirst)?,
                     longest: build(MatchKind::All)?,
+                    greedy_groups,
                 })
             })
             .as_ref()
     }
+}
+
+/// Whether every repetition in `hir` is greedy and repeats a single character, with no
+/// alternation anywhere. A backtracking match of such a pattern makes each repetition, in
+/// pattern order, as long as the rest of the pattern allows, so when it ends where the longest
+/// match ends its groups are the POSIX ones TRE reports. A repeated group or an alternation
+/// breaks this: `(a)?(ab)?b*` on `"abb"` spans the same text either way, but TRE gives the
+/// second group `"ab"` and a backtracker gives the first one `"a"`.
+fn greedy_single_width(hir: &regex_syntax::hir::Hir) -> bool {
+    use regex_syntax::hir::HirKind;
+    match hir.kind() {
+        HirKind::Empty | HirKind::Literal(_) | HirKind::Class(_) | HirKind::Look(_) => true,
+        HirKind::Repetition(repetition) => {
+            repetition.greedy
+                && match repetition.sub.kind() {
+                    HirKind::Class(_) => true,
+                    HirKind::Literal(literal) => {
+                        std::str::from_utf8(&literal.0).is_ok_and(|text| text.chars().count() == 1)
+                    }
+                    _ => false,
+                }
+        }
+        HirKind::Capture(capture) => greedy_single_width(&capture.sub),
+        HirKind::Concat(items) => items.iter().all(greedy_single_width),
+        HirKind::Alternation(_) => false,
+    }
+}
+
+/// The groups of the leftmost match from `first`, or `None` (inner) when there is no match;
+/// `None` (outer) when the match ends before the longest one does, so only the backtracker
+/// can tell TRE's groups.
+fn greedy_captures(
+    first: &meta::Regex,
+    longest: &meta::Regex,
+    text: &str,
+    from: usize,
+) -> Option<Option<Groups>> {
+    let mut captures = first.create_captures();
+    first.search_captures(&Input::new(text).range(from..), &mut captures);
+    let Some(found) = captures.get_match() else {
+        return Some(None);
+    };
+    let anchored = Input::new(text)
+        .range(found.start()..)
+        .anchored(Anchored::Yes);
+    let end = longest
+        .search(&anchored)
+        .map_or(found.end(), |longest| longest.end());
+    (end == found.end()).then(|| {
+        Some(
+            (0..captures.group_len())
+                .map(|group| captures.get_group(group).map(|span| (span.start, span.end)))
+                .collect(),
+        )
+    })
 }
 
 /// How many compiled patterns [`Matcher::compile`] keeps. R code calls `grepl` and `sub` with the
@@ -3299,7 +3403,7 @@ impl Matcher {
                 shortest,
                 ..
             } => {
-                let Some(Automata { first, longest }) = automata.get() else {
+                let Some(Automata { first, longest, .. }) = automata.get() else {
                     return regex
                         .find_from_pos(text, from)
                         .map(|found| found.map(|found| (found.start(), found.end())))
@@ -3358,6 +3462,19 @@ impl Matcher {
                         .map(|group| captures.get_group(group).map(|span| (span.start, span.end)))
                         .collect(),
                 ))
+            }
+            Matcher::Automaton {
+                automata,
+                shortest: false,
+                ..
+            } if let Some(Automata {
+                first,
+                longest,
+                greedy_groups: true,
+            }) = automata.get()
+                && let Some(groups) = greedy_captures(first, longest, text, from) =>
+            {
+                Ok(groups)
             }
             Matcher::Pattern { regex, .. } | Matcher::Automaton { regex, .. } => {
                 let Some(captures) = regex
