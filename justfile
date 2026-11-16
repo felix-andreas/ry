@@ -221,7 +221,7 @@ climb *args:
 
 # Keeps .agents/memory navigable: `split` moves a legacy decisions.md into decisions/<area>.md,
 # `index` regenerates decisions/index.md, and `check` fails on a stale index or an over-budget file.
-memory *args:
+memory *args="check":
     python3 -I tools/memory.py {{ args }}
 
 # Fails when a Rust file has more over-long, banner or process-history comments than its baseline,
