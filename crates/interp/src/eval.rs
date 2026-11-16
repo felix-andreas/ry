@@ -6997,6 +6997,7 @@ pub unsafe fn complex_assign(
             &getters,
             base,
             superassign,
+            env,
         )));
     }
     let heap = crate::heap();
@@ -7155,8 +7156,10 @@ pub unsafe fn complex_assign(
 }
 
 /// A profile summary's name for a complex assignment's target: the replacement functions from
-/// the outside in, then the variable's type, as in `` `names<-` `[<-` on character ``.
-unsafe fn assignment_shape(getters: &[Sexp], base: Sexp, superassign: bool) -> String {
+/// the outside in, then the variable's type, as in `` `names<-` `[<-` on character ``, whether
+/// the variable's class has a method for its replacement, and whether the frame `env` runs a
+/// body that is not compiled.
+unsafe fn assignment_shape(getters: &[Sexp], base: Sexp, superassign: bool, env: Sexp) -> String {
     let mut shape = String::new();
     for getter in getters {
         let head = getter.car();
@@ -7190,6 +7193,20 @@ unsafe fn assignment_shape(getters: &[Sexp], base: Sexp, superassign: bool) -> S
             PUBLIC_CLASSES.iter().find(|public| **public == name)
         });
         shape.push_str(&format!(" ({})", known.unwrap_or(&"an object")));
+        let innermost = getters.last().map(|getter| getter.car());
+        if let Some(head) = innermost.filter(|head| head.kind() == SexpType::Symbol)
+            && let Some(function) =
+                crate::builtins::primitive(&format!("{}<-", symbol_name(head)))
+            && let Ok(definition) = builtin_def(function)
+            && definition.generic == Generic::Internal
+            && dispatch::has_internal_method(definition, function, base, dispatch::Caller::Env(env))
+                .unwrap_or(false)
+        {
+            shape.push_str(" with a method");
+        }
+    }
+    if !env.has_gp(gp::COMPILED_FRAME) {
+        shape.push_str(", uncompiled");
     }
     shape
 }
