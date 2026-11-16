@@ -522,17 +522,35 @@ pub fn add_products(
     })
 }
 
-/// `total` plus every `x[i] * y[i]`, each product taken in long double precision, as GNU R's
-/// complete-observation covariance loop adds `(LDOUBLE)(x - mx) * (y - my)` of deviations it
-/// has already rounded to double. The slices must have the same length.
-pub fn add_double_products(total: LongDouble, x: &[f64], y: &[f64]) -> LongDouble {
-    assert_eq!(x.len(), y.len(), "covariance columns differ in length");
+/// Four covariance sums at once, sharing `x`: entry `j` is the sum of every
+/// `(x[i] - x_offset) * (y[j][i] - y_offsets[j])` in order, divided by `divisor` and rounded to
+/// double, with every operation before the final rounding in long double, as GNU R's
+/// complete-observation covariance computes it. The offsets are doubles, as GNU R's column means
+/// are. The four sums are independent, so they overlap in the floating-point unit where one
+/// alone waits on each addition. Every slice must be as long as `x`.
+pub fn covariances_by_four(
+    x: &[f64],
+    x_offset: f64,
+    y: [&[f64]; 4],
+    y_offsets: [f64; 4],
+    divisor: i64,
+) -> [f64; 4] {
+    assert!(
+        y.iter().all(|column| column.len() == x.len()),
+        "covariance columns differ in length"
+    );
     #[cfg(all(target_arch = "x86_64", not(windows)))]
-    if let Some(start) = to_x87(total) {
-        return from_x87(x87::add_double_products(start, x, y));
-    }
-    x.iter().zip(y).fold(total, |total, (&x, &y)| {
-        total + LongDouble::from(x) * LongDouble::from(y)
+    return x87::covariances_by_four(x, x_offset, y, y_offsets, divisor);
+    #[cfg(not(all(target_arch = "x86_64", not(windows))))]
+    std::array::from_fn(|j| {
+        let total = add_products(
+            LongDouble::ZERO,
+            x,
+            y[j],
+            LongDouble::from(x_offset),
+            LongDouble::from(y_offsets[j]),
+        );
+        (total / divisor as usize).to_f64()
     })
 }
 
@@ -826,33 +844,77 @@ mod x87 {
         total
     }
 
-    pub fn add_double_products(mut total: [u8; 10], x: &[f64], y: &[f64]) -> [u8; 10] {
-        // SAFETY: as in `add_all`; the caller checked that `y` is as long as `x`.
+    pub fn covariances_by_four(
+        x: &[f64],
+        x_offset: f64,
+        y: [&[f64]; 4],
+        y_offsets: [f64; 4],
+        divisor: i64,
+    ) -> [f64; 4] {
+        let mut out = [0.0; 4];
+        let offsets = [x_offset, y_offsets[0], y_offsets[1], y_offsets[2], y_offsets[3]];
+        // SAFETY: reads `x.len()` doubles from `x` and from each `y` column, which the caller
+        // checked are as long; the stack holds the four sums and two temporaries, and is left
+        // empty. The subtractions take the double offsets from memory, which extends them
+        // exactly, as loading them onto the stack would.
         unsafe {
             asm!(
-                "fld tbyte ptr [{total}]",
+                "fldz",
+                "fldz",
+                "fldz",
+                "fldz",
                 "test {count}, {count}",
                 "jz 3f",
+                "xor {index:e}, {index:e}",
                 "2:",
-                "fld qword ptr [{x}]",
-                "fmul qword ptr [{y}]",
-                "faddp st(1), st(0)",
-                "add {x}, 8",
-                "add {y}, 8",
-                "dec {count}",
-                "jnz 2b",
+                "fld qword ptr [{x} + {index} * 8]",
+                "fsub qword ptr [{offsets}]",
+                "fld qword ptr [{y0} + {index} * 8]",
+                "fsub qword ptr [{offsets} + 8]",
+                "fmul st(0), st(1)",
+                "faddp st(5), st(0)",
+                "fld qword ptr [{y1} + {index} * 8]",
+                "fsub qword ptr [{offsets} + 16]",
+                "fmul st(0), st(1)",
+                "faddp st(4), st(0)",
+                "fld qword ptr [{y2} + {index} * 8]",
+                "fsub qword ptr [{offsets} + 24]",
+                "fmul st(0), st(1)",
+                "faddp st(3), st(0)",
+                "fld qword ptr [{y3} + {index} * 8]",
+                "fsub qword ptr [{offsets} + 32]",
+                "fmul st(0), st(1)",
+                "faddp st(2), st(0)",
+                "fstp st(0)",
+                "inc {index}",
+                "cmp {index}, {count}",
+                "jne 2b",
                 "3:",
-                "fstp tbyte ptr [{total}]",
-                total = in(reg) total.as_mut_ptr(),
-                x = inout(reg) x.as_ptr() => _,
-                y = inout(reg) y.as_ptr() => _,
-                count = inout(reg) x.len() => _,
+                "fild qword ptr [{divisor}]",
+                "fdiv st(1), st(0)",
+                "fdiv st(2), st(0)",
+                "fdiv st(3), st(0)",
+                "fdivp st(4), st(0)",
+                "fstp qword ptr [{out} + 24]",
+                "fstp qword ptr [{out} + 16]",
+                "fstp qword ptr [{out} + 8]",
+                "fstp qword ptr [{out}]",
+                out = in(reg) out.as_mut_ptr(),
+                offsets = in(reg) offsets.as_ptr(),
+                divisor = in(reg) &divisor,
+                x = in(reg) x.as_ptr(),
+                y0 = in(reg) y[0].as_ptr(),
+                y1 = in(reg) y[1].as_ptr(),
+                y2 = in(reg) y[2].as_ptr(),
+                y3 = in(reg) y[3].as_ptr(),
+                count = in(reg) x.len(),
+                index = out(reg) _,
                 out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
                 out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
                 options(nostack),
             );
         }
-        total
+        out
     }
 
     pub fn add_differences(mut total: [u8; 10], values: &[f64], offset: [u8; 10]) -> [u8; 10] {
@@ -1247,11 +1309,19 @@ mod tests {
             });
             let fast = add_products(third, values, &reversed, third, seven);
             assert_eq!(format!("{fast:?}"), format!("{model:?}"), "{values:?}");
-            let model = values.iter().zip(&reversed).fold(third, |total, (&x, &y)| {
-                total + LongDouble::from(x) * LongDouble::from(y)
-            });
-            let fast = add_double_products(third, values, &reversed);
-            assert_eq!(format!("{fast:?}"), format!("{model:?}"), "{values:?}");
+            let shifted: Vec<f64> = values.iter().map(|value| value * 0.3 - 1.0).collect();
+            let columns = [&values[..], &reversed, &shifted, &values[..]];
+            let offsets = [0.7, -2.5, 1e-3, 0.0];
+            let fast = covariances_by_four(values, 1.0 / 3.0, columns, offsets, 7);
+            for (j, column) in columns.iter().enumerate() {
+                let model = values.iter().zip(*column).fold(LongDouble::ZERO, |total, (&x, &y)| {
+                    total
+                        + (LongDouble::from(x) - LongDouble::from(1.0 / 3.0))
+                            * (LongDouble::from(y) - LongDouble::from(offsets[j]))
+                });
+                let model = (model / 7).to_f64();
+                assert_eq!(fast[j].to_bits(), model.to_bits(), "{values:?}");
+            }
         }
         let pseudo: Vec<f64> = (1..2000u32)
             .map(|index| f64::from(index.wrapping_mul(2654435761) % 10007) * 1.37e-3 - 6.0)
