@@ -4838,8 +4838,7 @@ impl<'p> Translator<'p> {
         self.flush_all(state, failed);
         self.builder.ins().jump(done, &[]);
         self.builder.switch_to_block(release);
-        for slot in 0..state.slots.len() {
-            let current = state.slots[slot];
+        for (slot, current) in state.slots.iter().enumerate() {
             if !current.may_be(status::DIRTY)
                 || matches!(current.ty, Ty::Int | Ty::Lgl | Ty::Dbl | Ty::Num)
             {

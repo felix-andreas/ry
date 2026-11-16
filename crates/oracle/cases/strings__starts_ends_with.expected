@@ -1,0 +1,16 @@
+[stdout]
+| [1]  TRUE FALSE    NA FALSE  TRUE FALSE
+| [1] FALSE  TRUE    NA FALSE FALSE FALSE
+| [1]  TRUE  TRUE    NA FALSE  TRUE FALSE
+| [1] TRUE TRUE   NA TRUE TRUE TRUE
+| [1]  TRUE    NA FALSE  TRUE
+| [1] FALSE FALSE    NA FALSE FALSE  TRUE
+| logical(0)
+| logical(0)
+| [1] "non-character object(s)"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "non-character object(s)"

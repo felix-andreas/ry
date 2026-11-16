@@ -8,7 +8,7 @@
 |     }, test = function (object) 
 |     TRUE, replace = function (from, to, value) 
 |     {
-|         from@.Data <- as(value, "function", strict = FALSE)
+|         from@.Data <- methods::as(value, "function", strict = FALSE)
 |         from
 |     }, simple = TRUE, by = character(0), dataPart = TRUE, distance = 1)
 | new("Point", x = c(1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5), y = c(10, 

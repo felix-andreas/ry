@@ -557,19 +557,34 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
         let missing_y: Vec<bool> = y_summary.iter().map(|summary| summary.0).collect();
         let x_means: Vec<Option<LongDouble>> = x_summary.iter().map(|summary| summary.1).collect();
         let y_means: Vec<Option<LongDouble>> = y_summary.iter().map(|summary| summary.1).collect();
-        for i in 0..x_columns {
-            for j in 0..y_columns {
-                if !missing_x[i] && !missing_y[j] {
-                    result[i + j * x_columns] = complete_covariance(
-                        x_data[i],
-                        y_data[j],
-                        &used,
-                        kendall,
-                        [x_means[i], y_means[j]],
-                    )
-                    .to_f64();
+        if kendall {
+            for i in 0..x_columns {
+                for j in 0..y_columns {
+                    if !missing_x[i] && !missing_y[j] {
+                        result[i + j * x_columns] =
+                            complete_covariance(x_data[i], y_data[j], &used, true, [None, None])
+                                .to_f64();
+                    }
                 }
             }
+        } else {
+            let x_used = used_rows(&x[..n * x_columns], &x_data, &used, used_count);
+            let x_double_means = double_means(&x_used, used_count, &x_means, &missing_x);
+            let y_used = y
+                .as_ref()
+                .map(|y| used_rows(&y[..n * y_columns], &y_data, &used, used_count));
+            let y_double_means = y_used
+                .as_ref()
+                .map(|y_used| double_means(y_used, used_count, &y_means, &missing_y));
+            complete_covariances(
+                (&x_used, &x_double_means, &missing_x),
+                y_used
+                    .as_deref()
+                    .zip(y_double_means.as_deref())
+                    .map(|(data, means)| (data, means, &missing_y[..])),
+                used_count,
+                &mut result,
+            );
         }
         if correlate {
             let scales = |data: &[&[f64]], missing: &[bool], means: &[Option<LongDouble>]| {
@@ -699,6 +714,114 @@ fn complete_covariance(
         LongDouble::from(mean.to_f64())
     });
     long_double::add_products(sum, &x, &y, x_mean, y_mean) / (count - 1)
+}
+
+/// Columns of a covariance argument: the used rows of each column, one column after another,
+/// each column's mean rounded to double, and whether a column holds a used NA.
+type CovarianceColumns<'a> = (&'a [f64], &'a [f64], &'a [bool]);
+
+/// GNU R's complete-observation covariance of every pair of columns without a used NA, into
+/// the column-major `result`, over `rows` used rows. Without `y` the matrix is symmetric and
+/// only one triangle is computed. Four pairs share each pass over the rows, which keeps four
+/// independent long double sums in flight; each sum adds its products in row order, as GNU R
+/// does, so the result is the same to the last bit.
+fn complete_covariances(
+    x: CovarianceColumns<'_>,
+    y: Option<CovarianceColumns<'_>>,
+    rows: usize,
+    result: &mut [f64],
+) {
+    if rows < 2 {
+        return;
+    }
+    let (x_data, x_means, x_missing) = x;
+    let symmetric = y.is_none();
+    let (y_data, y_means, y_missing) = y.unwrap_or(x);
+    let x_columns = x_means.len();
+    let partners: Vec<usize> = (0..y_means.len()).filter(|&j| !y_missing[j]).collect();
+    // `rows` counts the elements of a vector, so it fits.
+    let divisor = (rows - 1) as i64;
+    for i in 0..x_columns {
+        if x_missing[i] {
+            continue;
+        }
+        let x_column = column(x_data, i, rows);
+        let partners = if symmetric {
+            &partners[..partners.partition_point(|&j| j <= i)]
+        } else {
+            &partners[..]
+        };
+        let mut groups = partners.chunks_exact(4);
+        for group in &mut groups {
+            let group = [group[0], group[1], group[2], group[3]];
+            let values = long_double::covariances_by_four(
+                x_column,
+                x_means[i],
+                group.map(|j| column(y_data, j, rows)),
+                group.map(|j| y_means[j]),
+                divisor,
+            );
+            for (j, value) in group.into_iter().zip(values) {
+                result[i + j * x_columns] = value;
+                if symmetric {
+                    result[j + i * x_columns] = value;
+                }
+            }
+        }
+        for &j in groups.remainder() {
+            let value = long_double::covariance(
+                x_column,
+                x_means[i],
+                column(y_data, j, rows),
+                y_means[j],
+                divisor,
+            );
+            result[i + j * x_columns] = value;
+            if symmetric {
+                result[j + i * x_columns] = value;
+            }
+        }
+    }
+}
+
+/// `data`, the whole column-major argument, when every row is used; otherwise the used rows of
+/// each of its `columns`, one column after another.
+fn used_rows<'a>(data: &'a [f64], columns: &[&[f64]], used: &[bool], used_count: usize) -> Cow<'a, [f64]> {
+    if used_count == used.len() {
+        return Cow::Borrowed(data);
+    }
+    Cow::Owned(
+        columns
+            .iter()
+            .flat_map(|column| {
+                column
+                    .iter()
+                    .zip(used)
+                    .filter(|(_, flag)| **flag)
+                    .map(|(value, _)| *value)
+            })
+            .collect(),
+    )
+}
+
+/// Each column's mean rounded to double, as GNU R keeps it, taking a mean the caller already
+/// has; NA for a column holding a used NA.
+fn double_means(data: &[f64], rows: usize, means: &[Option<LongDouble>], missing: &[bool]) -> Vec<f64> {
+    (0..means.len())
+        .map(|index| {
+            if missing[index] {
+                return NA_REAL;
+            }
+            means[index]
+                .unwrap_or_else(|| arith::long_double_mean(column(data, index, rows)))
+                .to_f64()
+        })
+        .collect()
+}
+
+/// Column `index` of `data`, which holds columns of `rows` values one after another.
+fn column(data: &[f64], index: usize, rows: usize) -> &[f64] {
+    &data[index * rows..(index + 1) * rows]
 }
 
 fn used_values(data: &[f64], used: &[bool]) -> Vec<f64> {
@@ -2610,12 +2733,7 @@ fn super_smooth(
     );
     let mut blended = std::mem::take(&mut columns[3]);
     for j in 0..n {
-        if spans[j] <= SUPSMU_SPANS[0] {
-            spans[j] = SUPSMU_SPANS[0];
-        }
-        if spans[j] >= SUPSMU_SPANS[2] {
-            spans[j] = SUPSMU_SPANS[2];
-        }
+        spans[j] = spans[j].clamp(SUPSMU_SPANS[0], SUPSMU_SPANS[2]);
         let f = spans[j] - SUPSMU_SPANS[1];
         blended[j] = if f < 0.0 {
             let f = -f / (SUPSMU_SPANS[1] - SUPSMU_SPANS[0]);

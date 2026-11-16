@@ -72,7 +72,7 @@ any that still fails.
 
 ```sh
 just oracle verify          # GNU R against the recorded .expected files
-just oracle compare         # GNU R against the second engine
+just oracle compare         # GNU R against ry-tier0 and ry-jit
 just oracle show file.R     # one file's outcome under GNU R
 RY_BLESS=1 cargo test -p oracle   # or: just oracle record
 ```
@@ -85,11 +85,11 @@ stopped it, and the deparsed last value. A warning or error carries its call, as
 environments, S3 and S4, conditions, vectors, recycling, attributes, NA handling, numerics,
 control flow, printing, delimited data I/O (`read.table`, `write.table`, `scan`, `type.convert`),
 colours, contour lines and axis ticks, graphics devices and parameters (`par`, layouts, the
-device list, text metrics), grid and the graphics engine (the `grid__*` cases, which need ragg and lattice installed and compare drawings with GNU R by pixel checksums of a ragg capture), object sizes, hash tables, and data.table queries (the `datatable__*` cases, which need data.table installed and check that data.table's own code prints and behaves under ry exactly as under GNU R). `cargo test -p oracle` replays them and passes without R installed. The expectations are GNU R 4.6.2 output, the release ry bundles as its base R (see [The reference GNU R](#the-reference-gnu-r)).
+device list, text metrics), grid and the graphics engine (the `grid__*` cases, which need ragg and lattice installed and compare drawings with GNU R by pixel checksums of a ragg capture), object sizes, hash tables, and data.table queries (the `datatable__*` cases, which need data.table installed and check that data.table's own code prints and behaves under ry exactly as under GNU R). `cargo test -p oracle` replays them under GNU R when it is installed, and under ry's runtime when it is built (see below). The expectations are GNU R 4.6.2 output, the release ry bundles as its base R (see [The reference GNU R](#the-reference-gnu-r)).
 
 The driver differs from `Rscript` in four ways that the cases avoid: it parses the whole file first, so a syntax error hides the output of the lines before it; its own frames show in `sys.nframe()` and `sys.calls()` (so data.table prints the table after a top-level `:=`, which it skips at a real prompt); `commandArgs(TRUE)` holds the two paths; and `quit()` ends the run without a report.
 
-The second engine is anything that implements the `Engine` trait. `ProcessEngine` covers a
+An engine compared with GNU R is anything that implements the `Engine` trait. `ProcessEngine` covers a
 command line: it is invoked as `<command…> <script> <report>`, must print the script's output
 to stdout, and must write the JSON report that `crates/oracle/src/driver.R` defines (`messages`,
 `warnings`, `errors`, and `value` with `kind` and `deparsed`). ry's runtime is `--engine ry`:
@@ -106,9 +106,22 @@ holds fails an assertion that is on in release builds too, so the case reports a
 keeps every object it holds rooted. `--engine` takes a comma-separated list, such as
 `--engine ry,ry-jit-gctorture`, which runs GNU R once per case and prints a summary line per engine.
 A failure listed in `crates/oracle/known_failures.toml` reports as known rather than failing the run
-([Testing](/development/testing#known-oracle-failures) has the rule). Without `--engine` or `ORACLE_ENGINE` the second engine
-is a stub and `compare` skips every case. `ORACLE_ENGINE=ry` (or `ry-jit`, or any command line) makes
-`cargo test -p oracle` also require the engine to match GNU R on every case.
+([Testing](/development/testing#known-oracle-failures) has the rule). Without `--engine`, the engines
+are the ones `ORACLE_ENGINE` lists, else `ry-tier0,ry-jit`. Without GNU R, `compare` checks the
+engines against the recorded `.expected` files instead.
+
+`cargo test -p oracle` runs the same check whenever ry finds a base R. It first builds the `ry`
+binary and `libR.so` (unless `ORACLE_RY` names a binary), so it never runs a stale runtime. Then
+every case under `ry-tier0` and `ry-jit`, or under the engines `ORACLE_ENGINE` lists, must give its
+recorded outcome, sorted against the known failures. It needs no GNU R: the recordings stand in for
+it, and the GNU R replay checks them wherever GNU R is installed. ry loads its own base R here, not
+the GNU R installation `compare` would point it at.
+
+The test asks each engine which base R release and which BLAS and LAPACK it loaded. Another release
+than the recordings' skips the test, or fails it when `ORACLE_ENGINE` is set. Other libraries turn a
+difference in a `# oracle: library-dependent` case into a warning. ry's bundled base R links R's own
+LAPACK (`libRlapack.so`), not the system LAPACK the recordings name, so under it those cases only
+ever warn.
 
 Every engine searches the same libraries: any `R_LIBS` you set, then the corpus library, then the
 reference R's own. The corpus library is `.corpus/library` in the workspace (`$RY_CORPUS_DIR/library`
@@ -361,7 +374,7 @@ On a machine whose `PATH` has another release, set `ORACLE_R` to a 4.6.2 build. 
 to a new release, delete `gnu-r.txt` and record every case. A GNU R killed by a signal before it
 writes its report skips the case with `skip ... this GNU R crashed`, because some hardened builds
 abort with "buffer overflow detected" in graphics cases that the reference build runs; a crash of
-the second engine stays a failure.
+ry's engines is a failure.
 
 Record with `ORACLE_R=<that R> oracle record crates/oracle/cases` and review every changed
 `.expected` file.

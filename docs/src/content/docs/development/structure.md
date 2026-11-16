@@ -119,7 +119,7 @@ The crate root is `src/loader.rs`.
 ## `oracle`
 
 The library root is `src/oracle.rs`, and the binary root is `src/main.rs`. It runs one R file under
-GNU R and under a second engine and compares stdout, messages, warnings, errors and the last value;
+GNU R and under ry's engines and compares stdout, messages, warnings, errors and the last value;
 `driver.R` is the script that produces each engine's report. `fuzz.rs` generates the programs for
 differential fuzzing, `packages.rs` runs the corpus packages' own tests on both runtimes,
 `install.rs` installs them from source on ry, and `bench.rs` compares the generated benchmark

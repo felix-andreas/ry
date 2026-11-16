@@ -951,3 +951,109 @@ without cells, promise forcing in the loop, and one observer word on the general
   call (`collect_evaluated_args`, `slot_builtin_args`).
 - **Pinned by** the oracle cases `replacement__slot_frame_targets` and
   `apply__element_calls_from_slot_frames`, each run on GNU R, tier 0 and the JIT.
+
+## A complex assignment calls a primitive replacement with its values
+
+**Status:** built.
+
+- **Previous source of truth.** `eval::complex_assign` ran every level of `f(g(x, i), j) <- v` the
+  way GNU R's AST evaluator describes it: it built the call `` `f<-`(`*tmp*`, j, value = v) ``, an
+  argument list for it, a forced promise for `*tmp*` and one for the value, and applied the
+  replacement function to that list. The call existed so that a closure or a method could read it
+  (`sys.call()`, `substitute(value)`, `match.call()`) and so that an error could name it.
+- **What was weak.** A primitive replacement (`[<-`, `[[<-`, `$<-`, `names<-`, `attr<-`, `dim<-`,
+  `levels<-`, `class<-` and the like) on an object without a method reads its arguments' values and
+  nothing else, so the call, the list and both promises were built to be unwrapped again: about
+  nine objects a level. Sampled allocation paths on the finbench suite put `complex_assign` at 11%
+  of the pairlist cells, 8% of the language objects and 17% of the promises. Tier 0 runs a
+  one-level replacement on a slot frame's variable without it (the entry "Replacement calls and
+  `lapply`/`vapply` element calls run on a slot frame's slots"), so what reached `complex_assign`
+  were targets that code does not serve: a variable in a binding cell, `<<-`, a nested target, a
+  frame that reads by name.
+- **Chosen shape.** A level whose replacement function is a primitive goes to
+  `replace_through_primitive` (`crates/interp/src/eval.rs`), which pushes the object, the level's
+  other arguments evaluated once, and the value into the primitive's argument vector and calls it
+  (`call_builtin`, or `subset::dollar_assign` for `$<-`, wrapped as a builtin call is: its error is
+  signalled while the assignment is the call in progress, and a profile counts it). It declines,
+  and the level builds its call as before, when the object has a method for the replacement (the
+  method receives the promises), when the primitive is a group generic (`` `add<-` <- `+` ``
+  dispatches on the value's class too), when it is a special that reads its arguments' code, when
+  the name of a `$<-` is neither a symbol nor a string, and when an argument compiled code already
+  evaluated is `...` or code. The last test scans every argument before one is read, so a declined
+  level reads no variable twice. A closure replacement always gets the built call. Getter levels
+  (`g(`*tmp*`, i)` for the inner levels of a nested target) are built and evaluated as before.
+- **The call an error names.** `Interp::assignment_call` holds the replacement call of the
+  assignment in progress and the assignment it reports as, so `unwind::resolve_call` turns one into
+  the other. On the direct path no replacement call exists, so the level's target (`f(x, j)`, a
+  constant of the code) stands for it and is the call the primitive runs with. GNU R reports three
+  messages against the generated call itself ("attempt to select more than one element in
+  vectorIndex", "no such index at level", a matrix "subscript out of bounds");
+  `unwind::generated_call` builds that call from the target and the assignment
+  (`eval::generated_replacement_call`) only when one of them is raised.
+- **`lapply` and `vapply` share one element call.** `FUN(X[[i]], ...)` is the same call for every
+  loop, so `ElementCalls::new` (`crates/interp/src/envir.rs`) reads it from `Globals::element_call`
+  instead of building five cells per `lapply`. Nothing may change it: `sys.call()` hands a frame's
+  call out as a copy (`envir::call_with_srcref`).
+- **GNU R behavior fixed alongside** (each pinned by `replacement__primitive_levels`): `exact` and
+  `drop` have no meaning to `[<-` and `[[<-` and count as subscripts; `attr<-` with a name vector
+  longer than one is an error from R 4.6.0; an unbound target is reported against the call of the
+  frame that owns the enclosure of the assigning environment, and against no call when no frame
+  owns it (an assignment in a promise that top-level code made); a nested assignment whose value
+  is the variable or one of its levels (`x$a$b <- x`, `z$a$b$c <- z$a`) copies that level first,
+  because the value on the operand stack counts no reference and the write would otherwise close
+  a cycle.
+- **Left unmatched.** GNU R's compiled code drops the names of subscripts from the assignment it
+  reports (`x[["a", exact = TRUE]] <- "s"` reports as `x[["a", TRUE]] <- "s"`), and its AST
+  evaluator keeps them. ry keeps them in every tier, so the oracle case prints only the message
+  for such rows.
+- **Measured** (finbench suite, profiling build, JIT on, before and after on one base). Complex
+  assignments that build a call: 1,029,547 to 256,523. Objects freed: 232.3M to 217.0M (-6.6%),
+  pairlist cells 56.5M to 47.0M, language objects 16.7M to 13.9M, promises 15.7M to 13.4M.
+  `just bench hot`, weighted instructions per second of GNU R work: finbench -0.4%, dsbench -0.3%,
+  biobench -0.8%. `lapply` over four elements: 16,550 to 15,897 instructions. Suite wall time
+  moves within its noise.
+- **What still builds calls.** 256,523 assignments on that suite, by profile row ("Complex
+  assignments that built their calls" in a profile summary): a nested target's getter levels
+  (`attr(attr(x, a), b) <- v` on an xts object is 38% of them, `names(l$a) <- v` 13%), an object
+  with a method for the replacement (`dimnames<-`, `[<-` on xts, `[[<-` and `$<-` on a data frame;
+  about 21%), and a closure replacement (about 5%). A direct getter for a primitive getter on an
+  object without a method is the next step (`backlog.md`, "Replacement calls that still build
+  their calls").
+- **Pinned by** the oracle cases `replacement__primitive_levels` (classed lists with and without
+  methods, calls and pairlists, environments, `<<-`, nested targets, a value that is the target,
+  evaluation order, empty and named subscripts, a locked binding and a locked environment, the
+  reported calls, a group generic as the replacement, S4 slots, data frames and factors) and
+  `apply__element_call_is_never_changed`.
+
+## An empty named argument leaves its formal to a positional argument
+
+**Status:** built
+
+- GNU R's positional pass tells a formal that a name matched from the value it holds, and an empty
+  argument leaves none. So `f(a = , 1)` for `function(a, b)` binds `a` to 1, and
+  `ifelse(test = , 1, 2)` is 2.
+- `eval::match_plan` records the empty argument that matched each formal by name. A positional
+  argument takes such a formal, and the empty argument's plan entry becomes `BINDS_NOTHING`, which
+  every reader of a plan skips because it indexes no formal.
+- A plan therefore depends on which named arguments are empty, so `match_args_cached`, whose key
+  is the names alone, matches a call with an empty argument afresh. A call site's own plan is
+  built from that site's arguments, whose empties never change.
+- `match_builtin_args` follows the same rule for a builtin that matches by name. `log`, `rep` and
+  `NextMethod` differ from GNU R with an empty named argument, which `backlog.md` describes.
+- An "unused argument" message deparses the argument with no option, as GNU R does, so an integer
+  loses its `L` and a vector its names (`deparse::deparse_unused_argument`).
+- Pinned by the oracle case `calls__empty_named_argument`.
+
+## `[[<-` reports a wrong subscript count in GNU R's order
+
+**Status:** built
+
+- With a subscript count that fits neither a vector nor the target's dimensions, GNU R's
+  `do_subassign2_dflt` reports the first of: a target that is no vector ("object of type ... is
+  not subsettable"), for an atomic target a value of the wrong length ("replacement has length
+  zero", "more elements supplied than there are to replace", or the "long vectors not supported
+  yet" message for a value with no length), and only then "[[ ]] improper number of subscripts".
+  `subset::subassign2` checks in that order, so a subscript that is itself a call, as in
+  `y[g(), , 1] <- 2`, reaches the same message as a constant one.
+- `islistfactor` refuses an `NA` for `recursive` from R 4.5 on, which earlier releases took as true.
+- Pinned by the oracle case `replacement__subscript_count_errors`.

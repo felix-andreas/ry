@@ -634,12 +634,14 @@ unsafe fn guarded<T>(
     }
     // `body` runs from one call site, so that it inlines into the unwinding frame rather than
     // costing every helper call a frame of its own.
-    let caller = unsafe { &layout(activation).inlined }.as_ref().map(|inlined| {
-        let state = interp::interp();
-        state
-            .assignment_call
-            .replace((values::unbound(), inlined.call, state.frames.len()))
-    });
+    let caller = unsafe { &layout(activation).inlined }
+        .as_ref()
+        .map(|inlined| {
+            let state = interp::interp();
+            state
+                .assignment_call
+                .replace((values::unbound(), inlined.call, state.frames.len()))
+        });
     let result = catch_unwind(AssertUnwindSafe(|| body(&mut *activation)));
     if let Some(caller) = caller {
         interp::interp().assignment_call = caller;
@@ -749,8 +751,7 @@ unsafe fn step_unsignalled<T>(activation: &Activation, step: impl FnOnce() -> T)
         Restore
     });
     let result = step();
-    let abandoned =
-        restore.is_some() && interp::interp().signalling == Signalling::Abandoned;
+    let abandoned = restore.is_some() && interp::interp().signalling == Signalling::Abandoned;
     drop(restore);
     (!abandoned).then_some(result)
 }
@@ -793,7 +794,11 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
 /// Runs the builtin call at `pc` ([`bytecode::call_builtin_step`]), which compiled code calls
 /// only where the call runs no R code, so nothing needs validating: [`outcome::OK`] or
 /// [`outcome::FAILED`]. A nonzero `record` records the result's type.
-pub unsafe extern "C" fn jit_call_builtin(activation: *mut Activation, pc: i64, record: i32) -> i32 {
+pub unsafe extern "C" fn jit_call_builtin(
+    activation: *mut Activation,
+    pc: i64,
+    record: i32,
+) -> i32 {
     unsafe {
         checked(activation, outcome::FAILED, |activation| {
             let called = step_unsignalled(activation, || {
@@ -1741,7 +1746,7 @@ unsafe fn count_handoff(compiled: &Compiled, inlined: &Inlined) {
         let counters = values::ints_mut(inlined.code.cdr().element(PROFILE));
         let state = counters[profile::TIER_STATE];
         counters[profile::TIER_STATE] = match state {
-            profile::TIER_OFF => state,
+            _ if state == profile::TIER_OFF => state,
             ..0 => NEVER_ELIDED,
             _ => state | NO_ELISION,
         };

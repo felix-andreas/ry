@@ -2016,7 +2016,7 @@ unsafe fn out_of_bounds(call: Sexp, message: &str, bounds: Bounds, index: Sexp) 
 // `$` and `@`.
 
 /// The name argument of `$` and `@`: a symbol or string, never evaluated.
-unsafe fn name_argument(value: Sexp) -> R<Sexp> {
+pub(crate) unsafe fn name_argument(value: Sexp) -> R<Sexp> {
     // A promise comes from `NextMethod` and stands for the name the method received.
     let value = eval::value_of(value)?;
     match value.kind() {
@@ -2442,16 +2442,13 @@ unsafe fn do_subassign(call: &Call<'_>) -> R<Sexp> {
     let Some((value_arg, rest)) = call.args.split_last() else {
         return Err(call.error("SubAssignArgs: invalid number of arguments"));
     };
-    let mut object = nil();
-    let mut indices: SmallVec<[Sexp; 4]> = SmallVec::new();
-    for (position, arg) in rest.iter().enumerate() {
-        if position == 0 {
-            object = arg.value;
-        } else if arg.tag != symbols().exact && arg.tag != symbols().drop {
-            indices.push(arg.value);
-        }
-    }
-    subassign(object, &indices, value_arg.value, call.call)
+    // Every argument between the object and the value is a subscript, whatever its name: GNU R
+    // gives `drop` and `exact` no meaning in an assignment.
+    let Some((object, indices)) = rest.split_first() else {
+        return subassign(nil(), &[], value_arg.value, call.call);
+    };
+    let indices: SmallVec<[Sexp; 4]> = indices.iter().map(|arg| arg.value).collect();
+    subassign(object.value, &indices, value_arg.value, call.call)
 }
 
 /// Whether `x[i] <- value` leaves the atomic vector `object` exactly as it is: the subscript
@@ -2687,12 +2684,16 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         1
     };
     if indices.len() >= 2 {
-        let Some(dims) = values::dims(result) else {
-            return Err(error_in(call, "incorrect number of subscripts on matrix"));
+        let Some(dims) = values::dims(result).filter(|dims| dims.len() == indices.len()) else {
+            return Err(error_in(
+                call,
+                if indices.len() == 2 {
+                    "incorrect number of subscripts on matrix"
+                } else {
+                    "incorrect number of subscripts"
+                },
+            ));
         };
-        if dims.len() != indices.len() {
-            return Err(error_in(call, "incorrect number of subscripts"));
-        }
         if value != result
             && let Some(fixed) = slab(indices, &dims, result, value)
         {
@@ -3190,16 +3191,11 @@ unsafe fn do_subassign2(call: &Call<'_>) -> R<Sexp> {
     let Some((value_arg, rest)) = call.args.split_last() else {
         return Err(call.error("SubAssignArgs: invalid number of arguments"));
     };
-    let mut object = nil();
-    let mut indices: SmallVec<[Sexp; 4]> = SmallVec::new();
-    for (position, arg) in rest.iter().enumerate() {
-        if position == 0 {
-            object = arg.value;
-        } else if arg.tag != symbols().exact {
-            indices.push(arg.value);
-        }
-    }
-    subassign2(object, &indices, value_arg.value, call.call)
+    let Some((object, indices)) = rest.split_first() else {
+        return subassign2(nil(), &[], value_arg.value, call.call);
+    };
+    let indices: SmallVec<[Sexp; 4]> = indices.iter().map(|arg| arg.value).collect();
+    subassign2(object.value, &indices, value_arg.value, call.call)
 }
 
 /// `x[[i]] <- value`.
@@ -3265,35 +3261,44 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
     if let [index] = indices {
         return subassign2_one(object, *index, value, call, 1);
     }
-    if let Some(dims) = values::dims(object)
-        && dims.len() == indices.len()
-    {
-        // `m[[i, j]] <- value` names one cell, which must exist.
-        let dimnames = get_attr(object, symbols().dimnames);
-        for (dimension, (&index, &extent)) in indices.iter().zip(dims.iter()).enumerate() {
-            let names = if dimnames.kind() == SexpType::List {
-                dimnames.element(dimension)
-            } else {
-                nil()
+    let Some(dims) = values::dims(object).filter(|dims| dims.len() == indices.len()) else {
+        // GNU R counts the subscripts after it has checked what the object can hold.
+        let is_vector = object == nil()
+            || object.kind().is_atomic()
+            || matches!(object.kind(), SexpType::List | SexpType::Expression);
+        if !is_vector {
+            return Err(not_subsettable(call, object));
+        }
+        if object.kind().is_atomic() {
+            atomic_replacement_check(value)?;
+        }
+        return Err(error_in(call, "[[ ]] improper number of subscripts"));
+    };
+    // `m[[i, j]] <- value` names one cell, which must exist.
+    let dimnames = get_attr(object, symbols().dimnames);
+    for (dimension, (&index, &extent)) in indices.iter().zip(dims.iter()).enumerate() {
+        let names = if dimnames.kind() == SexpType::List {
+            dimnames.element(dimension)
+        } else {
+            nil()
+        };
+        // A subscript GNU R rejects for another reason is left to the assignment below.
+        let inside = match one_index(extent, names, index) {
+            Ok(Slot::At(position)) => position < extent,
+            Ok(_) => false,
+            Err(_) => true,
+        };
+        if !inside {
+            let bounds = Bounds {
+                dimension: Some(dimension),
+                ..Bounds::of(object)
             };
-            // A subscript GNU R rejects for another reason is left to the assignment below.
-            let inside = match one_index(extent, names, index) {
-                Ok(Slot::At(position)) => position < extent,
-                Ok(_) => false,
-                Err(_) => true,
-            };
-            if !inside {
-                let bounds = Bounds {
-                    dimension: Some(dimension),
-                    ..Bounds::of(object)
-                };
-                return Err(out_of_bounds(
-                    unbound(),
-                    "[[ ]] subscript out of bounds",
-                    bounds,
-                    index,
-                ));
-            }
+            return Err(out_of_bounds(
+                unbound(),
+                "[[ ]] subscript out of bounds",
+                bounds,
+                index,
+            ));
         }
     }
     let is_list = matches!(object.kind(), SexpType::List | SexpType::Expression);
@@ -3616,7 +3621,13 @@ unsafe fn missing_subscript(call: Sexp, fields: &[(&str, Sexp)]) -> Unwind {
 
 unsafe fn do_dollar_assign(call: &Call<'_>) -> R<Sexp> {
     let object = eval::eval(call.arg(0), call.env()?)?;
-    let name = name_argument(call.arg(1))?;
+    // GNU R reports a name that is none against the replacement call itself.
+    let name = name_argument(call.arg(1)).map_err(|unwind| match unwind {
+        Unwind::Error(failure) if failure.call == unbound() => {
+            crate::unwind::errorcall(call.call, failure.message)
+        }
+        unwind => unwind,
+    })?;
     let value = eval::eval(call.arg(2), call.env()?)?;
     if object.is_object() {
         let name_string = values::scalar_string_charsxp(name)?;
@@ -4295,6 +4306,8 @@ unsafe fn do_matrix(call: &Call<'_>) -> R<Sexp> {
                 ),
             )?;
         }
+    } else if count > 1 && total == 0 {
+        conditions::warning("non-empty data for zero-extent matrix")?;
     }
     let kind = if data == nil() {
         SexpType::Logical
@@ -4306,7 +4319,7 @@ unsafe fn do_matrix(call: &Call<'_>) -> R<Sexp> {
         for position in 0..total {
             set_na(result, position);
         }
-    } else if by_row || !fill_recycled(result, data) {
+    } else if !place_elements(result, data, rows, by_row) {
         for row in 0..rows {
             for col in 0..cols {
                 let target = row + col * rows;
@@ -4324,24 +4337,60 @@ unsafe fn do_matrix(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-/// Fills `result` with `data` recycled, when both are the same plain atomic type and `data` is
-/// not empty. Returns whether it did.
-unsafe fn fill_recycled(result: Sexp, data: Sexp) -> bool {
-    fn fill<T: Copy>(target: &mut [T], source: &[T]) {
-        if let [single] = source {
-            target.fill(*single);
-        } else {
-            for (slot, &item) in target.iter_mut().zip(source.iter().cycle()) {
-                *slot = item;
+/// Fills `result`, a matrix of `rows` rows and of `data`'s type, with `data` recycled in column
+/// order, or in row order when `by_row`. Returns whether it did, which it does for every vector
+/// type when `data` is not empty.
+unsafe fn place_elements(result: Sexp, data: Sexp, rows: usize, by_row: bool) -> bool {
+    fn place<T: Copy>(target: &mut [T], source: &[T], rows: usize, by_row: bool) {
+        let cols = target.len().checked_div(rows).unwrap_or(0);
+        // One row or one column is the same order either way.
+        if !by_row || rows <= 1 || cols <= 1 {
+            if let [single] = source {
+                target.fill(*single);
+            } else {
+                for (slot, &item) in target.iter_mut().zip(source.iter().cycle()) {
+                    *slot = item;
+                }
+            }
+            return;
+        }
+        let count = source.len();
+        for (col, column) in target.chunks_exact_mut(rows).enumerate() {
+            if count == rows * cols {
+                for (row, slot) in column.iter_mut().enumerate() {
+                    *slot = source[row * cols + col];
+                }
+            } else {
+                for (row, slot) in column.iter_mut().enumerate() {
+                    *slot = source[(row * cols + col) % count];
+                }
             }
         }
     }
-    if data.kind() != result.kind() || length(data) == 0 {
+    if data.kind() != result.kind() || length(data) == 0 || data.is_altrep() {
         return false;
     }
     match data.kind() {
-        SexpType::Real => fill(values::reals_mut(result), values::reals(data)),
-        SexpType::Integer | SexpType::Logical => fill(values::ints_mut(result), values::ints(data)),
+        SexpType::Real => place(values::reals_mut(result), values::reals(data), rows, by_row),
+        SexpType::Integer | SexpType::Logical => {
+            place(values::ints_mut(result), values::ints(data), rows, by_row)
+        }
+        SexpType::Complex => place(
+            values::complexes_mut(result),
+            values::complexes(data),
+            rows,
+            by_row,
+        ),
+        SexpType::Raw => place(values::raws_mut(result), values::raws(data), rows, by_row),
+        SexpType::String | SexpType::List | SexpType::Expression => {
+            place(
+                result.slice_mut::<Sexp>(),
+                data.slice::<Sexp>(),
+                rows,
+                by_row,
+            );
+            crate::heap().count_written_elements(result);
+        }
         _ => return false,
     }
     true
@@ -4366,7 +4415,7 @@ unsafe fn do_array(call: &Call<'_>) -> R<Sexp> {
         data.kind()
     };
     let result = alloc(kind, total)?;
-    if count == 0 || !fill_recycled(result, data) {
+    if count == 0 || !place_elements(result, data, 1, false) {
         for position in 0..total {
             if count == 0 {
                 set_na(result, position);
@@ -4991,7 +5040,7 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
             continue;
         }
         let count = length(arg.value);
-        if !warned && count > 0 && (count > extent || extent % count != 0) {
+        if !warned && count > 0 && (count > extent || !extent.is_multiple_of(count)) {
             warned = true;
             let direction = if by_row { "columns" } else { "rows" };
             crate::conditions::warning_call(
@@ -5138,7 +5187,13 @@ unsafe fn do_rev(call: &Call<'_>) -> R<Sexp> {
 
 pub(crate) unsafe fn do_is_list_factor(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
-    let recursive = values::as_logical_scalar(call.arg(1)) == 1;
+    let recursive = match values::as_logical_scalar(call.arg(1)) {
+        // R 4.5 refuses an NA, which earlier releases took as true.
+        NA_LOGICAL if crate::system::r_at_least(4, 5) => {
+            return Err(call.error("NA in coercion to boolean"));
+        }
+        recursive => recursive != 0,
+    };
     unsafe fn check(object: Sexp, recursive: bool) -> Option<bool> {
         if object.kind() != SexpType::List {
             return Some(values::inherits(object, "factor"));

@@ -9,7 +9,10 @@
 
 use {
     crate::interp,
-    heap::{Marker, object::Sexp},
+    heap::{
+        Marker,
+        object::{Sexp, SexpType},
+    },
     std::sync::atomic::{AtomicBool, AtomicI32, Ordering},
 };
 
@@ -248,13 +251,17 @@ pub unsafe fn errorcall(call: Sexp, message: impl Into<String>) -> Unwind {
     }
 }
 
-/// `call` in a form `resolve_call` leaves alone: a copy when it is the generated replacement call
-/// of the complex assignment in progress, which `resolve_call` would otherwise report as the whole
-/// assignment.
+/// `call` in a form `resolve_call` leaves alone, when it is the replacement call of the complex
+/// assignment in progress, which `resolve_call` would otherwise report as the whole assignment:
+/// a copy of the generated call, or that call built from the target standing for it.
 pub unsafe fn generated_call(call: Sexp) -> R<Sexp> {
     match interp().assignment_call {
-        Some((replacement, _, _)) if replacement == call => {
-            crate::values::lcons(call.car(), call.cdr())
+        Some((replacement, whole, _)) if replacement == call => {
+            if whole.kind() == SexpType::Language && whole.cdr().car() == call {
+                crate::eval::generated_replacement_call(call, whole)
+            } else {
+                crate::values::lcons(call.car(), call.cdr())
+            }
         }
         _ => Ok(call),
     }

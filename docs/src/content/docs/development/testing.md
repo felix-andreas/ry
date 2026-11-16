@@ -14,15 +14,33 @@ the next reader.
 
 ## The fast loop
 
-Run `source tools/env.sh` once per shell. It puts the reference GNU R (`/opt/R/<version>/bin`) on
-`PATH` when no `R` is there, links Linux builds with mold when it runs on Linux and mold is installed
-(through `RUSTC_WRAPPER=tools/mold-rustc`, which cargo leaves out of its fingerprints, so switching it
-rebuilds nothing), and reports whether ry's base R (`target/base-r`) is built:
+Start every command with `source tools/env.sh &&`. Where nix is installed, which includes every
+Claude cloud container, it loads the flake's `default` dev shell: the Rust toolchain, the reference
+GNU R, `just` and mold, the same versions CI tests with. It then selects mold for Linux links
+(through `RUSTC_WRAPPER=tools/mold-rustc`, which cargo leaves out of its fingerprints) and reports
+whether ry's base R (`target/base-r`) is built:
 
 ```text
 $ source tools/env.sh
-ry env: GNU R 4.6.2 at /opt/R/4.6.2/bin; base R built; mold linker
+ry env: nix dev shell; GNU R 4.6.2 at /nix/store/...-gnu-r-4.6.2/bin; base R built; mold linker
 ```
+
+| Step | Time on a 4-core cloud container |
+| --- | --- |
+| First `source tools/env.sh` in a fresh container | 98 s, 8.8 GB downloaded into `/nix/store`, nothing built |
+| Every later `source tools/env.sh` | 0.06 s |
+| `nix develop -c <command>`, for comparison | 4.7 s per command |
+| First debug build of `ry`, `libR` and `ry-rcmd` in the shell | 5 min 20 s |
+
+The script saves `nix print-dev-env` in `target/nix-dev-env.sh` and sources that file, which is why
+later runs are fast; it rewrites the file when `flake.nix`, `flake.lock`, `rust-toolchain.toml` or
+the GNU R pin in `tools/base-r` is newer. Binaries built in the shell link nix's glibc, so do not mix shell and host builds in one
+target directory: cargo rebuilds everything when you switch.
+
+`RY_ENV=system source tools/env.sh` skips nix and uses the host's tools, with the reference GNU R
+from `/opt/R/<version>/bin`. Use it for the package corpus (`just bench-packages`), whose packages
+link the Ubuntu libraries that `sudo tools/dev-setup.sh` installs and the shell does not carry.
+Without nix the script behaves the same way.
 
 Every command below is plain cargo, so it works without `just`. A passing run prints only cargo's
 summary, and a failure prints a rerun command for just the failing case.
@@ -41,7 +59,7 @@ with mold, GNU R on `PATH` and base R built.
 | the interpreter, to run R | `cargo build -p ry-lang -p libr && target/debug/ry run --runtime ry x.R` | 13 s |
 | the interpreter, its tests | `cargo test -p interp --test test_<area>` | 4 s |
 | the interpreter, against GNU R | `cargo run -p oracle -- compare crates/oracle/cases/<case>.R` | 10 s |
-| the interpreter, a sample of the oracle | `cargo test -p oracle --test test_cases second_engine_matches_gnu_r` | 15 s |
+| the interpreter, every oracle case | `cargo test -p oracle --test test_cases ry_matches_recorded_outcomes` | 10 min |
 | the typed core (`typed`) | `cargo test -p typed` | 4 s |
 | the CLI or the server (`ry`) | `cargo test -p ry-lang --test test_cli`, or one journey: `SCENARIO=<name> cargo test -p ry-lang --test test_scenarios scenarios_hold` | 6 s |
 
@@ -59,7 +77,7 @@ themselves (a no-op build takes 0.4 s), so they never run a stale `libR.so`.
 | `SCENARIO` | `test_scenarios` `scenarios_hold` | runs the one scenario of that name, and fails if it skips |
 | `RY_TEST_WORKERS` | fixture suites, oracle, scenarios, `test_format_range` | the worker count; failures print the count the run used |
 | `DOCS_PAGE` | `test_docs` | runs the examples of pages whose path contains the value |
-| `ORACLE_ENGINE` | oracle `test_cases` | compares that engine (`ry`, `ry-jit`, `ry-gctorture`, ...) on every case instead of ry on a sample, and fails if base R is not built |
+| `ORACLE_ENGINE` | oracle `test_cases` | compares those engines (comma separated: `ry`, `ry-jit`, `ry-gctorture`, ...) instead of `ry-tier0,ry-jit`, and fails if base R is not built or is another release than the recordings' |
 | `ORACLE_RY` | the oracle | the `ry` binary to run, which the oracle then does not build |
 | `ORACLE_R`, `ORACLE_RSCRIPT` | the oracle | the GNU R to compare with (default: `R` and `Rscript` on `PATH`) |
 | `RY_BASE_R` | `ry` | the base R tree; a debug `ry` otherwise finds `target/base-r` |
@@ -71,7 +89,7 @@ themselves (a no-op build takes 0.4 s), so they never run a stale `libR.so`.
 
 A test that cannot run here (no GNU R, no base R, a missing package) passes and says why on
 standard error, which cargo shows only for a failing test or with `-- --nocapture`. Stable Rust has
-no way for a test to report itself skipped at run time, so a green run of the default oracle sample
+no way for a test to report itself skipped at run time, so a green run of the default oracle test
 or of the scenarios may have checked less than it looks. A run you ask for by name does not pass
 that way: `SCENARIO=<name>` fails when the scenario skips, and `ORACLE_ENGINE=<engine>` fails when
 the engine is ry and base R is not built.
@@ -540,7 +558,7 @@ area = "jit"
 reason = "the compiled body warns twice where GNU R warns once"
 ```
 
-`oracle compare` and `ORACLE_ENGINE=<engine> cargo test -p oracle` sort every failure against the
+`oracle compare` and `cargo test -p oracle` (with ry's runtime built) sort every failure against the
 file and fail the run on two things: a failure the file does not list, and a listed case that
 passes. The second rule means the change that fixes a case also deletes its entry. Add an entry
 only for a failure main already has, never for one your own change introduces. A run prints each

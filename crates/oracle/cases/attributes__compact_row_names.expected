@@ -1,0 +1,20 @@
+[stdout]
+|  int [1:5] 1 2 3 4 5
+|  int [1:5] 1 2 3 4 5
+|  int [1:5] 1 10 3 4 5
+|  int [1:5] 1 2 3 4 5
+|  int(0) 
+|  chr [1:2] "x" "y"
+|   a b
+| 1 1 a
+| 2 2 b
+|   a b
+| 4 4 d
+| 5 5 e
+| [1] TRUE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| TRUE

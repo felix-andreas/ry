@@ -482,7 +482,11 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>, ahead: bool
         cli::error("`--aot` compiles with ry's runtime, which `--runtime gnu-r` does not start");
         return ExitCode::from(2);
     }
-    let (_, program, flags) = match checked_script(file) {
+    let CheckedScript {
+        elaborated: program,
+        flags,
+        ..
+    } = match checked_script(file) {
         Ok(checked) => checked,
         Err(status) => return status,
     };
@@ -515,10 +519,19 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>, ahead: bool
     }
 }
 
-/// Reads and checks the script `file` as `ry run` does before it runs it: the file's bytes, the
-/// program the checker elaborated from them when it rewrote anything, and the flags the
-/// project's configuration sets. The error is the status to exit with, once reported.
-fn checked_script(file: &Path) -> Result<(Vec<u8>, Option<Vec<u8>>, repl::RuntimeFlags), ExitCode> {
+/// A script as `ry run` reads and checks it before it runs it.
+struct CheckedScript {
+    /// The file's bytes.
+    source: Vec<u8>,
+    /// The program the checker elaborated from `source`, when it rewrote anything.
+    elaborated: Option<Vec<u8>>,
+    /// The flags the project's configuration sets.
+    flags: repl::RuntimeFlags,
+}
+
+/// Reads and checks the script `file` as `ry run` does. The error is the status to exit with,
+/// once reported.
+fn checked_script(file: &Path) -> Result<CheckedScript, ExitCode> {
     // R reads a script in the session's encoding, so a Latin-1 script is valid R. The check
     // sees each invalid byte as `?`, which keeps every offset, and the elaborated program is
     // the file's own bytes with the checker's rewrites.
@@ -535,8 +548,13 @@ fn checked_script(file: &Path) -> Result<(Vec<u8>, Option<Vec<u8>>, repl::Runtim
     let elaborations = preflight
         .check_elaborations(&text)
         .ok_or(ExitCode::from(1))?;
-    let program = (!elaborations.is_empty()).then(|| preflight::elaborate(&source, &elaborations));
-    Ok((source, program, runtime_flags(preflight.config())))
+    let elaborated =
+        (!elaborations.is_empty()).then(|| preflight::elaborate(&source, &elaborations));
+    Ok(CheckedScript {
+        source,
+        elaborated,
+        flags: runtime_flags(preflight.config()),
+    })
 }
 
 /// `ry build --aot --exe`: checks the script `file` as `ry run` does, compiles its typed
@@ -579,7 +597,11 @@ fn build_executable(file: &Path, output: Option<&Path>, runtime: Option<Runtime>
         ));
         return ExitCode::from(2);
     }
-    let (source, elaborated, flags) = match checked_script(file) {
+    let CheckedScript {
+        source,
+        elaborated,
+        flags,
+    } = match checked_script(file) {
         Ok(checked) => checked,
         Err(status) => return status,
     };

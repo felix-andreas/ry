@@ -1467,6 +1467,28 @@ unsafe fn do_format_info(call: &Call<'_>) -> R<Sexp> {
                 exponent(&imaginary),
             ])
         }
+        // GNU R's `formatInteger`: the widest of the extremes, or of `NA`.
+        SexpType::Integer => {
+            let mut extremes: Option<(i32, i32)> = None;
+            let mut na = false;
+            for &value in values::ints(vector) {
+                if value == NA_INTEGER {
+                    na = true;
+                } else {
+                    let (low, high) = extremes.get_or_insert((value, value));
+                    *low = (*low).min(value);
+                    *high = (*high).max(value);
+                }
+            }
+            let digits = |value: i32| {
+                usize::from(value < 0)
+                    + value.unsigned_abs().checked_ilog10().unwrap_or(0) as usize
+                    + 1
+            };
+            let numbers = extremes.map_or(1, |(low, high)| digits(low).max(digits(high)));
+            let width = if na { numbers.max(2) } else { numbers };
+            values::integer_vector(&[width as i32])
+        }
         _ => {
             let items = format_vector(vector, settings, false, "NA")?;
             let width = items

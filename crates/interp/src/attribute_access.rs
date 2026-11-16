@@ -139,6 +139,14 @@ pub unsafe fn expand_row_names(value: Sexp) -> R<Sexp> {
         && values::ints(value)[0] == NA_INTEGER
     {
         let count = values::ints(value)[1].unsigned_abs() as usize;
+        // GNU R's `getAttrib` gives `1:n` as a compact sequence, so reading the row names of a
+        // long data frame allocates nothing.
+        if count > 0
+            && let Some(sequence) =
+                (crate::interp().hooks.compact_sequence)(SexpType::Integer, count, 1.0, 1.0)?
+        {
+            return Ok(sequence);
+        }
         let result = alloc(SexpType::Integer, count)?;
         for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
             *slot = index as i32 + 1;
@@ -198,12 +206,15 @@ unsafe fn do_set_attr(call: &Call<'_>) -> R<Sexp> {
     let object = present(matched[0]).unwrap_or(nil());
     let which = present(matched[1]).unwrap_or(nil());
     let value = present(matched[2]).unwrap_or(nil());
-    // GNU R's `isValidString`: the first of any number of names, if it is not `NA`.
+    // GNU R's `isValidString`, then its check for one name, which R 4.6 added.
     if which.kind() != SexpType::String
         || length(which) == 0
         || which.element(0) == values::na_string()
     {
         return Err(call.error("'name' must be non-null character string"));
+    }
+    if length(which) != 1 && crate::system::r_at_least(4, 6) {
+        return Err(call.error("'name' must be a scalar string"));
     }
     if object == nil() {
         if value == nil() {

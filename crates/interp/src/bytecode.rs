@@ -10932,6 +10932,8 @@ unsafe fn assign_slot_element(
             crate::subset::dollar_assign(object, index.element(0), value, setter_call)
         }
     };
+    // An error is signalled while the assignment is the call it reports.
+    let result = result.map_err(|unwind| eval::builtin_failure(unbound(), unwind));
     interp().assignment_call = outer;
     let result = result?;
     let result = values::unwrap_assigned(result, current == result);
@@ -12748,6 +12750,27 @@ unsafe fn assign_element(
     {
         return Ok(None);
     }
+    // `$<-` on a plain environment binds the name there, as the primitive would, without
+    // building the `*tmp*` call. A locked or active binding takes that call, which names it in
+    // the error or runs the binding's function.
+    if target.kind() == SexpType::Environment
+        && kind == ElementKind::Dollar
+        && index.kind() == SexpType::String
+    {
+        let symbol = heap.install_char(index.element(0))?;
+        // The empty environment refuses every binding, and the `*tmp*` call names the error.
+        let writable = target != heap.known().empty_env
+            && match heap.frame_cell(target, symbol) {
+                Some(cell) => !cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED),
+                None => !target.has_gp(gp::FRAME_LOCKED),
+            };
+        if !writable {
+            return Ok(None);
+        }
+        crate::moves::reaching_environment()?;
+        heap.define(target, symbol, value)?;
+        return Ok(Some(target));
+    }
     let fits = match target.kind() {
         SexpType::List => kind != ElementKind::Single && value != nil(),
         SexpType::Real | SexpType::Integer | SexpType::Logical | SexpType::String => {
@@ -13005,8 +13028,8 @@ unsafe fn replace_variable(
         // replaces as it does for any other value.
         SexpType::Builtin => {
             let definition = eval::builtin_def(function)?;
-            if target.is_object()
-                && definition.generic != Generic::None
+            // A group generic dispatches on any operand, so on the value too.
+            if definition.generic != Generic::None
                 && (definition.generic != Generic::Internal
                     || dispatch::has_internal_method(definition, function, target, caller)?)
             {
