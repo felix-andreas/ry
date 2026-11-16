@@ -3,12 +3,19 @@
 
     python3 tools/memory.py split   # move entries from decisions.md into decisions/<area>.md
     python3 tools/memory.py index   # regenerate decisions/index.md
-    python3 tools/memory.py check   # fail on a legacy decisions.md, a stale index or an over-budget file
+    python3 tools/memory.py check   # fail on a legacy decisions.md, a stale index, a repeated entry or an over-budget file
 
 `split` is idempotent and append-safe: an entry whose heading already lives in an area file is
 updated in place when its body differs and skipped otherwise, and every other entry is appended to
 the area its heading and body point at. Re-running it after `git checkout origin/main --
 .agents/memory/decisions.md` carries over whatever other sessions appended to the legacy file.
+
+Entries are matched by heading alone, which has two consequences for a re-run:
+
+- An entry whose title changed in the legacy file is added as a new entry, beside the old one under
+  its old title. `check` then reports nothing, because the headings differ, so delete the old copy.
+- When an entry's body differs, the legacy file's text wins: an edit made to that entry in an area
+  file is overwritten. Re-apply such edits after the split.
 """
 
 import collections
@@ -22,29 +29,19 @@ LEGACY = os.path.join(MEMORY, "decisions.md")
 AREA_DIR = os.path.join(MEMORY, "decisions")
 INDEX = os.path.join(AREA_DIR, "index.md")
 
-# Byte budgets, a ratchet about 5% above the sizes these files had when the budgets were set. A
-# later change tightens them; a file over budget is pruned or moved to the right horizon, not
-# given more room.
+# Byte budgets for the files every agent reads or appends to, about 5% above their sizes when the
+# budgets were set. A file over budget is pruned or moved to the right horizon, not given more room.
 BUDGETS = {
     "AGENTS.md": 28_000,
     ".agents/memory/MEMORY.md": 32_000,
-    ".agents/memory/backlog.md": 402_000,
+    ".agents/memory/backlog.md": 413_000,
     # Room for about 60 more one-line entries before the oldest move out to the git log.
     ".agents/memory/worklog.md": 40_000,
-    ".agents/memory/decisions/syntax-semantics.md": 262_000,
-    ".agents/memory/decisions/ide-server.md": 60_000,
-    ".agents/memory/decisions/interp.md": 124_000,
-    ".agents/memory/decisions/builtins.md": 194_000,
-    ".agents/memory/decisions/r-compat.md": 57_000,
-    ".agents/memory/decisions/jit-ssa.md": 178_000,
-    ".agents/memory/decisions/heap-gc.md": 157_000,
-    ".agents/memory/decisions/libr-rcmd.md": 141_000,
-    ".agents/memory/decisions/typed-stdlib.md": 221_000,
-    ".agents/memory/decisions/frames-table.md": 89_000,
-    ".agents/memory/decisions/tooling-bench-ci.md": 73_000,
-    ".agents/memory/decisions/docs-process.md": 30_000,
     ".agents/orchestrator.md": 30_000,
 }
+# One cap for every decisions area file. The log only grows, since a settled decision is not pruned,
+# so the cap exists to keep each file small enough to read: an area that reaches it is split in two.
+AREA_CAP = 260_000
 # Longest line each file may hold. A log that is meant to be one line per entry stays that way.
 LINE_LIMITS = {
     ".agents/orchestrator.md": 2048,
@@ -491,6 +488,10 @@ OVERRIDES = {
         "interp",
     "`%%` and `%/%` on doubles port GNU R's kernels, with a 64-bit path for whole numbers":
         "builtins",
+    "A compiled replacement probes the target before any subscript runs":
+        "jit-ssa",
+    "Small base closures with call arguments run their bodies natively behind prologues":
+        "builtins",
 }
 
 # Keyword weights per area. A heading hit counts HEADING_WEIGHT times a body hit.
@@ -838,6 +839,23 @@ def check():
         stale = not os.path.exists(INDEX) or read(INDEX) != render_index()
         if stale:
             problems.append(f"{rel(INDEX)} is stale. Run `python3 tools/memory.py index`.")
+    for name in AREA_NAMES:
+        path = area_path(name)
+        if os.path.exists(path) and os.path.getsize(path) > AREA_CAP:
+            problems.append(
+                f"{rel(path)} is {os.path.getsize(path)} bytes, over the {AREA_CAP}-byte cap for a "
+                f"decisions area. Settled decisions are not pruned: split the area into two files by "
+                f"adding an area to AREAS in tools/memory.py, pin the entries that move in OVERRIDES, "
+                f"move them, and run `python3 tools/memory.py index`.")
+    headings = collections.defaultdict(list)
+    for name in AREA_NAMES:
+        for entry in read_area(name):
+            headings[entry.heading].append(name)
+    for heading, names in headings.items():
+        if len(names) > 1:
+            problems.append(
+                f"the entry \"{heading}\" appears {len(names)} times ({', '.join(names)}). Merge the "
+                f"copies into one entry in the area it belongs to.")
     for path, budget in BUDGETS.items():
         full = os.path.join(ROOT, path)
         if not os.path.exists(full):

@@ -287,12 +287,13 @@ which `python3 tools/memory.py index` regenerates the index. A crate's own traps
 `crates/<crate>/AGENTS.md`.
 
 `python3 tools/memory.py check`, part of `just gate`, fails when a single `decisions.md` reappears,
-when the index is stale, when a file outgrows its byte budget in `tools/memory.py` (`AGENTS.md`,
-`MEMORY.md`, `backlog.md`, `worklog.md`, each decisions area and `.agents/orchestrator.md`), or when a
-line outgrows its file's line limit (400 bytes in `worklog.md`, 2 KB in the orchestrator file). A
-budget is a ratchet about 5% above the size the file had when it was set: a file over budget is
-pruned, not given more room. `python3 tools/memory.py split` moves the entries of a stray
-`decisions.md` into the area files.
+when the index is stale, when one entry heading appears in two area files, when a file outgrows its
+byte budget in `tools/memory.py` (`AGENTS.md`, `MEMORY.md`, `backlog.md`, `worklog.md` and
+`.agents/orchestrator.md`, each about 5% above its size when the budget was set, and pruned rather
+than given more room), when a decisions area file passes the shared 260 KB cap (settled decisions are
+not pruned, so the area is split into two files), or when a line outgrows its file's line limit (400
+bytes in `worklog.md`, 2 KB in the orchestrator file). `python3 tools/memory.py split` moves the
+entries of a stray `decisions.md` into the area files.
 
 ## References
 
