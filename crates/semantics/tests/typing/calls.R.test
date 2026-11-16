@@ -26,6 +26,7 @@ handler: fn() -> Any
 #---- manifest_only_exports_resolve
 f <- function(x, y) bitwAnd(x, y)
 g <- function(path) utils::aspell(path)
+h <- function(d) aggregate(d)
 #++++
 f: <T, U> fn(x: T, y: U) -> Unknown
 g: <T> fn(path: T) -> Unknown
@@ -37,6 +38,7 @@ extension: <T> fn(path: T) -> Unknown
 
 #---- datasets_type_through_stubs
 measurements <- function() iris
+states <- function() state.x77
 #++++
 measurements: fn() -> data.frame
 

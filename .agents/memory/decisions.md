@@ -1649,7 +1649,7 @@ data rather than namespace exports.
 
 The `StubSources` input carries sources and manifests. The loader unions manifest names into
 `exports_by_namespace`, so `pkg::name` validation and shadow lints see them, and into a flat
-`known_exports` set that `package_scheme_exists` consults after schemes and nominals. A manifest
+`known_exports` set that `package_scheme_exists_in` consults after schemes and nominals. A manifest
 name resolves everywhere a typed name does, which covers bare and qualified reads, completion and
 the typo-suggestion corpus, but it types `Unknown`. Precision stays the typed corpus's job, and the
 manifest's job is silence about a real name.

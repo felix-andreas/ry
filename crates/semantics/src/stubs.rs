@@ -896,8 +896,11 @@ mod tests {
     use {
         super::*,
         crate::{
-            DocumentKind, ProjectFiles, RootDatabase, SourceFile, check::ItemCheck, item_check,
-            item_tree, metadata::PackageMetadata, types::Atomic,
+            DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+            check::{ItemCheck, TypeErrorKind},
+            item_check, item_tree,
+            metadata::PackageMetadata,
+            types::Atomic,
         },
     };
 
@@ -996,6 +999,32 @@ mod tests {
             misplaced.is_empty(),
             "stub declarations that are not exports of their namespace: {misplaced:?}"
         );
+    }
+
+    /// A whole-number literal passes as an integer to a parameter outside any overload set, and
+    /// a fractional one does not.
+    #[test]
+    fn a_whole_number_literal_passes_as_an_integer_argument() {
+        for (call, accepted) in [("g(3)", true), ("g(2.5)", false)] {
+            let db = RootDatabase::default();
+            StubSources::new(
+                &db,
+                vec![(
+                    "test".to_owned(),
+                    "g : fn(n: integer) -> integer[]\n".to_owned(),
+                )],
+                Vec::new(),
+            );
+            let check = first_item_check(&db, &format!("f <- function() {call}\n"));
+            let mismatch = check
+                .errors
+                .iter()
+                .any(|error| matches!(error.kind, TypeErrorKind::Mismatch { .. }));
+            assert_eq!(!mismatch, accepted, "{call}: {:?}", check.errors);
+            if accepted {
+                assert!(check.errors.is_empty(), "{call}: {:?}", check.errors);
+            }
+        }
     }
 
     fn first_item_check<'db>(db: &'db RootDatabase, source: &str) -> &'db ItemCheck<'db> {

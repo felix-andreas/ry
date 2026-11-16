@@ -183,6 +183,12 @@ mod tests {
                 " \n",
             ),
             ("```{r}\nx <- 1L\n", " \nx <- 1L\n"),
+            ("```{r setup}\nx <- 1L\n```\n", " \nx <- 1L\n \n"),
+            // A fence for another language is prose.
+            (
+                "```{python}\nx = 1\n```\n```{r}\ny <- 2L\n```\n",
+                " \n \n \n \ny <- 2L\n \n",
+            ),
         ];
         for (document, expected) in cases {
             let converted = r_source_of_literate(document);

@@ -967,6 +967,13 @@ mod tests {
             7,
             "a file's ancestors"
         );
+        assert_eq!(
+            Config::discover(nested.join("script.R"))
+                .expect("discover config")
+                .source_directory,
+            Some(project.clone()),
+            "the config records the directory that holds it"
+        );
         assert_eq!(indent_width(inner), 3, "the nearest config wins");
         assert_eq!(
             Config::discover(root).expect("discover config"),

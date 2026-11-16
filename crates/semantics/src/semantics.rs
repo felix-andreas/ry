@@ -1041,17 +1041,9 @@ fn ref_class_binds(index: &RefClassIndex, class: RefClassKey, member: Symbol) ->
 /// Recognized structurally by the checker rather than through the stub corpus.
 const BUILTIN_GLOBAL_NAMES: &[&str] = &["c", "list", "switch", "return", "stop"];
 
-/// Includes stub declarations and checker builtins, not just package definitions.
-pub fn package_scheme_exists(db: &dyn Db, name: &str) -> bool {
-    let files = ProjectFiles::try_get(db);
-    let symbol = Symbol::new(name);
-    package_scheme_exists_in(db, stubs::stubs(db), symbol, |name| {
-        files.is_some_and(|files| package_binds(db, files, name))
-    })
-}
-
-/// [`package_scheme_exists`] for a caller that already holds the stubs and answers whether the
-/// package binds a name from maps it fetched once.
+/// Whether a name resolves to a package definition, a stub declaration or a checker builtin.
+/// The caller holds the stubs and answers whether the package binds the name from maps it
+/// fetched once.
 pub fn package_scheme_exists_in(
     db: &dyn Db,
     library: Option<&stubs::StubLibrary<'_>>,

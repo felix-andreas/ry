@@ -2180,8 +2180,8 @@ mod tests {
 
     #[test]
     fn values_match_gnu_r() {
-        // The functions the oracle case distributions__grid checksums bit for bit are left to
-        // it; these are the ones it does not reach.
+        // `crates/libr/tests/test_rmath.rs` checks every Rmath function against GNU R's
+        // recorded answers over a grid; these rows check a few points without its C package.
         let cases: [(f64, f64); 10] = [
             (qnorm(-1e5, 0.0, 1.0, true, true), -447.19789367852508),
             (pnbinom_mu(4.0, 3.0, 2.5, true, false), 0.84108134526042799),
@@ -2218,8 +2218,8 @@ mod tests {
         values
     }
 
-    /// The oracle cases random__prepared_samplers and stats__direct_routine_calls pin the other
-    /// generators' streams; neither reaches `rhyper`'s algorithm for large populations.
+    /// `crates/libr/tests/test_rmath.rs` pins the other generators' streams against GNU R's
+    /// recorded draws, but none of its cases reaches `rhyper`'s algorithm for a large mode.
     #[test]
     fn large_hypergeometric_stream_matches_gnu_r() {
         assert_eq!(

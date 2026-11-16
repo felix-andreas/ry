@@ -1358,8 +1358,11 @@ Cut:
   or the exact steps the code takes, and so breaks on a refactor that keeps the behavior;
 - trivia: a constructor returns what it was given, a getter reads a field, `Debug` or `Display` of
   an internal type has a certain spelling, a default is its default;
-- a duplicate: the same behavior is already pinned by a fixture, an oracle case, a scenario or a
-  harness, or by another unit test one line over;
+- a duplicate: the same behavior is already pinned by a fixture, a scenario, a harness, or another
+  unit test one line over, or by an oracle case that an automated run executes ry against. Neither
+  a plain `cargo test` nor CI compares ry's output with the recorded oracle cases: they replay the
+  recordings under GNU R, and the collection-stress pass compares ry only with itself, so an
+  oracle case alone does not cover a test of ry's behavior;
 - a test of the test harness, unless the harness's own failure would let real failures pass (a
   filter that matches nothing, a duplicate case name);
 - a snapshot of incidental output that no contract promises;
