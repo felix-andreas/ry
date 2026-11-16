@@ -1363,9 +1363,12 @@ Otherwise it counted as an undeclared nominal, compatible with everything, and `
   comes after the call (a sibling defined further down a `local()` block) is not forced
   (`optional_argument_targets`); an earlier-defined local still forces.
 - An unresolved inferred `integer` slot accepts a `double` (`fits_inferred_scalar`), since R's
-  integer-taking functions truncate.
+  integer-taking functions truncate; a string still fails. A slot already bound (a default lambda the join
+  binds) is not covered and still errors.
 - A `NULL` read is a placeholder only while no ordinary write gave the slot a non-`NULL` type
-  (`valued_slots`); a `<<-` write does not count.
+  (`valued_slots`), so a local narrowed or overwritten to `NULL` is checked. A `<<-` write does not count,
+  because sibling closures read the `NULL` until the defining frame joins the write, and a top-level
+  variable read from a function has no local slot, so it stays a placeholder.
 - A read before a body's first `<<-` can bind the superassignment seed; a first write that then fails to
   unify is reported, except an occurs failure, which is the accumulator `acc <<- c(acc, list(item))`.
 
@@ -1377,9 +1380,11 @@ Otherwise it counted as an undeclared nominal, compatible with everything, and `
   `top_level::super_assigned_names` over the item's own HIR); otherwise a Reference Class field
   `t <<- t[-inds]` resolved to base `t`.
 - `grepl`, `grep`, `regexpr` and `gregexpr` take `pattern: character[]` as a second overload, not a union,
-  because a union parameter makes an untyped caller's parameter infer the union.
-- Overload resolution lets a scalar narrowing beat the same atom's vector. A general "most specific" rule
-  was rejected: it picked list shapes later reads rejected.
+  because a union parameter makes an untyped caller's parameter infer the union, which then fails at
+  `paste0(collapse = p)`. Accepted cost: `grepl(1L, x)` reports "no overload matches" over the whole call.
+  `sub` and `gsub` keep `character`, since no corpus code needed more.
+- Overload resolution lets a scalar narrowing beat the same atom's vector. A general "most specific by
+  `compatible`" rule was rejected: it picked list shapes later reads rejected (ten more corpus reports).
 - `menu`'s `choices` is one union including `list[Any]`; split overloads made untyped callers `Unknown`.
 
 ## Strict-friction rules for matrices, unions, `...: Any` and `$` members
@@ -1387,15 +1392,18 @@ Otherwise it counted as an undeclared nominal, compatible with everything, and `
 **Status:** built.
 
 - `m[i, j]` on a `matrix` (`matrix_index`): elements are `Any`, two vector or empty slots give `matrix`, a
-  scalar slot gives `Any` (R drops dimensions), `drop = FALSE` keeps `matrix`.
-- An operator on a union containing a class dispatches per member (`ordinary_operator_result`), committing
-  only if that adds no error.
+  scalar slot gives `Any` (R drops dimensions), `drop = FALSE` keeps `matrix`; any other named argument
+  falls back to the general rules.
+- An operator on a union containing a class dispatches per member, a classless member taking the ordinary
+  rules (`ordinary_operator_result`), committing only if that adds no error, so plain unions keep their
+  messages.
 - An expected `fn(...: Any)` pads a lambda's parameter hints with `Any`, because R forwards anything through
   `...` and `Unknown` would make every plumber or shiny callback a strict report.
 - An annotation covers strict origins inside its value except inside a nested function literal or braced
   block (`annotation_covers`), which have their own bindings.
 - A stub declares an environment member as `Class$member : T` (`is_stub_name`, `infer_field`), looked up
-  before `$.class` dispatch (how polars types `frame$select(...)`).
+  before `$.class` dispatch (how polars types `frame$select(...)`), keyed by class name in the global
+  scheme map, with no separate table.
 
 ## Inferred annotations follow the project's annotation style
 
@@ -1403,9 +1411,10 @@ Otherwise it counted as an undeclared nominal, compatible with everything, and `
 
 - `ide::inferred_annotations` is the one source of edits for the code actions and `ry check --annotate`.
 - With inline annotations on, types go inline; a right assignment, quoted name, generic non-function value,
-  or a formal optional only because the body may not read it (inline spells optionality only as a default)
-  falls back to `#:`.
-- Whole-file annotation writes top-level bindings only; `--annotate` is separate from `--fix` because it
+  or a formal optional only because the body may not read it falls back to `#:` (inline spells optionality
+  only as a default, so the inline form would make a caller omitting the argument an error).
+- Whole-file annotation writes top-level bindings only, because locals carry no interface (the
+  per-binding action still offers a local); `--annotate` is separate from `--fix` because it
   rewrites every signature rather than repairing a finding.
 
 ## The cold check's per-call work: a bump arena, borrowed schemes, a token-only green builder
@@ -1413,14 +1422,17 @@ Otherwise it counted as an undeclared nominal, compatible with everything, and `
 **Status:** built, except the token-sharing green builder, which "The syntax tree is ry's own flat preorder arena" supersedes.
 
 - Argument matching allocates in a `bumpalo::Bump` per item check; the checker borrows `ItemCheck`s and stub
-  schemes instead of cloning.
+  schemes instead of cloning, and fetches the stub library once per check.
 - Lookups take `hir::Symbol`, and `types::Name::new` accepts `IntoSymbol`, so no caller round-trips through
-  a string.
+  a string. `hir::Symbol` orders by a cached 8-byte big-endian prefix before comparing text, so sorted
+  symbol sets rarely touch the spelling.
 - The lexer has ASCII fast paths; keyword lookup rejects by length and first byte.
 - `ry check` reads and renders in parallel, prints in path order, and hashes sources only for the cache.
 - `TypeDefinitions::of`, `read_context` and `SalsaGlobals::new` fetch stub library, project files and file
   kind up front: a few extra dependencies on rarely changing inputs, for one fetch per check instead of
   per lookup.
+- The 1 s cold-check target is not met, and the remaining profile is flat (`backlog.md`, "Check cache
+  follow-ups").
 
 ## The item check's working maps live in a pooled bump arena
 
@@ -1432,8 +1444,11 @@ Otherwise it counted as an undeclared nominal, compatible with everything, and `
 - The per-thread arena pool is a stack, because an item check can start a nested check while its arena is
   live; arenas are reset, not freed.
 - S3 method names are spelled in a per-thread buffer before interning (`method_symbol`).
-  `substitute_rigid` takes a slice of bindings.
+  `substitute_rigid` takes a slice of bindings and memoizes only types larger than 64 nodes
+  (`UNMEMOIZED_SUBSTITUTION_SIZE`), where sharing actually repeats work.
 - Yes-or-no syntax scans build no owned nodes; the full argument list is built only when a name repeats.
+- The pooled arenas cost about 24 MiB of committed memory on the finance bench. The remaining allocations
+  are salsa's memo bookkeeping and scattered `Vec` growth (`backlog.md`, "Check cache follow-ups").
 
 ## `$` fields resolve through the values that built the receiver
 
@@ -1443,14 +1458,17 @@ Otherwise it counted as an undeclared nominal, compatible with everything, and `
   including `inherit` and `self$`/`private$`, `Class$new(...)`, pass-through calls, project returns, `if`
   branches, `receiver$name <- value`), capped at `MAX_DEPTH`.
 - An unfollowable receiver falls back to every same-named declaration: references list them all and rename
-  is refused, because a guess must never edit code. A precise target's references are a closed set; rename
-  is refused while any same-named read is untraced.
+  is refused, because a guess must never edit code. A precise target's references are a closed set (a read
+  reaching one declaration brings in every other it reaches, such as both `if` branches); rename is refused
+  while any same-named read is untraced, and likewise for a method parameter, whose calls are the field's
+  reads.
 - Constructor parameters (`CONSTRUCTOR_PARAMETERS`) and tag payload records are not fields. A library
   function's return has its fields declared by that function.
 - A named argument to a project function forwarding `...` into a constructor declares that field, unless it
   names one of the function's parameters. `object$method(arg = 1)` navigates `arg` to the held function.
-- `Resolver::sources` is memoized per resolution with a cycle placeholder; spellings come from
-  `field_index` over per-file `file_fields`. `goto_definition` returns several locations because an `if`
+- `Resolver::sources` is memoized per resolution with a cycle placeholder, so a variable reassigned from
+  itself costs one pass per assignment, not a power of them. Spellings come from `field_index` over
+  per-file `file_fields`, so references never scan every file. `goto_definition` returns several locations because an `if`
   can build the value two ways.
 
 ## Packages without stubs are read from the R library by the host, lazily
@@ -1461,19 +1479,25 @@ Otherwise it counted as an undeclared nominal, compatible with everything, and `
   library, so it stays pure and machine-independent.
 - The host (`crates/ry/src/installed.rs`) resolves it through `rdb` (without R), writing the namespace as R
   source under `<cache>/ry/packages/<pkg>/<version>/<pkg>.R`; the server ignores that file's notifications
-  so it never becomes project code. Primitives' formals come from `.ArgsEnv`/`.GenericArgsEnv`.
-- No stub is generated; this is navigation only. The LSP simulator runs with `installed_packages: false`.
+  so it never becomes project code. A package is read once, on first use. Primitives' formals come from
+  `.ArgsEnv`/`.GenericArgsEnv`.
+- No stub is generated; this is navigation only. The LSP simulator runs with `installed_packages: false`,
+  because the machine's library would make it nondeterministic.
 - `ide::Installed` feeds signature help, completion and the import quick fix, which searches only packages
-  the project already depends on, attaches or reads with `::`.
-- Completion ranks a local ahead of library names at equal match quality unless `(` follows the cursor.
+  the project already depends on, attaches or reads with `::`. `()` answers nothing; the fixture harness
+  answers for one fake package. Exports are the `NAMESPACE` `export` names plus the `.rdx` names an
+  `exportPattern` matches.
+- Completion ranks a local ahead of library names at equal match quality unless `(` follows the cursor,
+  since most locals hold data. This raised httr2's two-character variable completion from 91% to 95%;
+  ranking locals first unconditionally lost call heads (`req |> req_url(...)` to the local `req`).
 
 ## One-shot checks record coarse dependencies
 
 **Status:** superseded by "Every host resolves names through one path, and trees live in the host's store", which removes `Db::one_shot`. Kept for two measurements that still shape the code.
 
 - A walk recording one salsa edge per project item leaves its handle's reused query-stack frame sized for
-  the project, and every later query at that depth clears it, so a project-wide name map is built on a
-  throwaway database handle.
+  the project, and every later query at that depth clears it (about 0.75 G instructions on the finance
+  bench), so a project-wide name map is built on a throwaway database handle.
 - The global allocator calls `mi_malloc` directly when alignment is at most 16 and no larger than the size;
   the `mimalloc` crate always took the aligned path.
 
@@ -1485,18 +1509,26 @@ Otherwise it counted as an undeclared nominal, compatible with everything, and `
 these at the call:
 
 - `flag_return`: a literal-logical-default formal the tail `if` tests, plus both branch types;
-  `flag_selected_return` picks a branch when the flag is omitted or literal.
-- `quoted`: formals read only through `substitute()`; `quoted_arguments` types the argument `Unknown`.
-- `default_reads`: an optional formal another forced formal's default forces.
+  `flag_selected_return` picks a branch when the flag is omitted or literal. It needs a literal default
+  and the tail as the only return. A forwarded `...` is assumed not to carry the flag, since the opposite
+  reports DistributionUtils' ordinary `pDist(densFn, q, ...)`.
+- `quoted`: formals read only through `substitute()` (a bare forward to another call counts as an
+  evaluation); `quoted_arguments` types the argument `Unknown` without inferring it.
+- `default_reads`: an optional formal another forced formal's default forces; `match_arguments` reports a
+  formal missing when both it and the formal whose default reads it are left out.
 - `missing_tested`: formals tested with `missing()`, which the callee may leave unread even with a default.
 - `condition_only`: formals read only as a whole `if`/`while` condition, the only ones a logical-looking
   string fits.
 - `null_unless`, `reduces`, `from_calls`: see the `Reduce` entry below.
 
 They live on the type because they belong to the function value, which flows through bindings, lists and
-callbacks. Annotations cannot spell them, so a written-back annotation is less precise
-(`test_roundtrip.rs`). At a `match.fun` caller a bare formal also read as a value is accepted unpinned
-(`check::reads_as_value`).
+callbacks; a per-item side table would serve only direct calls and need its own invalidation.
+Annotations cannot spell them, so a written-back annotation is less precise (`test_roundtrip.rs`).
+
+An apply-family element gets the inferred-scalar leniency a direct call gives. At a `match.fun` caller a
+bare formal also read as a value is accepted unpinned (`check::reads_as_value`), because `match.fun` looks
+a bare name up as a function; a formal used only as a function still infers as one
+(`function(xs, f) lapply(xs, f)` keeps `f: fn(T) -> U`).
 
 ## `Reduce` folds a named function instead of matching `fn(U, T) -> U`
 
@@ -1504,22 +1536,28 @@ callbacks. Annotations cannot spell them, so a written-back annotation is less p
 
 - `infer_reduce_fold` calls a directly named function (or an `if` between two names) on
   `(accumulator, element)` until the joined accumulator stops growing (at most four rounds), because R
-  carries a wider value forward than the start type. Closures over enclosing type variables and lambda
+  carries a wider value forward than the start type. Only the last round's findings are kept, unless a
+  round fails. Closures over enclosing type variables and lambda
   literals keep the stub path, since repeated calls would pin shared variables.
-- `FunctionType.reduces` records a body ending in `Reduce(f, x, init =)` over its formals;
+- `FunctionType.reduces` records a body ending in `Reduce(f, x, init =)` over its formals (possibly through
+  a local `function(a, b) formal(a, b, ...)`), with no early return;
   `forwarded_reduce` folds the caller's callback via `fold_reduce`, so purrr-style wrappers get the fold.
 - **Facts on edges.** `check::Environment` carries `facts` (`Fact::Holds(slot, predicate)`,
   `Fact::NullTogether(a, b)`) in the entries' undo log, so forks and joins treat them as refinements. Any
   write to a slot drops its facts, including in `join_writes` when the joined entry is unchanged (a
-  same-typed write is a different value). `FunctionType.null_unless` records a callee whose only `NULL`
-  return is an opening `if (!pred(formal)) return(NULL)`; `null_excluded_return` strips `NULL` where the
-  argument holds `pred`. Facts are about variables, not values, so they are not on the type.
+  same-typed write is a different value), and a loop counts that as a change so its body is rechecked. A
+  `NULL` guard on one slot also refines its null partners. `FunctionType.null_unless` records a callee
+  whose only `NULL` return is an opening `if (!pred(formal)) return(NULL)` on a formal it never writes (an
+  open, `Any` or `Unknown` member of another return counts as possibly `NULL`); `null_excluded_return`
+  strips `NULL` where the argument holds `pred`. Facts are about variables, not values, so they are not on the type.
 - `FunctionType.from_calls` marks a callback type synthesized from calls, whose later calls may omit an
   argument. Making its parameters optional was rejected: an expected callback's optional parameter requires
   the actual callback to have a default.
 - Bare `NA` returns (`bare_na_returns`) take the other returns' atomic kind, else `logical`; only inferred
-  returns are lenient.
-- Branch joins keep a bounded variable open when the closed side is not a plain scalar or vector.
+  returns are lenient: a declared `-> character` still reports `return(NA)`, so the round-trip test lists
+  the case.
+- Branch joins keep a bounded variable open when the closed side is not a plain scalar or vector (`rho +
+  rho0` against `L %*% rho`); a bound such as `numeric` does not make a matrix the parameter's type.
 - An `exists("name")` probe for a function an attached package ships and the project does not define makes
   the `else` diverge: the fallback serves older R versions ry never presents.
 
@@ -1528,27 +1566,42 @@ callbacks. Annotations cannot spell them, so a written-back annotation is less p
 **Status:** built.
 
 - The oracle (`crates/ry/src/scope_oracle.rs`) shares no code with the analysis, because checking against
-  the analysis's own resolver would agree with every bug. Sites scoping cannot decide (formulas, quoted
-  code, `:=` targets, calls with no visible function literal, unbound `<<-`) are left out.
-- Each `for` loop variable is its own binding, and a read links to the nearest preceding definition.
+  the analysis's own resolver would agree with every bug. It applies R's lexical rules: locals visible from
+  the end of their assignment, enclosing functions seeing all their locals, `<<-` falling through to
+  package level. Sites scoping cannot decide (formulas, quoted code, `:=` targets, calls with no visible
+  function literal, `<<-` targets nothing lexical defines) are left out.
+- Each `for` loop variable is its own binding, an assignment after a loop joins that loop's binding, and a
+  read links to the nearest preceding definition; reassignments with no loop between stay one binding.
 - `the$x <- v` in a function mints a local copy (R: `the <- \`$<-\`(the, ...)`);
   `ItemNaming::replacement_copies` maps it to a `CopySource`, and `ide::target_at`, hover and
   `occurrences` follow `copy_origin`, so renaming the global `the` reaches it. The checker types the copy
   as its own variable.
-- Measure with `ry debug analysis-stats <path>`; `project_declarations` indexes the declaring item.
+- Refused renames are not misses to fix: a parameter of a function stored in a field whose reads cannot all
+  be traced (an R6 `private$` method, `list(set = function(token))`) is refused, because a named argument
+  at an untraced call would break.
+- `ry debug analysis-stats <path>` ("editor coverage") on R6, purrr, httr2 and finbench: hover and
+  definition at or above 90% per role, references 100%, rename 95.5% to 100% (the rest are those
+  refusals), call hierarchy and workspace symbols 99% or more. Remaining misses are receivers or callees
+  nothing in the project declares (`.Call` symbols, a parameter's fields, generator `<<-` targets).
+- `project_declarations` indexes `declaring_item`, whose scan of every file on a miss was a references p99
+  regression; the probe's timing table catches such a regression.
 
 ## `if` in NAMESPACE is evaluated by the host, then resolved in text
 
 **Status:** built.
 
 - R evaluates, Rust parses. `.ry_namespace_conditions` (`crates/loader/src/runtime.R`) walks each `if` as
-  `parseNamespaceFile` does and encodes the values as one string (`.Call` routines take strings);
-  `Loader::read` substitutes taken directives (`metadata::resolve_namespace_conditionals`) before anything
-  parses `NAMESPACE`, so every consumer sees the NAMESPACE R would build.
+  `parseNamespaceFile` does (top level or inside a top-level `{`, only the taken branch) and encodes the
+  values as one string (`loader::parse_namespace_conditions`), because `.Call` routines take strings;
+  `Loader::read` substitutes taken directives (`metadata::resolve_namespace_conditionals`), keeping
+  directive order, before anything parses `NAMESPACE`, so the spec, diff, index cache key and analysis
+  all see the NAMESPACE R would build.
 - A directive without values fails the read with `LoadError::Conditionals` before any stamp is taken (a
-  stamp for a discarded read would hide the edit), and R evaluates again. The first request of a load sends
+  stamp for a discarded read would hide the edit), and R evaluates again, repeating while the plan names
+  new directives (values are keyed by directive source text). The first request of a load sends
   no values, since stale ones could run conditions the file no longer holds; such a package plans twice.
-- The checker cannot evaluate R, so it reads both branches.
+- The checker cannot evaluate R, so it reads both branches, which avoids false unresolved reports for
+  platform-conditional imports.
 
 ## Reference Class and R6 method bodies resolve object members in naming
 
@@ -1559,7 +1612,9 @@ callbacks. Annotations cannot spell them, so a written-back annotation is less p
   a method-body read it accepts records nothing (the checker reads `Unknown`). R6 methods answer only
   `self`, `private`, `super`. Otherwise a sibling method sharing a top-level function's name typed as it.
 - Membership is a per-name projection (`file_ref_classes`, `project_ref_classes`,
-  `project_ref_class_binds`) that reads `item_hir` only, never naming, so there is no cycle.
+  `project_ref_class_binds`) that reads `item_hir` only, never naming, so there is no cycle, and a class
+  edit rechecks only methods whose answers change (`test_incremental`,
+  `a_reference_class_edit_rechecks_only_methods_whose_member_answers_change`).
 - An undefined superclass or generator hides the members, so every name binds rather than guessing.
   `file_defines_r6_class` covers helpers placed in an R6 list by name.
 
@@ -1569,11 +1624,14 @@ callbacks. Annotations cannot spell them, so a written-back annotation is less p
 
 - `file_source_calls` collects literal `source`/`sys.source` paths in non-package files; `sourced_files`
   resolves them against the sourcing file's directory, then the project root, transitively.
-  `sourced_definition(file, name)` sits after the file's own scope (last sourced binding wins). A sourced
+  `sourced_definition(file, name)` is a per-name projection after the file's own scope and before the test
+  and package layers (last sourced binding wins), so a helper edit rechecks only reads whose answer
+  changes (`test_incremental`, `a_sourced_helper_edit_rechecks_only_the_script_reads_it_changes`). A sourced
   file reports no unused assignments (`file_is_sourced`). Position is ignored: a nested `source()` runs at
   an unknown time.
-- The server's `Worker::sync_sourced_files` keeps exactly the open documents plus what they source, so a
-  session equals a fresh start; its read retries on cancellation because the set must be complete.
+- The server otherwise holds only `R/` and open documents, so `Worker::sync_sourced_files` loads from disk
+  exactly the open documents plus what they and the package transitively source, dropping helpers nobody
+  sources, so a session equals a fresh start; its read retries on cancellation because the set must be complete.
 - A package file's `source()` is ignored: a namespace is its `R/` files.
 
 ## A masked argument is its own scope, and the base masking family is typed
@@ -1582,8 +1640,9 @@ callbacks. Annotations cannot spell them, so a written-back annotation is less p
 
 - Naming pushes a `ScopeKind::Mask` scope around each non-data argument of a masking call and pre-mints its
   assignments there (`syntactic_masking_family`); resolving them in the caller's scope made
-  `within(d, c <- a * 2)` shadow `base::c`. Mask writes are never unused (`within` copies them back). The
-  stubs are `@pure`, since arguments are walked for effects.
+  `within(d, c <- a * 2)` shadow `base::c`. Mask writes are never unused (`within` copies them back).
+  `top_level` walks a base-family masked argument with fresh locals, as for `local()`. The stubs are
+  `@pure`, since arguments are walked for effects.
 - An overloaded call left ambiguous only by an already-`Unknown` argument returns `Unknown` without a new
   strict origin (`typing-strict/unknown-origins.R.test`).
 
@@ -1600,7 +1659,8 @@ with stubs but no manifest is not checked (partial stubs would flag real exports
 **Status:** built.
 
 Naming lexes each string literal's `{...}` segments and marks the bindings they resolve to as read
-(`interpolated_names`), so a glue or cli template local is not unused. It records no resolution (the
+(`interpolated_names`), so a glue or cli template local is not unused (about 280 of the corpus's 3,180
+unused warnings were such locals). It records no resolution (the
 string may be plain text), so rename and hover ignore it. It applies to every string, because wrappers
 forwarding `parent.frame()` are common and a false read only misses an unused warning. `{{`, `.`-led
 (cli style), `?`-led (pluralization) segments and names after `$`, `@`, `::` are skipped.
@@ -1611,31 +1671,35 @@ forwarding `parent.frame()` are common and a false read only misses an unused wa
 
 `join_branch_values` returns `Any` when either side is `Any`, as unions do; unifying let `f: Any` take the
 other branch's signature. `join_written_values` keeps unifying, because the `Any` rule there lost true
-positives (a matrix called as a function).
+positives (NlcOptim's matrix called as a function).
 
 ## tidyr and tibble ship masked-verb stubs beside their manifests
 
 **Status:** built.
 
 `types/tidyr.Rtypes` and `types/tibble.Rtypes` declare only the `@masked` verbs, because masking is keyed by
-stub declarations; other exports come from the manifests. Reshaping verbs return `Any`; row-preserving ones
-keep `<T>`.
+stub declarations; other exports come from the manifests. Reshaping verbs return `Any` because their
+columns depend on the data; row-preserving ones (`drop_na`, `fill`, `complete`) keep `<T>`. tidyr
+re-exports `tibble`, so its stub declares `tibble` too.
 
 ## `length(x)` guards drop `NULL`
 
 **Status:** built.
 
 `recognize_guard` treats `length(x)` and `length(x) <op> literal` as a test whose zero-excluding edge is
-non-`NULL` (`non_null_edge`). It only drops `NULL` from a union, never shapes an open variable.
+non-`NULL` (`non_null_edge`). It only drops `NULL` from a union, never shapes an open variable, because a
+length test says nothing else about the value.
 
 ## A numeric binding yields to a matrix or a generic argument
 
 **Status:** built.
 
 Arithmetic ties operands to one variable, so the first argument bound it. `widen_numeric_binding` lets a
-`matrix` absorb a numeric binding; an open or numeric rigid argument meeting a `double`-bound variable is
-only constrained numeric, so the caller stays `<T: numeric>`. Redirecting the bound variable was rejected:
-it moved a variable between levels, so an inner function generalized an outer one's variable.
+`matrix` absorb a numeric binding (the element type is not tracked, so a character matrix passes); an open
+or numeric rigid argument meeting a `double`-bound variable is only constrained numeric, so the caller
+stays `<T: numeric>`. Redirecting the bound variable was rejected: it dropped the literal's `double`
+(`outer(1L)` typed `integer`) and moved a variable between levels, so an inner function generalized an
+outer one's variable.
 
 ## A splice reparse refuses a prefix with an unclosed delimiter
 
@@ -1643,16 +1707,19 @@ it moved a variable between levels, so an inner function generalized an outer on
 
 `reparse::try_splice` does a full parse when the old tree reports an unclosed delimiter, unterminated
 string or "to close" error before the edit: recovery ended that group early, so a closer the edit adds
-reshapes the tree. Such files are already broken, so the fallback is cheap.
+reshapes the tree. The "to close" phrase catches a `[[` closed by one `]`, which never says "unclosed";
+it also matches other recoveries (a type argument list's `>`), which only costs a full parse. Such files
+are already broken, so the fallback is cheap.
 
 ## Alias cycles are reported at the declaration, and short names get narrow suggestions
 
 **Status:** built.
 
 `alias_cycle_diagnostics` (`diagnostics.rs`, via `check::alias_cycle_walk`) reports every alias on a cycle
-at its declaration, and a use drops the annotation silently, so the mistake is reported once. A two- or
-three-character name gets a suggestion only when exactly one candidate is it with one character inserted
-(`nam` finds `name`), because substitutions on short names match unrelated names.
+at its declaration, and a use drops the annotation silently, so the mistake is reported once. It runs per
+file over that file's declarations, so it adds no project-wide read. A two- or three-character name gets
+a suggestion only when exactly one candidate is it with one character inserted (`nam` finds `name`, `df`
+never finds `dt`), because substitutions on short names match unrelated names.
 
 ## The syntax tree is ry's own flat preorder arena
 
@@ -1664,9 +1731,12 @@ three-character name gets a suggestion only when exactly one candidate is it wit
   `Vec` pushes. It replaced rowan, whose per-node allocations and transient red nodes forced a second
   traversal API beside the red one.
 - `SyntaxNode`/`SyntaxToken` (an `Arc<Tree>` plus an index) mirror rowan's API; `NodeRef`/`TokenRef` are
-  borrowed `Copy` cursors for hot walks, and `TokenRef` reads kind, range and text lazily.
+  borrowed `Copy` cursors for hot walks, and `TokenRef` reads kind, range and text lazily (eager reads cost
+  about 1 G instructions per cold check). Token sharing across files and rowan's node cache were given up.
 - An item's syntax is a window (`Tree::subtree`) over the file's shared columns, so nothing is copied;
-  copying item columns duplicated every file's columns (about 80 MiB more peak). Equality compares kinds,
+  copying item columns duplicated every file's columns (about 114 MiB, 80 MiB more peak on the finance
+  bench). The windows' offset arithmetic costs about 0.85 G instructions but measured faster than the
+  copies' memory traffic. Equality compares kinds,
   ends and item-relative offsets, so per-item cutoffs are position independent. A window keeps its file's
   columns alive, which is fine because an edit replaces that file's item trees too.
 - `tree::splice` is cross-checked against a full parse (parents included, which equality omits) under
@@ -1679,7 +1749,8 @@ three-character name gets a suggestion only when exactly one candidate is it wit
 
 `shape_verdict` (`check.rs`) decides arity, overflow and missing required arguments from argument targets
 alone; `match_arguments` uses it for its own arity findings, so the two never disagree, and
-`probe_overload_candidate` runs it before instantiating a candidate. A call forwarding `...`, or naming an
+`probe_overload_candidate` runs it before instantiating a candidate (the finance bench ran about 155 k
+full probes for 17 k overloaded calls without it). A call forwarding `...`, or naming an
 unmatched argument without overflowing, gets no verdict and falls through to full matching.
 
 ## `[[` by name on a named atomic vector is the element, not `T | NULL`
@@ -1735,6 +1806,8 @@ Each trades a narrow class of missed errors for a class of false reports seen on
 - `ReadContext` fetches the file's package definition and conditional-slot maps once;
   `package_scheme_exists_in` takes a probe closure so both paths share one rule.
 - `cold_check_memory_budget` (`crates/ry/tests/test_perf.rs`) fails a release cold check above 256 MiB.
+- The profile is flat: the parser and tree builder (about 1.4 G instructions on finance), the lexer
+  (about 0.65 G), spread salsa fetches and `infer_ordinary_call` remain.
 
 ## The checker's per-item facts are columns and bitsets indexed by dense id
 
@@ -1759,7 +1832,8 @@ they could disagree, and trees had three homes.
   rejected: a read of an unheld file would reparse it every time.
 - **`item_links(item)`** resolves every name the item's naming lists against the project name maps, and
   holds its interface edges and whether its file is in the project. It is the item's projection of the
-  project-wide maps and backdates unless one of its names moved.
+  project-wide maps and backdates unless one of its names moved. It reads the project's file list but no
+  fold over the project's names, so a name a test or script adds re-runs no package item's links.
 - **Constructed names** (S3 methods like `+.Date`) go through `package_name`, `test_name` and
   `frame_binder`. A project package item skips `frame_binder` for a name the package layer does not bind,
   since every top-level name a package file binds is a definition or a listed conditional write; helper
@@ -1768,13 +1842,18 @@ they could disagree, and trees had three homes.
   positions, so they stay equal when a statement is added. `SalsaGlobals` keeps one column of resolved
   schemes by link position, because resolving copies a scheme.
 - **Rejected:** a project-wide bound-name set (it lowered and named every file before the first check
-  finished, and is a fold over the project); a per-file name set (any new name re-checks the file); a
-  `frame_binder` memo per constructed name (about 100,000 memos, nearly all for unbound names); edges in
+  finished: one package file's cold diagnostics ran `file_binders` 1,006 times and `item_hir` 9,905
+  times on the finance bench; and it is a fold over the project); a per-file name set (any new name
+  re-checks the file); a `frame_binder` memo per constructed name (about 100,000 memos, 18 MB, nearly all
+  for unbound names); edges in
   their own query (a second memo from the same inputs); one per-file links query (loses the per-item
   firewall).
 - **Pinned:** `enable_invariants()` compares linked lookups with per-name answers, unbound verdicts with
-  `frame_binder`, groups with a walk from the item. `test_incremental.rs` covers every way a file binds a
-  name its check constructs, query counts, and that a diagnostics-only host reports what an editor reports.
+  `frame_binder`, groups with a walk from the item. `test_incremental.rs` covers every way a package or
+  helper file binds a name its check constructs (definition, conditional, chained, call-argument and
+  in-loop writes, each failing if the verdict ignores the winner or conditional writers), query counts
+  (a package file's check lowers no other file's item), and that a diagnostics-only host reports what an
+  editor reports.
 
 ## Types and symbols are four-byte ids into append-only columns
 
@@ -1783,20 +1862,27 @@ is rejected below.
 
 Interner lookups took a shard mutex that checking threads contended for, hidden behind four caches.
 
-- `crates/semantics/src/intern.rs`: `Column<T, CHUNKS>` is append-only in fixed chunks that never move;
+- `crates/semantics/src/intern.rs`: `Column<T, CHUNKS>` is append-only in fixed chunks of 4,096 that
+  never move, so a read is a shift, a load and an offset;
   `IdTable<W>` is an open-addressing hash-to-id table whose slots fill once and that grows by replacement,
   so lookup is lock-free and only storing takes a lock.
 - A `Ty` is a `NonZeroU32`: low 27 bits index the kind and facts columns, upper bits say whether it is or
-  contains a variable, named type, rigid parameter or `Unknown`. `TyKind` is `Copy`. Leaf kinds and the
-  first inference variables are constants. A `Symbol` orders by spelling; `Symbol::lookup` probes without
-  interning.
+  contains a variable, named type, rigid parameter or `Unknown`. `TyKind` is `Copy`, its child slices in a
+  bump arena behind the writer lock. The 15 leaf kinds and the first 4,081 inference variables fill the
+  first chunk as constants. A `Symbol` is an id into a column of `{ text, hash, first eight bytes, length }`,
+  hashes as its stored spelling hash and orders by spelling; `Symbol::lookup` probes without interning.
 - `resolve` and `substitute_rigid` return on the id bits when nothing can change, and memoize subtrees for
-  one call only for large work. `InferenceTable::named_types` is two inline lists, because 91% of definition
-  lookups repeat a name the item already asked about.
+  one call only for large work (`resolve` after 64 steps, `substitute_rigid` above 64 nodes).
+  `InferenceTable::named_types` is two inline lists searched front to back, not a hash map: 91% of 1.08
+  million definition lookups on the finance bench repeat a name the item already asked about, and an
+  uncached answer is two salsa fetches and a scan.
 - **Rejected:** a per-item store for types with variables (they leave the item via `EditorFacts`,
-  `TypeErrorKind` and diagnostics, so every exit would copy). Never freed (see "Types and names are
+  `TypeErrorKind` and diagnostics, so every exit would copy, and only 696 of the 2,589 distinct types a
+  finance check builds contain one). Never freed (see "Types and names are
   hash-consed outside salsa"); a full store (2^24 types, 2^28 spellings) panics.
-- **Invariant:** id order differs between parallel runs, so nothing reaching output may walk ids in order.
+- **Invariant:** id order differs between parallel runs, so nothing reaching output may walk ids in order;
+  that is why `Symbol` orders by spelling.
+- A finance check executes 18.06 G instructions against 19.07 G with pointer types.
 
 ## An item's syntax has a stamp, so an edit lowers only the items it changed
 
@@ -1805,28 +1891,43 @@ Interner lookups took a shard mutex that checking threads contended for, hidden 
 Reading an item's range from `item_spans` made every edit re-lower every item of the file.
 
 - The store keeps a `SyntaxStamp` per top-level node. On reparse, nodes at the file's start and end whose
-  subtrees equal the old ones keep their stamps, others get fresh ones; equal stamps imply equal subtrees.
+  subtrees equal the old ones (an exact comparison) keep their stamps, others get fresh ones from a
+  store-wide counter; equal stamps imply equal subtrees.
 - `item_stamp(item)` backdates outside the edited region; `item_syntax` reads only the stamp and finds the
   node through a per-file index, falling back to a fresh parse when a bounded store dropped the tree.
+- `item_annotation_syntax` and `item_name_range` read per-file memos (`file_item_annotations`,
+  `item_spans`); the detached annotation subtrees compare by content, so they backdate while no `#:` block
+  changes. An edit to any `#:` block re-runs `item_annotations` for every item of the file (each backdates
+  unless its own block changed).
 - `TreeStore` has 16 shards; a parse runs outside every lock, and a second reader waits for it.
-- **Rejected:** the stamp in `item_syntax_flags` (other items read those flags); a content hash (a
-  collision keeps a stale lowering unnoticed); matching moved nodes anywhere (prefix and suffix suffice).
-- **Pinned:** `enable_invariants()` checks each stamp read; `test_incremental.rs` pins query counts.
+- **Rejected:** the stamp in `item_syntax_flags` (other items read those flags, so they would re-run on a
+  body edit); a content hash (a collision keeps a stale lowering unnoticed); matching moved nodes anywhere
+  (one edit changes one region, so the linear prefix and suffix comparison suffices).
+- Known cost: edits at both ends of a file between two reads make one region spanning the file, so the
+  items between re-lower and `item_hir` backdates. The stamp queries take 3.3 MB at the finance heap peak
+  (50,815 items).
+- **Pinned:** `enable_invariants()` checks each stamp read; `test_incremental.rs` pins query counts for an
+  edit inside an item, a new item above the others, a removed item, the second of two equal statements
+  removed, and edits at both ends.
 
 ## The analysis core's per-item and per-file tables after the type store
 
 **Status:** built.
 
-- `item_links` has one memo per item for the whole run, so `ItemLinks` is two thin vectors (`words`:
-  header, names, one word per binding; `items`: binding items, then edges) and allocates nothing when
-  empty. Edges sort by file, spelling, kind and disambiguator, not `Symbol::index()`, which is not
+- `item_links` has one memo per item for the whole run (50,815 on the finance bench), so `ItemLinks` is two
+  thin vectors (`words`: header, names, one word per binding holding its name's position above its kind;
+  `items`: binding items, then edges), two pointers wide, and allocates nothing when empty. Its memos hold
+  10.5 MB at the finance heap peak, and it is 4.6% of a check's instructions, mostly resolving every listed
+  name (`backlog.md` has it). Edges sort by file, spelling, kind and disambiguator, not `Symbol::index()`, which is not
   reproducible.
 - `file_follows_strict` is the one answer to "is this file strict"; `item_tree_positions` the one
-  item-to-position map; only an item binding more than its own name keeps `item_bound_names`.
+  item-to-position map; only an item binding more than its own name keeps `item_bound_names`. `Item.name`
+  is a `Symbol`, and the stub library's collections are `SymbolMap`/`SymbolSet`.
 - The server derives the attached set from `file_attached_namespaces` scans rather than a hand-kept copy.
   `ide::spelled_names` lets tag completion and searches open only matching files.
 - **Trap:** every tracked read on the server worker must run inside `Worker::cancellable`; one that did not
-  let a queued cancellation kill the worker (`burst_of_edits_settles_on_the_final_text`).
+  let a queued cancellation kill the worker (about one run in ten under load, in
+  `burst_of_edits_settles_on_the_final_text`), so the worker's exit message names an escaped cancellation.
 
 ## A function has one signature, resolved in `syntax::annotation`
 
@@ -1840,19 +1941,28 @@ Reading an item's range from `item_spans` made every edit re-lower every item of
   attached `#:` block. Refused blocks, `misplaced_directives` and non-function types declare nothing; a
   coercion (`@trust`, `@if-unknown`, `@new`) leaves no signature; `inline = false` reads only `#:`. The
   runtime (`interp::annotations::register_definition`) and the checker share `attached_annotation`,
-  `block_declaration` and `pair_formals`; the checker lowers types itself.
+  `block_declaration` and `pair_formals` (a formal takes the declared parameter of its name, else the next
+  unnamed one, and `...` the rest type); the checker lowers types itself.
 - **Why syntax.** The runtime lowers code the checker never sees (`eval(parse())`, installed packages, lazy
-  definitions), and `interp` does not depend on `semantics`. The gap is a signature that is only an alias
-  name: the checker peels it (`check::declared_function`), the runtime cannot, and
-  `native::Uncompiled::AliasedSignature` warns only when an alias was peeled and the types are incomplete.
-- **Difference.** The checker drops a block on any lowering error; the runtime checks the types it
-  recognizes. Such blocks carry an error, and strict mode refuses to run the file.
-- **Consequence.** A `#:` comment is enforced at run time, where GNU R ignores it; the check is first-order
-  and fails only on a value that really lacks the type.
+  definitions), and `interp` does not depend on `semantics`; handing it the checker's scheme would need a
+  serialized signature and a checker run before every lowering. The gap is a signature that is only an
+  alias name: the checker peels it (`check::declared_function`), the runtime cannot, and
+  `native::Uncompiled::AliasedSignature` warns only when an alias was peeled and the types are incomplete,
+  so an incomplete signature with another cause (a parameter name the function lacks) is not blamed on it.
+- **Difference.** The checker drops a block on any lowering error (`Lowering::finish`), including ones only
+  it sees, such as an unknown type name; the runtime checks the types it recognizes. Such blocks carry an
+  error, and strict mode refuses to run the file.
+- **Consequence.** A `#:` comment is enforced at run time, where GNU R ignores it, `ry check --annotate`
+  output included; the check is first-order and fails only on a value that really lacks the type.
 - **Lowering needs the statement.** `loader::Code` carries `statement_start`; `loader_backend::lower_code`
   parses from the statement's line plus the `#:` lines above, masking the prefix with spaces so offsets
-  match. The console's `syntax::input_is_unfinished` waits after a trailing `#:` block until a blank line.
-  `typed::lower::resolve_function` forces a lazy definition (`ryLoaderForce`), which is unobservable.
-- **Pinned by** `typing-strict/native.R.test` (`signature_written_in_a_comment` and siblings),
+  match; a parse error inside a `#:` line does not fail the lowering, since R reads it as a comment. The
+  console's `syntax::input_is_unfinished` waits after a trailing `#:` block until the next line, and a
+  blank line ends the wait. `typed::lower::resolve_function` forces a lazy definition (`ryLoaderForce`),
+  which is unobservable because the loader binds only function definitions and pure constants of strict
+  files that way.
+- **Pinned by** `typing-strict/native.R.test` (`signature_written_in_a_comment`,
+  `signature_from_a_type_alias`, `signature_alias_is_blamed_only_when_an_alias_is_the_cause`,
+  `signature_in_a_comment_reports_what_blocks_it`),
   `crates/ry/tests/native/blocked-aliased-signature.R`, `crates/syntax/tests/test_annotation.rs`,
   `a_console_reads_on_only_when_the_input_ended_too_early`, and the scenario `typed-comment-signatures`.
