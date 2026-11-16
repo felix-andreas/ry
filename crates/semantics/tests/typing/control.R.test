@@ -77,6 +77,7 @@ h: fn() -> integer
 #---- a_double_condition_coerces
 f <- function() if (2.5) 1L else 2L
 #++++
+f: fn() -> integer
 
 #---- a_character_condition_is_refused
 # Every string but the spellings of TRUE and FALSE raises at run time in R.

@@ -54,6 +54,12 @@ use_a: Thing <- 1.0
 #: @alias Thing {character}
 use_b: Thing <- "x"
 #++++
+== one.R
+use_a: Thing
+25..30 warning[unused] `use_a` is assigned but never used.
+== two.R
+use_b: Thing
+28..33 warning[unused] `use_b` is assigned but never used.
 
 #==== script_typing
 #---- script_self_reference_typechecks_sequentially

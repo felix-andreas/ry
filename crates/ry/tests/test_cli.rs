@@ -1259,9 +1259,17 @@ fn a_missing_script_exits_two_before_any_r_starts() {
 #[test]
 fn usage_errors_exit_two() {
     let directory = project(&[("script.R", "1\n")]);
+    let missing = ry(directory.path(), &["check", "does-not-exist.R"]);
+    assert_eq!(missing.code, 2, "{}", missing.stderr);
+    assert!(
+        missing
+            .stderr
+            .contains("failed to resolve: does-not-exist.R"),
+        "{}",
+        missing.stderr
+    );
     for arguments in [
         &["bogus-subcommand"][..],
-        &["check", "does-not-exist.R"],
         &["run", "--interactive"],
         &["run", "-i", "script.R", "extra"],
         &["R", "--runtime", "ry", "script.R"],
