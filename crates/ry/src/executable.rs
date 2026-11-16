@@ -243,8 +243,10 @@ fn hash(bytes: &[u8]) -> u64 {
 
 /// Checks for the fuzz harnesses, which feed them arbitrary bytes.
 pub mod testing {
-    use super::{Found, Metadata, Payload, append, read};
-    use std::{io::Cursor, path::PathBuf};
+    use {
+        super::{Found, Metadata, Payload, append, read},
+        std::{io::Cursor, path::PathBuf},
+    };
 
     /// Reads `bytes` as an executable: the reader must not panic, and a payload it finds must
     /// lie inside the file.

@@ -8,8 +8,8 @@ use {
         Frame, Signalling,
         annotations::Entry,
         builtins::{
-            Arg, BuiltinDef, Call, Generic, Kind, NativeArgs, Visibility, builtin, internal,
-            internal_special, special,
+            Arg, BuiltinDef, Call, DirectFn, Generic, Kind, NativeArgs, Visibility, builtin,
+            internal, internal_special, special,
         },
         bytecode,
         coerce::{CoercionWarnings, real_to_int},
@@ -658,6 +658,12 @@ unsafe fn slot_content(function: Sexp, header: usize, symbol: Sexp) -> Option<Se
         .position(|&name| name == symbol)?;
     let value = *bytecode::register_address(header + 1 + slot);
     (value != unbound()).then_some(value)
+}
+
+/// The value of `symbol` read from `enclosure` for the running slot frame, whose own slots do
+/// not bind it.
+pub(crate) unsafe fn enclosed_value(symbol: Sexp, enclosure: Sexp) -> R<Sexp> {
+    eval_enclosed_name(symbol, enclosure, interp().slot_owner as usize)
 }
 
 /// Evaluates `symbol` from `enclosure` for the slot frame at `owner`, whose own slots do not bind
@@ -1691,16 +1697,49 @@ pub unsafe fn call_builtin(
 }
 
 /// The builtin's [`BuiltinDef::direct`] result for `args`, in formal order, or `None` for the
-/// full call. The entry is skipped while a profile or activity trace is being taken, so that
-/// samples and counts name the builtin as the full call does.
+/// full call. While a profile or activity trace is being taken, the entry publishes the builtin
+/// and takes the profile sample as the full call does, so an observed run takes the same path
+/// as an unobserved one: a special replacing a variable in a slot has only this entry to keep
+/// the frame without an environment.
 #[inline]
 pub unsafe fn call_direct(definition: &BuiltinDef, call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
     let Some(direct) = definition.direct else {
         return Ok(None);
     };
     if activity::hooks() != 0 {
-        return Ok(None);
+        return call_direct_observed(definition, direct, call, args);
     }
+    run_direct(definition, direct, call, args)
+}
+
+#[inline(never)]
+unsafe fn call_direct_observed(
+    definition: &BuiltinDef,
+    direct: DirectFn,
+    call: Sexp,
+    args: &[Sexp],
+) -> R<Option<Sexp>> {
+    let index = builtin_index(definition);
+    let _activity = activity::enter(Activity::Builtin, index as u32);
+    if activity::profile_ticked() {
+        record_profile_sample(Some(definition.name))?;
+    }
+    let value = run_direct(definition, direct, call, args)?;
+    // A declined entry leaves the count to the full call that follows.
+    if value.is_some() && activity::enabled() {
+        activity::count(Counter::BuiltinCalls);
+        activity::count_builtin(index);
+    }
+    Ok(value)
+}
+
+#[inline(always)]
+unsafe fn run_direct(
+    definition: &BuiltinDef,
+    direct: DirectFn,
+    call: Sexp,
+    args: &[Sexp],
+) -> R<Option<Sexp>> {
     let value = scope(|| direct(call, args))
         .and_then(|value| crate::unwind::raise_parked().map(|()| value))
         .map_err(|unwind| builtin_failure(unbound(), unwind))?;
@@ -2128,10 +2167,9 @@ unsafe fn collect_evaluated_args(
                     let item = cell.car();
                     let evaluated = if item == missing {
                         if !keep_missing {
-                            return Err(error_in(
-                                call,
-                                format!("argument {} is empty", args.len() + 1),
-                            ));
+                            // GNU R evaluates the empty item as a symbol, in the frame that
+                            // passes `...` on, so the error is that frame's, not the call's.
+                            return Err(error("argument is missing, with no default"));
                         }
                         missing
                     } else {
@@ -3211,6 +3249,19 @@ pub unsafe fn slot_dots(index: usize) -> Option<Sexp> {
         formal = formal.cdr();
     }
     None
+}
+
+/// The register that holds the variable `symbol` of the frame at `index`, when it is a slot
+/// frame that keeps every variable in its slot and has a slot of that name.
+pub unsafe fn slot_register(index: usize, symbol: Sexp) -> Option<usize> {
+    let frame = interp().frames.get(index)?;
+    if frame.env != nil() || frame.slots == crate::NO_SLOTS || frame.inlined {
+        return None;
+    }
+    let position = bytecode::frame_slot_names(frame.function)
+        .iter()
+        .position(|&name| name == symbol)?;
+    Some(frame.slots as usize + 1 + position)
 }
 
 /// What the slot of the formal `symbol` holds in the frame at `index`, and whether the formal is
@@ -6057,6 +6108,103 @@ pub unsafe fn force_and_call_with(
     let result = call_seeded(call, function, env, &mut args, count, seeded, known);
     release_references(mark);
     result
+}
+
+/// [`force_and_call_with`] for the closure `function` called from the slot frame at `frame`,
+/// which has no environment: `first` binds as a forced argument reference to the call's first
+/// argument, and the frame's `...` passes on what it holds. The frame keeps running on its
+/// slots unless the callee asks for its caller's environment.
+pub unsafe fn force_and_call_from_slots(
+    call: Sexp,
+    function: Sexp,
+    frame: usize,
+    first: Sexp,
+    known: Option<&mut KnownFirst>,
+) -> R<Sexp> {
+    let mut args = Args::new();
+    let mark = interp().references_used;
+    let reference = argument_reference(frame, NO_REFERENCE_SLOT, call.cdr().car())?;
+    crate::heap().set_car(reference, first);
+    args.push(Arg {
+        tag: nil(),
+        value: reference,
+    });
+    if let Some(dots) = slot_dots(frame) {
+        activity::count(Counter::DotsCalls);
+        let mut cell = dots;
+        while matches!(cell.kind(), SexpType::Dots | SexpType::Pairlist) {
+            args.push(Arg {
+                tag: cell.tag(),
+                value: cell.car(),
+            });
+            cell = cell.cdr();
+        }
+    }
+    let result = call_seeded(call, function, nil(), &mut args, 1, true, known);
+    release_references(mark);
+    result
+}
+
+/// [`force_and_call_with`] for the builtin `function` called from the slot frame at `frame`,
+/// which has no environment: `first` and the forced items of the frame's `...` are its
+/// arguments. `None` when the call needs the environment, because an argument is an object the
+/// builtin may dispatch on, an item of `...` is empty, or forcing an item gave the frame its
+/// environment; the items forced so far stay forced, so evaluating the call again runs nothing
+/// twice.
+pub unsafe fn call_builtin_from_slots(
+    call: Sexp,
+    function: Sexp,
+    frame: usize,
+    first: Sexp,
+) -> R<Option<Sexp>> {
+    let definition = builtin_def(function)?;
+    let mut args = Args::new();
+    crate::heap().root(first);
+    args.push(Arg {
+        tag: nil(),
+        value: first,
+    });
+    let mut plain = true;
+    let mut forced = Ok(());
+    if let Some(dots) = slot_dots(frame) {
+        activity::count(Counter::DotsCalls);
+        // As in `evaluate_args`, each value counts as referenced while the later ones evaluate.
+        first.increment_refcount();
+        let mut cell = dots;
+        while matches!(cell.kind(), SexpType::Dots | SexpType::Pairlist) {
+            let item = cell.car();
+            if item == missing_arg() {
+                plain = false;
+                break;
+            }
+            match value_of(item) {
+                Ok(value) => {
+                    crate::heap().root(value);
+                    value.increment_refcount();
+                    args.push(Arg {
+                        tag: cell.tag(),
+                        value,
+                    });
+                }
+                Err(unwind) => {
+                    forced = Err(unwind);
+                    break;
+                }
+            }
+            cell = cell.cdr();
+        }
+        for arg in &args {
+            arg.value.decrement_refcount();
+        }
+    }
+    forced?;
+    if !plain
+        || interp().frames[frame].env != nil()
+        || (definition.generic != Generic::None && args.iter().any(|arg| arg.value.is_object()))
+    {
+        return Ok(None);
+    }
+    call_builtin(definition, call, function, &args, nil()).map(Some)
 }
 
 /// The rest of [`force_and_call_with`] for a closure `function`, with `args` made. A seeded

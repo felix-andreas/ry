@@ -1376,7 +1376,11 @@ pub unsafe extern "C" fn ry_write_script_code(
         crate::boundary::write_console(b"ry: no script source to compile\n", true);
         return 1;
     };
-    let command_args = vec!["ry".to_owned(), format!("--file={path}"), "--args".to_owned()];
+    let command_args = vec![
+        "ry".to_owned(),
+        format!("--file={path}"),
+        "--args".to_owned(),
+    ];
     if !start_script_session(command_args, flags) {
         return 1;
     }

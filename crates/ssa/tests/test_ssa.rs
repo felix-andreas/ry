@@ -364,12 +364,15 @@ fn relocatable_code_runs_against_its_table() {
         *(code.sub(8) as *mut i64) = 1000;
         *(code.sub(16) as *mut usize) = triple as *const () as usize;
         assert_eq!(
-            libc::mprotect(code as *mut libc::c_void, size - TABLE, libc::PROT_READ | libc::PROT_EXEC),
+            libc::mprotect(
+                code as *mut libc::c_void,
+                size - TABLE,
+                libc::PROT_READ | libc::PROT_EXEC
+            ),
             0
         );
-        let function = std::mem::transmute::<*const u8, extern "C" fn(i64) -> i64>(
-            code.add(outer_start),
-        );
+        let function =
+            std::mem::transmute::<*const u8, extern "C" fn(i64) -> i64>(code.add(outer_start));
         assert_eq!(function(7), 3 * 14 + 1000);
     }
 }

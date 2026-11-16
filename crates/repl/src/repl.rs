@@ -177,7 +177,11 @@ pub fn run_on_ry_runtime(
 /// Makes the next [`run_on_ry_runtime`] attach its script's typed code from the typed code file
 /// `length` bytes long at `offset` of `path` instead of compiling it. The script's `source` must
 /// be the text [`write_script_code_on_ry_runtime`] compiled.
-pub fn set_script_code_on_ry_runtime(path: &Path, offset: u64, length: u64) -> Result<(), ReplError> {
+pub fn set_script_code_on_ry_runtime(
+    path: &Path,
+    offset: u64,
+    length: u64,
+) -> Result<(), ReplError> {
     use std::ffi::{CString, c_char};
     let library = ry_runtime()?;
     type SetCode = unsafe extern "C" fn(*const c_char, u64, u64);

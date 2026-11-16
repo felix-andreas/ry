@@ -36,7 +36,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
         .direct(direct_subassign),
     special("[[<-", -1, do_subassign2).dispatch_or_eval(),
     special("$<-", 3, do_dollar_assign),
-    special("@<-", 3, do_at_assign),
+    special("@<-", 3, do_at_assign).direct(direct_at_assign),
     builtin(".subset", -1, do_subset).keep_missing(),
     builtin(".subset2", -1, do_subset2)
         .keep_missing()
@@ -2375,19 +2375,41 @@ unsafe fn do_at_assign(call: &Call<'_>) -> R<Sexp> {
         }
     }
 
-    // The methods package checks the assignment against the class definition, using the
-    // implicit class of an object without a class attribute, so `x@a <- 1` on a list fails.
-    if let Some(check) = interp_methods_function("checkAtAssignment")? {
-        let class = crate::dispatch::class_of(object)?;
-        crate::heap().root(class);
-        let name = values::scalar_string_charsxp(symbol.car())?;
-        crate::heap().root(name);
-        let value_class = crate::dispatch::class_of(value)?;
-        crate::heap().root(value_class);
-        let check_call = values::call(check, &[class, name, value_class])?;
-        eval::eval(check_call, values::base_env())?;
-    }
+    check_at_assignment(object, symbol, value)?;
     set_slot(object, symbol, value)
+}
+
+/// `@<-` on evaluated arguments, for `object@name <- value` compiled to registers: the object,
+/// the slot's name as a symbol or a string, and the value. An S3 object answers `None`, because
+/// it may dispatch to a method, which the special looks up in its caller's environment.
+pub(crate) unsafe fn direct_at_assign(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
+    let &[object, name, value] = args else {
+        return Ok(None);
+    };
+    if object.is_object() && !object.has_gp(gp::S4_OBJECT) {
+        return Ok(None);
+    }
+    let symbol = slot_symbol(name)?;
+    check_at_assignment(object, symbol, value)?;
+    set_slot(object, symbol, value).map(Some)
+}
+
+/// The methods package's check of `object@symbol <- value` against the class definition, which
+/// uses the implicit class of an object without a class attribute, so `x@a <- 1` on a list
+/// fails.
+unsafe fn check_at_assignment(object: Sexp, symbol: Sexp, value: Sexp) -> R<()> {
+    let Some(check) = interp_methods_function("checkAtAssignment")? else {
+        return Ok(());
+    };
+    let class = crate::dispatch::class_of(object)?;
+    crate::heap().root(class);
+    let name = values::scalar_string_charsxp(symbol.car())?;
+    crate::heap().root(name);
+    let value_class = crate::dispatch::class_of(value)?;
+    crate::heap().root(value_class);
+    let check_call = values::call(check, &[class, name, value_class])?;
+    eval::eval(check_call, values::base_env())?;
+    Ok(())
 }
 
 /// `R_do_slot_assign`.
