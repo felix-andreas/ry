@@ -454,6 +454,7 @@ f <- function() {
   done
 }
 #++++
+f: fn() -> logical
 
 #==== switch
 #---- branches_union_with_null
