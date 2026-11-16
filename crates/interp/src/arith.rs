@@ -486,7 +486,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("Conj", 1, |call| unsafe { complex_part(call, 4) }).generic(Generic::Complex),
     internal("complex", 3, do_complex),
     internal("polyroot", 1, do_polyroot),
-    internal("pmin", -1, |call| unsafe { parallel_extreme(call, false) }),
+    internal("pmin", -1, do_parallel_min),
     internal("pmax", -1, do_parallel_max),
     internal("cumall", 1, |call| Ok(call.arg(0))),
     internal("tabulate", 2, do_tabulate),
@@ -4826,13 +4826,17 @@ unsafe fn do_complex(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
+pub(crate) unsafe fn do_parallel_min(call: &Call<'_>) -> R<Sexp> {
+    parallel_extreme(call, false)
+}
+
 pub(crate) unsafe fn do_parallel_max(call: &Call<'_>) -> R<Sexp> {
     parallel_extreme(call, true)
 }
 
 unsafe fn parallel_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
     let na_rm = match values::as_logical_scalar(call.arg(0)) {
-        NA_LOGICAL => return Err(call.error("invalid 'na.rm' value")),
+        NA_LOGICAL => return Err(error("invalid 'na.rm' value")),
         value => value == 1,
     };
     let items: Vec<Sexp> = call.args[1..]
@@ -4840,7 +4844,7 @@ unsafe fn parallel_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
         .map(|arg| values::materialize(arg.value))
         .collect::<R<_>>()?;
     if items.is_empty() {
-        return Err(call.error("no arguments"));
+        return Err(error("no arguments"));
     }
     let mut kind = SexpType::Integer;
     for &item in &items {
@@ -4849,7 +4853,7 @@ unsafe fn parallel_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
             SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::String => {
                 kind = coerce::higher_type(kind, item.kind());
             }
-            _ => return Err(call.error("invalid input type")),
+            _ => return Err(error("invalid input type")),
         }
     }
     let count = items.iter().map(|&item| length(item)).max().unwrap_or(0);
@@ -4944,7 +4948,6 @@ unsafe fn parallel_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
             values::reals_mut(result)[index] = value;
         }
     }
-    values::copy_most_attributes(items[0], result, true)?;
     Ok(result)
 }
 
