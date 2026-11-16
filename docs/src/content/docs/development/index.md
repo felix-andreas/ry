@@ -277,6 +277,21 @@ The third is the one to write:
 
 > R's parser rewrites `x |> f(y)` into `f(x, y)` before anything runs, so the pipe types exactly like that call. The piped value becomes the first positional argument, and every call rule applies to it: arity, argument compatibility, and overload selection. A chain composes from left to right, and a type error in the piped value is reported on the left-hand expression.
 
+## Comments
+
+Agents read whole source files, so every comment line costs context on every read. A Rust comment
+explains why the code is written as it is, and only when the reason is not obvious. `just comments`
+(part of `just gate`) runs `tools/comments.py check`, which flags a `//` or `///` block longer
+than 12 lines, a `//!` module doc longer than 25, a banner (`// ----`, `// ==== Section ====`), a
+section heading (a short `// Allocation.` line between blank lines), and process words such as a
+milestone, a pull request number or a commit hash. A license header at the top of a file is exempt,
+as are `patches/` and `target/`.
+
+The check is a ratchet: `tools/comments-baseline.txt` lists the files still allowed some violations.
+A file over its count fails. A file under its count also fails, with a hint to run
+`python3 tools/comments.py baseline` so the count shrinks. `python3 tools/comments.py report` lists
+the worst blocks with their file, line and size.
+
 ## Agent memory layout
 
 The agent knowledge base is `.agents/memory/`, indexed by `MEMORY.md`. Settled decisions live in

@@ -579,3 +579,4 @@ A new entry gets its status line when it is written, and the line changes in the
 - [Docs information architecture: Introduction, Learn, Reference, Development](docs-process.md#docs-information-architecture-introduction-learn-reference-development) (built)
 - [Landing-page and README samples are captured from the running tools](docs-process.md#landing-page-and-readme-samples-are-captured-from-the-running-tools) (built)
 - [The decision log is one file per area, with a generated index and byte budgets](docs-process.md#the-decision-log-is-one-file-per-area-with-a-generated-index-and-byte-budgets) (built)
+- [Source comments have length limits, enforced by a ratchet](docs-process.md#source-comments-have-length-limits-enforced-by-a-ratchet) (built)
