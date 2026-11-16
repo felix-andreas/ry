@@ -63,8 +63,16 @@ fn canonical_spellings_read_back() {
         ("Meters", Some("F64"), Some(Type::Dbl)),
         ("List<Meters>", Some("List<F64>"), vector(Item::Dbl, true)),
         ("List< I64 >", Some("List<I64>"), vector(Item::I64, true)),
-        ("List<Tree>", Some("List<:Leaf(I64) | :Node(Tree, Tree)>"), None),
-        ("Sales", Some("DataFrame{price: double[]}"), Some(Type::Table)),
+        (
+            "List<Tree>",
+            Some("List<:Leaf(I64) | :Node(Tree, Tree)>"),
+            None,
+        ),
+        (
+            "Sales",
+            Some("DataFrame{price: double[]}"),
+            Some(Type::Table),
+        ),
         ("DataFrame", Some("DataFrame"), Some(Type::Table)),
         ("Point", Some("Record{x: F64, y: F64}"), None),
         ("Boxed<I64>", Some("Record{value: I64}"), None),
@@ -96,13 +104,23 @@ fn canonical_spellings_read_back() {
     let formals: Vec<_> = root
         .descendants()
         .filter(|node| node.kind() == SyntaxKind::FUNCTION_DEF)
-        .filter_map(|function| signature(&function, true).formals.into_iter().next().flatten())
+        .filter_map(|function| {
+            signature(&function, true)
+                .formals
+                .into_iter()
+                .next()
+                .flatten()
+        })
         .collect();
     assert_eq!(formals.len(), cases.len());
     for (node, (written, canonical, read)) in formals.iter().zip(&cases) {
         assert_eq!(node.text().to_string(), *written);
         let spelled = canonical_annotation(&db, definitions, node);
-        assert_eq!(spelled.as_deref(), *canonical, "the canonical spelling of `{written}`");
+        assert_eq!(
+            spelled.as_deref(),
+            *canonical,
+            "the canonical spelling of `{written}`"
+        );
         let text = spelled.unwrap_or_else(|| written.to_string());
         assert_eq!(annotated_type(&text), *read, "the reading of `{text}`");
     }
@@ -145,7 +163,12 @@ fn benchmark_signatures_all_have_canonical_spellings() {
             .filter(|node| node.kind() == SyntaxKind::FUNCTION_DEF)
         {
             let written_types = signature(&function, true);
-            for node in written_types.formals.into_iter().flatten().chain(written_types.ret) {
+            for node in written_types
+                .formals
+                .into_iter()
+                .flatten()
+                .chain(written_types.ret)
+            {
                 if node.text().to_string().contains('\n') {
                     continue;
                 }
@@ -164,5 +187,9 @@ fn benchmark_signatures_all_have_canonical_spellings() {
         left.len()
     );
     assert!(programs.len() >= 60 && written > 0);
-    assert!(left.is_empty(), "types with no canonical spelling:\n{}", left.join("\n"));
+    assert!(
+        left.is_empty(),
+        "types with no canonical spelling:\n{}",
+        left.join("\n")
+    );
 }

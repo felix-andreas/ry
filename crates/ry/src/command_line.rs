@@ -249,7 +249,12 @@ pub enum Command {
         #[arg(long, default_value_t = false)]
         aot: bool,
         /// With `--aot`, build an executable that runs the script `path` names
-        #[arg(long, default_value_t = false, requires = "aot", conflicts_with = "library")]
+        #[arg(
+            long,
+            default_value_t = false,
+            requires = "aot",
+            conflicts_with = "library"
+        )]
         exe: bool,
         /// The library to install into with `--aot`
         #[arg(long, short, requires = "aot")]

@@ -452,8 +452,11 @@ fn typed_scripts_agree_however_they_compile() {
             .expect("write DESCRIPTION");
             fs::write(package.join("NAMESPACE"), "exportPattern(\"^[^.]\")\n")
                 .expect("write NAMESPACE");
-            fs::write(package.join("R").join("program.R"), definitions.join("\n") + "\n")
-                .expect("write the definitions");
+            fs::write(
+                package.join("R").join("program.R"),
+                definitions.join("\n") + "\n",
+            )
+            .expect("write the definitions");
             let library = directory.path().join(format!("library_{seed}"));
             let install = Command::new(env!("CARGO_BIN_EXE_ry"))
                 .arg("install")
@@ -472,7 +475,10 @@ fn typed_scripts_agree_however_they_compile() {
             let user = directory.path().join(format!("use_{seed}.R"));
             fs::write(
                 &user,
-                format!("library({name}, lib.loc = {library:?})\n{}\n", rest.join("\n")),
+                format!(
+                    "library({name}, lib.loc = {library:?})\n{}\n",
+                    rest.join("\n")
+                ),
             )
             .expect("write the script that uses the package");
             // The install wrote the package's typed code file, so the first run attaches its
@@ -502,11 +508,8 @@ fn typed_scripts_agree_however_they_compile() {
             let sourced = directory.path().join(format!("definitions_{seed}.R"));
             fs::write(&sourced, definitions.join("\n") + "\n").expect("write the definitions");
             let user = directory.path().join(format!("source_{seed}.R"));
-            fs::write(
-                &user,
-                format!("source({sourced:?})\n{}\n", rest.join("\n")),
-            )
-            .expect("write the script that sources the definitions");
+            fs::write(&user, format!("source({sourced:?})\n{}\n", rest.join("\n")))
+                .expect("write the script that sources the definitions");
             for tiering in [&TIERINGS[2], &TIERINGS[3]] {
                 let (sourced_code, sourced_stdout, sourced_stderr, log) = run(&user, tiering);
                 assert_eq!(
@@ -624,11 +627,22 @@ fn fuzz_typed_code_file() {
         .status()
         .expect("run cp");
     assert!(copied.success());
-    fs::write(root.join("write.R"), include_str!("../../rcmd/src/code-image.R"))
-        .expect("write the driver");
+    fs::write(
+        root.join("write.R"),
+        include_str!("../../rcmd/src/code-image.R"),
+    )
+    .expect("write the driver");
     let second = root.join("second").display().to_string();
     let rewritten = ry(&[
-        "run", "--runtime", "ry", "write.R", "typedfile", &second, "pkg", "none", "no-image",
+        "run",
+        "--runtime",
+        "ry",
+        "write.R",
+        "typedfile",
+        &second,
+        "pkg",
+        "none",
+        "no-image",
         "typed",
     ]);
     assert!(
@@ -660,7 +674,11 @@ fn fuzz_typed_code_file() {
         // fifth word), and the code and data from the 64 KiB boundary on, not the padding.
         let word = |index: usize| {
             let start = 12 + 8 * index;
-            u64::from_le_bytes(original[start..start + 8].try_into().expect("a header word"))
+            u64::from_le_bytes(
+                original[start..start + 8]
+                    .try_into()
+                    .expect("a header word"),
+            )
         };
         let metadata_end = 116 + word(4);
         let code_offset = word(6);
@@ -718,15 +736,16 @@ fn package_parts(statements: &[String]) -> Option<(Vec<String>, Vec<String>)> {
         let code = code_of(statement);
         code.starts_with("alias ")
             || code.starts_with("type ")
-            || code
-                .split_once(" <- ")
-                .is_some_and(|(name, value)| {
-                    name.chars().all(|character| character.is_alphanumeric() || character == '_')
-                        && value.starts_with("function(")
-                })
+            || code.split_once(" <- ").is_some_and(|(name, value)| {
+                name.chars()
+                    .all(|character| character.is_alphanumeric() || character == '_')
+                    && value.starts_with("function(")
+            })
     };
-    let (definitions, rest): (Vec<String>, Vec<String>) =
-        statements.iter().cloned().partition(|statement| is_definition(statement));
+    let (definitions, rest): (Vec<String>, Vec<String>) = statements
+        .iter()
+        .cloned()
+        .partition(|statement| is_definition(statement));
     let mut names: Vec<String> = definitions
         .iter()
         .filter_map(|definition| {
@@ -757,7 +776,9 @@ fn a_script_with_more_definitions_than_the_closure_limit_compiles_them_all_ahead
     let directory = tempfile::tempdir().expect("temporary directory");
     let mut text = String::new();
     for index in 0..4200 {
-        text.push_str(&format!("f{index} <- function(x: F64) -> F64 x + {index}.5\n"));
+        text.push_str(&format!(
+            "f{index} <- function(x: F64) -> F64 x + {index}.5\n"
+        ));
     }
     text.push_str("hot <- function(x: F64) -> F64 x * 2.5\nprint(hot(1))\nprint(f4199(1))\n");
     let script = directory.path().join("many.R");
@@ -773,11 +794,23 @@ fn a_script_with_more_definitions_than_the_closure_limit_compiles_them_all_ahead
         .output()
         .expect("run ry");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "[1] 2.5\n[1] 4200.5\n", "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "[1] 2.5\n[1] 4200.5\n",
+        "{stderr}"
+    );
     let (_, after) = stderr
         .split_once("typed: compiled 4201 functions ahead of time in ")
-        .unwrap_or_else(|| panic!("not every definition compiled ahead:\n{}", last_lines(&stderr)));
-    assert!(!after.contains("typed: "), "the run compiled or refused later:\n{after}");
+        .unwrap_or_else(|| {
+            panic!(
+                "not every definition compiled ahead:\n{}",
+                last_lines(&stderr)
+            )
+        });
+    assert!(
+        !after.contains("typed: "),
+        "the run compiled or refused later:\n{after}"
+    );
 }
 
 fn last_lines(text: &str) -> String {

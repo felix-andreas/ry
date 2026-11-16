@@ -4472,7 +4472,9 @@ impl<'p> Translator<'p> {
             let done = self.builder.create_block();
             self.builder.ins().brif(evaluated, done, &[], slow, &[]);
             self.builder.switch_to_block(done);
-            self.builder.ins().jump(merged, &[promised, borrowed_status]);
+            self.builder
+                .ins()
+                .jump(merged, &[promised, borrowed_status]);
         } else {
             self.builder.ins().jump(outline, &[]);
         }
