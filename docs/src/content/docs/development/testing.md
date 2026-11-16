@@ -33,8 +33,8 @@ ry env: nix dev shell; GNU R 4.6.2 at /nix/store/...-gnu-r-4.6.2/bin; base R bui
 | First debug build of `ry`, `libR` and `ry-rcmd` in the shell | 5 min 20 s |
 
 The script saves `nix print-dev-env` in `target/nix-dev-env.sh` and sources that file, which is why
-later runs are fast; it rewrites the file when `flake.nix`, `flake.lock` or `rust-toolchain.toml` is
-newer. Binaries built in the shell link nix's glibc, so do not mix shell and host builds in one
+later runs are fast; it rewrites the file when `flake.nix`, `flake.lock`, `rust-toolchain.toml` or
+the GNU R pin in `tools/base-r` is newer. Binaries built in the shell link nix's glibc, so do not mix shell and host builds in one
 target directory: cargo rebuilds everything when you switch.
 
 `RY_ENV=system source tools/env.sh` skips nix and uses the host's tools, with the reference GNU R

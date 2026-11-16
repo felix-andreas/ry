@@ -223,13 +223,13 @@ Apply these when writing or optimizing code in the analysis core, the runtime, t
 
 # Testing strategy
 
-- Robustness is the long-run priority, so everything must be fuzzable and simulatable (user directive). Every component gets fuzz, simulation or scenario coverage the day it exists, never as a later add-on, with a bounded pass in the default test suite. `docs/src/content/docs/development/robustness.md` is the contract.
+- Robustness is the long-run priority, so everything must be fuzzable and simulatable (user directive). Every component (each analysis stage, the language server, the loader, the runtime, the GC, the C API, the JIT, the table engine, package install, the CLI) gets fuzz, simulation or scenario coverage the day it exists, never as a later add-on, with a bounded pass in the default test suite. `docs/src/content/docs/development/robustness.md` is the contract.
 - Never let nondeterminism escape a seam: no wall clock, OS randomness, unordered iteration that reaches output, or unsteppable threads in a component's logic. Harnesses draw all randomness from one seed and print a replay command on failure. A new incremental shortcut gets a from-scratch cross-check behind `syntax::testing::enable_invariants()`.
 - A bug a harness finds lands with a pinned regression input (a regression battery entry, fixture, or scenario). A user journey a feature enables gets a `crates/ry/tests/scenarios/*.scenario` file.
 - Prefer fixtures. A new phase or module gets a fixture suite, and a behavior gets the lightest fixture change that captures it, before any crate-local unit test unless it is awkward as a fixture. Favor renderers that expose semantic facts over implementation detail. Read `docs/src/content/docs/development/testing.md` before you change the harness or add a suite.
 - Fixtures are the desired semantics contract, not a record of known-wrong behavior. Change an expectation only when wording or behavior improves on purpose, never commit a wrong outcome to keep the suite green, and delete a case no longer worth keeping. A `group__case` name is the test identity: keep it stable and unique across the suite.
-- Start every shell command with `source tools/env.sh &&`: it loads the nix dev shell (toolchain, GNU R, `just`, mold; `testing.md`, "The fast loop").
-- Run one fixture case with `just fixture group__case [test-binary]` (default `test_typing_fixtures`), and prefer focused crate tests (`cargo test -p semantics`) while iterating. `just gate` is the full check.
+- Start every shell command with `source tools/env.sh &&` (the nix dev shell; `testing.md`).
+- Run one fixture with `just fixture group__case [test-binary] [package]` (default `test_typing_fixtures`), and prefer focused crate tests (`cargo test -p semantics`) while iterating. `just gate` checks all.
 
 # Rules hygiene
 
@@ -241,6 +241,6 @@ Editing or clarifying an existing rule is always welcome. A new rule must be:
 2. **Repeatedly encountered**: it came up more than once (several hits in one session count).
 3. **Specific enough to act on**: a concrete instruction, not a vague principle.
 
-A rule that applies to a single crate belongs in that crate's own `AGENTS.md`, not here. The crate's `CLAUDE.md` (`@AGENTS.md`) loads it; other agents read it first.
+A rule for a single crate belongs in that crate's `AGENTS.md`. Its `CLAUDE.md` (`@AGENTS.md`) loads it; other agents read it.
 
 Do not describe a crate's architecture (module layout, data flow, key types): it goes stale fast, and the code shows it. A rule marks a trap to avoid, not a map to follow.

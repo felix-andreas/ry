@@ -5,7 +5,7 @@
 #   flake's `default` shell, which carries the Rust toolchain, the reference GNU R, just and mold.
 #   `nix print-dev-env` is saved in target/nix-dev-env.sh and sourced, because entering
 #   `nix develop` costs about 5 s per command and sourcing the saved file 20 ms. The file is
-#   rewritten when flake.nix, flake.lock or rust-toolchain.toml is newer. `RY_ENV=system` skips
+#   rewritten when a file the shell is built from is newer. `RY_ENV=system` skips
 #   this for work that needs the host's libraries (the package corpus, tools/dev-setup.sh).
 #   Binaries built in the shell link nix's glibc, so a target directory built outside it rebuilds.
 # - GNU R: the `R` on PATH, else the oracle's reference build in /opt/R/<version>
@@ -21,22 +21,33 @@ ry_env_notes=()
 
 if [ -n "${BASH_VERSION:-}" ] && [ -z "${IN_NIX_SHELL:-}" ] && [ "${RY_ENV:-}" != system ] && command -v nix >/dev/null 2>&1; then
 	ry_env_nix=$ry_env_root/target/nix-dev-env.sh
-	if [ ! -s "$ry_env_nix" ] || [ "$ry_env_root/flake.nix" -nt "$ry_env_nix" ] ||
-		[ "$ry_env_root/flake.lock" -nt "$ry_env_nix" ] ||
-		[ "$ry_env_root/rust-toolchain.toml" -nt "$ry_env_nix" ]; then
+	ry_env_stale=
+	[ -s "$ry_env_nix" ] || ry_env_stale=1
+	for ry_env_input in flake.nix flake.lock rust-toolchain.toml tools/base-r/VERSION tools/base-r/SHA256SUMS; do
+		[ "$ry_env_root/$ry_env_input" -nt "$ry_env_nix" ] && ry_env_stale=1
+	done
+	if [ -n "$ry_env_stale" ]; then
 		printf 'ry env: preparing the nix dev shell (the first run in a container downloads about 9 GB)\n' >&2
 		mkdir -p "$ry_env_root/target"
-		if nix print-dev-env --accept-flake-config "$ry_env_root" >"$ry_env_nix.new"; then
-			mv "$ry_env_nix.new" "$ry_env_nix"
+		# The profile is a garbage-collection root for the shell's store paths, and the temporary
+		# file is per process because several commands may start at once.
+		if nix print-dev-env --accept-flake-config --profile "$ry_env_root/target/nix-dev-profile" \
+			"$ry_env_root" >"$ry_env_nix.$$"; then
+			mv -f "$ry_env_nix.$$" "$ry_env_nix"
 		else
-			rm -f "$ry_env_nix.new" "$ry_env_nix"
-			ry_env_notes+=("nix dev shell failed to evaluate, using the host's tools")
+			rm -f "$ry_env_nix.$$"
+			if [ -s "$ry_env_nix" ]; then
+				ry_env_notes+=("nix dev shell is OUT OF DATE (nix print-dev-env failed)")
+			else
+				ry_env_notes+=("nix dev shell FAILED to load, using the host's tools")
+			fi
 		fi
 	fi
 	if [ -s "$ry_env_nix" ]; then
-		# The saved environment names a build directory that only `nix develop` creates.
 		ry_env_tmpdir=${TMPDIR:-}
 		. "$ry_env_nix"
+		# The saved environment makes a build directory on every load and points TMPDIR at it.
+		rmdir "$NIX_BUILD_TOP" 2>/dev/null || true
 		unset TMP TEMP TEMPDIR NIX_BUILD_TOP
 		if [ -n "$ry_env_tmpdir" ]; then export TMPDIR=$ry_env_tmpdir; else unset TMPDIR; fi
 		ry_env_notes+=("nix dev shell")
@@ -78,4 +89,4 @@ fi
 	IFS=';'
 	printf 'ry env: %s\n' "${ry_env_notes[*]}" | sed 's/;/; /g'
 )
-unset ry_env_root ry_env_notes ry_env_r_bin ry_env_nix ry_env_tmpdir
+unset ry_env_root ry_env_notes ry_env_r_bin ry_env_nix ry_env_tmpdir ry_env_stale ry_env_input
