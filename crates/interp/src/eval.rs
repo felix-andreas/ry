@@ -7042,9 +7042,6 @@ pub unsafe fn complex_assign(
     };
     let heap = crate::heap();
     let local_cell = heap.frame_cell(env, inner);
-    // A locked binding rejects the final assignment, so the replacement must not have modified
-    // its value in place by then.
-    let locked = local_cell.is_some_and(|cell| cell.has_gp(gp::BINDING_LOCKED));
     // An index that assigns, as in `x[{x[2] <- 3; 1}] <- 2`, rebinds the variable while the
     // replacement still holds the old value, which therefore must be a copy. The `*tmp*`
     // promise deliberately counts no reference, so the inner assignment cannot see the share.
@@ -7054,9 +7051,22 @@ pub unsafe fn complex_assign(
         })
     });
     let mut binding_env = lookup_env;
-    while binding_env != heap.known().empty_env && heap.frame_cell(binding_env, inner).is_none() {
+    let mut binding_cell = None;
+    while binding_env != heap.known().empty_env {
+        binding_cell = heap.frame_cell(binding_env, inner);
+        if binding_cell.is_some() {
+            break;
+        }
         binding_env = binding_env.enclosure();
     }
+    // A locked binding rejects the final assignment, so the replacement must not have modified
+    // its value in place by then. `<<-` writes the binding it found, `<-` the local one.
+    let written = if superassign {
+        binding_cell
+    } else {
+        local_cell
+    };
+    let locked = written.is_some_and(|cell| cell.has_gp(gp::BINDING_LOCKED));
     // Ending a move into this frame hands the caller `base` back, which makes it shared, and
     // must come before any level changes in place, since an inner level is an element of it.
     crate::moves::modifying(base)?;

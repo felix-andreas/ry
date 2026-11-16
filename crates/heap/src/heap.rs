@@ -2724,6 +2724,22 @@ impl Heap {
         self.define_unbound(env, symbol, value)
     }
 
+    /// [`Heap::define`] into the base environment past a locked binding, as GNU R's
+    /// `SET_SYMVALUE` writes the variables the runtime keeps there itself (`.Last.value`,
+    /// `.Traceback`, `.Options`), whose bindings start-up locks with the rest of base's.
+    pub unsafe fn define_base_variable(&mut self, symbol: Sexp, value: Sexp) -> HeapResult<()> {
+        let env = self.known.base_env;
+        if let Some(cell) = self.frame_cell(env, symbol)
+            && cell.has_gp(gp::BINDING_LOCKED)
+        {
+            cell.set_gp_bits(gp::BINDING_LOCKED, false);
+            let written = self.set_binding_value(cell, value);
+            cell.set_gp_bits(gp::BINDING_LOCKED, true);
+            return written;
+        }
+        self.define(env, symbol, value)
+    }
+
     /// [`Heap::define`] for a `symbol` that `env`'s own frame does not bind, which the caller
     /// just found by probing it.
     pub unsafe fn define_unbound(

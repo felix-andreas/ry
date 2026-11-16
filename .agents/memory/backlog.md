@@ -1511,12 +1511,9 @@ overhead, not allocation.
   the names `a z` on ry and `a b` on GNU R, and `levels(x)[{ keep <- x; 1 }] <- "z"` does the
   same to a factor. `eval::complex_assign` decides whether to copy the variable before the
   subscripts run; GNU R's replacement primitives test the reference count when they write.
-- `<<-` through a replacement into a locked binding changes the value before the assignment
-  fails: with `g <- c(1, 2); lockBinding("g", globalenv())`, `(function() g[1] <<- 5)()` fails
-  on both engines but leaves `g` as `5 2` on ry. `complex_assign` reads `locked` from the local
-  frame's cell, not from the binding `<<-` writes. Base's bindings are not locked either:
-  `(function() T[2] <<- FALSE)()` succeeds where GNU R fails with "cannot change value of locked
-  binding for 'T'".
+- `environmentIsLocked(baseenv())` is `FALSE` on ry and `TRUE` on GNU R, and a new binding in
+  base succeeds where GNU R fails (`lockEnvironment` leaves base's frame unlocked); base's
+  bindings are locked as GNU R locks them.
 - Smaller differences in complex assignments, each the same in every tier: `exists("*tmp*")` in
   a subscript is `FALSE` (GNU R binds `*tmp*` for the length of the assignment); `x[c(TRUE, NA)]
   <- 1:2` warns and assigns where GNU R fails with "NAs are not allowed in subscripted

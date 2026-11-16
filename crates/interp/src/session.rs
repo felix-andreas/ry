@@ -12,7 +12,7 @@ use {
         values::{self, base_env, base_namespace, global_env, length, nil},
         write_console,
     },
-    heap::object::{Sexp, SexpType},
+    heap::object::{Sexp, SexpType, gp},
     std::{cell::RefCell, rc::Rc},
 };
 
@@ -120,6 +120,8 @@ unsafe fn prepare_process() {
 /// is removed first, so that the hooks, which set only options not yet set, see the order GNU
 /// R's start-up gives them.
 unsafe fn start_from_image(home: &str) -> R<()> {
+    // The image was written by a start that had locked them.
+    lock_base_bindings(false)?;
     crate::base_fast_paths::register_native_entries(base_namespace())?;
     crate::base_fast_paths::register_routine_entries()?;
     mark_base_closures()?;
@@ -132,6 +134,7 @@ unsafe fn start_from_image(home: &str) -> R<()> {
         "detach(pos = 2L); .AutoloadEnv <- as.environment(\"Autoloads\")",
         base_env(),
     )?;
+    lock_base_bindings(true)?;
     // utils' hook also assigns `osVersion`, this machine's, into its sealed namespace.
     eval_text(
         "local(for (name in c(\"utils\", \"grDevices\", \"stats\")) { \
@@ -156,6 +159,20 @@ unsafe fn define_process_variables() -> R<()> {
     let platform = crate::system::platform()?;
     eval::define(values::install(".Platform")?, platform, base_env())?;
     (interp().extensions.graphics.define_device_variables)()
+}
+
+/// Locks, or with `false` unlocks, every binding of the base environment but the graphics
+/// device variables, as GNU R does once base's profile has run: `T <<- 0` in a function fails
+/// with "cannot change value of locked binding for 'T'".
+unsafe fn lock_base_bindings(lock: bool) -> R<()> {
+    let heap = crate::heap();
+    let open = [values::install(".Device")?, values::install(".Devices")?];
+    for symbol in heap.bound_symbols(base_env()) {
+        if let Some(cell) = heap.frame_cell(base_env(), symbol) {
+            cell.set_gp_bits(gp::BINDING_LOCKED, lock && !open.contains(&symbol));
+        }
+    }
+    Ok(())
 }
 
 /// The base profile binds `.Library.site` in the global environment too, so that a site profile
@@ -229,6 +246,7 @@ unsafe fn start_slowly(
     mark_base_closures()?;
     install_register_s3_methods()?;
     source_file(&format!("{home}/library/base/R/Rprofile"), base_env())?;
+    lock_base_bindings(true)?;
     eval_text(".OptRequireMethods()", global_env())?;
     // GNU R's order: the site profile, then the user profile, both after `methods` loads.
     if let Some(site) = site_profile {
@@ -935,7 +953,7 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
         value = result;
         crate::heap().root(value);
         let last = values::install(".Last.value")?;
-        crate::heap().define(base_env(), last, value)?;
+        crate::heap().define_base_variable(last, value)?;
         // GNU R's `.Last.value` does not count as a reference, so a value the user just
         // bound stays unshared and `.Internal(refcnt())` reports what the user's own
         // bindings hold.
