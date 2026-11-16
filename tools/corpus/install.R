@@ -204,7 +204,7 @@ unmet_constraints <- function() {
     parts <- regmatches(entries, regexec("^([A-Za-z][A-Za-z0-9.]*)\\s*\\(\\s*([<>=]+)\\s*([^)]+?)\\s*\\)$", entries))
     for (part in parts[lengths(parts) == 4]) {
       dependency <- part[2]
-      if (dependency == "R" || !dependency %in% names(versions)) next
+      if (dependency == "R" || !dependency %in% names(versions) || !part[3] %in% c(">=", ">", "<=", "<", "==")) next
       holds <- do.call(part[3], list(package_version(versions[[dependency]]), package_version(part[4])))
       if (!holds) unmet[[length(unmet) + 1]] <- sprintf("%s needs %s (%s %s), found %s", package, dependency, part[3], part[4], versions[[dependency]])
       if (!holds) names(unmet)[length(unmet)] <- dependency
@@ -212,13 +212,18 @@ unmet_constraints <- function() {
   }
   unmet
 }
+# Each dependency is upgraded once: an upper bound or a package CRAN lacks stays unmet however
+# often it is rebuilt.
+upgraded <- character()
 for (round in 1:3) {
   unmet <- unmet_constraints()
-  if (length(unmet) == 0) break
+  upgrade <- setdiff(unique(names(unmet)), upgraded)
+  if (length(upgrade) == 0) break
   cat(sprintf("unmet version constraint: %s\n", unlist(unmet)), sep = "")
   with_warnings(install.packages(
-    unique(names(unmet)), lib = library_dir, repos = c(CRAN = "https://cloud.r-project.org"), type = "source"
+    upgrade, lib = library_dir, repos = c(CRAN = "https://cloud.r-project.org"), type = "source"
   ))
+  upgraded <- c(upgraded, upgrade)
 }
 unmet <- unmet_constraints()
 if (length(unmet) > 0) cat(sprintf("still unmet: %s\n", unlist(unmet)), sep = "")

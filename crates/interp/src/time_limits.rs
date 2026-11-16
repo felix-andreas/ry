@@ -50,6 +50,11 @@ const NONE: u64 = u64::MAX;
 /// deadline to sleep until.
 const CPU_POLL: Duration = Duration::from_millis(20);
 
+/// How often the watchdog raises the poll flag again while a passed deadline waits for the check.
+const DUE_REPEAT: Duration = Duration::from_millis(50);
+
+const MAX_WAIT: Duration = Duration::from_secs(3600);
+
 /// `.Internal(setTimeLimit(cpu, elapsed, transient))`. A transient limit applies until the next
 /// top-level expression, because the reset there no longer finds it.
 pub fn set_time_limit(cpu: f64, elapsed: f64, transient: bool) {
@@ -134,7 +139,8 @@ pub fn check() -> R<()> {
             }));
         }
     }
-    // The watchdog read its clock a moment early: lower the flag and let it wait again.
+    // `DUE` outlived the deadline it reported: `publish()` moved the deadlines while the watchdog
+    // was raising it. Lower it and let the watchdog wait for the deadlines in force.
     publish();
     Ok(())
 }
@@ -191,8 +197,16 @@ fn watch(started: Instant) {
     loop {
         let cpu = load(&CPU_DEADLINE);
         let elapsed = load(&ELAPSED_DEADLINE);
-        if DUE.load(Ordering::Relaxed) || (cpu.is_none() && elapsed.is_none()) {
+        if cpu.is_none() && elapsed.is_none() {
             std::thread::park();
+            continue;
+        }
+        if DUE.load(Ordering::Relaxed) {
+            // The evaluator can lower the poll flag between reading `DUE` and storing the flag,
+            // or read a stale `DUE` on weakly ordered hardware, so keep raising it until the
+            // check runs rather than trust one store to be seen.
+            crate::unwind::INTERRUPT_REQUESTED.store(true, Ordering::Relaxed);
+            std::thread::park_timeout(DUE_REPEAT);
             continue;
         }
         let mut wait = None;
@@ -202,7 +216,11 @@ fn watch(started: Instant) {
             if remaining <= 0.0 {
                 passed = true;
             } else {
-                wait = Some(Duration::from_secs_f64(remaining));
+                // A limit of years overflows a `Duration`; waking once an hour costs nothing.
+                wait = Some(
+                    Duration::try_from_secs_f64(remaining)
+                        .map_or(MAX_WAIT, |wait| wait.min(MAX_WAIT)),
+                );
             }
         }
         if let Some(deadline) = cpu {
