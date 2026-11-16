@@ -42,9 +42,12 @@ BUDGETS = {
     ".agents/memory/decisions/frames-table.md": 89_000,
     ".agents/memory/decisions/tooling-bench-ci.md": 73_000,
     ".agents/memory/decisions/docs-process.md": 30_000,
+    ".agents/orchestrator.md": 30_000,
 }
-ORCHESTRATOR = ".agents/orchestrator.md"
-ORCHESTRATOR_LINE_LIMIT = 2048
+# Longest line each file may hold. A log that is meant to be one line per entry stays that way.
+LINE_LIMITS = {
+    ".agents/orchestrator.md": 2048,
+}
 
 # Area file name, title, and what belongs there. The order is the index's order.
 AREAS = [
@@ -843,12 +846,15 @@ def check():
                 f"{path} is {size} bytes, over its budget of {budget}. Prune resolved or stale "
                 f"material (or move it to the right horizon) rather than raising the budget in "
                 f"tools/memory.py.")
-    orchestrator = os.path.join(ROOT, ORCHESTRATOR)
-    if os.path.exists(orchestrator):
-        for number, line in enumerate(read(orchestrator).splitlines(), 1):
-            if len(line.encode()) > ORCHESTRATOR_LINE_LIMIT:
-                print(f"warning: {ORCHESTRATOR}:{number} is {len(line.encode())} bytes, over "
-                      f"{ORCHESTRATOR_LINE_LIMIT}; split or shorten it.", file=sys.stderr)
+    for path, limit in LINE_LIMITS.items():
+        full = os.path.join(ROOT, path)
+        if not os.path.exists(full):
+            continue
+        for number, line in enumerate(read(full).splitlines(), 1):
+            if len(line.encode()) > limit:
+                problems.append(
+                    f"{path}:{number} is {len(line.encode())} bytes, over the line limit of "
+                    f"{limit}. Shorten it to the essential outcome.")
     for problem in problems:
         print(f"error: {problem}", file=sys.stderr)
     return 1 if problems else 0
