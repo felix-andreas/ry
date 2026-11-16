@@ -7162,9 +7162,12 @@ pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<Option<Sexp>> 
         state.resume_base = (*state.interp).bytecode.resumes.len();
         state.stepping = true;
         let entered = if *state.header == (*state.heap).known().nil {
-            call_fast::<false>(&mut state, pc)
+            match call_fast::<false, false>(&mut state, pc) {
+                None => call_fast::<false, true>(&mut state, pc),
+                taken => taken,
+            }
         } else {
-            call_fast::<true>(&mut state, pc)
+            call_fast::<true, false>(&mut state, pc)
         };
         match entered {
             Some(STOP) => {}
@@ -8184,7 +8187,7 @@ fast_paths! {
 /// in [`call_generic_by_name`], a tail call, so the rarer path adds no saved register to this
 /// one.
 unsafe fn fast_call_generic(state: &mut Activation<'_, '_>, at: usize) {
-    if let Some(next) = call_fast::<false>(state, at) {
+    if let Some(next) = call_fast::<false, false>(state, at) {
         if next == STOP {
             return;
         }
@@ -8193,13 +8196,17 @@ unsafe fn fast_call_generic(state: &mut Activation<'_, '_>, at: usize) {
     become call_generic_by_name(state, at)
 }
 
-/// `CallGeneric` from a frame that reads its variables by name, through [`call_fast`] when it
-/// takes the call, and the generic handler for every call that neither path took.
+/// `CallGeneric` from a frame that reads its variables by name, or at a site that passes
+/// `...` from a frame on its slots, through [`call_fast`] when it takes the call, and the
+/// generic handler for every call that no path took.
 #[inline(never)]
 unsafe fn call_generic_by_name(state: &mut Activation<'_, '_>, at: usize) {
-    if *state.header != (*state.heap).known().nil
-        && let Some(next) = call_fast::<true>(state, at)
-    {
+    let taken = if *state.header != (*state.heap).known().nil {
+        call_fast::<true, false>(state, at)
+    } else {
+        call_fast::<false, true>(state, at)
+    };
+    if let Some(next) = taken {
         if next == STOP {
             return;
         }
@@ -8243,6 +8250,11 @@ unsafe fn return_discarding(state: &mut Activation<'_, '_>, at: usize) {
 /// callee's caller. A call from the other kind of frame is left alone. The two are compiled
 /// apart so that the path from slots carries none of the other's tests.
 ///
+/// `SPREAD` says which sites the path takes: those whose plan is a spread plan
+/// ([`PLAN_SPREAD`]), from a frame on its slots, or all others. A spread plan's call first
+/// checks that the frame's `...` holds what the plan was made for, and then writes those
+/// arguments, which are the frame's caller's and pass on unchanged, where the site has `...`.
+///
 /// It does what [`op_call_generic`] does for the same call through [`slot_promises_into`] or
 /// [`eval::referenced_args_into`], then
 /// [`eval::bind_plan`], [`eval::enter`] and [`enter_in_place`], and leaves every call that
@@ -8250,7 +8262,7 @@ unsafe fn return_discarding(state: &mut Activation<'_, '_>, at: usize) {
 /// system ([`activity::hooks`]), a closure flagged for debugging or with a native entry, the
 /// namespace loader, `do.call`, a frame stack or register file that is full.
 #[inline(always)]
-unsafe fn call_fast<const BY_NAME: bool>(
+unsafe fn call_fast<const BY_NAME: bool, const SPREAD: bool>(
     state: &mut Activation<'_, '_>,
     at: usize,
 ) -> Option<usize> {
@@ -8274,7 +8286,7 @@ unsafe fn call_fast<const BY_NAME: bool>(
         PLAN_FAST_BY_NAME
     } else {
         PLAN_FAST
-    };
+    } | if SPREAD { PLAN_SPREAD } else { 0 };
     let word = *feedback.data().cast::<i32>().add(at + 1);
     let function = *state.registers.add(*code.add(at + 2) as usize);
     let plans = &mut interp.bytecode.call_plans;
@@ -8292,7 +8304,7 @@ unsafe fn call_fast<const BY_NAME: bool>(
         || (*row).site as usize != at
         || (*row).formals != function.car()
         || (*row).body != body
-        || (*row).flags & fast == 0
+        || (*row).flags & (fast | PLAN_SPREAD) != fast
         || function
             .has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE | gp::NATIVE_ENTRY)
         || function == interp.namespace_loader
@@ -8314,6 +8326,36 @@ unsafe fn call_fast<const BY_NAME: bool>(
     }
     let call_index = *code.add(at + 3) as usize;
     let references = interp.references_used;
+    let site_count = (*row).arguments as usize;
+    let pool = interp.bytecode.call_plans.pool.as_ptr();
+    let sources = pool.add((*row).sources_at as usize);
+    let sources_len = (*row).sources_len as usize;
+    let kinds = sources.add(sources_len);
+    let (dots, dots_count) = if SPREAD {
+        let spread = kinds.add(site_count);
+        let dots = *state.header.add(1 + *spread.add(SPREAD_SLOT) as usize);
+        let dots_count = *spread.add(SPREAD_COUNT) as usize;
+        let tags = spread.add(SPREAD_TAGS);
+        let mut item = dots;
+        for index in 0..dots_count {
+            if item.kind() != SexpType::Dots
+                || item.car() == missing_value
+                || tag_words(item.tag()) != [*tags.add(2 * index), *tags.add(2 * index + 1)]
+            {
+                return None;
+            }
+            item = item.cdr();
+        }
+        // Past the plan's arguments the chain ends, and an empty `...` is the missing
+        // argument. A slot that was never set belongs to a function without the formal, whose
+        // `...` is an enclosing function's.
+        if item.kind() == SexpType::Dots || (dots_count == 0 && item != missing_value) {
+            return None;
+        }
+        (dots, dots_count)
+    } else {
+        (nil, 0)
+    };
     // The same test as the generic path's, with the callee's answer kept in the plan's row.
     let eager = pool_constant(state, call_index + 2) != nil
         && !conditions::calling_established(&interp.handlers)
@@ -8327,11 +8369,7 @@ unsafe fn call_fast<const BY_NAME: bool>(
                 Err(unwind) => return Some(failed::<false>(state, at, unwind)),
             }
         };
-    let count = (*row).arguments as usize;
-    let pool = interp.bytecode.call_plans.pool.as_ptr();
-    let sources = pool.add((*row).sources_at as usize);
-    let sources_len = (*row).sources_len as usize;
-    let kinds = sources.add(sources_len);
+    let count = site_count - usize::from(SPREAD) + dots_count;
     let args_start = interp.frame_args.len();
     interp.frame_args.reserve(count);
     // Written past the stack's length, which moves once every argument is there. Until then
@@ -8346,9 +8384,23 @@ unsafe fn call_fast<const BY_NAME: bool>(
     } else {
         compiled
     };
-    for index in 0..count {
+    let mut written = 0;
+    for index in 0..site_count {
         let expression = cell.car();
         let kind = *kinds.add(index);
+        if SPREAD && kind == ARGUMENT_DOTS {
+            let mut item = dots;
+            while item.kind() == SexpType::Dots {
+                args.add(written).write(Arg {
+                    tag: item.tag(),
+                    value: item.car(),
+                });
+                written += 1;
+                item = item.cdr();
+            }
+            cell = cell.cdr();
+            continue;
+        }
         let value = if kind == ARGUMENT_VALUE {
             expression
         } else {
@@ -8370,7 +8422,9 @@ unsafe fn call_fast<const BY_NAME: bool>(
             } else {
                 effects::eager_argument(expression, state.machine.function.tag())
             };
-            match eager_value {
+            // A spread plan was matched for arguments that are all given, and a variable
+            // whose value is the empty argument reads as left out unless it stays a reference.
+            match eager_value.filter(|&value| !SPREAD || value != missing_value) {
                 Some(value) => value,
                 None => {
                     let reference = if BY_NAME {
@@ -8398,13 +8452,25 @@ unsafe fn call_fast<const BY_NAME: bool>(
                 }
             }
         };
-        args.add(index).write(Arg {
+        args.add(written).write(Arg {
             tag: cell.tag(),
             value,
         });
+        written += 1;
         cell = cell.cdr();
     }
     interp.frame_args.set_len(args_start + count);
+    if SPREAD && syntax::testing::invariants_enabled() {
+        let collected = std::slice::from_raw_parts(args, count);
+        let planned = std::slice::from_raw_parts(sources, sources_len);
+        assert!(
+            matches!(
+                eval::matched_sources(function, collected, call),
+                Ok(Some((_, fresh))) if fresh[..] == *planned
+            ),
+            "a spread plan disagrees with matching the call's arguments"
+        );
+    }
     let formals = (shape.formals as usize).min(sources_len);
     let mut dots = missing_value;
     for index in (formals..sources_len).rev() {
@@ -9762,7 +9828,10 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         let plan = direct_plan(state, instruction, function, call)?;
         let plans = &(*state.interp).bytecode.call_plans;
         let generation = plans.generation;
-        let per_call = plan.is_some_and(|id| plans.sources(id) == [eval::MATCH_PER_CALL]);
+        let per_call = plan.is_some_and(|id| {
+            plans.rows[id as usize].flags & PLAN_SPREAD != 0
+                || plans.sources(id) == [eval::MATCH_PER_CALL]
+        });
         if let Some(id) = plan
             && !per_call
         {
@@ -9809,17 +9878,23 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             }
             env
         };
-        let result = match plan {
-            Some(_) if per_call => eval::call_matching(call, function, &args, sys_parent),
-            // The sources are read from the table only once the arguments are collected, and
-            // binding them grows no table.
-            Some(id) => match (*state.interp).bytecode.call_plans.current(
+        // The sources are read from the table only once the arguments are collected, and
+        // binding them grows no table.
+        let planned = match plan {
+            Some(id) if per_call => {
+                spread_plan(state, instruction, id, function, call, arguments, &args)?
+            }
+            Some(id) => (*state.interp).bytecode.call_plans.current(
                 id,
                 generation,
                 state.constants,
                 instruction.at,
                 function,
-            ) {
+            ),
+            None => None,
+        };
+        let result = match plan {
+            Some(_) => match planned {
                 Some((shape, sources)) => {
                     if in_place(state, function) {
                         return Ok(Flow::Goto(
@@ -9847,6 +9922,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
                     }
                     eval::call_with_plan(call, function, shape, sources, &args, sys_parent)
                 }
+                None if per_call => eval::call_matching(call, function, &args, sys_parent),
                 None => match eval::direct_sources(function, call)? {
                     Some((shape, sources)) if sources[..] != [eval::MATCH_PER_CALL] => {
                         eval::call_with_plan(call, function, shape, &sources, &args, sys_parent)
@@ -9921,6 +9997,118 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
     Ok(Flow::Next)
 }
 
+/// The spread plan ([`PLAN_SPREAD`]) of the site with plan `id`, which passes `...`, for the
+/// call of `function` with `args`, the call's `arguments` with `...` spread out: the site's plan
+/// when it holds for them, and otherwise a plan matched for them, which the site keeps for its
+/// next calls. `None` when the call matches per call instead: the arguments do not match, a
+/// default does not fit a slot, the site passes `...` twice, an argument in `...` has a name
+/// that is no symbol, an argument is empty, or the site replanned [`PLAN_MISSES`] times
+/// already, as a site does whose callers pass it ever different arguments.
+unsafe fn spread_plan<'plans>(
+    state: &Activation<'_, '_>,
+    instruction: Instruction,
+    id: u32,
+    function: Sexp,
+    call: Sexp,
+    arguments: Sexp,
+    args: &[Arg],
+) -> R<Option<(eval::CallShape, &'plans [i32])>> {
+    let (owner, at) = (state.constants, instruction.at);
+    let plans: &'plans mut CallPlans = &mut (*state.interp).bytecode.call_plans;
+    // Collecting the arguments can run R code that replans the site, or frees the plan and
+    // reuses its id.
+    let current = |plans: &CallPlans| {
+        plans.owned(id, owner, at).filter(|&id| {
+            plans.rows[id].formals == function.car() && plans.rows[id].body == function.cdr()
+        })
+    };
+    let Some(id) = current(plans) else {
+        return Ok(None);
+    };
+    let held = plans.rows[id].flags & PLAN_SPREAD != 0;
+    if !(held && plans.spread_holds(id, args)) {
+        let misses = plans.misses[id];
+        if i32::from(misses) >= PLAN_MISSES {
+            return Ok(None);
+        }
+        let missing = missing_arg();
+        let (mut site_count, mut dots_at) = (0, None);
+        let mut cell = call.cdr();
+        while cell.kind() == SexpType::Pairlist {
+            if cell.car() == symbols().dots && dots_at.replace(site_count).is_some() {
+                return Ok(None);
+            }
+            site_count += 1;
+            cell = cell.cdr();
+        }
+        let Some(dots_at) = dots_at else {
+            return Ok(None);
+        };
+        let Some(dots_count) = (args.len() + 1).checked_sub(site_count) else {
+            return Ok(None);
+        };
+        let mut spread: SmallVec<[i32; 16]> = smallvec![dots_at as i32, -1, dots_count as i32];
+        // Matching reads which arguments are empty, and an eager argument can turn out to be.
+        if args.iter().any(|arg| arg.value == missing) {
+            return Ok(None);
+        }
+        for arg in &args[dots_at..dots_at + dots_count] {
+            if !(arg.tag == nil() || arg.tag.kind() == SexpType::Symbol) {
+                return Ok(None);
+            }
+            spread.extend(tag_words(arg.tag));
+        }
+        if site_count >= u16::MAX as usize {
+            return Ok(None);
+        }
+        let plan = eval::matched_sources(function, args, call)?;
+        // Matching allocates, and a collection frees a plan whose closure died.
+        let plans = &mut (*state.interp).bytecode.call_plans;
+        let Some(id) = current(plans) else {
+            return Ok(None);
+        };
+        // A call the site cannot plan for counts as a miss, so a site whose calls never plan
+        // stops trying.
+        let Some(plan) = plan else {
+            plans.misses[id] = misses + 1;
+            return Ok(None);
+        };
+        plans.store(
+            Some(id),
+            owner,
+            at,
+            function.car(),
+            function.cdr(),
+            site_count,
+            &plan,
+            &spread,
+        );
+        // Replacing a plan made for other arguments counts as a miss.
+        plans.misses[id] = misses + u8::from(held);
+    } else if syntax::testing::invariants_enabled() {
+        let planned: SmallVec<[i32; 8]> = SmallVec::from_slice(plans.sources(id as u32));
+        assert!(
+            matches!(
+                eval::matched_sources(function, args, call),
+                Ok(Some((_, fresh))) if fresh == planned
+            ),
+            "a spread plan disagrees with matching the call's arguments"
+        );
+    }
+    let plans: &'plans mut CallPlans = &mut (*state.interp).bytecode.call_plans;
+    let Some(id) = current(plans) else {
+        return Ok(None);
+    };
+    // The site's compiled arguments are settled once it has run for a function.
+    if plans.rows[id].flags & PLAN_PREPARED == 0
+        && state.constants.element(instruction.operand(2) + 1) != unbound()
+    {
+        prepare_plan(state, id as u32, arguments);
+    }
+    let plans: &'plans CallPlans = &(*state.interp).bytecode.call_plans;
+    Ok(Some((plans.rows[id].shape, plans.sources(id as u32))))
+}
+
 /// Whether the dispatch loop may run the body of `function`, which a call instruction is about
 /// to call through its plan, in place of calling it: the loop runs whole activations, and the
 /// body's loop states fit [`State::loop_states`].
@@ -9982,9 +10170,10 @@ unsafe fn closure_arguments(
 }
 
 /// How many times a call site may fail to plan, by meeting a closure with other formals or
-/// body than its plan's or one it cannot plan for, before it stops planning and always takes
-/// the generic call path: a site that calls a new closure on every call would otherwise pay
-/// for matching each time.
+/// body than its plan's, one it cannot plan for, or a `...` that holds other arguments than its
+/// spread plan's ([`PLAN_SPREAD`]), before it stops planning and always takes the generic call
+/// path: a site that calls a new closure on every call would otherwise pay for matching each
+/// time. A site has one count for all three.
 const PLAN_MISSES: i32 = 8;
 
 /// The direct-call plan of a call site for `function` (see [`eval::call_with_plan`]): which
@@ -10050,6 +10239,7 @@ unsafe fn direct_plan(
                 body,
                 arguments,
                 &plan,
+                &[],
             );
             plans.misses[id] = misses as u8;
             values::ints_mut(owner.element(FEEDBACK))[word_at] = id as i32 + 1;
@@ -10126,6 +10316,27 @@ const PLAN_EFFECT_FREE: u8 = 4;
 /// The [`PlanRow::flags`] bit set when [`call_fast`] may take the site's calls from a frame
 /// that reads its variables by name, in its environment.
 const PLAN_FAST_BY_NAME: u8 = 8;
+/// The [`PlanRow::flags`] bit of a spread plan: the plan of a site that passes `...`, made
+/// for the arguments of one call with `...` spread out into what it held. Which argument fills
+/// which slot depends only on the closure's formals and on the arguments' count and names, so
+/// the plan holds for every call whose `...` holds as many arguments with the same names, none
+/// of them empty. After the kinds of the site's arguments, the plan's range of
+/// [`CallPlans::pool`] holds the position of `...` among them ([`SPREAD_AT`]), the calling
+/// frame's `...` slot or -1 ([`SPREAD_SLOT`]), how many arguments `...` held ([`SPREAD_COUNT`])
+/// and their names, two words each ([`tag_words`]).
+const PLAN_SPREAD: u8 = 16;
+
+const SPREAD_AT: usize = 0;
+const SPREAD_SLOT: usize = 1;
+const SPREAD_COUNT: usize = 2;
+const SPREAD_TAGS: usize = 3;
+
+/// The name of an argument as a spread plan keeps it. A name is a symbol or `NULL`, neither of
+/// which is ever freed, so the address identifies it for as long as the plan lives.
+fn tag_words(tag: Sexp) -> [i32; 2] {
+    let bits = tag.as_ptr() as usize as u64;
+    [bits as i32, (bits >> 32) as i32]
+}
 
 /// The kind of an argument a site passes as it is written: a constant, or the empty argument.
 const ARGUMENT_VALUE: i32 = -1;
@@ -10137,6 +10348,9 @@ const ARGUMENT_CODE: i32 = -3;
 /// The kind of an argument that is code only a frame with an environment can run: the
 /// compiler rejected it, or compiled it for a frame that has no slot table.
 const ARGUMENT_BY_NAME: i32 = -4;
+/// The kind of the `...` a spread plan's site passes ([`PLAN_SPREAD`]): the arguments the
+/// calling frame's `...` slot collected go in its place.
+const ARGUMENT_DOTS: i32 = -5;
 
 impl CallPlans {
     /// The plan `id` when it belongs to the site at `at` in the code whose constants are
@@ -10182,7 +10396,8 @@ impl CallPlans {
     }
 
     /// Stores a plan for the site, which writes `arguments` arguments, in `existing`'s place
-    /// when it has one.
+    /// when it has one. A spread plan ([`PLAN_SPREAD`]) comes with `spread`, the words that
+    /// follow its kinds.
     #[allow(clippy::too_many_arguments)]
     unsafe fn store(
         &mut self,
@@ -10193,6 +10408,7 @@ impl CallPlans {
         body: Sexp,
         arguments: usize,
         (shape, sources): &eval::CallPlan,
+        spread: &[i32],
     ) -> usize {
         self.generation = self.generation.wrapping_add(1);
         let id = match existing.or_else(|| self.free.pop().map(|id| id as usize)) {
@@ -10217,7 +10433,7 @@ impl CallPlans {
                 self.rows.len() - 1
             }
         };
-        let length = sources.len() + arguments;
+        let length = sources.len() + arguments + spread.len();
         let mut sources_at = self.rows[id].sources_at;
         if length > self.capacities[id] as usize {
             sources_at = self.pool.len() as u32;
@@ -10226,6 +10442,7 @@ impl CallPlans {
         }
         let start = sources_at as usize;
         self.pool[start..start + sources.len()].copy_from_slice(sources);
+        self.pool[start + length - spread.len()..start + length].copy_from_slice(spread);
         self.rows[id] = PlanRow {
             owner,
             formals,
@@ -10240,9 +10457,32 @@ impl CallPlans {
             arguments: u16::try_from(arguments).unwrap_or(u16::MAX),
             shape: *shape,
             loops: u16::try_from(loop_count(body)).unwrap_or(u16::MAX),
-            flags: 0,
+            flags: if spread.is_empty() { 0 } else { PLAN_SPREAD },
         };
         id
+    }
+
+    /// The words that follow the kinds of the spread plan `id` ([`PLAN_SPREAD`]).
+    fn spread(&self, id: usize) -> &[i32] {
+        let row = &self.rows[id];
+        let at = (row.sources_at + row.sources_len) as usize + row.arguments as usize;
+        let count = self.pool[at + SPREAD_COUNT] as usize;
+        &self.pool[at..at + SPREAD_TAGS + 2 * count]
+    }
+
+    /// Whether the spread plan `id` holds for `args`, a call's arguments with `...` spread
+    /// out: `...` held as many arguments as the plan was made for, with the same names, and
+    /// no argument is the empty one, which would take a formal's default.
+    unsafe fn spread_holds(&self, id: usize, args: &[Arg]) -> bool {
+        let spread = self.spread(id);
+        let (at, count) = (spread[SPREAD_AT] as usize, spread[SPREAD_COUNT] as usize);
+        let missing = missing_arg();
+        args.len() + 1 == self.rows[id].arguments as usize + count
+            && args.iter().all(|arg| arg.value != missing)
+            && args[at..at + count]
+                .iter()
+                .zip(spread[SPREAD_TAGS..].chunks_exact(2))
+                .all(|(arg, words)| tag_words(arg.tag)[..] == *words)
     }
 
     /// Frees every plan with a dead key.
@@ -10270,21 +10510,36 @@ impl CallPlans {
 /// and the kinds beside it), and from which frames [`call_fast`] may take the site's calls. A
 /// frame whose code runs on its slots passes a constant, the empty argument, a variable, or
 /// code compiled against its slots ([`PLAN_FAST`]). A frame that reads by name also passes
-/// code that needs its environment ([`PLAN_FAST_BY_NAME`]). `...` and `..N` leave the site to
-/// the generic path.
+/// code that needs its environment ([`PLAN_FAST_BY_NAME`]). The `...` of a spread plan
+/// ([`PLAN_SPREAD`]) passes from a frame on its slots that keeps `...` in one. Any other `...`,
+/// and `..N`, leave the site to the generic path.
 unsafe fn prepare_plan(state: &Activation<'_, '_>, id: u32, arguments: Sexp) {
     let mut kinds: SmallVec<[i32; 8]> = SmallVec::new();
     // Code compiled without a slot table never runs on slots.
     let slotted = state.constants.element(SLOTS) != nil();
     let (mut on_slots, mut by_name) = (slotted, true);
+    let plans = &(*state.interp).bytecode.call_plans;
+    let spread = plans.rows[id as usize].flags & PLAN_SPREAD != 0;
+    let mut dots_slot = None;
     let mut cell = arguments;
     while cell.kind() == SexpType::Pairlist {
         let expression = cell.car();
         kinds.push(match expression.kind() {
             _ if expression == missing_arg() => ARGUMENT_VALUE,
-            SexpType::Symbol
-                if expression == symbols().dots || eval::dot_dot_index(expression).is_some() =>
-            {
+            SexpType::Symbol if expression == symbols().dots => {
+                dots_slot = if on_slots && spread {
+                    slot_index(state, expression)
+                } else {
+                    None
+                };
+                if dots_slot.is_none() {
+                    (on_slots, by_name) = (false, false);
+                    break;
+                }
+                by_name = false;
+                ARGUMENT_DOTS
+            }
+            SexpType::Symbol if eval::dot_dot_index(expression).is_some() => {
                 (on_slots, by_name) = (false, false);
                 break;
             }
@@ -10314,6 +10569,9 @@ unsafe fn prepare_plan(state: &Activation<'_, '_>, id: u32, arguments: Sexp) {
     let start = (row.sources_at + row.sources_len) as usize;
     row.flags |= if on_slots { PLAN_FAST } else { 0 } | if by_name { PLAN_FAST_BY_NAME } else { 0 };
     plans.pool[start..start + kinds.len()].copy_from_slice(&kinds);
+    if let Some(slot) = dots_slot {
+        plans.pool[start + kinds.len() + SPREAD_SLOT] = slot as i32;
+    }
 }
 
 /// Runs a call of base R's `do.call(what, args)` from the call site, without the closure's
@@ -10927,7 +11185,11 @@ unsafe fn slot_builtin_call(
         let expression = cell.car();
         let fits = match expression.kind() {
             _ if expression == missing => true,
-            SexpType::Symbol if expression == dots => slot_named(state, dots).is_some(),
+            // An unset `...` slot is a local the function never assigned, and the `...` it
+            // passes is an enclosing function's.
+            SexpType::Symbol if expression == dots => {
+                slot_named(state, dots).is_some_and(|slot| *slot != unbound())
+            }
             SexpType::Symbol => {
                 eval::dot_dot_index(expression).is_none()
                     && slot_named(state, expression).is_some_and(|slot| {
@@ -11324,9 +11586,10 @@ unsafe fn slot_promises_into(
 }
 
 /// Whether a `...` slot holding `value` passes on as it is: the arguments it collected, or
-/// none. Anything else is the error a heap frame reports.
+/// none. A slot that was never set is the local of a function without the formal, which reads
+/// an enclosing function's `...`, and anything else is the error a heap frame reports.
 unsafe fn forwardable_dots(value: Sexp) -> bool {
-    value.kind() == SexpType::Dots || value == missing_arg() || value == unbound()
+    value.kind() == SexpType::Dots || value == missing_arg()
 }
 
 /// Appends the arguments the slot frame's `...` collected, which are its caller's promises and
@@ -12927,6 +13190,27 @@ unsafe fn assign_element(
         || length(index) != 1
     {
         return Ok(None);
+    }
+    // `$<-` on a plain environment binds the name there, as the primitive would, without
+    // building the `*tmp*` call. A locked or active binding takes that call, which names it in
+    // the error or runs the binding's function.
+    if target.kind() == SexpType::Environment
+        && kind == ElementKind::Dollar
+        && index.kind() == SexpType::String
+    {
+        let symbol = heap.install_char(index.element(0))?;
+        // The empty environment refuses every binding, and the `*tmp*` call names the error.
+        let writable = target != heap.known().empty_env
+            && match heap.frame_cell(target, symbol) {
+                Some(cell) => !cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED),
+                None => !target.has_gp(gp::FRAME_LOCKED),
+            };
+        if !writable {
+            return Ok(None);
+        }
+        crate::moves::reaching_environment()?;
+        heap.define(target, symbol, value)?;
+        return Ok(Some(target));
     }
     let fits = match target.kind() {
         SexpType::List => kind != ElementKind::Single && value != nil(),

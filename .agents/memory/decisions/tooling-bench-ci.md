@@ -285,6 +285,17 @@ Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and be
 - **Cache directory, not the project's `.ry/`,** because a file in the project can be committed and `ry run` writes nothing else there. Two machines label differently; `RY_PROFILE_KEY` from a CI secret gives a fleet one key.
 - **Randomness seam:** tests call `package_display` with a fixed key, and the scenario sets `RY_PROFILE_KEY`.
 
+## The builtins sweep times every export of base, stats and utils, behind a shrinking ratchet
+
+**Status:** built.
+
+- **`tools/bench/builtins`** holds one or more cases per exported function (`cases/*.R`, a scalar, a 1e3 and a 1e6 input where meaningful, plus character, list, matrix and data frame variants) and a skip with a reason for the rest (I/O, nondeterminism, language constructs, session changes). `sweep.py list` and `check` keep every export covered, so a new export in base R fails the check until it gets a case or a skip.
+- **Why per function:** suites and kernels find a slow builtin only when a workload happens to hit it. The sweep finds it by construction, and `sweep.py weights` (call counts in the code-base templates and the oracle corpus) orders the fixes.
+- **The ratchet is `slower.txt`,** the functions slower than GNU R in any case on ry with or without the JIT. `ratchet` fails on an unlisted function below `1 / (1 + tolerance)` after confirming rounds, `--update` removes functions that pass, and `check` refuses a list longer than main's. `--seed` rewrites it, which only a change to the cases justifies. `--ci` drops the 1e5+ inputs and shortens the batches; the workflow is `.github/workflows/builtins.yml`, run by hand like `ci.yml`.
+- **bench.py runs it as the `builtins` suite** with its own round counts (`SUITE_ROUNDS`), because the harness repeats each case in five batches inside one process and a round takes most of an hour.
+- **The large fixtures are dropped after each case and rebuilt on demand**, with a collection between cases. Hundreds of megabytes of live 1e6 inputs made every allocating case on ry pay for collections that rescan them, so allocation-heavy calls measured 2 to 4 times slower than they run in real code: before the change 577 functions looked slower than GNU R, after it 81 did. A case's time must not depend on which cases ran before it.
+- **Harness traps:** `bench(.name, ...)` so a variant named `n` or `na` is not partially matched to the name; every timed call reads a variable, because both engines fold calls of constants; a connection left open in one case warns inside a later one. `compare --parallel` runs the engines side by side for a fast triage, at the cost of noise.
+
 ## The edit-to-signal loop is tuned for agents
 
 **Status:** built. Commands and timings live in `docs/src/content/docs/development/testing.md`, "The fast loop".

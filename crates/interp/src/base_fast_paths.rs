@@ -1073,7 +1073,8 @@ unsafe fn unnamed(obj: Sexp) -> R<Option<Sexp>> {
     if !names && !dimnames {
         return Ok(Some(obj));
     }
-    let copy = values::shallow_duplicate(obj)?;
+    // The copy `names<-` takes, which shares a long vector's data rather than copying it.
+    let copy = values::replacement_copy(obj)?;
     crate::heap().root(copy);
     values::remove_attr(copy, symbols.names);
     values::remove_attr(copy, symbols.dimnames);

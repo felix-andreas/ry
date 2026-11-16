@@ -595,12 +595,12 @@ About seven in ten of the hot suite's closure calls from compiled code take `cal
 | plan stored but not prepared | 5.5% |
 | plan prepared but not fast, a row that belongs to another plan, or a caller that got an environment mid-frame | 0.7% |
 
-- **What the generic path then does with them** (shares of all closure calls): 12.5% have a plan and enter the callee in place, 7.1% are answered by a native entry and 5.0% are declined by one, 4.7% match their arguments per call (`MATCH_PER_CALL`, mostly `...`), 3.9% enter an unplanned body in place, and 3.5% are sites that gave up planning.
+- **What the generic path then does with them** (shares of all closure calls): 12.5% have a plan and enter the callee in place, 7.1% are answered by a native entry and 5.0% are declined by one, 4.7% match their arguments per call (`MATCH_PER_CALL`, mostly `...`; counted before a site that passes `...` kept a spread plan, and not counted again since), 3.9% enter an unplanned body in place, and 3.5% are sites that gave up planning.
 - **A top-level call site with an argument that is a call never takes the fast path.** A site settles its compiled arguments only when it runs for a function (`closure_arguments`), so `prepare_plan` never runs for it. Script-level loops pay the generic path for such calls.
 - **Next questions, in the census's order.** Why a stored plan stays unprepared (5.5%), and whether a site that gave up planning can keep one plan per callee instead of none. A callee with a native entry that declines (5.0%) pays the native attempt and then the generic path; a plan could record that the entry declines for this site's argument shapes.
 - **Returns.** `return_fast` takes 93% of the returns to a compiled caller. One in six of those discards the frame's pending environment on the way. What leaves: the frame has a complete environment (4.9%), the pending environment is held by something that outlives the call (2.2%).
 - **Environments.** About a quarter of the frames get a pending environment (1.6M of about 6.6M frames), and nine in ten of those are discarded at return without ever being completed. On the testthat application workload (350,000 closure calls) 13% of the calls make an environment for their slot frame, each call frees about 4 objects, and 0.19 of them is an environment and 0.37 a promise. Those per-call object counts did not move with the fast-path coverage, so they come from the callee's own work (`...` pairlists, promises for arguments that are calls, binding cells), not from which call path was taken.
-- **Mechanism prices, instructions per call:** no arguments 760, constant body 640, identity body 890, one argument and a branch 1,090, a default 990, arguments by name 980, three arguments 1,170, `...` forwarded 3,400, `...` collected 2,900, `missing()` 1,780, a closure made and called in the body 3,850, `on.exit` 2,200, `match.arg` 8,250, `stopifnot` 5,000, `parent.frame()` 1,900, `sys.call()` 2,500, `assign` to a local 8,700, `do.call` 11,000, `eval` of a quoted call 8,900. A call that forwards `...` costs three times a plain call and is the commonest slow shape in package code.
+- **Mechanism prices, instructions per call:** no arguments 760, constant body 640, identity body 890, one argument and a branch 1,090, a default 990, arguments by name 980, three arguments 1,170, `...` forwarded 2,040, `...` collected 2,900, `missing()` 1,780, a closure made and called in the body 3,850, `on.exit` 2,200, `match.arg` 8,250, `stopifnot` 5,000, `parent.frame()` 1,900, `sys.call()` 2,500, `assign` to a local 8,700, `do.call` 11,000, `eval` of a quoted call 8,900. The `...` row is two calls, the wrapper's and the forwarded one, so forwarding costs about what a plain call does while the site's spread plan holds.
 - **The fast path's own cost is the floor for everything above.** A fast call and return is about 750 instructions against the 200 the end shape names (`decisions/interp.md`, "Closure call setup: the 10x end shape"). The parts: the frame record `call_fast` fills, the resume record, the argument references, and the slot clearing at return.
 - **What gives a slot frame an environment** (each costs about 2,400 instructions): `eval` 14%, a builtin dispatching to an R method 13%, a call of a special 9%, a promise over the frame 7%, a closure outliving the frame 6%, `$` on a field 6%, `vapply` and `lapply` 10%, the generic call's arguments 5%, a promise outliving the frame 5%, subassignment and replacement calls 6%, `parent.frame` 3%, `.External2` 2%. Only `eval`, `parent.frame`, `.External2`, `sys.frame` and a closure or promise that outlives the frame observe the environment; the others are mechanisms a slot frame could serve without one. These shares predate the fast path taking calls from frames that read by name.
 - **The AST evaluator makes about one closure call for every six from compiled code** (`apply_call`: 0.9M beside 5.5M), for promise code that is not compiled against the frame's slots, run-once bodies and `eval`. 85% of them use the site's plan.
@@ -614,6 +614,15 @@ About seven in ten of the hot suite's closure calls from compiled code take `cal
 
 - S3 method lookup walks the calling function frames below the top environment on every dispatch, by name (`method_scope` and `lookup_in_scope` in `crates/interp/src/dispatch.rs`, about 260 and 180 instructions per call). It is most of the dispatch cost left in the validation workload, where `format()` dispatches from inside `vapply`. Closure frames in fixed slots could answer "no binding of this name in any function frame" without hashing, which belongs to the closure-frame work, not to dispatch (`decisions/interp.md`, "S3 methods are found through one row per method symbol").
 - S3 dispatch maps each (generic, class) pair to its `generic.class` symbol through a hash map keyed by the generic's symbol and the class `CHARSXP` (`MethodCache::names` in `crates/interp/src/dispatch.rs`, about 69 instructions per lookup, 0.7% of the objects workload). A dense id per interned `CHARSXP`, stored in the string, would let that become an index, and would serve every other table keyed by an interned string. Interning the class as a symbol instead costs more than the hash (`decisions/interp.md`, "S3 methods are found through one row per method symbol").
+
+## Open: builtins slower than GNU R
+
+`tools/bench/builtins/slower.txt` lists every export of base, stats and utils that the builtins sweep finds slower than GNU R (or failing) in at least one case; `sweep.py ratchet --update` shrinks it as fixes land, and `sweep.py weights` orders the work by call frequency in the code bases and the oracle corpus.
+
+- **Failing on ry in the sweep:** `R_compiled_by`, `aregexec`, `rsmirnov`, `ppr`, `arima0`, `ar.mle`, `prmatrix` and `memDecompress` of an unknown type, among others; `sweep.py compare` prints the full list.
+- **`names<-` and list copies:** a list whose reference count is shared copies on each `names<-`, where GNU R's reference counting lets the copy be skipped; structural, in the heap's reference counts.
+- **`e[["a"]] <- v` on an environment** takes the `*tmp*` replacement call (0.47 s against GNU R's 0.12 s for 1e6 assignments); only `e$a <- v` has the direct path in `assign_element` (`crates/interp/src/bytecode.rs`).
+- **POSIX repeated groups:** `(a)?(ab)?b*` on "abb" fills the first optional group where TRE fills the second (`strings__posix_repeated_group`, a known failure).
 
 ## Open: base R kernels against GNU R
 
@@ -639,6 +648,28 @@ About seven in ten of the hot suite's closure calls from compiled code take `cal
 - **Peak memory** (`run.py --memory`) at 1e6 rows is within 1.13 times GNU R's for every kernel (`decisions/frames-table.md`, "String keys sort by rank, and merge pairs come from sorted codes"). The highest are `unsplit` 1.13 (184 MB against 163), `gsub(perl = TRUE)` 1.08, `xts period.apply` and `as.character(double)` 1.07. `make.unique` on 1e6 names peaks at 127 MB against GNU R's 92 MB; names that are not ASCII still take the `String` path.
 - **`mkChar` on the C API boundary's direct path is measured and not taken.** Interning `mkChar`, `mkCharCE`, `mkCharLen` and `mkCharLenCE` without leaving the direct path, with the string-table probe inlined, cuts a 16-byte `Rf_mkCharLenCE` from 868 to 765 instructions (fresh) and 376 to 288 (re-interned), and the marginal cost of `str_split(s, "_")` on 1e6 strings by 4.1%. Whole package runs move by less than the bar (single process, `TESTTHAT_PARALLEL=false`): testthat -0.25%, purrr -0.17%, rlang -0.11%, and it adds about 40 lines. Revisit if a profile shows `mkChar*` call overhead above a few percent.
 - **Long strings through `mkCharLenCE` are measured and not taken.** processx hands it chunks of 45 to 95 KB, about 2.2G instructions in vctrs' test run (1.7%). Per byte of a 64 KB string under callgrind, ry re-interns an existing string in 1.7 instructions (1.57 in the one pass that does the NUL test, the ASCII test and the hash, 0.14 in the `memcmp` of the hit) and creates a new one in 4.0 (the same pass, a 1.0 copy and the allocation), against GNU R's 14.1 and 15.6. A 32-byte NUL and ASCII test with the copy folded in, plus hashing only a sample of a long string, might bring the pass to about 0.15 (an estimate), which would save under 1% of that run. Hashing a sample would also chain strings that share their ends in one bucket.
+
+## Open: failing tests on main
+
+`just ci` stops at the first failing test binary. With `--no-fail-fast` (and GNU R's
+`lib/` on `LD_LIBRARY_PATH` for the `gnu-r` runtime tests), these are the only tests that fail:
+
+- **`test_load`: `held_back_s4_definitions_behave_as_if_run_eagerly` and
+  `a_lazy_generic_whose_held_back_definitions_fail_reports_the_failure_on_every_use`.** The first
+  use of a held-back class or generic stops with `could not find function ".ry_force_s4"`. That
+  happens only after a `load_all(full = TRUE)` reload with `options(ry.load.lazy_s4 = TRUE)` in
+  the same session. A first load, a reload with lazy S4 off and a non-full reload all work, and
+  neither the JIT nor GC timing matters. The `force` closure that `.ry_defer_s4` hands to
+  `ryLoaderDefer` cannot see the loader environment, although `environment(load_all)` binds
+  `.ry_force_s4`. The likely cause, unverified: the full reload's `.ry_new_package` registers
+  the new definitions under the same root key while something from the old load's state stays
+  reachable, or the closure's enclosing frame is rewired once `.ry_defer_s4` returns. A plain R
+  closure that a function stores and a later call runs keeps its enclosure. Reproduce with the
+  `SHAPES` package from `test_load.rs`: `ry load DIR -e "options(ry.load.lazy_s4 = TRUE);
+  load_all('DIR', full = TRUE)" -e "isVirtualClass('Sq')"`.
+- **`oracle`: `recorded_outcomes_match_gnu_r` on `s4__deparse_class_definition`.** GNU R 4.6.2
+  deparses `methods::as` where the recording has `as`, so the recording has drifted. Re-record
+  the case.
 
 ## Open: the package loader
 

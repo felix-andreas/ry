@@ -1631,6 +1631,16 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
             let count = source.length() as usize;
             let copy = alloc(kind, count)?;
             match kind {
+                // The elements are shared, so the slots copy as one block and are then counted
+                // and barriered together.
+                SexpType::String | SexpType::List | SexpType::Expression if !deep => {
+                    std::ptr::copy_nonoverlapping(
+                        source.data() as *const Sexp,
+                        copy.data() as *mut Sexp,
+                        count,
+                    );
+                    heap.count_written_elements(copy);
+                }
                 SexpType::String => {
                     for index in 0..count {
                         heap.set_element(copy, index, source.element(index));

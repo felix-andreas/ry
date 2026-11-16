@@ -204,6 +204,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A complex assignment calls a primitive replacement with its values
 - An empty named argument leaves its formal to a positional argument
 - `[[<-` reports a wrong subscript count in GNU R's order
+- A call site that passes `...` keeps a plan for what `...` held
 
 ## Builtins and base R
 
@@ -254,6 +255,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `validObject` runs validity methods without its slot loop, and `new()` copies the prototype shallowly
 - Small base closures with call arguments run their bodies natively behind prologues
 - `c`, `unlist`, `rep` and positional `[` copy handle vectors a run at a time
+- The radix string order ranks bytes with integer keys, and plain POSIX patterns capture on the automata
 - `x[] <- value` and `x[a:b] <- value` write whole copies of the value
 - `order`, `sort.int` and `sort.default` run natively on plain vectors
 
@@ -574,6 +576,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The hot suite replays the package entries the code bases spend their time in
 - The code bases are a benchmark suite of their own, outside the headline
 - The profile summary hashes private package names with a secret key per project
+- The builtins sweep times every export of base, stats and utils, behind a shrinking ratchet
 - The edit-to-signal loop is tuned for agents
 - The interpreter stays one crate, because the edit loop is bound by links
 - Agent-written notes are not mass-rewritten for brevity

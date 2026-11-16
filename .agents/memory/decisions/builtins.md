@@ -524,6 +524,13 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 - **Measured** (a million elements, release, ms per call, GNU R 4.6.2 first): `c(x, x)` of strings with 2,000 distinct values 42.9 against 24.6 before and 10.0 after; `unlist(list(x, x))` 22.8, 33.1, 14.2; `rep(x, 2)` 26.6, 31.8, 16.5; `rep_len` 15.7, 22.7, 6.2; `x[perm]` of a million distinct strings 79.8, 26.2, 11.9; `lst[perm]` 71.7, 30.2, 11.3.
 - **Contract.** `builtins__bulk_handle_copies.R` pins the results, sharing after a copy is modified, and loops that make the collector run between copies.
 
+## The radix string order ranks bytes with integer keys, and plain POSIX patterns capture on the automata
+
+**Status:** built.
+
+- **`byte_ranks` (`crates/interp/src/sort.rs`)** ranks the distinct strings of a radix sort by their stored `CHAR()` bytes, untranslated, which is GNU R's rule (`StrCmp2` is `strcmp`), so a latin1 string and its UTF-8 twin rank apart. It skips the prefix all strings share, packs the next eight bytes into a big-endian `u64` (zero padding orders correctly because no R string holds a NUL), sorts the keys with an LSD radix that skips constant bytes, and re-keys only runs of equal keys. A comparison sort over the strings chased pointers per comparison and took 185 ms on 1e6 strings against GNU R's 170 ms; the key sort takes about GNU R's time. `order()` under a collation keeps the comparison sort.
+- **POSIX captures without backtracking:** when a pattern has no alternation, no lazy quantifier and repeats only single characters (`greedy_single_width` in `crates/interp/src/strings.rs`), the leftmost-first captures of the `regex` crate equal TRE's whenever the leftmost-first match ends where the leftmost-longest one does. `captures_at` checks that end against the longest automaton and falls back to the backtracker otherwise, so `sub`/`gsub` with back-references and `regexec` on such patterns run at GNU R's speed. A repeated group (`(a)?(ab)?b*`) still differs from TRE on the backtracker (`crates/oracle/known_failures.toml`).
+
 ## `x[] <- value` and `x[a:b] <- value` write whole copies of the value
 
 **Status:** built.

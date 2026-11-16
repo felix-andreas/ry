@@ -4011,33 +4011,40 @@ impl Heap {
                     Counted::Digest(_) => Vec::new(),
                 });
             }
-            let held = (0..object.length() as usize).map(|index| {
-                let child = object.stored_element(index);
-                object.set_element_unbarriered(index, nil);
-                child
-            });
-            let (held, counted) = match counted {
+            self.release_swept_child(attributes, &mut dying);
+            // The slots are cleared as they are read, so a list met again (a child that reached
+            // zero while its own entry was still pending) releases nothing twice.
+            let slots = object.slice_mut::<Sexp>();
+            match counted {
                 Some(counted) => {
-                    held.for_each(drop);
-                    (None, counted)
-                }
-                None => (Some(held), Vec::new()),
-            };
-            for child in std::iter::once(attributes)
-                .chain(held.into_iter().flatten())
-                .chain(counted)
-            {
-                if !child.release_reference() {
-                    continue;
-                }
-                if !self.space.is_marked(child) {
-                    if child.kind() == SexpType::List && !child.is_altrep() {
-                        dying.push(child);
+                    slots.fill(nil);
+                    for child in counted {
+                        self.release_swept_child(child, &mut dying);
                     }
-                } else {
-                    self.note_zero(child);
+                }
+                None => {
+                    for slot in slots {
+                        let child = std::mem::replace(slot, nil);
+                        self.release_swept_child(child, &mut dying);
+                    }
                 }
             }
+        }
+    }
+
+    /// Gives up one reference a dying list held: a child that reaches zero dies with it when
+    /// unmarked, and is noted for the next reconcile otherwise.
+    #[inline]
+    unsafe fn release_swept_child(&mut self, child: Sexp, dying: &mut Vec<Sexp>) {
+        if !child.release_reference() {
+            return;
+        }
+        if !self.space.is_marked(child) {
+            if child.kind() == SexpType::List && !child.is_altrep() {
+                dying.push(child);
+            }
+        } else {
+            self.note_zero(child);
         }
     }
 
