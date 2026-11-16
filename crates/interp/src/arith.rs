@@ -591,16 +591,24 @@ unsafe fn margin_sums(call: &Call<'_>, rows: bool, mean: bool) -> R<Sexp> {
         let output = values::reals_mut(result);
         let mut totals = vec![0i64; outer];
         let mut missing = vec![false; outer];
-        for (index, &value) in data.iter().enumerate() {
-            let position = if rows {
-                index % row_count.max(1)
-            } else {
-                index / row_count.max(1)
-            };
-            if value == NA_INTEGER {
-                missing[position] = true;
-            } else {
-                totals[position] += i64::from(value);
+        if row_count > 0 {
+            for (column, values) in data.chunks_exact(row_count).enumerate() {
+                if rows {
+                    for (row, &value) in values.iter().enumerate() {
+                        if value == NA_INTEGER {
+                            missing[row] = true;
+                        } else {
+                            totals[row] += i64::from(value);
+                        }
+                    }
+                } else {
+                    let mut total = 0i64;
+                    for &value in values {
+                        missing[column] |= value == NA_INTEGER;
+                        total += i64::from(value);
+                    }
+                    totals[column] = total;
+                }
             }
         }
         for position in 0..outer {
@@ -3323,10 +3331,29 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
                         if na_rm {
                             long_double::add_all_numbers(LongDouble::ZERO, reals).to_f64()
                         } else {
-                            match kernels::first_nan(reals) {
-                                Some(value) => value,
-                                None => long_double::add_all(LongDouble::ZERO, reals).to_f64(),
+                            // The first NaN the running sum meets is the answer, whether an
+                            // input or one `Inf + -Inf` made. A chunk is searched only once its
+                            // sum is NaN, so the x87 unit meets one chunk's NaN operands at most.
+                            let mut total = LongDouble::ZERO;
+                            let mut answer = None;
+                            for chunk in reals.chunks(512) {
+                                let before = total;
+                                total = long_double::add_all(total, chunk);
+                                if !total.to_f64().is_nan() {
+                                    continue;
+                                }
+                                let made = match chunk.iter().position(|value| value.is_nan()) {
+                                    Some(index) => long_double::add_all(before, &chunk[..index])
+                                        .to_f64(),
+                                    None => total.to_f64(),
+                                };
+                                answer = Some(match chunk.iter().find(|value| value.is_nan()) {
+                                    Some(&input) if !made.is_nan() => input,
+                                    _ => made,
+                                });
+                                break;
                             }
+                            answer.unwrap_or_else(|| total.to_f64())
                         }
                     } else {
                         let mut item_total = LongDouble::ZERO;
@@ -4258,15 +4285,17 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
             }
             let steps = (quotient + 1e-10).floor() as usize;
             if all_integer {
-                let values: Vec<i32> = (0..=steps)
-                    .map(|index| (from + index as f64 * by) as i32)
-                    .collect();
-                values::integer_vector(&values)
+                let result = values::alloc_uninit(SexpType::Integer, steps + 1)?;
+                for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
+                    *slot = (from + index as f64 * by) as i32;
+                }
+                Ok(result)
             } else {
-                let values: Vec<f64> = (0..=steps)
-                    .map(|index| finite_term(from, index as f64, by))
-                    .collect();
-                values::real_vector(&values)
+                let result = values::alloc_uninit(SexpType::Real, steps + 1)?;
+                for (index, slot) in values::reals_mut(result).iter_mut().enumerate() {
+                    *slot = finite_term(from, index as f64, by);
+                }
+                Ok(result)
             }
         }
         (from, to, by, Some(count)) => {
@@ -4274,38 +4303,31 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
             match (from, to, by) {
                 (Some(from), Some(to), None) => {
                     if count == 1 {
-                        return whole_sequence(&[from]);
+                        return whole_sequence(1, |_| from);
                     }
                     let intervals = count as f64 - 1.0;
                     let by = (to - from) / intervals;
                     // When `to - from` overflows, the half-size step still exists.
                     let half_by = to / (2.0 * intervals) - from / (2.0 * intervals);
-                    let values: Vec<f64> = (0..count)
-                        .map(|index| {
-                            if index == count - 1 {
-                                to
-                            } else if by.is_finite() {
-                                from + index as f64 * by
-                            } else {
-                                2.0 * (from / 2.0 + index as f64 * half_by)
-                            }
-                        })
-                        .collect();
-                    whole_sequence(&values)
+                    whole_sequence(count, |index| {
+                        if index == count - 1 {
+                            to
+                        } else if by.is_finite() {
+                            from + index as f64 * by
+                        } else {
+                            2.0 * (from / 2.0 + index as f64 * half_by)
+                        }
+                    })
                 }
                 (from, None, by) => {
                     let from = from.unwrap_or(1.0);
                     let by = by.unwrap_or(1.0);
-                    let values: Vec<f64> =
-                        (0..count).map(|index| from + index as f64 * by).collect();
-                    whole_sequence(&values)
+                    whole_sequence(count, |index| from + index as f64 * by)
                 }
                 (None, Some(to), by) => {
                     let by = by.unwrap_or(1.0);
                     let from = to - (count as f64 - 1.0) * by;
-                    let values: Vec<f64> =
-                        (0..count).map(|index| from + index as f64 * by).collect();
-                    whole_sequence(&values)
+                    whole_sequence(count, |index| from + index as f64 * by)
                 }
                 _ => Err(call.error("too many arguments")),
             }
@@ -4314,17 +4336,25 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
     }
 }
 
-/// A `length.out` sequence is integer whenever every element is a whole number in integer
-/// range, whatever the types of `from`, `to` and `by`, as in GNU R.
-unsafe fn whole_sequence(values: &[f64]) -> R<Sexp> {
-    if values
-        .iter()
-        .all(|value| value.fract() == 0.0 && value.abs() <= i32::MAX as f64)
-    {
-        let integers: Vec<i32> = values.iter().map(|&value| value as i32).collect();
-        return values::integer_vector(&integers);
+/// The `length.out` sequence of `count` terms `term(index)`, which is integer whenever every
+/// term is a whole number in integer range, whatever the types of `from`, `to` and `by`, as in
+/// GNU R. The terms are computed twice, which is cheaper than holding them while deciding.
+unsafe fn whole_sequence(count: usize, term: impl Fn(usize) -> f64) -> R<Sexp> {
+    if (0..count).all(|index| {
+        let value = term(index);
+        value.fract() == 0.0 && value.abs() <= i32::MAX as f64
+    }) {
+        let result = values::alloc_uninit(SexpType::Integer, count)?;
+        for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
+            *slot = term(index) as i32;
+        }
+        return Ok(result);
     }
-    values::real_vector(values)
+    let result = values::alloc_uninit(SexpType::Real, count)?;
+    for (index, slot) in values::reals_mut(result).iter_mut().enumerate() {
+        *slot = term(index);
+    }
+    Ok(result)
 }
 
 /// A classed `x` that has no `rep.int` or `rep_len` method of its own repeats through its
@@ -4896,11 +4926,14 @@ unsafe fn parallel_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
     }
     if kind == SexpType::String {
         let result = alloc(SexpType::String, count)?;
+        let strings: Vec<Sexp> = items
+            .iter()
+            .map(|&item| coerce_vector(item, SexpType::String))
+            .collect::<R<_>>()?;
         for index in 0..count {
             let mut best: Option<Sexp> = None;
             let mut na = false;
-            for &item in &items {
-                let strings = coerce_vector(item, SexpType::String)?;
+            for &strings in &strings {
                 let value = strings.element(index % length(strings));
                 if value == values::na_string() {
                     na = true;
@@ -4933,53 +4966,61 @@ unsafe fn parallel_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
         }
         return Ok(result);
     }
-    let integer = matches!(kind, SexpType::Integer | SexpType::Logical);
-    let result = alloc(
-        if integer {
-            SexpType::Integer
-        } else {
-            SexpType::Real
-        },
-        count,
-    )?;
-    for index in 0..count {
-        let mut best: Option<f64> = None;
-        // GNU R keeps the last NA or NaN it meets, so `pmax(c(NA, NaN), c(NaN, NA))` is
-        // `c(NaN, NA)`, and with `na.rm = TRUE` it is the answer only when every value is missing.
-        let mut missing: Option<f64> = None;
-        for &item in &items {
-            let value = real_at(item, index % length(item));
-            if value.is_nan() {
-                missing = Some(value);
-                continue;
-            }
-            best = Some(match best {
-                None => value,
-                Some(current) => {
-                    if is_max {
-                        current.max(value)
-                    } else {
-                        current.min(value)
-                    }
-                }
+    // As in GNU R, the items fold into the result one after another. A missing value replaces
+    // the running one unless `na.rm`, and with `na.rm` only replaces a missing one, so the last
+    // missing value met is the answer when it wins.
+    if matches!(kind, SexpType::Integer | SexpType::Logical) {
+        let result = values::alloc_uninit(SexpType::Integer, count)?;
+        let out = values::ints_mut(result);
+        for (position, &item) in items.iter().enumerate() {
+            fold_items(out, values::ints(item), position == 0, |current, value| {
+                let replace = if na_rm {
+                    current == NA_INTEGER
+                        || (value != NA_INTEGER && (value > current) == is_max && value != current)
+                } else {
+                    value == NA_INTEGER
+                        || (current != NA_INTEGER && (value > current) == is_max && value != current)
+                };
+                if replace { value } else { current }
             });
         }
-        let value = match (missing, best) {
-            (Some(missing), _) if !na_rm => missing,
-            (_, Some(best)) => best,
-            (missing, None) => missing.unwrap_or(NA_REAL),
-        };
-        if integer {
-            values::ints_mut(result)[index] = if value.is_nan() {
-                NA_INTEGER
+        return Ok(result);
+    }
+    let result = values::alloc_uninit(SexpType::Real, count)?;
+    for (position, &item) in items.iter().enumerate() {
+        let item = coerce_vector(item, SexpType::Real)?;
+        let out = values::reals_mut(result);
+        fold_items(out, values::reals(item), position == 0, |current, value| {
+            let better = if is_max { value > current } else { value < current };
+            let replace = if na_rm {
+                current.is_nan() || better
             } else {
-                value as i32
+                better || value.is_nan()
             };
-        } else {
-            values::reals_mut(result)[index] = value;
-        }
+            if replace { value } else { current }
+        });
     }
     Ok(result)
+}
+
+/// Folds `values`, recycled, into `out` with `combine(current, value)`, or copies them in when
+/// `first`.
+fn fold_items<T: Copy>(out: &mut [T], values: &[T], first: bool, combine: impl Fn(T, T) -> T) {
+    if let [value] = *values {
+        for slot in out.iter_mut() {
+            *slot = if first { value } else { combine(*slot, value) };
+        }
+        return;
+    }
+    for chunk in out.chunks_mut(values.len()) {
+        if first {
+            chunk.copy_from_slice(&values[..chunk.len()]);
+        } else {
+            for (slot, &value) in chunk.iter_mut().zip(values) {
+                *slot = combine(*slot, value);
+            }
+        }
+    }
 }
 
 unsafe fn do_tabulate(call: &Call<'_>) -> R<Sexp> {

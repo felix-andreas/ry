@@ -139,6 +139,18 @@ pub unsafe fn expand_row_names(value: Sexp) -> R<Sexp> {
         && values::ints(value)[0] == NA_INTEGER
     {
         let count = values::ints(value)[1].unsigned_abs() as usize;
+        // GNU R's `getAttrib` gives `1:n` as a compact sequence, so reading the row names of a
+        // long data frame allocates nothing.
+        if count > 0
+            && let Some(sequence) = (crate::interp().hooks.compact_sequence)(
+                SexpType::Integer,
+                count,
+                1.0,
+                1.0,
+            )?
+        {
+            return Ok(sequence);
+        }
         let result = alloc(SexpType::Integer, count)?;
         for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
             *slot = index as i32 + 1;

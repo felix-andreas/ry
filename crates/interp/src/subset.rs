@@ -4197,6 +4197,8 @@ unsafe fn do_matrix(call: &Call<'_>) -> R<Sexp> {
                 ),
             )?;
         }
+    } else if count > 1 && total == 0 {
+        conditions::warning("non-empty data for zero-extent matrix")?;
     }
     let kind = if data == nil() {
         SexpType::Logical
@@ -4208,7 +4210,7 @@ unsafe fn do_matrix(call: &Call<'_>) -> R<Sexp> {
         for position in 0..total {
             set_na(result, position);
         }
-    } else if by_row || !fill_recycled(result, data) {
+    } else if !place_elements(result, data, rows, by_row) {
         for row in 0..rows {
             for col in 0..cols {
                 let target = row + col * rows;
@@ -4226,24 +4228,55 @@ unsafe fn do_matrix(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-/// Fills `result` with `data` recycled, when both are the same plain atomic type and `data` is
-/// not empty. Returns whether it did.
-unsafe fn fill_recycled(result: Sexp, data: Sexp) -> bool {
-    fn fill<T: Copy>(target: &mut [T], source: &[T]) {
-        if let [single] = source {
-            target.fill(*single);
-        } else {
-            for (slot, &item) in target.iter_mut().zip(source.iter().cycle()) {
-                *slot = item;
+/// Fills `result`, a matrix of `rows` rows and of `data`'s type, with `data` recycled in column
+/// order, or in row order when `by_row`. Returns whether it did, which it does for every vector
+/// type when `data` is not empty.
+unsafe fn place_elements(result: Sexp, data: Sexp, rows: usize, by_row: bool) -> bool {
+    fn place<T: Copy>(target: &mut [T], source: &[T], rows: usize, by_row: bool) {
+        let cols = target.len().checked_div(rows).unwrap_or(0);
+        // One row or one column is the same order either way.
+        if !by_row || rows <= 1 || cols <= 1 {
+            if let [single] = source {
+                target.fill(*single);
+            } else {
+                for (slot, &item) in target.iter_mut().zip(source.iter().cycle()) {
+                    *slot = item;
+                }
+            }
+            return;
+        }
+        let count = source.len();
+        for (col, column) in target.chunks_exact_mut(rows).enumerate() {
+            if count == rows * cols {
+                for (row, slot) in column.iter_mut().enumerate() {
+                    *slot = source[row * cols + col];
+                }
+            } else {
+                for (row, slot) in column.iter_mut().enumerate() {
+                    *slot = source[(row * cols + col) % count];
+                }
             }
         }
     }
-    if data.kind() != result.kind() || length(data) == 0 {
+    if data.kind() != result.kind() || length(data) == 0 || data.is_altrep() {
         return false;
     }
     match data.kind() {
-        SexpType::Real => fill(values::reals_mut(result), values::reals(data)),
-        SexpType::Integer | SexpType::Logical => fill(values::ints_mut(result), values::ints(data)),
+        SexpType::Real => place(values::reals_mut(result), values::reals(data), rows, by_row),
+        SexpType::Integer | SexpType::Logical => {
+            place(values::ints_mut(result), values::ints(data), rows, by_row)
+        }
+        SexpType::Complex => place(
+            values::complexes_mut(result),
+            values::complexes(data),
+            rows,
+            by_row,
+        ),
+        SexpType::Raw => place(values::raws_mut(result), values::raws(data), rows, by_row),
+        SexpType::String | SexpType::List | SexpType::Expression => {
+            place(result.slice_mut::<Sexp>(), data.slice::<Sexp>(), rows, by_row);
+            crate::heap().count_written_elements(result);
+        }
         _ => return false,
     }
     true
@@ -4268,7 +4301,7 @@ unsafe fn do_array(call: &Call<'_>) -> R<Sexp> {
         data.kind()
     };
     let result = alloc(kind, total)?;
-    if count == 0 || !fill_recycled(result, data) {
+    if count == 0 || !place_elements(result, data, 1, false) {
         for position in 0..total {
             if count == 0 {
                 set_na(result, position);

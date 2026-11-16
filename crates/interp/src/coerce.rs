@@ -379,6 +379,39 @@ pub unsafe fn coerce_atomic(
         return Ok(object);
     }
     let result = alloc(kind, count)?;
+    match (source, kind) {
+        (SexpType::Real, SexpType::Integer) => {
+            let mut out_of_range = false;
+            for (slot, &value) in values::ints_mut(result).iter_mut().zip(values::reals(object)) {
+                // `as i32` saturates and maps NaN to 0, so range and NaN are decided first.
+                *slot = if value.is_nan() {
+                    NA_INTEGER
+                } else if value >= 2147483648.0 || value <= -2147483648.0 {
+                    out_of_range = true;
+                    NA_INTEGER
+                } else {
+                    value as i32
+                };
+            }
+            warnings.integer_range |= out_of_range;
+            return Ok(result);
+        }
+        (SexpType::Logical, SexpType::Integer) => {
+            values::ints_mut(result).copy_from_slice(values::ints(object));
+            return Ok(result);
+        }
+        (SexpType::Integer | SexpType::Logical, SexpType::Real) => {
+            for (slot, &value) in values::reals_mut(result).iter_mut().zip(values::ints(object)) {
+                *slot = if value == NA_INTEGER {
+                    NA_REAL
+                } else {
+                    f64::from(value)
+                };
+            }
+            return Ok(result);
+        }
+        _ => {}
+    }
     match kind {
         SexpType::Logical => {
             let target = values::ints_mut(result);
@@ -549,6 +582,20 @@ pub unsafe fn coerce_atomic(
         SexpType::String if matches!(source, SexpType::Real | SexpType::Integer) => {
             let object = values::materialize(object)?;
             write_number_strings(object, result, crate::format::Settings::current_scipen())?;
+        }
+        SexpType::String if source == SexpType::Logical => {
+            let object = values::materialize(object)?;
+            let true_text = values::mkchar("TRUE")?;
+            let false_text = values::mkchar("FALSE")?;
+            let missing = na_string();
+            for (slot, &value) in result.slice_mut::<Sexp>().iter_mut().zip(values::ints(object)) {
+                *slot = match value {
+                    NA_LOGICAL => missing,
+                    0 => false_text,
+                    _ => true_text,
+                };
+            }
+            crate::heap().count_written_elements(result);
         }
         SexpType::String => {
             for index in 0..count {
@@ -1041,7 +1088,17 @@ unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
 
 unsafe fn do_as_vector(call: &Call<'_>) -> R<Sexp> {
     let mode = values::require_str(call.arg(1), "mode")?;
-    as_vector(call.arg(0), &mode)
+    let object = call.arg(0);
+    // GNU R's `coerceVector` makes a number vector without attributes into deferred strings, as
+    // `as.character` does.
+    if mode == "character"
+        && matches!(object.kind(), SexpType::Integer | SexpType::Real)
+        && !values::has_attributes(object)
+        && let Some(deferred) = (crate::interp().hooks.defer_strings)(object)?
+    {
+        return Ok(deferred);
+    }
+    as_vector(object, &mode)
 }
 
 unsafe fn do_as_call(call: &Call<'_>) -> R<Sexp> {

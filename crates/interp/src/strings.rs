@@ -1682,24 +1682,64 @@ unsafe fn starts_or_ends_with(call: &Call<'_>, starts: bool) -> R<Sexp> {
     } else {
         text_count.max(affix_count)
     };
-    let result = alloc(SexpType::Logical, count)?;
-    for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
-        *slot = match (
-            string_at(x, index % text_count),
-            string_at(affix, index % affix_count),
-        ) {
-            (Some(text), Some(affix)) => {
-                let found = if starts {
-                    text.starts_with(affix.as_ref())
+    let x = values::materialize(x)?;
+    let affix = values::materialize(affix)?;
+    let result = values::alloc_uninit(SexpType::Logical, count)?;
+    let missing = na_string();
+    let texts = x.slice::<Sexp>();
+    let affixes: Vec<Option<&[u8]>> = affix
+        .slice::<Sexp>()
+        .iter()
+        .map(|&charsxp| (charsxp != missing).then(|| utf8_bytes(charsxp)).flatten())
+        .collect();
+    let test = |text: Sexp, affix_index: usize| -> i32 {
+        let affix_charsxp = affix.slice::<Sexp>()[affix_index];
+        if text == missing || affix_charsxp == missing {
+            return NA_LOGICAL;
+        }
+        // Valid UTF-8 matches a prefix or suffix byte for byte exactly when it matches
+        // character for character. An affix without NUL matches a text's prefix exactly when it
+        // matches the text cut at its first NUL, as `char_str` reads it, but a suffix match
+        // must check the text holds no NUL.
+        if let (Some(affix), true) = (affixes[affix_index], text.is_valid_utf8()) {
+            if !text.has_gp(gp::LATIN1 | gp::BYTES) {
+                let bytes = text.bytes();
+                return if starts {
+                    bytes.starts_with(affix) as i32
                 } else {
-                    text.ends_with(affix.as_ref())
+                    (bytes.ends_with(affix) && memchr::memchr(0, bytes).is_none()) as i32
                 };
-                found as i32
             }
-            _ => NA_LOGICAL,
-        };
+        }
+        let (text, affix) = (values::char_str(text), values::char_str(affix_charsxp));
+        if starts {
+            text.starts_with(affix.as_ref()) as i32
+        } else {
+            text.ends_with(affix.as_ref()) as i32
+        }
+    };
+    let out = values::ints_mut(result);
+    if affixes.len() == 1 && texts.len() == count {
+        for (slot, &text) in out.iter_mut().zip(texts) {
+            *slot = test(text, 0);
+        }
+    } else {
+        let (text_count, affix_count) = (texts.len(), affixes.len());
+        for (index, slot) in out.iter_mut().enumerate() {
+            *slot = test(texts[index % text_count], index % affix_count);
+        }
     }
     Ok(result)
+}
+
+/// The bytes of `charsxp` when they are its text as UTF-8 as they stand: valid UTF-8 not
+/// declared Latin-1 or bytes, and without the NUL that [`values::char_str`] would end the text at.
+unsafe fn utf8_bytes<'a>(charsxp: Sexp) -> Option<&'a [u8]> {
+    if !charsxp.is_valid_utf8() || charsxp.has_gp(gp::LATIN1 | gp::BYTES) {
+        return None;
+    }
+    let bytes = charsxp.bytes();
+    memchr::memchr(0, bytes).is_none().then_some(bytes)
 }
 
 unsafe fn do_strrep(call: &Call<'_>) -> R<Sexp> {
