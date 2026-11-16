@@ -579,7 +579,13 @@ mod tests {
     /// will do), whether its first record is a header, and its columns.
     #[test]
     fn files_sniff_as_fread_reads_them() {
-        let cases: [(&str, Option<char>, bool, &[(&str, ColumnType)]); 17] = [
+        type Case = (
+            &'static str,
+            Option<char>,
+            bool,
+            &'static [(&'static str, ColumnType)],
+        );
+        let cases: [Case; 17] = [
             // Each field takes the narrowest type that reads it, and a column of nothing but
             // missing values is logical.
             (
@@ -767,9 +773,6 @@ mod tests {
 
     #[test]
     fn the_head_ignores_a_line_cut_short() {
-        assert_eq!(
-            sniff_head(b"a,b\n1,2\n3,x").columns[1].kind,
-            Integer
-        );
+        assert_eq!(sniff_head(b"a,b\n1,2\n3,x").columns[1].kind, Integer);
     }
 }

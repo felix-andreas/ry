@@ -178,7 +178,10 @@ mod tests {
                 "```{r}\ntotal <- 42L\n```\n\nWe sold `r total` units and `r nchar(total)` digits.\n",
                 " \ntotal <- 42L\n \n\n total; nchar(total); \n",
             ),
-            ("See `total` and `rate` and `python x` and `r unclosed\n", " \n"),
+            (
+                "See `total` and `rate` and `python x` and `r unclosed\n",
+                " \n",
+            ),
             ("```{r}\nx <- 1L\n", " \nx <- 1L\n"),
         ];
         for (document, expected) in cases {
