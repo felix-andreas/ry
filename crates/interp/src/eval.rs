@@ -8,8 +8,8 @@ use {
         Frame, Signalling,
         annotations::Entry,
         builtins::{
-            Arg, BuiltinDef, Call, DirectFn, Generic, Kind, NativeArgs, Visibility, builtin,
-            internal, internal_special, special,
+            Arg, BuiltinDef, Call, DirectFn, Generic, Kind, NativeArgs, Replacement, Visibility,
+            builtin, internal, internal_special, special,
         },
         bytecode,
         coerce::{CoercionWarnings, real_to_int},
@@ -1790,7 +1790,7 @@ unsafe fn call_builtin_blaming(
     if activity::hooks() != 0
         || (checks.arity && args.len() != definition.arity as usize)
         || (checks.names && args.iter().any(|arg| arg.tag != nil()))
-        || (checks.replacement
+        || (checks.replacement != Replacement::None
             && args
                 .first()
                 .is_some_and(|target| target.value.refcount() >= 1))
@@ -1814,7 +1814,7 @@ pub(crate) unsafe fn call_builtin_positional(
     let checks = definition.checks;
     if activity::hooks() != 0
         || (checks.arity && args.len() != definition.arity as usize)
-        || (checks.replacement
+        || (checks.replacement != Replacement::None
             && args
                 .first()
                 .is_some_and(|target| target.value.refcount() >= 1))
@@ -1896,10 +1896,16 @@ unsafe fn call_builtin_checked(
     let copied_target;
     let args = match args.first() {
         Some(target)
-            if checks.replacement && target.value.refcount() >= 1 && !is_assignment(call) =>
+            if checks.replacement != Replacement::None
+                && target.value.refcount() >= 1
+                && !is_assignment(call) =>
         {
             let mut copy = args.to_vec();
-            copy[0].value = values::shallow_duplicate(target.value)?;
+            copy[0].value = if checks.replacement == Replacement::Attributes {
+                values::replacement_copy(target.value)?
+            } else {
+                values::shallow_duplicate(target.value)?
+            };
             copied_target = copy;
             copied_target.as_slice()
         }
@@ -5685,18 +5691,12 @@ pub(crate) unsafe fn switch_alternative(
     };
     // GNU R rejects a second default before it looks for a match, naming the calling function
     // rather than the `switch`.
-    let defaults: Vec<&Arg> = alternatives
+    let mut defaults = alternatives
         .iter()
-        .filter(|arg| arg.tag == nil() || symbol_name(arg.tag).is_empty())
-        .collect();
-    if defaults.len() > 1 {
-        return Err(error(
-            "duplicate 'switch' defaults: '".to_string()
-                + &deparse::deparse_one_line(defaults[0].value)
-                + "' and '"
-                + &deparse::deparse_one_line(defaults[1].value)
-                + "'",
-        ));
+        .filter(|arg| arg.tag == nil() || symbol_name(arg.tag).is_empty());
+    let default = defaults.next();
+    if let (Some(first), Some(second)) = (default, defaults.next()) {
+        return Err(duplicate_defaults_error(first.value, second.value));
     }
     for (position, arg) in alternatives.iter().enumerate() {
         if arg.tag.kind() == SexpType::Symbol && switch_name_matches(arg.tag.car(), text) {
@@ -5708,7 +5708,7 @@ pub(crate) unsafe fn switch_alternative(
                 .map(|later| later.value));
         }
     }
-    match defaults.first() {
+    match default {
         Some(default) if default.value == missing => Err(error(SWITCH_EMPTY_DEFAULT)),
         Some(default) => Ok(Some(default.value)),
         None => Ok(None),
@@ -5763,6 +5763,29 @@ pub(crate) unsafe fn switch_selector(selector: Sexp, call: Sexp) -> R<SwitchSele
     };
     warnings.report()?;
     Ok(SwitchSelector::Position(position))
+}
+
+/// The error a string selector raises for a `switch` whose `alternatives` (the call's arguments
+/// after the selector, as a pairlist) have more than one default.
+pub(crate) unsafe fn duplicate_switch_defaults(alternatives: Sexp) -> Unwind {
+    let mut defaults = values::pairlist_items(alternatives)
+        .into_iter()
+        .filter(|(tag, _)| *tag == nil() || symbol_name(*tag).is_empty())
+        .map(|(_, value)| value);
+    match (defaults.next(), defaults.next()) {
+        (Some(first), Some(second)) => duplicate_defaults_error(first, second),
+        _ => error("duplicate 'switch' defaults"),
+    }
+}
+
+unsafe fn duplicate_defaults_error(first: Sexp, second: Sexp) -> Unwind {
+    error(
+        "duplicate 'switch' defaults: '".to_string()
+            + &deparse::deparse_one_line(first)
+            + "' and '"
+            + &deparse::deparse_one_line(second)
+            + "'",
+    )
 }
 
 /// Whether the alternative named `name` is the one the string selector `text` picks. GNU R

@@ -10,9 +10,7 @@ use {
         builtins::{BuiltinDef, Call, Generic, builtin, internal, is_native_value, present},
         dispatch::{self, basic_class},
         eval,
-        subset::{
-            modifiable, modifiable_attributes, set_attribute_checked, set_names, set_row_names,
-        },
+        subset::{modifiable_attributes, set_attribute_checked, set_names, set_row_names},
         unwind::R,
         values::{self, alloc, get_attr, length, nil, symbols},
     },
@@ -382,7 +380,7 @@ unsafe fn direct_set_names(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
     if names == nil() && get_attr(object, symbols().names) == nil() {
         return Ok(Some(object));
     }
-    let object = modifiable(object)?;
+    let object = modifiable_attributes(object)?;
     set_names(object, names)?;
     Ok(Some(object))
 }

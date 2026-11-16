@@ -189,8 +189,8 @@ pub struct Checks {
     pub arity: bool,
     /// Argument names must match the formals base R records for the primitive.
     pub names: bool,
-    /// A replacement primitive such as `class<-`, whose target a direct call copies first.
-    pub replacement: bool,
+    /// How a direct call of a replacement primitive such as `class<-` copies its target first.
+    pub replacement: Replacement,
     pub native: NativeArgs,
 }
 
@@ -205,11 +205,24 @@ pub enum NativeArgs {
     RefusedExceptArrayIndexes,
 }
 
+/// How a direct call such as `` `class<-`(x, "foo") `` copies its target, which the caller's
+/// binding must keep unchanged.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Replacement {
+    /// Not a replacement primitive.
+    None,
+    /// A replacement that writes the target's contents, which gets a shallow copy.
+    Contents,
+    /// A replacement that changes only attributes, as GNU R's `R_shallow_duplicate_attr`
+    /// callers do: a long vector is copied under a wrapper that shares its data.
+    Attributes,
+}
+
 impl Checks {
     const UNDERIVED: Checks = Checks {
         arity: false,
         names: false,
-        replacement: false,
+        replacement: Replacement::None,
         native: NativeArgs::Accepted,
     };
 
@@ -222,7 +235,14 @@ impl Checks {
                     Kind::Internal | Kind::InternalSpecial | Kind::Builtin
                 ),
             names: matches!(definition.kind, Kind::Builtin | Kind::Special),
-            replacement: name.ends_with("<-") && !matches!(name, "<-" | "<<-"),
+            replacement: match name {
+                "attr<-" | "attributes<-" | "class<-" | "dimnames<-" | "names<-" | "oldClass<-" => {
+                    Replacement::Attributes
+                }
+                "<-" | "<<-" => Replacement::None,
+                _ if name.ends_with("<-") => Replacement::Contents,
+                _ => Replacement::None,
+            },
             native: if definition.accepts_native
                 || !(matches!(definition.kind, Kind::Builtin | Kind::Internal)
                     || definition.is_dispatch_or_eval())

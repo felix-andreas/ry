@@ -204,6 +204,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A complex assignment calls a primitive replacement with its values
 - An empty named argument leaves its formal to a positional argument
 - `[[<-` reports a wrong subscript count in GNU R's order
+- A direct call of an attribute replacement wraps its target
 
 ## Builtins and base R
 
@@ -376,6 +377,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Marking a traced object costs a few table loads (built, with exceptions)
 - Peak RSS is judged as anonymous, image and code size, not as one number
 - A handler stack set aside is traced
+- A list of inert elements skips its children when it dies
 
 ## C API, R home and packages
 

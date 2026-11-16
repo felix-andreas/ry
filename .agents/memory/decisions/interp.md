@@ -1057,3 +1057,11 @@ without cells, promise forcing in the loop, and one observer word on the general
   `y[g(), , 1] <- 2`, reaches the same message as a constant one.
 - `islistfactor` refuses an `NA` for `recursive` from R 4.5 on, which earlier releases took as true.
 - Pinned by the oracle case `replacement__subscript_count_errors`.
+
+## A direct call of an attribute replacement wraps its target
+
+**Status:** built.
+
+- **Rule.** A direct call of a replacement primitive (`` `names<-`(x, v) ``) copies a bound target first, because ry's arguments hold no reference and the builtin would otherwise change the caller's binding. `Checks::replacement` says how: `Replacement::Attributes` (`attr<-`, `attributes<-`, `class<-`, `dimnames<-`, `names<-`, `oldClass<-`) copies through `values::replacement_copy`, which puts a long vector, list included, under a wrapper that shares its data, as GNU R's `R_shallow_duplicate_attr` does; `Replacement::Contents` makes a shallow copy.
+- **Why.** A plain shallow copy of a 1,000-element list costs 2 to 3 µs against GNU R's 0.45 µs wrapper.
+- The bytecode fast path `direct_set_names` copies through `modifiable_attributes` for the same reason.
