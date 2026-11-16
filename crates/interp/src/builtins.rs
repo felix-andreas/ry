@@ -702,12 +702,14 @@ pub unsafe fn match_builtin_args(
                 format!(
                     "unused argument ({} = {})",
                     names[arg_index].as_deref().unwrap_or(""),
-                    crate::deparse::deparse_one_line(arg.value)
+                    crate::deparse::deparse_unused_argument(arg.value)
                 ),
             ));
         }
+        // An empty argument matched by name leaves its formal to a positional one, as for a
+        // closure (`eval::match_plan`).
         while formal_index < formals.len()
-            && (matched[formal_index].is_some() || formals[formal_index] == "...")
+            && (present(matched[formal_index]).is_some() || formals[formal_index] == "...")
         {
             if formals[formal_index] == "..." {
                 break;
@@ -724,7 +726,7 @@ pub unsafe fn match_builtin_args(
                 call,
                 format!(
                     "unused argument ({})",
-                    crate::deparse::deparse_one_line(arg.value)
+                    crate::deparse::deparse_unused_argument(arg.value)
                 ),
             ));
         }

@@ -201,6 +201,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Base fast paths read formals one at a time, except `formatC()`
 - Parked: cheaper restart setup in `withRestarts` (planned)
 - Replacement calls and `lapply`/`vapply` element calls run on a slot frame's slots
+- An empty named argument leaves its formal to a positional argument
+- `[[<-` reports a wrong subscript count in GNU R's order
 
 ## Builtins and base R
 
