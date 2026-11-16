@@ -647,6 +647,28 @@ About seven in ten of the hot suite's closure calls from compiled code take `cal
 - **`mkChar` on the C API boundary's direct path is measured and not taken.** Interning `mkChar`, `mkCharCE`, `mkCharLen` and `mkCharLenCE` without leaving the direct path, with the string-table probe inlined, cuts a 16-byte `Rf_mkCharLenCE` from 868 to 765 instructions (fresh) and 376 to 288 (re-interned), and the marginal cost of `str_split(s, "_")` on 1e6 strings by 4.1%. Whole package runs move by less than the bar (single process, `TESTTHAT_PARALLEL=false`): testthat -0.25%, purrr -0.17%, rlang -0.11%, and it adds about 40 lines. Revisit if a profile shows `mkChar*` call overhead above a few percent.
 - **Long strings through `mkCharLenCE` are measured and not taken.** processx hands it chunks of 45 to 95 KB, about 2.2G instructions in vctrs' test run (1.7%). Per byte of a 64 KB string under callgrind, ry re-interns an existing string in 1.7 instructions (1.57 in the one pass that does the NUL test, the ASCII test and the hash, 0.14 in the `memcmp` of the hit) and creates a new one in 4.0 (the same pass, a 1.0 copy and the allocation), against GNU R's 14.1 and 15.6. A 32-byte NUL and ASCII test with the copy folded in, plus hashing only a sample of a long string, might bring the pass to about 0.15 (an estimate), which would save under 1% of that run. Hashing a sample would also chain strings that share their ends in one bucket.
 
+## Open: failing tests on main
+
+`just ci` stops at the first failing test binary. With `--no-fail-fast` (and GNU R's
+`lib/` on `LD_LIBRARY_PATH` for the `gnu-r` runtime tests), these are the only tests that fail:
+
+- **`test_load`: `held_back_s4_definitions_behave_as_if_run_eagerly` and
+  `a_lazy_generic_whose_held_back_definitions_fail_reports_the_failure_on_every_use`.** The first
+  use of a held-back class or generic stops with `could not find function ".ry_force_s4"`. That
+  happens only after a `load_all(full = TRUE)` reload with `options(ry.load.lazy_s4 = TRUE)` in
+  the same session. A first load, a reload with lazy S4 off and a non-full reload all work, and
+  neither the JIT nor GC timing matters. The `force` closure that `.ry_defer_s4` hands to
+  `ryLoaderDefer` cannot see the loader environment, although `environment(load_all)` binds
+  `.ry_force_s4`. The likely cause, unverified: the full reload's `.ry_new_package` registers
+  the new definitions under the same root key while something from the old load's state stays
+  reachable, or the closure's enclosing frame is rewired once `.ry_defer_s4` returns. A plain R
+  closure that a function stores and a later call runs keeps its enclosure. Reproduce with the
+  `SHAPES` package from `test_load.rs`: `ry load DIR -e "options(ry.load.lazy_s4 = TRUE);
+  load_all('DIR', full = TRUE)" -e "isVirtualClass('Sq')"`.
+- **`oracle`: `recorded_outcomes_match_gnu_r` on `s4__deparse_class_definition`.** GNU R 4.6.2
+  deparses `methods::as` where the recording has `as`, so the recording has drifted. Re-record
+  the case.
+
 ## Open: the package loader
 
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
