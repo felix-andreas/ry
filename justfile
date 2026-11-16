@@ -76,6 +76,24 @@ ci:
     just clippy
     just battery
 
+# CI's collection-stress job (ci.yml, job `stress`), which the release gate requires next to
+# `just ci` (docs: development/releasing.md, "The release gate"). It runs in the same shell with
+# the same variables. Every oracle case runs twice in one process under seeded stress with the
+# heap checked, for three seeds, and the generated programs run under GNU R, tier 0, the JIT and
+# the same repeated stress.
+ci-stress:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export TZ=UTC NOT_CRAN=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0
+    R_HOME=$(R RHOME)
+    export R_HOME
+    bash tools/oracle-locales.sh
+    just base-r dev
+    for seed in 0 1 2; do
+        FUZZ_SEED=$seed just gc-torture repeat
+    done
+    just fuzz-differential 0 300 ry-tier0,ry-jit,ry-repeat-gctorture-seeded
+
 # Workspace tests; `zed_ry` needs a wasm toolchain, so it is excluded.
 battery *args:
     cargo test --workspace --exclude zed_ry {{ args }}
@@ -751,12 +769,14 @@ fuzz-differential seed="0" count="200" engines="ry-tier0,ry-jit":
 # `just gc-torture young` keeps survivors collectable (`RY_GC_STRESS=young`), which finds an
 # object only a Rust local holds, and `just gc-torture seeded` collects at random gaps with the
 # write barrier checked (`RY_GC_STRESS=seed:N`, `RY_GC_VERIFY`), which finds a store that skipped
-# the barrier; `FUZZ_SEED` picks its gaps. `ORACLE_ENGINE=ry-gctorture cargo test -p oracle`
-# compares the cases with their recorded outcomes instead.
+# the barrier; `FUZZ_SEED` picks its gaps. `just gc-torture repeat` adds a second pass to the
+# seeded mode: each case runs twice in one process, which finds what a closure's first call left
+# behind for its second (a reused frame, a call site's plan). `ORACLE_ENGINE=ry-gctorture cargo
+# test -p oracle` compares the cases with their recorded outcomes instead.
 gc-torture mode="plain":
     cargo build -q -p ry-lang -p libr -p rcmd
     FUZZ_ITERS=1000000 cargo test -p oracle --test test_cases \
-        {{ if mode == "young" { "cases_survive_young_gc_torture" } else if mode == "seeded" { "native_cases_keep_the_write_barrier_under_seeded_gc_torture" } else { "cases_survive_gc_torture" } }} \
+        {{ if mode == "young" { "cases_survive_young_gc_torture" } else if mode == "seeded" { "native_cases_keep_the_write_barrier_under_seeded_gc_torture" } else if mode == "repeat" { "cases_survive_a_second_pass_under_seeded_gc_torture" } else { "cases_survive_gc_torture" } }} \
         -- --exact --nocapture
 
 # The language-server simulator over many seeds: `just simulate 1000 120` runs seeds 0 to 999 with

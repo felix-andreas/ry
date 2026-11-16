@@ -15,6 +15,11 @@
 //! compiled body must not evaluate them first. The block draws from its own stream, so adding it
 //! left the rest of every seed's program unchanged.
 //!
+//! A third block, also on its own stream, replaces elements of vectors, matrices and lists whose
+//! lengths sit on either side of each size at which the runtime changes how it stores a value,
+//! and calls each function three times with the same argument, because storage that is right for
+//! a fresh short vector is where a second call or a longer one goes wrong.
+//!
 //! Every program is deterministic under GNU R: nothing reads the clock, addresses, the
 //! environment or an unseeded random number, and no environment or closure is ever printed.
 
@@ -44,7 +49,131 @@ pub fn program(seed: u64) -> String {
     text.push_str(&replacement_promises(&mut SplitMix64(
         seed ^ 0x9e37_79b9_7f4a_7c15,
     )));
+    text.push_str(&storage_thresholds(&mut SplitMix64(
+        seed ^ 0xc2b2_ae3d_27d4_eb4f,
+    )));
     text.push_str(&generator.ending());
+    text
+}
+
+/// The lengths at which the runtime changes how it stores or copies a vector, each with a
+/// neighbor on either side: the 64 elements from which a copied vector is wrapped rather than
+/// duplicated and a move stops tracking, the 128 elements one card of a list covers, and the
+/// lengths whose data fills the largest small-object slot for 16-, 8- and 4-byte elements (126,
+/// 252 and 504), past which a vector is allocated on its own. The short lengths cover the
+/// small size classes and the inline capacities of 8.
+const THRESHOLD_LENGTHS: [usize; 24] = [
+    1, 7, 8, 9, 16, 60, 63, 64, 65, 72, 125, 126, 127, 128, 129, 251, 252, 253, 256, 503, 504, 505,
+    2016, 2017,
+];
+
+/// Replacements into values of every storage shape at [`THRESHOLD_LENGTHS`]: several element
+/// assignments in one function body, a loop of them, growth past the length, and attribute
+/// replacements, on a fresh constant vector, a sequence, a matrix, a list and a character vector.
+/// Each function runs three times on the same global, whose summary is printed beside the
+/// result's each time, so a write that reaches the caller's value, storage that a first call
+/// left in a state the second cannot use, or a freed vector shows up as a different line.
+fn storage_thresholds(rng: &mut SplitMix64) -> String {
+    // `@` stands for the length. The last three are matrices of eight rows.
+    const VECTORS: [&str; 12] = [
+        "numeric(@)",
+        "integer(@)",
+        "logical(@)",
+        "rep(0, @)",
+        "seq_len(@)",
+        "as.numeric(seq_len(@))",
+        "character(@)",
+        "rep(c(\"a\", \"bc\"), length.out = @)",
+        "vector(\"list\", @)",
+        "as.list(seq_len(@))",
+        "complex(@)",
+        "raw(@)",
+    ];
+    const MATRICES: [&str; 4] = [
+        "matrix(0, 8, @ %/% 8)",
+        "matrix(0L, 8, @ %/% 8)",
+        "matrix(seq_len(@ %/% 8 * 8), 8)",
+        "matrix(\"a\", 8, @ %/% 8)",
+    ];
+    let mut text = String::from(
+        "sum_st <- function(x) {\n  total <- if (is.list(x)) sum(lengths(x)) else if (is.character(x)) sum(nchar(x), na.rm = TRUE) else if (is.complex(x)) sum(Re(x), na.rm = TRUE) + sum(Im(x), na.rm = TRUE) else sum(as.numeric(x), na.rm = TRUE)\n  paste(typeof(x), length(x), paste(dim(x), collapse = \"x\"), total, sum(is.na(unlist(x))), sum(nchar(names(x))))\n}\nreport_st <- function(label, f, x0) {\n  for (n in 1:3) {\n    out <- tryCatch(sum_st(f(x0)), error = function(e) paste(\"error:\", conditionMessage(e)))\n    cat(label, n, out, \"| argument:\", sum_st(x0), \"\\n\")\n  }\n}\n",
+    );
+    for shape_number in 0..2 + rng.below(3) {
+        let length = THRESHOLD_LENGTHS[rng.below(THRESHOLD_LENGTHS.len())];
+        let matrix = rng.chance(1, 3) && length >= 16;
+        let constructor = match matrix {
+            true => MATRICES[rng.below(MATRICES.len())],
+            false => VECTORS[rng.below(VECTORS.len())],
+        }
+        .replace('@', &length.to_string());
+        // A value of the constructor's own type, so the assignment stays in place when it can.
+        let value = if constructor.contains("list") {
+            ["list(1, 2)", "\"v\"", "NULL", "7"][rng.below(4)]
+        } else if constructor.contains('"') || constructor.contains("character") {
+            ["\"v\"", "NA_character_"][rng.below(2)]
+        } else if constructor.contains("raw") {
+            "as.raw(7)"
+        } else if constructor.contains("complex") {
+            "1+2i"
+        } else if constructor.contains("logical") {
+            ["TRUE", "NA"][rng.below(2)]
+        } else if constructor.contains("0L")
+            || constructor.contains("integer")
+            || constructor.starts_with("seq_len")
+            || constructor.starts_with("matrix(seq_len")
+        {
+            ["7L", "NA_integer_", "7.5"][rng.below(3)]
+        } else {
+            ["7", "NA_real_", "7L"][rng.below(3)]
+        };
+        let single = match constructor.contains("list") {
+            true => ["x[[@]]", "x[@]"][rng.below(2)],
+            false => ["x[@]", "x[[@]]"][rng.below(2)],
+        };
+        let element = |index: &str| match matrix {
+            true => format!("x[{index}, {index}] <- {value}"),
+            false => format!("{} <- {value}", single.replace('@', index)),
+        };
+        let columns = length / 8;
+        let last = match matrix {
+            true => columns.min(8).to_string(),
+            false => length.to_string(),
+        };
+        let body = match rng.below(7) {
+            // Two or three assignments in one body, the shape a single call site plan serves.
+            0 => format!("{}; {}; x", element("1"), element(&last)),
+            1 => format!("{}; {}; {}; x", element("1"), element("1"), element(&last)),
+            2 => format!("for (i in 1:{last}) {}; x", element("i")),
+            // Growth across the length, one element at a time.
+            3 if !matrix => format!(
+                "for (i in {}:{}) {}; x",
+                length.saturating_sub(1).max(1),
+                length + 2,
+                element("i")
+            ),
+            4 if !matrix => format!(
+                "names(x) <- rep(\"n\", length(x)); {}; names(x)[{last}] <- \"last\"; x",
+                element("1")
+            ),
+            5 => format!(
+                "attr(x, \"note\") <- \"a\"; {}; y <- x; {}; attr(y, \"note\") <- NULL; y",
+                element("1"),
+                element(&last)
+            ),
+            6 if matrix => format!(
+                "x[1, ] <- {value}; x[, {last}] <- {value}; {}; x",
+                element("2")
+            ),
+            _ => format!(
+                "inner <- function(x) {{ {}; x }}; x <- inner(x); x <- inner(x); {}; x",
+                element("1"),
+                element(&last)
+            ),
+        };
+        text.push_str(&format!(
+            "x{shape_number}_st <- {constructor}\nf{shape_number}_st <- function(x) {{ {body} }}\nreport_st(\"st{shape_number}\", f{shape_number}_st, x{shape_number}_st)\n"
+        ));
+    }
     text
 }
 

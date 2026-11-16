@@ -531,7 +531,9 @@ its replay command, and `just fuzz-differential` and `just gc-torture` are the l
 `crates/oracle/tests/test_gallery.rs` renders a seeded sample of the plot gallery under both
 engines and compares the images ([Corpus and oracle](/development/corpus-and-oracle)).
 `just gc-torture` runs every oracle case on every core and takes about ten minutes on four cores
-in a debug build, and `just gc-torture young` runs them under `ry-gctorture-young`. The generated
+in a debug build, and `just gc-torture young` runs them under `ry-gctorture-young`.
+`just gc-torture repeat` runs them twice in one process under seeded stress with the heap checked
+(`ry-repeat-gctorture-seeded`), and prints each case that takes over a minute. The generated
 programs run under both torture engines. `RY_GC_STRESS=1` stresses from the script's start and
 `RY_GC_STRESS=startup` from the first allocation, which takes about seven seconds on an empty script
 in a debug build ([Robustness](/development/robustness) lists the modes).
@@ -572,7 +574,8 @@ A crash is never a known failure. When an engine is killed by a signal, the run 
 as `CRASHED` and counts it as new even if the file lists it, because a crash is a memory-safety
 bug and blocks until it is fixed. Where it shows can depend on the host, since it depends on
 where the collector happens to run, which is why the gctorture engines (`ry-gctorture`,
-`ry-gctorture-young` and `ry-jit-gctorture`) exist. The file has no mark that lets a case pass on
+`ry-gctorture-young`, `ry-gctorture-seeded`, `ry-repeat-gctorture-seeded` and `ry-jit-gctorture`)
+exist. The file has no mark that lets a case pass on
 some runs and fail on others. A beta release requires the file to be empty.
 
 A count is only trustworthy if it covers every case, so `oracle compare` also refuses to start when

@@ -8,6 +8,12 @@
 # syntax error hides the output of the lines before it; the driver's own frames show up in
 # sys.nframe() and sys.calls(); commandArgs(TRUE) holds the two paths; and quit() ends the
 # run without a report.
+#
+# With ORACLE_PASSES above 1 the driver evaluates the same parsed expressions that many times in
+# the one process. The report describes the first pass alone and is written after the last, so a
+# crash in a later pass leaves no report. A later pass starts from the state the passes before it
+# left, so what it prints is not compared: it follows a marker line on standard output, which
+# the oracle cuts at.
 local({
   argv <- commandArgs(trailingOnly = TRUE)
   script <- argv[1L]
@@ -42,7 +48,7 @@ local({
   }
   json_array <- function(items) paste0("[", paste(vapply(items, json_string, ""), collapse = ","), "]")
 
-  write_report <- function() {
+  report_text <- function() {
     value <- "null"
     if (!is.null(last)) {
       deparsed <- paste(
@@ -51,12 +57,11 @@ local({
       )
       value <- sprintf("{\"kind\":%s,\"deparsed\":%s}", json_string(typeof(last$value)), json_string(deparsed))
     }
-    body <- sprintf(
+    sprintf(
       "{\"messages\":%s,\"warnings\":%s,\"errors\":%s,\"value\":%s,\"libraries\":%s}\n",
       json_array(messages), json_array(warnings), json_array(errors), value,
       json_string(Sys.getenv("R_LIBS"))
     )
-    writeLines(body, report, useBytes = TRUE)
   }
 
   expressions <- tryCatch(
@@ -94,5 +99,32 @@ local({
     )
     if (failed) break
   }
-  write_report()
+  # The text is made before a later pass can change what the last value refers to.
+  body <- report_text()
+
+  passes <- suppressWarnings(as.integer(Sys.getenv("ORACLE_PASSES", "1")))
+  if (!is.na(passes) && passes > 1L) {
+    for (pass in 2:passes) {
+      cat("\001oracle: pass ", pass, "\001\n", sep = "")
+      for (expression in expressions) {
+        failed <- FALSE
+        withCallingHandlers(
+          tryCatch(
+            {
+              result <- withVisible(eval(expression, globalenv()))
+              if (result$visible) print(result$value)
+            },
+            error = function(condition) failed <<- TRUE
+          ),
+          warning = function(condition) {
+            if (isTRUE(getOption("warn") >= 2)) return(invisible())
+            invokeRestart("muffleWarning")
+          },
+          message = function(condition) invokeRestart("muffleMessage")
+        )
+        if (failed) break
+      }
+    }
+  }
+  writeLines(body, report, useBytes = TRUE)
 })

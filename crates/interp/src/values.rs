@@ -1570,7 +1570,7 @@ pub unsafe fn unwrap_assigned(value: Sexp, bound: bool) -> Sexp {
 }
 
 /// GNU R's `WRAP_THRESHOLD`: a shorter vector is cheaper to copy than to wrap.
-const WRAP_THRESHOLD: usize = 64;
+pub(crate) const WRAP_THRESHOLD: usize = 64;
 
 unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
     let heap = crate::heap();

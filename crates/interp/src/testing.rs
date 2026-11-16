@@ -6,7 +6,7 @@ use {
     crate::{bytecode, code_image, deparse, eval, lower, serialize, unwind::Unwind, values},
     heap::{
         Heap,
-        object::{Sexp, SexpType},
+        object::{CARD_ELEMENTS, LARGEST_SMALL_BYTES, Sexp, SexpType, VECTOR_DATA_OFFSET},
     },
     std::sync::{Mutex, Once},
     syntax::testing::Entropy,
@@ -445,6 +445,55 @@ pub fn check_element_access_agreement(entropy: &mut impl Entropy) {
                 "call {}: `{body}` with a = {a}, b = {b}",
                 call + 1
             );
+        }
+    });
+}
+
+/// A closure that writes elements of its argument answers on every call what the same statements
+/// answer once at top level, and leaves the caller's value as it was. A second and a third call
+/// run the closure's reused frame and its call sites' plans, and the argument's length sits at a
+/// storage threshold (`storage_lengths`), where a value changes its representation.
+pub fn check_replacement_agreement(entropy: &mut impl Entropy) {
+    let lengths = storage_lengths();
+    let length = lengths[entropy.below(lengths.len())];
+    let kind = &REPLACEMENT_KINDS[entropy.below(REPLACEMENT_KINDS.len())];
+    let columns = match length % 8 == 0 && length >= 16 && entropy.chance(1, 2) {
+        true => Some(length / 8),
+        false => None,
+    };
+    let vector = kind.subject.replace('N', &length.to_string());
+    let subject = match columns {
+        Some(columns) => format!("{{ m <- {vector}; attr(m, \"dim\") <- c(8L, {columns}L); m }}"),
+        None => vector,
+    };
+    let body = replacement_program(entropy, length, kind, columns);
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed.
+        unsafe {
+            let case = format!("`{body}` with x = {subject}");
+            assert_ne!(
+                run(&format!("a0 <- {subject}")),
+                "error",
+                "the subject does not evaluate: {subject}"
+            );
+            let before = run("a0");
+            let direct = run(&format!(
+                "x <- a0\nlocal_value <- {{ {body} }}\nlocal_value"
+            ));
+            assert_eq!(
+                before,
+                run("a0"),
+                "the direct run changed its source: {case}"
+            );
+            run(&format!("f <- function(x) {{ {body} }}"));
+            for call in 1..=3 {
+                assert_eq!(direct, run("f(a0)"), "call {call}: {case}");
+                assert_eq!(
+                    before,
+                    run("a0"),
+                    "call {call} changed its argument: {case}"
+                );
+            }
         }
     });
 }
@@ -1624,6 +1673,115 @@ fn element_program(entropy: &mut impl Entropy) -> String {
         statements.push(statement);
     }
     statements.push("list(x, attributes(x), v)".to_owned());
+    statements.join("\n")
+}
+
+/// A vector kind the replacement programs write into: how to build one of `N` elements without
+/// base R, a value of its own type, and a value that forces the vector to another type.
+struct ReplacementKind {
+    subject: &'static str,
+    same: &'static str,
+    other: &'static str,
+}
+
+const REPLACEMENT_KINDS: [ReplacementKind; 7] = [
+    ReplacementKind {
+        subject: "0 * (1:N)",
+        same: "1.5",
+        other: "\"s\"",
+    },
+    ReplacementKind {
+        subject: "(1:N) + 0L",
+        same: "7L",
+        other: "1.5",
+    },
+    // A compact sequence, which a write must expand first.
+    ReplacementKind {
+        subject: "1:N",
+        same: "7L",
+        other: "1.5",
+    },
+    ReplacementKind {
+        subject: "(1:N) > 0L",
+        same: "NA",
+        other: "2L",
+    },
+    ReplacementKind {
+        subject: "as.character(1:N)",
+        same: "\"s\"",
+        other: "list(1)",
+    },
+    ReplacementKind {
+        subject: "(1:N) * 1i",
+        same: "2i",
+        other: "\"s\"",
+    },
+    ReplacementKind {
+        subject: "as.raw((1:N) %% 256L)",
+        same: "as.raw(9L)",
+        other: "as.raw(255L)",
+    },
+];
+
+/// The lengths one below, at and one above each length at which a vector's storage changes:
+/// a copy becomes a wrapper, a handle vector gets a second card, and a vector of each element
+/// size leaves the small-object pages for an allocation of its own.
+fn storage_lengths() -> Vec<usize> {
+    let room = LARGEST_SMALL_BYTES - VECTOR_DATA_OFFSET;
+    let mut lengths = vec![1, 2, 8];
+    for threshold in [
+        values::WRAP_THRESHOLD,
+        CARD_ELEMENTS,
+        room,
+        room / 4,
+        room / 8,
+        room / 16,
+    ] {
+        lengths.extend([threshold - 1, threshold, threshold + 1]);
+    }
+    // Lengths a matrix of eight rows can have, on both sides of the same thresholds.
+    lengths.extend([16, 72, room / 8 / 8 * 8, room / 8 / 8 * 8 + 8]);
+    lengths
+}
+
+fn replacement_program(
+    entropy: &mut impl Entropy,
+    length: usize,
+    kind: &ReplacementKind,
+    columns: Option<usize>,
+) -> String {
+    let (same, other) = (kind.same, kind.other);
+    let mut statements = Vec::new();
+    for _ in 0..entropy.below(4) + 2 {
+        let index = [1, 2, length, length + 1, length + 70][entropy.below(5)];
+        let statement = match (entropy.below(12), columns) {
+            (0..=3, Some(columns)) => {
+                let row = [1, 2, 8][entropy.below(3)];
+                let column = [1, 2, columns][entropy.below(3)];
+                match entropy.below(4) {
+                    0 | 1 => format!("x[{row}L, {column}L] <- {same}"),
+                    2 => format!("x[{row}L, ] <- {same}"),
+                    _ => format!("x[, {column}L] <- {same}"),
+                }
+            }
+            (0 | 1, None) | (4, _) => format!("x[{index}L] <- {same}"),
+            (2, None) | (5, _) => format!("x[[{index}L]] <- {same}"),
+            (3, None) => format!("x[c(1L, {length}L)] <- {same}"),
+            (6, _) => format!("x[{index}L] <- {other}"),
+            (7, _) => format!("for (k in 1:3) x[k] <- {same}"),
+            (8, _) => format!("y <- x; y[1L] <- {same}; x[{length}L] <- y[[1L]]"),
+            (9, _) => format!("g <- function(z) {{ z[1L] <- {same}; z }}; x <- g(x); x <- g(x)"),
+            (10, _) => format!("x <- c(x, {same})"),
+            _ => [
+                "names(x) <- NULL",
+                "attr(x, \"n\") <- 1L",
+                "x[2L] <- x[[1L]]",
+            ][entropy.below(3)]
+            .to_owned(),
+        };
+        statements.push(statement);
+    }
+    statements.push("list(x, attributes(x))".to_owned());
     statements.join("\n")
 }
 

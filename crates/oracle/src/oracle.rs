@@ -97,7 +97,7 @@ struct Report {
 }
 
 /// The modes of ry's runtime that `--engine` names, which [`KnownFailure::engine`] must be one of.
-pub const ENGINES: [&str; 7] = [
+pub const ENGINES: [&str; 9] = [
     "ry",
     "ry-tier0",
     "ry-jit",
@@ -105,6 +105,8 @@ pub const ENGINES: [&str; 7] = [
     "ry-gctorture-young",
     "ry-gctorture-seeded",
     "ry-jit-gctorture",
+    "ry-repeat",
+    "ry-repeat-gctorture-seeded",
 ];
 
 /// A case that fails on main under one engine, listed in [`KNOWN_FAILURES_FILE`] so that a run
@@ -252,7 +254,13 @@ pub struct ProcessEngine {
     /// A run that takes longer is killed and fails, so a hang under fuzzing is a finding
     /// rather than a stuck harness.
     timeout: Option<Duration>,
+    /// How many times the driver evaluates the script in the one process
+    /// ([`ProcessEngine::repeated`]).
+    passes: u32,
 }
+
+/// What the driver prints before each pass after the first, up to the pass number.
+const PASS_MARKER: &str = "\u{1}oracle: pass ";
 
 /// How an engine is handed `driver.R`.
 #[derive(Clone, Copy)]
@@ -275,6 +283,7 @@ impl ProcessEngine {
             erases_annotations: true,
             environment: Vec::new(),
             timeout: None,
+            passes: 1,
         }
     }
 
@@ -289,6 +298,8 @@ impl ProcessEngine {
             "ry-gctorture-young" => Some(ProcessEngine::ry_gc_torture_young()),
             "ry-gctorture-seeded" => Some(ProcessEngine::ry_gc_torture_seeded(0)),
             "ry-jit-gctorture" => Some(ProcessEngine::ry_jit_gc_torture()),
+            "ry-repeat" => Some(ProcessEngine::ry_repeat()),
+            "ry-repeat-gctorture-seeded" => Some(ProcessEngine::ry_repeat_gc_torture_seeded(0)),
             command => ProcessEngine::from_command(command),
         }
     }
@@ -296,6 +307,17 @@ impl ProcessEngine {
     /// Kills a run that takes longer than `timeout` and reports it as failed.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    /// Evaluates the script `passes` times in the one process. The outcome is the first pass's:
+    /// a later pass starts from the state the earlier ones left, so only its survival is
+    /// checked. A crash or a failed runtime check in any pass fails the run. The later passes
+    /// run each function body again from a new closure over the same code, which is where a
+    /// compiled body, a call-site plan or a reused frame first meets values it did not create.
+    /// A case marked `# oracle: runs once` ([`runs_once`]) runs once all the same.
+    pub fn repeated(mut self, passes: u32) -> Self {
+        self.passes = passes;
         self
     }
 
@@ -371,6 +393,22 @@ impl ProcessEngine {
         engine
     }
 
+    /// ry's runtime running every script twice in one process ([`ProcessEngine::repeated`]).
+    pub fn ry_repeat() -> Self {
+        let mut engine = ProcessEngine::ry().repeated(2);
+        engine.name = "ry-repeat".to_string();
+        engine
+    }
+
+    /// [`ProcessEngine::ry_gc_torture_seeded`] running every script twice in one process, so the
+    /// second pass's reused code and frames meet collections at the seed's random gaps with
+    /// the heap's invariants checked.
+    pub fn ry_repeat_gc_torture_seeded(seed: u64) -> Self {
+        let mut engine = ProcessEngine::ry_gc_torture_seeded(seed).repeated(2);
+        engine.name = "ry-repeat-gctorture-seeded".to_string();
+        engine
+    }
+
     /// ry's runtime with its JIT forced on, so every body that runs twice and every loop runs
     /// compiled. Comparing it against GNU R checks the compiled tier on every case.
     pub fn ry_jit() -> Self {
@@ -397,6 +435,7 @@ impl ProcessEngine {
                 .map(|home| vec![("R_HOME".to_string(), home)])
                 .unwrap_or_default(),
             timeout: None,
+            passes: 1,
         }
     }
 
@@ -412,6 +451,7 @@ impl ProcessEngine {
             erases_annotations: false,
             environment: Vec::new(),
             timeout: None,
+            passes: 1,
         })
     }
 }
@@ -491,7 +531,14 @@ impl Engine for ProcessEngine {
                 }
             }
         }
+        let passes = match runs_once(&script) {
+            true => 1,
+            false => self.passes,
+        };
         command.arg(&script).arg(&report_path);
+        if passes > 1 {
+            command.env("ORACLE_PASSES", passes.to_string());
+        }
         command
             .current_dir(&directory)
             .env("LANG", "C.UTF-8")
@@ -517,6 +564,16 @@ impl Engine for ProcessEngine {
                 self.timeout.map_or(0, |timeout| timeout.as_secs())
             )));
         }
+        // A report does not excuse a crash: the driver writes it before the process exits, and
+        // finalizers and the runtime's own shutdown run after that.
+        if killed_by_signal(output.status) && report_path.exists() {
+            return Err(EngineError::Crashed(format!(
+                "{} crashed after writing its report ({}): {}",
+                self.name,
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
         let report = std::fs::read_to_string(&report_path);
         let report = report.map_err(|_| {
             let message = format!(
@@ -533,8 +590,21 @@ impl Engine for ProcessEngine {
         let report: Report = serde_json::from_str(&report).map_err(|error| {
             EngineError::Failed(format!("{} wrote an unreadable report: {error}", self.name))
         })?;
+        let mut stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        if passes > 1 {
+            match stdout.find(PASS_MARKER) {
+                Some(first_pass_end) => stdout.truncate(first_pass_end),
+                None => {
+                    return Err(EngineError::Failed(format!(
+                        "{} printed no pass marker: the script left standard output diverted, \
+                         so it cannot run twice in one process (mark it `{RUNS_ONCE}`)",
+                        self.name
+                    )));
+                }
+            }
+        }
         Ok(Outcome {
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stdout,
             messages: report.messages,
             warnings: report.warnings,
             errors: report.errors,
@@ -1123,6 +1193,20 @@ pub fn library_dependent(case: &Path) -> bool {
 }
 
 const LIBRARY_DEPENDENT: &str = "# oracle: library-dependent";
+
+/// Whether `case` declares, in a leading `# oracle: runs once` comment, that a second evaluation
+/// in the same process says nothing about the runtime: the script ends the process, leaves
+/// standard output diverted, or waits for something its first pass used up. An engine made with
+/// [`ProcessEngine::repeated`] runs such a case once.
+pub fn runs_once(case: &Path) -> bool {
+    std::fs::read_to_string(case).is_ok_and(|text| {
+        text.lines()
+            .take_while(|line| line.starts_with('#'))
+            .any(|line| line.trim_end() == RUNS_ONCE)
+    })
+}
+
+const RUNS_ONCE: &str = "# oracle: runs once";
 
 fn case_requirements(case: &Path) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(case) else {
