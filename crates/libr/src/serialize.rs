@@ -1925,7 +1925,7 @@ fn bytes_of_mut<T>(values: &mut [T]) -> &mut [u8] {
 /// (`crate::altrep`), which holds base R's classes and every class a loaded package registered.
 /// A class that is not registered makes the reader load its package's namespace and retry, as
 /// GNU R does; failing that, it reads as a zero-length vector of its type, with GNU R's warning.
-unsafe fn unserialize_altrep(
+pub(crate) unsafe fn unserialize_altrep(
     info: Sexp,
     state: Sexp,
     attributes: Sexp,

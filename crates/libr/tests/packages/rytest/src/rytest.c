@@ -317,6 +317,100 @@ SEXP rytest_setcdr_any(void)
     return tail;
 }
 
+/* Removing dim through setAttrib drops dimnames too (tibble's matrixToDataFrame relies on it):
+   returns the number of attributes left on a 2 x 2 matrix with dimnames. */
+SEXP rytest_remove_dim(void)
+{
+    SEXP matrix = PROTECT(allocMatrix(INTSXP, 2, 2));
+    for (int i = 0; i < 4; i++) INTEGER(matrix)[i] = i;
+    SEXP dimnames = PROTECT(allocVector(VECSXP, 2));
+    SEXP column = PROTECT(allocVector(STRSXP, 2));
+    SET_STRING_ELT(column, 0, mkChar("c"));
+    SET_STRING_ELT(column, 1, mkChar("d"));
+    SET_VECTOR_ELT(dimnames, 1, column);
+    setAttrib(matrix, R_DimNamesSymbol, dimnames);
+    setAttrib(matrix, R_DimSymbol, R_NilValue);
+    UNPROTECT(3);
+    return ScalarInteger(length(ATTRIB(matrix)));
+}
+
+/* GNU R ends R_check_class_etc's table at its first empty string, as Matrix's tables do: the
+   entry after it is never read, so a class named only there is not found (-1). */
+SEXP rytest_check_class_table(void)
+{
+    static const char *valid[] = {"a", "b", "", "x"};
+    SEXP object = PROTECT(allocVector(INTSXP, 1));
+    setAttrib(object, R_ClassSymbol, mkString("x"));
+    SEXP found = PROTECT(allocVector(INTSXP, 2));
+    INTEGER(found)[0] = R_check_class_etc(object, valid);
+    setAttrib(object, R_ClassSymbol, mkString("b"));
+    INTEGER(found)[1] = R_check_class_etc(object, valid);
+    UNPROTECT(2);
+    return found;
+}
+
+/* GNU R installs an unreferenced dimnames list itself, so filling it afterwards shows. */
+SEXP rytest_dimnames_filled_late(void)
+{
+    SEXP array = PROTECT(allocMatrix(INTSXP, 1, 2));
+    SEXP dimnames = PROTECT(allocVector(VECSXP, 2));
+    setAttrib(array, R_DimNamesSymbol, dimnames);
+    SEXP column = PROTECT(allocVector(STRSXP, 2));
+    SET_STRING_ELT(column, 0, mkChar("c"));
+    SET_STRING_ELT(column, 1, mkChar("d"));
+    SET_VECTOR_ELT(dimnames, 1, column);
+    UNPROTECT(3);
+    return VECTOR_ELT(getAttrib(array, R_DimNamesSymbol), 1);
+}
+
+/* GNU R installs the dim vector itself, so its names survive, as stars' C++ code expects. */
+/* GNU R's dimgets removes only dimnames, so the object keeps its names, whatever the type of
+   the dim vector. */
+SEXP rytest_dim_keeps_names(void)
+{
+    SEXP vector = PROTECT(allocVector(REALSXP, 4));
+    SEXP names = PROTECT(allocVector(STRSXP, 4));
+    for (int i = 0; i < 4; i++) {
+        REAL(vector)[i] = i;
+        char name[2] = {(char) ('a' + i), 0};
+        SET_STRING_ELT(names, i, mkChar(name));
+    }
+    setAttrib(vector, R_NamesSymbol, names);
+    SEXP dim = PROTECT(allocVector(INTSXP, 2));
+    INTEGER(dim)[0] = 2;
+    INTEGER(dim)[1] = 2;
+    setAttrib(vector, R_DimSymbol, dim);
+    UNPROTECT(3);
+    return getAttrib(vector, R_NamesSymbol);
+}
+
+SEXP rytest_named_dim(void)
+{
+    SEXP array = PROTECT(allocVector(REALSXP, 6));
+    SEXP dim = PROTECT(allocVector(INTSXP, 2));
+    INTEGER(dim)[0] = 2;
+    INTEGER(dim)[1] = 3;
+    SEXP names = PROTECT(allocVector(STRSXP, 2));
+    SET_STRING_ELT(names, 0, mkChar("x"));
+    SET_STRING_ELT(names, 1, mkChar("y"));
+    setAttrib(dim, R_NamesSymbol, names);
+    setAttrib(array, R_DimSymbol, dim);
+    UNPROTECT(3);
+    return getAttrib(getAttrib(array, R_DimSymbol), R_NamesSymbol);
+}
+
+/* udunits' ut_trim trims a string in place by moving its text forward and writing a NUL. */
+SEXP rytest_trim_in_place(SEXP x)
+{
+    char *text = (char *) CHAR(STRING_ELT(x, 0));
+    size_t start = strspn(text, " ");
+    size_t length = strlen(text + start);
+    memmove(text, text + start, length + 1);
+    while (length > 0 && text[length - 1] == ' ')
+        text[--length] = '\0';
+    return x;
+}
+
 /* R_alloc. */
 
 SEXP rytest_r_alloc(SEXP count)
@@ -1557,6 +1651,12 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_escaped_temporary", (DL_FUNC) &rytest_escaped_temporary, 0},
     {"rytest_return_null", (DL_FUNC) &rytest_return_null, 0},
     {"rytest_setcdr_any", (DL_FUNC) &rytest_setcdr_any, 0},
+    {"rytest_remove_dim", (DL_FUNC) &rytest_remove_dim, 0},
+    {"rytest_dimnames_filled_late", (DL_FUNC) &rytest_dimnames_filled_late, 0},
+    {"rytest_check_class_table", (DL_FUNC) &rytest_check_class_table, 0},
+    {"rytest_named_dim", (DL_FUNC) &rytest_named_dim, 0},
+    {"rytest_dim_keeps_names", (DL_FUNC) &rytest_dim_keeps_names, 0},
+    {"rytest_trim_in_place", (DL_FUNC) &rytest_trim_in_place, 1},
     {"rytest_destructor_count", (DL_FUNC) &rytest_destructor_count, 0},
     {"rytest_api_extras", (DL_FUNC) &rytest_api_extras, 0},
     {"rytest_accessor_agreement", (DL_FUNC) &rytest_accessor_agreement, 1},

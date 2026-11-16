@@ -3136,9 +3136,10 @@ pub(crate) unsafe fn run(
 }
 
 /// Forces each argument promise a compiled call read without forcing: a promise shared through
-/// `...` must keep the value this call saw, as if tier 0 had forced it. Settling runs code only
-/// for a checked promise, which the reads decline, but the native call may have run R code that
-/// checks one since, and that check's error is the call's.
+/// `...` must keep the value this call saw, as if tier 0 had forced it. Settling a checked
+/// promise runs its annotation checks, which a read took only when they admit the value
+/// unchanged (`annotations::accepts_unchanged`), but the native call may have run R code since
+/// that changed what they admit, and a check's error is the call's.
 unsafe fn force_read(read: &[(Sexp, Sexp)]) -> R<()> {
     for &(promise, value) in read {
         settle_unforced(promise, value)?;
@@ -3160,11 +3161,9 @@ unsafe fn promise_value(
     if promise.car() != values::unbound() {
         return Some(promise.car());
     }
-    // A checked promise runs its annotation check when forced, which only tier 0 does, and
-    // forcing a promise whose code is running raises the recursion error, which a read must not
+    // Forcing a promise whose code is running raises the recursion error, which a read must not
     // replace with a value.
-    if promise.has_gp(gp::CHECKED_PROMISE) || promise.has_gp(PROMISE_SEEN) || depth > MAX_PURE_DEPTH
-    {
+    if promise.has_gp(PROMISE_SEEN) || depth > MAX_PURE_DEPTH {
         return None;
     }
     let expression = promise.cdr();
@@ -3201,6 +3200,12 @@ unsafe fn promise_value(
         // computes what its source does.
         pure_value(bytecode::source_of_body(expression), env, read, depth + 1)?
     };
+    // A checked promise runs the annotation checks of the typed frames it was passed to when it
+    // is forced, which settling it does. A value a check would reject or convert is left to the
+    // interpreter, which reports the failure where R code uses the argument.
+    if promise.has_gp(gp::CHECKED_PROMISE) && !annotations::accepts_unchanged(promise, value) {
+        return None;
+    }
     read.push((promise, value));
     Some(value)
 }

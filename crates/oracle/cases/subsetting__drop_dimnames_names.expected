@@ -1,0 +1,18 @@
+[stdout]
+|  int [1:2, 1:2] 1 2 3 4
+|  - attr(*, "dimnames")=List of 2
+|   ..$ iteration: chr [1:2] "1" "2"
+|   ..$ chain    : chr [1:2] "a" "b"
+|  int [1:2, 1:2] 1 2 3 4
+|  int [1:2, 1:2] 1 2 3 4
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : NULL
+|   ..$ : chr [1:2] "p" "q"
+|  Named int [1:2] 1 2
+|  - attr(*, "names")= chr [1:2] "p" "q"
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

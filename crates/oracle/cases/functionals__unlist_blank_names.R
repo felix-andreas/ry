@@ -1,0 +1,10 @@
+# unlist() keeps a names attribute whose names are all blank, and sapply() follows it.
+x <- structure(list(1, 2), names = c("", ""))
+print(names(unlist(x)))
+print(names(unlist(structure(list(1:2, 3), names = c("", "")))))
+print(names(unlist(list(1, 2))))
+print(names(sapply(x, identity)))
+print(names(sapply(list(1, 2), identity)))
+s <- sapply(structure(list("a"), names = ""), identity)
+print(s)
+print(names(s) == "")
