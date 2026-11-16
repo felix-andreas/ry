@@ -1,14 +1,14 @@
 //! ry's typed core: native values (`values`) and the compiler that turns a strict typed closure
 //! into machine code over them.
 //!
-//! A call of a typed closure from R reaches [`call`], which reads the argument values' types,
-//! compiles the closure for them once (lowering its body to the IR, inserting the reference
-//! counts and generating code), converts the arguments to native values, runs the code and
-//! converts its value back. Whatever the compiler cannot handle, and every call whose code gives
-//! up partway, runs in the interpreter instead, which the caller does when [`call`] returns
-//! `None`. Code gives up before anything it did is visible, so running the call again from the
-//! start is correct, with one exception: code that called an R function ([`ry_call_r`]) may have
-//! done something visible, so once it has, giving up is an error instead of a second run.
+//! A call of a typed closure from R reaches [`call`], which compiles the closure once for the
+//! argument values' types (lowering its body to the IR, inserting the reference counts and
+//! generating code), converts the arguments to native values, runs the code and converts its
+//! value back. What the compiler cannot handle, and every call whose code gives up partway, runs in
+//! the interpreter when [`call`] returns `None`. Code gives up before anything it did is visible,
+//! so rerunning from the start is correct, except after it called an R function ([`ry_call_r`]),
+//! which may have done something visible: from then on, giving up is an error instead of a second
+//! run.
 
 #![allow(unsafe_op_in_unsafe_fn)]
 // Every `unsafe fn` here has one contract: the handles it takes are live objects of this heap.
@@ -1417,19 +1417,17 @@ unsafe fn to_r(ty: Type, out: [u64; 2]) -> Result<Sexp, Unwind> {
 }
 
 /// Makes the R call `site` for compiled code, with the argument words at `words`, and writes the
-/// words of its converted value to `out`. 0 when the call returned; 1 when it raised an error,
-/// which [`call`] raises once the code has given up, or when a conversion the code guessed the
-/// type of gave another type ([`FAILED_GUESS`]), after which [`call`] runs the call again in
-/// the interpreter.
-///
-/// A call that may have done something visible is recorded ([`replay::record`]), so that the
-/// interpreter does not make it a second time if the code gives up later. While the interpreter
-/// runs such a call again, a call the code makes that was recorded gives its recorded value.
+/// words of its converted value to `out`. Returns 0 when the call returned, and 1 when it raised an
+/// error (which [`call`] raises once the code has given up) or when a conversion whose type the
+/// code guessed gave another type ([`FAILED_GUESS`]), after which [`call`] reruns it in the
+/// interpreter. A call that may have done something visible is recorded ([`replay::record`]), and
+/// while the interpreter reruns, a recorded call gives its recorded value instead of happening
+/// twice.
 ///
 /// # Safety
 ///
-/// `site` is a site the code was compiled with, `words` holds the words of its arguments, and
-/// `out` has room for the words of its result.
+/// `site` is a site the code was compiled with, `words` holds the words of its arguments, and `out`
+/// has room for the words of its result.
 pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *mut u64) -> i32 {
     let site = &*site;
     let replayed = replay::replayed(site.call);

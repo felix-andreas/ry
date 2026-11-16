@@ -1215,8 +1215,8 @@ mod tests {
         Ok(())
     }
 
-    /// A blank line inside the rows is a row of missing values however the slices fall. A slice
-    /// of only blank lines used to be skipped. Input: `"c0\n1\n\n\n2\n"` in slices of 1 byte.
+    /// A blank line inside the rows is a row of missing values however the slices fall, including a
+    /// slice of only blank lines. Input: `"c0\n1\n\n\n2\n"` in slices of 1 byte.
     #[test]
     fn a_blank_line_is_a_row_in_any_slice() {
         let [sliced, whole] = read_sliced_and_whole("c0\n1\n\n\n2\n", &ReadOptions::default(), 1);

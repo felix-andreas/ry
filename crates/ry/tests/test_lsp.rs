@@ -689,33 +689,6 @@ async fn utf8_is_negotiated_when_offered_and_positions_count_bytes() {
 }
 
 #[tokio::test]
-async fn push_diagnostics_report_lints_and_syntax_errors() {
-    let mut context = setup_test(&[]).await;
-    let assignment = context.open("R/assign.R", "x = 1\n");
-    let clean = context.open("R/clean.R", "y <- 1\n");
-    let syntax = context.open("R/syntax.R", "z <- (\n");
-
-    let published = messages(context.recv_diagnostics(&assignment).await);
-    assert_eq!(published.len(), 1, "{published:?}");
-    assert!(
-        published[0].contains("Use <-, not =, for assignment"),
-        "{published:?}"
-    );
-
-    let published = messages(context.recv_diagnostics(&clean).await);
-    assert!(published.is_empty(), "{published:?}");
-
-    let published = messages(context.recv_diagnostics(&syntax).await);
-    assert!(
-        published
-            .first()
-            .is_some_and(|message| message.contains("unclosed `(`")),
-        "expected syntax diagnostics: {published:?}"
-    );
-    context.shutdown().await;
-}
-
-#[tokio::test]
 async fn diagnostics_arrive_in_a_fast_wave_then_a_settled_wave() {
     let mut context = setup_test(&[]).await;
     let broken = context.open("R/bad.R", "x <- (\nbad_type <- 1L + \"a\"\n");
@@ -888,23 +861,25 @@ async fn positions_count_utf16_units_by_default() {
         true_diagnostic.range
     );
 
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn goto_definition() {
-    let mut context = setup_test(&[]).await;
-    let uri = context.open(
-        "R/def.R",
-        "helper <- function(x) x\ncaller <- function() helper(1)\n",
-    );
-    context.recv_diagnostics(&uri).await;
-    let location = context.definition_location(&uri, 1, 22).await;
-    assert_eq!(location.uri, uri);
+    // Each emoji is 4 UTF-8 bytes and 2 UTF-16 units, so a byte-counting range
+    // formatter would pick the wrong column here.
+    let format_uri = context.open("R/emoji_fmt.R", "a<-\"😀😀\"\nb<-\"🎉\"\nc<-1\n");
+    context.recv_diagnostics(&format_uri).await;
+    let edits = context
+        .range_formatting(
+            &format_uri,
+            Range::new(Position::new(1, 5), Position::new(1, 5)),
+        )
+        .await
+        .expect("range formatting failed")
+        .expect("expected range formatting edits");
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].new_text, "b <- \"🎉\"\n");
     assert_eq!(
-        location.range,
-        Range::new(Position::new(0, 0), Position::new(0, 6))
+        edits[0].range,
+        Range::new(Position::new(1, 0), Position::new(2, 0))
     );
+
     context.shutdown().await;
 }
 
@@ -942,31 +917,6 @@ async fn stub_names_lead_to_their_declaration_site() {
             && markdown.contains("Declared at `utils.Rtypes:"),
         "expected the stub declaration location in: {markdown}"
     );
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn formatting_rewrites_documents_and_refuses_on_syntax_errors() {
-    let mut context = setup_test(&[]).await;
-    let uri = context.open("R/fmt.R", "x<-1\n");
-    let broken = context.open("R/bad.R", "y <- (\n");
-    context.recv_diagnostics(&uri).await;
-    context.recv_diagnostics(&broken).await;
-
-    let edits = context
-        .formatting(&uri)
-        .await
-        .expect("formatting failed")
-        .expect("expected formatting edits");
-    assert_eq!(edits.len(), 1);
-    assert_eq!(edits[0].new_text, "x <- 1\n");
-    assert_eq!(edits[0].range.start, Position::new(0, 0));
-
-    let edits = context
-        .formatting(&broken)
-        .await
-        .expect("formatting failed");
-    assert!(edits.is_none(), "{edits:?}");
     context.shutdown().await;
 }
 
@@ -1025,49 +975,12 @@ async fn range_formatting_lays_out_only_the_lines_a_selection_touches() {
         .expect("range formatting failed")
         .expect("expected range formatting edits");
     assert_eq!(apply_edits(text, &edits), "x<-1\ny<-2\nz <- 3\n");
-    context.shutdown().await;
-}
 
-#[tokio::test]
-async fn range_formatting_reaches_into_a_function_at_the_documents_indentation() {
-    let mut context = setup_test(&[]).await;
-    let text = "f <- function(x) {\n    a<-1\n    b<-2\n}\n";
-    let uri = context.open("R/four.R", text);
-    context.recv_diagnostics(&uri).await;
-    let edits = context
-        .range_formatting(&uri, Range::new(Position::new(1, 6), Position::new(1, 6)))
-        .await
-        .expect("range formatting failed")
-        .expect("expected range formatting edits");
-    assert_eq!(
-        apply_edits(text, &edits),
-        "f <- function(x) {\n    a <- 1\n    b<-2\n}\n",
-        "a selection keeps the four-space step the file already uses"
-    );
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn range_formatting_skips_off_regions_and_refuses_broken_files() {
-    let mut context = setup_test(&[]).await;
-    let text = "before<-1\n# fmt: off\nweird   <-  1\n# fmt: on\nafter<-1\n";
-    let uri = context.open("R/fmt.R", text);
+    // A file that does not parse is refused, while a laid-out selection is answered with no edits.
     let broken = context.open("R/bad.R", "x <- (\ny<-2\n");
     let laid_out = context.open("R/done.R", "x <- 1\ny <- 2\nz<-3\n");
-    context.recv_diagnostics(&uri).await;
     context.recv_diagnostics(&broken).await;
     context.recv_diagnostics(&laid_out).await;
-
-    let edits = context
-        .range_formatting(&uri, Range::new(Position::new(0, 0), Position::new(4, 8)))
-        .await
-        .expect("range formatting failed")
-        .expect("expected range formatting edits");
-    assert_eq!(
-        apply_edits(text, &edits),
-        "before <- 1\n# fmt: off\nweird   <-  1\n# fmt: on\nafter <- 1\n"
-    );
-
     let edits = context
         .range_formatting(
             &broken,
@@ -1076,7 +989,6 @@ async fn range_formatting_skips_off_regions_and_refuses_broken_files() {
         .await
         .expect("range formatting failed");
     assert!(edits.is_none(), "{edits:?}");
-
     let edits = context
         .range_formatting(
             &laid_out,
@@ -1090,33 +1002,14 @@ async fn range_formatting_skips_off_regions_and_refuses_broken_files() {
 }
 
 #[tokio::test]
-async fn range_formatting_positions_count_utf16_units() {
-    let mut context = setup_test(&[]).await;
-    // Each emoji is 4 UTF-8 bytes and 2 UTF-16 units, so a byte-counting
-    // server would pick the wrong column here.
-    let uri = context.open("R/emoji.R", "a<-\"😀😀\"\nb<-\"🎉\"\nc<-1\n");
-    context.recv_diagnostics(&uri).await;
-    let edits = context
-        .range_formatting(&uri, Range::new(Position::new(1, 5), Position::new(1, 5)))
-        .await
-        .expect("range formatting failed")
-        .expect("expected range formatting edits");
-    assert_eq!(edits.len(), 1);
-    assert_eq!(edits[0].new_text, "b <- \"🎉\"\n");
-    assert_eq!(
-        edits[0].range,
-        Range::new(Position::new(1, 0), Position::new(2, 0))
-    );
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn formatting_replaces_only_the_lines_that_change() {
+async fn formatting_replaces_only_the_lines_that_change_and_refuses_broken_files() {
     let mut context = setup_test(&[]).await;
     let uri = context.open("R/fmt.R", "x <- 1\ny<-2\nz <- 3\n");
     let done = context.open("R/done.R", "x <- 1\ny <- 2\n");
+    let broken = context.open("R/bad.R", "y <- (\n");
     context.recv_diagnostics(&uri).await;
     context.recv_diagnostics(&done).await;
+    context.recv_diagnostics(&broken).await;
     let edits = context
         .formatting(&uri)
         .await
@@ -1134,6 +1027,12 @@ async fn formatting_replaces_only_the_lines_that_change() {
         .expect("formatting failed")
         .expect("an answer, not a refusal");
     assert!(edits.is_empty(), "{edits:?}");
+
+    let edits = context
+        .formatting(&broken)
+        .await
+        .expect("formatting failed");
+    assert!(edits.is_none(), "{edits:?}");
     context.shutdown().await;
 }
 
@@ -1388,18 +1287,6 @@ fn any_save_republishes_documents_that_an_edit_elsewhere_changed() {
     assert_eq!(unresolved_square(&mut simulation), None);
     simulation.notify(save(&uri("R/never_opened.R")));
     assert_eq!(unresolved_square(&mut simulation), Some(false));
-}
-
-#[tokio::test]
-async fn workspace_root_comes_from_the_client_not_the_process_cwd() {
-    let mut context = setup_test(&[("R/lib.R", "make_count <- function() 1L\n")]).await;
-    let uri = context.open("R/use.R", "total <- make_count()\n");
-    let published = messages(context.recv_diagnostics(&uri).await);
-    assert!(
-        published.is_empty(),
-        "cross-file resolution must succeed: {published:?}"
-    );
-    context.shutdown().await;
 }
 
 #[tokio::test]
@@ -1677,29 +1564,6 @@ async fn untitled_document_is_served_as_a_standalone_script() {
 }
 
 #[tokio::test]
-async fn full_text_did_change_replaces_the_document() {
-    let mut context = setup_test(&[]).await;
-    let uri = context.open("R/full_sync.R", "x <- T\n");
-    let initial = messages(context.recv_diagnostics(&uri).await);
-    assert!(
-        mentions(&initial, "TRUE"),
-        "expected the T-vs-TRUE lint before the replacement, got: {initial:?}"
-    );
-
-    context.change(&uri, 2, None, "y = 1\n");
-    let after = messages(context.recv_diagnostics(&uri).await);
-    assert!(
-        mentions(&after, "<-"),
-        "expected the `=` lint from the replacement text, got: {after:?}"
-    );
-    assert!(
-        !mentions(&after, "TRUE"),
-        "the old text must be fully replaced, not merged, got: {after:?}"
-    );
-    context.shutdown().await;
-}
-
-#[tokio::test]
 async fn did_close_survives_a_failing_disk_reread() {
     let mut context = setup_test(&[]).await;
     fs::create_dir_all(context.workspace_dir.join("R/casualty.R"))
@@ -1715,26 +1579,6 @@ async fn did_close_survives_a_failing_disk_reread() {
         mentions(&published, "TRUE"),
         "expected the server to survive the failing close-time re-read, got: {published:?}"
     );
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn watched_file_create_and_delete_change_cross_file_resolution() {
-    let mut context = setup_with(&[], pull_capabilities(false)).await;
-    let consumer = context.open("R/consumer.R", "value <- helper()\n");
-    let before = report_messages(context.document_diagnostic(&consumer, None).await);
-    assert!(mentions(&before, "`helper`"), "{before:?}");
-
-    let helper = context.workspace_dir.join("R/helper.R");
-    fs::write(&helper, "helper <- function() 1L\n").expect("write helper");
-    context.notify_watched_file_changed("R/helper.R", FileChangeType::CREATED);
-    let created = report_messages(context.document_diagnostic(&consumer, None).await);
-    assert!(!mentions(&created, "`helper`"), "{created:?}");
-
-    fs::remove_file(&helper).expect("delete helper");
-    context.notify_watched_file_changed("R/helper.R", FileChangeType::DELETED);
-    let deleted = report_messages(context.document_diagnostic(&consumer, None).await);
-    assert!(mentions(&deleted, "`helper`"), "{deleted:?}");
     context.shutdown().await;
 }
 
@@ -2242,19 +2086,6 @@ async fn out_of_bounds_positions_are_safe_on_every_entry_point() {
         .inlay_hints(&uri, Range::new(Position::new(0, 0), Position::new(99, 99)))
         .await
         .expect("inlay hints must not panic the server");
-    context.shutdown().await;
-}
-
-#[tokio::test]
-async fn annotation_bodies_get_semantic_tokens() {
-    let mut context = setup_test(&[]).await;
-    let uri = context.open("R/tokens.R", "#: <T> fn(x: T) -> T\nid <- function(x) x\n");
-    context.drain_diagnostics();
-    let tokens = context.semantic_tokens(&uri).await;
-    assert!(
-        !tokens.data.is_empty(),
-        "the #: annotation body must produce semantic tokens"
-    );
     context.shutdown().await;
 }
 

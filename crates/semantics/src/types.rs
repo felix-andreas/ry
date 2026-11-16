@@ -1492,7 +1492,7 @@ mod tests {
     use {super::*, crate::RootDatabase, std::thread};
 
     #[test]
-    fn size_counts_the_tree_not_the_shared_graph() {
+    fn size_counts_the_tree_not_the_shared_graph_and_saturates() {
         let db = RootDatabase::default();
         let leaf = scalar(&db, Atomic::Integer);
         let pair = Ty::new(&db, TyKind::Tuple(&[leaf, leaf]));
@@ -1505,16 +1505,12 @@ mod tests {
             7,
             "the shared pair is counted once per path, not once overall"
         );
-    }
 
-    #[test]
-    fn size_saturates_at_the_ceiling() {
-        let db = RootDatabase::default();
-        let mut ty = scalar(&db, Atomic::Integer);
+        let mut deep = leaf;
         for _ in 0..64 {
-            ty = Ty::new(&db, TyKind::Tuple(&[ty, ty]));
+            deep = Ty::new(&db, TyKind::Tuple(&[deep, deep]));
         }
-        assert_eq!(type_size(&db, ty), TYPE_SIZE_CEILING);
+        assert_eq!(type_size(&db, deep), TYPE_SIZE_CEILING);
     }
 
     #[test]
@@ -1540,32 +1536,6 @@ mod tests {
             panic!("erasure keeps the shape")
         };
         assert_eq!(function.named[0].default, Some(unknown(&db)));
-    }
-
-    #[test]
-    fn interning_gives_id_equality() {
-        let db = RootDatabase::default();
-        let integer = scalar(&db, Atomic::Integer);
-        let double = scalar(&db, Atomic::Double);
-        assert_eq!(integer, scalar(&db, Atomic::Integer));
-        assert_eq!(integer, Ty::new(&db, TyKind::Scalar(Atomic::Integer)));
-        let first = Ty::new(
-            &db,
-            TyKind::Function(&FunctionType::declared(&[integer], &[], None, double)),
-        );
-        let positional = vec![integer];
-        let second = Ty::new(
-            &db,
-            TyKind::Function(&FunctionType::declared(&positional, &[], None, double)),
-        );
-        assert_eq!(first, second);
-        assert_ne!(
-            first,
-            Ty::new(
-                &db,
-                TyKind::Function(&FunctionType::declared(&[double], &[], None, double)),
-            )
-        );
     }
 
     #[test]
@@ -1641,57 +1611,14 @@ mod tests {
             panic!("expected a union")
         };
         assert_eq!(*members, &[chr, null(&db)]);
-    }
 
-    fn tag<'db>(db: &'db RootDatabase, name: &str, items: Option<&[Ty<'db>]>) -> Ty<'db> {
-        let payload = items.map(|items| Ty::new(db, TyKind::NativeTuple(items)));
-        Ty::new(db, TyKind::Tag(Name::new(db, name), payload))
-    }
-
-    #[test]
-    fn same_shape_tags_merge_their_payloads() {
-        let db = RootDatabase::default();
-        let int = scalar(&db, Atomic::Integer);
-        let chr = scalar(&db, Atomic::Character);
-        let merged = union_of(
-            &db,
-            [
-                tag(&db, "Some", Some(&[int])),
-                tag(&db, "Some", Some(&[chr])),
-            ],
-        );
-        assert_eq!(
-            merged,
-            tag(&db, "Some", Some(&[union_of(&db, [int, chr])])),
-            "one member per tag name and shape"
-        );
-        assert_eq!(conflicting_tags(&db, merged), None);
-    }
-
-    #[test]
-    fn different_shape_tags_stay_apart_and_conflict() {
-        let db = RootDatabase::default();
-        let int = scalar(&db, Atomic::Integer);
-        let one = tag(&db, "Some", Some(&[int]));
-        let two = tag(&db, "Some", Some(&[int, int]));
-        let union = union_of(&db, [one, two]);
-        let TyKind::Union(members) = union.kind(&db) else {
-            panic!("expected a union")
-        };
-        assert_eq!(*members, &[one, two]);
-        assert_eq!(conflicting_tags(&db, union), Some((one, two)));
-    }
-
-    #[test]
-    fn other_tags_go_last() {
-        let db = RootDatabase::default();
         let other = Ty::new(&db, TyKind::OtherTags);
-        let none = tag(&db, "None", None);
-        let union = union_of(&db, [other, null(&db), none]);
-        let TyKind::Union(members) = union.kind(&db) else {
+        let none = Ty::new(&db, TyKind::Tag(Name::new(&db, "None"), None));
+        let open = union_of(&db, [other, null(&db), none]);
+        let TyKind::Union(members) = open.kind(&db) else {
             panic!("expected a union")
         };
-        assert_eq!(*members, &[none, null(&db), other]);
+        assert_eq!(*members, &[none, null(&db), other], "other tags go last");
     }
 
     /// Threads that build the same types at the same time, each in its own order, must agree

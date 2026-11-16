@@ -102,93 +102,85 @@ fn counts_in_a_row_share_one_pass_and_their_common_steps() {
     assert_eq!(list_operations(&function), 0);
 }
 
+/// Each case builds two counts that one pass must not compute together, and says why.
 #[test]
-fn counts_over_lists_they_do_not_share_keep_their_own_passes() {
-    // The two lists may differ in length, and one pass reads all its lists at one length.
-    let mut builder = Builder::new(String::from("test"), &[WHOLES, WHOLES, Type::I64]);
-    let (wins, losses, bound) = (Local(0), Local(1), Local(2));
-    let good = greater(&mut builder, wins, bound);
-    let first = count(&mut builder, good);
-    let bad = greater(&mut builder, losses, bound);
-    let second = count(&mut builder, bad);
-    let total = sum(&mut builder, &[first, second]);
-    builder.terminate(Terminator::Return(total));
-    let mut function = builder.function;
-    fuse(&mut function);
-    assert_eq!(passes(&function), [(2, 1, 1), (2, 1, 1)]);
-}
-
-#[test]
-fn a_count_that_reads_an_earlier_count_keeps_its_own_pass() {
-    let mut builder = Builder::new(String::from("test"), &[WHOLES, Type::I64]);
-    let (list, bound) = (Local(0), Local(1));
-    let above = greater(&mut builder, list, bound);
-    let first = count(&mut builder, above);
-    let above_first = greater(&mut builder, list, first);
-    let second = count(&mut builder, above_first);
-    let total = sum(&mut builder, &[first, second]);
-    builder.terminate(Terminator::Return(total));
-    let mut function = builder.function;
-    fuse(&mut function);
-    assert_eq!(passes(&function), [(2, 1, 1), (2, 1, 1)]);
-}
-
-#[test]
-fn an_input_assigned_between_two_counts_keeps_them_apart() {
-    let mut builder = Builder::new(String::from("test"), &[WHOLES, Type::I64]);
-    let list = Local(0);
-    let bound = builder.emit(Type::I64, Op::Copy(Local(1)));
-    let above = greater(&mut builder, list, bound);
-    let first = count(&mut builder, above);
-    builder.push(Some(bound), Op::Const(Constant::I64(7)));
-    let above_seven = greater(&mut builder, list, bound);
-    let second = count(&mut builder, above_seven);
-    let total = sum(&mut builder, &[first, second]);
-    builder.terminate(Terminator::Return(total));
-    let mut function = builder.function;
-    fuse(&mut function);
-    assert_eq!(passes(&function), [(2, 1, 1), (2, 1, 1)]);
-}
-
-#[test]
-fn a_call_between_two_counts_keeps_them_apart() {
-    let mut builder = Builder::new(String::from("test"), &[WHOLES, Type::I64, Type::I64]);
-    let (list, low, high) = (Local(0), Local(1), Local(2));
-    let above_low = greater(&mut builder, list, low);
-    let first = count(&mut builder, above_low);
-    builder.push(None, Op::CallR(0, SmallVec::new()));
-    let above_high = greater(&mut builder, list, high);
-    let second = count(&mut builder, above_high);
-    let total = sum(&mut builder, &[first, second]);
-    builder.terminate(Terminator::Return(total));
-    let mut function = builder.function;
-    fuse(&mut function);
-    assert_eq!(passes(&function), [(2, 1, 1), (2, 1, 1)]);
-}
-
-#[test]
-fn a_result_read_between_two_counts_keeps_them_apart() {
-    // The second count writes a variable that is read, with its earlier value, after the first.
-    let mut builder = Builder::new(String::from("test"), &[WHOLES, Type::I64, Type::I64]);
-    let (list, low, high) = (Local(0), Local(1), Local(2));
-    let variable = builder.emit(Type::I64, Op::Const(Constant::I64(0)));
-    let above_low = greater(&mut builder, list, low);
-    let first = count(&mut builder, above_low);
-    let earlier = builder.emit(Type::I64, Op::Copy(variable));
-    let above_high = greater(&mut builder, list, high);
-    builder.push(
-        None,
-        Op::CountTrue {
-            program: SmallVec::new(),
-            inputs: SmallVec::from_slice(&[above_high]),
-            counts: SmallVec::from_slice(&[(0, variable)]),
-        },
-    );
-    let total = sum(&mut builder, &[first, earlier, variable]);
-    builder.terminate(Terminator::Return(total));
-    let mut function = builder.function;
-    fuse(&mut function);
-    assert_eq!(passes(&function), [(2, 1, 1), (2, 1, 1)]);
+fn counts_that_cannot_share_a_pass_keep_their_own() {
+    let cases: [(&str, fn() -> Function); 5] = [
+        ("the two lists may differ in length", || {
+            let mut builder = Builder::new(String::from("test"), &[WHOLES, WHOLES, Type::I64]);
+            let (wins, losses, bound) = (Local(0), Local(1), Local(2));
+            let good = greater(&mut builder, wins, bound);
+            let first = count(&mut builder, good);
+            let bad = greater(&mut builder, losses, bound);
+            let second = count(&mut builder, bad);
+            let total = sum(&mut builder, &[first, second]);
+            builder.terminate(Terminator::Return(total));
+            builder.function
+        }),
+        ("the second count reads the first", || {
+            let mut builder = Builder::new(String::from("test"), &[WHOLES, Type::I64]);
+            let (list, bound) = (Local(0), Local(1));
+            let above = greater(&mut builder, list, bound);
+            let first = count(&mut builder, above);
+            let above_first = greater(&mut builder, list, first);
+            let second = count(&mut builder, above_first);
+            let total = sum(&mut builder, &[first, second]);
+            builder.terminate(Terminator::Return(total));
+            builder.function
+        }),
+        ("an input is assigned between them", || {
+            let mut builder = Builder::new(String::from("test"), &[WHOLES, Type::I64]);
+            let list = Local(0);
+            let bound = builder.emit(Type::I64, Op::Copy(Local(1)));
+            let above = greater(&mut builder, list, bound);
+            let first = count(&mut builder, above);
+            builder.push(Some(bound), Op::Const(Constant::I64(7)));
+            let above_seven = greater(&mut builder, list, bound);
+            let second = count(&mut builder, above_seven);
+            let total = sum(&mut builder, &[first, second]);
+            builder.terminate(Terminator::Return(total));
+            builder.function
+        }),
+        ("a call runs between them", || {
+            let mut builder = Builder::new(String::from("test"), &[WHOLES, Type::I64, Type::I64]);
+            let (list, low, high) = (Local(0), Local(1), Local(2));
+            let above_low = greater(&mut builder, list, low);
+            let first = count(&mut builder, above_low);
+            builder.push(None, Op::CallR(0, SmallVec::new()));
+            let above_high = greater(&mut builder, list, high);
+            let second = count(&mut builder, above_high);
+            let total = sum(&mut builder, &[first, second]);
+            builder.terminate(Terminator::Return(total));
+            builder.function
+        }),
+        // The second count writes a variable that is read, with its earlier value, after the
+        // first.
+        ("a result is read between them", || {
+            let mut builder = Builder::new(String::from("test"), &[WHOLES, Type::I64, Type::I64]);
+            let (list, low, high) = (Local(0), Local(1), Local(2));
+            let variable = builder.emit(Type::I64, Op::Const(Constant::I64(0)));
+            let above_low = greater(&mut builder, list, low);
+            let first = count(&mut builder, above_low);
+            let earlier = builder.emit(Type::I64, Op::Copy(variable));
+            let above_high = greater(&mut builder, list, high);
+            builder.push(
+                None,
+                Op::CountTrue {
+                    program: SmallVec::new(),
+                    inputs: SmallVec::from_slice(&[above_high]),
+                    counts: SmallVec::from_slice(&[(0, variable)]),
+                },
+            );
+            let total = sum(&mut builder, &[first, earlier, variable]);
+            builder.terminate(Terminator::Return(total));
+            builder.function
+        }),
+    ];
+    for (reason, build) in cases {
+        let mut function = build();
+        fuse(&mut function);
+        assert_eq!(passes(&function), [(2, 1, 1), (2, 1, 1)], "{reason}");
+    }
 }
 
 #[test]

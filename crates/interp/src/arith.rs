@@ -486,7 +486,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("Conj", 1, |call| unsafe { complex_part(call, 4) }).generic(Generic::Complex),
     internal("complex", 3, do_complex),
     internal("polyroot", 1, do_polyroot),
-    internal("pmin", -1, |call| unsafe { parallel_extreme(call, false) }),
+    internal("pmin", -1, do_parallel_min),
     internal("pmax", -1, do_parallel_max),
     internal("cumall", 1, |call| Ok(call.arg(0))),
     internal("tabulate", 2, do_tabulate),
@@ -4582,8 +4582,8 @@ unsafe fn is_replicable(object: Sexp) -> bool {
     kind.is_atomic() || matches!(kind, SexpType::List | SexpType::Expression)
 }
 
-/// The elements of a logical, integer or double `object` recycled to `total`, copied a whole
-/// run at a time; `None` for an empty object or any other type.
+/// The elements of `object` recycled to `total`, copied a whole run at a time; `None` for an
+/// empty object, an ALTREP vector of strings or values, and anything that is not a vector.
 unsafe fn repeat_plain(object: Sexp, total: usize) -> R<Option<Sexp>> {
     fn fill<T: Copy>(target: &mut [T], source: &[T]) {
         for chunk in target.chunks_mut(source.len()) {
@@ -4591,17 +4591,38 @@ unsafe fn repeat_plain(object: Sexp, total: usize) -> R<Option<Sexp>> {
         }
     }
     let kind = object.kind();
-    if length(object) == 0
-        || !matches!(kind, SexpType::Logical | SexpType::Integer | SexpType::Real)
-    {
+    if length(object) == 0 {
         return Ok(None);
     }
-    let result = values::alloc_uninit(kind, total)?;
-    if kind == SexpType::Real {
-        fill(values::reals_mut(result), values::reals(object));
-    } else {
-        fill(values::ints_mut(result), values::ints(object));
-    }
+    let result = match kind {
+        SexpType::Logical | SexpType::Integer => {
+            let result = values::alloc_uninit(kind, total)?;
+            fill(values::ints_mut(result), values::ints(object));
+            result
+        }
+        SexpType::Real => {
+            let result = values::alloc_uninit(kind, total)?;
+            fill(values::reals_mut(result), values::reals(object));
+            result
+        }
+        SexpType::Complex => {
+            let result = values::alloc_uninit(kind, total)?;
+            fill(values::complexes_mut(result), values::complexes(object));
+            result
+        }
+        SexpType::Raw => {
+            let result = values::alloc_uninit(kind, total)?;
+            fill(values::raws_mut(result), values::raws(object));
+            result
+        }
+        SexpType::String | SexpType::List | SexpType::Expression if !object.is_altrep() => {
+            let result = alloc(kind, total)?;
+            fill(result.slice_mut::<Sexp>(), object.slice::<Sexp>());
+            crate::heap().count_written_elements(result);
+            result
+        }
+        _ => return Ok(None),
+    };
     Ok(Some(result))
 }
 
@@ -4826,13 +4847,17 @@ unsafe fn do_complex(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
+pub(crate) unsafe fn do_parallel_min(call: &Call<'_>) -> R<Sexp> {
+    parallel_extreme(call, false)
+}
+
 pub(crate) unsafe fn do_parallel_max(call: &Call<'_>) -> R<Sexp> {
     parallel_extreme(call, true)
 }
 
 unsafe fn parallel_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
     let na_rm = match values::as_logical_scalar(call.arg(0)) {
-        NA_LOGICAL => return Err(call.error("invalid 'na.rm' value")),
+        NA_LOGICAL => return Err(error("invalid 'na.rm' value")),
         value => value == 1,
     };
     let items: Vec<Sexp> = call.args[1..]
@@ -4840,7 +4865,7 @@ unsafe fn parallel_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
         .map(|arg| values::materialize(arg.value))
         .collect::<R<_>>()?;
     if items.is_empty() {
-        return Err(call.error("no arguments"));
+        return Err(error("no arguments"));
     }
     let mut kind = SexpType::Integer;
     for &item in &items {
@@ -4849,7 +4874,7 @@ unsafe fn parallel_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
             SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::String => {
                 kind = coerce::higher_type(kind, item.kind());
             }
-            _ => return Err(call.error("invalid input type")),
+            _ => return Err(error("invalid input type")),
         }
     }
     let count = items.iter().map(|&item| length(item)).max().unwrap_or(0);
@@ -4944,7 +4969,6 @@ unsafe fn parallel_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
             values::reals_mut(result)[index] = value;
         }
     }
-    values::copy_most_attributes(items[0], result, true)?;
     Ok(result)
 }
 

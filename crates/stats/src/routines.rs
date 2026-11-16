@@ -228,8 +228,6 @@ pub(crate) unsafe fn matrix_shape(x: Sexp) -> (usize, usize) {
     }
 }
 
-// Least squares.
-
 /// `Cdqrls(x, y, tol, check)`: the least squares fit behind `lm.fit` and `glm.fit`, through a
 /// Householder QR decomposition with limited column pivoting.
 unsafe fn cdqrls(call: &NativeCall<'_>) -> R<Sexp> {
@@ -321,8 +319,6 @@ unsafe fn cdqrls(call: &NativeCall<'_>) -> R<Sexp> {
     ])
 }
 
-// The binomial family's link helpers.
-
 const THRESHOLD: f64 = 30.0;
 const MINUS_THRESHOLD: f64 = -30.0;
 
@@ -413,8 +409,6 @@ unsafe fn binomial_dev_resids(call: &NativeCall<'_>) -> R<Sexp> {
     }
     Ok(result)
 }
-
-// Correlation and covariance.
 
 /// How `cov` and `cor` treat missing values: `use`'s choices, in the order of its codes.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -787,8 +781,6 @@ pub(crate) fn sign(value: f64) -> f64 {
     }
 }
 
-// Distances and complete cases.
-
 /// `Cdist(x, method, attrs, p)`: the lower triangle of the distance matrix between the rows of
 /// `x`, by columns. Missing coordinates are skipped and the sum scaled up for them.
 unsafe fn cdist(call: &NativeCall<'_>) -> R<Sexp> {
@@ -997,8 +989,6 @@ unsafe fn compcases(call: &NativeCall<'_>) -> R<Sexp> {
     values::logical_vector(&complete)
 }
 
-// Fourier transforms.
-
 /// `fft(z, inverse)`: the unnormalized discrete Fourier transform of a vector, or of every
 /// dimension of an array.
 unsafe fn fft(call: &NativeCall<'_>) -> R<Sexp> {
@@ -1125,8 +1115,6 @@ unsafe fn nextn(call: &NativeCall<'_>) -> R<Sexp> {
     }
     values::integer_vector(&result)
 }
-
-// Interpolation.
 
 /// `ApproxTest(x, y, method, f, na.rm)`: validates `approx`'s inputs.
 unsafe fn approx_test(call: &NativeCall<'_>) -> R<Sexp> {
@@ -1490,8 +1478,6 @@ unsafe fn mono_fc_m(call: &NativeCall<'_>) -> R<Sexp> {
     }
     values::real_vector(&slopes)
 }
-
-// Smoothing.
 
 /// `lowess(x, y, f, iter, delta)`: Cleveland's robust locally weighted regression ("Robust
 /// locally weighted regression and smoothing scatterplots", JASA 1979) of `y` on the sorted
@@ -1877,8 +1863,6 @@ unsafe fn rfilter(call: &NativeCall<'_>) -> R<Sexp> {
     values::real_vector(&out)
 }
 
-// Small numerical helpers.
-
 /// `DoubleCentre(A)`: subtracts the row means, then the column means, of a square matrix.
 unsafe fn double_centre(call: &NativeCall<'_>) -> R<Sexp> {
     let a = values::duplicate(as_reals(call.arg(0))?)?;
@@ -2035,8 +2019,6 @@ unsafe fn bw_phi6(call: &NativeCall<'_>) -> R<Sexp> {
     let sum = 2.0 * sum - 15.0 * n;
     values::scalar_real(sum / (n * (n - 1.0) * h.powi(7) * SQRT_2PI))
 }
-
-// Time series.
 
 /// `acf(x, lag.max, sCor)`: the auto- and cross-covariances (or correlations) of the columns
 /// of `x`, as a `lag.max + 1` by `ns` by `ns` array; missing values are skipped.
@@ -2210,8 +2192,6 @@ unsafe fn ts_conv(call: &NativeCall<'_>) -> R<Sexp> {
     }
     values::real_vector(&product)
 }
-
-// Isotonic regression.
 
 /// `isoreg(y)`: the isotonic (monotone increasing) least squares fit, as the slopes of the
 /// greatest convex minorant of the cumulative sums.

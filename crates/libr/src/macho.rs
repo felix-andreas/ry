@@ -268,19 +268,21 @@ mod tests {
     }
 
     #[test]
-    fn rewrites_the_cran_framework_and_homebrew_libr() {
+    fn rewrites_the_cran_framework_homebrew_and_old_framework_libr() {
         let mut bytes = image(&[
             "/Library/Frameworks/R.framework/Versions/4.5-arm64/Resources/lib/libR.dylib",
             "/opt/homebrew/opt/r/lib/R/lib/libR.dylib",
+            "/Library/Frameworks/R.framework/Versions/3.6/R",
             "/Library/Frameworks/R.framework/Versions/4.5-arm64/Resources/lib/libRblas.dylib",
             "/usr/lib/libSystem.B.dylib",
         ]);
         let before = bytes.len();
-        assert_eq!(rewritten(&mut bytes), Ok(2));
+        assert_eq!(rewritten(&mut bytes), Ok(3));
         assert_eq!(bytes.len(), before);
         assert_eq!(
             names(&bytes),
             [
+                RY_LIBR_INSTALL_NAME,
                 RY_LIBR_INSTALL_NAME,
                 RY_LIBR_INSTALL_NAME,
                 "/Library/Frameworks/R.framework/Versions/4.5-arm64/Resources/lib/libRblas.dylib",
@@ -290,18 +292,17 @@ mod tests {
         assert_eq!(rewritten(&mut bytes), Ok(0), "rewriting is idempotent");
     }
 
+    /// A binary that links no libR, and a file that is not Mach-O at all (left for `dlopen` to
+    /// reject), come through untouched.
     #[test]
-    fn an_old_framework_binary_counts_as_libr() {
-        let mut bytes = image(&["/Library/Frameworks/R.framework/Versions/3.6/R"]);
-        assert_eq!(rewritten(&mut bytes), Ok(1));
-    }
-
-    #[test]
-    fn a_binary_without_libr_is_left_alone() {
+    fn images_without_libr_are_left_alone() {
         let mut bytes = image(&["/usr/lib/libSystem.B.dylib"]);
         let original = bytes.clone();
         assert_eq!(rewritten(&mut bytes), Ok(0));
         assert_eq!(bytes, original);
+        let mut elf = [0x7f, b'E', b'L', b'F', 0, 0, 0, 0];
+        assert_eq!(rewritten(&mut elf), Ok(0));
+        assert_eq!(elf, [0x7f, b'E', b'L', b'F', 0, 0, 0, 0]);
     }
 
     #[test]
@@ -364,12 +365,6 @@ mod tests {
     }
 
     #[test]
-    fn a_file_that_is_not_mach_o_is_left_for_dlopen() {
-        let mut elf = [0x7f, b'E', b'L', b'F', 0, 0, 0, 0];
-        assert_eq!(rewritten(&mut elf), Ok(0));
-    }
-
-    #[test]
     fn the_recorded_compatibility_version_is_cleared() {
         let mut bytes = image(&["/opt/R/lib/libR.dylib", "/usr/lib/libSystem.B.dylib"]);
         let first = MACH_HEADER_64_SIZE + COMPATIBILITY_VERSION_OFFSET;
@@ -404,10 +399,8 @@ mod tests {
         assert_eq!(rebind_libr(&mut bytes).map(|rebound| rebound.climb), Ok(0));
         assert_eq!(climb("../lib/../../share/libx.dylib"), 2);
         assert_eq!(climb("lib/../../libx.dylib"), 1);
-    }
 
-    #[test]
-    fn a_loader_path_rpath_counts_toward_the_climb() {
+        // An `@loader_path` rpath climbs too, since `@rpath` names resolve through it.
         let mut bytes = image(&["@rpath/libdep.dylib"]);
         let path = "@loader_path/../lib";
         let size = (12 + path.len() + 1).div_ceil(8) * 8;

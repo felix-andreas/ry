@@ -591,35 +591,26 @@ pub fn check_format_invariants(input: &str) {
     }
 }
 
-/// The fuzz invariant battery for range formatting over one input, swept
-/// across a bounded, deterministic set of selections. "In place" below is the
-/// whole file formatted at the indentation it already uses, which is what a
-/// selection is cut from. The contract every selection must hold:
+/// The fuzz invariant battery for range formatting over one input, swept across a bounded,
+/// deterministic set of selections. "In place" is the whole file formatted at its own indentation,
+/// which a selection is cut from. Every selection must hold:
 ///
 ///  1. determinism, and refusal exactly when whole-file formatting refuses;
 ///  2. geometry: edits are ordered, disjoint, whole lines, and in bounds;
-///  3. preservation: applying them keeps every token, so no code is lost;
-///  4. convergence: the applied document still formats to what the original
-///     formats to, both as a whole file and in place, which is the property
-///     that makes formatting a selection safe to do repeatedly and in any
-///     order;
-///  5. restriction: every edit is one formatting the whole file in place
-///     would have made, so a selection can only ever do less, never something
-///     else;
-///  6. completeness: selecting the whole file reproduces formatting it in
-///     place byte for byte, and the whole-document edits reproduce whole-file
-///     formatting byte for byte;
-///  7. stability: the region the edits produced is already laid out, so
-///     formatting the same selection again is a no-op;
-///  8. additivity: a selection of whole lines makes exactly the edits its
-///     lines make one at a time, so the result never depends on how a region
-///     was selected;
-///  9. composition: formatting one line at a time, top to bottom and swept
-///     until a sweep changes nothing, reaches formatting in place, and every
-///     step on the way still formats to it.
+///  3. preservation: applying them keeps every token;
+///  4. convergence: the result formats as the original does, whole and in place, the property
+///     that makes formatting a selection safe to do repeatedly and in any order;
+///  5. restriction: every edit is one formatting in place would make, so a selection can only
+///     ever do less, never something else;
+///  6. completeness: selecting the whole file reproduces formatting in place, and whole-document
+///     edits reproduce whole-file formatting, byte for byte;
+///  7. stability: formatting the same selection again is a no-op;
+///  8. additivity: a selection of whole lines makes exactly the edits its lines make one at a
+///     time, so the result never depends on how a region was selected;
+///  9. composition: formatting one line at a time, top to bottom until a sweep changes nothing,
+///     reaches formatting in place, and every step still formats to it.
 ///
-/// Additivity and composition re-run range formatting per line, so they are
-/// checked on small inputs only, which is all a fuzzer generates.
+/// Additivity and composition re-run range formatting per line, so they run on small inputs only.
 pub fn check_range_format_invariants(input: &str) {
     let config = Config::default();
     let whole_file = format(input, config);

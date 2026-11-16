@@ -73,11 +73,9 @@ pub enum PendingAccess {
 }
 
 /// What using the bindings of a slot frame's environment runs first. A slot frame keeps its
-/// variables in registers, and the environment that stands for it binds only what something
-/// has read by name; the interpreter installs a resolver that moves a variable from its slot
-/// into a cell of the environment when a lookup asks for it. Routing every bindings read
-/// through [`bindings`] or [`bindings_for`] means no reader can miss a variable that is still
-/// in a slot.
+/// variables in registers and its environment binds only what was read by name; the interpreter's
+/// resolver moves a variable from its slot into a cell when a lookup asks for it. Routing every
+/// bindings read through [`bindings`] or [`bindings_for`] means no reader misses a slot variable.
 static PENDING_RESOLVER: std::sync::OnceLock<unsafe fn(Sexp, PendingAccess)> =
     std::sync::OnceLock::new();
 
@@ -511,13 +509,12 @@ pub enum GcStress {
     /// can free it. Every 64th collection tenures the survivors, so the objects traced again
     /// stay few, and major collections are spaced as for `EveryAllocation`.
     Young,
-    /// Collect at random allocations drawn from `seed`: the gaps between collections follow a
-    /// heavy-tailed distribution from one allocation to a few thousand, and most collections
-    /// are minor. Collecting at every allocation promotes each object before the operation
-    /// that made it is done with it, so a store that skips the write barrier on a young object
-    /// goes unnoticed; here objects routinely stay young across whole operations, such as a
-    /// native call that permutes a list, and a missed barrier frees them. A major collection
-    /// runs once per as many allocations as there are live objects.
+    /// Collect at random allocations drawn from `seed`, with heavy-tailed gaps from one allocation
+    /// to a few thousand, mostly minor. Collecting at every allocation promotes each object before
+    /// its operation is done with it, hiding a store that skips the barrier on a young object; here
+    /// objects stay young across whole operations (a native call permuting a list), so a missed
+    /// barrier frees them. A major collection runs once per as many allocations as there are live
+    /// objects.
     Seeded {
         seed: u64,
     },
@@ -1316,13 +1313,8 @@ impl Heap {
         self.stats.live_vector_cells += cells;
     }
 
-    // Allocation.
-
-    /// A vector of `length` elements. Atomic elements start zeroed, character elements as `""`
-    /// and list elements as `NULL`, as in GNU R.
-    /// A vector of plain numbers whose elements are not initialized, for a kernel that writes
-    /// every element before anything reads the vector. Skipping the zeroing matters for the
-    /// large results of whole-vector arithmetic.
+    /// A vector of plain numbers whose elements are not initialized, for a kernel that writes every
+    /// element before anything reads it: skipping the zeroing matters for whole-vector arithmetic.
     ///
     /// # Safety
     /// The caller must write every element before the vector is read.
@@ -1489,6 +1481,8 @@ impl Heap {
         Ok(object)
     }
 
+    /// A vector of `length` elements: atomic elements start zeroed, character elements as `""` and
+    /// list elements as `NULL`, as in GNU R.
     #[inline(never)]
     unsafe fn alloc_vector_general(&mut self, kind: SexpType, length: isize) -> HeapResult<Sexp> {
         if !kind.is_vector() {
@@ -1727,15 +1721,12 @@ impl Heap {
         Ok(object)
     }
 
-    /// Runs the collection check for `bytes` of small objects at once, keeping `keep` alive
-    /// across the collection it may run. The `_uncollected` allocators never collect, so a
-    /// caller that builds a known batch of objects, such as a closure call's environment,
-    /// binding cells and promises, pays for one check instead of one per object, and the
-    /// objects it builds need no root until its next allocation that can collect.
-    ///
-    /// The reservation is a budget, not memory set aside: allocating past it is allowed and
-    /// only moves the next collection earlier. Size it with [`TRIPLE_BYTES`] and
-    /// [`ENVIRONMENT_BYTES`].
+    /// Runs the collection check for `bytes` of small objects at once, keeping `keep` alive across
+    /// the collection it may run. The `_uncollected` allocators never collect, so a caller building
+    /// a known batch (a closure call's environment, binding cells and promises) pays one check, and
+    /// its objects need no root until its next collecting allocation. The reservation is a budget,
+    /// not memory: allocating past it only moves the next collection earlier. Size it with
+    /// [`TRIPLE_BYTES`] and [`ENVIRONMENT_BYTES`].
     #[inline]
     pub unsafe fn reserve(&mut self, bytes: usize, keep: &[Sexp]) {
         if self.young_bytes + bytes > self.small_trigger {
@@ -1940,9 +1931,10 @@ impl Heap {
         Ok(object)
     }
 
-    /// An immutable record from slots compiled code already split into raw numbers and handles,
-    /// so a number never has to be boxed on its way in. A [`Slot::Real`] must not carry a bit
-    /// pattern [`slot_for`] keeps as a handle, and only the first [`crate::object::UNBOXED_SLOTS`] may be raw.
+    /// An immutable record from slots compiled code already split into raw numbers and handles, so
+    /// a number never has to be boxed on its way in. A [`Slot::Real`] must not carry a bit pattern
+    /// [`slot_for`] keeps as a handle, and only the first [`crate::object::UNBOXED_SLOTS`] may be
+    /// raw.
     pub unsafe fn alloc_record_slots(&mut self, layout: u32, slots: &[Slot]) -> HeapResult<Sexp> {
         let Some(size) = object_size(SexpType::Record, slots.len()) else {
             return Err(HeapError::TooLong);
@@ -2313,12 +2305,9 @@ impl Heap {
     }
 
     /// Moves every element of `from` to the start of `to` and leaves `from` empty. The references
-    /// `from` held pass to `to` uncounted, so growing a list by copying it costs one store per
-    /// element instead of counting each element into the copy and, when the collector sweeps
-    /// the original, back out of it.
-    ///
-    /// A list whose pointer escaped is copied instead, because its retirement settles its counts
-    /// from what it holds then.
+    /// pass uncounted, so growing a list by copying costs one store per element instead of counting
+    /// each into the copy and back out when the original is swept. A list whose pointer escaped is
+    /// copied instead, because its retirement settles its counts from what it holds then.
     ///
     /// # Safety
     /// `to` and `from` are distinct, non-ALTREP vectors of one handle kind, `to` has room for
@@ -2386,20 +2375,17 @@ impl Heap {
         }
     }
 
-    /// Replaces `env`'s enclosure. A cached lookup is keyed by the environment its walk starts
-    /// from, which is a closure's environment or an environment's enclosure and so carries
-    /// [`gp::ENCLOSING`], and symbol stamps cover that environment and its ancestors.
+    /// Replaces `env`'s enclosure. Cached lookups are keyed by the environment a walk starts from,
+    /// which carries [`gp::ENCLOSING`], and symbol stamps cover it and its ancestors. Only symbols
+    /// bound in a frame the old and new chains do not share can resolve differently, so only their
+    /// stamps move ([`Heap::bump_symbols_between`]): lazy loading sets the parent of every closure
+    /// environment a package serialized, and moving every stamp each time made every lookup cache
+    /// miss once.
     ///
-    /// When the walk through `env` changes from the old chain of enclosures to the new one,
-    /// only symbols bound in a frame the two chains do not share can resolve differently, so
-    /// the stamps of those symbols move instead of every stamp (see
-    /// [`Heap::bump_symbols_between`]). Lazy loading makes an environment and sets its parent
-    /// for every closure environment a package serialized, and moving every stamp each time
-    /// made every lookup cache in the process miss once. An environment outside every cached
-    /// chain moves nothing: one without the bit, or an empty frame whose enclosure is the empty
-    /// environment (a walk that reached it found nothing there or beyond), as long as it is
-    /// neither a function frame nor a top environment (the global environment, or one with
-    /// bindings or attributes, such as a namespace or a package environment).
+    /// An environment outside every cached chain moves nothing: one without the bit, or an empty
+    /// frame enclosed by the empty environment (a walk that reached it found nothing there or
+    /// beyond), unless it is a function frame or a top environment (the global environment, or one
+    /// with bindings or attributes, such as a namespace or a package environment).
     pub unsafe fn set_enclosure(&mut self, env: Sexp, value: Sexp) {
         let unobserved = !env.has_gp(gp::FUNCTION_FRAME)
             && (!env.has_gp(gp::ENCLOSING) || env.enclosure() == self.known.empty_env)
@@ -2489,15 +2475,12 @@ impl Heap {
         });
     }
 
-    /// Counts `value` into `list` when an escape of `list` is pending, and says whether it did.
-    /// The retirement counts what the list then holds and releases what the snapshot names, so
-    /// the value counts now, which keeps copy-on-modify right while native code runs, and joins
-    /// the snapshot to be released once. The value it replaces is not released now: if the
-    /// counts ever counted it, the snapshot names it and the retirement releases it, and if
-    /// native code stored it uncounted, nothing may.
-    ///
-    /// Only element stores come here: the retirement settles a list's elements, never its
-    /// attributes.
+    /// Counts `value` into `list` when an escape of `list` is pending, and says whether it did. The
+    /// retirement counts what the list then holds and releases what the snapshot names, so the
+    /// value counts now, keeping copy-on-modify right while native code runs, and joins the
+    /// snapshot to be released once. The replaced value is not released: if it was ever counted,
+    /// the snapshot names it, and if native code stored it uncounted, nothing may. Only element
+    /// stores come here, since the retirement never settles attributes.
     #[cold]
     #[inline(never)]
     unsafe fn count_escaped_store(&mut self, list: Sexp, value: Sexp) -> bool {
@@ -2543,10 +2526,10 @@ impl Heap {
     /// would be rescanned by every minor collection for the rest of the session.
     ///
     /// A vector may hold younger children when it is remembered, which covers the ones it held
-    /// before the escape, the ones stored since through the barrier, and any writable escape;
-    /// and when a collection ran during the escape, which may have aged its children without
-    /// remembering it, since an escaped vector's children are all marked. Any other old vector held only
-    /// old children throughout, and permuting them through a read-only pointer cannot change
+    /// before the escape, the ones stored since through the barrier, and any writable escape; and
+    /// when a collection ran during the escape, which may have aged its children without
+    /// remembering it, since an escaped vector's children are all marked. Any other old vector held
+    /// only old children throughout, and permuting them through a read-only pointer cannot change
     /// that, so it costs no rescan: data.table reads most columns through `DATAPTR_RO` and
     /// `STRING_PTR_RO` without changing them.
     pub unsafe fn retire_escaped(&mut self) {
@@ -2596,8 +2579,6 @@ impl Heap {
         }
         self.escaped = escaped;
     }
-
-    // Environments.
 
     fn is_symbol_frame(&self, env: Sexp) -> bool {
         env == self.known.base_env || env == self.known.base_namespace
@@ -3195,13 +3176,13 @@ impl Heap {
         cell.set_cdr_unbarriered(unbound);
     }
 
-    /// Moves the stamp of every symbol bound in a frame on one of the enclosure chains from
-    /// `old` and from `new`, `env`'s enclosure before and after, but not on both, which are the only symbols a walk that switches
-    /// from one chain to the other can resolve differently. Fails, moving nothing a caller can
-    /// rely on, when such a frame keeps its bindings outside the stamps (a function frame, or a
-    /// base frame whose bindings live on the symbols), a chain passes `env` itself (so the
-    /// chains after the change are not the ones walked here), or the chains are too long or
-    /// bind too many symbols for this to beat moving every stamp.
+    /// Moves the stamp of every symbol bound in a frame on one of the enclosure chains from `old`
+    /// and from `new`, `env`'s enclosure before and after, but not on both, which are the only
+    /// symbols a walk that switches from one chain to the other can resolve differently. Fails,
+    /// moving nothing a caller can rely on, when such a frame keeps its bindings outside the stamps
+    /// (a function frame, or a base frame whose bindings live on the symbols), a chain passes `env`
+    /// itself (so the chains after the change are not the ones walked here), or the chains are too
+    /// long or bind too many symbols for this to beat moving every stamp.
     unsafe fn bump_symbols_between(&mut self, env: Sexp, old: Sexp, new: Sexp) -> bool {
         const MAX_CHAIN: usize = 64;
         const MAX_SYMBOLS: usize = 1 << 14;
@@ -3386,8 +3367,6 @@ impl Heap {
         (*env.frame_ptr()).mark_formals();
     }
 
-    // Roots.
-
     /// Keeps `object` alive until the current handle scope ends.
     #[inline]
     pub fn root(&mut self, object: Sexp) {
@@ -3484,8 +3463,6 @@ impl Heap {
         payload.finalizer.set(nil);
         payload.c_finalizer.set(0);
     }
-
-    // Collection.
 
     #[inline(always)]
     unsafe fn allocate(&mut self, kind: SexpType, size: usize, keep: &[Sexp]) -> HeapResult<Sexp> {
@@ -4371,12 +4348,11 @@ impl Heap {
                 // survived, so an explicit `gc()` between two large operations does not drop it
                 // below the next one's peak and buy a full collection in the middle of it.
                 let policy = &mut self.policy;
-                // A full heap that forces a major collection before the program allocated a
-                // limit's worth of vectors since the last one means the limit is too close to
-                // what the program keeps in flight between collections: each such major
-                // collection tenures that working set, which only the next major collection
-                // can free. The survivors alone cannot show it, so the limit grows as if they
-                // filled it.
+                // A full heap that forces a major collection before a limit's worth of vectors was
+                // allocated since the last one means the limit is too close to the working set the
+                // program keeps between collections, which each such collection tenures for the
+                // next major one to free. The survivors cannot show that, so the limit grows as if
+                // they filled it.
                 let thrashing =
                     self.escalating && self.large_allocated_since_major < policy.heap_limit;
                 self.large_allocated_since_major = 0;
@@ -4593,12 +4569,11 @@ impl Heap {
             Shape::Vector => {
                 if object.flags() & flag_bits::WEAK_PAIRS != 0 {
                     // Tracing marks no pair, so it learns nothing about younger children, yet a
-                    // tenured list must stay remembered while it holds one. The next intermediate
-                    // collection traces a tenured list only from the remembered set, and that
-                    // trace is what clears a pair whose key or value died; without it the
-                    // collection frees the child and leaves the pair pointing at it. Keeping the
-                    // list remembered never marks a pair strongly, because a minor collection
-                    // that rescans it comes back to this branch.
+                    // tenured list must stay remembered while it holds one: the next intermediate
+                    // collection traces it only from the remembered set, and that trace clears a
+                    // pair whose key or value died, without which the child is freed under the
+                    // pair. Staying remembered never marks a pair strongly, because a minor
+                    // collection that rescans the list comes back to this branch.
                     if TENURED {
                         has_younger |= (0..object.length() as usize)
                             .any(|index| younger(object, object.stored_element(index)));
@@ -4684,20 +4659,18 @@ impl Heap {
         has_younger
     }
 
-    /// Marks the strings of a character vector and says whether one of them is younger and
-    /// whether one of them repeated a string the table holds. A character vector usually
-    /// repeats a few strings, like a column of categories, and marking one again only finds it
-    /// marked, so `table` skips the strings this vector already marked. Strings hold no
-    /// references, so a skipped repeat loses nothing but its age, which the table keeps: a
-    /// string cannot age between two of its marks, because the first one aged it.
+    /// Marks the strings of a character vector and says whether one is younger and whether one
+    /// repeated a string the table holds. A character vector usually repeats a few strings (a
+    /// column of categories), so `table` skips strings this vector already marked. A skipped repeat
+    /// loses nothing: strings hold no references, and a string cannot age between two marks because
+    /// the first aged it.
     ///
-    /// The table is cheaper than any mark test. A repeat costs a hash of the address and one
-    /// load from a table that stays in L1, about 6 instructions; a mark test must find the
-    /// string's page, size class, word and bit and read the mark and tenured bitmaps, about 25.
-    /// A flat bitmap over a space of strings alone would still need the range check, the shift
-    /// and both bitmap reads, and a mark bit in the string's own header would cost a cache miss
-    /// per element. A string the table misses costs about 11 instructions more than a plain
-    /// mark, which is why a caller stops using it on a vector without repeats.
+    /// The table is cheaper than any mark test: a repeat costs an address hash and one L1 load
+    /// (about 6 instructions), where a mark test finds the page, size class, word and bit and reads
+    /// the mark and tenured bitmaps (about 25). A flat bitmap over strings alone still needs the
+    /// range check and both reads, and a mark bit in the header costs a cache miss per element. A
+    /// table miss costs about 11 instructions over a plain mark, so a caller stops using the table
+    /// on a vector without repeats.
     #[inline(always)]
     unsafe fn mark_strings<const TENURED: bool>(
         &mut self,
@@ -4763,12 +4736,11 @@ impl Heap {
         any
     }
 
-    /// Ephemeron semantics: a weak reference's value and finalizer are reachable only while its
-    /// key is, so the values are marked to a fixpoint before any key is declared dead. Every
-    /// reference with a dead key is then taken off at once: one with a finalizer is revived with
-    /// its key, value and finalizer until the finalizer has run, and one without is cleared.
-    /// Because all dying references leave together, what the revived finalizers reach cannot
-    /// revive another, so one pass suffices.
+    /// Ephemeron semantics: a weak reference's value and finalizer are reachable only while its key
+    /// is, so values are marked to a fixpoint before any key is declared dead. Then every reference
+    /// with a dead key leaves at once: one with a finalizer is revived with its key, value and
+    /// finalizer until the finalizer has run, one without is cleared. Because they all leave
+    /// together, what the revived finalizers reach cannot revive another, so one pass suffices.
     unsafe fn process_weak_refs(&mut self) {
         self.mark_live_weak_values();
         let mut dying = Vec::new();
@@ -5569,11 +5541,10 @@ const _: () = assert!(VECTOR_DATA_OFFSET.is_multiple_of(16));
 const _: () = assert!(REFCOUNT_MAX == u16::MAX);
 
 /// Physical memory plus swap on Linux, where the allocator reserves address space without
-/// committing it, so a vector far larger than the machine would be handed out and fail only when
-/// touched. GNU R gets its "cannot allocate vector" error from the kernel's overcommit heuristic
-/// refusing such a request, and this bound gives the same answer before asking. With
-/// `vm.overcommit_memory` set to 1 the kernel grants any request, and so does GNU R, so there is
-/// no bound; macOS and Windows also grant oversized requests to GNU R, so they have none either.
+/// committing it, so an impossibly large vector would fail only when touched. GNU R's "cannot
+/// allocate vector" comes from the kernel's overcommit heuristic, and this bound answers the same
+/// before asking. With `vm.overcommit_memory` set to 1 the kernel and GNU R grant any request, as
+/// on macOS and Windows, so there is no bound.
 #[cfg(target_os = "linux")]
 fn memory_ceiling() -> usize {
     let always_overcommit =

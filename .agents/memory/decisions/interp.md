@@ -6,544 +6,948 @@ The evaluator: calls, promises, frames, environments, lookups, dispatch and cond
 
 **Status:** built, except loading base R's R code from the user's GNU R installation, which "ry ships its own base R, and GNU R through `R_HOME` is the opt-in" supersedes.
 
-This settles step 3 of `development/design/r-runtime.md`. The code is `crates/interp`; before it
-there was no evaluator, so there was no previous source of truth.
+The code is `crates/interp` (`development/design/r-runtime.md`, step 3).
 
-- **`interp` sits between `heap` and `libr`.** `libr` depends on `interp` and installs it on the
-  runtime's heap (`interp::install`), passing host hooks (console output, ALTREP materialization,
-  finalizers) and replacing the foreign-function builtins (`.Call`, `dyn.load`, ...) with
-  `interp::register_builtins`. `interp` never sees C, so it builds and tests without libR, and the C
+- **`interp` sits below `libr`.** `libr` installs it (`interp::install`) with host hooks (console,
+  ALTREP materialization, finalizers) and replaces the foreign-function builtins
+  (`interp::register_builtins`). `interp` never sees C, so it builds and tests without libR; the C
   API's `Rf_eval`, `R_tryEval` and `R_ToplevelExec` are thin calls into it.
 - **Every non-local exit is a Rust `Err(Unwind)`.** `return`, `break`, `next`, exiting handlers and
-  restarts are `Jump`s to a frame's environment; an error raised by a builtin stays unsignalled
+  restarts are `Jump`s to a frame's environment; a builtin's error stays unsignalled
   (`Unwind::Error`) until the nearest `eval` or builtin boundary signals it, so calling handlers run
-  before any frame unwinds. Only the libR boundary converts to and from `longjmp`. This keeps Rust
+  before any frame unwinds. Only the libR boundary converts to and from `longjmp`, which keeps Rust
   destructors sound and needs no context stack beyond `Interp::frames`.
 - **Frames mirror GNU R's function contexts exactly** (closure calls, `eval()` and internal
-  dispatch push one), because `sys.call`, `sys.function`, `parent.frame` and the oracle driver's own
-  `sys.nframe()` arithmetic observe them.
-- **Base R's R code loads from the user's GNU R installation** (the base lazy-load database,
-  `R_HOME/library`), per the licensing record; GNU R's byte code reads back as its source
-  expression, which ry compiles itself.
-- **The default packages' native code is reimplemented in Rust** (`builtin_libraries.rs`). GNU R
-  builds the shared libraries of methods, utils, stats, grDevices, graphics and tools against its
-  internal headers, so they inline its object layout (`LENGTH`, `PROTECT` through `R_PPStack`) and
-  cannot run on ry's heap. `dyn.load` of one returns a library record backed by a table with GNU R's
-  routine names and arities, so `useDynLib` binds every `C_` symbol and an unimplemented routine fails
-  naming itself. CRAN packages are unaffected: since R 4.2 they see an opaque `SEXP`.
-- **Tier-0 code is a register machine stored in the closure** as a `BCODESXP` (instructions,
-  constants with the source first, inline caches), compiled on a body's second call. Keeping it in
-  the closure means it is collected with it and needs no side table; `closure_body` is the one
-  reader that must know. Inlined constructs run behind a cached guard that the symbol still names
-  the base primitive, falling back to the AST evaluator for the whole expression, so redefining
-  `if` or `+` keeps GNU R's semantics instead of GNU R's compiler's assumption that base is not
-  shadowed.
-- **Inline caches are validated per symbol** (`Heap::lookup_stamp`): each symbol carries an epoch
-  that moves when a binding of that symbol is created or removed outside a function frame, and the
-  stamp adds a heap-wide enclosure epoch that moves when any enclosure changes. A single heap-wide
-  counter was invalidated by every test body evaluated in a fresh environment. Function frames
-  (flagged `FUNCTION_FRAME`) are excluded because bindings appear in them on every call, so a
-  cached lookup never resolves through one and the frame itself is probed directly. A function
-  lookup that skipped a non-function binding is not cached, because that binding could later hold
-  a function without moving the stamp. A lookup that reaches the global environment goes through
-  the symbol's cached search-path cell (`Heap::global_cell`), GNU R's global cache.
-- **A complex assignment's `*tmp*` does not count as a reference** (`Heap::untrack_references`,
-  GNU R's `DISABLE_REFCNT`): counting it made every `x[i] <- v` copy `x`, which made fill loops
-  quadratic.
-- **A replacement call is built as GNU R builds it, with separate arguments.** Each level's call
-  names the symbol `*tmp*` (`` `[<-`(`*tmp*`, i, value = v) ``, getters `` `*tmp*`[["a"]] ``), and
-  `apply_call` receives that call plus a separate argument list of forced promises: the object
-  promise's code is `*tmp*`, the value promise's is the right-hand side at the first level and the
-  value at later ones. So `sys.call()` and `substitute(value)` in a method match GNU R, and
-  `substitute` unwraps a chain of promises. A forced promise deparses as its code; GNU R's
-  bytecode shows the right-hand side expression at every level inside compiled code (`value =
-  vals[[v]]`), which ry's AST form does not copy.
-- **Which call a replacement error names is chosen per message.** `Interp::assignment_call` maps the
-  generated call to the reported one: the whole assignment at the first level, and `` names(x) <-
-  `*vtmp*` `` for a later level, built eagerly because call resolution cannot fail. `error`/
-  `error_in` resolve to it (GNU R's `error()`), while `unwind::errorcall` and `generated_call`
-  keep the generated call, for the messages GNU R raises with `errorcall()`: the out-of-bounds
-  `[<-` matrix subscript, vectorIndex, and "no such index at level N". Only a builtin
-  replacement is mapped: a closure such as `` `f<-` `` reports its own frame call
-  (`` `f<-`(`*tmp*`, value = 1) ``), as in GNU R.
-- **`*tmp*` is answered from a side table, not bound.** GNU R binds `*tmp*` in the assignment's
-  environment for the duration, so a replacement closure can evaluate `sys.call()[[2]]` in
-  `parent.frame()`. ry pushes `(env, value)` onto `Interp::tmp_values` instead, and `find_var`
-  consults it only when a lookup of `*tmp*` finds no binding. Defining and removing a binding per
-  complex assignment would bump the heap's binding epoch twice and invalidate every global lookup
-  cache inside a loop like `for (i in s) x[i] <- i`, and it would make `*tmp*` count a reference
-  to the target, forcing a copy. `exists("*tmp*")` and `ls()` therefore do not see it.
-- **"Not subsettable" errors are `notSubsettableError` conditions** with GNU R's `object` field
-  (`subset.rs`'s `not_subsettable`), naming the type as `typeof` does (`builtin`, `special`), and
-  `$`/`$<-` on a function or symbol raise them too.
-- **Out-of-bounds subscripts are classed conditions.** `subset.rs`'s `out_of_bounds` signals
-  `subscriptOutOfBoundsError` through `conditions::classed_error`, with GNU R's `object`,
-  `subscript` (1-based dimension, `NA` for a vector subscript or a numeric `[` subscript) and
-  `index` (the failing element for `[`, the whole vector of a recursive `[[`) fields.
-- **Top-level task callbacks live in libr's C, behind two interpreter hooks**
-  (`Hooks::run_task_callbacks`, `Hooks::task_callback_routine`). C packages register callbacks
-  through `Rf_addTaskCallback`, so the list has to be the C one; R's `addTaskCallback` reaches the
-  same list through the routine hook rather than keeping a second list in `interp`.
-  `session::run_toplevel` runs them after printing the task's warnings, as GNU R does.
-- **S4 objects get their S3 class vector from a cache keyed by class name** (`Globals::s4_extends`,
-  filled by `.cache_class` or by calling methods' `.extendsForS3` on a miss). This is GNU R's
-  `R_S4_extends_table`: without it, S3 dispatch on an S4 object sees only its own class and misses
-  methods for the classes it contains.
-- **`.External2` routines get GNU R's four-argument convention** `(call, op, args, env)`, which
-  rlang's `ffi_eval` relies on to evaluate in the caller's environment.
+  dispatch push one), because `sys.call`, `sys.function`, `parent.frame` and `sys.nframe()`
+  arithmetic observe them.
+- **The default packages' native code is reimplemented in Rust** (`builtin_libraries.rs`): GNU R
+  builds them against its internal headers, so they inline its object layout (`LENGTH`, `PROTECT`
+  through `R_PPStack`) and cannot run on
+  ry's heap. `dyn.load` of one returns a table with GNU R's routine names and arities, so
+  `useDynLib` binds every `C_` symbol and an unimplemented routine fails naming itself. CRAN
+  packages see an opaque `SEXP` since R 4.2, so they are unaffected.
+- **Tier-0 code is a register machine stored in the closure** as a `BCODESXP`, compiled on a
+  body's second call, so it is collected with the closure and needs no side table (`closure_body`
+  is the one reader that must know). Inlined constructs run behind a guard that the symbol still
+  names the base primitive, falling back to the AST evaluator, so redefining `if` or `+` keeps GNU
+  R's semantics rather than GNU R's compiler's assumption.
+- **Inline caches are validated per symbol** (`Heap::lookup_stamp`): a symbol epoch moves when a
+  binding of it is created or removed outside a function frame, plus a heap-wide enclosure epoch. A
+  single heap-wide counter was invalidated by every test body run in a fresh environment. Function
+  frames (`FUNCTION_FRAME`) are excluded and probed directly, since bindings appear in them every
+  call. A function lookup that skipped a non-function binding is not cached (that binding could
+  later hold a function without moving the stamp). Global lookups use the symbol's search-path cell
+  (`Heap::global_cell`), GNU R's global cache.
+- **`*tmp*` does not count as a reference** (`Heap::untrack_references`, GNU R's
+  `DISABLE_REFCNT`); counting it made every `x[i] <- v` copy `x`, so fill loops went quadratic.
+- **A replacement call is built as GNU R builds it**: each level's call names `*tmp*`
+  (`` `[<-`(`*tmp*`, i, value = v) ``, getters `` `*tmp*`[["a"]] ``) and `apply_call` gets a
+  separate list of forced promises (object code `*tmp*`, value code the right-hand side at the
+  first level, the value later), so `sys.call()` and `substitute(value)` in a method match GNU R
+  and `substitute` unwraps a promise chain. Known difference: GNU R's bytecode shows the
+  right-hand side at every level inside compiled code (`value = vals[[v]]`); ry's AST form does
+  not copy that.
+- **The call a replacement error names is chosen per message.** `Interp::assignment_call` maps to
+  the whole assignment at the first level and `` names(x) <- `*vtmp*` `` later; `error`/`error_in`
+  use it (GNU R's `error()`), while `unwind::errorcall` and `generated_call` keep the generated
+  call for GNU R's `errorcall()` messages (out-of-bounds matrix `[<-`, vectorIndex, "no such index
+  at level N"). Only builtin replacements are mapped: a closure `` `f<-` `` reports its own frame
+  call (`` `f<-`(`*tmp*`, value = 1) ``), as in GNU R.
+- **`*tmp*` is answered from a side table, not bound** (`Interp::tmp_values`, consulted by
+  `find_var` only when a `*tmp*` lookup finds no binding). Binding it would bump the binding epoch
+  twice per assignment, invalidating global caches in `for (i in s) x[i] <- i`, and count a
+  reference to the target. So `exists("*tmp*")` and `ls()` do not see it.
+- **"Not subsettable" and out-of-bounds errors are classed conditions**
+  (`notSubsettableError`, `subscriptOutOfBoundsError` via `conditions::classed_error`) with GNU R's
+  `object`, `subscript` and `index` fields (`subset.rs`'s `not_subsettable`, `out_of_bounds`).
+  `subscript` is the 1-based dimension, `NA` for a vector or numeric `[` subscript; `index` is the
+  failing element for `[` and the whole vector of a recursive `[[`. Not-subsettable errors name the
+  type as `typeof` does (`builtin`, `special`), and `$`/`$<-` on a function or symbol raise them.
+- **Task callbacks live in libr's C list**, because C packages register through
+  `Rf_addTaskCallback`; R's `addTaskCallback` reaches the same list through
+  `Hooks::task_callback_routine` (no second list in `interp`), and `session::run_toplevel` runs them after the task's warnings.
+- **S4 objects get their S3 class vector from `Globals::s4_extends`** (GNU R's
+  `R_S4_extends_table`, filled by `.cache_class` or `.extendsForS3`); without it S3 dispatch misses
+  methods for contained classes.
+- **`.External2` routines get GNU R's `(call, op, args, env)`**, which rlang's `ffi_eval` needs to evaluate in the
+  caller's environment.
 
 ## `[`, `[[`, `[<-` and `[[<-` dispatch before evaluating their other arguments
 
 **Status:** built.
 
-- **Previous shape.** The four were builtins: every argument was evaluated before S3 dispatch. data.table's `[.data.table` needs `j` and `by` unevaluated (`.()`, `:=`, column names), so `dt[, .(x)]` failed with "could not find function `.`".
-- **Target shape.** GNU R's DispatchOrEval. The definition flag `BuiltinDef::dispatch_or_eval()` (a special with internal generic) makes `eval::apply_call` call `dispatch::dispatch_or_eval`: it evaluates only the first argument, and for an object passes the rest to the S4 method, or else the S3 method, as promises. Otherwise it evaluates them and calls the function with values, so the subset code itself never sees unevaluated arguments. A symbol bound to a missing argument evaluates to the empty argument, as GNU R's `R_isMissing` check does, so `f <- function(m, i, j) m[i, j]; f(m, , 2)` selects every row. `do.call` (`eval::apply`) hands such a special forced values.
-- **Bytecode.** A call of a dispatch-or-eval special (`bytecode.rs`, `subject_call`) evaluates the subject into a register, branches on `BranchIfObject` to `DispatchSubject` (which runs `dispatch::dispatch_evaluated_subject`, so a method still gets promises and the subject's expression), and otherwise evaluates the rest into registers and runs `CallBuiltin`, which the JIT turns into its element intrinsic. A `BranchUnlessSame` guard sends a rebound `[` to the generic call. A formal in an index position takes the generic path too, because a register cannot hold the empty argument a missing formal stands for. Without this shape `x[i]` in a loop ran as a generic call and compiled loops fell to tier-0 speed.
-- **NextMethod.** As in GNU R, NextMethod reaching any primitive names the call `<generic>.default`, which error messages show and which a dispatching special reads as "do not dispatch again". Without that, `[.simple.list` re-dispatched to itself forever.
+- **Shape.** GNU R's DispatchOrEval: `BuiltinDef::dispatch_or_eval()` makes `eval::apply_call`
+  call `dispatch::dispatch_or_eval`, which evaluates only the first argument and, for an object,
+  passes the rest to the S4 or S3 method as promises; otherwise it evaluates them, so subset code
+  never sees unevaluated arguments. data.table's `[.data.table` needs `j` and `by` unevaluated. A
+  symbol bound to a missing argument evaluates to the empty argument, as GNU R's `R_isMissing`
+  check does (`f(m, , 2)` selects every row); `do.call` (`eval::apply`) hands forced values.
+- **Bytecode** (`subject_call`): evaluate the subject, `BranchIfObject` to `DispatchSubject`
+  (`dispatch::dispatch_evaluated_subject`, so methods still get promises), else `CallBuiltin`,
+  which the JIT turns into its element intrinsic. `BranchUnlessSame` sends a rebound `[` to the
+  generic call. A formal in an index position takes the generic path, because a register cannot
+  hold the empty argument. Without this shape `x[i]` in a loop ran as a generic call and compiled
+  loops fell to tier-0 speed.
+- **NextMethod** reaching a primitive names the call `<generic>.default`, which a dispatching
+  special reads as "do not dispatch again"; otherwise `[.simple.list` recursed forever.
 
 ## `object-systems = false` stops class definitions in project code at run time
 
 **Status:** built.
 
-- **Previous shape.** Only the lint read the option, so `ry run` happily defined S4, Reference and R6 classes in a project that had turned them off. A first runtime check covered only code whose top environment is the global one, so the package under `ry load` still defined classes.
-- **Target shape.** `ry run`, `ry load` and the console on ry's runtime pass the option to the interpreter as a run flag (`RUN_FLAG_OBJECT_SYSTEMS`). With it off, `run_closure` calls `refuse_object_system`, which raises the lint's message (one text, `syntax::native_values::object_systems_disabled_message`, and one table of defining functions, `object_system_function`, shared with the lint and strict mode's top-level rule) when a call named after a class definition form (bare or after `::`) runs a closure owned by `methods` or `R6` and the caller is project code.
-- **Scope.** Project code is whatever has the global environment as its top level (scripts, the console, functions defined there), or runs in a namespace the loader built, which `runtime.R` marks with `.__ry_loader__.`. Installed packages are exempt, because they must keep loading (`stats4` defines S4 classes when it loads). Matching by call name keeps the hot path to one flag test when the option is on and one symbol-name lookup per closure call when it is off; a renamed alias (`f <- setClass`) slips through, which is acceptable for a guardrail whose job is to stop deliberate use. GNU R has no such check, so there only the lint applies.
+- `ry run`, `ry load` and the console pass the option as `RUN_FLAG_OBJECT_SYSTEMS`. With it off,
+  `run_closure` calls `refuse_object_system`, which raises the lint's message
+  (`syntax::native_values::object_systems_disabled_message`, table `object_system_function`,
+  shared with the lint and strict mode) when a call named after a class definition form (bare or
+  after `::`) runs a closure owned by `methods` or `R6` from project code.
+- **Project code** has the global environment as its top level, or runs in a namespace the loader
+  built (marked `.__ry_loader__.` by `runtime.R`). Installed packages are exempt because they must
+  keep loading (`stats4` defines S4 classes). Matching by call name costs one flag test, or one
+  symbol-name lookup per closure call when off; an alias (`f <- setClass`) slips through, which is
+  acceptable for a guardrail. GNU R has only the lint.
 
 ## Smaller runtime choices
 
 **Status:** built.
 
-- **PostScript output reuses the PDF device's drawing operators** with a prolog that defines them in PostScript, so the two devices share one renderer. The page is placed on the paper as GNU R places it (centred, turned a quarter for `horizontal = TRUE` with `%%Orientation: Landscape`), Only `onefile = FALSE` writes the `EPSF-3.0` header (one file per page through the `%d` name), and an EPS file has no `%%DocumentMedia` or `%%Orientation`. Otherwise `%%DocumentMedia` names the paper as given with its truncated size, `paper = "special"` is the device size (turned for `horizontal = TRUE`) and omits `%%Orientation`, and the bounding box is rounded; `graphics__device_files` pins these headers against GNU R. JPEG goes through `jpeg-encoder` from the same raster the PNG device draws.
-- **The native codeset follows `LC_CTYPE`** (`l10n_info`, `iconv("")`), so the C locale reports ASCII as GNU R does and utf8's formatting under `LC_ALL=C` escapes what GNU R escapes.
+- **PostScript reuses the PDF device's drawing operators** through a prolog, so both share one
+  renderer. Placement and DSC headers follow GNU R (centred, turned a quarter with
+  `%%Orientation: Landscape` for `horizontal = TRUE`; `EPSF-3.0` only for `onefile = FALSE`, one
+  file per page, with no `%%DocumentMedia` or `%%Orientation`; `paper = "special"` is the device
+  size and omits `%%Orientation`; the bounding box is rounded), pinned by `graphics__device_files`. JPEG uses
+  `jpeg-encoder` on the PNG device's raster.
+- **The native codeset follows `LC_CTYPE`** (`l10n_info`, `iconv("")`), so the C locale reports
+  ASCII and escaping under `LC_ALL=C` matches GNU R.
 
 ## The interpreter's call path, lookups and allocation
 
 **Status:** built, except `Decoded` and `combine_unnamed_atomic`, which the code does not have.
 
 - **Goal.** Per-test time on the three benchmark code bases, without the JIT, at or below GNU R's.
-  The cost was spread over the interpreter core (`step`, frame lookup, argument matching, an
-  allocation per binding and promise), so the fixes are many small cuts rather than one redesign.
-- **A closure call's heap objects are the environment, one cell per formal, and the argument
-  promises with their pairlist; the bookkeeping stays off the Rust heap.** Arguments and matched
-  formals live in inline `SmallVec`s (`eval::Args` holds 10, `eval::Matched` 8, so a call with
-  more spills to one Rust allocation), callers fill a vector they own (`promise_args_into`,
-  `evaluate_args_into`), and the frame lives inside the environment object. A formal whose default
-  is atomic or `NULL` binds that value directly with `BINDING_MISSING` set, because a promise of a
-  constant costs an allocation and a force for the same value; `missing()` reads the bit, not the
-  binding's type. A typed closure turns such a binding back into a promise on entry, because an
-  inline annotation checks a default only when the body uses it.
-- **Duplicate formals keep the first binding.** `formals<-` can make them, and `define_formals`
-  skips the probe that would catch them, so the frame (scanned or indexed) answers with the first
-  cell, as GNU R's frame list does.
-- **Frames scan up to 16 cells before building a hash index**, and hold nine bindings inline as
-  symbol and cell pairs, so a lookup reads one cache line per four bindings. `identical` has nine
-  formals, and building a map per call cost more than scanning. Separate symbol and cell arrays
-  were measured and cost 3% more instructions, because inserts then check two spills.
-- **A call binds its formals in one batch** (`Heap::define_formals`): one collection check that
-  keeps every value and the environment alive, then the cells, then one write barrier.
-- **Compiled code inlines more of base**: `.Internal(f(...))` of a non-dispatching builtin
-  compiles to register loads plus `CallBuiltin`; `local(expr)` compiles to a closure creation plus
-  a call, as GNU R's compiler does, behind the usual guard that `local` is still base's (base binds
-  it as a lazy-load promise, so the guard compares against the forced value); and a function
-  expression compiles its body once per site, shared by every closure the site creates.
-- **Scalar `x[i]` and `x[[i]]` on a plain vector skip general subscript resolution**, in the
-  subset builtins (`subset.rs`) rather than the compiler, so both evaluators take it.
-- **A compiled read of a promise-bound variable forces the promise it found** instead of
-  restarting the lookup through `eval_symbol`; only active, missing and unbound cells take the slow
-  path.
-- **A for loop reuses its scalar** when only the loop binding references it, as GNU R's `STEPFOR`
-  does, and the AST loop releases each iteration's handles instead of rooting them until the end.
-- **Minor collections mark only roots added since the last one** (new symbols, newly preserved
-  objects), because older ones are already marked old. The nursery stays at 8 MB: 32 MB was
-  measured slower, because first touches of fresh pages cost more than the collections saved.
-- **Compiled regular expressions are cached by pattern and flags**, and fixed argument names
-  (`PACKAGE`, `NAOK`, `.Environment` and friends) are interned once in `values::symbols()`.
-- **`inherits()` follows `class()`**: an object with no class attribute inherits from the implicit
-  class `class()` reports (`matrix`/`array`, else the basic class), not the dispatch chain, so
-  `inherits(1L, "numeric")` is `FALSE`, as in GNU R. It compares bytes and allocates nothing.
-- **A hashed frame's table is flat head and next arrays indexed by slot**, and callers
-  that only need the set (`length(env)`, sorted `ls()`, `lockEnvironment`) use
-  `Heap::bound_symbols`, which skips the walk.
-- **`step` is inlined into the dispatch loop** and reads the activation through a `Decoded` struct
-  (code, constants, caches, feedback pointer), so a simple instruction costs no call; type
-  feedback writes through a raw pointer that is null when no tier is collecting it. This cut
-  `mean.default` by about a quarter of its instructions.
-- **`GetFun` always looks in the local frame first.** Starting a function lookup in the
-  enclosure's cached cell when the compiler sees no local binding of the name was tried and
-  rejected: a frame gains bindings the compiler cannot see (`assign(..., envir =
-  parent.frame())` as zeallot's `%<-%` does, `<-` inside a default argument, `base::assign`, the
-  locals `UseMethod` copies into a method's frame), and a frame binding does not move the symbol
-  epoch that guards the cache. `Guard` keeps that shortcut for operators only, as GNU R's
-  compiler does.
-- **S3 dispatch allocates no implicit class vector**: `Globals::implicit_classes` caches one shared
-  (not-mutable) vector per dimension shape and type, except for calls and records, whose class
-  depends on the value. Method names are built in a stack buffer and interned directly.
-- **A `.Call` routine's external pointer holds the `Routine` entry's address**, so `try_call`
-  finds the implementation by index in a table built once; a pointer that comes back null from
-  serialization falls back to the lookup by name. C code that calls `R_ExternalPtrAddr` on such
-  a symbol gets that entry's address, not a function, but it got null before, which fails the
-  same way; every libr foreign-call path goes through `try_call` first.
-- **`c()` of untagged, unnamed atomic vectors copies slice by slice** into the result
-  (`combine_unnamed_atomic`), because the general path records every element and its name first
-  and was the largest source of Rust allocations in `sd()`.
-- **The random generators skip work GNU R repeats per call, and stay bit-identical to it.**
-  Measured on the Vasicek simulation (one `rnorm(200)` and one `m[i, ] <- ...` per step), these
-  cut ry from 142.5k to 87.3k instructions per step, against GNU R's 117.7k.
-  - `GetRNGstate` returns early when `.Random.seed` still holds the session's state (same kind
-    code, Mersenne position in range, same words), because rebuilding the generator from the
-    vector is the dominant cost of a short draw. `PutRNGstate` writes into an uninitialized vector.
-  - `rnorm` with scalar, finite `mean` and positive finite `sd` under Mersenne-Twister and
-    Inversion fills the result in two passes (all uniforms, then `qnorm` of each), so the twister
-    and the AS 241 central branch run as tight loops. The arithmetic is GNU R's exactly, with no
-    fused multiply-add, so streams match `set.seed` runs in GNU R. Every other case draws one at a
-    time through a closure that `random_vector` monomorphizes per generator.
-  - `m[i, ]` and `m[i, ] <- v` on a 2-D double, integer or logical matrix with a plain scalar row
-    copy the strided row directly instead of resolving both subscripts.
+  The cost was spread thin over the core, so the fixes are many small cuts, not one redesign.
+- **A closure call's bookkeeping stays off the Rust heap.** Arguments and matched formals live in
+  inline `SmallVec`s (`eval::Args` 10, `eval::Matched` 8), callers fill a vector they own
+  (`promise_args_into`, `evaluate_args_into`). A formal whose default is atomic or `NULL` binds the
+  value directly with `BINDING_MISSING` set (a promise of a constant costs an allocation and a
+  force); `missing()` reads the bit. A typed closure turns such a binding back into a promise,
+  because an inline annotation checks a default only when the body uses it.
+- **Duplicate formals keep the first binding**, as GNU R's frame list does (`formals<-` can make
+  them and `define_formals` skips the probe).
+- **Frames scan up to 16 cells before indexing** and hold nine bindings inline as symbol/cell pairs
+  (`identical` has nine formals). Separate symbol and cell arrays cost 3% more, because inserts
+  check two spills.
+- **A call binds its formals in one batch** (`Heap::define_formals`): one collection check, the
+  cells, one write barrier.
+- **Compiled code inlines more of base**: `.Internal(f(...))` of a non-dispatching builtin becomes
+  `CallBuiltin`; `local(expr)` a closure creation plus call behind a guard compared against the
+  forced lazy-load value; a function expression compiles its body once per site.
+- **Scalar `x[i]`/`x[[i]]` on a plain vector skip subscript resolution** in `subset.rs`, so both
+  evaluators take it.
+- **A compiled read of a promise-bound variable forces the promise it found**; only active,
+  missing and unbound cells restart the lookup.
+- **A for loop reuses its scalar** when only the loop binding holds it (GNU R's `STEPFOR`), and
+  the AST loop releases each iteration's handles instead of rooting them until the end.
+- **Compiled regexes are cached by pattern and flags**, and fixed argument names (`PACKAGE`,
+  `NAOK`, `.Environment`) are interned once in `values::symbols()`.
+- **Minor collections mark only roots added since the last one.** The nursery stays 8 MB: 32 MB
+  was slower because first touches of fresh pages cost more than the collections saved.
+- **`inherits()` follows `class()`'s implicit class** (`matrix`/`array`, else the basic class), so
+  `inherits(1L, "numeric")` is `FALSE` as in GNU R.
+- **A hashed frame's table is flat head/next arrays**; set-only callers (`length(env)`, sorted
+  `ls()`, `lockEnvironment`) use `Heap::bound_symbols`.
+- **`GetFun` always looks in the local frame first.** Starting in the enclosure's cached cell when
+  the compiler sees no local binding was rejected: frames gain bindings the compiler cannot see
+  (`assign(..., envir = parent.frame())` as zeallot's `%<-%`, `<-` in a default, locals
+  `UseMethod` copies), and those do not move the symbol epoch. `Guard` keeps that shortcut for
+  operators only, as GNU R's compiler does.
+- **S3 dispatch allocates no implicit class vector** (`Globals::implicit_classes`, one shared
+  not-mutable vector per shape and type, except calls and records).
+- **A `.Call` routine's external pointer holds its `Routine` entry's address**, so `try_call`
+  indexes a table; a null pointer from serialization falls back to lookup by name. C code calling
+  `R_ExternalPtrAddr` on such a symbol gets the entry's address, not a function (it got null
+  before, which fails the same way); every libr foreign-call path tries `try_call` first.
+- **The random generators skip GNU R's per-call rebuild and stay bit-identical.** `GetRNGstate`
+  returns early when `.Random.seed` still holds the session's state (rebuilding the generator is
+  the dominant cost of a short draw); `PutRNGstate` writes into an uninitialized vector. `rnorm`
+  with scalar finite parameters under Mersenne-Twister and Inversion fills in two passes
+  (uniforms, then `qnorm`), with GNU R's arithmetic and no FMA; other cases draw one at a time
+  through a closure `random_vector` monomorphizes per generator. `m[i, ]` and `m[i, ] <- v` with a
+  scalar row copy the strided row directly. Vasicek simulation (one `rnorm(200)` and one
+  `m[i, ] <- ...` per step): 142.5k to 87.3k instructions per step, against GNU R's 117.7k.
 
 ## A primitive's S4 cache lookup matches arguments by name first
 
 **Status:** built.
 
-- **Previous shape:** `s4_dispatch` (`crates/interp/src/dispatch.rs`) built the dispatch label from the primitive's supplied arguments in order, as GNU R's `R_quick_dispatch` does. `x[i, drop = FALSE]` then took the class of `drop` for `j`, keyed as `x#logical#logical#missing`, and ran the method cached for `x[i, j]`. Matrix's `indexing.R` hit this: after `D[TRUE, TRUE]`, `D[L, drop = FALSE]` failed with "logical subscript too long".
-- **Why GNU R gets away with it:** the quick table GNU R consults for a primitive is often a stale environment that lacks the inherited entries (as for Matrix), so the lookup misses and full dispatch, which matches by name, runs. A small class defined at top level does show the quirk in GNU R (`a[TRUE, TRUE]` then `a[TRUE, drop = FALSE]` both run the `j = "logical"` method).
-- **Chosen shape:** `methods::signature_arguments` matches the supplied arguments to the generic's formals (exact names, then positions up to `...`) and orders them by `.SigArgs` before the cache lookup. A partial or unknown name skips the cache and leaves matching to the generic. ry deliberately differs from GNU R's quirk here; an oracle case cannot pin it, the Matrix test suite does.
+- `methods::signature_arguments` (used by `s4_dispatch` in `crates/interp/src/dispatch.rs`) matches supplied arguments to the generic's formals (exact names,
+  then positions up to `...`) and orders them by `.SigArgs` before the cache lookup; a partial or
+  unknown name skips the cache. Ordering by position, as GNU R's `R_quick_dispatch` does, keyed
+  `x[i, drop = FALSE]` as `x#logical#logical#missing` and ran the `x[i, j]` method (Matrix's
+  `indexing.R`: after `D[TRUE, TRUE]`, `D[L, drop = FALSE]` failed with "logical subscript too
+  long").
+- GNU R shows the quirk only for small top-level classes, because its quick table is usually stale
+  and misses. ry deliberately differs; the Matrix suite pins it, an oracle case cannot.
 
 ## A hashed frame counts complex assignment's `*tmp*`
 
 **Status:** built.
 
-- GNU R binds `*tmp*` in the frame for the length of a complex assignment, and in a hashed frame that insert and removal move the chain count (`env.profile` as the black box), which can grow the table and so change the order `ls(sorted = FALSE)` lists. ry never binds `*tmp*`, so `complex_assign` calls `Heap::count_transient_binding`, which applies the insert and the removal to the frame's `HashTable` without a slot (`crates/heap/src/env.rs`, `HashTable::count_transient`). Pinned by `crates/oracle/cases/environments__hashed_order_after_removal.R`.
+- GNU R binds `*tmp*` for the length of a complex assignment, which moves a hashed frame's chain
+  count and can grow the table, changing `ls(sorted = FALSE)` order. ry never binds it, so
+  `complex_assign` calls `Heap::count_transient_binding`, which applies the insert and removal to
+  the table without a slot (`HashTable::count_transient` in `crates/heap/src/env.rs`). Pinned by
+  `crates/oracle/cases/environments__hashed_order_after_removal.R`.
 
 ## Single-thread first, parallel-ready architecture (user directive)
 
-**Status:** built, except the explicit context invariant: `interp()` and `heap()` are process globals. The other invariants are not verified.
+**Status:** built, except the explicit context invariant: `interp()` and `heap()` are process
+globals (`crates/interp/src/interp.rs`). The other invariants are not verified.
 
-- **Scope.** Performance work targets one thread. The parallel runtime (thread pool, atomic counts, parallel GC) is deferred, and the roadmap row for automatic parallelism is "deferred, architecture-ready".
-- **The effect-free fact.** One stored per-function body fact in the function summary says whether calling the function has effects. Untyped code gets it from bytecode at compile time and at install time; strict and locked typed code gets it statically. Promise elision for effect-free arguments reads it today, and the parallel apply family reads the same fact later. There is no second computation of it.
-- **Invariants that keep parallelism possible**, to hold while the call path and heap are redesigned:
-  - interpreter and allocation state live in an explicit context passed through calls, not in globals or scattered thread-locals;
-  - allocation goes through a per-context bump buffer;
-  - GC safepoints are polled at allocation and at loop back edges;
-  - the reference-count field leaves room for a "shared across threads" mark, so only marked objects switch to atomic counts (as in Lean 4);
-  - inline caches and type feedback change only through monotonic state transitions, so a concurrent reader always sees a valid state;
-  - the symbol and CHARSXP tables can be read concurrently;
-  - warnings, conditions and the RNG stream are collected per task and merge in a deterministic order.
-- **Package native code stays single-threaded by contract**, because packages assume R's C API is. A parallel task may run only ry-owned code: R-level code, builtins, and ry's own ports (nmath, fft, loess and the rest of base and stats).
-- **Known gaps against the invariants:** `interp()` and `heap()` are process globals today (`crates/interp/src/interp.rs`); tier 0 caches the `Interp` pointer per activation, which is the first step toward a passed context.
+- **Scope.** Performance work targets one thread; the parallel runtime (thread pool, atomic
+  counts, parallel GC) is deferred, "architecture-ready".
+- **The effect-free fact** is one stored per-function fact in the function summary (from bytecode
+  at compile and install time for untyped code, statically for strict and locked typed code). Promise elision reads it, and the parallel
+  apply family will read the same fact; there is no second computation.
+- **Invariants to keep parallelism possible:** state in an explicit context, not globals;
+  allocation through a per-context bump buffer; GC safepoints at allocation and back edges; room in
+  the reference count for a "shared across threads" mark (atomic counts only for marked objects,
+  as in Lean 4); inline caches and feedback change monotonically; symbol and CHARSXP tables
+  readable concurrently; warnings, conditions and the RNG stream collected per task and merged
+  deterministically.
+- **Package native code stays single-threaded by contract**, because packages assume R's C API
+  is; a parallel task runs only ry-owned code (R code, builtins, ry's ports such as nmath and fft).
+- Tier 0 caching the `Interp` pointer per activation is the first step toward a passed context.
 
 ## Argument-match caches live in the callee's code, not at the call site
 
 **Status:** built.
 
-- **Previous shape.** Every call that names an argument ran GNU R's three-pass matcher (`eval::match_args`): exact names, partial names, positions. `validation` and `objects` in `tools/bench/real` make 1.0 to 1.2 million such calls each.
-- **Chosen shape.** Matching produces a plan, one formal index per argument (`Plan` in `eval.rs`), and the result is built from the plan. The plan depends only on the formals and the argument tags, so the callee's compiled body keeps its last plan in the `MATCHES` constant with the formals and the tags it was made for, and a call with the same formals and identical tag symbols reuses it (`match_args_cached`). A failed match is never stored, so errors come from the full matcher.
-- **Why the callee and not the call site.** Calls that pass `...` (633k in `validation`) and S3 dispatch have no compiled call site whose tags are fixed. Keying on the callee covers them all, and the check (one pointer compare per argument) is cheap enough that a miss costs only the full match plus three small allocations. A body called with alternating name patterns thrashes the one entry; revisit with two entries if a profile shows it.
-- **Impact.** Matching inside `seq(1, 10, by = 2)` drops from about 3.6k to 1.0k instructions. Unpositional calls on uncompiled closures keep the full matcher.
+- Matching produces a plan, one formal index per argument (`Plan` in `eval.rs`). The callee's
+  compiled body keeps its last plan in the `MATCHES` constant with the formals and tags it was made
+  for, and a call with identical tag symbols reuses it (`match_args_cached`). A failed match is
+  never stored, so errors come from the full matcher. `validation` and `objects`
+  (`tools/bench/real`) make 1.0 to 1.2 million named calls each; matching in
+  `seq(1, 10, by = 2)` drops from about 3.6k to 1.0k instructions.
+- **Why the callee.** Calls passing `...` (633k in `validation`) and S3 dispatch have no call site
+  with fixed tags; keying on the callee covers them, and the check is one pointer compare per
+  argument, so a miss costs only the full match plus three small allocations. Alternating name
+  patterns thrash the one entry; revisit with two if a profile shows it.
 
 ## Cheap promises: measured, not redesigned; call setup and package loads trimmed instead
 
 **Status:** built.
 
-- **Question.** Closure calls create about 1.2 promises each (testthat workload: 1.23M calls, 1.51M promises), and a user's profile put call setup at a quarter of the time. Three designs were weighed for cheaper promises: creating them lazily, holding them inline in the frame slot, or a per-call arena.
-- **Measured.** Callgrind on the testthat workload, minus the cost of loading it, gives about 8,100 instructions per closure call with a flat profile: `frame_environment` 325, `run_closure` itself 322, `bind_arguments` 276, defining formals 270, clearing and releasing the frame 250, `force_promise` 113, settling a promise 87. Allocating a promise is a bump allocation in the nursery, and promises are 1.4 of the 7.4 objects freed per call; binding cells (2.8) and environments (1.0) are more. None of the three designs removes more than the allocation itself (a few dozen instructions), while each changes what `PRCODE`, `PRENV`, `substitute`, `delayedAssign` identity and the C API see. So promises keep their shape.
-- **Built instead.**
-  - Formals are bound in one pass: all cells allocated, inserted with one filter and duplicate scan (`Frame::insert_formals`), and one write barrier (`Heap::define_formals_uncollected`).
-  - Settling a forced promise does its reference counting and write barrier once (`Heap::settle_promise`).
-  - The stack check keeps the floor of the current stack segment and a ceiling above every interpreter frame on it in the interpreter (`interp().stack_floor`, `stack_ceiling`) and compares the stack pointer against both, so a segment other code switched to (`libr`'s and `rdb`'s readers call R hooks on their own `stacker` segments) takes the slow path, so `stacker`'s thread-local lookup runs only near the floor (`on_large_stack` in `eval.rs`). A guard restores the caller's floor when an R error unwinds, because a stale floor from a freed segment would let the fast path skip the check.
-  - Together these measure small: 8,174 to 8,140 instructions per closure call on the testthat workload (callgrind, load subtracted), because the cost they remove was already spread thin.
-- **Namespace loads defer major collections.** `run_closure` recognises `loadNamespace` by identity (`Interp::namespace_loader`, preserved, recorded by `session::mark_base_closures` on every start, the image start included), not by a gp bit: closure gp bits are scarce, and one shared with `NATIVE_ENTRY` once made every declined native-entry call count as a load (`gp::CLOSURE_BITS` and `closure_gp_bits_do_not_overlap` in `crates/heap/tests/test_frames.rs` guard against a repeat). A drop guard ends the load on any exit. While any call of it runs, `escalate_if_full` doubles the small-object limit instead of escalating, because almost everything a load allocates survives it. When the outermost load returns, the limit is rebased on the old and young bytes kept, so the next ordinary collection does not immediately escalate. Load of testthat, xts, data.table and a 40,744-object package: 2 major collections to 0, GC from 15.7% to about 5% of the time. Pinned by `a_namespace_load_defers_major_collections_until_it_ends` in `crates/heap/tests/test_gc.rs`.
-- **Lazy-load records.** The record reader inlines its slice path for integers, reals and strings, borrows string bytes instead of copying them, and reads a pairlist's cells in a loop. `makeLazy` builds GNU R's promise (the key spliced into a copy of the expression, one shared evaluation environment) instead of a new environment per binding. `registerS3methods` asks whether each local generic is an S4 generic; a generic still in its database whose record header says a closure without a class or S4 bit is answered without fetching it (`serialize::lazy_record_header`, which inflates only the first 64 bytes), and each generic is answered once per call. `library()` of 11 packages: 914 records fetched to 651, 1,197.8M instructions to 1,133.0M.
-- **Left open.** Minor collections during a load cost about 30M instructions each. Re-marking remembered namespace frames was the suspected cause, but a frame watermark removed only 1.3M of 90M on `library(testthat)`: the cost is tracing the young survivors themselves (about 360k objects per collection at about 70 instructions each, `Space::mark` 44 of them). See "Card marking, frame watermarks and moved list growth". `unserializeFromConn` reads through the connection's buffer (same entry).
+- **Promises keep their shape.** Closure calls make about 1.2 promises each (testthat: 1.23M
+  calls, 1.51M promises). Lazy creation, inline promises in the frame slot and a per-call arena
+  were weighed; none removes more than the nursery bump allocation (a few dozen instructions of a
+  flat ~8,100 per call: `frame_environment` 325, `run_closure` 322, `bind_arguments` 276, defining
+  formals 270, frame clear and release 250, `force_promise` 113, settling 87), and each changes
+  what `PRCODE`, `PRENV`, `substitute`, `delayedAssign` identity and the C API see. Promises are
+  1.4 of 7.4 objects freed per call; binding cells (2.8) and environments (1.0) are more. The cuts
+  below together measured only 8,174 to 8,140 per call.
+- **Formals bind in one pass** (`Frame::insert_formals`, `Heap::define_formals_uncollected`);
+  settling a forced promise counts and barriers once (`Heap::settle_promise`).
+- **The stack check** compares the stack pointer against a floor and ceiling kept on the
+  interpreter, so `stacker`'s thread-local lookup runs only near the floor (`on_large_stack` in
+  `eval.rs`); a segment another reader switched to (`libr`'s and `rdb`'s readers call R hooks on
+  their own `stacker` segments) takes the slow path. A guard restores the
+  caller's floor on unwind, since a stale floor from a freed segment would skip the check.
+- **Namespace loads defer major collections.** `run_closure` recognises `loadNamespace` by identity
+  (`Interp::namespace_loader`, recorded by `session::mark_base_closures` on every start), not a gp
+  bit: closure gp bits are scarce, and one shared with `NATIVE_ENTRY` once counted every declined
+  native entry as a load (`gp::CLOSURE_BITS` and `closure_gp_bits_do_not_overlap` in
+  `crates/heap/tests/test_frames.rs` guard it). While a load runs, `escalate_if_full` doubles the
+  small-object limit, because almost everything a load allocates survives; the outermost load
+  rebases the limit on the bytes kept. Loading testthat, xts, data.table and a 40,744-object
+  package: 2 major collections to 0, GC from 15.7% to about 5% of the time. Pinned by
+  `a_namespace_load_defers_major_collections_until_it_ends` in `crates/heap/tests/test_gc.rs`.
+- **Lazy-load records.** `makeLazy` builds GNU R's promise (key spliced into the expression, one
+  shared environment) rather than an environment per binding. `registerS3methods` answers whether a
+  generic is S4 from its record header without fetching it (`serialize::lazy_record_header`,
+  inflating 64 bytes). `library()` of 11 packages: 914 records fetched to 651.
+- **Left open.** Minor collections during a load cost about 30M instructions each: tracing the
+  young survivors (about 360k objects at about 70 instructions), not remembered frames (a frame
+  watermark removed 1.3M of 90M on `library(testthat)`; see "Card marking, frame watermarks and
+  moved list growth"). `unserializeFromConn` reads through the connection's buffer.
 
 ## Promises per call: native base closures take arguments by value; the rest of the promises are observable
 
 **Status:** built.
 
-- **Question.** Cut promises and allocations per closure call on the testthat workload (`tools/bench/applications/testthat.R`, three repeats): 1,575,315 promises in 1,251,213 framed calls (1.26), 9.50M objects freed.
-- **Where the promises come from** (an instrumented build, since removed): symbol arguments whose binding in the caller is a plain value 421k, a forced promise 267k, an unforced promise 423k (a formal passed on); language arguments 154k; compiled arguments 307k; non-literal defaults 171k. The receivers are mostly small base and rlang predicates (`match`, `typeof`, `identical`, `inherits`, `%in%`, `is_call`, `isNamespace`, `is.factor`, `is.vector`). The effect-free eager path (`effects.rs`, `eager_args_into`) applied to almost none of them: the callee is rarely provably effect-free, and testthat always has a calling handler established.
-- **Built.** A call of a closure registered in `base_fast_paths::NATIVE_ENTRIES` first tries `native_entry_by_value` on the unevaluated arguments (`op_call_generic` in `bytecode.rs`, the closure branch of `eval::apply_call`). It proceeds only when every argument is untagged and is a constant or a variable bound to a value or a forced promise (`effects::eager_argument`, no active binding). Reading those runs no R code, so it gives the value forcing would; when the native code declines, nothing has changed and the promises are built as before, so `substitute`, `missing`, `sys.call` and `match.call` see exactly what GNU R shows. New native entries: `typeof`, `inherits` (not S4, `what` a character vector), `is.factor`, `is.data.frame`, `is.vector` (one-string `mode`) and `isNamespace`, each pinned by hash.
-- **Counting.** Native-entry calls never build a frame and are counted apart (`Counter::NativeEntries`, "closure calls run natively, without a frame"), so promises per R-level call is promises over framed plus native calls.
-- **Measured** (same workload): promises 1,575,315 to 1,453,304; framed calls 1,251,213 to 1,182,756 plus 97,990 native (about 30k native before, since the R-level call count is fixed), so 1.23 to 1.13 promises per R-level call; objects freed 9.50M to 9.18M (7.42 to 7.17 per R-level call); callgrind 7.930G to 7.821G instructions.
-- **Rejected, because GNU R code can observe it.**
-  - Forcing an unforced caller promise before the call (strictness) from an uncompiled caller or for a closure GNU R's compiler does not inline: an error or a handler inside the forced code would see `sys.calls()` without the callee's frame, and rlang traces record exactly that.
-  - Passing the caller's own promise for a formal passed on: `substitute` in the callee would show the caller's expression.
-  - Binding values in the frame of a closure that merely forwards its formals to a builtin: a calling handler for a warning that builtin raises can `substitute` the formal through `sys.frame()`.
-  - Pools for frames and argument lists: binding cells need stable addresses for compiled code's watches, and a dead frame can still be held by uncounted references (handles, the C protect stack), so reuse needs the collector's proof anyway (see "Cheap promises").
-- **Revised: compiled call sites force strict arguments of the closures GNU R's compiler inlines.** GNU R's byte compiler turns `typeof`, `identical`, `inherits`, `is.vector` and `match` into `GETVAR` plus `CALLBUILTIN` (`cmpSimpleInternal`), so compiled GNU R forces their arguments in the caller with no closure frame, and `sys.call(-1)` inside a forced promise shows the caller's call (`g(y)`), not `typeof(x)`. ry compiles a closure on its second call, as GNU R's JIT does, so a compiled ry call site forces those arguments the same way (`native_entry_by_value`, `compiled`, and the fourth field of `NATIVE_ENTRIES`). Other native entries, and AST callers, never run promise code before the call: they only settle promise chains whose links are variables or constants (`eval::settled_without_code`, innermost first, at most 16 links), and only for an argument the entry's R body would read: the by-value call hands each variable's binding to the entry unresolved, and the entry resolves what it consumes, so `getOption(x, default)` with the option set and `a %||% b` with a non-`NULL` `a` leave the other promise unsettled. Settling it up front is observable, because a later assignment to the variable it names must still reach the promise when the caller forces it. A language argument at the call site still declines to the closure call. `builtins__native_entry_promise_chains` pins the side-effect order and the visible calls.
-- **Left.** The remaining per-call allocations are binding cells (2.7 per framed call), the promises above and environments; cutting cells needs frames whose slots compiled code can watch without a separate cell object.
+- **Where the promises come from** (testthat, an instrumented build): symbol arguments bound in
+  the caller to a value 421k, a forced promise 267k, an unforced promise 423k; language arguments
+  154k; compiled arguments 307k; non-literal defaults 171k. The receivers are mostly small base
+  and rlang predicates. The effect-free eager path (`eager_args_into`) applied to almost none:
+  the callee is rarely provably effect-free, and testthat always has a calling handler.
+- **By-value native entries.** A call of a closure in `base_fast_paths::NATIVE_ENTRIES` first tries
+  `native_entry_by_value` on the unevaluated arguments (`op_call_generic`, the closure branch of
+  `eval::apply_call`), only when every argument is untagged and a constant or a variable bound to a
+  value or forced promise (`effects::eager_argument`). Reading those runs no R code; when the
+  native code declines nothing has changed and promises are built as usual, so `substitute`,
+  `missing`, `sys.call` and `match.call` see what GNU R shows. Native-entry calls build no frame
+  and are counted apart (`Counter::NativeEntries`). Entries added for this: `typeof`, `inherits`
+  (not S4, character `what`), `is.factor`, `is.data.frame`, `is.vector` (one-string `mode`) and
+  `isNamespace`. Measured: 1.23 to 1.13 promises per R-level call, objects freed 7.42 to 7.17.
+- **Compiled sites force strict arguments of closures GNU R's compiler inlines** (`typeof`,
+  `identical`, `inherits`, `is.vector`, `match`: `GETVAR` plus `CALLBUILTIN` in GNU R's
+  `cmpSimpleInternal`, so
+  `sys.call(-1)` in a forced promise shows the caller's call). Marked by the fourth field of
+  `NATIVE_ENTRIES`. Other entries and AST callers only settle promise chains whose links are
+  variables or constants (`eval::settled_without_code`, at most 16 links), and only for arguments
+  the entry consumes, so `getOption(x, default)` with the option set leaves `default` unsettled:
+  settling up front is observable, since a later assignment to the variable must still reach the
+  promise. A language argument at the site declines to the closure call. Pinned by
+  `builtins__native_entry_promise_chains`.
+- **Rejected because GNU R code can observe it:** forcing a caller's promise before the call
+  (handlers would see `sys.calls()` without the callee, and rlang traces record that); passing the
+  caller's own promise for a forwarded formal (`substitute` would show the caller's expression);
+  binding values in a frame that forwards formals to a builtin (a warning handler can `substitute`
+  the formal via `sys.frame()`); pools for frames and argument lists (binding cells need stable
+  addresses for compiled watches, and dead frames can be held by uncounted references such as
+  handles and the C protect stack).
+- **Left.** Binding cells (2.7 per framed call), the promises above and environments; cutting
+  cells needs frames whose slots compiled code can watch without a cell object.
 
 ## Slot frames: closure locals live in registers until something asks for the environment
 
-**Status:** built. Tier-1 code also runs on slot frames. "A slot frame's environment binds a variable only when a lookup asks for it" replaces this entry's rule that the first trigger moves every variable into the environment; the bullets below describe the layout, the plans and the references, which stand.
+**Status:** built. Tier-1 code also runs on slot frames. "A slot frame's environment binds a
+variable only when a lookup asks for it" replaces the rule that the first trigger moves every
+variable into the environment; the layout, plans and references below stand.
 
-- **Previous shape.** Every closure call allocated an environment, one binding cell per formal and local, and released them on return. On the testthat workload frames and argument matching were the largest exclusive cost (23.8% of instructions), and an instrumented build found that 62.5% of calls never needed the environment as an object (`docs/src/content/docs/development/design/slot-frames.md`). The environment was the only source of truth for a frame's bindings, and `Frame.env` and `Frame.sys_parent` were always filled, so every frame lookup compared environments.
-- **Chosen shape.** A body the compiler can number (`local_symbols` succeeds, at most 64 formals, no base fast-path prologue; a `...` formal's slot holds the collected `DOTSXP`) gets a slot table (`SLOTS` in its constants). `bind_slots` (`eval.rs`) binds such a call into `1 + n` registers above the caller's: a header register that holds the environment once there is one, then one slot per numbered symbol, formals first. A slot counts one reference, an unassigned local holds the unbound marker, and `Frame.missing` keeps one missing bit per formal. A variable is in its slot or in a binding cell of the frame's environment, never both, so nothing is copied back and the two cannot drift.
-- **Frame identity.** `Frame.env` is nil while the frame's own code runs on its slots, `Frame.pending` holds the environment once it exists, and a nil `Frame.sys_parent` means the caller is a slot frame, which `Frame.caller` names by position (`envir::caller_index`). `eval::frame_env` and `eval::frame_sys_parent` are the only ways to get either as an `SEXP`, and both make the environment on demand. A frame makes its environment once, so `environment()`, `sys.frame()`, a promise's or closure's environment and `parent.frame()` from a callee all return the identical object. Every lookup of a frame by environment goes through `Frame::owns`. Builtins that only read frame properties take `Call::frame_index` instead of the environment.
-- **What asks for the environment.** The table "What asks for the environment" in `slot-frames.md` lists each route and the state it needs. Reads that need none: `substitute(sym)` (`slot_substitute`), `missing`, `nargs`, `sys.call`, `return`, the condition system's call lookup, and the dots accessors.
-- **The C API.** `crates/libr` exports no context walker: `R_GlobalContext` is an opaque top-level block and `R_sysframe`, `R_sysfunction` and `Rf_sysparent` are not exported. `R_GetCurrentEnv` reifies through `frame_env`, and every other entry point receives an environment that R code or one of those routes already handed out.
-- **Machine code.** A body with tier-1 or baseline code gets a heap frame, because compiled code reads variables through the environment; tier-1 entry otherwise reified on every call (442k times on `functional`). This is a known gap: hot bodies are where slot frames pay off most. Closing it needs tier-1 and baseline code to read and write slots by index (the baseline's inline probe and tier 1's own slots become the interpreter's), and deoptimization to materialize the environment from slots through `reify` instead of assuming one exists. `Machine::enclosure` gives the enclosing environment for a promise or top-level machine, whose `function` is nil.
-- **Direct calls.** A call site's fourth constant is its plan (`direct_plan` in `bytecode.rs`): the first call of a body marks the site, the second builds `[formals, body, [plans made, source per formal]]`, and later calls of the same formals and body run `eval::call_with_plan`, which writes the arguments straight into the slots without matching. A site stops after eight plans. The plan is built lazily because allocating one per first call pushed start-up over a collection threshold (+33M instructions on an empty script). `run_frame` moves the frame's handler and restart stacks back on return instead of cloning them on entry. Measured per `h -> f` call pair from a loop (JIT off): 3,065 instructions on heap frames, 2,605 on slot frames with matching, about 2,330 with the plan.
-- **Compiling before binding.** `bind_slots` calls `bytecode::compile_before_call`, which compiles a body at the call where `run_body` would (the first call of a body with a loop, the second of any other), so that call already runs in a slot frame. Before that, a body compiled inside `run_body` after its environment was bound, so the first call of a looping function ran in a heap frame. That first call is often the only one: every bench-real driver calls `execute` once, through `capture.output`. The helper counts nothing, so a call that does not compile is counted once, by `run_body`. On rcp/bytecodes, which assigns 25 locals per iteration, this took 18% of instructions off tier 0 and 16% off JIT-on runs relative to the build before slot frames.
-- **Accepted cost in heap frames.** An instruction that reads or writes a variable checks the header register (`Activation::in_slots`) before taking the heap path, and the frame's environment is read through the header register rather than held in the activation. In a frame that has an environment, that costs a few instructions per variable access. Two rcp programs show it, because their loop frames are reified. On super-while the closure `f` made in `execute` reifies `execute`'s frame, and tier 0 runs 3.6% more instructions than before slot frames. On matrix-for, the variable promise in `matrix(nrow = n, ncol = n)` reifies the frame, and tier 0 runs 8% more instructions, or 2.5% more with the JIT on, where tier-1 code spends about 4 more instructions per iteration. Both are accepted: making the heap path cheaper again would need a second dispatch loop specialized on the frame kind, and the inlining tier removes these frames from hot loops anyway. `lookup_outside` is `#[inline(always)]` for the same reason: as a call, it cost super-while about 50 instructions per iteration in saved registers.
-- **Forwarding `...`.** A call from a slot frame that passes `...` appends the slot's promises (`slot_dots_into`); a builtin call whose other arguments are constants or slotted locals forces them from the slots (`slot_builtin_call`), so neither makes the environment.
-- **No heap-frame fallback for bodies that keep reifying.** A per-body reify count that sent a body to heap frames once it reified on most entries cut testthat's reifies from about 100,000 to 6,700, yet ran 0.2 to 0.7% more instructions on testthat and functional: making the environment late costs about what binding a heap frame costs, and the heap path loses the direct-call plan. The bodies that reify every call (S3 generics through `UseMethod`, `.Internal` wrappers that receive the environment, `paste0`) are fixed at the trigger instead, by giving those builtins a slot path.
-- **Argument references.** A variable passed from a slot frame to a planned callee is a pooled promise with `gp::ARGUMENT_REFERENCE` that names the caller's frame and slot (`eval::argument_reference`), not a promise over a pending environment, so passing a variable allocates nothing and the caller keeps no environment. It stays a promise rather than a new object kind or a tagged register value because every reader of a slot already handles promises (`force_promise`, `substitute`, `missing`, tier 1), and the GC traces registers, which rules out an immediate. A per-symbol shared reference would need no pool, but a stray one would silently read whichever frame read it; the pooled object carries its frame and header register, so a stale one panics. The cost is that nothing may keep a reference past the call: `materialize_references` converts them at every route that could (reify, S3/S4 dispatch, the debugger's generic path), and `op_call_generic` releases the pool slice when the call returns. A caller that has an environment passes a pooled reference holding that environment (`eval::env_reference`) to a planned callee too: it saves the promise allocation, and it is what lets a package call made from test code or a reified frame count as direct. Compiled argument code from a slot frame is a pooled reference too (`eval::code_reference`), holding the code in its environment field; the field's kind (environment, bytecode or nil) tells the three kinds apart, so they share one pool and one release. Code from a caller with an environment is a reference too (`eval::env_code_reference` keeps the code in the attribute), and the AST evaluator also passes constants as references, because lazyeval-style native code reads a promise's environment; each pooled reference's own attribute vector lives in `Interp.reference_targets`, so a borrowed attribute is restored at release instead of reallocated. The AST evaluator plans calls through `direct_sources` and `call_with_plan` like the bytecode call instruction, so there is one binding path for planned calls. A callee with a `...` formal is planned as well (`DOTS_SOURCE`, then the positions `...` collects), which makes forwarding `...` share one reference object between frames; `detach_reference` therefore converts a reference into its promise in place and refills the pool slot, rather than handing out a copy that would force a second time. A call that passes `...` cannot keep sources across calls, since what `...` holds differs per call, so its plan is the single entry `MATCH_PER_CALL` and `call_matching` matches the expanded arguments on every call; that still skips `bind_slots` and the promise per argument. Tier 1 lowers a direct call's argument code eagerly in the caller's frame, so `lower_block` refuses an assignment there (`Lowering.inlined` is false): binding it in the inlined scope would drop the caller's write, which `RY_JIT=force` showed as `n <- 0; twice({ n <- n + 1; n }); n` giving 0.
-- **No separate call path for builtin wrappers.** A closure whose body is one builtin call (`function(x) .Call(C_f, x)`, or the same inside `{ }`) is an ordinary callee of the fast call path (`bytecode::call_fast`). A dedicated path once ran the builtin from the caller without binding anything (`call_wrapper`, with a pin per plan that recorded the enclosure and the lookup stamp of every symbol the body resolved). It was the second source of truth for how such a call evaluates: it re-implemented argument order, laziness, the frame that `sys.call` sees and the promises a reified frame binds, and each had needed its own fix. It was also slower than the path it bypassed, about 2,400 instructions for `k1(i)` with body `x + 1L` against about 900 on the fast call path, because it rechecked the pin's stamps and settled every argument on each call. Its one advantage was that it ran from a frame with an environment, where the fast path did not. The target shape is one path: `call_fast` takes calls from frames that read by name too (`PLAN_FAST_BY_NAME`, arguments as `eval::env_reference` and `eval::env_code_reference`), and the wrapper path, the pins column and its counter are deleted. `do.call` keeps `eval::run_inlined`, whose frame runs without the closure's body. Impact: one set of call semantics to keep right, no heap object held by a plan (so `clear_dead` no longer drops anything at a major collection), and `k1(i)` 2,419 to 903 and `k2(i)` 2,503 to 989 instructions per call (`just bench-mechanisms --filter call:`). Oracle case `functions__builtin_wrappers` pins what such a call must show.
-- **Closures on the frame's environment, guarded in the heap.** A `function` expression compiled in a slot frame closes over the frame's environment (`eval::slot_closure`), which binds nothing while the variables are in slots. Making every variable a cell on each function definition cost 8,926 testthat package calls, mostly for `tryCatch` handlers and callbacks that never escape. The risk is a reader that sees an environment without its bindings. A single accessor in `interp` could not cover every reader (`CLOENV` in C, `environment()`, lexical lookup, `effects.rs`), so the guard sits where all of them end up: every binding access in `heap.rs` goes through the private `bindings` or `bindings_for`, which call the resolver the interpreter installs while a slot-frame flag is set, and `frame_ptr` is `pub(crate)` so nothing outside the heap reads a frame raw. The resolver runs with collection inhibited and panics if the owner has returned, which `finish_frame` rules out: a frame returns with tracked closures (at most 16, `Interp.pending_closures`) only when each is provably dead (reference count equal to the slots and cells holding it, not the result, not preserved, not a global calling handler), and its environment takes every variable otherwise.
-- **Subassignment and replacement without an environment.** `x[i] <- v`, `x[[i]] <- v`, `x$name <- v` and one-level builtin replacement calls on a non-object slot value call the primitive's code directly and store the result in the slot. The compiler keeps the generated `` `[<-`(`*tmp*`, i, value = v) `` call as `Op::SubAssign`'s seventh operand, because ry reports some primitive errors against that call and others against the whole assignment (`Interp.assignment_call`), as GNU R does. Copy semantics rest on `slot_owns` (reference count one and no expression register holding the value); anything else copies first. Objects reify, since a method may read the frame.
-- **`parent.frame()` hands out the caller's environment without its variables; exit code runs there.** Profiling testthat showed most `parent.frame()` calls came from callers that only pass the frame on: `do.call`'s `envir` default, `tryCatch`'s handler frame, and `withr::defer(envir = parent.frame())`, which registers exit code on the caller through `do.call(base::on.exit, ..., envir = envir)`. `on.exit` from a slot frame registers compiled promise code on `Frame.on_exit` (`slot_on_exit`), and `run_on_exit` runs compiled entries on the slots and other entries in the frame's environment. The alternative, a native `withr::defer` keyed by frame identity, would still need both of these for every other `do.call(on.exit)` and `parent.frame()` user, so it was not built.
-- **Call plans live in a side table, not in the code's constants.** Each call site used to carry a fourth constant for its plan and each plan was two heap objects (a list and an integer vector), which with the slot tables made the branch's permanent heap about 0.5 MB larger than main on testthat; because the nursery trigger is half the old generation, that pushed the GC heap's committed region over one more 2 MB huge page (peak RssAnon 55 against 53 MB). `bytecode::CallPlans` (in `bytecode::State`) keeps plans as columns indexed by plan id with sources in one pooled `Vec<i32>`; a site's state (unseen, seen, misses, or plan id plus one) sits in the feedback word of its call instruction's first operand, which no recording uses, so planless sites allocate nothing. Keys are weak through the new `heap::RootSource::clear_dead` hook (runs after marking, before sweeping), and `CallPlans::owned` checks the owner and position, so a stale or saved id never matches. A plan holds no heap object strongly. Measured on testthat after the change: peak RSS 76 MB with the JIT off and on (main 76-77 and 81).
-- **Fast-path prologues run on slot frames.** A prologue (`.Internal(ryX())` first in a body) used to read its frame as an environment, so `has_prologue` denied every such closure a slot table, and once withr's helpers got prologues, "frame with an environment" became the largest reify reason in testthat (about 18% of package calls; `stopifnot`, `match.arg` and `structure` were the largest base callers). The prologue helpers (`argument`, `finish`, `is_default`, `is_supplied`, `dots`, `kernel`) take a `ClosureFrame`, which is the environment or the slot frame's index; on a slot frame they read `eval::slot_formal` and the missing bits, and `finish` returns through the pending environment, which `finish_frame` catches. Only `match.arg`, `Reduce` and `trace_back` define variables in or evaluate code in their frame, so `prologue_needs_environment` keeps the old rule for them alone. `methods::is` became a one-line prologue in `methods_core.R` for the same reason, and `install_fast_paths` replaces a stale saved prologue (`calls_fast_path`), so a prologue edit needs no base image rebuild.
-- **Checking.** Behind `syntax::testing::enable_invariants()`, `lift_frame` checks the frame once its environment holds every variable (`check_lifted`). The bytecode fuzzer runs each program with the frame's environment in each state, reached before and after the body (`check_bytecode_agreement`), and `crates/ry/tests/scenarios/slot-frames.scenario` exercises each route that asks for the environment and each read that needs none.
+Design and measurements: `development/design/slot-frames.md`.
+
+- **Why.** On testthat, frames and argument matching were the largest exclusive cost (23.8% of
+  instructions), and 62.5% of calls never needed the environment as an object.
+
+- **Layout.** A body the compiler can number (`local_symbols` succeeds, at most 64 formals; a `...`
+  slot holds the `DOTSXP`) gets a slot table (`SLOTS` constant). `bind_slots` binds a call into a
+  header register (the environment once there is one) plus one slot per symbol, formals first. A
+  slot counts one reference; `Frame.missing` keeps one bit per formal. A variable is in its slot or
+  in a cell of the environment, never both, so nothing is copied back.
+- **Frame identity.** `Frame.env` is nil while code runs on slots, `Frame.pending` holds the
+  environment once made, and a nil `Frame.sys_parent` means a slot-frame caller named by position
+  (`envir::caller_index`). `eval::frame_env` and `eval::frame_sys_parent` are the only ways to get
+  either as an `SEXP` and make the environment once, so every route returns the identical object.
+  Lookups by environment go through `Frame::owns`; property-only builtins take `Call::frame_index`.
+  Routes that need the environment are tabled in `slot-frames.md`; `substitute(sym)`
+  (`slot_substitute`), `missing`, `nargs`, `sys.call`, `return` and the dots accessors need none.
+- **The C API** exports no context walker (`R_GlobalContext` is opaque; `R_sysframe` and friends
+  are not exported); `R_GetCurrentEnv` reifies through `frame_env`.
+- **Direct calls.** A planned site runs `eval::call_with_plan`, writing arguments straight into
+  slots; the plan is built on a body's second call because allocating on the first pushed start-up
+  over a collection threshold (+33M instructions on an empty script). A site stops after eight
+  plans. Per `h -> f` pair (JIT off): 3,065 instructions on heap frames, 2,605 on slot frames with
+  matching, about 2,330 with the plan. `run_frame` moves handler and
+  restart stacks back on return rather than cloning.
+- **Compile before binding.** `bytecode::compile_before_call` compiles where `run_body` would, so
+  that call already runs on slots; the first call of a looping function is often its only one
+  (bench drivers call `execute` once). On rcp/bytecodes (25 locals assigned per iteration) slot
+  frames took 18% of instructions off tier 0 and 16% off JIT-on runs.
+- **Accepted cost in heap frames.** Variable instructions test the header register
+  (`Activation::in_slots`) first: rcp super-while (a closure made in `execute` reifies it) runs
+  3.6% more tier-0 instructions, matrix-for (a variable promise in `matrix(nrow = n, ncol = n)`)
+  8% more, 2.5% with the JIT on. Making the heap path cheaper again would need a second dispatch
+  loop; inlining removes these frames from hot loops. `lookup_outside` is `#[inline(always)]`
+  because as a call it cost ~50 instructions per iteration in saved registers.
+- **Forwarding.** `slot_dots_into` appends the slot's promises for `...`; `slot_builtin_call` forces
+  constant and slotted arguments from slots.
+- **No heap-frame fallback for bodies that keep reifying.** A per-body reify counter cut testthat's
+  reifies from about 100,000 to 6,700 yet ran 0.2 to 0.7% more instructions: making the
+  environment late costs about what binding a heap frame costs, and the heap path loses the direct
+  plan. Fix the trigger instead (give the builtin a slot path; `UseMethod` generics, `.Internal`
+  wrappers that receive the environment, `paste0`).
+- **Argument references.** A variable passed from a slot frame to a planned callee is a pooled
+  promise with `gp::ARGUMENT_REFERENCE` naming the caller's frame and slot
+  (`eval::argument_reference`). It stays a promise, not a new kind or tagged register, because
+  every slot reader already handles promises and the GC traces registers. A shared per-symbol
+  reference was rejected because a stray one would silently read the wrong frame; the pooled one
+  carries its frame, so a stale one panics. Nothing may keep a reference past the call:
+  `materialize_references` converts them where one could escape (reify, S3/S4 dispatch, the
+  debugger), and `op_call_generic` releases the pool slice on return. Variants share one pool,
+  told apart by the environment field: `eval::env_reference` (caller with an environment),
+  `eval::code_reference` and `eval::env_code_reference` (compiled argument code); the AST evaluator
+  passes constants as references too, because lazyeval-style native code reads a promise's
+  environment. Each reference's attribute vector lives in `Interp.reference_targets`. The AST
+  evaluator plans through `direct_sources`/`call_with_plan`, so planned calls have one binding
+  path. A `...` callee plans with `DOTS_SOURCE`; `detach_reference` converts in place so a shared
+  reference is not forced twice. A call passing `...` has the single plan `MATCH_PER_CALL`
+  (`call_matching`). Tier 1 lowers a direct call's argument code in the caller's frame, so
+  `lower_block` refuses an assignment there (`Lowering.inlined`), which would drop the caller's
+  write (`RY_JIT=force` showed `n <- 0; twice({ n <- n + 1; n }); n` giving 0).
+- **No separate call path for builtin wrappers.** A closure whose body is one builtin call is an
+  ordinary callee of `bytecode::call_fast` (`PLAN_FAST_BY_NAME` covers callers with an
+  environment). A dedicated wrapper path was deleted: it was a second source of truth for argument
+  order, laziness and visible frames, needed its own fixes, and was slower (`k1(i)` 2,419 against
+  903 instructions per call on the fast path, `just bench-mechanisms --filter call:`). `do.call` keeps
+  `eval::run_inlined`. Pinned by `functions__builtin_wrappers`.
+- **Closures close over the frame's environment, guarded in the heap** (`eval::slot_closure`).
+  Making every variable a cell per function definition cost 8,926 testthat package calls, mostly
+  `tryCatch` handlers and callbacks that never escape. No single accessor in `interp` covers every reader (`CLOENV` in C, lexical lookup,
+  `effects.rs`), so every binding access in `heap.rs` goes through private `bindings`/`bindings_for`,
+  which call the interpreter's resolver; `frame_ptr` is `pub(crate)`. The resolver runs with
+  collection inhibited and panics if the owner returned, which `finish_frame` rules out: a frame
+  returns with tracked closures (at most 16, `Interp.pending_closures`) only when each is provably
+  dead (reference count equal to the slots and cells holding it, not the result, not preserved,
+  not a global calling handler), else its environment takes every variable.
+- **Subassignment without an environment.** `x[i] <- v`, `x[[i]] <- v`, `x$name <- v` and one-level
+  builtin replacements on a non-object slot value call the primitive and store into the slot;
+  `Op::SubAssign`'s seventh operand keeps the generated call for error blame. Copy semantics rest on
+  `slot_owns` (reference count one and no expression register holding the value; anything else
+  copies first); objects reify, since a method may read the frame.
+- **`parent.frame()` hands out the caller's environment without its variables; exit code runs
+  there.** `on.exit` from a slot frame registers compiled code on `Frame.on_exit` (`slot_on_exit`),
+  run on the slots by `run_on_exit`. Most `parent.frame()` calls come from callers that only pass
+  the frame on (`do.call`'s `envir` default, `tryCatch`'s handler frame, `withr::defer(envir =
+  parent.frame())`). A native `withr::defer` keyed by frame was rejected: every other
+  `do.call(on.exit)` user would still need this.
+- **Call plans live in a side table** (`bytecode::CallPlans`, columns by plan id, sources in one
+  pooled `Vec<i32>`); a site's state sits in its call instruction's unused feedback word, so
+  planless sites allocate nothing. Heap-object plans grew the permanent heap about 0.5 MB, which
+  crossed one more 2 MB huge page (peak RssAnon 55 against 53 MB); with the table testthat's peak
+  RSS is 76 MB with the JIT off and on. Keys are weak via `heap::RootSource::clear_dead`, and `CallPlans::owned`
+  checks owner and position, so a stale id never matches.
+- **Prologues run on slot frames.** The prologue helpers take a `ClosureFrame` (environment or slot
+  index) and read `eval::slot_formal`; only `match.arg`, `Reduce` and `trace_back` need an
+  environment (`prologue_needs_environment`). Denying prologue closures a slot table made "frame
+  with an environment" about 18% of testthat's package-call reifies; `methods::is` is a one-line
+  prologue in `methods_core.R` for the same reason. `install_fast_paths` replaces a stale saved prologue
+  (`calls_fast_path`), so a prologue edit needs no base image rebuild.
+- **Checking.** Under `syntax::testing::enable_invariants()`, `check_lifted` verifies a lifted
+  frame; the bytecode fuzzer runs each program with the environment in each state
+  (`check_bytecode_agreement`); `crates/ry/tests/scenarios/slot-frames.scenario` covers each route.
 
 ## A slot frame's environment binds a variable only when a lookup asks for it
 
 **Status:** built.
 
-- **Previous shape.** A slot frame had two states. Its variables lived in slots until the first trigger, and the trigger built an environment with a binding cell for every variable and turned each argument reference into a real promise. A promise made in the frame, a builtin that dispatches, `parent.frame()` from a callee, a closure that escaped and `$` on an object were all triggers. One run of the finance code base's tests made 10.2 million such environments in 53 million closure calls and freed 348 million objects, of them 66.6 million binding cells, 41.4 million promises and 19.6 million environments. A default argument was a promise over the frame's environment, so a function with a non-literal default paid the environment on every call that left the argument out. An S3 method never took the generic's argument references: `UseMethod` turned each into a promise.
-- **What was weak.** One request for the frame's identity paid for every variable. Most requesters need only the object (a promise's environment, a closure's enclosure, `parent.frame()` passed on) or one or two variables (a callback reading a local of its defining frame). The call protocol also had two argument forms, pooled references and promises, with the choice made per caller and callee pair, so the method call, the default and the heap-frame callee each fell back to promises.
-- **Chosen shape.** The environment has three states, flagged on the object (`gp::PENDING_FRAME`, `gp::PARTIAL_FRAME`): it exists and binds nothing; it binds the variables that lookups asked for; it binds everything and is an ordinary environment. A variable is in its slot or in a cell, never both, so each state has one source of truth per variable. The heap asks the interpreter for one variable (`bindings_for`, `eval::box_variable`) or for all (`bindings`, `eval::lift_frame`). The heap knows which names the frame may bind (the slot names list in the frame record and `gp::DISPATCH_VARIABLE` on the dispatch variables' symbols; see "A slot frame's environment asks its frame only for names the frame binds"), so a lookup of any other name passes through without a call. Lookups from a closure or promise over the frame read the slot in place (`eval::slot_binding`, `dots_binding`, `slot_is_missing`) and move nothing. Arguments are pooled references on every path that runs the callee on slots: closure calls, S3 methods (`dispatch::use_method_in_slots` hands the generic's references on unchanged), and a frame's own defaults (`eval::default_promises`). A reference becomes a real promise only where something that outlives the call can hold it (`detach_reference`: a heap-frame callee, a variable that gets a cell, native typed entries, non-closure methods). `.GenericCallEnv` is recorded as unbound when the generic's caller is a slot frame without an environment, and reading it asks that caller (`eval::method_var_value`).
-- **Why not keep slots as the only store and give the environment a view.** An environment that reads through to the slots would need no cells at all, but an `SEXP` binding cell is what `R_findVarLoc`, active bindings, `lockBinding` and the hashed-frame code in `heap.rs` hand out, and a frame that returns while its environment is held needs cells anyway. Moving one variable at a time keeps the C API on real cells and makes the escape case the same code as the lookup case.
-- **Why the frame's own code leaves its slots once a variable has a cell.** After the first variable moves, the frame's instructions read and write by name (`leave_slots`). Keeping them on slots would need a per-variable test in every slot instruction and in tier 1's code, which reads slots without a check.
-- **How a lookup finds the frame.** The environment's frame record stores the position of the frame it stands for (`Heap::slot_owner`), in the field that counts removed bindings in an ordinary environment; a slot frame's environment takes every variable and becomes ordinary before a binding can be removed from it, so the two uses never meet. The previous shape scanned the frame stack for the frame naming the environment on every lookup, which costs in proportion to the stack depth at the point a callback reads a local of its defining frame.
-- **Closures made over a slot frame are listed in frame order.** `Interp.pending_closures` was one unordered list, and a non-empty list sent every return in the interpreter down the general path and made every frame pop filter the whole list. That was cheap while a frame with a pending environment was reified soon after; with environments that stand for their frame for its whole life (a testthat wrapper holding a handler closure for a test), it raised the returns that take the general path (`eval::leave`) in a 225-test slice of the finance tests from 0.90 million to 1.54 million. With the ordered list the same slice takes 0.60 million. The list is ordered by frame index: a frame's closures are a run found from the end (`pending_closures_of`), popping frames drop theirs from the end (`forget_pending_closures`), and `bytecode::return_fast` tests only the returning frame's own state.
-- **Measured.** On the finance code base's test suite (53.0 million closure calls, JIT on) the run frees 264.0 million objects instead of 348.2 million: binding cells 65.9 to 22.8 million, promises 41.1 to 21.1 million, environments 19.5 to 14.1 million. 81.5% of package calls run with no argument promise and no environment (59.7% before), and 3.4 million slot frames come to read by name where 10.2 million built their whole environment. Collector time falls from 2.41 s to 1.86 s. Run time does not follow: closure call setup takes 16.9 s before and 17.3 s after (equal within the noise of that machine), the geometric mean over the three benchmark code bases is 1.55x GNU R against 1.57x in the same round (one round, good to about 5%), and callgrind counts 1.5% fewer instructions on a 225-test slice. The objects were cheap to make and to free; matching, the frame record and the bookkeeping that replaced them are what a call still pays for (`development/design/slot-frames.md`, "Measured").
-- **Impact.** Correctness: one source of truth per variable in every state, checked by `check_lifted` and the bytecode fuzzer across the states. Simplicity: one argument form for every call that runs on slots, and the escape rules in one function (`outliving_cause`). Performance: a quarter fewer objects and a quarter less collector time at unchanged run time, so take the remaining sources (`backlog.md`, "The call path after slot frames bind on demand") for memory churn, not for speed. The analysis core is not involved.
+- **Shape.** The environment has three states (`gp::PENDING_FRAME`, `gp::PARTIAL_FRAME`): binds
+  nothing; binds the variables lookups asked for; binds everything (ordinary). A variable is in its
+  slot or a cell, never both. The heap asks for one variable (`bindings_for`,
+  `eval::box_variable`) or all (`bindings`, `eval::lift_frame`), and passes other names through
+  (see the next entry). Lookups from a closure or promise over the frame read the slot in place
+  (`eval::slot_binding`, `dots_binding`, `slot_is_missing`). Arguments are pooled references on
+  every slot path: closure calls, S3 methods (`dispatch::use_method_in_slots`) and the frame's own
+  defaults (`eval::default_promises`). A reference becomes a real promise only where something
+  outliving the call can hold it (`detach_reference`: a heap-frame callee, a variable that gets a
+  cell, native typed entries, non-closure methods). `.GenericCallEnv` is read through
+  `eval::method_var_value` when the caller has no environment.
+- **Why.** One request for the frame's identity used to pay for every variable, while most
+  requesters need only the object or one or two variables. The finance tests made 10.2M whole
+  environments in 53M closure calls and freed 348M objects.
+- **Why not slots only, with a view environment.** `R_findVarLoc`, active bindings, `lockBinding`
+  and hashed frames hand out real `SEXP` cells, and a returned frame whose environment is held
+  needs cells anyway. Moving one variable at a time keeps the C API on real cells and makes escape
+  and lookup the same code.
+- **Once a variable has a cell, the frame's code reads by name** (`leave_slots`); staying on slots
+  would need a per-variable test in every slot instruction and in tier 1.
+- **The environment stores its frame's position** (`Heap::slot_owner`) in the field that counts
+  removed bindings in an ordinary environment; the uses never meet, because a slot frame's
+  environment becomes ordinary before a binding can be removed. Scanning the stack instead costs
+  per depth.
+- **Pending closures are ordered by frame index** (`pending_closures_of`,
+  `forget_pending_closures`), so `bytecode::return_fast` tests only the returning frame; an
+  unordered list sent every return down the general path (`eval::leave` returns on a 225-test
+  finance slice: 0.90M before on-demand binding, 1.54M with it unordered, 0.60M ordered).
+- **Measured** (finance tests, JIT on): objects freed 348.2M to 264.0M (cells 65.9 to 22.8M,
+  promises 41.1 to 21.1M, environments 19.5 to 14.1M); 81.5% of package calls with no argument
+  promise and no environment (59.7% before); GC 2.41 to 1.86 s; call setup 16.9 vs 17.3 s and
+  1.55x vs 1.57x GNU R, equal within noise.
+- **Impact.** About a quarter fewer objects and less collector time at unchanged run time, so the
+  remaining sources (`backlog.md`, "The call path after slot frames bind on demand") are memory
+  churn, not speed. Escape rules are in one function (`outliving_cause`).
 
 ## A slot frame's environment asks its frame only for names the frame binds
 
 **Status:** built.
 
-- **Previous shape.** A slot frame's environment learned which names its frame may bind by setting their bits in the frame record's symbol filter (`expect_bindings`), and a lookup that passed the filter and found no cell called the interpreter's resolver (`eval::resolve_pending_access`). The filter is a 64-bit hash of the symbol's address, so it only rules names out.
-- **What was weak.** A name whose filter bit collides with a slot name's passes the filter, finds no cell and calls the resolver, which finds no slot of that name and moves nothing. The next lookup of the name asks again, so a hot loop that reads a global through a closure over the frame calls the resolver on every read. On one build `spectralnorm_alt_3` made 840 thousand such calls; on another it made none, because the bits depend on where the symbols were allocated.
-- **Chosen shape.** The frame record keeps the frame's list of slot names (`Frame::expected`, set by `set_slot_owner` from the function's slot table, which holds the list alive while the frame runs). The symbols of S3 dispatch variables carry `gp::DISPATCH_VARIABLE` (`expect_dispatch_variables`), since a method's frame binds them on first use without a slot. `bindings_for` calls the resolver only when the name passes the filter, has no cell, and is in the list or a dispatch variable (`Frame::expects`). The extra field fits because the spilled-frame index moved into the spilled storage (`Spilled::index`), which only a large frame uses, so the frame record keeps its size class.
-- **Why `Heap::may_bind` stays filter-only.** Its callers (`slot_binding` and the slot readers) search the frame's slot names next anyway, so an exact test there scanned the list twice per lookup and cost about 0.5 billion instructions on `spectralnorm_alt_3`. The exact test lives where the resolver would be called and nowhere else.
-- **Measured.** On `spectralnorm_alt_3` (one run of `execute`) the build at hand has no collision: resolver calls go from 523 to 437 and instructions from 23.19 to 23.16 billion, with the same run time (about 1.0 s). The forced collision in the test is the case that matters, and there each lookup goes from one resolver call to none.
-- **Impact.** Correctness: a lookup can no longer call the resolver for a name the frame never binds, pinned by `slot_frame_environment_asks_only_for_slot_names` in `crates/heap/tests/test_frames.rs`, which forces a collision. Simplicity: the filter means "may bind" for every environment again, and the exact set has one source of truth, the function's slot table. Performance: no change on the common path, which the filter answers; a collision costs one list scan instead of a resolver call. Incremental analysis: unaffected.
+- The frame record keeps the frame's slot names (`Frame::expected`, set by `set_slot_owner`), and
+  S3 dispatch variables' symbols carry `gp::DISPATCH_VARIABLE` (`expect_dispatch_variables`).
+  `bindings_for` calls the resolver only when the name passes the 64-bit filter, has no cell, and
+  `Frame::expects` it. The filter alone let a colliding name call the resolver on every read,
+  depending on symbol addresses (`spectralnorm_alt_3` made 840k resolver calls on one build, none
+  on another). The field fits because the spilled-frame index lives in `Spilled::index`.
+- **`Heap::may_bind` stays filter-only**, because its callers search the slot names next anyway;
+  an exact test there scanned twice per lookup (about 0.5B instructions on `spectralnorm_alt_3`).
+- Pinned by `slot_frame_environment_asks_only_for_slot_names` in
+  `crates/heap/tests/test_frames.rs`, which forces a collision.
 
 ## Single-core speed first; per-process costs count once per worker
 
 **Status:** built, except package code running from install-time compiled code, which "No baseline tier, and code images hold bytecode only" supersedes.
 
-- **Context.** The target users run their test suites in parallel across processes (one R process per worker) and are CPU bound, so all cores are already busy.
-- **Decision.** Single-core speed is the goal. Automatic parallelism (row (b) in `r-runtime.md`) is deferred: threads inside one worker would compete with the other workers for the same cores.
-- **Metrics.** The primary metric for every runtime track is the testthat workload (`tools/bench/applications/testthat.R`) under callgrind. `just bench applications` comes second. Work on the native execution model also reports `just bench public` (awfy, shootout, rcp), because scalar loops are where FastR and Ř are ahead.
-- **Per-process costs.** Every cost paid per process is paid once per worker: JIT warm-up and compile time, package loading, resident memory and cache pressure. So package code should run from install-time compiled code (read-only pages shared between workers, no warm-up) rather than code compiled at run time, and per-worker resident memory is a metric that must not regress.
+- **Decision.** Target users run test suites in parallel processes and are CPU bound, so
+  single-core speed is the goal; automatic parallelism inside a worker is deferred because threads
+  would compete with the other workers.
+- **Metrics.** Primary: the testthat workload (`tools/bench/applications/testthat.R`) under
+  callgrind; then `just bench applications`; native execution work also reports `just bench public`,
+  because scalar loops are where FastR and Ř are ahead.
+- **Per-process costs** (JIT warm-up, compile time, package loading, resident memory and cache
+  pressure) are paid once per worker, so per-worker resident memory must not regress.
 
 ## Closure call setup: the 10x end shape
 
-**Status:** planned. Built so far: `eval::enter` and `eval::leave`, tier-0 calls to a compiled body run in the dispatch loop, the planned fast path (`bytecode::call_fast` and `return_fast`, with arguments written once and one observer byte), the `CallPlans` rows with `CallShape` and the default sources, and the reference pool. Not built: the depth-indexed frame columns, the packed code header, pooled default promises with `u32` reference columns, `...` without cells, and promise forcing in the loop.
+**Status:** planned. Built: `eval::enter` and `eval::leave`, tier-0 calls to a compiled body run
+in the dispatch loop, the planned fast path (`bytecode::call_fast`, `return_fast`), `CallPlans`
+rows with `CallShape` and default sources, and the reference pool. Not built: depth-indexed frame
+columns, the packed code header, pooled default promises with `u32` reference columns, `...`
+without cells, promise forcing in the loop, and one observer word on the general path.
 
-- **Question.** Closure call setup is 22.4% of corpus time (frames, promises, argument matching, entry and exit). The 10x row asks for a tenth of that. This entry is the target every call-setup change builds toward; tier 0 (T0) and the JIT call through the contract at the end.
-- **Measured today** (callgrind, release, `RY_JIT=off`, a planned `h -> f` pair with one positional argument and a literal default, about 3,300 instructions, of which about 2,100 are call setup). The largest exclusive parts: `run_frame` 406, `run_call_generic` 263, `call_with_plan` 152, `run_at` 141, `execute_code` 121, a `Frame` memcpy 119, `effect_free` 111, `slot_args_into` 89, `slot_named` 68, `direct_plan` 67, and 76 in `heap()` accessor reads. The structural causes:
-  - `push_frame` writes a 150-byte `Frame` that carries an `on_exit: Vec`, two `Rc` clones (handler and restart stacks), and a `srcref` found by walking the closure's attributes on every call.
-  - The caller builds an `Arg` buffer and `push_frame` copies it into `Interp.frame_args`.
-  - `call_with_plan` reads the slot count, register count and formal count from the code's constants list and the formals pairlist on every call. (Fixed: the plan row's `CallShape`, below.)
-  - Every optional observer (activity counters, the profile summary, the debugger, `moves::tracking`, the object-system refusal, the namespace loader, the depth limit) is tested separately on every call.
-  - A missing formal with a non-literal default allocates a heap promise over a pending environment, which allocates the pending environment; a callee with `...` allocates one `DOTSXP` cell per dotted argument.
-  - Each pooled argument reference keeps its target (frame, slot, header) in a heap integer vector.
-  - Tier 0 enters every callee through Rust recursion (`run_frame`, `run_slots`, `execute_code`, `run_at`), which costs about 700 instructions of entry, exit and `scope` bookkeeping per call.
-- **Goal.** On the common path, a call allocates nothing on the R heap or the Rust heap and runs in about 200 instructions from the call op to the callee's first op and back. The common path is a planned site, a callee with a slot table, arguments that are constants, variables or compiled code, defaults of any kind, `...` received or forwarded, no `on.exit`, and no handler established in the callee. What GNU R code can observe stays exactly as "Promises per call" settles it: no strictness, no passing the caller's promise, `substitute`, `missing`, `sys.call` and `match.call` unchanged.
-- **Frame layout: stacks indexed by depth, struct of arrays.** Every piece of per-call state lives on a stack that the call pushes and the return truncates, so the stacks are the per-depth bump arenas and only grow amortized.
-  - The hot record per depth is 40 bytes: `function`, `call`, `slots` (the header register, which Track C's `lookup_outside` matches, with the flags inlined, pending shared and reified in its top byte), `missing` (u64), `caller` (u32) and the `slot_owner` before the call (u32), which `leave` restores. `Frame.slots` stays the identity of a slot activation.
-  - Cold columns indexed by the same depth hold `env`, `sys_parent`, `pending`, `unforced`, `args` start, `method_vars` start, `closures` start and the caller's `srcref`. The push writes the hot record, the four starts, and nil into `env` and `pending`; the rest is written only when set.
-  - `on.exit` expressions move to one `Interp.on_exit` stack with a start per depth, so a frame without exit code owns no `Vec`.
-  - Handler and restart stacks become one arena each (`Vec<Handler>` with a parent index), and the current stack is an index. A frame stores two `u32`s, establishing pushes an entry, and unwinding resets the index; the arena truncates when its top entry is dead. This replaces the `Rc` linked lists, whose sharing is what the parent index gives for free (a calling handler runs with the index of the entry below it). `calling_below` stays a bit on each entry.
-  - The closure's `srcref` is read once, when its code is compiled, into the code header below. No attribute walk per call.
-  - The register window (header, slots, body registers) is unchanged; it is already a bump region on `bytecode::State.registers`.
-- **Formals-dependent facts live in the call plan, not the code header (settled).** A closure whose formals were replaced (`formals<-`) keeps its body, so the formal count and the default bitsets are facts of the formals and body together, which is exactly the key of a `CallPlans` row. The row's `eval::CallShape` (formal count, slot count and register count, 6 bytes) is filled once in `plannable` when the site plans, and which left-out formals take a literal or a code default is in the row's sources (`LITERAL_DEFAULT`, `PROMISED_DEFAULT`). A first version kept two `u64` default bitsets in the shape (32 bytes a row), which raised testthat_full's peak RssAnon by about 0.09 MiB; the sources already had one entry per formal, so the bitsets were redundant. The slot and register counts are copies of body facts, kept in the row so binding reads one record; they cannot drift because the row is keyed by the immutable body. Previous source of truth: the formals pairlist and the constants list, walked on every call. Impact (callgrind, `RY_JIT=on`, `RY_BENCH_REPEAT=5`, against main): testthat -2.60%, validation -1.77%, report -1.65% warm Ir, about 220 Ir less per slot-frame entry; planning and compile cost unchanged; no new per-site state beyond the row. `bind_slots`, which machine code binds through, records the same `promised` mask in `CallFrame::Slots`. A table generation (moved by every store and free) replaces copying the sources into a `SmallVec` per call: the site reads the row after collecting its arguments and checks the generation, falling back to the full key check.
-- **The code header.** A compiled body starts with one packed header: slot count, register count, formal count, a bitset of formals with non-literal defaults, a bitset of formals whose defaults are literals, the `...` slot, the srcref, the effect-free proof and the prologue flag. It replaces the constants-list and formals walks per call. It is not a cache: the code object is immutable once compiled, the header is part of it, and nothing else holds these facts.
-- **Promises: every promise a slot-frame call creates comes from the reference pool.** The pool (`eval::pooled_reference`) is the promise arena per call depth: `op_call_generic` releases a call's slice at return, and `materialize_references` converts any reference at the routes through which one could outlive the call (reify, S3 and S4 dispatch, the debugger). Four kinds, told apart by the environment field:
-  - a variable of the caller's frame (built),
-  - a variable of a caller with an environment (built),
-  - compiled argument code (built),
-  - a non-literal default, which is compiled default code run on the callee's own slots, so the callee needs no pending environment for its defaults. `default_promises` stops allocating.
-  - Reference targets (frame, slot, header) move from heap integer vectors into three `u32` columns indexed by pool position.
-  - A constant argument goes into the slot as the value: nothing can change it. A variable argument does so only when the slot table proves that the formal's first read comes before any op that can run arbitrary code (any call, `<<-`, `eval`) on every path; otherwise it stays a reference. The proof is needed for a variable bound to a forced promise too, because what is fixed is the promise, not the caller's binding: `x <- 1; f <- function(a) { x <<- 2; a }; f(x)` returns 2 in GNU R, and so do the same shapes with `assign("x", 2, envir = parent.frame())` and with a callee that calls a function writing `x`. The oracle pins these cases.
-- **`...` without cells.** A received `...` is a slice of the call's arguments on `Interp.frame_args` plus the plan's dots sources. The slot holds a pooled reference of a fifth kind, a dots view (start, count), which `slot_dots_into`, `...length()`, `..N` and `list(...)` read directly. A `DOTSXP` chain is built only when a reader needs the pairlist (reify, `substitute(list(...))`, `match.call`, C code) and then replaces the view in the slot.
-- **Argument matching: plans, densely indexed, built once.** The site word in a call op's feedback operand holds the plan id (built, `bytecode::CallPlans`). A plan is one row of columns: the callee's code, its formals identity, the source per formal (position, `DOTS_SOURCE`, `MATCH_PER_CALL`, or default). Writing arguments is one loop over the sources. Matching by name runs only when a site is planned or the plan misses. do.call plans use the same columns (built: `call_do_call`).
-- **Arguments are written once.** The caller pushes arguments straight onto `Interp.frame_args` and passes the start; the plan's loop reads from there into the slots. The `Arg` buffer and its copy go away.
-- **One flags word for observers.** `Interp.slow_calls` is a bitset set while any observer is on: activity counting, the profile summary, the debugger, `moves::tracking`, a disabled object system, the namespace loader, and `trace`. The common path tests it once and takes the general path when it is nonzero. The depth limit compares the frame stack's length with a capacity reserved to `max_depth`.
-- **The contract T0 and the JIT call through.** Call setup exposes two halves instead of one recursive call:
-  - `enter(plan, function, call, args_start, sys_parent) -> R<Entered>` checks the site's plan, pushes the hot record, writes the slots from the plan's sources, sets `slot_owner`, and returns `Entered { value, header, depth }` (16 bytes, so it comes back in registers). It allocates nothing on the common path. When the plan misses or `slow_calls` is set, it runs the general path and returns `header == NO_SLOTS` with the result in `value`; otherwise `value` is the callee's code, rooted by the hot record's `function` while the depth lives.
-  - `leave(depth, result: R<Sexp>) -> R<Sexp>` runs `return` targeting, `on.exit` (on the error path too), the pending-environment and reference checks, restores `slot_owner`, and pops the depth. A `return()` or unwind aimed at this depth comes back as `Ok`. `leave` is the only thing that pops a depth.
-  - Built as `eval::enter` and `eval::leave`, with `run_frame` as their first caller for slot frames. Until plans and `slow_calls` exist, `enter` takes the binding the caller already did (`header`, `missing`, `args`) instead of a plan, and tests the observers it replaces one by one. The frame records the handle-stack mark and the `slot_owner` before the call, so `leave` needs only the depth; `pop_frame` reads the caller's srcref and the arguments from the frame.
-  - Tier 0 runs `enter`, continues its dispatch loop at the callee's first op on the new window, and runs `leave` at the callee's return op, so a call costs no Rust recursion. Resume state (caller code, pc, window, destination) is tier 0's own shadow stack, not a frame column, because machine-code frames never use it. Each Rust entry into the loop records its base depth; on an error the loop calls `leave(d, Err(e))` for each of its depths above the base, innermost first, resumes in the caller when one returns `Ok`, and returns the error to Rust at the base. Frames entered by builtins, `eval` or the general path still nest through Rust.
-  - Machine code writes unboxed or boxed values into the slots following the frame-state map of "The native execution model", then calls `enter` with the site's plan already checked by its guard. A direct sibling call in an image skips the plan check because the image's check epoch guards the target.
-  - Feedback for call targets is read by pc: `call_target(code, pc)` returns the closure a planned site last ran, from the site word and the plan's code column. The JIT reads this to inline; there is no map.
-- **S3 dispatch has no per-site state.** A method is found through its name's row ("S3 methods are found through one row per method symbol"), which a dispatch from an instruction, `NextMethod`, an AST body and C all share. A dispatch op needs no feedback word, and the JIT can guard an inlined method on the row's stamp.
-- **Remaining allocations, all off the common path.** The environment when a frame reifies, heap promises for references that escape, a `DOTSXP` chain when a reader asks for the pairlist, and closures made in the frame.
-- **Built: every tier-0 closure call to a compiled body runs in the dispatch loop.** `eval::enter` and `eval::leave` are the contract, and `eval::apply_closure_entering` is `apply_closure_owning` up to the point where the body would run, so the Rust path and the loop path share one setup and cannot drift. A call op enters its callee through `bytecode::enter_in_place`, which pushes a `Resume` record (the caller's `Machine`, its call site, the callee's depth, the reference high-water mark and the loop-state mark) and answers with the callee's first instruction; `bytecode::finished` pops that record, calls `eval::leave` and resumes the caller. Every way out goes through it: a return, an error, a `return()` aimed at an outer frame, and a `break` or `next` the caller's loops take. Each Rust entry into the loop records its base, so an unwind past the base leaves the loop as an error. A call entered from a builtin, from `Rf_eval`, from `UseMethod` or from the general binding path still nests through Rust. Measured against the build before it (callgrind, `RY_JIT=off`): expr_tree -10.4%, validation -1.5%, objects -0.8%, conditions +0.0% of whole-program instructions, and the planned `h -> f` pair 4,127 to 2,725 instructions. With the JIT on, functional style costs 1.3% more instructions (three repetitions). Half of its 320K closure calls are made by builtins such as `lapply` and nest through Rust, where the shared setup costs up to 70 instructions more than `apply_closure` did, and 124K of its 168K `CallGeneric` executions fall back to the generic path after the fast path's tests.
-- **Built: a planned site's fast path, `bytecode::call_fast` and `bytecode::return_fast`.** A `CallGeneric` whose site has a prepared plan row, made while `heap::activity::hooks()` is zero, writes each argument once onto `Interp.frame_args`, fills the slots from the row's sources, takes the slot, register and loop counts from the row, pushes the frame and continues in the callee. The caller is a frame whose code runs on its slots (`PLAN_FAST`: arguments are references to slots or to code compiled against them) or a frame that reads by name (`PLAN_FAST_BY_NAME`: arguments are references over its environment, which is the callee's caller). `return_fast` is the exit of a frame whose code is still on its slots, with no `on.exit` and nothing observing; an environment the frame handed out that nothing references any more is discarded there. `slot-frames.md`, "The fast call path", lists which sites, callers and callees qualify. The observer word is `activity`'s `HOOKS` byte (`SUMMARY`, `PROFILE_TICK`, `DEBUGGER`, `MOVES`, `NO_OBJECT_SYSTEMS`), each bit set by whatever changes the state it stands for; under `syntax::testing::enable_invariants()` every generic call asserts the byte against `interp::observer_bits()`, which is how the fuzz suites catch a stale bit. So "arguments are written once" and "one flags word for observers" hold on this path only: `op_call_generic` and `eval::enter` build an `Arg` buffer that `push_frame` copies, read the counts through `pool_ints`, and test their observers one by one. The fast path writes the whole `Frame`, clones the handler and restart `Rc`s, reads `srcref` from the closure's attributes, and calls `eval::default_promises`, which allocates, for a default that is code.
-- **Measured: where a framed call's instructions go** (callgrind by instruction address, `RY_JIT=off`, `f <- function(a, b = 1) { r <- a + b; r }` called from a loop, 1,172 instructions per call over the empty loop).
-  - The callee's own ops and the caller's `GetFun` and guard: 342. No change to call setup removes these.
-  - The call op: 535. Resume record and machine switch 83, arguments written once 64, slots filled from the sources 57, accessors inlined from `object.rs` (reference counts, pairlist reads) 57, inlined code with no line 53, the `Frame` write 47, handler entry and dispatch 44, clearing the locals and registers 37, guards and the plan row check 37, the effect-free test 12, constants reads 11, the rest 33.
-  - The return op: 225, plus `Heap::release_slots` 69.
-  - **No single part is large.** The `Frame` write that the depth-indexed columns replace is 47 of the 829 instructions of call machinery, so the columns alone move little. Reaching the goal needs every part together: a hot record in place of the `Frame`, a smaller resume record, a window that needs no clearing, and guards folded into the code header and the plan row.
-- **Measured: why validation does not move.** Its 284K `CallGeneric` executions (two repetitions) split into 115K on the fast path (49% of the closure calls), 55K from a caller whose frame has an environment, 48K with a builtin callee, 42K at a site whose plan word is still zero because a body compiled per closure creation never gives its sites a second call, 12K at a site not prepared yet, and 11K to a closure with a native entry. The rest of its profile is flat: 772K promise forces, 333K S3 method-name lookups, builtin calls and allocation. Even with every closure call on the fast path, validation cannot gain 8% from the call op; its forces (2.7 per call instruction) are where the instructions are.
-- **Found: forcing a promise in the loop does not pay before promises are pooled.** A version in which a `GetVar` of an unforced argument reference continued the loop in the promise's code, instead of entering `eval::force_promise` through a Rust frame, measured as a net loss on every program tried: against the same build without it, validation 2.544G to 2.551G instructions, expr_tree 4.827G to 4.872G, objects 95.7M to 95.9M, conditions 4.449G to 4.458G, and the `h -> f` pair 2,725 to 2,779. Its per-force overhead is a forcing record, a resume record, two heap roots, a walk of the caller's live registers for their reference counts, and reading the reference target out of a heap integer vector, which together cost about what the Rust frame did. Three of those five go away once promises come from the reference pool with their targets in `u32` columns: the pool roots the promise, so the two roots go, and the target is read from a column instead of the heap. So in-loop forcing belongs with that step, and was removed rather than kept disabled.
-- **Expected impact.** Call setup goes from about 2,100 to about 200 instructions on the planned pair above, and objects allocated per framed call go from about 7 to 0 on the common path. Correctness holds by construction: every observation route either reads the slot state that GNU R's environment would hold or reifies first, as today. The design removes three duplicated or derived states (handler and restart snapshots per frame, the per-call `srcref` lookup, the argument copy) and one pointer graph (`Rc` condition stacks). Incremental analysis is unaffected.
-- **Checking.** The bytecode fuzzer's reify-before-and-after agreement and `crates/ry/tests/scenarios/slot-frames.scenario` cover the new reference kinds; the oracle runs forced in all three modes. Allocations per call are compared with GNU R's from the allocation audit.
+- **Question.** Closure call setup is 22.4% of corpus time (frames, promises, argument matching,
+  entry and exit); the 10x row asks for a tenth of that. A planned `h -> f` pair (one positional
+  argument, a literal default) measured about 3,300 instructions, about 2,100 of them call setup.
+  Structural causes: a 150-byte `Frame` with an `on_exit` `Vec`, two `Rc` clones and a `srcref`
+  attribute walk per call; an `Arg` buffer copied into `Interp.frame_args`; each observer tested
+  separately; a non-literal default allocating a heap promise plus pending environment; one
+  `DOTSXP` cell per dotted argument; reference targets in heap integer vectors; and tier 0
+  entering callees through Rust recursion (about 700 instructions of entry, exit and `scope`
+  bookkeeping per call).
+- **Goal.** On the common path (planned site, slot-table callee, constant/variable/code arguments,
+  any defaults, `...`, no `on.exit`, no handler in the callee) a call allocates nothing and runs in
+  about 200 instructions from call op to callee's first op and back. What GNU R code can observe
+  stays as "Promises per call" settles it.
+- **Frame layout: stacks indexed by depth, struct of arrays.** A 40-byte hot record per depth
+  (`function`, `call`, `slots` with flags in its top byte, `missing` u64, `caller` u32, the prior
+  `slot_owner` u32); cold columns (`env`, `sys_parent`, `pending`, `unforced`, starts of `args`,
+  `method_vars`, `closures`, and the caller's `srcref`) written only when set. `on.exit` moves to
+  one stack with a start per depth. Handler and restart stacks become arenas with parent indices,
+  replacing the `Rc` lists (a calling handler runs with the index below it). The `srcref` is read
+  once at compile time. The register window is already a bump region.
+- **Formals-dependent facts live in the call plan (settled, built).** A closure whose formals were
+  replaced keeps its body, so formal count and defaults are facts of formals and body together,
+  the key of a `CallPlans` row. `eval::CallShape` (formal, slot, register counts, 6 bytes) is
+  filled in `plannable`; literal vs code defaults are in the row's sources (`LITERAL_DEFAULT`,
+  `PROMISED_DEFAULT`). Two `u64` default bitsets in the shape (32 bytes a row) were redundant
+  with the sources and raised testthat_full's peak RssAnon by about 0.09 MiB. `bind_slots`, which
+  machine code binds through, records the same `promised` mask in `CallFrame::Slots`.
+  The counts cannot drift because the row is keyed by the immutable body. A table generation lets a
+  site check the row without copying sources.
+- **The code header** packs slot, register and formal counts, default bitsets, the `...` slot,
+  srcref, effect-free proof and prologue flag. It is part of the immutable code object, not a cache.
+- **Every promise a slot-frame call creates comes from the reference pool**, the per-depth promise
+  arena. Kinds: caller variable, caller-with-environment variable, compiled argument code (built),
+  and a non-literal default run on the callee's slots (planned, so `default_promises` stops
+  allocating). Targets move to three `u32` columns. A constant argument goes into the slot as the
+  value; a variable does only when the slot table proves the formal's first read precedes any op
+  that can run arbitrary code (any call, `<<-`, `eval`) on every path, even for a forced promise,
+  because what is fixed is the promise, not the caller's binding: `x <- 1; f <- function(a) {
+  x <<- 2; a }; f(x)` returns 2 in GNU R, as do the same shapes with `assign("x", 2, envir =
+  parent.frame())` and with a callee that calls a function writing `x` (oracle-pinned).
+- **`...` without cells.** A received `...` is a dots view (start, count) over `Interp.frame_args`;
+  `slot_dots_into`, `...length()`, `..N` and `list(...)` read the view directly, and a `DOTSXP`
+  chain is built only when a reader needs the pairlist (reify, `substitute(list(...))`,
+  `match.call`, C code) and then replaces the view in the slot.
+- **Arguments are written once** onto `Interp.frame_args`; one observer bitset is tested once per
+  call; the depth limit compares against reserved capacity.
+- **The contract T0 and the JIT call through.** `enter(plan, function, call, args_start,
+  sys_parent) -> R<Entered>` (16 bytes, returned in registers; `header == NO_SLOTS` means the
+  general path ran) and `leave(depth, result)`, the only thing that pops a depth, which runs
+  `return` targeting and `on.exit`. Tier 0 continues its loop at the callee's first op and keeps
+  resume state on its own shadow stack (`Resume`), not in a frame column, since machine frames
+  never use it; on error it calls `leave` for each depth above its base. Machine code writes slots
+  per the frame-state map and calls `enter` with the plan checked by its guard. `call_target(code,
+  pc)` gives the JIT the closure a site last ran; there is no map.
+- **Built: tier-0 calls run in the loop.** `eval::apply_closure_entering` shares setup with
+  `apply_closure_owning`, so the paths cannot drift; `bytecode::enter_in_place` pushes a `Resume`
+  and `bytecode::finished` pops it through `eval::leave` on every exit. Calls from builtins,
+  `Rf_eval`, `UseMethod` or the general binding path still nest through Rust. Measured
+  (`RY_JIT=off`): expr_tree -10.4%, validation -1.5%, the planned `h -> f` pair 4,127 to 2,725
+  instructions. With the JIT on, functional costs 1.3% more: half its 320K closure calls come from
+  builtins such as `lapply` and nest through Rust, where the shared setup costs up to 70
+  instructions more, and 124K of its 168K `CallGeneric`s fall back after the fast path's tests.
+- **Built: the planned fast path.** `call_fast` takes sites with a prepared row (made while
+  `heap::activity::hooks()` is zero) from `PLAN_FAST` or `PLAN_FAST_BY_NAME` callers;
+  `slot-frames.md`, "The fast call path", lists what qualifies. The observer word is `activity`'s
+  `HOOKS` byte, asserted against `interp::observer_bits()` under `enable_invariants()` so fuzzing
+  catches a stale bit. `return_fast` exits a frame still on its slots with no `on.exit` and
+  nothing observing, discarding an environment nothing references any more. The general path
+  (`op_call_generic`, `eval::enter`) still copies an `Arg` buffer, reads counts through
+  `pool_ints` and tests observers one by one; the fast path still writes the whole `Frame`, clones
+  the handler and restart `Rc`s, reads `srcref` from attributes, and allocates in
+  `eval::default_promises` for a code default.
+- **No single part of a framed call is large** (`f <- function(a, b = 1) { r <- a + b; r }` from a
+  loop: 1,172 instructions per call; the callee's own ops and caller's `GetFun` 342, the call op
+  535, the return 225 plus `Heap::release_slots` 69; the `Frame` write is 47 of 829 instructions
+  of call machinery), so the depth-indexed columns alone move little;
+  the goal needs the hot record, a smaller resume record, a window that needs no clearing, and
+  guards folded into the header and the plan row together.
+- **Why validation does not move.** Of its 284K `CallGeneric`s, 115K take the fast path (49% of
+  closure calls); the rest: 55K from a caller frame with an environment, 48K to a builtin, 42K at
+  a site whose plan word is still zero because a body compiled per closure creation never gives
+  its sites a second call, 12K at an unprepared site, 11K to a native entry. Even with all of them
+  on it, the call op cannot gain 8%: its 772K promise forces (2.7 per call instruction) dominate.
+- **Forcing a promise in the loop does not pay before promises are pooled** (net loss everywhere:
+  validation 2.544G to 2.551G, expr_tree 4.827G to 4.872G, `h -> f` 2,725 to 2,779): its forcing
+  record, resume record, two roots, live-register walk and heap target read cost about what the
+  Rust frame did. The pool removes three of the five (roots and target read), so it belongs with
+  pooled targets in `u32` columns and was removed rather than kept disabled.
+- **Expected impact.** Call setup about 2,100 to 200 instructions on the planned pair, objects per
+  framed call about 7 to 0 on the common path.
+- **S3 dispatch has no per-site state**; methods are found through their name's row.
+- **Checking.** The bytecode fuzzer's reify agreement and `slot-frames.scenario` cover new
+  reference kinds; the oracle runs forced in all modes. Allocations per call are compared with GNU
+  R's from the allocation audit.
 
 ## Tier-0 lookups through binding cells
 
 **Status:** built.
 
-- **Lookup sites keep (start environment, cell) and a lookup stamp.** A stamp is the symbol's epoch plus the heap's enclosure epoch, so a site revalidates with one compare. Replacing an enclosure moves only the stamps of the symbols bound between the old and new enclosure (`bump_symbols_between`), and only for environments marked `ENCLOSING`: named by a closure or environment, or used as a cache key (`Heap::observe_environment`, called by `fill_cache`). A key nothing names would otherwise go stale unseen.
-- **`pkg::name` with literal names is an op, not a builtin call.** `Op::Namespace` keeps the cell `namespace_binding` (`envir.rs`) found and checks the summed stamps of the package, the name, `.__NAMESPACE__.` and `exports`. Stamps only grow, so the sum moves whenever one does. The bindings read on the way (registry entry, namespace information, `exports`, the export entry) are marked `WATCHED`, so assigning one moves its symbol's stamp. Lazy data and renamed exports give no cell and stay on the builtin path. The JIT treats the op as opaque because the slow path can load a namespace.
-- **Large frames index bindings with one allocation.** `SlotIndex` in `env.rs` is a single block `[capacity, count, entries]`, each entry `hash << 32 | position + 1`, with linear probing at load at most 1/2 and backward-shift deletion. It replaced an `FxHashMap` keyed by symbol. `fuzz_indexed_lookups_match_the_bindings` in `crates/heap/tests/test_frames.rs` cross-checks it against the bindings.
-- **Measured** (callgrind, testthat_full, JIT off, `RY_CODE_IMAGE=0`, per repetition from repeats 1 and 5): 841.0M to 821.5M instructions, the first repetition 2,137.9M to 2,077.3M.
+- **Sites keep (start environment, cell) and a lookup stamp** (symbol epoch plus enclosure epoch),
+  revalidated with one compare. Replacing an enclosure moves only the stamps of symbols bound
+  between old and new enclosure (`bump_symbols_between`), and only for environments marked
+  `ENCLOSING` (named by a closure or environment, or used as a cache key via
+  `Heap::observe_environment`); an unnamed key would otherwise go stale unseen.
+- **`pkg::name` with literal names is `Op::Namespace`**, keeping the cell `namespace_binding` found
+  and checking the summed stamps of package, name, `.__NAMESPACE__.` and `exports` (stamps only
+  grow, so the sum moves when one does). The bindings read on the way are `WATCHED`. Lazy data and
+  renamed exports stay on the builtin. The JIT treats the op as opaque because the slow path can
+  load a namespace.
+- **Large frames index with one allocation** (`SlotIndex` in `env.rs`, one block `[capacity,
+  count, entries]` with entries `hash << 32 | position + 1`, linear probing at load at most 1/2,
+  backward-shift deletion; it replaced an `FxHashMap`), cross-checked by
+  `fuzz_indexed_lookups_match_the_bindings` in `crates/heap/tests/test_frames.rs`.
+- **Measured** (testthat_full, JIT off, `RY_CODE_IMAGE=0`): 841.0M to 821.5M instructions per
+  repetition, the first repetition 2,137.9M to 2,077.3M.
 
 ## Native entries read promises over a pending frame without forcing them
 
 **Status:** built.
 
-- **Previous shape.** `jit::native::argument_value` (the typed core's argument gathering) and `base_fast_paths::resolved_through` (the native entries of base closures, since replaced by `eval::settled_without_code`, whose `promise_link` carried the same refusal) refused every promise whose environment carries `gp::PENDING_FRAME`. Slot frames made such promises common: an argument reference whose slot is unbound materializes as a promise over the pending environment (`eval::pending_env`), and a variable passed from an interpreted wrapper is one. So every warm call of a strict typed closure from a slot-frame caller ran in tier 0, and `tools/bench/why/typed` lost up to 500x (`array_dot` 0.004 s to 2.2 s). The refusal existed because reading a pending environment through the heap resolver reifies the owner, and forcing through `settle_promise` left `Frame.unforced` counting a promise that was no longer unforced.
-- **Chosen shape.** Two primitives in `eval.rs` read such a promise in place. `peek_variable(symbol, env)` resolves a pending environment through `pending_name`: a slotted name reads the slot (a missing slot is `None`), any other name continues in the enclosure. It never forces, and it never reifies the frame whose pending environment it starts from. `settle_unforced(promise, value)` settles the promise and decrements its owner frame's `unforced` count, so the frame's return does not reify for a promise that is already settled. Both the typed core's `gather` and `settled_without_code` (the native entries of base closures and the compiled call sites that force strict arguments) use them. An argument reference reads the same way: `reference_variable` gives what a slot frame's reference names (its slot, else the enclosure, else the reified environment) without forcing, and both readers continue through an unforced promise found there, so a wrapper's own computed argument (`doubled(k + 0.5)` passing `v` on) reaches native code. An environment reference reads as the promise it stands for, and a compiled promise's argument is read from its source. The one refusal left is a call head that is a slot-bound name (`native::pure_value`), because a local function cannot be resolved as a base function there. Any other head resolves from the slot frame's enclosure, never from the pending environment: every lookup in a pending environment (`frame_cell`, `bindings`, `resolve_function`) goes through the heap resolver and reifies the frame, which a typed call that is then declined pays on every call (20,083 frames turned into environments in 20,000 calls of a record-returning `taxed`). `effects::resolve_function` takes the search-path part of its walk from `heap.global_cell`, the heap's per-symbol first binding under the lookup stamp, because the typed core resolves an argument's head on every call and walking the attached packages' frames costs about 2,000 instructions.
-- **Guard.** `RY_TYPED_LOG` prints ``typed: `name` runs in the interpreter`` once per name when a typed closure's call declines native code (`annotations::log_interpreted`). `test_scenarios::typed_benchmarks_run_natively` runs every `*.typed.R` program in `tools/bench/kernels` and `tools/bench/applications` with it and fails on any name outside the listed exceptions, so a refusal that silently sends a kernel to tier 0 fails the suite instead of only costing time. `typed-calls-stay-native.scenario` pins the slot-frame wrapper shape, and `native_entries_hold_in_slot_frames` counts the native entries of `Sys.unsetenv` called from a slot frame through `--profile-summary`, and `declined_typed_calls_keep_slot_frames` and `native_typed_calls_keep_slot_frames` bound the frames a declined or a native typed call turns into environments; the second fails when a native read leaves a settled promise counted as unforced.
-- **Counting.** `Frame.unforced` counts every unforced promise over the frame's pending environment, and `finish_frame` skips the check for promises and closures that outlive the frame when the count is zero. So the count is taken where any promise is made, in `make_promise` and `compiled_promise` (`count_unforced`), and when an argument reference detaches into a promise. Counting only in `slot_promise` missed promises made by code evaluated in the pending environment from outside, such as `do.call(f, list(quote(x)), envir = parent.frame())`, and forcing one decremented a count that never included it (`promises_over_slot_frames_are_counted`). The C API's `R_MakeDelayedBinding` and `SET_PRENV` give a promise the frame's real environment (`resolved_env`) instead, since native code may hold a pending environment that `parent.frame()` handed out. `settle_unforced` decrements only after the settle succeeds, because a checked promise's check can fail and leave it unforced.
-- **Refused closures keep the read.** A strict typed closure that no compiler takes reads its arguments on every call (`gather`, then the per-type compile cache) before it goes to the interpreter, which evaluates the same pure code again: about 3% of typed `orders`' instructions. Marking the closure itself as refused, whether after any call that was not native or only after a compile refusal, is wrong: `log_rank`'s first call declines while its callee compiles (2x slower when marked), and an untyped caller can pass one annotation in several representations, so a `List<I64>` closure refused for doubles compiles for `List.range` (`test_tiers::typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic`). The refusal stays per (closure, argument types), and `backlog.md` records the cost.
-- **Impact.** Correctness is unchanged (the promise's value is what forcing would compute, and only side-effect-free code is read). Performance returns to the native path for every typed caller shape; untyped native entries were measured unaffected, because tier 0 binds the arguments of effect-free closures eagerly before they reach `settled_without_code`.
+- **Shape.** `peek_variable(symbol, env)` resolves a pending environment through `pending_name`
+  (slot, else enclosure) without forcing or reifying; `settle_unforced(promise, value)` settles and
+  decrements the owner frame's `unforced`, only after the settle succeeds (a checked promise's
+  check can fail). The typed core's `gather` and `settled_without_code` use both;
+  `reference_variable` reads what an argument reference names (its slot, else the enclosure, else
+  the reified environment), and both readers continue through an unforced promise found there, so
+  a wrapper's computed argument (`doubled(k + 0.5)` passing `v` on) reaches native code. An
+  environment reference reads as its promise, and a compiled promise's argument from its source.
+  Refusing such promises sent every typed call from a slot-frame caller to tier 0
+  (`tools/bench/why/typed` `array_dot` 0.004 s to 2.2 s).
+- **Call heads.** A slot-bound head is refused (`native::pure_value`); any other resolves from the
+  enclosure, never the pending environment, because every lookup there (`frame_cell`, `bindings`,
+  `resolve_function`) reifies the frame, which a declined typed call would pay every call (20,083
+  frames reified in 20,000 calls of a record-returning closure). `effects::resolve_function` uses `heap.global_cell` for
+  the search path, since walking attached frames costs ~2,000 instructions per call.
+- **Counting.** `Frame.unforced` counts every unforced promise over the pending environment, taken
+  wherever a promise is made (`make_promise`, `compiled_promise`, including
+  code evaluated there from outside, as `do.call(f, list(quote(x)), envir = parent.frame())`) and
+  when a reference detaches (`promises_over_slot_frames_are_counted`); `finish_frame` skips the
+  escape check when the count is zero. `R_MakeDelayedBinding` and `SET_PRENV` give a promise
+  the real environment, since native code may hold a pending one.
+- **Refusal stays per (closure, argument types).** A refused strict closure re-reads its
+  arguments every call (about 3% of typed `orders`' instructions; `backlog.md` records it), but
+  marking the closure refused is wrong: `log_rank`'s first call declines while its callee compiles
+  (2x slower when marked), and an untyped caller can pass one annotation in several
+  representations, so a `List<I64>` closure refused for doubles compiles for `List.range`
+  (`test_tiers::typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic`).
+- **Guard.** `RY_TYPED_LOG` prints when a typed call declines native code
+  (`annotations::log_interpreted`); `test_scenarios::typed_benchmarks_run_natively` fails on any
+  unlisted name. `typed-calls-stay-native.scenario`, `native_entries_hold_in_slot_frames`,
+  `declined_typed_calls_keep_slot_frames` and `native_typed_calls_keep_slot_frames` bound reifies;
+  the last fails when a native read leaves a settled promise counted as unforced. Untyped native
+  entries are unaffected, because tier 0 binds effect-free closures' arguments eagerly first.
 
 ## Interpreter hot paths make no Rust allocations
 
 **Status:** built.
 
-- **Previous shape.** Every R object comes from the heap's bump allocator, but the interpreter built Rust temporaries around them on most calls: a `Vec` of arguments or tags before linking a pairlist (`duplicate`, `as.list` of a call, `sys.calls`, `do.call`), a boxed jump per `return()` or `break`, a fresh `String` per element in `sprintf`, `paste`, `gsub`, `format` and `as.character`, an owned pattern key per regex lookup, an `Rc` per established handler, a `String` per zone abbreviation in `as.POSIXlt`, and a `Vec` per dimension in `x[i, j]`. Warm testthat made 218k Rust allocations per run, strings 763k.
-- **Target shape.** Three rules, stated in `r-runtime.md` ("Interpreter hot paths make no Rust allocations"): a usually short list lives on the stack (`SmallVec`), data that exists is borrowed, and text of unbounded length goes into one scratch buffer the interpreter owns (`Interp::text_buffer`, `strings::with_text_buffer`). The buffer is an explicit allocator, not a thread-local cache: each use takes it, clears it and puts it back, so a nested use gets a fresh buffer instead of clobbering the outer one.
-- **Pairlists are linked as they are built** (`values::PairlistBuilder`). Only the head takes a root: a later cell comes from `Heap::alloc_triple`, which keeps its arguments alive, and is linked to the rooted chain before anything else allocates. `hot_paths_survive_gc_stress` runs the builder and handler paths under `gctorture`; with the head left unrooted it hangs on a freed cell.
-- **`Unwind::Jump` holds the jump inline**, with a size assertion so the enum stays small.
-- **Handlers come from a pool** (`Interp::handler_pool`, at most 64): `conditions::new_handler` reuses an unshared entry, and `conditions::restore_handlers` returns the entries a frame established when it exits. Restarts still allocate one `Rc` each.
-- **The regex table is keyed by borrowed text** (`FxHashMap<Box<str>, [Option<Matcher>; 5]>`, one slot per flag combination), so a lookup allocates nothing; a fixed pattern caches its `memmem::Finder`.
-- **Left in place.** fancy_regex allocates one capture set per match and its API cannot reuse one. Non-`.` `OutDec`, and the general `format`/`print` padding still allocate a `String` per element. The call protocol (`build_call`, `Bindings::grow`, `Frame::set_hashed`, `run_at`, `bind_slots`, the bytecode compiler, the argument vectors of `run_call_generic`) is owned by the call and frame work and still allocates there.
-- **Measured** under callgrind (warm run, JIT on): Rust allocations fell from 218k to 55k in testthat, 763k to 117k in strings and 573k to 95k in timeseries, and instructions fell by 1.5% to 14% on every workload except simulation, which allocated little to begin with. Peak RSS of testthat is unchanged within run-to-run noise.
-- **Enforced** by `crates/interp/tests/test_rust_allocations.rs`: pinned shapes run warm under a counting global allocator and must stay within a budget per iteration, zero for all but `gsub` with capture groups and `mapply` (whose closure calls go through the call protocol).
+- The rules are stated in `r-runtime.md` ("Interpreter hot paths make no Rust allocations"):
+  short lists on the stack, existing data borrowed, unbounded text in one interpreter-owned scratch
+  buffer (`Interp::text_buffer`, `strings::with_text_buffer`). The buffer is an explicit
+  allocator, not a thread-local cache: each use takes it and puts it back, so a nested use gets a
+  fresh one.
+- **Pairlists link as they are built** (`values::PairlistBuilder`): only the head is rooted; later
+  cells come from `Heap::alloc_triple`, which keeps its arguments alive, and link before anything
+  else allocates. `hot_paths_survive_gc_stress` hangs if the head is unrooted.
+- `Unwind::Jump` holds the jump inline (size-asserted); handlers come from
+  `Interp::handler_pool` (at most 64; `conditions::new_handler` reuses an unshared entry,
+  `conditions::restore_handlers` returns them; restarts still allocate one `Rc` each); the regex
+  table is keyed by borrowed text with one slot per flag combination, and a fixed pattern caches
+  its `memmem::Finder`.
+- **Left in place:** fancy_regex's per-match capture set (its API cannot reuse one), non-`.`
+  `OutDec` and general `format`/`print` padding, and the call protocol's own allocations
+  (`build_call`, `Bindings::grow`, `run_at`, `bind_slots`, the bytecode compiler).
+- **Measured** (warm, JIT on): Rust allocations 218k to 55k in testthat, 763k to 117k in strings,
+  573k to 95k in timeseries; instructions down 1.5% to 14% except simulation; peak RSS unchanged.
+- **Enforced** by `crates/interp/tests/test_rust_allocations.rs` (per-iteration budgets under a
+  counting allocator, zero except `gsub` with groups and `mapply`).
 
 ## Closure frames live in fixed slots that are never moved
 
 **Status:** built.
 
-- **Previous shape.** `Interp::frames` was a `Vec<Frame>`. A closure call built its 144-byte `Frame` on the native stack and pushed it, which copied it with a `memcpy` call because LLVM inlines copies only up to 128 bytes; the return moved it off with `pop` and a second `memcpy`, then dropped it through out-of-line drop glue. The two copies spent about 60 instructions per call in `memcpy`.
-- **Target shape.** `FrameStack` (`crates/interp/src/interp.rs`) owns a vector of slots and a depth. `push_with` finds the slot above the top first and builds the frame in it, overwriting a dead slot without a drop; `pop` takes the popped frame's handler and restart stacks out, clears a non-empty `on.exit` list and lowers the depth, so the caller reads the frame's plain fields where it lies. A slot above the depth therefore owns nothing, which is what makes the overwrite sound, and `truncate` releases every slot it pops the same way. Reads see the live frames as a slice through `Deref`, so every reader (`sys.function`, `parent.frame`, the collector's roots) is unchanged.
-- **Frame size.** `on_exit` is a `ThinVec`, one word that allocates nothing while empty, which brings `Frame` to 120 bytes; a `const` assertion keeps it at or under 128, so a by-value `push` is never a `memcpy` call.
-- **Handlers.** `restore_handlers` inlines its common case (the stack to restore is the one in place, compared by pointer) and keeps the release loop out of line.
-- **Measured.** Callgrind, release build: a call `f(i)` from a loop costs 2,844 instructions, down from 2,927 (-2.8%). testthat_full over five repetitions falls 1.16% with the JIT off (4,078.6M to 4,031.4M) and 1.17% with it on (4,084.3M to 4,036.6M); the `validation` application falls 0.91% and `report` 0.41%. Anonymous and start-image peak RSS are unchanged and libR's `.text` grows by 5 KB. A plain in-place pop from the `Vec` (no slot reuse) saved only 33 instructions per call: it traded the `memcpy` for drop glue and the frame was still built on the stack and copied.
-- **Not done.** The call's arguments are still copied into `Interp::frame_args` with `extend_from_slice`, a `memcpy` call per call; writing them there directly belongs to the call path.
+- `FrameStack` (`crates/interp/src/interp.rs`) builds a frame in the slot above the top
+  (`push_with`), overwriting a dead slot without a drop; `pop` takes out the handler and restart
+  stacks and clears `on.exit`, so a slot above the depth owns nothing, which makes the overwrite
+  sound; `truncate` releases every slot it pops the same way. Readers see a slice through `Deref`.
+  Why: pushing and popping a `Vec<Frame>` cost two `memcpy` calls per call (about 60
+  instructions). A plain in-place pop without slot reuse saved only 33 per call, trading the
+  `memcpy` for drop glue. Measured: `f(i)` from a loop 2,927 to 2,844 instructions; testthat_full
+  -1.16% JIT off, -1.17% on.
+- `on_exit` is a `ThinVec` (one word, no allocation while empty, `Frame` at 120 bytes); a `const`
+  assertion keeps `Frame` at or under 128 bytes, LLVM's inline copy limit, so a by-value push is
+  never a `memcpy` call. `restore_handlers` inlines its common case (the same stack, compared by
+  pointer) and keeps the release loop out of line.
+- The arguments are still copied into `Interp::frame_args`; writing them there directly belongs to
+  the call path.
 
 ## Arguments that name a local stay lazy
 
 **Status:** built.
 
-- **Rejected: binding a caller's local variable to the callee's parameter by value.** A promise for `x` reads `x` when the argument is forced, not at the call, and code can write `x` in between: in `f <- function(a, b) { b; a }; g <- function() { x <- 1; f(x, x <- 2) }` the call returns 2, and a callee that runs `assign("x", 5, envir = parent.frame())` before using its argument sees 5, in ry and GNU R alike. Reading the value at the call needs a proof that nothing writes the local before the force: no other argument and no outstanding promise over the frame assigns it, and the frame is not turned into an environment during the call. `effects::effect_free` is that proof for the callees it accepts, which is why tier 0 binds their arguments eagerly. A promise created already forced keeps `substitute()` and `match.call()` correct but not the early read, and it still costs the promise.
-- **Measured ceiling.** Callgrind on one warm iteration (`RY_BENCH_REPEAT=2` minus `1`, release build, one process). The full ceiling is creating and forcing the promise for every variable argument; force only is what a promise created already forced could save, the most reachable without a proof that the callee never looks at the promise.
-
-  | Workload | Warm iteration | All promise work | Full ceiling | Force only |
-  |---|---|---|---|---|
-  | testthat_full | 624M Ir | 7.9% | 2.7% | 1.7% |
-  | validation | 1,571M Ir | 6.4% | 0.53% | 0.4% |
-  | objects | 2,747M Ir | 5.5% | 0.37% | 0.25% |
-  | functional | 3,035M Ir | 4.6% | 0.62% | 0.4% |
-
-  Constants already pass as themselves. The rest of what promises cost is code promises and the fixed cost of each promise, not the argument's shape.
-- **Revisit** only with a caller-side proof that the frame's locals cannot be written during the call, and a workload where variable arguments to callees that are not effect-free are at least 2% of the instructions.
+- **Rejected: binding a caller's local to the parameter by value.** A promise reads `x` when
+  forced, and code can write `x` first: `f <- function(a, b) { b; a }; g <- function() { x <- 1;
+  f(x, x <- 2) }` returns 2, as does a callee that `assign`s into `parent.frame()`. The early read
+  needs a proof that nothing writes the local before the force; `effects::effect_free` is that
+  proof for the callees it accepts, which is why tier 0 binds their arguments eagerly. The proof
+  needs that no other argument or outstanding promise over the frame assigns the local and the
+  frame is not reified during the call. A promise created already forced keeps `substitute()` and
+  `match.call()` right but not the early read, and still costs the promise.
+- **Measured ceiling** (callgrind, warm iteration): all promise work / full ceiling (create and
+  force every variable argument's promise) / force only: testthat_full 7.9% / 2.7% / 1.7%,
+  validation 6.4% / 0.53% / 0.4%, objects 5.5% / 0.37% / 0.25%, functional 4.6% / 0.62% / 0.4%.
+  Constants already pass as themselves; the rest is code promises and each promise's fixed cost.
+- **Revisit** only with a caller-side proof that locals cannot be written during the call and a
+  workload where such arguments to non-effect-free callees exceed 2% of instructions.
 
 ## The fixed cost of an argument reference
 
 **Status:** built.
 
-- **Previous shape.** `slot_promises_into` walked a call's arguments twice, once to check that every argument fits and once to build them. `release_references` walked the pool slice through checked `get` and `zip`.
-- **Target shape.** `slot_promises_into` builds the argument list in one pass. When an argument does not fit, which is rare, the pass undoes what it built: it restores the owner frame's `unforced` count from a snapshot and releases the references it took. `release_references` indexes the pool directly, since the pool keeps `references_used` within both vectors. Each field is written only when it differs from its reset value. A forced reference's tag is nil whatever its kind, because `settle_promise` clears it, so the attribute must always be compared with the stored target. Skipping that comparison when the tag is nil lets a reused environment reference run a forced code reference's stale code, which breaks base R's start-up (`rm -> match.call`).
-- **Guard.** `fuzz_argument_references_agree_with_the_ast_evaluator` (`testing::check_argument_reference_agreement`) compares compiled calls through forwarded, delayed, dotted and kept references with the AST evaluator. It fails on the release shortcut above. The oracle case `environments__argument_reference_reuse` pins reuse across writes, recursion, `...`, `sys.function`, `substitute`, `match.call` and a reified caller.
-- **Measured.** Instructions in one warm iteration (callgrind, `RY_BENCH_REPEAT=2` minus `1`), plain release builds against main: testthat_full 615.8M to 613.8M (-0.32%), validation -0.19%, objects -0.18%, functional -0.17%. Anonymous and start-image peak RSS are flat on all four workloads.
-- **Rejected: a slot-reference fast path in `force_promise`.** Settling a slot reference straight from a plain value or an already forced promise in its slot, and computing its target once, saved 1.0M instructions (0.16%) on testthat_full's warm iteration. It cost about 30 lines and a new guarded-forcing helper beside the existing path, which the gain does not pay for.
-- **Rejected: a side table indexed by reference.** Keeping each reference's reset state in a dense table instead of in its fields needs an index on the reference, and a pooled promise has no free field to hold one. The target write is already a raw store, and the barriered resets of car, tag and attribute stay either way. Revisit if references gain an index field.
-- **Rejected: lazy defaults.** Keeping a missing argument's compiled default in its slot and making a promise only when something other than the frame's own read sees the slot would save at most about 0.6% of testthat_full: `default_promises`, `alloc_compiled_promise` and `compiled_promise` together are 1.1% of its instructions, and only part of that goes away. The unmaterialized default would be a new kind of slot value that every slot reader must handle, including tier 1, which reads registers directly.
+- `slot_promises_into` builds in one pass and, in the rare case an argument does not fit, undoes
+  it (restores `unforced` from a snapshot, releases the references). `release_references` indexes
+  the pool directly (the pool keeps `references_used` within both vectors) and writes each field
+  only when it differs from its reset value. testthat_full -0.32% warm instructions, RSS flat.
+- **Trap.** A forced reference's tag is nil whatever its kind (`settle_promise` clears it), so the
+  attribute must always be compared with the stored target; skipping that when the tag is nil lets
+  a reused environment reference run a forced code reference's stale code and breaks base R's
+  start-up (`rm -> match.call`).
+- **Guard.** `fuzz_argument_references_agree_with_the_ast_evaluator`
+  (`testing::check_argument_reference_agreement`) fails on that shortcut;
+  `environments__argument_reference_reuse` pins reuse across writes, recursion, `...`,
+  `sys.function`, `substitute`, `match.call` and a reified caller.
+- **Rejected:** a slot-reference fast path in `force_promise` (0.16% for about 30 lines and a
+  second guarded-forcing helper); a side table of reset state (a pooled promise has no free field
+  for an index, and the barriered resets stay either way; revisit if references gain one); lazy
+  defaults (at most ~0.6% of testthat_full, since `default_promises`, `alloc_compiled_promise` and
+  `compiled_promise` are 1.1% together, for a new slot value kind every reader, tier 1 included,
+  must handle).
 
 ## S3 methods are found through one row per method symbol
 
 **Status:** built.
 
-- **Previous shape.** S3 dispatch kept three structures between calls, all in `dispatch::MethodCache`.
-  - `S3Sites`: a polymorphic inline cache per dispatching instruction, up to four entries keyed on the generic, group, class vector and defining environment, each valid under the summed lookup stamps of every candidate name it probed.
-  - `entries`: a hash map from (method name, top environment, methods table, whether the top frame is searched) to the binding cell found, dropped whenever `Heap::binding_epoch` moved, which every definition anywhere outside a function frame does.
-  - `names`: a hash map from the (generic, class) pair to the interned `generic.class` symbol.
-- **Why they were weak.** What a site cached is a fact about a method name, so the same fact lived in a site entry and in `entries`, with two invalidation schemes. Sites hit for few resolutions (testthat 15%, objects 25%, validation 40% of 10k, 116k and 45k resolutions), because most sites run a handful of times and `$` dispatch from a builtin has no site, and `entries` started over after each definition. Every dispatch also allocated `.Generic`, `.Class` and `.Method` strings. The site table and the map were GC roots walked on full collections, about 0.4% of testthat in `trace_method_cache`.
-- **Shape.** `MethodRows` is a struct-of-arrays table with one row per method or generic symbol, and the symbol holds its row index (`SymbolObject::method_row`, which shares a word with the symbol's 32-bit stamp share, so a symbol stays 64 bytes). A row holds:
-  - the name as a shared one-string vector, which is `.Generic`, `.Group` or `.Method` without an allocation;
-  - the binding found the last time the name was looked up from a top environment on, or nil for none found, with the top environment, the generic's methods table and the symbol's lookup stamp at that lookup.
-- **Validity.** A lookup walks the calling frames below the top environment on every dispatch, as GNU R does, so a method in a function frame needs no stamp. The row answers for the rest when the top environment, the table and the stamp match and the binding still holds a function. The stamp moves when a binding of the name appears or disappears outside a function frame, a watched binding is assigned, or an enclosure changes, which covers a global mask, `rm`, `registerS3method`, `attach` and `detach`. A lookup that passed a function frame, an active binding, or a binding to a non-function stores nothing. One row holds one scope, so code that dispatches one name from two top environments alternately repeats the walk, which is the walk a miss already did. `.Class` matches GNU R: the object's class vector itself, held not mutable, when the first class has the method, `NULL` for the default method, and otherwise the remaining classes, which carry the whole vector as their `previous` attribute unless a group generic dispatched (`dispatch__dot_class_values`).
-- **The (generic, class) name.** `names` stays: a dense key would need an id per interned class string, which `CHARSXP` does not have. Interning the class string as a symbol to get a dense key costs about 81 instructions per class (`install_charsxp` 26 plus `install_char` 55), or 0.8% of the objects workload at its 274k name lookups, more than the 69-instruction hash lookup of the pair it would replace, so no id is stored per class vector either. A dense `CHARSXP` id is a strings follow-up (`backlog.md`).
-- **Measured.** Warm-iteration instructions against main, plain release builds: testthat -1.54%, validation +0.58%, objects -0.08%, functional +0.18%. Validation is the one regression, all of it in dispatch: about 45k resolutions per iteration, mostly `format()` on doubles inside `vapply`, each walking two function frames and three candidate names. The old site entry skipped that walk and the name hash on its 40% of hits, so the walk is now paid on every resolution (`lookup_in_scope` +5.7M, `method_name` +3.5M, `method_scope` +2.0M, against `resolve_s3` -4.9M and the old `EntryKey` hash -2.0M). The walk is what slot frames make cheap, so it is a closure-frame follow-up, not a reason for a site cache. Anonymous and start-image RSS are flat on all four workloads, and libR `.text` is 19 KB smaller.
-- **Checking.** Oracle cases `dispatch__method_lookup_order` (lookup order, the define, mask, `rm` and `registerS3method` sequence, one name from two top environments, base generics and `$`/`$<-` methods defined after the first call, `conditionMessage` methods) and `dispatch__r6_and_dollar_methods` (R6 `self$x`, `super$`, `$` methods on an R6 class and a classed list), with `dispatch__method_cache` and `dispatch__site_cache_invalidation`. The fuzzer's S3 block changes methods between calls of one site.
+- **Shape.** `MethodCache` in `crates/interp/src/dispatch.rs` keeps a struct-of-arrays table with
+  one row per method or generic symbol; the symbol holds its row index (`Heap::method_row`, sharing
+  a word with its stamp, so a symbol stays 64 bytes). A row holds the name as a shared one-string
+  vector (`.Generic`, `.Group` or `.Method` without allocating) and the binding found from a top
+  environment on, with the top environment, methods table and lookup stamp. Validity rules are in
+  the `MethodCache` doc comment. It replaced per-site inline caches plus a binding map: the same
+  fact in two places with two invalidation schemes, a low site hit rate (testthat 15%, objects 25%,
+  validation 40% of 10k, 116k and 45k resolutions, since most sites run a few times and `$`
+  dispatch from a builtin has no site), and GC roots walked on full collections (about 0.4% of
+  testthat in `trace_method_cache`).
+- Calling frames below the top environment are walked on every dispatch, as GNU R does. One row
+  holds one scope, so dispatching a name from two top environments alternately repeats the walk.
+- **`.Class` matches GNU R**: the class vector itself (not mutable) when the first class has the
+  method, `NULL` for the default, otherwise the remaining classes with the whole vector as
+  `previous` unless a group generic dispatched (`dispatch__dot_class_values`).
+- **The (generic, class) name map stays a hash**: a dense key needs an id per `CHARSXP`, and
+  interning the class as a symbol costs about 81 instructions (`install_charsxp` 26 plus
+  `install_char` 55, 0.8% of objects at its 274k name lookups), more than the 69-instruction hash
+  lookup. A dense `CHARSXP` id is a strings follow-up (`backlog.md`).
+- **Measured** (warm, against the site caches): testthat -1.54%, validation +0.58%, objects
+  -0.08%, functional +0.18%; RSS flat, libR `.text` 19 KB smaller. Validation's regression is its
+  45k resolutions (mostly `format()` on doubles in `vapply`, each walking two function frames and
+  three candidate names), which the old site entry skipped on its hits. That walk is what slot
+  frames make cheap, so it is a closure-frame follow-up, not a reason for a site cache.
+- **Checking.** `dispatch__method_lookup_order` (lookup order, define/mask/`rm`/`registerS3method`
+  sequences, two top environments, `$`/`$<-` methods defined after the first call),
+  `dispatch__r6_and_dollar_methods` (R6 `self$x`, `super$`),
+  `dispatch__method_cache`, `dispatch__site_cache_invalidation`; the fuzzer's S3 block changes
+  methods between calls of one site.
 
 ## The interpreter is an engine crate between a numeric crate and four leaf crates
 
 **Status:** built.
 
-- **Previous shape.** `interp` was one crate of 186,000 lines. It held the evaluator and base R's builtins, and also the numeric ports, the stats package's routines, the graphics engine with its renderer, the `DataFrame` binding and the HTTP client. It depended on `table` (Polars), reqwest with rustls, tiny-skia and ab_glyph, so every crate that needs the evaluator (`jit`, `typed`, `loader`) built after all of them, and an edit to the evaluator re-optimized all 186,000 lines.
-- **What was structurally weak.** The dependency pointed the wrong way. The engine knew the table engine, the rasterizer and the HTTP client by name for a handful of cold calls (tracing the devices' objects, `[` on a table, opening a URL), and in return carried their whole build.
-- **Target shape.** Six crates, with the name `interp` kept for the engine so that no caller changes:
-
-  | Crate | Position | Holds |
-  |---|---|---|
-  | `numeric` | below the engine | nmath (`rmath`), x87 sums (`long_double`), `vector_math`, `fft`, `linpack`, C's number formats |
-  | `interp` | the engine | the evaluator, tier 0, conditions, dispatch, base R's builtins, the standard library |
-  | `stats` | leaf | the stats package's native routines |
-  | `graphics` | leaf | the graphics engine, the graphics and grDevices routines, plotmath, the renderer |
-  | `frames` | leaf | the `DataFrame` value and API over `table`, and the data viewer |
-  | `services` | leaf | the HTTP client |
-
-  A leaf depends on the engine, and only a host (`libr`, or a test) depends on a leaf. Each leaf has an `install()` that the host calls after `interp::install`. It registers the leaf's builtins (`register_builtins`) and native routine tables (`builtin_libraries::register_routines`), and fills the leaf's part of `Interp::extensions` (`crates/interp/src/extensions.rs`), a struct of plain `fn` pointers through which the engine makes its few calls into a leaf. Every pointer defaults to what a session without that leaf does: no device is open, no object is a table, a transfer fails as an unsupported protocol.
-- **Why a table of `fn` pointers.** There is one host and one implementation of each leaf, so a trait object or a generic parameter would add a second way to say the same thing. The calls are cold: once per session start and end, once per collection, once per `[` on an object already known to carry a class, once per URL. Cargo features would have kept the code in the crate, where an evaluator edit still recompiles it.
-- **`numeric` answers the emulated release through a provider.** A few kernels changed results between GNU R releases, and the release comes from the base R the session loaded, which is engine state. The engine sets `numeric::set_emulated_r_provider` at install, so `numeric` reads no engine state and stays below it.
-- **What stays in the engine.** `distributions` and `random` (their builtins are `.Internal`s that the base fast paths call directly), `linalg` (`%*%` and `crossprod` are base builtins), the console server, the help server and the debugger (they read the frame stack and the evaluator's breakpoints, and use only the standard library's sockets), and the regex engines and compression libraries (base's string builtins and connections). None of them is a build cost on an edit, because a dependency compiles once.
-- **Rejected: an API crate with the engine behind a vtable**, so that a leaf would not recompile after an engine edit. The leaves call several hundred engine functions (constructors, accessors, coercion, the unwinding types), and a vtable over that surface is R's C API again, written in Rust. It also buys little: cargo starts a leaf as soon as the engine's metadata is ready, so the leaves compile beside the engine's code generation and none of them is on the critical path.
-- **The loader's backend for ry's runtime is a module of `libr`.** It was `loader`'s `ry_runtime` module behind a `runtime` feature that linked `heap`, `interp` and `rcmd`. The workspace unifies features, so every build turned the feature on and the checker binary linked the interpreter (`interp <- loader <- ry-lang`). `libr` was the module's only user, so it lives there as `crates/libr/src/loader_backend.rs`, and `loader` has no feature and no runtime dependency. `cargo tree -p ry-lang -i interp` finds nothing, and `ry-lang` reaches the runtime only through `repl`, which loads `libR` at run time.
-- **Not taken yet: the evaluator above base's builtins.** Cargo recompiles every crate above an edited one, so after the split an evaluator edit still rebuilds the engine's 126,000 lines (76 s of the 82 s loop on `iterate`) and then every leaf, `typed`, `jit` and `libr`. The cut that changes this puts the evaluator core (`eval`, `bytecode`, dispatch and closure application, about 30,000 lines) in a crate above base's builtins. The lower crate keeps values, coercion, the unwinding types, environments, builtin registration and the builtins, and reaches `eval` and closure application through `fn` pointers. Only that direction needs pointers, because tier 0 sits above the builtins and calls their kernels directly. The leaves then depend on the lower crate, and an evaluator edit rebuilds the evaluator, `jit`, `typed` and `libr` only. `backlog.md`, "Open: the evaluator's edit loop", holds it. It is also where passing the interpreter state as an argument would start (the engine has about 1,500 reads of the global).
-- **Rejected: incremental compilation for `iterate`.** It cuts the loop to 41 s, then 29 s (17 s with 256 codegen units), but the code it produces runs tier 0 two to three and a half times slower: against the plain `iterate` build, warm medians were 2.0x on the records workload, 2.3x on validation, and 2.5x to 3.6x on interpreter loops with the JIT off (`fib`, `loop_sum`, `vector_loop`). JIT-compiled code was unchanged. `iterate` exists for optimized tests and performance work, so a build that slow defeats it. The fast correctness loop is `dev`.
-- **Impact.** Edit loop after touching the body of `eval()`, `cargo build -p ry-lang -p libr -p rcmd`, four cores:
-
-  | Build | One crate | Split |
-  |---|--:|--:|
-  | `dev` | 11.7 s | 11.3 s |
-  | `iterate`, not incremental | 95.3 s | 81.9 s |
-
-  The engine links no Polars, reqwest, rustls or tiny-skia. An edit to a leaf rebuilds that leaf and `libr` only, except that the engine's own viewer tests install `frames`, so `cargo test -p interp` builds `table` once and rebuilds `frames` with the engine.
+- **Shape.** `numeric` (nmath `rmath`, `long_double`, `vector_math`, `fft`, `linpack`, number
+  formats) sits below `interp` (the evaluator, tier 0, conditions, dispatch, base builtins, the
+  standard library); the leaves `stats`, `graphics`, `frames` (`DataFrame` over `table`, the
+  viewer) and `services` (HTTP) sit above it. Only a host (`libr`, or a test) depends on a leaf.
+  Each leaf's `install()` runs after `interp::install`, registers builtins and routine tables, and
+  fills its part of `Interp::extensions` (`crates/interp/src/extensions.rs`), plain `fn` pointers
+  whose defaults behave as a session without that leaf. Why: the engine carried Polars, reqwest,
+  rustls and tiny-skia for a handful of cold calls, so every crate needing the evaluator built after
+  them.
+- **Why `fn` pointers.** One host and one implementation per leaf, so a trait or generic adds a
+  second way to say the same thing; the calls are cold. Cargo features would keep the code in the
+  crate, where an evaluator edit still recompiles it.
+- **`numeric` reads the emulated release through `numeric::set_emulated_r_provider`**, set at
+  install, so it reads no engine state. (A few kernels changed results between GNU R releases, and
+  the release comes from the loaded base R.)
+- **Stays in the engine:** `distributions` and `random` (base fast paths call their `.Internal`s),
+  `linalg` (`%*%`), the console, help server and debugger (they read the frame stack), regex and
+  compression (base builtins).
+- **Rejected: an API crate with the engine behind a vtable.** Leaves call several hundred engine
+  functions, so the vtable would be R's C API again in Rust; leaves already compile beside the
+  engine's codegen and are off the critical path.
+- **The loader backend for ry's runtime is `crates/libr/src/loader_backend.rs`**, because a
+  `runtime` feature on `loader` was unified on by every build and linked the interpreter into the
+  checker. `cargo tree -p ry-lang -i interp` finds nothing.
+- **Not taken yet: the evaluator above base's builtins**, so an evaluator edit stops rebuilding the
+  builtins and leaves (`backlog.md`, "Open: the evaluator's edit loop"). After the split an
+  evaluator edit still rebuilds the engine's 126,000 lines (76 s of the 82 s `iterate` loop). The
+  evaluator core (`eval`, `bytecode`, dispatch and closure application, about 30,000 lines) would
+  sit above a lower crate of values, coercion, unwinding types, environments and builtins, which
+  reaches `eval` through `fn` pointers; only that direction needs pointers, because tier 0 calls
+  the builtins' kernels directly. It is also where passing interpreter state as an argument would
+  start (about 1,500 reads of the global).
+- **Rejected: incremental compilation for `iterate`.** It cuts the loop to 41 s (29 s, or 17 s
+  with 256 codegen units) but its code runs tier 0 2x to 3.6x slower (records 2.0x, validation
+  2.3x, `fib`/`loop_sum`/`vector_loop` with the JIT off 2.5x to 3.6x; JIT code unchanged), which
+  defeats a profile meant for performance work; the fast correctness loop is `dev`.
+- **Measured** (edit to `eval()`'s body, four cores): `dev` 11.7 s to 11.3 s, `iterate` 95.3 s to
+  81.9 s. A leaf edit rebuilds that leaf and `libr` only, except `cargo test -p interp`, whose
+  viewer tests install `frames` and so build `table` once.
 
 ## A watchdog thread raises the poll flag at a time limit's deadline, and the interrupt check raises the error
 
 **Status:** built.
 
-- **Previous shape.** `setTimeLimit()` and `setSessionTimeLimit()` were no-ops, so future's timeouts never fired.
-- **Constraint.** The evaluator polls one atomic (`unwind::INTERRUPT_REQUESTED`) at every call and back edge, and compiled code reads the same flag at its back edges and hands the activation to tier 0 when it is raised. Reading a clock there, or keeping the flag raised while a limit is armed, would cost every loop (compiled loops would deoptimize at every back edge).
-- **Choice.** `crates/interp/src/time_limits.rs` keeps GNU R's state (`cpuLimit`, `cpuLimit2`, `cpuLimitValue` and the elapsed ones) on `Interp`. A watchdog thread, started when a limit is first armed, sleeps until the elapsed deadline (or polls the CPU clock every 20 ms) and then raises `time_limits::DUE` and the poll flag. `check_user_interrupt` (GNU R's `R_CheckUserInterrupt`, reached from the evaluator every 1000 polls once the flag is up, from `Sys.sleep` after each wait, and from native code) reads the clocks and raises the error, so the thread never decides an outcome. Deadlines reach the thread through atomics that only the evaluator's thread writes, so a fork never copies a held lock; a forked child starts its own thread (`fork.rs` calls `time_limits::after_fork`). `session::run_toplevel` calls `time_limits::reset` before every top-level expression, as GNU R's REPL calls `resetTimeLimits`.
-- **Rejected.** `setitimer` signals: they interrupt system calls in packages' code, and Windows has none. A clock read per poll: costs every loop for a feature almost no code uses.
-- **Difference from GNU R.** GNU R 4.6 skips five of every six checks and reads the clock at most every 50 ms, so a single long `Sys.sleep()` under a shorter limit often returns normally there. ry checks after every wait once the deadline has passed, so the limit fires at the end of that sleep. `crates/oracle/cases/system__time_limits.R` pins only outcomes both agree on.
+- **Constraint.** The evaluator and compiled back edges poll one atomic
+  (`unwind::INTERRUPT_REQUESTED`); a clock read there, or keeping the flag raised while a limit is
+  armed, would cost every loop (compiled loops would deoptimize at every back edge).
+- **Choice.** `crates/interp/src/time_limits.rs` keeps GNU R's limit state on `Interp`. A watchdog
+  thread, started when a limit is first armed, sleeps to the elapsed deadline (or polls CPU time
+  every 20 ms) and raises `time_limits::DUE` and the poll flag; `check_user_interrupt` (GNU R's
+  `R_CheckUserInterrupt`, reached every 1000 polls once the flag is up, after each `Sys.sleep`
+  wait, and from native code) reads the clocks and raises the error, so the thread never decides
+  an outcome. Deadlines are atomics only
+  the evaluator thread writes, so a fork copies no held lock; a forked child restarts the thread
+  (`time_limits::after_fork`). `session::run_toplevel` calls `time_limits::reset` per top-level
+  expression, as GNU R's `resetTimeLimits`.
+- **Rejected:** `setitimer` (interrupts system calls in packages, none on Windows); a clock read per
+  poll.
+- **Difference.** GNU R 4.6 skips five of every six checks and reads the clock at most every
+  50 ms, so a long `Sys.sleep()` under a
+  shorter limit often returns normally; ry fires at the end of that sleep.
+  `crates/oracle/cases/system__time_limits.R` pins only shared outcomes.
 
 ## Measured and not taken: O(1) `Sys.getenv` and `options`
 
 **Status:** built (not taken; the measurement stands).
 
-- **Neither is worth an index.** On testthat_full (callgrind, `RY_JIT=off`, warm Ir 594.6M per repeat) the `environ` scan (`find_variable`, `do_sys_getenv`) and the `.Options` walks (`set_option`, `option_value`, `do_options`) cost about 12.5M Ir (2.1%) together, and a probe per lookup costs some of that back, so the net is 1.5 to 1.9%. The `environ` scan already rejects most entries after one byte load.
-- **If a profile puts them higher:** for options, an index from symbol to pairlist cell beside `.Options`, rebuilt when the binding's head changes (about 1.1% net). For getenv, a slot index validated against the `environ` base pointer and the entry pointer, re-reading the entry's bytes on every hit so C `setenv` stays visible (about 0.8% net); it is derived state, so it needs a stronger case.
+- Together they cost about 12.5M Ir, 2.1% of testthat_full (callgrind, `RY_JIT=off`; the
+  `environ` scan in `find_variable`/`do_sys_getenv` rejects most entries after one byte, the
+  `.Options` walks are `set_option`, `option_value`, `do_options`), and a probe per lookup costs
+  some back, so the net is 1.5 to 1.9%.
+- If a profile puts them higher: for options, an index from symbol to pairlist cell beside
+  `.Options`, rebuilt when the binding's head changes (about 1.1% net); for getenv, a slot index
+  validated against the `environ` base and entry pointers that re-reads the entry's bytes so C
+  `setenv` stays visible (about 0.8% net; derived state, so it needs a stronger case).
 
 ## Measured and not taken: a leaner `format()` on the validation workload
 
 **Status:** built (not taken; the measurement stands).
 
-- **About 2.5% of validation's warm Ir is within reach, under the 3% bar, and ry is already about 7x faster than GNU R per call** (about 16k Ir against 111k for `format(round(v, 3), nsmall = 3)`; `.Internal(format())` 3.76k against 8.25k).
-- **Where the cost is:** S3 dispatch to `format.default` about 6.6k Ir (call-path work, not format's); `do_format_default` 7.3k, of which per-formal lookups and default forcing 2.47k (about 1.0% from one pass), `real_format_candidates` on the emulated long double 1.13k and the text buffer 1.19k (about 1.3% together).
+- About 2.5% of validation is within reach, under the 3% bar, and ry is already about 7x faster than
+  GNU R per `format(round(v, 3), nsmall = 3)` (about 16k Ir against 111k; `.Internal(format())`
+  3.76k against 8.25k). The cost: S3 dispatch to `format.default` about 6.6k (call-path work);
+  `do_format_default` 7.3k, of which per-formal lookups and default forcing 2.47k (about 1.0% from
+  one pass), `real_format_candidates` on the emulated long double 1.13k and the text buffer 1.19k
+  (about 1.3% together).
 
 ## Base fast paths read formals one at a time, except `formatC()`
 
 **Status:** built (one pass taken for `formatC()` only).
 
-- **One pass over the formals is under the bar on every workload but report.** The helpers `argument`, `is_default`, `is_supplied` and `dots` (`base_fast_paths.rs`) each walk the formals again; their self share of warm Ir is 5.15% on report (`formatC()`), 1.88% on validation (`format.default`), and under 0.6% elsewhere. One walk still pays the walk and a frame re-resolve per lookup (forcing can give a slot frame an environment), so it saves about 40%.
-- **`formatC()` reads its 13 formals in one walk** (`eval::slot_formals`), takes a defaulted formal as its known constant without forcing it, and reads `OutDec` only when `decimal.mark` is defaulted: report runs 4.5% fewer warm instructions. `format.default` keeps per-formal lookups.
+- The helpers `argument`, `is_default`, `is_supplied` and `dots` (`base_fast_paths.rs`) each walk
+  the formals; their self share of warm Ir is 5.15% on report, 1.88% on validation and under 0.6%
+  elsewhere, and one pass saves only about 40% (it still walks and re-resolves the frame per
+  lookup, since forcing can give a slot frame an environment), so it is under the bar except on
+  report. `formatC()` reads its 13 formals in one walk (`eval::slot_formals`), takes a defaulted
+  formal as its known constant without forcing it, and reads `OutDec` only when `decimal.mark` is
+  defaulted: report runs 4.5% fewer warm instructions. `format.default` keeps per-formal lookups.
 
 ## Parked: cheaper restart setup in `withRestarts`
 
 **Status:** planned, parked on its branch until a workload clears the bar.
 
-- **What the branch `perf/restart-setup` does.** The native `withRestarts` prologue shares one `names` and one `"restart"` class vector across restart objects, looks `makeRestart` and the `$` methods up through pre-installed symbols, makes the handler closures without `eval`, and calls `withOneRestart` directly for one restart. team_scores warm Ir fell 1.98% (`make_restart_for` 55M to 22M, unpaired baseline). The oracle case `conditions__restart_objects` on the branch passes on four engines.
-- **Why parked.** A native muffle in `warning_call` (`conditions.rs`) skips `.signalSimpleWarning`, `withRestarts` and the handler when `suppressWarnings`'s own handler applies, which removes this path from team_scores. What is left matters only for the conditions workload, estimated at 1.5 to 2%, below the bar. To revive, merge main in and re-measure the conditions workload.
+- Branch `perf/restart-setup`: the native `withRestarts` prologue shares one `names` and `"restart"`
+  class vector, looks up `makeRestart` and `$` methods through pre-installed symbols, builds
+  handler closures without `eval`, and calls `withOneRestart` directly for one restart
+  (`conditions__restart_objects` passes on four engines). team_scores warm Ir fell 1.98%
+  (`make_restart_for` 55M to 22M).
+- **Parked because** the native muffle in `warning_call` (`conditions.rs`) skips
+  `.signalSimpleWarning`, `withRestarts` and the handler when `suppressWarnings`'s own handler
+  applies, which removed this path from team_scores; what is left matters only for the conditions
+  workload, estimated at 1.5 to 2%, below the bar. To revive, merge main and re-measure the
+  conditions workload.
+
+## Replacement calls and `lapply`/`vapply` element calls run on a slot frame's slots
+
+**Status:** built.
+
+- **Previous source of truth.** A variable of a slot frame lives in a register, but four operations
+  could only reach it through the frame's environment, so each made the environment and moved the
+  frame to reading by name: `f(x) <- v` and `x[i, j] <- v` on anything but a plain vector with a
+  builtin setter (`eval::complex_assign` builds `*tmp*`, the getter call and the setter call in the
+  environment), `x@name <- v` (a special), and the element calls of `lapply` and `vapply`, whose
+  `.Internal` evaluated `FUN(X[[i]], ...)` in the calling frame after binding `i` there.
+- **What was weak.** The environment was a means of addressing the variable, not something the
+  operation needed: a builtin setter reads its arguments and nothing else, and `FUN` needs the
+  element and the frame's `...`. On the finbench suite these four reasons were 1.47M of the 2.91M
+  slot frames that moved to reading by name (`vapply` 471,633, replacement call 375,260, `lapply`
+  320,598, subassignment 298,534), and each such frame then reads every variable by name for the
+  rest of the call.
+- **Chosen shape for replacement.** `replace_variable` (`crates/interp/src/bytecode.rs`) addresses
+  the variable by its home, a binding cell or a slot (`Home`), and runs the same update for both. On
+  a slot it reads an unforced argument or an enclosing variable first, as `complex_assign` does, and
+  gives up (`false`, so `complex_assign` runs) whenever that or the setter lookup gave the frame its
+  environment. The setter is a builtin (when the target has no method for it, asked through
+  `dispatch::has_internal_method` with `Caller::SlotFrame`), a special with a direct entry (`@<-` on
+  an S4 object, `direct_at_assign`), or a closure whose other arguments are constants
+  (`replace_with_closure`). The closure gets the target and the value in forced promises that count
+  them, unlike the uncounted `*tmp*` and value promises `complex_assign` hands a builtin: tier 0
+  passes a builtin its arguments without the argument list whose cells count in GNU R, so a value
+  only an uncounted promise holds reads as unreferenced, and the closure's `unclass(value)` would
+  strip the class in place. A frame that dies with the call releases its promises
+  (`Heap::release_slots`), which leaves the target unshared for the next update, and a frame that
+  outlives the call keeps counting, so the caller's next update copies. `assign_slot_element` does
+  the same for `[<-`, `[[<-` and `$<-`, including on an object without a method, and
+  `assign_slot_matrix_element` for an element of a plain matrix. A target with a method, a closure
+  setter with computed arguments and a nested target still take `complex_assign`.
+- **Chosen shape for element calls.** A body with `.Internal(lapply(...))` or
+  `.Internal(vapply(...))` gets a slot for `i` (`binds_element_index`), and `ElementCalls`
+  (`crates/interp/src/envir.rs`) stores each index there while the frame has no environment. A
+  closure `FUN` is called with the element as a forced argument reference and the frame's `...`
+  items appended (`eval::force_and_call_from_slots`), so it sees the call `FUN(X[[i]], ...)` and the
+  promises a call evaluated in the environment would give it. A builtin `FUN` gets the element and
+  the forced values of the `...` items (`eval::call_builtin_from_slots`). `ElementCalls` switches to
+  the environment for the rest of the loop as soon as the frame has one (`parent.frame()` in `FUN`),
+  and evaluates the call there from the start when `X[[i]]` may dispatch, `FUN` is a special, a
+  generic builtin `FUN` would see an object, or the closure has no `...` formal (the `...` in the
+  call is then an enclosing function's, or an error).
+- **A direct entry runs under a profile.** `eval::call_direct` declined every call while a profile
+  summary, `Rprof` or a capture was on, so a special reachable only through its direct entry (`@<-`)
+  fell back to `complex_assign` exactly when someone was measuring. It publishes the builtin's
+  activity, counts the call and takes the profile sample itself (`call_direct_observed`), so an
+  observed run takes the path an unobserved one takes.
+- **Rule.** An operation on a slot frame's variable addresses the slot. The environment is made only
+  when something asks for the frame itself, and code that may trigger that (forcing a promise, a
+  lookup) rechecks the frame afterwards before it writes a slot.
+- **Impact.** Correctness: the element call, the promises and the copy-on-shared behavior are what
+  the environment path gives (`y <- x; names(x) <- v` leaves `y` alone because a slot's value
+  changes in place only when the slot alone holds it). Performance, on the finbench suite (both
+  tiers): slot frames given an environment 8.94M to 6.61M, with `vapply` 471,633 to 2,731, `lapply`
+  320,598 to 7,047, replacement call 375,260 to 38,391 and subassignment 298,534 to 75,333, and per
+  suite run 7.9M fewer pairlists (68.0M to 60.1M), 3.9M fewer promises (19.7M to 15.9M) and 2.3M
+  fewer environments (12.9M to 10.6M). The hot suite's weighted instruction count falls 3.0% on
+  finbench, 2.9% on dsbench and 2.3% on biobench. The nested forms the compiler leaves to the `<-`
+  special are 113,492 frames on finbench. Simplicity: one update routine for both homes instead of a
+  slot-only fast path beside the general one. Incremental analysis is unaffected.
+- **An empty `...` item reaching a builtin** is "argument is missing, with no default" from the
+  frame that passes `...` on, as in GNU R, where it was "argument N is empty" from the builtin's
+  call (`collect_evaluated_args`, `slot_builtin_args`).
+- **Pinned by** the oracle cases `replacement__slot_frame_targets` and
+  `apply__element_calls_from_slot_frames`, each run on GNU R, tier 0 and the JIT.
