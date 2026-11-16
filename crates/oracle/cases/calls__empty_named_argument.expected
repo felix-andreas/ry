@@ -353,9 +353,11 @@
 | [1] "error: 'recursive' is NA | call: unlist(list(a = 1), NA)"
 | [1] "error: NA in coercion to boolean | call: islistfactor(list(a = 1), NA)"
 | [1] TRUE
+| [1] "error: unused argument (list(1, 2)) | call: (function (a, b)  a)(1L, 2L, list(a = 1L, 2L))"
+| [1] "error: unused argument (1) | call: round(1L, 2L, c(a = 1L))"
 [messages]
 [warnings]
 [errors]
 [value]
-logical
-| TRUE
+character
+| "error: unused argument (1) | call: round(1L, 2L, c(a = 1L))"
