@@ -419,6 +419,9 @@ pub unsafe fn select_positions(
                 values::raws_mut(result)
             });
         }
+        SexpType::String | SexpType::List | SexpType::Expression => {
+            return gather_handles(vector, positions, count);
+        }
         _ => {}
     }
     let result = alloc(kind, count)?;
@@ -612,22 +615,7 @@ unsafe fn gather_kind(
 ) -> R<Sexp> {
     let kind = object.kind();
     if matches!(kind, SexpType::String | SexpType::List) {
-        let result = alloc(kind, count)?;
-        let source = object.slice::<Sexp>();
-        let missing = if kind == SexpType::String {
-            na_string()
-        } else {
-            nil()
-        };
-        let heap = crate::heap();
-        for (slot, position) in positions.take(count).enumerate() {
-            heap.set_element(
-                result,
-                slot,
-                source.get(position).copied().unwrap_or(missing),
-            );
-        }
-        return Ok(result);
+        return gather_handles(object, positions, count);
     }
     let result = values::alloc_uninit(kind, count)?;
     if kind == SexpType::Real {
@@ -641,6 +629,29 @@ unsafe fn gather_kind(
             *slot = source.get(position).copied().unwrap_or(NA_INTEGER);
         }
     }
+    Ok(result)
+}
+
+/// `object[positions]` for a character vector, list or expression vector that is not ALTREP, with
+/// NA (or `NULL`) past the end. The elements go straight into the result's slots and are counted
+/// as references afterwards, in one pass each, so `positions` must not allocate.
+unsafe fn gather_handles(
+    object: Sexp,
+    positions: impl Iterator<Item = usize>,
+    count: usize,
+) -> R<Sexp> {
+    let kind = object.kind();
+    let result = alloc(kind, count)?;
+    let source = object.slice::<Sexp>();
+    let missing = if kind == SexpType::String {
+        na_string()
+    } else {
+        nil()
+    };
+    for (slot, position) in result.slice_mut::<Sexp>().iter_mut().zip(positions) {
+        *slot = source.get(position).copied().unwrap_or(missing);
+    }
+    crate::heap().count_written_elements(result);
     Ok(result)
 }
 
