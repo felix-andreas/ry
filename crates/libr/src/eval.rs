@@ -896,7 +896,7 @@ unsafe fn c_call(
             | SexpType::Raw => {
                 // The copy is an ordinary vector even when the argument is ALTREP, so the
                 // checks below read its storage directly.
-                let copy = crate::memory::duplicate(value, false)?;
+                let copy = crate::memory::plain_duplicate(value, false)?;
                 runtime.heap.root(copy);
                 if !na_ok && !c_values_finite(copy)? {
                     return Err(error_in(
@@ -908,15 +908,8 @@ unsafe fn c_call(
                 CArgument::Vector(copy)
             }
             SexpType::String => {
-                // An ALTREP class may duplicate into another ALTREP object, so the copy is
-                // materialized: the routine writes back into ordinary storage.
-                let copy = crate::memory::duplicate(value, false)?;
-                runtime.heap.root(copy);
-                let copy = if copy.is_altrep() {
-                    crate::altrep::materialize(copy)?
-                } else {
-                    copy
-                };
+                // The routine writes back into the copy, which must be ordinary storage.
+                let copy = crate::memory::plain_duplicate(value, false)?;
                 runtime.heap.root(copy);
                 let length = xlength(copy)? as usize;
                 let mut strings = Vec::with_capacity(length);
@@ -940,7 +933,7 @@ unsafe fn c_call(
                 CArgument::Strings(copy, strings)
             }
             SexpType::List if kind == RoutineKind::C => {
-                let copy = crate::memory::duplicate(value, false)?;
+                let copy = crate::memory::plain_duplicate(value, false)?;
                 runtime.heap.root(copy);
                 runtime.heap.escape(copy, true);
                 pointers.push(copy.data() as *mut std::ffi::c_void);
