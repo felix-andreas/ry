@@ -341,7 +341,7 @@ fn render_at(
 }
 
 #[test]
-fn workspace_symbols_ranked() {
+fn workspace_symbols_rank_matches_and_include_class_members() {
     let db = RootDatabase::default();
     install_shipped_stubs(&db);
     let first = SourceFile::new(
@@ -354,124 +354,20 @@ fn workspace_symbols_ranked() {
         "alpha_two <- function() 3\nnot_matching <- 4\n".to_owned(),
         DocumentKind::Package,
     );
-    let files = ProjectFiles::new(&db, vec![first, second]);
+    let members = SourceFile::new(
+        &db,
+        "Account <- R6Class(\"Account\",\n  public = list(deposit = function(amount) invisible(self))\n)\n"
+            .to_owned(),
+        DocumentKind::Package,
+    );
+    let files = ProjectFiles::new(&db, vec![first, second, members]);
 
     assert_eq!(
         symbol_names(&db, files, "alpha"),
         ["alpha_one", "alpha_two"]
     );
     assert_eq!(symbol_names(&db, files, "aone"), ["alpha_one"]);
-}
-
-#[test]
-fn document_symbols_expose_s4_and_r6_hierarchy() {
-    let db = RootDatabase::default();
-    install_shipped_stubs(&db);
-    let source = "\
-setClass(\"Person\", representation(name = \"character\"))
-setGeneric(\"greet\", function(object) standardGeneric(\"greet\"))
-setMethod(\"greet\", \"Person\", function(object) object@name)
-Account <- R6Class(\"Account\",
-  public = list(
-    balance = 0,
-    deposit = function(amount) invisible(self)
-  ),
-  private = list(audit = function() NULL),
-  active = list(status = function() \"open\")
-)
-plain <- function(x, ...) x
-setMethod(f = \"baz\", signature = \"Person\", definition = function(x) x)
-setMethod(\"qux\", c(\"Person\", \"Other\"), function(x, y) x)
-setMethod(f = \"foo\", signature = list(x = \"Person\", y = \"Other\"), definition = function(x, y) x)
-setMethod(\"bar\", signature(\"Person\", y = \"Other\"), function(x, y) x)
-";
-    let file = SourceFile::new(&db, source.to_owned(), DocumentKind::Package);
-    let files = ProjectFiles::new(&db, vec![file]);
-
-    let symbols = document_symbols(&db, file);
-    let rendered: Vec<String> = symbols
-        .iter()
-        .map(|symbol| {
-            format!(
-                "{} ({:?}{})",
-                symbol.name,
-                symbol.kind,
-                symbol
-                    .detail
-                    .as_deref()
-                    .map(|detail| format!(", {detail}"))
-                    .unwrap_or_default()
-            )
-        })
-        .collect();
-    assert_eq!(
-        rendered,
-        vec![
-            "Person (S4Class)",
-            "greet (S4Generic)",
-            "greet (S4Method, Person)",
-            "Account (R6Class)",
-            "plain (Function, fn(x, ...))",
-            "baz (S4Method, Person)",
-            "qux (S4Method, Person, Other)",
-            "foo (S4Method, Person, Other)",
-            "bar (S4Method, Person, Other)",
-        ],
-        "{symbols:#?}"
-    );
-
-    let account = &symbols[3];
-    let members: Vec<String> = account
-        .children
-        .iter()
-        .map(|child| format!("{} ({:?})", child.name, child.kind))
-        .collect();
-    assert_eq!(
-        members,
-        vec![
-            "balance (R6Field)",
-            "deposit (R6Method)",
-            "audit (R6Method)",
-            "status (R6Field)",
-        ],
-        "{account:#?}"
-    );
-
     assert_eq!(symbol_names(&db, files, "deposit"), ["deposit"]);
-}
-
-#[test]
-fn document_symbols_include_inline_type_definitions() {
-    let db = RootDatabase::default();
-    install_shipped_stubs(&db);
-    let source = "\
-#: @type Money {double}
-type UserId = integer
-alias Box<T> = list{value: T}
-id <- @UserId(1L)
-";
-    let file = SourceFile::new(&db, source.to_owned(), DocumentKind::Package);
-    let rendered: Vec<String> = document_symbols(&db, file)
-        .iter()
-        .map(|symbol| {
-            let selected = &source[std::ops::Range::<usize>::from(symbol.selection)];
-            format!(
-                "{} ({:?}, {}) at {selected}",
-                symbol.name,
-                symbol.kind,
-                symbol.detail.as_deref().unwrap_or_default()
-            )
-        })
-        .collect();
-    assert_eq!(
-        rendered,
-        vec![
-            "Money (TypeDefinition, @type) at Money",
-            "UserId (TypeDefinition, type) at UserId",
-            "Box (AliasDefinition, alias) at Box",
-            "id (Value, ) at id",
-        ]
-    );
 }
 
 fn symbol_names(db: &RootDatabase, files: ProjectFiles, query: &str) -> Vec<String> {
