@@ -198,6 +198,10 @@ pub unsafe fn remove_attribute(object: Sexp, name: Sexp) {
         }
         return;
     }
+    // Dimnames without a dim would be an invalid object, so GNU R's `removeAttrib` drops both.
+    if name == R_DimSymbol.get() {
+        remove_attribute(object, R_DimNamesSymbol.get());
+    }
     let mut previous: Option<Sexp> = None;
     let mut cell = object.attrib();
     while cell.kind() == SexpType::Pairlist {
@@ -280,17 +284,23 @@ pub unsafe fn names_gets(object: Sexp, value: Sexp) -> ApiResult<Sexp> {
 }
 
 pub unsafe fn dim_gets(object: Sexp, value: Sexp) -> ApiResult<Sexp> {
-    let runtime = runtime();
     if !object.kind().is_vector() && !object.is_altrep() {
         return Err(error(
             "invalid first argument, must be vector (list or atomic)",
         ));
     }
+    if !matches!(
+        value.kind(),
+        SexpType::Integer | SexpType::Real | SexpType::Logical
+    ) {
+        return Err(error("invalid second argument, must be vector or NULL"));
+    }
     let length = xlength(object)?;
-    let dims = match value.kind() {
-        SexpType::Integer | SexpType::Real | SexpType::Logical => integers(value)?,
-        _ => return Err(error("invalid second argument, must be vector or NULL")),
-    };
+    // As in GNU R, the coerced vector itself becomes the attribute, names and all (sf's raster
+    // reader names its dimensions "x" and "y" this way), and the object keeps its own names.
+    let dim = crate::vectors::coerce_vector(value, SexpType::Integer)?;
+    runtime().heap.root(dim);
+    let dims = integers(dim)?;
     if dims.is_empty() {
         return Err(error("length-0 dimension vector is invalid"));
     }
@@ -312,13 +322,7 @@ pub unsafe fn dim_gets(object: Sexp, value: Sexp) -> ApiResult<Sexp> {
             "dims [product {product}] do not match the length of object [{length}]"
         )));
     }
-    remove_attribute(object, R_NamesSymbol.get());
     remove_attribute(object, R_DimNamesSymbol.get());
-    let dim = runtime
-        .heap
-        .alloc_vector(SexpType::Integer, dims.len() as isize)?;
-    runtime.heap.root(dim);
-    dim.slice_mut::<i32>().copy_from_slice(&dims);
     install_attribute(object, R_DimSymbol.get(), dim)?;
     dim.mark_not_mutable();
     Ok(dim)
@@ -554,13 +558,14 @@ unsafe fn dim_direct(runtime: &mut Runtime, object: Sexp, value: Sexp) -> Option
         return None;
     }
     attach(runtime, object, R_DimSymbol.get(), value)?;
-    // New extents invalidate the names and dimnames, which one walk unlinks together.
-    let (names, dimnames) = (R_NamesSymbol.get(), R_DimNamesSymbol.get());
+    // New extents invalidate the dimnames. GNU R's `dimgets` keeps the names, which only the
+    // R-level `dim<-` drops.
+    let dimnames = R_DimNamesSymbol.get();
     let mut previous: Option<Sexp> = None;
     let mut cell = object.attrib();
     while cell.kind() == SexpType::Pairlist {
         let next = cell.cdr();
-        if cell.tag() == names || cell.tag() == dimnames {
+        if cell.tag() == dimnames {
             match previous {
                 Some(previous) => runtime.heap.set_cdr(previous, next),
                 None => runtime.heap.set_attrib(object, next),
@@ -608,6 +613,21 @@ unsafe fn dimnames_direct(runtime: &mut Runtime, object: Sexp, value: Sexp) -> O
         {
             return None;
         }
+    }
+    // An unreferenced list of the right length is installed itself, as GNU R's `dimnamesgets`
+    // does, so C code that sets the attribute and then fills the list sees its writes kept.
+    if components.len() == extents.len() && value.refcount() == 0 {
+        for index in 0..components.len() {
+            let component = value.slice::<Sexp>()[index];
+            if component != nil && component.length() == 0 {
+                runtime.heap.set_element(value, index, nil);
+            }
+        }
+        let mark = runtime.heap.handle_mark();
+        runtime.heap.root(value);
+        let attached = attach(runtime, object, R_DimNamesSymbol.get(), value);
+        runtime.heap.release_handles(mark);
+        return attached.map(|()| Reachable(value));
     }
     let mark = runtime.heap.handle_mark();
     runtime.heap.root(object);

@@ -2184,7 +2184,7 @@ unsafe fn collect_evaluated_args(
                     counted_push(args);
                     cell = cell.cdr();
                 }
-            } else if value != missing && value != unbound() && value != nil() {
+            } else if value != missing && value != nil() {
                 return Err(error("'...' used in an incorrect context"));
             }
         } else if expression == missing {
@@ -2305,7 +2305,7 @@ unsafe fn closure_args_into<const MODE: u8>(
                     });
                     cell = cell.cdr();
                 }
-            } else if value != missing_arg() && value != unbound() && value != nil() {
+            } else if value != missing_arg() && value != nil() {
                 return Err(error("'...' used in an incorrect context"));
             }
         } else {
@@ -6428,6 +6428,10 @@ unsafe fn do_substitute(call: &Call<'_>) -> R<Sexp> {
     let env = match env.kind() {
         SexpType::Environment => env,
         SexpType::List => crate::envir::list_to_env(env, values::empty_env())?,
+        SexpType::Pairlist => crate::envir::list_to_env(
+            crate::coerce::coerce_vector(env, SexpType::List)?,
+            values::empty_env(),
+        )?,
         SexpType::Nil => values::empty_env(),
         _ => return Err(call.error("invalid environment specified")),
     };
@@ -6982,6 +6986,10 @@ pub unsafe fn complex_assign(
             format!("object '{}' not found", symbol_name(inner)),
         ));
     }
+    // A promise that another reference also holds, as the caller's `...` list does for an
+    // argument passed on through `...`, shares its value with that holder. GNU R wraps each such
+    // argument in a promise of its own, whose value then counts a second reference.
+    let shared_promise = base.kind() == SexpType::Promise && values::maybe_shared(base);
     if base.kind() == SexpType::Promise {
         base = force_promise(base)?;
     }
@@ -7006,6 +7014,7 @@ pub unsafe fn complex_assign(
     // must come before any level changes in place, since an inner level is an element of it.
     crate::moves::modifying(base)?;
     if values::maybe_shared(base)
+        || shared_promise
         || locked
         || index_assigns
         || (!superassign && local_cell.is_none())
@@ -7018,7 +7027,7 @@ pub unsafe fn complex_assign(
         // the data until the replacement writes to it; a replacement that only changes
         // attributes, or writes nothing, as `x[FALSE] <- 1` does, never copies it.
         base = if !superassign && local_cell.is_some() && values::maybe_shared(base) {
-            values::shallow_duplicate_attr(base)?
+            values::replacement_copy(base)?
         } else {
             values::shallow_duplicate(base)?
         };

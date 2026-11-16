@@ -6,6 +6,9 @@
 #   RY_CORPUS_DIR       output directory (default: <repo>/.corpus)
 #   RY_CORPUS_SNAPSHOT  Posit Package Manager snapshot date (default: pinned below)
 #   RY_CORPUS_NCPUS     parallel install jobs (default: 4)
+#   RY_CORPUS_ROOTS     the package list to install (default: tools/corpus/roots.txt, the benchmark
+#                       set, which also installs the GitHub remotes below); `just top-packages` passes
+#                       tools/corpus/top-packages.txt
 
 args <- commandArgs(trailingOnly = FALSE)
 script <- sub("^--file=", "", grep("^--file=", args, value = TRUE))
@@ -15,10 +18,14 @@ corpus_dir <- Sys.getenv("RY_CORPUS_DIR", file.path(repo_root, ".corpus"))
 snapshot <- Sys.getenv("RY_CORPUS_SNAPSHOT", "2025-03-01")
 ncpus <- as.integer(Sys.getenv("RY_CORPUS_NCPUS", "4"))
 
-# The benchmark dependency set from AGENTS.md, minus the GitHub remotes below.
-roots <- readLines(file.path(repo_root, "tools", "corpus", "roots.txt"))
+# The benchmark dependency set from AGENTS.md, minus the GitHub remotes below, unless
+# RY_CORPUS_ROOTS names another list.
+roots_file <- Sys.getenv("RY_CORPUS_ROOTS", "")
+roots <- readLines(if (nzchar(roots_file)) roots_file else file.path(repo_root, "tools", "corpus", "roots.txt"))
+roots <- trimws(sub("#.*", "", roots))
+roots <- roots[nzchar(roots)]
 # Packages the benchmark takes from GitHub: name, URL, ref (NA means the default branch).
-remotes <- list(
+remotes <- if (nzchar(roots_file)) list() else list(
   list(name = "esgtoolkit", url = "https://github.com/Techtonique/esgtoolkit", ref = "v1.0.0"),
   list(name = "loadfast", url = "https://github.com/finccam/loadfast", ref = NA)
 )
@@ -87,15 +94,139 @@ for (remote in remotes) {
   }
 }
 
-# The snapshot's binaries were built for an older R. xts 0.14.1's calls `ATTRIB` without a
-# prototype there and truncates the returned pointer to an int, so `x[2:4]` of an xts object aborts
-# on R 4.6 under GNU R and ry alike. The newest source compiles against the running R's headers.
-if ("xts" %in% installed()) {
+# GNU R skips a dependency its own `.Library` already holds, but ry's runtime reads only this library,
+# so a non-priority package an R build ships there (the reference R ships testthat, rlang and about 50
+# more) would be missing under ry. Copying those builds keeps this library self-contained.
+bundled <- installed.packages(lib.loc = .Library, noCache = TRUE)
+bundled <- setdiff(rownames(bundled)[is.na(bundled[, "Priority"])], installed())
+if (length(bundled) > 0 && !all(file.copy(file.path(.Library, bundled), library_dir, recursive = TRUE))) {
+  stop("cannot copy R's own packages into ", library_dir)
+}
+
+# Older R headers declared functions that libR exports but R 4.6's leave undeclared by default,
+# such as `ATTRIB`, `ENCLOS` and `Rf_findVarInFrame`. With gcc 13, C code from the pinned snapshot
+# that calls one compiles with only a warning, and the implicit `int` return truncates a returned
+# pointer, so the package aborts at its first such call, under GNU R and ry alike (xts's `x[2:4]`,
+# Matrix's `Cholesky`). A Posit binary and a package compiled here are equally affected, so the
+# check reads each shared object's imports instead of its `Built:` field: a package that imports an
+# exported function the default headers leave undeclared is reinstalled from the newest CRAN source,
+# which compiles against those headers. A function whose prototype under `ENABLE_LEGACY_NONAPI`
+# returns an `int` or nothing (`OBJECT`, `SET_ATTRIB`) survives the implicit declaration and does
+# not count; one with no prototype at all (`ENCLOS`, `CLOENV`) does. A package that declares the
+# function itself (S7 defines `ENABLE_LEGACY_NONAPI_FUNS`) is rebuilt for nothing and logged again
+# below, and so is one whose newest source needs a newer dependency than the snapshot holds, which
+# fails to install and leaves the old build in place.
+undeclared_entry_points <- function() {
+  libr <- file.path(R.home("lib"), "libR.so")
+  if (!file.exists(libr) || !nzchar(Sys.which("nm"))) {
+    message("libR.so or nm not found, so packages' imports are not checked")
+    return(character())
+  }
+  include <- R.home("include")
+  ext <- setdiff(list.files(file.path(include, "R_ext"), "\\.h$"), c("GraphicsEngine.h", "GraphicsDevice.h"))
+  headers <- c(
+    "R.h", "Rinternals.h", "Rmath.h", "Rdefines.h", "Rembedded.h", "Rinterface.h",
+    "R_ext/GraphicsEngine.h", file.path("R_ext", ext)
+  )
+  source <- tempfile(fileext = ".h")
+  writeLines(sprintf("#include <%s>", headers), source)
+  r <- file.path(R.home("bin"), "R")
+  preprocess <- function(compiler, defines = "") {
+    command <- system2(r, c("CMD", "config", compiler), stdout = TRUE)
+    language <- if (compiler == "CC") "c" else "c++"
+    suppressWarnings(system(
+      paste(command, "-E -P -w", defines, "-x", language, "-I", shQuote(include), shQuote(source), "2>/dev/null"),
+      intern = TRUE
+    ))
+  }
+  identifiers <- function(text) unlist(regmatches(text, gregexpr("[A-Za-z_][A-Za-z0-9_]*", text)))
+  declared <- unique(c(identifiers(preprocess("CC")), identifiers(preprocess("CXX"))))
+  legacy <- preprocess("CC", "-DENABLE_LEGACY_NONAPI")
+  if (length(declared) == 0 || length(legacy) == 0) {
+    message("the C preprocessor read nothing from R's headers, so packages' imports are not checked")
+    return(character())
+  }
+  exported <- read.table(
+    text = system2("nm", c("-D", "--defined-only", shQuote(libr)), stdout = TRUE),
+    fill = TRUE, colClasses = "character", quote = "", comment.char = ""
+  )
+  # Fortran-callable helpers (`dblepr_` and the like) have no C prototype in any R version.
+  candidates <- setdiff(exported[[3]][exported[[2]] %in% c("T", "W")], declared)
+  candidates <- candidates[!grepl("_$", candidates)]
+  statements <- trimws(strsplit(paste(legacy, collapse = " "), ";", fixed = TRUE)[[1]])
+  returns_scalar <- vapply(candidates, function(name) {
+    call <- sprintf("\\(?%s\\)?\\s*\\(", name)
+    prototype <- grep(sprintf("^[^(]*[ *(]%s", call), statements, value = TRUE)
+    length(prototype) > 0 && !grepl("\\*|\\bSEXP\\b", sub(sprintf("%s.*", call), "", prototype[1]))
+  }, TRUE)
+  candidates[!returns_scalar]
+}
+
+packages_calling_undeclared <- function(undeclared) {
+  shared_objects <- Sys.glob(file.path(library_dir, "*", "libs", "*.so"))
+  imports <- lapply(shared_objects, function(object) {
+    sub("@.*", "", system2("nm", c("-D", "--undefined-only", "--format=just-symbols", shQuote(object)), stdout = TRUE))
+  })
+  hits <- lapply(imports, intersect, undeclared)
+  package <- basename(dirname(dirname(shared_objects)))
+  calls <- vapply(split(hits, package), function(found) paste(sort(unique(unlist(found))), collapse = " "), "")
+  calls[nzchar(calls)]
+}
+
+undeclared <- undeclared_entry_points()
+calls <- packages_calling_undeclared(undeclared)
+if (length(calls) > 0) {
+  cat(sprintf("imports a function R's headers do not declare: %s (%s)\n", names(calls), calls), sep = "")
   with_warnings(install.packages(
-    "xts", lib = library_dir, repos = c(CRAN = "https://cloud.r-project.org"),
+    names(calls), lib = library_dir, repos = c(CRAN = "https://cloud.r-project.org"),
     type = "source", dependencies = FALSE
   ))
+  calls <- packages_calling_undeclared(undeclared)
+  if (length(calls) > 0) {
+    cat(sprintf("imports one after the rebuild (fine if it declares it itself): %s (%s)\n", names(calls), calls), sep = "")
+  }
 }
+
+# A package newer than the snapshot (from the retry against the newest snapshot, or rebuilt above)
+# can need a newer version of a dependency the snapshot already installed, and install.packages()
+# never upgrades an installed dependency, so the package fails to load: Rdpack 2.6.6 imports
+# rbibutils (> 2.4) while the snapshot holds 2.3. Each dependency that fails a version constraint is
+# reinstalled from the newest CRAN source, and the check repeats because a newer dependency can
+# need newer dependencies of its own.
+unmet_constraints <- function() {
+  fields <- c("Depends", "Imports", "LinkingTo")
+  db <- installed.packages(lib.loc = c(library_dir, .Library), fields = fields, noCache = TRUE)
+  db <- db[!duplicated(rownames(db)), , drop = FALSE]
+  versions <- db[, "Version"]
+  unmet <- list()
+  for (package in rownames(db)) {
+    entries <- trimws(unlist(strsplit(paste(db[package, fields][!is.na(db[package, fields])], collapse = ","), ",")))
+    parts <- regmatches(entries, regexec("^([A-Za-z][A-Za-z0-9.]*)\\s*\\(\\s*([<>=]+)\\s*([^)]+?)\\s*\\)$", entries))
+    for (part in parts[lengths(parts) == 4]) {
+      dependency <- part[2]
+      if (dependency == "R" || !dependency %in% names(versions) || !part[3] %in% c(">=", ">", "<=", "<", "==")) next
+      holds <- do.call(part[3], list(package_version(versions[[dependency]]), package_version(part[4])))
+      if (!holds) unmet[[length(unmet) + 1]] <- sprintf("%s needs %s (%s %s), found %s", package, dependency, part[3], part[4], versions[[dependency]])
+      if (!holds) names(unmet)[length(unmet)] <- dependency
+    }
+  }
+  unmet
+}
+# Each dependency is upgraded once: an upper bound or a package CRAN lacks stays unmet however
+# often it is rebuilt.
+upgraded <- character()
+for (round in 1:3) {
+  unmet <- unmet_constraints()
+  upgrade <- setdiff(unique(names(unmet)), upgraded)
+  if (length(upgrade) == 0) break
+  cat(sprintf("unmet version constraint: %s\n", unlist(unmet)), sep = "")
+  with_warnings(install.packages(
+    upgrade, lib = library_dir, repos = c(CRAN = "https://cloud.r-project.org"), type = "source"
+  ))
+  upgraded <- c(upgraded, upgrade)
+}
+unmet <- unmet_constraints()
+if (length(unmet) > 0) cat(sprintf("still unmet: %s\n", unlist(unmet)), sep = "")
 
 # Record the outcome per package: every root and remote, with its reason when missing.
 have <- rownames(installed.packages(noCache = TRUE))
@@ -115,7 +246,7 @@ row <- function(package, role) {
   ok <- package %in% have
   data.frame(
     package = package, role = role, installed = ok,
-    version = if (ok) as.character(packageVersion(package, lib.loc = library_dir)) else "",
+    version = if (ok) as.character(packageVersion(package, lib.loc = c(library_dir, .Library))) else "",
     reason = if (ok) "" else reason_for(package)
   )
 }

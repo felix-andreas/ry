@@ -45,6 +45,29 @@ packages that load system libraries (`git2r`, `odbc`, `pdftools`, `Rglpk` and th
 dependencies) need the Ubuntu packages in `tools/corpus/system-packages.txt` first; without them
 they install but fail to load.
 
+GNU R does not install a dependency its own `.Library` already holds, but ry's runtime searches
+only the corpus library and its own base packages. The script therefore copies every
+non-priority package of the running R's `.Library` (the reference R ships about 50, testthat and
+rlang among them) into the corpus library, so both runtimes see the same packages.
+
+Older R headers declared functions that libR exports but R 4.6's leave undeclared by default,
+such as `ATTRIB`, `ENCLOS` and `Rf_findVarInFrame`. Snapshot C code that calls one compiles with
+only a warning under gcc 13, and the implicit `int` return truncates a returned pointer, so the
+package crashes at that call under GNU R and ry alike. After installing, the script lists each
+package whose shared object imports such a function (unless its prototype under
+`ENABLE_LEGACY_NONAPI` returns an `int` or nothing) and reinstalls it from the newest CRAN source.
+`logs/install.log` names any package that imports one after the rebuild: either it declares the
+function itself (S7 does, and is correct), or its newest source failed to install.
+
+A package newer than the snapshot, from the retry against the newest snapshot or from that
+rebuild, can need a newer version of a dependency the snapshot already installed, and
+`install.packages()` never upgrades an installed dependency. Rdpack 2.6.6, for example, imports
+rbibutils (> 2.4) while the snapshot holds 2.3, so every Rdpack user failed to load. The script
+therefore checks the version constraints in every installed package's `Depends`, `Imports` and
+`LinkingTo`, reinstalls each dependency that fails one from the newest CRAN source, and repeats
+until all hold (at most three rounds). `logs/install.log` lists each unmet constraint it found and
+any that still fails.
+
 ## The differential oracle
 
 ```sh
@@ -173,6 +196,31 @@ The pass rate counts the packages whose tests pass under GNU R, since a suite th
 measures the container, not ry. With the packages ry installed itself, ry passes 140 of the 164
 that GNU R passes (85.4%), and with the packages GNU R installed it passes 115 of 146 (78.8%).
 `MEMORY.md` records the current rate.
+
+### Top CRAN packages
+
+The corpus is the benchmark's dependency closure, so ry is tuned to it. A second set measures
+packages the corpus has not mined: `tools/corpus/top-packages.txt` lists the 100 most-downloaded
+CRAN packages outside the closure, leaving out the few that need a system library the container
+lacks or take hours to build.
+
+```sh
+just top-packages-setup     # GNU R installs them and their Suggests into .corpus-top, with sources
+just top-packages --jobs 3  # ry builds them all from source, then both runtimes run their tests
+```
+
+`just top-packages` reinstalls every package into `.corpus-top/ry-library` with ry's `R CMD
+INSTALL` and then runs `oracle packages --installed` against `.corpus-top`, so the results land
+in `.corpus-top/tests/summary-installed.md`. To rerun one package's tests on ry without
+reinstalling, call the oracle directly:
+
+```sh
+ORACLE_RY=$PWD/target/release/ry ./target/release/oracle packages --corpus .corpus-top \
+  --installed --runtime ry ggplot2
+```
+
+Of the 100 packages, 85 have tests and GNU R passes 84; ry passes 82 of those 84 (97.6%).
+`backlog.md` lists the two that fail and why.
 
 ## Installing on ry
 

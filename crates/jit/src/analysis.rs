@@ -272,6 +272,9 @@ pub fn sub_assign_store(target: Ty, value: Ty, double: bool) -> Option<Store> {
 }
 
 /// Slot statuses, as bits of [`Slot::status`]. At run time a slot's status is the bit's index.
+/// `ENCLOSING` is any value the frame does not own, so the first element assignment copies it:
+/// an enclosing frame's variable, a promise's value, which the caller may hold too, or what a
+/// caller passed an inlined call.
 pub mod status {
     pub const NOT_LOADED: u8 = 1 << 0;
     pub const LOCAL: u8 = 1 << 1;

@@ -188,9 +188,10 @@ struct Bodies {
     /// Below [`COMPILED`], the calls the body has seen; with that bit set, the index of its
     /// compiled entry in the columns below.
     states: FxHashMap<Sexp, u32>,
-    /// The compiled entries, as columns indexed by entry. `keys` holds the body, or `NULL` for
-    /// a free entry. None of the columns is traced: an entry holds its objects weakly and goes
-    /// once any of them dies, so the code lives exactly as long as a closure that runs it.
+    /// The compiled entries, as columns indexed by entry. `keys` holds the body, and `codes`
+    /// holds `NULL` for a free entry, since a body can itself be `NULL`, as `function(e) NULL`'s
+    /// is. None of the columns is traced: an entry holds its objects weakly and goes once any of
+    /// them dies, so the code lives exactly as long as a closure that runs it.
     keys: Vec<Sexp>,
     codes: Vec<Sexp>,
     formals: Vec<Sexp>,
@@ -319,10 +320,10 @@ impl Bodies {
             .retain(|&body, state| *state & COMPILED != 0 || liveness.is_live(body));
         let live = |object: Sexp| object == nil() || liveness.is_live(object);
         for entry in 0..self.keys.len() {
-            let body = self.keys[entry];
-            if body == nil() {
+            if self.codes[entry] == nil() {
                 continue;
             }
+            let body = self.keys[entry];
             if !live(body)
                 || !live(self.codes[entry])
                 || !live(self.formals[entry])
@@ -7042,6 +7043,8 @@ pub unsafe fn passes_missing_argument(machine: &mut Machine<'_>, pc: usize) -> R
     Ok(missing)
 }
 
+/// Loads the variable the `GetVar` at `pc` reads, with whether the frame owns the value: it
+/// binds it directly rather than through a promise, whose value the caller may hold too.
 pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)> {
     let code = machine.code;
     let words = values::ints(code.car());
@@ -7085,7 +7088,7 @@ pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)>
                 } else {
                     value.car()
                 };
-                (forced, true)
+                (forced, false)
             } else if value == missing_arg() {
                 let env = machine.reify(Reify::Site("missing argument lookup"))?;
                 (
@@ -7111,7 +7114,9 @@ pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)>
         }
         None => {
             let env = machine.env();
-            let local = crate::heap().frame_cell(env, symbol).is_some();
+            let local = crate::heap()
+                .frame_cell(env, symbol)
+                .is_some_and(|cell| cell.cdr().kind() != SexpType::Promise);
             (
                 lookup_variable(symbol, env, LookupCache::of(code), cache, 0..0)?,
                 local,
@@ -10593,16 +10598,8 @@ unsafe fn slot_use_method(
     {
         return Ok(None);
     }
-    let formals = state.machine.function.car();
-    let first = if formals.kind() == SexpType::Pairlist {
-        match slot_named(state, formals.tag()) {
-            Some(slot) => slot,
-            None => return Ok(None),
-        }
-    } else {
-        std::ptr::null_mut()
-    };
     // Through R 4.3 the method sees the generic's locals, which only an environment can show.
+    let formals = state.machine.function.car();
     let names = state.constants.element(SLOTS).element(1);
     let locals =
         (length(formals)..length(names)).any(|index| *state.header.add(1 + index) != unbound());
@@ -10610,7 +10607,7 @@ unsafe fn slot_use_method(
         return Ok(None);
     }
     let owner = (*state.interp).slot_owner as usize;
-    dispatch::use_method_in_slots(generic, owner, first, object)
+    dispatch::use_method_in_slots(generic, owner, object)
 }
 
 /// A builtin call from a slot frame whose arguments the slots answer: `...`, a constant, or a
@@ -12931,7 +12928,7 @@ unsafe fn replace_variable(
     // An environment is changed where it is, whoever else holds it.
     if (shared || args[1..].contains(&target)) && target.kind() != SexpType::Environment {
         let was_array = target.is_array();
-        target = values::shallow_duplicate_attr(target)?;
+        target = values::replacement_copy(target)?;
         target.set_array(was_array);
     }
     heap.root(target);

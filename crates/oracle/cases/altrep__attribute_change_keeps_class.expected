@@ -1,0 +1,24 @@
+[stdout]
+| [1] "238"
+| [1] "494"
+| [1] "494"
+| [1] 1 2
+| attr(,"foo")
+| [1] 1
+| [1] "baz" "qux"
+| [1] 1 2
+| attr(,"foo")
+| [1] 1
+| attr(,"class")
+| [1] "baz"
+| [1] 10  2
+| attr(,"foo")
+| [1] 1
+| attr(,"class")
+| [1] "qux"
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| structure(c(10, 2), foo = 1, class = "qux")

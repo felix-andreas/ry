@@ -1,0 +1,17 @@
+[stdout]
+| [1] 11 12 13
+| $a
+| [1] 101
+| 
+| $b
+| [1] 102
+| 
+| [1] TRUE
+| 1 + z
+| 2 + b
+[messages]
+[warnings]
+[errors]
+[value]
+language
+| 2 + b

@@ -10,6 +10,7 @@ use {
         builtins::{Arg, BuiltinDef, Call, Generic, Kind, builtin, internal, special},
         eval::{self, Args, apply_closure, call_builtin, forced_promise, value_of},
         interp,
+        subset::modifiable_attributes,
         unwind::{R, error},
         values::{
             self, char_str, get_attr, length, missing_arg, nil, scalar_string, string_vector,
@@ -875,17 +876,18 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
     activity::count(Counter::S3Dispatches);
     let dispatching = activity::enter(Activity::S3Dispatch, 0);
     let env = call.env()?;
-    let state = interp();
-    let Some(position) = state.frames.iter().rposition(|frame| frame.owns(env)) else {
-        return Err(call.error("UseMethod called from outside a function"));
-    };
     if call.is_empty() {
-        return Err(call.error("'UseMethod' called with no arguments"));
+        return Err(call.error("there must be a 'generic' argument"));
     }
     let generic = eval::eval(call.arg(0), env)?;
     if generic.kind() != SexpType::String || length(generic) != 1 {
         return Err(call.error("'generic' argument must be a character string"));
     }
+    // As in GNU R, the innermost call must be the generic's own: `UseMethod` in an argument
+    // that another function forces, as in `try(UseMethod("f"))`, dispatches nothing.
+    let Some(position) = innermost_frame_of(env) else {
+        return Err(call.error("'UseMethod' used in an inappropriate fashion"));
+    };
     let (frame_call, function) = {
         let frame: &Frame = &interp().frames[position];
         (frame.call, frame.function)
@@ -898,14 +900,7 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
     let object = if call.len() >= 2 {
         eval::eval(call.arg(1), env)?
     } else {
-        match dispatch_object(function, env)? {
-            // GNU R's `GetObject` falls back to the first supplied argument when the first
-            // formal was not supplied, so `f(y = obj)` dispatches on `obj`.
-            object if object == nil() && first_formal_missing(function, env)? => {
-                first_supplied(&promargs)?
-            }
-            object => object,
-        }
+        dispatch_argument(function, &promargs)?
     };
     let found = generic_method(generic, object, env.enclosure(), sys_parent, sys_parent)?;
     let mut vars = found.vars;
@@ -957,23 +952,31 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
     }))
 }
 
+/// The position of the innermost frame when it is the call that runs in `env`.
+unsafe fn innermost_frame_of(env: Sexp) -> Option<usize> {
+    let frames = &interp().frames;
+    let position = frames.len().checked_sub(1)?;
+    frames[position].owns(env).then_some(position)
+}
+
 /// `UseMethod(generic)` from the slot frame at `position`, as the call its body returns,
-/// without giving the frame an environment: GNU R's dispatch reads only the frame's first
-/// argument, its supplied promises and its call. `first` is the first formal's slot, or null
-/// when the function has no formals, and `explicit` the object `UseMethod(generic, object)`
-/// names. Through R 4.3 the method sees the generic's locals, so the caller checks there are
-/// none.
+/// without giving the frame an environment: GNU R's dispatch reads only the frame's arguments
+/// and its call. `explicit` is the object `UseMethod(generic, object)` names. Through R 4.3 the
+/// method sees the generic's locals, so the caller checks there are none. `None` when the frame
+/// is not the innermost call, which the generic path reports as an error.
 pub(crate) unsafe fn use_method_in_slots(
     generic: Sexp,
     position: usize,
-    first: *mut Sexp,
     explicit: Option<Sexp>,
 ) -> R<Option<Sexp>> {
+    if position + 1 != interp().frames.len() {
+        return Ok(None);
+    }
     activity::count(Counter::S3Dispatches);
     let dispatching = activity::enter(Activity::S3Dispatch, 0);
-    let (frame_call, function, missing) = {
+    let (frame_call, function) = {
         let frame: &Frame = &interp().frames[position];
-        (frame.call, frame.function, frame.missing)
+        (frame.call, frame.function)
     };
     let caller = lazy_caller(position, generic)?;
     let sys_parent = match caller {
@@ -984,18 +987,9 @@ pub(crate) unsafe fn use_method_in_slots(
     // calling instruction releases them only after the generic's call returns, and a method
     // that gets a heap frame turns them into promises itself (`eval::run_on_heap_frame`).
     let promargs: eval::Args = crate::frame_args(interp(), position).into();
-    let value = if first.is_null() { nil() } else { *first };
-    // As in `dispatch_object`: a missing first formal dispatches on the first supplied argument.
-    let object = if let Some(object) = explicit {
-        object
-    } else if first.is_null() {
-        nil()
-    } else if value.kind() == SexpType::Dots {
-        value_of(value.car())?
-    } else if missing & 1 != 0 || value == unbound() || eval::value_is_missing(value)? {
-        first_supplied(&promargs)?
-    } else {
-        value_of(value)?
+    let object = match explicit {
+        Some(object) => object,
+        None => dispatch_argument(function, &promargs)?,
     };
     let Some((owner, enclosure)) = caller else {
         let found = generic_method(generic, object, function.tag(), sys_parent, sys_parent)?;
@@ -1153,65 +1147,60 @@ unsafe fn lookup_generic_definition(
     Ok(None)
 }
 
-/// The object a generic dispatches on: its first argument's value.
-unsafe fn dispatch_object(function: Sexp, env: Sexp) -> R<Sexp> {
+/// The object `UseMethod` and `NextMethod` dispatch on when the call names none, found as GNU
+/// R's `GetObject` finds it: among the arguments as the call passed them, the one tagged with
+/// the first formal's name (exactly, then partially), else the first untagged one, else the
+/// first; for a generic whose first formal is `...`, the first. The generic's own variable is
+/// never read, so a generic that assigns its first formal still dispatches on its argument.
+unsafe fn dispatch_argument(function: Sexp, args: &[Arg]) -> R<Sexp> {
     if function.kind() != SexpType::Closure {
-        return Ok(nil());
+        return Err(error("generic 'function' is not a function"));
     }
     let formals = function.car();
-    if formals.kind() != SexpType::Pairlist {
-        return Ok(nil());
-    }
-    let first = formals.tag();
-    if first == symbols().dots {
-        let dots = eval::find_var_in_frame(first, env)?;
-        if dots.kind() == SexpType::Dots {
-            return value_of(dots.car());
-        }
-        return Ok(nil());
-    }
-    // GNU R dispatches on the first supplied argument, so a generic called without one, even
-    // where the formal has a default, dispatches on NULL.
-    if crate::heap()
-        .frame_cell(env, first)
-        .is_some_and(|cell| cell.has_gp(gp::BINDING_MISSING))
-    {
-        return Ok(nil());
-    }
-    let value = eval::find_var_in_frame(first, env)?;
-    // A generic called without its first argument dispatches as on NULL.
-    if value == unbound() || value == missing_arg() {
-        return Ok(nil());
-    }
-    value_of(value)
-}
-
-unsafe fn first_formal_missing(function: Sexp, env: Sexp) -> R<bool> {
-    let formals = function.car();
-    if formals.kind() != SexpType::Pairlist || formals.tag() == symbols().dots {
-        return Ok(false);
-    }
-    let first = formals.tag();
-    if crate::heap()
-        .frame_cell(env, first)
-        .is_some_and(|cell| cell.has_gp(gp::BINDING_MISSING))
-    {
-        return Ok(true);
-    }
-    let value = eval::find_var_in_frame(first, env)?;
-    Ok(value == missing_arg() || value == unbound())
-}
-
-/// The value of the first supplied argument among a call's arguments.
-unsafe fn first_supplied(args: &[Arg]) -> R<Sexp> {
-    let Some(first) = args.first() else {
-        return Ok(nil());
+    let first = if formals.kind() == SexpType::Pairlist {
+        formals.tag()
+    } else {
+        nil()
     };
-    // GNU R's GetObject takes the first argument even when it was left empty.
-    match first.value {
-        value if value.kind() == SexpType::Dots => value_of(value.car()),
-        value if value == missing_arg() => Ok(nil()),
-        value => value_of(value),
+    let mut chosen = None;
+    if first != nil() && first != symbols().dots {
+        let name = first.car().bytes();
+        for exact in [true, false] {
+            for arg in args {
+                if arg.tag == nil() {
+                    continue;
+                }
+                let tag = arg.tag.car().bytes();
+                let matches = if exact {
+                    tag == name
+                } else {
+                    name.starts_with(tag)
+                };
+                if !matches {
+                    continue;
+                }
+                if chosen.is_some() {
+                    return Err(error(format!(
+                        "formal argument \"{}\" matched by multiple actual arguments",
+                        String::from_utf8_lossy(name)
+                    )));
+                }
+                chosen = Some(arg.value);
+            }
+            if chosen.is_some() {
+                break;
+            }
+        }
+        if chosen.is_none() {
+            chosen = args.iter().find(|arg| arg.tag == nil()).map(|arg| arg.value);
+        }
+    }
+    // GNU R takes the first argument even when it was left empty, and dispatches on the empty
+    // argument marker itself, a symbol, so on class "name".
+    match chosen.or_else(|| args.first().map(|arg| arg.value)) {
+        None => Ok(nil()),
+        Some(value) if value.kind() == SexpType::Dots => value_of(value.car()),
+        Some(value) => value_of(value),
     }
 }
 
@@ -1325,8 +1314,8 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     // called directly on an unclassed object has nothing to resume from.
     let mut classes = read(symbols.dot_class)?;
     if classes == unbound() {
-        let env = eval::frame_env(position, eval::Reify::Site("method dispatch"))?;
-        let object = dispatch_object(function, env)?;
+        let args: eval::Args = crate::frame_args(interp(), position).into();
+        let object = dispatch_argument(function, &args)?;
         classes = get_attr(object, symbols.class);
         if classes == nil() {
             return Err(error("object not specified"));
@@ -1439,10 +1428,13 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
             if let Some(method) = lookup_in_scope(default, &mut scope)? {
                 (method, default, class_count)
             } else {
+                // A closure generic such as `rep_len` wraps an internal generic, and GNU R's
+                // `NextMethod` falls back to that `.Internal` function.
                 let function = eval::find_fun(generic_symbol, values::base_env())
                     .ok()
                     .filter(|function| function.kind() != SexpType::Closure)
-                    .or_else(|| crate::builtins::primitive(&char_str(generic_string)));
+                    .or_else(|| crate::builtins::primitive(&char_str(generic_string)))
+                    .or_else(|| crate::builtins::internal_function(generic_symbol));
                 match function {
                     Some(function) => (function, generic_symbol, class_count),
                     None => {
@@ -2250,7 +2242,14 @@ unsafe fn group_dispatch(
             entry.1 = method_vector;
         }
     }
-    let promised = promised_args(call, args)?;
+    let mut promised = promised_args(call, args)?;
+    // GNU R drops the operands' names for the operator groups, so `get("*")(x = a, y = 2)`
+    // reaches `Ops.class(e1, e2)` positionally.
+    if binary {
+        for arg in &mut promised {
+            arg.tag = nil();
+        }
+    }
     let new_call = renamed_call(call, found_method.method_name)?;
     apply_method(new_call, found_method.method, &promised, env, &vars, true).map(Some)
 }
@@ -2563,16 +2562,8 @@ unsafe fn do_set_s4_object(call: &Call<'_>) -> R<Sexp> {
 
 // The class builtins.
 
-unsafe fn modifiable(object: Sexp) -> R<Sexp> {
-    if values::maybe_shared(object) {
-        values::shallow_duplicate(object)
-    } else {
-        Ok(object)
-    }
-}
-
 unsafe fn do_set_old_class(call: &Call<'_>) -> R<Sexp> {
-    let object = modifiable(call.arg(0))?;
+    let object = modifiable_attributes(call.arg(0))?;
     let value = call.arg(1);
     if value != nil() && value.kind() != SexpType::String {
         return Err(call.error("attempt to set invalid 'class' attribute"));
@@ -2603,7 +2594,7 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
         }
         return Err(call.error("attempt to set an attribute on NULL"));
     }
-    let object = modifiable(object)?;
+    let object = modifiable_attributes(object)?;
     if value == nil() || length(value) == 0 {
         set_class_attribute(object, nil())?;
         return Ok(object);
