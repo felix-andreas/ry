@@ -540,7 +540,7 @@ area = "jit"
 reason = "the compiled body warns twice where GNU R warns once"
 ```
 
-`oracle compare` and `ORACLE_ENGINE=<engine> cargo test -p oracle` sort every failure against the
+`oracle compare` and `cargo test -p oracle` (with ry's runtime built) sort every failure against the
 file and fail the run on two things: a failure the file does not list, and a listed case that
 passes. The second rule means the change that fixes a case also deletes its entry. Add an entry
 only for a failure main already has, never for one your own change introduces. A run prints each
