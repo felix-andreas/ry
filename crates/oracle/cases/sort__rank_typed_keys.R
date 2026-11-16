@@ -1,0 +1,17 @@
+# rank of doubles, integers and strings through their typed keys, and of a prefix chosen by
+# length(xx) through .Internal.
+x <- c(3, -0, 0, Inf, -Inf, 2.5, 2.5, -1e300, 1e-300, 3)
+for (ties in c("average", "min", "max", "first", "last")) print(rank(x, ties.method = ties))
+print(.Internal(rank(x, 10L, "average")))
+print(.Internal(rank(x, 4L, "min")))
+i <- c(5L, -3L, .Machine$integer.max, -.Machine$integer.max, 5L, 0L)
+print(rank(i)); print(rank(i, ties.method = "max"))
+print(rank(c(TRUE, FALSE, TRUE)))
+s <- c("b", "a", "B", "A", "b", "", "aa", "Ab")
+print(rank(s)); print(rank(s, ties.method = "min"))
+print(.Internal(rank(c("b", "c", "a"), 2L, "min")))
+print(rank(c(x = 2, y = 1, z = NA)))
+print(rank(c(x = 2, y = 1, z = NA), na.last = "keep"))
+print(rank(numeric(0)))
+print(rank(factor(c("u", "t", "u"))))
+invisible(NULL)

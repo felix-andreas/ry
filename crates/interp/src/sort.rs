@@ -1063,7 +1063,17 @@ unsafe fn do_rank(call: &Call<'_>) -> R<Sexp> {
     if x.kind() == SexpType::Raw && !x.is_object() {
         return Err(error("raw vectors cannot be sorted"));
     }
-    let column = column(x).ok_or_else(|| unimplemented_type(x, "greater"))?;
+    if !matches!(
+        x.kind(),
+        SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::Raw
+            | SexpType::String
+    ) {
+        return Err(unimplemented_type(x, "greater"));
+    }
     let requested = values::as_real_scalar(call.arg(1));
     if requested.is_nan() || requested < 0.0 {
         return Err(error("invalid 'length(xx)' value"));
@@ -1079,32 +1089,107 @@ unsafe fn do_rank(call: &Call<'_>) -> R<Sexp> {
             ));
         }
     };
-    let mut order: Vec<usize> = (0..count).collect();
-    order.sort_by(|&left, &right| column.compare(left, right, true));
     let mut ranks = vec![0.0; count];
-    let mut start = 0;
-    while start < count {
-        let mut end = start;
-        while end + 1 < count
-            && column.compare(order[start], order[end + 1], true) == Ordering::Equal
-        {
-            end += 1;
-        }
+    let mut assign = |start: usize, end: usize, members: &mut dyn Iterator<Item = usize>| {
         let rank = match ties {
             Ties::Average => (start + end + 2) as f64 / 2.0,
             Ties::Min => (start + 1) as f64,
             Ties::Max => (end + 1) as f64,
         };
-        for &index in &order[start..=end] {
+        for index in members {
             ranks[index] = rank;
         }
-        start = end + 1;
+    };
+    if let Some(keys) = rank_keys(x, count) {
+        let mut order: Vec<(u64, u32)> = keys
+            .into_iter()
+            .enumerate()
+            .map(|(index, key)| (key, index as u32))
+            .collect();
+        order.sort_unstable();
+        let mut start = 0;
+        while start < count {
+            let key = order[start].0;
+            let end = start
+                + order[start..]
+                    .iter()
+                    .take_while(|entry| entry.0 == key)
+                    .count()
+                - 1;
+            assign(
+                start,
+                end,
+                &mut order[start..=end].iter().map(|entry| entry.1 as usize),
+            );
+            start = end + 1;
+        }
+    } else {
+        let column = column(x).ok_or_else(|| unimplemented_type(x, "greater"))?;
+        let mut order: Vec<usize> = (0..count).collect();
+        order.sort_by(|&left, &right| column.compare(left, right, true));
+        let mut start = 0;
+        while start < count {
+            let mut end = start;
+            while end + 1 < count
+                && column.compare(order[start], order[end + 1], true) == Ordering::Equal
+            {
+                end += 1;
+            }
+            assign(start, end, &mut order[start..=end].iter().copied());
+            start = end + 1;
+        }
     }
     if ties == Ties::Average {
         values::real_vector(&ranks)
     } else {
         let ranks: Vec<i32> = ranks.iter().map(|&rank| rank as i32).collect();
         values::integer_vector(&ranks)
+    }
+}
+
+/// The first `count` elements of `x` as integers that sort, and tie, as `rank` compares the
+/// elements, or `None` when one is missing, which only the general comparison orders. A double
+/// maps to its bits with the sign folded so that unsigned order is numeric order, with `-0`
+/// read as `0`; a string maps to its collation rank.
+unsafe fn rank_keys(x: Sexp, count: usize) -> Option<Vec<u64>> {
+    match x.kind() {
+        SexpType::Logical | SexpType::Integer => {
+            let data = &values::ints(x)[..count];
+            if data.contains(&NA_INTEGER) {
+                return None;
+            }
+            Some(
+                data.iter()
+                    .map(|&value| u64::from((value as u32) ^ 0x8000_0000))
+                    .collect(),
+            )
+        }
+        SexpType::Real => {
+            let data = &values::reals(x)[..count];
+            if data.iter().any(|value| value.is_nan()) {
+                return None;
+            }
+            Some(
+                data.iter()
+                    .map(|&value| {
+                        let bits = (value + 0.0).to_bits();
+                        if bits >> 63 == 1 {
+                            !bits
+                        } else {
+                            bits | 1 << 63
+                        }
+                    })
+                    .collect(),
+            )
+        }
+        SexpType::String if count == length(x) => {
+            let ranks = string_ranks(x, TextOrder::Collation);
+            if ranks.contains(&0) {
+                return None;
+            }
+            Some(ranks.into_iter().map(u64::from).collect())
+        }
+        _ => None,
     }
 }
 
