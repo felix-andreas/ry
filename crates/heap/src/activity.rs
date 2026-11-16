@@ -296,6 +296,7 @@ static LABELS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static PACKAGE_FALLBACKS: [AtomicU64; LABEL_SLOTS] = [const { AtomicU64::new(0) }; LABEL_SLOTS];
 static REIFICATIONS: [AtomicU64; LABEL_SLOTS] = [const { AtomicU64::new(0) }; LABEL_SLOTS];
 static JIT_REFUSALS: [AtomicU64; LABEL_SLOTS] = [const { AtomicU64::new(0) }; LABEL_SLOTS];
+static GENERAL_ASSIGNMENTS: [AtomicU64; LABEL_SLOTS] = [const { AtomicU64::new(0) }; LABEL_SLOTS];
 static FRAME_OWNERS: [AtomicU32; FRAME_SLOTS] = [const { AtomicU32::new(0) }; FRAME_SLOTS];
 static FRAME_NAMES: [AtomicUsize; FRAME_SLOTS] = [const { AtomicUsize::new(0) }; FRAME_SLOTS];
 static FRAME_BODIES: [AtomicUsize; FRAME_SLOTS] = [const { AtomicUsize::new(0) }; FRAME_SLOTS];
@@ -441,6 +442,19 @@ pub fn count_reification(reason: u32) {
 /// The slot frames [`count_reification`] counted under each reason, largest first.
 pub fn reifications() -> Vec<(String, u64)> {
     by_label(&REIFICATIONS)
+}
+
+/// Counts a complex assignment that ran through the general routine, under the [`label`] of its
+/// target's shape.
+pub fn count_general_assignment(shape: u32) {
+    if let Some(slot) = GENERAL_ASSIGNMENTS.get(shape as usize) {
+        bump(slot);
+    }
+}
+
+/// The assignments [`count_general_assignment`] counted under each shape, largest first.
+pub fn general_assignments() -> Vec<(String, u64)> {
+    by_label(&GENERAL_ASSIGNMENTS)
 }
 
 /// Counts a compile attempt tier 1 refused, under the [`label`] of the refusal's reason.

@@ -6992,6 +6992,13 @@ pub unsafe fn complex_assign(
     if base.kind() == SexpType::Promise {
         base = force_promise(base)?;
     }
+    if activity::enabled() {
+        activity::count_general_assignment(activity::label(&assignment_shape(
+            &getters,
+            base,
+            superassign,
+        )));
+    }
     let heap = crate::heap();
     let local_cell = heap.frame_cell(env, inner);
     // A locked binding rejects the final assignment, so the replacement must not have modified
@@ -7145,6 +7152,46 @@ pub unsafe fn complex_assign(
         replaced = values::unwrap_assigned(replaced, bound);
     }
     assign_symbol(inner, replaced, env, superassign)
+}
+
+/// A profile summary's name for a complex assignment's target: the replacement functions from
+/// the outside in, then the variable's type, as in `` `names<-` `[<-` on character ``.
+unsafe fn assignment_shape(getters: &[Sexp], base: Sexp, superassign: bool) -> String {
+    let mut shape = String::new();
+    for getter in getters {
+        let head = getter.car();
+        if head.kind() == SexpType::Symbol {
+            shape.push_str(&format!("`{}<-` ", symbol_name(head)));
+        } else {
+            shape.push_str("(computed) ");
+        }
+    }
+    shape.push_str(if superassign { "by `<<-` on " } else { "on " });
+    // A summary is shared, so a class a user's code defines is not named.
+    const PUBLIC_CLASSES: [&str; 12] = [
+        "data.frame",
+        "data.table",
+        "factor",
+        "Date",
+        "POSIXct",
+        "POSIXlt",
+        "difftime",
+        "xts",
+        "zoo",
+        "tbl_df",
+        "R6",
+        "formula",
+    ];
+    shape.push_str(crate::coerce::type_name(base));
+    if base.is_object() {
+        let class = values::get_attr(base, symbols().class);
+        let known = (0..length(class)).find_map(|index| {
+            let name = values::string_at(class, index)?;
+            PUBLIC_CLASSES.iter().find(|public| **public == name)
+        });
+        shape.push_str(&format!(" ({})", known.unwrap_or(&"an object")));
+    }
+    shape
 }
 
 /// Whether `expression` contains an assignment whose target is `variable` or a part of it. An

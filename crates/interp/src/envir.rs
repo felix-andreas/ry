@@ -1909,11 +1909,8 @@ struct ElementCalls {
 
 impl ElementCalls {
     unsafe fn new(call: &Call<'_>, list: Sexp) -> R<ElementCalls> {
-        let symbols = symbols();
-        let index_symbol = symbols.i;
-        let element = values::call(symbols.bracket2, &[symbols.upper_x, index_symbol])?;
-        let fun_call = values::call(symbols.fun, &[element, symbols.dots])?;
-        crate::heap().root(fun_call);
+        let index_symbol = symbols().i;
+        let fun_call = element_call()?;
         let plain = if list.kind().is_vector()
             && !list.is_object()
             && !list.is_array()
@@ -2042,6 +2039,29 @@ impl ElementCalls {
             eval::force_and_call_with(self.fun_call, 1, self.env, first, self.known.as_mut())
         })
     }
+}
+
+/// The call `FUN(X[[i]], ...)`. Every `lapply` and `vapply` runs it for each element, and code
+/// never changes where it is (a write through `sys.call()` or `substitute()` copies a value
+/// something else holds), so the session keeps one.
+unsafe fn element_call() -> R<Sexp> {
+    let kept = interp().globals.element_call;
+    if kept != nil() {
+        return Ok(kept);
+    }
+    let symbols = symbols();
+    let element = values::call(symbols.bracket2, &[symbols.upper_x, symbols.i])?;
+    crate::heap().root(element);
+    let call = values::call(symbols.fun, &[element, symbols.dots])?;
+    for object in [element, call] {
+        let mut cell = object;
+        while cell != nil() {
+            cell.mark_not_mutable();
+            cell = cell.cdr();
+        }
+    }
+    interp().globals.element_call = call;
+    Ok(call)
 }
 
 /// What every element [`ElementCalls`] reads directly from from `list` is known to share: its storage type,

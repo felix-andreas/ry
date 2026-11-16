@@ -1389,6 +1389,26 @@ fn report(
         }
     }
 
+    let assignments = activity::general_assignments();
+    if !assignments.is_empty() {
+        let total: u64 = assignments.iter().map(|(_, count)| count).sum();
+        writeln!(out, "\n## Complex assignments that built their calls\n")?;
+        writeln!(
+            out,
+            "Each of these {total} assignments built the getter and replacement calls of its \
+             target and a promise per value. A row names the replacement functions from the \
+             outside in, then what the variable held.\n"
+        )?;
+        writeln!(out, "| target | assignments | share |\n| --- | ---: | ---: |")?;
+        for (shape, count) in assignments.into_iter().take(40) {
+            writeln!(
+                out,
+                "| {shape} | {count} | {:.1}% |",
+                100.0 * count as f64 / total as f64
+            )?;
+        }
+    }
+
     let refusals = activity::jit_refusals();
     if !refusals.is_empty() {
         writeln!(out, "\n## JIT compile attempts refused, by reason\n")?;
