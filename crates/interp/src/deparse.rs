@@ -110,6 +110,12 @@ pub unsafe fn deparse_one_line(object: Sexp) -> String {
     join_one_line(deparse_lines(object, 60, options::SIMPLE))
 }
 
+/// An argument's code in an "unused argument" message, which GNU R deparses with no option, so
+/// an integer loses its `L` and a vector its names: `f(1L, 4L)` reports `unused argument (4)`.
+pub unsafe fn deparse_unused_argument(object: Sexp) -> String {
+    join_one_line(deparse_lines(object, 60, 0))
+}
+
 /// The deparse `as.character` of a list stores for an element, GNU R's `deparse1line` with no
 /// option but the names: integers lose their `L`, a missing value is a plain `NA`, and the lines
 /// of a function or a block are joined by newlines. It raises deparse's errors.

@@ -56,7 +56,7 @@ prune *args:
     python3 -I tools/prune.py {{ args }}
 
 test *args:
-    cargo test -- --nocapture {{ args }}
+    cargo test {{ args }}
 
 # The pre-landing check: tests, clippy at -D warnings, fmt, the licence notices, the memory layout and comment length.
 gate: battery clippy fmt-check (notices "--check") (readme "--check") (memory "check") comments
@@ -93,9 +93,10 @@ clippy:
 fmt-check:
     cargo fmt --all --check
 
-# One fixture case, e.g. `just fixture pipes__pipe_chains_type_end_to_end`.
+# The fixture cases whose `group__case` id contains `case`: one case, or a whole group with
+# `just fixture pipes__`.
 fixture case binary="test_typing_fixtures" package="semantics":
-    FIXTURE_FILTER={{ case }} cargo test -p {{ package }} --test {{ binary }} -- --nocapture
+    FIXTURE_FILTER={{ case }} cargo test -p {{ package }} --test {{ binary }}
 
 # Re-bless expectations, e.g. `just bless -p semantics --test test_typing_fixtures`.
 bless *args:
@@ -107,11 +108,11 @@ format-docs:
 
 # Run the docs' marked examples, or those of the pages whose path contains `page`.
 docs-test page="":
-    DOCS_PAGE={{ page }} cargo test -p ry-lang --test test_docs -- --nocapture
+    DOCS_PAGE={{ page }} cargo test -p ry-lang --test test_docs
 
 # Rewrite the output of the docs' exact examples from the real tool; excerpts are left to you.
 docs-bless page="":
-    RY_BLESS=1 DOCS_PAGE={{ page }} cargo test -p ry-lang --test test_docs -- --nocapture
+    RY_BLESS=1 DOCS_PAGE={{ page }} cargo test -p ry-lang --test test_docs
 
 # Every seeded harness at `depth` times its default seeds (`FUZZ_DEPTH`) for `minutes`, each round
 # starting at a fresh seed from `base`, plus the
@@ -237,7 +238,7 @@ climb *args:
 
 # Keeps .agents/memory navigable: `split` moves a legacy decisions.md into decisions/<area>.md,
 # `index` regenerates decisions/index.md, and `check` fails on a stale index or an over-budget file.
-memory *args:
+memory *args="check":
     python3 -I tools/memory.py {{ args }}
 
 # Fails when a Rust file has more over-long, banner or process-history comments than its baseline,
@@ -289,7 +290,7 @@ bench-table dir *args:
 
 # Drives `ry repl` through a pty against the system R; skips without R.
 repl-e2e:
-    cargo test -p ry-lang --test test_repl_e2e -- --nocapture
+    cargo test -p ry-lang --test test_repl_e2e
 
 docs:
     cd docs && bun dev
@@ -751,7 +752,7 @@ fuzz-differential seed="0" count="200" engines="ry-tier0,ry-jit":
 # object only a Rust local holds, and `just gc-torture seeded` collects at random gaps with the
 # write barrier checked (`RY_GC_STRESS=seed:N`, `RY_GC_VERIFY`), which finds a store that skipped
 # the barrier; `FUZZ_SEED` picks its gaps. `ORACLE_ENGINE=ry-gctorture cargo test -p oracle`
-# compares the cases with GNU R instead.
+# compares the cases with their recorded outcomes instead.
 gc-torture mode="plain":
     cargo build -q -p ry-lang -p libr -p rcmd
     FUZZ_ITERS=1000000 cargo test -p oracle --test test_cases \
@@ -761,12 +762,11 @@ gc-torture mode="plain":
 # The language-server simulator over many seeds: `just simulate 1000 120` runs seeds 0 to 999 with
 # 120 actions each. Replay one failure with `SIMULATION_SEED=<seed> cargo test -p ry-lang --test test_simulation`.
 simulate count="200" actions="60" base="0":
-    SIMULATION_BASE={{ base }} FUZZ_ITERS={{ count }} SIMULATION_ACTIONS={{ actions }} cargo test -p ry-lang --profile iterate --test test_simulation -- --nocapture
+    SIMULATION_BASE={{ base }} FUZZ_ITERS={{ count }} SIMULATION_ACTIONS={{ actions }} cargo test -p ry-lang --profile iterate --test test_simulation
 
 # The scripted user journeys in crates/ry/tests/scenarios; `just scenarios edit-and-rename` runs one.
 scenarios name="":
-    cargo build -q -p libr
-    SCENARIO={{ name }} cargo test -p ry-lang --test test_scenarios -- --nocapture
+    SCENARIO={{ name }} cargo test -p ry-lang --test test_scenarios scenarios_hold
 
 # Fuzz `ry migrate data-table --write` over the generated benchmark code bases and the data.table users: parse, strict checks and checksums, e.g. `just bench-migrate --lines 20000`.
 bench-migrate *args:

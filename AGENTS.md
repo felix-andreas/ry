@@ -228,7 +228,8 @@ Apply these when writing or optimizing code in the analysis core, the runtime, t
 - A bug a harness finds lands with a pinned regression input (a regression battery entry, fixture, or scenario). A user journey a feature enables gets a `crates/ry/tests/scenarios/*.scenario` file.
 - Prefer fixtures. A new phase or module gets a fixture suite, and a behavior gets the lightest fixture change that captures it, before any crate-local unit test unless it is awkward as a fixture. Favor renderers that expose semantic facts over implementation detail. Read `docs/src/content/docs/development/testing.md` before you change the harness or add a suite.
 - Fixtures are the desired semantics contract, not a record of known-wrong behavior. Change an expectation only when wording or behavior improves on purpose, never commit a wrong outcome to keep the suite green, and delete a case no longer worth keeping. A `group__case` name is the test identity: keep it stable and unique across the suite.
-- Run one fixture case with `just fixture group__case [test-binary] [package]` (default `test_typing_fixtures` in `semantics`), and prefer focused crate tests such as `cargo test -p semantics` while iterating. `just gate` runs the full check.
+- Start every shell command with `source tools/env.sh &&` (the nix dev shell; `testing.md`).
+- Run one fixture with `just fixture group__case [test-binary] [package]` (default `test_typing_fixtures`), and prefer focused crate tests (`cargo test -p semantics`) while iterating. `just gate` checks all.
 
 # Rules hygiene
 
@@ -240,6 +241,6 @@ Editing or clarifying an existing rule is always welcome. A new rule must be:
 2. **Repeatedly encountered**: it came up more than once (several hits in one session count).
 3. **Specific enough to act on**: a concrete instruction, not a vague principle.
 
-A rule that applies to a single crate belongs in that crate's own `AGENTS.md`, not here. Before you edit a crate, read its `crates/<crate>/AGENTS.md` if it exists.
+A rule for a single crate belongs in that crate's `AGENTS.md`. Its `CLAUDE.md` (`@AGENTS.md`) loads it; other agents read it.
 
 Do not describe a crate's architecture (module layout, data flow, key types): it goes stale fast, and the code shows it. A rule marks a trap to avoid, not a map to follow.

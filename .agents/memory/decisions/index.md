@@ -200,6 +200,10 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Measured and not taken: a leaner `format()` on the validation workload
 - Base fast paths read formals one at a time, except `formatC()`
 - Parked: cheaper restart setup in `withRestarts` (planned)
+- Replacement calls and `lapply`/`vapply` element calls run on a slot frame's slots
+- A complex assignment calls a primitive replacement with its values
+- An empty named argument leaves its formal to a positional argument
+- `[[<-` reports a wrong subscript count in GNU R's order
 
 ## Builtins and base R
 
@@ -251,6 +255,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Small base closures with call arguments run their bodies natively behind prologues
 - `c`, `unlist`, `rep` and positional `[` copy handle vectors a run at a time
 - The radix string order ranks bytes with integer keys, and plain POSIX patterns capture on the automata
+- `x[] <- value` and `x[a:b] <- value` write whole copies of the value
+- `order`, `sort.int` and `sort.default` run natively on plain vectors
 
 ## R compatibility
 
@@ -554,7 +560,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Benchmark suites are directories the renderers only display (built, with exceptions)
 - Four published benchmark suites, one runner (built, with exceptions)
 - Flake inputs are git URLs (built, with exceptions)
-- Cloud sessions are provisioned by tools/dev-setup.sh, not the nix shell
+- Agents work in the nix dev shell, loaded by tools/env.sh
+- tools/dev-setup.sh provisions the host for package-corpus work
 - CI runs in the flake's dev shell
 - Workspace-wide feature unification
 - Prebuilt trees come from the ry.cachix.org binary cache
@@ -568,6 +575,9 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The code bases are a benchmark suite of their own, outside the headline
 - The profile summary hashes private package names with a secret key per project
 - The builtins sweep times every export of base, stats and utils, behind a shrinking ratchet
+- The edit-to-signal loop is tuned for agents
+- The interpreter stays one crate, because the edit loop is bound by links
+- Agent-written notes are not mass-rewritten for brevity
 
 ## Docs, process and positioning
 
@@ -580,3 +590,4 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Landing-page and README samples are captured from the running tools
 - The decision log is one file per area, with a generated index and byte budgets
 - Source comments have length limits, enforced by a ratchet
+- Each crate's `AGENTS.md` loads through a one-line `CLAUDE.md` beside it

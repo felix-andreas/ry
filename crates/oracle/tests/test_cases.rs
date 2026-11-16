@@ -1,29 +1,30 @@
-//! Replays the recorded cases under GNU R, and under the engine in `ORACLE_ENGINE` when set.
-//! `RY_BLESS=1` re-records the expectations. The test passes without R installed, and skips
-//! when GNU R is another release than the one `cases/gnu-r.txt` names. On other BLAS or LAPACK
-//! libraries it skips the cases marked `# oracle: library-dependent`.
+//! Replays the recorded cases under GNU R, and under ry's tier-0 interpreter and JIT (or the
+//! engines `ORACLE_ENGINE` lists). `RY_BLESS=1` re-records the expectations. GNU R's replay
+//! passes without R installed, and skips when GNU R is another release than the one
+//! `cases/gnu-r.txt` names. On other BLAS or LAPACK libraries it skips the cases marked
+//! `# oracle: library-dependent`.
 //!
 //! When ry's runtime is built, a rotating subset of the cases also runs under each collection
 //! stress (`ry-gctorture` and `ry-gctorture-young`) and must give what ry gives unstressed.
 //! `FUZZ_SEED` picks the subset and `FUZZ_ITERS` its size; `ORACLE_ENGINE=ry-gctorture` runs
-//! every case against GNU R.
+//! every case against the recordings.
 
 use {
     oracle::{
-        BUILD_FILE, BuildCheck, CaseRun, Engine, EngineError, KNOWN_FAILURES_FILE, ProcessEngine,
-        Verdict, check_build, diff, engine_from_environment, expected_path, fails_run, find_cases,
-        gnu_r_available, gnu_r_build, installed_packages, known_failure, known_failures,
-        libraries_ahead_of_reference, library_dependent, parse, parse_known_failures, render,
-        runnable_cases, ry_runtime_available, verdict, write_build,
+        BUILD_FILE, BuildCheck, CaseRun, DEFAULT_ENGINES, Engine, EngineError, KNOWN_FAILURES_FILE,
+        ProcessEngine, Verdict, build_workspace_ry, check_build, diff, engine_build,
+        engine_packages, engines_named, expected_path, fails_run, find_cases, gnu_r_available,
+        gnu_r_build, installed_packages, known_failure, known_failures,
+        libraries_ahead_of_reference, library_dependent, parse, parse_known_failures, read_build,
+        render, runnable_cases, ry_runtime_available, target_directory, verdict, write_build,
     },
     std::{
         ffi::OsStr,
         path::{Path, PathBuf},
         process::Command,
-        sync::atomic::{AtomicUsize, Ordering},
         time::{Duration, Instant},
     },
-    syntax::testing::{SplitMix64, fuzz_iterations},
+    syntax::testing::{SplitMix64, fuzz_iterations, in_parallel},
 };
 
 fn case_directory() -> PathBuf {
@@ -77,9 +78,10 @@ fn recorded_outcomes_match_gnu_r() {
         }
         BuildCheck::Unrecorded => panic!("cases/{BUILD_FILE} is missing; bless to write it"),
     }
-    let mut failures = Vec::new();
-    assert!(!cases().is_empty(), "no oracle cases found");
-    for case in cases() {
+    let all = cases();
+    assert!(!all.is_empty(), "no oracle cases found");
+    let mut chosen = Vec::new();
+    for case in all {
         // A bless records them all the same, as `oracle record` does on other libraries.
         if other_libraries && !bless && library_dependent(&case) {
             eprintln!(
@@ -89,7 +91,19 @@ fn recorded_outcomes_match_gnu_r() {
             );
             continue;
         }
-        let actual = match gnu_r.run(&case) {
+        chosen.push(case);
+    }
+    let runs = in_parallel(&chosen, |case| gnu_r.run(case));
+    let mut failures = Vec::new();
+    for (case, run) in chosen.iter().zip(runs) {
+        let run = match run {
+            Ok(run) => run,
+            Err(message) => {
+                failures.push(format!("{} panicked: {message}", case.display()));
+                continue;
+            }
+        };
+        let actual = match run {
             Ok(actual) => actual,
             Err(EngineError::Crashed(error)) => {
                 eprintln!("skipped {}: this GNU R crashed: {error}", case.display());
@@ -98,10 +112,10 @@ fn recorded_outcomes_match_gnu_r() {
             Err(error) => panic!("{}: {error}", case.display()),
         };
         if bless {
-            std::fs::write(expected_path(&case), render(&actual)).expect("write expectation");
+            std::fs::write(expected_path(case), render(&actual)).expect("write expectation");
             continue;
         }
-        let expected = std::fs::read_to_string(expected_path(&case))
+        let expected = std::fs::read_to_string(expected_path(case))
             .ok()
             .and_then(|text| parse(&text));
         match expected {
@@ -116,65 +130,170 @@ fn recorded_outcomes_match_gnu_r() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Every case gives its recorded outcome under ry's tier-0 interpreter and under its JIT (or under
+/// the engines `ORACLE_ENGINE` lists), sorted against the known failures. The recordings stand in
+/// for GNU R, which [`recorded_outcomes_match_gnu_r`] checks them against wherever it is
+/// installed, so this test needs only ry. Unless `ORACLE_RY` names a binary, it first builds the
+/// workspace's `ry` and `libR.so`, so it never runs a stale runtime. A runtime that loads another
+/// release of base R than the recordings' skips, and on other BLAS or LAPACK libraries a
+/// difference in a library-dependent case is a warning.
 #[test]
-fn second_engine_matches_gnu_r() {
-    if !gnu_r_available() {
-        return;
+fn ry_matches_recorded_outcomes() {
+    let explicit = std::env::var("ORACLE_ENGINE")
+        .ok()
+        .filter(|names| !names.trim().is_empty());
+    let names = explicit.as_deref().unwrap_or(DEFAULT_ENGINES);
+    if names.split(',').any(|name| name.trim().starts_with("ry")) {
+        if !workspace_ry_has_base_r() {
+            let message = "the workspace ry has no base R, so no case ran under it. Build one \
+                           with `cargo build -p libr -p rcmd && tools/base-r/build.sh target/base-r \
+                           target/debug/ry-rcmd target/debug/libR.so` (about 7 minutes, needs \
+                           gfortran), or set R_HOME to a GNU R installation";
+            match explicit {
+                Some(_) => panic!("{message}"),
+                None => {
+                    eprintln!("skipped: {message}");
+                    return;
+                }
+            }
+        }
+        build_workspace_ry().unwrap_or_else(|error| panic!("{error}"));
     }
-    let gnu_r = ProcessEngine::gnu_r();
-    let second = engine_from_environment();
-    match gnu_r_build() {
-        Ok(build) => eprintln!("GNU R {build}"),
-        Err(error) => panic!("{error}"),
+    let timeout = Duration::from_secs(600);
+    let recorded =
+        read_build(&case_directory().join(BUILD_FILE)).unwrap_or_else(|error| panic!("{error}"));
+    // Each engine pairs with whether its BLAS or LAPACK differ from the recordings'.
+    let mut engines: Vec<(ProcessEngine, bool)> = Vec::new();
+    for engine in engines_named(Some(names)).unwrap_or_else(|error| panic!("{error}")) {
+        let engine = engine.with_timeout(timeout).with_own_base_r();
+        let name = engine.name();
+        let build = engine_build(&engine).unwrap_or_else(|error| panic!("{error}"));
+        if build.release != recorded.release {
+            let message = format!(
+                "the cases were recorded with GNU R {recorded}, but {name} loads base R {}; set \
+                 R_HOME or RY_BASE_R to an R {} base",
+                build.release, recorded.release
+            );
+            match explicit {
+                Some(_) => panic!("{message}"),
+                None => {
+                    eprintln!("skipped: {message}");
+                    return;
+                }
+            }
+        }
+        let other_libraries = build != recorded;
+        if other_libraries {
+            eprintln!(
+                "warning: the cases were recorded with GNU R {recorded}, but {name} runs on \
+                 {build}, so a difference in a library-dependent case is only a warning"
+            );
+        }
+        engines.push((engine, other_libraries));
     }
+    let first = &engines
+        .first()
+        .expect("engines_named returns at least one engine")
+        .0;
     let known = known_failures().unwrap_or_else(|error| panic!("{error}"));
-    let name = second.name();
-    let mut failures = Vec::new();
-    for case in cases() {
-        let (run, failure) = match second.run(&case) {
-            Err(EngineError::Unavailable(_)) => return,
-            Err(EngineError::Crashed(error)) => (
-                CaseRun::Crashed,
-                Some(format!("{} crashed: {error}", case.display())),
-            ),
-            Err(error) => (
-                CaseRun::Failed,
-                Some(format!("{}: {error}", case.display())),
-            ),
-            Ok(actual) => {
-                let expected = match gnu_r.run(&case) {
-                    Ok(expected) => expected,
-                    Err(EngineError::Crashed(error)) => {
-                        eprintln!("skipped {}: this GNU R crashed: {error}", case.display());
-                        continue;
-                    }
-                    Err(error) => panic!("{}: {error}", case.display()),
-                };
-                match diff("GNU R", &expected, &name, &actual) {
+    let (cases, missing) = runnable_cases(find_cases(&case_directory()), || engine_packages(first));
+    for (case, needs) in &missing {
+        eprintln!("skipped {}: needs {}", case.display(), needs.join(", "));
+    }
+    assert!(!cases.is_empty(), "no oracle cases to run");
+    let started = Instant::now();
+    let runs = in_parallel(&cases, |case| {
+        let expected = std::fs::read_to_string(expected_path(case))
+            .ok()
+            .and_then(|text| parse(&text));
+        let Some(expected) = expected else {
+            return vec![format!("{}: no readable expectation", case.display())];
+        };
+        let mut found = Vec::new();
+        for (engine, other_libraries) in &engines {
+            let name = engine.name();
+            // Only a difference in the output follows the libraries; a timeout or an engine
+            // error fails whatever the libraries are.
+            let (run, failure, differs) = match engine.run(case) {
+                Ok(actual) => match diff("recorded", &expected, &name, &actual) {
                     Some(difference) => (
                         CaseRun::Failed,
-                        Some(format!("{}\n{difference}", case.display())),
+                        format!("{} [{name}]\n{difference}", case.display()),
+                        true,
                     ),
-                    None => (CaseRun::Passed, None),
-                }
+                    None => (CaseRun::Passed, String::new(), false),
+                },
+                Err(EngineError::Unavailable(error)) => panic!("{name} is unavailable: {error}"),
+                Err(EngineError::Crashed(error)) => (
+                    CaseRun::Crashed,
+                    format!("{} [{name}] crashed: {error}", case.display()),
+                    false,
+                ),
+                Err(error) => (
+                    CaseRun::Failed,
+                    format!("{} [{name}]: {error}", case.display()),
+                    false,
+                ),
+            };
+            if differs && *other_libraries && library_dependent(case) {
+                eprintln!("warning: {failure}");
+                continue;
             }
-        };
-        let entry = known_failure(&known, &case, &name);
-        match verdict(run, entry) {
-            Verdict::Known => {
-                if let Some(entry) = entry {
-                    eprintln!("known {}: {}", case.display(), entry.reason);
+            let entry = known_failure(&known, case, &name);
+            match verdict(run, entry) {
+                Verdict::Passed => {}
+                Verdict::Known => {
+                    if let Some(entry) = entry {
+                        eprintln!("known {} [{name}]: {}", case.display(), entry.reason);
+                    }
                 }
+                Verdict::New => found.push(failure),
+                Verdict::ListedButPassing => found.push(format!(
+                    "{} passes under {name}, so delete its entry from {KNOWN_FAILURES_FILE}",
+                    case.display()
+                )),
             }
-            Verdict::New => failures.extend(failure),
-            Verdict::ListedButPassing => failures.push(format!(
-                "{} passes under {name}, so delete its entry from {KNOWN_FAILURES_FILE}",
-                case.display()
-            )),
-            Verdict::Passed => {}
         }
+        found
+    });
+    let failures: Vec<String> = cases
+        .iter()
+        .zip(runs)
+        .flat_map(|(case, run)| {
+            run.unwrap_or_else(|message| vec![format!("{} panicked: {message}", case.display())])
+        })
+        .collect();
+    eprintln!(
+        "{} case(s) under {names} in {:.1} s, {} skipped",
+        cases.len(),
+        started.elapsed().as_secs_f64(),
+        missing.len()
+    );
+    assert!(
+        failures.is_empty(),
+        "{} failure(s) against the recorded outcomes; rerun one with `cargo run -p oracle -- \
+         compare --engine <engine> <case>`:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// Whether the `ry` the oracle runs finds a base R, looked up as `ry` does: `R_HOME`, then
+/// `RY_BASE_R`, then a `base-r` tree beside the binary or one directory up. Checked before
+/// building, so a checkout without one (CI's fast job) skips instead of building libR for nothing.
+/// A binary `ORACLE_RY` names may embed its base R, so it is trusted.
+fn workspace_ry_has_base_r() -> bool {
+    let set = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    if set("ORACLE_RY").is_some() || set("R_HOME").is_some() {
+        return true;
     }
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    if let Some(base) = set("RY_BASE_R") {
+        return rcmd::base::holds_base_r(Path::new(&base));
+    }
+    let target = target_directory();
+    [target.join("debug/base-r"), target.join("base-r")]
+        .iter()
+        .any(|candidate| rcmd::base::is_complete(candidate))
 }
 
 /// Every entry in `known_failures.toml` names an existing case and engine, once.
@@ -441,57 +560,29 @@ fn cases_survive(torture: fn(u64) -> ProcessEngine, focus: &[&str], focused: usi
     let ry = ProcessEngine::ry().with_timeout(timeout);
     let torture = torture.with_timeout(timeout);
     let started = Instant::now();
-    // Each case is two independent processes, so the cases run on every core; the failures are
-    // reported in the order the seed chose the cases, whichever thread finished first.
-    let next = AtomicUsize::new(0);
-    let workers = std::thread::available_parallelism().map_or(1, |count| count.get());
-    let mut failures: Vec<(usize, String)> = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..workers)
-            .map(|_| {
-                scope.spawn(|| {
-                    let mut found = Vec::new();
-                    loop {
-                        let index = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(case) = chosen.get(index) else {
-                            return found;
-                        };
-                        let unstressed = match ry.run(case) {
-                            Ok(outcome) => outcome,
-                            // A case ry cannot run at all is the plain oracle's finding, not
-                            // torture's.
-                            Err(error) => {
-                                eprintln!("{}: ry: {error}", case.display());
-                                continue;
-                            }
-                        };
-                        match torture.run(case) {
-                            Ok(stressed) => {
-                                if let Some(difference) =
-                                    diff("ry", &unstressed, &torture.name(), &stressed)
-                                {
-                                    found
-                                        .push((index, format!("{}\n{difference}", case.display())));
-                                }
-                            }
-                            Err(error) => {
-                                found.push((index, format!("{}: {error}", case.display())))
-                            }
-                        }
-                    }
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|handle| {
-                handle
-                    .join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-            })
-            .collect()
-    });
-    failures.sort_by_key(|(index, _)| *index);
-    let failures: Vec<String> = failures.into_iter().map(|(_, failure)| failure).collect();
+    // Each case is two independent processes, so the cases run in parallel; the failures are
+    // reported in the order the seed chose the cases.
+    let failures: Vec<String> = in_parallel(&chosen, |case| {
+        let unstressed = match ry.run(case) {
+            Ok(outcome) => outcome,
+            // A case ry cannot run at all is the plain oracle's finding, not torture's.
+            Err(error) => {
+                eprintln!("{}: ry: {error}", case.display());
+                return None;
+            }
+        };
+        match torture.run(case) {
+            Ok(stressed) => diff("ry", &unstressed, &torture.name(), &stressed)
+                .map(|difference| format!("{}\n{difference}", case.display())),
+            Err(error) => Some(format!("{}: {error}", case.display())),
+        }
+    })
+    .into_iter()
+    .zip(&chosen)
+    .filter_map(|(outcome, case)| {
+        outcome.unwrap_or_else(|message| Some(format!("{} panicked: {message}", case.display())))
+    })
+    .collect();
     eprintln!(
         "{} case(s) from seed {seed} under {} in {:.1} s",
         chosen.len(),

@@ -1240,9 +1240,9 @@ unsafe fn lower(node: NodeRef<'_>, context: Lowering<'_>) -> R<Sexp> {
                     )
                 })
                 .ok_or_else(|| error("missing operator"))?;
-            let (left, right) = match children.as_slice() {
-                &[left, right, ..] => (lower(left, context)?, lower(right, context)?),
-                &[left] => {
+            let (left, right) = match *children.as_slice() {
+                [left, right, ..] => (lower(left, context)?, lower(right, context)?),
+                [left] => {
                     // A keyword or string on the right is a token, not a node.
                     let token = significant_tokens(node)
                         .next_back()
@@ -1366,9 +1366,9 @@ unsafe fn binary(node: NodeRef<'_>, context: Lowering<'_>) -> R<Sexp> {
     let operator = significant_tokens(node)
         .find(|token| !matches!(token.kind(), SyntaxKind::L_PAREN | SyntaxKind::R_PAREN))
         .ok_or_else(|| error("missing operator"))?;
-    let (left, right) = match children.as_slice() {
-        &[left, right, ..] => (left, Some(right)),
-        &[left] => (left, None),
+    let (left, right) = match *children.as_slice() {
+        [left, right, ..] => (left, Some(right)),
+        [left] => (left, None),
         _ => return Err(error("malformed binary expression")),
     };
     let left_value = lower(left, context)?;
@@ -1770,8 +1770,7 @@ unsafe fn pattern(node: NodeRef<'_>) -> R<Sexp> {
                 .ok_or_else(|| error("`as` needs a pattern before it"))?;
             let name = node
                 .child_nodes()
-                .filter(|child| child.kind() == SyntaxKind::NAME)
-                .last()
+                .rfind(|child| child.kind() == SyntaxKind::NAME)
                 .ok_or_else(|| error("`as` needs a name after it"))?;
             values::call(install(".ry_as")?, &[pattern(inner)?, name_symbol(name)?])
         }

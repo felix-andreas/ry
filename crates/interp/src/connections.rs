@@ -2924,9 +2924,10 @@ unsafe fn read_text_rest(con: Rconnection) -> R<Vec<u8>> {
     };
     // `read_char` reads the character after a `\r` to drop a `\n`. The bytes are folded in
     // place: the write position never passes the read position.
-    let mut kept = start + first;
+    let first = start + first;
+    let mut kept = first;
     let mut after_return = false;
-    for position in kept..text.len() {
+    for position in first..text.len() {
         let byte = text.get(position).copied().unwrap_or_default();
         let folded = match (after_return, byte) {
             (true, b'\n') => {

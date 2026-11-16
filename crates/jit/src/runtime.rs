@@ -168,15 +168,17 @@ pub mod outcome {
     pub const LOAD_INVALIDATED: i32 = 4;
 }
 
-/// What [`jit_quiet_step`] did with an element read or store.
-pub mod quiet {
+/// What [`jit_element_step`] did with an element read or store.
+pub mod element {
+    /// Tier 0's fast handler ran the instruction, which stores in place.
+    pub const HANDLED: i32 = 0;
     /// The generic handler ran the instruction, which may have rebound a store's variable.
-    pub const STEPPED: i32 = 0;
+    pub const STEPPED: i32 = 1;
     /// Nothing ran: the generic handler might run R code, so compiled code steps the
     /// instruction with the frame written back.
-    pub const DECLINED: i32 = 1;
+    pub const DECLINED: i32 = 2;
     /// The generic handler raised an error, which is parked.
-    pub const FAILED: i32 = 2;
+    pub const FAILED: i32 = 3;
 }
 
 /// A compiled body. Owned by an external pointer in the code's `TIER1` constant, which keeps
@@ -630,22 +632,20 @@ unsafe fn guarded<T>(
     if unsafe { (*parked).panic.is_some() } {
         return fallback;
     }
-    let Some(inlined) = (unsafe { &layout(activation).inlined }) else {
-        return match catch_unwind(AssertUnwindSafe(|| body(&mut *activation))) {
-            Ok(value) => value,
-            Err(payload) => {
-                unsafe { (*parked).panic = Some(payload) };
-                fallback
-            }
-        };
-    };
-    let state = interp::interp();
-    let caller =
-        state
-            .assignment_call
-            .replace((values::unbound(), inlined.call, state.frames.len()));
+    // `body` runs from one call site, so that it inlines into the unwinding frame rather than
+    // costing every helper call a frame of its own.
+    let caller = unsafe { &layout(activation).inlined }
+        .as_ref()
+        .map(|inlined| {
+            let state = interp::interp();
+            state
+                .assignment_call
+                .replace((values::unbound(), inlined.call, state.frames.len()))
+        });
     let result = catch_unwind(AssertUnwindSafe(|| body(&mut *activation)));
-    interp::interp().assignment_call = caller;
+    if let Some(caller) = caller {
+        interp::interp().assignment_call = caller;
+    }
     match result {
         Ok(value) => value,
         Err(payload) => {
@@ -712,14 +712,15 @@ unsafe fn checked<T>(
 }
 
 /// The frame slot that holds `slot`'s variable, while the activation runs in a slot frame
-/// without an environment.
+/// without an environment. A helper may call this outside its panic guard, so it does not index.
 unsafe fn frame_slot(
     activation: &Activation,
     machine: &Machine<'_>,
     slot: i64,
 ) -> Option<*mut Sexp> {
     unsafe {
-        layout(activation).frame[slot as usize].and_then(|position| machine.frame_slot(position))
+        let position = (*layout(activation).frame.get(slot as usize)?)?;
+        machine.frame_slot(position)
     }
 }
 
@@ -744,13 +745,15 @@ unsafe fn step_unsignalled<T>(activation: &Activation, step: impl FnOnce() -> T)
             interp::interp().signalling = Signalling::Immediate;
         }
     }
-    if unsafe { layout(activation).inlined.is_none() } {
-        return Some(step());
-    }
-    interp::interp().signalling = Signalling::Deferred;
-    let _restore = Restore;
+    // `step` runs from one call site, so that it inlines into the caller.
+    let restore = unsafe { layout(activation).inlined.is_some() }.then(|| {
+        interp::interp().signalling = Signalling::Deferred;
+        Restore
+    });
     let result = step();
-    (interp::interp().signalling != Signalling::Abandoned).then_some(result)
+    let abandoned = restore.is_some() && interp::interp().signalling == Signalling::Abandoned;
+    drop(restore);
+    (!abandoned).then_some(result)
 }
 
 /// Runs the tier-0 instruction at `pc`, then checks the speculations when `validate` is set.
@@ -788,28 +791,55 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
     }
 }
 
-/// Runs the element read or store at `pc` through tier 0's fast handler for it
-/// ([`bytecode::fast_step`]), which runs no R code: nonzero when the handler applied.
-pub unsafe extern "C" fn jit_fast_step(activation: *mut Activation, pc: i64) -> i32 {
-    unsafe { i32::from(bytecode::fast_step(machine(&*activation), pc as usize)) }
+/// Runs the builtin call at `pc` ([`bytecode::call_builtin_step`]), which compiled code calls
+/// only where the call runs no R code, so nothing needs validating: [`outcome::OK`] or
+/// [`outcome::FAILED`]. A nonzero `record` records the result's type.
+pub unsafe extern "C" fn jit_call_builtin(
+    activation: *mut Activation,
+    pc: i64,
+    record: i32,
+) -> i32 {
+    unsafe {
+        checked(activation, outcome::FAILED, |activation| {
+            let called = step_unsignalled(activation, || {
+                scoped(|| {
+                    bytecode::call_builtin_step(machine(activation), pc as usize, record != 0)
+                })
+            });
+            match called {
+                Some(Ok(())) => outcome::OK,
+                Some(Err(unwind)) => {
+                    park(activation, unwind);
+                    outcome::FAILED
+                }
+                None => outcome::FAILED,
+            }
+        })
+    }
 }
 
-/// Runs the element read or store at `pc` through its generic handler where that runs no R
-/// code ([`bytecode::quiet_step`]), so nothing needs validating: one of [`quiet`]'s outcomes.
-pub unsafe extern "C" fn jit_quiet_step(activation: *mut Activation, pc: i64) -> i32 {
+/// Runs the element read or store at `pc` through tier 0's fast handler for it
+/// ([`bytecode::fast_step`]) when `fast` is set, then through its generic handler where that
+/// runs no R code ([`bytecode::quiet_step`]), so nothing needs validating: one of [`element`]'s
+/// outcomes. The fast handler runs no R code, so it runs outside the panic guard, which would
+/// cost every hit a stack frame.
+pub unsafe extern "C" fn jit_element_step(activation: *mut Activation, pc: i64, fast: i32) -> i32 {
     unsafe {
-        checked(activation, quiet::FAILED, |activation| {
+        if fast != 0 && bytecode::fast_step(machine(&*activation), pc as usize) {
+            return element::HANDLED;
+        }
+        checked(activation, element::FAILED, |activation| {
             let stepped = step_unsignalled(activation, || {
                 bytecode::quiet_step(machine(activation), pc as usize)
             });
             match stepped {
-                Some(None) => quiet::DECLINED,
-                Some(Some(Ok(()))) => quiet::STEPPED,
+                Some(None) => element::DECLINED,
+                Some(Some(Ok(()))) => element::STEPPED,
                 Some(Some(Err(unwind))) => {
                     park(activation, unwind);
-                    quiet::FAILED
+                    element::FAILED
                 }
-                None => quiet::FAILED,
+                None => element::FAILED,
             }
         })
     }
@@ -1716,7 +1746,7 @@ unsafe fn count_handoff(compiled: &Compiled, inlined: &Inlined) {
         let counters = values::ints_mut(inlined.code.cdr().element(PROFILE));
         let state = counters[profile::TIER_STATE];
         counters[profile::TIER_STATE] = match state {
-            profile::TIER_OFF => state,
+            _ if state == profile::TIER_OFF => state,
             ..0 => NEVER_ELIDED,
             _ => state | NO_ELISION,
         };
@@ -2020,25 +2050,31 @@ pub unsafe extern "C" fn jit_flush(
     bits: i64,
 ) -> i32 {
     unsafe {
+        // A boxed value into a slot frame is a store that allocates nothing and cannot fail, so
+        // it needs neither the panic guard nor a handle scope, which cost more than the store.
+        if kind == representation::BOXED && (*(*activation).parked).panic.is_none() {
+            let activation = &*activation;
+            let machine = machine(activation);
+            if let Some(frame) = frame_slot(activation, machine, slot) {
+                let value = *slot_cell(activation, slot);
+                machine.hand_over_slot(frame, value);
+                return 1;
+            }
+        }
+        flush_guarded(activation, slot, kind, bits)
+    }
+}
+
+/// [`jit_flush`] for every write-back but a boxed value into a slot frame. Kept out of line so
+/// that the store's path saves no registers for it.
+#[inline(never)]
+unsafe fn flush_guarded(activation: *mut Activation, slot: i64, kind: i32, bits: i64) -> i32 {
+    unsafe {
         guarded(activation, 0, |activation| {
             let machine = machine(activation);
             let symbol = layout(activation).slots[slot as usize];
             let cell = slot_cell(activation, slot);
             let frame = frame_slot(activation, machine, slot);
-            // A boxed value into a slot frame allocates nothing, so it needs no handle scope.
-            if kind == representation::BOXED && frame.is_some() {
-                let value = *cell;
-                return match machine.assign(frame, symbol, value) {
-                    Ok(()) => {
-                        value.decrement_refcount();
-                        1
-                    }
-                    Err(unwind) => {
-                        park(activation, unwind);
-                        0
-                    }
-                };
-            }
             let element = match kind {
                 representation::INTEGER => Some((SexpType::Integer, f64::from(bits as i32))),
                 representation::LOGICAL => Some((SexpType::Logical, f64::from(bits as i32))),

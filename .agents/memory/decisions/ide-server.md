@@ -98,7 +98,7 @@ The Zed extension bundles no binary: it locates `ry` at run time through the LSP
 - **Hooks.** Statements are located by the srcrefs `{` already sets (`Op::SetSrcref`, `do_begin`/`eval_all`). Without an adapter the hook costs one `Option` check per statement. `SetSrcref` carries a flag because the one restoring the outer srcref after a block starts no statement and must not stop. `browser()` and the uncaught-error handler stop through the same entry.
 - **Rooting.** Every object the variables view hands out a reference for is rooted until resume, because the debug console can drop its last other reference.
 - **Stdout.** The protocol owns stdout, so the adapter keeps a duplicate and points fd 1 at stderr; native `printf` cannot corrupt the protocol.
-- **Tests:** `interp` `test_debugger` (transcripts and a seeded random client) and the `debug-*.scenario` journeys, which run the real `ry debug-adapter`.
+- **Tests:** `frames` `test_debugger` (transcripts and a seeded random client) and the `debug-*.scenario` journeys, which run the real `ry debug-adapter`.
 
 ## Range formatting is a cut of the whole-file format
 

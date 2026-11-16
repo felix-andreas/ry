@@ -36,7 +36,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
         .direct(direct_subassign),
     special("[[<-", -1, do_subassign2).dispatch_or_eval(),
     special("$<-", 3, do_dollar_assign),
-    special("@<-", 3, do_at_assign),
+    special("@<-", 3, do_at_assign).direct(direct_at_assign),
     builtin(".subset", -1, do_subset).keep_missing(),
     builtin(".subset2", -1, do_subset2)
         .keep_missing()
@@ -2016,7 +2016,7 @@ unsafe fn out_of_bounds(call: Sexp, message: &str, bounds: Bounds, index: Sexp) 
 // `$` and `@`.
 
 /// The name argument of `$` and `@`: a symbol or string, never evaluated.
-unsafe fn name_argument(value: Sexp) -> R<Sexp> {
+pub(crate) unsafe fn name_argument(value: Sexp) -> R<Sexp> {
     // A promise comes from `NextMethod` and stands for the name the method received.
     let value = eval::value_of(value)?;
     match value.kind() {
@@ -2375,19 +2375,41 @@ unsafe fn do_at_assign(call: &Call<'_>) -> R<Sexp> {
         }
     }
 
-    // The methods package checks the assignment against the class definition, using the
-    // implicit class of an object without a class attribute, so `x@a <- 1` on a list fails.
-    if let Some(check) = interp_methods_function("checkAtAssignment")? {
-        let class = crate::dispatch::class_of(object)?;
-        crate::heap().root(class);
-        let name = values::scalar_string_charsxp(symbol.car())?;
-        crate::heap().root(name);
-        let value_class = crate::dispatch::class_of(value)?;
-        crate::heap().root(value_class);
-        let check_call = values::call(check, &[class, name, value_class])?;
-        eval::eval(check_call, values::base_env())?;
-    }
+    check_at_assignment(object, symbol, value)?;
     set_slot(object, symbol, value)
+}
+
+/// `@<-` on evaluated arguments, for `object@name <- value` compiled to registers: the object,
+/// the slot's name as a symbol or a string, and the value. An S3 object answers `None`, because
+/// it may dispatch to a method, which the special looks up in its caller's environment.
+pub(crate) unsafe fn direct_at_assign(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
+    let &[object, name, value] = args else {
+        return Ok(None);
+    };
+    if object.is_object() && !object.has_gp(gp::S4_OBJECT) {
+        return Ok(None);
+    }
+    let symbol = slot_symbol(name)?;
+    check_at_assignment(object, symbol, value)?;
+    set_slot(object, symbol, value).map(Some)
+}
+
+/// The methods package's check of `object@symbol <- value` against the class definition, which
+/// uses the implicit class of an object without a class attribute, so `x@a <- 1` on a list
+/// fails.
+unsafe fn check_at_assignment(object: Sexp, symbol: Sexp, value: Sexp) -> R<()> {
+    let Some(check) = interp_methods_function("checkAtAssignment")? else {
+        return Ok(());
+    };
+    let class = crate::dispatch::class_of(object)?;
+    crate::heap().root(class);
+    let name = values::scalar_string_charsxp(symbol.car())?;
+    crate::heap().root(name);
+    let value_class = crate::dispatch::class_of(value)?;
+    crate::heap().root(value_class);
+    let check_call = values::call(check, &[class, name, value_class])?;
+    eval::eval(check_call, values::base_env())?;
+    Ok(())
 }
 
 /// `R_do_slot_assign`.
@@ -2420,16 +2442,13 @@ unsafe fn do_subassign(call: &Call<'_>) -> R<Sexp> {
     let Some((value_arg, rest)) = call.args.split_last() else {
         return Err(call.error("SubAssignArgs: invalid number of arguments"));
     };
-    let mut object = nil();
-    let mut indices: SmallVec<[Sexp; 4]> = SmallVec::new();
-    for (position, arg) in rest.iter().enumerate() {
-        if position == 0 {
-            object = arg.value;
-        } else if arg.tag != symbols().exact && arg.tag != symbols().drop {
-            indices.push(arg.value);
-        }
-    }
-    subassign(object, &indices, value_arg.value, call.call)
+    // Every argument between the object and the value is a subscript, whatever its name: GNU R
+    // gives `drop` and `exact` no meaning in an assignment.
+    let Some((object, indices)) = rest.split_first() else {
+        return subassign(nil(), &[], value_arg.value, call.call);
+    };
+    let indices: SmallVec<[Sexp; 4]> = indices.iter().map(|arg| arg.value).collect();
+    subassign(object.value, &indices, value_arg.value, call.call)
 }
 
 /// Whether `x[i] <- value` leaves the atomic vector `object` exactly as it is: the subscript
@@ -2665,12 +2684,16 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         1
     };
     if indices.len() >= 2 {
-        let Some(dims) = values::dims(result) else {
-            return Err(error_in(call, "incorrect number of subscripts on matrix"));
+        let Some(dims) = values::dims(result).filter(|dims| dims.len() == indices.len()) else {
+            return Err(error_in(
+                call,
+                if indices.len() == 2 {
+                    "incorrect number of subscripts on matrix"
+                } else {
+                    "incorrect number of subscripts"
+                },
+            ));
         };
-        if dims.len() != indices.len() {
-            return Err(error_in(call, "incorrect number of subscripts"));
-        }
         if value != result
             && let Some(fixed) = slab(indices, &dims, result, value)
         {
@@ -2802,14 +2825,14 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
     Ok(result)
 }
 
-/// `target[index] <- value` written straight from an attribute-free integer or double subscript
-/// whose positions all lie inside `target`, when `value` already has `target`'s type and its
-/// length divides the number of positions. Returns false, having written nothing, for every
-/// other shape, which the general path handles with GNU R's full rules.
+/// `target[index] <- value` written straight from an empty subscript or an attribute-free
+/// integer or double one whose positions all lie inside `target`, when `value` already has
+/// `target`'s type and its length divides the number of positions. Returns false, having written
+/// nothing, for every other shape, which the general path handles with GNU R's full rules.
 unsafe fn scatter_plain(target: Sexp, index: Sexp, value: Sexp, value_count: usize) -> R<bool> {
     let kind = target.kind();
-    if index == missing_arg()
-        || values::has_attributes(index)
+    if values::has_attributes(index)
+        || value == target
         || value.kind() != kind
         || target.is_altrep()
         || value.is_altrep()
@@ -2826,6 +2849,23 @@ unsafe fn scatter_plain(target: Sexp, index: Sexp, value: Sexp, value_count: usi
         return Ok(false);
     }
     let count = length(target);
+    if index == missing_arg() {
+        return Ok(scatter_run(target, 0, count, value, value_count));
+    }
+    if let Some((run, first, increment)) = values::compact_sequence(index)
+        && increment == 1.0
+        && first >= 1.0
+        && first.fract() == 0.0
+        && first as usize - 1 + run <= count
+    {
+        return Ok(scatter_run(
+            target,
+            first as usize - 1,
+            run,
+            value,
+            value_count,
+        ));
+    }
     if let Some((highest, offsets)) = sequence_offsets(index) {
         return Ok(highest < count && scatter_offsets(target, offsets, value, value_count));
     }
@@ -2866,6 +2906,65 @@ unsafe fn scatter_plain(target: Sexp, index: Sexp, value: Sexp, value_count: usi
         value,
         value_count,
     ))
+}
+
+/// Writes `value`, recycled, to the `run` elements of `target` from `start`, which lie inside it,
+/// a whole copy of `value` at a time. `value` has `target`'s type and is another vector. False,
+/// having written nothing, unless `run` is a multiple of `value_count`.
+unsafe fn scatter_run(
+    target: Sexp,
+    start: usize,
+    run: usize,
+    value: Sexp,
+    value_count: usize,
+) -> bool {
+    if !run.is_multiple_of(value_count) {
+        return false;
+    }
+    if run == 0 {
+        return true;
+    }
+    match target.kind() {
+        SexpType::Real => fill_run(
+            &mut values::reals_mut(target)[start..start + run],
+            values::reals(value),
+        ),
+        SexpType::Logical | SexpType::Integer => fill_run(
+            &mut values::ints_mut(target)[start..start + run],
+            values::ints(value),
+        ),
+        _ => {
+            // The written part is copied onto the part after it, so a short value costs a
+            // barrier decision per doubling, not per copy.
+            let heap = crate::heap();
+            heap.copy_elements(target, start, value, 0, value_count);
+            let mut filled = value_count;
+            while filled < run {
+                let step = filled.min(run - filled);
+                heap.copy_elements(target, start + filled, target, start, step);
+                filled += step;
+            }
+        }
+    }
+    true
+}
+
+/// Fills `target`, whose length is a multiple of `source`'s, with copies of `source`.
+fn fill_run<T: Copy>(target: &mut [T], source: &[T]) {
+    if let [single] = source {
+        target.fill(*single);
+        return;
+    }
+    let Some(first) = target.get_mut(..source.len()) else {
+        return;
+    };
+    first.copy_from_slice(source);
+    let mut filled = source.len();
+    while filled < target.len() {
+        let step = filled.min(target.len() - filled);
+        target.copy_within(..step, filled);
+        filled += step;
+    }
 }
 
 /// Writes `value`, recycled, to `offsets` of `target`, which share its type and lie inside it.
@@ -3092,16 +3191,11 @@ unsafe fn do_subassign2(call: &Call<'_>) -> R<Sexp> {
     let Some((value_arg, rest)) = call.args.split_last() else {
         return Err(call.error("SubAssignArgs: invalid number of arguments"));
     };
-    let mut object = nil();
-    let mut indices: SmallVec<[Sexp; 4]> = SmallVec::new();
-    for (position, arg) in rest.iter().enumerate() {
-        if position == 0 {
-            object = arg.value;
-        } else if arg.tag != symbols().exact {
-            indices.push(arg.value);
-        }
-    }
-    subassign2(object, &indices, value_arg.value, call.call)
+    let Some((object, indices)) = rest.split_first() else {
+        return subassign2(nil(), &[], value_arg.value, call.call);
+    };
+    let indices: SmallVec<[Sexp; 4]> = indices.iter().map(|arg| arg.value).collect();
+    subassign2(object.value, &indices, value_arg.value, call.call)
 }
 
 /// `x[[i]] <- value`.
@@ -3167,35 +3261,44 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
     if let [index] = indices {
         return subassign2_one(object, *index, value, call, 1);
     }
-    if let Some(dims) = values::dims(object)
-        && dims.len() == indices.len()
-    {
-        // `m[[i, j]] <- value` names one cell, which must exist.
-        let dimnames = get_attr(object, symbols().dimnames);
-        for (dimension, (&index, &extent)) in indices.iter().zip(dims.iter()).enumerate() {
-            let names = if dimnames.kind() == SexpType::List {
-                dimnames.element(dimension)
-            } else {
-                nil()
+    let Some(dims) = values::dims(object).filter(|dims| dims.len() == indices.len()) else {
+        // GNU R counts the subscripts after it has checked what the object can hold.
+        let is_vector = object == nil()
+            || object.kind().is_atomic()
+            || matches!(object.kind(), SexpType::List | SexpType::Expression);
+        if !is_vector {
+            return Err(not_subsettable(call, object));
+        }
+        if object.kind().is_atomic() {
+            atomic_replacement_check(value)?;
+        }
+        return Err(error_in(call, "[[ ]] improper number of subscripts"));
+    };
+    // `m[[i, j]] <- value` names one cell, which must exist.
+    let dimnames = get_attr(object, symbols().dimnames);
+    for (dimension, (&index, &extent)) in indices.iter().zip(dims.iter()).enumerate() {
+        let names = if dimnames.kind() == SexpType::List {
+            dimnames.element(dimension)
+        } else {
+            nil()
+        };
+        // A subscript GNU R rejects for another reason is left to the assignment below.
+        let inside = match one_index(extent, names, index) {
+            Ok(Slot::At(position)) => position < extent,
+            Ok(_) => false,
+            Err(_) => true,
+        };
+        if !inside {
+            let bounds = Bounds {
+                dimension: Some(dimension),
+                ..Bounds::of(object)
             };
-            // A subscript GNU R rejects for another reason is left to the assignment below.
-            let inside = match one_index(extent, names, index) {
-                Ok(Slot::At(position)) => position < extent,
-                Ok(_) => false,
-                Err(_) => true,
-            };
-            if !inside {
-                let bounds = Bounds {
-                    dimension: Some(dimension),
-                    ..Bounds::of(object)
-                };
-                return Err(out_of_bounds(
-                    unbound(),
-                    "[[ ]] subscript out of bounds",
-                    bounds,
-                    index,
-                ));
-            }
+            return Err(out_of_bounds(
+                unbound(),
+                "[[ ]] subscript out of bounds",
+                bounds,
+                index,
+            ));
         }
     }
     let is_list = matches!(object.kind(), SexpType::List | SexpType::Expression);
@@ -3518,7 +3621,13 @@ unsafe fn missing_subscript(call: Sexp, fields: &[(&str, Sexp)]) -> Unwind {
 
 unsafe fn do_dollar_assign(call: &Call<'_>) -> R<Sexp> {
     let object = eval::eval(call.arg(0), call.env()?)?;
-    let name = name_argument(call.arg(1))?;
+    // GNU R reports a name that is none against the replacement call itself.
+    let name = name_argument(call.arg(1)).map_err(|unwind| match unwind {
+        Unwind::Error(failure) if failure.call == unbound() => {
+            crate::unwind::errorcall(call.call, failure.message)
+        }
+        unwind => unwind,
+    })?;
     let value = eval::eval(call.arg(2), call.env()?)?;
     if object.is_object() {
         let name_string = values::scalar_string_charsxp(name)?;
@@ -4931,7 +5040,7 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
             continue;
         }
         let count = length(arg.value);
-        if !warned && count > 0 && (count > extent || extent % count != 0) {
+        if !warned && count > 0 && (count > extent || !extent.is_multiple_of(count)) {
             warned = true;
             let direction = if by_row { "columns" } else { "rows" };
             crate::conditions::warning_call(
@@ -5078,7 +5187,13 @@ unsafe fn do_rev(call: &Call<'_>) -> R<Sexp> {
 
 pub(crate) unsafe fn do_is_list_factor(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
-    let recursive = values::as_logical_scalar(call.arg(1)) == 1;
+    let recursive = match values::as_logical_scalar(call.arg(1)) {
+        // R 4.5 refuses an NA, which earlier releases took as true.
+        NA_LOGICAL if crate::system::r_at_least(4, 5) => {
+            return Err(call.error("NA in coercion to boolean"));
+        }
+        recursive => recursive != 0,
+    };
     unsafe fn check(object: Sexp, recursive: bool) -> Option<bool> {
         if object.kind() != SexpType::List {
             return Some(values::inherits(object, "factor"));

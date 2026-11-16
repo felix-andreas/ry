@@ -261,6 +261,11 @@ symbol_table! {
     inherits = "inherits",
     try_invoke_restart = "tryInvokeRestart",
     w = "w",
+    decreasing = "decreasing",
+    na_last = "na.last",
+    method = "method",
+    partial = "partial",
+    index_return = "index.return",
 }
 
 /// Session-wide objects the builtins keep. Each is rooted for the life of the session.
@@ -292,6 +297,9 @@ pub struct Globals {
     /// The environment the host's sessions attach beside base R, as a start-up image carries it
     /// ([`crate::image::ImageHost::environment`]); nil when the session started without one.
     pub host_environment: Sexp,
+    /// The call `FUN(X[[i]], ...)` that `lapply` and `vapply` run for each element, built by the
+    /// first of them ([`crate::envir::element_call`]); nil before.
+    pub element_call: Sexp,
 }
 
 impl Globals {
@@ -307,6 +315,7 @@ impl Globals {
             implicit_classes: rustc_hash::FxHashMap::default(),
             deferred_definitions: Vec::new(),
             host_environment: Sexp::dangling(),
+            element_call: Sexp::dangling(),
         }
     }
 
@@ -316,12 +325,14 @@ impl Globals {
         globals.methods_namespace = nil;
         globals.methods_templates = nil;
         globals.host_environment = nil;
+        globals.element_call = nil;
     }
 
     pub(crate) unsafe fn trace(&self, marker: &mut Marker<'_>) {
         marker.mark(self.methods_namespace);
         marker.mark(self.methods_templates);
         marker.mark(self.host_environment);
+        marker.mark(self.element_call);
         for methods in self.primitive_methods.values() {
             marker.mark(methods.generic);
             marker.mark(methods.methods);

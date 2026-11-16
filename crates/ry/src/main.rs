@@ -482,7 +482,11 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>, ahead: bool
         cli::error("`--aot` compiles with ry's runtime, which `--runtime gnu-r` does not start");
         return ExitCode::from(2);
     }
-    let (_, program, flags) = match checked_script(file) {
+    let CheckedScript {
+        elaborated: program,
+        flags,
+        ..
+    } = match checked_script(file) {
         Ok(checked) => checked,
         Err(status) => return status,
     };
@@ -515,10 +519,19 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>, ahead: bool
     }
 }
 
-/// Reads and checks the script `file` as `ry run` does before it runs it: the file's bytes, the
-/// program the checker elaborated from them when it rewrote anything, and the flags the
-/// project's configuration sets. The error is the status to exit with, once reported.
-fn checked_script(file: &Path) -> Result<(Vec<u8>, Option<Vec<u8>>, repl::RuntimeFlags), ExitCode> {
+/// A script as `ry run` reads and checks it before it runs it.
+struct CheckedScript {
+    /// The file's bytes.
+    source: Vec<u8>,
+    /// The program the checker elaborated from `source`, when it rewrote anything.
+    elaborated: Option<Vec<u8>>,
+    /// The flags the project's configuration sets.
+    flags: repl::RuntimeFlags,
+}
+
+/// Reads and checks the script `file` as `ry run` does. The error is the status to exit with,
+/// once reported.
+fn checked_script(file: &Path) -> Result<CheckedScript, ExitCode> {
     // R reads a script in the session's encoding, so a Latin-1 script is valid R. The check
     // sees each invalid byte as `?`, which keeps every offset, and the elaborated program is
     // the file's own bytes with the checker's rewrites.
@@ -535,8 +548,13 @@ fn checked_script(file: &Path) -> Result<(Vec<u8>, Option<Vec<u8>>, repl::Runtim
     let elaborations = preflight
         .check_elaborations(&text)
         .ok_or(ExitCode::from(1))?;
-    let program = (!elaborations.is_empty()).then(|| preflight::elaborate(&source, &elaborations));
-    Ok((source, program, runtime_flags(preflight.config())))
+    let elaborated =
+        (!elaborations.is_empty()).then(|| preflight::elaborate(&source, &elaborations));
+    Ok(CheckedScript {
+        source,
+        elaborated,
+        flags: runtime_flags(preflight.config()),
+    })
 }
 
 /// `ry build --aot --exe`: checks the script `file` as `ry run` does, compiles its typed
@@ -579,7 +597,11 @@ fn build_executable(file: &Path, output: Option<&Path>, runtime: Option<Runtime>
         ));
         return ExitCode::from(2);
     }
-    let (source, elaborated, flags) = match checked_script(file) {
+    let CheckedScript {
+        source,
+        elaborated,
+        flags,
+    } = match checked_script(file) {
         Ok(checked) => checked,
         Err(status) => return status,
     };
@@ -588,7 +610,9 @@ fn build_executable(file: &Path, output: Option<&Path>, runtime: Option<Runtime>
         ahead: true,
         ..flags
     };
-    if let Some(directory) = output.parent().filter(|directory| !directory.as_os_str().is_empty())
+    if let Some(directory) = output
+        .parent()
+        .filter(|directory| !directory.as_os_str().is_empty())
         && let Err(error) = fs::create_dir_all(directory)
     {
         cli::error(&format!("cannot create {}: {error}", directory.display()));
@@ -941,34 +965,36 @@ fn run_install(
             let staging = env::temp_dir().join(format!("ry-install-{}", std::process::id()));
             fs::create_dir_all(&staging)
                 .map_err(|error| format!("cannot create {}: {error}", staging.display()))?;
-            let result = build_tarball(runtime, &home, &root, &staging, false).and_then(|tarball| {
-                let mut command = std::process::Command::new(home.join("bin").join("R"));
-                command.args(["CMD", "INSTALL"]);
-                if let Some(library) = library {
-                    fs::create_dir_all(library)
-                        .map_err(|error| format!("cannot create {}: {error}", library.display()))?;
-                    command.arg("-l").arg(library);
-                }
-                if let Some(train) = train {
-                    let workload = match train {
-                        "tests" | "examples" | "none" => train.to_owned(),
-                        script => std::path::absolute(script)
-                            .map_err(|error| format!("cannot resolve {script}: {error}"))?
-                            .display()
-                            .to_string(),
-                    };
-                    command.arg(format!("--ry-train={workload}"));
-                }
-                let status = command
-                    .arg(&tarball)
-                    .status()
-                    .map_err(|error| format!("cannot run {command:?}: {error}"))?;
-                if status.success() {
-                    Ok(())
-                } else {
-                    Err(format!("installing {} failed", root.display()))
-                }
-            });
+            let result =
+                build_tarball(runtime, &home, &root, &staging, false).and_then(|tarball| {
+                    let mut command = std::process::Command::new(home.join("bin").join("R"));
+                    command.args(["CMD", "INSTALL"]);
+                    if let Some(library) = library {
+                        fs::create_dir_all(library).map_err(|error| {
+                            format!("cannot create {}: {error}", library.display())
+                        })?;
+                        command.arg("-l").arg(library);
+                    }
+                    if let Some(train) = train {
+                        let workload = match train {
+                            "tests" | "examples" | "none" => train.to_owned(),
+                            script => std::path::absolute(script)
+                                .map_err(|error| format!("cannot resolve {script}: {error}"))?
+                                .display()
+                                .to_string(),
+                        };
+                        command.arg(format!("--ry-train={workload}"));
+                    }
+                    let status = command
+                        .arg(&tarball)
+                        .status()
+                        .map_err(|error| format!("cannot run {command:?}: {error}"))?;
+                    if status.success() {
+                        Ok(())
+                    } else {
+                        Err(format!("installing {} failed", root.display()))
+                    }
+                });
             // The tarball is a by-product; a leftover in the temporary directory harms nothing.
             if let Err(error) = fs::remove_dir_all(&staging) {
                 tracing::debug!("cannot remove {}: {error}", staging.display());
@@ -1052,9 +1078,9 @@ fn build_tarball(
             let copy = staging.path().join(name);
             copy_package(root, &copy)?;
             for (path, program) in &elaborated {
-                let relative = path.strip_prefix(root).map_err(|_| {
-                    format!("{} is outside {}", path.display(), root.display())
-                })?;
+                let relative = path
+                    .strip_prefix(root)
+                    .map_err(|_| format!("{} is outside {}", path.display(), root.display()))?;
                 let target = copy.join(relative);
                 // `.Rbuildignore` left this file out, so the build does not read it.
                 if !target.is_file() {
@@ -1111,10 +1137,18 @@ fn copy_package(root: &Path, copy: &Path) -> Result<(), String> {
         .filter_map(|pattern| regex::Regex::new(&format!("(?i){pattern}")).ok())
         .collect();
     let canonical = |path: &Path| {
-        fs::canonicalize(path).map_err(|error| format!("cannot resolve {}: {error}", path.display()))
+        fs::canonicalize(path)
+            .map_err(|error| format!("cannot resolve {}: {error}", path.display()))
     };
     let mut ancestors = vec![canonical(root)?];
-    copy_directory(root, copy, Path::new(""), &ignored, &mut ancestors, &canonical)
+    copy_directory(
+        root,
+        copy,
+        Path::new(""),
+        &ignored,
+        &mut ancestors,
+        &canonical,
+    )
 }
 
 /// Copies the directory `relative` below `root` into `copy`. `ancestors` holds the directories
@@ -1132,8 +1166,8 @@ fn copy_directory(
     let target = copy.join(relative);
     fs::create_dir_all(&target)
         .map_err(|error| format!("cannot create {}: {error}", target.display()))?;
-    let entries =
-        fs::read_dir(&source).map_err(|error| format!("cannot read {}: {error}", source.display()))?;
+    let entries = fs::read_dir(&source)
+        .map_err(|error| format!("cannot read {}: {error}", source.display()))?;
     for entry in entries {
         let entry = entry.map_err(|error| format!("cannot read {}: {error}", source.display()))?;
         let name = entry.file_name();
@@ -1160,7 +1194,11 @@ fn copy_directory(
         } else if metadata.is_file() {
             let target = copy.join(&path);
             fs::copy(entry.path(), &target).map_err(|error| {
-                format!("cannot copy {} to {}: {error}", entry.path().display(), target.display())
+                format!(
+                    "cannot copy {} to {}: {error}",
+                    entry.path().display(),
+                    target.display()
+                )
             })?;
         }
     }

@@ -276,7 +276,9 @@ impl Relocatable {
             bodies.into_iter().map(Mutex::new).collect();
         let results: Vec<Mutex<Option<Result<Compiled, Error>>>> =
             (0..count).map(|_| Mutex::new(None)).collect();
-        let workers = std::thread::available_parallelism().map_or(1, usize::from).min(count.max(1));
+        let workers = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(count.max(1));
         std::thread::scope(|scope| {
             for _ in 0..workers {
                 scope.spawn(|| {
@@ -322,10 +324,11 @@ impl Relocatable {
                 }
             }
             if code.relocations.iter().any(|relocation| {
-                matches!(relocation.target, Link::Unsupported)
-                    || !supported(relocation.kind)
+                matches!(relocation.target, Link::Unsupported) || !supported(relocation.kind)
             }) {
-                *function = Err(Error("the code needs a relocation the file has no slot for"));
+                *function = Err(Error(
+                    "the code needs a relocation the file has no slot for",
+                ));
             }
         }
         // A function that calls one left out is left out too, until nothing changes.
@@ -990,7 +993,9 @@ impl Lowering<'_, '_> {
             }
             Op::TableWord(slot) => {
                 if !self.table {
-                    return Err(Error("code for this module cannot load from an offset table"));
+                    return Err(Error(
+                        "code for this module cannot load from an offset table",
+                    ));
                 }
                 let global = match self.table_words.get(&slot) {
                     Some(&global) => global,

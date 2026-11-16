@@ -379,7 +379,7 @@ GNU R's `tests/*.R` pin behaviors that come from its machine or implementation, 
   counts and warnings move, not only digits.
 - **A GNU R killed by a signal** is `EngineError::Crashed` and the case is skipped with the build
   named (a hardened 4.6.2 aborts with "buffer overflow detected" on four graphics cases the reference
-  source build runs); a crashing second engine is a failure.
+  source build runs); a crashing ry engine is a failure.
 - The forced oracle runs ry on the live R's base, so on a 4.3.3 host it tests 4.3.3 emulation; set
   `ORACLE_R` to a 4.6.2 build.
 - **Last digits depend on libm and FMA contraction**: glibc's x86-64-v3 build rounds `hypot`
@@ -415,7 +415,7 @@ GNU R's `tests/*.R` pin behaviors that come from its machine or implementation, 
 
 - `crates/oracle/known_failures.toml` lists each case and engine main fails, with the area and a
   one-line reason (`provisional` while seen only on a branch). `oracle compare` (a comma-separated
-  engine list, one summary line per engine) and `second_engine_matches_gnu_r` report a listed
+  engine list, one summary line per engine) and `ry_matches_recorded_outcomes` report a listed
   failure as known and fail on an unlisted failure and on a listed case that passes, so a
   fix and its entry's deletion land together. Unknown engines, missing cases and duplicates are
   refused. `ry-jit-gctorture` (`RY_JIT=force` plus `RY_GC_STRESS=1`) is its own engine because a

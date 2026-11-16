@@ -90,6 +90,15 @@ impl Call<'_> {
         crate::eval::frame_env(self.frame as usize, crate::eval::Reify::Builtin(self.op))
     }
 
+    /// The position in the frame stack of the slot frame the call was made from, while that
+    /// frame has no environment.
+    pub unsafe fn slot_frame(&self) -> Option<usize> {
+        (self.rho == nil()
+            && self.frame != crate::NO_SLOTS
+            && crate::interp().frames[self.frame as usize].env == nil())
+        .then_some(self.frame as usize)
+    }
+
     /// What the calling slot frame's `...` slot holds, when the call was made from a slot frame
     /// that has no environment and a `...` formal; `None` otherwise, and then the caller's
     /// environment answers.
@@ -693,12 +702,14 @@ pub unsafe fn match_builtin_args(
                 format!(
                     "unused argument ({} = {})",
                     names[arg_index].as_deref().unwrap_or(""),
-                    crate::deparse::deparse_one_line(arg.value)
+                    crate::deparse::deparse_unused_argument(arg.value)
                 ),
             ));
         }
+        // An empty argument matched by name leaves its formal to a positional one, as for a
+        // closure (`eval::match_plan`).
         while formal_index < formals.len()
-            && (matched[formal_index].is_some() || formals[formal_index] == "...")
+            && (present(matched[formal_index]).is_some() || formals[formal_index] == "...")
         {
             if formals[formal_index] == "..." {
                 break;
@@ -715,7 +726,7 @@ pub unsafe fn match_builtin_args(
                 call,
                 format!(
                     "unused argument ({})",
-                    crate::deparse::deparse_one_line(arg.value)
+                    crate::deparse::deparse_unused_argument(arg.value)
                 ),
             ));
         }

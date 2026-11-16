@@ -1756,6 +1756,77 @@ pub unsafe fn try_builtin_dispatch(
     }
 }
 
+/// Where a builtin's caller looks S3 methods up.
+#[derive(Clone, Copy)]
+pub enum Caller {
+    Env(Sexp),
+    /// The slot frame whose slots the running byte code reads ([`crate::Interp::slot_owner`]),
+    /// which has no environment to search.
+    SlotFrame,
+}
+
+/// Whether a call of the internal generic `definition`, the primitive `op`, on `object` could
+/// run a method in place of the primitive's own code. A slot frame asks before it makes its
+/// environment, which only a method needs: the frame's variables are its slot names, and every
+/// other name resolves from the closure's enclosure. A `true` may be wrong, since any local
+/// named like a method counts whatever it holds, and the caller then dispatches as usual.
+pub unsafe fn has_internal_method(
+    definition: &BuiltinDef,
+    op: Sexp,
+    object: Sexp,
+    caller: Caller,
+) -> R<bool> {
+    if !object.is_object() {
+        return Ok(false);
+    }
+    let state = interp();
+    if object.has_gp(gp::S4_OBJECT)
+        && state.globals.allow_primitive_methods
+        && (crate::methods::first_units_pending()
+            || state
+                .globals
+                .primitive_methods
+                .get(&op.primitive_index())
+                .is_some_and(|entry| {
+                    matches!(entry.state, MethodsState::Has | MethodsState::NeedsReset)
+                }))
+    {
+        return Ok(true);
+    }
+    let generic = match definition.symbol {
+        _ if definition.name == "seq.int" => symbols().seq,
+        Some(symbol) => symbol,
+        None => values::install(definition.name)?,
+    };
+    let call_env = match caller {
+        Caller::Env(env) => env,
+        Caller::SlotFrame => {
+            let function = state.frames[state.slot_owner as usize].function;
+            let prefix = generic.car().bytes();
+            let method_like = |name: &Sexp| {
+                let name = name.car().bytes();
+                name.len() > prefix.len() && name[prefix.len()] == b'.' && name.starts_with(prefix)
+            };
+            if crate::bytecode::frame_slot_names(function)
+                .iter()
+                .any(method_like)
+            {
+                return Ok(true);
+            }
+            function.tag()
+        }
+    };
+    let classes = implicit_class(object)?;
+    let mut scope = method_scope(call_env, values::base_namespace())?;
+    for index in 0..length(classes) {
+        let name = method_name(generic, classes.element(index))?;
+        if lookup_in_scope(name, &mut scope)?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(lookup_in_scope(default_name(generic)?, &mut scope)?.is_some())
+}
+
 /// The arguments as promises that hold their values, with the call's expressions as code, as
 /// GNU R passes them to a method.
 unsafe fn promised_args(call: Sexp, args: &[Arg]) -> R<Args> {
