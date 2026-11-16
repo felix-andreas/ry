@@ -264,10 +264,10 @@ pub const LABEL_SLOTS: usize = 1024;
 /// What makes a call leave its fast path, one bit each: [`SUMMARY`] while anything needs every
 /// closure call to pass the profiling hooks (a profile summary, benchmark regions, the
 /// boundary-call recorder), [`CAPTURE`] while boundary calls are recorded, [`PROFILE_TICK`] once
-/// per `Rprof` interval, and the interpreter's own call observers ([`DEBUGGER`], [`MOVES`],
-/// [`NO_OBJECT_SYSTEMS`]). One byte lets a call test them all with one load ([`hooks`]). It is
-/// atomic because `Rprof`'s timer thread sets its bit; the R thread writes every other bit
-/// ([`set_hook`]).
+/// per `Rprof` sampling interval, and the interpreter's own observers of calls ([`DEBUGGER`],
+/// [`MOVES`], [`NO_OBJECT_SYSTEMS`]). They share one byte so a call tests all of them with a single
+/// load ([`hooks`]). The byte is atomic because `Rprof`'s timer thread sets its bit; every other
+/// bit is written by the R thread, by whatever changes the state the bit stands for ([`set_hook`]).
 static HOOKS: AtomicU8 = AtomicU8::new(0);
 /// The [`HOOKS`] bit [`enabled`] reads.
 pub const SUMMARY: u8 = 1;

@@ -87,7 +87,8 @@ pub struct CMethodDef {
 
 impl Drop for Dll {
     fn drop(&mut self) {
-        // SAFETY: both pointers come from `CString::into_raw` in `Dll::new` and are freed only here.
+        // SAFETY: both pointers come from `CString::into_raw` in `Dll::new` and are freed only
+        // here.
         unsafe {
             drop(CString::from_raw(self.c_path));
             drop(CString::from_raw(self.c_name));
@@ -317,7 +318,8 @@ fn fresh_copy(path: &str, generation: usize) -> ApiResult<(std::path::PathBuf, S
 ///
 /// The copy is cached under the rewrite's version and the original's path, size and modification
 /// time, so a package is rewritten and re-signed once, a reinstall gets a new copy, and a cache hit
-/// costs two `stat` calls; a library that needs no rewrite leaves an empty marker. The copy keeps
+/// costs two `stat` calls; a library that needs no rewrite leaves an empty marker, so it is not
+/// read again either. The copy keeps
 /// the original's file name, so dyld's messages name the library the user loaded. Links around it
 /// mirror the original's surroundings as far up as its `@loader_path` references and rpaths climb
 /// ([`mirror_surroundings`]), so dependencies found relative to the library are found from the

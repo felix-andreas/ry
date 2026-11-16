@@ -324,8 +324,9 @@ const PACKAGE_TIERINGS: [Tiering; 2] = [
 /// `ry run --aot` changes when typed functions compile and nothing a script can observe. Each seed
 /// writes a script of typed functions and runs it every way [`TIERINGS`] lists and as an `ry build
 /// --aot --exe` executable, and every run must end with the same exit code, stdout and stderr. A
-/// script whose meaning does not rest on its annotations also runs with them erased, and one whose
-/// definitions mean the same in a package also runs with them installed and attached, and sourced.
+/// script whose meaning does not rest on its annotations also runs with them erased, which must
+/// print the same, and one whose definitions mean the same in a package also runs with them
+/// installed and attached, and sourced.
 ///
 /// The scripts are built from shapes where compiling ahead differs from compiling at a first call:
 /// a call before its callee is defined, a name defined twice or rebound between calls, a definition
@@ -1069,9 +1070,9 @@ struct NativeProgram {
     source: String,
     /// Files the program reads from its working directory when it runs.
     siblings: Vec<PathBuf>,
-    /// Whether the program is written for strict mode, so it must report no error but the
-    /// `native` and `interpreted` findings of the functions its `# blocked:` header names. A program that is not
-    /// is left out when strict mode finds another error in it.
+    /// Whether the program is written for strict mode, so it must report no error but the `native`
+    /// and `interpreted` findings of the functions its `# blocked:` header names. A program that is
+    /// not is left out when strict mode finds another error in it.
     stated: bool,
 }
 
@@ -1083,7 +1084,8 @@ struct NativeProgram {
 /// finding, a declared boundary function, or one `NATIVE_CHECK_EXCEPTIONS` pins.
 ///
 /// A program under `tests/native` states in its header `# blocked: f, g` (the top-level functions
-/// that must get a finding) and `# boundary: h` (those with an R type in their signature). It runs
+/// that must get a finding) and `# boundary: h` (those with an R type in their signature, which the
+/// interpreter runs). It runs
 /// without strict mode, which refuses to run a program with an error, and the typed core compiles
 /// the same either way.
 #[test]
@@ -1501,10 +1503,11 @@ fn native_reads_leave_missing_arguments_to_the_interpreter() {
 ///
 /// A minor collection escalates only when old small objects fill the node limit to within a fifth
 /// of its minimum, about 25.6 MiB after start-up, so the last eight rounds' tables are held
-/// together with 10,000 small vectors each and are promoted before they die. The old generation
-/// then crosses that line about a third of the way through the loop, leaving room for base R's
-/// start-up heap to change size. No `gc()` runs inside the loop, because a major collection would
-/// empty the old generation; the final one guarantees a major collection.
+/// together with 10,000 small vectors each, so they outlive several minor collections and are
+/// promoted before they die. The old generation then crosses that line about a third of the way
+/// through the loop, leaving room for base R's start-up heap to change size. No `gc()` runs inside
+/// the loop, because a major collection would empty the old generation; the final one guarantees a
+/// major collection.
 #[test]
 fn identical_runs_make_identical_collections() {
     if let Some(reason) =
@@ -3112,7 +3115,8 @@ impl Journey {
                         "entry" => launch["stopOnEntry"] = json!(true),
                         "prelude" => launch["prelude"] = json!(value("R code")?),
                         "test" => launch["testName"] = json!(value("a test name")?),
-                        // `break 3` is a line of the program, `break R/file.R:3` one of another file.
+                        // `break 3` is a line of the program, `break R/file.R:3` one of another
+                        // file.
                         "break" => {
                             let place = value("a line")?;
                             let (file, line) = match place.rsplit_once(':') {

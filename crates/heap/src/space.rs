@@ -1,17 +1,24 @@
-//! The small-object space. Every object of at most 2 KiB lives in one reserved address range, cut
-//! into 64 KiB pages that each hold one size class. Page metadata lives outside the page, in dense
-//! bitmaps with a bit per slot (marked, allocated, owns memory to release on death), so marking an
-//! already-marked object or freeing a dead one touches no object memory. Marking an object for the
-//! first time also sets its header's `OLD` bit for the write barrier; the collector scans it next,
-//! so the header is about to be in cache anyway. An object ages one generation per collection that
-//! marks it, as in GNU R: a deeper collection sets `TENURED` on a survivor already old, and a
-//! per-page tenured bitmap mirrors it so an intermediate collection can unmark the younger old
-//! generation with word operations.
+//! The small-object space. Every object of at most 2 KiB lives in one reserved range of address
+//! space, cut into 64 KiB pages, and each page holds the slots of one size class. A page's
+//! metadata lives outside the page, in dense per-page bitmaps with one bit per slot: whether the
+//! slot is marked, whether it is allocated, and whether its object owns memory that must be
+//! released when it dies. The collector tests and sets marks, and sweeps a page, with word
+//! operations on those bitmaps, so neither marking an already-marked object nor freeing a dead
+//! one touches the object's own memory. Marking an object for the first time also sets its
+//! header's `OLD` bit, which the write barrier reads; the collector scans that object next, so
+//! the header is about to be in cache anyway. An object ages one generation per collection that
+//! marks it, as in GNU R: an intermediate or major collection sets the `TENURED` bit of a survivor
+//! that was already old, and a per-page tenured bitmap records the same slots so that an
+//! intermediate collection can unmark the younger old generation with word operations.
 //!
-//! Allocation bumps a pointer: a size class's cursor claims a run of free slots (a whole fresh or
-//! emptied page) and hands out one per allocation. A sweep first gives back the slots a cursor
-//! claimed but never handed out, so they count as free rather than freed. Objects never move, which
-//! the C API requires, and a mark is sticky between collections, so a marked object is old.
+//! Allocation bumps a pointer. The cursor of a size class claims a run of consecutive free slots
+//! in the allocated bitmap, which on a fresh or emptied page is the whole page, and then hands
+//! out one slot per allocation by adding the slot size to its pointer. A sweep first gives back
+//! the slots a cursor claimed but never handed out, so they count as free rather than as freed
+//! objects.
+//!
+//! Objects never move, which the C API requires, and a mark is sticky between collections, so a
+//! marked object is an old one.
 
 use {
     crate::{
@@ -1069,11 +1076,12 @@ impl Space {
         self.locate(object).is_some()
     }
 
-    /// Moves each object of `order` (small, marked, unpinned) into a slot of its class laid out in
-    /// that order, and returns the moves as `(from, to)`. A class fills the free slots of pages
-    /// that keep an object first, in page order, then emptied and new pages, so an object's page
-    /// follows the order of the objects that first needed it. Every collection bit moves with its
-    /// object; the caller points every reference at the new addresses.
+    /// Moves each object of `order`, which are small, marked and unpinned, into a slot of its
+    /// class laid out in that order, and returns each move as `(from, to)`. The first objects of
+    /// a class fill the free slots of the pages that keep an object, in page order; the rest go
+    /// to the emptied and then to new pages, a page taken whenever a class needs one, so an
+    /// object's page follows the order of the objects that first needed it. Every collection
+    /// bit moves with its object; the caller points every reference at the new addresses.
     pub unsafe fn compact_for_image(&mut self, order: &[Sexp]) -> Vec<(Sexp, Sexp)> {
         self.release_cursors();
         release_runs(&mut self.parked_cursors, &mut self.allocated, self.base);

@@ -1,20 +1,26 @@
-//! The object model. Every R value is a heap object behind a [`Sexp`] handle, the raw, non-moving
-//! pointer native code receives as a C `SEXP`. Every object starts with a [`Header`], followed by:
+//! The object model. Every R value is a heap object behind a [`Sexp`] handle, which is the raw,
+//! non-moving pointer that native code receives as a C `SEXP`.
 //!
-//! - for a vector (`CHARSXP`, the atomic vectors, `STRSXP`, `VECSXP`, `EXPRSXP`), its length, its
-//!   capacity and its elements inline, so `INTEGER(x)` is an interior pointer;
-//! - for a triple (pairlists, calls, closures, promises, symbols, binding cells, ALTREP instances),
-//!   three handles, which are `CAR`, `CDR` and `TAG` for a pairlist;
-//! - for an environment, its frame and enclosure; for an external pointer, its address, tag and
-//!   protected value; for a weak reference, its key, value and finalizer; for a primitive, its
-//!   index;
-//! - for a ry record, tuple or tag, its interned layout id, its slot count, a mask of the slots
-//!   that hold raw numbers, and its eight-byte slots.
+//! Every object starts with a [`Header`]. What follows depends on the object's shape:
 //!
-//! A ry `I64` is a vector of its own type ([`SexpType::I64`]) with `REALSXP`'s layout, so a single
-//! `I64` is a length-one vector and a `List<I64>` is the same object with the Array flag set. The
-//! accessors are `unsafe` because a handle is valid only while its object is reachable from a root;
-//! holding one unrooted across an allocation is a bug the GC stress tests exist to catch.
+//! - a vector (`CHARSXP`, the atomic vectors, `STRSXP`, `VECSXP`, `EXPRSXP`) stores its length,
+//!   its capacity and then its elements inline, so `INTEGER(x)` is an interior pointer;
+//! - a triple (pairlists, calls, closures, promises, symbols, binding cells, ALTREP instances)
+//!   stores three handles, which are `CAR`, `CDR` and `TAG` for a pairlist;
+//! - an environment stores its frame and its enclosure;
+//! - an external pointer stores its address, tag and protected value;
+//! - a weak reference stores its key, value and finalizer;
+//! - a primitive stores its index in the primitive table;
+//! - a ry record, tuple or tag stores its interned layout id, its slot count, a mask of the
+//!   slots that hold raw numbers, and then its eight-byte slots.
+//!
+//! A ry `I64` is a vector of its own type ([`SexpType::I64`]) with `REALSXP`'s layout: eight bytes
+//! per item, inline after the length and capacity. A single `I64` is a length-one vector, and a
+//! `List<I64>` is the same object at any length with the Array flag set.
+//!
+//! The accessors are `unsafe` because a handle is only valid while its object is reachable from a
+//! root. Holding one across an allocation without rooting it is a bug, and the GC stress tests
+//! exist to catch it.
 
 use {
     crate::env::Frame,
@@ -480,8 +486,8 @@ pub(crate) mod flag_bits {
     /// The object's fields do not count as references (GNU R's `DISABLE_REFCNT`), as for the
     /// `*tmp*` value of a complex assignment, which must not make the target look shared.
     pub const UNTRACKED: u8 = 1 << 3;
-    /// A ry Array: an attribute-free, NA-free vector built by `[...]` or `List.from_r`. The bit lives
-    /// here, not in the general-purpose bits, so C code reading `LEVELS` never sees it.
+    /// A ry Array: an attribute-free, NA-free vector built by `[...]` or `List.from_r`. The bit
+    /// lives here, not in the general-purpose bits, so C code reading `LEVELS` never sees it.
     pub const ARRAY: u8 = 1 << 4;
     /// A list of `(key, value)` pairs that keeps neither alive: a collection that finds either
     /// dead sets both slots of its pair to `NULL`.

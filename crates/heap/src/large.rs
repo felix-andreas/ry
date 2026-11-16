@@ -21,12 +21,14 @@ pub(crate) const MAPPED_BYTES: usize = 1 << 20;
 pub(crate) struct MappedPool {
     mappings: Vec<Mapping>,
     bytes: usize,
-    /// The most bytes kept, which [`crate::Heap`] keeps at its vector limit. The pool maps nothing
-    /// while it holds a mapping, so what it keeps never lifts the peak above the most bytes large
-    /// vectors took at once; the limit only bounds idle memory after a peak. A smaller limit costs
-    /// time without lowering the peak: at half the vector limit, the 40 MB `1:n` of a
-    /// ten-million-element `for` loop was unmapped after every call and faulted in again by the
-    /// next.
+    /// The most bytes kept, which [`crate::Heap`] keeps at its vector limit. The pool maps
+    /// nothing while it holds a mapping, so what it keeps never lifts the peak above the most
+    /// bytes the large vectors took at once; its limit only bounds the memory left idle after
+    /// such a peak. A smaller limit costs time without lowering the peak: at half the vector
+    /// limit, with a minimum of 32 MB, the 40 MB `1:n` a `for` loop over ten million elements
+    /// expands was unmapped after every call and faulted in again by the next, and a loop of
+    /// 8 MB vector arithmetic, which frees four temporaries between allocations, kept only two
+    /// at a quarter.
     pub limit: usize,
 }
 

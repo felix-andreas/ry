@@ -34,18 +34,26 @@ const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 #[cfg(target_os = "linux")]
 const PURGE_DELAY_MS: std::ffi::c_long = 1_000_000_000;
 
-/// Two allocator defaults, set from a load-time constructor because mimalloc reads them whenever it
-/// reserves an arena or considers a purge. `MIMALLOC_ARENA_EAGER_COMMIT` and `MIMALLOC_PURGE_DELAY`
-/// override them, and `crates/ry/src/main.rs` sets the first for the `ry` binary too.
+/// Two allocator defaults, set from a constructor that runs when the library loads because
+/// mimalloc reads them each time it reserves an arena or considers a purge. The environment
+/// variables `MIMALLOC_ARENA_EAGER_COMMIT` and `MIMALLOC_PURGE_DELAY` still override them.
 ///
-/// Eager commit is off because an eagerly committed arena is backed by transparent huge pages,
-/// which the kernel zeroes in full and compacts memory to find: planning a large package on every
-/// core took twice as long, and `rbindlist` on 1e7 rows went from one second to six after purged
-/// arenas. The purge delay is [`PURGE_DELAY_MS`] because the default 10 ms returns churned pages to
-/// the kernel to be zeroed again (`clear_page_erms` was 15% of the benchmark profile). It is not
-/// negative, because mimalloc schedules a purge only for a non-negative delay, and the forced
-/// `mi_collect` behind `gc()` and a dropped large table carry out scheduled purges, returning
-/// memory as GNU R's `gc()` does.
+/// An eagerly committed arena is backed by transparent huge pages, which the kernel zeroes in full
+/// when they are first touched or faulted back in after a purge, compacting memory to find them.
+/// Loading a package plans it on every core and every new arena paid for that zeroing, which made
+/// the plan of a large package take twice as long and vary from run to run; data.table's
+/// `rbindlist` on 1e7 rows went from about one second to six once earlier work had left purged
+/// arenas behind. The `ry` binary sets the same option for its own allocator in
+/// `crates/ry/src/main.rs`.
+///
+/// By default mimalloc also returns memory that stays free for 10 ms to the kernel, which zeroes
+/// each page again when it is next touched. Short-lived R values are freed and reallocated every
+/// few milliseconds, so on the benchmark tests that zeroing (`clear_page_erms`) was 15% of the
+/// profile. The delay is therefore [`PURGE_DELAY_MS`], long enough that no purge ever comes due on
+/// its own, but not "never" (a negative delay): mimalloc schedules a purge only when the delay is
+/// non-negative, and a scheduled purge is what the forced `mi_collect` behind `gc()` and a dropped
+/// large table carries out. So freed memory is reused while R code runs and returned to the kernel
+/// when the program asks for a collection, as GNU R's `gc()` returns it.
 #[cfg(target_os = "linux")]
 #[used]
 #[unsafe(link_section = ".init_array")]

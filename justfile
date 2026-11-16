@@ -224,9 +224,9 @@ memory *args:
     python3 -I tools/memory.py {{ args }}
 
 # Fails when a Rust file has more over-long, banner or process-history comments than its baseline,
-# e.g. `just comments report` for the worst blocks or `just comments baseline` after shortening some.
-comments mode="check":
-    python3 -I tools/comments.py {{ mode }}
+# e.g. `just comments report 20` for the worst blocks or `just comments baseline` after shortening some.
+comments *args="check":
+    python3 -I tools/comments.py {{ args }}
 
 # Regenerates what the READMEs show: the benchmark blocks and chart from the committed results files,
 # and the diagnostic panels docs/public/diagnostic*.svg from real `ry check` runs on the README's examples.

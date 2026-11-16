@@ -13,15 +13,18 @@
 //!
 //! The reader decodes everything GNU R writes, but three things come back in another shape on
 //! purpose. Bytecode reads as the expression it was compiled from (the constant pool's first
-//! constant), since ry does not run GNU R's bytecode. ALTREP objects of base R's classes read as
-//! the vectors they stand for; other classes need their package's class table, which
+//! constant), so a compiled closure's body is its AST, since ry does not run GNU R's bytecode.
+//! ALTREP objects of base R's classes (compact sequences, deferred strings, wrappers) read as the
+//! vectors they stand for; other classes need their package's class table, which
 //! [`unserialize_altrep`] marks, and until it exists they read as a zero-length vector with a
 //! warning, as GNU R does for an unregistered class. Namespace and package environments are written
 //! as names and resolved through [`set_environment_resolver`]'s hook, whose default
-//! ([`default_resolver`]) looks in the namespace registry, else records a reused placeholder.
+//! ([`default_resolver`]) looks in the namespace registry, else records a placeholder that every
+//! later reference to the same name in the session resolves to.
 //!
-//! The writer writes a frame as a pairlist, newest binding first (GNU R's unhashed layout), and an
-//! ALTREP object as its vector, since ry's ALTREP classes record no class name or serialized state.
+//! The writer writes a frame as a pairlist, newest binding first (GNU R's unhashed layout), which
+//! GNU R reads back unchanged, and an ALTREP object as its vector, since ry's ALTREP classes record
+//! no class name or serialized state.
 
 use {
     crate::{

@@ -1,7 +1,9 @@
-//! The `R_alloc` arena: transient memory native code borrows until the `.Call`, `.C` or `.External`
-//! call that allocated it returns, or until `vmaxset` releases it earlier, so it is a stack of
-//! nested watermarks. It bumps through fixed-size chunks, and a request too large for one gets a
-//! chunk of its own, so a watermark is a chunk count and an offset into the last chunk.
+//! The `R_alloc` arena: transient memory that native code borrows for the duration of a foreign
+//! call. R frees it when the `.Call`, `.C` or `.External` call that allocated it returns, and
+//! `vmaxget`/`vmaxset` let code release it earlier, so it is a stack of nested watermarks.
+//!
+//! The arena bumps through fixed-size chunks. A request too large for a chunk gets a chunk of its
+//! own, so a watermark is just a chunk count and an offset into the last chunk.
 
 use std::{alloc::Layout, ptr::NonNull};
 

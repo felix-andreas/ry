@@ -284,13 +284,15 @@ explains why the code is written as it is, and only when the reason is not obvio
 (part of `just gate`) runs `tools/comments.py check`, which flags a `//` or `///` block longer
 than 12 lines, a `//!` module doc longer than 25, a banner (`// ----`, `// ==== Section ====`), a
 section heading (a short `// Allocation.` line between blank lines), and process words such as a
-milestone, a pull request number or a commit hash. A license header at the top of a file is exempt,
+milestone, a pull request number or a hash cited as a commit. A license header at the top of a file is exempt,
 as are `patches/` and `target/`.
 
 The check is a ratchet: `tools/comments-baseline.txt` lists the files still allowed some violations.
 A file over its count fails. A file under its count also fails, with a hint to run
 `python3 tools/comments.py baseline` so the count shrinks. `python3 tools/comments.py report` lists
-the worst blocks with their file, line and size.
+the worst blocks with their file, line and size. A block whose facts do not fit the limit stays over
+it and is carried by the baseline: shortening a comment must never drop a reason, an invariant or a
+measured cost.
 
 ## Agent memory layout
 

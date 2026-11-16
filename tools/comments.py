@@ -28,9 +28,15 @@ BASELINE = os.path.join(ROOT, "tools", "comments-baseline.txt")
 SKIP = ("patches/", "target/")
 BLOCK_LIMIT = {"//": 12, "///": 12, "//!": 25}
 
+# A hash counts only where it reads as a commit reference, so hex constants pass; `M1` counts
+# unless it names an Apple chip.
+HASH = r"(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{7,40}"
 PROCESS = re.compile(
-    r"\b[Pp]hase \d|\bM\d\b|\bthe spike\b|\bthe cutover\b|\b[Pp]reviously\b|\bused to (?:be|panic|fail|ask|crash|return)\b"
-    r"|\bpull request #?\d|(?<![\w&%#R])#\d{2,}\b|\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{7,40}\b(?![-+.]\d)"
+    r"\b[Pp]hase \d|(?<!Apple )\bM\d\b(?! (?:chip|Mac|Pro|Max|Ultra))|\bthe spike\b|\bthe cutover\b"
+    r"|\b[Pp]reviously\b|\bused to (?:be|panic|fail|ask|crash|return)\b"
+    r"|\bpull request #?\d|(?<![\w&%#R])#\d{2,}\b"
+    rf"|\b(?:[Cc]ommit|cherry-pick(?:ed)?|[Rr]evert(?:ed|s)?|fixed in|landed in)\s+`?{HASH}\b"
+    rf"|`{HASH}`"
 )
 BANNER = re.compile(r"^//[/!]?\s*(?:[-=*#~_/]{4,}|.*\s[-=*#~]{3,}\s*$)")
 COMMENT = re.compile(r"^\s*(//!|///(?!/)|//)(.*)$")

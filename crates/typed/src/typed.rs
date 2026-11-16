@@ -2,7 +2,8 @@
 //! into machine code over them.
 //!
 //! A call of a typed closure from R reaches [`call`], which compiles the closure once for the
-//! argument values' types, converts the arguments to native values, runs the code and converts its
+//! argument values' types (lowering its body to the IR, inserting the reference counts and
+//! generating code), converts the arguments to native values, runs the code and converts its
 //! value back. What the compiler cannot handle, and every call whose code gives up partway, runs in
 //! the interpreter when [`call`] returns `None`. Code gives up before anything it did is visible,
 //! so rerunning from the start is correct, except after it called an R function ([`ry_call_r`]),

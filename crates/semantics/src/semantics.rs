@@ -161,17 +161,20 @@ pub type SyntaxStamp = u64;
 /// The stamp of an item that has no node.
 const NO_STAMP: SyntaxStamp = 0;
 
-/// The syntax trees a host holds, at most one per file. Trees live here rather than in query memos
-/// because an edit reparses by splicing the file's previous tree, which a memo has dropped by then,
-/// and because how long a tree stays is the host's choice: an editor keeps every tree for position
-/// requests, while a one-shot check keeps each worker's file ([`TreeStore::hold`]) and a few more,
-/// bounding memory by thread count instead of project size. A dropped tree is parsed again on the
-/// next read, and a spliced or repeated parse is byte- and error-identical to a fresh one, so
-/// capacity changes only time and memory.
+/// The syntax trees a host holds, one per file at most. Trees live here rather than in query
+/// memos for two reasons. An edit reparses by splicing the file's previous tree, which a memo
+/// has already dropped by the time the query runs again. And how long a tree stays is the
+/// host's choice, not the analysis's: an editor session keeps every tree, because position
+/// requests read them at any time, while a command that checks once keeps the tree of each file
+/// a worker holds ([`TreeStore::hold`]) and a few more, which bounds its memory by its thread
+/// count instead of the project.
 ///
-/// Files are spread over shards with a lock each, and a parse runs outside every lock. A worker
-/// that asks for a file another worker is parsing waits for that tree instead of parsing a second
-/// one.
+/// A dropped tree is parsed again on the next read, so capacity changes time and memory only:
+/// a spliced or repeated parse is byte- and error-identical to a fresh one.
+///
+/// Files are spread over shards with a lock each, so workers reading different files rarely
+/// meet, and a parse runs outside every lock. A worker that asks for a file another worker is
+/// parsing waits for that tree instead of parsing a second one.
 pub struct TreeStore {
     shards: [Shard; SHARD_COUNT],
     capacity: usize,

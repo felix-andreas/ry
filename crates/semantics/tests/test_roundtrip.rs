@@ -13,15 +13,21 @@ use {
 };
 
 /// `id :: name` schemes known not to round-trip. Keep it to schemes whose written-back form is
-/// checked on purpose where inference is more permissive: a `NULL` default (a placeholder when
-/// inferred); a scalar parameter taking a vector or a number, or a vector parameter passed to a
-/// scalar one; a callback shape inferred from calls, which lets a later call name its slots or omit
-/// an argument an earlier call passed; a callback called with two arities after testing
-/// `formals()`; a formal read as a value and also handed to `match.fun`; an argument the callee
-/// only substitutes; a parameter tested with `missing()`, to which a caller may forward its own
-/// missing formal; and a bare `return(NA)`, which takes the other returns' type when inferred. A
-/// return that a flag's default selects has no annotation syntax, so the declared form returns both
-/// branches.
+/// checked on purpose: an inferred `NULL` default passes on as a placeholder, while the same `NULL`
+/// once declared is checked at the call, and an inferred scalar parameter takes a vector or a
+/// number that the same scalar once declared rejects, and an inferred vector parameter passes to a
+/// scalar parameter that the same vector once declared does not. A callback shape inferred from a
+/// call lets a later call name its slots, while the same shape once declared has no names to match.
+/// A callback the body calls with two arities after testing `formals()` has no single declared
+/// shape that admits both calls. A return that a flag's default selects has no annotation syntax,
+/// so the declared form returns both branches. A formal that is read as a value and also handed to
+/// `match.fun` keeps an open type when inferred, while the declared form pins it to the function
+/// `match.fun` expects. An argument the callee only substitutes is unchecked at an inferred call,
+/// while the declared parameter type is checked. A parameter the body tests with `missing()` lets a
+/// caller forward its own missing formal there, which a declared default does not. A bare
+/// `return(NA)` takes the type of the other returns when inferred, while a declared return type
+/// checks it as `logical`. A callback shape inferred from calls lets a later call omit an argument
+/// an earlier call passed, while the declared shape requires it.
 const KNOWN_UNWRITABLE: [&str; 21] = [
     "semantics/tests/typing::correct_r__a_formal_used_as_a_vector_passes_a_scalar_parameter :: unpack",
     "semantics/tests/typing::correct_r__a_null_default_is_a_placeholder_at_a_numeric_parameter :: solve",

@@ -6801,7 +6801,8 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// callee may leave unread: optional without a default, or tested with `missing()` (knitr's
     /// `kable_format(format = NULL)`). A missing formal passed on does not take the callee's
     /// default, so a defaulted parameter read without a test still errors. Names match exactly, the
-    /// rest fill the unclaimed formals before `...` in order, and an unknown callee yields none. A
+    /// rest fill the unclaimed formals before `...` in order, and an unknown callee yields none, so
+    /// its arguments stay forced. A
     /// local function already bound counts too (callr's `format_advice(x)` hands `x` to a helper
     /// that never reads it).
     fn optional_argument_targets(
@@ -15171,7 +15172,8 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// Binds a type variable that several parameters share (`<T> fn(first: T, second: T)`, or
     /// `list[T]` and `Array<T>` items) to the join of the arguments before any is checked. Checking
     /// in order would bind `T` to the first and reject a wider second, so `Bool.is_eq(:Red, light)`
-    /// with `light: :Red | :Green` would fail where the reversed call passes. The join stays sound:
+    /// with `light: :Red | :Green` would fail where the reversed call passes. Joining first is
+    /// order-independent and sound:
     /// every argument fits it, and a contravariant use (`f: fn(T) -> U`) is still checked against
     /// it. Tags join to their union and numbers to R's arithmetic promotion; any other pair, such
     /// as `integer` and `character`, is a real mistake left to the argument checks.
@@ -15421,10 +15423,10 @@ impl<'db, 'a> Checker<'db, 'a> {
 
     /// A variable assigned from a `switch` without a default, an `if` without `else` or a helper
     /// that returns `NULL` on some path is presumably not `NULL` where it is passed on (rlang's
-    /// `type <- switch(type, ...)` feeds `sprintf(type, kind)`). So such an argument drops its
-    /// `NULL` when the parameter's type is settled or bounded and admits none, as does an
-    /// undeclared formal's `NULL` from a `NULL` default or an `is.null()` test. A declared
-    /// parameter's or annotated assignment's `NULL` stays.
+    /// `type <- switch(type, ...)` feeds `sprintf(type, kind)` after every type has an arm). So
+    /// such an argument drops its `NULL` when the parameter's type is settled or bounded and admits
+    /// none, as does an undeclared formal's `NULL` from a `NULL` default or an `is.null()` test. A
+    /// declared parameter's or annotated assignment's `NULL` stays.
     fn without_inferred_null(&self, expected: Ty<'db>, ty: Ty<'db>) -> Ty<'db> {
         let expected = self.table.resolve(self.db, expected);
         let admits_null = |ty: Ty<'db>| match ty.kind(self.db) {
@@ -17152,13 +17154,13 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
-    /// `Reduce(f, x)` with a non-overloaded function, named or picked by an `if`. The accumulator
-    /// takes whatever `f` returns, so its type is the join of the start and every return
-    /// (`function(x, y) if (identical(x, y)) x` folds to `T | NULL`); the stub's `fn(U, T) -> U`
-    /// cannot widen, so the fold iterates until the accumulator stops growing. A failing step is
-    /// reported as is, otherwise only the last step's findings are kept. A function closing over
-    /// the enclosing function's open variables keeps the stub's typing, since iterating would pin
-    /// them to every step.
+    /// `Reduce(f, x)` with a non-overloaded function, named or picked by an `if`. R hands `f` the
+    /// accumulator and each element in turn, and the accumulator takes whatever `f` returns, so its
+    /// type is the join of the start and every return (`function(x, y) if (identical(x, y)) x`
+    /// folds to `T | NULL`); the stub's `fn(U, T) -> U` cannot widen, so the fold iterates until
+    /// the accumulator stops growing. A failing step is reported as is, otherwise only the last
+    /// step's findings are kept. A function closing over the enclosing function's open variables
+    /// keeps the stub's typing, since iterating would pin them to every step.
     fn infer_reduce_fold(
         &mut self,
         id: ExprId,
@@ -18200,11 +18202,12 @@ impl<'db, 'a> Checker<'db, 'a> {
             } else {
                 right_resolved
             };
-            // Only an unconstrained variable is protected, so recursion converges, including one
-            // nested in a list (sessioninfo's `if (identical(dp, FALSE)) list(character(),
-            // character()) else list(dp, dp)` leaves `dp` open). A bounded one is protected from
-            // types outside its bound's atomic scalars and vectors: mgcv's `if (is.null(L)) rho +
-            // rho0 else L %*% rho + rho0` must not demand a matrix `rho`.
+            // Only an unconstrained variable is protected: pinning an already-restricted one adds
+            // no new requirement and lets recursion converge. One nested in a list is protected
+            // too: sessioninfo's `if (identical(dp, FALSE)) list(character(), character()) else
+            // list(dp, dp)` leaves `dp` open. A bounded one is protected from types outside its
+            // bound's atomic scalars and vectors: mgcv's `if (is.null(L)) rho + rho0 else L %*% rho
+            // + rho0` must not demand a matrix `rho`.
             let closed = if left_open {
                 right_resolved
             } else {

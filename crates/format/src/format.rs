@@ -195,18 +195,33 @@ pub fn format_edits(source: &str, config: Config) -> Result<Vec<TextEdit>, Forma
         .collect())
 }
 
-/// The edits that lay out the lines `selection` touches exactly as formatting the whole file lays
-/// them out at the file's own indentation, leaving every other line byte for byte as it was.
+/// The edits that lay out the lines `selection` touches exactly as formatting
+/// the whole file lays them out at the file's own indentation, leaving every
+/// other line of the file byte for byte as it was.
 ///
-/// The text put in is cut out of the whole file's formatted form, which makes the two agree by
-/// construction: formatting the slice alone would lose what decides its layout, such as its
-/// indentation depth, a `# fmt: off` region opened above it, a `# fmt: skip-file` header and the
-/// file's line endings. That form is indented by the file's own step ([`format_in_place`]), not
-/// `indent-width`, because a selection asks to tidy code where it sits; re-indenting is what
-/// whole-file formatting is for. The selection widens to whole lines and a statement is laid out as
-/// one unit, so the only unselected lines that change belong to a statement the selection reaches
-/// into. Edits are ordered and never overlap or share an offset with an insertion, so a client may
-/// apply them in any order. A file that does not parse refuses, as whole-file formatting does.
+/// The text put in is *cut out of* the whole file's formatted form rather than
+/// produced by formatting the selected text on its own, and that is what makes
+/// the two agree by construction. Formatting a slice would lose everything
+/// about the slice's surroundings that decides its layout: the indentation
+/// depth it sits at, a `# fmt: off` region opened above it, a
+/// `# fmt: skip-file` header, and the line endings the rest of the file uses.
+///
+/// That whole-file form is indented by the step the file already uses
+/// ([`format_in_place`]), not by `indent-width`. A selection is a request to
+/// tidy some code where it sits: laid out at the configured width inside a
+/// file indented by four spaces or tabs, the selected lines would come out at
+/// a different depth from the unselected lines beside them. Re-indenting the
+/// file is what formatting the whole file is for.
+///
+/// The selection widens to whole lines, and a statement is laid out as one
+/// unit, so a line just outside the selection can still change when it belongs
+/// to a statement the selection reaches into. That is the only way an
+/// unselected line changes.
+///
+/// Edits are ordered, and never overlap or share an offset with an insertion,
+/// so a client may apply them in any order. A file that does not parse refuses
+/// exactly as whole-file formatting refuses: a slice of a file whose structure
+/// is unknown has no trustworthy layout either.
 pub fn format_range(
     source: &str,
     config: Config,
@@ -232,15 +247,19 @@ pub fn format_range(
         .collect())
 }
 
-/// `source` formatted as a whole, but with one level of indentation being the step the file already
-/// uses rather than `indent-width`. A formatted selection is cut from this text.
+/// `source` formatted as a whole, but with one level of indentation being
+/// the step the file already uses rather than `indent-width`. A formatted
+/// selection is cut from this text.
 ///
-/// The step is read off the statements the formatter places: a statement at level `n` that the
-/// source indents by `n` copies of one string votes for that string, and the commonest wins (the
-/// first seen on a tie). Levels come from the file's structure, never its indentation, so
-/// formatting part of the file can only re-indent statements by the winning step, which adds to its
-/// lead; that keeps a formatted selection from changing the step the rest of the file is formatted
-/// with. A file with no indented statement has no step of its own and gets `indent-width`.
+/// The step is read off the statements the formatter places: a statement it
+/// puts at level `n` and that the source indents by `n` copies of one string
+/// is a vote for that string, and the commonest wins (the first seen on a
+/// tie). Levels come from the file's structure, never from its indentation,
+/// so formatting part of the file cannot move a statement to another level;
+/// it can only re-indent statements by the winning step, which adds to its
+/// lead. That is what keeps formatting a selection from changing the step
+/// the rest of the file is then formatted with. A file with no indented
+/// statement to read has no step of its own and gets `indent-width`.
 fn format_in_place(source: &str, config: Config) -> Result<String, FormatError> {
     let configured = " ".repeat(config.indent_width);
     let configured_layout = layout(source, config, &configured)?;
@@ -417,17 +436,26 @@ fn changed_spans(source: &str, formatted: &str) -> Vec<(TextRange, TextRange)> {
     spans
 }
 
-/// Where each statement of `source` starts, paired with where the statement holding the same code
-/// starts in `formatted`, in source order.
+/// Where each statement of `source` starts, paired with where the statement
+/// holding the same code starts in `formatted`, in source order.
 ///
-/// Statements are the unit because they are the only thing this formatter lays out independently:
-/// it breaks a call or a block by that construct's own line structure, so swapping a formatted
-/// argument into a half-formatted call can produce text neither form contains, while a statement
-/// starts its own line at a fixed indent. Statements nest, so selecting one line of a long function
-/// rewrites only its statement. The walk descends only while the two nodes have the same children
-/// in the same order, so it never pairs constructs that are not each other: bracing a bare `if`
-/// body adds a node the source lacks, so the walk stops at the `if`, and the difference belongs to
-/// the `if` as a whole.
+/// Statements are the unit because they are the only thing this formatter lays
+/// out independently: it decides how to break a call or a block from that
+/// construct's *own* line structure, so swapping a formatted argument into a
+/// half-formatted call can flip the decision for the whole call and produce
+/// text neither form contains. Whole statements have no such coupling: every
+/// one starts its own line at a fixed indent, and nothing above it decides how
+/// it breaks. That is exactly the property that lets a selection be formatted
+/// at all. They nest, so a statement inside a function body is a unit of its
+/// own and selecting one line of a long function still rewrites only that
+/// line's statement.
+///
+/// The walk descends only while the two nodes have the same children in the
+/// same order, so it cannot pair up constructs that are not each other. That is
+/// what rules out the formatter's structural rewrites: bracing a bare `if` body
+/// wraps it in a node the source has no counterpart for, and the walk stops at
+/// the `if` rather than pairing its body with the new block, so the difference
+/// then belongs to the `if` as a whole, which is the only way to describe it.
 fn paired_statements(
     source: &SyntaxNode,
     formatted: &SyntaxNode,
@@ -564,16 +592,25 @@ pub fn check_format_invariants(input: &str) {
 }
 
 /// The fuzz invariant battery for range formatting over one input, swept across a bounded,
-/// deterministic set of selections, each of which must hold: determinism, and refusal exactly when
-/// whole-file formatting refuses; geometry (edits are ordered, disjoint, whole lines, in bounds);
-/// preservation of every token; convergence (the result formats as the original does, as a whole
-/// file and in place, meaning at the file's own indentation); restriction (every edit is one that
-/// formatting in place would make); completeness (selecting the whole file reproduces formatting in
-/// place, and whole-document edits reproduce whole-file formatting, byte for byte); stability
-/// (formatting the selection again is a no-op); additivity (a selection of whole lines makes the
-/// edits its lines make one at a time); and composition (formatting one line at a time, swept until
-/// nothing changes, reaches formatting in place, and every step still formats to it). Additivity
-/// and composition re-run range formatting per line, so they run on small inputs only.
+/// deterministic set of selections. "In place" is the whole file formatted at its own indentation,
+/// which a selection is cut from. Every selection must hold:
+///
+///  1. determinism, and refusal exactly when whole-file formatting refuses;
+///  2. geometry: edits are ordered, disjoint, whole lines, and in bounds;
+///  3. preservation: applying them keeps every token;
+///  4. convergence: the result formats as the original does, whole and in place, the property
+///     that makes formatting a selection safe to do repeatedly and in any order;
+///  5. restriction: every edit is one formatting in place would make, so a selection can only
+///     ever do less, never something else;
+///  6. completeness: selecting the whole file reproduces formatting in place, and whole-document
+///     edits reproduce whole-file formatting, byte for byte;
+///  7. stability: formatting the same selection again is a no-op;
+///  8. additivity: a selection of whole lines makes exactly the edits its lines make one at a
+///     time, so the result never depends on how a region was selected;
+///  9. composition: formatting one line at a time, top to bottom until a sweep changes nothing,
+///     reaches formatting in place, and every step still formats to it.
+///
+/// Additivity and composition re-run range formatting per line, so they run on small inputs only.
 pub fn check_range_format_invariants(input: &str) {
     let config = Config::default();
     let whole_file = format(input, config);

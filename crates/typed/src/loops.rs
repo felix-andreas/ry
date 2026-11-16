@@ -7,7 +7,8 @@
 //! ```
 //!
 //! lowers to three counted loops and two lists, but the bodies can run in one loop with neither
-//! list, after which [`crate::unbox`] replaces the items' boxes. A list is fused away when:
+//! list. Once no list holds them, the results and records the items were boxed in never leave the
+//! function, and [`crate::unbox`] replaces them with their fields. A list is fused away when:
 //!
 //! - One counted loop, the producer, fills it once per iteration: a `Push` onto a list that starts
 //!   empty, or a `Set` at its own counter into a list as long as the one it counts over. Making the

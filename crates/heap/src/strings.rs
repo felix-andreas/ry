@@ -423,10 +423,11 @@ impl StringTable {
 
     /// Re-places every live entry into the smallest power-of-two table they fill to at most 5/8,
     /// which drops the tombstones. Growth at 7/8 then keeps the table between 5/16 and 7/8 full,
-    /// close to GNU R's chained table, which grows at 0.85. A probe for an absent string near the
-    /// top scans a few cache lines but compares only tags; a sparser table would double the slots'
-    /// memory (32 MB at four million strings). Hashes are read from the strings in slot order, so
-    /// the reads overlap.
+    /// close to GNU R's chained table, which grows at 0.85. Near the top of that range a probe
+    /// for an absent string scans a few consecutive cache lines, but it compares only the tags in
+    /// them; a sparser table would double the slots' memory, 32 MB at four million strings, and
+    /// a growth step taken while the old slots are still live briefly costs both. Each entry's
+    /// hash is read from its string, in slot order, so the reads are independent and overlap.
     unsafe fn rebuild(&mut self) {
         let old = std::mem::take(&mut self.slots);
         unsafe {

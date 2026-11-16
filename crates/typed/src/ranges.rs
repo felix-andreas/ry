@@ -3,8 +3,9 @@
 //! only counts up, so `i %% 7` needs no correction for a negative dividend and lies in `0..=6`, and
 //! adding 1 to it needs no overflow test.
 //!
-//! A range covers every value any assignment gives the local anywhere in the function. The ranges
-//! are the smallest that agree with every assignment, grown from nothing until nothing changes; a
+//! A range covers every value any assignment gives the local anywhere in the function. Each
+//! assignment's range follows from its operands' ranges, and the ranges are the smallest that
+//! agree with every assignment, grown from nothing until nothing changes; a
 //! bound that keeps growing, such as a counter's upper end, jumps to its type's limit after a few
 //! rounds, which bounds the work.
 //!

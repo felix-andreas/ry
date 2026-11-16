@@ -7,15 +7,17 @@
 //! the shape and one for each field some instruction reads. Building the box assigns them, a copy
 //! copies them, and a shape or field read reads them. Every assignment of the old variable assigns
 //! the new ones at the same place, so a read sees the same value on every path, including around a
-//! loop and after a join of branches that built different shapes. A tag without a payload is a
-//! static box, but its variable becomes its shape all the same, so a test compares a number.
+//! loop and after a join of branches that built different shapes. A tag without a payload is one
+//! static box per shape, which nothing allocates, but its variable becomes its shape all the same,
+//! so a test compares a number instead of loading the shape out of the box.
 //!
 //! Variables copied into each other form a group, replaced as a whole or not at all. A group keeps
 //! its boxes when any variable is assigned by anything but a construction, a copy or a tag without
 //! a payload, or used by anything but a shape or field read or a copy within the group (as an
 //! argument, a list item, another box's field or the result). A field only one shape has is read
-//! from a variable the other shapes do not assign; the reference counts treating it as live is
-//! sound because a local starts at zero and a zero string, list or box counts as nothing.
+//! from a variable the other shapes do not assign. Such a read never runs for those shapes, but the
+//! reference counts treat the variable as live, which is sound because a local starts at zero and
+//! a zero string, list or box counts as nothing.
 //!
 //! [`replace_split_lists`] does the same for the list `Str.split_on` builds when its items are read
 //! only at constant positions (`parts <- Str.split_on(row, ","); parts[[2]]`): the variables are
