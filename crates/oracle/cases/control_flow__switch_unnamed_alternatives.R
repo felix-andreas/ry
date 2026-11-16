@@ -1,0 +1,16 @@
+# A numeric selector picks an unnamed alternative by position, however many defaults the call
+# has, and a string selector rejects two defaults before it looks for a match.
+m <- function(err) conditionMessage(err)
+f <- function(x) switch(x, "a", "b", "c")
+for (x in list(1L, 2, 3L, 0L, 4, -1L, 2.9)) print(f(x))
+g <- function(x) switch(x, a = 1, 2, b = , 3)
+print(tryCatch(g("a"), error = m))
+print(tryCatch(g("b"), error = m))
+print(g(1)); print(g(2)); print(tryCatch(g(3), error = m)); print(g(4))
+h <- function(x) switch(x, , "y")
+print(tryCatch(h("a"), error = m))
+print(tryCatch(h(1), error = m)); print(h(2))
+print(tryCatch(switch("a", "x", "y"), error = m))
+print(tryCatch(switch("a", , "y"), error = m))
+k <- function(x) switch(x, "only")
+print(k("q")); print(k(1)); print(is.null(k(2)))
