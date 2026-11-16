@@ -1053,7 +1053,11 @@ fn run_fuzz(run: FuzzRun) -> ExitCode {
                                 if let Some(reduced) = &reduced {
                                     rendered.push_str(reduced);
                                 }
-                                println!("DIFFERS {rendered}");
+                                let crashed = report.divergences.iter().any(|divergence| divergence.crashed);
+                                println!("{} {rendered}", if crashed { "CRASHES" } else { "DIFFERS" });
+                                for name in report.divergences.iter().flat_map(|divergence| divergence.kinds()) {
+                                    *tally.kinds.entry(name).or_default() += 1;
+                                }
                                 if let Some(findings) = &run.findings {
                                     for (extension, text) in
                                         [("R", &report.program), ("report", &rendered)]
@@ -1101,6 +1105,8 @@ fn run_fuzz(run: FuzzRun) -> ExitCode {
             .map(|(kind, seed)| format!("{}:{seed}", kind.name()))
             .collect();
         println!("diverging: {}", listed.join(" "));
+        let kinds: Vec<String> = tally.kinds.iter().map(|(name, count)| format!("{name} {count}")).collect();
+        println!("by kind: {}", kinds.join(", "));
         ExitCode::FAILURE
     }
 }
@@ -1110,6 +1116,8 @@ struct FuzzTally {
     ran: usize,
     ended_in_error: usize,
     diverging: Vec<(oracle::fuzz::ProgramKind, u64)>,
+    /// How many engine runs differ in each way ([`oracle::fuzz::Divergence::kinds`]).
+    kinds: std::collections::BTreeMap<&'static str, usize>,
     unavailable: bool,
 }
 

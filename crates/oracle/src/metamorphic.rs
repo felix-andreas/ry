@@ -7,11 +7,13 @@
 //! one to five statements that mutate and read it. A body alone says little, so each one runs in
 //! many forms that R's semantics require to agree: called again and again (a body compiles after
 //! its first call), in `local()`, in an anonymous function, at top level, with the variable
-//! renamed, on a value that went through `serialize`, through `do.call` and `lapply`, and with a
-//! collection between its statements. Every form's result is compared with the first by
-//! `identical()` inside the program, and the first is printed, so GNU R checks both the result
-//! and the claim that the forms agree. A form that shares its input with a second variable also
-//! checks that the mutation did not write through to it.
+//! renamed, on a value that went through `serialize`, through `do.call` and `lapply`, with a
+//! collection between its statements, and after calls on values of other types and sizes.
+//! Every form's result is compared with the first by `identical()` inside the program, and the
+//! first is printed, so GNU R checks both the result and the claim that the forms agree. A form
+//! that shares its input with a second variable also checks that the mutation did not write
+//! through to it. A program therefore checks itself: a line that ends in `DIFFERENT` is a bug
+//! in the engine that printed it, with or without GNU R to compare with.
 //!
 //! [`builtins_program`] is the same zoo fed to builtins instead: one or two values and a few
 //! dozen calls on them, each a top-level value the deep observer dumps.
@@ -59,9 +61,10 @@ pub enum Feature {
     Callers,
     Shared,
     Collected,
+    Warmed,
 }
 
-const FEATURES: [Feature; 32] = [
+const FEATURES: [Feature; 33] = [
     Feature::Logical,
     Feature::Integer,
     Feature::Double,
@@ -94,6 +97,7 @@ const FEATURES: [Feature; 32] = [
     Feature::Callers,
     Feature::Shared,
     Feature::Collected,
+    Feature::Warmed,
 ];
 
 /// The set of [`Feature`]s one seed's program draws from.
@@ -167,11 +171,24 @@ pub fn builtins_program(seed: u64) -> String {
     for round in 0..1 + zoo.rng.below(2) {
         let first = zoo.value();
         let second = zoo.value();
-        text.push_str(&format!("v <- {}\nw <- {}\n", first.text, second.text));
+        text.push_str(&format!(
+            "v <- try_({})\nw <- try_({})\n",
+            first.text, second.text
+        ));
         for _ in 0..10 + zoo.rng.below(14) {
             let template = BUILTIN_CALLS[zoo.rng.below(BUILTIN_CALLS.len())];
+            // A call whose result has a cell per pair of elements would ask for gigabytes.
+            let quadratic = QUADRATIC_CALLS.iter().any(|name| template.contains(name));
+            let template = if quadratic && first.length.max(second.length) > 300 {
+                "length(#)"
+            } else {
+                template
+            };
             let small = zoo.small_count().to_string();
-            let call = template.replace('#', "v").replace('@', "w").replace('~', &small);
+            let call = template
+                .replace('#', "v")
+                .replace('@', "w")
+                .replace('~', &small);
             let line = match zoo.rng.below(12) {
                 // The same call twice must give the same value, and a call must not change
                 // its argument.
@@ -184,7 +201,7 @@ pub fn builtins_program(seed: u64) -> String {
             text.push('\n');
         }
         text.push_str(&format!(
-            "identical(v, {})\nidentical(w, {})\n",
+            "try_(identical(v, {}))\ntry_(identical(w, {}))\n",
             first.text, second.text
         ));
         if round == 0 && zoo.rng.chance(1, 2) {
@@ -250,7 +267,14 @@ const LARGE_LENGTHS: [usize; 9] = [511, 512, 513, 1000, 4096, 8191, 8192, 8193, 
 /// Names for elements, columns and attributes, as R string literals: ASCII, empty, duplicated,
 /// `NA`, and UTF-8 in one, two, three and four bytes, combining and precomposed.
 const ASCII_NAMES: [&str; 8] = [
-    "\"a\"", "\"b\"", "\"alpha\"", "\"a b\"", "\"x1\"", "\"\"", "\"a\"", "\"NA\"",
+    "\"a\"",
+    "\"b\"",
+    "\"alpha\"",
+    "\"a b\"",
+    "\"x1\"",
+    "\"\"",
+    "\"a\"",
+    "\"NA\"",
 ];
 const NON_ASCII_NAMES: [&str; 6] = [
     "\"a\\u00e4\"",
@@ -277,9 +301,24 @@ const SPECIAL_DOUBLES: [&str; 10] = [
     ".Machine$double.eps",
     "1e15",
 ];
-const COMPLEXES: [&str; 5] = ["0i", "1+2i", "-1.5i", "NA_complex_", "complex(real = Inf, imaginary = -0)"];
+const COMPLEXES: [&str; 5] = [
+    "0i",
+    "1+2i",
+    "-1.5i",
+    "NA_complex_",
+    "complex(real = Inf, imaginary = -0)",
+];
 const STRINGS: [&str; 10] = [
-    "\"a\"", "\"\"", "\"b c\"", "\"1\"", "\" 2 \"", "\"1e3\"", "\"TRUE\"", "\"NA\"", "NA_character_", "\"Zed\"",
+    "\"a\"",
+    "\"\"",
+    "\"b c\"",
+    "\"1\"",
+    "\" 2 \"",
+    "\"1e3\"",
+    "\"TRUE\"",
+    "\"NA\"",
+    "NA_character_",
+    "\"Zed\"",
 ];
 const NON_ASCII_STRINGS: [&str; 7] = [
     "\"a\\u00e4\"",
@@ -341,7 +380,11 @@ impl Zoo {
             5..=7 => MIDDLE_LENGTHS[self.rng.below(MIDDLE_LENGTHS.len())],
             _ if self.has(Feature::LargeSizes) => {
                 // The lengths above a thousand cost seconds per form in a debug build.
-                let limit = if self.rng.chance(1, 6) { LARGE_LENGTHS.len() } else { 4 };
+                let limit = if self.rng.chance(1, 6) {
+                    LARGE_LENGTHS.len()
+                } else {
+                    4
+                };
                 LARGE_LENGTHS[self.rng.below(limit)]
             }
             _ => MIDDLE_LENGTHS[self.rng.below(MIDDLE_LENGTHS.len())],
@@ -420,7 +463,9 @@ impl Zoo {
         }
         let n = length;
         let compact = self.has(Feature::CompactSequences);
-        let pool: Vec<&str> = (0..2 + self.rng.below(4)).map(|_| self.element(kind)).collect();
+        let pool: Vec<&str> = (0..2 + self.rng.below(4))
+            .map(|_| self.element(kind))
+            .collect();
         let constructor = if kind == Kind::List { "list" } else { "c" };
         let recycled = format!("rep_len({constructor}({}), {n})", pool.join(", "));
         match (kind, self.rng.below(6)) {
@@ -436,7 +481,9 @@ impl Zoo {
             (Kind::Double, 2) => format!("(seq_len({n}) / 4)"),
             (Kind::Double, 3) => format!("numeric({n})"),
             (Kind::Double, 4) => format!("seq(0, 1, length.out = {n})"),
-            (Kind::Complex, 0) => format!("complex(real = seq_len({n}), imaginary = -seq_len({n}))"),
+            (Kind::Complex, 0) => {
+                format!("complex(real = seq_len({n}), imaginary = -seq_len({n}))")
+            }
             (Kind::Character, 0) => format!("as.character(seq_len({n}))"),
             (Kind::Character, 1) => format!("paste0(\"k\", seq_len({n}))"),
             (Kind::Character, 2) => format!("letters[(seq_len({n}) - 1L) %% 26L + 1L]"),
@@ -467,7 +514,10 @@ impl Zoo {
                     1 => format!("setNames({text}, as.character({length}:1))"),
                     _ => {
                         names = pool.clone();
-                        format!("setNames({text}, rep_len(c({}), {length}))", pool.join(", "))
+                        format!(
+                            "setNames({text}, rep_len(c({}), {length}))",
+                            pool.join(", ")
+                        )
                     }
                 };
             }
@@ -555,7 +605,8 @@ impl Zoo {
         let mut names: Vec<&'static str> = Vec::new();
         let mut parts = Vec::new();
         const COLUMN_NAMES: [&str; 6] = ["\"a\"", "\"b\"", "\"val\"", "\"key\"", "\"x1\"", "\"n\""];
-        const NON_ASCII_COLUMNS: [&str; 3] = ["\"gr\\u00f6\\u00dfe\"", "\"\\u00e4\"", "\"\\u65e5\""];
+        const NON_ASCII_COLUMNS: [&str; 3] =
+            ["\"gr\\u00f6\\u00dfe\"", "\"\\u00e4\"", "\"\\u65e5\""];
         for index in 0..columns {
             let name = if self.has(Feature::NonAscii) && self.rng.chance(1, 3) {
                 NON_ASCII_COLUMNS[index % NON_ASCII_COLUMNS.len()]
@@ -565,13 +616,15 @@ impl Zoo {
             if names.contains(&name) {
                 continue;
             }
-            let kind = [Kind::Integer, Kind::Double, Kind::Character, Kind::Logical][self.rng.below(4)];
+            let kind =
+                [Kind::Integer, Kind::Double, Kind::Character, Kind::Logical][self.rng.below(4)];
             let data = self.bare_vector(kind, rows);
-            let column = if kind == Kind::Character && self.has(Feature::Factor) && self.rng.chance(1, 4) {
-                format!("factor({data})")
-            } else {
-                data
-            };
+            let column =
+                if kind == Kind::Character && self.has(Feature::Factor) && self.rng.chance(1, 4) {
+                    format!("factor({data})")
+                } else {
+                    data
+                };
             // A name in backticks reads as written, and `data.frame` keeps it with
             // `check.names = FALSE`.
             parts.push(format!("`{}` = {column}", unquote(name)));
@@ -628,7 +681,9 @@ impl Zoo {
         let text = match self.rng.below(5) {
             0 => format!("as.Date(\"2024-02-29\") + 0:{}", length - 1),
             1 => format!("rep_len(as.Date(c(\"2024-01-31\", NA, \"1999-12-31\")), {length})"),
-            2 => format!("as.POSIXct(\"2024-03-10 12:34:56\", tz = \"UTC\") + seq_len({length}) * 3600"),
+            2 => format!(
+                "as.POSIXct(\"2024-03-10 12:34:56\", tz = \"UTC\") + seq_len({length}) * 3600"
+            ),
             3 => format!("as.difftime(seq_len({length}) / 2, units = \"hours\")"),
             _ => format!("structure(seq_len({length}), class = \"Date\")"),
         };
@@ -680,7 +735,7 @@ impl Zoo {
         for _ in 0..1 + self.rng.below(5) {
             let statement = self.statement(&value, &mut body);
             let statement = if self.has(Feature::Guards) && self.rng.chance(1, 4) {
-                format!("tryCatch({statement}, error = function(e) NULL)")
+                format!("tryCatch({{ {statement} }}, error = function(e) NULL)")
             } else {
                 statement
             };
@@ -720,15 +775,24 @@ impl Zoo {
         if self.has(Feature::Repeated) {
             let count = [1, 2, 3, 10, 50, 300][self.rng.below(6)];
             // A long vector three hundred times over costs minutes in a debug build.
-            let count = if value.length > 1000 { count.min(3) } else { count };
+            let count = if value.length > 1000 {
+                count.min(3)
+            } else {
+                count
+            };
             check(
                 &format!("again x{count}"),
-                format!("{{ out <- NULL; for (k_ in seq_len({count})) out <- {step}({make}()); out }}"),
+                format!(
+                    "{{ out <- NULL; for (k_ in seq_len({count})) out <- {step}({make}()); out }}"
+                ),
             );
         }
         if self.has(Feature::Scopes) {
             match self.rng.below(4) {
-                0 => check("local", format!("local({{ x <- {make}(); {} }})", lines("x", "; "))),
+                0 => check(
+                    "local",
+                    format!("local({{ x <- {make}(); {} }})", lines("x", "; ")),
+                ),
                 1 => check(
                     "inline",
                     format!("(function() {{ x <- {make}(); {} }})()", lines("x", "; ")),
@@ -770,7 +834,10 @@ impl Zoo {
             let variable = ["value", ".v", "`my var`", "`x\u{e4}`", "T", "c"][self.rng.below(6)];
             check(
                 &format!("renamed {}", variable.replace('`', "")),
-                format!("(function({variable}) {{ {} }})({make}())", lines(variable, "; ")),
+                format!(
+                    "(function({variable}) {{ {} }})({make}())",
+                    lines(variable, "; ")
+                ),
             );
         }
         if self.has(Feature::Callers) {
@@ -792,6 +859,19 @@ impl Zoo {
                 format!("(function(x) {{ {} }})({make}())", lines("x", "; gc(); ")),
             );
         }
+        if self.has(Feature::Warmed) {
+            // The body first runs on values of other types and sizes, so whatever a first call
+            // specialized it for (a compiled body, a quickened instruction, an inline cache)
+            // meets a value it was not specialized for.
+            let others: Vec<String> = (0..1 + self.rng.below(3))
+                .map(|_| format!("safe_(function() {step}({})); ", self.value().text))
+                .collect();
+            let fresh = format!("fresh_{number}");
+            text.push_str(&format!(
+                "{fresh} <- {step}\nenvironment({fresh}) <- globalenv()\nbody({fresh}) <- body({step})\ncheck_(\"{number} warmed\", {reference}, safe_(function() {{ {}{step}({make}()) }}))\ncheck_(\"{number} cold\", {reference}, safe_(function() {fresh}({make}())))\n",
+                others.concat()
+            ));
+        }
         if self.has(Feature::Shared) {
             // The body's argument is also held by a second variable, a list, an environment
             // or a closure. The holder's copy must come out unchanged.
@@ -799,11 +879,19 @@ impl Zoo {
                 0 => ("keep <- input", "input", "keep"),
                 1 => ("keep <- list(input)", "keep[[1]]", "keep[[1]]"),
                 2 => ("keep <- new.env(); keep$v <- input", "keep$v", "keep$v"),
-                3 => ("keep <- (function(captured) function() captured)(input)", "keep()", "keep()"),
-                _ => ("keep <- structure(1, held = input)", "attr(keep, \"held\")", "attr(keep, \"held\")"),
+                3 => (
+                    "keep <- (function(captured) function() captured)(input)",
+                    "keep()",
+                    "keep()",
+                ),
+                _ => (
+                    "keep <- structure(1, held = input)",
+                    "attr(keep, \"held\")",
+                    "attr(keep, \"held\")",
+                ),
             };
             text.push_str(&format!(
-                "shared_{number} <- safe_(function() {{ input <- {make}(); {setup}; out <- {step}({argument}); list(out, identical({holder}, {make}()), identical(input, {make}())) }})\ncheck_(\"{number} shared\", list({reference}, TRUE, TRUE), shared_{number})\n",
+                "shared_{number} <- safe_(function() {{ input <- {make}(); {setup}; out <- safe_(function() {step}({argument})); list(out, identical({holder}, {make}()), identical(input, {make}())) }})\ncheck_(\"{number} shared\", list({reference}, TRUE, TRUE), shared_{number})\n",
             ));
         }
         // A long result prints as thousands of lines that say little; its dump shows both ends
@@ -827,9 +915,18 @@ impl Zoo {
             6 => (1 + self.rng.below(count)).to_string(),
             7 => format!("{}L", 1 + self.rng.below(count)),
             8 => (count + 1).to_string(),
-            9 if self.has(Feature::IllTyped) => {
-                self.pick(&["0", "-1", "NA", "2.9", "NA_integer_", "1e10", "TRUE", "\"1\""]).to_owned()
-            }
+            9 if self.has(Feature::IllTyped) => self
+                .pick(&[
+                    "0",
+                    "-1",
+                    "NA",
+                    "2.9",
+                    "NA_integer_",
+                    "1e10",
+                    "TRUE",
+                    "\"1\"",
+                ])
+                .to_owned(),
             10 => (count + 3).to_string(),
             _ => (1 + self.rng.below(count)).to_string(),
         }
@@ -859,7 +956,10 @@ impl Zoo {
             9 => format!("-(1:{})", count.min(2)),
             10 => format!("{}:{}", count, count + 2),
             11 if self.has(Feature::IllTyped) => self
-                .pick(&["NA", "c(1, NA)", "0", "c(-1, 1)", "c(0, 1)", "1.9", "\"zz\"", "NULL", "list(1)", "-99"])
+                .pick(&[
+                    "NA", "c(1, NA)", "0", "c(-1, 1)", "c(0, 1)", "1.9", "\"zz\"", "NULL",
+                    "list(1)", "-99",
+                ])
                 .to_owned(),
             12 => "FALSE".to_owned(),
             13 => format!("c({}, 1)", count + 2),
@@ -883,7 +983,15 @@ impl Zoo {
             0..=5 => self.element(kind).to_owned(),
             6 | 7 => self.element(other).to_owned(),
             8 if self.has(Feature::IllTyped) => self
-                .pick(&["NULL", "list(1)", "integer(0)", "c(1, 2)", "sum", "quote(a)", "NA"])
+                .pick(&[
+                    "NULL",
+                    "list(1)",
+                    "integer(0)",
+                    "c(1, 2)",
+                    "sum",
+                    "quote(a)",
+                    "NA",
+                ])
                 .to_owned(),
             _ => format!("c({}, {})", self.element(kind), self.element(kind)),
         }
@@ -941,7 +1049,10 @@ impl Zoo {
                 6 => "comment(@) <- \"c\"".to_owned(),
                 _ => "tag_(@) <- \"t\"".to_owned(),
             },
-            12 => format!("length(@) <- {}", [0, 1, length / 2, length + 1, length + 70][self.rng.below(5)]),
+            12 => format!(
+                "length(@) <- {}",
+                [0, 1, length / 2, length + 1, length + 70][self.rng.below(5)]
+            ),
             13 => match self.rng.below(8) {
                 0 => format!("@ <- c(@, {stored})"),
                 1 => format!("@ <- append(@, {stored}, after = 1)"),
@@ -969,10 +1080,16 @@ impl Zoo {
                     7 => format!("@[{name}]"),
                     _ => "typeof(@)".to_owned(),
                 };
-                format!("read_{} <- tryCatch({read}, error = function(e) conditionMessage(e))", body.reads)
+                format!(
+                    "read_{} <- tryCatch({read}, error = function(e) conditionMessage(e))",
+                    body.reads
+                )
             }
             18 if self.has(Feature::Loops) => match self.rng.below(5) {
-                0 => format!("for (k_ in seq_len({})) @[k_] <- {stored}", self.small_count().min(length + 2)),
+                0 => format!(
+                    "for (k_ in seq_len({})) @[k_] <- {stored}",
+                    self.small_count().min(length + 2)
+                ),
                 1 => "for (k_ in seq_along(@)) @[[k_]] <- @[[length(@) - k_ + 1L]]".to_owned(),
                 2 => format!("for (k_ in 1:3) @[[k_ + 1L]] <- {stored}"),
                 3 => format!("k_ <- 0L; while (k_ < 3L) {{ k_ <- k_ + 1L; @[k_] <- {stored} }}"),
@@ -1026,18 +1143,20 @@ impl Zoo {
                 (Kind::List, 1) => "@ <- unname(@)".to_owned(),
                 (Kind::List, _) => "@ <- @[!vapply(@, is.null, NA)]".to_owned(),
             },
-            29 | 30 if self.has(Feature::Nested) || kind == Kind::List => match self.rng.below(10) {
-                0 => format!("@${} <- {stored}", bare(name)),
-                1 => format!("@[[{name}]] <- {stored}"),
-                2 => format!("@${}[{position}] <- {stored}", bare(name)),
-                3 => format!("@${}$deep <- {stored}", bare(name)),
-                4 => format!("@[[{position}]][[2]] <- {stored}"),
-                5 => format!("names(@${})[1] <- {name}", bare(name)),
-                6 => format!("attr(@[[{position}]], \"k\") <- {stored}"),
-                7 => format!("@[[{position}]] <- NULL"),
-                8 => format!("@[c({name}, \"b\")] <- list(1, 2)"),
-                _ => format!("@[[\"new\"]]$sub[3] <- {stored}"),
-            },
+            29 | 30 if self.has(Feature::Nested) || kind == Kind::List => {
+                match self.rng.below(10) {
+                    0 => format!("@${} <- {stored}", bare(name)),
+                    1 => format!("@[[{name}]] <- {stored}"),
+                    2 => format!("@${}[{position}] <- {stored}", bare(name)),
+                    3 => format!("@${}$deep <- {stored}", bare(name)),
+                    4 => format!("@[[{position}]][[2]] <- {stored}"),
+                    5 => format!("names(@${})[1] <- {name}", bare(name)),
+                    6 => format!("attr(@[[{position}]], \"k\") <- {stored}"),
+                    7 => format!("@[[{position}]] <- NULL"),
+                    8 => format!("@[c({name}, \"b\")] <- list(1, 2)"),
+                    _ => format!("@[[\"new\"]]$sub[3] <- {stored}"),
+                }
+            }
             31 => format!("@[{positions}] <- NULL"),
             _ => format!("@[{position}] <- {stored}"),
         }
@@ -1176,58 +1295,410 @@ fn bare(literal: &str) -> String {
     }
 }
 
+const QUADRATIC_CALLS: [&str; 8] = [
+    "outer(",
+    "%o%",
+    "%*%",
+    "expand.grid(",
+    "merge(",
+    "crossprod(",
+    "do.call(rbind",
+    "mapply(",
+];
+
 /// Calls on the zoo values `#` and `@`; `~` is a small count. Nothing here reads the clock, an
 /// address, the locale's collation of non-ASCII text, or a random number.
 const BUILTIN_CALLS: &[&str] = &[
-    "rev(#)", "sort(#)", "order(#)", "unique(#)", "duplicated(#)", "anyDuplicated(#)", "rank(#)", "table(#)",
-    "length(#)", "names(#)", "attributes(#)", "dim(#)", "typeof(#)", "class(#)", "mode(#)", "storage.mode(#)",
-    "is.na(#)", "anyNA(#)", "is.null(#)", "is.numeric(#)", "is.character(#)", "is.vector(#)", "is.list(#)", "is.atomic(#)",
-    "is.function(#)", "is.element(#, @)", "is.object(#)", "is.matrix(#)", "is.array(#)", "is.finite(#)", "is.infinite(#)", "is.nan(#)",
-    "sum(#)", "prod(#)", "mean(#)", "max(#)", "min(#)", "range(#)", "cumsum(#)", "cumprod(#)",
-    "cummax(#)", "cummin(#)", "diff(#)", "var(#)", "median(#)", "which(#)", "which.max(#)", "which.min(#)",
-    "any(#)", "all(#)", "xor(#, @)", "isTRUE(#)", "isFALSE(#)", "!#", "-#", "+#",
-    "# + @", "# - @", "# * @", "# / @", "# ^ @", "# %% @", "# %/% @", "# == @",
-    "# != @", "# < @", "# <= @", "# > @", "# >= @", "# & @", "# | @", "# && TRUE",
-    "abs(#)", "sqrt(#)", "exp(#)", "log(#)", "log2(#)", "log10(#)", "log1p(#)", "expm1(#)",
-    "floor(#)", "ceiling(#)", "round(#)", "round(#, 1)", "signif(#, 2)", "trunc(#)", "sign(#)", "sin(#)",
-    "cos(#)", "tan(#)", "atan(#)", "sinh(#)", "tanh(#)", "gamma(#)", "lgamma(#)", "factorial(#)",
-    "choose(#, 2)", "bitwAnd(#, @)", "bitwOr(#, 3L)", "bitwXor(#, @)", "Re(#)", "Im(#)", "Mod(#)", "Conj(#)",
-    "as.integer(#)", "as.numeric(#)", "as.character(#)", "as.logical(#)", "as.complex(#)", "as.raw(#)", "as.list(#)", "as.vector(#)",
-    "as.vector(#, \"list\")", "as.vector(#, \"character\")", "unlist(#)", "unlist(#, use.names = FALSE)", "as.factor(#)", "as.double(#)", "as.symbol(#)", "as.data.frame(#)",
-    "as.matrix(#)", "as.array(#)", "as.Date(#)", "as.numeric_version(#)", "as.call(#)", "as.pairlist(#)",
-    "c(#, @)", "c(#, NULL)", "c(#, list(1))", "c(a = #)", "append(#, @, after = 1)", "rep(#, 2)", "rep(#, each = 2)", "rep_len(#, ~)",
-    "rep(#, times = ~)", "head(#, ~)", "tail(#, ~)", "head(#, -1)", "tail(#, -1)", "#[~]", "#[-1]", "#[[1]]",
-    "#[c(TRUE, FALSE)]", "#[0]", "#[NA]", "#[\"a\"]", "#[[\"a\"]]", "#$a", "#[@]", "#[[~]]",
-    "#[1, ]", "#[, 1]", "#[1, 1]", "#[1, , drop = FALSE]", "#[-1, ]", "#[cbind(1, 1)]", "#[# > 1]", "#[order(#)]",
-    "paste(#)", "paste(#, collapse = \"|\")", "paste0(#, @)", "paste(#, @, sep = \"-\")", "format(#)", "format(#, width = 8)", "format(#, nsmall = 2)", "format(#, digits = 3)",
-    "format(#, justify = \"right\")", "formatC(#)", "formatC(#, width = 6)", "formatC(#, digits = 2, format = \"f\")", "formatC(#, flag = \"0\", width = 5)", "prettyNum(#, big.mark = \",\")", "toString(#)", "sprintf(\"%s\", #)",
-    "sprintf(\"%d\", #)", "sprintf(\"%5.2f\", #)", "sprintf(\"%-6s|\", #)", "sprintf(\"%e\", #)", "sprintf(\"%g\", #)", "sprintf(\"%x\", #)", "sprintf(\"%s=%s\", #, @)", "sprintf(\"%05d\", #)",
-    "nchar(#)", "nchar(#, \"bytes\")", "nchar(#, \"width\")", "toupper(#)", "tolower(#)", "casefold(#, upper = TRUE)", "substr(#, 1, 2)", "substr(#, 2, 100)",
-    "substring(#, 1:2, 2:3)", "strsplit(#, \"\")", "strsplit(#, \" \")", "strsplit(#, \"[0-9]\")", "strtoi(#)", "strtoi(#, 16L)", "trimws(#)", "rev(strsplit(paste(#, collapse = \"\"), NULL)[[1]])",
-    "grepl(\"a\", #)", "grepl(\"^[[:alpha:]]+$\", #)", "grepl(\"\\\\d\", #, perl = TRUE)", "grepl(\"a\", #, fixed = TRUE)", "grep(\"a\", #)", "grep(\"a\", #, value = TRUE)", "sub(\"a\", \"<A>\", #)", "gsub(\"[aeiou]\", \"\", #)",
-    "gsub(\"\", \"-\", #)", "gsub(\"(.)\", \"\\\\1\\\\1\", #)", "gsub(\".\", \"X\", #, fixed = TRUE)", "gsub(\"\\\\s+\", \" \", #)", "regexpr(\"a\", #)", "gregexpr(\"a\", #)", "regmatches(#, regexpr(\"[a-z]+\", #))", "startsWith(#, \"a\")",
-    "endsWith(#, \"a\")", "chartr(\"ab\", \"xy\", #)", "make.names(#)", "make.unique(#)", "abbreviate(#, 3)", "shQuote(#)", "dQuote(#, FALSE)", "sQuote(#, FALSE)",
-    "encodeString(#)", "encodeString(#, quote = '\"')", "noquote(#)", "utf8ToInt(#)", "intToUtf8(#)", "intToUtf8(#, multiple = TRUE)", "chartr(\"\\u00e4\", \"a\", #)", "iconv(#, \"UTF-8\", \"ASCII\", sub = \"?\")",
-    "enc2utf8(#)", "enc2native(#)", "Encoding(#)", "validUTF8(#)", "charToRaw(#)", "rawToChar(#)", "basename(#)", "dirname(#)",
-    "tools::file_ext(#)", "file.path(#, @)", "sprintf(\"%3s|\", #)", "formatC(#, width = -8)", "format(#, width = 4, justify = \"centre\")", "strtrim(#, 2)", "strrep(#, 2)", "rawToChar(rev(charToRaw(#)))",
-    "match(#, @)", "# %in% @", "setdiff(#, @)", "union(#, @)", "intersect(#, @)", "tabulate(#)", "rle(#)", "findInterval(#, c(0, 1, 5))",
-    "cut(#, 3)", "outer(#, @)", "crossprod(#)", "# %*% @", "# %o% @", "t(#)", "diag(#)", "det(#)",
-    "nrow(#)", "ncol(#)", "NROW(#)", "NCOL(#)", "rowSums(#)", "colSums(#)", "rowMeans(#)", "colMeans(#)",
-    "apply(#, 1, sum)", "apply(#, 2, function(column) length(unique(column)))", "sapply(#, length)", "sapply(#, class)", "lapply(#, rev)", "vapply(#, length, 1L)", "Map(function(a, b) list(a, b), #, @)", "mapply(function(a, b) paste(a, b), #, @)",
-    "Reduce(`+`, #)", "Reduce(function(a, b) paste(a, b), #, accumulate = TRUE)", "Filter(Negate(is.na), #)", "Position(is.na, #)", "do.call(c, as.list(#))", "do.call(rbind, as.list(#))", "do.call(cbind, list(#, @))", "rbind(#, @)",
-    "cbind(#, @)", "rbind(#)", "cbind(#, 1)", "merge(#, @)", "split(#, rep_len(1:2, length(#)))", "unsplit(split(#, rep_len(1:2, length(#))), rep_len(1:2, length(#)))", "stack(#)", "expand.grid(#, @)",
-    "ifelse(#, @, NA)", "ifelse(is.na(#), 0, #)", "replace(#, 1, NA)", "identical(#, @)", "all.equal(#, @)", "isTRUE(all.equal(#, #))", "Negate(is.null)(#)", "invisible(#)",
-    "seq_along(#)", "seq_len(length(#))", "seq(#)", "rev(seq_along(#))", "max(-Inf, #)", "pmin(#, @)", "pmax(#, 0)", "nlevels(#)",
-    "levels(#)", "droplevels(#)", "as.integer(factor(#))", "factor(#, levels = unique(#))", "summary(#)", "str(#)", "print(#)", "deparse(#)",
-    "dput(#)", "format(#, nsmall = 1L)", "noquote(format(#))", "toupper(names(#))", "unname(#)", "setNames(#, NULL)", "structure(#, class = \"zoo\")", "unclass(#)",
-    "inherits(#, \"factor\")", "nchar(deparse(#))", "object.size(#) > 0", "lengths(#)", "nchar(names(#))", "rapply(#, function(leaf) leaf, how = \"unlist\")", "rapply(#, toupper, classes = \"character\", how = \"replace\")", "mapply(rep, #, 2)",
-    "array(#, c(2, 2))", "matrix(#, 2)", "matrix(#, ncol = 2, byrow = TRUE)", "aperm(#)", "dim(t(#))", "upper.tri(#)", "row(#)", "col(#)",
-    "sort(#, decreasing = TRUE)", "sort(#, na.last = TRUE)", "order(#, decreasing = TRUE)", "sort(#, method = \"radix\")", "order(#, @)", "rev(order(#))", "xtfrm(#)", "is.unsorted(#)",
-    "trimws(format(#))", "weekdays(#)", "months(#)", "format(#, \"%Y-%m-%d\")", "julian(#)", "difftime(#, @)", "seq(#[1], by = 1, length.out = 3)", "as.numeric(#) %% 7",
-    "serialize(#, NULL, version = 2)[-(1:14)]", "identical(unserialize(serialize(#, NULL)), #)", "nchar(#, \"chars\", allowNA = TRUE)", "nchar(#, keepNA = FALSE)", "sprintf(\"%s\", list(#))", "vapply(#, function(item) paste(class(item), collapse = \"/\"), \"\")", "environmentName(environment(#))", "is.primitive(#)",
-    "mean(#, na.rm = TRUE)", "sum(#, na.rm = TRUE)", "max(#, na.rm = TRUE)", "range(#, na.rm = TRUE)", "quantile(#, 0.5, names = FALSE)", "cor(#, @)", "sd(#)", "scale(#)",
-    "trunc(# / @)", "bitwNot(#)", "bitwShiftL(#, 1L)", "rowsum(#, rep_len(1:2, NROW(#)))", "aggregate(#, list(rep_len(1:2, NROW(#))), length)", "tapply(#, rep_len(c(\"p\", \"q\"), length(#)), length)", "by(#, rep_len(1:2, NROW(#)), NROW)", "nchar(toString(#))",
-    "rev(as.list(#))", "append(#, list(NULL))", "modifyList(as.list(#), list(a = NULL))", "within(#, extra <- 1)", "with(#, 1)", "subset(#, TRUE)", "transform(#, extra = 1)", "head(as.data.frame(#), 2)",
+    "rev(#)",
+    "sort(#)",
+    "order(#)",
+    "unique(#)",
+    "duplicated(#)",
+    "anyDuplicated(#)",
+    "rank(#)",
+    "table(#)",
+    "length(#)",
+    "names(#)",
+    "attributes(#)",
+    "dim(#)",
+    "typeof(#)",
+    "class(#)",
+    "mode(#)",
+    "storage.mode(#)",
+    "is.na(#)",
+    "anyNA(#)",
+    "is.null(#)",
+    "is.numeric(#)",
+    "is.character(#)",
+    "is.vector(#)",
+    "is.list(#)",
+    "is.atomic(#)",
+    "is.function(#)",
+    "is.element(#, @)",
+    "is.object(#)",
+    "is.matrix(#)",
+    "is.array(#)",
+    "is.finite(#)",
+    "is.infinite(#)",
+    "is.nan(#)",
+    "sum(#)",
+    "prod(#)",
+    "mean(#)",
+    "max(#)",
+    "min(#)",
+    "range(#)",
+    "cumsum(#)",
+    "cumprod(#)",
+    "cummax(#)",
+    "cummin(#)",
+    "diff(#)",
+    "var(#)",
+    "median(#)",
+    "which(#)",
+    "which.max(#)",
+    "which.min(#)",
+    "any(#)",
+    "all(#)",
+    "xor(#, @)",
+    "isTRUE(#)",
+    "isFALSE(#)",
+    "!#",
+    "-#",
+    "+#",
+    "# + @",
+    "# - @",
+    "# * @",
+    "# / @",
+    "# ^ @",
+    "# %% @",
+    "# %/% @",
+    "# == @",
+    "# != @",
+    "# < @",
+    "# <= @",
+    "# > @",
+    "# >= @",
+    "# & @",
+    "# | @",
+    "# && TRUE",
+    "abs(#)",
+    "sqrt(#)",
+    "exp(#)",
+    "log(#)",
+    "log2(#)",
+    "log10(#)",
+    "log1p(#)",
+    "expm1(#)",
+    "floor(#)",
+    "ceiling(#)",
+    "round(#)",
+    "round(#, 1)",
+    "signif(#, 2)",
+    "trunc(#)",
+    "sign(#)",
+    "sin(#)",
+    "cos(#)",
+    "tan(#)",
+    "atan(#)",
+    "sinh(#)",
+    "tanh(#)",
+    "gamma(#)",
+    "lgamma(#)",
+    "factorial(#)",
+    "choose(#, 2)",
+    "bitwAnd(#, @)",
+    "bitwOr(#, 3L)",
+    "bitwXor(#, @)",
+    "Re(#)",
+    "Im(#)",
+    "Mod(#)",
+    "Conj(#)",
+    "as.integer(#)",
+    "as.numeric(#)",
+    "as.character(#)",
+    "as.logical(#)",
+    "as.complex(#)",
+    "as.raw(#)",
+    "as.list(#)",
+    "as.vector(#)",
+    "as.vector(#, \"list\")",
+    "as.vector(#, \"character\")",
+    "unlist(#)",
+    "unlist(#, use.names = FALSE)",
+    "as.factor(#)",
+    "as.double(#)",
+    "as.symbol(#)",
+    "as.data.frame(#)",
+    "as.matrix(#)",
+    "as.array(#)",
+    "as.Date(#)",
+    "as.numeric_version(#)",
+    "as.call(#)",
+    "as.pairlist(#)",
+    "c(#, @)",
+    "c(#, NULL)",
+    "c(#, list(1))",
+    "c(a = #)",
+    "append(#, @, after = 1)",
+    "rep(#, 2)",
+    "rep(#, each = 2)",
+    "rep_len(#, ~)",
+    "rep(#, times = ~)",
+    "head(#, ~)",
+    "tail(#, ~)",
+    "head(#, -1)",
+    "tail(#, -1)",
+    "#[~]",
+    "#[-1]",
+    "#[[1]]",
+    "#[c(TRUE, FALSE)]",
+    "#[0]",
+    "#[NA]",
+    "#[\"a\"]",
+    "#[[\"a\"]]",
+    "#$a",
+    "#[@]",
+    "#[[~]]",
+    "#[1, ]",
+    "#[, 1]",
+    "#[1, 1]",
+    "#[1, , drop = FALSE]",
+    "#[-1, ]",
+    "#[cbind(1, 1)]",
+    "#[# > 1]",
+    "#[order(#)]",
+    "paste(#)",
+    "paste(#, collapse = \"|\")",
+    "paste0(#, @)",
+    "paste(#, @, sep = \"-\")",
+    "format(#)",
+    "format(#, width = 8)",
+    "format(#, nsmall = 2)",
+    "format(#, digits = 3)",
+    "format(#, justify = \"right\")",
+    "formatC(#)",
+    "formatC(#, width = 6)",
+    "formatC(#, digits = 2, format = \"f\")",
+    "formatC(#, flag = \"0\", width = 5)",
+    "prettyNum(#, big.mark = \",\")",
+    "toString(#)",
+    "sprintf(\"%s\", #)",
+    "sprintf(\"%d\", #)",
+    "sprintf(\"%5.2f\", #)",
+    "sprintf(\"%-6s|\", #)",
+    "sprintf(\"%e\", #)",
+    "sprintf(\"%g\", #)",
+    "sprintf(\"%x\", #)",
+    "sprintf(\"%s=%s\", #, @)",
+    "sprintf(\"%05d\", #)",
+    "nchar(#)",
+    "nchar(#, \"bytes\")",
+    "nchar(#, \"width\")",
+    "toupper(#)",
+    "tolower(#)",
+    "casefold(#, upper = TRUE)",
+    "substr(#, 1, 2)",
+    "substr(#, 2, 100)",
+    "substring(#, 1:2, 2:3)",
+    "strsplit(#, \"\")",
+    "strsplit(#, \" \")",
+    "strsplit(#, \"[0-9]\")",
+    "strtoi(#)",
+    "strtoi(#, 16L)",
+    "trimws(#)",
+    "rev(strsplit(paste(#, collapse = \"\"), NULL)[[1]])",
+    "grepl(\"a\", #)",
+    "grepl(\"^[[:alpha:]]+$\", #)",
+    "grepl(\"\\\\d\", #, perl = TRUE)",
+    "grepl(\"a\", #, fixed = TRUE)",
+    "grep(\"a\", #)",
+    "grep(\"a\", #, value = TRUE)",
+    "sub(\"a\", \"<A>\", #)",
+    "gsub(\"[aeiou]\", \"\", #)",
+    "gsub(\"\", \"-\", #)",
+    "gsub(\"(.)\", \"\\\\1\\\\1\", #)",
+    "gsub(\".\", \"X\", #, fixed = TRUE)",
+    "gsub(\"\\\\s+\", \" \", #)",
+    "regexpr(\"a\", #)",
+    "gregexpr(\"a\", #)",
+    "regmatches(#, regexpr(\"[a-z]+\", #))",
+    "startsWith(#, \"a\")",
+    "endsWith(#, \"a\")",
+    "chartr(\"ab\", \"xy\", #)",
+    "make.names(#)",
+    "make.unique(#)",
+    "abbreviate(#, 3)",
+    "shQuote(#)",
+    "dQuote(#, FALSE)",
+    "sQuote(#, FALSE)",
+    "encodeString(#)",
+    "encodeString(#, quote = '\"')",
+    "noquote(#)",
+    "utf8ToInt(#)",
+    "intToUtf8(#)",
+    "intToUtf8(#, multiple = TRUE)",
+    "chartr(\"\\u00e4\", \"a\", #)",
+    "iconv(#, \"UTF-8\", \"ASCII\", sub = \"?\")",
+    "enc2utf8(#)",
+    "enc2native(#)",
+    "Encoding(#)",
+    "validUTF8(#)",
+    "charToRaw(#)",
+    "rawToChar(#)",
+    "basename(#)",
+    "dirname(#)",
+    "tools::file_ext(#)",
+    "file.path(#, @)",
+    "sprintf(\"%3s|\", #)",
+    "formatC(#, width = -8)",
+    "format(#, width = 4, justify = \"centre\")",
+    "strtrim(#, 2)",
+    "strrep(#, 2)",
+    "rawToChar(rev(charToRaw(#)))",
+    "match(#, @)",
+    "# %in% @",
+    "setdiff(#, @)",
+    "union(#, @)",
+    "intersect(#, @)",
+    "tabulate(#)",
+    "rle(#)",
+    "findInterval(#, c(0, 1, 5))",
+    "cut(#, 3)",
+    "outer(#, @)",
+    "crossprod(#)",
+    "# %*% @",
+    "# %o% @",
+    "t(#)",
+    "diag(#)",
+    "det(#)",
+    "nrow(#)",
+    "ncol(#)",
+    "NROW(#)",
+    "NCOL(#)",
+    "rowSums(#)",
+    "colSums(#)",
+    "rowMeans(#)",
+    "colMeans(#)",
+    "apply(#, 1, sum)",
+    "apply(#, 2, function(column) length(unique(column)))",
+    "sapply(#, length)",
+    "sapply(#, class)",
+    "lapply(#, rev)",
+    "vapply(#, length, 1L)",
+    "Map(function(a, b) list(a, b), #, @)",
+    "mapply(function(a, b) paste(a, b), #, @)",
+    "Reduce(`+`, #)",
+    "Reduce(function(a, b) paste(a, b), #, accumulate = TRUE)",
+    "Filter(Negate(is.na), #)",
+    "Position(is.na, #)",
+    "do.call(c, as.list(#))",
+    "do.call(rbind, as.list(#))",
+    "do.call(cbind, list(#, @))",
+    "rbind(#, @)",
+    "cbind(#, @)",
+    "rbind(#)",
+    "cbind(#, 1)",
+    "merge(#, @)",
+    "split(#, rep_len(1:2, length(#)))",
+    "unsplit(split(#, rep_len(1:2, length(#))), rep_len(1:2, length(#)))",
+    "stack(#)",
+    "expand.grid(#, @)",
+    "ifelse(#, @, NA)",
+    "ifelse(is.na(#), 0, #)",
+    "replace(#, 1, NA)",
+    "identical(#, @)",
+    "all.equal(#, @)",
+    "isTRUE(all.equal(#, #))",
+    "Negate(is.null)(#)",
+    "invisible(#)",
+    "seq_along(#)",
+    "seq_len(length(#))",
+    "seq(#)",
+    "rev(seq_along(#))",
+    "max(-Inf, #)",
+    "pmin(#, @)",
+    "pmax(#, 0)",
+    "nlevels(#)",
+    "levels(#)",
+    "droplevels(#)",
+    "as.integer(factor(#))",
+    "factor(#, levels = unique(#))",
+    "summary(#)",
+    "str(#)",
+    "print(#)",
+    "deparse(#)",
+    "dput(#)",
+    "format(#, nsmall = 1L)",
+    "noquote(format(#))",
+    "toupper(names(#))",
+    "unname(#)",
+    "setNames(#, NULL)",
+    "structure(#, class = \"zoo\")",
+    "unclass(#)",
+    "inherits(#, \"factor\")",
+    "nchar(deparse(#))",
+    "object.size(#) > 0",
+    "lengths(#)",
+    "nchar(names(#))",
+    "rapply(#, function(leaf) leaf, how = \"unlist\")",
+    "rapply(#, toupper, classes = \"character\", how = \"replace\")",
+    "mapply(rep, #, 2)",
+    "array(#, c(2, 2))",
+    "matrix(#, 2)",
+    "matrix(#, ncol = 2, byrow = TRUE)",
+    "aperm(#)",
+    "dim(t(#))",
+    "upper.tri(#)",
+    "row(#)",
+    "col(#)",
+    "sort(#, decreasing = TRUE)",
+    "sort(#, na.last = TRUE)",
+    "order(#, decreasing = TRUE)",
+    "sort(#, method = \"radix\")",
+    "order(#, @)",
+    "rev(order(#))",
+    "xtfrm(#)",
+    "is.unsorted(#)",
+    "trimws(format(#))",
+    "weekdays(#)",
+    "months(#)",
+    "format(#, \"%Y-%m-%d\")",
+    "julian(#)",
+    "difftime(#, @)",
+    "seq(#[1], by = 1, length.out = 3)",
+    "as.numeric(#) %% 7",
+    "serialize(#, NULL, version = 2)[-(1:14)]",
+    "identical(unserialize(serialize(#, NULL)), #)",
+    "nchar(#, \"chars\", allowNA = TRUE)",
+    "nchar(#, keepNA = FALSE)",
+    "sprintf(\"%s\", list(#))",
+    "vapply(#, function(item) paste(class(item), collapse = \"/\"), \"\")",
+    "environmentName(environment(#))",
+    "is.primitive(#)",
+    "mean(#, na.rm = TRUE)",
+    "sum(#, na.rm = TRUE)",
+    "max(#, na.rm = TRUE)",
+    "range(#, na.rm = TRUE)",
+    "quantile(#, 0.5, names = FALSE)",
+    "cor(#, @)",
+    "sd(#)",
+    "scale(#)",
+    "trunc(# / @)",
+    "bitwNot(#)",
+    "bitwShiftL(#, 1L)",
+    "rowsum(#, rep_len(1:2, NROW(#)))",
+    "aggregate(#, list(rep_len(1:2, NROW(#))), length)",
+    "tapply(#, rep_len(c(\"p\", \"q\"), length(#)), length)",
+    "by(#, rep_len(1:2, NROW(#)), NROW)",
+    "nchar(toString(#))",
+    "rev(as.list(#))",
+    "append(#, list(NULL))",
+    "modifyList(as.list(#), list(a = NULL))",
+    "within(#, extra <- 1)",
+    "with(#, 1)",
+    "subset(#, TRUE)",
+    "transform(#, extra = 1)",
+    "head(as.data.frame(#), 2)",
 ];
 
 #[cfg(test)]

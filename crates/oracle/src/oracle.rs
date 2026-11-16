@@ -1346,6 +1346,67 @@ fn unescape(text: &str) -> String {
     result
 }
 
+/// A top-level expression whose observed entries differ between two outcomes.
+pub struct ExpressionDifference {
+    /// The expression's number, from one.
+    pub position: usize,
+    /// The reference's entries for it and the other outcome's, without the number.
+    pub reference: Vec<String>,
+    pub other: Vec<String>,
+}
+
+/// The top-level expressions whose observed entries differ between two outcomes, in order.
+/// Empty when either outcome was not observed.
+pub fn differing_expressions(reference: &Outcome, other: &Outcome) -> Vec<ExpressionDifference> {
+    fn by_expression(outcome: &Outcome) -> Vec<(usize, Vec<String>)> {
+        let mut groups: Vec<(usize, Vec<String>)> = Vec::new();
+        for entry in &outcome.observed {
+            let Some((position, text)) = entry
+                .strip_prefix('[')
+                .and_then(|rest| rest.split_once("] "))
+                .and_then(|(position, text)| Some((position.parse::<usize>().ok()?, text)))
+            else {
+                continue;
+            };
+            match groups.last_mut() {
+                Some((last, texts)) if *last == position => texts.push(text.to_string()),
+                _ => groups.push((position, vec![text.to_string()])),
+            }
+        }
+        groups
+    }
+    if reference.observed.is_empty() || other.observed.is_empty() {
+        return Vec::new();
+    }
+    let mut reference = by_expression(reference).into_iter().peekable();
+    let mut other = by_expression(other).into_iter().peekable();
+    let mut differing = Vec::new();
+    loop {
+        let (first, second) = match (reference.peek(), other.peek()) {
+            (None, None) => return differing,
+            (Some((first, _)), Some((second, _))) => (*first, *second),
+            (Some((first, _)), None) => (*first, usize::MAX),
+            (None, Some((second, _))) => (usize::MAX, *second),
+        };
+        let position = first.min(second);
+        let reference = reference
+            .next_if(|(candidate, _)| *candidate == position)
+            .map(|(_, texts)| texts)
+            .unwrap_or_default();
+        let other = other
+            .next_if(|(candidate, _)| *candidate == position)
+            .map(|(_, texts)| texts)
+            .unwrap_or_default();
+        if reference != other {
+            differing.push(ExpressionDifference {
+                position,
+                reference,
+                other,
+            });
+        }
+    }
+}
+
 /// A unified diff of two outcomes, or `None` when they are equal.
 pub fn diff(
     expected_label: &str,

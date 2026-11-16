@@ -20,8 +20,12 @@ local({
     dump <- tryCatch(.oracle_observe(result$value), error = function(condition) {
       paste("the observer failed:", conditionMessage(condition))
     })
-    observed <<- c(observed, paste0(if (result$visible) "visible " else "invisible ", dump))
+    observe_note(paste0(if (result$visible) "visible " else "invisible ", dump))
   }
+  # Each entry starts with the number of the top-level expression it belongs to, so a
+  # difference names the expression.
+  position <- 0L
+  observe_note <- function(text) observed <<- c(observed, paste0("[", position, "] ", text))
 
   argv <- commandArgs(trailingOnly = TRUE)
   script <- argv[1L]
@@ -82,6 +86,7 @@ local({
   )
 
   for (expression in expressions) {
+    position <- position + 1L
     failed <- FALSE
     withCallingHandlers(
       tryCatch(
@@ -92,20 +97,20 @@ local({
           if (result$visible) print(result$value)
         },
         error = function(condition) {
-          if (observing) observed <<- c(observed, .oracle_observe_condition("error", condition))
+          if (observing) observe_note(.oracle_observe_condition("error", condition))
           errors <<- c(errors, describe(condition))
           last <<- NULL
           failed <<- TRUE
         }
       ),
       warning = function(condition) {
-        if (observing) observed <<- c(observed, .oracle_observe_condition("warning", condition))
+        if (observing) observe_note(.oracle_observe_condition("warning", condition))
         warnings <<- c(warnings, describe(condition))
         if (isTRUE(getOption("warn") >= 2)) return(invisible())
         invokeRestart("muffleWarning")
       },
       message = function(condition) {
-        if (observing) observed <<- c(observed, .oracle_observe_condition("message", condition))
+        if (observing) observe_note(.oracle_observe_condition("message", condition))
         messages <<- c(messages, sub("\n$", "", conditionMessage(condition)))
         invokeRestart("muffleMessage")
       }
