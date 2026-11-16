@@ -7156,11 +7156,18 @@ pub unsafe fn complex_assign(
                     .assignment_call
                     .replace((*getter, reported, frame_depth));
                 let level_arguments = if depth == 0 { evaluated } else { &[] };
+                // An inner level belongs to the variable's value, which the level's own arguments
+                // may share, as `names(x)[{ keep <- x; 2 }]` does after the getters ran.
+                let owner = if depth + 1 < levels.len() {
+                    base
+                } else {
+                    nil()
+                };
                 let result = replace_through_primitive(
                     function,
                     *getter,
                     (object, replacement),
-                    reported,
+                    (reported, owner),
                     env,
                     level_arguments,
                 );
@@ -7247,7 +7254,7 @@ unsafe fn replace_through_primitive(
     function: Sexp,
     getter: Sexp,
     (object, value): (Sexp, Sexp),
-    reported: Sexp,
+    (reported, owner): (Sexp, Sexp),
     env: Sexp,
     evaluated: &[Sexp],
 ) -> R<Option<Sexp>> {
@@ -7344,6 +7351,15 @@ unsafe fn replace_through_primitive(
             });
             item = item.cdr();
         }
+    }
+    // GNU R's getter marks an attribute it returns as not mutable, so the level is a copy by
+    // the time it is written. Here it is copied only when its owner became shared meanwhile.
+    if owner != nil() && values::maybe_shared(owner) && args[0].value == object {
+        let was_array = object.is_array();
+        let copy = values::shallow_duplicate(object)?;
+        copy.set_array(was_array);
+        crate::heap().root(copy);
+        args[0].value = copy;
     }
     args.push(Arg {
         tag: symbols.value,
