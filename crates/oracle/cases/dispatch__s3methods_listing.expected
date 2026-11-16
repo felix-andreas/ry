@@ -1,0 +1,9 @@
+[stdout]
+| [1] TRUE
+| [1] TRUE TRUE TRUE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| c(TRUE, TRUE, TRUE)

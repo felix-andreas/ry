@@ -201,7 +201,9 @@ unsafe fn combine_items(items: Items<'_>, recursive: bool, use_names: bool) -> R
         result: nil(),
         names: nil(),
         position: 0,
-        any_names: false,
+        // GNU R's `unlist` names its result whenever the list has a names attribute, even one
+        // whose names are all blank.
+        any_names: matches!(items, Items::List { names, .. } if names != nil()),
         base: String::new(),
         base_name: None,
     };
@@ -308,7 +310,13 @@ impl Combiner {
 
     unsafe fn add_in(&mut self, value: Sexp, scope: &mut NameScope) -> R<()> {
         let count = length(value);
-        let element_names = values::names(value);
+        // A call is one element, so its argument tags do not name the result, as GNU R's
+        // `HasNames` counts tags only on a pairlist.
+        let element_names = if value.kind() == SexpType::Language {
+            nil()
+        } else {
+            values::names(value)
+        };
         if !self.base.is_empty() || element_names != nil() {
             self.any_names = true;
         }

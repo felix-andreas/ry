@@ -3,6 +3,10 @@
 //! the jumping thread, so this binary runs on the main thread (`harness = false`), as ry's
 //! runtime does: the lock is recursive, so later loads and the exit handlers still run.
 //!
+//! A library built from Fortran without registration names `subroutine cube` as `cube_`, and
+//! `.Fortran("cube", ...)` finds it by the name without the underscore, as GNU R's `R_dlsym`
+//! does. An ALTREP argument reaches the routine as an ordinary copy.
+//!
 //! GNU R's `tcltk.so` is compiled against GNU R's internal object layout, so ry refuses it as a
 //! GNU R built without Tcl/Tk would, before the loader ever opens it.
 
@@ -31,6 +35,55 @@ fn main() {
         error.contains("Tcl/Tk support is not available on this system"),
         "{error}"
     );
+    let fortran = build_package("fortransym", Headers::Ry);
+    r.eval("dyn.load", &[(None, r.string(&fortran.to_string_lossy()))])
+        .expect("the Fortran-style library loads");
+    let values = r.keep(r.real(1.0));
+    let values = r
+        .eval(
+            "c",
+            &[(None, values), (None, r.real(2.0)), (None, r.real(3.0))],
+        )
+        .expect("a double vector");
+    let result = r
+        .eval(
+            ".Fortran",
+            &[
+                (None, r.string("cube")),
+                (Some("n"), r.integer(3)),
+                (Some("x"), values),
+            ],
+        )
+        .expect(".Fortran finds cube_ as cube");
+    assert_eq!(r.reals(r.element(result, 1)), vec![1.0, 8.0, 27.0]);
+    // A wrapper's `Duplicate` method returns another wrapper, so `.Fortran` must still hand the
+    // routine ordinary storage and check that storage for `NA`.
+    let plain = r.keep(r.real(1.0));
+    let plain = r
+        .eval(
+            "c",
+            &[(None, plain), (None, r.real(2.0)), (None, r.real(3.0))],
+        )
+        .expect("a double vector");
+    let wrap = r.call_expression(
+        "wrap_meta",
+        &[(None, plain), (None, r.integer(0)), (None, r.integer(0))],
+    );
+    let wrapper = r
+        .eval_expression(r.call_expression(".Internal", &[(None, wrap)]))
+        .expect("a wrapper");
+    let result = r
+        .eval(
+            ".Fortran",
+            &[
+                (None, r.string("cube")),
+                (Some("n"), r.integer(3)),
+                (Some("x"), wrapper),
+            ],
+        )
+        .expect(".Fortran takes a wrapper");
+    assert_eq!(r.reals(r.element(result, 1)), vec![1.0, 8.0, 27.0]);
+    assert_eq!(r.reals(wrapper), vec![1.0, 2.0, 3.0]);
     r.load(&build_package("rytest", Headers::Ry));
     println!("test_load_errors: ok");
 }

@@ -156,6 +156,7 @@ unsafe fn fork(call: &NativeCall<'_>) -> R<Sexp> {
             close_fd(master);
         }
         state.is_child = true;
+        crate::time_limits::after_fork();
         let master = match pipes {
             Some((result, input)) => {
                 close_fd(result[0]);

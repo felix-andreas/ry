@@ -4,9 +4,10 @@
 //! A connection lives in a slot of a fixed table of [`NCONNECTIONS`], as in GNU R: slots 0, 1
 //! and 2 are stdin, stdout and stderr, and the R-level connection object is an integer vector
 //! holding the slot number, classed `c(<class>, "connection")`. Every connection but the
-//! standard three also carries a `conn_id` attribute, an external pointer whose address is the
-//! slot's `Rconn`. Closing a connection frees its slot and clears that address, so an R object
-//! that outlives its connection reads as an invalid connection instead of dangling.
+//! standard three also carries a `conn_id` attribute, an external pointer whose address is a
+//! serial number, as in GNU R. The slot number alone names the connection: an R object that
+//! outlives its connection reads as invalid until a new connection takes the slot, and then
+//! names that one, as in GNU R.
 //!
 //! Every connection is driven through the method pointers of its `Rconn`, because packages fill
 //! them in for custom connections (curl, processx) and call them directly on any connection
@@ -250,6 +251,8 @@ pub struct Table {
     /// The connection messages, warnings and errors go to: `stderr` unless
     /// `sink(type = "message")` diverted them. Unlike output, these diversions do not nest.
     message_slot: usize,
+    /// The serial number the next connection's `conn_id` gets as its address.
+    next_id: usize,
 }
 
 struct Entry {
@@ -314,6 +317,7 @@ impl Table {
             entries,
             sinks: Vec::new(),
             message_slot: 2,
+            next_id: 1,
         }
     }
 
@@ -391,15 +395,9 @@ unsafe fn resolve_number(object: Sexp) -> R<(usize, Rconnection)> {
         .ok()
         .and_then(entry)
         .ok_or_else(invalid)?;
-    // The `conn_id` object itself identifies the connection, not its address: a package may
-    // store its own pointer there, as curl does with its multi handle.
-    let id = values::get_attr(object, values::install("conn_id")?);
-    // Closing clears the `conn_id` address, so an object kept past `close()` stays invalid even
-    // once a new connection takes its slot. Any other address is accepted, because curl stores
-    // its own handle there, and GNU R never looks at it.
-    if id.kind() == SexpType::ExternalPtr && id.external_address().is_null() {
-        return Err(invalid());
-    }
+    // The slot alone names the connection, as in GNU R, which never looks at `conn_id`: an
+    // object kept past `close()` names whatever connection takes its slot next, and one read
+    // back by `unserialize()`, whose `conn_id` address is null, still names its slot.
     Ok((slot as usize, entry.con))
 }
 
@@ -472,18 +470,33 @@ pub unsafe fn write_message(bytes: &[u8]) {
     }
 }
 
+/// Writes ordinary output to the current sink. As in GNU R's `Rvprintf`, a split sink passes the
+/// output on to the sink beneath it, so output reaches every level down to the first unsplit
+/// one, or the console.
 pub unsafe fn write_output(bytes: &[u8]) {
-    let Some(sink) = interp().connections.sinks.last() else {
-        write_terminal(bytes, false);
-        return;
-    };
-    let (slot, split) = (sink.slot, sink.split);
-    if split || slot == 1 {
-        write_terminal(bytes, false);
+    let mut level = interp().connections.sinks.len();
+    loop {
+        let Some(sink) = level
+            .checked_sub(1)
+            .and_then(|index| interp().connections.sinks.get(index))
+        else {
+            write_terminal(bytes, false);
+            return;
+        };
+        let (slot, split) = (sink.slot, sink.split);
+        if slot == 1 {
+            write_terminal(bytes, false);
+        } else {
+            write_sink(slot, bytes);
+        }
+        if !split || slot == 1 {
+            return;
+        }
+        level -= 1;
     }
-    if slot == 1 {
-        return;
-    }
+}
+
+unsafe fn write_sink(slot: usize, bytes: &[u8]) {
     // GNU R's `Rvprintf` flushes after every write, so the file a sink writes to can be read
     // before the sink ends.
     let written = match entry(slot) {
@@ -1349,10 +1362,7 @@ unsafe fn do_gzcon(call: &Call<'_>) -> R<Sexp> {
     (*con).canwrite = (*inner).canwrite;
     (*con).text = text as Rboolean;
     (*con).ex_ptr = (*inner).ex_ptr;
-    (*con).id = con.cast();
-    if let Some(id) = Sexp::from_raw((*con).ex_ptr.cast()) {
-        id.set_external_address(con.cast());
-    }
+    (*con).id = (*inner).id;
     if let Some(Some(slot_entry)) = entries().get_mut(slot) {
         *slot_entry = Entry {
             con,
@@ -1556,13 +1566,12 @@ unsafe fn do_read_lines(call: &Call<'_>) -> R<Sexp> {
         // Reading to the end takes the device's bytes in blocks, which costs a fraction of
         // asking the connection for each character.
         let rest = if n < 0 && reads_device_bytes(con)? {
-            Some(remaining_text(con)?)
+            Some(read_text_rest(con)?)
         } else {
             None
         };
         let mut offset = 0;
         while n < 0 || (lines.len() as i64) < n {
-            line.clear();
             let (character, nul) = match &rest {
                 Some(text) => text_line(text, &mut offset, skip_nul, &mut line),
                 None => connection_line(con, skip_nul, &mut line)?,
@@ -1593,7 +1602,7 @@ unsafe fn do_read_lines(call: &Call<'_>) -> R<Sexp> {
                 }
                 break;
             }
-            lines.push(line.clone());
+            lines.push(std::mem::take(&mut line));
         }
         if n > 0 && (lines.len() as i64) < n && !ok {
             return Err(error("too few lines read in readLines"));
@@ -1671,55 +1680,6 @@ unsafe fn reads_device_bytes(con: Rconnection) -> R<bool> {
                 | Device::Gzcon(_)
                 | Device::Pipe(_)
         ))
-}
-
-/// Everything left to read on `con`, as [`read_char`] would return it one character at a time:
-/// what is pushed back or looked ahead, then the device's bytes with `\r` and `\r\n` read as
-/// `\n`.
-unsafe fn remaining_text(con: Rconnection) -> R<Vec<u8>> {
-    let mut text = Vec::new();
-    while has_buffered_input(con) {
-        let character = read_char(con)?;
-        if character != EOF {
-            text.push(character as u8);
-        }
-    }
-    let start = text.len();
-    // The buffer is zeroed before each read, so the blocks start small and double: a short
-    // file pays for a few kilobytes, not for a whole block.
-    let mut block = 4096;
-    loop {
-        let filled = text.len();
-        text.resize(filled + block, 0);
-        let count = device_read(con, text.get_mut(filled..).unwrap_or_default())?;
-        text.truncate(filled + count);
-        if count == 0 {
-            break;
-        }
-        block = (block * 2).min(READ_CHUNK);
-    }
-    if memchr(b'\r', text.get(start..).unwrap_or_default()).is_some() {
-        // `read_char` reads the character after a `\r` to drop a `\n`, and a second `\r`
-        // there is its own line end.
-        let device = text.split_off(start);
-        let mut bytes = device.iter().copied().peekable();
-        while let Some(byte) = bytes.next() {
-            if byte != b'\r' {
-                text.push(byte);
-                continue;
-            }
-            text.push(b'\n');
-            match bytes.peek() {
-                Some(b'\n') => drop(bytes.next()),
-                Some(b'\r') => {
-                    bytes.next();
-                    text.push(b'\n');
-                }
-                _ => {}
-            }
-        }
-    }
-    Ok(text)
 }
 
 /// `writeLines(text, con, sep, useBytes)`.
@@ -2673,7 +2633,12 @@ unsafe fn register(con: Rconnection, builtin: bool) -> R<Sexp> {
     };
     let heap = crate::heap();
     let tag = values::install("connection")?;
-    let id = heap.alloc_external_ptr(con.cast(), tag, nil())?;
+    // GNU R's `conn_id` address is a small serial number rather than the struct's address, and
+    // packages read it: parallelly parses it with `strtoi(, 16L)` to tell connections apart.
+    let table = &mut interp().connections;
+    let serial = table.next_id as *mut c_void;
+    table.next_id += 1;
+    let id = heap.alloc_external_ptr(serial, tag, nil())?;
     heap.root(id);
     heap.alloc_weak_ref(
         id,
@@ -2683,22 +2648,22 @@ unsafe fn register(con: Rconnection, builtin: bool) -> R<Sexp> {
         false,
     )?;
     (*con).ex_ptr = id.as_ptr().cast();
-    (*con).id = con.cast();
+    (*con).id = serial;
     connection_object(slot)
 }
 
 /// Runs when a connection's `conn_id` becomes unreachable.
 unsafe extern "C" fn connection_finalizer(id: Sexp) {
     from_native(|| {
-        let address = id.external_address();
-        if address.is_null() {
+        if id.external_address().is_null() {
             return Ok(());
         }
-        let found = (3..NCONNECTIONS).find(|&slot| {
-            entry(slot).is_some_and(|entry| entry.con.cast() == address && !entry.pinned)
+        let found = (3..NCONNECTIONS).find_map(|slot| {
+            entry(slot)
+                .filter(|entry| (*entry.con).ex_ptr == id.as_ptr().cast() && !entry.pinned)
+                .map(|entry| (slot, entry.con))
         });
-        if let Some(slot) = found {
-            let con = address as Rconnection;
+        if let Some((slot, con)) = found {
             // GNU R destroys a closed connection, or any text connection, silently and warns
             // only about an open one of another class.
             if (*con).isopen == 0 || class_of(con) == "textConnection" {
@@ -2736,14 +2701,14 @@ unsafe fn close_slot(slot: usize) -> R<c_int> {
         None
     };
     if let Some((inner, inner_builtin)) = wrapped {
-        // The wrapped connection shares the wrapper's `conn_id`, which is cleared below.
+        // The wrapped connection shares the wrapper's `conn_id`.
         let destroyed = method_destroy(inner);
         free_rconn(inner, inner_builtin);
         destroyed?;
     }
-    if let Some(id) = Sexp::from_raw((*con).ex_ptr.cast()) {
-        id.set_external_address(null_mut());
-    }
+    // GNU R leaves a destroyed connection's `conn_id` address in place: future reads a null
+    // address as a connection that came back from `unserialize()`, and so would wait forever
+    // on a worker whose connection was closed under it.
     free_rconn(con, builtin);
     closed?;
     destroyed?;
@@ -2931,32 +2896,55 @@ unsafe fn read_text_rest(con: Rconnection) -> R<Vec<u8>> {
             text.push(character as u8);
         }
     }
-    let mut chunk = vec![0u8; READ_CHUNK];
-    let mut after_return = false;
+    let start = text.len();
+    // The buffer is zeroed before each read, so the blocks start small and double: a short
+    // file pays for a few kilobytes, not for a whole block.
+    let mut block = 4096;
     loop {
-        let count = device_read(con, &mut chunk)?;
+        let filled = text.len();
+        text.resize(filled + block, 0);
+        let count = device_read(con, text.get_mut(filled..).unwrap_or_default())?;
+        text.truncate(filled + count);
         if count == 0 {
-            return Ok(text);
+            break;
         }
-        for &byte in chunk.get(..count).unwrap_or_default() {
-            match (after_return, byte) {
-                (true, b'\n') => after_return = false,
-                // The second `\r` reads as `\n` without starting a pair of its own.
-                (true, b'\r') => {
-                    after_return = false;
-                    text.push(b'\n');
-                }
-                (_, b'\r') => {
-                    after_return = true;
-                    text.push(b'\n');
-                }
-                (_, byte) => {
-                    after_return = false;
-                    text.push(byte);
-                }
-            }
-        }
+        block = (block * 2).min(READ_CHUNK);
     }
+    let Some(first) = memchr(b'\r', text.get(start..).unwrap_or_default()) else {
+        return Ok(text);
+    };
+    // `read_char` reads the character after a `\r` to drop a `\n`. The bytes are folded in
+    // place: the write position never passes the read position.
+    let mut kept = start + first;
+    let mut after_return = false;
+    for position in kept..text.len() {
+        let byte = text.get(position).copied().unwrap_or_default();
+        let folded = match (after_return, byte) {
+            (true, b'\n') => {
+                after_return = false;
+                continue;
+            }
+            // The second `\r` reads as `\n` without starting a pair of its own.
+            (true, b'\r') => {
+                after_return = false;
+                b'\n'
+            }
+            (_, b'\r') => {
+                after_return = true;
+                b'\n'
+            }
+            (_, byte) => {
+                after_return = false;
+                byte
+            }
+        };
+        if let Some(slot) = text.get_mut(kept) {
+            *slot = folded;
+        }
+        kept += 1;
+    }
+    text.truncate(kept);
+    Ok(text)
 }
 
 unsafe fn pop_push_back(con: Rconnection) {

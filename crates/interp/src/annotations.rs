@@ -371,7 +371,7 @@ pub unsafe fn enter_positional(call: Sexp, function: Sexp, values: &[Sexp]) -> R
 /// Checks a typed closure's value, and returns the value the call returns (see [`check_value`]).
 pub unsafe fn check_return(call: Sexp, signature: Sexp, value: Sexp) -> R<Sexp> {
     let mask = mask_at(signature.element(MASKS), RETURN_SLOT);
-    if mask == 0 || (admits(mask, value) && !lacks_item_type(mask, value)) {
+    if passes_unchanged(mask, value) {
         return Ok(value);
     }
     // `-> I64` converts a whole R number, as an `I64` parameter does.
@@ -433,6 +433,21 @@ pub unsafe fn check_forced(promise: Sexp, mut value: Sexp) -> R<Sexp> {
         .pending
         .retain(|entry| entry.promise != promise);
     Ok(value)
+}
+
+/// Whether every pending check of `promise` admits `value` as it is, so code that reads the
+/// value ahead of forcing the promise may use it: settling the promise then passes its checks
+/// and stores `value` unchanged.
+pub unsafe fn accepts_unchanged(promise: Sexp, value: Sexp) -> bool {
+    interp()
+        .annotations
+        .pending
+        .iter()
+        .filter(|entry| entry.promise == promise)
+        .all(|entry| {
+            let mask = mask_at(entry.signature.element(MASKS), entry.slot);
+            passes_unchanged(mask, value)
+        })
 }
 
 /// What an annotation that admits exactly one of `logical`, `integer` or `double` declares
@@ -779,7 +794,7 @@ unsafe fn check_argument(
 /// itself, or the `I64` an `I64` annotation converts a whole R number to.
 unsafe fn check_value(call: Sexp, signature: Sexp, slot: usize, value: Sexp) -> R<Sexp> {
     let mask = mask_at(signature.element(MASKS), slot);
-    if mask == 0 || (admits(mask, value) && !lacks_item_type(mask, value)) {
+    if passes_unchanged(mask, value) {
         return Ok(value);
     }
     // R has no `I64` literal, so `f(10)` for `n: I64` passes the R double 10, which the checker
@@ -852,6 +867,12 @@ unsafe fn as_i64(mask: Mask, value: Sexp) -> R<Option<Sexp>> {
         Some(items) => crate::numbers::list(&items).map(Some),
         None => Ok(None),
     }
+}
+
+/// Whether the annotation `mask` accepts `value` as it is, with no conversion; a mask of 0
+/// declares nothing.
+unsafe fn passes_unchanged(mask: Mask, value: Sexp) -> bool {
+    mask == 0 || (admits(mask, value) && !lacks_item_type(mask, value))
 }
 
 /// Whether `value` is an empty list built without an item type (stored as `logical`, as

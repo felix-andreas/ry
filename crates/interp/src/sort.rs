@@ -2886,19 +2886,21 @@ unsafe fn hash_object(object: Sexp, hasher: &mut FxHasher) {
 }
 
 /// `x` or `table` of `match`, with factors as their labels and other classed objects as
-/// `mtfrm()` makes them.
+/// `mtfrm()` makes them. The transform comes before the vector check, as in GNU R, so an S4
+/// object with an `as.character` method matches as its strings.
 unsafe fn match_operand(object: Sexp, call: &Call<'_>) -> R<Sexp> {
-    if object != nil() && !object.kind().is_vector() {
+    let operand = if !object.is_object() {
+        object
+    } else if values::inherits(object, "factor") {
+        factor_as_character(object)?
+    } else {
+        let transform = values::call(values::install("mtfrm")?, &[object])?;
+        eval::eval(transform, call.env()?)?
+    };
+    if operand != nil() && !operand.kind().is_vector() {
         return Err(error("'match' requires vector arguments"));
     }
-    if !object.is_object() {
-        return Ok(object);
-    }
-    if values::inherits(object, "factor") {
-        return factor_as_character(object);
-    }
-    let transform = values::call(values::install("mtfrm")?, &[object])?;
-    eval::eval(transform, call.env()?)
+    Ok(operand)
 }
 
 unsafe fn identical_skipping(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped: &[Sexp]) -> bool {

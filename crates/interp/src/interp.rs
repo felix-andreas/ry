@@ -107,6 +107,7 @@ pub mod strings;
 pub mod subset;
 pub mod system;
 pub mod testing;
+pub mod time_limits;
 pub mod tools;
 pub mod unwind;
 pub mod utils;
@@ -550,6 +551,11 @@ pub struct Hooks {
     /// evaluating R code: the boundary-call recorder serializes inputs of the program it
     /// records, and an error it raised through `eval` would reach that program's handlers.
     pub serialize: unsafe fn(Sexp) -> R<Vec<u8>>,
+    /// An ALTREP object read back from a stream: its class information, serialized state,
+    /// attributes, levels and object bit. The host's class registry holds the classes packages
+    /// register (s2's geographies), so it rebuilds the object, or `None` leaves the interpreter
+    /// to materialize base R's classes itself.
+    pub unserialize_altrep: unsafe fn(Sexp, Sexp, Sexp, u16, bool) -> R<Option<Sexp>>,
 }
 
 /// The ALTREP summary methods `sum`, `min` and `max` consult.
@@ -761,6 +767,8 @@ pub struct Interp {
     /// The evaluator polls left before the next one that delivers a pending user interrupt
     /// (see [`crate::unwind::poll_interrupt`]).
     pub interrupt_countdown: u32,
+    /// `setTimeLimit()` and `setSessionTimeLimit()`.
+    pub time_limits: time_limits::State,
     /// Closure calls the session has made, wrapping: the JIT's measure of how much work ran
     /// between two calls of a body, which does not change when a call allocates less.
     pub calls_ever: u32,
@@ -948,6 +956,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         parked_unwind: None,
         held_unwinds: Vec::new(),
         interrupt_countdown: crate::unwind::INTERRUPT_CHECK_INTERVAL,
+        time_limits: time_limits::State::default(),
         calls_ever: 0,
         #[cfg(unix)]
         forks: fork::Forks::default(),
@@ -1018,6 +1027,7 @@ pub fn default_hooks() -> Hooks {
         connection_vfprintf: None,
         find_native_symbol: |_| None,
         serialize: |_| Err(unwind::error("serialization needs the libR host")),
+        unserialize_altrep: |_, _, _, _, _| Ok(None),
     }
 }
 

@@ -211,7 +211,7 @@ unsafe fn do_set_attr(call: &Call<'_>) -> R<Sexp> {
         }
         return Err(call.error("attempt to set an attribute on NULL"));
     }
-    let object = modifiable(object)?;
+    let object = modifiable_attributes(object)?;
     let symbol = values::install_charsxp(which.element(0))?;
     set_attribute_checked(object, symbol, value, call.call)?;
     Ok(object)
@@ -234,7 +234,7 @@ unsafe fn direct_set_attr(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
         return Ok(None);
     }
     let symbols = symbols();
-    let object = modifiable(object)?;
+    let object = modifiable_attributes(object)?;
     let symbol = values::install_charsxp(which.element(0))?;
     if symbol == symbols.names {
         set_names(object, value)?;
@@ -323,7 +323,11 @@ unsafe fn do_set_names(call: &Call<'_>) -> R<Sexp> {
         }
         return Err(call.error("attempt to set an attribute on NULL"));
     }
-    if names == nil() && get_attr(object, symbols().names) == nil() {
+    // A call or pairlist keeps its names as tags, not as a `names` attribute.
+    if names == nil()
+        && get_attr(object, symbols().names) == nil()
+        && !matches!(object.kind(), SexpType::Pairlist | SexpType::Language)
+    {
         return Ok(object);
     }
     if object.kind() == SexpType::Object {
