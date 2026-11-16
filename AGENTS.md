@@ -1,6 +1,6 @@
 # Overview
 
-ry is a backwards-compatible reimplementation of R, extended with ry's static typing (user directive). It runs R on its own runtime with a bundled base R on Linux, macOS and Windows, and its ABI-compatible `libR` implements R's C API, so `R CMD` installs compiled packages against it. It runs the three benchmark code bases below and pinned CRAN packages' test suites faster than GNU R. Typed ry compiles to native code at a typed closure's first call or ahead of time (`ry run --aot`), and a JIT compiles hot untyped code. The runtime is incomplete: code that needs something it lacks stops with an error naming it.
+ry is a backwards-compatible reimplementation of R, extended with ry's static typing (user directive). It runs R on its own runtime with a bundled base R on Linux, macOS and Windows, and its ABI-compatible `libR` implements R's C API, so `R CMD` installs compiled packages against it. It runs the three benchmark code bases below and pinned CRAN packages' test suites faster than GNU R on every benchmark suite (`docs/src/content/docs/benchmarks.mdx`). Typed ry compiles to native code at a typed closure's first call or ahead of time (`ry run --aot`, a package's typed code file), and a JIT compiles hot untyped code. The runtime is incomplete: code that needs something it lacks stops with an error naming it.
 
 The same binary is the tooling: a language server and a command-line tool that aim to be world class at code analysis on the level of rust-analyzer, code formatting, and linting, with a static type checker at the core of the analysis.
 
@@ -161,7 +161,7 @@ Memory lives in git so every agent reads the same source of truth; never keep pr
 - **`crates/<crate>/AGENTS.md`** holds the traps of one crate.
 - Unsettled design work belongs in `docs/src/content/docs/development/design/`, not in memory.
 
-Add what is durable, prune what is resolved, stale or duplicated, and move items between horizons as their status changes. `python3 tools/memory.py check` (in `just gate`) enforces byte budgets and line limits; prune a file over budget instead of raising it. `just` may be absent in a cloud container: every recipe is a plain command in the `justfile`.
+Add what is durable, prune what is resolved, stale or duplicated, and move items between horizons as their status changes. `python3 tools/memory.py check` (in `just gate`) enforces byte budgets and line limits; prune a file over budget (split a decisions area file) instead of raising it. `just` may be absent in a cloud container: every recipe is a plain command in the `justfile`.
 
 ## `docs/`
 
@@ -212,12 +212,14 @@ Apply these when writing or optimizing code in the analysis core, the runtime, t
 - Make illegal states unrepresentable whenever practical.
 - Keep a single source of truth for each semantic fact; store a fact that derives cheaply from it only for a clear performance reason, and never as state that can drift out of sync.
 - Minimize cloning, copying and rebuilding whole structures; optimize for fast incremental analysis and low memory churn.
+- A check must never read a project-wide map directly, because every edit would invalidate it: go through a per-name or per-item tracked projection (details in `crates/semantics/AGENTS.md` and `development/architecture.md`).
 - **Do not work around a structural problem** (multiple sources of truth, duplicated metadata, unjustified persisted derived state, snapshot-local ids where stable indirection would do, cloning only to maintain convenience state, a design more complicated than the semantics): design the fix, implement it, and when it settles an architectural question record in `decisions/<area>.md` the previous source of truth, what was duplicated or weak, the target shape, and the expected impact on correctness, simplicity, performance, and incremental analysis.
 
 # Error handling
 
 - Never swallow an analysis, synchronization, or document-loading error anywhere in the project.
 - If an operation is required to keep analysis state coherent and it fails, `panic!` immediately rather than logging and carrying on with corrupted or stale state.
+- A document-sync or analysis-sync failure in the LSP path is unrecoverable: `panic!`, never fall back to stale state (details in `crates/ry/AGENTS.md`).
 
 # Testing strategy
 

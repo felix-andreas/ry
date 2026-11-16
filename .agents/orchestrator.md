@@ -37,25 +37,40 @@ The goal, the mandate and the benchmark are in `AGENTS.md`. On top of them:
 
 ## Log rule
 
-"In flight" holds the current sessions only, one or two lines each. "Log" holds at most the last 20 one-line entries (time, event, outcome); drop the oldest when adding one. Durable facts go to `.agents/memory/`, never here.
+"In flight" holds the current sessions only, one or two lines each. "Log" holds at most the last 20 one-line entries (time, event, outcome); drop the oldest when adding one. A line of `.agents/memory/worklog.md` is at most 400 bytes, and `python3 tools/memory.py check` (in `just gate`) enforces it. Durable facts go to `.agents/memory/`, never here.
+
+## Direction
+
+- **Bold pivot (user, 2026-11-09: "be bold, not chase the peanuts").** No percent-level tier-0 tuning. Track A, the native execution model: slot frames, a native calling convention between locked-namespace closures, unboxed scalars, whole-package install-time compilation with entry guards and deopt to tier 0. Track B, vector kernels: allocation-free, SIMD, fused element-wise chains, the top Amdahl builtins native. Allocation and GC work follows A. Each track lands its full end shape at once, old paths deleted (user: "work on both in parallel", "do all changes at once").
 
 ## In flight
 
-Release: the next release may be cut without asking once #589, call setup and the source-files work are merged and the oracle is green (user). `.github/pending/` is not required for it.
+Release: the next release may be cut without asking once call setup and the source-files work are merged and the oracle is green (#589 is merged; user). `.github/pending/` is not required for it.
 
 - session_0111kWqC7RFhwr7cUXCLb1kD (Fable high, call setup): closure call setup end shape; #579 merged. Resumed after its weekly limit; replacement-call reification forwarded to it.
-- session_0111kWqEuykBqAFmDRUX18Uv (Fable high + up to 2 Opus high subagents, a user's package-suite kernels k1-k13): #584, #586, #587, #590 merged. Next: parse speed, k3 (base closure prologues), loading, data.table under testthat, k2/k8.
-- session_0111kWqBMmAzH7BQL9wcvEQ4 (Opus high, broken on main, bug A): #588 merged; #589 (replacement-call promises, `fix/replacement-call-promises`) waits on a retried commit.
+- session_0111kWqEuykBqAFmDRUX18Uv (Fable high + up to 2 Opus high subagents, a user's package-suite kernels k1-k14): #584, #586, #587, #590, #595 (parse), #597 (base closure prologues), #598 (lazy-load fetch) merged. Next: data.table under testthat, k2/k8.
+- session_0111kWqBMmAzH7BQL9wcvEQ4 (Opus high, broken on main): #588 and #589 (replacement-call promises) merged; `jit`'s `element_ops_cost_no_more_than_tier_zero` fails on main (backlog, "Open: untyped R against GNU R").
 - session_0111kWqAnTx97virE5EiXtV1 (Opus high): the JIT abort; also #523 (scan each package `.so` for implicit declarations, reinstall hits from source), close #312.
 - session_0111kWqB22GkB9yjpoxGpSxo (Fable, low-signal test cut): PR #594.
 - session_0111kWqBDx8gHzkTxw2tx3iw (developer experience): agent memory layout and context cost (`dx/memory-structure`).
 
 User-only items (never ask; note in the final report): the Marketplace trusted-publishing policy, the Zed listing, a real Windows run, deleting remote branches `feat/runtime-stats` and `runtime-packages-round4`, moving staged files from `.github/pending/`.
 
+## Open asks to the user
+
+Unanswered (do not re-ask; note in the final report): deploy the docs site, pre-release the nightly, the data.table name arms in `check.rs`. A history rewrite to drop an old customer-project name from git history awaits the user.
+
+## Unverified reports
+
+- A worker saw `f <- function(x) x + 1; f('a')` with `double` annotations pass `ry check` with no problem (annotation form not recorded); check whether it should be flagged.
+- The `log_rank` typed-kernel regression (6 s where earlier runs were far faster) is unverified.
+- CRAN itself is unreachable from the cloud runner, but the rrepo CRAN mirror (https://rrepo.org) works.
+
 Open: `tools/loader-bench/s4_package.py` hangs for seed 2 and fails for seeds 7 and 42 with `--local-share 0.3`; `/usr/lib/R/library` from /etc/R/Renviron is missing from `.libPaths()`; about 20 stale remote branches (leave feat/runtime-stats and runtime-packages-round4 alone).
 
 ## Log
 
+- 2026-11-16: #589 (replacement-call promises), #595 (parse speed), #597 (base closure prologues), #598 (lazy-load fetch) merged.
 - 2026-11-16 10:54Z: #590 merged (readLines 0.70x to 2.43x, list.files 0.64x to 2.14x of GNU R; oracle 529/529).
 - 2026-11-16 10:52Z: user: go for the low-signal test cut and the docs deploy (docs.yml dispatched on main); release rule above.
 - 2026-11-16 10:45Z: weekly limit reset; user: no nightly, work until a full release is reasonable, then cut it. #592, #593 merged overnight; failed sessions nudged to resume.

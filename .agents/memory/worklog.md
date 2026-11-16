@@ -1,6 +1,6 @@
 # Work log
 
-This file holds one line per autonomous work cycle, newest last.
+This file holds one line per autonomous work cycle, newest last. A line is at most 400 bytes (the outcome, not the steps), and `python3 tools/memory.py check`, part of `just gate`, fails on a longer one.
 
 It is the one file in `.agents/memory/` that is deliberately chronological. The timeless rule that
 governs `MEMORY.md`, `backlog.md` and `decisions/` does not apply here, so do not turn it into a
