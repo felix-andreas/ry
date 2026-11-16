@@ -3201,7 +3201,7 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
         if !is_vector {
             return Err(not_subsettable(call, object));
         }
-        if object.kind().is_atomic() && (value == nil() || value.kind().is_atomic()) {
+        if object.kind().is_atomic() {
             atomic_replacement_check(value)?;
         }
         return Err(error_in(call, "[[ ]] improper number of subscripts"));
