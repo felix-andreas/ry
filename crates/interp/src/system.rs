@@ -1695,8 +1695,7 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
     for (index, &value) in seconds.iter().enumerate() {
         // A year beyond the integer range cannot be broken down either, so it is kept like a
         // non-finite time.
-        let years_since_1970 = value / (365.2425 * 86400.0);
-        if !value.is_finite() || (years_since_1970 + 70.0).abs() > i32::MAX as f64 {
+        if beyond_broken_down_range(value) {
             // GNU R keeps a non-finite time, including NA versus NaN, in `sec`.
             values::reals_mut(fields[0])[index] = value;
             for &field in &fields[1..8] {
@@ -2543,7 +2542,11 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
     let tz = values::first_string(call.arg(2))
         .map(|text| text.into_owned())
         .unwrap_or_default();
-    let count = length(texts);
+    // GNU R recycles `x` and `format` to the longer of the two, unless `x` is empty.
+    let count = match length(texts) {
+        0 => 0,
+        texts => texts.max(length(formats)),
+    };
     let zone = resolve_zone(&tz);
     let name = if tz.is_empty() {
         session_zone_name()
@@ -2554,10 +2557,10 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
     let mut parsed = Vec::with_capacity(count);
     let mut warnings = Vec::new();
     for index in 0..count {
-        let format = values::string_at(formats, index % length(formats).max(1))
-            .map(|text| text.into_owned())
-            .unwrap_or_default();
-        parsed.push(match values::string_at(texts, index) {
+        // GNU R reads an NA format as the text "NA".
+        let format = values::string_at(formats, index % length(formats))
+            .map_or_else(|| "NA".to_owned(), |text| text.into_owned());
+        parsed.push(match values::string_at(texts, index % length(texts)) {
             Some(text) => parse_time(&text, &format, &mut warnings)?,
             None => None,
         });
@@ -2616,7 +2619,16 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
     if !utc {
         values::ints_mut(fields[10]).fill(NA_INTEGER);
     }
-    set_year_names(result, values::names(texts))?;
+    let mut names = values::names(texts);
+    if names != nil() && count > length(texts) {
+        // The names recycle with `x` under a longer `format`.
+        let recycled = alloc(SexpType::String, count)?;
+        for index in 0..count {
+            values::set_elt(recycled, index, names.element(index % length(texts)));
+        }
+        names = recycled;
+    }
+    set_year_names(result, names)?;
     for message in warnings {
         crate::conditions::warning(message)?;
     }
@@ -2676,6 +2688,51 @@ unsafe fn do_posixlt_to_date(call: &Call<'_>) -> R<Sexp> {
     let class = scalar_string("Date")?;
     values::set_attr(result, symbols().class, class)?;
     Ok(result)
+}
+
+/// What `as.Date(strptime(text, format, tz))` makes of one string, worked out without the
+/// POSIXlt in between, for `as.Date.character`'s fast path.
+pub(crate) enum DateFromText {
+    /// The day number since 1970-01-01.
+    Day(f64),
+    /// The text does not match the format: `strptime` gives NA.
+    Unmatched,
+    /// `strptime` would warn or raise an error, or the date depends on the session's time
+    /// zone or on a year too large to break down; the R code must decide.
+    Unsupported,
+}
+
+/// The date `as.Date(strptime(text, format, tz))` gives, with `tz = "GMT"` when `gmt` holds and
+/// `tz = ""` otherwise. `POSIXlt2Date` reads only the wall-clock fields, and `strptime` fills them
+/// with the parsed text's own wall clock, except that a parsed `%z` offset moves the time to the
+/// zone `tz`: GMT is known here, the session's zone is left to the R code.
+pub(crate) fn date_from_text(text: &str, format: &str, gmt: bool) -> DateFromText {
+    let mut warnings = Vec::new();
+    let Ok(parsed) = parse_time(text, format, &mut warnings) else {
+        return DateFromText::Unsupported;
+    };
+    if !warnings.is_empty() {
+        return DateFromText::Unsupported;
+    }
+    let Some(time) = parsed else {
+        return DateFromText::Unmatched;
+    };
+    let wall = match time.offset {
+        None => time.whole,
+        Some(offset) if gmt => time.whole - offset as f64,
+        Some(_) => return DateFromText::Unsupported,
+    };
+    if beyond_broken_down_range(wall) {
+        return DateFromText::Unsupported;
+    }
+    DateFromText::Day(((wall + time.fraction) / 86400.0).floor())
+}
+
+/// Whether a time `seconds` from the epoch has a year beyond the integer range, which a POSIXlt
+/// cannot hold in its fields.
+fn beyond_broken_down_range(seconds: f64) -> bool {
+    let years_since_1970 = seconds / (365.2425 * 86400.0);
+    !seconds.is_finite() || (years_since_1970 + 70.0).abs() > i32::MAX as f64
 }
 
 unsafe fn do_file_info(call: &Call<'_>) -> R<Sexp> {
@@ -3844,7 +3901,10 @@ unsafe fn set_gc_stress(gap: i32, wait: i32) -> i32 {
         }
         policy.stress_gap = gap;
     });
-    let wait = u32::try_from(wait).ok().and_then(NonZeroU32::new).unwrap_or(gap);
+    let wait = u32::try_from(wait)
+        .ok()
+        .and_then(NonZeroU32::new)
+        .unwrap_or(gap);
     heap.delay_stress(wait);
     previous
 }
