@@ -6881,15 +6881,17 @@ pub unsafe fn call_builtin_step(machine: &mut Machine<'_>, pc: usize) -> R<()> {
 /// Runs the element read or store at `pc` through tier 0's fast handler for it, for the
 /// optimizing tier, and says whether the handler applied: it then read and wrote only the
 /// instruction's registers, recorded its feedback and, for `SubAssign`, wrote the element of
-/// its variable's vector in place. The fast handlers read few of the activation's fields, so
-/// the activation stays in registers; [`quiet_step`] builds its own rather than receive this
-/// one, which would then be stored to memory on every hit.
+/// its variable's vector in place.
+///
+/// The fast handlers read few of the activation's fields, so it stays in registers, unless its
+/// address escapes on some path: then every path stores it to memory. `call_builtin_fast` passes
+/// it to handlers out of line, so each arm builds its own, and [`quiet_step`] builds its own too.
 pub unsafe fn fast_step(machine: &mut Machine<'_>, pc: usize) -> bool {
-    let mut state = activation(machine, true);
-    let applied = match op_of(*state.code.add(pc) as u32) {
-        Some(Op::CallBuiltin) => call_builtin_fast(&mut state, pc),
-        Some(Op::SubAssign) => sub_assign_fast(&mut state, pc),
-        Some(Op::Field) => field_fast(&mut state, pc),
+    let code = machine.code.car().data().cast::<i32>().cast_const();
+    let applied = match op_of(*code.add(pc) as u32) {
+        Some(Op::CallBuiltin) => call_builtin_fast(&mut activation(machine, true), pc),
+        Some(Op::SubAssign) => sub_assign_fast(&mut activation(machine, true), pc),
+        Some(Op::Field) => field_fast(&mut activation(machine, true), pc),
         _ => None,
     };
     applied.is_some()

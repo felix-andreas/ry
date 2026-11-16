@@ -632,22 +632,18 @@ unsafe fn guarded<T>(
     if unsafe { (*parked).panic.is_some() } {
         return fallback;
     }
-    let Some(inlined) = (unsafe { &layout(activation).inlined }) else {
-        return match catch_unwind(AssertUnwindSafe(|| body(&mut *activation))) {
-            Ok(value) => value,
-            Err(payload) => {
-                unsafe { (*parked).panic = Some(payload) };
-                fallback
-            }
-        };
-    };
-    let state = interp::interp();
-    let caller =
+    // `body` runs from one call site, so that it inlines into the unwinding frame rather than
+    // costing every helper call a frame of its own.
+    let caller = unsafe { &layout(activation).inlined }.as_ref().map(|inlined| {
+        let state = interp::interp();
         state
             .assignment_call
-            .replace((values::unbound(), inlined.call, state.frames.len()));
+            .replace((values::unbound(), inlined.call, state.frames.len()))
+    });
     let result = catch_unwind(AssertUnwindSafe(|| body(&mut *activation)));
-    interp::interp().assignment_call = caller;
+    if let Some(caller) = caller {
+        interp::interp().assignment_call = caller;
+    }
     match result {
         Ok(value) => value,
         Err(payload) => {
@@ -747,13 +743,16 @@ unsafe fn step_unsignalled<T>(activation: &Activation, step: impl FnOnce() -> T)
             interp::interp().signalling = Signalling::Immediate;
         }
     }
-    if unsafe { layout(activation).inlined.is_none() } {
-        return Some(step());
-    }
-    interp::interp().signalling = Signalling::Deferred;
-    let _restore = Restore;
+    // `step` runs from one call site, so that it inlines into the caller.
+    let restore = unsafe { layout(activation).inlined.is_some() }.then(|| {
+        interp::interp().signalling = Signalling::Deferred;
+        Restore
+    });
     let result = step();
-    (interp::interp().signalling != Signalling::Abandoned).then_some(result)
+    let abandoned =
+        restore.is_some() && interp::interp().signalling == Signalling::Abandoned;
+    drop(restore);
+    (!abandoned).then_some(result)
 }
 
 /// Runs the tier-0 instruction at `pc`, then checks the speculations when `validate` is set.
