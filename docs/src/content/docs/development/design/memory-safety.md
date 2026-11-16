@@ -107,7 +107,7 @@ All four are one machine word, the same word a `SEXP` is, because the heap does 
 | --- | --- | --- | --- |
 | `Gc<'a, T>` | read from the heap, not rooted | a load through `&'a Cx` | the next safepoint: it borrows the context |
 | `Local<'s, T>` | rooted in scope `'s` | `cx.root(gc)`, every constructor, every argument, every register operand | the scope ends |
-| `Fresh<'s, T>` | a new object nothing else can see | `cx.alloc_*`, `cx.duplicate` | `finish()` turns it into a `Local` |
+| `Fresh<'s, T>` | a new object nothing else can see | `cx.alloc::<T>(n)`, `cx.duplicate` | `finish()` turns it into a `Local` |
 | `Write<'a, 's, T>` | exclusive access to an existing object | the interpreter's ownership checks | it borrows the context mutably |
 
 `Gc` and `Local` are `Copy`. `Fresh` and `Write` are not: each is the only way to reach its object
@@ -117,7 +117,7 @@ Holding an unrooted value across a safepoint does not compile:
 
 ```rust
 let first = list.get(cx, 0);        // Gc<'_, Value>, borrows cx
-let copy = cx.alloc_real(n)?;       // error[E0502]: cannot borrow `*cx` as mutable
+let copy = cx.alloc::<Real>(n)?;    // error[E0502]: cannot borrow `*cx` as mutable
 use_both(first, copy);              //   because it is also borrowed as immutable
 ```
 
@@ -125,7 +125,7 @@ The fix is the root the hand-written rule asks for, and it is the same push:
 
 ```rust
 let first = cx.root(list.get(cx, 0));   // Local<'s, Value>
-let copy = cx.alloc_real(n)?;
+let copy = cx.alloc::<Real>(n)?;
 ```
 
 `cx.root` takes `&Cx`, not `&mut Cx`: pushing onto the handle stack is not a safepoint, and it must
@@ -133,8 +133,9 @@ be callable while the `Gc` it roots still borrows the context.
 
 ### A kind names a representation
 
-`T` is the object's kind: `Real`, `Int`, `Lgl`, `Cplx`, `Raw`, `Str`, `Chars`, `List`, `Sym`,
-`Env`, `Closure`, `Promise`, `Lang`, `Pairlist`, `Alt` and `Value` for any of them. A vector kind
+`T` is the object's kind: `Real`, `Integer`, `Logical`, `Complex`, `Raw`, `Str`, `Chars`, `List`,
+`Expression`, `Symbol`, `Environment`, `Closure`, `Promise`, `Language`, `Pairlist`, `Alt` and
+`Value` for any of them. A vector kind
 means a standard vector, with its length in the header and its elements behind it. An ALTREP
 object is an `Alt`, whatever R type it reports, so a `Local<Real>` always has elements and
 `len()`, `get(cx, i)` and `as_slice(cx)` on it are plain loads.
@@ -144,16 +145,18 @@ makes when it dispatches on `kind()`. Code that accepts "a double vector" asks f
 work with:
 
 ```rust
-match cx.reals(value)? {                              // one test of the kind and the ALTREP bit
+match reals(cx, value)? {                             // one test of the kind and the ALTREP bit
     Reals::Standard(vector) => sum(vector.as_slice(cx)),
     Reals::Sequence { first, step, len } => closed_form(first, step, len),
     Reals::Lazy(alt) => each(cx, alt),                // alt.get(cx, i) takes &mut Cx
 }
-let dense = cx.dense_reals(value)?;                   // &mut Cx: Local<Real>, materialized once
+let dense = dense::<Real>(cx, value)?;                // &mut Cx: Local<Real>, materialized once
 let slice: &[f64] = dense.as_slice(cx);               // borrows cx, so no safepoint while it lives
 ```
 
-`dense_*` always returns a standard vector, as `values::materialize` does: the vector itself, the
+The views live in `interp::handles`, because expanding an ALTREP object runs the hook `libr`
+installs, and `heap` knows only that an `Alt` is not a vector. `dense` always returns a standard
+vector, as `values::materialize` does: the vector itself, the
 one a wrapper wraps, the one a compact sequence or deferred string vector expands into and keeps,
 or a copy for a class a package registers. No slice ever points at memory a class owns. A loop
 that only reads a few elements uses the `Lazy` arm, so a class's `Elt` method runs for the
@@ -169,7 +172,7 @@ only on standard kinds.
 | --- | --- | --- |
 | Fill a new atomic vector | `fresh.as_mut_slice()` | `Fresh` is the only pointer and takes `&mut self`. No context is needed, because the object holds no pointers |
 | Fill a new list, string vector or pairlist | `fresh.set(cx, i, value)` with `&Cx` | the store runs the barrier and the count inside `heap`. A safepoint between two stores can promote the object, and the barrier covers that. There is no `&mut [Gc]` to fill without it |
-| Change an existing object in place | `let (elements, reader) = write.split()` | `Write` holds `&mut Cx`, so no slice taken earlier is alive, no R code runs, and nothing can share the object meanwhile |
+| Change an existing object in place | `write.split()`, or `write.split_elements()` for a list | `Write` holds `&mut Cx`, so no slice taken earlier is alive, no R code runs, and nothing can share the object meanwhile |
 | Store into an object with reference semantics | `cx.define(env, sym, value)` (`&mut Cx`), promise and external-pointer fields (`&Cx`) | the barrier and the count run inside `heap` |
 
 A store is not a safepoint: a count that drops to zero is only noted, and the object is freed at
@@ -177,7 +180,7 @@ the next allocation. That is why element stores need only `&Cx`, and why copying
 list into a new one roots nothing:
 
 ```rust
-let mut out = cx.alloc_list(n)?;
+let mut out = cx.alloc::<List>(n)?;
 for index in 0..n {
     out.set(cx, index, input.get(cx, index));
 }
@@ -194,35 +197,38 @@ and are the only callers of `Cx::assume_exclusive`, an `unsafe` constructor that
 between the check and the write. When the check fails, the caller duplicates (`cx.duplicate`
 returns a `Fresh`, never an ALTREP wrapper), stores the copy in the variable and checks again.
 
-`write.split()` gives the element storage and a `reader` for the sources. For an atomic vector
-the reader compares storage addresses and returns `None` for a source that shares the target's
+`write.split()` gives an atomic vector's element storage and a `reader` for the sources. The
+reader compares storage addresses and returns `None` for a source that shares the target's
 storage, which also covers a wrapper around the target. The caller then reads from the mutable
-slice itself, so `x[i] <- x[j]` is `elements.copy_within(..)`. For a list the reader returns
-single elements, and the same object may be read and written.
+slice itself, so `x[i] <- x[j]` is `elements.copy_within(..)`. For a list,
+`write.split_elements()` gives barriered single stores and a reader of single elements, and the
+same object may be read and written.
 
 ```rust
 let mut write = own_slot(cx, state, slot)?;       // interp: the ownership check
 let (elements, reader) = write.split();
-match reader.reals(value) {
+match reader.slice(value) {
     Some(source) => elements[position] = source[0],
     None => elements.copy_within(0..1, position),
 }
 ```
 
 `Write` also carries the operations that change an object's shape: setting attributes, and
-shortening or growing within capacity. `Lgl` and `Int` share a storage trait, so a copy that is
-generic over the element type serves both.
+shortening or growing within capacity. `Logical` and `Integer` have the same `Atomic::Element`,
+so a copy that is generic over the element type serves both.
 
-`do_nchar` in this shape:
+`nchar` is written in this shape (`crates/interp/src/strings.rs`). Its core:
 
 ```rust
-fn do_nchar<'s>(cx: &mut Cx<'s>, call: &Call<'s>) -> R<Local<'s, Value>> {
-    let text = cx.dense_strings(character_vector(cx, call.arg(0))?)?;
-    let mut result = cx.alloc_int(text.len())?;
-    for (slot, chars) in result.as_mut_slice().iter_mut().zip(text.iter(cx)) {
+fn do_nchar<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let x = arguments.value(0);
+    let text = handles::character_vector(context, x)?;      // a standard Local<Str>
+    let mut result = context.alloc::<Integer>(text.len())?;
+    for (slot, chars) in result.as_mut_slice().iter_mut().zip(text.iter(context)) {
         *slot = chars.bytes().len() as i32;
     }
-    copy_shape(cx, call.arg(0), result.finish())
+    handles::copy_shape(context, x, &mut result)?;          // attributes go onto the Fresh
+    Ok(result.finish().value())
 }
 ```
 
@@ -241,8 +247,9 @@ let total = cx.scope(|cx| {            // cx: &mut Cx<'inner>
 
 The closure is generic over `'inner`, so a `Local<'inner, _>` cannot leave it except as the result.
 This is `interp::scope` with the lifetime that proves what its comment asks for. An unwind
-(`Error`, `Return`, `Break`) carries values under the same brand and leaves a scope the way a
-result does, rooted again in the enclosing one.
+(`Error`, `Return`, `Break`) carries its values unbranded, and the scope it leaves roots them
+again in the enclosing one, as it does a result: the error type implements `Reroot`, whose one
+`unsafe impl` for `Unwind` says that every object it gives access to is rooted afterwards.
 
 The bytecode loop does not pay that second root. Its registers are traced, so an instruction that
 can root runs in `cx.scope_to(register, ..)`, which writes the result into the destination
@@ -335,20 +342,27 @@ between it and the object, and native code needs the object's address.
 
 ## Migration
 
-The handle types and `Cx` land in `heap` with compile-fail tests for each rule above. The builtin
-table accepts both signatures while files move. A migrated function that calls an unmigrated one
-does it in an `unsafe` block, so the boundary between the two halves is visible and counted.
+`heap::handle` holds the handle types and `Cx`, with a compile-fail doctest for each rule above
+and `crates/heap/tests/test_handles.rs` running them on a heap that collects before every
+allocation. `interp::handles` is the interpreter's side: a safe builtin has the signature
+`fn(&mut Cx<'s>, &Args<'_, 's>) -> R<Local<'s>>`, the `safe!` macro makes the raw entry the
+builtin table holds, and each value helper a safe builtin calls has a safe form there that wraps
+the raw one and says why the handle types make the call sound. The wrappers are where a migrated
+function meets an unmigrated one, so that boundary is visible and counted, and a wrapper
+disappears when the helper under it is migrated.
 
-1. `heap`: the handle module, `Cx`, typed constructors, views, `Write`, scopes.
-2. `interp` leaf builtins (strings, numbers, sorting, arithmetic kernels), then `values.rs`, then
+The order:
+
+1. `interp` leaf builtins (strings, numbers, sorting, arithmetic kernels), then `values.rs`, then
    subsetting and assignment, then the evaluator and the bytecode loop.
-3. `stats`, `graphics`, `frames`.
-4. `libr`, `jit`, `typed`: entry points make a `Cx`; raw access leaves their bodies.
-5. `heap` stops exporting the raw accessors outside a `raw` module that only the boundary imports,
+2. `stats`, `graphics`, `frames`.
+3. `libr`, `jit`, `typed`: entry points make a `Cx`; raw access leaves their bodies.
+4. `heap` stops exporting the raw accessors outside a `raw` module that only the boundary imports,
    and `interp::heap()` and `interp::interp()` are deleted.
 
-A budget file records the count of `unsafe` per source file. `just gate` fails when a file's count
-rises, and a change that lowers one lowers the budget with it, so the count only falls.
+`tools/unsafe-baseline.txt` records the count of `unsafe` per source file outside the crates that
+own it. `just gate` fails when a file's count rises (`tools/unsafe.py check`), and a change that
+lowers one lowers the baseline with it, so the count only falls.
 
 ## Open questions
 
@@ -359,3 +373,7 @@ rises, and a change that lowers one lowers the budget with it, so the count only
   pointer protection) share one definition with `libr`.
 - The spelling for linking a pairlist cell after it is visible to other code, which the evaluator
   does when it builds argument lists incrementally.
+- A bulk fill for a new list or character vector. `fresh.set` runs the barrier and the count per
+  element, and the raw code fills such a vector through its slice and counts once
+  (`Heap::count_written_elements`), which measured several times faster in `as.character` and
+  `strsplit`-style builders. The safe form is one call that takes an iterator of elements.
