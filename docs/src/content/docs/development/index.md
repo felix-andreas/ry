@@ -70,8 +70,8 @@ the oracle's packages from the binary cache in seconds and needs no nix store.
 
 The workspace builds on the dated nightly that `rust-toolchain.toml` pins, because std's allocator
 API and other unstable features are worth having before they stabilize (the policy is in
-`.agents/memory/decisions.md`, "Data-oriented design and explicit allocators"). With rustup, cargo
-downloads that toolchain, with clippy and rustfmt, on the first build. The Zed extension is the
+`.agents/memory/decisions/docs-process.md`, "Data-oriented design and explicit allocators").
+With rustup, cargo downloads that toolchain, with clippy and rustfmt, on the first build. The Zed extension is the
 exception: `editors/zed/rust-toolchain.toml` pins a stable toolchain, because the nightly's
 `wasm32-wasip2` std imports a WASI function that Zed's host does not provide yet.
 The nix dev shell reads the same file. Nightly rustfmt also applies the import settings in
@@ -192,9 +192,17 @@ of `libr` and the crates it links, so editing the formatter or the IDE layer nev
 
 ## The docs site
 
-The sidebar (`docs/astro.config.ts`) has four sections: Introduction (getting started,
-installation, benchmarks), Learn (the adoption guide and the language tour), Reference and
-Development. A moved or deleted page gets an entry in the
+The sidebar (`docs/astro.config.ts`) has four sections, and detail belongs in Reference or
+Development, never in the introduction or the guide:
+
+| Section | Pages |
+| --- | --- |
+| Introduction | `getting-started.mdx`, the landing page: a short pitch, what ry does, the benchmark summary and next steps, with no code example (by user direction); `installation.md` (binary, R, editors); `benchmarks.mdx` (bar charts, what each suite contains, how it is measured) |
+| Learn | `guide.mdx` ("Adopting ry": one H2 per adoption step, each a sequence of snippets with real output); `ry.mdx`, the language tour (every feature once, code first, also served as `/ry.md`), kept current when a feature changes |
+| Reference | `reference/`, the contracts: `type-system.mdx` is the semantics contract, and the other pages document the tool |
+| Development | `development/`, for contributors; `development/design/` holds unsettled drafts, the one place allowed to describe behavior that does not exist, kept out of the sidebar and listed on that folder's index page |
+
+A moved or deleted page gets an entry in the
 `redirects` map there. `docs/src/components/Sidebar.astro` keeps the sidebar's scroll position
 across page loads, because the theme scrolls `.sidebar-content` rather than the element
 Starlight's own persister restores.
@@ -208,6 +216,18 @@ annotation itself. Pages with tabs are `.mdx`. Use one tab group per idea, not o
 
 Every block of `ry` output on a page is a test that `just docs-test` runs through the real binary;
 [Docs examples](/development/testing#docs-examples) has the marker format and the rules for tabs.
+
+`benchmarks.mdx` has one section per measured suite, in this order: public R JIT benchmarks,
+package test suites, numeric kernels (ours), application workloads (ours), hot package entries, and
+typed ry against Rust, with typed as a column where a typed version exists. A suite without
+committed results gets no section and no summary row. The suite against Rust reports typed ry's
+time over Rust's, where lower is faster, so it never shares a table, a chart or a sentence with the
+speed-ups over GNU R. Each suite is a directory under `tools/bench/` holding `suite.toml` (its `id`,
+names, summaries, source paths) and `results.json`, which `just bench <suite> --release ARCHIVE
+--write` writes on the tagged release archive. The runner, `tools/bench/bench.py`, owns every
+too-short or refused flag and every geometric mean, and `docs/src/lib/benchmarks.ts` and
+`tools/bench/readme.py` only render those files, so never type a benchmark number into prose.
+`just readme --check` (in `just gate`) catches a stale README block or diagnostic image.
 
 Agents read the site as Markdown. Every page is also served at its URL plus `.md` (for example
 `/guide#step-2-type-your-code.md`), with the frontmatter, imports and components removed and each tab
@@ -241,6 +261,39 @@ comment, so the formatter walks the concrete children token by token and decides
 token level. The parser attaches a trailing comment *inside* an expression node, so a decision about
 where a closing token goes has to look at tokens, never at whole elements. See
 `crates/format/src/format.rs` and the fixtures under `crates/format/tests/format/`.
+
+## Writing: one idea three ways
+
+`AGENTS.md`, "How to write", sets the rules for everything an agent writes. Here is one idea written
+three ways. The first packs five facts into one sentence behind a colon:
+
+> `x |> f(y)` is syntax R's own parser rewrites to `f(x, y)` before evaluation, and it types as exactly that call: the piped value becomes the first positional argument, every call rule above applies (arity, argument compatibility, overload selection), chains compose left to right, and a type error on the piped value blames the left-hand expression.
+
+The second overcorrects. Every sentence is short, and none of them says how it relates to the one before:
+
+> R's parser rewrites `x |> f(y)` into `f(x, y)` before it evaluates the code. ry types the pipe as that call and nothing else. The piped value becomes the first positional argument. All call rules above apply to it: arity, argument compatibility, and overload selection. Chains compose from left to right. If the piped value has a type error, ry reports it on the left-hand expression.
+
+The third is the one to write:
+
+> R's parser rewrites `x |> f(y)` into `f(x, y)` before anything runs, so the pipe types exactly like that call. The piped value becomes the first positional argument, and every call rule applies to it: arity, argument compatibility, and overload selection. A chain composes from left to right, and a type error in the piped value is reported on the left-hand expression.
+
+## Agent memory layout
+
+The agent knowledge base is `.agents/memory/`, indexed by `MEMORY.md`. Settled decisions live in
+`.agents/memory/decisions/`, one file per area (`syntax-semantics.md`, `interp.md`, `jit-ssa.md`
+and nine more), and `decisions/index.md` lists every entry with a link and its status. A new
+decision is an H2 section with a `**Status:**` line, appended to the area file it belongs to, after
+which `python3 tools/memory.py index` regenerates the index. A crate's own traps live in
+`crates/<crate>/AGENTS.md`.
+
+`python3 tools/memory.py check`, part of `just gate`, fails when a single `decisions.md` reappears,
+when the index is stale, when one entry heading appears in two area files, when a file outgrows its
+byte budget in `tools/memory.py` (`AGENTS.md`, `MEMORY.md`, `backlog.md`, `worklog.md` and
+`.agents/orchestrator.md`, each about 5% above its size when the budget was set, and pruned rather
+than given more room), when a decisions area file passes the shared 260 KB cap (settled decisions are
+not pruned, so the area is split into two files), or when a line outgrows its file's line limit (400
+bytes in `worklog.md`, 2 KB in the orchestrator file). `python3 tools/memory.py split` moves the
+entries of a stray `decisions.md` into the area files.
 
 ## References
 

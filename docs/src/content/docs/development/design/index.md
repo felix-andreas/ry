@@ -56,7 +56,7 @@ How ry becomes an R implementation of its own: an ABI-compatible C API (with mea
 the benchmark's 232-package dependency closure), the object model and GC that API forces, a bytecode
 interpreter with a Cranelift JIT fed by ry's static types, lazy package loading from the analysis
 index, a table type on Polars, and the order to build it in. The C API, the object model, the
-interpreter and the table engine are built; the JIT is not.
+interpreter, the table engine and the JIT (`crates/jit`) are built.
 
 ### [Slot frames](/development/design/slot-frames/)
 
