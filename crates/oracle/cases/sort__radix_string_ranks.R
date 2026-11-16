@@ -1,0 +1,16 @@
+# Radix ordering of strings ranks them by bytes, eight at a time past the shared prefix.
+set.seed(42)
+pieces <- c("a", "ab", "abc", "abcdefgh", "abcdefghi", "abcdefghij", "b", "", "zz", "é", "é")
+x <- vapply(1:600, function(i) paste(sample(pieces, sample(0:4, 1), replace = TRUE), collapse = ""), "")
+x[sample(600, 20)] <- NA
+print(head(order(x, method = "radix"), 40))
+print(identical(order(x, method = "radix"), order(x, method = "radix", decreasing = TRUE)[600:1]))
+print(sort(unique(x), method = "radix"))
+long <- paste0(strrep("prefix/", 5), sprintf("%04d", sample(1000, 300, replace = TRUE)), c("", "x", "xy"))
+print(head(order(long, method = "radix"), 30))
+print(order(c("id12_b", "id12_a", "id12", "id1", "id12_a"), method = "radix"))
+print(order(c(strrep("q", 40), paste0(strrep("q", 39), "p"), strrep("q", 41), strrep("q", 40)), method = "radix"))
+latin <- iconv("café", "UTF-8", "latin1")
+print(order(c(latin, "cafe", "café", "cafz"), method = "radix"))
+print(order(character(0), method = "radix"))
+print(order(c(NA, "a", NA), method = "radix", na.last = FALSE))

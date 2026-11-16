@@ -1,0 +1,22 @@
+# c(..., recursive = TRUE) of unnamed arguments that are NULL, atomic vectors without
+# attributes, or lists without attributes of such vectors flattens them in one pass; anything
+# named, classed or nested deeper takes the general walk.
+str(c(list(1, 2L, NULL, TRUE), recursive = TRUE))
+str(c(list(1L, 2L), 3:4, NULL, list(), recursive = TRUE))
+str(c(list("a", 1), list(TRUE), recursive = TRUE))
+str(c(list(raw(1), as.raw(7)), recursive = TRUE))
+str(c(list(raw(1)), 2L, recursive = TRUE))
+str(c(list(1i), 2, recursive = TRUE))
+str(c(list(), recursive = TRUE))
+str(c(recursive = TRUE))
+str(c(list(NULL, NULL), recursive = TRUE))
+str(c(list(1, list(2, 3)), recursive = TRUE))
+str(c(list(a = 1, 2), recursive = TRUE))
+str(c(x = list(1, 2), recursive = TRUE))
+str(c(list(c(a = 1), 2), recursive = TRUE))
+str(c(list(factor("a")), recursive = TRUE))
+str(c(structure(list(1, 2), class = "foo"), recursive = TRUE))
+str(c(list(1, 2), recursive = TRUE, use.names = FALSE))
+l <- as.list(seq(0.5, 5, by = 0.5))
+identical(c(l, recursive = TRUE), seq(0.5, 5, by = 0.5))
+identical(c(as.list(1:5), recursive = TRUE), 1:5)

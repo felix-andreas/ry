@@ -1,0 +1,9 @@
+[stdout]
+| [1] "abb" ""    "ab" 
+| [1] "<|ab>"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "<|ab>"
