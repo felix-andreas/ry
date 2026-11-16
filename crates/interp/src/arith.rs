@@ -3392,20 +3392,32 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
             // argument and across them, so `prod(NaN, NA)` is NaN.
             let mut total: f64 = 1.0;
             for &item in &items {
-                let mut product = LongDouble::from(1.0);
-                let mut nan = None;
-                for index in 0..length(item) {
-                    let value = real_at(item, index);
-                    if na_rm && value.is_nan() {
-                        continue;
+                let one = LongDouble::from(1.0);
+                // As for `sum`, the x87 unit is never handed a NaN.
+                let item_product = if item.kind() == SexpType::Real {
+                    let reals = values::reals(values::materialize(item)?);
+                    if na_rm {
+                        long_double::multiply_all_numbers(one, reals).to_f64()
+                    } else {
+                        long_double::multiply_all(one, reals)
+                            .map_or_else(|nan| nan, LongDouble::to_f64)
                     }
-                    if value.is_nan() {
-                        nan = Some(value);
-                        break;
+                } else {
+                    let mut product = one;
+                    let mut nan = None;
+                    for index in 0..length(item) {
+                        let value = real_at(item, index);
+                        if na_rm && value.is_nan() {
+                            continue;
+                        }
+                        if value.is_nan() {
+                            nan = Some(value);
+                            break;
+                        }
+                        product = product * LongDouble::from(value);
                     }
-                    product = product * LongDouble::from(value);
-                }
-                let item_product = nan.unwrap_or_else(|| product.to_f64());
+                    nan.unwrap_or_else(|| product.to_f64())
+                };
                 if !total.is_nan() {
                     total = if item_product.is_nan() {
                         item_product

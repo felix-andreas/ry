@@ -489,6 +489,38 @@ pub fn add_all_numbers(total: LongDouble, values: &[f64]) -> LongDouble {
         .fold(total, |total, &value| total + LongDouble::from(value))
 }
 
+/// `total` times every value in order, rounding after each multiplication, as GNU R's `prod`
+/// loop on a `long double` does, or the first NaN or NA when one comes first.
+pub fn multiply_all(total: LongDouble, values: &[f64]) -> Result<LongDouble, f64> {
+    #[cfg(all(target_arch = "x86_64", not(windows)))]
+    if let Some(start) = to_x87(total) {
+        let (product, unread) = x87::multiply_all(start, values);
+        return match unread {
+            0 => Ok(from_x87(product)),
+            _ => Err(values[values.len() - unread]),
+        };
+    }
+    values.iter().try_fold(total, |total, &value| {
+        if value.is_nan() {
+            Err(value)
+        } else {
+            Ok(total * LongDouble::from(value))
+        }
+    })
+}
+
+/// `total` times every value that is not NaN or NA, in order, as `prod(x, na.rm = TRUE)` does.
+pub fn multiply_all_numbers(total: LongDouble, values: &[f64]) -> LongDouble {
+    #[cfg(all(target_arch = "x86_64", not(windows)))]
+    if let Some(start) = to_x87(total) {
+        return from_x87(x87::multiply_all_numbers(start, values));
+    }
+    values
+        .iter()
+        .filter(|value| !value.is_nan())
+        .fold(total, |total, &value| total * LongDouble::from(value))
+}
+
 /// `total` plus every `value - offset` in order, rounding after each subtraction and addition,
 /// as GNU R's second pass over the deviations from a mean does.
 pub fn add_differences(total: LongDouble, values: &[f64], offset: LongDouble) -> LongDouble {
@@ -787,6 +819,67 @@ mod x87 {
         total
     }
 
+    /// The product and how many values are left unread, from the NaN that stopped it on.
+    pub fn multiply_all(mut total: [u8; 10], values: &[f64]) -> ([u8; 10], usize) {
+        let unread: usize;
+        // SAFETY: as in `add_all_numbers`; the loop stops at a NaN before the x87 unit sees it.
+        unsafe {
+            asm!(
+                "fld tbyte ptr [{total}]",
+                "test {count}, {count}",
+                "jz 3f",
+                "2:",
+                "movsd {value}, qword ptr [{data}]",
+                "ucomisd {value}, {value}",
+                "jp 3f",
+                "fmul qword ptr [{data}]",
+                "add {data}, 8",
+                "dec {count}",
+                "jnz 2b",
+                "3:",
+                "fstp tbyte ptr [{total}]",
+                total = in(reg) total.as_mut_ptr(),
+                data = inout(reg) values.as_ptr() => _,
+                count = inout(reg) values.len() => unread,
+                value = out(xmm_reg) _,
+                out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
+                out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
+                options(nostack),
+            );
+        }
+        (total, unread)
+    }
+
+    pub fn multiply_all_numbers(mut total: [u8; 10], values: &[f64]) -> [u8; 10] {
+        // SAFETY: as in `add_all_numbers`.
+        unsafe {
+            asm!(
+                "fld tbyte ptr [{total}]",
+                "test {count}, {count}",
+                "jz 3f",
+                "2:",
+                "movsd {value}, qword ptr [{data}]",
+                "ucomisd {value}, {value}",
+                "jp 4f",
+                "fmul qword ptr [{data}]",
+                "4:",
+                "add {data}, 8",
+                "dec {count}",
+                "jnz 2b",
+                "3:",
+                "fstp tbyte ptr [{total}]",
+                total = in(reg) total.as_mut_ptr(),
+                data = inout(reg) values.as_ptr() => _,
+                count = inout(reg) values.len() => _,
+                value = out(xmm_reg) _,
+                out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
+                out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
+                options(nostack),
+            );
+        }
+        total
+    }
+
     pub fn add_all_numbers(mut total: [u8; 10], values: &[f64]) -> [u8; 10] {
         // SAFETY: as in `add_all`; a NaN compares unordered with itself, so `jp` skips it before
         // the x87 unit sees it.
@@ -909,7 +1002,13 @@ mod x87 {
         divisor: i64,
     ) -> [f64; 4] {
         let mut out = [0.0; 4];
-        let offsets = [x_offset, y_offsets[0], y_offsets[1], y_offsets[2], y_offsets[3]];
+        let offsets = [
+            x_offset,
+            y_offsets[0],
+            y_offsets[1],
+            y_offsets[2],
+            y_offsets[3],
+        ];
         // SAFETY: reads `x.len()` doubles from `x` and from each `y` column, which the caller
         // checked are as long; the stack holds the four sums and two temporaries, and is left
         // empty. The subtractions take the double offsets from memory, which extends them
@@ -1303,6 +1402,35 @@ mod tests {
         );
     }
 
+    /// The x87 product kernels round like the software multiplication, past the double range
+    /// and back, and the `_numbers` kernel skips NaNs where the other stops at one.
+    #[test]
+    fn products_match_the_software_model() {
+        let values: Vec<f64> = (0..200)
+            .map(|index| 0.37 + f64::from(index) * 1.013e3)
+            .collect();
+        let model = values.iter().fold(LongDouble::from(1.0), |total, &value| {
+            total * LongDouble::from(value)
+        });
+        let product = multiply_all(LongDouble::from(1.0), &values).expect("no NaN");
+        assert_eq!(product.to_f64().to_bits(), model.to_f64().to_bits());
+        assert_eq!(product.to_f64(), f64::INFINITY, "past the double range");
+        let back: Vec<f64> = values.iter().map(|value| 1.0 / value).collect();
+        let round_trip = multiply_all(product, &back).expect("no NaN").to_f64();
+        let round_trip_model = back
+            .iter()
+            .fold(model, |total, &value| total * LongDouble::from(value))
+            .to_f64();
+        assert_eq!(round_trip.to_bits(), round_trip_model.to_bits());
+        let with_nan = [2.0, f64::NAN, 3.0];
+        assert_eq!(
+            multiply_all_numbers(LongDouble::from(1.0), &with_nan).to_f64(),
+            6.0
+        );
+        let stopped = multiply_all(LongDouble::from(1.0), &with_nan).map(LongDouble::to_f64);
+        assert!(stopped.is_err_and(f64::is_nan), "stops at the NaN");
+    }
+
     #[test]
     fn round_trips_doubles_and_subnormals() {
         for value in [1.0, -0.1, 1e-310, f64::MIN_POSITIVE, f64::MAX, 5e-324] {
@@ -1371,11 +1499,14 @@ mod tests {
             let offsets = [0.7, -2.5, 1e-3, 0.0];
             let fast = covariances_by_four(values, 1.0 / 3.0, columns, offsets, 7);
             for (j, column) in columns.iter().enumerate() {
-                let model = values.iter().zip(*column).fold(LongDouble::ZERO, |total, (&x, &y)| {
-                    total
-                        + (LongDouble::from(x) - LongDouble::from(1.0 / 3.0))
-                            * (LongDouble::from(y) - LongDouble::from(offsets[j]))
-                });
+                let model = values
+                    .iter()
+                    .zip(*column)
+                    .fold(LongDouble::ZERO, |total, (&x, &y)| {
+                        total
+                            + (LongDouble::from(x) - LongDouble::from(1.0 / 3.0))
+                                * (LongDouble::from(y) - LongDouble::from(offsets[j]))
+                    });
                 let model = (model / 7).to_f64();
                 assert_eq!(fast[j].to_bits(), model.to_bits(), "{values:?}");
                 let single = covariance(values, 1.0 / 3.0, column, offsets[j], 7);

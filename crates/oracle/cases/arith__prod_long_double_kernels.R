@@ -1,0 +1,22 @@
+# prod of doubles accumulates in long double, past the double range and back, skips NaN and NA
+# under na.rm, and returns the first NaN or NA otherwise; format.info of integers is the widest
+# extreme or NA.
+x <- c(1e200, 1e200, 1e-200, 1e-200, 3)
+cat(sprintf("%a", prod(x)), sprintf("%a", prod(c(0.1, 0.2, 0.3, 0.7))), "\n")
+print(prod(c(1e300, 1e300)))
+print(prod(c(-1e300, 1e300)))
+print(prod(c(2, NA, NaN, 3)))
+print(prod(c(2, NaN, NA, 3)))
+print(prod(c(2, NA, 3), na.rm = TRUE))
+print(prod(c(2, NaN, 3), 4L, na.rm = TRUE))
+print(prod(numeric()))
+print(prod(c(1.5, 2), 1:4, TRUE))
+set.seed(1)
+y <- runif(1000, 0.5, 1.5)
+cat(sprintf("%a", prod(y)), sprintf("%a", prod(y, rev(y))), "\n")
+print(format.info(c(1L, -20L, 300L)))
+print(format.info(c(NA, 5L)))
+print(format.info(NA_integer_))
+print(format.info(integer()))
+print(format.info(c(-2147483647L, 0L)))
+print(format.info(factor(c("a", "b"))))
