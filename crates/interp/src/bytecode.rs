@@ -6932,8 +6932,9 @@ pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<Option<Sexp>> 
 pub unsafe fn call_builtin_step(machine: &mut Machine<'_>, pc: usize, record: bool) -> R<()> {
     let code = machine.code.car().data().cast::<i32>().cast_const();
     // A positional call of a builtin with a direct entry reads only its registers, so it runs
-    // without the activation, which costs as much to build as the call itself.
-    if *code.add(pc) as u32 == POSITIONAL_CALL_BUILTIN_WORD {
+    // without the activation, which costs as much to build as the call itself. Under a hook a
+    // declined entry would be observed twice, so the full path takes it.
+    if *code.add(pc) as u32 == POSITIONAL_CALL_BUILTIN_WORD && activity::hooks() == 0 {
         let constants = machine.code.cdr();
         let registers = register_address(machine.base);
         let operand = |index: usize| *code.add(pc + 1 + index) as usize;
