@@ -41,7 +41,7 @@ with mold, GNU R on `PATH` and base R built.
 | the interpreter, to run R | `cargo build -p ry-lang -p libr && target/debug/ry run --runtime ry x.R` | 13 s |
 | the interpreter, its tests | `cargo test -p interp --test test_<area>` | 4 s |
 | the interpreter, against GNU R | `cargo run -p oracle -- compare crates/oracle/cases/<case>.R` | 10 s |
-| the interpreter, every oracle case | `cargo test -p oracle --test test_cases ry_matches_recorded_outcomes` | unverified |
+| the interpreter, every oracle case | `cargo test -p oracle --test test_cases ry_matches_recorded_outcomes` | 10 min |
 | the typed core (`typed`) | `cargo test -p typed` | 4 s |
 | the CLI or the server (`ry`) | `cargo test -p ry-lang --test test_cli`, or one journey: `SCENARIO=<name> cargo test -p ry-lang --test test_scenarios scenarios_hold` | 6 s |
 
