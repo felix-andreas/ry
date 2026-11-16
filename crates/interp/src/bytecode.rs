@@ -12921,8 +12921,8 @@ unsafe fn replace_variable(
         // replaces as it does for any other value.
         SexpType::Builtin => {
             let definition = eval::builtin_def(function)?;
-            if target.is_object()
-                && definition.generic != Generic::None
+            // A group generic dispatches on any operand, so on the value too.
+            if definition.generic != Generic::None
                 && (definition.generic != Generic::Internal
                     || dispatch::has_internal_method(definition, function, target, caller)?)
             {
