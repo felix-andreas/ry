@@ -406,7 +406,7 @@ fn verify(gnu_r: &ProcessEngine, selection: &Selection, verbose: bool) -> ExitCo
     if check_suites(cases, &build, "verify").is_err() {
         return ExitCode::from(2);
     }
-    let runs = oracle::in_parallel(cases, |case| {
+    let runs = syntax::testing::in_parallel(cases, |case| {
         let expected = std::fs::read_to_string(expected_path(case))
             .ok()
             .and_then(|text| parse(&text));
@@ -631,7 +631,7 @@ fn compare(
             }
         }
     }
-    let runs = oracle::in_parallel(cases, |case| run_case(gnu_r, engines, case));
+    let runs = syntax::testing::in_parallel(cases, |case| run_case(gnu_r, engines, case));
     let mut tallies = vec![Tally::default(); engines.len()];
     let mut crashed = Vec::new();
     for (case, runs) in cases.iter().zip(runs) {

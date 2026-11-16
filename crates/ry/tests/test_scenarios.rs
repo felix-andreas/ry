@@ -27,12 +27,11 @@ use {
         process::{Child, ChildStdin, Command, Stdio},
         sync::{
             OnceLock,
-            atomic::{AtomicUsize, Ordering},
             mpsc::{self, Receiver},
         },
         time::{Duration, Instant},
     },
-    syntax::testing::{SplitMix64, cargo_build, for_each_seed},
+    syntax::testing::{SplitMix64, cargo_build, for_each_seed, in_parallel},
 };
 
 #[test]
@@ -91,40 +90,6 @@ fn scenarios_hold() {
         failures.len()
     );
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
-}
-
-/// `work` applied to every item on one worker per core, returned in the order of `items`.
-fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
-    let next = AtomicUsize::new(0);
-    let workers = std::thread::available_parallelism()
-        .map_or(1, |count| count.get())
-        .min(items.len().max(1));
-    let mut results: Vec<(usize, R)> = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..workers)
-            .map(|_| {
-                scope.spawn(|| {
-                    let mut done = Vec::new();
-                    loop {
-                        let index = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(item) = items.get(index) else {
-                            return done;
-                        };
-                        done.push((index, work(item)));
-                    }
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|handle| {
-                handle
-                    .join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-            })
-            .collect()
-    });
-    results.sort_by_key(|(index, _)| *index);
-    results.into_iter().map(|(_, result)| result).collect()
 }
 
 /// The scenarios `SCENARIO` selects. Unset or empty (`just scenarios` with no name) selects them

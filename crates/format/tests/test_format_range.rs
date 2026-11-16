@@ -8,15 +8,13 @@ use {
         Config, TextEdit, apply_edits, check_range_format_invariants as check_invariants, format,
         format_range,
     },
-    syntax::{TextRange, TextSize},
+    syntax::{TextRange, TextSize, testing::in_parallel},
 };
 
 #[test]
 fn fixture_sources_hold_range_invariants() {
-    for (id, source) in syntax::testing::fixture_case_sources() {
-        std::panic::catch_unwind(|| check_invariants(&source))
-            .unwrap_or_else(|_| panic!("fixture case `{id}` broke a range-format invariant"));
-    }
+    let sources = syntax::testing::fixture_case_sources();
+    hold_invariants(&sources, |id| format!("fixture case `{id}`"));
 }
 
 #[test]
@@ -27,11 +25,25 @@ fn program_corpus_holds_range_invariants() {
         "expected the mined corpus, found {}",
         sources.len()
     );
-    for (id, source) in sources {
-        std::panic::catch_unwind(|| check_invariants(&source)).unwrap_or_else(|_| {
-            panic!("program corpus case `{id}` broke a range-format invariant")
-        });
-    }
+    hold_invariants(&sources, |id| format!("program corpus case `{id}`"));
+}
+
+/// Checks the battery on every source, one worker per core, and fails naming each source that
+/// broke an invariant (the battery's own panic message precedes the list).
+fn hold_invariants(sources: &[(String, String)], describe: impl Fn(&str) -> String + Sync) {
+    let broken: Vec<String> = in_parallel(sources, |(id, source)| {
+        std::panic::catch_unwind(|| check_invariants(source))
+            .err()
+            .map(|_| describe(id))
+    })
+    .into_iter()
+    .flatten()
+    .collect();
+    assert!(
+        broken.is_empty(),
+        "{} broke a range-format invariant",
+        broken.join(", ")
+    );
 }
 
 /// The same sources re-indented the ways real files are (four spaces, tabs,
@@ -56,19 +68,18 @@ fn reindented_sources_hold_range_invariants() {
     let steps: [&dyn Fn(usize) -> &'static str; 3] = [&|_| "    ", &|_| "\t", &|index| {
         if index % 3 == 0 { "  " } else { "   " }
     }];
-    let indented = syntax::testing::fixture_case_sources()
+    let variants: Vec<(String, String)> = syntax::testing::fixture_case_sources()
         .into_iter()
-        .filter(|(_, source)| source.lines().any(|line| line.starts_with("  ")));
-    for (id, source) in indented.step_by(5) {
-        for step in steps {
-            let variant = reindent(&source, step);
-            std::panic::catch_unwind(|| check_invariants(&variant)).unwrap_or_else(|_| {
-                panic!(
-                    "fixture case `{id}` re-indented as {variant:?} broke a range-format invariant"
-                )
-            });
-        }
-    }
+        .filter(|(_, source)| source.lines().any(|line| line.starts_with("  ")))
+        .step_by(5)
+        .flat_map(|(id, source)| {
+            steps
+                .iter()
+                .map(|step| (id.clone(), reindent(&source, step)))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    hold_invariants(&variants, |id| format!("fixture case `{id}` re-indented"));
 }
 
 /// The edits for the line `caret` sits on.

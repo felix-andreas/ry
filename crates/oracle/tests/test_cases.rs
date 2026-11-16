@@ -13,10 +13,9 @@ use {
     oracle::{
         BUILD_FILE, BuildCheck, CaseRun, Engine, EngineError, KNOWN_FAILURES_FILE, ProcessEngine,
         Verdict, build_workspace_ry, check_build, diff, engine_from_environment, engine_packages,
-        expected_path, fails_run, find_cases, gnu_r_available, gnu_r_build, in_parallel,
-        installed_packages, known_failure, known_failures, libraries_ahead_of_reference,
-        library_dependent, parse, parse_known_failures, render, runnable_cases,
-        ry_runtime_available, verdict, write_build,
+        expected_path, fails_run, find_cases, gnu_r_available, gnu_r_build, installed_packages,
+        known_failure, known_failures, libraries_ahead_of_reference, library_dependent, parse,
+        parse_known_failures, render, runnable_cases, ry_runtime_available, verdict, write_build,
     },
     std::{
         ffi::OsStr,
@@ -25,7 +24,7 @@ use {
         sync::atomic::{AtomicUsize, Ordering},
         time::{Duration, Instant},
     },
-    syntax::testing::{SplitMix64, fuzz_iterations},
+    syntax::testing::{SplitMix64, fuzz_iterations, in_parallel},
 };
 
 fn case_directory() -> PathBuf {

@@ -81,7 +81,9 @@ pub fn run_fixture_suite(suite_dir: &Path, render: &(dyn Fn(&str) -> String + Sy
         suite_dir.display()
     );
 
-    let filter = env::var("FIXTURE_FILTER").ok().filter(|filter| !filter.is_empty());
+    let filter = env::var("FIXTURE_FILTER")
+        .ok()
+        .filter(|filter| !filter.is_empty());
     let bless = env_var("BLESS").is_some_and(|value| value == "1");
     let mut seen_ids = HashSet::new();
     for case in files.iter().flat_map(|file| &file.cases) {
@@ -102,7 +104,10 @@ pub fn run_fixture_suite(suite_dir: &Path, render: &(dyn Fn(&str) -> String + Sy
                 .is_none_or(|filter| case.id.contains(filter))
         })
         .collect();
-    let outcomes = render_in_parallel(&selected, render);
+    let outcomes = in_parallel(&selected, |(_, case)| {
+        panic::catch_unwind(AssertUnwindSafe(|| render(&case.source)))
+            .map_err(|payload| panic_message(payload.as_ref()))
+    });
     let matched = !selected.is_empty();
 
     let mut failures = Vec::new();
@@ -170,30 +175,25 @@ pub fn run_fixture_suite(suite_dir: &Path, render: &(dyn Fn(&str) -> String + Sy
     );
 }
 
-/// Each case's rendering, or its panic message, in the order of `cases`. Every case renders from
-/// its own source alone, so the order the workers take them in cannot change any result.
-fn render_in_parallel(
-    cases: &[(usize, &FixtureCase)],
-    render: &(dyn Fn(&str) -> String + Sync),
-) -> Vec<Result<String, String>> {
+/// `work` applied to every item on one worker per core, returned in the order of `items` whichever
+/// worker finished first. Callers hand it work whose result depends on its item alone (a fixture
+/// rendering, a case run in its own process and directory), so the result is deterministic.
+pub fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
     let next = AtomicUsize::new(0);
     let workers = std::thread::available_parallelism()
         .map_or(1, |count| count.get())
-        .min(cases.len().max(1));
-    let mut outcomes: Vec<(usize, Result<String, String>)> = std::thread::scope(|scope| {
+        .min(items.len().max(1));
+    let mut results: Vec<(usize, R)> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..workers)
             .map(|_| {
                 scope.spawn(|| {
                     let mut done = Vec::new();
                     loop {
                         let position = next.fetch_add(1, Ordering::Relaxed);
-                        let Some((_, case)) = cases.get(position) else {
+                        let Some(item) = items.get(position) else {
                             return done;
                         };
-                        let outcome =
-                            panic::catch_unwind(AssertUnwindSafe(|| render(&case.source)))
-                                .map_err(|payload| panic_message(payload.as_ref()));
-                        done.push((position, outcome));
+                        done.push((position, work(item)));
                     }
                 })
             })
@@ -207,8 +207,8 @@ fn render_in_parallel(
             })
             .collect()
     });
-    outcomes.sort_by_key(|(position, _)| *position);
-    outcomes.into_iter().map(|(_, outcome)| outcome).collect()
+    results.sort_by_key(|(position, _)| *position);
+    results.into_iter().map(|(_, result)| result).collect()
 }
 
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {

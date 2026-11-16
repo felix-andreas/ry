@@ -989,42 +989,6 @@ pub fn build_workspace_ry() -> Result<(), String> {
     }
 }
 
-/// `work` applied to every item, one worker per core, in the order of `items` whichever worker
-/// finished first. Each case runs in its own processes and scratch directory, so the order they
-/// run in changes no outcome.
-pub fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
-    let next = AtomicUsize::new(0);
-    let workers = std::thread::available_parallelism()
-        .map_or(1, |count| count.get())
-        .min(items.len().max(1));
-    let mut results: Vec<(usize, R)> = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..workers)
-            .map(|_| {
-                scope.spawn(|| {
-                    let mut done = Vec::new();
-                    loop {
-                        let index = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(item) = items.get(index) else {
-                            return done;
-                        };
-                        done.push((index, work(item)));
-                    }
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|handle| {
-                handle
-                    .join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-            })
-            .collect()
-    });
-    results.sort_by_key(|(index, _)| *index);
-    results.into_iter().map(|(_, result)| result).collect()
-}
-
 /// Every `.R` file under `root`, sorted. A file argument yields itself.
 pub fn find_cases(root: &Path) -> Vec<PathBuf> {
     let mut cases = Vec::new();
