@@ -739,6 +739,8 @@ fn complete_covariances(
     let (y_data, y_means, y_missing) = y.unwrap_or(x);
     let x_columns = x_means.len();
     let partners: Vec<usize> = (0..y_means.len()).filter(|&j| !y_missing[j]).collect();
+    // `rows` counts the elements of a vector, so it fits.
+    let divisor = (rows - 1) as i64;
     for i in 0..x_columns {
         if x_missing[i] {
             continue;
@@ -749,12 +751,9 @@ fn complete_covariances(
         } else {
             &partners[..]
         };
-        // `rows` counts the elements of a vector, so it fits.
-        let divisor = (rows - 1) as i64;
-        // A short last group repeats its final partner; the repeats are computed and dropped.
-        for group in partners.chunks(4) {
-            let last = group[group.len() - 1];
-            let group: [usize; 4] = std::array::from_fn(|k| group.get(k).copied().unwrap_or(last));
+        let mut groups = partners.chunks_exact(4);
+        for group in &mut groups {
+            let group = [group[0], group[1], group[2], group[3]];
             let values = long_double::covariances_by_four(
                 x_column,
                 x_means[i],
@@ -767,6 +766,19 @@ fn complete_covariances(
                 if symmetric {
                     result[j + i * x_columns] = value;
                 }
+            }
+        }
+        for &j in groups.remainder() {
+            let value = long_double::covariance(
+                x_column,
+                x_means[i],
+                column(y_data, j, rows),
+                y_means[j],
+                divisor,
+            );
+            result[i + j * x_columns] = value;
+            if symmetric {
+                result[j + i * x_columns] = value;
             }
         }
     }

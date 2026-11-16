@@ -30,7 +30,7 @@ Usage:
 `--ci` times only the cases without a 1e6 input, in shorter batches, and gives every function that
 looks slower two more rounds before judging it, so it runs in a few minutes.
 """
-import argparse, collections, math, os, pathlib, re, shutil, statistics, subprocess, sys, tempfile, threading, time
+import argparse, collections, concurrent.futures, math, os, pathlib, re, shutil, statistics, subprocess, sys, tempfile, threading, time
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent.parent
@@ -180,15 +180,17 @@ def engines(ry, rscript, jit_off=True):
     return table
 
 
-def measure(ids, table, rounds, batch, batches, verbose=True):
-    """`{engine: [ {id: result} per round ]}`, the engines taking turns within each round."""
+def measure(ids, table, rounds, batch, batches, verbose=True, parallel=False):
+    """`{engine: [ {id: result} per round ]}`, the engines taking turns within each round, or with
+    `parallel` running side by side on separate cores, which is faster and noisier."""
     measured = {engine: [] for engine in table}
     for number in range(rounds):
-        for engine, (command, env) in table.items():
+        def one(engine):
+            command, env = table[engine]
             started = time.monotonic()
             done = collections.Counter()
 
-            def progress(case, result, engine=engine):
+            def progress(case, result):
                 done["cases"] += 1
                 if result.get("seconds") is None:
                     done["failed"] += 1
@@ -196,10 +198,18 @@ def measure(ids, table, rounds, batch, batches, verbose=True):
                     print(f"    {engine}: {done['cases']} of {len(ids)} cases", file=sys.stderr, flush=True)
 
             results, _ = run_cases(command, env, ids, batch=batch, batches=batches, progress=progress)
-            measured[engine].append(results)
             if verbose:
                 print(f"  round {number + 1}, {engine}: {len(ids)} cases in {time.monotonic() - started:.0f} s, "
                       f"{done['failed']} failed", file=sys.stderr, flush=True)
+            return results
+
+        if parallel:
+            with concurrent.futures.ThreadPoolExecutor(len(table)) as pool:
+                rounds_ = dict(zip(table, pool.map(one, table)))
+        else:
+            rounds_ = {engine: one(engine) for engine in table}
+        for engine in table:
+            measured[engine].append(rounds_[engine])
     return measured
 
 
@@ -325,7 +335,7 @@ def command_compare(args):
     listing = list_cases(args.rscript)
     ids = selected_ids(listing, args.filter, args.ci)
     table = engines(args.ry, args.rscript, jit_off=args.jit_off)
-    measured = measure(ids, table, args.rounds, args.batch, args.batches)
+    measured = measure(ids, table, args.rounds, args.batch, args.batches, parallel=args.parallel)
     ratios, broken = case_ratios(measured, ids)
     weights = call_weights(listing)
     rows = []
@@ -488,6 +498,8 @@ def main():
                         help="ratchet: how much slower than GNU R an unlisted function may measure before it fails")
     parser.add_argument("--confirm", type=int, default=2, help="ratchet: more rounds for functions that look slower")
     parser.add_argument("--with-ry", action="store_true", help="validate: also run the cases on ry")
+    parser.add_argument("--parallel", action="store_true",
+                        help="compare: run the engines side by side on separate cores (faster, noisier)")
     parser.add_argument("--save", help="compare: keep the raw measurements as JSON")
     parser.add_argument("--top", type=int, default=100, help="weights: how many functions to print")
     args = parser.parse_args()

@@ -554,6 +554,24 @@ pub fn covariances_by_four(
     })
 }
 
+/// One covariance sum as `covariances_by_four` computes each of its four.
+pub fn covariance(x: &[f64], x_offset: f64, y: &[f64], y_offset: f64, divisor: i64) -> f64 {
+    assert_eq!(x.len(), y.len(), "covariance columns differ in length");
+    #[cfg(all(target_arch = "x86_64", not(windows)))]
+    return x87::covariance(x, x_offset, y, y_offset, divisor);
+    #[cfg(not(all(target_arch = "x86_64", not(windows))))]
+    {
+        let total = add_products(
+            LongDouble::ZERO,
+            x,
+            y,
+            LongDouble::from(x_offset),
+            LongDouble::from(y_offset),
+        );
+        (total / divisor as usize).to_f64()
+    }
+}
+
 /// GNU R's `cumsum` of doubles: each running long double total, rounded to double into `out`,
 /// for the shorter of the two. NA and NaN propagate as the x87 unit propagates them, which is
 /// what decides between them in GNU R.
@@ -842,6 +860,45 @@ mod x87 {
             );
         }
         total
+    }
+
+    pub fn covariance(x: &[f64], x_offset: f64, y: &[f64], y_offset: f64, divisor: i64) -> f64 {
+        let mut out = 0.0;
+        let offsets = [x_offset, y_offset];
+        // SAFETY: as in `covariances_by_four`, for one column of `y`.
+        unsafe {
+            asm!(
+                "fldz",
+                "test {count}, {count}",
+                "jz 3f",
+                "xor {index:e}, {index:e}",
+                "2:",
+                "fld qword ptr [{x} + {index} * 8]",
+                "fsub qword ptr [{offsets}]",
+                "fld qword ptr [{y} + {index} * 8]",
+                "fsub qword ptr [{offsets} + 8]",
+                "fmulp st(1), st(0)",
+                "faddp st(1), st(0)",
+                "inc {index}",
+                "cmp {index}, {count}",
+                "jne 2b",
+                "3:",
+                "fild qword ptr [{divisor}]",
+                "fdivp st(1), st(0)",
+                "fstp qword ptr [{out}]",
+                out = in(reg) &mut out,
+                offsets = in(reg) offsets.as_ptr(),
+                divisor = in(reg) &divisor,
+                x = in(reg) x.as_ptr(),
+                y = in(reg) y.as_ptr(),
+                count = in(reg) x.len(),
+                index = out(reg) _,
+                out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
+                out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
+                options(nostack),
+            );
+        }
+        out
     }
 
     pub fn covariances_by_four(
@@ -1321,6 +1378,8 @@ mod tests {
                 });
                 let model = (model / 7).to_f64();
                 assert_eq!(fast[j].to_bits(), model.to_bits(), "{values:?}");
+                let single = covariance(values, 1.0 / 3.0, column, offsets[j], 7);
+                assert_eq!(single.to_bits(), model.to_bits(), "{values:?}");
             }
         }
         let pseudo: Vec<f64> = (1..2000u32)
