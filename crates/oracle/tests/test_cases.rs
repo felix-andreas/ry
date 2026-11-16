@@ -17,7 +17,8 @@ use {
         engine_packages, engines_named, expected_path, fails_run, find_cases, gnu_r_available,
         gnu_r_build, installed_packages, known_failure, known_failures,
         libraries_ahead_of_reference, library_dependent, parse, parse_known_failures, read_build,
-        render, runnable_cases, ry_runtime_available, target_directory, verdict, write_build,
+        render, runnable_cases, ry_runtime_available, sets_collection_stress, target_directory,
+        verdict, write_build,
     },
     std::{
         ffi::OsStr,
@@ -552,7 +553,10 @@ fn cases_survive(
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
     let torture = torture(seed);
-    let (mut chosen, rest): (Vec<PathBuf>, Vec<PathBuf>) = cases().into_iter().partition(|case| {
+    let stressable = cases()
+        .into_iter()
+        .filter(|case| !sets_collection_stress(case));
+    let (mut chosen, rest): (Vec<PathBuf>, Vec<PathBuf>) = stressable.partition(|case| {
         case.file_stem()
             .is_some_and(|stem| REGRESSION_CASES.iter().any(|name| stem == *name))
     });

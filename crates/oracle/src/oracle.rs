@@ -1208,6 +1208,19 @@ pub fn runs_once(case: &Path) -> bool {
 
 const RUNS_ONCE: &str = "# oracle: runs once";
 
+/// Whether `case` declares, in a leading `# oracle: sets collection stress` comment, that it
+/// reads or changes the collection stress setting itself, so its output under a stressed
+/// engine differs by design and the stress passes leave it out.
+pub fn sets_collection_stress(case: &Path) -> bool {
+    std::fs::read_to_string(case).is_ok_and(|text| {
+        text.lines()
+            .take_while(|line| line.starts_with('#'))
+            .any(|line| line.trim_end() == SETS_COLLECTION_STRESS)
+    })
+}
+
+const SETS_COLLECTION_STRESS: &str = "# oracle: sets collection stress";
+
 fn case_requirements(case: &Path) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(case) else {
         return Vec::new();

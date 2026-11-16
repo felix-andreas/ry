@@ -117,6 +117,10 @@ before each later pass, which the oracle cuts standard output at. A case that ca
 one process (it leaves standard output diverted, or consumes something the first pass used up)
 says so in a leading `# oracle: runs once` comment, and these engines run it once.
 
+A case that reads or changes the collection stress setting itself (`gctorture`, `gctorture2`)
+prints something else under a stressed engine by design. It says so in a leading
+`# oracle: sets collection stress` comment, and the stress passes of `test_cases` leave it out.
+
 `--engine` takes a comma-separated list, such as
 `--engine ry,ry-jit-gctorture`, which runs GNU R once per case and prints a summary line per engine.
 A failure listed in `crates/oracle/known_failures.toml` reports as known rather than failing the run
