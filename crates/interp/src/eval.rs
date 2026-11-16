@@ -27,7 +27,7 @@ use {
         object::{NA_INTEGER, Sexp, SexpType, gp},
     },
     smallvec::{SmallVec, smallvec},
-    std::mem::MaybeUninit,
+    std::{cell::Cell, mem::MaybeUninit},
     thin_vec::ThinVec,
 };
 
@@ -660,10 +660,15 @@ unsafe fn slot_content(function: Sexp, header: usize, symbol: Sexp) -> Option<Se
     (value != unbound()).then_some(value)
 }
 
-/// The value of `symbol` read from `enclosure` for the running slot frame, whose own slots do
-/// not bind it.
+/// The variable `symbol` a replacement in the running slot frame changes, read from `enclosure`
+/// because the frame's own slots do not bind it. GNU R evaluates the name in the enclosure, so
+/// an unbound one is reported against the call that made the enclosure, if a call did.
 pub(crate) unsafe fn enclosed_value(symbol: Sexp, enclosure: Sexp) -> R<Sexp> {
-    eval_enclosed_name(symbol, enclosure, interp().slot_owner as usize)
+    interp().visible = true;
+    match eval_symbol(symbol, enclosure) {
+        Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
+        result => result,
+    }
 }
 
 /// Evaluates `symbol` from `enclosure` for the slot frame at `owner`, whose own slots do not bind
@@ -1966,7 +1971,7 @@ unsafe fn run_builtin(
 /// primitive's call as `errorcall` does.
 #[cold]
 #[inline(never)]
-unsafe fn builtin_failure(blame: Sexp, unwind: Unwind) -> Unwind {
+pub(crate) unsafe fn builtin_failure(blame: Sexp, unwind: Unwind) -> Unwind {
     match unwind {
         Unwind::Error(mut failure) => {
             if failure.call == unbound() {
@@ -2064,7 +2069,7 @@ unsafe fn check_argument_names(definition: &BuiltinDef, call: Sexp, args: &[Arg]
             [formal] => format!("supplied argument name '{name}' does not match '{formal}'"),
             _ => format!(
                 "unused argument ({name} = {})",
-                crate::deparse::deparse_one_line(arg.value)
+                crate::deparse::deparse_unused_argument(arg.value)
             ),
         };
         return Err(error_in(call, message));
@@ -4406,16 +4411,27 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> 
 }
 
 /// Which formal each argument binds to: an argument that `...` collects maps to the position of
-/// `...`. The plan depends only on the formals and the argument names, so a call site that
-/// passes the same names to the same function reuses it ([`match_args_cached`]).
+/// `...`, and an argument that binds nothing to [`BINDS_NOTHING`]. The plan depends only on the
+/// formals, the argument names and which named arguments are empty, so a call site that passes
+/// the same names to the same function reuses it while no named argument is empty
+/// ([`match_args_cached`]).
 type Plan = SmallVec<[u32; 8]>;
+
+/// The plan entry of an empty named argument whose formal a positional argument took: GNU R
+/// matches `f(a = , 1)` for `function(a, b)` as `f(a = 1)`, because its positional pass tells
+/// a formal matched by name from its value, and an empty argument leaves none.
+const BINDS_NOTHING: u32 = u32::MAX;
 
 /// [`match_args`] for a call of the compiled closure `function`, reusing the plan of the last
 /// call of its body when it had the same formals and argument names. The cache holds one entry
 /// in the body's `MATCHES` constant: a list of the formals, the plan, and the argument tags.
 unsafe fn match_args_cached(function: Sexp, formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> {
     let code = function.cdr();
-    if code.kind() != SexpType::Bytecode || !args.iter().any(is_named) {
+    let missing = missing_arg();
+    if code.kind() != SexpType::Bytecode
+        || !args.iter().any(is_named)
+        || args.iter().any(|arg| arg.value == missing)
+    {
         return match_args(formals, args, call);
     }
     let constants = code.cdr();
@@ -4469,6 +4485,9 @@ unsafe fn match_plan(formals: Sexp, args: &[Arg], call: Sexp) -> R<Plan> {
     }
     let count = formal_symbols.len();
     let mut matched: SmallVec<[bool; 8]> = smallvec![false; count];
+    // The empty argument that matched each formal by name, which a positional argument replaces.
+    let mut empty_match: SmallVec<[Option<usize>; 8]> = smallvec![None; count];
+    let missing = missing_arg();
     let mut plan: Plan = smallvec![0; args.len()];
     let mut used: SmallVec<[bool; 8]> = smallvec![false; args.len()];
     let dots_position = formal_symbols
@@ -4507,6 +4526,9 @@ unsafe fn match_plan(formals: Sexp, args: &[Arg], call: Sexp) -> R<Plan> {
                 matched[formal_index] = true;
                 plan[arg_index] = formal_index as u32;
                 used[arg_index] = true;
+                if args[arg_index].value == missing {
+                    empty_match[formal_index] = Some(arg_index);
+                }
             }
         }
     }
@@ -4549,6 +4571,9 @@ unsafe fn match_plan(formals: Sexp, args: &[Arg], call: Sexp) -> R<Plan> {
                 plan[arg_index] = formal_index as u32;
                 used[arg_index] = true;
                 partial_owner[arg_index] = Some(formal_index);
+                if args[arg_index].value == missing {
+                    empty_match[formal_index] = Some(arg_index);
+                }
             }
         }
     }
@@ -4570,10 +4595,14 @@ unsafe fn match_plan(formals: Sexp, args: &[Arg], call: Sexp) -> R<Plan> {
         while formal_index < count
             && formal_symbols[formal_index] != dots_symbol
             && matched[formal_index]
+            && empty_match[formal_index].is_none()
         {
             formal_index += 1;
         }
         if formal_index < count && formal_symbols[formal_index] != dots_symbol {
+            if let Some(empty) = empty_match[formal_index] {
+                plan[empty] = BINDS_NOTHING;
+            }
             matched[formal_index] = true;
             plan[arg_index] = formal_index as u32;
             formal_index += 1;
@@ -4593,7 +4622,7 @@ unsafe fn match_plan(formals: Sexp, args: &[Arg], call: Sexp) -> R<Plan> {
                 } else {
                     arg.value
                 };
-                let text = deparse::deparse_one_line(code);
+                let text = deparse::deparse_unused_argument(code);
                 match arg_names[index] {
                     Some(name) => format!("{} = {text}", String::from_utf8_lossy(name)),
                     None => text,
@@ -6980,8 +7009,17 @@ pub unsafe fn complex_assign(
     let lookup_env = if superassign { env.enclosure() } else { env };
     let mut base = find_var(inner, lookup_env)?;
     if base == unbound() {
+        // GNU R evaluates the name in the enclosure and names the call whose frame that is, or
+        // no call when the enclosure is not a frame's.
+        let enclosure = env.enclosure();
+        let frames = &interp().frames;
+        let call = frames
+            .iter()
+            .rev()
+            .find(|frame| frame.owns(enclosure))
+            .map_or(nil(), |frame| frame.call);
         return Err(error_in(
-            whole,
+            call,
             format!("object '{}' not found", symbol_name(inner)),
         ));
     }
@@ -6992,6 +7030,16 @@ pub unsafe fn complex_assign(
     if base.kind() == SexpType::Promise {
         base = force_promise(base)?;
     }
+    // A profile summary counts the assignment once, when its first level builds a call.
+    let counted = Cell::new(!activity::enabled());
+    let original = base;
+    let count_built = || -> R<()> {
+        if !counted.replace(true) {
+            let shape = unsafe { assignment_shape(&getters, original, superassign, env) }?;
+            activity::count_general_assignment(activity::label(&shape));
+        }
+        Ok(())
+    };
     let heap = crate::heap();
     let local_cell = heap.frame_cell(env, inner);
     // A locked binding rejects the final assignment, so the replacement must not have modified
@@ -7012,7 +7060,9 @@ pub unsafe fn complex_assign(
     // Ending a move into this frame hands the caller `base` back, which makes it shared, and
     // must come before any level changes in place, since an inner level is an element of it.
     crate::moves::modifying(base)?;
+    // The value being the variable's own, as in `x$a$b <- x`, counts no second reference.
     if values::maybe_shared(base)
+        || value == base
         || shared_promise
         || locked
         || index_assigns
@@ -7043,6 +7093,7 @@ pub unsafe fn complex_assign(
         let tmp_symbol = symbols.tmp;
         let mut shared = false;
         for getter in getters.iter().skip(1).rev() {
+            count_built()?;
             let previous = *levels.last().unwrap_or(&base);
             let promise = forced_promise(tmp_symbol, previous)?;
             crate::heap().untrack_references(promise);
@@ -7058,7 +7109,7 @@ pub unsafe fn complex_assign(
             crate::heap().root(arguments);
             let function = call_head_function(getter.car(), env)?;
             let mut level = apply_call(getter_call, function, arguments, env)?;
-            if values::maybe_shared(level) || shared {
+            if values::maybe_shared(level) || shared || level == value {
                 shared = true;
                 let was_array = level.is_array();
                 level = values::shallow_duplicate(level)?;
@@ -7074,6 +7125,41 @@ pub unsafe fn complex_assign(
         for (depth, getter) in getters.iter().enumerate() {
             let object = levels[levels.len() - 1 - depth];
             let setter = replacement_function(getter.car(), whole)?;
+            let function = call_head_function(setter, env)?;
+            // A closure reports its errors against its own call, `` `f<-`(`*tmp*`, value = v) ``,
+            // as GNU R's does, so only a primitive replacement names the assignment. A level
+            // past the first reports as GNU R does, against the assignment of that level's
+            // target, such as `` names(x) <- `*vtmp*` `` in `names(x)[2] <- "b"`.
+            let primitive = function.kind() != SexpType::Closure;
+            let reported = if !primitive || depth == 0 {
+                whole
+            } else {
+                values::call(whole.car(), &[*getter, symbols.vtmp])?
+            };
+            crate::heap().root(reported);
+            if primitive {
+                let frame_depth = interp().frames.len();
+                // The level's target stands for the replacement call, which only an error that
+                // names it builds (`generated_replacement_call`).
+                let outer = interp()
+                    .assignment_call
+                    .replace((*getter, reported, frame_depth));
+                let level_arguments = if depth == 0 { evaluated } else { &[] };
+                let result = replace_through_primitive(
+                    function,
+                    *getter,
+                    (object, replacement),
+                    reported,
+                    env,
+                    level_arguments,
+                );
+                interp().assignment_call = outer;
+                if let Some(result) = result? {
+                    replacement = result;
+                    continue;
+                }
+            }
+            count_built()?;
             // The object promise is the `*tmp*` GNU R binds: it must not count as a reference, or
             // the replacement function would always see its target as shared and copy it.
             let object_promise = forced_promise(tmp_symbol, object)?;
@@ -7111,21 +7197,10 @@ pub unsafe fn complex_assign(
                 tail
             };
             let arguments = values::cons(object_promise, argument_tail)?;
-            let function = call_head_function(setter, env)?;
-            // A closure reports its errors against its own call, `` `f<-`(`*tmp*`, value = v) ``,
-            // as GNU R's does, so only a builtin replacement names the assignment.
-            if function.kind() == SexpType::Closure {
+            if !primitive {
                 replacement = apply_call(setter_call, function, arguments, env)?;
                 continue;
             }
-            // A level past the first reports its errors as GNU R does, against the assignment of
-            // that level's target, such as `` names(x) <- `*vtmp*` `` in `names(x)[2] <- "b"`.
-            let reported = if depth == 0 {
-                whole
-            } else {
-                values::call(whole.car(), &[*getter, symbols.vtmp])?
-            };
-            crate::heap().root(reported);
             let frame_depth = interp().frames.len();
             let outer = interp()
                 .assignment_call
@@ -7145,6 +7220,214 @@ pub unsafe fn complex_assign(
         replaced = values::unwrap_assigned(replaced, bound);
     }
     assign_symbol(inner, replaced, env, superassign)
+}
+
+/// One level of a complex assignment through the replacement primitive `function` itself:
+/// `object` and `value` go to the primitive as they are, with the level's other arguments
+/// evaluated between them, so the level builds no `*tmp*` and value promises and no argument
+/// list. `evaluated` is [`complex_assign`]'s, for the outermost level. `None` leaves the level
+/// to the call `complex_assign` builds: an `object` with a method for the replacement, which
+/// receives the promises, and a special that reads its arguments' code.
+///
+/// The primitive runs with `getter` as its call, which the caller has published as the
+/// replacement call of the assignment in progress ([`crate::Interp::assignment_call`]), so its
+/// errors report against `reported`.
+unsafe fn replace_through_primitive(
+    function: Sexp,
+    getter: Sexp,
+    (object, value): (Sexp, Sexp),
+    reported: Sexp,
+    env: Sexp,
+    evaluated: &[Sexp],
+) -> R<Option<Sexp>> {
+    let definition = builtin_def(function)?;
+    let symbols = symbols();
+    let special = function.kind() == SexpType::Special;
+    let dollar = definition.symbol == Some(symbols.dollar_assign);
+    // Of the specials, `[<-` and `[[<-` evaluate every argument, and `$<-` all but the name.
+    if special && !dollar && !definition.is_dispatch_or_eval() {
+        return Ok(None);
+    }
+    // A group generic dispatches on any operand, the value included.
+    let internal = special || definition.generic == Generic::Internal;
+    if !internal && definition.generic != Generic::None {
+        return Ok(None);
+    }
+    let caller = dispatch::Caller::Env(env);
+    if internal && dispatch::has_internal_method(definition, function, object, caller)? {
+        return Ok(None);
+    }
+    let rest = getter.cdr().cdr();
+    if dollar {
+        let named = rest.kind() == SexpType::Pairlist
+            && rest.cdr() == nil()
+            && rest.tag() == nil()
+            && match rest.car().kind() {
+                SexpType::Symbol => rest.car() != missing_arg(),
+                SexpType::String => length(rest.car()) >= 1,
+                _ => false,
+            };
+        if !named {
+            return Ok(None);
+        }
+        let observed = activity::hooks() != 0;
+        let index = builtin_index(definition);
+        let _activity = observed.then(|| activity::enter(Activity::Builtin, index as u32));
+        if activity::enabled() {
+            activity::count(Counter::BuiltinCalls);
+            activity::count_builtin(index);
+        }
+        if observed && activity::profile_ticked() {
+            record_profile_sample(Some(definition.name))?;
+        }
+        // An error is signalled here, as a builtin call signals its own, while the assignment
+        // is the call it reports.
+        let result = scope(|| {
+            let name = crate::subset::name_argument(rest.car())?;
+            crate::subset::dollar_assign(object, name, value, getter)
+        })
+        .and_then(|result| crate::unwind::raise_parked().map(|()| result))
+        .map_err(|unwind| builtin_failure(unbound(), unwind))?;
+        return Ok(Some(result));
+    }
+    let keep_missing = special || definition.keep_missing;
+    let mut args = Args::new();
+    args.push(Arg {
+        tag: nil(),
+        value: object,
+    });
+    if evaluated.is_empty() || evaluated.len() != values::pairlist_length(rest) {
+        evaluate_args_into(rest, env, keep_missing, reported, &mut args)?;
+    } else {
+        // Declining after a variable was read would read it a second time in the built call.
+        let unevaluated = evaluated.iter().any(|argument| match argument.kind() {
+            SexpType::Symbol => {
+                *argument == symbols.dots || (*argument == missing_arg() && !keep_missing)
+            }
+            SexpType::Language | SexpType::Bytecode => true,
+            _ => false,
+        });
+        if unevaluated {
+            return Ok(None);
+        }
+        let mut item = rest;
+        for &argument in evaluated {
+            // A forced promise holds the value compiled code evaluated. Anything else is the
+            // argument's code: a constant, an empty argument, or a formal left for this lookup.
+            let value = match argument.kind() {
+                SexpType::Promise => value_of(argument)?,
+                SexpType::Symbol if argument == missing_arg() => argument,
+                SexpType::Symbol if keep_missing && argument_is_missing(argument, env)? => {
+                    missing_arg()
+                }
+                SexpType::Symbol => {
+                    let value = eval_symbol(argument, env)?;
+                    crate::heap().root(value);
+                    value
+                }
+                _ => argument,
+            };
+            args.push(Arg {
+                tag: item.tag(),
+                value,
+            });
+            item = item.cdr();
+        }
+    }
+    args.push(Arg {
+        tag: symbols.value,
+        value,
+    });
+    call_builtin(definition, getter, function, &args, env).map(Some)
+}
+
+/// The call GNU R generates for one level of a complex assignment, `` `f<-`(`*tmp*`, i, value = v) ``,
+/// from the level's target `f(x, i)` and the assignment `f(x, i) <- v` it reports as.
+pub unsafe fn generated_replacement_call(target: Sexp, assignment: Sexp) -> R<Sexp> {
+    let symbols = symbols();
+    let setter = replacement_function(target.car(), assignment)?;
+    crate::heap().root(setter);
+    let mut items: SmallVec<[(Sexp, Sexp); 4]> = smallvec![(nil(), symbols.tmp)];
+    let mut rest = target.cdr().cdr();
+    while matches!(rest.kind(), SexpType::Pairlist | SexpType::Language) {
+        items.push((rest.tag(), rest.car()));
+        rest = rest.cdr();
+    }
+    items.push((symbols.value, assignment.cdr().cdr().car()));
+    values::lcons(setter, values::pairlist(&items, SexpType::Pairlist)?)
+}
+
+/// A profile summary's name for a complex assignment's target: the replacement functions from
+/// the outside in, then the variable's type, as in `` `names<-` `[<-` on character ``, whether
+/// the variable's class has a method for its replacement, and whether the frame `env` runs a
+/// body that is not compiled.
+unsafe fn assignment_shape(
+    getters: &[Sexp],
+    base: Sexp,
+    superassign: bool,
+    env: Sexp,
+) -> R<String> {
+    let mut shape = String::new();
+    for getter in getters {
+        let head = getter.car();
+        // A summary is shared, so only a replacement function base R defines is named.
+        let mut name = None;
+        if head.kind() == SexpType::Symbol {
+            let setter = format!("{}<-", symbol_name(head));
+            if crate::builtins::primitive(&setter).is_some()
+                || find_var_in_frame(values::install(&setter)?, values::base_namespace())?
+                    != unbound()
+            {
+                name = Some(setter);
+            }
+        }
+        match name {
+            Some(name) => shape.push_str(&format!("`{name}` ")),
+            None if head.kind() == SexpType::Symbol => shape.push_str("(a function) "),
+            None => shape.push_str("(computed) "),
+        }
+    }
+    shape.push_str(if superassign { "by `<<-` on " } else { "on " });
+    // Nor is a class a user's code defines.
+    const PUBLIC_CLASSES: [&str; 12] = [
+        "data.frame",
+        "data.table",
+        "factor",
+        "Date",
+        "POSIXct",
+        "POSIXlt",
+        "difftime",
+        "xts",
+        "zoo",
+        "tbl_df",
+        "R6",
+        "formula",
+    ];
+    shape.push_str(crate::coerce::type_name(base));
+    if base.is_object() {
+        let class = values::get_attr(base, symbols().class);
+        let known = (0..length(class)).find_map(|index| {
+            let name = values::string_at(class, index)?;
+            PUBLIC_CLASSES.iter().find(|public| **public == name)
+        });
+        shape.push_str(&format!(" ({})", known.unwrap_or(&"an object")));
+        let innermost = getters.last().map(|getter| getter.car());
+        if let Some(head) = innermost.filter(|head| head.kind() == SexpType::Symbol)
+            && let Some(function) = crate::builtins::primitive(&format!("{}<-", symbol_name(head)))
+        {
+            let definition = builtin_def(function)?;
+            let caller = dispatch::Caller::Env(env);
+            if (definition.generic == Generic::Internal || function.kind() == SexpType::Special)
+                && dispatch::has_internal_method(definition, function, base, caller)?
+            {
+                shape.push_str(" with a method");
+            }
+        }
+    }
+    if !env.has_gp(gp::COMPILED_FRAME) {
+        shape.push_str(", uncompiled");
+    }
+    Ok(shape)
 }
 
 /// Whether `expression` contains an assignment whose target is `variable` or a part of it. An

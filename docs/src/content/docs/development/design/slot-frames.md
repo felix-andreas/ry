@@ -371,7 +371,7 @@ register holding it); otherwise the slot gets a copy, so `y <- x; x[1] <- 0` lea
 | An object whose class has no method for the setter | In the slot. The method lookup starts from the frame's enclosure (`dispatch::has_internal_method` with `Caller::SlotFrame`), because a slot frame defines no functions a lookup could find first. |
 | An S4 object, `x@name <- v` | In the slot, with the validity check `do_at_assign` makes (`direct_at_assign`). |
 | A closure setter whose other arguments are constants, `f(x) <- v` or `f(x, "a") <- v` | The closure is called from the slot frame with forced promises for `*tmp*` and the value (`replace_with_closure`). Each promise counts a reference to what it holds while the closure's frame holds the promise, so the closure reads both as shared, and a frame that outlives the call keeps the caller from changing the target in place. The caller's frame gets an environment only if the closure asks for its caller's. |
-| An object with a method for the setter, a closure setter with computed arguments, a nested target such as `names(x)[2] <- v` | `eval::complex_assign` in the frame's environment, which moves the assigned variable into a cell. |
+| An object with a method for the setter, a closure setter with computed arguments, a nested target such as `names(x)[2] <- v` | `eval::complex_assign` in the frame's environment, which moves the assigned variable into a cell. A level whose setter is a primitive, on an object without a method for it, is called with its evaluated values (`replace_through_primitive`); any other level builds its call, its argument list and a promise for `*tmp*` and for the value. |
 
 A name the frame has not bound yet is read from the enclosure first (`eval::enclosed_value`), so
 `x[1] <- 0` on an outer `x` binds the changed copy in the slot.
@@ -636,10 +636,10 @@ where frame work is about 2.2k instructions per call.
   that moves into a cell switches all of the frame's code to reading by name, and each variable it
   then reads moves too. Keeping the code on slots would need every slot instruction, and the JIT's
   code, to test per variable where it lives.
-- Nested replacement (`names(x)[2] <- v`, `l$a$b <- v`) and replacement through a method
-  (`eval::complex_assign`) build a forced promise for the object and one for the value at each
-  level, plus the call and its argument list, in the frame's environment. GNU R's byte code keeps
-  the call as a constant with `*vtmp*` for the value, which would remove most of them. Compiled
-  getter and setter steps on registers would keep a nested target in its slot when every
-  subscript is free of side effects, since the general assignment evaluates each nested subscript
-  twice, once for the getter and once for the setter.
+- Nested replacement (`names(x)[2] <- v`, `l$a$b <- v`) runs in the frame's environment
+  (`eval::complex_assign`). Its setter levels call a primitive directly, but each getter level
+  builds a call, an argument list and a promise for `*tmp*`, and a level with a method or a closure
+  setter builds all of them. A primitive getter could be called with its values the same way.
+  Compiled getter and setter steps on registers would also keep a nested target in its slot when
+  every subscript is free of side effects, since the general assignment evaluates each nested
+  subscript twice, once for the getter and once for the setter.

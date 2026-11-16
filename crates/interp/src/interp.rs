@@ -650,13 +650,13 @@ pub struct Interp {
     /// `returnValue()` for the `on.exit` code running innermost: the value its function
     /// returns, or `None` when the function is being left by an error or a jump past it.
     pub returned_values: Vec<Option<Sexp>>,
-    /// The innermost complex assignment running: its replacement call, the whole assignment,
-    /// and the frame depth it runs at. GNU R evaluates the replacement inside a context for the
-    /// assignment, so a builtin replacement function reports its errors and warnings against
-    /// `x[i] <- v`, not `` `[<-`(*tmp*, i, v) `` or the enclosing function's call. An inlined
-    /// base wrapper ([`crate::eval::call_inlined_internal`]) stands in for the frame its call
-    /// would have the same way, with the unbound marker as the replacement call, which no call
-    /// equals.
+    /// The innermost complex assignment running: its replacement call (or the target standing
+    /// for one that was never built), the whole assignment, and the frame depth it runs at.
+    /// GNU R evaluates the replacement inside a context whose call is the assignment, so a
+    /// builtin replacement function reports its errors and warnings against `x[i] <- v`, not
+    /// `` `[<-`(*tmp*, i, v) `` or the enclosing function's call. An inlined base wrapper
+    /// ([`crate::eval::call_inlined_internal`]) stands in for the frame its call would have
+    /// the same way, with the unbound marker as the replacement call, which no call equals.
     pub assignment_call: Option<(Sexp, Sexp, usize)>,
     /// The closures whose calls run natively, each with its native code, sorted by address
     /// (`base_fast_paths::native_entry`).

@@ -5056,7 +5056,7 @@ fn a_parked_return_value_survives_its_exit() {
 /// same shape. The machine has no hardware counters to read, so each shape runs in a child of
 /// this test binary under cachegrind, which counts instructions exactly; the cost of one
 /// iteration is the difference between two loop lengths, which cancels startup. Without
-/// valgrind the test has nothing to measure with and passes with a note.
+/// valgrind, or in a debug build, the test has nothing to measure and passes with a note.
 #[test]
 fn element_ops_cost_no_more_than_tier_zero() {
     const NAME: &str = "element_ops_cost_no_more_than_tier_zero";
@@ -5081,6 +5081,11 @@ fn element_ops_cost_no_more_than_tier_zero() {
             assert_eq!(run(&format!("f({iterations}L)")), "0");
             jit::install_mode(Mode::Off);
         });
+        return;
+    }
+    // Unoptimized code's instruction counts measure the Rust compiler's output, not the design.
+    if cfg!(debug_assertions) {
+        eprintln!("{NAME}: a debug build measures nothing; run it with --release");
         return;
     }
     if std::process::Command::new("valgrind")
@@ -5136,21 +5141,9 @@ fn element_ops_cost_no_more_than_tier_zero() {
         .map(|(body, (off, force))| format!("{body}: tier 0 {off}, compiled {force}"))
         .collect();
     eprintln!("{}", report.join("\n"));
-    // Tier 0 runs a base call that compiled code bound without checking the binding, and tier 1
-    // checks the same bindings once, when it enters. The compiled code for these two shapes calls
-    // a small builtin (`list`, `c`) and stores the element through the same runtime steps tier 0
-    // takes, so it only ties tier 0. Compiled code measures up to about 8% over tier 0, and the
-    // count moves by an instruction from run to run, so the bound allows 10%. A call-free tier-1
-    // path for small builtin calls and the element store would restore the strict bound for them.
-    const TIED: &[&str] = &["x[k] <- list(5)", "w <- c(1, 2); w[[3L]] <- k"];
     for (body, (off, force)) in ELEMENT_OPS.iter().zip(&measured) {
-        let bound = if TIED.contains(body) {
-            off + off / 10
-        } else {
-            *off
-        };
         assert!(
-            *force <= bound,
+            force <= off,
             "`{body}` costs {force} instructions per iteration compiled but {off} in tier 0"
         );
     }
