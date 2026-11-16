@@ -91,8 +91,9 @@ per-item and per-file tables after the type store".
 
 ## Open: the kernels of a package test suite's profile
 
-`just bench-ci` runs thirteen kernels from a user's profiles of a large package's test suite on ry 0.4.5 (`tools/bench/internal/ci/kernels.R`; `development/testing.md` describes them). In the profile tier 0 held 32% of the time, builtins 32%, native code 17% and closure call setup 10%, and tier 1 ran 0.1%. Speed-up over GNU R per kernel: `k1` 2.6x, `k2` 1.9x, `k3` 2.4x, `k4` 2.8x, `k5` 2.7x, `k6` 1.7x, `k7` 1.8x, `k8` 1.4x, `k9` 0.60x, `k10` 2.4x, `k11` 2.1x, `k12` 10x, and `k13` takes 4 µs per object against GNU R's 4.8 ms.
+`just bench-ci` runs thirteen kernels from a user's profiles of a large package's test suite on ry 0.4.5 (`tools/bench/internal/ci/kernels.R`; `development/testing.md` describes them). In the profile tier 0 held 32% of the time, builtins 32%, native code 17% and closure call setup 10%, and tier 1 ran 0.1%. Speed-up over GNU R per kernel: `k1` 2.6x, `k2` 11x, `k3` 2.4x, `k4` 2.8x, `k5` 2.7x, `k6` 1.7x, `k7` 1.8x, `k8` 9x, `k9` 0.60x, `k10` 2.4x, `k11` 2.1x, `k12` 10x, and `k13` takes 4 µs per object against GNU R's 4.8 ms.
 
+- `k2` and `k8` run their base closures behind prologues (`ryAsDateCharacter`, `ryPmin`, `ryPmax`); what is left is the closure calls and S3 dispatch around them (`zoo::as.Date`, `UseMethod`, `as.Date.default`) and `[` on the matrix columns.
 - `k4` (an argument checker over `list(...)` with `delayedAssign`) and `k7` (a data.table grown by `rbind`) have no work planned. `k4` and `k5` are tier-0 closure calls: see "Open: JIT on against JIT off".
 - Replacement calls turned 23.0M slot frames into environments in the profile, and `standardGeneric` 24.8M.
 - `list.files` differs from GNU R in two argument edge cases: `pattern = NA_character_` lists everything where GNU R reports `invalid 'pattern' argument`, and a directory written with a trailing slash joins with one slash under `full.names = TRUE` where GNU R keeps two (`"sub//inner"`). `pushBack` on a raw connection is accepted where GNU R refuses it.
