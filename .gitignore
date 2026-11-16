@@ -35,3 +35,4 @@ roughly.toml
 .corpus
 .corpus-*
 .bench
+__pycache__/
