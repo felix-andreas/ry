@@ -363,12 +363,6 @@ Unverified until a Windows release smoke test runs:
 - Drop `cli.md`'s Windows `R_HOME` note for linear algebra once the no-`R_HOME` smoke check passes on a Windows release.
 - **ry's own base R has never run on Windows.** Earlier Windows releases ran on GNU R's base, so the smoke test after a green base build is the first run of the bundled base there. Behind lattice wait 11 more recommended packages, the archive, and the smoke test.
 - **Landed:** the `fork` module is Unix-only again (a moved `#[cfg(unix)]` broke the Windows compile); the `Sys.which` fast path is Unix-only, because Windows base R defines its own `Sys.which`; the base tree carries GNU R's `Rblas.dll` and `Rlapack.dll`; it writes `etc/Rcmd_environ` and base's `Rprofile` with the lines GNU R's installer uncomments, so Rtools comes first on `PATH`; `shlib` runs `make` on the `PATH` that `Rcmd_environ` sets, which got grid and splines compiling (`shlib_runs_make_on_the_path_rcmd_environ_sets`).
-User directive: go through the whole code base and delete low-signal tests. The deliverable is fewer, stronger tests. Fuzzing, scenario tests, simulations and well-structured fixture suites are high signal and stay.
-
-- **Low signal means** a test that restates the implementation; one assertion per trivial getter; a duplicate of what a fixture, oracle case or fuzz target already covers; a snapshot of incidental output; a test of a helper with no behavior; a test that has never failed and cannot fail for a plausible bug.
-- **Fold, do not just delete.** Where a group of small unit tests covers one behavior, replace it with one fixture, table test or property test.
-- **The rule to write down:** a test must pin a contract from the docs or a bug that once happened. Once the cut is done, add it to `docs/src/content/docs/development/testing.md` and `robustness.md`.
-
 ## Open: one Renviron reader
 
 - ry has two Renviron readers, the interpreter's startup one in `crates/interp/src/session.rs` and `rcmd::command_environment`. The interpreter's lets an already-set variable win, which differs from GNU R's `process_Renviron` (a file line always overrides). Merge them into one reader with GNU R's semantics.
