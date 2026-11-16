@@ -51,9 +51,9 @@ type-mismatch
   contiguous: no `NA` encodings, no attributes, no recycling, value semantics with in-place update
   of a uniquely held value. The [runtime contract](#runtime-contract) states what the runtime must
   provide.
-- **Hindley-Milner** (`decisions.md`, "The type system is Hindley-Milner"). Every feature here is
+- **Hindley-Milner** (`decisions/syntax-semantics.md`, "Beta semantics: The type system is Hindley-Milner, and stays fast to check"). Every feature here is
   unification over the existing constraint mechanism, and the unifier gains nothing: records stay
-  closed and there are no row variables (`decisions.md`, native records).
+  closed and there are no row variables (`decisions/typed-stdlib.md`, native records).
 - **One boundary.** An R value becomes a ry value only through a conversion function that checks
   it. A ry value whose representation R already has (`F64`, `Bool`, `Str` and Lists of them) fits
   the R type directly, because nothing R code relies on is lost.
@@ -285,7 +285,7 @@ pattern of its type.
 
 ## Equality, hashing and printing
 
-ry has no abilities or methods, because traits are declined (`decisions.md`). Roc derives
+ry has no abilities or methods, because traits are declined (`decisions/syntax-semantics.md`). Roc derives
 `is_eq`, `to_hash` and `to_inspect` for every structural type whose parts have them, and ry builds
 the same three in, for every ry type except functions:
 
@@ -392,7 +392,7 @@ provides them.
   vector layouts, so they pass to R code and C code without a copy. `List<I64>` is the `I64SXP`
   vector at length n, so a scalar and a list share one representation.
 - An update through `xs[[i]] <- v`, `List.set`, `List.append` and the like reuses the storage when
-  the list is uniquely held (`decisions.md`, "Standard library updates reuse a uniquely held
+  the list is uniquely held (`decisions/typed-stdlib.md`, "Standard library updates reuse a uniquely held
   value"), so a loop that appends is amortized constant time per item.
 - A `List` carries no attributes, so a compiled loop over one needs only a bounds check per read.
 

@@ -1,7 +1,7 @@
 //! Builds ry's base R from GNU R's source tarball: the default packages' R code, data, help and
 //! metadata, laid out as an installed GNU R home (`library/`, `share/`, `etc/`, `doc/`), so that
-//! ry needs no GNU R installation to run R code (`decisions.md`, "ry ships its own base R, and
-//! GNU R through `R_HOME` is the opt-in").
+//! ry needs no GNU R installation to run R code (`decisions/libr-rcmd.md`, "ry ships its own base
+//! R, and GNU R through `R_HOME` is the opt-in").
 //!
 //! The build follows `src/library/Makefile` of the R sources step by step, with ry's own
 //! interpreter as the R that runs each step: base's R code is concatenated and sourced, then

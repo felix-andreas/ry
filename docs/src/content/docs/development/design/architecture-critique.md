@@ -30,7 +30,7 @@ fuzzed against the others, but the count is why a change is slow to make, why th
 is 186,000 lines, and why the largest remaining lever (removing calls) has no home: tier 1 has no
 R-level intermediate representation in which inlining and speculation could be expressed once.
 
-Three smaller structural facts compound it. The data-oriented shapes that `decisions.md` settles
+Three smaller structural facts compound it. The data-oriented shapes that `decisions/` settles
 for the frame stack and the code header are not what the code has. The interpreter crate sits above
 Polars, a TLS stack and a rasterizer, so an edit to the evaluator costs two minutes. And no workflow
 gates a release on a test.
@@ -47,14 +47,14 @@ the right shape, but only a restart or a much later rewrite justifies it.
 | 2 | Tier 1 translates one bytecode instruction to one `Action` and hands the result to Cranelift. No IR carries frame states, so only effect-free callees inline | An R-level SSA IR with frame states between bytecode and Cranelift, where inlining, speculation and environment elision are passes | XL | Now. It is the precondition of the call-removal lever |
 | 3 | Version-pinned fast paths: bodies of base R 4.6.2, rlang 1.3.0 and withr 3.0.3 are matched by hash and replaced. They vanish silently on any other version | Report every pin that fails to match, test the pins against the benchmark dependency set, and retire each one as finding 2 makes it unnecessary | S, then ongoing | Now |
 | 4 | `interp` is one crate of 186,273 lines, of which about 49,000 are the engine. It depends on Polars, reqwest and rustls, tiny-skia, and three regex engines. An edit costs 2m06s | An engine crate with no heavy dependency, and separate crates for the numeric ports, graphics, network services and the table binding | L | Now. Agent velocity is bounded by this loop |
-| 5 | The settled data-oriented shapes are not built. The frame stack is an array of 20-field records, and code metadata lives in an R list read by position on every call | Build the packed code header and the hot/cold frame columns that `decisions.md` already specifies | L | Now. Both are on the call path |
+| 5 | The settled data-oriented shapes are not built. The frame stack is an array of 20-field records, and code metadata lives in an R list read by position on every call | Build the packed code header and the hot/cold frame columns that `decisions/` already specifies | L | Now. Both are on the call path |
 | 6 | `heap()` and `interp()` return `&'static mut` from a global, with about 1,500 call sites, under a crate-wide `allow(unsafe_op_in_unsafe_fn)` and 5,795 `unsafe fn` | Pass the context as a pointer or a register-pinned argument. Shrink the unsafe surface to the object accessors | L | Greenfield for the full shape. Now for the aliasing in new code |
-| 7 | The checker binary depends on the interpreter. Workspace feature unification turns on `loader`'s `runtime` feature for every build | Build `ry-lang` without the runtime feature, as `decisions.md` says it is built | S | Now |
+| 7 | The checker binary depends on the interpreter. Workspace feature unification turns on `loader`'s `runtime` feature for every build | Build `ry-lang` without the runtime feature, as `decisions/tooling-bench-ci.md` says it is built | S | Now |
 | 8 | The checker's working state is 22 hash tables keyed by dense ids, and `Ty` is a pointer to a leaked enum that holds `Vec`s | Columns and bitsets indexed by `ExprId` and `BindingId`. A `u32` type id into a struct-of-arrays store, with a per-item store for types that contain variables | M, XL | Columns now. Type store greenfield |
 | 9 | One analysis fact has two lookup paths chosen by `Db::one_shot()`, plus six hand-rolled caches that exist to avoid salsa's per-read cost | One per-file item tree query that returns dense arrays, with salsa only at file-interface and item-check granularity | L to XL | Now. It removes a class of CLI-against-server divergence |
 | 10 | The heap runs three liveness mechanisms together: generational tracing with card marking, two old generations, and deferred reference counts with five bookkeeping sets | Tracing decides liveness. The reference count answers only "may this be modified in place" | L | Greenfield, unless a GC bug forces it |
 | 11 | No workflow runs a test on push, the release workflow runs none, and 17 libFuzzer targets run nowhere. A segfault under GC torture was handled by marking it intermittent | A release job that fails on the fixture suites and a bounded fuzz pass. Treat a GC-torture crash as a blocker | S | When the broken-main phase ends. The segfault now |
-| 12 | `decisions.md` is 9,832 lines and mixes built shapes with planned ones. `MEMORY.md` is about 52,000 tokens with duplicated bullets | Mark each decision built or planned, mark superseded ones, and cut `MEMORY.md` to what one read can hold | S | Now. Every agent session pays for it |
+| 12 | The decision log (`decisions/`) is 9,832 lines and mixes built shapes with planned ones. `MEMORY.md` is about 52,000 tokens with duplicated bullets | Mark each decision built or planned, mark superseded ones, and cut `MEMORY.md` to what one read can hold | S | Now. Every agent session pays for it |
 
 ### Status
 
@@ -63,13 +63,13 @@ describes the tree as the review found it.
 
 | # | Status |
 |-:|---|
-| 2 | Frame states built, the R-level IR open. A point where tier 1 can leave compiled code is a frame state in `crates/ssa`, every exit shares one block, and the runtime rebuilds the interpreter frames from the cells the exit saved, the frames of inlined callees included. On top of that, tier 1 runs a call of a known closure without a frame, an environment or promises when the call passes one positional argument per formal, behind a guard on the callee's code, with arguments and results unboxed. A frameless call also takes named and omitted arguments, literal defaults and assigned formals, starts with one leaf helper call, and reads the callee's free variables inline. A body compiles only when its native work covers what compiled code costs, which leaves most bodies in tier 0. In the applications suite `orders` and `bond_book` run 1.8 and 1.3 times as fast as with the JIT off, the other thirteen programs run within 0.6% of their JIT-off instruction count, and the three benchmark code bases run within 0.4% of theirs, because their hot bodies are calls of builtins on boxed values and of closures tier 1 cannot inline yet. The planner in `analysis.rs` still picks one `Action` per instruction and decides the inlining, and `ssa` has no R-level value nodes or passes (`decisions.md`, "Tier 1 leaves compiled code through frame states" and "A body compiles only when its native work covers what compiled code costs"; `backlog.md`, "Open: JIT on against JIT off") |
+| 2 | Frame states built, the R-level IR open. A point where tier 1 can leave compiled code is a frame state in `crates/ssa`, every exit shares one block, and the runtime rebuilds the interpreter frames from the cells the exit saved, the frames of inlined callees included. On top of that, tier 1 runs a call of a known closure without a frame, an environment or promises when the call passes one positional argument per formal, behind a guard on the callee's code, with arguments and results unboxed. A frameless call also takes named and omitted arguments, literal defaults and assigned formals, starts with one leaf helper call, and reads the callee's free variables inline. A body compiles only when its native work covers what compiled code costs, which leaves most bodies in tier 0. In the applications suite `orders` and `bond_book` run 1.8 and 1.3 times as fast as with the JIT off, the other thirteen programs run within 0.6% of their JIT-off instruction count, and the three benchmark code bases run within 0.4% of theirs, because their hot bodies are calls of builtins on boxed values and of closures tier 1 cannot inline yet. The planner in `analysis.rs` still picks one `Action` per instruction and decides the inlining, and `ssa` has no R-level value nodes or passes (`decisions/jit-ssa.md`, "Tier 1 leaves compiled code through frame states" and "A body compiles only when its native work covers what compiled code costs"; `backlog.md`, "Open: JIT on against JIT off") |
 | 4 | Built. `interp` is the engine (126,000 lines) between `numeric` below it and the leaf crates `stats`, `graphics`, `frames` and `services` above it, and it links no Polars, reqwest, rustls or tiny-skia. An edit to `eval()` costs 82 s on `iterate` (95 s before) and 11 s on `dev`. Cargo recompiles every crate above an edited one, so the engine and its leaves still rebuild after an evaluator edit. The cut that shortens that loop puts the evaluator core above base's builtins, and `backlog.md` holds it under "Open: the evaluator's edit loop" |
 | 7 | Built. The loader's backend for ry's runtime is a module of `libr`, `loader` has no `runtime` feature, and `cargo tree -p ry-lang -i interp` finds nothing |
-| 8 | Columns built. The checker's per-expression, per-pattern and per-binding facts are 24 columns and bitsets in the check arena (`crates/semantics/src/dense.rs`), and no hash table in `check.rs` is keyed by a dense id. A type is a four-byte id into two parallel columns, with the facts a walk would compute in the id's upper bits, and one store holds every type: a per-item store for types with inference variables is rejected, because those types leave their item in diagnostics and editor facts (`decisions.md`, "Decision record: types and symbols are four-byte ids into append-only columns") |
+| 8 | Columns built. The checker's per-expression, per-pattern and per-binding facts are 24 columns and bitsets in the check arena (`crates/semantics/src/dense.rs`), and no hash table in `check.rs` is keyed by a dense id. A type is a four-byte id into two parallel columns, with the facts a walk would compute in the id's upper bits, and one store holds every type: a per-item store for types with inference variables is rejected, because those types leave their item in diagnostics and editor facts (`decisions/syntax-semantics.md`, "Types and symbols are four-byte ids into append-only columns") |
 | 9 | Built, with per-item memos kept where each one is a firewall. No `Db::one_shot` exists and every host runs the same queries: trees live in the host's `TreeStore`, an item resolves the names it spells through one `item_links` query that also holds its interface edges, and one walk per file finds the cyclic groups. Of the four `SalsaGlobals` caches, three are removed and the fourth is a column. On the finance bench a cold check takes 0.71 s and 248 MB at the median (0.70 s and 237 MB with two paths). In the server a body edit settles in 3 ms, a new definition in 5 to 6 ms and a file opened on an idle server in 12 to 13 ms, the same as with two paths. The item tree is not one per-file query of dense arrays: HIR, naming, links and check stay per item, because each memo is the firewall that keeps an edit inside one item. Of the caches in `infer.rs` and `types.rs`, the per-thread type cache and the resolve cache are removed, and the definition lookup keeps a short per-item list. An edit lowers only the items whose syntax changed, through a stamp per top-level node |
 | 11 | The segfault is fixed and the mark is removed: the collector traces the unwind a compiled body parks for tier 0 (`a_parked_return_value_survives_its_exit` in `crates/jit/tests/test_tiers.rs`), the oracle refuses `intermittent` in `known_failures.toml`, and a case whose engine is killed by a signal fails the run even when the file lists it. The workflow is staged and runs nothing until a maintainer runs `just accept`: `.github/pending/test.yml` runs `just test-fast` (the fixture suites and the tests of the crates that need no GNU R) and `just fuzz-all 60 runtime` (the 15 fuzz targets that build without Polars, 60 seconds each) when started by hand, and `.github/pending/release.yml` calls it and publishes only when both pass. No push starts a test run, by user decision, so between releases the tests run locally (`just gate`) or when someone starts the workflow |
-| 12 | Built. Every entry in `decisions.md` opens with a status line (`built`, `planned` or `superseded`), with the exceptions to a built entry named in that line, and superseded entries a reader no longer needs are cut. `MEMORY.md` is 44 KB, about 11,000 tokens, and its open work lives in `backlog.md` |
+| 12 | Built. Every entry in `decisions/` opens with a status line (`built`, `planned` or `superseded`), with the exceptions to a built entry named in that line, and superseded entries a reader no longer needs are cut. `MEMORY.md` is 44 KB, about 11,000 tokens, and its open work lives in `backlog.md` |
 
 Of the analysis core's smaller findings, the keystroke scan is closed: the server walks a file's
 `source()` calls only when the edited file's `source()` literals change. The rest are in
@@ -116,18 +116,18 @@ Maglev and TurboFan graphs, JavaScriptCore's DFG, LuaJIT's trace IR, and for R i
 they share is frame states: each point that can leave optimized code records how to rebuild the
 interpreter's frame. With that, inlining a closure, eliding its environment, unboxing across a call
 and speculating on a callee's identity are ordinary passes. Without it, each needs a special case,
-which is what the effect-free-callee inliner and the fast paths are. `decisions.md` plans frame-state
+which is what the effect-free-callee inliner and the fast paths are. `decisions/jit-ssa.md` plans frame-state
 maps. The critique is that the plan should be an IR, not maps bolted to the template compiler, and
 that `ssa` is the natural crate to become it.
 
 Compile cost supports the same move. At 5 to 7 microseconds per bytecode word, `[<-.data.frame`
-takes 125 ms to compile (figures from `decisions.md`). That is Cranelift doing register allocation
+takes 125 ms to compile (figures from `decisions/jit-ssa.md`). That is Cranelift doing register allocation
 on unoptimized templates. A middle IR that removes guards and boxes before lowering shrinks
 Cranelift's input, which is the only way to keep it as the backend at this cost.
 
 ### The settled shapes are not the built shapes
 
-| Fact | What `decisions.md` settles | What the code has |
+| Fact | What `decisions/` settles | What the code has |
 |---|---|---|
 | Frame stack | A 40-byte hot record with cold columns beside it | `FrameStack { slots: Vec<Frame> }`, where `Frame` has about 20 fields including `on_exit`, `handlers`, `restarts` and `srcref` (`interp.rs:152-213`) |
 | Code metadata | A packed code header read with one load | An R list with positional slots `SOURCE=0` to `SLOTS=10` (`bytecode.rs:1099-1113`). The register count is read through `pool_ints(code.cdr(), REGISTERS)` on each call (`bytecode.rs:6420`, `6458`, `6511`) |
@@ -146,7 +146,7 @@ The object header is good: 16 bytes, with the kind, GC bits, flags and a 16-bit 
 packed (`object.rs:295-305`). The collector around it is three designs at once. Sticky-mark
 generational tracing with card marking decides what dies young. Two old generations decide what is
 scanned. Deferred reference counts are reconciled through `zero_count`, `escaped`, `escaped_lists`,
-`returned`, `untracked` and `expect_dead`. Each has a measured reason in `decisions.md`, and
+`returned`, `untracked` and `expect_dead`. Each has a measured reason in `decisions/`, and
 together they are the part of the system most likely to hold a bug that only GC torture finds. The
 recorded response to one such segfault was an `intermittent = true` mark.
 
@@ -251,7 +251,7 @@ One cold debug build of `ry-lang`, `libr` and `rcmd` on four cores:
 | Debug `ry` | 180 MB |
 | Packages in `Cargo.lock` | 555 |
 
-`decisions.md` records the loop that matters more: 2m06s per `interp` edit on the `iterate` profile
+`decisions/tooling-bench-ci.md` records the loop that matters more: 2m06s per `interp` edit on the `iterate` profile
 and 5m51s for release. Roc-class compile time is not reachable through profiles. It needs the
 dependency graph to change:
 
@@ -262,7 +262,7 @@ dependency graph to change:
   graphics (18,000) and services (20,000) change rarely and should not recompile with the evaluator.
 - `cargo tree -p ry-lang -i interp` prints `interp <- loader <- ry-lang`. The workspace setting
   `feature-unification = "workspace"` enables `loader`'s `runtime` feature everywhere, so the
-  checker binary has 504 dependencies where `decisions.md` says it does not depend on the runtime.
+  checker binary has 504 dependencies where `decisions/tooling-bench-ci.md` says it does not depend on the runtime.
 - `libr` has 23 separate `[[test]]` binaries, each linked against the full runtime, and no fast
   linker is configured.
 - `editors/zed` is a workspace member and adds about 60 wasm crates to the lockfile.
@@ -353,7 +353,7 @@ scripts and 353 IDE cases. The gaps are on the runtime side and in the increment
 
 ### The knowledge base
 
-`decisions.md` has more than 400 entries in 9,832 lines. An entry does not say whether its shape is
+The decision log (`decisions/`) has more than 400 entries in 9,832 lines. An entry does not say whether its shape is
 built, and three pairs of entries contradict each other with no superseded mark (lines 7611 and
 9279, 7106 and 9257, 4752 and 7417). That is how the frame stack and the code header came to be
 settled on paper and absent in code without anyone noticing. `MEMORY.md` is about 52,000 tokens,
@@ -376,7 +376,7 @@ or `superseded` on each decision is the cheapest high-value change in this revie
 
 ## Not verified
 
-- No run-time measurement was taken. Every speed figure is quoted from `decisions.md`,
+- No run-time measurement was taken. Every speed figure is quoted from `decisions/`,
   `backlog.md` or [The big levers](/development/design/big-levers/).
 - Whether the aliased `&'static mut` accessors miscompile anything today.
 - What the deferred reference counts are worth in freed memory, which decides finding 10.
