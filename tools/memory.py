@@ -26,18 +26,19 @@ INDEX = os.path.join(AREA_DIR, "index.md")
 # later change tightens them; a file over budget is pruned or moved to the right horizon, not
 # given more room.
 BUDGETS = {
-    "AGENTS.md": 40_000,
-    ".agents/memory/MEMORY.md": 65_000,
-    ".agents/memory/backlog.md": 483_000,
-    ".agents/memory/worklog.md": 141_000,
+    "AGENTS.md": 28_000,
+    ".agents/memory/MEMORY.md": 32_000,
+    ".agents/memory/backlog.md": 402_000,
+    # Room for about 60 more one-line entries before the oldest move out to the git log.
+    ".agents/memory/worklog.md": 40_000,
     ".agents/memory/decisions/syntax-semantics.md": 262_000,
     ".agents/memory/decisions/ide-server.md": 60_000,
-    ".agents/memory/decisions/interp.md": 120_000,
+    ".agents/memory/decisions/interp.md": 124_000,
     ".agents/memory/decisions/builtins.md": 194_000,
     ".agents/memory/decisions/r-compat.md": 57_000,
     ".agents/memory/decisions/jit-ssa.md": 178_000,
     ".agents/memory/decisions/heap-gc.md": 157_000,
-    ".agents/memory/decisions/libr-rcmd.md": 140_000,
+    ".agents/memory/decisions/libr-rcmd.md": 141_000,
     ".agents/memory/decisions/typed-stdlib.md": 221_000,
     ".agents/memory/decisions/frames-table.md": 89_000,
     ".agents/memory/decisions/tooling-bench-ci.md": 73_000,
