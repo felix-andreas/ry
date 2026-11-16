@@ -1173,3 +1173,15 @@ Nothing loaded packages before; `development/design/r-runtime.md` section 6 and 
   | `SETCAR`, `CAR`, `Rf_protect` | 0.1 to 0.3% each | | | |
 
   A direct path roughly halves an entry's cost, so the two largest together would save about 0.5% of cli and less elsewhere. Reopen this only if a profile shows one entry above 2% of a named workload. Two vctrs costs that look like boundary costs are not: `Rf_allocVector` at about 11,000 Ir per call is probably collection charged to the allocator (unverified), and `INTEGER_RO` at about 19,000 Ir per call comes from callers that build a fresh `1:n` on every call. A compact sequence is expanded once and then reused, as in GNU R, and building it costs about 37,000 Ir per call on both sides.
+
+## Measured and not taken: a builtin path for `Rf_eval` and a cheaper protect stack
+
+**Status:** built (not taken; the measurement stands).
+
+- **Even removing all of it stays under the 3% bar on timeseries.** xts's `xts_get_attrs` evaluates `attributes(x)` through `Rf_eval` about 97k times per repeat (2.87% of warm Ir, 1,685 Ir per call, of which 867 in `do_attributes` and 818 in the evaluator around it), and protect, unprotect and reprotect cost 1.13%. A direct builtin path must still look the function up from `rho` and hand the result out, and protect at about 10 Ir saves about 0.8%, so the realistic total is about 1.8%.
+
+## Measured and not taken: libdeflate for lazy-load records
+
+**Status:** built (not taken; the measurement stands).
+
+- **Inflating whole records with libdeflate saves 1.1% of testthat, under the 2% bar.** A record states its decompressed length, so one `libdeflate_zlib_decompress` call could replace the streaming inflater in `serialize::decompress_record` (41.5M to 18.3M Ir on the testthat workload). Only packages GNU R installed benefit, because ry-installed packages read records uncompressed from the code image, and it adds a C dependency. The branch `perf/libdeflate-records` holds the change, a size check against deflate's 1032:1 expansion, and a bounded fuzz test.

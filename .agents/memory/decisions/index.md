@@ -196,6 +196,10 @@ A new entry gets its status line when it is written, and the line changes in the
 - [S3 methods are found through one row per method symbol](interp.md#s3-methods-are-found-through-one-row-per-method-symbol) (built)
 - [The interpreter is an engine crate between a numeric crate and four leaf crates](interp.md#the-interpreter-is-an-engine-crate-between-a-numeric-crate-and-four-leaf-crates) (built)
 - [A watchdog thread raises the poll flag at a time limit's deadline, and the interrupt check raises the error](interp.md#a-watchdog-thread-raises-the-poll-flag-at-a-time-limits-deadline-and-the-interrupt-check-raises-the-error) (built)
+- [Measured and not taken: O(1) `Sys.getenv` and `options`](interp.md#measured-and-not-taken-o1-sysgetenv-and-options) (built)
+- [Measured and not taken: a leaner `format()` on the validation workload](interp.md#measured-and-not-taken-a-leaner-format-on-the-validation-workload) (built)
+- [Base fast paths read formals one at a time, except `formatC()`](interp.md#base-fast-paths-read-formals-one-at-a-time-except-formatc) (built)
+- [Parked: cheaper restart setup in `withRestarts`](interp.md#parked-cheaper-restart-setup-in-withrestarts) (planned)
 
 ## Builtins and base R
 
@@ -323,6 +327,7 @@ A new entry gets its status line when it is written, and the line changes in the
 - [A compiled return writes locals back only when something can still read the frame](jit-ssa.md#a-compiled-return-writes-locals-back-only-when-something-can-still-read-the-frame) (built)
 - [A call compiled code cannot inline enters the callee in tier 0's dispatch loop](jit-ssa.md#a-call-compiled-code-cannot-inline-enters-the-callee-in-tier-0s-dispatch-loop) (built)
 - [A native recursive function's depth budget shrinks with the interpreter depth](jit-ssa.md#a-native-recursive-functions-depth-budget-shrinks-with-the-interpreter-depth) (built)
+- [Parked: cheaper global bindings in top-level loops (tier 0)](jit-ssa.md#parked-cheaper-global-bindings-in-top-level-loops-tier-0) (planned)
 
 ## Heap and collector
 
@@ -416,6 +421,8 @@ A new entry gets its status line when it is written, and the line changes in the
 - [Package builds run `make` in parallel and link BLAS and LAPACK by versioned file](libr-rcmd.md#package-builds-run-make-in-parallel-and-link-blas-and-lapack-by-versioned-file) (built)
 - [ry's base R ships the recommended packages](libr-rcmd.md#rys-base-r-ships-the-recommended-packages) (built)
 - [Hot C API entry points take a direct success path](libr-rcmd.md#hot-c-api-entry-points-take-a-direct-success-path) (built)
+- [Measured and not taken: a builtin path for `Rf_eval` and a cheaper protect stack](libr-rcmd.md#measured-and-not-taken-a-builtin-path-for-rf_eval-and-a-cheaper-protect-stack) (built)
+- [Measured and not taken: libdeflate for lazy-load records](libr-rcmd.md#measured-and-not-taken-libdeflate-for-lazy-load-records) (built)
 
 ## Typed ry and the standard library
 

@@ -1045,3 +1045,10 @@ Tier 0, the Cranelift tier, the shared SSA IR, deoptimization, and what compiles
 - **Rejected: marking the function as failed and never retrying.** A recursion that fails once at depth 400,000 still succeeds natively for every shallower call, and those are the common ones.
 - **Not built.** The native stack does not bound native recursion: a native frame's size is not known to the budget, and only a 128 KiB red zone is guaranteed below the stack check. A raised limit with a deep native recursion relies on the budget alone.
 - **Pinned by** `a_recursion_past_a_raised_depth_limit_fails_as_in_tier_zero` in `crates/jit/tests/test_tiers.rs`.
+
+## Parked: cheaper global bindings in top-level loops (tier 0)
+
+**Status:** planned, parked on its branch until a workload clears the bar.
+
+- **What the branch `perf/global-loop-tier0` does.** Global reads and writes go through the site's cached binding cell, validated by `Heap::lookup_stamp` (the stamp tier 1 checks), every fast path reads the cell's flags because `lockBinding` and `makeActiveBinding` move no stamp, and `x <- left op right` on an unshared scalar global overwrites it in place. The oracle case `base__global_loop_bindings` pins every binding-change path. `s <- s + i` per iteration falls from 856 to 495 Ir (412 with an ungated draft; GNU R 249).
+- **Why parked.** Top-level loops may be rare in the application workloads, and compile cost, RSS and the workload effect are unmeasured. Measure the workloads before building more; the bar is 3% on a named workload (2% on testthat).

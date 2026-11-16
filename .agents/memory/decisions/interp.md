@@ -519,3 +519,31 @@ there was no evaluator, so there was no previous source of truth.
 - **Choice.** `crates/interp/src/time_limits.rs` keeps GNU R's state (`cpuLimit`, `cpuLimit2`, `cpuLimitValue` and the elapsed ones) on `Interp`. A watchdog thread, started when a limit is first armed, sleeps until the elapsed deadline (or polls the CPU clock every 20 ms) and then raises `time_limits::DUE` and the poll flag. `check_user_interrupt` (GNU R's `R_CheckUserInterrupt`, reached from the evaluator every 1000 polls once the flag is up, from `Sys.sleep` after each wait, and from native code) reads the clocks and raises the error, so the thread never decides an outcome. Deadlines reach the thread through atomics that only the evaluator's thread writes, so a fork never copies a held lock; a forked child starts its own thread (`fork.rs` calls `time_limits::after_fork`). `session::run_toplevel` calls `time_limits::reset` before every top-level expression, as GNU R's REPL calls `resetTimeLimits`.
 - **Rejected.** `setitimer` signals: they interrupt system calls in packages' code, and Windows has none. A clock read per poll: costs every loop for a feature almost no code uses.
 - **Difference from GNU R.** GNU R 4.6 skips five of every six checks and reads the clock at most every 50 ms, so a single long `Sys.sleep()` under a shorter limit often returns normally there. ry checks after every wait once the deadline has passed, so the limit fires at the end of that sleep. `crates/oracle/cases/system__time_limits.R` pins only outcomes both agree on.
+
+## Measured and not taken: O(1) `Sys.getenv` and `options`
+
+**Status:** built (not taken; the measurement stands).
+
+- **Neither is worth an index.** On testthat_full (callgrind, `RY_JIT=off`, warm Ir 594.6M per repeat) the `environ` scan (`find_variable`, `do_sys_getenv`) and the `.Options` walks (`set_option`, `option_value`, `do_options`) cost about 12.5M Ir (2.1%) together, and a probe per lookup costs some of that back, so the net is 1.5 to 1.9%. The `environ` scan already rejects most entries after one byte load.
+- **If a profile puts them higher:** for options, an index from symbol to pairlist cell beside `.Options`, rebuilt when the binding's head changes (about 1.1% net). For getenv, a slot index validated against the `environ` base pointer and the entry pointer, re-reading the entry's bytes on every hit so C `setenv` stays visible (about 0.8% net); it is derived state, so it needs a stronger case.
+
+## Measured and not taken: a leaner `format()` on the validation workload
+
+**Status:** built (not taken; the measurement stands).
+
+- **About 2.5% of validation's warm Ir is within reach, under the 3% bar, and ry is already about 7x faster than GNU R per call** (about 16k Ir against 111k for `format(round(v, 3), nsmall = 3)`; `.Internal(format())` 3.76k against 8.25k).
+- **Where the cost is:** S3 dispatch to `format.default` about 6.6k Ir (call-path work, not format's); `do_format_default` 7.3k, of which per-formal lookups and default forcing 2.47k (about 1.0% from one pass), `real_format_candidates` on the emulated long double 1.13k and the text buffer 1.19k (about 1.3% together).
+
+## Base fast paths read formals one at a time, except `formatC()`
+
+**Status:** built (one pass taken for `formatC()` only).
+
+- **One pass over the formals is under the bar on every workload but report.** The helpers `argument`, `is_default`, `is_supplied` and `dots` (`base_fast_paths.rs`) each walk the formals again; their self share of warm Ir is 5.15% on report (`formatC()`), 1.88% on validation (`format.default`), and under 0.6% elsewhere. One walk still pays the walk and a frame re-resolve per lookup (forcing can give a slot frame an environment), so it saves about 40%.
+- **`formatC()` reads its 13 formals in one walk** (`eval::slot_formals`), takes a defaulted formal as its known constant without forcing it, and reads `OutDec` only when `decimal.mark` is defaulted: report runs 4.5% fewer warm instructions. `format.default` keeps per-formal lookups.
+
+## Parked: cheaper restart setup in `withRestarts`
+
+**Status:** planned, parked on its branch until a workload clears the bar.
+
+- **What the branch `perf/restart-setup` does.** The native `withRestarts` prologue shares one `names` and one `"restart"` class vector across restart objects, looks `makeRestart` and the `$` methods up through pre-installed symbols, makes the handler closures without `eval`, and calls `withOneRestart` directly for one restart. team_scores warm Ir fell 1.98% (`make_restart_for` 55M to 22M, unpaired baseline). The oracle case `conditions__restart_objects` on the branch passes on four engines.
+- **Why parked.** A native muffle in `warning_call` (`conditions.rs`) skips `.signalSimpleWarning`, `withRestarts` and the handler when `suppressWarnings`'s own handler applies, which removes this path from team_scores. What is left matters only for the conditions workload, estimated at 1.5 to 2%, below the bar. To revive, merge main in and re-measure the conditions workload.
