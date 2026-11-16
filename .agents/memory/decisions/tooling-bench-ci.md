@@ -259,3 +259,17 @@ Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and be
 
 - **`package_display` (`crates/interp/src/profile_summary.rs`) labels a private package with SipHash-2-4 under a 128-bit secret key,** because an unkeyed hash lets anyone confirm a guessed name. The key is `RY_PROFILE_KEY` (32 hex digits; invalid is an error) or a per-project file under the user's cache directory, `ry/profile-keys/`, created once with `getrandom`, mode 0600, by hard-linking a staged file so racing sessions agree. With no keepable file the run uses its own key and the summary says why.
 - **Cache directory, not the project's `.ry/`,** because a file in the project can be committed and `ry run` writes nothing else there. Two machines label differently; `RY_PROFILE_KEY` from a CI secret gives a fleet one key.
+
+## The edit-to-signal loop is tuned for agents
+
+**Status:** built. Commands and timings live in `docs/src/content/docs/development/testing.md`, "The fast loop".
+
+- **Legacy symbol mangling in `[profile.dev]`** (`.cargo/config.toml`, through `profile-rustflags`): the debug `libR.so` is 623 MB instead of 894 MB with v0, and an interpreter rebuild is about 1 s faster. Release keeps the default.
+- **mold through `RUSTC_WRAPPER=tools/mold-rustc`, set by `tools/env.sh`,** not through `CARGO_TARGET_<triple>_LINKER`: cargo fingerprints the linker setting, so toggling it rebuilt 427 crates, while the wrapper is outside the fingerprint. mold cuts the link's peak memory from 3.1 GB to 0.9 GB.
+- **`doctest = false` in every crate,** because no crate has doctests and each doctest pass costs a rustdoc invocation.
+- **One scoped-thread pool, `syntax::testing::in_parallel`,** used by the fixture harness, the oracle, `test_scenarios` and `test_format_range`. Results return in item order so output stays deterministic.
+- **`FIXTURE_FILTER` is a substring of `group__case`,** so a group prefix runs a group; a filter matching nothing in any suite fails. Every failure prints a one-line rerun command.
+- **The oracle builds the workspace ry itself** (`cargo build -p ry-lang -p libr` unless `ORACLE_RY`), so it never compares a stale `libR.so`, and prints failures only unless `--verbose`. `cargo test -p oracle` compares a seeded sample by default and every case only with `ORACLE_ENGINE` set; it skips when no base R is built.
+- **Nested `cargo build` calls in tests stay,** because a no-op build costs 0.35 s once per process (`syntax::testing::cargo_build`) and is the only freshness guarantee. Caching `build_package` across processes would save about 2 s, not worth a staleness risk.
+- **Tests that link `frames` live in `crates/frames/tests`,** so interp's test binaries link no Polars (each moved binary was 748 MB).
+- **interp's integration tests stay separate binaries,** because the interpreter is a process-wide singleton (`interp::install`) and tests sharing one process would share its state. typed's tests are one binary (`tests/test_typed/`), table's engine tests one (`tests/test_table/`); `test_memory` keeps its own `#[global_allocator]`.
