@@ -12,6 +12,7 @@ autotests = false
 # The shared library is `libR.so` (`libR.dylib`, `R.dll`), the name compiled packages link
 # against, and its soname is set in build.rs. The rlib serves the crate's own unit tests.
 [lib]
+doctest = false
 name = "R"
 path = "src/libr.rs"
 crate-type = ["cdylib", "rlib"]

@@ -18,12 +18,13 @@ use {
         eval, interp,
         session::{FNV_OFFSET, stable_hash},
         sort::{self, IdenticalFlags},
+        system::{DateFromText, date_from_text},
         unwind::{R, Unwind, jump},
         values::{self, install, length, missing_arg, nil, symbols},
     },
     heap::{
         activity::{self, Counter},
-        object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp},
+        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, gp},
     },
     smallvec::SmallVec,
     std::borrow::Cow,
@@ -40,7 +41,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("rySysWhich", 0, do_sys_which).prologue(),
     internal("ryFormatDefault", 0, do_format_default).prologue(),
     internal("ryFormatC", 0, do_format_c).prologue(),
+    internal("ryPmin", 0, do_pmin).prologue(),
     internal("ryPmax", 0, do_pmax).prologue(),
+    internal("ryAsDateCharacter", 0, do_as_date_character).prologue(),
     internal("ryDeparse", 0, do_deparse).prologue(),
     internal("ryDeparseOpts", 0, do_deparse_opts).prologue(),
     internal("ryReduce", 0, do_reduce).prologue(),
@@ -83,7 +86,9 @@ const FAST_PATHS: &[(&str, &str, u64)] = &[
     ("Sys.which", "rySysWhich", 0x17980645114e720c),
     ("format.default", "ryFormatDefault", 0x5eb64c51109fbc94),
     ("formatC", "ryFormatC", 0x85c5e0cf394a6e6d),
+    ("pmin", "ryPmin", 0xb6f4eeb91b6ae6a4),
     ("pmax", "ryPmax", 0x80c09180cb181c18),
+    ("as.Date.character", "ryAsDateCharacter", 0x308ab91efad05a7e),
     ("deparse", "ryDeparse", 0xe0e6a113b041c11d),
     (".deparseOpts", "ryDeparseOpts", 0xa1d9386db7b3f18c),
     ("Reduce", "ryReduce", 0xd929e4c219983788),
@@ -3096,10 +3101,25 @@ unsafe fn do_unname(call: &Call<'_>) -> R<Sexp> {
     }
 }
 
-/// `pmax(..., na.rm)` when every argument is `NULL` or an atomic vector that is no object, and
-/// the first has no attributes for `mostattributes<-` to copy. The R body's `vapply()` check and
-/// attribute copy are closure calls around the same internal.
+/// `pmin(..., na.rm)`; see [`parallel_extreme`].
+unsafe fn do_pmin(call: &Call<'_>) -> R<Sexp> {
+    parallel_extreme(call, crate::arith::do_parallel_min)
+}
+
+/// `pmax(..., na.rm)`; see [`parallel_extreme`].
 unsafe fn do_pmax(call: &Call<'_>) -> R<Sexp> {
+    parallel_extreme(call, crate::arith::do_parallel_max)
+}
+
+/// `pmin` and `pmax` when every argument is `NULL` or an atomic vector that is no object, the
+/// R body's internal branch. The body checks that with a `vapply()` over a closure and copies the
+/// first argument's attributes with `mostattributes<-`, a closure of a dozen calls, around one
+/// call of the internal; here the check is a loop and the copy is [`most_attributes_from`].
+/// Fractional recycling declines, so its warning comes from the body's internal call.
+unsafe fn parallel_extreme(call: &Call<'_>, internal: BuiltinFn) -> R<Sexp> {
+    if !fast_paths_enabled() {
+        return decline();
+    }
     let frame = ClosureFrame::of(call);
     let Some(items) = dots(frame)? else {
         return decline();
@@ -3126,10 +3146,6 @@ unsafe fn do_pmax(call: &Call<'_>) -> R<Sexp> {
         }
         args.push(value);
     }
-    if args[1].attrib() != nil() {
-        return decline();
-    }
-    // GNU R warns when an argument is recycled fractionally.
     let longest = args[1..]
         .iter()
         .map(|&value| length(value))
@@ -3145,11 +3161,240 @@ unsafe fn do_pmax(call: &Call<'_>) -> R<Sexp> {
         return decline();
     };
     args[0] = na_rm;
-    let result = match kernel(crate::arith::do_parallel_max, &args, frame) {
+    let result = match kernel(internal, &args, frame) {
         Ok(result) => result,
         Err(Unwind::Error(_)) => return decline(),
         Err(other) => return Err(other),
     };
+    if !most_attributes_from(args[1], result)? {
+        return decline();
+    }
+    finish(frame, result, true)
+}
+
+/// `mostattributes(result) <- attributes(first)` for a fresh `result` without attributes, or
+/// `false` when `first` has an attribute whose replacement the R function would check against
+/// `result` (`tsp`, `row.names`), or `names` beside `dim`. Every other attribute is copied in
+/// order; then `dim` when `result` has as many elements as it implies, `dimnames` when `dim` was
+/// set and each non-empty component matches its extent, and `names` when there is no `dim` and
+/// they are as long as `result`, in that order, as the R function sets them.
+unsafe fn most_attributes_from(first: Sexp, result: Sexp) -> R<bool> {
+    let symbols = symbols();
+    let (mut names, mut dim, mut dimnames) = (nil(), nil(), nil());
+    let mut attribute = first.attrib();
+    while attribute.kind() == SexpType::Pairlist {
+        let (tag, value) = (attribute.tag(), attribute.car());
+        if tag == symbols.names {
+            names = value;
+        } else if tag == symbols.dim {
+            dim = value;
+        } else if tag == symbols.dimnames {
+            dimnames = value;
+        } else if tag == symbols.tsp || tag == symbols.row_names {
+            return Ok(false);
+        } else {
+            values::set_attr(result, tag, value)?;
+        }
+        attribute = attribute.cdr();
+    }
+    if names != nil() && dim != nil() {
+        return Ok(false);
+    }
+    let count = length(result);
+    let mut has_dim = false;
+    if dim != nil() {
+        if dim.kind() != SexpType::Integer {
+            return Ok(false);
+        }
+        let extent: f64 = values::ints(dim)
+            .iter()
+            .map(|&size| f64::from(size))
+            .product();
+        if extent == count as f64 {
+            values::set_attr(result, symbols.dim, dim)?;
+            has_dim = true;
+        }
+    }
+    if has_dim && dimnames != nil() {
+        if dimnames.kind() != SexpType::List || length(dimnames) != length(dim) {
+            return Ok(false);
+        }
+        let matches = values::ints(dim).iter().enumerate().all(|(axis, &size)| {
+            let component = length(dimnames.element(axis));
+            component == 0 || component == size as usize
+        });
+        if matches {
+            values::set_attr(result, symbols.dimnames, dimnames)?;
+        }
+    }
+    if names != nil() && length(names) == count {
+        values::set_attr(result, symbols.names, names)?;
+    }
+    Ok(true)
+}
+
+/// The value of the formal `symbol` when the call gave it and reading it runs no R code: a value,
+/// a forced promise, or a promise [`eval::settled_without_code`] settles. `as.Date.character`'s
+/// body forces its arguments inside the closures it calls (`charToDate`, `strptime`), whose
+/// frames code run by forcing could see in `sys.calls()`, so such an argument declines instead.
+unsafe fn given_without_code(frame: ClosureFrame, symbol: Sexp) -> R<Option<Sexp>> {
+    let Some([Formal::Given(value)]) = formals(frame, [symbol]) else {
+        return Ok(None);
+    };
+    if value.kind() != SexpType::Promise {
+        return Ok(Some(value));
+    }
+    if value.car() != values::unbound() {
+        return Ok(Some(value.car()));
+    }
+    let settled = eval::settled_without_code(value)?;
+    if let Some(settled) = settled {
+        crate::heap().root(settled);
+    }
+    Ok(settled)
+}
+
+/// `as.Date.character(x, format, tryFormats, optional)` for a character vector `x` with no
+/// attribute but names. The R body tries each of `tryFormats` on the first string that is neither
+/// NA nor empty with `strptime()`, `is.na.POSIXlt()` and `as.POSIXct()`, parses every string into
+/// a POSIXlt with the format that matched, and reads the dates back with `as.Date.POSIXlt()`;
+/// [`date_from_text`] gives each date without the POSIXlt. Arguments are forced as the body forces
+/// them: `x`, then `format` when it was given, or else `tryFormats` once a string is found. When
+/// no format matches, the call declines, so `optional` and the error are the body's. `...` is
+/// never forced, as the body never forces it.
+unsafe fn do_as_date_character(call: &Call<'_>) -> R<Sexp> {
+    if !fast_paths_enabled() {
+        return decline();
+    }
+    let frame = ClosureFrame::of(call);
+    let symbols = symbols();
+    let Some(x) = given_without_code(frame, symbols.x)? else {
+        return decline();
+    };
+    if x.kind() != SexpType::String {
+        return decline();
+    }
+    let mut attribute = x.attrib();
+    while attribute.kind() == SexpType::Pairlist {
+        if attribute.tag() != symbols.names {
+            return decline();
+        }
+        attribute = attribute.cdr();
+    }
+    let count = length(x);
+    let texts: SmallVec<[Option<Cow<'_, str>>; 4]> = (0..count)
+        .map(|index| values::string_at(x, index))
+        .collect();
+    // `strptime()` turns these into infinite times.
+    if texts
+        .iter()
+        .flatten()
+        .any(|text| text == "Inf" || text == "-Inf")
+    {
+        return decline();
+    }
+    let mut days: SmallVec<[f64; 4]> = SmallVec::with_capacity(count);
+    if is_supplied(frame, symbols.format)? {
+        // `strptime(x, format, tz = "GMT")`, which recycles `x` to a longer `format`.
+        let Some(format) = given_without_code(frame, symbols.format)? else {
+            return decline();
+        };
+        let formats = length(format);
+        if format.kind() != SexpType::String || formats == 0 || (count > 0 && formats > count) {
+            return decline();
+        }
+        for (index, text) in texts.iter().enumerate() {
+            let Some(format) = values::string_at(format, index % formats) else {
+                return decline();
+            };
+            days.push(match text {
+                None => NA_REAL,
+                Some(text) => match date_from_text(text, &format, true) {
+                    DateFromText::Day(day) => day,
+                    DateFromText::Unmatched => NA_REAL,
+                    DateFromText::Unsupported => return decline(),
+                },
+            });
+        }
+    } else {
+        // `is.na(x) <- !nzchar(x)`: an empty string counts as NA.
+        match texts
+            .iter()
+            .find_map(|text| text.as_deref().filter(|text| !text.is_empty()))
+        {
+            None => days.resize(count, NA_REAL),
+            Some(first) => {
+                let Some([try_formats]) = formals(frame, [symbols.try_formats]) else {
+                    return decline();
+                };
+                let value = match try_formats {
+                    // While `tryFormats` holds its own unforced default promise, its value is
+                    // base's constant `c("%Y-%m-%d", "%Y/%m/%d")`, so the promise and its `c()`
+                    // call are skipped: the fast path returns, or declines with the promise
+                    // still unforced for the body.
+                    Formal::Default(value)
+                        if value.kind() == SexpType::Promise
+                            && value.car() == values::unbound() =>
+                    {
+                        None
+                    }
+                    Formal::Default(value) if value.kind() == SexpType::Promise => {
+                        Some(value.car())
+                    }
+                    Formal::Default(_) => return decline(),
+                    Formal::Given(_) => {
+                        let Some(value) = given_without_code(frame, symbols.try_formats)? else {
+                            return decline();
+                        };
+                        Some(value)
+                    }
+                };
+                let formats: SmallVec<[Option<Cow<'_, str>>; 2]> = match value {
+                    None => [Some("%Y-%m-%d".into()), Some("%Y/%m/%d".into())].into(),
+                    Some(value) if value.kind() == SexpType::String => (0..length(value))
+                        .map(|index| values::string_at(value, index))
+                        .collect(),
+                    Some(_) => return decline(),
+                };
+                let mut chosen = None;
+                for format in formats {
+                    let Some(format) = format else {
+                        return decline();
+                    };
+                    match date_from_text(first, &format, true) {
+                        DateFromText::Day(_) => {
+                            chosen = Some(format);
+                            break;
+                        }
+                        DateFromText::Unmatched => {}
+                        DateFromText::Unsupported => return decline(),
+                    }
+                }
+                let Some(format) = chosen else {
+                    return decline();
+                };
+                for text in &texts {
+                    days.push(match text {
+                        Some(text) if !text.is_empty() => {
+                            match date_from_text(text, &format, false) {
+                                DateFromText::Day(day) => day,
+                                DateFromText::Unmatched => NA_REAL,
+                                DateFromText::Unsupported => return decline(),
+                            }
+                        }
+                        _ => NA_REAL,
+                    });
+                }
+            }
+        }
+    }
+    let result = values::real_vector(&days)?;
+    crate::heap().root(result);
+    let names = values::get_attr(x, symbols.names);
+    if names != nil() {
+        values::set_attr(result, symbols.names, names)?;
+    }
+    values::set_attr(result, symbols.class, values::scalar_string("Date")?)?;
     finish(frame, result, true)
 }
 

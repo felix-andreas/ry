@@ -274,3 +274,35 @@ Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and be
 - **`package_display` (`crates/interp/src/profile_summary.rs`) labels a private package with SipHash-2-4 under a 128-bit secret key,** because an unkeyed hash lets anyone confirm a guessed name. The key is `RY_PROFILE_KEY` (32 hex digits; invalid is an error) or a per-project file under the user's cache directory, `ry/profile-keys/`, named by an unkeyed SipHash of the project's canonical path (`outside-projects` outside any project; the project is the nearest directory with `ry.toml`, `roughly.toml` or `DESCRIPTION`), created once with `getrandom`, mode 0600, by hard-linking a staged file so racing sessions agree. With no keepable file the run uses its own key and the summary says why.
 - **Cache directory, not the project's `.ry/`,** because a file in the project can be committed and `ry run` writes nothing else there. Two machines label differently; `RY_PROFILE_KEY` from a CI secret gives a fleet one key.
 - **Randomness seam:** tests call `package_display` with a fixed key, and the scenario sets `RY_PROFILE_KEY`.
+
+## The edit-to-signal loop is tuned for agents
+
+**Status:** built. Commands and timings live in `docs/src/content/docs/development/testing.md`, "The fast loop".
+
+- **Legacy symbol mangling in `[profile.dev]`** (`Cargo.toml`'s `[profile.dev] rustflags`, which needs the `profile-rustflags` feature `.cargo/config.toml` turns on): the debug `libR.so` is 623 MB instead of 894 MB with v0, and an interpreter rebuild is about 1 s faster. Release keeps the default.
+- **mold through `RUSTC_WRAPPER=tools/mold-rustc`, set by `tools/env.sh`,** not through `CARGO_TARGET_<triple>_LINKER`: cargo fingerprints the linker setting, so toggling it rebuilt 427 crates, while the wrapper is outside the fingerprint and toggling it rebuilds nothing. The wrapper adds the flag only for Linux targets, and `tools/env.sh` sets it only on Linux. mold cuts the link's peak memory from 3.1 GB to 0.9 GB.
+- **`doctest = false` in every crate,** because no crate has doctests and each doctest pass costs a rustdoc invocation.
+- **One scoped-thread pool, `syntax::testing::in_parallel`,** used by the fixture harness, the oracle, `test_scenarios` and `test_format_range`. Results return in item order. Items are dealt out statically (worker `w` of `n` takes `w`, `w + n`, ...), not to whichever worker is free, because fixture renders reuse a per-thread database (`semantics::testing`) and a work-stealing order would give each database a different history on every run; `RY_TEST_WORKERS` pins `n` and failures print it. Each item's panic is caught and returned as that item's `Err(message)`, so one panic neither loses its case's name nor discards the other results.
+- **`FIXTURE_FILTER` is a substring of `group__case`,** so a group prefix runs a group; a filter matching nothing in any suite fails. Every failure prints a one-line rerun command.
+- **The oracle builds the workspace ry itself** (`cargo build -p ry-lang -p libr` unless `ORACLE_RY`), so it never compares a stale `libR.so`, and prints failures only unless `--verbose`. `cargo test -p oracle` compares a seeded sample by default and every case only with `ORACLE_ENGINE` set; it skips when no base R is built, except with `ORACLE_ENGINE` set, where it fails. The target directory comes from `oracle::target_directory` (honoring `CARGO_TARGET_DIR`) for both the build and the lookup.
+- **Nested `cargo build` calls in tests stay,** because a no-op build costs 0.35 s once per process (`syntax::testing::cargo_build`) and is the only freshness guarantee. Caching `build_package` across processes would save about 2 s, not worth a staleness risk.
+- **Tests that link `frames` live in `crates/frames/tests`,** so interp's test binaries link no Polars (each moved binary was 748 MB).
+- **interp's integration tests stay separate binaries,** because the interpreter is a process-wide singleton (`interp::install`) and tests sharing one process would share its state. typed's tests are one binary (`tests/test_typed/`), table's engine tests one (`tests/test_table/`); `test_memory` keeps its own `#[global_allocator]`.
+
+## The interpreter stays one crate, because the edit loop is bound by links
+
+**Status:** built (a decision not to split).
+
+- **Measured** (4 cores, debug, one-line body edit, then `cargo build -p ry-lang -p libr`): interp 11.0 s, heap 11.5 s, jit 11.7 s, semantics 14.4 s, ry 9.9 s; `cargo check -p <crate>` 0.8 to 3.9 s. A clean build is 56 s for `ry-lang` and 145 s more for `libr`, whose critical path is polars-core, polars-ops, table, frames, libr.
+- **Where the time goes.** After an interp edit, interp's rustc takes 3.4 s with 1 of 256 codegen units recompiled; the rest is fixed front-end cost. The `libR.so` link alone takes 3.6 s, and the binary was 1.38 GB, 905 MB of it symbol names.
+- **Rejected: splitting `interp`.** 58 of its 69 modules form one dependency cycle through `use crate::`, which a split would have to break first, for an estimated 1 to 2 s of a 10 to 15 s loop.
+- **Rejected by measurement.** The Cranelift codegen backend cannot build interp's explicit tail calls or the variadic `f64` calls in `numeric` and `stats`, was no faster with those three on LLVM, and broke unwinding for salsa cancellation in 9 language-server tests. `-Zthreads=4`, `debug = 0` and `split-debuginfo = "unpacked"` changed nothing. GNU `bfd` took 30 s per `libR.so` link.
+- **Not tried.** sccache: containers are fresh and have no persistent cache, so it would need a remote backend and would help only clean builds.
+- **What was done instead.** Legacy mangling in the dev profile, mold where installed, and keeping Polars out of interp's test links (the entries on those in this file).
+
+## Agent-written notes are not mass-rewritten for brevity
+
+**Status:** built (a process rule).
+
+- **What happened.** A terse rewrite of the decision log by agents that had not written it halved its size and dropped a load-bearing fact (a number behind a decision, a rejected alternative, a trap, a code pointer) from about 421 of 509 entries; an entry-by-entry comparison against the old text put them back. A rewrite of long source comments lost invariants and the reasons behind constants in about a dozen blocks while saving 20 KB of 3.26 MB.
+- **Rule.** Cut context cost by structure (area files, an index of headings, byte budgets, a comment lint that ratchets) and by deleting what is superseded, not by rewording dense notes. A rewording pass needs an entry-by-entry comparison against the original, which costs more than it saves.

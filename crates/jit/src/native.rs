@@ -2573,7 +2573,10 @@ impl Emitter {
                 raw,
                 RECORD_LAYOUT_OFFSET as i32,
             );
-            let lazy = self.builder.ins().icmp_imm_s(IntCC::SignedLessThan, layout, 0);
+            let lazy = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::SignedLessThan, layout, 0);
             self.fail_if(lazy);
             return Ok(raw);
         }
@@ -3323,7 +3326,10 @@ unsafe fn pure_value(
     }
     // `I64` arithmetic, which ry's literals give, reads ahead for `+`, `-` and `*` of `I64`s only.
     // One that overflows is left to tier 0, which raises the error.
-    if operands.iter().any(|operand| operand.kind() == SexpType::I64) {
+    if operands
+        .iter()
+        .any(|operand| operand.kind() == SexpType::I64)
+    {
         let mut numbers: SmallVec<[i64; 2]> = SmallVec::new();
         for operand in &operands {
             if operand.kind() != SexpType::I64 || operand.length() != 1 {
