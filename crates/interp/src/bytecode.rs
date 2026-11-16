@@ -6930,6 +6930,34 @@ pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<Option<Sexp>> 
 /// otherwise only while tier 0 profiles.
 #[inline(always)]
 pub unsafe fn call_builtin_step(machine: &mut Machine<'_>, pc: usize, record: bool) -> R<()> {
+    let code = machine.code.car().data().cast::<i32>().cast_const();
+    // A positional call of a builtin with a direct entry reads only its registers, so it runs
+    // without the activation, which costs as much to build as the call itself.
+    if *code.add(pc) as u32 == POSITIONAL_CALL_BUILTIN_WORD {
+        let constants = machine.code.cdr();
+        let registers = register_address(machine.base);
+        let operand = |index: usize| *code.add(pc + 1 + index) as usize;
+        let definition = eval::builtin_def(*registers.add(operand(1)))?;
+        let values = std::slice::from_raw_parts(registers.add(operand(3)), operand(4));
+        let value = if let [value] = values
+            && let Some(unary) = definition.unary
+            && let Some(value) = unary(*value)?
+        {
+            interp().visible = true;
+            Some(value)
+        } else if definition.direct.is_some() && !definition.checks.replacement {
+            eval::call_direct(definition, pool_entry(constants, operand(2)), values)?
+        } else {
+            None
+        };
+        if let Some(value) = value {
+            if record || *pool_ints(constants, PROFILE).add(profile::RECORDING) != 0 {
+                *pool_ints(constants, FEEDBACK).add(pc) |= value_kind(value) as i32;
+            }
+            *registers.add(operand(0)) = value;
+            return Ok(());
+        }
+    }
     let mut state = activation(machine, record);
     let instruction = Instruction {
         code: state.code,

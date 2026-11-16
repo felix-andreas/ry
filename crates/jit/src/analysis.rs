@@ -1509,8 +1509,10 @@ impl Plan<'_> {
     /// the usual static estimate of how much more often a nested loop's body runs: one
     /// instruction handed to tier 0 in an outer loop must not outweigh an inner loop that runs
     /// natively. A backward jump counts as native work, because a compiled loop's own control
-    /// costs no dispatch.
-    pub fn work(&self) -> BodyWork {
+    /// costs no dispatch. A call handed to tier 0 that has never returned a value (`feedback`)
+    /// counts as no work: it is a path the body has not taken, such as `stop()` under a check,
+    /// and costs nothing until it runs.
+    pub fn work(&self, feedback: &[i32]) -> BodyWork {
         let backward = |inst: &Inst| inst.op == Op::Jump && inst.operand(0) <= inst.pc;
         let loops: SmallVec<[(usize, usize); 4]> = self
             .insts
@@ -1526,6 +1528,12 @@ impl Plan<'_> {
                 | Action::Traverse { .. }
                 | Action::Call { .. }
                 | Action::NativeCall { .. } => (0, 1, 0),
+                Action::Step { .. }
+                    if matches!(inst.op, Op::CallGeneric | Op::CallBuiltin | Op::Internal)
+                        && feedback.get(inst.pc).is_none_or(|&bits| bits == 0) =>
+                {
+                    continue;
+                }
                 Action::Step { .. } => (0, 0, 1),
                 action if native(action) || backward(inst) => (1, 0, 0),
                 _ => continue,
