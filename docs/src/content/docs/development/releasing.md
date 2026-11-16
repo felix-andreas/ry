@@ -206,6 +206,9 @@ first full release, so publish the Zed extension no earlier than 0.4.4, or it se
 
 ## Version numbers
 
+A release bumps the patch number (0.5.0, then 0.5.1, 0.5.2 and so on). Only the maintainer decides a
+minor or major bump.
+
 `just bump-version X.Y.Z-beta` sets `workspace.package.version` in `Cargo.toml` to `X.Y.Z-beta`,
 and the VS Code and Zed extensions' versions to `X.Y.Z`, because the Marketplace rejects a suffix.
 The patch number is therefore the one counter across channels: never release `0.4.0-beta` and

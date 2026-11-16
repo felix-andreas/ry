@@ -13,6 +13,8 @@ PCRE2_SYS_STATIC = "1"
 # of rebuilding polars per command. crates/features adds what only dev-dependencies turn on.
 [unstable]
 feature-unification = true
+# `[profile.dev] rustflags` in Cargo.toml (legacy symbol mangling) needs it.
+profile-rustflags = true
 
 [resolver]
 feature-unification = "workspace"

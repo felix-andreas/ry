@@ -64,8 +64,13 @@ tokio-util = { version = "0.7.15", features = ["compat"] }
 # test run links dozens of them, which fills a 16 GB machine's disk and slows every link. Line
 # tables keep backtraces and profiles symbolized; set CARGO_PROFILE_DEV_DEBUG=true to step
 # through locals in a debugger.
+# v0 symbol names, the nightly default, are over half of a debug libR.so (its `.strtab`), and the
+# linker reads and writes every byte of them on each relink after an interpreter edit. Legacy names
+# are shorter and demangle the same way in backtraces, `crash` reports and perf. Release keeps the
+# default: it strips symbols anyway.
 [profile.dev]
 debug = "line-tables-only"
+rustflags = ["-Csymbol-mangling-version=legacy", "-Zunstable-options"]
 
 # Dependency debug info, mostly Polars, runs to tens of gigabytes per build and
 # slows every link, while backtraces through workspace code stay intact without it.
