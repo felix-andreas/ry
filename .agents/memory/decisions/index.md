@@ -201,6 +201,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Base fast paths read formals one at a time, except `formatC()`
 - Parked: cheaper restart setup in `withRestarts` (planned)
 - Replacement calls and `lapply`/`vapply` element calls run on a slot frame's slots
+- A complex assignment calls a primitive replacement with its values
 
 ## Builtins and base R
 
