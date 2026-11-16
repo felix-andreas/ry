@@ -41,7 +41,7 @@ BUDGETS = {
     ".agents/memory/decisions/typed-stdlib.md": 221_000,
     ".agents/memory/decisions/frames-table.md": 89_000,
     ".agents/memory/decisions/tooling-bench-ci.md": 73_000,
-    ".agents/memory/decisions/docs-process.md": 28_000,
+    ".agents/memory/decisions/docs-process.md": 30_000,
 }
 ORCHESTRATOR = ".agents/orchestrator.md"
 ORCHESTRATOR_LINE_LIMIT = 2048
