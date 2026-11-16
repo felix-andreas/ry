@@ -500,8 +500,6 @@ fn tilde_expansion_uses_home() {
     assert_eq!(untouched.to_string_lossy(), "data/~x");
 }
 
-// Bounded property checks against reference implementations.
-
 type SortReal = unsafe extern "C" fn(*mut f64, c_int);
 type SortInt = unsafe extern "C" fn(*mut c_int, c_int);
 type SortIndexed = unsafe extern "C" fn(*mut f64, *mut c_int, c_int);

@@ -246,21 +246,18 @@ impl Heap {
         self.space.pin_allocated();
     }
 
-    /// Writes the heap as an image that a heap whose [`Heap::image_precondition`] is
-    /// `precondition` can load, and leaves this heap fit only to be dropped or exited from.
+    /// Writes the heap as an image that a heap whose [`Heap::image_precondition`] is `precondition`
+    /// can load, and leaves this heap fit only to be dropped or exited from.
     ///
-    /// The image is compacted: every object that can move is laid out in `order`, a list of
-    /// stable ids, and then in the order of the ids, which number the objects in a walk from the
-    /// roots that does not depend on their addresses. Objects with an id missing from `order`
-    /// follow those in it, in id order. An order recorded for another numbering is an error,
-    /// since its ids would name other objects.
-    ///
-    /// Everything the heap's roots, the fixed objects and `roots` reach is kept; the loader
-    /// returns `roots`, in order. `replace` names an object the image stores in place of another
-    /// everywhere it is referenced, such as a closure body's source in place of its compiled
-    /// code. `address` encodes each external pointer's address as a nonzero token the loading
-    /// process can decode, or `None` when it cannot be carried. Strings that name a path at or
-    /// under one of `prefixes` are listed so that a [`Relocation`] can move them.
+    /// The image is compacted: movable objects are laid out first in `order`, a list of stable ids
+    /// that number objects in an address-independent walk from the roots, then the rest in id
+    /// order. An order recorded for another numbering is an error, since its ids would name other
+    /// objects. Everything the heap's roots, the fixed objects and `roots` reach is kept, and the
+    /// loader returns `roots` in order. `replace` names an object stored in place of another
+    /// everywhere (a closure body's source for its compiled code). `address` encodes each external
+    /// pointer as a nonzero token the loading process decodes, or `None` when it cannot be carried.
+    /// Strings that name a path at or under one of `prefixes` are listed so that a [`Relocation`]
+    /// can move them.
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn write_image(
         &mut self,

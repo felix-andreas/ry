@@ -380,8 +380,6 @@ pub fn finite(x: f64) -> bool {
     x.is_finite()
 }
 
-// Small utilities.
-
 pub fn fmax2(x: f64, y: f64) -> f64 {
     if x.is_nan() || y.is_nan() {
         return x + y;
@@ -1018,8 +1016,6 @@ pub fn lgamma1p(a: f64) -> f64 {
     }
     (a * lgam - EULER) * a - log1pmx(a)
 }
-
-// The gamma function and its relatives.
 
 /// Evaluates `c[0]/2 + sum c[k] T_k(x)` by Clenshaw's recurrence.
 fn chebyshev_eval(x: f64, coefficients: &[f64]) -> f64 {
@@ -2457,8 +2453,6 @@ pub fn choose(n: f64, k: f64) -> f64 {
     lfastchoose(n, k).exp()
 }
 
-// The polygamma functions.
-
 /// The Bernoulli numbers `B_2, B_4, ..., B_30`.
 const BERNOULLI: [f64; 15] = [
     1.0 / 6.0,
@@ -2681,8 +2675,6 @@ pub fn tetragamma(x: f64) -> f64 {
 pub fn pentagamma(x: f64) -> f64 {
     polygamma(x, 3, 6.0)
 }
-
-// The normal distribution.
 
 pub fn dnorm(x: f64, mu: f64, sigma: f64, log: bool) -> f64 {
     if x.is_nan() || mu.is_nan() || sigma.is_nan() {
@@ -3354,8 +3346,6 @@ fn qnorm_central(q: f64) -> f64 {
             * r
             + 1.0)
 }
-
-// The uniform distribution.
 
 pub fn dunif(x: f64, a: f64, b: f64, log: bool) -> f64 {
     if x.is_nan() || a.is_nan() || b.is_nan() {
@@ -7239,8 +7229,6 @@ pub fn qpois(p: f64, lambda: f64, lower: bool, log: bool) -> f64 {
     })
 }
 
-// Student's t and Fisher's F.
-
 pub fn dt(x: f64, n: f64, log: bool) -> f64 {
     if x.is_nan() || n.is_nan() {
         return x + n;
@@ -7600,8 +7588,6 @@ pub fn qf(p: f64, df1: f64, df2: f64, lower: bool, log: bool) -> f64 {
     if value.is_nan() { f64::NAN } else { value }
 }
 
-// Non-central distributions.
-
 /// The noncentral chi-squared density, the Poisson mixture `sum_i w_i(ncp / 2) f(x; df + 2i)`
 /// of central chi-squared densities (Johnson, Kotz and Balakrishnan (1995), chapter 29).
 /// Neighbouring terms have the ratio `(x ncp / 2) / ((i + 1)(df + 2i))`, which falls as `i`
@@ -7750,19 +7736,17 @@ pub fn pnchisq(x: f64, df: f64, ncp: f64, lower: bool, log: bool) -> f64 {
     mixture_tail(lower_sum, upper_sum, lower, log)
 }
 
-/// Both tails of a Poisson mixture `sum_k w_k(rate) F_k` whose component distribution
-/// functions fall by `F_k - F_(k+1) = g_k`, given the tails of `F_mode` at the Poisson mode,
-/// `ln g_mode`, and `ln(g_(k+1) / g_k)` as `log_ratio(k)`. This is the summation of Lenth
-/// (1987) AS 226, with the remainders bounded by the Poisson tails as in Frick (1990) AS R84.
+/// Both tails of a Poisson mixture `sum_k w_k(rate) F_k` whose component distribution functions
+/// fall by `F_k - F_(k+1) = g_k`, given the tails of `F_mode` at the Poisson mode, `ln g_mode`, and
+/// `ln(g_(k+1) / g_k)` as `log_ratio(k)`: Lenth's (1987) AS 226 summation, with the remainders
+/// bounded by the Poisson tails as in Frick (1990) AS R84.
 ///
-/// The sum runs outward from the mode, where the weights are largest. Each tail is
-/// accumulated in both directions, which means that in one direction its recurrence
-/// subtracts; there its rounding error stays below that of the starting value at the mode,
-/// whose term alone is a fixed share of the sum. Both tails are therefore summed directly,
-/// rather than one being the complement of the other, and a small tail keeps its relative
-/// accuracy. The weights beyond index `k` sum to at most `w_(k+1) / (1 - rate / (k + 2))`, and
-/// those below it to at most `w_(k-1) / (1 - (k - 1) / rate)`; a component's tail lies in
-/// [0, 1] and only grows away from the mode on the side being bounded.
+/// The sum runs outward from the mode, where the weights are largest. A tail's recurrence subtracts
+/// in one direction, but its rounding error there stays below that of the mode's term, which is a
+/// fixed share of the sum, so both tails are summed directly instead of one being the other's
+/// complement, and a small tail keeps its relative accuracy. The weights beyond index `k` sum to at
+/// most `w_(k+1) / (1 - rate / (k + 2))`, and those below it to at most `w_(k-1) / (1 - (k - 1) /
+/// rate)`; a component's tail lies in [0, 1] and only grows away from the mode on the bounded side.
 fn poisson_mixture_tails(
     rate: f64,
     mode: f64,
