@@ -1556,13 +1556,12 @@ unsafe fn do_read_lines(call: &Call<'_>) -> R<Sexp> {
         // Reading to the end takes the device's bytes in blocks, which costs a fraction of
         // asking the connection for each character.
         let rest = if n < 0 && reads_device_bytes(con)? {
-            Some(remaining_text(con)?)
+            Some(read_text_rest(con)?)
         } else {
             None
         };
         let mut offset = 0;
         while n < 0 || (lines.len() as i64) < n {
-            line.clear();
             let (character, nul) = match &rest {
                 Some(text) => text_line(text, &mut offset, skip_nul, &mut line),
                 None => connection_line(con, skip_nul, &mut line)?,
@@ -1593,7 +1592,7 @@ unsafe fn do_read_lines(call: &Call<'_>) -> R<Sexp> {
                 }
                 break;
             }
-            lines.push(line.clone());
+            lines.push(std::mem::take(&mut line));
         }
         if n > 0 && (lines.len() as i64) < n && !ok {
             return Err(error("too few lines read in readLines"));
@@ -1671,55 +1670,6 @@ unsafe fn reads_device_bytes(con: Rconnection) -> R<bool> {
                 | Device::Gzcon(_)
                 | Device::Pipe(_)
         ))
-}
-
-/// Everything left to read on `con`, as [`read_char`] would return it one character at a time:
-/// what is pushed back or looked ahead, then the device's bytes with `\r` and `\r\n` read as
-/// `\n`.
-unsafe fn remaining_text(con: Rconnection) -> R<Vec<u8>> {
-    let mut text = Vec::new();
-    while has_buffered_input(con) {
-        let character = read_char(con)?;
-        if character != EOF {
-            text.push(character as u8);
-        }
-    }
-    let start = text.len();
-    // The buffer is zeroed before each read, so the blocks start small and double: a short
-    // file pays for a few kilobytes, not for a whole block.
-    let mut block = 4096;
-    loop {
-        let filled = text.len();
-        text.resize(filled + block, 0);
-        let count = device_read(con, text.get_mut(filled..).unwrap_or_default())?;
-        text.truncate(filled + count);
-        if count == 0 {
-            break;
-        }
-        block = (block * 2).min(READ_CHUNK);
-    }
-    if memchr(b'\r', text.get(start..).unwrap_or_default()).is_some() {
-        // `read_char` reads the character after a `\r` to drop a `\n`, and a second `\r`
-        // there is its own line end.
-        let device = text.split_off(start);
-        let mut bytes = device.iter().copied().peekable();
-        while let Some(byte) = bytes.next() {
-            if byte != b'\r' {
-                text.push(byte);
-                continue;
-            }
-            text.push(b'\n');
-            match bytes.peek() {
-                Some(b'\n') => drop(bytes.next()),
-                Some(b'\r') => {
-                    bytes.next();
-                    text.push(b'\n');
-                }
-                _ => {}
-            }
-        }
-    }
-    Ok(text)
 }
 
 /// `writeLines(text, con, sep, useBytes)`.
@@ -2931,32 +2881,55 @@ unsafe fn read_text_rest(con: Rconnection) -> R<Vec<u8>> {
             text.push(character as u8);
         }
     }
-    let mut chunk = vec![0u8; READ_CHUNK];
-    let mut after_return = false;
+    let start = text.len();
+    // The buffer is zeroed before each read, so the blocks start small and double: a short
+    // file pays for a few kilobytes, not for a whole block.
+    let mut block = 4096;
     loop {
-        let count = device_read(con, &mut chunk)?;
+        let filled = text.len();
+        text.resize(filled + block, 0);
+        let count = device_read(con, text.get_mut(filled..).unwrap_or_default())?;
+        text.truncate(filled + count);
         if count == 0 {
-            return Ok(text);
+            break;
         }
-        for &byte in chunk.get(..count).unwrap_or_default() {
-            match (after_return, byte) {
-                (true, b'\n') => after_return = false,
-                // The second `\r` reads as `\n` without starting a pair of its own.
-                (true, b'\r') => {
-                    after_return = false;
-                    text.push(b'\n');
-                }
-                (_, b'\r') => {
-                    after_return = true;
-                    text.push(b'\n');
-                }
-                (_, byte) => {
-                    after_return = false;
-                    text.push(byte);
-                }
-            }
-        }
+        block = (block * 2).min(READ_CHUNK);
     }
+    let Some(first) = memchr(b'\r', text.get(start..).unwrap_or_default()) else {
+        return Ok(text);
+    };
+    // `read_char` reads the character after a `\r` to drop a `\n`. The bytes are folded in
+    // place: the write position never passes the read position.
+    let mut kept = start + first;
+    let mut after_return = false;
+    for position in kept..text.len() {
+        let byte = text.get(position).copied().unwrap_or_default();
+        let folded = match (after_return, byte) {
+            (true, b'\n') => {
+                after_return = false;
+                continue;
+            }
+            // The second `\r` reads as `\n` without starting a pair of its own.
+            (true, b'\r') => {
+                after_return = false;
+                b'\n'
+            }
+            (_, b'\r') => {
+                after_return = true;
+                b'\n'
+            }
+            (_, byte) => {
+                after_return = false;
+                byte
+            }
+        };
+        if let Some(slot) = text.get_mut(kept) {
+            *slot = folded;
+        }
+        kept += 1;
+    }
+    text.truncate(kept);
+    Ok(text)
 }
 
 unsafe fn pop_push_back(con: Rconnection) {
