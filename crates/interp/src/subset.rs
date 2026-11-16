@@ -3194,6 +3194,16 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
         return subassign2_one(object, *index, value, call, 1);
     }
     let Some(dims) = values::dims(object).filter(|dims| dims.len() == indices.len()) else {
+        // GNU R counts the subscripts after it has checked what the object can hold.
+        let is_vector = object == nil()
+            || object.kind().is_atomic()
+            || matches!(object.kind(), SexpType::List | SexpType::Expression);
+        if !is_vector {
+            return Err(not_subsettable(call, object));
+        }
+        if object.kind().is_atomic() && (value == nil() || value.kind().is_atomic()) {
+            atomic_replacement_check(value)?;
+        }
         return Err(error_in(call, "[[ ]] improper number of subscripts"));
     };
     // `m[[i, j]] <- value` names one cell, which must exist.
@@ -5066,7 +5076,10 @@ unsafe fn do_rev(call: &Call<'_>) -> R<Sexp> {
 pub(crate) unsafe fn do_is_list_factor(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let recursive = match values::as_logical_scalar(call.arg(1)) {
-        NA_LOGICAL => return Err(call.error("NA in coercion to boolean")),
+        // R 4.5 refuses an NA, which earlier releases took as true.
+        NA_LOGICAL if crate::system::r_at_least(4, 5) => {
+            return Err(call.error("NA in coercion to boolean"));
+        }
         recursive => recursive != 0,
     };
     unsafe fn check(object: Sexp, recursive: bool) -> Option<bool> {

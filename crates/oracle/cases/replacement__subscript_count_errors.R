@@ -24,6 +24,16 @@ cases <- list(
   function() { y <- NULL; y[[1, 1]] <- 2; y },
   function() { y <- array(1:8, c(2, 2, 2)); y[[1, 1]] <- 2; y },
   function() { y <- matrix(1:6, 2); y[[2, 3]] <- 0L; y },
+  function() { y <- 1:6; y[[1, 1]] <- integer(0); y },
+  function() { y <- 1:6; y[[1, 1]] <- NULL; y },
+  function() { y <- 1:6; y[[1, 1]] <- 1:2; y },
+  function() { y <- 1:6; y[[1, 1]] <- list(1, 2); y },
+  function() { y <- 1:6; y[[1, 1]] <- quote(s); y },
+  function() { y <- matrix(1:4, 2); y[[1, 2, 3]] <- 1:3; y },
+  function() { y <- list(1); y[[1, 2]] <- 1:3; y },
+  function() { y <- sum; y[[1, 2]] <- 9; y },
+  function() { y <- quote(s); y[[1, 2]] <- 9; y },
+  function() { y <- function() 1; y[[1, 2]] <- 9; y },
   function() { y <- 1:6; y[[1, 1]] },
   function() { y <- matrix(1:6, 2); y[[1, 1, 1]] }
 )

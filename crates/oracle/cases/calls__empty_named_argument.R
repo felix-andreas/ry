@@ -81,3 +81,8 @@ show(unlist(list(), "a"))
 show(unlist(list(a = 1), NA))
 show(.Internal(islistfactor(list(a = 1), NA)))
 show(.Internal(islistfactor(list(factor("a"), factor("b")), FALSE)))
+
+# An unused argument is deparsed without its names.
+two <- function(a, b) a
+show(do.call(two, list(1L, 2L, list(a = 1L, 2L))))
+show(round(1L, 2L, c(a = 1L)))
