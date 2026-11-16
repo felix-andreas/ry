@@ -2442,16 +2442,13 @@ unsafe fn do_subassign(call: &Call<'_>) -> R<Sexp> {
     let Some((value_arg, rest)) = call.args.split_last() else {
         return Err(call.error("SubAssignArgs: invalid number of arguments"));
     };
-    let mut object = nil();
-    let mut indices: SmallVec<[Sexp; 4]> = SmallVec::new();
-    for (position, arg) in rest.iter().enumerate() {
-        if position == 0 {
-            object = arg.value;
-        } else if arg.tag != symbols().exact && arg.tag != symbols().drop {
-            indices.push(arg.value);
-        }
-    }
-    subassign(object, &indices, value_arg.value, call.call)
+    // Every argument between the object and the value is a subscript, whatever its name: GNU R
+    // gives `drop` and `exact` no meaning in an assignment.
+    let Some((object, indices)) = rest.split_first() else {
+        return subassign(nil(), &[], value_arg.value, call.call);
+    };
+    let indices: SmallVec<[Sexp; 4]> = indices.iter().map(|arg| arg.value).collect();
+    subassign(object.value, &indices, value_arg.value, call.call)
 }
 
 /// Whether `x[i] <- value` leaves the atomic vector `object` exactly as it is: the subscript
@@ -3114,16 +3111,11 @@ unsafe fn do_subassign2(call: &Call<'_>) -> R<Sexp> {
     let Some((value_arg, rest)) = call.args.split_last() else {
         return Err(call.error("SubAssignArgs: invalid number of arguments"));
     };
-    let mut object = nil();
-    let mut indices: SmallVec<[Sexp; 4]> = SmallVec::new();
-    for (position, arg) in rest.iter().enumerate() {
-        if position == 0 {
-            object = arg.value;
-        } else if arg.tag != symbols().exact {
-            indices.push(arg.value);
-        }
-    }
-    subassign2(object, &indices, value_arg.value, call.call)
+    let Some((object, indices)) = rest.split_first() else {
+        return subassign2(nil(), &[], value_arg.value, call.call);
+    };
+    let indices: SmallVec<[Sexp; 4]> = indices.iter().map(|arg| arg.value).collect();
+    subassign2(object.value, &indices, value_arg.value, call.call)
 }
 
 /// `x[[i]] <- value`.

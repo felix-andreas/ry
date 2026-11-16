@@ -198,12 +198,15 @@ unsafe fn do_set_attr(call: &Call<'_>) -> R<Sexp> {
     let object = present(matched[0]).unwrap_or(nil());
     let which = present(matched[1]).unwrap_or(nil());
     let value = present(matched[2]).unwrap_or(nil());
-    // GNU R's `isValidString`: the first of any number of names, if it is not `NA`.
+    // GNU R's `isValidString`, then its check for one name.
     if which.kind() != SexpType::String
         || length(which) == 0
         || which.element(0) == values::na_string()
     {
         return Err(call.error("'name' must be non-null character string"));
+    }
+    if length(which) != 1 {
+        return Err(call.error("'name' must be a scalar string"));
     }
     if object == nil() {
         if value == nil() {
