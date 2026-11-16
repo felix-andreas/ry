@@ -51,7 +51,7 @@ type-mismatch
   contiguous: no `NA` encodings, no attributes, no recycling, value semantics with in-place update
   of a uniquely held value. The [runtime contract](#runtime-contract) states what the runtime must
   provide.
-- **Hindley-Milner** (`decisions/syntax-semantics.md`, "The type system is Hindley-Milner"). Every feature here is
+- **Hindley-Milner** (`decisions/syntax-semantics.md`, "Beta semantics: The type system is Hindley-Milner, and stays fast to check"). Every feature here is
   unification over the existing constraint mechanism, and the unifier gains nothing: records stay
   closed and there are no row variables (`decisions/typed-stdlib.md`, native records).
 - **One boundary.** An R value becomes a ry value only through a conversion function that checks

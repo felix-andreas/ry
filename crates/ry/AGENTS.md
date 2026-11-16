@@ -8,7 +8,7 @@ A document-sync or analysis-sync failure in the LSP path is unrecoverable: panic
 
 ## Traps
 
-- **Server inputs are `Durability::MEDIUM`, except open documents and `ProjectFiles` (`LOW`), and every setter names its durability.** One `LOW` input that most memos read turns each keystroke into a project-wide verification (`.agents/memory/decisions/ide-server.md`, "Decision record: editor responsiveness at 300,000 lines").
+- **Server inputs are `Durability::MEDIUM`, except open documents and `ProjectFiles` (`LOW`), and every setter names its durability.** One `LOW` input that most memos read turns each keystroke into a project-wide verification (`.agents/memory/decisions/ide-server.md`, "Editor responsiveness at 300,000 lines").
 - **On the server's worker every tracked read goes through `Worker::cancellable`.** A notification queued behind the running job flips the cancellation token, and a query fetch outside the catch unwinds through `run_job` and stops the worker with no panic message.
 - **Salsa clears a handle's cancellation flag whenever a top-level query returns**, so background work that must yield polls `CancelHandle::has_queued_jobs` between units (`Worker::in_parallel`).
 - **miette's header column counts bytes, so `read_span` re-counts characters** (`crates/ry/src/cli.rs`); a multi-line range clamps to the first line, and sources are borrowed (`NamedText`).

@@ -431,8 +431,8 @@ package version target="":
     esac
     # The runtime and base R are built first, because `ry` embeds both (crates/repl/build.rs). On
     # x86_64 Linux the build is profile-guided and libR is laid out by BOLT (tools/layout/optimize.sh,
-    # decisions/heap-gc.md "The Linux release build is profile-guided"); RY_LAYOUT=off builds it
-    # plainly.
+    # decisions/heap-gc.md, "The runtime's object model, collector and native boundary", item "The
+    # Linux release build is profile-guided"); RY_LAYOUT=off builds it plainly.
     if [ "$target" = x86_64-unknown-linux-gnu ] && [ "${RY_LAYOUT:-}" != off ]; then
     	tools/layout/optimize.sh "$target"
     else

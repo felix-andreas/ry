@@ -1052,7 +1052,7 @@ a gap that size, so shrinking the op count and the cost per op (step 3) comes fo
 geometric mean over the application workloads (`just bench applications`) and over the package
 test suites (`just bench packages`). The milestones are 1.5x and then 3x; `benchmarks.mdx` has
 where both suites stand. Parallelism
-is deferred: the architecture keeps it possible (`decisions/interp.md`, "Single-thread first"), but the
+is deferred: the architecture keeps it possible (`decisions/interp.md`, "Single-thread first, parallel-ready architecture (user directive)"), but the
 target does not count on it.
 
 **Where the time goes.** `ry run --profile-summary` splits a run into the buckets below. R code is
@@ -1087,7 +1087,7 @@ of that removes single files, such as the `verify_exec_*` files testthat writes 
 snapshot test in `cli`, which cost GNU R the same system call. Removing a directory tree costs
 more, because `rmdir` waits on the ext4 journal (0.1 ms on an idle disk, 2 to 4 ms under writes),
 and GNU R pays that wait too: a testthat-shaped tree takes about 0.35 ms on both idle and 2.6 ms on
-both under write load (`decisions/builtins.md`, "unlink() follows GNU R's R_unlink"). The waiting is the suites' own `Sys.sleep`
+both under write load (`decisions/builtins.md`, "unlink() follows GNU R's R_unlink, with directory descriptors"). The waiting is the suites' own `Sys.sleep`
 (`foreach` 77%, `lgr` 22%, `cachem` 10%), which GNU R pays too. Child R processes started through
 `callr` and `processx` run ry, because `R.home()`'s `bin/R` and `bin/Rscript` start ry, and
 `Rscript -e` starts in 32 ms against GNU R's 140 ms. Start-up dominates the smallest suites

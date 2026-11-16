@@ -162,7 +162,7 @@ plain R programs of the numeric kernels and application workloads, and half the 
 the JIT on and off), and rebuilds
 with the profile. Any profile-mismatch warning, or more than 1% of functions without a profile
 record, fails the build, because a stale profile optimizes hot code as cold
-(`decisions/heap-gc.md`, "The Linux release build is profile-guided"). The training needs testthat, purrr,
+(`decisions/heap-gc.md`, "The runtime's object model, collector and native boundary", item "The Linux release build is profile-guided"). The training needs testthat, purrr,
 stringr, lubridate, data.table, xts and zoo in GNU R's library, the instrumented fat-LTO link of
 `ry` takes about 14 GB of memory, which outgrows a GitHub-hosted runner's 16 GB of memory and 4 GB
 of swap (the runner is killed mid-link), so under GitHub Actions the script first adds 16 GB of

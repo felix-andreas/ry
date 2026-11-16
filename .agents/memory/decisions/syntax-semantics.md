@@ -877,7 +877,7 @@ golden error-message suite pins the wording, and the diagnostics goal in `AGENTS
 
 ## Deep resolve cuts a cycle to `Unknown` and resolves a shared subtree once
 
-**Status:** built. The table of finished subtrees lives for one call, as "Decision record: types
+**Status:** built. The table of finished subtrees lives for one call, as "Types
 and symbols are four-byte ids into append-only columns" describes. It replaced a table kept across
 calls and cleared by a binding epoch.
 
@@ -920,7 +920,7 @@ invariant the performance harness can watch.
 
 ## The interface fixpoint is canonical per group, so a cyclic scheme does not depend on forcing order
 
-**Status:** built, except `interface_sccs` and the per-item `interface_group` walk: groups come from one walk per file ("Decision record: every host resolves names through one path, and trees live in the host's store"), and an item reads its edges from `item_links`.
+**Status:** built, except `interface_sccs` and the per-item `interface_group` walk: groups come from one walk per file ("Every host resolves names through one path, and trees live in the host's store"), and an item reads its edges from `item_links`.
 
 A corpus-scale finding from the multi-core instrument drove this. Pre-forcing the per-file phases
 gave 64852 findings, and forcing file diagnostics directly gave 64835. Both counts were stable
@@ -1076,7 +1076,7 @@ kind and a type walk, with no fixpoint machinery. Incremental analysis: the chec
 
 ## Script frame semantics
 
-**Status:** built, except a conditional top-level slot typing `Unknown`, which "Decision record: conditional slots type, export edges generalize, and `missing()` flows through the environment" supersedes.
+**Status:** built, except a conditional top-level slot typing `Unknown`, which "Conditional slots type, export edges generalize, and `missing()` flows through the environment" supersedes.
 
 A script's top level is one frame executed top-down. The question was what a cross-item read
 resolves to, for naming, for the unused check and for typing, when the frame holds several bindings
@@ -1500,7 +1500,7 @@ new is stored and no query is added: the lookup is a hash probe plus a descent i
 
 ## A check reads per-name firewalls, never project-wide maps
 
-**Status:** built, except `interface_group` and the per-name lookups for names an item spells, which "Decision record: every host resolves names through one path, and trees live in the host's store" replaces with `file_interface_groups` and `item_links`. `package_name`, `test_name` and `frame_binder` serve the names a check constructs.
+**Status:** built, except `interface_group` and the per-name lookups for names an item spells, which "Every host resolves names through one path, and trees live in the host's store" replaces with `file_interface_groups` and `item_links`. `package_name`, `test_name` and `frame_binder` serve the names a check constructs.
 
 `item_check` used to resolve cross-item reads against three whole maps that it read eagerly:
 `package_definitions`, which holds every winner in the project, the membership of
@@ -1531,7 +1531,7 @@ edit. `backlog.md` tracks it.
 
 ## Cold-pass memory and time: interned names, compact HIR, parallel setup
 
-**Status:** built, except the per-thread rowan token cache and the boxed-slice HIR lists, which "Decision record: the syntax tree is ry's own flat preorder arena" and "Decision record: HIR as struct-of-arrays, lowered from the green tree" supersede.
+**Status:** built, except the per-thread rowan token cache and the boxed-slice HIR lists, which "The syntax tree is ry's own flat preorder arena" and "HIR as struct-of-arrays, lowered from the green tree" supersede.
 
 - **Previous shape.** Every HIR expression, naming binding and resolution owned its own `String`
   for each identifier, `Vec`s with spare capacity held block and argument lists, the HIR arena kept
@@ -1561,9 +1561,9 @@ edit. `backlog.md` tracks it.
 
 ## Syntax trees are evicted, and only small syntax facts are memoized
 
-**Status:** built, except tree eviction and `RootDatabase::one_shot`, which "Decision record: every host resolves names through one path, and trees live in the host's store" supersedes. Kept for the rule that tree readers are memoized queries with small results.
+**Status:** built, except tree eviction and `RootDatabase::one_shot`, which "Every host resolves names through one path, and trees live in the host's store" supersedes. Kept for the rule that tree readers are memoized queries with small results.
 
-Tree eviction itself is superseded: see "Decision record: every host keeps every tree" below.
+Tree eviction itself is superseded: see "Every host keeps every tree" below.
 The small memoized syntax facts remain.
 
 - **Previous shape.** Every file's rowan tree stayed memoized for the whole process, beside the
@@ -1715,7 +1715,7 @@ The small memoized syntax facts remain.
 
 ## Cold-check constant costs: one green walk per file, immortal interning, high durability
 
-**Status:** built, except the salsa-interned `Name` and `Ty`, which "Types and names are hash-consed outside salsa" supersedes, and `item_frame_binders`, which `item_links` replaces ("Decision record: every host resolves names through one path, and trees live in the host's store").
+**Status:** built, except the salsa-interned `Name` and `Ty`, which "Types and names are hash-consed outside salsa" supersedes, and `item_frame_binders`, which `item_links` replaces ("Every host resolves names through one path, and trees live in the host's store").
 
 - **Previous shape.** Each per-file syntax collector and the syntax lints walked the red tree
   separately. `annotation_rule_diagnostics` rebuilt the project's duplicate-type map for every
@@ -1747,7 +1747,7 @@ The small memoized syntax facts remain.
 ## Types and names are hash-consed outside salsa
 
 **Status:** built, with the storage superseded: a type is an id into columns, not a pointer to an
-entry in a sharded table ("Decision record: types and symbols are four-byte ids into append-only
+entry in a sharded table ("Types and symbols are four-byte ids into append-only
 columns"). Hash-consing outside salsa and the reasoning for never sweeping stand.
 
 - **Previous shape.** `Ty` and `Name` were `#[salsa::interned]` structs. Every type construction went
@@ -1807,7 +1807,7 @@ columns"). Hash-consing outside salsa and the reasoning for never sweeping stand
 
 ## A file's check names only what its interface reaches
 
-**Status:** built, except the per-item `interface_group` walk and `item_interface_reads`: one walk per file finds the groups and `item_links` holds the edges ("Decision record: every host resolves names through one path, and trees live in the host's store").
+**Status:** built, except the per-item `interface_group` walk and `item_interface_reads`: one walk per file finds the groups and `item_links` holds the edges ("Every host resolves names through one path, and trees live in the host's store").
 
 - **Previous source of truth.** Cyclic interface groups came from one project-wide query,
   `interface_sccs`, which built the reference graph over every item of every file and condensed it
@@ -1847,9 +1847,9 @@ columns"). Hash-consing outside salsa and the reasoning for never sweeping stand
 
 ## Every host keeps every tree
 
-**Status:** built for the server. A command keeps a bounded number of trees in its `TreeStore` ("Decision record: every host resolves names through one path, and trees live in the host's store"). Kept for the measurement that salsa LRU capacities serialize parallel reads.
+**Status:** built for the server. A command keeps a bounded number of trees in its `TreeStore` ("Every host resolves names through one path, and trees live in the host's store"). Kept for the measurement that salsa LRU capacities serialize parallel reads.
 
-The server still keeps every tree; `ry check` now releases them once (see "Decision record: `ry
+The server still keeps every tree; `ry check` now releases them once (see "`ry
 check` releases its trees once, and memoized records are compact" below).
 
 - **Previous source.** `limit_resident_trees` gave `parse`, `file_item_annotations`,
@@ -1866,7 +1866,7 @@ check` releases its trees once, and memoized records are compact" below).
   `crates/ry/src/cli.rs`). Tree readers stay memoized queries with small results, so a check
   never walks another file's tree. The type interner (`crates/semantics/src/types.rs`) gained a
   direct-mapped per-thread cache in front of its 64 shard mutexes, which sampling showed
-  contended on hot types. A lookup that takes no lock replaced both ("Decision record: types and
+  contended on hot types. A lookup that takes no lock replaced both ("Types and
   symbols are four-byte ids into append-only columns").
 - **Correctness.** Findings are identical on the three benchmark code bases (2337, 1853, 784).
 - **Simplicity.** The batching driver, `limit_resident_trees` and the eviction-only comments are
@@ -1880,7 +1880,7 @@ check` releases its trees once, and memoized records are compact" below).
 
 ## `ry check` releases its trees once, and memoized records are compact
 
-**Status:** built, except the tree release (`release_trees`) and `item_interface_reads`, which "Decision record: every host resolves names through one path, and trees live in the host's store" supersedes.
+**Status:** built, except the tree release (`release_trees`) and `item_interface_reads`, which "Every host resolves names through one path, and trees live in the host's store" supersedes.
 
 - **Previous source.** `ry check` kept every tree to the end, because salsa's LRU records each
   read under one mutex per query. The checker recorded strict-mode origins for every item, and
@@ -2069,7 +2069,7 @@ check` releases its trees once, and memoized records are compact" below).
 
 ## A new top-level name costs one project fold
 
-**Status:** built, except that `item_interface_edges` is part of `item_links`, which reads the project name maps once per item ("Decision record: every host resolves names through one path, and trees live in the host's store").
+**Status:** built, except that `item_interface_edges` is part of `item_links`, which reads the project name maps once per item ("Every host resolves names through one path, and trees live in the host's store").
 
 - **Before.** A name being typed is a new top-level definition on every keystroke. That re-ran
   `package_definitions` and `duplicate_binding_map`, two folds over every package file's
@@ -2222,7 +2222,7 @@ check` releases its trees once, and memoized records are compact" below).
 
 ## The cold check's per-call work: a bump arena, borrowed schemes, a token-only green builder
 
-**Status:** built, except the token-sharing green builder, which "Decision record: the syntax tree is ry's own flat preorder arena" supersedes.
+**Status:** built, except the token-sharing green builder, which "The syntax tree is ry's own flat preorder arena" supersedes.
 
 - **Previous shape.** Argument matching allocated its target and match vectors on the heap per
   call, each item check cloned the stub library's schemes out of a salsa fetch per lookup, the
@@ -2260,7 +2260,7 @@ check` releases its trees once, and memoized records are compact" below).
 
 ## The item check's working maps live in a pooled bump arena
 
-**Status:** built, except the reads of a green tree, which "Decision record: the syntax tree is ry's own flat preorder arena" supersedes.
+**Status:** built, except the reads of a green tree, which "The syntax tree is ry's own flat preorder arena" supersedes.
 
 - **Previous shape.** Every `Checker` built a dozen `FxHashMap`s and `FxHashSet`s on the global
   heap (expression annotations, binding types, superassign seeds, read slots and the rest), so
@@ -2364,7 +2364,7 @@ check` releases its trees once, and memoized records are compact" below).
 
 ## One-shot checks record coarse dependencies
 
-**Status:** superseded by "Decision record: every host resolves names through one path, and trees live in the host's store", which removes `Db::one_shot`. Kept for two measurements that still shape the code.
+**Status:** superseded by "Every host resolves names through one path, and trees live in the host's store", which removes `Db::one_shot`. Kept for two measurements that still shape the code.
 
 - A walk that records one salsa edge per project item leaves its handle's reused query-stack
   frame sized for the project, and every later query at the same depth then clears a table of
@@ -2699,7 +2699,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 
 ## A cold check holds one parse tree per worker
 
-**Status:** built, except `with_held_tree`, `parse_memo`, the per-item syntax memos and `Db::one_shot`, which "Decision record: every host resolves names through one path, and trees live in the host's store" supersedes: trees live in the host's `TreeStore`, and `RootDatabase::for_command(editor_facts)` replaces both one-shot constructors.
+**Status:** built, except `with_held_tree`, `parse_memo`, the per-item syntax memos and `Db::one_shot`, which "Every host resolves names through one path, and trees live in the host's store" supersedes: trees live in the host's `TreeStore`, and `RootDatabase::for_command(editor_facts)` replaces both one-shot constructors.
 
 - **Previous source.** `ry check` memoized every file's tree in the syntax pass and then released
   them all at once (`release_trees`, a serial LRU eviction of about 56 ms on finance). Per-item
@@ -2747,7 +2747,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 
 ## The one-shot check scans kind columns and overlaps its serial phases
 
-**Status:** built, except the one-shot frame-binder path, `project_interface_groups` and the `SalsaGlobals::layer` memo, which "Decision record: every host resolves names through one path, and trees live in the host's store" supersedes.
+**Status:** built, except the one-shot frame-binder path, `project_interface_groups` and the `SalsaGlobals::layer` memo, which "Every host resolves names through one path, and trees live in the host's store" supersedes.
 
 - **Previous source.** Whole-file readers (lints, write-token counts, used namespace tokens, the
   syntax sites) visited every element in preorder and tested each one. Item HIR, binder memos and
@@ -2828,7 +2828,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
     the capacity keeps the most recently read trees. Holds alone were rejected: a read of a
     file nobody holds (an item of another file, a rewrite after the check) would parse the
     whole file on every read.
-  - `item_syntax` is a plain window of the stored tree. "Decision record: an item's syntax has a
+  - `item_syntax` is a plain window of the stored tree. "An item's syntax has a
     stamp, so an edit lowers only the items it changed" says which items an edit lowers.
   - `item_links(item)` resolves every name the item's naming lists against the project name
     maps, in parallel arrays (one row per name, one per binding), and holds the item's interface
@@ -2880,7 +2880,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
   edit settle in 3 ms and a new top-level definition in 5 to 6 ms at the median on both builds.
   A file opened on an idle server settles its diagnostics in 13 ms at the median on both
   builds. The file open at start-up settles in 44 ms at the median (38 to 46) against 38 ms
-  (35 to 52). "Decision record: types and symbols are four-byte ids into append-only columns"
+  (35 to 52). "Types and symbols are four-byte ids into append-only columns"
   has the measurements after the memory and the start-up cost were taken back.
 - **Incremental.** A new top-level name re-runs `item_links` for every item whose check is
   verified afterwards and re-walks the groups of files that reach a changed edge. Both backdate,
@@ -3059,7 +3059,7 @@ is rejected below.
   load, in `burst_of_edits_settles_on_the_final_text`). Every tracked read on the worker
   outside `Worker::cancellable` has that failure, so the worker's exit message names an
   escaped cancellation.
-- **Performance.** Part of the measurements in "Decision record: types and symbols are four-byte
+- **Performance.** Part of the measurements in "Types and symbols are four-byte
   ids into append-only columns". At the heap peak of a check of the finance bench the
   `item_links` memos hold 10.5 MB, where 11 MB was measured before: 2.4 MB of memo boxes (48
   bytes each, down from 112), 4.2 MB in the two vectors, and 3.9 MB of the dependency edges

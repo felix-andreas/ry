@@ -4,7 +4,7 @@ The object model, allocation, the garbage collector, and start-up and code image
 
 ## The runtime's object model, collector and native boundary
 
-**Status:** built, except one-step promotion and the 16 MB large-vector budget, which "Two old generations, separate vector and node limits, and a pool as large as the vector limit" supersedes, and the small `Rf_eval` subset, which "Decision record: the interpreter and base R" supersedes.
+**Status:** built, except one-step promotion and the 16 MB large-vector budget, which "Two old generations, separate vector and node limits, and a pool as large as the vector limit" supersedes, and the small `Rf_eval` subset, which "The interpreter and base R" supersedes.
 
 This settles step 2 of `development/design/r-runtime.md`. The code is `crates/heap` (object
 model and collector) and `crates/libr` (the C API, built as `libR.so`, with its C half in
