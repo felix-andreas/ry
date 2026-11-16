@@ -1,0 +1,327 @@
+[stdout]
+|  Named num [1:6] 0 0 0 0 0 0
+|  - attr(*, "names")= chr [1:6] "a" "b" "c" "d" ...
+| list(names = c("a", "b", "c", "d", "e", "f")) 
+|  Named num [1:6] 10 20 10 20 10 20
+|  - attr(*, "names")= chr [1:6] "a" "b" "c" "d" ...
+| list(names = c("a", "b", "c", "d", "e", "f")) 
+|  Named num [1:6] 1 2 3 4 5 NaN
+|  - attr(*, "names")= chr [1:6] "a" "b" "c" "d" ...
+| list(names = c("a", "b", "c", "d", "e", "f")) 
+|  int [1:6] 9 9 9 9 9 9
+| NULL 
+|  int [1:6] 7 NA 8 7 NA 8
+| NULL 
+|  logi [1:4] FALSE NA FALSE NA
+| NULL 
+|  Named chr [1:4] "z" "z" "z" "z"
+|  - attr(*, "names")= chr [1:4] "a" "b" "c" "d"
+| list(names = c("a", "b", "c", "d")) 
+|  Named chr [1:4] "u" NA "u" NA
+|  - attr(*, "names")= chr [1:4] "a" "b" "c" "d"
+| list(names = c("a", "b", "c", "d")) 
+|  Named chr [1:4] "long string here" "" NA "p"
+|  - attr(*, "names")= chr [1:4] "a" "b" "c" "d"
+| list(names = c("a", "b", "c", "d")) 
+| List of 6
+|  $ : chr "only"
+|  $ : chr "only"
+|  $ : chr "only"
+|  $ : chr "only"
+|  $ : chr "only"
+|  $ : chr "only"
+| NULL 
+| List of 6
+|  $ : NULL
+|  $ : int [1:2] 1 2
+|  $ : language f(y)
+|  $ : NULL
+|  $ : int [1:2] 1 2
+|  $ : language f(y)
+| NULL 
+| List of 6
+|  $ : symbol sym
+|  $ :List of 1
+|   ..$ : num 5
+|  $ : num [1:2] 3 4
+|  $ : NULL
+|  $ : chr "two"
+|  $ : int 1
+| NULL 
+|   expression(g(1), 2, g(1)) ...
+| NULL 
+|  cplx [1:3] 0+1i 0+1i 0+1i
+| NULL 
+|  raw [1:4] ff 00 ff 00
+| NULL 
+|  Named num [1:6] 1 1 1 1 1 1
+|  - attr(*, "names")= chr [1:6] "a" "b" "c" "d" ...
+| list(names = c("a", "b", "c", "d", "e", "f")) 
+|  Named num [1:6] NA NA NA NA NA NA
+|  - attr(*, "names")= chr [1:6] "a" "b" "c" "d" ...
+| list(names = c("a", "b", "c", "d", "e", "f")) 
+|  num [1:6] 2.5 2.5 2.5 2.5 2.5 2.5
+| NULL 
+|  chr [1:6] "s" "s" "s" "s" "s" "s"
+| NULL 
+|  int [1:4] 1 2 1 2
+| NULL 
+|  Named chr [1:4] "1" "2" "1" "2"
+|  - attr(*, "names")= chr [1:4] "a" "b" "c" "d"
+| list(names = c("a", "b", "c", "d")) 
+| List of 6
+|  $ a: num 1
+|  $ b: chr "a"
+|  $ c: num 1
+|  $ d: chr "a"
+|  $ e: num 1
+|  $ f: chr "a"
+| list(names = c("a", "b", "c", "d", "e", "f")) 
+| List of 6
+|  $ : int 1
+|  $ : int 2
+|  $ : int 3
+|  $ : int 1
+|  $ : int 2
+|  $ : int 3
+| NULL 
+| List of 6
+|  $ : chr "s"
+|  $ : chr "s"
+|  $ : chr "s"
+|  $ : chr "s"
+|  $ : chr "s"
+|  $ : chr "s"
+| NULL 
+| warning: number of items to replace is not a multiple of replacement length 
+| error: replacement has length zero 
+| error: replacement has length zero 
+| error: replacement has length zero 
+|  num(0) 
+| NULL 
+|  num(0) 
+| NULL 
+|  chr(0) 
+| NULL 
+|  list()
+| NULL 
+|  num(0) 
+| NULL 
+|  num [1:3, 1:4] 0 0 0 0 0 0 0 0 0 0 ...
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:3] "a" "b" "c"
+|   ..$ : chr [1:4] "A" "B" "C" "D"
+| list(dim = 3:4, dimnames = list(c("a", "b", "c"), c("A", "B",  "C", "D"))) 
+|  num [1:3, 1:4] 2 4 6 8 10 12 14 16 18 20 ...
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:3] "a" "b" "c"
+|   ..$ : chr [1:4] "A" "B" "C" "D"
+| list(dim = 3:4, dimnames = list(c("a", "b", "c"), c("A", "B",  "C", "D"))) 
+|  num [1:3, 1:4] 1 2 3 1 2 3 1 2 3 1 ...
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:3] "a" "b" "c"
+|   ..$ : chr [1:4] "A" "B" "C" "D"
+| list(dim = 3:4, dimnames = list(c("a", "b", "c"), c("A", "B",  "C", "D"))) 
+|  num [1:3, 1:4] 12 11 10 9 8 7 6 5 4 3 ...
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:3] "a" "b" "c"
+|   ..$ : chr [1:4] "A" "B" "C" "D"
+| list(dim = 3:4, dimnames = list(c("a", "b", "c"), c("A", "B",  "C", "D"))) 
+|  int [1:2, 1:3, 1:4] 24 23 22 21 20 19 18 17 16 15 ...
+| list(dim = 2:4) 
+|  Factor w/ 2 levels "u","v": 2 2 2
+| list(levels = c("u", "v"), class = "factor") 
+| warning: invalid factor level, NA generated 
+|  Date[1:3], format: "2025-05-05" "2025-05-05" "2025-05-05"
+| list(class = "Date") 
+|  num [1:3] 9 8 7
+|  - attr(*, "note")= chr "kept"
+| list(note = "kept") 
+| 'data.frame':	3 obs. of  2 variables:
+|  $ p: int  3 2 1
+|  $ q: chr  "z" "y" "x"
+| list(names = c("p", "q"), row.names = 1:3, class = "data.frame") 
+| 'data.frame':	3 obs. of  2 variables:
+|  $ p: int  0 0 0
+|  $ q: int  0 0 0
+| list(names = c("p", "q"), row.names = 1:3, class = "data.frame") 
+|  Time-Series [1:4] from 2020 to 2021: 4 3 2 1
+| list(tsp = c(2020, 2020.75, 4), class = "ts") 
+|  Named num [1:6] 1.5 2.5 NA 4 5 6
+|  - attr(*, "names")= chr [1:6] "a" "b" "c" "d" ...
+| list(names = c("a", "b", "c", "d", "e", "f")) 
+|  Named chr [1:4] "p" NA "" "long string here"
+|  - attr(*, "names")= chr [1:4] "a" "b" "c" "d"
+| list(names = c("a", "b", "c", "d")) 
+| List of 6
+|  $ : int 1
+|  $ : chr "two"
+|  $ : NULL
+|  $ : num [1:2] 3 4
+|  $ :List of 1
+|   ..$ : num 5
+|  $ : symbol sym
+| NULL 
+| List of 6
+|  $ : chr "two"
+|  $ : int 1
+|  $ : chr "two"
+|  $ : int 1
+|  $ : chr "two"
+|  $ : int 1
+| NULL 
+|  Named chr [1:4] "p" NA "" "long string here"
+|  - attr(*, "names")= chr [1:4] "a" "b" "c" "d"
+| list(names = c("a", "b", "c", "d")) 
+|  Named chr [1:4] "changed" "changed" "changed" "changed"
+|  - attr(*, "names")= chr [1:4] "a" "b" "c" "d"
+| list(names = c("a", "b", "c", "d")) 
+| List of 6
+|  $ : int 1
+|  $ : chr "two"
+|  $ : NULL
+|  $ : num [1:2] 3 4
+|  $ :List of 1
+|   ..$ : num 5
+|  $ : symbol sym
+| NULL 
+| List of 6
+|  $ : num 0
+|  $ : num 0
+|  $ : num 0
+|  $ : num 0
+|  $ : num 0
+|  $ : num 0
+| NULL 
+|  num [1:3, 1:4] 1 2 3 4 5 6 7 8 9 10 ...
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:3] "a" "b" "c"
+|   ..$ : chr [1:4] "A" "B" "C" "D"
+| list(dim = 3:4, dimnames = list(c("a", "b", "c"), c("A", "B",  "C", "D"))) 
+|  Named num [1:6] 1.5 2.5 NA 4 5 6
+|  - attr(*, "names")= chr [1:6] "a" "b" "c" "d" ...
+| list(names = c("a", "b", "c", "d", "e", "f")) 
+|  Named num [1:6] 0 0 0 0 0 0
+|  - attr(*, "names")= chr [1:6] "a" "b" "c" "d" ...
+| list(names = c("a", "b", "c", "d", "e", "f")) 
+| List of 6
+|  $ : int 1
+|  $ : chr "two"
+|  $ : NULL
+|  $ : num [1:2] 3 4
+|  $ :List of 1
+|   ..$ : num 5
+|  $ : symbol sym
+| NULL 
+| List of 6
+|  $ : chr "f"
+|  $ : chr "f"
+|  $ : chr "f"
+|  $ : chr "f"
+|  $ : chr "f"
+|  $ : chr "f"
+| NULL 
+|  chr [1:2] "a" "b"
+| NULL 
+| List of 3
+|  $ : num 1
+|  $ : num 2
+|  $ : num 3
+| NULL 
+|  Named num [1:6] 1.5 0 0 0 5 6
+|  - attr(*, "names")= chr [1:6] "a" "b" "c" "d" ...
+| list(names = c("a", "b", "c", "d", "e", "f")) 
+|  Named num [1:6] 1 2 3 1 2 3
+|  - attr(*, "names")= chr [1:6] "a" "b" "c" "d" ...
+| list(names = c("a", "b", "c", "d", "e", "f")) 
+|  Named num [1:6] 1.5 2.5 7 8 7 8
+|  - attr(*, "names")= chr [1:6] "a" "b" "c" "d" ...
+| list(names = c("a", "b", "c", "d", "e", "f")) 
+|  Named num [1:6] 1.5 2.5 NA 4 5 60
+|  - attr(*, "names")= chr [1:6] "a" "b" "c" "d" ...
+| list(names = c("a", "b", "c", "d", "e", "f")) 
+|  Named num [1:6] 1.5 20 30 40 5 6
+|  - attr(*, "names")= chr [1:6] "a" "b" "c" "d" ...
+| list(names = c("a", "b", "c", "d", "e", "f")) 
+|  Named chr [1:4] "p" "m" "n" "long string here"
+|  - attr(*, "names")= chr [1:4] "a" "b" "c" "d"
+| list(names = c("a", "b", "c", "d")) 
+|  Named chr [1:4] "all" "all" "all" "all"
+|  - attr(*, "names")= chr [1:4] "a" "b" "c" "d"
+| list(names = c("a", "b", "c", "d")) 
+| List of 6
+|  $ : int 1
+|  $ : chr "a"
+|  $ : NULL
+|  $ : chr "a"
+|  $ : NULL
+|  $ : symbol sym
+| NULL 
+| List of 6
+|  $ :List of 1
+|   ..$ : num 5
+|  $ : symbol sym
+|  $ : NULL
+|  $ : num [1:2] 3 4
+|  $ :List of 1
+|   ..$ : num 5
+|  $ : symbol sym
+| NULL 
+|  int [1:6] 1 0 0 0 0 6
+| NULL 
+|  logi [1:4] NA NA NA TRUE
+| NULL 
+|  num [1:3, 1:4] 1 0 0 0 0 0 0 8 9 10 ...
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:3] "a" "b" "c"
+|   ..$ : chr [1:4] "A" "B" "C" "D"
+| list(dim = 3:4, dimnames = list(c("a", "b", "c"), c("A", "B",  "C", "D"))) 
+|  Named num [1:8] 1.5 2.5 NA 4 50 60 70 80
+|  - attr(*, "names")= chr [1:8] "a" "b" "c" "d" ...
+| list(names = c("a", "b", "c", "d", "e", "f", "", "")) 
+|  Named chr [1:6] "p" NA "" "d" "e" "f"
+|  - attr(*, "names")= chr [1:6] "a" "b" "c" "d" ...
+| list(names = c("a", "b", "c", "d", "", "")) 
+|  Named num [1:6] 1.5 2.5 NA 4 5 6
+|  - attr(*, "names")= chr [1:6] "a" "b" "c" "d" ...
+| list(names = c("a", "b", "c", "d", "e", "f")) 
+|  Named num [1:6] 1 2 NA 4 5 6
+|  - attr(*, "names")= chr [1:6] "a" "b" "c" "d" ...
+| list(names = c("a", "b", "c", "d", "e", "f")) 
+| warning: number of items to replace is not a multiple of replacement length 
+| error: replacement has length zero 
+|  Named num [1:6] 1.5 -1 -2 -3 5 6
+|  - attr(*, "names")= chr [1:6] "a" "b" "c" "d" ...
+| list(names = c("a", "b", "c", "d", "e", "f")) 
+|  Named num [1:6] 1.5 -1 -2 -3 5 6
+|  - attr(*, "names")= chr [1:6] "a" "b" "c" "d" ...
+| list(names = c("a", "b", "c", "d", "e", "f")) 
+|  Named num [1:6] 1.5 0 0 0 5 6
+|  - attr(*, "names")= chr [1:6] "a" "b" "c" "d" ...
+| list(names = c("a", "b", "c", "d", "e", "f")) 
+| List of 6
+|  $ : int 1
+|  $ : chr "two"
+|  $ : int 1
+|  $ : chr "two"
+|  $ :List of 1
+|   ..$ : num 5
+|  $ : symbol sym
+| NULL 
+|  Named chr [1:4] "" "long string here" "" "long string here"
+|  - attr(*, "names")= chr [1:4] "a" "b" "c" "d"
+| list(names = c("a", "b", "c", "d")) 
+|  num [1:8] 3 30 60 3 3 3 3 3
+| NULL 
+|  chr [1:6] "a" "b" "s3" "s3" "a" "b"
+| NULL 
+| 10000100000 1e+05 1 
+| 150000 a bb 
+| 100000 integer 
+| r3 r3 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL
