@@ -838,8 +838,6 @@ pub unsafe fn inspect(
     }
 }
 
-// Serialization.
-
 /// `ALTREP_SERIALIZED_CLASS`: the pairlist (class symbol, package symbol, type code) the
 /// serializer writes before the state, or `None` for an ordinary vector.
 pub unsafe fn serialized_class(object: Sexp) -> Option<Sexp> {
@@ -934,8 +932,6 @@ unsafe fn symbol_text(symbol: Sexp) -> String {
         String::new()
     }
 }
-
-// Classes and the registry.
 
 static REGISTRY: Global<Vec<Sexp>> = Global::new(Vec::new());
 static BUILTINS: Global<Option<Builtins>> = Global::new(None);
@@ -1303,8 +1299,6 @@ summary_api!(ALTREAL_SUM, sum);
 summary_api!(ALTREAL_MIN, min);
 summary_api!(ALTREAL_MAX, max);
 summary_api!(ALTLOGICAL_SUM, sum);
-
-// The built-in classes.
 
 #[derive(Clone, Copy)]
 struct Builtins {

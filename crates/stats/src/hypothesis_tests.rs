@@ -695,19 +695,18 @@ pub unsafe fn fisher_sim(call: &NativeCall<'_>) -> R<Sexp> {
     values::real_vector(&statistics)
 }
 
-/// `Fexact(x, pars, workspace, mult)`: the p-value of Fisher's exact test for an r x c table,
-/// the total probability of the tables with the observed margins that are at most
-/// `1 + 1e-7` times as likely as the observed one. The p-value is always exact: the hybrid
-/// approximation `pars` can ask for, and the workspace limits, do not apply.
+/// `Fexact(x, pars, workspace, mult)`: the p-value of Fisher's exact test for an r x c table, the
+/// total probability of the tables with the observed margins that are at most `1 + 1e-7` times as
+/// likely as the observed one. It is always exact; `pars`'s hybrid approximation and the workspace
+/// limits do not apply.
 ///
-/// A table's probability is a constant times the product of `1 / x!` over its cells, so the
-/// search works with `-sum(log(x!))`, the table's value. Tables are built column by column, as
-/// paths through a network whose nodes are the remaining row sums after each column, sorted,
-/// because the completions of a node depend only on that multiset. Paths that reach a node with
-/// the same value merge. At each node, bounds on the values its completions can add (each
-/// remaining column maximized or minimized on its own) settle most paths at once: a path whose
-/// every completion is below the threshold counts the closed-form total of its completions, and
-/// one whose every completion is above it is dropped.
+/// A table's probability is a constant times the product of `1 / x!` over its cells, so the search
+/// works with `-sum(log(x!))`, the table's value. Tables are built column by column as paths
+/// through a network whose nodes are the sorted remaining row sums, since a node's completions
+/// depend only on that multiset, and paths reaching a node with the same value merge. Bounds on
+/// what a node's completions can add (each remaining column maximized or minimized alone) settle
+/// most paths at once: one whose every completion is below the threshold counts their closed-form
+/// total, and one whose every completion is above it is dropped.
 pub unsafe fn fexact(call: &NativeCall<'_>) -> R<Sexp> {
     let x = call.arg(0);
     let Some([rows, columns]) =

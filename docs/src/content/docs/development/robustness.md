@@ -67,6 +67,10 @@ budget, so `cargo test` stays fast while a long run is one environment variable 
 input: a `fuzz_regressions_hold_invariants` entry, a splice regression, a fixture, or a scenario.
 A bug that is not small and local is filed in `.agents/memory/backlog.md` with its reproducing seed.
 
+**A harness and its pinned inputs are never cut for being slow or quiet.** The rule for which tests
+earn their place is in [What earns a test its place](/development/testing#what-earns-a-test-its-place):
+unit tests that duplicate a harness go, and the harness stays.
+
 ## The language-server simulator
 
 `crates/ry/src/server/simulation.rs` runs the real server, the same `ServerState` and `Worker` code

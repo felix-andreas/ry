@@ -1133,8 +1133,6 @@ unsafe fn copy_most_attributes_no_ts(from: Sexp, to: Sexp) -> R<()> {
     Ok(())
 }
 
-// Nonlinear least squares.
-
 /// `numeric_deriv(expr, theta, rho, dir, eps, central)`: the value of the model `expr` in
 /// `rho`, with the forward (or central) difference gradient with respect to the parameters
 /// named in `theta` as its `gradient` attribute.

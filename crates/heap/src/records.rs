@@ -1,14 +1,9 @@
 //! The runtime tables behind ry's records, tuples and tags: the tag-name interner and the layout
-//! interner. Both only grow, so an id handed out once stays valid for the life of the heap, and
-//! two values have the same shape exactly when their layout ids are equal.
-//!
-//! The standard library's dictionaries and sets are record objects too, with a fixed layout of
-//! their own: a dictionary holds its keys, values and hash index in three slots, and a set its
-//! elements and index in two. Sharing the record object keeps one boundary check, one tracer and
-//! one value-semantics rule for every ry value.
-//!
-//! Tag and field names are interned symbols, which the heap roots for its whole life, so the
-//! tables hold them without tracing.
+//! interner. Both only grow, so an id stays valid for the heap's life, and two values have the same
+//! shape exactly when their layout ids are equal. Dictionaries and sets are records with fixed
+//! layouts (keys, values and hash index; elements and index), which keeps one boundary check, one
+//! tracer and one value-semantics rule for every ry value. Tag and field names are interned
+//! symbols, which the heap roots for its whole life, so the tables hold them without tracing.
 
 use {
     crate::object::{LAZY_RECORD, Sexp},

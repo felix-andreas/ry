@@ -362,12 +362,10 @@ pub mod gp {
     /// time, so they do not move the heap's binding epoch, and cached lookups never resolve
     /// through one.
     pub const FUNCTION_FRAME: u16 = 1 << 8;
-    /// An environment that some closure or other environment names as its
-    /// environment or enclosure, or that a cached lookup started from, so a cached lookup may
-    /// have walked through it. Replacing the
-    /// enclosure of an environment without the bit, such as `parent.env(e) <- p` right after
-    /// `e <- new.env()`, cannot change what any cached lookup found (see
-    /// `Heap::set_enclosure`).
+    /// An environment that a closure or another environment names as its environment or enclosure,
+    /// or that a cached lookup started from, so a cached lookup may have walked through it.
+    /// Replacing the enclosure of one without the bit, as `parent.env(e) <- p` right after `e <-
+    /// new.env()` does, cannot change what a cached lookup found (`Heap::set_enclosure`).
     pub const ENCLOSING: u16 = 1 << 0;
     /// An environment a compiled closure body is running on. The body keeps values in registers
     /// that do not count as references, which code running on the environment from elsewhere
@@ -488,8 +486,8 @@ pub(crate) mod flag_bits {
     /// The object's fields do not count as references (GNU R's `DISABLE_REFCNT`), as for the
     /// `*tmp*` value of a complex assignment, which must not make the target look shared.
     pub const UNTRACKED: u8 = 1 << 3;
-    /// A ry Array: an attribute-free, NA-free vector built by `[...]` or `List.from_r`. The bit lives
-    /// here, not in the general-purpose bits, so C code reading `LEVELS` never sees it.
+    /// A ry Array: an attribute-free, NA-free vector built by `[...]` or `List.from_r`. The bit
+    /// lives here, not in the general-purpose bits, so C code reading `LEVELS` never sees it.
     pub const ARRAY: u8 = 1 << 4;
     /// A list of `(key, value)` pairs that keeps neither alive: a collection that finds either
     /// dead sets both slots of its pair to `NULL`.
@@ -720,11 +718,10 @@ pub(crate) const LARGE_CLASS: u8 = u8::MAX;
 const LARGEST_SMALL_BYTES: usize = 2048;
 
 /// The elements one card of a large handle vector covers. A large character vector, list or
-/// expression vector keeps one card byte per this many elements after its data, and a store of
-/// a younger child into it while it is old marks the child's card dirty. A minor collection then
-/// rescans only the dirty cards of a remembered vector instead of all its elements: a list grown
-/// one element per iteration to a million elements is remembered on every iteration's store,
-/// and rescanning it whole made each minor collection cost time proportional to the old list.
+/// expression vector keeps a card byte per this many elements after its data, and storing a younger
+/// child into it while old dirties the child's card, so a minor collection rescans only dirty
+/// cards: a list grown to a million elements, remembered on every store, otherwise cost each minor
+/// collection time proportional to the whole list.
 pub(crate) const CARD_ELEMENTS: usize = 128;
 /// A card whose elements are no younger than its vector.
 pub(crate) const CARD_CLEAN: u8 = 0;
@@ -1131,8 +1128,6 @@ impl Sexp {
         unsafe { self.payload::<TripleObject>().third.set(value) }
     }
 
-    // Environments.
-
     pub(crate) unsafe fn frame_ptr(self) -> *mut Frame {
         unsafe { self.payload::<EnvironmentObject>().frame.get() }
     }
@@ -1148,8 +1143,6 @@ impl Sexp {
     pub(crate) unsafe fn set_enclosure_unbarriered(self, value: Sexp) {
         unsafe { self.payload::<EnvironmentObject>().enclosure.set(value) }
     }
-
-    // External pointers.
 
     pub unsafe fn external_address(self) -> *mut c_void {
         unsafe { self.payload::<ExternalPtrObject>().address.get() }
@@ -1175,8 +1168,6 @@ impl Sexp {
         unsafe { self.payload::<ExternalPtrObject>().protected.set(value) }
     }
 
-    // Weak references.
-
     pub unsafe fn weak_key(self) -> Sexp {
         unsafe { self.payload::<WeakRefObject>().key.get() }
     }
@@ -1200,8 +1191,6 @@ impl Sexp {
     pub(crate) unsafe fn weak_payload<'a>(self) -> &'a WeakRefObject {
         unsafe { self.payload::<WeakRefObject>() }
     }
-
-    // Primitives.
 
     pub unsafe fn primitive_index(self) -> u32 {
         unsafe { self.payload::<PrimitiveObject>().index.get() }
