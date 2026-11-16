@@ -1,6 +1,6 @@
 # Kernels modeled on a user's profiles of a package's test suite: each is one code shape that a
 # profile ranked high, cut down to a loop, with every name replaced by a neutral one. K1 to K5,
-# K12 and K13 follow shapes a user sent as code. K6 to K11 and K14 are reconstructions from
+# K12 and K13 follow shapes a user sent as code. K6 to K11, K14 and K15 are reconstructions from
 # one-line descriptions, and so are the sizes and the runner. `set.seed` and the `checks` list
 # make the data and one result per kernel comparable between GNU R and ry.
 #
@@ -139,8 +139,15 @@ fetchAll <- function(base) {
 }
 k14 <- function(n) for (i in seq_len(n)) for (base in lazyBases) fetchAll(base)
 
+# Reconstructed: "a grouped data.table `j` calling a small function, many small groups". GForce
+# cannot optimize a call to a user's function, so data.table's C code evaluates `j` once per group.
+grouped <- data.table(g = rep(1:4000, each = 5L), v = rnorm(20000), w = runif(20000))
+spread <- function(x) max(x) - min(x)
+groupSummary <- function(table) table[, .(s = spread(v), t = v[1L] + w[.N]), by = g]
+k15 <- function(n) for (i in seq_len(n)) groupSummary(grouped)
+
 sizes <- c(k1 = 20000, k2 = 30000, k3 = 100000, k4 = 60000, k5 = 20000, k6 = 4000, k7 = 500, k8 = 30000,
-           k9 = 20, k10 = 100, k11 = 2000, k12 = 100000, k13 = 500, k14 = 10)
+           k9 = 20, k10 = 100, k11 = 2000, k12 = 100000, k13 = 500, k14 = 10, k15 = 40)
 checks <- list(
   k1 = function() recordLabel(makeRecord(a = "id1", b = "p", c = "q")),
   k2 = function() format(c(toDate("2024-03-15"), toDate(as.Date("2024-01-02")))),
@@ -161,7 +168,8 @@ checks <- list(
   k13 = function() { first <- new("Seeded", name = "y"); first@series[1] <- -1; second <- new("Seeded")
     c(length(first@series), first@series[1], second@series[1] >= 0, nchar(paste0(first@name, second@name)),
       round(sum(getClass("Seeded")@prototype@series), 6)) },
-  k14 = function() vapply(lazyBases, fetchAll, c(0L, 0L), USE.NAMES = FALSE)
+  k14 = function() vapply(lazyBases, fetchAll, c(0L, 0L), USE.NAMES = FALSE),
+  k15 = function() { summary <- groupSummary(grouped); c(nrow(summary), round(sum(summary$s), 6), round(sum(summary$t), 6)) }
 )
 
 selected <- Sys.getenv("KERNELS", "")

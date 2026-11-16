@@ -109,6 +109,10 @@ api! {
     VECTOR_ELT: fn(Sexp, isize) -> Sexp;
     R_CHAR: fn(Sexp) -> *const c_char;
     SET_TAG: fn(Sexp, Sexp);
+    CAR: fn(Sexp) -> Sexp;
+    CDR: fn(Sexp) -> Sexp;
+    SETCAR: fn(Sexp, Sexp) -> Sexp;
+    SET_TYPEOF: fn(Sexp, u32);
     SET_VECTOR_ELT: fn(Sexp, isize, Sexp) -> Sexp;
     Rf_duplicate: fn(Sexp) -> Sexp;
     Rf_setAttrib: fn(Sexp, Sexp, Sexp) -> Sexp;

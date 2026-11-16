@@ -335,6 +335,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A native recursive function's depth budget shrinks with the interpreter depth
 - Parked: cheaper global bindings in top-level loops (tier 0) (planned)
 - A compiled replacement probes the target before any subscript runs
+- A call native code evaluates repeatedly compiles at its third evaluation
 
 ## Heap and collector
 

@@ -122,6 +122,8 @@ pub struct State {
     pub(crate) registers: Vec<Sexp>,
     /// The tier of every closure body that has run, shared by all closures over the body.
     bodies: Bodies,
+    /// The tier of every call native code has evaluated ([`run_call`]).
+    calls: Calls,
     tier: Option<Tier>,
     pub(crate) call_plans: CallPlans,
     /// What the dispatch loop resumes as each callee it entered in place returns, innermost
@@ -143,6 +145,7 @@ impl Default for State {
         State {
             registers: Vec::with_capacity(REGISTER_FILE_CAPACITY),
             bodies: Bodies::default(),
+            calls: Calls::default(),
             tier: None,
             call_plans: CallPlans::default(),
             resumes: Vec::new(),
@@ -162,6 +165,7 @@ impl State {
     pub(crate) unsafe fn clear_dead(&mut self, liveness: &Liveness<'_>) {
         self.call_plans.clear_dead(liveness);
         self.bodies.clear_dead(liveness);
+        self.calls.clear_dead(liveness);
     }
 }
 
@@ -446,6 +450,149 @@ unsafe fn hash_leaf(node: Sexp, hasher: &mut rustc_hash::FxHasher) {
             values::reals(node)[0].to_bits().hash(hasher);
         }
         _ => node.hash(hasher),
+    }
+}
+
+/// The tier of each call object that native code evaluates ([`run_call`]), keyed by the object,
+/// shaped like [`Bodies`]. A call compiles at its [`COMPILE_AFTER_EVALUATIONS`]th evaluation into
+/// guarded code that reads and writes the environment's bindings by name, so one code object
+/// serves every environment the call is evaluated in, as data.table's grouped `j` and purrr's
+/// mapped call are evaluated in a new frame per outer call.
+///
+/// The code's constants hold the call, so the table holds nothing itself: each compiled entry
+/// has a weak reference whose key is the call and whose value is the code, which keeps the code
+/// exactly as long as the call lives and lets both die together.
+#[derive(Default)]
+struct Calls {
+    /// Below [`COMPILED`], the evaluations the call has seen, or [`NEVER_COMPILES`]; with that
+    /// bit set, the index of its compiled entry in the columns below.
+    states: FxHashMap<Sexp, u32>,
+    /// The compiled entries, as columns indexed by entry. `weaks` holds `NULL` for a free entry,
+    /// and none of the columns is traced: the weak reference holds the code for as long as the
+    /// call lives, and the entry goes in the collection that finds the call dead.
+    keys: Vec<Sexp>,
+    codes: Vec<Sexp>,
+    weaks: Vec<Sexp>,
+    /// The [`call_shape`] of the call when its code compiled.
+    shapes: Vec<u64>,
+    /// How often the call compiled again after it changed in place.
+    recompiles: Vec<u8>,
+    free: Vec<u32>,
+}
+
+/// The [`Calls`] state of a call that runs on the AST evaluator for good.
+const NEVER_COMPILES: u32 = COMPILED - 1;
+
+impl Calls {
+    /// Counts an evaluation of `call` on the AST evaluator.
+    fn count(&mut self, call: Sexp, evaluations: u32) {
+        if self.states.len() > MAX_TRACKED_BODIES {
+            self.states.retain(|_, state| *state & COMPILED != 0);
+        }
+        self.states.insert(call, evaluations);
+    }
+
+    /// Records `code`, just compiled from `call`, whose shape is `shape`.
+    unsafe fn add(&mut self, call: Sexp, code: Sexp, shape: u64) -> R<()> {
+        let weak = crate::heap().alloc_weak_ref(call, code, nil(), 0, false)?;
+        let entry = match self.free.pop() {
+            Some(entry) => {
+                let index = entry as usize;
+                self.keys[index] = call;
+                self.codes[index] = code;
+                self.weaks[index] = weak;
+                self.shapes[index] = shape;
+                self.recompiles[index] = 0;
+                entry
+            }
+            None => {
+                self.keys.push(call);
+                self.codes.push(code);
+                self.weaks.push(weak);
+                self.shapes.push(shape);
+                self.recompiles.push(0);
+                (self.keys.len() - 1) as u32
+            }
+        };
+        self.states.insert(call, entry | COMPILED);
+        Ok(())
+    }
+
+    /// Makes `code`, compiled again from the call of `entry` after it changed, the entry's code.
+    unsafe fn replace(&mut self, entry: usize, code: Sexp, shape: u64) {
+        crate::heap().set_weak_value(self.weaks[entry], code);
+        self.codes[entry] = code;
+        self.shapes[entry] = shape;
+        self.recompiles[entry] += 1;
+    }
+
+    /// Drops the code of `entry`, whose call keeps changing, and leaves the call to the AST
+    /// evaluator. The weak reference holds nothing from here on and goes when the call dies.
+    unsafe fn give_up(&mut self, entry: usize) {
+        crate::heap().set_weak_value(self.weaks[entry], nil());
+        self.states.insert(self.keys[entry], NEVER_COMPILES);
+        self.free_entry(entry);
+    }
+
+    fn free_entry(&mut self, entry: usize) {
+        self.keys[entry] = nil();
+        self.codes[entry] = nil();
+        self.weaks[entry] = nil();
+        self.free.push(entry as u32);
+    }
+
+    /// Frees every entry whose call the collection found dead, and drops every dead call's
+    /// state, so a new call the allocator places at its address starts from zero. The
+    /// collection has already cleared such a call's weak reference.
+    unsafe fn clear_dead(&mut self, liveness: &Liveness<'_>) {
+        self.states.retain(|&call, _| liveness.is_live(call));
+        for entry in 0..self.keys.len() {
+            if self.weaks[entry] != nil() && !liveness.is_live(self.keys[entry]) {
+                self.free_entry(entry);
+            }
+        }
+    }
+}
+
+/// A hash of everything code compiled from `call` depends on: each cell's identity, kind and
+/// tag, and each leaf's identity, with a scalar's value and attributes, since native code writes
+/// a call's scalars in place (`INTEGER(index)[0] = i`). Identity rather than structure, because
+/// the code holds the call's own cells and leaves for `sys.call()`, `match.call()` and the calls
+/// conditions report, and a leaf that is a different object must reach them too.
+unsafe fn call_shape(call: Sexp) -> u64 {
+    let mut hasher = rustc_hash::FxHasher::default();
+    let mut pending: SmallVec<[Sexp; 16]> = smallvec![call];
+    while let Some(mut node) = pending.pop() {
+        while matches!(node.kind(), SexpType::Language | SexpType::Pairlist) {
+            node.hash(&mut hasher);
+            (node.kind() as u8).hash(&mut hasher);
+            node.tag().hash(&mut hasher);
+            let head = node.car();
+            if matches!(head.kind(), SexpType::Language | SexpType::Pairlist) {
+                pending.push(head);
+            } else {
+                hash_call_leaf(head, &mut hasher);
+            }
+            node = node.cdr();
+        }
+        hash_call_leaf(node, &mut hasher);
+    }
+    hasher.finish()
+}
+
+unsafe fn hash_call_leaf(node: Sexp, hasher: &mut rustc_hash::FxHasher) {
+    node.hash(hasher);
+    // Reading an ALTREP vector can run R code, so one hashes by identity alone.
+    if node.is_altrep() || !node.kind().is_atomic() || length(node) != 1 {
+        return;
+    }
+    node.attrib().hash(hasher);
+    match node.kind() {
+        SexpType::Integer | SexpType::Logical => values::ints(node)[0].hash(hasher),
+        SexpType::Real => values::reals(node)[0].to_bits().hash(hasher),
+        // The compiler reads a one-string constant's text (`x$"name"`, `x[["name"]]`).
+        SexpType::String => node.element(0).hash(hasher),
+        _ => {}
     }
 }
 
@@ -878,6 +1025,111 @@ pub unsafe fn run_loop(call: Sexp, sequence: Option<Sexp>, env: Sexp) -> R<Optio
     Ok(Some(nil()))
 }
 
+/// Evaluates `call` in `env` for native code (`Rf_eval`), on the AST evaluator until its
+/// [`COMPILE_AFTER_EVALUATIONS`]th evaluation and then as compiled code (see [`Calls`]). The
+/// code runs as a promise's does, in an activation with no call frame, so `parent.frame()`,
+/// `sys.call()` and the calls conditions report are those of the tree walker.
+///
+/// Native code and R code may change a call between evaluations, so each evaluation of compiled
+/// code first compares the call's [`call_shape`] with the one it compiled from. A call that
+/// changed compiles again, from the live object, and one that changed [`MAX_RECOMPILES`] times
+/// stays with the AST evaluator, as does a call that [`compiles_as_promise`] rejects.
+pub unsafe fn run_call(call: Sexp, env: Sexp) -> R<Sexp> {
+    let calls = &mut interp().bytecode.calls;
+    let state = calls.states.get(&call).copied().unwrap_or(0);
+    if state & COMPILED != 0 {
+        let entry = (state & !COMPILED) as usize;
+        if call_shape(call) == calls.shapes[entry] && runs_compiled(env) {
+            return run_promise(calls.codes[entry], env);
+        }
+        return run_changed_call(call, env, entry);
+    }
+    normalize_argument_cells(call)?;
+    if state == NEVER_COMPILES || !runs_compiled(env) {
+        return eval::eval(call, env);
+    }
+    if state + 1 < COMPILE_AFTER_EVALUATIONS {
+        calls.count(call, state + 1);
+        return eval::eval(call, env);
+    }
+    if !compiles_as_promise(call) {
+        calls.states.insert(call, NEVER_COMPILES);
+        return eval::eval(call, env);
+    }
+    let code = compile_call(call, env)?;
+    interp().bytecode.calls.add(call, code, call_shape(call))?;
+    run_promise(code, env)
+}
+
+/// [`run_call`] for a compiled call whose shape no longer matches its code, or whose
+/// environment the code cannot run in.
+#[cold]
+#[inline(never)]
+unsafe fn run_changed_call(call: Sexp, env: Sexp, entry: usize) -> R<Sexp> {
+    // Native code that rebuilt an argument cell with `LCONS` changed its kind, which the
+    // shape covers, and retyping it may restore the shape the code compiled from.
+    normalize_argument_cells(call)?;
+    if !runs_compiled(env) {
+        return eval::eval(call, env);
+    }
+    let shape = call_shape(call);
+    let calls = &mut interp().bytecode.calls;
+    if shape == calls.shapes[entry] {
+        return run_promise(calls.codes[entry], env);
+    }
+    if calls.recompiles[entry] >= MAX_RECOMPILES || !compiles_as_promise(call) {
+        calls.give_up(entry);
+        return eval::eval(call, env);
+    }
+    // The caller holds the call, so no collection while compiling frees its entry.
+    let code = compile_call(call, env)?;
+    interp().bytecode.calls.replace(entry, code, shape);
+    run_promise(code, env)
+}
+
+/// Whether compiled code can evaluate a call in `env` now: an environment that is not a slot
+/// frame's stand-in, with no debugger that may stop at a statement of the call.
+#[inline(always)]
+unsafe fn runs_compiled(env: Sexp) -> bool {
+    env.kind() == SexpType::Environment
+        && !env.has_gp(gp::SLOT_FRAME)
+        && interp().debugger.is_none()
+}
+
+/// Compiles `call` as guarded code over the bindings of whatever environment runs it. The
+/// pseudo closure over `env` without formals only gives the compiler an enclosure to look
+/// names up in, and with no compile-time binding every choice it informs is guarded where the
+/// code runs.
+unsafe fn compile_call(call: Sexp, env: Sexp) -> R<Sexp> {
+    let heap = crate::heap();
+    heap.root(call);
+    let function = values::triple(SexpType::Closure, nil(), call, env)?;
+    heap.root(function);
+    let code = compile_with_locals(call, function, None, None)?;
+    heap.root(code);
+    Ok(code)
+}
+
+/// Retypes the argument cells of every call in `expression` to pairlist cells. Native code
+/// often builds a call as `LCONS(fun, LCONS(arg, R_NilValue))`, whose argument cells are
+/// LANGSXP; GNU R walks any cons cell there, while the interpreter and the compiler walk
+/// pairlist cells only, so they would see no arguments at all.
+pub unsafe fn normalize_argument_cells(expression: Sexp) -> R<()> {
+    if expression.kind() != SexpType::Language {
+        return Ok(());
+    }
+    normalize_argument_cells(expression.car())?;
+    let mut cell = expression.cdr();
+    while matches!(cell.kind(), SexpType::Pairlist | SexpType::Language) {
+        if cell.kind() == SexpType::Language {
+            crate::heap().retype(cell, SexpType::Pairlist)?;
+        }
+        normalize_argument_cells(cell.car())?;
+        cell = cell.cdr();
+    }
+    Ok(())
+}
+
 /// Whether `expression` calls `return` outside the functions it defines.
 unsafe fn calls_return(expression: Sexp) -> bool {
     if expression.kind() != SexpType::Language {
@@ -1139,6 +1391,13 @@ pub fn registers_hold(value: Sexp) -> bool {
 }
 
 const COMPILE_AFTER_CALLS: u32 = 2;
+/// A call native code evaluates compiles one evaluation later than a closure body, because
+/// data.table substitutes its `j` afresh for each `[` call, and a table of two groups would
+/// otherwise compile it for a single compiled evaluation.
+const COMPILE_AFTER_EVALUATIONS: u32 = 3;
+/// How often a call that changes between evaluations compiles again before it stays with the
+/// AST evaluator.
+const MAX_RECOMPILES: u8 = 2;
 const MAX_TRACKED_BODIES: usize = 1 << 16;
 
 pub const SOURCE: usize = 0;
