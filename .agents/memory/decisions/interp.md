@@ -951,3 +951,22 @@ without cells, promise forcing in the loop, and one observer word on the general
   call (`collect_evaluated_args`, `slot_builtin_args`).
 - **Pinned by** the oracle cases `replacement__slot_frame_targets` and
   `apply__element_calls_from_slot_frames`, each run on GNU R, tier 0 and the JIT.
+
+## An empty named argument leaves its formal to a positional argument
+
+**Status:** built
+
+- GNU R's positional pass tells a formal that a name matched from the value it holds, and an empty
+  argument leaves none. So `f(a = , 1)` for `function(a, b)` binds `a` to 1, and
+  `ifelse(test = , 1, 2)` is 2.
+- `eval::match_plan` records the empty argument that matched each formal by name. A positional
+  argument takes such a formal, and the empty argument's plan entry becomes `BINDS_NOTHING`, which
+  every reader of a plan skips because it indexes no formal.
+- A plan therefore depends on which named arguments are empty, so `match_args_cached`, whose key
+  is the names alone, matches a call with an empty argument afresh. A call site's own plan is
+  built from that site's arguments, whose empties never change.
+- `match_builtin_args` follows the same rule for a builtin that matches by name. The builtins
+  that match their own arguments (`log`, `rep`) do not, which `backlog.md` names.
+- An "unused argument" message deparses the argument with no option, as GNU R does, so an integer
+  loses its `L` (`deparse::deparse_unused_argument`).
+- Pinned by the oracle case `calls__empty_named_argument`.
