@@ -1,0 +1,58 @@
+[stdout]
+| [1] "one"  "two"  ""     "four"
+| [1] "one"  "two"  ""     "four"
+| [1] "one"  "two"  ""     "four"
+| warning: incomplete final line found on '<dir>/mixed' 
+| [1] "a" ""  ""  "b" ""  "c" ""  "d"
+| [1] "a" "b"
+| warning: incomplete final line found on '<dir>/partial' 
+| [1] "one" "two"
+| [1] "one" "two"
+| character(0)
+| [1] ""
+| [1] "" "" ""
+| warning: line 1 appears to contain an embedded nul 
+| warning: line 3 appears to contain an embedded nul 
+| warning: incomplete final line found on '<dir>/nul' 
+| [1] "ab"   "ef"   ""     "last"
+| warning: incomplete final line found on '<dir>/nul' 
+| [1] "abcd" "ef"   "gh"   "last"
+| [1] "abcd" "ef"   "gh"   "last"
+| [1] 200000  70000      1
+| [1] 50000
+| [1] 63 61 66 e9
+| [1] "latin1"
+| [1] "UTF-8"   "unknown"
+| [1] "one"
+| [1] "two"  ""     "four"
+| character(0)
+| [1] "pushed one"  "pushed\rtwo" "one"         "two"         ""           
+| [6] "four"       
+| [1] "one"
+| warning: incomplete final line found on '<dir>/partial' 
+| [1] "again" "two"  
+| warning: text connection used with readChar(), results may be incorrect 
+| [1] "on"
+| [1] "e"    "two"  ""     "four"
+| [1] "one"
+| [1] TRUE
+| character(0)
+| [1] "one" "two"
+| [1] ""     "four"
+| [1] "t one" "t two" ""     
+| [1] "solo"
+| warning: incomplete final line found on 'text("r one\r\nr two")' 
+| [1] "r one" "r two"
+| [1] "g one"  "g two"  ""       "g four"
+| [1] "g one" "g two"
+| [1] "p one" "p two"
+| [1] "warned"
+| [1] "too few lines read in readLines"
+| character(0)
+| [1] "one" "two"
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 0L
