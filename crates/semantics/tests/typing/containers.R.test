@@ -335,6 +335,15 @@ f <- function() {
 #++++
 f: fn() -> character
 
+#---- a_field_write_adds_the_field
+f <- function() {
+  p <- list()
+  p$b <- TRUE
+  p$b
+}
+#++++
+f: fn() -> logical
+
 #---- computed_key_builds_a_map
 f <- function(key) {
   m <- list()

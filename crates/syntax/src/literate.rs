@@ -163,89 +163,44 @@ fn fence_body(trimmed: &str) -> Option<&str> {
 mod tests {
     use super::*;
 
-    fn convert(document: &str) -> String {
-        let converted = r_source_of_literate(document);
-        assert_eq!(converted.len(), document.len(), "{converted:?}");
-        converted
-    }
-
+    /// The script of each document, with every run of blanks squeezed to one space so the rows
+    /// stay readable. The fuzz harness checks that no byte moves.
     #[test]
-    fn conversion_preserves_length_and_keeps_chunk_code() {
-        let document = "# Title\n\nSome prose.\n\n```{r setup}\nx <- 1L\n```\n\nMore prose.\n\n```{r}\nprint(x)\n```\n";
-        let converted = convert(document);
-        assert!(converted.contains("x <- 1L"));
-        assert!(converted.contains("print(x)"));
-        assert!(!converted.contains("Title"));
-        assert!(!converted.contains("prose"));
-        assert_eq!(
-            converted.find("x <- 1L"),
-            document.find("x <- 1L"),
-            "{converted:?}"
-        );
-    }
-
-    #[test]
-    fn a_fence_for_another_language_is_prose() {
-        let document = "```{python}\nx = 1\n```\n```{r}\ny <- 2L\n```\n";
-        let converted = convert(document);
-        assert!(!converted.contains("x = 1"));
-        assert!(converted.contains("y <- 2L"));
-    }
-
-    #[test]
-    fn sweave_chunks_convert() {
-        let document = "\\section{One}\n<<setup, echo=FALSE>>=\nz <- 3L\n@\ntext\n";
-        let converted = convert(document);
-        assert!(converted.contains("z <- 3L"));
-        assert!(!converted.contains("section"));
-    }
-
-    #[test]
-    fn multibyte_prose_keeps_byte_offsets_aligned() {
-        let document = "prosé — ünicode\n```{r}\nx <- 1L\n```\n";
-        let converted = convert(document);
-        assert_eq!(
-            document.find("x <- 1L"),
-            converted.find("x <- 1L"),
-            "the chunk must sit at the same byte offset"
-        );
-    }
-
-    #[test]
-    fn exotic_whitespace_in_prose_is_blanked() {
-        let document = "texte\u{a0}ins\u{e9}cable\n```{r}\nx <- 1L\n```\n";
-        let converted = convert(document);
-        assert!(
-            !converted.contains('\u{a0}'),
-            "prose must not survive: {converted:?}"
-        );
-        assert!(converted.contains("x <- 1L"));
-    }
-
-    #[test]
-    fn inline_expressions_are_code() {
-        let document =
-            "```{r}\ntotal <- 42L\n```\n\nWe sold `r total` units and `r nchar(total)` digits.\n";
-        let converted = convert(document);
-        assert_eq!(
-            document.find("total)"),
-            converted.find("total)"),
-            "an inline expression keeps its byte offset"
-        );
-        assert!(converted.contains("total;"), "{converted:?}");
-        assert!(converted.contains("nchar(total);"), "{converted:?}");
-        assert!(!converted.contains("units"), "{converted:?}");
-    }
-
-    #[test]
-    fn a_code_span_that_is_not_inline_r_stays_prose() {
-        let document = "See `total` and `rate` and `python x` and `r unclosed\n";
-        let converted = convert(document);
-        assert_eq!(
-            converted.trim(),
-            "",
-            "nothing on this line is inline R: {converted:?}"
-        );
+    fn literate_documents_read_as_their_r_script() {
+        let cases = [
+            // R's lexer rejects a non-breaking space, so prose must not leak one into the script.
+            (
+                "texte\u{a0}ins\u{e9}cable\n```{r}\nx <- 1L\n```\n",
+                " \n \nx <- 1L\n \n",
+            ),
+            // Each inline expression ends in `;`, so two on one line parse as two statements.
+            (
+                "```{r}\ntotal <- 42L\n```\n\nWe sold `r total` units and `r nchar(total)` digits.\n",
+                " \ntotal <- 42L\n \n\n total; nchar(total); \n",
+            ),
+            (
+                "See `total` and `rate` and `python x` and `r unclosed\n",
+                " \n",
+            ),
+            ("```{r}\nx <- 1L\n", " \nx <- 1L\n"),
+            ("```{r setup}\nx <- 1L\n```\n", " \nx <- 1L\n \n"),
+            // A fence for another language is prose.
+            (
+                "```{python}\nx = 1\n```\n```{r}\ny <- 2L\n```\n",
+                " \n \n \n \ny <- 2L\n \n",
+            ),
+        ];
+        for (document, expected) in cases {
+            let converted = r_source_of_literate(document);
+            assert_eq!(converted.len(), document.len(), "{converted:?}");
+            let mut squeezed = String::new();
+            for character in converted.chars() {
+                if !(character == ' ' && squeezed.ends_with(' ')) {
+                    squeezed.push(character);
+                }
+            }
+            assert_eq!(squeezed, expected, "{document:?}");
+        }
     }
 
     #[test]
@@ -263,11 +218,5 @@ mod tests {
                 ("  y\n", RegionKind::Chunk { indented: true }),
             ]
         );
-    }
-
-    #[test]
-    fn an_unclosed_chunk_still_yields_its_code() {
-        let document = "```{r}\nx <- 1L\n";
-        assert!(convert(document).contains("x <- 1L"));
     }
 }

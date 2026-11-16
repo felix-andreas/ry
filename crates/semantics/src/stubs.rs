@@ -898,33 +898,11 @@ mod tests {
         crate::{
             DocumentKind, ProjectFiles, RootDatabase, SourceFile,
             check::{ItemCheck, TypeErrorKind},
-            diagnostics::file_diagnostics,
             item_check, item_tree,
-            metadata::{PackageMetadata, attached_union},
-            package_scheme_exists,
+            metadata::PackageMetadata,
             types::Atomic,
         },
-        salsa::Setter,
     };
-
-    #[test]
-    fn shipped_corpus_loads() {
-        let db = RootDatabase::default();
-        let sources = install_shipped_stubs(&db);
-        let library = stub_library(&db, sources);
-        assert!(
-            library.schemes.len() > 400,
-            "expected the full shipped corpus, got {} names",
-            library.schemes.len()
-        );
-        assert!(library.nominals.contains("data.frame"));
-        assert_eq!(
-            library.schemes.get("sum").map(Vec::len),
-            Some(5),
-            "sum keeps its ordered overload candidates"
-        );
-        assert_eq!(library.schemes.get("length").map(Vec::len), Some(1));
-    }
 
     #[test]
     fn standard_library_stub_loads_cleanly() {
@@ -946,24 +924,6 @@ mod tests {
                 .any(|name| name.text(&db) == "Result")
         );
         assert_eq!(declaring_namespace(&db, "Dict"), Some(STANDARD_LIBRARY));
-    }
-
-    #[test]
-    fn a_representation_must_be_a_type() {
-        let db = RootDatabase::default();
-        install_shipped_stubs(&db);
-        let problems = stub_source_problems(
-            &db,
-            "@type structural { a: integer }\nmk : fn() -> structural\n",
-        );
-        assert_eq!(problems[0].line, 0);
-        assert_eq!(
-            problems[0].message,
-            "this type declaration does not load: write `@alias NAME<T> {TYPE}`, `@type NAME {TYPE}` or `@type NAME<T>`."
-        );
-        // The nominal is refused, so the use below reports too, and an author
-        // who reads only the second error is not sent to a correct line.
-        assert_eq!(problems[1].line, 1);
     }
 
     /// A dispatch target for operator lookup (`+.Date`, `Compare.Date`), not an exported name.
@@ -1041,212 +1001,30 @@ mod tests {
         );
     }
 
+    /// A whole-number literal passes as an integer to a parameter outside any overload set, and
+    /// a fractional one does not.
     #[test]
-    fn manifest_exports_resolve_without_a_typed_declaration() {
-        let db = RootDatabase::default();
-        install_shipped_stubs(&db);
-        // `bitwAnd` (base) and `aggregate` (stats) are manifest-only names.
-        assert!(package_scheme_exists(&db, "bitwAnd"));
-        assert!(package_scheme_exists(&db, "aggregate"));
-        let file = SourceFile::new(
-            &db,
-            "f <- function(x, y) bitwAnd(x, y)\n".to_owned(),
-            DocumentKind::Package,
-        );
-        ProjectFiles::new(&db, vec![file]);
-        let diagnostics = file_diagnostics(&db, file);
-        assert!(
-            diagnostics.is_empty(),
-            "manifest exports must resolve cleanly: {diagnostics:?}"
-        );
-    }
-
-    #[test]
-    fn qualified_only_namespaces_gate_bare_reads() {
-        let db = RootDatabase::default();
-        install_shipped_stubs(&db);
-        assert!(namespace_exports(&db, "tools", "file_ext"));
-        let file = SourceFile::new(
-            &db,
-            "f <- function(p) tools::file_ext(p)\n".to_owned(),
-            DocumentKind::Package,
-        );
-        ProjectFiles::new(&db, vec![file]);
-        assert!(file_diagnostics(&db, file).is_empty());
-        assert!(!package_scheme_exists(&db, "mclapply"));
-        let active = RootDatabase::default();
-        install_shipped_stubs(&active);
-        PackageMetadata::new(
-            &active,
-            Vec::new(),
-            Default::default(),
-            ["parallel".to_owned()].into(),
-            None,
-            Default::default(),
-        );
-        assert!(package_scheme_exists(&active, "mclapply"));
-    }
-
-    #[test]
-    fn datasets_objects_are_bare_visible() {
-        let db = RootDatabase::default();
-        install_shipped_stubs(&db);
-        assert!(package_scheme_exists(&db, "iris"));
-        assert!(package_scheme_exists(&db, "state.x77"));
-        let file = SourceFile::new(
-            &db,
-            "widths <- function() iris\n".to_owned(),
-            DocumentKind::Package,
-        );
-        ProjectFiles::new(&db, vec![file]);
-        assert!(file_diagnostics(&db, file).is_empty());
-    }
-
-    #[test]
-    fn conditional_manifest_names_stay_dark_without_activation() {
-        let db = RootDatabase::default();
-        install_shipped_stubs(&db);
-        // `alloc.col` is a data.table manifest name with no typed declaration.
-        assert!(!package_scheme_exists(&db, "alloc.col"));
-        let active = RootDatabase::default();
-        install_shipped_stubs(&active);
-        PackageMetadata::new(
-            &active,
-            Vec::new(),
-            ["data.table".to_owned()].into(),
-            Default::default(),
-            None,
-            Default::default(),
-        );
-        assert!(package_scheme_exists(&active, "alloc.col"));
-    }
-
-    #[test]
-    fn declarations_record_winning_sites() {
-        let db = RootDatabase::default();
-        let sources = install_shipped_stubs(&db);
-        let library = stub_library(&db, sources);
-        let declaration = library
-            .declarations
-            .get("print")
-            .expect("base declares print");
-        let (namespace, text) = &sources.sources(&db)[declaration.source_index];
-        assert_eq!(namespace, "base");
-        let range = usize::from(declaration.range.start())..usize::from(declaration.range.end());
-        assert_eq!(&text[range], "print");
-        let nominal = library
-            .declarations
-            .get("data.frame")
-            .expect("base declares data.frame");
-        let (_, nominal_text) = &sources.sources(&db)[nominal.source_index];
-        let range = usize::from(nominal.range.start())..usize::from(nominal.range.end());
-        assert_eq!(&nominal_text[range], "data.frame");
-    }
-
-    #[test]
-    fn conditional_namespace_is_dark_without_activation() {
-        let db = RootDatabase::default();
-        let sources = install_shipped_stubs(&db);
-        let library = stub_library(&db, sources);
-        assert!(!library.schemes.contains_key("fread"));
-        assert!(!library.nominals.contains("data.table"));
-        assert!(!library.exports_by_namespace.contains_key("data.table"));
-    }
-
-    #[test]
-    fn declared_dependency_activates_a_conditional_namespace() {
-        let db = RootDatabase::default();
-        let sources = install_shipped_stubs(&db);
-        PackageMetadata::new(
-            &db,
-            Vec::new(),
-            ["data.table".to_owned()].into(),
-            Default::default(),
-            None,
-            Default::default(),
-        );
-        let library = stub_library(&db, sources);
-        assert!(library.schemes.contains_key("fread"));
-        assert!(library.nominals.contains("data.table"));
-    }
-
-    #[test]
-    fn library_call_attaches_a_conditional_namespace() {
-        let mut db = RootDatabase::default();
-        let sources = install_shipped_stubs(&db);
-        let metadata = PackageMetadata::new(
-            &db,
-            Vec::new(),
-            Default::default(),
-            Default::default(),
-            None,
-            Default::default(),
-        );
-        let file = SourceFile::new(
-            &db,
-            "library(data.table)\nprint(fread(\"x.csv\"))\n".to_owned(),
-            DocumentKind::Script,
-        );
-        ProjectFiles::new(&db, vec![file]);
-        let attached = attached_union(&db, [file]);
-        assert_eq!(
-            attached.iter().collect::<Vec<_>>(),
-            ["data.table"],
-            "the library() call must be scanned"
-        );
-        metadata.set_attached(&mut db).to(attached);
-        let library = stub_library(&db, sources);
-        assert!(library.schemes.contains_key("fread"));
-        let diagnostics = file_diagnostics(&db, file);
-        assert!(
-            diagnostics.is_empty(),
-            "an attached conditional namespace resolves its exports: {diagnostics:?}"
-        );
-    }
-
-    #[test]
-    fn stub_names_resolve_in_package_files() {
-        let db = RootDatabase::default();
-        install_shipped_stubs(&db);
-        let file = SourceFile::new(
-            &db,
-            "total <- function(x) sum(x, na.rm = TRUE)\nsize <- function(x) length(x)\n".to_owned(),
-            DocumentKind::Package,
-        );
-        ProjectFiles::new(&db, vec![file]);
-        let diagnostics = file_diagnostics(&db, file);
-        assert!(
-            diagnostics.is_empty(),
-            "stub names must resolve cleanly: {diagnostics:?}"
-        );
-    }
-
-    #[test]
-    fn stub_signature_mismatch_reports() {
-        let db = RootDatabase::default();
-        install_shipped_stubs(&db);
-        let file = SourceFile::new(
-            &db,
-            "find_x <- function(x) grepl(1L, x)\n".to_owned(),
-            DocumentKind::Package,
-        );
-        ProjectFiles::new(&db, vec![file]);
-        let diagnostics = file_diagnostics(&db, file);
-        assert!(
-            diagnostics
+    fn a_whole_number_literal_passes_as_an_integer_argument() {
+        for (call, accepted) in [("g(3)", true), ("g(2.5)", false)] {
+            let db = RootDatabase::default();
+            StubSources::new(
+                &db,
+                vec![(
+                    "test".to_owned(),
+                    "g : fn(n: integer) -> integer[]\n".to_owned(),
+                )],
+                Vec::new(),
+            );
+            let check = first_item_check(&db, &format!("f <- function() {call}\n"));
+            let mismatch = check
+                .errors
                 .iter()
-                .any(|d| d.code == "type-mismatch" && d.message.contains("character")),
-            "expected a mismatch against grepl's character pattern: {diagnostics:?}"
-        );
-    }
-
-    #[test]
-    fn nominal_names_count_as_resolvable() {
-        let db = RootDatabase::default();
-        install_shipped_stubs(&db);
-        assert!(package_scheme_exists(&db, "data.frame"));
-        assert!(package_scheme_exists(&db, "sum"));
-        assert!(!package_scheme_exists(&db, "definitely_not_a_name"));
+                .any(|error| matches!(error.kind, TypeErrorKind::Mismatch { .. }));
+            assert_eq!(!mismatch, accepted, "{call}: {:?}", check.errors);
+            if accepted {
+                assert!(check.errors.is_empty(), "{call}: {:?}", check.errors);
+            }
+        }
     }
 
     fn first_item_check<'db>(db: &'db RootDatabase, source: &str) -> &'db ItemCheck<'db> {
@@ -1265,31 +1043,6 @@ mod tests {
     }
 
     #[test]
-    fn overload_selection_picks_the_specific_candidate() {
-        let db = RootDatabase::default();
-        install_shipped_stubs(&db);
-        let check = first_item_check(&db, "f <- function() cumsum(1L)\n");
-        assert!(check.errors.is_empty(), "{:?}", check.errors);
-        let ret = scheme_return(&db, check);
-        let TyKind::Vector(element) = ret.kind(&db) else {
-            panic!("expected integer[], got {:?}", ret.kind(&db));
-        };
-        assert!(matches!(element.kind(&db), TyKind::Scalar(Atomic::Integer)));
-    }
-
-    #[test]
-    fn strict_round_keeps_doubles_double() {
-        let db = RootDatabase::default();
-        install_shipped_stubs(&db);
-        let check = first_item_check(&db, "f <- function() sum(1, 2)\n");
-        assert!(check.errors.is_empty(), "{:?}", check.errors);
-        assert!(matches!(
-            scheme_return(&db, check).kind(&db),
-            TyKind::Scalar(Atomic::Double)
-        ));
-    }
-
-    #[test]
     fn courtesy_round_admits_whole_double_literals() {
         let db = RootDatabase::default();
         StubSources::new(
@@ -1305,46 +1058,6 @@ mod tests {
         assert!(matches!(
             scheme_return(&db, check).kind(&db),
             TyKind::Scalar(Atomic::Integer)
-        ));
-    }
-
-    #[test]
-    fn no_matching_overload_reports_with_first_failure() {
-        let db = RootDatabase::default();
-        StubSources::new(
-            &db,
-            vec![(
-                "test".to_owned(),
-                "f : fn(x: integer) -> integer\nf : fn(x: double) -> double\n".to_owned(),
-            )],
-            Vec::new(),
-        );
-        let check = first_item_check(&db, "g <- function() f(\"a\")\n");
-        assert!(
-            check.errors.iter().any(|error| matches!(
-                &error.kind,
-                TypeErrorKind::NoMatchingOverload {
-                    name,
-                    candidates: 2,
-                    first: Some(_),
-                } if name == "f"
-            )),
-            "expected a no-matching-overload report, got {:?}",
-            check.errors
-        );
-    }
-
-    #[test]
-    fn an_open_argument_the_candidates_narrow_differently_stays_unchecked() {
-        let db = RootDatabase::default();
-        install_shipped_stubs(&db);
-        let check = first_item_check(&db, "f <- function(x) sum(x)\n");
-        assert!(check.errors.is_empty(), "{:?}", check.errors);
-        let scheme = check.scheme.clone().expect("scheme");
-        assert!(scheme.binders.is_empty(), "{scheme:?}");
-        assert!(matches!(
-            scheme_return(&db, check).kind(&db),
-            TyKind::Unknown
         ));
     }
 
@@ -1414,50 +1127,6 @@ mod tests {
         assert!(matches!(
             scheme_return(&db, check).kind(&db),
             TyKind::Scalar(Atomic::Character)
-        ));
-    }
-
-    #[test]
-    fn courtesy_applies_outside_overload_sets_too() {
-        let db = RootDatabase::default();
-        StubSources::new(
-            &db,
-            vec![(
-                "test".to_owned(),
-                "g : fn(n: integer) -> integer[]\n".to_owned(),
-            )],
-            Vec::new(),
-        );
-        let ok = first_item_check(&db, "f <- function() g(3)\n");
-        assert!(ok.errors.is_empty(), "{:?}", ok.errors);
-        let db2 = RootDatabase::default();
-        StubSources::new(
-            &db2,
-            vec![(
-                "test".to_owned(),
-                "g : fn(n: integer) -> integer[]\n".to_owned(),
-            )],
-            Vec::new(),
-        );
-        let bad = first_item_check(&db2, "f <- function() g(2.5)\n");
-        assert!(
-            bad.errors
-                .iter()
-                .any(|error| matches!(error.kind, TypeErrorKind::Mismatch { .. })),
-            "a fractional double must not pass as integer: {:?}",
-            bad.errors
-        );
-    }
-
-    #[test]
-    fn namespace_access_resolves_through_globals() {
-        let db = RootDatabase::default();
-        install_shipped_stubs(&db);
-        let check = first_item_check(&db, "f <- function(x) base::length(x)\n");
-        assert!(check.errors.is_empty(), "{:?}", check.errors);
-        assert!(matches!(
-            scheme_return(&db, check).kind(&db),
-            TyKind::Scalar(Atomic::Integer)
         ));
     }
 

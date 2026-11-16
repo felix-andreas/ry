@@ -257,7 +257,7 @@ fn built_in_classes_survive_collection_stress() {
     let _session = session();
     runtime()
         .heap
-        .update_policy(|policy| policy.stress = GcStress::EVERY_ALLOCATION);
+        .update_policy(|policy| policy.stress = GcStress::EveryAllocation);
     check_compact_sequences();
     check_deferred_strings();
     check_wrappers();

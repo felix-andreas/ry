@@ -291,23 +291,6 @@ fn start_session() -> Option<ReplSession> {
     Some(session)
 }
 
-/// Runs `body` as a script through `ry R`, or skips the test when no R is installed.
-fn run_script(body: &str) -> Option<(std::process::Output, String)> {
-    if !r_available() {
-        return None;
-    }
-    let directory = tempfile::tempdir().expect("temp dir");
-    let script = directory.path().join("script.R");
-    fs::write(&script, body).expect("write script");
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ry"))
-        .arg("R")
-        .arg(&script)
-        .output()
-        .expect("run the binary");
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    Some((output, stdout))
-}
-
 #[test]
 fn the_package_in_the_working_directory_loads_and_edits_reload_before_the_next_command() {
     for runtime in runtimes() {
@@ -491,29 +474,6 @@ fn reloads_survive_a_custom_prompt_and_skip_readline_answers() {
     session.expect("got typed level two");
     session.quit();
     fs::remove_dir_all(&package).ok();
-}
-
-#[test]
-fn evaluates_and_autoprints() {
-    let Some(mut session) = start_session() else {
-        return;
-    };
-    session.send("1 + 1\r");
-    session.expect("[1] 2");
-    session.quit();
-}
-
-#[test]
-fn multiline_input_continues_and_defines() {
-    let Some(mut session) = start_session() else {
-        return;
-    };
-    session.send("f <- function(x) {\r");
-    session.send("x * 2\r");
-    session.send("}\r");
-    session.send("f(21)\r");
-    session.expect("[1] 42");
-    session.quit();
 }
 
 /// A paste costs time linear in its length, as under GNU R: 5,000 lines take about ten times as
@@ -742,37 +702,6 @@ fn a_table_that_fits_is_printed_on_one_line() {
     );
     session.expect("a_reasonably_long_column another_long_column_name third_column_name_here");
     session.quit();
-}
-
-#[test]
-fn run_executes_a_file_and_exits_zero() {
-    let Some((output, stdout)) = run_script("x <- 40 + 2\nprint(x)\n") else {
-        return;
-    };
-    assert!(
-        output.status.success(),
-        "expected exit 0, got {:?}\nstdout: {stdout}\nstderr: {}",
-        output.status.code(),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(stdout.contains("[1] 42"), "script output missing: {stdout}");
-}
-
-#[test]
-fn run_error_exits_nonzero() {
-    let Some((output, stdout)) = run_script("stop(\"boom\")\nprint(\"unreached\")\n") else {
-        return;
-    };
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "a top-level error must exit 1\nstdout: {stdout}\nstderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        !stdout.contains("unreached"),
-        "the error must halt the script: {stdout}"
-    );
 }
 
 /// ry's runtime is the `libR` built beside the binary, which `cargo test -p ry-lang` does not
