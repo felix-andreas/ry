@@ -2557,6 +2557,7 @@ dependencies = [
  "clap",
  "libc",
  "png",
+ "rcmd",
  "serde",
  "serde_json",
  "similar",

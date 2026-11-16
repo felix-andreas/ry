@@ -134,6 +134,19 @@ fn second_engine_matches_gnu_r() {
     let second = engine_from_environment();
     let name = second.name();
     if name.starts_with("ry") {
+        if !workspace_ry_has_base_r() {
+            let message = "the workspace ry has no base R, so no case ran under it. Build one \
+                           with `cargo build -p libr -p rcmd && tools/base-r/build.sh target/base-r \
+                           target/debug/ry-rcmd target/debug/libR.so` (about 7 minutes, needs \
+                           gfortran), or set R_HOME to a GNU R installation";
+            match explicit {
+                true => panic!("{message}"),
+                false => {
+                    eprintln!("skipped: {message}");
+                    return;
+                }
+            }
+        }
         build_workspace_ry().unwrap_or_else(|error| panic!("{error}"));
     }
     let gnu_r = gnu_r_available().then(ProcessEngine::gnu_r);
@@ -226,6 +239,24 @@ fn second_engine_matches_gnu_r() {
         failures.len(),
         failures.join("\n")
     );
+}
+
+/// Whether the `ry` the oracle runs finds a base R, looked up as `ry` does: `R_HOME`, then
+/// `RY_BASE_R`, then a `base-r` tree beside the binary or one directory up. Checked before
+/// building, so a checkout without one (CI's fast job) skips instead of building libR for nothing.
+/// A binary `ORACLE_RY` names may embed its base R, so it is trusted.
+fn workspace_ry_has_base_r() -> bool {
+    let set = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    if set("ORACLE_RY").is_some() || set("R_HOME").is_some() {
+        return true;
+    }
+    if let Some(base) = set("RY_BASE_R") {
+        return rcmd::base::holds_base_r(Path::new(&base));
+    }
+    let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+    [target.join("debug/base-r"), target.join("base-r")]
+        .iter()
+        .any(|candidate| rcmd::base::is_complete(candidate))
 }
 
 /// Every entry in `known_failures.toml` names an existing case and engine, once.
