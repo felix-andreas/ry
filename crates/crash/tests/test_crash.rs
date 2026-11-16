@@ -31,6 +31,7 @@ fn child() {
             std::hint::black_box(recurse(0));
         }
         "bus" => bus_error(),
+        "named" => std::hint::black_box(a_named_faulting_function)(),
         "traceback" => {
             crash::set_traceback(fake_traceback);
             unsafe { std::ptr::write_volatile(std::ptr::null_mut::<u8>(), 1) }
@@ -57,6 +58,11 @@ unsafe extern "C" fn fake_traceback(emit: Emit, readable: Readable) {
 
 unsafe extern "C" fn faulting_traceback(_: Emit, _: Readable) {
     unsafe { std::ptr::write_volatile(std::ptr::null_mut::<u8>(), 1) };
+}
+
+#[inline(never)]
+fn a_named_faulting_function() {
+    unsafe { std::ptr::write_volatile(std::hint::black_box(std::ptr::null_mut::<u8>()), 1) }
 }
 
 fn bus_error() {
@@ -186,5 +192,18 @@ fn a_fault_while_printing_the_traceback_still_prints_the_native_stack() {
         crashed.stderr
     );
     assert!(crashed.stderr.contains("Native stack"));
+    assert_eq!(crashed.signal, Some(libc::SIGSEGV), "{}", crashed.stderr);
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn the_native_stack_names_functions_without_their_hash() {
+    let crashed = crash("named");
+    assert!(
+        crashed.stderr.contains("(test_crash::a_named_faulting_function+0x"),
+        "{}",
+        crashed.stderr
+    );
+    assert!(!crashed.stderr.contains("17h"), "{}", crashed.stderr);
     assert_eq!(crashed.signal, Some(libc::SIGSEGV), "{}", crashed.stderr);
 }

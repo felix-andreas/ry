@@ -327,3 +327,12 @@ Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and be
 
 - **What happened.** A terse rewrite of the decision log by agents that had not written it halved its size and dropped a load-bearing fact (a number behind a decision, a rejected alternative, a trap, a code pointer) from about 421 of 509 entries; an entry-by-entry comparison against the old text put them back. A rewrite of long source comments lost invariants and the reasons behind constants in about a dozen blocks while saving 20 KB of 3.26 MB.
 - **Rule.** Cut context cost by structure (area files, an index of headings, byte budgets, a comment lint that ratchets) and by deleting what is superseded, not by rewording dense notes. A rewording pass needs an entry-by-entry comparison against the original, which costs more than it saves.
+
+## Shipped binaries keep their symbol table, and crash reports name functions from it
+
+**Status:** built; the release size cost is unmeasured.
+
+- **Rule.** Release builds strip debug info only (`[profile.release] strip = "debuginfo"`, `strip --strip-debug` in `tools/layout/optimize.sh` after BOLT), so `.symtab` ships in `ry` and `libR`. Release uses legacy symbol mangling, like dev, because v0 names roughly double `.strtab`.
+- **Why.** `dladdr` sees only `.dynsym`, which names the few exported functions, so a stripped report attributed every internal frame to the nearest export, and a test user's crash report could not be read.
+- **Shape.** On Linux with glibc, `crash` maps each frame's file read-only in the signal handler (the executable through `/proc/self/exe`, since R's `setwd` breaks a relative `argv[0]`), scans `.symtab` for the `STT_FUNC` symbol holding the address, and demangles it with `rustc-demangle` without its hash, allocating nothing. macOS keeps `backtrace_symbols_fd`.
+- **Rejected.** Separate symbol files published as release assets: smaller archives, but every report needs an offline symbolization step with the matching build, which a user filing a report does not have. `optimize.sh` prints `.symtab` and `.strtab` sizes so the cost shows in each release build log.

@@ -12,3 +12,4 @@ path = "crash.rs"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+rustc-demangle = "0.1"

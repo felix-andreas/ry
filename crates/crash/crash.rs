@@ -85,6 +85,8 @@ mod unix {
         BANNER.get_or_init(|| Box::leak(banner.to_owned().into_boxed_str()));
         // The first call loads the unwinder's library, which allocates and takes locks.
         warm_up_native_stack();
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        symbols::remember_executable();
         open_probe();
         install_alternate_stack();
         // SAFETY: the structs are zeroed before the fields the kernel reads are set.
@@ -320,7 +322,21 @@ mod unix {
     #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
     fn warm_up_native_stack() {}
 
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    fn write_native_stack(out: &mut Out) {
+        let mut frames = [ptr::null_mut(); NATIVE_FRAMES];
+        out.text("\nNative stack, innermost first, starting in the crash handler (module(function+offset) [address]):\n");
+        // SAFETY: the buffer has room for the count it is told.
+        let count = unsafe { libc::backtrace(frames.as_mut_ptr(), NATIVE_FRAMES as libc::c_int) };
+        let mut files = symbols::Files::new();
+        for (index, frame) in frames.iter().take(count.max(0) as usize).enumerate() {
+            symbols::write_frame(out, &mut files, *frame as usize, index > 0);
+        }
+        out.flush();
+        files.close();
+    }
+
+    #[cfg(target_os = "macos")]
     fn write_native_stack(out: &mut Out) {
         let mut frames = [ptr::null_mut(); NATIVE_FRAMES];
         out.text("\nNative stack, innermost first, starting in the crash handler (module(symbol+offset) [address]):\n");
@@ -410,6 +426,272 @@ mod unix {
         fn flush(&mut self) {
             write_all(&self.buffer[..self.used]);
             self.used = 0;
+        }
+    }
+
+    impl std::fmt::Write for Out {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            self.text(text);
+            Ok(())
+        }
+    }
+
+    /// Function names for native frames, read from the `.symtab` of each frame's file.
+    /// `dladdr` sees only the dynamic symbols, which name the few exported functions, so it
+    /// would attribute an internal function to whichever export precedes it. The files are
+    /// mapped read-only for the report and unmapped after it; nothing is allocated.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    mod symbols {
+        use {
+            super::Out,
+            std::{
+                ffi::CStr,
+                fmt::Write,
+                mem, ptr,
+                sync::atomic::{AtomicUsize, Ordering},
+            },
+        };
+
+        const SHT_SYMTAB: u32 = 2;
+        const STT_FUNC: u8 = 2;
+        const ET_DYN: u16 = 3;
+        const PT_LOAD: u32 = 1;
+        const FILES: usize = 8;
+
+        /// The load base of the executable that installed the handler. `dladdr` names the
+        /// executable by `argv[0]`, which a relative path makes wrong once R changes the
+        /// working directory, so its file is opened through `/proc/self/exe` instead.
+        static EXECUTABLE_BASE: AtomicUsize = AtomicUsize::new(0);
+
+        pub(super) fn remember_executable() {
+            // SAFETY: the address is a function of this executable, and `info` is written by
+            // dladdr.
+            unsafe {
+                let mut info: libc::Dl_info = mem::zeroed();
+                if libc::dladdr(remember_executable as *const libc::c_void, &mut info) != 0 {
+                    EXECUTABLE_BASE.store(info.dli_fbase as usize, Ordering::SeqCst);
+                }
+            }
+        }
+
+        /// One mapped file and where its symbol table lies.
+        #[derive(Clone, Copy)]
+        struct File {
+            base: usize,
+            map: *const u8,
+            length: usize,
+            /// The offset of the symbol table and its symbol count, and the offset and length
+            /// of its string table; zero counts for a file without one.
+            symbols: (usize, usize),
+            strings: (usize, usize),
+            /// What a symbol's value adds to an address in the file to give a loaded address.
+            bias: usize,
+        }
+
+        pub(super) struct Files {
+            files: [Option<File>; FILES],
+        }
+
+        impl Files {
+            pub(super) fn new() -> Self {
+                Self { files: [None; FILES] }
+            }
+
+            pub(super) fn close(&mut self) {
+                for file in self.files.iter_mut().filter_map(Option::take) {
+                    // SAFETY: the region was mapped by `open` with this length.
+                    unsafe { libc::munmap(file.map as *mut libc::c_void, file.length) };
+                }
+            }
+        }
+
+        /// Writes `module(function+0xoffset) [0xaddress]` for the return address `address`.
+        pub(super) fn write_frame(out: &mut Out, files: &mut Files, address: usize, returned: bool) {
+            // A return address may already belong to the next function, so a frame that
+            // returns is looked up one byte before it.
+            let lookup = if returned { address.wrapping_sub(1) } else { address };
+            // SAFETY: dladdr writes `info`, whose name pointers stay valid while the object is
+            // loaded.
+            let mut info: libc::Dl_info = unsafe { mem::zeroed() };
+            if unsafe { libc::dladdr(lookup as *const libc::c_void, &mut info) } == 0
+                || info.dli_fname.is_null()
+            {
+                out.text("??? [0x");
+                out.hex(address as u64);
+                out.text("]\n");
+                return;
+            }
+            // SAFETY: a non-null `dli_fname` is a NUL-terminated string.
+            let module = unsafe { CStr::from_ptr(info.dli_fname) }.to_bytes();
+            out.bytes(module);
+            let base = info.dli_fbase as usize;
+            let found = lookup_file(files, base, info.dli_fname)
+                .and_then(|file| function_of(&file, lookup));
+            let symbol = found.or_else(|| {
+                // SAFETY: a non-null `dli_sname` is a NUL-terminated string.
+                (!info.dli_sname.is_null()).then(|| {
+                    (unsafe { CStr::from_ptr(info.dli_sname) }.to_bytes(), info.dli_saddr as usize)
+                })
+            });
+            match symbol {
+                Some((name, start)) => {
+                    out.text("(");
+                    write_name(out, name);
+                    out.text("+0x");
+                    out.hex(address.wrapping_sub(start) as u64);
+                    out.text(")");
+                }
+                None => {
+                    out.text("(+0x");
+                    out.hex(address.wrapping_sub(base) as u64);
+                    out.text(")");
+                }
+            }
+            out.text(" [0x");
+            out.hex(address as u64);
+            out.text("]\n");
+        }
+
+        fn write_name(out: &mut Out, name: &[u8]) {
+            match std::str::from_utf8(name).map(rustc_demangle::try_demangle) {
+                // The alternate form leaves out the hash.
+                Ok(Ok(demangled)) if write!(out, "{demangled:#}").is_ok() => {}
+                _ => out.bytes(name),
+            }
+        }
+
+        fn lookup_file(files: &mut Files, base: usize, name: *const libc::c_char) -> Option<File> {
+            let free = match files.files.iter().position(|file| file.is_none_or(|file| file.base == base)) {
+                Some(index) => index,
+                None => return None,
+            };
+            if let Some(file) = files.files[free] {
+                return Some(file);
+            }
+            let executable = EXECUTABLE_BASE.load(Ordering::SeqCst);
+            let path = if base == executable && executable != 0 { c"/proc/self/exe".as_ptr() } else { name };
+            let file = open(path, base)?;
+            files.files[free] = Some(file);
+            Some(file)
+        }
+
+        fn open(path: *const libc::c_char, base: usize) -> Option<File> {
+            // SAFETY: `path` is NUL-terminated, the stat buffer is written by fstat, and the
+            // mapping is read-only and private.
+            let (map, length) = unsafe {
+                let descriptor = libc::open(path, libc::O_RDONLY | libc::O_CLOEXEC);
+                if descriptor < 0 {
+                    return None;
+                }
+                let mut status: libc::stat = mem::zeroed();
+                let length = match libc::fstat(descriptor, &mut status) {
+                    0 => status.st_size as usize,
+                    _ => 0,
+                };
+                let map = match length {
+                    0 => libc::MAP_FAILED,
+                    _ => libc::mmap(ptr::null_mut(), length, libc::PROT_READ, libc::MAP_PRIVATE, descriptor, 0),
+                };
+                libc::close(descriptor);
+                if map == libc::MAP_FAILED {
+                    return None;
+                }
+                (map as *const u8, length)
+            };
+            let mut file = File { base, map, length, symbols: (0, 0), strings: (0, 0), bias: 0 };
+            // SAFETY: the mapping holds `length` readable bytes until `Files::close`.
+            let bytes = unsafe { std::slice::from_raw_parts(map, length) };
+            if let Some((symbols, strings, bias)) = layout(bytes, base) {
+                (file.symbols, file.strings, file.bias) = (symbols, strings, bias);
+            }
+            Some(file)
+        }
+
+        /// The symbol table, string table and load bias of a 64-bit little-endian ELF file.
+        fn layout(bytes: &[u8], base: usize) -> Option<((usize, usize), (usize, usize), usize)> {
+            if bytes.get(..6)? != b"\x7fELF\x02\x01" {
+                return None;
+            }
+            let kind = u16_at(bytes, 16)?;
+            let (program_headers, program_size, program_count) =
+                (u64_at(bytes, 32)? as usize, u16_at(bytes, 54)? as usize, u16_at(bytes, 56)? as usize);
+            let (section_headers, section_size, section_count) =
+                (u64_at(bytes, 40)? as usize, u16_at(bytes, 58)? as usize, u16_at(bytes, 60)? as usize);
+            // A shared object or position-independent executable is loaded at `base` less its
+            // first segment's page-aligned address; anything else is loaded where it says.
+            let bias = match kind {
+                ET_DYN => {
+                    let lowest = (0..program_count)
+                        .map(|index| program_headers + index * program_size)
+                        .filter(|&header| u32_at(bytes, header) == Some(PT_LOAD))
+                        .filter_map(|header| u64_at(bytes, header + 16))
+                        .min()
+                        .unwrap_or(0) as usize;
+                    base.wrapping_sub(lowest & !0xfff)
+                }
+                _ => 0,
+            };
+            for index in 0..section_count {
+                let header = section_headers + index * section_size;
+                if u32_at(bytes, header + 4)? != SHT_SYMTAB {
+                    continue;
+                }
+                let (offset, size, entry) =
+                    (u64_at(bytes, header + 24)? as usize, u64_at(bytes, header + 32)? as usize, u64_at(bytes, header + 56)? as usize);
+                let link = section_headers + u32_at(bytes, header + 40)? as usize * section_size;
+                let strings = (u64_at(bytes, link + 24)? as usize, u64_at(bytes, link + 32)? as usize);
+                if entry != 24 || offset.checked_add(size)? > bytes.len() || strings.0.checked_add(strings.1)? > bytes.len() {
+                    return None;
+                }
+                return Some(((offset, size / entry), strings, bias));
+            }
+            None
+        }
+
+        /// The name and loaded start of the function that holds `address`: the one whose
+        /// extent holds it, or else the closest one that starts before it.
+        fn function_of<'a>(file: &File, address: usize) -> Option<(&'a [u8], usize)> {
+            // SAFETY: the mapping holds `length` readable bytes until `Files::close`.
+            let bytes: &'a [u8] = unsafe { std::slice::from_raw_parts(file.map, file.length) };
+            let target = address.wrapping_sub(file.bias) as u64;
+            let (table, count) = file.symbols;
+            let mut best: Option<(u64, u32, bool)> = None;
+            for index in 0..count {
+                let entry = table + index * 24;
+                let Some(&info) = bytes.get(entry + 4) else { break };
+                let (Some(value), Some(size), Some(name)) =
+                    (u64_at(bytes, entry + 8), u64_at(bytes, entry + 16), u32_at(bytes, entry))
+                else {
+                    break;
+                };
+                if info & 0xf != STT_FUNC || value == 0 || value > target {
+                    continue;
+                }
+                let holds = target < value.saturating_add(size);
+                if match best {
+                    None => true,
+                    Some((start, _, best_holds)) => (holds && !best_holds) || (holds == best_holds && value > start),
+                } {
+                    best = Some((value, name, holds));
+                }
+            }
+            let (start, name, _) = best?;
+            let (strings, length) = file.strings;
+            let name = bytes.get(strings + name as usize..strings + length)?;
+            let name = &name[..name.iter().position(|&byte| byte == 0)?];
+            Some((name, (start as usize).wrapping_add(file.bias)))
+        }
+
+        fn u16_at(bytes: &[u8], at: usize) -> Option<u16> {
+            Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
+        }
+
+        fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
+            Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+        }
+
+        fn u64_at(bytes: &[u8], at: usize) -> Option<u64> {
+            Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
         }
     }
 }

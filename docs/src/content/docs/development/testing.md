@@ -525,7 +525,10 @@ released. A second battery drives random API sequences under collection stress a
 under GNU R, ry's tier 0 and ry's JIT, and under collection stress against ry unstressed, and every
 engine must print the same output, warnings and errors. The generator covers loops shaped for the
 JIT, closures, S3 dispatch, conditions and `on.exit`, environments, attributes, `NA` and overflow,
-and about one program in eight ends on a deliberate error. `cargo run -p oracle -- fuzz --seed N
+and element stores into a function's argument copy (`x[i, j] <- v`, `x[[i]] <- v` and `x[i] <- v`
+on matrices and vectors of every type, around the 64-element size at which GNU R's copy is a
+wrapper without storage), with the function called three times so its body runs both interpreted
+and compiled. About one program in eight ends on a deliberate error. `cargo run -p oracle -- fuzz --seed N
 --count K --engines ry-tier0,ry-jit,ry-gctorture` runs any range, prints each divergent program and
 its replay command, and `just fuzz-differential` and `just gc-torture` are the long runs.
 `crates/oracle/tests/test_gallery.rs` renders a seeded sample of the plot gallery under both
