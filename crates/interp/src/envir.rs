@@ -1927,9 +1927,12 @@ impl ElementCalls {
             None
         };
         let slots = match call.slot_frame() {
+            // The calls take the frame's `...` from its slot. A frame without the formal reads
+            // an enclosing function's `...`, or has none to read, which is an error.
             Some(frame)
                 if plain.is_some()
-                    && matches!(call.arg(1).kind(), SexpType::Closure | SexpType::Builtin) =>
+                    && matches!(call.arg(1).kind(), SexpType::Closure | SexpType::Builtin)
+                    && eval::slot_dots(frame).is_some() =>
             {
                 eval::slot_register(frame, index_symbol).map(|slot| (frame, slot))
             }

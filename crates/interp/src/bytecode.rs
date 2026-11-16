@@ -10205,13 +10205,11 @@ unsafe fn settled_argument(state: &Activation<'_, '_>, expression: Sexp) -> R<Op
     eval::settled_without_code(value)
 }
 
-/// The slot of `symbol` in a slot frame, found by name for instructions that carry no lookup
-/// cache. Slot tables are short, so the scan costs less than a hash lookup.
 /// Fills the fourth element of a code object's [`SLOTS`] table: for each constant that a
 /// `ForStep`, `SubAssign` or `SubAssignMatrix` names as its variable, that variable's slot, so
 /// those handlers find it with one load ([`slot_at`]); -1 elsewhere. The map ends at the last
-/// such constant, and code with none of these ops has none, because most code has no loop or element assignment and a map over
-/// every constant of every function costs megabytes. It is derived from the code, the names and
+/// such constant, and code with none of these ops has none, because most code has no loop or
+/// element assignment and a map over every constant of every function costs megabytes. It is derived from the code, the names and
 /// the constants, so the code image stores neither it nor anything it could disagree with.
 pub(crate) unsafe fn index_slots(words: Sexp, constants: Sexp) -> R<()> {
     let table = constants.element(SLOTS);
@@ -10265,6 +10263,8 @@ unsafe fn slot_at(state: &Activation<'_, '_>, constant: usize) -> Option<*mut Se
     (slot >= 0).then(|| state.header.add(1 + slot as usize))
 }
 
+/// The slot of `symbol` in a slot frame, found by name for instructions that carry no lookup
+/// cache. Slot tables are short, so the scan costs less than a hash lookup.
 unsafe fn slot_named(state: &Activation<'_, '_>, symbol: Sexp) -> Option<*mut Sexp> {
     slot_index(state, symbol).map(|position| state.header.add(1 + position))
 }
@@ -13040,12 +13040,15 @@ unsafe fn replacement_constants(setter_call: Sexp) -> bool {
     true
 }
 
-/// Calls the replacement closure `function` as `` `f<-`(`*tmp*`, ..., value = <promise>) ``
-/// from the frame with the environment `env`, or from a slot frame that has none (`NULL`),
-/// which the closure's frame finds below its own. `args` are the target, the constant
-/// arguments and the value; the target and the value go in the promises `complex_assign`
-/// passes, and neither counts a reference, so a replacement that updates its target in place
-/// leaves it unshared for the next update.
+/// Calls the replacement closure `function` as `` `f<-`(`*tmp*`, ..., value = <code>) `` from
+/// the frame with the environment `env`, or from a slot frame that has none (`NULL`), which
+/// the closure's frame finds below its own. `args` are the target, the constant arguments and
+/// the value. The target and the value go in forced promises that count them for as long as
+/// the closure's frame holds the promises: the closure reads both as shared, so `unclass(value)`
+/// copies, and a frame that outlives the call keeps the caller from updating the target in
+/// place. A frame that dies with the call releases the promises (`Heap::release_slots`), which
+/// leaves the target unshared for the next update. The call names the value's code and not its
+/// promise, which the call would otherwise hold past the frame.
 unsafe fn replace_with_closure(
     function: Sexp,
     setter_call: Sexp,
@@ -13055,11 +13058,10 @@ unsafe fn replace_with_closure(
 ) -> R<Sexp> {
     let heap = crate::heap();
     let last = args.len() - 1;
+    let value_code = whole.cdr().cdr().car();
     let object = eval::forced_promise(symbols().tmp, args[0])?;
-    heap.untrack_references(object);
     heap.root(object);
-    let value = eval::forced_promise(whole.cdr().cdr().car(), args[last])?;
-    heap.untrack_references(value);
+    let value = eval::forced_promise(value_code, args[last])?;
     heap.root(value);
     let mut arguments = eval::Args::new();
     let mut items: SmallVec<[(Sexp, Sexp); 6]> = smallvec![(nil(), setter_call.car())];
@@ -13067,7 +13069,7 @@ unsafe fn replace_with_closure(
     for (position, &constant) in args.iter().enumerate() {
         let (in_call, passed) = match position {
             0 => (symbols().tmp, object),
-            position if position == last => (value, value),
+            position if position == last => (value_code, value),
             _ => (constant, constant),
         };
         items.push((code.tag(), in_call));
