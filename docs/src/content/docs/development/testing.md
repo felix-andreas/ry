@@ -733,7 +733,7 @@ diff's ordering rules turns it red within a few hundred seeds.
 - per-file `# typing:` directives and suppression comments;
 - `NAMESPACE` validation, and project stub overrides including their loader-problem reports;
 - data-masked evaluation;
-- the formatter's `--check`, `--diff`, and in-place modes;
+- the formatter's `--check` mode, range formatting, and literate documents;
 - `ry run` and `ry R` without R: help output, usage errors, a missing script, and strict mode
   refusing a script before any R starts.
 
@@ -1336,3 +1336,38 @@ comment at the top of `tools/bench/harness.R` gives the full environment of each
 - A new phase or module gets a fixture suite before it relies on ad hoc unit tests.
 - Use the lightest fixture change that captures the failing shape.
 - Change a fixture expectation deliberately, never as a side effect.
+
+### What earns a test its place
+
+A test must pin a contract the docs state or a bug that once happened. The suite is judged by the
+bugs it can catch, not by its size, so a test that cannot fail for a plausible bug is deleted
+rather than kept for safety.
+
+Keep:
+
+- fixture suites, oracle cases, scenarios, simulations and every fuzz, property or differential
+  harness, with their pinned regression inputs;
+- a regression test for a real bug, even a narrow one, when no fixture or harness would catch the
+  bug coming back;
+- a test of behavior a user or another crate can observe, which no fixture, oracle case or harness
+  already covers.
+
+Cut:
+
+- a test that restates the implementation: it asserts a private data layout, an internal constant,
+  or the exact steps the code takes, and so breaks on a refactor that keeps the behavior;
+- trivia: a constructor returns what it was given, a getter reads a field, `Debug` or `Display` of
+  an internal type has a certain spelling, a default is its default;
+- a duplicate: the same behavior is already pinned by a fixture, a scenario, a harness, or another
+  unit test one line over, or by an oracle case that an automated run executes ry against. Neither
+  a plain `cargo test` nor CI compares ry's output with the recorded oracle cases: they replay the
+  recordings under GNU R, and the collection-stress pass compares ry only with itself, so an
+  oracle case alone does not cover a test of ry's behavior;
+- a test of the test harness, unless the harness's own failure would let real failures pass (a
+  filter that matches nothing, a duplicate case name);
+- a snapshot of incidental output that no contract promises;
+- a slow test that finds nothing a faster one would not.
+
+Fold before deleting. When a group of small unit tests covers one behavior, one fixture case, one
+oracle case or one table-driven test replaces them. The only coverage of a behavior is never
+dropped: it moves to the cheapest form that still catches the bug.

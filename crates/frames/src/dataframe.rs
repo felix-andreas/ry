@@ -256,8 +256,6 @@ unsafe fn describe(value: Sexp) -> String {
     }
 }
 
-// Expressions.
-
 /// An operand: an expression, or a single R value as a literal.
 unsafe fn operand(value: Sexp, call: Sexp) -> R<Expr> {
     if let Some(Object::Expr(named)) = object_of(value) {
@@ -459,8 +457,6 @@ unsafe fn do_format(call: &Call<'_>) -> R<Sexp> {
     };
     scalar_string(&text)
 }
-
-// Verbs.
 
 /// The plan a verb extends, and whether the result stays lazy.
 unsafe fn plan_of(value: Sexp, call: Sexp) -> R<(Plan, bool)> {

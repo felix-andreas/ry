@@ -489,63 +489,92 @@ fn filters_order_and_positions_select_rows() {
     assert_eq!(read(&mut result, "g"), strings(&["a", "b"]));
 }
 
+/// Row-wise operators, each on its own small frame, evaluated as a bare `j`, which gives a vector.
 #[test]
-fn a_bare_j_returns_a_vector() {
-    let mut table = sales();
-    let Output::Vector(series) = run(
-        &mut table,
-        Query {
-            select: Select::Value(column("w")),
+fn row_wise_operators_follow_r() {
+    let integers = || vec![("x", ints(&[i32::MAX, 7, -7])), ("y", ints(&[1, 2, 2]))];
+    let numbers_as_logicals = || vec![("a", ints(&[0, 2])), ("b", ints(&[2, 0]))];
+    let cases = [
+        (
+            "overflow is NA",
+            integers(),
+            binary(BinaryOp::Add, column("x"), column("y")),
+            ints(&[NA_INTEGER, 9, -5]),
+        ),
+        (
+            "`/` is double",
+            integers(),
+            binary(BinaryOp::Divide, column("x"), column("y")),
+            doubles(&[i32::MAX as f64, 3.5, -3.5]),
+        ),
+        (
+            "`%/%` floors",
+            integers(),
+            binary(BinaryOp::IntegerDivide, column("x"), column("y")),
+            ints(&[i32::MAX, 3, -4]),
+        ),
+        (
+            "`%%` takes the divisor's sign",
+            integers(),
+            binary(BinaryOp::Modulo, column("x"), column("y")),
+            ints(&[0, 1, 1]),
+        ),
+        (
+            "negation",
+            integers(),
+            Expr::Unary(UnaryOp::Negate, Box::new(column("y"))),
+            ints(&[-1, -2, -2]),
+        ),
+        (
+            "`!` of a number",
+            numbers_as_logicals(),
+            Expr::Unary(UnaryOp::Not, Box::new(column("a"))),
+            RVector::Logical(vec![1, 0]),
+        ),
+        (
+            "`&` of numbers",
+            numbers_as_logicals(),
+            binary(BinaryOp::And, column("a"), column("b")),
+            RVector::Logical(vec![0, 0]),
+        ),
+        (
+            "`|` of numbers",
+            numbers_as_logicals(),
+            binary(BinaryOp::Or, column("a"), column("b")),
+            RVector::Logical(vec![1, 1]),
+        ),
+        (
+            "a logical against a string compares its R spelling",
+            vec![
+                ("l", RVector::Logical(vec![1, 0])),
+                ("s", strings(&["TRUE", "TRUE"])),
+            ],
+            binary(BinaryOp::Equal, column("l"), column("s")),
+            RVector::Logical(vec![1, 0]),
+        ),
+        (
+            "an NA ifelse test gives NA",
+            vec![("t", RVector::Logical(vec![1, NA_INTEGER]))],
+            Expr::IfElse(
+                Box::new(column("t")),
+                Box::new(Expr::Double(1.0)),
+                Box::new(Expr::Double(2.0)),
+            ),
+            doubles(&[1.0, NA_REAL]),
+        ),
+    ];
+    for (what, columns, expr, expected) in cases {
+        let mut table = frame(columns);
+        let query = Query {
+            select: Select::Value(expr),
             ..Query::default()
-        },
-    ) else {
-        panic!("not a vector")
-    };
-    assert_eq!(
-        to_r(&series).ok(),
-        Some(doubles(&[1.0, 2.0, 3.0, 4.0, 5.0]))
-    );
-}
-
-#[test]
-fn integer_arithmetic_follows_r() {
-    let mut table = frame(vec![
-        ("x", ints(&[i32::MAX, 7, -7])),
-        ("y", ints(&[1, 2, 2])),
-    ]);
-    let select = |op| Query {
-        select: Select::Value(binary(op, column("x"), column("y"))),
-        ..Query::default()
-    };
-    let value = |table: &mut Table, query| match run(table, query) {
-        Output::Vector(series) => to_r(&series).unwrap_or_else(|error| panic!("{error}")),
-        other => panic!("{other:?}"),
-    };
-    assert_eq!(
-        value(&mut table, select(BinaryOp::Add)),
-        ints(&[NA_INTEGER, 9, -5]),
-        "overflow is NA"
-    );
-    assert_eq!(
-        value(&mut table, select(BinaryOp::Divide)),
-        doubles(&[i32::MAX as f64, 3.5, -3.5]),
-        "`/` is double"
-    );
-    assert_eq!(
-        value(&mut table, select(BinaryOp::IntegerDivide)),
-        ints(&[i32::MAX, 3, -4]),
-        "`%/%` floors"
-    );
-    assert_eq!(
-        value(&mut table, select(BinaryOp::Modulo)),
-        ints(&[0, 1, 1]),
-        "`%%` takes the divisor's sign"
-    );
-    let negated = Query {
-        select: Select::Value(Expr::Unary(UnaryOp::Negate, Box::new(column("y")))),
-        ..Query::default()
-    };
-    assert_eq!(value(&mut table, negated), ints(&[-1, -2, -2]));
+        };
+        let Output::Vector(series) = run(&mut table, query) else {
+            panic!("{what}: a bare j is not a vector")
+        };
+        let found = to_r(&series).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(Read(found), expected, "{what}");
+    }
 }
 
 #[test]
@@ -648,21 +677,6 @@ fn a_join_follows_the_rows_of_i_with_data_tables_column_layout() {
     );
 }
 
-#[test]
-fn a_keyed_table_joins_on_its_key() {
-    let (mut x, mut i) = (join_x(), join_i());
-    x.set_key(&["id"]).unwrap_or_else(|error| panic!("{error}"));
-    let rows = join(&mut i, &[], true, Roll::None);
-    let mut result = run_table(
-        &mut x,
-        Query {
-            rows,
-            ..Query::default()
-        },
-    );
-    assert_eq!(read(&mut result, "id"), ints(&[2, 2, 1]));
-}
-
 fn prices() -> Table {
     let mut table = frame(vec![
         ("g", ints(&[1, 1, 1, 2])),
@@ -690,6 +704,8 @@ fn rolling_joins_match_data_table() {
         (Roll::Forward(None), [9.0, 3.0, 1.0, 9.0]),
         (Roll::Nearest, [5.0, 3.0, 1.0, 9.0]),
         (Roll::Backward(Some(2.0)), [5.0, NA_REAL, NA_REAL, 9.0]),
+        // 6 is more than 0.5 after 5, and an exact match is within any window.
+        (Roll::Backward(Some(0.5)), [NA_REAL, NA_REAL, NA_REAL, 9.0]),
     ];
     for (roll, expected) in cases {
         let (mut x, mut i) = (prices(), trades());
@@ -722,29 +738,6 @@ fn rolling_joins_match_data_table() {
             );
         }
     }
-}
-
-#[test]
-fn a_tight_roll_window_misses() {
-    let (mut x, mut i) = (prices(), trades());
-    let rows = join(
-        &mut i,
-        &[("g", "g"), ("t", "t")],
-        false,
-        Roll::Backward(Some(0.5)),
-    );
-    let mut result = run_table(
-        &mut x,
-        Query {
-            rows,
-            ..Query::default()
-        },
-    );
-    let RVector::Double(found) = get(&mut result, "price") else {
-        panic!("not double")
-    };
-    assert!(is_na_real(found[0]), "6 is more than 0.5 after 5");
-    assert_eq!(found[3], 9.0, "an exact match is within any window");
 }
 
 #[test]
@@ -1136,20 +1129,6 @@ fn reordering_positions_drop_the_key() {
 }
 
 #[test]
-fn logical_operators_treat_numbers_as_r_does() {
-    let mut x = frame(vec![("a", ints(&[0, 2])), ("b", ints(&[2, 0]))]);
-    let select = Select::Columns(vec![
-        named("n", Expr::Unary(UnaryOp::Not, Box::new(column("a")))),
-        named("both", binary(BinaryOp::And, column("a"), column("b"))),
-        named("either", binary(BinaryOp::Or, column("a"), column("b"))),
-    ]);
-    let mut result = run_table(&mut x, query(Rows::All, select));
-    assert_eq!(read(&mut result, "n"), RVector::Logical(vec![1, 0]));
-    assert_eq!(read(&mut result, "both"), RVector::Logical(vec![0, 0]));
-    assert_eq!(read(&mut result, "either"), RVector::Logical(vec![1, 1]));
-}
-
-#[test]
 fn nan_compares_sorts_and_aggregates_as_in_r() {
     let mut x = frame(vec![("d", doubles(&[1.0, f64::NAN, -1.0, NA_REAL]))]);
     let positive = Rows::Filter(binary(BinaryOp::Greater, column("d"), Expr::Double(0.0)));
@@ -1193,20 +1172,6 @@ fn nan_compares_sorts_and_aggregates_as_in_r() {
     assert!(
         matches!(get(&mut extremes, "mn"), RVector::Double(values) if values[0].is_nan() && !is_na_real(values[0]))
     );
-}
-
-#[test]
-fn a_logical_compares_with_a_string_by_its_r_spelling() {
-    let mut x = frame(vec![
-        ("l", RVector::Logical(vec![1, 0])),
-        ("s", strings(&["TRUE", "TRUE"])),
-    ]);
-    let select = Select::Columns(vec![named(
-        "eq",
-        binary(BinaryOp::Equal, column("l"), column("s")),
-    )]);
-    let mut result = run_table(&mut x, query(Rows::All, select));
-    assert_eq!(read(&mut result, "eq"), RVector::Logical(vec![1, 0]));
 }
 
 #[test]
@@ -1362,21 +1327,6 @@ fn na_rm_drops_nan_and_an_emptied_mean_is_nan() {
         matches!(get(&mut result, "m"), RVector::Double(values) if values[0].is_nan() && !is_na_real(values[0])),
         "data.table gives NaN, not NA"
     );
-}
-
-#[test]
-fn an_na_ifelse_test_gives_na() {
-    let mut x = frame(vec![("t", RVector::Logical(vec![1, NA_INTEGER]))]);
-    let choice = Expr::IfElse(
-        Box::new(column("t")),
-        Box::new(Expr::Double(1.0)),
-        Box::new(Expr::Double(2.0)),
-    );
-    let mut result = run_table(
-        &mut x,
-        query(Rows::All, Select::Columns(vec![named("r", choice)])),
-    );
-    assert_eq!(read(&mut result, "r"), doubles(&[1.0, NA_REAL]));
 }
 
 #[test]
@@ -3621,7 +3571,7 @@ fn random_read_options(rng: &mut SplitMix64, bytes: &[u8]) -> io::ReadOptions {
     }
 }
 
-/// A read that needs no columns used to panic inside Polars, which cannot parse none. Input:
+/// A read that needs no columns counts the rows, although Polars cannot parse no columns. Input:
 /// `"a,b\n1,2\n3,4\n"` with `columns: Some(vec![])`.
 #[test]
 fn a_read_of_no_columns_counts_the_rows() {
@@ -3798,20 +3748,6 @@ fn a_factor_read_parses_codes_and_matches_reading_text_then_converting() {
     assert_eq!(levels.first().map(String::as_str), Some(""));
     assert_eq!(codes[0], 1);
     assert_eq!(codes[1], NA_INTEGER);
-}
-
-#[test]
-fn a_string_column_becomes_a_factor_with_sorted_levels() {
-    let column = column_of("k", strings(&["us", "eu", "NA", "us", "asia"]));
-    let factor = factor::from_strings(column.as_materialized_series())
-        .unwrap_or_else(|error| panic!("{error}"));
-    assert_eq!(
-        to_r(&factor).unwrap_or_else(|error| panic!("{error}")),
-        RVector::Factor {
-            codes: vec![3, 2, NA_INTEGER, 3, 1],
-            levels: vec!["asia".to_string(), "eu".to_string(), "us".to_string()],
-        }
-    );
 }
 
 #[test]
@@ -4331,7 +4267,7 @@ fn dcast_spreads_sorted_values_into_sorted_columns() {
 }
 
 #[test]
-fn dcast_names_columns_as_r_spells_the_values() {
+fn dcast_names_and_orders_columns_as_r_spells_and_sorts_the_values() {
     let numbers = frame(vec![
         ("r", strings(&["a", "a"])),
         ("c", doubles(&[0.5, 1.0])),
@@ -4343,10 +4279,8 @@ fn dcast_names_columns_as_r_spells_the_values() {
         output_table(cast).schema().to_string(),
         "DataFrame{r: character[], 0.5: integer[], 1: integer[]}"
     );
-}
 
-#[test]
-fn dcast_orders_dates_and_puts_an_na_label_first() {
+    // Dates sort as dates, and an `NA` value of the column variable names the first column.
     let d = frame(vec![
         ("day", RVector::Date(vec![19725.0, 19724.0, 19725.0])),
         ("c", ints(&[2, NA_INTEGER, 1])),
@@ -4361,20 +4295,6 @@ fn dcast_orders_dates_and_puts_an_na_label_first() {
     assert_eq!(get(&mut wide, "day"), RVector::Date(vec![19724.0, 19725.0]));
     assert_eq!(Read(get(&mut wide, "NA")), doubles(&[2.5, NA_REAL]));
     assert_eq!(Read(get(&mut wide, "2")), doubles(&[NA_REAL, 1.5]));
-}
-
-#[test]
-fn nafill_fills_nan_like_na() {
-    let gaps = column_of("x", doubles(&[f64::NAN, 1.0, f64::NAN]));
-    let filled = |fill| ops::nafill(&gaps, fill).unwrap_or_else(|error| panic!("{error}"));
-    assert_eq!(
-        Read(vector(&filled(ops::Fill::Forward))),
-        doubles(&[NA_REAL, 1.0, 1.0])
-    );
-    assert_eq!(
-        Read(vector(&filled(ops::Fill::Value(0.0)))),
-        doubles(&[0.0, 1.0, 0.0])
-    );
 }
 
 #[test]
@@ -4454,6 +4374,17 @@ fn the_vector_helpers_follow_data_table() {
         doubles(&[0.0, 1.0, 0.0, 3.0, 0.0])
     );
     assert!(ops::nafill(&column_of("s", strings(&["a"])), ops::Fill::Forward).is_err());
+    // `NaN` is a gap like `NA`, and a leading one stays missing as `NA`.
+    let nan_gaps = column_of("x", doubles(&[f64::NAN, 1.0, f64::NAN]));
+    let filled = |fill| ops::nafill(&nan_gaps, fill).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        Read(vector(&filled(ops::Fill::Forward))),
+        doubles(&[NA_REAL, 1.0, 1.0])
+    );
+    assert_eq!(
+        Read(vector(&filled(ops::Fill::Value(0.0)))),
+        doubles(&[0.0, 1.0, 0.0])
+    );
 
     let values = column_of("x", doubles(&[1.0, 5.0, NA_REAL, 10.0]));
     let inside = ops::between(&values, 2.0, 10.0, true).unwrap_or_else(|error| panic!("{error}"));
@@ -4511,10 +4442,7 @@ fn unique_keeps_the_first_row_of_each_combination() {
     let mut unique = ops::unique_rows(&d, &["r"]).unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(get(&mut unique, "r"), strings(&["b", "a"]));
     assert_eq!(get(&mut unique, "c"), strings(&["y", "x"]));
-}
 
-#[test]
-fn unique_on_keys_too_wide_to_pack_still_drops_duplicates() {
     // Two doubles spanning almost the whole range need more key bits than one packed integer
     // holds, so the rows take the general path.
     let d = frame(vec![
@@ -4527,10 +4455,7 @@ fn unique_on_keys_too_wide_to_pack_still_drops_duplicates() {
         ops::unique_count(&d, &[]).unwrap_or_else(|error| panic!("{error}")),
         3
     );
-}
 
-#[test]
-fn unique_on_a_short_table_with_a_sparse_key() {
     let d = frame(vec![("k", ints(&[0, 9_000_000, 0, 9_000_000, 4]))]);
     let mut unique = ops::unique_rows(&d, &["k"]).unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(get(&mut unique, "k"), ints(&[0, 9_000_000, 4]));

@@ -78,3 +78,13 @@ show(g("15.03.2024", format = "%d.%m.%Y"))
 show(g("15/03/2024", tryFormats = "%d/%m/%Y"))
 h <- function(s, fmt) as.Date(s, format = fmt)
 show(h("2024-03-15"))
+
+# strptime() recycles x, with its names, to a longer format.
+both <- c("%Y-%m-%d", "%Y/%m/%d")
+show(as.Date(c(a = "2024-03-15"), format = both))
+show(as.Date(c(a = "2024-03-15", b = "2024/03/16", c = "x"), format = c(both, both)))
+r <- strptime(c(a = "2024-03-15", "2024/03/16"), c(both, both, both), tz = "GMT")
+print(names(r))
+print(attributes(r$year))
+print(names(strptime(c(a = "2024-03-15", b = "2024-03-16"), "%Y-%m-%d", tz = "GMT")))
+print(names(strptime(character(0), both, tz = "GMT")))

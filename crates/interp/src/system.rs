@@ -2619,7 +2619,16 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
     if !utc {
         values::ints_mut(fields[10]).fill(NA_INTEGER);
     }
-    set_year_names(result, values::names(texts))?;
+    let mut names = values::names(texts);
+    if names != nil() && count > length(texts) {
+        // The names recycle with `x` under a longer `format`.
+        let recycled = alloc(SexpType::String, count)?;
+        for index in 0..count {
+            values::set_elt(recycled, index, names.element(index % length(texts)));
+        }
+        names = recycled;
+    }
+    set_year_names(result, names)?;
     for message in warnings {
         crate::conditions::warning(message)?;
     }

@@ -61,13 +61,11 @@ impl Encoding {
     }
 }
 
-/// The intern table, open-addressed with linear probing over one dense array of 8-byte slots.
-///
-/// A slot packs a string's address and a tag of its hash, so a probe reads one cache line and
-/// dereferences only a string whose tag matches. A lookup that finds its string costs two
-/// dependent memory reads (the slot and the string), and one that misses costs one, however
-/// many strings are live. A chained or control-byte table would add a third read, which in a
-/// table of millions of strings is a cache miss on every call to `mk_char`.
+/// The intern table, open-addressed with linear probing over one dense array of 8-byte slots. A
+/// slot packs a string's address and a tag of its hash, so a probe reads one cache line and
+/// dereferences only a string whose tag matches: a hit costs two dependent reads and a miss one,
+/// however many strings are live, where a chained or control-byte table would add a third read, a
+/// cache miss on every `mk_char` in a table of millions of strings.
 pub(crate) struct StringTable {
     /// A power-of-two count of slots: 0 for empty, [`TOMBSTONE`] for a removed entry, and
     /// otherwise a string's address over 8 in the low [`ADDRESS_BITS`] with the low
@@ -116,9 +114,9 @@ const SEED_HIGH: u64 = 0x1319_8A2E_0370_7344;
 const ONES: u64 = 0x0101_0101_0101_0101;
 const HIGHS: u64 = 0x8080_8080_8080_8080;
 
-/// Reads the bytes once, a word at a time, for the NUL test, the ASCII test and the hash
-/// together. Re-interning a string that is already in the table costs little more than this pass
-/// and one probe, so the three used to be separate passes and are now one.
+/// Reads the bytes once, a word at a time, for the NUL test, the ASCII test and the hash together:
+/// re-interning a string that is already in the table costs little more than this pass and one
+/// probe, so separate passes would dominate it.
 #[inline]
 pub(crate) fn scan(bytes: &[u8]) -> Scan {
     let length = bytes.len();

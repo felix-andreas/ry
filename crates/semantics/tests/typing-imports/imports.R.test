@@ -258,6 +258,27 @@ load <- function(path) fread(path)
 load: <T> fn(path: T) -> Unknown
 23..28 warning[unresolved] I could not resolve `fread` in this package, its imports, or builtins.
 
+#---- manifest_only_and_qualified_only_names_stay_dark_until_activated
+# `alloc.col` is a data.table export with no typed declaration, and `parallel` is
+# reachable bare only once something activates it.
+grow <- function(x) alloc.col(x)
+spread <- function(xs) mclapply(xs, length)
+#++++
+grow: <T> fn(x: T) -> Unknown
+spread: <T> fn(xs: T) -> Unknown
+153..162 warning[unresolved] I could not resolve `alloc.col` in this package, its imports, or builtins.
+189..197 warning[unresolved] I could not resolve `mclapply` in this package, its imports, or builtins. Did you mean `lapply`?
+
+#---- activation_reaches_manifest_only_and_qualified_only_names
+#description Imports: data.table
+library(parallel)
+grow <- function(x) alloc.col(x)
+spread <- function(xs) mclapply(xs, length)
+#++++
+Any
+grow: <T> fn(x: T) -> Unknown
+spread: fn(xs: Unknown) -> Unknown
+
 #---- library_call_activates_the_stub
 library(data.table)
 load <- function(path) fread(path)

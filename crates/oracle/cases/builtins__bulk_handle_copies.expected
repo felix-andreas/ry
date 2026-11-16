@@ -1,0 +1,229 @@
+[stdout]
+|  chr [1:8] "p" "q" NA "r" "p" "q" NA "r"
+| NULL 
+|  Named chr [1:12] "x" NA "" "long string here" "p" "q" NA "r" "x" NA "" ...
+|  - attr(*, "names")= chr [1:12] "a" "b" "c" "d" ...
+| list(names = c("a", "b", "c", "d", "", "", "", "", "a", "b",  "c", "d")) 
+|  chr [1:6] "p" "q" NA "r" "z" NA
+| NULL 
+|  chr [1:6] "p" "q" NA "r" "1" "TRUE"
+| NULL 
+| List of 14
+|  $ : int 1
+|  $ : chr "two"
+|  $ : NULL
+|  $ : num [1:2] 3 4
+|  $ :List of 1
+|   ..$ : num 5
+|  $ : symbol sym
+|  $ :function (x)  
+|  $ : int 1
+|  $ : chr "two"
+|  $ : NULL
+|  $ : num [1:2] 3 4
+|  $ :List of 1
+|   ..$ : num 5
+|  $ : symbol sym
+|  $ :function (x)  
+| NULL 
+| List of 12
+|  $  : int 1
+|  $  : chr "two"
+|  $  : NULL
+|  $  : num [1:2] 3 4
+|  $  :List of 1
+|   ..$ : num 5
+|  $  : symbol sym
+|  $  :function (x)  
+|  $ a: num 1
+|  $  : chr "p"
+|  $  : chr "q"
+|  $  : chr NA
+|  $  : chr "r"
+| list(names = c("", "", "", "", "", "", "", "a", "", "", "", "" )) 
+|   expression(a + b, f(x), 1) ...
+| NULL 
+|   expression(a + b, f(x), 1) ...
+| NULL 
+|  chr [1:8] "p" "q" NA "r" "p" "q" NA "r"
+| NULL 
+|  Named chr [1:13] "x" NA "" "long string here" "p" "q" NA "r" "deep" "p" ...
+|  - attr(*, "names")= chr [1:13] "a" "b" "c" "d" ...
+| list(names = c("a", "b", "c", "d", "x1", "x2", "x3", "x4", "y",  "", "", "", "")) 
+|  chr [1:6] "p" "q" NA "r" "1" "2"
+| NULL 
+| List of 14
+|  $ : int 1
+|  $ : chr "two"
+|  $ : NULL
+|  $ : num [1:2] 3 4
+|  $ :List of 1
+|   ..$ : num 5
+|  $ : symbol sym
+|  $ :function (x)  
+|  $ : int 1
+|  $ : chr "two"
+|  $ : NULL
+|  $ : num [1:2] 3 4
+|  $ :List of 1
+|   ..$ : num 5
+|  $ : symbol sym
+|  $ :function (x)  
+| NULL 
+|  chr [1:12] "p" "q" NA "r" "p" "q" NA "r" "p" "q" NA "r"
+| NULL 
+|  Named chr [1:8] "x" NA "" "long string here" "x" NA "" "long string here"
+|  - attr(*, "names")= chr [1:8] "a" "b" "c" "d" ...
+| list(names = c("a", "b", "c", "d", "a", "b", "c", "d")) 
+|  chr [1:10] "p" "q" NA "r" "p" "q" NA "r" "p" "q"
+| NULL 
+|  chr [1:2] "p" "q"
+| NULL 
+|  chr [1:8] "p" "p" "q" "q" NA NA "r" "r"
+| NULL 
+|  chr [1:6] "q" "q" NA "r" "r" "r"
+| NULL 
+|  chr(0) 
+| NULL 
+| List of 14
+|  $ : int 1
+|  $ : chr "two"
+|  $ : NULL
+|  $ : num [1:2] 3 4
+|  $ :List of 1
+|   ..$ : num 5
+|  $ : symbol sym
+|  $ :function (x)  
+|  $ : int 1
+|  $ : chr "two"
+|  $ : NULL
+|  $ : num [1:2] 3 4
+|  $ :List of 1
+|   ..$ : num 5
+|  $ : symbol sym
+|  $ :function (x)  
+| NULL 
+| List of 3
+|  $ : int 1
+|  $ : chr "two"
+|  $ : NULL
+| NULL 
+|   expression(a + b, f(x), 1) ...
+| NULL 
+|  cplx [1:9] 1+2i NA 0-3i ...
+| NULL 
+|  raw [1:8] 01 ff 00 01 ...
+| NULL 
+|  chr [1:8] "p" "q" NA "r" "p" "q" NA "r"
+| NULL 
+| List of 14
+|  $ : int 1
+|  $ : chr "two"
+|  $ : NULL
+|  $ : num [1:2] 3 4
+|  $ :List of 1
+|   ..$ : num 5
+|  $ : symbol sym
+|  $ :function (x)  
+|  $ : int 1
+|  $ : chr "two"
+|  $ : NULL
+|  $ : num [1:2] 3 4
+|  $ :List of 1
+|   ..$ : num 5
+|  $ : symbol sym
+|  $ :function (x)  
+| NULL 
+|  chr [1:9] "p" "q" NA "r" "p" "q" NA "r" "p"
+| NULL 
+|  raw [1:7] 01 02 03 01 ...
+| NULL 
+|  cplx [1:5] 0+1i 2+0i 0+1i ...
+| NULL 
+|  Factor w/ 2 levels "u","v": 1 2 NA 1 2 NA
+| list(class = "factor", levels = c("u", "v")) 
+|  chr [1:10] "1" "2" "3" "4" "5" "1" "2" "3" "4" "5"
+| NULL 
+|  chr [1:7] "1" "2" "3" "4" "5" "1.5" NA
+| NULL 
+| [[1]]
+| [1] 1 2 3
+| 
+| [[2]]
+| [1] "s"
+| 
+| [[1]]
+| [1]  1 99  3
+| 
+| [[2]]
+| [1] 1 2 3
+| 
+| [[1]]
+| [1] 1 2 3
+| 
+| [[2]]
+| [1] -1  2  3
+| 
+| [1] 100000 150000 100001 250000
+| [1] TRUE
+| [1] TRUE
+| [1] "id00001" "id50000" "id00001" "id50000" "id00001" "id50000" "end"    
+| [1]     40000     40000 800040000 800040000     80000
+|  chr [1:6] "r" "p" "p" NA NA "q"
+| NULL 
+|  Named chr [1:4] NA NA NA "x"
+|  - attr(*, "names")= chr [1:4] "b" "b" NA "a"
+| list(names = c("b", "b", NA, "a")) 
+| List of 4
+|  $ :function (x)  
+|  $ : int 1
+|  $ : NULL
+|  $ : NULL
+| NULL 
+|   expression(1, a + b, NULL)
+| NULL 
+|  chr [1:3] "p" NA "r"
+| NULL 
+| List of 4
+|  $ : int 1
+|  $ : NULL
+|  $ :List of 1
+|   ..$ : num 5
+|  $ :function (x)  
+| NULL 
+|  chr [1:3] NA NA NA
+| NULL 
+|  Named chr [1:8] "x" "x" NA NA "" "" "long string here" "long string here"
+|  - attr(*, "names")= chr [1:8] "a" "a" "b" "b" ...
+| list(names = c("a", "a", "b", "b", "c", "c", "d", "d")) 
+| List of 5
+|  $ : int 1
+|  $ : int 1
+|  $ : chr "two"
+|  $ : chr "two"
+|  $ : NULL
+| NULL 
+|   expression(a + b, a + b, 1)
+| NULL 
+|  Named chr [1:16] "x" "x" NA NA "" "" "long string here" "long string here" ...
+|  - attr(*, "names")= chr [1:16] "a" "a" "b" "b" ...
+| list(names = c("a", "a", "b", "b", "c", "c", "d", "d", "a", "a",  "b", "b", "c", "c", "d", "d")) 
+| List of 3
+|  $ :function (x)  
+|  $ : symbol sym
+|  $ :List of 1
+|   ..$ : num 5
+| NULL 
+|  chr [1:3] "id00001" "id00002" "id00003"
+| NULL 
+|  chr [1:2] "id49999" "id50000"
+| NULL 
+|  [1] "id50000" "id49999" "id49998" "id49997" "id49996" "id49995" "id49994"
+|  [8] "id49993" "id49992" "id49991" "id49990" NA        NA       
+| [1]     40000 800039999         1         1         1         1
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| c(40000, 800039999, 1, 1, 1, 1)

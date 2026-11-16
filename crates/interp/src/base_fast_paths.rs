@@ -3117,6 +3117,9 @@ unsafe fn do_pmax(call: &Call<'_>) -> R<Sexp> {
 /// call of the internal; here the check is a loop and the copy is [`most_attributes_from`].
 /// Fractional recycling declines, so its warning comes from the body's internal call.
 unsafe fn parallel_extreme(call: &Call<'_>, internal: BuiltinFn) -> R<Sexp> {
+    if !fast_paths_enabled() {
+        return decline();
+    }
     let frame = ClosureFrame::of(call);
     let Some(items) = dots(frame)? else {
         return decline();
@@ -3260,6 +3263,9 @@ unsafe fn given_without_code(frame: ClosureFrame, symbol: Sexp) -> R<Option<Sexp
 /// no format matches, the call declines, so `optional` and the error are the body's. `...` is
 /// never forced, as the body never forces it.
 unsafe fn do_as_date_character(call: &Call<'_>) -> R<Sexp> {
+    if !fast_paths_enabled() {
+        return decline();
+    }
     let frame = ClosureFrame::of(call);
     let symbols = symbols();
     let Some(x) = given_without_code(frame, symbols.x)? else {

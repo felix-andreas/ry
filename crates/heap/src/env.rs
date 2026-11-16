@@ -930,15 +930,12 @@ impl Frame {
     }
 }
 
-/// A large frame's lookup index: an open-addressing table with linear probing over the frame's
-/// slot positions. Each entry packs the upper half of the symbol's hash above its position plus
-/// one, so zero marks an empty entry, a probe that meets another symbol mostly fails on the
-/// packed hash without loading that binding, and growing or deleting rehashes from the entries
-/// alone. The table is at most half full, so a probe for a symbol the frame does not bind,
-/// which is what most lookups through a namespace ask, ends after about one entry.
-///
-/// One allocation holds the capacity and the count ahead of the entries, so the frame keeps a
-/// single thin pointer to it.
+/// A large frame's lookup index: an open-addressing table with linear probing over the frame's slot
+/// positions. An entry packs the symbol hash's upper half above its position plus one, so zero is
+/// empty, a probe meeting another symbol mostly fails without loading that binding, and growing or
+/// deleting rehashes from the entries alone. At most half full, so a probe for an unbound symbol
+/// (most lookups through a namespace) ends after about one entry. One allocation holds the capacity
+/// and count ahead of the entries, so the frame keeps one thin pointer.
 struct SlotIndex {
     header: NonNull<u64>,
 }
@@ -1194,7 +1191,8 @@ impl HashTable {
     fn count_transient(&mut self, hash: u32) {
         self.count += 1;
         if self.count as f64 > self.heads.len() as f64 * 0.85 {
-            // The regrown count leaves the transient out, which is where its removal would leave it.
+            // The regrown count leaves the transient out, which is where its removal would leave
+            // it.
             self.grow();
         } else if self.heads[hash as usize % self.heads.len()] == EMPTY_CHAIN {
             self.count -= 1;

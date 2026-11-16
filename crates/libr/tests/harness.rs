@@ -454,8 +454,6 @@ impl R<'_> {
     }
 }
 
-// Building packages.
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Headers {
     Ry,

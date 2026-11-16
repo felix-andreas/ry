@@ -1,36 +1,28 @@
-//! Replaces a record or tag that never leaves its function with the values of its fields.
-//! `invoice <- price_line(order)` followed by `invoice$gross`, with `price_line` inlined, would
-//! otherwise allocate two boxes per call only to read fields back out of them. So would
-//! `match (Str.to_i64(text)) { :Ok(n) => ..., :Err(_) => ... }`, which builds `:Ok(n)` on one
-//! branch only to take it apart after the branches join.
+//! Replaces a record or tag that never leaves its function with the values of its fields, so
+//! `invoice <- price_line(order); invoice$gross` with `price_line` inlined allocates no box, and
+//! neither does `match (Str.to_i64(text)) { :Ok(n) => ..., :Err(_) => ... }`, which would build
+//! `:Ok(n)` on one branch only to take it apart after the join.
 //!
-//! The IR's locals are variables, so a variable that holds a box becomes a group of variables:
-//! one for the box's shape, and one for each field some instruction reads. Building the box
-//! assigns them, an assignment between two such variables copies them, and a read of the shape
-//! or of a field reads them. No box exists, and because every assignment of the old variable
-//! assigns the new ones at the same place, a read sees the same value on every path, including
-//! around a loop and after a join of branches that built different shapes.
+//! The IR's locals are variables, so a variable holding a box becomes a group of variables: one for
+//! the shape and one for each field some instruction reads. Building the box assigns them, a copy
+//! copies them, and a shape or field read reads them. Every assignment of the old variable assigns
+//! the new ones at the same place, so a read sees the same value on every path, including around a
+//! loop and after a join of branches that built different shapes. A tag without a payload is one
+//! static box per shape, which nothing allocates, but its variable becomes its shape all the same,
+//! so a test compares a number instead of loading the shape out of the box.
 //!
-//! A tag without a payload is one static box per shape, which nothing allocates, but a variable
-//! that holds one becomes its shape all the same, so a test of it compares a number instead of
-//! loading the shape out of the box.
+//! Variables copied into each other form a group, replaced as a whole or not at all. A group keeps
+//! its boxes when any variable is assigned by anything but a construction, a copy or a tag without
+//! a payload, or used by anything but a shape or field read or a copy within the group (as an
+//! argument, a list item, another box's field or the result). A field only one shape has is read
+//! from a variable the other shapes do not assign. Such a read never runs for those shapes, but the
+//! reference counts treat the variable as live, which is sound because a local starts at zero and
+//! a zero string, list or box counts as nothing.
 //!
-//! Variables that are copied into each other form a group, which is replaced as a whole or not
-//! at all. A group keeps its boxes when any of its variables is assigned by anything but a
-//! construction, a copy or a tag without a payload, or is used by anything but a read of its
-//! shape or of a field or a copy within the group: as an argument, a list item, a field of
-//! another box or the function's result.
-//!
-//! A field that only one shape of a tag has is read from a variable that the constructions of
-//! the other shapes do not assign. Such a read never runs for those shapes, but the reference
-//! counts treat the variable as live, which is sound because a local starts out as zero and a
-//! zero string, list or box counts as nothing.
-//!
-//! The list `Str.split_on` builds gets the same treatment when its items are only read at
-//! constant positions, as in `parts <- Str.split_on(row, ","); parts[[2]]`
-//! ([`replace_split_lists`]). Its variables are the string, the number of pieces, and where
-//! each piece that is read starts and ends, so a read cuts its piece out of the string and no
-//! list or unread piece is ever allocated.
+//! [`replace_split_lists`] does the same for the list `Str.split_on` builds when its items are read
+//! only at constant positions (`parts <- Str.split_on(row, ","); parts[[2]]`): the variables are
+//! the string, the piece count and each read piece's bounds, so no list or unread piece is
+//! allocated.
 
 use {
     crate::{
