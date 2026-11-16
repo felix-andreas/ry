@@ -1982,6 +1982,9 @@ impl<'a> Builder<'a> {
                 Op::GetVar | Op::Argument => Some(inst.operand(1)),
                 Op::SetVar => Some(inst.operand(0)),
                 Op::ForStep => Some(inst.operand(2)),
+                // `ComplexAssign` names its target only inside its call, but the compiler emits
+                // it only as the cold branch of a `SubAssign`, `SubAssignMatrix` or `Replace` of
+                // the same variable, which marks the slot modified.
                 Op::SubAssign | Op::SubAssignMatrix | Op::Replace => Some(inst.operand(1)),
                 _ => None,
             };

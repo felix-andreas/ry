@@ -1806,16 +1806,24 @@ pub unsafe fn dispatch_builtin(
     {
         return Ok(Some(value));
     }
+    let Some(object) = args.first() else {
+        return Ok(None);
+    };
+    let Some(found) = find_s3_method(generic, object.value, env, values::base_namespace())? else {
+        return Ok(None);
+    };
+    activity::count(Counter::S3Dispatches);
+    let mut promised = promised_args(call, args)?;
     // GNU R's `$` and `@` hand a method the name as a string that is also the code of its
-    // promise, so `substitute(name)` is `"abc"` for `x$abc`, not the symbol.
-    let mut named: SmallVec<[Arg; 3]> = args.iter().copied().collect();
-    if let Some(name) = named.get_mut(1)
-        && name.value.kind() == SexpType::String
+    // promise, so `substitute(name)` is `"abc"` for `x$abc`, not the symbol. Only a found
+    // method pays for that promise, because `self$field` on an object without one is common.
+    if let (Some(name), Some(&Arg { value, .. })) = (promised.get_mut(1), args.get(1))
+        && value.kind() == SexpType::String
     {
-        name.value = forced_promise(name.value, name.value)?;
+        name.value = forced_promise(value, value)?;
         crate::heap().root(name.value);
     }
-    internal_dispatch(generic, call, &named, env)
+    apply_internal_method(call, found, &promised, env).map(Some)
 }
 
 /// GNU R's `DispatchOrEval`, for a [`BuiltinDef::dispatch_or_eval`] special called with the
