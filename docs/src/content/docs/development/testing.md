@@ -729,10 +729,10 @@ diff's ordering rules turns it red within a few hundred seeds.
 - JSON Lines output;
 - the [exit-code contract](/reference/cli#exit-codes);
 - finding the configuration, and failing to;
-- per-file `# typing:` directives and suppression comments;
+- per-file `# typing:` directives;
 - `NAMESPACE` validation, and project stub overrides including their loader-problem reports;
 - data-masked evaluation;
-- the formatter's `--check`, `--diff`, and in-place modes;
+- the formatter's `--check` mode, range formatting, and literate documents;
 - `ry run` and `ry R` without R: help output, usage errors, a missing script, and strict mode
   refusing a script before any R starts.
 

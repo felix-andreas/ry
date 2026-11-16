@@ -42,7 +42,9 @@ fn an_edit_rechecks_the_edited_items_and_the_readers_whose_answers_change() {
     ];
     const RECURSIVE: &str =
         "count <- function(n) if (n > 0L) count(n - 1L) else 0L\nplain <- function() 1L\n";
-    let cases: &[(&str, &[&str], &[(&str, &[&str])])] = &[
+    /// The edited first file's text, and the items checked again after it.
+    type Step = (&'static str, &'static [&'static str]);
+    let cases: &[(&str, &[&str], &[Step])] = &[
         (
             "a body edit keeping the scheme",
             READERS,
