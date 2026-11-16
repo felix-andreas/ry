@@ -842,7 +842,7 @@ mod tests {
     }
 
     #[test]
-    fn all_fields() {
+    fn documented_keys_parse() {
         let config = parse(indoc! {r#"
             [format]
             indent-width = 4
@@ -850,10 +850,22 @@ mod tests {
 
             [lint]
             naming-style = "snake_case"
+            assignment-operator = "off"
+            boolean-shorthand = "error"
+            missing-comma = "off"
+
+            [check]
+            unused = false
         "#});
         assert_eq!(config.format.indent_width, 4);
         assert_eq!(config.format.line_ending, LineEnding::Auto);
         assert_eq!(config.lint.naming_style, Some(NameStyle::Snake));
+        assert_eq!(config.lint.assignment_operator, LintLevel::Off);
+        assert_eq!(config.lint.boolean_shorthand, LintLevel::Error);
+        assert_eq!(config.lint.trailing_comma, LintLevel::Default);
+        // An obsolete key that older configs carry is still accepted.
+        assert_eq!(config.lint.missing_comma, LintLevel::Off);
+        assert!(!config.check.unused);
     }
 
     #[test]
@@ -891,8 +903,13 @@ mod tests {
 
     #[test]
     fn unknown_keys_warn_but_load() {
-        let config = parse("strict = true\n[check]\ntyping = true\nstric = true\n");
-        assert_eq!(config.unknown_keys, ["strict", "check.stric"]);
+        let config = parse(
+            "strict = true\n[format]\nindent = 4\n[lint]\nstyle = \"x\"\n[check]\ntyping = true\nstric = true\n",
+        );
+        assert_eq!(
+            config.unknown_keys,
+            ["strict", "format.indent", "lint.style", "check.stric"]
+        );
         assert!(
             config.check.typing,
             "the known keys around an unknown one still apply"
@@ -921,16 +938,42 @@ mod tests {
     }
 
     #[test]
-    fn discover_walks_ancestors_from_a_file_target() {
+    fn discover_finds_the_nearest_config_above_the_target() {
         let directory = tempfile::tempdir().expect("temp dir");
         let root = directory.path();
-        fs::write(root.join(CONFIG_FILE_NAME), "[format]\nindent-width = 7\n")
-            .expect("write config");
-        let nested = root.join("a").join("b");
+        let project = root.join("project");
+        let nested = project.join("a").join("b");
+        let inner = project.join("inner");
         fs::create_dir_all(&nested).expect("create nested dirs");
+        fs::create_dir_all(&inner).expect("create the inner dir");
+        fs::write(
+            project.join(CONFIG_FILE_NAME),
+            "[format]\nindent-width = 7\n",
+        )
+        .expect("write the project config");
+        fs::write(inner.join(CONFIG_FILE_NAME), "[format]\nindent-width = 3\n")
+            .expect("write the inner config");
         fs::write(nested.join("script.R"), "x <- 1\n").expect("write script");
-        let config = Config::discover(nested.join("script.R")).expect("discover config");
-        assert_eq!(config.format.indent_width, 7);
+        fs::write(root.join("outside.R"), "x <- 1\n").expect("write outside script");
+
+        let indent_width = |target: PathBuf| {
+            Config::discover(target)
+                .expect("discover config")
+                .format
+                .indent_width
+        };
+        assert_eq!(indent_width(nested.join("script.R")), 7, "a file's ancestors");
+        assert_eq!(indent_width(inner), 3, "the nearest config wins");
+        assert_eq!(
+            Config::discover(root).expect("discover config"),
+            Config::default(),
+            "no config above the target"
+        );
+        assert_eq!(
+            Config::discover(project.join("..").join("outside.R")).expect("discover config"),
+            Config::default(),
+            "a `..` component leaves the project behind"
+        );
     }
 
     #[test]
