@@ -1,0 +1,144 @@
+[stdout]
+| [1] 1
+| [1] "b"
+| [1] NA
+| [1]  1 -2 NA
+| logical(0)
+| [1] 1
+| [1] "b"
+| [1] NA
+| [1]  1 -2 NA
+| logical(0)
+| [1] 1
+| [1] "b"
+| [1] NA
+| [1]  1 -2 NA
+| logical(0)
+| [1] "yes"
+| [1] "no"
+| [1] NA
+| [1] NA
+| [1] "yes"
+| [1] "no"
+| [1] "yes"
+| [1] "no"
+| [1] NA
+| [1] NA
+| [1] NA
+| a 
+| 1 
+|      [,1]
+| [1,]    2
+| error: invalid to change the storage mode of a factor 
+| [1] 1
+| attr(,"class")
+| [1] "flag"
+| [1] 1
+| logical(0)
+| [1] "cannot coerce type 'symbol' to vector of type 'logical'"
+| [1] "cannot coerce type 'builtin' to vector of type 'logical'"
+| An object of class "Truth"
+| [1] 1
+| [1] "later"
+| [1] 20772
+| [1] 1
+| [1] 2
+| [1] 1
+| [1] 1
+| error: replacement has length zero 
+| [1] NA
+| [[1]]
+| [1] 1
+| 
+| [[1]]
+| [1] 1
+| 
+| function (..., na.rm = FALSE)  .Primitive("sum")
+| function (x) 
+| x
+| [1] "srcref"
+| function(x) x + 1
+| [1] "attempt to replicate an object of type 'closure'"
+| sym
+| error: cannot set length of non-(vector or list) 
+| [1] 1
+| [1] 2
+| [1] NA
+| forced no 
+| [1] "no"
+| forced yes 
+| [1] "yes"
+| forced yes 
+| [1] "yes"
+| [1] 3
+| forced TRUE 
+| forced 1 
+| [1] 1
+| forced TRUE FALSE 
+| forced 1 
+| forced 2 
+| [1] 1 2
+| [1] 8
+| ifelse({
+|     warning("in test")
+|     TRUE
+| }, 1, 2)
+| [1] 1
+| [1] "in yes"
+| [1] "argument \"yes\" is missing, with no default"
+| [1] "argument \"no\" is missing, with no default"
+| [1] NA
+| [1] "argument \"test\" is missing, with no default"
+| [1] "ifelse(stop(\"in test\"), 1, 2)"
+| [1] 0 1 1
+|  [1] "local({"                                            
+|  [2] "eval.parent(substitute(eval(quote(expr), envir)))"  
+|  [3] "eval(expr, p)"                                      
+|  [4] "eval(expr, p)"                                      
+|  [5] "eval(quote({"                                       
+|  [6] "eval(quote({"                                       
+|  [7] "withCallingHandlers(tryCatch({"                     
+|  [8] "tryCatch({"                                         
+|  [9] "tryCatchList(expr, classes, parentenv, handlers)"   
+| [10] "tryCatchOne(expr, names, parentenv, handlers[[1L]])"
+| [11] "doTryCatch(return(expr), name, parentenv, handler)" 
+| [12] "withVisible(eval(expression, globalenv()))"         
+| [13] "eval(expression, globalenv())"                      
+| [14] "eval(expression, globalenv())"                      
+| [15] "ifelse(TRUE, list(depth()), 0)"                     
+| [16] "depth()"                                            
+| [1] "ifelse(TRUE, who(), \"no\")"
+| [1] 1
+| [1] 1
+| [1] "b missing"
+| [1] "b given"
+| [1] TRUE
+| [1] "n"
+| [1] "n"
+| $value
+| [1] 1
+| 
+| $visible
+| [1] TRUE
+| 
+| $value
+| [1] NA
+| 
+| $visible
+| [1] TRUE
+| 
+| $value
+| [1] 1
+| 
+| $visible
+| [1] TRUE
+| 
+| [1] "mine"
+| [1] "edited"
+[messages]
+[warnings]
+- 'x' is NULL so the result will be NULL (in rep(yes, length.out = len))
+[errors]
+[value]
+character
+| "edited"
