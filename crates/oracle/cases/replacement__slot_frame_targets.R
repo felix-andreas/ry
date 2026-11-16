@@ -412,3 +412,59 @@ matrix_errors <- function() {
   )
 }
 print(run(matrix_errors))
+
+# `x@name <- v`: the caller's object is left alone, the class is checked, an S3 object
+# dispatches, and a slot's name is never evaluated.
+at_shapes <- function(a, other) {
+  balance <- "tags"
+  a@balance <- 99
+  kept <- a
+  a@balance <- a@balance + 1
+  a@"tags" <- "quoted"
+  list(a@balance, kept@balance, a@tags, other@balance)
+}
+print(run(at_shapes, account, account))
+print(account@balance)
+at_errors <- function(a) {
+  list(
+    tryCatch({ a@balance <- "text"; "stored" }, error = function(e) conditionMessage(e)),
+    tryCatch({ a@nowhere <- 1; "stored" }, error = function(e) conditionMessage(e)),
+    tryCatch({ plain <- list(1); plain@balance <- 1; "stored" }, error = function(e) conditionMessage(e)),
+    tryCatch({ unbound_target@balance <- 1; "stored" }, error = function(e) conditionMessage(e))
+  )
+}
+print(run(at_errors, account))
+at_data <- function() {
+  setClass("Tagged", contains = "numeric", representation(tag = "character"))
+  t <- new("Tagged", c(1, 2), tag = "a")
+  t@tag <- "b"
+  t@.Data <- c(3, 4, 5)
+  list(t@tag, length(t), is(t, "Tagged"))
+}
+print(run(at_data))
+at_s3 <- function() {
+  `@<-.recorded` <- function(object, name, value) {
+    cat("S3 @<-", name, "\n")
+    attr(object, name) <- value
+    object
+  }
+  r <- structure(list(), class = "recorded")
+  r@field <- 3
+  attr(r, "field")
+}
+print(run(at_s3))
+at_missing <- function(a, value) {
+  tryCatch({ a@balance <- value; "stored" }, error = function(e) conditionMessage(e))
+}
+print(run(at_missing, account))
+at_global <- function() {
+  account@balance <- 5
+  account@balance
+}
+print(run(at_global))
+print(account@balance)
+at_loop <- function(a, n) {
+  for (k in seq_len(n)) a@balance <- a@balance + k
+  a@balance
+}
+print(run(at_loop, account, 10))

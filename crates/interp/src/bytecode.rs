@@ -1609,6 +1609,7 @@ unsafe fn compile_promise_arguments(function: Sexp, arguments: Sexp) -> R<Sexp> 
         // slot table instead of building its own.
         slot_formals: slot_names(function.cdr()),
         slots_fixed: true,
+        element_index: false,
         bound: None,
         assigned: Vec::new(),
         cold: Vec::new(),
@@ -2178,6 +2179,8 @@ struct Compiler {
     /// Whether [`Compiler::slot_formals`] is a whole slot table that the code must fit, as for
     /// promise code, rather than the formals the table starts with.
     slots_fixed: bool,
+    /// Whether the body calls an internal that binds `i` in the frame ([`binds_element_index`]).
+    element_index: bool,
     /// The register an element-wise operator last wrote a fresh result into, with the code
     /// position after it. An operand compiled to exactly that is a temporary only its parent
     /// reads, which may then write its result into the operand's storage (see
@@ -2370,6 +2373,7 @@ unsafe fn compile_unreported(
         summary: nil(),
         slot_formals: None,
         slots_fixed: false,
+        element_index: false,
         temporary: None,
         sites: None,
         hoisted: Vec::new(),
@@ -2416,6 +2420,14 @@ pub unsafe fn local_symbols(body: Sexp, formals: Sexp) -> Option<FxHashSet<Sexp>
     } else {
         None
     }
+}
+
+/// Whether `inner`, the call inside `.Internal(...)`, is one of the internals that bind `i` in
+/// the frame they are called from: `lapply` and `vapply`, which evaluate `FUN(X[[i]], ...)`
+/// there.
+unsafe fn binds_element_index(inner: Sexp) -> bool {
+    let head = inner.car();
+    head.kind() == SexpType::Symbol && matches!(&*symbol_name(head), "lapply" | "vapply")
 }
 
 /// A binding's value with a forced promise replaced by its value; an unforced promise stays.
@@ -3063,6 +3075,9 @@ unsafe fn collect_bindings(expression: Sexp, found: &mut FxHashSet<Sexp>) -> boo
         if &*name == ".Internal" {
             let inner = expression.cdr().car();
             if inner.kind() == SexpType::Language {
+                if binds_element_index(inner) {
+                    found.insert(symbols().i);
+                }
                 return collect_arguments(inner.cdr(), found);
             }
         }
@@ -3279,6 +3294,12 @@ impl Compiler {
                 }
             }
             pc += 1 + operand_count(op);
+        }
+        // `lapply` and `vapply` bind `i` in this frame, and a slot for it lets them do so
+        // without the frame's environment.
+        let index = symbols().i;
+        if self.element_index && !self.slots_fixed && !names.contains(&index) {
+            names.push(index);
         }
         let heap = crate::heap();
         let map = values::alloc(SexpType::Integer, table.len())?;
@@ -4196,13 +4217,25 @@ impl Compiler {
         // `x[i]` and `x[[i]]` with one or two plain subscripts take the element assignment;
         // the shapes it refuses, such as `x[i, j, ]` or `x[, j]`, replace through `[<-` here.
         let element = matches!(&*getter, "[" | "[[");
-        if matches!(&*getter, "$" | "@") {
+        if &*getter == "$" {
             return Ok(None);
         }
         let parts = values::pairlist_items(target.cdr());
         let Some(((variable_tag, variable), rest)) = parts.split_first() else {
             return Ok(None);
         };
+        // `x@name` quotes the slot's name, which `@<-` takes as the symbol it is.
+        if &*getter == "@" {
+            let plain = *variable_tag == nil()
+                && variable.kind() == SexpType::Symbol
+                && *variable != symbols().dots
+                && eval::dot_dot_index(*variable).is_none()
+                && matches!(rest, [(tag, name)] if *tag == nil()
+                    && name.kind() == SexpType::Symbol
+                    && *name != symbols().dots
+                    && *name != missing_arg());
+            return Ok(plain.then_some(symbols().at_assign));
+        }
         let constant = |value: Sexp| {
             matches!(
                 value.kind(),
@@ -4251,7 +4284,9 @@ impl Compiler {
         let mut guards: SmallVec<[usize; 2]> =
             self.guard(call, head, primitive)?.into_iter().collect();
         let rest = values::pairlist_items(target.cdr().cdr());
-        let lazy = !rest.iter().all(|(_, value)| self_evaluating(*value));
+        // `@<-` never evaluates the slot's name, so the name is no code a method could force.
+        let quoted = setter == symbols().at_assign;
+        let lazy = !quoted && !rest.iter().all(|(_, value)| self_evaluating(*value));
         let setter_name = symbol_name(setter);
         let element_setter = match &*setter_name {
             "[<-" | "[[<-" if lazy => self.base_primitive(setter, &setter_name)?,
@@ -4297,9 +4332,9 @@ impl Compiler {
         };
         for (index, (_, value)) in rest.iter().enumerate() {
             let register = base + 1 + index as u32;
-            if *value == missing_arg() {
-                let empty = self.constant(missing_arg());
-                self.emit(Op::Constant, &[register, empty]);
+            if quoted || *value == missing_arg() {
+                let constant = self.constant(*value);
+                self.emit(Op::Constant, &[register, constant]);
             } else {
                 self.expression(*value, register)?;
             }
@@ -5026,6 +5061,7 @@ impl Compiler {
                 let Some(function) = compiled_internal(inner)? else {
                     return self.fallback(call, dst);
                 };
+                self.element_index |= binds_element_index(inner);
                 let inner_args = values::pairlist_items(inner.cdr());
                 if eval::builtin_def(function)?.prologue && inner_args.is_empty() && !self.argument
                 {
@@ -9571,8 +9607,12 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             && (head == symbols().double_colon || head == symbols().triple_colon)
         {
             crate::heap().known().base_env
+        } else if matches!(function.kind(), SexpType::Special | SexpType::Builtin) {
+            // Named after the special, so a profile summary says which one took the frame's
+            // environment: `<-` for an assignment form the compiler left to it, `switch`, `quote`.
+            state.env(Reify::Builtin(function))?
         } else {
-            state.env(Reify::Site("generic call: special"))?
+            state.env(Reify::Site("generic call"))?
         };
         eval::apply_call(call, function, call.cdr(), env)?
     };
@@ -12860,7 +12900,9 @@ unsafe fn replace_variable(
         // the registers; anything that entry declines goes to `complex_assign`.
         SexpType::Special => {
             let definition = eval::builtin_def(function)?;
-            if target.is_object()
+            // `@<-` dispatches only for an S3 object, which its direct entry declines.
+            let slot_of_s4 = setter == symbols().at_assign && target.has_gp(gp::S4_OBJECT);
+            if (target.is_object() && !slot_of_s4)
                 || definition.direct.is_none()
                 || !replacement_arguments(setter_call, true)
             {

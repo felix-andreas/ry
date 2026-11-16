@@ -1,0 +1,386 @@
+[stdout]
+| argument
+| a b 
+| 1 2 
+| v
+| x
+| i
+| [1] 1 9 3
+| m
+| i
+| j
+|      [,1] [,2]
+| [1,]    1    0
+| [2,]    1    1
+| [[1]]
+| a b 
+| 1 2 
+| 
+| [[2]]
+| a b 
+| 1 2 
+| 
+| [1] "missing subscript"
+| [[1]]
+| [[1]][[1]]
+| a b c 
+| 1 9 3 
+| attr(,"k")
+| [1] "local"
+| 
+| [[1]][[2]]
+|      [,1] [,2]
+| [1,]    0    0
+| [2,]    5    0
+| 
+| 
+| [[2]]
+| [1] 1 2 3
+| 
+| [[3]]
+|      [,1] [,2]
+| [1,]    0    0
+| [2,]    0    0
+| 
+|      [,1] [,2]
+| [1,]  100    2
+| x y 
+| 1 2 
+| [1] "object 'nowhere' not found"
+| [1] "object 'nowhere' not found"
+| List of 3
+|  $ a    : num 2
+|  $ b    : num 3
+|  $ third: chr "c"
+|  - attr(*, "class")= chr "record"
+|  - attr(*, "note")= chr "kept"
+| List of 1
+|  $ a: num 1
+|  - attr(*, "class")= chr "record"
+| $<-.metered a 
+| [[<-.metered b 
+| [<-.metered 1 
+| names<-.metered
+| dim<-.metered
+| levels<-.metered
+| $<-.metered a 
+| [[<-.metered b 
+| [<-.metered 1 
+| names<-.metered
+| dim<-.metered
+| levels<-.metered
+| $<-.metered a 
+| [[<-.metered b 
+| [<-.metered 1 
+| names<-.metered
+| dim<-.metered
+| levels<-.metered
+| $<-.metered a 
+| [[<-.metered b 
+| [<-.metered 1 
+| names<-.metered
+| dim<-.metered
+| levels<-.metered
+| $<-.metered a 
+| [[<-.metered b 
+| [<-.metered 1 
+| names<-.metered
+| dim<-.metered
+| levels<-.metered
+| List of 2
+|  $ P: num 0
+|  $ Q: num 3
+|  - attr(*, "class")= chr "metered"
+| local names<-.nearby
+| local [<-.nearby
+| local names<-.nearby
+| local [<-.nearby
+| local names<-.nearby
+| local [<-.nearby
+| local names<-.nearby
+| local [<-.nearby
+| local names<-.nearby
+| local [<-.nearby
+| List of 2
+|  $ b: num 1
+|  $ a: num 2
+| enclosing $<-.outer
+| enclosing $<-.outer
+| enclosing $<-.outer
+| enclosing $<-.outer
+| enclosing $<-.outer
+|  list()
+|  - attr(*, "class")= chr "outer"
+| List of 2
+|  $ a: num 10
+|  $ b: num 2
+|  - attr(*, "class")= chr "late"
+| names<-.late
+| $<-.late
+| names<-.late
+| $<-.late
+| names<-.late
+| $<-.late
+| names<-.late
+| $<-.late
+| names<-.late
+| $<-.late
+| List of 2
+|  $ a!: num 1
+|  $ b!: num 2
+|  - attr(*, "class")= chr "late"
+| List of 2
+|  $ a: num 10
+|  $ b: num 2
+|  - attr(*, "class")= chr "late"
+| names<-.base_kind
+| names<-.base_kind
+| names<-.base_kind
+| names<-.base_kind
+| names<-.base_kind
+| List of 1
+|  $ n: num 1
+|  - attr(*, "class")= chr [1:2] "derived_kind" "base_kind"
+| [[1]]
+|   [,1] [,2]
+| a    1    3
+| b    2    4
+| attr(,"class")
+| [1] "tagged"
+| 
+| [[2]]
+| [1] p p p
+| Levels: p q
+| 
+| [[3]]
+|    A B C
+| r1 2 0 x
+| r2 4 4 y
+| 
+| $count
+| [1] 5
+| 
+| $label
+| [1] "set"
+| 
+| [1] "5"      "holder"
+| [1] 15  1
+| $<-.guarded a 
+| $<-.guarded a 
+| $<-.guarded a 
+| $<-.guarded a 
+| $<-.guarded a 
+| [1] "a" "b"
+| [1] "cannot change value of locked binding for 'fixed'"
+| active set 3 
+| active set 4 
+| active set 3 
+| active set 4 
+| active set 3 
+| active set 4 
+| active set 3 
+| active set 4 
+| active set 3 
+| active set 4 
+| [1] "read"
+| An object of class "Account"
+| Slot "balance":
+| [1] 10
+| 
+| Slot "tags":
+| [1] "x" "y"
+| 
+| [1] 1
+| [1] "no method yet"
+| S4 [<-
+| S4 $<- extra 
+| S4 [[<- deep 
+| S4 names<-
+| S4 [<-
+| S4 $<- extra 
+| S4 [[<- deep 
+| S4 names<-
+| S4 [<-
+| S4 $<- extra 
+| S4 [[<- deep 
+| S4 names<-
+| S4 [<-
+| S4 $<- extra 
+| S4 [[<- deep 
+| S4 names<-
+| S4 [<-
+| S4 $<- extra 
+| S4 [[<- deep 
+| S4 names<-
+| An object of class "Account"
+| Slot "balance":
+| [1] 5
+| 
+| Slot "tags":
+| [1] "renamed"
+| 
+| [[1]]
+| [1] 10 10 30
+| 
+| [[2]]
+| [1] 1 2 3
+| 
+| [[3]]
+| [1]  7 -1  9
+| 
+| call: `inspect<-`(`*tmp*`, value = 2) 
+| matched: `inspect<-`(x = `*tmp*`, value = 2) 
+| caller has marker: yes 
+| frames: 18 function: f 
+| value missing: FALSE 
+| call: `inspect<-`(`*tmp*`, value = 2) 
+| matched: `inspect<-`(x = `*tmp*`, value = 2) 
+| caller has marker: yes 
+| frames: 18 function: f 
+| value missing: FALSE 
+| call: `inspect<-`(`*tmp*`, value = 2) 
+| matched: `inspect<-`(x = `*tmp*`, value = 2) 
+| caller has marker: yes 
+| frames: 18 function: f 
+| value missing: FALSE 
+| call: `inspect<-`(`*tmp*`, value = 2) 
+| matched: `inspect<-`(x = `*tmp*`, value = 2) 
+| caller has marker: yes 
+| frames: 18 function: f 
+| value missing: FALSE 
+| call: `inspect<-`(`*tmp*`, value = 2) 
+| matched: `inspect<-`(x = `*tmp*`, value = 2) 
+| caller has marker: yes 
+| frames: 18 function: f 
+| value missing: FALSE 
+| [1] 3
+| warned: careful 
+| warned: careful 
+| warned: careful 
+| warned: careful 
+| warned: careful 
+| [[1]]
+| [1] "refused: 5 | `failing<-`(`*tmp*`, value = 5)"
+| 
+| [[2]]
+| [1] 6
+| 
+| [[3]]
+| [1] 6
+| 
+| setter exits
+| setter exits
+| setter exits
+| setter exits
+| setter exits
+| setter exits
+| setter exits
+| setter exits
+| setter exits
+| setter exits
+| [1] 8 3
+| [1] 0 1
+| [1] 0
+| [1]  1  2  9 NA  7
+| [[1]]
+|      [,1] [,2]
+| [1,]    0    3
+| [2,]    0    4
+| 
+| [[2]]
+|      [,1] [,2]
+| [1,]    0    3
+| [2,]    0    0
+| 
+| [[3]]
+|      [,1] [,2]
+| [1,]  100    1
+| [2,]    1    1
+| 
+| [[4]]
+|      [,1] [,2]
+| [1,]  1.0    3
+| [2,]  0.5    4
+| 
+| [[5]]
+|      [,1] [,2]
+| [1,] "z"  "c" 
+| [2,] "b"  "d" 
+| 
+| [[6]]
+|      [,1] [,2]
+| [1,] TRUE TRUE
+| [2,] TRUE   NA
+| 
+|      [,1] [,2]
+| [1,]    1    1
+| [2,]    1    1
+| [[1]]
+| [1] "subscript out of bounds"
+| 
+| [[2]]
+| [1] "incorrect number of subscripts on matrix"
+| 
+| [[3]]
+| [1] 2 2
+| 
+| [[4]]
+|      [,1] [,2]
+| [1,]    0    0
+| [2,]    0    7
+| 
+| [[5]]
+|      [,1] [,2]
+| [1,]    8    0
+| [2,]    8    7
+| 
+| [[1]]
+| [1] 100
+| 
+| [[2]]
+| [1] 99
+| 
+| [[3]]
+| [1] "quoted"
+| 
+| [[4]]
+| [1] 1
+| 
+| [1] 1
+| [[1]]
+| [1] "assignment of an object of class “character” is not valid for @‘balance’ in an object of class “Account”; is(value, \"numeric\") is not TRUE"
+| 
+| [[2]]
+| [1] "‘nowhere’ is not a slot in class “Account”"
+| 
+| [[3]]
+| [1] "‘balance’ is not a slot in class “list”"
+| 
+| [[4]]
+| [1] "‘balance’ is not a slot in class “function”"
+| 
+| [[1]]
+| [1] "b"
+| 
+| [[2]]
+| [1] 3
+| 
+| [[3]]
+| [1] TRUE
+| 
+| S3 @<- field 
+| S3 @<- field 
+| S3 @<- field 
+| S3 @<- field 
+| S3 @<- field 
+| [1] 3
+| [1] "argument \"value\" is missing, with no default"
+| [1] 5
+| [1] 1
+| [1] 56
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 56
