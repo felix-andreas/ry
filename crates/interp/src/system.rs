@@ -3216,18 +3216,23 @@ unsafe fn do_file_path(call: &Call<'_>) -> R<Sexp> {
         return alloc(SexpType::String, 0);
     }
     let longest = pieces.iter().map(|piece| length(*piece)).max().unwrap_or(0);
-    let mut paths = Vec::with_capacity(longest);
+    let result = alloc(SexpType::String, longest)?;
+    let mut path = String::new();
     for index in 0..longest {
-        let parts: Vec<String> = pieces
-            .iter()
-            .map(|piece| {
-                values::string_at(*piece, index % length(*piece))
-                    .map_or_else(|| "NA".into(), |text| text.into_owned())
-            })
-            .collect();
-        paths.push(parts.join(&separator));
+        path.clear();
+        for (position, &piece) in pieces.iter().enumerate() {
+            if position > 0 {
+                path.push_str(&separator);
+            }
+            match values::string_at(piece, index % length(piece)) {
+                Some(text) => path.push_str(&text),
+                None => path.push_str("NA"),
+            }
+        }
+        let charsxp = values::mkchar(&path)?;
+        crate::heap().set_element(result, index, charsxp);
     }
-    string_vector(&paths)
+    Ok(result)
 }
 
 /// ry translates no messages, so binding a domain to a directory changes nothing and keeps no

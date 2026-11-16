@@ -1498,18 +1498,30 @@ unsafe fn group_positions(call: &Call<'_>) -> R<Groups> {
     };
     let group = values::materialize(coerce_vector(group, kind)?)?;
     let unique = values::materialize(coerce_vector(unique, kind)?)?;
+    let missing = || call.error("'ugroup' does not contain every group");
+    if let (Some(table_keys), Some(group_keys)) = (plain_keys(unique), plain_keys(group))
+        && plain_kinds_match(table_keys, group_keys)
+    {
+        let mut matched = vec![0i32; length(group)];
+        if match_positions(table_keys, group_keys, &mut matched) {
+            let positions = matched
+                .into_iter()
+                .map(|position| position.checked_sub(1).filter(|&index| index >= 0))
+                .map(|index| index.map(|index| index as usize).ok_or_else(missing))
+                .collect::<R<Vec<usize>>>()?;
+            return Ok(Groups {
+                positions,
+                count: length(unique),
+            });
+        }
+    }
     let mut table: FxHashMap<Key<'_>, usize> = FxHashMap::default();
     for (index, key) in element_keys(unique).into_iter().enumerate() {
         table.entry(key).or_insert(index);
     }
     let positions = element_keys(group)
         .into_iter()
-        .map(|key| {
-            table
-                .get(&key)
-                .copied()
-                .ok_or_else(|| call.error("'ugroup' does not contain every group"))
-        })
+        .map(|key| table.get(&key).copied().ok_or_else(missing))
         .collect::<R<Vec<usize>>>()?;
     Ok(Groups {
         positions,

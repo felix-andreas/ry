@@ -291,6 +291,46 @@ unsafe fn copy_mapped(
     Ok(())
 }
 
+/// Fills `to[start..start + count]` with `from` recycled, a run of `from` at a time.
+unsafe fn copy_recycled(from: Sexp, to: Sexp, start: usize, count: usize) -> R<()> {
+    let length = length(from);
+    if length == 0 || count == 0 {
+        return Ok(());
+    }
+    match (from.kind(), to.kind()) {
+        (SexpType::Logical | SexpType::Integer, SexpType::Logical | SexpType::Integer)
+            if from.kind() == to.kind() =>
+        {
+            let from = values::ints(from);
+            for chunk in values::ints_mut(to)[start..start + count].chunks_mut(length) {
+                chunk.copy_from_slice(&from[..chunk.len()]);
+            }
+        }
+        (SexpType::Real, SexpType::Real) => {
+            let from = values::reals(from);
+            for chunk in values::reals_mut(to)[start..start + count].chunks_mut(length) {
+                chunk.copy_from_slice(&from[..chunk.len()]);
+            }
+        }
+        (SexpType::Logical | SexpType::Integer, SexpType::Real) => {
+            let from = values::ints(from);
+            for chunk in values::reals_mut(to)[start..start + count].chunks_mut(length) {
+                for (slot, &value) in chunk.iter_mut().zip(from) {
+                    *slot = int_to_real(value);
+                }
+            }
+        }
+        _ => copy_mapped(
+            from,
+            to,
+            count,
+            |position| position % length,
+            |position| start + position,
+        )?,
+    }
+    Ok(())
+}
+
 /// An integer or logical element as a double, NA staying NA.
 pub(crate) fn int_to_real(value: i32) -> f64 {
     if value == NA_INTEGER {
@@ -5415,9 +5455,9 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
             let count = dims[across];
             let source = values::materialize(value)?;
             let source_rows = dims[0];
-            for line in 0..count {
-                let line_offset = offset + line;
-                if by_row {
+            if by_row {
+                for line in 0..count {
+                    let line_offset = offset + line;
                     copy_mapped(
                         source,
                         result,
@@ -5425,15 +5465,10 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                         |position| line + position * source_rows,
                         |position| line_offset + position * rows,
                     )?;
-                } else {
-                    copy_mapped(
-                        source,
-                        result,
-                        extent,
-                        |position| position + line * source_rows,
-                        |position| position + line_offset * rows,
-                    )?;
                 }
+            } else {
+                // Every matrix has `extent` rows, so its columns are one run of the result's.
+                copy_recycled(source, result, offset * rows, extent * count)?;
             }
             let dimnames = get_attr(value, symbols().dimnames);
             let names = if dimnames != nil() {
@@ -5472,13 +5507,7 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                     |position| offset + position * rows,
                 )?;
             } else {
-                copy_mapped(
-                    source,
-                    result,
-                    extent,
-                    |position| position % source_length,
-                    |position| position + offset * rows,
-                )?;
+                copy_recycled(source, result, offset * rows, extent)?;
             }
         }
         let names = values::names(value);

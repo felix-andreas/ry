@@ -3219,8 +3219,7 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
             } else {
                 long_double::running_products(values::reals(operand), out);
             }
-            // NA's payload outranks a plain NaN's on the x87 unit GNU R accumulates on, so from
-            // the first NA on every total is NA, whatever NaN came before it.
+            // GNU R marks every total from the first NA on as NA, whatever NaN came before it.
             if out.last().is_some_and(|total| total.is_nan())
                 && let Some(first) = values::reals(operand)
                     .iter()

@@ -7246,7 +7246,8 @@ pub unsafe fn call_builtin_step(machine: &mut Machine<'_>, pc: usize, record: bo
         {
             interp().visible = true;
             Some(value)
-        } else if definition.direct.is_some() && !definition.checks.replacement {
+        } else if definition.direct.is_some() && definition.checks.replacement == Replacement::None
+        {
             eval::call_direct(definition, pool_entry(constants, operand(2)), values)?
         } else {
             None
