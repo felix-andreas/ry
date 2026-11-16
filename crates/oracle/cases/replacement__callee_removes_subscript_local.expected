@@ -1,0 +1,35 @@
+[stdout]
+| method [<- 1 
+| method [[<-
+| method [<- 2 
+| [1] "done"
+| [1] "object 'k' not found"
+| method [<- 1 
+| method [[<-
+| method [<- 2 
+| [1] "done"
+| [1] "object 'k' not found"
+| method [<- 1 
+| method [[<-
+| method [<- 2 
+| [1] "done"
+| [1] "object 'k' not found"
+| method [<- 1 
+| method [[<-
+| method [<- 2 
+| [1] "done"
+| [1] "object 'k' not found"
+| [1] 1 2 9
+| [1] 1 2 9
+| [1] 1 2 9
+| [1] 1 2 9
+| [1] "object 'k' not found"
+| [1] "object 'k' not found"
+| [1] "object 'k' not found"
+| [1] "object 'k' not found"
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL
