@@ -435,8 +435,6 @@ pub unsafe fn trace(marker: &mut Marker<'_>) {
     });
 }
 
-// The device table.
-
 /// `GEcurrentDevice`: the current device, opening `getOption("device")` when only the null
 /// device exists.
 pub unsafe fn current_device() -> R<*mut GEDevDesc> {
@@ -844,8 +842,6 @@ pub unsafe fn publish_devices() -> R<()> {
     Ok(())
 }
 
-// Graphics systems.
-
 /// The indices systems may hold: odd ones, below the slot that mirrors `ask`.
 fn system_indices() -> impl Iterator<Item = usize> {
     (1..MAX_SYSTEMS - 1).step_by(2)
@@ -988,8 +984,6 @@ pub unsafe fn handle_event(event: c_int, dev: *mut DevDesc, data: Sexp) -> R<Sex
     Ok(nil())
 }
 
-// Units.
-
 /// `GEUnit`: device units, the device as the unit square, inches, and centimetres.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Unit {
@@ -1095,8 +1089,6 @@ pub unsafe fn to_device_width(value: f64, from: Unit, dd: *mut GEDevDesc) -> f64
 pub unsafe fn to_device_height(value: f64, from: Unit, dd: *mut GEDevDesc) -> f64 {
     to_device_size(value, from, dd, true)
 }
-
-// Line parameters.
 
 /// The line type names and their dash patterns: four bits per dash length, the first dash in
 /// the low bits.
@@ -1247,8 +1239,6 @@ pub fn string_to_pch(text: Option<&str>) -> R<c_int> {
         Ok(-(first as c_int))
     }
 }
-
-// Clipping.
 
 #[derive(Clone, Copy)]
 struct ClipRect {
@@ -1655,8 +1645,6 @@ unsafe fn clip_polygon(
         device_polygon(&mut closed_x[..n], &mut closed_y[..n], gc, dd)
     }
 }
-
-// Drawing.
 
 unsafe fn check_lwd(gc: &GEContext) -> R<()> {
     if gc.lwd == f64::INFINITY || gc.lwd < 0.0 {
@@ -2266,8 +2254,6 @@ pub unsafe fn glyph(
     Ok(())
 }
 
-// Text.
-
 /// The encoding a string reaches the device in: UTF-8, or the symbol font's own.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TextEncoding {
@@ -2576,8 +2562,6 @@ unsafe fn clip_text(
         _ => Ok(()),
     }
 }
-
-// Plotting symbols.
 
 const SYMBOL_RADIUS: f64 = 0.375;
 const SYMBOL_SMALL: f64 = 0.25;
@@ -2895,8 +2879,6 @@ pub unsafe fn math_text(
 ) -> R<()> {
     crate::plotmath::math_text(x, y, expression, xc, yc, rotation, gc, dd)
 }
-
-// The display list.
 
 fn engine_device(dd: *mut GEDevDesc) -> *mut EngineDevice {
     dd.cast()
