@@ -326,6 +326,20 @@ impl<'a> Gc<'a, Chars> {
         // SAFETY: a live `CHARSXP` holds `length` bytes, and it is live for `'a`.
         unsafe { self.raw.bytes() }
     }
+
+    /// Whether any of the encoding marks `bits` (`object::gp`) is set.
+    #[inline]
+    pub fn has_mark(self, bits: u16) -> bool {
+        // SAFETY: the pointer is a live object, whose header holds the marks.
+        unsafe { self.raw.has_gp(bits) }
+    }
+
+    /// Whether the heap found the bytes to be valid UTF-8 when it interned them.
+    #[inline]
+    pub fn is_valid_utf8(self) -> bool {
+        // SAFETY: the pointer is a live `CHARSXP`.
+        unsafe { self.raw.is_valid_utf8() }
+    }
 }
 
 /// A pointer rooted in the handle scope `'s`.
@@ -474,6 +488,12 @@ impl<'s, T: Vector> Fresh<'s, T> {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// The raw pointer, for code that calls the raw API.
+    #[inline]
+    pub fn raw(&self) -> Sexp {
+        self.raw
     }
 
     /// The object as a value other code may see. It was rooted when it was allocated.

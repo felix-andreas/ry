@@ -59,7 +59,7 @@ test *args:
     cargo test {{ args }}
 
 # The pre-landing check: tests, clippy at -D warnings, fmt, the licence notices, the memory layout and comment length.
-gate: battery clippy fmt-check (notices "--check") (readme "--check") (memory "check") comments
+gate: battery clippy fmt-check (notices "--check") (readme "--check") (memory "check") comments unsafe
 
 # CI's test job, step for step: .github/workflows/ci.yml runs `nix develop .#ci -c just ci`. Run it
 # in that shell, whose GNU R, compiler, glibc and locales are the ones CI has. The variables are
@@ -263,6 +263,11 @@ memory *args="check":
 # e.g. `just comments report 20` for the worst blocks or `just comments baseline` after shortening some.
 comments *args="check":
     python3 -I tools/comments.py {{ args }}
+
+# Fails when a file outside heap, libr, jit, typed and ssa has more `unsafe` than its baseline, e.g.
+# `just unsafe stats` for the counts per crate or `just unsafe baseline` after removing some.
+unsafe *args="check":
+    python3 -I tools/unsafe.py {{ args }}
 
 # Regenerates what the READMEs show: the benchmark blocks and chart from the committed results files,
 # and the diagnostic panels docs/public/diagnostic*.svg from real `ry check` runs on the README's examples.

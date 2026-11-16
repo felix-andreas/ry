@@ -18,6 +18,7 @@ use {
         conditions::warning,
         eval,
         format::{display_width, push_fixed, push_general, push_scientific},
+        handles::{self, Args, Cx, Integer, Local, safe},
         pcre::{CompileError, PerlRegex},
         unwind::{R, error},
         values::{
@@ -45,7 +46,7 @@ use {
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("paste", 4, do_paste),
     internal("paste0", 3, do_paste0),
-    internal("nchar", 4, do_nchar),
+    internal("nchar", 4, safe!(do_nchar)),
     builtin("nzchar", -1, do_nzchar),
     internal("substr", 3, do_substr),
     internal("substr<-", 4, do_set_substr),
@@ -301,33 +302,28 @@ enum CountType {
     Width,
 }
 
-unsafe fn do_nchar(call: &Call<'_>) -> R<Sexp> {
-    let x = call.arg(0);
-    if values::inherits(x, "factor") {
+fn do_nchar<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let x = arguments.value(0);
+    if handles::inherits(context, x, "factor") {
         return Err(error("'nchar()' requires a character vector"));
     }
-    let count_type = match values::first_string(call.arg(1)).as_deref() {
+    let count_type = match handles::first_string(context, arguments.value(1)).as_deref() {
         Some(name) if !name.is_empty() && "bytes".starts_with(name) => CountType::Bytes,
         Some(name) if !name.is_empty() && "chars".starts_with(name) => CountType::Chars,
         Some(name) if !name.is_empty() && "width".starts_with(name) => CountType::Width,
         _ => return Err(error("invalid 'type' argument")),
     };
-    let keep_na = values::as_logical_scalar(call.arg(3));
+    let keep_na = handles::logical_scalar(context, arguments.value(3));
     let na_count = match (keep_na, count_type) {
         (1, _) | (NA_LOGICAL, CountType::Bytes | CountType::Chars) => NA_INTEGER,
         _ => 2,
     };
-    let allow_na = values::as_logical_scalar(call.arg(2)) == 1;
-    let text = character_vector(x)?;
-    let count = length(text);
-    let result = alloc(SexpType::Integer, count)?;
-    let counts = values::ints_mut(result);
-    for (index, slot) in counts.iter_mut().enumerate() {
-        let charsxp = text.element(index);
-        if count_type != CountType::Bytes
-            && charsxp.has_gp(gp::BYTES)
-            && !charsxp.bytes().is_ascii()
-        {
+    let allow_na = handles::logical_scalar(context, arguments.value(2)) == 1;
+    let text = handles::character_vector(context, x)?;
+    let mut result = context.alloc::<Integer>(text.len())?;
+    let counts = result.as_mut_slice().iter_mut();
+    for (index, (slot, chars)) in counts.zip(text.iter(context)).enumerate() {
+        if count_type != CountType::Bytes && handles::is_bytes(chars) && !chars.bytes().is_ascii() {
             if !allow_na {
                 let what = if count_type == CountType::Chars {
                     "number of characters"
@@ -343,9 +339,9 @@ unsafe fn do_nchar(call: &Call<'_>) -> R<Sexp> {
             continue;
         }
         let invalid = count_type != CountType::Bytes
-            && !charsxp.has_gp(gp::LATIN1)
-            && std::str::from_utf8(charsxp.bytes()).is_err();
-        *slot = if charsxp == na_string() {
+            && !handles::is_latin1(chars)
+            && std::str::from_utf8(chars.bytes()).is_err();
+        *slot = if handles::is_na(chars) {
             na_count
         } else if invalid {
             if !allow_na {
@@ -357,14 +353,14 @@ unsafe fn do_nchar(call: &Call<'_>) -> R<Sexp> {
             NA_INTEGER
         } else {
             match count_type {
-                CountType::Bytes => charsxp.bytes().len() as i32,
-                CountType::Chars => values::char_str(charsxp).chars().count() as i32,
-                CountType::Width => display_width(&values::char_str(charsxp)) as i32,
+                CountType::Bytes => chars.bytes().len() as i32,
+                CountType::Chars => handles::text(chars).chars().count() as i32,
+                CountType::Width => display_width(&handles::text(chars)) as i32,
             }
         };
     }
-    copy_shape(x, result)?;
-    Ok(result)
+    handles::copy_shape(context, x, &mut result)?;
+    Ok(result.finish().value())
 }
 
 unsafe fn do_nzchar(call: &Call<'_>) -> R<Sexp> {
@@ -4398,25 +4394,6 @@ unsafe fn character_vector(x: Sexp) -> R<Sexp> {
     } else {
         coerce_vector(x, SexpType::String)
     }
-}
-
-/// Copies the names, dim and dimnames of `from` onto `to`.
-unsafe fn copy_shape(from: Sexp, to: Sexp) -> R<()> {
-    let symbols = symbols();
-    for symbol in [symbols.names, symbols.dim, symbols.dimnames] {
-        // GNU R reads the names through `getAttrib`, which turns a pairlist's tags into names.
-        let value = if symbol == symbols.names
-            && matches!(from.kind(), SexpType::Pairlist | SexpType::Language)
-        {
-            values::names(from)
-        } else {
-            get_attr(from, symbol)
-        };
-        if value != nil() {
-            set_attr(to, symbol, value)?;
-        }
-    }
-    Ok(())
 }
 
 unsafe fn integer_argument(value: Sexp) -> R<Vec<i32>> {
