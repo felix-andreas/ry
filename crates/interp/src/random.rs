@@ -2243,6 +2243,25 @@ mod tests {
         });
     }
 
+    #[test]
+    fn rejection_index_matches_gnu_r() {
+        // `set.seed(42); sample(1:10, 4)` after three uniforms.
+        let mut rng = seeded_rng(42);
+        for _ in 0..3 {
+            next_uniform(&mut rng.state);
+        }
+        let mut remaining = 10.0;
+        let mut pool: Vec<i32> = (1..=10).collect();
+        let mut drawn = Vec::new();
+        for _ in 0..4 {
+            let slot = rng.draws().index_value(remaining) as usize;
+            drawn.push(pool[slot]);
+            pool.swap_remove(slot);
+            remaining -= 1.0;
+        }
+        assert_eq!(drawn, [9, 4, 2, 8]);
+    }
+
     /// The AVX2 kernels must give their portable references' bits: the twister's recurrence,
     /// its tempering with the fix-up, and the inversion probabilities, over random words and
     /// lengths that leave every remainder.
