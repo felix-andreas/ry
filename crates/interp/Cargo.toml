@@ -7,6 +7,7 @@ license = "GPL-2.0-or-later"
 publish = false
 
 [lib]
+doctest = false
 path = "src/interp.rs"
 
 [dependencies]
@@ -35,9 +36,6 @@ encoding_rs = "0.8"
 memchr = "2.7"
 getrandom = "0.3"
 siphasher = "1"
-
-[dev-dependencies]
-frames = { path = "../frames" }
 
 [target.'cfg(windows)'.dependencies]
 glob = "0.3"

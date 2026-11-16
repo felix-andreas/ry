@@ -4,7 +4,7 @@
 //! An engine is anything that implements [`Engine`]. [`ProcessEngine`] covers every engine
 //! with a command line: it is invoked as `<command…> <script> <report>`, must print the
 //! script's own output to stdout, and must write the JSON report that `driver.R` defines.
-//! GNU R is one such engine, and ry's runtime will be another.
+//! GNU R is one such engine, and ry's runtime is another.
 
 pub mod bench;
 pub mod fuzz;
@@ -31,7 +31,8 @@ pub mod packages;
 
 const DRIVER: &str = include_str!("driver.R");
 
-pub trait Engine {
+/// `Sync`, because a run hands every engine to one worker per core.
+pub trait Engine: Sync {
     fn name(&self) -> String;
     fn run(&self, script: &Path) -> Result<Outcome, EngineError>;
 }
@@ -236,21 +237,6 @@ pub fn known_failure<'a>(
         .find(|entry| entry.case == name && entry.engine == engine)
 }
 
-/// The stand-in until ry's runtime exists. It reports itself as unavailable for every file.
-pub struct StubEngine;
-
-impl Engine for StubEngine {
-    fn name(&self) -> String {
-        "stub".to_string()
-    }
-
-    fn run(&self, _script: &Path) -> Result<Outcome, EngineError> {
-        Err(EngineError::Unavailable(
-            "the ry runtime does not exist yet".to_string(),
-        ))
-    }
-}
-
 pub struct ProcessEngine {
     name: String,
     program: String,
@@ -423,13 +409,23 @@ impl ProcessEngine {
     }
 }
 
+/// The workspace's cargo target directory: `CARGO_TARGET_DIR` when set, resolved against the
+/// workspace root (where [`build_workspace_ry`] runs cargo), else `target` there.
+pub fn target_directory() -> PathBuf {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    match std::env::var_os("CARGO_TARGET_DIR").filter(|value| !value.is_empty()) {
+        Some(directory) => workspace.join(directory),
+        None => workspace.join("target"),
+    }
+}
+
 /// The `ry` binary: `$ORACLE_RY`, else the workspace's debug build.
 /// A relative `ORACLE_RY` resolves against the current directory, because the engines run
 /// each case from the case's own directory.
 pub fn ry_program() -> String {
     let program = std::env::var("ORACLE_RY")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ry"));
+        .unwrap_or_else(|_| target_directory().join("debug/ry"));
     std::fs::canonicalize(&program)
         .unwrap_or(program)
         .display()
@@ -976,15 +972,30 @@ pub fn gnu_r_available() -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
-/// The engine named by `ORACLE_ENGINE`, or the stub.
-pub fn engine_from_environment() -> Box<dyn Engine> {
-    match std::env::var("ORACLE_ENGINE")
+/// The engine named by `ORACLE_ENGINE`, else ry's runtime.
+pub fn engine_from_environment() -> ProcessEngine {
+    std::env::var("ORACLE_ENGINE")
         .ok()
         .as_deref()
         .and_then(ProcessEngine::named)
-    {
-        Some(engine) => Box::new(engine),
-        None => Box::new(StubEngine),
+        .unwrap_or_else(ProcessEngine::ry)
+}
+
+/// Builds the workspace's `ry` and `libR.so` (`cargo build -p ry-lang -p libr`) unless
+/// `ORACLE_RY` names another binary, so that a run never compares a build older than the
+/// sources. Cargo does nothing when both are current, which takes about a second.
+pub fn build_workspace_ry() -> Result<(), String> {
+    if std::env::var_os("ORACLE_RY").is_some() {
+        return Ok(());
+    }
+    let status = syntax::testing::cargo_build(&target_directory().join("debug"))
+        .args(["-p", "ry-lang", "-p", "libr"])
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .status()
+        .map_err(|error| format!("cargo build -p ry-lang -p libr: {error}"))?;
+    match status.success() {
+        true => Ok(()),
+        false => Err("cargo build -p ry-lang -p libr failed".to_string()),
     }
 }
 
