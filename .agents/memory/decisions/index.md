@@ -249,6 +249,7 @@ A new entry gets its status line when it is written, and the line changes in the
 - [`%%` and `%/%` on doubles port GNU R's kernels, with a 64-bit path for whole numbers](builtins.md#-and--on-doubles-port-gnu-rs-kernels-with-a-64-bit-path-for-whole-numbers)
 - [`validObject` runs validity methods without its slot loop, and `new()` copies the prototype shallowly](builtins.md#validobject-runs-validity-methods-without-its-slot-loop-and-new-copies-the-prototype-shallowly) (built)
 - [Small base closures with call arguments run their bodies natively behind prologues](builtins.md#small-base-closures-with-call-arguments-run-their-bodies-natively-behind-prologues) (built)
+- [`c`, `unlist`, `rep` and positional `\[` copy handle vectors a run at a time](builtins.md#c-unlist-rep-and-positional--copy-handle-vectors-a-run-at-a-time) (built)
 
 ## R compatibility
 
