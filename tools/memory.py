@@ -3,7 +3,7 @@
 
     python3 tools/memory.py split   # move entries from decisions.md into decisions/<area>.md
     python3 tools/memory.py index   # regenerate decisions/index.md
-    python3 tools/memory.py check   # fail on a legacy decisions.md, a stale index, a repeated entry or an over-budget file
+    python3 tools/memory.py check   # fail on a legacy decisions.md, a stale index, an entry without a status, a repeated entry or an over-budget file
 
 `split` is idempotent and append-safe: an entry whose heading already lives in an area file is
 updated in place when its body differs and skipped otherwise, and every other entry is appended to
@@ -576,7 +576,7 @@ Settled architecture decisions and the reasons behind them, one file per area. E
 - **planned**: the design is settled and not fully implemented. The line says what exists so far.
 - **superseded**: another entry replaced this one. The line names it and says what the text is kept for. A superseded entry with nothing left to teach is deleted.
 
-An entry listed here without a status is built. To read one, search its heading in the area file. A new entry gets its status line when it is written, and the line changes in the same change that builds or replaces the design. A new entry is an H2 section appended to the area file it belongs to; then run `python3 tools/memory.py index` to regenerate this file, which `python3 tools/memory.py check` (part of `just gate`) keeps honest.
+An entry listed here without a status is built. `check` fails on an entry without a status line. To read one, search its heading in the area file. A new entry gets its status line when it is written, and the line changes in the same change that builds or replaces the design. A new entry is an H2 section appended to the area file it belongs to; then run `python3 tools/memory.py index` to regenerate this file, which `python3 tools/memory.py check` (part of `just gate`) keeps honest.
 """
 
 
@@ -839,6 +839,12 @@ def check():
     for name in AREA_NAMES:
         for entry in read_area(name):
             headings[entry.heading].append(name)
+    for name in AREA_NAMES:
+        for entry in read_area(name):
+            if status_of(entry.body) is None:
+                problems.append(
+                    f"the entry \"{entry.heading}\" in {name}.md has no `**Status:**` line in its "
+                    f"first lines. Add one (built, planned, or superseded by \"...\").")
     for heading, names in headings.items():
         if len(names) > 1:
             problems.append(

@@ -4,13 +4,13 @@ The built-in DataFrame, its kernels, CSV reading, and the data.table boundary.
 
 ## The built-in frame
 
-**Status:** built. The name `frame` and its class are superseded by "The DataFrame API is Polars', and ry's own types are UpperCamelCase".
+**Status:** built, except the name `frame` and its class, which "The DataFrame API is Polars', and ry's own types are UpperCamelCase" supersedes.
 
 The table is a Polars `DataFrame` held by the `table` crate; this entry holds the semantics of `x[i, j, by]` and `:=` on it.
 
 - **`:=` has value semantics in the checker** (aliases keep the old type) and is copy-on-write at run time: in place on an unshared table, else after `Table::fork`, which copies only the column list because Arrow buffers are shared. data.table's own `:=` keeps reference semantics.
 - **`:=` writes only a slot the current scope already owns** (`naming.rs`, the `Index` arm), because naming runs before types and cannot tell a frame from a `data.table`; minting a local broke goto-definition on a global `data.table` updated in a function. A global frame's update refines the non-local name (`non_local_slots`).
-- **`:=` into an existing column keeps its type unless the value replaces it whole** (`assigned_type` in `query.rs`), as data.table coerces to the column. The checker treats only a literal as one value (`is_literal`), because a scalar-like type is no length guarantee.
+- **`:=` into an existing column keeps its type unless the value replaces it whole** (`assigned_type` in `query.rs`), as data.table coerces to the column. The checker treats only a literal as one value (`is_literal`), because a scalar-like type is no length guarantee. A string written into a factor keeps the factor and appends the new labels as levels in order of appearance, as data.table does.
 - **One query IR** (`crates/table/src/query.rs`) serves the interpreter, the checker's `result_type` and the tests. Lowering imposes R semantics on Polars (integer overflow to `NA`, NaN comparisons `NA`, `%/%` floors, `%%` takes the divisor's sign, `cor` `NA` where Polars gives `NaN`).
 - **Integer `sum` is a double exactly when a total overflows** (R 4.3, data.table's gsum); totals stay 64-bit until known (`narrow_sums`, `staged`), and a grouped `:=` becomes double if any group overflows, where data.table takes the first group's type.
 - **data.table's layout is the contract for joins and grouping:** rows follow `i`, `x`'s columns first, clashes prefixed `i.`, NA keys join each other (`join_nulls`), `by` keeps first-appearance order and `keyby` sorts (`group_by_stable`).
@@ -18,16 +18,16 @@ The table is a Polars `DataFrame` held by the `table` crate; this entry holds th
 - **Native kernels run below Polars, with plans as fallback and reference** (`kernel.rs`, `group.rs`, `join.rs`), because Polars pays for planning, overflow widening, whole-column rebuilds for a partial `:=` and nested `take`. The fuzz in `crates/table/tests/test_table.rs` checks every kernel against `query::execute_with_plans_only`. Every column is one contiguous chunk (`normalize`), because kernels read one slice.
 - **Grouping codes keys densely as mixed-radix digits of one `u64`;** a range wider than the rows (or 2^20) hash-partitions, because dense states cost memory per possible code.
 - **Moments use Welford with a symmetric co-moment and Chan's merge,** so `cor(a, b)` equals `cor(b, a)` bit for bit; the fuzz compares doubles to 1e-6.
-- **Non-equi joins and `.EACHI` follow data.table except naming:** `join_layout` is the one description of output columns, and repeated conditions on one column give `t.1`, `t.2` where data.table writes `t, t`. `.EACHI` reruns as a join grouped by the row of `i`, where an aggregate over an `i` column sees its one value (`single_value`). Prefixed join columns become ordinary copies before the join (`prefixed_copies`).
+- **Non-equi joins and `.EACHI` follow data.table except naming:** `join_layout` is the one description of output columns, and repeated conditions on one column give `t.1`, `t.2` where data.table writes `t, t`. `.EACHI` reruns as a join grouped by the row of `i`, where an aggregate over an `i` column sees its one value (`single_value`). Prefixed join columns become ordinary copies before the join (`prefixed_copies`). Under `.EACHI` the checker types `i`'s columns as scalars inside `j` (each row of `i` runs `j` once) while `x`'s stay vectors; the groups are the compared columns in condition order, matching `each_i`.
 - **Warnings are data in `Executed`,** raised after the query succeeds, so a failed query raises none and kernels and plans compare on them.
 - **The checker mirrors `join_layout` in `join_columns`; it cannot call it,** because `semantics` must not depend on Polars. The `frame_joins` fixtures pin both against data.table.
-- **A lossy `:=` is a type error, though data.table only warns,** because the result is almost always a bug and `as.*()` states intent.
+- **A lossy `:=` is a type error, though data.table only warns,** because the result is almost always a bug and `as.*()` states intent. A number into a string column converts without loss and stays accepted, as R code relies on it.
 - **`lapply(.SD, f)` is typed once per column** (`subset_apply`), because `.SD` through `lapply` is a list of the union of column types.
 - **A result repeating a column name has unknown columns,** because a record cannot hold two fields of one name.
 
 ## Frames as runtime values
 
-**Status:** built. The class name `"frame"` and `ry` as the standard library's home are superseded by "The DataFrame API is Polars', and ry's own types are UpperCamelCase" and "The standard library is the `std` namespace, with an optional prelude".
+**Status:** built, except the class name `"frame"` and `ry` as the standard library's home, which "The DataFrame API is Polars', and ry's own types are UpperCamelCase" and "The standard library is the `std` namespace, with an optional prelude" supersede.
 
 - **A frame is an `EXTPTRSXP` owning a `Box<table::Table>`** (`crates/frames/src/frame.rs`), dropped by a C finalizer. The table is the only copy of the data; a column becomes an R vector when R reads it. It is not a `data.frame`, because a data.frame's list layout and row names do not hold; the checker agrees (fails a `data.frame` parameter, passes a `list` one).
 - **`x[i, j, by]` on a frame never reaches the `[` primitive:** `dispatch::dispatch_or_eval` evaluates only the subject and hands the unevaluated call to `frame::run`, because `[.frame` would be too late when `i`, `j` and `by` name columns. The `[` method exists for evaluated calls (`do.call`, `Map`).
@@ -38,14 +38,14 @@ The table is a Polars `DataFrame` held by the `table` crate; this entry holds th
 
 ## data.table runs on its own code; the `[` bridge is removed
 
-**Status:** built. The `ry::setkey`, `setkeyv`, `key` and `copy` clause is superseded by "package:ry attaches no bare name another package exports".
+**Status:** built, except `ry::setkey`, `setkeyv`, `key` and `copy`, which "package:ry attaches no bare name another package exports" supersedes.
 
 - **A `[` on a data.table always runs data.table's code;** no engine bridge, dispatch hook or masking hook exists. A bridge that declines whenever data.table would behave its own way must predict an open-ended set (data.table's wording, over-allocation and index state in its C, every query shape), and a seeded differential found it wrong on about 7% of the queries it answered (lost warnings, a missing cartesian-product error, NA bit patterns). It was also a data.table special case, which the user directive rules out.
 - **Cost accepted:** grouped queries on a data.table lose the engine; the DataFrame is the fast table, chosen for new code. The `as.data.table` method for DataFrame stays, because it converts a DataFrame. The `datatable__*` oracle cases check data.table's own code under ry.
 
 ## Delimited files: one sniffer for the reader and the checker
 
-**Status:** built. "fread returns a frame" is superseded by "data.table's helpers run data.table's own C, and the C API is what makes them fast".
+**Status:** built, except "fread returns a frame", which "data.table's helpers run data.table's own C, and the C API is what makes them fast" supersedes.
 
 - **`crates/sniff` decides a delimited file's layout with fread's rules** (separator, header, names, logical/integer/double/character), from the head plus jump points. It is the single source of truth: `table::io::read_csv` parses with it, and the hosts sniff each project `.csv`/`.tsv` head (`sniff_head`) into the `DataFiles` salsa input, read per path through `data_file_layout`, so editing a data file invalidates only the checks that read it. A column whose sample missed a wider value is reread from all its values, so the reader never gives a narrower type than the data holds.
 - **The CLI walks data files ignoring `.gitignore`,** since data directories are commonly ignored. The checker resolves a data path against the project root only, because `SourceFile` carries no path.
@@ -64,7 +64,7 @@ The table is a Polars `DataFrame` held by the `table` crate; this entry holds th
 
 ## The DataFrame API is Polars', and ry's own types are UpperCamelCase
 
-**Status:** built. Routing plain data.table queries to the engine is superseded by "data.table runs on its own code; the `[` bridge is removed".
+**Status:** built, except routing plain data.table queries to the engine, which "data.table runs on its own code; the `[` bridge is removed" supersedes.
 
 - **Every type ry adds is UpperCamelCase** (`DataFrame`, `LazyFrame`, `GroupBy`, `Expr`, `Record{...}`, `Tuple{...}`, `Result`, `List`, ...) and R's own types stay lowercase, so case is the visible line between them. No lowercase alias was kept: the old names had no users outside this repository, and an alias adds a second spelling to every renderer and fixture.
 - **API: Polars' verbs over expressions as qualified functions used with `|>`** (`DataFrame.select`, `filter`, `group_by` + `GroupBy.agg`, `join`, `lazy`, the `LazyFrame.*` mirror; `Expr.col`, `Expr.lit`, R operators through `Ops.Expr`). No method dispatch: a qualified name always means one function, so the checker and IDE do a plain name lookup. A string names a column wherever a verb takes an expression.
@@ -84,7 +84,7 @@ The table is a Polars `DataFrame` held by the `table` crate; this entry holds th
 
 ## data.table's helpers run data.table's own C, and the C API is what makes them fast
 
-**Status:** built. The `[` bridge is superseded by "data.table runs on its own code; the `[` bridge is removed".
+**Status:** built, except the `[` bridge, which "data.table runs on its own code; the `[` bridge is removed" supersedes.
 
 - **No routing hook for `fread`, `fwrite`, `setkey`, `rbindlist`, `melt`, `dcast`, `shift` and friends;** they stay data.table's own code, so their output is data.table's by construction. Their speed comes from the C API (`crates/libr/src/vectors.rs`, `memory.rs`): an accessor on a plain, non-ALTREP object of the right type reads directly and enters the error boundary only to raise. Every compiled package gains.
 - **Routing `fread` to the engine was measured slower:** the reader is faster, but converting its columns to R vectors (one CHARSXP per string) costs more than it saves. The numeric helpers are already a `memmove` or one loop in C. A helper moves to the engine only if it wins end to end, conversion included.
@@ -92,7 +92,7 @@ The table is a Polars `DataFrame` held by the `table` crate; this entry holds th
 
 ## Frames and the checker share one CSV reader, and data.table keeps its own
 
-**Status:** built. Reading factors back with `convert::factor_levels` is superseded by "Factors are ry's own codes plus one level table, outside Polars".
+**Status:** built, except reading factors back with `convert::factor_levels`, which "Factors are ry's own codes plus one level table, outside Polars" supersedes.
 
 - **The engine has one CSV reader** (`table::io::read_csv`/`read_csv_with` through `read_bytes` in `crates/table/src/io.rs`), and `sniff` decides layout and types for it and the checker. A second, lighter reader was rejected because its inference and quoting could drift from the checker's schema; a faster path is a change inside this reader. Factor columns go through `io::strings_as_factors`.
 - data.table's helpers stay on data.table's C (see the entry above); measured at 1e6 and 1e7 rows they all run at or below GNU R's time under ry (`tools/bench/internal/table/ops.R`).

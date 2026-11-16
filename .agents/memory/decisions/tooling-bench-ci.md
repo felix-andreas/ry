@@ -4,7 +4,7 @@ Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and be
 
 ## Every pipeline stage is fuzzed from its first commit
 
-**Status:** built.
+**Status:** built, except the "CI does not fuzz" paragraph, which "CI runs `just gate` against GNU R 4.6.2, and nothing ignored" supersedes.
 
 - **User directive:** every stage (lowering, naming, inference, diagnostics, the incremental layer, the formatter, IDE features) gets fuzz and property coverage the day it exists, never later. The formatter is fuzzed for idempotence and losslessness, an IDE feature for never panicking at any cursor.
 - **Template: `crates/semantics/tests/test_fuzz.rs`.** Over a generator biased toward live shapes plus a token-soup arm it asserts no panic (fixpoints converge), determinism across fresh databases, valid diagnostic ranges, and incremental equivalence with a fresh build. `FUZZ_ITERS` scales budgets; a bounded pass runs in each crate's tests and `fuzz_deep` variants carry long runs.
@@ -27,6 +27,7 @@ Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and be
 - **Rejected: static musl,** because a static binary cannot `dlopen` libR, losing `ry repl` and `ry run`. musl's own `malloc` also made `ry check` 2 to 5 times slower.
 - **Rejected: static glibc,** whose `dlopen` runs libR against a second, uninitialized libc; and glibc plus musl downloads, because the directive is one release build per platform.
 - **Accepted cost:** no Alpine, and NixOS needs nix-ld or the flake's `default`.
+- **Allocator measurements** (`ry check`, against glibc's `malloc`): zig's libc (`SmpAllocator`) matched glibc's speed with 13 to 23% more peak memory; jemalloc was 10 to 32% faster but builds C through `configure` and `make`; mimalloc was 24 to 25% slower on the largest packages. The release keeps glibc's own.
 
 ## The benchmark harness compares test by test through `ry load`
 
@@ -225,9 +226,13 @@ Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and be
 
 ## The dev shells' GNU R is cached on every change to its inputs
 
+**Status:** built.
+
 - `.github/workflows/cachix.yml` also runs on a push to main touching `flake.nix`, `flake.lock` or `tools/base-r/**` (the only inputs of `lib.gnuR`), builds the `default` and `ci` shells and pushes them without the Rust toolchain and `ry-deps-*`, so `nix develop` never compiles GNU R. The path filter keeps runs rare.
 
 ## The hot suite replays the package entries the code bases spend their time in
+
+**Status:** built.
 
 - **Why:** the published suites' means disagree with the three code bases, which are the goal and take minutes per run, so no suite was fast and representative. `tools/bench/hot/` (`just bench hot`) replays 100 captured package entries; `tools/bench/tooling/hot.py` builds and checks it; `testing.md`, "The hot suite", describes it.
 - **The unit is a package entry,** a closure call from user code into package code, because there time can be attributed and the arguments are values user code built. Rejected: hot bodies anywhere, whose arguments are promises into package frames and whose times nest.
@@ -242,11 +247,15 @@ Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and be
 
 ## The code bases are a benchmark suite of their own, outside the headline
 
+**Status:** built.
+
 - `tools/bench/codebases` records each code base's time as the sum of its test blocks' times, with GNU R, ry and ry without the JIT in the same rounds, shown in its own section after the package suites.
 - **No headline row,** because generated code says less about real code than the package suites; kept out by `outsideSummary` (`docs/src/lib/benchmarks.ts`) and `outside_summary` (`tools/bench/readme.py`). Release runs use `--extra-rounds 0`, because a round takes about 22 minutes.
 - **Trap:** the Posit snapshot's xts binary truncates `ATTRIB`'s result on R 4.6, so `tools/corpus/install.R` reinstalls xts from source.
 
 ## The profile summary hashes private package names with a secret key per project
+
+**Status:** built.
 
 - **`package_display` (`crates/interp/src/profile_summary.rs`) labels a private package with SipHash-2-4 under a 128-bit secret key,** because an unkeyed hash lets anyone confirm a guessed name. The key is `RY_PROFILE_KEY` (32 hex digits; invalid is an error) or a per-project file under the user's cache directory, `ry/profile-keys/`, created once with `getrandom`, mode 0600, by hard-linking a staged file so racing sessions agree. With no keepable file the run uses its own key and the summary says why.
 - **Cache directory, not the project's `.ry/`,** because a file in the project can be committed and `ry run` writes nothing else there. Two machines label differently; `RY_PROFILE_KEY` from a CI secret gives a fleet one key.

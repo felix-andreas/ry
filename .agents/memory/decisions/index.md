@@ -6,7 +6,7 @@ Settled architecture decisions and the reasons behind them, one file per area. E
 - **planned**: the design is settled and not fully implemented. The line says what exists so far.
 - **superseded**: another entry replaced this one. The line names it and says what the text is kept for. A superseded entry with nothing left to teach is deleted.
 
-An entry listed here without a status is built. To read one, search its heading in the area file. A new entry gets its status line when it is written, and the line changes in the same change that builds or replaces the design. A new entry is an H2 section appended to the area file it belongs to; then run `python3 tools/memory.py index` to regenerate this file, which `python3 tools/memory.py check` (part of `just gate`) keeps honest.
+An entry listed here without a status is built. `check` fails on an entry without a status line. To read one, search its heading in the area file. A new entry gets its status line when it is written, and the line changes in the same change that builds or replaces the design. A new entry is an H2 section appended to the area file it belongs to; then run `python3 tools/memory.py index` to regenerate this file, which `python3 tools/memory.py check` (part of `just gate`) keeps honest.
 
 ## Syntax and semantics
 
@@ -171,11 +171,11 @@ An entry listed here without a status is built. To read one, search its heading 
 
 [`interp.md`](interp.md): The evaluator: calls, promises, frames, environments, lookups, dispatch and conditions.
 
-- The interpreter and base R
+- The interpreter and base R (built, with exceptions)
 - `[`, `[[`, `[<-` and `[[<-` dispatch before evaluating their other arguments
 - `object-systems = false` stops class definitions in project code at run time
 - Smaller runtime choices
-- The interpreter's call path, lookups and allocation
+- The interpreter's call path, lookups and allocation (built, with exceptions)
 - A primitive's S4 cache lookup matches arguments by name first
 - A hashed frame counts complex assignment's `*tmp*`
 - Single-thread first, parallel-ready architecture (user directive) (built, with exceptions)
@@ -185,7 +185,7 @@ An entry listed here without a status is built. To read one, search its heading 
 - Slot frames: closure locals live in registers until something asks for the environment
 - A slot frame's environment binds a variable only when a lookup asks for it
 - A slot frame's environment asks its frame only for names the frame binds
-- Single-core speed first; per-process costs count once per worker
+- Single-core speed first; per-process costs count once per worker (built, with exceptions)
 - Closure call setup: the 10x end shape (planned)
 - Tier-0 lookups through binding cells
 - Native entries read promises over a pending frame without forcing them
@@ -217,7 +217,7 @@ An entry listed here without a status is built. To read one, search its heading 
 - The message sink and connection flush points
 - utils' sockets, internal downloads and allocation profiling
 - One session temporary directory, removed at exit
-- Base R kernels: radix sorting, gather subsetting, x87 accumulation and shortest-digit formatting
+- Base R kernels: radix sorting, gather subsetting, x87 accumulation and shortest-digit formatting (built, with exceptions)
 - Base R kernels: position tables, a most significant digit radix order, and a per-call string memo
 - Base kernels pick their data structure by the value range
 - `as.character` of a long number vector is deferred
@@ -256,7 +256,7 @@ An entry listed here without a status is built. To read one, search its heading 
 
 - Package tests through the oracle
 - Corpus package tests: compatibility details that are easy to get wrong
-- Matching GNU R's own tests where its behavior is an artifact
+- Matching GNU R's own tests where its behavior is an artifact (built, with exceptions)
 - Runtime semantics settled by the corpus package tests
 - Package-test compatibility details that look optional but are not
 - Runtime error checks follow GNU R's order and blame
@@ -374,41 +374,41 @@ An entry listed here without a status is built. To read one, search its heading 
 [`libr-rcmd.md`](libr-rcmd.md): The `libR` C API, `R CMD`, package installation, the bundled base R, and the loader behind `ry load`, `ry test` and `ry document`.
 
 - Packages and R versions in the runtime (built, with exceptions)
-- The full C API surface and package installation
-- The package-development loader
+- The full C API surface and package installation (built, with exceptions)
+- The package-development loader (built, with exceptions)
 - The loader on ry's runtime
 - libr reads options from base's `.Options`
 - One serializer writer, in libr
 - A package ry compiled records its headers' binary interface
 - ALTREP elements go through the class methods everywhere
-- The presented R version comes from the base package the runtime runs
+- The presented R version comes from the base package the runtime runs (built, with exceptions)
 - ry run and ry R: the command chooses the runtime
 - Source-change detection lives in the loader, so both runtimes reload the same way
 - A reload re-derives one file and rewrites only the bindings it changed
 - A cold load is analyzed while base R starts
 - ry refuses a `libR.so` built from other sources
-- The C headers declare the API of the presented R version
+- The C headers declare the API of the presented R version (built, with exceptions)
 - macOS packages bind to ry's libR
-- Windows runtime: `R.dll` and `ry.exe` for windows-gnullvm, linked with lld
+- Windows runtime: `R.dll` and `ry.exe` for windows-gnullvm, linked with lld (built, with exceptions)
 - ry ships its own base R, and GNU R through `R_HOME` is the opt-in
 - The runtime emulates the GNU R version it loads base R from
 - The C API draws from the interpreter's generator
 - Native code reads an environment as a cell
-- The strict load check overlaps the runtime start
-- Every load of a strict package is checked
+- The strict load check overlaps the runtime start (built, with exceptions)
+- Every load of a strict package is checked (built, with exceptions)
 - Lazy definitions keep source references
 - GNU R's public C API is a checked list, not a measured subset
-- Windows `R CMD INSTALL`: the home's `Makeconf` decides the platform
+- Windows `R CMD INSTALL`: the home's `Makeconf` decides the platform (built, with exceptions)
 - The Windows session's native encoding is UTF-8
 - A load holds back S4 definitions and caches its index across processes
-- The strict load check shares the check record
+- The strict load check shares the check record (built, with exceptions)
 - `ry test` is `ry load` plus testthat, with affected tests first
 - `ry test --jobs` runs test files in testthat's workers, loaded by ry's loader
 - A C API argument that may be a C `NULL` is typed `Option<Sexp>`
 - Source edits arrive by OS notification, ordered by a barrier file
 - `ry document` is roxygen2 with block and topic caches and linear topic ordering
 - A strict reload re-checks through a persistent salsa database
-- Compiled code under `ry load` builds with ry's own R home
+- Compiled code under `ry load` builds with ry's own R home (built, with exceptions)
 - The strict load check analyses only the package
 - A reload diffs S3 registrations per table entry
 - `R CMD` make variables expand as GNU make expands them
@@ -500,15 +500,15 @@ An entry listed here without a status is built. To read one, search its heading 
 
 [`frames-table.md`](frames-table.md): The built-in DataFrame, its kernels, CSV reading, and the data.table boundary.
 
-- The built-in frame
-- Frames as runtime values
-- data.table runs on its own code; the `[` bridge is removed
-- Delimited files: one sniffer for the reader and the checker
+- The built-in frame (built, with exceptions)
+- Frames as runtime values (built, with exceptions)
+- data.table runs on its own code; the `[` bridge is removed (built, with exceptions)
+- Delimited files: one sniffer for the reader and the checker (built, with exceptions)
 - The table engine's sort and distinct kernel
-- The DataFrame API is Polars', and ry's own types are UpperCamelCase
+- The DataFrame API is Polars', and ry's own types are UpperCamelCase (built, with exceptions)
 - Per-group top rows and as-of joins reuse the engine's kernels
-- data.table's helpers run data.table's own C, and the C API is what makes them fast
-- Frames and the checker share one CSV reader, and data.table keeps its own
+- data.table's helpers run data.table's own C, and the C API is what makes them fast (built, with exceptions)
+- Frames and the checker share one CSV reader, and data.table keeps its own (built, with exceptions)
 - A DataFrame column reads back as a plain vector, not an Array
 - The engine's workers return freed memory at large frame boundaries
 - Group codes wider than 64 bits are ranked, not handed to Polars
@@ -534,7 +534,7 @@ An entry listed here without a status is built. To read one, search its heading 
 
 [`tooling-bench-ci.md`](tooling-bench-ci.md): Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and benchmark suites.
 
-- Every pipeline stage is fuzzed from its first commit
+- Every pipeline stage is fuzzed from its first commit (built, with exceptions)
 - The shipping binary links no Apple frameworks (built, with exceptions)
 - The Linux release binary links glibc 2.17 through zig (superseded by "Releases are built natively per platform, with the runtime beside the binary")
 - The benchmark harness compares test by test through `ry load`
@@ -570,8 +570,8 @@ An entry listed here without a status is built. To read one, search its heading 
 
 [`docs-process.md`](docs-process.md): The docs site, licensing, positioning, and how agents record and organize knowledge.
 
-- Licensing
-- Positioning
+- Licensing (built, with exceptions)
+- Positioning (built, with exceptions)
 - Data-oriented design and explicit allocators
 - Docs information architecture: Introduction, Learn, Reference, Development
 - Landing-page and README samples are captured from the running tools

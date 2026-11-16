@@ -16,11 +16,11 @@ Design and measurements: `development/design/packaging.md`.
 
 ## The full C API surface and package installation
 
-**Status:** built. Base R's source, the BLAS link line, byte-compilation and the numeric ports are superseded by "ry ships its own base R, and GNU R through `R_HOME` is the opt-in", "BLAS and LAPACK come from the system, then from GNU R's Makeconf", "Bytecode is build output, not a cache" and "Numeric routines are exact ports of GNU R 4.6.2, and LINPACK lives in the interpreter crate".
+**Status:** built, except base R from GNU R's home, the header-only BLAS and LAPACK link line, the skipped byte-compile and the routines rewritten from published algorithms, which "ry ships its own base R, and GNU R through `R_HOME` is the opt-in", "BLAS and LAPACK come from the system, then from GNU R's Makeconf", "Bytecode is build output, not a cache" and "Numeric routines are exact ports of GNU R 4.6.2, and LINPACK lives in the interpreter crate" supersede.
 
 - **Evaluation is a hook the interpreter installs, not a dependency.** `libr::eval::Evaluator` is set once with `install_evaluator`, and every evaluating C entry point (`Rf_eval`, `R_tryEval`, `R_ParseVector`, finalizers, S4 class functions, namespace loading in `R_GetCCallable` and the unserializer) goes through it. Without one, a built-in evaluator of native calls runs, so libR is testable alone.
 - **libR depends on zlib, bzip2 and xz** as GNU R's does, because binaries (gert, httpuv) call zlib without linking it.
-- **Names R 4.6 dropped are still exported and declared** (`legacy.rs`), because older binaries import them and pinned sources (readr, isoband, yaml) use them; one missing symbol stops a library loading. A `TRUELENGTH` other than a shrunk vector's capacity lives in `Runtime::truelengths`, with the object preserved so no address is reused under a stale value.
+- **Names R 4.6 dropped are still exported and declared** (`legacy.rs`), because older binaries import them and pinned sources (readr, isoband, yaml) use them; one missing symbol stops a library loading. A `TRUELENGTH` other than a shrunk vector's capacity lives in `Runtime::truelengths`, with the object preserved so no address is reused under a stale value. `SETLENGTH` makes the vector resizable; `FRAME` returns a snapshot pairlist (frames are hashed); `R_PPStack` is a real array that a root source scans up to `R_PPStackTop`, for code compiled with R's internal macros.
 - **`.C` and `.Fortran` copy their arguments** and return the copies as a named list. `.Call` accepts `NativeSymbolInfo` objects (`R_forceSymbols` needs it).
 - **`R_withCallingErrorHandler` runs its handler after unwinding;** GNU R runs it before. Only a handler that inspects the unwound native frames can tell.
 - **Hash tables (`R_mkhashtab`) live entirely in heap objects** (an external pointer tagged `c(type, count)` protecting the bucket list), so the collector traces them and nothing is freed by hand.
@@ -32,14 +32,14 @@ Design and measurements: `development/design/packaging.md`.
 - **An error raised while `dlopen` runs static initializers surfaces as a `dyn.load` error** (`ry_call_dlopen` sets a jump target; Rcpp's `Function c("c")` globals call `Rf_findFun` there). Longjmping out of an initializer leaves glibc's loader lock with that thread, as in GNU R, so a process exiting from another thread deadlocks in `_dl_fini`; R and `test_load_errors` run on the main thread.
 - **`getNamespace` is a built-in of the native-call evaluator,** because Rcpp's initializers look it up before any interpreter exists.
 - **One L-BFGS-B, written from the BSD reference v3.0** (`crates/stats/src/lbfgsb.rs`), matching GNU R's hybrid of versions found by bitwise iterate comparison: no Morales-Nocedal projection in the subspace step, and the Cauchy search keeps the `f2` floor and is skipped unconstrained once memory exists. Addition order is pinned with comments; oracle case `stats__lbfgsb_paths`.
-- **`nlminb` runs PORT's drivers written from netlib's reference** (`crates/stats/src/port_minimizer.rs`; GNU R's `portsrc.f` was never read), matching GNU R's driver by black-box tests (a Hessian without a gradient is ignored, a NaN objective warns and becomes Inf). `DV2NRM` is BLAS `dnrm2`, because GNU R links PORT's norm to the BLAS. Oracle case `stats__nlminb_port_paths`; open divergences in `backlog.md`.
+- **`nlminb` runs PORT's drivers written from netlib's reference** (`crates/stats/src/port_minimizer.rs`; GNU R's `portsrc.f` was never read), matching GNU R's driver by black-box tests (a Hessian without a gradient is ignored, a NaN objective warns and becomes Inf). `DV2NRM` is BLAS `dnrm2`, because GNU R links PORT's norm to the BLAS. Oracle case `stats__nlminb_port_paths`; open divergences in `backlog.md`. `nls(algorithm = "port")` still runs ry's own trust-region method (`crates/stats/src/port.rs`).
 - **KalmanLike and `prod` accumulate as GNU R observably does:** the Kalman filter updates term by term, and `prod` multiplies each argument in long double, combines in double, and lets the first NaN win (`prod(NaN, NA)` is NaN).
 - **`R CMD SHLIB` passes `-l`, `-L` and `.a` arguments to the link,** because configure scripts probe with `R CMD SHLIB conftest.c -lfoo` (Rglpk).
 - **`Rf_rnbeta` is exported** though GNU R does not define it, because `Rmath.h` declares `rnbeta` and Rcpp's sugar refers to `::Rf_rnbeta`.
 
 ## The package-development loader
 
-**Status:** built. The ignored `if` in `NAMESPACE` and the console's stat fingerprint are superseded by "`if` in NAMESPACE is evaluated by the host, then resolved in text" and "Source-change detection lives in the loader, so both runtimes reload the same way".
+**Status:** built, except the ignored `if` in `NAMESPACE` and the console's own stat fingerprint, which "`if` in NAMESPACE is evaluated by the host, then resolved in text" and "Source-change detection lives in the loader, so both runtimes reload the same way" supersede.
 
 User page: `reference/package-loading.md`; design: `development/design/r-runtime.md` section 6.
 
@@ -97,7 +97,7 @@ User page: `reference/package-loading.md`; design: `development/design/r-runtime
 
 ## The presented R version comes from the base package the runtime runs
 
-**Status:** built. The source of the revision and date is superseded by "The runtime emulates the GNU R version it loads base R from".
+**Status:** built, except the source of the revision and date, which "The runtime emulates the GNU R version it loads base R from" supersedes.
 
 - **One source of truth: the R home's `library/base/DESCRIPTION`.** `R.version`, `getRversion()` (`interp::system::r_version`), the serialize writer version and the home's generated `include/Rversion.h` (`rcmd::assemble`) all read it. The revision is raised to at least 89194, because ry implements the API data.table guards on it.
 - **Why the C and R versions must agree:** with C at 4.6 and R at 4.3, rlang's C made `ns_registry_env()` defunct while its R code still called it, breaking pkgload and generics. A version claim above the base R code actually running is false at the R level.
@@ -146,7 +146,7 @@ User page: `reference/package-loading.md`; design: `development/design/r-runtime
 
 ## The C headers declare the API of the presented R version
 
-**Status:** built. The default version is superseded by "ry ships its own base R, and GNU R through `R_HOME` is the opt-in".
+**Status:** built, except the default version 4.3.3, which "ry ships its own base R, and GNU R through `R_HOME` is the opt-in" supersedes.
 
 - Packages branch on `R_VERSION` to backport newer API, so headers declaring everything ry implements would collide with the backports (rlang's `ANY_ATTRIB`, yaml's `R_mkClosure`) and miss names newer R removed (Rcpp's `VECTOR_PTR` below 4.5).
 - Every declaration GNU R added in 4.4 to 4.6 sits behind `#if R_VERSION >= R_Version(...)`, versions taken from GNU R's headers; the headers include the home's generated `Rversion.h`. The crate's fallback `Rversion.h` says 4.6. `libR.so` exports every name regardless.
@@ -164,7 +164,7 @@ User page: `reference/package-loading.md`; design: `development/design/r-runtime
 
 ## Windows runtime: `R.dll` and `ry.exe` for windows-gnullvm, linked with lld
 
-**Status:** built. Shipping `R.dll` beside `ry.exe` is superseded by "A release is `ry` alone, with the runtime embedded and the R front end folded in".
+**Status:** built, except shipping `R.dll` beside `ry.exe`, which "A release is `ry` alone, with the runtime embedded and the R front end folded in" supersedes.
 
 - **Target `x86_64-pc-windows-gnullvm`,** the mingw-w64 ABI Rtools builds packages with, on the UCRT. `windows-gnu` links `msvcrt.dll` and an MSVC `ry.exe` mixes runtimes too, so `errno`, `FILE *` and `malloc`/`free` crossing the API would hit two C runtimes. Package DLLs import `R.dll` by module name and Windows reuses a loaded module of that name, so naming ry's library `R.dll` binds them with no rewriting. Exports come from `__declspec(dllexport)` in `native.c` plus rustc's, so no `.def` file can drift.
 - **One platform seam:** every OS call the interpreter makes goes through `crates/interp/src/platform.rs` (Unix and Windows `imp`), so a new libc use is a Windows build error in one file. The heap's reservation has its own seam (`virtual_memory` in `crates/heap/src/space.rs`). `PortableIconv` uses `encoding_rs` because Windows has no `iconv(3)`.
@@ -215,7 +215,7 @@ User page: `reference/package-loading.md`; design: `development/design/r-runtime
 
 ## The strict load check overlaps the runtime start
 
-**Status:** built. The whole-root walk is superseded by "The strict load check analyses only the package".
+**Status:** built, except the whole-root walk, which "The strict load check analyses only the package" supersedes.
 
 - **On ry's runtime the check runs on a thread while the runtime starts** (`run_load` in `crates/ry/src/main.rs`). The loader calls a verdict callback (`ry_loader_set_verdict`, `.ry_await_verdict()` in `runtime.R`) before any statement that is not effect-free, before compiled code, `.onLoad`, `sysdata.rda` and `data/*.R` (ordinary code), after the load, and before a held-back S4 statement that is not effect-free; a refusal exits with the verdict's status. GNU R checks before it starts, because its loader cannot call back into ry.
 - **Effect-free** (`EagerItem.effect_free`, `load_index.rs`): binds a function literal, or `item_effect_free` (`top_level.rs`) holds. Strict mode's `Definition` alone is not enough, because it leaves a declaring call's arguments to R (`setRefClass(..., methods = list(m = { cat(1); function() 1 }))` passes strict mode yet prints). Loading imports is allowed before the verdict. A constant may call a user `@pure` function, whose purity is trusted by the `@pure` contract.
@@ -223,7 +223,7 @@ User page: `reference/package-loading.md`; design: `development/design/r-runtime
 
 ## Every load of a strict package is checked
 
-**Status:** built. The full analysis per reload is superseded by "A strict reload re-checks through a persistent salsa database".
+**Status:** built, except the full analysis on every reload, which "A strict reload re-checks through a persistent salsa database" supersedes.
 
 - **Every plan carries `Plan::strict`** (`PackageIndex::strict`, the same test as `prepare_purity`), and a host checks every plan that changes something: GNU R's `.Call` routine and `ry load --emit-plan` through `load::strict_value`, ry's runtime through a host callback (`loader_backend::set_check`, registered by `repl::set_package_check_on_ry_runtime`), because the loader cannot depend on the CLI's analysis. A refusal turns the plan into an error before R sees it, so the old bindings stay.
 - **Strictness is decided per package root from its own `ry.toml`** (`load::strict_config`); taking it from the command's configuration would let a lax script `load_all()` a strict package unchecked.
@@ -249,7 +249,7 @@ User page: `reference/package-loading.md`; design: `development/design/r-runtime
 
 ## Windows `R CMD INSTALL`: the home's `Makeconf` decides the platform
 
-**Status:** built. The front ends as plain copies of `ry-rcmd.exe` are superseded by "A release is `ry` alone, with the runtime embedded and the R front end folded in".
+**Status:** built, except the front ends as plain copies of `ry-rcmd.exe`, which "A release is `ry` alone, with the runtime embedded and the R front end folded in" supersedes.
 
 - **`rcmd::Platform::of_home` reads `SHLIB_EXT` from the home's `etc/Makeconf`,** so the home is the single source of truth and a Linux test can drive Windows conventions with a Windows `Makeconf`. From it follow the suffix, `libs/x64/`, `R_ARCH` and build-file precedence (`.ucrt`, then `.win`, then portable `Makevars`; `configure` and `Makefile` have no Unix fallback, as in GNU R). `makeconf` writes the Rtools ABI: `-shared -static-libgcc`, no PIC flags, forward slashes, `-L"$(R_HOME)/bin/x64" -lR`.
 - **The SHLIB is `<package><ext>`** as GNU R links it, and every shared object `src/` holds is installed, so one a Makevars renames (data.table's `data_table.dll`) is found.
@@ -283,7 +283,7 @@ User page: `reference/package-loading.md`; design: `development/design/r-runtime
 
 ## The strict load check shares the check record
 
-**Status:** built. The whole-root walk is superseded by "The strict load check analyses only the package".
+**Status:** built, except the whole-root walk, which "The strict load check analyses only the package" supersedes.
 
 - **The load check is `ry check`'s analysis (`cli::analyze_project`) asked about `R/` alone, sharing its record,** so a package `ry check` or the editor just checked loads without re-checking. A recorded file's `diagnostics` is `None` when the writing run did not check it, and `check_cache::plan` treats it as stale. Kind isolation makes this sound: a name only a test defines stays unresolved in `R/`.
 - **A verdict-only pass was rejected:** a lint configured as an error counts (`is_strict_error`), so lints cannot be skipped, and rendering is a small share.
@@ -337,7 +337,7 @@ User page: `reference/package-loading.md`; design: `development/design/r-runtime
 
 ## Compiled code under `ry load` builds with ry's own R home
 
-**Status:** built. `ry-rcmd` beside libR is superseded by "A release is `ry` alone, with the runtime embedded and the R front end folded in".
+**Status:** built, except that `ry-rcmd` sits beside libR, which "A release is `ry` alone, with the runtime embedded and the R front end folded in" supersedes.
 
 - **`.ry_compile` calls `.Internal(ryLoaderCompile(...))`,** running `rcmd::compile` in process against a home from `rcmd::cached_home`, so no pkgbuild and no GNU R `libR` link. The home is under the user cache, keyed by ry's version, libR's and the front end's stamps and base, built from headers embedded at build time (`embed_headers` in `crates/ry/build.rs`). libR is hard-linked in.
 - **Pruning:** processes hold a shared `flock` on a home's `.lock`; a new build prunes only homes whose recorded inputs (`.libr`) no longer hash to their name and no process holds, renaming to `.removing-*` first so a half-deleted home is never found. Pruning every unheld home was rejected: two builds sharing a cache would delete each other's homes. Stale homes each pin an old libR inode.

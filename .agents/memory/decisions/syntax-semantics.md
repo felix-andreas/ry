@@ -16,6 +16,8 @@ every client. Contract: `development/authoring-stubs.md`.
 
 ## The beta semantics
 
+**Status:** built.
+
 The core type-system decisions follow. The semantics contract is `reference/type-system.mdx`, updated
 before the behavior it describes ships; `backlog.md` holds the work that follows.
 
@@ -280,6 +282,8 @@ model, and gating falls out of it. Until then the NAMESPACE surface is import va
 the corpus) and the opt-in `unused-import` lint.
 
 ## The shipping stack is a hand-written parser, a lossless tree, and salsa
+
+**Status:** built.
 
 `development/architecture.md` describes the architecture; the entries below hold the reasoning and the
 risks.

@@ -138,7 +138,7 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 
 ## Base R kernels: radix sorting, gather subsetting, x87 accumulation and shortest-digit formatting
 
-**Status:** built.
+**Status:** built, except the radix keys computed per pass (`SortKey::get`), which "Base R kernels: position tables, a most significant digit radix order, and a per-call string memo" supersedes.
 
 - `long_double.rs` is the one home for GNU R's long double accumulation, on x87 where available (`add_all`, `add_differences`, `add_products`, block row sums, `running_sums`). cov and cor round each column mean to double before the products, as GNU R does.
 - `format.rs` uses Rust's shortest round-trip digits only for normal values needing at most 15 significant digits; past that GNU R prints exact digits the shortest form lacks.
@@ -210,6 +210,7 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 **Status:** built.
 
 - **Mechanism.** `crates/interp/src/base_fast_paths.rs` puts `.Internal(ryX())` in front of a base closure's body when base loads, as the methods core does: a stable hash of formals and body guards the install (a miss is an error on the bundled R version and a silent skip on any other), the closure is patched in place, and the start-up image carries the patched closures. A prologue either returns from the closure's frame or returns NULL and lets the body run.
+- **Patched closures and their reach.** `match.arg` (a single ASCII string), `setdiff` (plain atomic vectors; R 4.6.2's body spends 17 of its 24 µs in two `tryCatch` calls), `format.default` (no marks or `justify`), `structure` (plain attributes, a non-factor character class), `stopifnot` (all-TRUE logicals), `readRDS`, `Reduce` (`accumulate = FALSE` over a plain vector), `deparse`/`.deparseOpts`, `formatC` (plain integer or double, `mode` NULL, formats d f e E g G fg), `pmax` (plain atomics, first without attributes, no fractional recycling), `tryCatch` (one handler), `withRestarts` (`function` literals or strings), and `invokeRestart`/`tryInvokeRestart` (a name only). Small closures with call arguments (`ifelse`, `isTRUE`, `isFALSE`, `unname`, `%in%`, `unlist`) have their own entry, "Small base closures with call arguments run their bodies natively behind prologues".
 - **Invariants.** A prologue forces only what the body forces, in the body's order, so a declined call sees the same promises. It covers the common case only and declines everything else, so errors, warnings and messages always come from the R body. A defaulted argument is checked by the cell holding the bound default (`gp::BINDING_MISSING`), not `missing()`: a wrapper passing on its own missing formal makes `missing()` TRUE, but forcing it in the body errors.
 - **Nested closures** (`NESTED_FAST_PATHS`). `assignNativeRoutines` is defined inside `loadNamespace`'s body, so the prologue goes into that `function` expression, found by its `name <- function` assignment; `ryAssignNativeRoutines` binds all routines at once instead of growing vectors with `c()`. Hashes of nested functions are taken with nested prologues stripped (`without_nested_prologues`), because the image saves patched bodies.
 - **`readRDS(path)`** reads the file whole, inflates gzip in one pass and unserializes the slice; the R body's `gzfile()` connection costs three times as much. It declines for `~` paths, xz, bzip2, headerless streams and any unserialize error. An uncompressed form would need a second file per database or a non-GNU `saveRDS`, so it is not done; `zlib-rs` inflated no faster than `miniz_oxide`.
@@ -219,6 +220,8 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 - **`formatC` and `pmax`.** The prologue does the body's NA/NaN/Inf substitution and default-digits arithmetic and calls `format::format_c_vector`, the same body as the `formatC` internal, with Rust values. An ASCII `big.mark` with default marks is inserted natively, matching `prettyNum()`'s reversed `([0-9]{k})\B` substitution. While `decimal.mark` holds its unforced default, it reads `OutDec` through `envir::option_value` (`getOption()` has no side effect). The `'` and `I` flags are not pinned because GNU R's output depends on the C locale (`base__format_c_fast_path.R`, `base__format_c_out_dec.R`).
 - **`tryCatch`, `withRestarts`, restarts.** The prologues keep every frame the R bodies make (`tryCatchList`, `tryCatchOne`, `doTryCatch`, `withOneRestart`, `doWithOneRestart`); only the bookkeeping between them is native, because a frame GNU R shows cannot be skipped (`sys.calls()`, `conditionCall()`, handler frame variables). Inner closures are made through `bytecode::inner_closure`, which reuses the compiled body stored in the outer function's constants; otherwise each new closure recompiled. `tryCatchList` covers one handler. `.signalSimpleWarning` and `.handleSimpleError` are called from the base environment, as `errors.c` does (`conditions__try_catch_fast_path.R`).
 - **Known difference.** The prologue is visible: `body(match.arg)[[2]]` is `.Internal(ryMatchArg())`, so printing, `deparse()` or digesting a patched function differs from GNU R.
+- **Known gap.** The `format` internal checks its arguments in `do_format`'s order but does not yet warn "NAs introduced by coercion" for a string `digits` or `width`.
+- **Measured.** `validation` went from 0.58 to 0.65 times GNU R to 1.87x; `formatC(42L, width = 6L, flag = "0")` 13.2 to 1.4 µs (GNU R 14), with `big.mark` 76 to 2 µs (GNU R 106); `deparse` 9.1 to 1.4 µs (GNU R 12.8); `tryCatch(1, error = h)` 3.7 µs (GNU R 4.1; 19 µs without `inner_closure`). `match`, `%in%`, `intersect`, `ls` and `pmatch` were each under 1% of the testthat profile and left alone.
 - Next candidates: `utils::modifyList` (needs an install hook when utils loads) and `tryCatchList` with several handlers.
 
 ## Builtin fast paths take names as CHARSXPs and evaluate nothing twice
@@ -461,6 +464,8 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 - Pinned by `conditions__suppress_warnings_muffle.R` and `conditions__warning_signal_routes.R`.
 
 ## `%%` and `%/%` on doubles port GNU R's kernels, with a 64-bit path for whole numbers
+
+**Status:** built.
 
 - Both kernels (`real_modulo`, `real_integer_divide` in `crates/interp/src/arith.rs`) port GNU R as it runs with an x87 `long double`. Earlier approximations differed in 311 of 2,209 grid pairs (`1 / (-6 %% 3)`, `1e-300 %/% -1`, NA payloads).
 - Whole operands below 2^53 divide as `i64` (`whole_division`), exact and giving GNU R's `+0.0`. Other pairs follow GNU R's test order: zero divisor, NaN operands (`extended_nan` reproduces the x87 NaN choice, so `NA` survives against `NaN`), infinite dividend, the divisor-above-2^63 shortcut, then the correction through `numeric::LongDouble`.

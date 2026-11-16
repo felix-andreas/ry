@@ -4,7 +4,7 @@ The evaluator: calls, promises, frames, environments, lookups, dispatch and cond
 
 ## The interpreter and base R
 
-**Status:** built. Where base R's R code comes from is settled by "ry ships its own base R, and GNU
+**Status:** built, except loading base R's R code from the user's GNU R installation, which "ry ships its own base R, and GNU R through `R_HOME` is the opt-in" supersedes.
 R through `R_HOME` is the opt-in".
 
 The code is `crates/interp` (`development/design/r-runtime.md`, step 3).
@@ -110,7 +110,7 @@ The code is `crates/interp` (`development/design/r-runtime.md`, step 3).
 
 ## The interpreter's call path, lookups and allocation
 
-**Status:** built.
+**Status:** built, except `Decoded` and `combine_unnamed_atomic`, which the code does not have.
 
 - **A closure call's bookkeeping stays off the Rust heap.** Arguments and matched formals live in
   inline `SmallVec`s (`eval::Args` 10, `eval::Matched` 8), callers fill a vector they own
@@ -401,7 +401,7 @@ Design and measurements: `development/design/slot-frames.md`.
 
 ## Single-core speed first; per-process costs count once per worker
 
-**Status:** built. How package code avoids run-time compilation is settled by "No baseline tier,
+**Status:** built, except package code running from install-time compiled code, which "No baseline tier, and code images hold bytecode only" supersedes.
 and code images hold bytecode only".
 
 - **Decision.** Target users run test suites in parallel processes and are CPU bound, so
@@ -472,6 +472,7 @@ without cells, promise forcing in the loop, and one observer word on the general
 - **No single part of a framed call is large**, so the depth-indexed columns alone move little;
   the goal needs the hot record, a smaller resume record, a window that needs no clearing, and
   guards folded into the header and the plan row together.
+- **Why validation does not move.** Only 49% of its closure calls reach the fast path (the rest: a caller frame with an environment, a builtin callee, a plan word still zero because a body compiled per closure creation never gives its sites a second call, a native entry). Even with all of them on it, the call op cannot gain 8%: its promise forces (2.7 per call instruction) dominate.
 - **Forcing a promise in the loop does not pay before promises are pooled** (measured as a net loss
   everywhere): its forcing record, two roots and heap target reads cost about what the Rust frame
   did. It belongs with pooled targets in `u32` columns and was removed rather than kept disabled.

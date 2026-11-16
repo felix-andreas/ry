@@ -44,7 +44,7 @@ tests") runs each corpus package's own `tests/` under GNU R and ry.
 
 ## Matching GNU R's own tests where its behavior is an artifact
 
-**Status:** built. The numeric-port rule is in "Numeric routines are exact ports of GNU R 4.6.2,
+**Status:** built, except the black-box rule and the `smooth.spline` and `loess` notes, which "Numeric routines are exact ports of GNU R 4.6.2, and LINPACK lives in the interpreter crate" supersedes, and the long double `List.sum`, which "`List.sum` adds doubles in order in double precision" supersedes.
 and LINPACK lives in the interpreter crate"; typed `List.sum` follows "`List.sum` adds doubles in
 order in double precision".
 
@@ -129,8 +129,10 @@ GNU R's `tests/*.R` pin behaviors that come from its machine or implementation, 
   `socketAccept(timeout =)` gives up where GNU R waits forever. `parallel::makeCluster()` works
   (`parallel__socket_cluster`); workers start `R.home("bin")/Rscript`, so they run ry only under
   ry's R home.
-- **Unserializing from a connection reads one object** (`unserialize_connection`). An ASCII string
-  reads exactly its length, leaving the newline unread as GNU R does.
+- **Unserializing from a connection reads one object** (`unserialize_connection`,
+  `crates/interp/src/serialize.rs`), so a peer's next message stays unread. An ASCII string reads
+  exactly its length, leaving the newline unread as GNU R does. Trap: an ASCII object that ends in a
+  string is therefore followed by that newline, which only a following ASCII header (`\nA\n`) accepts.
 - **`warning(immediate. = TRUE)` signals like any warning**; only the default handler prints it at
   once, so calling handlers still see it.
 - **`Cstack_info()`** reports a fixed 7969177-byte size; scripts only compare its fields.

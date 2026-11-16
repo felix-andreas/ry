@@ -4,7 +4,7 @@ The docs site, licensing, positioning, and how agents record and organize knowle
 
 ## Licensing
 
-**Status:** built.
+**Status:** built, except reading base R's code from the user's GNU R installation, which "ry ships its own base R, and GNU R through `R_HOME` is the opt-in" supersedes.
 
 - **Rule.** GPL-2.0-or-later where code translated from GNU R is contained or linked, UPL-1.0 elsewhere, LGPL-2.1-or-later C headers (`crates/libr/include`), MIT editor extensions. Each `Cargo.toml` `license` field is the source of truth; `docs/src/content/docs/reference/licensing.md` is the user-facing contract and lists every part.
 - **Why GPL at all.** Many runtime components (TOMS 708, `pnorm`/`qnorm`, `ptukey`, the random variate generators, plotmath, `persp`, `swilk`, UNCMIN, QUADPACK, the X-spline and others) are translations of GNU R's C sources, so an earlier clean-room/UPL claim was false. Each such file keeps R's copyright lines in a header naming the R source file.
@@ -17,7 +17,7 @@ The docs site, licensing, positioning, and how agents record and organize knowle
 
 ## Positioning
 
-**Status:** built.
+**Status:** built, except the Tutorial and why-ry pages, which "Docs information architecture: Introduction, Learn, Reference, Development" supersedes, and the Speed tab's linear chart, which the landing page does not have.
 
 - **Audience.** Teams with large, old R code bases that want agents to write and change that code. Agent-written code needs verification that does not depend on a human reading every line, and a type checker gives it on every edit. The pitch leads with this, because "a language server for R" undersells why the project exists.
 - **Shape: one toolchain, R plus types, then R++ and R--.** ry's types sit on top of R and check existing code; ry's runtime features (records, tags and `match`, frames, the standard library, inline annotations) plus plain R are R++; strict mode, typed code only, is R--. A two-circle Venn diagram shows it, with one source, `docs/src/components/Venn.astro`, used by the landing page and `getting-started.mdx`.
