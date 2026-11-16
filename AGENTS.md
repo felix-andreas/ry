@@ -155,7 +155,7 @@ A reproduction that names the user's own functions or files is real code, not an
 Memory lives in git so every agent reads the same source of truth; never keep project knowledge in a private store such as `~/.claude/`.
 
 - **`MEMORY.md`** is the index, naming every other knowledge document, and keeps three sections under exactly these names. **Short-term**: current focus and loose ends, pruned once resolved or obvious from the source tree. **Mid-term**: active priorities, open bugs and debt, kept until done. **Long-term**: durable, non-obvious, cross-cutting traps and conventions, terse, pointing at the code or the docs.
-- **`decisions/<area>.md`** holds settled decisions, one H2 entry each with a `**Status:**` line. Append a new one to its area file, then run `python3 tools/memory.py index`. To look one up, read `decisions/index.md` and then only the entries you need.
+- **`decisions/<area>.md`** holds settled decisions, one H2 entry each with a `**Status:**` line. Append a new one to its area file, then run `python3 tools/memory.py index`. To look one up, search `decisions/index.md` and read only that entry.
 - **`backlog.md`** lists open work, prioritized. Delete an item once it ships: rationale to `decisions/<area>.md`, contract to the docs, a closed user-testing finding to `test-user-reports.md`.
 - **`worklog.md`** is the one chronological file, one line of at most 400 bytes per cycle, appended by a scheduled routine; do not prune it as a rules violation.
 - **`crates/<crate>/AGENTS.md`** holds the traps of one crate.

@@ -404,7 +404,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn real_vectors_print_like_r() {
+    fn vectors_print_like_r() {
         assert_eq!(format_real_vector(&[1.0, 2.5, 3.0]), "[1] 1.0 2.5 3.0\n");
         assert_eq!(format_real_vector(&[1e10, 1.0]), "[1] 1e+10 1e+00\n");
         assert_eq!(
@@ -419,10 +419,6 @@ mod tests {
             format_integer_vector(&[1, NA_INTEGER, 300]),
             "[1]   1  NA 300\n"
         );
-    }
-
-    #[test]
-    fn long_vectors_wrap_with_index_labels() {
         let values: Vec<c_int> = (1..=30).collect();
         let text = format_integer_vector(&values);
         let lines: Vec<&str> = text.lines().collect();

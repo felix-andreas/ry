@@ -4582,8 +4582,8 @@ unsafe fn is_replicable(object: Sexp) -> bool {
     kind.is_atomic() || matches!(kind, SexpType::List | SexpType::Expression)
 }
 
-/// The elements of a logical, integer or double `object` recycled to `total`, copied a whole
-/// run at a time; `None` for an empty object or any other type.
+/// The elements of `object` recycled to `total`, copied a whole run at a time; `None` for an
+/// empty object, an ALTREP vector of strings or values, and anything that is not a vector.
 unsafe fn repeat_plain(object: Sexp, total: usize) -> R<Option<Sexp>> {
     fn fill<T: Copy>(target: &mut [T], source: &[T]) {
         for chunk in target.chunks_mut(source.len()) {
@@ -4591,17 +4591,38 @@ unsafe fn repeat_plain(object: Sexp, total: usize) -> R<Option<Sexp>> {
         }
     }
     let kind = object.kind();
-    if length(object) == 0
-        || !matches!(kind, SexpType::Logical | SexpType::Integer | SexpType::Real)
-    {
+    if length(object) == 0 {
         return Ok(None);
     }
-    let result = values::alloc_uninit(kind, total)?;
-    if kind == SexpType::Real {
-        fill(values::reals_mut(result), values::reals(object));
-    } else {
-        fill(values::ints_mut(result), values::ints(object));
-    }
+    let result = match kind {
+        SexpType::Logical | SexpType::Integer => {
+            let result = values::alloc_uninit(kind, total)?;
+            fill(values::ints_mut(result), values::ints(object));
+            result
+        }
+        SexpType::Real => {
+            let result = values::alloc_uninit(kind, total)?;
+            fill(values::reals_mut(result), values::reals(object));
+            result
+        }
+        SexpType::Complex => {
+            let result = values::alloc_uninit(kind, total)?;
+            fill(values::complexes_mut(result), values::complexes(object));
+            result
+        }
+        SexpType::Raw => {
+            let result = values::alloc_uninit(kind, total)?;
+            fill(values::raws_mut(result), values::raws(object));
+            result
+        }
+        SexpType::String | SexpType::List | SexpType::Expression if !object.is_altrep() => {
+            let result = alloc(kind, total)?;
+            fill(result.slice_mut::<Sexp>(), object.slice::<Sexp>());
+            crate::heap().count_written_elements(result);
+            result
+        }
+        _ => return Ok(None),
+    };
     Ok(Some(result))
 }
 

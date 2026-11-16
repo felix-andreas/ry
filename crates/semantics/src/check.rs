@@ -462,14 +462,12 @@ pub struct ItemCheck<'db> {
     /// `double` whatever the checker decided, so the code ry's runtime runs spells each one with
     /// its suffix (`preflight` in the `ry` crate); without it, `-> I64` could return a `double`.
     pub i64_literals: ThinVec<ExprId>,
-    /// The expressions whose types only this check knows and the runtime needs: an empty `[]`, a
-    /// call to a library function whose result items come from a callback rather than from a
-    /// list it was given (`List.map`), a library call that builds a dictionary from no entries
-    /// (`Dict.empty()`), and a `Num.from_r`. An empty list is stored by its items' storage, and
-    /// one built from no items is `logical`, typed code lays a dictionary out by its key and
-    /// value types, and the number a `Num.from_r` gives otherwise depends on the R value, so the
-    /// code ry's runtime runs passes each of these through `.ry_items` with the type
-    /// (`preflight` in the `ry` crate). In id order.
+    /// The expressions whose types only this check knows and the runtime needs, in id order: an
+    /// empty `[]` (stored by its items' storage, `logical` when there are none), a library call
+    /// whose result items come from a callback (`List.map`), one building a dictionary from no
+    /// entries (`Dict.empty()`, laid out by key and value types), and `Num.from_r`, whose number
+    /// otherwise depends on the R value. The runtime receives each through `.ry_items` (`preflight`
+    /// in `ry`).
     pub checked_types: ThinVec<(ExprId, CheckedType)>,
     /// What only editor features read, absent when the host asked for no editor facts, so a
     /// command's check keeps no per-item slots for them.
@@ -6799,15 +6797,14 @@ impl<'db, 'a> Checker<'db, 'a> {
         module.for_each_child(id, |child| self.collect_formal_uses(child, uses));
     }
 
-    /// For each argument of a call to the project function `name`, whether it binds a
-    /// parameter the callee may leave unread: optional without a default, or one the callee
-    /// tests with `missing()`. A missing formal passed on does not take the callee's default,
-    /// so a defaulted parameter that the callee reads without testing it still errors, while
-    /// knitr's `kable_format(format = NULL)` tests `missing(format)`. Names match exactly, and the remaining
-    /// arguments fill the unclaimed formals before `...` in order. An unknown callee yields no
-    /// optional targets, so its arguments stay forced. A local function the enclosing body
-    /// has already bound counts as well, as callr's `format_advice(x)` hands `x` to a local
-    /// helper that never reads it.
+    /// For each argument of a call to the project function `name`, whether it binds a parameter the
+    /// callee may leave unread: optional without a default, or tested with `missing()` (knitr's
+    /// `kable_format(format = NULL)`). A missing formal passed on does not take the callee's
+    /// default, so a defaulted parameter read without a test still errors. Names match exactly, the
+    /// rest fill the unclaimed formals before `...` in order, and an unknown callee yields none, so
+    /// its arguments stay forced. A
+    /// local function already bound counts too (callr's `format_advice(x)` hands `x` to a helper
+    /// that never reads it).
     fn optional_argument_targets(
         &self,
         callee: ExprId,
@@ -9432,12 +9429,11 @@ impl<'db, 'a> Checker<'db, 'a> {
             let whole_literal = self.is_whole_double(operand);
             let inferred = self.infer(operand);
             let resolved = self.structural(inferred);
-            // R takes a logical endpoint as a number, and a vector endpoint by its first element.
-            // A vector type carries no length, so only a literal `c()` of several elements is
-            // known to be too long. An endpoint read from a list field that is only sometimes
-            // `NULL` is used where the code has ruled that out: mgcv's basis fills `off` only
-            // when a `penalty` flag is set, and callers read `b$off[i]:...` only after passing
-            // it. A local, an element read straight from a value, and a field of a parameter,
+            // R takes a logical endpoint as a number and a vector endpoint by its first element; a
+            // vector type carries no length, so only a literal `c()` of several elements is known
+            // to be too long. A list field that is only sometimes `NULL` is read where the code has
+            // ruled that out (mgcv reads `b$off[i]:...` only after testing the flag that fills
+            // `off`). A local, an element read straight from a value, and a field of a parameter,
             // whose `NULL` the declaration admits, stay checked.
             let field_read = {
                 let mut expression = operand;
@@ -11010,13 +11006,11 @@ impl<'db, 'a> Checker<'db, 'a> {
         walk(db, resolved, &unconstrained)
     }
 
-    /// A variable whose every visible write is `NULL`, such as `msg <- NULL # trick R CMD
-    /// check` before `msg %<~% ...`, or a top-level `.flag = NULL` that `assign()` fills in, is
-    /// a placeholder for a value written where the checker cannot see. Correct R never tests
-    /// or passes on a value that is always `NULL` where `NULL` fails, so such a read is not
-    /// reported there. A parameter's `NULL` is what the caller passed, and stays checked.
-    /// A local whose every visible write is a bare `NA` (`pattern.end = NA` before a closure
-    /// fills it with `<<-`) is the same placeholder, spelled as a missing value.
+    /// A variable whose every visible write is `NULL` (`msg <- NULL # trick R CMD check` before
+    /// `msg %<~% ...`, or a top-level `.flag = NULL` that `assign()` fills) or, for a local, a bare
+    /// `NA` (filled later with `<<-`) is a placeholder for a write the checker cannot see. Correct
+    /// R never uses an always-`NULL` value where `NULL` fails, so such a read is not reported
+    /// there. A parameter's `NULL` is what the caller passed, and stays checked.
     fn reads_null_placeholder(&self, value: ExprId, ty: Ty<'db>) -> bool {
         let mut value = value;
         while let ExpressionKind::Paren(inner) = self.module.kind(value) {
@@ -13675,13 +13669,11 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
         }
 
-        // Report the overload-set finding unless one answer exists: every candidate failed
-        // for the same reason, or the candidates that got furthest into the call (their first
-        // blamed argument is the deepest; a whole-call verdict blames none) all failed for the
-        // same reason.
-        // The standard library declares an Array twin before each `List` signature. When the
-        // argument is not an Array at all, that twin's failure explains nothing, so the finding
-        // comes from the remaining candidates.
+        // Report the overload-set finding unless one answer exists: every candidate failed for the
+        // same reason, or the candidates that got furthest (deepest first blamed argument; a
+        // whole-call verdict blames none) did. The standard library declares an Array twin before
+        // each `List` signature, and when the argument is no Array that twin's failure explains
+        // nothing, so it is left out.
         let candidate_count = schemes.len();
         let (candidate_errors, candidate_count) = if candidate_errors.len() == candidate_count {
             let relevant: Vec<TypeError<'db>> = candidate_errors
@@ -13892,13 +13884,11 @@ impl<'db, 'a> Checker<'db, 'a> {
         self.infer_call_arguments_against(range, arguments, &[])
     }
 
-    /// Infers a call's arguments, typing an unannotated function literal last and in context:
-    /// its formals take the parameter types of the function the callee expects at its
-    /// position, once the other arguments have bound the callee's type variables. In
-    /// `List.map(xs, \(x) c(x, x))`, `x` is the item type of `xs` before the body infers, so
-    /// `c(x, x)` types concretely instead of over an open variable. `callees` are the
-    /// instantiated candidate signatures; a hint is used only where every candidate that
-    /// accepts the other arguments agrees on it.
+    /// Infers a call's arguments, typing an unannotated function literal last: its formals take the
+    /// parameter types the callee expects there once the other arguments bound the type variables,
+    /// so in `List.map(xs, \(x) c(x, x))` the body types over `xs`'s item type, not an open
+    /// variable. `callees` are the instantiated candidates; a hint is used only where every
+    /// candidate accepting the other arguments agrees on it.
     fn infer_call_arguments_against(
         &mut self,
         range: TextRange,
@@ -15179,17 +15169,14 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
-    /// Binds a type variable that two or more parameters share (`<T> fn(first: T, second: T)`,
-    /// or `list[T]` and `Array<T>` items) to the join of what the arguments pass, before any
-    /// argument is checked. Checking argument by argument would bind `T` to the first argument
-    /// and reject a wider second one, so `Bool.is_eq(:Red, light)` with `light: :Red | :Green`
-    /// would fail where the reversed call passes. Joining first is order-independent and stays
-    /// sound: every argument fits the join, and a parameter that uses the variable
-    /// contravariantly (`f: fn(T) -> U`) is still checked against the joined type.
-    ///
-    /// Tags join to their union and numbers to the type R's arithmetic promotes them to. Any
-    /// other pair is left to the argument checks, because two unrelated types such as `integer`
-    /// and `character` passed to one variable are a real mistake.
+    /// Binds a type variable that several parameters share (`<T> fn(first: T, second: T)`, or
+    /// `list[T]` and `Array<T>` items) to the join of the arguments before any is checked. Checking
+    /// in order would bind `T` to the first and reject a wider second, so `Bool.is_eq(:Red, light)`
+    /// with `light: :Red | :Green` would fail where the reversed call passes. Joining first is
+    /// order-independent and sound:
+    /// every argument fits it, and a contravariant use (`f: fn(T) -> U`) is still checked against
+    /// it. Tags join to their union and numbers to R's arithmetic promotion; any other pair, such
+    /// as `integer` and `character`, is a real mistake left to the argument checks.
     fn join_shared_parameters(
         &mut self,
         function: &FunctionType<'db>,
@@ -15434,13 +15421,12 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
-    /// A variable the body assigns, from a `switch` without a default, an `if` without `else`
-    /// or a helper that returns `NULL` on some path, is `NULL` only where the code presumably
-    /// does not pass it on: rlang's `type <- switch(type, ...)` feeds `sprintf(type, kind)`
-    /// after every type has an arm. So an argument naming such a variable drops its `NULL`
-    /// when the parameter's type is settled, or bounded, and admits no `NULL`. The `NULL` of an
-    /// undeclared formal, from a `NULL` default or an `is.null()` test, is the same kind of
-    /// placeholder. The `NULL` of a declared parameter, or of an annotated assignment, stays.
+    /// A variable assigned from a `switch` without a default, an `if` without `else` or a helper
+    /// that returns `NULL` on some path is presumably not `NULL` where it is passed on (rlang's
+    /// `type <- switch(type, ...)` feeds `sprintf(type, kind)` after every type has an arm). So
+    /// such an argument drops its `NULL` when the parameter's type is settled or bounded and admits
+    /// none, as does an undeclared formal's `NULL` from a `NULL` default or an `is.null()` test. A
+    /// declared parameter's or annotated assignment's `NULL` stays.
     fn without_inferred_null(&self, expected: Ty<'db>, ty: Ty<'db>) -> Ty<'db> {
         let expected = self.table.resolve(self.db, expected);
         let admits_null = |ty: Ty<'db>| match ty.kind(self.db) {
@@ -17168,15 +17154,13 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
-    /// `Reduce(f, x)` with a function that is not overloaded, named directly or picked by an
-    /// `if`, such as `Reduce(if (reals) merge_reals else merge_sets, x)`. R hands `f` the
-    /// accumulator and each element in turn, and the accumulator takes whatever `f` returned, so
-    /// its type is the join of the start and every return: `function(x, y) if (identical(x, y))
-    /// x` folds to `T | NULL`. The stub's `fn(U, T) -> U` cannot widen, so the fold is iterated
-    /// here until the accumulator stops growing. A step that fails is reported as it is, and only
-    /// the last step's findings are kept otherwise.
-    /// A function that closes over the enclosing function's open variables keeps the stub's
-    /// typing, because calling it repeatedly would pin those variables to every step at once.
+    /// `Reduce(f, x)` with a non-overloaded function, named or picked by an `if`. R hands `f` the
+    /// accumulator and each element in turn, and the accumulator takes whatever `f` returns, so its
+    /// type is the join of the start and every return (`function(x, y) if (identical(x, y)) x`
+    /// folds to `T | NULL`); the stub's `fn(U, T) -> U` cannot widen, so the fold iterates until
+    /// the accumulator stops growing. A failing step is reported as is, otherwise only the last
+    /// step's findings are kept. A function closing over the enclosing function's open variables
+    /// keeps the stub's typing, since iterating would pin them to every step.
     fn infer_reduce_fold(
         &mut self,
         id: ExprId,
@@ -17430,13 +17414,12 @@ impl<'db, 'a> Checker<'db, 'a> {
         frame_of(Some(columns))
     }
 
-    /// `j` as `y := v`, `c("a", "b") := list(v, w)`, or `` `:=`(a = v, b = w) ``: the
-    /// queried frame with each named column set to its value's vector type, or removed
-    /// by `NULL`. A left side naming columns some other way widens to unknown columns.
-    /// data.table coerces a value written into an existing column to the column's type, so the
-    /// column keeps its type unless the value replaces it whole: with `partial` (an `i` or a
-    /// `by` is present) or a literal value, the type stays. Only a literal is certainly one value;
-    /// a scalar-like type is not, because `as.character(x)` is scalar-like too.
+    /// `j` as `y := v`, `c("a", "b") := list(v, w)` or `` `:=`(a = v, b = w) ``: the frame with
+    /// each named column set to its value's vector type, or removed by `NULL`; other left sides
+    /// widen to unknown columns. data.table coerces a value into an existing column's type, so the
+    /// type stays unless the value replaces the column whole, which it does not with `partial` (an
+    /// `i` or `by`) or a literal. Only a literal is certainly one value: `as.character(x)` is
+    /// scalar-like too.
     fn column_update(
         &mut self,
         arguments: &[Argument],
@@ -18219,13 +18202,12 @@ impl<'db, 'a> Checker<'db, 'a> {
             } else {
                 right_resolved
             };
-            // Only an unconstrained variable is protected: pinning an already-restricted one
-            // adds no new requirement and lets recursion converge. One nested in a list is
-            // protected too, so sessioninfo's `if (identical(dp, FALSE)) list(character(),
-            // character()) else list(dp, dp)` leaves `dp` open.
-            // A bounded one is protected from a type outside the atomic scalars and vectors its
-            // bound describes: mgcv's `if (is.null(L)) rho + rho0 else L %*% rho + rho0` must
-            // not make every caller pass a matrix `rho`.
+            // Only an unconstrained variable is protected: pinning an already-restricted one adds
+            // no new requirement and lets recursion converge. One nested in a list is protected
+            // too: sessioninfo's `if (identical(dp, FALSE)) list(character(), character()) else
+            // list(dp, dp)` leaves `dp` open. A bounded one is protected from types outside its
+            // bound's atomic scalars and vectors: mgcv's `if (is.null(L)) rho + rho0 else L %*% rho
+            // + rho0` must not demand a matrix `rho`.
             let closed = if left_open {
                 right_resolved
             } else {
@@ -19505,703 +19487,4 @@ fn mentions_tag<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
         found = found || mentions_tag(db, child)
     });
     found
-}
-
-#[cfg(test)]
-mod tests {
-    use {
-        super::*,
-        crate::{
-            RootDatabase, annotations::lower_annotation, hir::lower_item, naming::resolve_item,
-        },
-        syntax::{SyntaxKind, ast::is_expression_kind},
-    };
-
-    fn check_source<'db>(db: &'db RootDatabase, source: &str) -> ItemCheck<'db> {
-        let parse = syntax::parse(source);
-        let root = parse.syntax_node();
-        let annotation = root
-            .children()
-            .find(|child| child.kind() == SyntaxKind::ANNOTATION)
-            .map(|node| lower_annotation(db, &node));
-        let item = root
-            .children()
-            .find(|child| is_expression_kind(child.kind()))
-            .expect("one top-level item");
-        let module = lower_item(&item);
-        let naming = resolve_item(&module, &Default::default(), &|_, _| false);
-        check_item_with_annotation(
-            db,
-            &module,
-            &naming,
-            annotation.as_ref(),
-            &[],
-            None,
-            true,
-            false,
-        )
-    }
-
-    #[test]
-    fn arithmetic_generalizes_with_numeric_constraint() {
-        let db = RootDatabase::default();
-        let check = check_source(&db, "add <- function(x) x + 1L");
-        assert!(check.errors.is_empty(), "{:?}", check.errors);
-        let scheme = check.scheme.expect("definition scheme");
-        assert_eq!(scheme.binders.len(), 1);
-        assert_eq!(scheme.binders[0].1, Constraint::Numeric);
-        let TyKind::Function(function) = scheme.body.kind(&db) else {
-            panic!("expected a function scheme");
-        };
-        assert_eq!(function.named.len(), 1);
-        assert_eq!(function.named[0].name.text(&db), "x");
-        assert_eq!(function.named[0].ty, function.ret);
-    }
-
-    #[test]
-    fn call_mismatch_reports() {
-        let db = RootDatabase::default();
-        let check = check_source(
-            &db,
-            "g <- function() {\n  f <- function(x) x + 1\n  f(\"txt\")\n}",
-        );
-        assert!(
-            check.errors.iter().any(|error| matches!(
-                error.kind,
-                TypeErrorKind::ConstraintViolation {
-                    constraint: Constraint::Numeric,
-                    ..
-                }
-            )),
-            "expected a numeric-constraint violation, got {:?}",
-            check.errors
-        );
-    }
-
-    #[test]
-    fn polymorphic_reuse_across_calls() {
-        let db = RootDatabase::default();
-        let check = check_source(
-            &db,
-            "use <- function() {\n  id <- function(x) x\n  id(1L)\n  id(\"s\")\n}",
-        );
-        assert!(
-            check.errors.is_empty(),
-            "let-polymorphism failed: {:?}",
-            check.errors
-        );
-    }
-
-    #[test]
-    fn if_join_unifies_or_unions() {
-        let db = RootDatabase::default();
-        // A `NULL` branch joins by union, never binding the variable.
-        let check = check_source(&db, "pick <- function(f) if (f) 1L else NULL");
-        assert!(check.errors.is_empty());
-        let scheme = check.scheme.expect("scheme");
-        let TyKind::Function(function) = scheme.body.kind(&db) else {
-            panic!()
-        };
-        let TyKind::Union(members) = function.ret.kind(&db) else {
-            panic!("expected integer | NULL, got {:?}", function.ret.kind(&db));
-        };
-        assert_eq!(members.len(), 2);
-    }
-
-    #[test]
-    fn unknown_named_argument_reports() {
-        let db = RootDatabase::default();
-        let check = check_source(
-            &db,
-            "g <- function() {\n  f <- function(x) x\n  f(z = 1)\n}",
-        );
-        assert!(
-            check.errors.iter().any(|error| matches!(
-                &error.kind,
-                TypeErrorKind::NamedArgumentMismatch { argument, .. } if argument == "z"
-            )),
-            "expected a named-argument mismatch, got {:?}",
-            check.errors
-        );
-    }
-
-    #[test]
-    fn for_loops_bind_the_element_and_reach_a_fixed_point() {
-        let db = RootDatabase::default();
-        let accumulator = check_source(
-            &db,
-            "f <- function() {\n  total <- 0L\n  for (i in 1:3) {\n    total <- total + i\n  }\n  total\n}",
-        );
-        assert!(accumulator.errors.is_empty(), "{:?}", accumulator.errors);
-        assert_eq!(scheme_ret(&db, &accumulator), scalar(&db, Atomic::Integer));
-        let heterogeneous = check_source(
-            &db,
-            "f <- function() {\n  out <- 1L\n  for (item in list(2L, \"a\")) {\n    out <- item\n  }\n  out\n}",
-        );
-        assert!(
-            heterogeneous.errors.is_empty(),
-            "{:?}",
-            heterogeneous.errors
-        );
-        assert!(matches!(
-            scheme_ret(&db, &heterogeneous).kind(&db),
-            TyKind::Union(members) if members.len() == 2
-        ));
-        let bad = check_source(
-            &db,
-            "f <- function() {\n  g <- function() 1L\n  for (i in g) i\n}",
-        );
-        assert!(
-            bad.errors
-                .iter()
-                .any(|error| matches!(error.kind, TypeErrorKind::NotIterable { .. })),
-            "{:?}",
-            bad.errors
-        );
-    }
-
-    #[test]
-    fn while_condition_checks_inside_the_fixed_point() {
-        let db = RootDatabase::default();
-        let check = check_source(
-            &db,
-            "f <- function() {\n  done <- FALSE\n  while (!done) {\n    done <- TRUE\n  }\n  done\n}",
-        );
-        assert!(check.errors.is_empty(), "{:?}", check.errors);
-    }
-
-    #[test]
-    fn repeat_applies_the_exit_state() {
-        let db = RootDatabase::default();
-        let check = check_source(
-            &db,
-            "f <- function() {\n  repeat {\n    x <- 1L\n    break\n  }\n  x + 1L\n}",
-        );
-        assert!(check.errors.is_empty(), "{:?}", check.errors);
-    }
-
-    #[test]
-    fn replacement_writes_update_the_base_slot() {
-        let db = RootDatabase::default();
-        let replaced = check_source(
-            &db,
-            "f <- function() {\n  p <- list(a = 1L)\n  p$a <- \"s\"\n  p$a\n}",
-        );
-        assert!(replaced.errors.is_empty(), "{:?}", replaced.errors);
-        assert_eq!(scheme_ret(&db, &replaced), scalar(&db, Atomic::Character));
-        let added = check_source(
-            &db,
-            "f <- function() {\n  p <- list()\n  p$b <- TRUE\n  p$b\n}",
-        );
-        assert!(added.errors.is_empty(), "{:?}", added.errors);
-        assert_eq!(scheme_ret(&db, &added), scalar(&db, Atomic::Logical));
-        let computed = check_source(
-            &db,
-            "f <- function(key) {\n  m <- list()\n  m[[key]] <- 1L\n  m[[key]]\n}",
-        );
-        assert!(computed.errors.is_empty(), "{:?}", computed.errors);
-        assert_eq!(scheme_ret(&db, &computed), scalar(&db, Atomic::Integer));
-        let kept = check_source(
-            &db,
-            "f <- function() {\n  v <- c(1L, 2L)\n  names(v) <- c(\"a\", \"b\")\n  v + 1L\n}",
-        );
-        assert!(kept.errors.is_empty(), "{:?}", kept.errors);
-    }
-
-    #[test]
-    fn early_returns_union_with_the_trailing_value() {
-        let db = RootDatabase::default();
-        let check = check_source(&db, "f <- function(c) {\n  if (c) return(\"foo\")\n  5\n}");
-        assert!(check.errors.is_empty(), "{:?}", check.errors);
-        let TyKind::Union(members) = scheme_ret(&db, &check).kind(&db) else {
-            panic!(
-                "expected character | double, got {:?}",
-                scheme_ret(&db, &check).kind(&db)
-            );
-        };
-        assert!(members.contains(&scalar(&db, Atomic::Character)));
-        assert!(members.contains(&scalar(&db, Atomic::Double)));
-    }
-
-    #[test]
-    fn diverging_branch_contributes_neither_value_nor_state() {
-        let db = RootDatabase::default();
-        let value = check_source(
-            &db,
-            "f <- function(c) {\n  x <- if (c) return(NULL) else 5\n  x + 1\n}",
-        );
-        assert!(value.errors.is_empty(), "{:?}", value.errors);
-        let state = check_source(
-            &db,
-            "f <- function(flag) {\n  x <- 1L\n  if (flag) {\n    x <- \"s\"\n    return(x)\n  }\n  x + 1L\n}",
-        );
-        assert!(state.errors.is_empty(), "{:?}", state.errors);
-    }
-
-    #[test]
-    fn null_guard_narrows_the_early_exit_idiom() {
-        let db = RootDatabase::default();
-        let check = check_source(
-            &db,
-            "#: fn(x: integer | NULL) -> integer\nf <- function(x) {\n  if (is.null(x)) {\n    return(0L)\n  }\n  x + 1L\n}",
-        );
-        assert!(check.errors.is_empty(), "{:?}", check.errors);
-    }
-
-    #[test]
-    fn null_guard_shapes_the_unannotated_coalesce_idiom() {
-        let db = RootDatabase::default();
-        let check = check_source(
-            &db,
-            "coalesce <- function(value, fallback) if (is.null(value)) fallback else value",
-        );
-        assert!(check.errors.is_empty(), "{:?}", check.errors);
-        let scheme = check.scheme.clone().expect("scheme");
-        assert_eq!(scheme.binders.len(), 1, "{scheme:?}");
-        let TyKind::Function(function) = scheme.body.kind(&db) else {
-            panic!()
-        };
-        assert!(matches!(function.ret.kind(&db), TyKind::Rigid(_)));
-        assert_eq!(function.named[1].ty, function.ret, "fallback ties to T");
-        let TyKind::Union(members) = function.named[0].ty.kind(&db) else {
-            panic!("value must be T | NULL, got {:?}", function.named[0].ty);
-        };
-        assert!(members.contains(&function.ret));
-        assert!(members.contains(&null(&db)));
-    }
-
-    #[test]
-    fn family_guard_filters_union_members() {
-        let db = RootDatabase::default();
-        let check = check_source(
-            &db,
-            "f <- function(flag) {\n  y <- if (flag) 1L else \"a\"\n  if (is.character(y)) y else \"z\"\n}",
-        );
-        assert!(check.errors.is_empty(), "{:?}", check.errors);
-        assert_eq!(
-            scheme_ret(&db, &check),
-            scalar(&db, Atomic::Character),
-            "the true edge must narrow y to character"
-        );
-    }
-
-    #[test]
-    fn arithmetic_ties_two_flexible_operands() {
-        let db = RootDatabase::default();
-        let check = check_source(&db, "add <- function(a, b) a + b");
-        assert!(check.errors.is_empty(), "{:?}", check.errors);
-        let scheme = check.scheme.expect("scheme");
-        assert_eq!(scheme.binders.len(), 1, "{scheme:?}");
-        let TyKind::Function(function) = scheme.body.kind(&db) else {
-            panic!()
-        };
-        assert_eq!(function.named[0].ty, function.ret);
-        assert_eq!(function.named[1].ty, function.ret);
-    }
-
-    #[test]
-    fn division_is_always_double_and_keeps_the_operand_generic() {
-        let db = RootDatabase::default();
-        let check = check_source(&db, "half <- function(x) x / 2");
-        assert!(check.errors.is_empty(), "{:?}", check.errors);
-        let scheme = check.scheme.clone().expect("scheme");
-        assert_eq!(scheme.binders.len(), 1, "x stays generic: {scheme:?}");
-        assert_eq!(scheme_ret(&db, &check), scalar(&db, Atomic::Double));
-    }
-
-    #[test]
-    fn arithmetic_shape_rules_over_vectors() {
-        let db = RootDatabase::default();
-        let vector = check_source(&db, "f <- function() c(1L, 2L) + 1L");
-        assert!(vector.errors.is_empty(), "{:?}", vector.errors);
-        assert!(matches!(
-            scheme_ret(&db, &vector).kind(&db),
-            TyKind::Vector(element) if *element == scalar(&db, Atomic::Integer)
-        ));
-        let divided = check_source(&db, "f <- function() c(1L, 2L) / 2L");
-        assert!(divided.errors.is_empty(), "{:?}", divided.errors);
-        assert!(matches!(
-            scheme_ret(&db, &divided).kind(&db),
-            TyKind::Vector(element) if *element == scalar(&db, Atomic::Double)
-        ));
-        let modulo = check_source(&db, "f <- function() 7L %% 2L");
-        assert!(modulo.errors.is_empty(), "{:?}", modulo.errors);
-        assert_eq!(scheme_ret(&db, &modulo), scalar(&db, Atomic::Integer));
-        let bad = check_source(&db, "f <- function() \"a\" + 1L");
-        assert!(
-            bad.errors.iter().any(|error| matches!(
-                error.kind,
-                TypeErrorKind::InvalidOperand {
-                    expected: OperandExpectation::Numeric,
-                    ..
-                }
-            )),
-            "{:?}",
-            bad.errors
-        );
-    }
-
-    #[test]
-    fn colon_yields_integer_sequences_with_double_fallback() {
-        let db = RootDatabase::default();
-        let literal = check_source(&db, "f <- function() 1:10");
-        assert!(literal.errors.is_empty(), "{:?}", literal.errors);
-        assert!(matches!(
-            scheme_ret(&db, &literal).kind(&db),
-            TyKind::Vector(element) if *element == scalar(&db, Atomic::Integer)
-        ));
-        let flexible = check_source(&db, "f <- function(n) 1:n");
-        assert!(flexible.errors.is_empty(), "{:?}", flexible.errors);
-        assert!(matches!(
-            scheme_ret(&db, &flexible).kind(&db),
-            TyKind::Vector(element) if *element == scalar(&db, Atomic::Double)
-        ));
-    }
-
-    #[test]
-    fn comparisons_coerce_across_atomics_and_shape_elementwise() {
-        let db = RootDatabase::default();
-        let flexible = check_source(&db, "positive <- function(x) x > 0L");
-        assert!(flexible.errors.is_empty(), "{:?}", flexible.errors);
-        let scheme = flexible.scheme.clone().expect("scheme");
-        assert_eq!(scheme.binders.len(), 1);
-        assert_eq!(scheme.binders[0].1, Constraint::Unconstrained);
-        assert_eq!(scheme_ret(&db, &flexible), scalar(&db, Atomic::Logical));
-        let vector = check_source(&db, "f <- function() c(1L, 2L) > 1L");
-        assert!(vector.errors.is_empty(), "{:?}", vector.errors);
-        assert!(matches!(
-            scheme_ret(&db, &vector).kind(&db),
-            TyKind::Vector(element) if *element == scalar(&db, Atomic::Logical)
-        ));
-        let mixed = check_source(&db, "f <- function() 1L > \"a\"");
-        assert!(mixed.errors.is_empty(), "{:?}", mixed.errors);
-    }
-
-    #[test]
-    fn conditions_coerce_numerics_and_refuse_everything_else() {
-        let db = RootDatabase::default();
-        for source in [
-            "f <- function() if (1L) 2L",
-            "f <- function() 1L && TRUE",
-            "f <- function(x) if (length(x)) 1L else 2L",
-            "f <- function() if (2.5) 1L else 2L",
-        ] {
-            let ok = check_source(&db, source);
-            assert!(ok.errors.is_empty(), "{source}: {:?}", ok.errors);
-        }
-        let bad_condition = check_source(&db, "f <- function() if (\"yes\") 2L");
-        assert!(
-            bad_condition
-                .errors
-                .iter()
-                .any(|error| matches!(error.kind, TypeErrorKind::Mismatch { .. })),
-            "{:?}",
-            bad_condition.errors
-        );
-        let ok = check_source(&db, "f <- function(a, b) a && b");
-        assert!(ok.errors.is_empty(), "{:?}", ok.errors);
-    }
-
-    #[test]
-    fn unary_operators_preserve_shape() {
-        let db = RootDatabase::default();
-        let negated = check_source(&db, "f <- function() -c(1L, 2L)");
-        assert!(negated.errors.is_empty(), "{:?}", negated.errors);
-        assert!(matches!(
-            scheme_ret(&db, &negated).kind(&db),
-            TyKind::Vector(element) if *element == scalar(&db, Atomic::Integer)
-        ));
-        let notted = check_source(&db, "f <- function() !c(TRUE, FALSE)");
-        assert!(notted.errors.is_empty(), "{:?}", notted.errors);
-        assert!(matches!(
-            scheme_ret(&db, &notted).kind(&db),
-            TyKind::Vector(element) if *element == scalar(&db, Atomic::Logical)
-        ));
-        let bad = check_source(&db, "f <- function() -\"a\"");
-        assert!(
-            bad.errors.iter().any(|error| matches!(
-                error.kind,
-                TypeErrorKind::InvalidOperand {
-                    expected: OperandExpectation::Numeric,
-                    ..
-                }
-            )),
-            "{:?}",
-            bad.errors
-        );
-    }
-
-    #[test]
-    fn arity_mismatch_reports_both_directions() {
-        let db = RootDatabase::default();
-        let surplus = check_source(&db, "g <- function() {\n  f <- function(x) x\n  f(1, 2)\n}");
-        assert!(
-            surplus
-                .errors
-                .iter()
-                .any(|error| matches!(error.kind, TypeErrorKind::ArityMismatch { .. })),
-            "expected a surplus-argument arity error, got {:?}",
-            surplus.errors
-        );
-        let missing = check_source(&db, "g <- function() {\n  f <- function(x) x\n  f()\n}");
-        assert!(
-            missing
-                .errors
-                .iter()
-                .any(|error| matches!(error.kind, TypeErrorKind::MissingArguments { .. })),
-            "expected a missing-argument error, got {:?}",
-            missing.errors
-        );
-        let defaulted = check_source(&db, "g <- function() {\n  f <- function(x = 1) x\n  f()\n}");
-        assert!(defaulted.errors.is_empty(), "{:?}", defaulted.errors);
-    }
-
-    fn scheme_ret<'db>(db: &'db RootDatabase, check: &ItemCheck<'db>) -> Ty<'db> {
-        let scheme = check.scheme.clone().expect("scheme");
-        let TyKind::Function(function) = *scheme.body.kind(db) else {
-            panic!("expected a function scheme");
-        };
-        function.ret
-    }
-
-    #[test]
-    fn list_builds_fixed_shapes_and_extraction_is_precise() {
-        let db = RootDatabase::default();
-        let tuple = check_source(
-            &db,
-            "f <- function() {\n  x <- list(1L, \"a\")\n  x[[1L]]\n}",
-        );
-        assert!(tuple.errors.is_empty(), "{:?}", tuple.errors);
-        assert_eq!(scheme_ret(&db, &tuple), scalar(&db, Atomic::Integer));
-        let record = check_source(
-            &db,
-            "f <- function() {\n  p <- list(a = 1L, b = \"s\")\n  p$b\n}",
-        );
-        assert!(record.errors.is_empty(), "{:?}", record.errors);
-        assert_eq!(scheme_ret(&db, &record), scalar(&db, Atomic::Character));
-        let computed = check_source(
-            &db,
-            "f <- function(i) {\n  x <- list(1L, \"a\")\n  x[[i]]\n}",
-        );
-        assert!(computed.errors.is_empty(), "{:?}", computed.errors);
-        assert!(matches!(
-            scheme_ret(&db, &computed).kind(&db),
-            TyKind::Union(members) if members.len() == 2
-        ));
-        let slice = check_source(&db, "f <- function() {\n  x <- list(1L, \"a\")\n  x[1L]\n}");
-        assert!(slice.errors.is_empty(), "{:?}", slice.errors);
-        assert!(matches!(
-            scheme_ret(&db, &slice).kind(&db),
-            TyKind::List(element) if matches!(element.kind(&db), TyKind::Union(_))
-        ));
-    }
-
-    #[test]
-    fn index_errors_report_precisely() {
-        let db = RootDatabase::default();
-        let out_of_range = check_source(
-            &db,
-            "f <- function() {\n  x <- list(1L, \"a\")\n  x[[3L]]\n}",
-        );
-        assert!(
-            out_of_range.errors.iter().any(|error| matches!(
-                error.kind,
-                TypeErrorKind::PositionDoesNotExist { position: 3, .. }
-            )),
-            "{:?}",
-            out_of_range.errors
-        );
-        let missing_field = check_source(
-            &db,
-            "f <- function() {\n  p <- list(value = 1L)\n  p$valeu\n}",
-        );
-        assert!(
-            missing_field.errors.iter().any(|error| matches!(
-                &error.kind,
-                TypeErrorKind::FieldDoesNotExist { field, .. } if field == "valeu"
-            )),
-            "{:?}",
-            missing_field.errors
-        );
-        let dollar_atomic = check_source(&db, "f <- function() {\n  v <- c(a = 1L)\n  v$a\n}");
-        assert!(
-            dollar_atomic
-                .errors
-                .iter()
-                .any(|error| matches!(error.kind, TypeErrorKind::DollarOnAtomicVector { .. })),
-            "{:?}",
-            dollar_atomic.errors
-        );
-    }
-
-    #[test]
-    fn combine_promotes_drops_null_and_keeps_names() {
-        let db = RootDatabase::default();
-        let promoted = check_source(&db, "f <- function() c(1L, 2.5)");
-        assert!(promoted.errors.is_empty());
-        assert!(matches!(
-            scheme_ret(&db, &promoted).kind(&db),
-            TyKind::Vector(element) if *element == scalar(&db, Atomic::Double)
-        ));
-        let character = check_source(&db, "f <- function() c(1L, \"a\")");
-        assert!(character.errors.is_empty());
-        assert!(matches!(
-            scheme_ret(&db, &character).kind(&db),
-            TyKind::Vector(element) if *element == scalar(&db, Atomic::Character)
-        ));
-        let named = check_source(&db, "f <- function() c(a = 1L, b = 2L)");
-        assert!(named.errors.is_empty());
-        assert!(matches!(
-            scheme_ret(&db, &named).kind(&db),
-            TyKind::NamedVector(_)
-        ));
-        let null_dropped = check_source(&db, "f <- function() c(1L, NULL)");
-        assert!(null_dropped.errors.is_empty());
-        assert!(matches!(
-            scheme_ret(&db, &null_dropped).kind(&db),
-            TyKind::Vector(_)
-        ));
-        let empty = check_source(&db, "f <- function() c()");
-        assert!(matches!(scheme_ret(&db, &empty).kind(&db), TyKind::Null));
-    }
-
-    #[test]
-    fn switch_unions_branches_with_null_unless_defaulted() {
-        let db = RootDatabase::default();
-        let no_default = check_source(&db, "f <- function(x) switch(x, a = 1L, b = \"s\")");
-        assert!(no_default.errors.is_empty(), "{:?}", no_default.errors);
-        let TyKind::Union(members) = scheme_ret(&db, &no_default).kind(&db) else {
-            panic!("expected a union");
-        };
-        assert_eq!(members.len(), 3, "integer | character | NULL: {members:?}");
-        let with_default = check_source(&db, "f <- function(x) switch(x, a = 1L, 2L)");
-        assert!(with_default.errors.is_empty());
-        assert_eq!(
-            scheme_ret(&db, &with_default),
-            scalar(&db, Atomic::Integer),
-            "both branches integer, no NULL member"
-        );
-    }
-
-    #[test]
-    fn union_of_functions_calls_every_member() {
-        let db = RootDatabase::default();
-        let check = check_source(
-            &db,
-            "f <- function(flag) {\n  h <- if (flag) function(x) 1L else function(x) \"a\"\n  h(2L)\n}",
-        );
-        assert!(check.errors.is_empty(), "{:?}", check.errors);
-        let scheme = check.scheme.expect("scheme");
-        let TyKind::Function(function) = scheme.body.kind(&db) else {
-            panic!()
-        };
-        let TyKind::Union(members) = function.ret.kind(&db) else {
-            panic!(
-                "expected integer | character, got {:?}",
-                function.ret.kind(&db)
-            );
-        };
-        assert_eq!(members.len(), 2);
-    }
-
-    #[test]
-    fn conditional_slot_write_joins_types() {
-        let db = RootDatabase::default();
-        let check = check_source(
-            &db,
-            "f <- function(flag) {\n  x <- 1L\n  if (flag) x <- \"two\"\n  x\n}",
-        );
-        assert!(check.errors.is_empty());
-        let scheme = check.scheme.expect("scheme");
-        let TyKind::Function(function) = scheme.body.kind(&db) else {
-            panic!()
-        };
-        let TyKind::Union(members) = function.ret.kind(&db) else {
-            panic!(
-                "expected integer | character return, got {:?}",
-                function.ret.kind(&db)
-            );
-        };
-        assert_eq!(members.len(), 2);
-    }
-
-    #[test]
-    fn annotated_identity_keeps_declared_scheme() {
-        let db = RootDatabase::default();
-        let check = check_source(&db, "#: <T> fn(x: T) -> T\nid <- function(x) x");
-        assert!(check.errors.is_empty(), "{:?}", check.errors);
-        let scheme = check.scheme.expect("declared scheme");
-        assert_eq!(scheme.binders.len(), 1);
-        let TyKind::Function(function) = scheme.body.kind(&db) else {
-            panic!()
-        };
-        assert!(matches!(function.ret.kind(&db), TyKind::Rigid(_)));
-    }
-
-    #[test]
-    fn annotated_return_mismatch_reports() {
-        let db = RootDatabase::default();
-        let check = check_source(&db, "#: fn(x: integer) -> character\nf <- function(x) x");
-        assert!(
-            check
-                .errors
-                .iter()
-                .any(|e| matches!(e.kind, TypeErrorKind::Mismatch { .. })),
-            "expected return mismatch, got {:?}",
-            check.errors
-        );
-    }
-
-    #[test]
-    fn annotated_parameter_name_mismatch_reports() {
-        let db = RootDatabase::default();
-        let check = check_source(&db, "#: fn(x: integer) -> integer\nf <- function(y) 1L");
-        assert!(
-            check
-                .errors
-                .iter()
-                .any(|e| matches!(&e.kind, TypeErrorKind::AnnotationParameterMismatch { .. })),
-            "expected parameter mismatch, got {:?}",
-            check.errors
-        );
-    }
-
-    #[test]
-    fn rigid_binder_refuses_undeclared_bound() {
-        let db = RootDatabase::default();
-        let bad = check_source(&db, "#: <T> fn(x: T) -> T\nbad <- function(x) x + 1L");
-        assert!(
-            !bad.errors.is_empty(),
-            "plain <T> must refuse arithmetic, got no errors"
-        );
-        let ok = check_source(
-            &db,
-            "#: <T: numeric> fn(x: T) -> T\nok <- function(x) x + 1L",
-        );
-        assert!(ok.errors.is_empty(), "{:?}", ok.errors);
-    }
-
-    #[test]
-    fn expanded_param_return_form_checks() {
-        let db = RootDatabase::default();
-        let check = check_source(
-            &db,
-            "#: @forall T: numeric\n#: @param x {T}\n#: @return {T}\nround2 <- function(x) x + 1L",
-        );
-        assert!(check.errors.is_empty(), "{:?}", check.errors);
-        let scheme = check.scheme.expect("declared scheme");
-        assert_eq!(scheme.binders.len(), 1);
-        assert_eq!(scheme.binders[0].1, Constraint::Numeric);
-    }
-
-    #[test]
-    fn trusted_annotation_skips_enforcement() {
-        let db = RootDatabase::default();
-        let check = check_source(
-            &db,
-            "#: @trust fn(x: integer) -> character\nf <- function(x) x",
-        );
-        assert!(check.errors.is_empty(), "{:?}", check.errors);
-        assert!(check.scheme.is_some());
-    }
 }

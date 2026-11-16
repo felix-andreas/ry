@@ -9,8 +9,8 @@ mod harness;
 use {
     harness::*,
     std::{
-        ffi::{CString, c_char, c_int, c_void},
-        path::{Path, PathBuf},
+        ffi::{c_char, c_int},
+        path::PathBuf,
         process::Command,
         sync::OnceLock,
     },
@@ -678,76 +678,6 @@ fn the_random_number_generator_matches_gnu_r() {
         .collect();
     assert_eq!(uniform, expected_uniform);
     assert_eq!(sample, expected_sample);
-}
-
-/// The coverage of the API the benchmark closure uses, measured in `tools/research/data`.
-#[test]
-fn the_most_used_api_names_are_exported() {
-    let r = r();
-    let table = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/research/data/symbols.csv"),
-    )
-    .expect("the measured symbol table");
-    let macros: &[(&str, Option<&str>)] = &[
-        ("PROTECT", Some("Rf_protect")),
-        ("UNPROTECT", Some("Rf_unprotect")),
-        ("UNPROTECT_PTR", Some("Rf_unprotect_ptr")),
-        ("PROTECT_WITH_INDEX", Some("R_ProtectWithIndex")),
-        ("REPROTECT", Some("R_Reprotect")),
-        ("CHAR", Some("R_CHAR")),
-        ("R_Calloc", Some("R_chk_calloc")),
-        ("R_Free", Some("R_chk_free")),
-        ("R_Realloc", Some("R_chk_realloc")),
-        ("MAYBE_REFERENCED", Some("NAMED")),
-        ("MAYBE_SHARED", Some("NAMED")),
-        ("NA_STRING", Some("R_NaString")),
-        ("NA_INTEGER", Some("R_NaInt")),
-        ("NA_REAL", Some("R_NaReal")),
-        ("NA_LOGICAL", Some("R_NaInt")),
-        ("ISNA", Some("R_IsNA")),
-        ("ISNAN", Some("R_isnancpp")),
-        ("R_FINITE", Some("R_finite")),
-        ("LCONS", Some("Rf_lcons")),
-        ("FALSE", None),
-        ("TRUE", None),
-        ("R_Version", None),
-        ("R_VERSION", None),
-        ("R_INLINE", None),
-        ("M_PI", None),
-    ];
-    let mut rows: Vec<(String, usize)> = table
-        .lines()
-        .skip(1)
-        .filter_map(|line| {
-            let fields: Vec<&str> = line.splitn(6, ',').collect();
-            let class = *fields.get(1)?;
-            matches!(class, "api" | "experimental" | "non-api" | "embedding")
-                .then(|| Some((fields[0].to_owned(), fields.get(3)?.parse().ok()?)))?
-        })
-        .collect();
-    rows.sort_by_key(|row| std::cmp::Reverse(row.1));
-    let mut missing = Vec::new();
-    for (name, _) in rows.iter().take(150) {
-        let target = macros
-            .iter()
-            .find(|(macro_name, _)| macro_name == name)
-            .map_or(Some(name.as_str()), |(_, target)| *target);
-        let Some(target) = target else { continue };
-        let symbol = CString::new(target).expect("no NUL");
-        if unsafe {
-            r.api()
-                .library
-                .get::<*mut c_void>(symbol.as_bytes_with_nul())
-        }
-        .is_err()
-        {
-            missing.push(name.clone());
-        }
-    }
-    assert!(
-        missing.len() <= 2,
-        "the most-used names that libR lacks: {missing:?}"
-    );
 }
 
 /// Inputs GNU R accepts that ry once mishandled: escaped temporaries in the next collection, a

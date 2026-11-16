@@ -1060,13 +1060,9 @@ mod tests {
         );
         let names: Vec<&str> = dependencies.iter().map(String::as_str).collect();
         assert_eq!(names, ["data.table", "dplyr", "rlang", "testthat"]);
-    }
-
-    #[test]
-    fn description_without_dependency_fields_is_empty() {
-        let dependencies =
+        let field_name_in_a_value =
             parse_description_dependencies("Package: demo\nTitle: Imports: not-a-field\n");
-        assert!(dependencies.is_empty());
+        assert!(field_name_in_a_value.is_empty());
     }
 
     #[test]

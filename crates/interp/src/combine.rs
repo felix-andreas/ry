@@ -384,8 +384,12 @@ impl Combiner {
         }
         if self.result != nil() {
             self.write_elements(value, count)?;
-            for index in 0..count {
-                self.write_name(scope, self.position + index, own_name(element_names, index))?;
+            if self.names == nil() {
+                scope.position += count;
+            } else {
+                for index in 0..count {
+                    self.write_name(scope, self.position + index, own_name(element_names, index))?;
+                }
             }
         }
         self.position += count;
@@ -420,6 +424,13 @@ impl Combiner {
             }
             (SexpType::Raw, SexpType::Raw) => {
                 values::raws_mut(result)[target].copy_from_slice(values::raws(value))
+            }
+            (SexpType::String, SexpType::String)
+            | (SexpType::List, SexpType::List)
+            | (SexpType::Expression, SexpType::Expression)
+                if !value.is_altrep() =>
+            {
+                crate::heap().copy_elements(result, start, value, 0, count)
             }
             _ => {
                 for index in 0..count {

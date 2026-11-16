@@ -1,16 +1,14 @@
 //! Lowering a typed closure's body to the typed IR.
 //!
-//! The lowering reads the closure's body as R code and gives every expression a type from the
-//! argument types the function is compiled for, the way R would compute it: `i %% 5L` of two
-//! integers is an integer, `seq_len(n)` a vector of integers, `paste0("a", i)` a string. A local
-//! keeps one type for the whole body, and an expression whose type the lowering cannot determine,
-//! or a call it does not know, refuses the function, which then runs as before.
+//! Every expression gets the type R would compute from the argument types the function is compiled
+//! for: `i %% 5L` of two integers is an integer, `seq_len(n)` a vector of integers, `paste0("a",
+//! i)` a string. A local keeps one type for the whole body, and an expression of undetermined type
+//! or a call the lowering does not know refuses the function, which then runs in the interpreter.
 //!
-//! Calls of base and standard library functions become IR operations, calls of other typed
-//! closures become direct calls of their compiled code, and a local function or a function
-//! literal passed to `lapply` or `vapply` is inlined where it is called, reading the enclosing
-//! function's locals in place, which is exactly what its environment would give it in R since
-//! it never escapes.
+//! Base and standard library calls become IR operations and calls of other typed closures direct
+//! calls of their code. A local function or a literal passed to `lapply` or `vapply` is inlined,
+//! reading the enclosing function's locals in place, which is what its environment would give it in
+//! R since it never escapes.
 
 use {
     crate::{

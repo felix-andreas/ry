@@ -135,8 +135,6 @@ pub fn package_functions() -> impl Iterator<Item = &'static str> {
         .filter(|name| !name.starts_with(' '))
 }
 
-// The object.
-
 thread_local! {
     static TAG: Cell<Option<Sexp>> = const { Cell::new(None) };
 }
@@ -231,8 +229,6 @@ pub unsafe fn table_of<'a>(object: Sexp) -> R<&'a mut Table> {
 unsafe fn table_error(call: Sexp, failure: table::Error) -> Unwind {
     error_in(call, failure.to_string())
 }
-
-// Conversion between R vectors and columns.
 
 /// A column as a new R vector. An integer or double column is copied straight into the R
 /// allocation, chunk by chunk, with nulls rewritten into R's `NA`.
@@ -461,8 +457,6 @@ unsafe fn table_from_list(list: Sexp, call: Sexp) -> R<Table> {
     table_from_values(&columns, call)
 }
 
-// Constructors and IO.
-
 unsafe fn do_frame_new(call: &Call<'_>) -> R<Sexp> {
     let pieces = argument_pieces(call.args, call.env()?)?;
     let mut columns = Vec::with_capacity(pieces.len());
@@ -632,8 +626,6 @@ unsafe fn rebind(name: Sexp, value: Sexp, env: Sexp) -> R<()> {
     }
     Ok(())
 }
-
-// Methods.
 
 unsafe fn do_dollar(call: &Call<'_>) -> R<Sexp> {
     let table = table_of(call.arg(0))?;
@@ -955,8 +947,6 @@ fn format_position(value: f64) -> String {
     }
 }
 
-// Printing.
-
 unsafe fn do_print(call: &Call<'_>) -> R<Sexp> {
     let subject = call.arg(0);
     let table = table_of(subject)?;
@@ -1116,8 +1106,6 @@ unsafe fn format_cells(column: &Column, kind: ColumnType) -> R<Vec<String>> {
             .collect(),
     })
 }
-
-// Queries.
 
 /// One argument of a query call, unevaluated: its expression and the environment to evaluate it
 /// in, or a value already forced (a promise from `...` that something else forced).
@@ -2402,8 +2390,6 @@ unsafe fn roll(value: Sexp, call: Sexp) -> R<Roll> {
         )),
     }
 }
-
-// The R fallback.
 
 /// Runs the parts of a query the IR cannot express as R code, in a data mask over the frame.
 #[allow(clippy::too_many_arguments)]

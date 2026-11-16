@@ -2,17 +2,15 @@
 //! allocator, and the kernels compiled code calls by address.
 //!
 //! Every `ry_*` function is part of a fixed ABI with the code generator. Values are immutable to
-//! the program and acyclic, so a reference count is exact and nothing here traces. The compiler
-//! inserts the dups and drops (Perceus style), and an operation handed an owned, uniquely held
-//! buffer writes its result into that buffer instead of allocating.
+//! the program and acyclic, so a reference count is exact and nothing traces. The compiler inserts
+//! the dups and drops (Perceus style), and an operation handed an owned, uniquely held buffer
+//! writes its result into it. Everything runs on the interpreter's thread, so counts are plain
+//! integers and the allocator state is thread-local.
 //!
-//! Every function runs on the R interpreter's thread, so counts are plain integers and the
-//! allocator state is thread-local.
-//!
-//! Ownership flags: a nonzero `owned` argument passes the caller's reference to the function,
-//! which either reuses the buffer or drops it, failure included. A zero flag borrows it. Results
-//! are always owned. A function that fails returns null (or its documented status) after
-//! consuming its owned arguments, so the caller reruns the whole operation in the interpreter.
+//! A nonzero `owned` argument passes the caller's reference, which the function reuses or drops,
+//! failure included; a zero flag borrows it. Results are always owned. A failing function returns
+//! null (or its documented status) after consuming its owned arguments, and the caller reruns the
+//! whole operation in the interpreter.
 
 // Every function dereferences raw pointers handed over by compiled code, so the module is an
 // FFI-style unsafe layer and an `unsafe` block inside each `unsafe fn` would only add noise.
@@ -198,8 +196,6 @@ pub fn set_hash_seed(seed: u64) {
     HASH_SEEDED.store(true, Ordering::Relaxed);
 }
 
-// Counting and freeing.
-
 /// Frees a list or a dict whose count reached zero, dropping its items.
 pub unsafe extern "C" fn ry_list_free(list: *mut List) {
     if list.is_null() {
@@ -255,8 +251,6 @@ pub unsafe extern "C" fn ry_str_drop(lo: u64, hi: u64) {
 pub unsafe extern "C" fn ry_live_objects() -> i64 {
     POOLS.with(|pools| pools.live.get())
 }
-
-// Construction.
 
 /// A box of `shape` with count one and `words` uninitialized field words, which the caller fills
 /// before anything can read or free it.
@@ -1747,8 +1741,6 @@ pub unsafe extern "C" fn ry_list_equal(a: *mut List, b: *mut List) -> u32 {
     equal as u32
 }
 
-// Strings.
-
 /// A new string holding a copy of `length` bytes of valid UTF-8.
 pub unsafe extern "C" fn ry_str_from_bytes(bytes: *const u8, length: u64) -> Str {
     str_from_bytes(raw_slice(bytes, length as usize))
@@ -2262,8 +2254,6 @@ pub unsafe extern "C" fn ry_list_from_utf8_lossy(list: *mut List, out: *mut Str)
     1
 }
 
-// Lists.
-
 /// The string at a 0-based index, with a count of its own.
 pub unsafe extern "C" fn ry_list_get_str(list: *mut List, index: u64) -> Str {
     let item = *((*list).data as *const Str).add(index as usize);
@@ -2527,8 +2517,6 @@ pub unsafe extern "C" fn ry_list_slice(
     result
 }
 
-// Dicts.
-
 /// An empty dict. Keys are `INT`, `DBL` or `STR`, values any list kind.
 pub unsafe extern "C" fn ry_dict_new(key_kind: u32, value_kind: u32) -> *mut u8 {
     let (Some(key_kind), Some(value_kind)) = (list_kind(key_kind), list_kind(value_kind)) else {
@@ -2693,8 +2681,6 @@ pub unsafe extern "C" fn ry_dict_values(dict: *mut u8) -> *mut List {
     dict_column(dict, (*dict).value_kind, (*dict).values)
 }
 
-// Private types and constants.
-
 /// A heap string's buffer header; the bytes follow at offset 8.
 #[repr(C)]
 struct StrBuffer {
@@ -2811,8 +2797,6 @@ thread_local! {
         }
     };
 }
-
-// Allocation.
 
 /// A block of at least `size` bytes, 16-byte aligned: a pooled power of two up to 64 KiB, else
 /// a larger power of two that a freed block of its class provides when there is one.
@@ -2996,8 +2980,6 @@ unsafe fn count_add(count: *mut u32, amount: u64) {
         *count = (u64::from(current) + amount).min(u64::from(STATIC_COUNT)) as u32;
     }
 }
-
-// List storage.
 
 /// A list with count one, `length` uninitialized items, and room for at least `capacity`. Items
 /// share the header's block while they fit a pooled block, and get their own system block
@@ -3246,8 +3228,6 @@ fn int_to_dbl(value: i32) -> f64 {
         f64::from(value)
     }
 }
-
-// Elementwise kernels.
 
 unsafe fn list_side(list: *mut List, owned: u32) -> Side {
     Side {
@@ -3769,8 +3749,6 @@ unsafe fn unique_into<T: Copy>(
     kept
 }
 
-// String storage and helpers.
-
 /// A heap string buffer for `length` bytes with count one, its spare block bytes as capacity.
 unsafe fn str_buffer_alloc(length: usize) -> *mut u8 {
     let size = STR_HEADER
@@ -4228,8 +4206,6 @@ impl Write for StackText {
         Ok(())
     }
 }
-
-// Dict storage and helpers.
 
 /// The seed for a new dict: the one tests fixed, or one drawn from the OS once per process.
 fn dict_seed() -> u64 {

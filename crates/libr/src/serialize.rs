@@ -1,37 +1,30 @@
-//! R's serialization format: what `serialize`, `saveRDS`, `save` and the lazy-load databases of
-//! installed packages store, and the stream API (`R_Serialize`, `R_Unserialize`) native code
-//! uses to write and read it.
+//! R's serialization format: what `serialize`, `saveRDS`, `save` and installed packages' lazy-load
+//! databases store, and the stream API (`R_Serialize`, `R_Unserialize`) native code uses.
 //!
-//! A stream is a short header followed by one item. The header names the format (XDR, which is
-//! big-endian binary and the default; native binary; or ASCII), the format version (2 or 3), the
-//! version of R that wrote it, the oldest version that can read it, and for version 3 the
-//! writer's native encoding. An item starts with a flags word: the type code in the low byte,
-//! then the is-object, has-attributes and has-tag bits, and the object's general-purpose bits
-//! (`LEVELS`) in the top 16 bits. Special objects (`NULL`, the global, base and empty
-//! environments, the base namespace, the unbound value and the missing argument) are a type code
-//! alone. Symbols, environments, external pointers, weak references and persistent objects are
-//! remembered in the order they are written, so a second occurrence is a back-reference to its
-//! index, which is how shared symbols and environment cycles survive a round trip.
+//! A stream is a header (the format: XDR big-endian binary, the default, native binary or ASCII;
+//! the format version, 2 or 3; the writer's R version and the oldest that can read it; for version
+//! 3 the writer's native encoding) followed by one item. An item starts with a flags word: the type
+//! code in the low byte, then the is-object, has-attributes and has-tag bits, and `LEVELS` in the
+//! top 16 bits. Special objects (`NULL`, the global, base and empty environments, the base
+//! namespace, the unbound value and the missing argument) are a type code alone. Symbols,
+//! environments, external pointers, weak references and persistent objects are remembered in write
+//! order, so a repeat is a back-reference to its index, which is how shared symbols and environment
+//! cycles survive.
 //!
-//! The reader decodes everything GNU R writes. Three things come back in a different shape than
-//! GNU R would build, on purpose:
+//! The reader decodes everything GNU R writes, but three things come back in another shape on
+//! purpose. Bytecode reads as the expression it was compiled from (the constant pool's first
+//! constant), so a compiled closure's body is its AST, since ry does not run GNU R's bytecode.
+//! ALTREP objects of base R's classes (compact sequences, deferred strings, wrappers) read as the
+//! vectors they stand for; other classes need their package's class table, which
+//! [`unserialize_altrep`] marks, and until it exists they read as a zero-length vector with a
+//! warning, as GNU R does for an unregistered class. Namespace and package environments are written
+//! as names and resolved through [`set_environment_resolver`]'s hook, whose default
+//! ([`default_resolver`]) looks in the namespace registry, else records a placeholder that every
+//! later reference to the same name in the session resolves to.
 //!
-//! - **Bytecode** reads as the expression it was compiled from (the first constant of the
-//!   constant pool), so a compiled closure's body is its AST. ry does not run GNU R's bytecode.
-//! - **ALTREP objects** of base R's classes (compact sequences, deferred strings, wrappers) read
-//!   as the ordinary vectors they stand for. Other classes need the class table of the package
-//!   that defines them, which [`unserialize_altrep`] marks; until it exists they read as a
-//!   zero-length vector with a warning, which is what GNU R does when a class is not registered.
-//! - **Namespace and package environments** are written as their names. Reading resolves a name
-//!   through the hook the interpreter installs with [`set_environment_resolver`]; the default
-//!   looks in the namespace registry and otherwise creates a placeholder environment and records
-//!   it, so every later reference to the same name in the session resolves to the same
-//!   placeholder (see [`default_resolver`]).
-//!
-//! The writer writes an environment's frame as a pairlist (GNU R's unhashed layout) with the
-//! newest binding first, which GNU R reads back unchanged. An ALTREP object is written as the
-//! vector it stands for, because ry's ALTREP classes do not yet record a class name and a
-//! serialized state.
+//! The writer writes a frame as a pairlist, newest binding first (GNU R's unhashed layout), which
+//! GNU R reads back unchanged, and an ALTREP object as its vector, since ry's ALTREP classes record
+//! no class name or serialized state.
 
 use {
     crate::{
@@ -350,8 +343,6 @@ pub struct StreamHeader {
     /// The writer's native encoding, which only version 3 records.
     pub native_encoding: Option<String>,
 }
-
-// Writing.
 
 /// Serializes `object` into a byte vector.
 pub unsafe fn to_bytes(object: Sexp, format: Format, version: c_int) -> ApiResult<Vec<u8>> {
@@ -950,8 +941,6 @@ unsafe fn package_name(env: Sexp) -> Option<Sexp> {
 /// deeply nested object never overflows the thread's stack.
 const STACK_RED_ZONE: usize = 128 * 1024;
 const STACK_GROWTH: usize = 4 * 1024 * 1024;
-
-// Reading.
 
 /// Where a stream's bytes come from.
 pub trait Source {
@@ -2154,8 +2143,6 @@ fn parse_hex_magnitude(text: &str) -> Option<f64> {
     Some(mantissa as f64 * 2f64.powi(half) * 2f64.powi(scale - half))
 }
 
-// Compressed files and lazy-load databases.
-
 /// The bytes inside a file written by `saveRDS` or `save`, which may be gzip, bzip2 or xz
 /// compressed, or not compressed at all.
 pub fn decompress(bytes: &[u8]) -> ApiResult<Cow<'_, [u8]>> {
@@ -2237,8 +2224,6 @@ pub fn lazyload_decompress(
     };
     interp::serialize::decompress_record(entry, kind).map(Cow::Owned)
 }
-
-// The C API.
 
 pub type OutCharFn = unsafe extern "C" fn(*mut R_outpstream_st, c_int);
 pub type OutBytesFn = unsafe extern "C" fn(*mut R_outpstream_st, *mut c_void, c_int);

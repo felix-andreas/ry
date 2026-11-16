@@ -1,10 +1,11 @@
 //! Windows link settings for `ry.exe`, and for `ry-rcmd`, whose package names this script as its
 //! build script too, because its copies run as an R home's `R.exe` and `Rscript.exe`. The builds
-//! embed `ry.exe.manifest`, so Windows runs them with a UTF-8 code page, which embedded R inherits as its native encoding: MSVC through linker
-//! flags, gnullvm through a resource object that `windres` compiles. Every Windows target reserves a
-//! 64 MiB main-thread stack, because R sessions run on `main` and Windows' default of 1 MiB
-//! overflows while the default packages load (Linux and macOS give `main` 8 MiB). For `rcmd` it
-//! also embeds ry's C headers, from which ry assembles its R home at run time.
+//! embed `ry.exe.manifest`, so Windows runs them with a UTF-8 code page, which embedded R inherits
+//! as its native encoding: MSVC through linker flags, gnullvm through a resource object that
+//! `windres` compiles. Every Windows target reserves a 64 MiB main-thread stack, because R sessions
+//! run on `main` and Windows' default of 1 MiB overflows while the default packages load (Linux and
+//! macOS give `main` 8 MiB). For `rcmd` it also embeds ry's C headers, from which ry assembles its
+//! R home at run time.
 //!
 //! It also sets `RY_VERSION`, which names the cargo profile of any build other than release
 //! (`0.4.3-beta (iterate build)`), so that `tools/bench/bench.py` can refuse it.
