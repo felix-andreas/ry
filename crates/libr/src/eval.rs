@@ -90,6 +90,10 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
             }))
         },
         altrep_dataptr: |object| unsafe { crate::altrep::readable_dataptr(object) },
+        altrep_dataptr_or_null: |object| unsafe {
+            let pointer = crate::altrep::dataptr_or_null(object)?;
+            Ok((!pointer.is_null()).then_some(pointer.cast()))
+        },
         altrep_int_elt: |object, index| unsafe {
             crate::altrep::int_elt(object, index as crate::R_xlen_t)
         },
