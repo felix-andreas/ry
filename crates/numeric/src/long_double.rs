@@ -698,6 +698,48 @@ pub fn finite_row_means(values: &[f64], rows: usize, divisor: usize, out: &mut [
     }
 }
 
+/// GNU R's `colSums` (`divisor` 1) or `colMeans` (`divisor` the row count) of a column-major
+/// matrix with `rows` rows: each column's long double total, divided by `divisor` in long double
+/// and rounded once to double into `out`. Returns which columns were written; a column holding
+/// an infinite or NaN value is left for the caller, whose `na.rm` decides it.
+pub fn finite_column_means(
+    values: &[f64],
+    rows: usize,
+    divisor: usize,
+    out: &mut [f64],
+) -> Vec<bool> {
+    if rows == 0 {
+        return vec![false; out.len()];
+    }
+    let columns = (values.len() / rows).min(out.len());
+    #[cfg(all(target_arch = "x86_64", not(windows)))]
+    {
+        let mut totals = vec![[0u8; 16]; columns];
+        x87::column_sums(&values[..rows * columns], rows, &mut totals);
+        x87::divide_each(&totals, divisor as u64, &mut out[..columns]);
+        let mut done: Vec<bool> = totals
+            .iter()
+            .map(|total| u16::from_le_bytes([total[8], total[9]]) & 0x7fff != 0x7fff)
+            .collect();
+        done.resize(out.len(), false);
+        done
+    }
+    #[cfg(not(all(target_arch = "x86_64", not(windows))))]
+    {
+        let mut done = vec![false; out.len()];
+        for ((column, out), done) in values.chunks_exact(rows).zip(out.iter_mut()).zip(&mut done) {
+            let total = add_all(LongDouble::ZERO, column);
+            *out = if divisor == 1 {
+                total.to_f64()
+            } else {
+                (total / divisor).to_f64()
+            };
+            *done = total.finite().is_some();
+        }
+        done
+    }
+}
+
 impl LongDouble {
     /// The value when it is finite before any rounding to double, so that a finite total too
     /// large for a double still counts, as it does in x87 registers. A sum of doubles never
@@ -1227,6 +1269,46 @@ mod x87 {
                 stride = in(reg) rows * 8,
                 count = inout(reg) columns => _,
                 out = in(reg) out.as_mut_ptr(),
+                out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
+                out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
+                options(nostack),
+            );
+        }
+    }
+
+    /// The extended total of each `rows`-long column of `values` into `totals`, for as many
+    /// whole columns as both hold. Each total starts a new chain, so the processor overlaps a
+    /// column's additions with the end of the previous column's.
+    pub(super) fn column_sums(values: &[f64], rows: usize, totals: &mut [[u8; 16]]) {
+        let columns = values
+            .len()
+            .checked_div(rows)
+            .unwrap_or(0)
+            .min(totals.len());
+        // SAFETY: reads `rows * columns` doubles inside `values` and writes the first ten bytes
+        // of `columns` totals.
+        unsafe {
+            asm!(
+                "test {columns}, {columns}",
+                "jz 4f",
+                "2:",
+                "fldz",
+                "mov {count}, {rows}",
+                "3:",
+                "fadd qword ptr [{pointer}]",
+                "add {pointer}, 8",
+                "dec {count}",
+                "jnz 3b",
+                "fstp tbyte ptr [{totals}]",
+                "add {totals}, 16",
+                "dec {columns}",
+                "jnz 2b",
+                "4:",
+                pointer = inout(reg) values.as_ptr() => _,
+                totals = inout(reg) totals.as_mut_ptr() => _,
+                columns = inout(reg) columns => _,
+                rows = in(reg) rows,
+                count = out(reg) _,
                 out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
                 out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
                 options(nostack),
