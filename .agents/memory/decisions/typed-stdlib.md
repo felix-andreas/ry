@@ -249,7 +249,7 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 **Status:** built.
 
 - **Elaborated install.** `preflight::elaborate_package` checks a typed package (strict in `ry.toml`, or a file with ry syntax or `# typing: strict`), refuses the build on a strict error, and returns each file's elaborated text in the package's declared encoding. A rewrite that changes the line count or the parse errors fails the build. `build_tarball` (`crates/ry/src/main.rs`) builds a copy in a temporary directory (skipping `.git` and `.Rbuildignore` matches, entering each directory once so a link cannot loop), so the package directory is never touched. Without this, installed code had no checked conversion types and ran literals as R doubles where the checker said `I64`.
-- **Canonical annotations.** Every file the preflight elaborates gets each one-line parameter and return annotation rewritten to the checker's type (`semantics::canonical_annotation`): aliases expanded, project nominal types unfolded except a recursive one inside itself, printed by `TypeRenderer`. A spelling is used only when reading it back gives the same type, so a rewrite never changes what was declared; unfolding stops at `UNFOLD_BUDGET`, because definitions naming another twice double the spelling each step. Open records, type parameters, unknown names and non-ASCII field names stay as written. `annotated_type` reads this closed grammar, so the lowering no longer needs its own reader of type definitions (one source of truth for named types). Elaboration keeps line counts, so srcrefs hold. Pinned by `benchmark_signatures_all_have_canonical_spellings` in `crates/typed/tests/test_annotations.rs`.
+- **Canonical annotations.** Every file the preflight elaborates gets each one-line parameter and return annotation rewritten to the checker's type (`semantics::canonical_annotation`): aliases expanded, project nominal types unfolded except a recursive one inside itself, printed by `TypeRenderer`. A spelling is used only when reading it back gives the same type, so a rewrite never changes what was declared; unfolding stops at `UNFOLD_BUDGET`, because definitions naming another twice double the spelling each step. Open records, type parameters, unknown names and non-ASCII field names stay as written. `annotated_type` reads this closed grammar, so the lowering no longer needs its own reader of type definitions (one source of truth for named types). Elaboration keeps line counts, so srcrefs hold. Pinned by `benchmark_signatures_all_have_canonical_spellings` in `crates/typed/tests/test_typed/annotations.rs`.
 - **Serialization.** `I64` and `List<I64>` serialize as ry's type code 28 (array flag, length, each item's high and low halves; `crates/libr/src/serialize.rs`, `crates/interp/src/serialize.rs`), so a package's `I64` constants reach the lazy-load database through `lazyLoadDBinsertValue`; `saveRDS` and other builtins still refuse a top-level one. Records, tuples, tags, dicts and sets have no stream form and are refused.
 - **Behaviour.** A parameter typed by a record alias is checked at run time as the record, where an alias reads as unchecked otherwise.
 
@@ -382,7 +382,7 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 - **Shape.** `count_if` with the identity predicate over a `List<Bool>` lowers to `Op::CountTrue`. `crates/typed/src/fusion.rs`, before ownership insertion, follows the list back through `VectorCompare` (`I64`/`F64`), `VectorLogic`, `VectorNot` and same-typed `Copy` and makes one program over the comparisons' inputs. `values::ry_count_true` runs it in 128-item chunks with lanes 0, 1, 2 for `FALSE`, `NA`, `TRUE` (`&` is `min`, `|` is `max`, `!` is `2 - x`), and fails on `NA` in the result, a length mismatch or an invalid program, as the unfused code would.
 - **Why after lowering.** At lowering an operand is a local that may be reassigned, read in a branch or returned. The IR pass fuses only within a straight-line run ending at the count (its block and the chain of single-predecessor blocks into it) and checks no input is reassigned between comparison and count.
 - **Comparisons and `!` on ry lists give `List<Bool>`**, not R logicals, so `&` and `|` with another ry list accept them.
-- **Pinned by** `typed-mask-counts.scenario` and `fused_counts_follow_three_valued_logic` in `crates/typed/tests/test_values.rs`.
+- **Pinned by** `typed-mask-counts.scenario` and `fused_counts_follow_three_valued_logic` in `crates/typed/tests/test_typed/values.rs`.
 
 ## A uniquely owned Array grows in place
 
@@ -410,7 +410,7 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 - **Sorting.** `sort_with` in `lower.rs` builds a bottom-up merge sort in the IR with two buffers that trade places per pass, and inlines the comparator once into the merge step. A right item goes first only on `:GT` (`Op::ShapeOf`), which keeps the sort stable as the standard-library page promises. Rejected: a native sort that calls back, which needs a compiled comparator with a native entry, which inlined lambdas lack.
 - **Tuple index.** `[[` on a tuple with a constant position is `Op::Field`; a computed position, or any index of a named record, refuses, because the field's type depends on the position.
 - **String order.** `values::str_order` calls `interp::sort::collate`, the function behind R's `<`, for `ry_str_compare` and list comparisons. The interpreter reruns failed native calls, so the tiers must agree in every locale; one function is the only way, and `collate` reads the locale per call, so `Sys.setlocale` is honored.
-- **Pinned by** `typed-sort-with.scenario`, `test_tiers` sort and string cases, and `comparisons_and_logic_follow_r` in `crates/typed/tests/test_values.rs`.
+- **Pinned by** `typed-sort-with.scenario`, `test_tiers` sort and string cases, and `comparisons_and_logic_follow_r` in `crates/typed/tests/test_typed/values.rs`.
 
 ## Converting a record tree at the typed boundary takes one shape-table borrow and no per-node allocation
 
@@ -488,7 +488,7 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 - **Payload-less tag variables** are replaced too when some instruction builds for the group, so a `match` compares a register instead of loading from the static box.
 - **A field only one shape has** may be dead-but-live after a join (liveness is not path-sensitive). Sound because locals start at zero, a zero string, list or box counts as nothing (`backend::dup`/`drop` test it), and a live local holds zero or a value it owns.
 - **Nested boxes** go in later rounds (`MAX_ROUNDS`).
-- **Pinned by** `crates/typed/tests/test_unbox.rs`, `typed-records-unboxed.scenario`, and the loop case of `typed_core_keeps_tier_zero_semantics_for_records_tags_and_text`.
+- **Pinned by** `crates/typed/tests/test_typed/unbox.rs`, `typed-records-unboxed.scenario`, and the loop case of `typed_core_keeps_tier_zero_semantics_for_records_tags_and_text`.
 
 ## A small typed function is lowered into its caller
 
@@ -520,7 +520,7 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 - **Feature levels at run time.** A released binary must run on any x86-64, so not `-C target-cpu`. `count_true` is `#[inline(always)]` and compiled twice (`count_true_avx2` with `#[target_feature(enable = "avx2")]`, picked by `is_x86_feature_detected!`). Trap: its helpers (`operand`, `compare_lanes`) must be `#[inline(always)]` too, because a function without the attribute is not compiled with the caller's features. `crates/numeric/src/vector_math.rs` does the same.
 - **The arithmetic kernel** calls one step function per step and chunk through a pointer chosen once (`Step<T>`: `step_dbl_avx2`/`step_dbl_baseline`, same for `I64`). The slices are step parameters, so the compiler knows they do not overlap and vectorizes every operator with its `NaN` or overflow test; the last step writes into the result list. A call per 128-item chunk costs nothing beside the chunk.
 - **No clearing.** `Rows` holds chunk buffers uninitialized; a kernel fills its scalar rows, clears only rows its steps write, and reads no other row. Zeroed arrays cleared up to 36 KB per call.
-- **Pinned by** `fused_counts_follow_three_valued_logic` and `fused_arithmetic_agrees_with_one_item_at_a_time` in `crates/typed/tests/test_values.rs`, and `typed-mask-counts.scenario`.
+- **Pinned by** `fused_counts_follow_three_valued_logic` and `fused_arithmetic_agrees_with_one_item_at_a_time` in `crates/typed/tests/test_typed/values.rs`, and `typed-mask-counts.scenario`.
 
 ## `Dict.update` probes once and builds no `Result`
 
@@ -529,7 +529,7 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 - The lowerer emits `Op::DictFind` (position or -1), branches, and lowers an inline `f` once per branch: found reads with `Op::DictAt`, applies `f` to `:Ok(value)` and stores with `Op::DictPut` at the known position; absent applies `f` to `:Err(:Missing)` and stores with `Op::DictInsert`. Each branch's `Result` is built and read in one function, so `typed::unbox` removes it. A called (not inlined) closure keeps one joined lookup and one call (`lower::dict_update`, `store_update`).
 - **Why two copies of the callback**: one copy at a join sees a `Result` assigned on two paths, which unboxing keeps as a box. The cost is bounded by `MAX_INLINE_CALLS`.
 - `ry_dict_put` falls back to an insert when the dict is shared, static or the position is -1, so `Op::DictPut` is correct wherever `Op::DictInsert` is.
-- **Pinned by** `typed_core_keeps_tier_zero_semantics_for_records_tags_and_text` and `test_values`.
+- **Pinned by** `typed_core_keeps_tier_zero_semantics_for_records_tags_and_text` and `values` in `crates/typed/tests/test_typed`.
 
 ## The typed `sales` benchmark is written over `Dict`
 
@@ -544,7 +544,7 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 
 - A string of at most 15 bytes is two words with inline bytes. `values::str_from_bytes` builds them from overlapping fixed-size reads with no `memcpy`, and `values::key_hash` mixes the two words. Equal inline strings have equal words because bytes past the length are zero. The crate is little-endian only (`compile_error!`), which the layout relies on.
 - `typed::usable_string` skips UTF-8 validation for a CHARSXP with `VALID_UTF8` set.
-- **Pinned by** `test_values::strings_switch_to_heap_past_fifteen_bytes`.
+- **Pinned by** `values::strings_switch_to_heap_past_fifteen_bytes`.
 
 ## The typed log reports each compilation's own time
 
@@ -566,7 +566,7 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 - `ry_str_split` with a one-byte separator counts first and cuts second, both eight bytes at a time: `values::separators_in_word` XORs with the repeated separator and uses the carry-free zero-byte test, which sets exactly the high bit of each match. The tail is read through `str_from_bytes`, never past the text; the list is allocated once at its final length and short fields are inline.
 - **Rejected: `memchr`**, because delimited fields are short and a call per separator costs more than the scan.
 - `box_free` walks the set bits of the `objects` and `strings` masks.
-- **Pinned by** the sweep in `test_values::string_functions_follow_r_and_the_standard_library`.
+- **Pinned by** the sweep in `values::string_functions_follow_r_and_the_standard_library`.
 
 ## A branch on a comparison of two doubles compares once
 
@@ -582,7 +582,7 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 - **Shape.** In `Lowerer::walk`, a `count_if` over a `List<F64>` whose inline one-parameter predicate only compares the item with numbers (`Lowerer::compares_item`: comparisons against a double literal or `F64` local, joined by `&`, `|`, `!`, parentheses) lowers the body once with the parameter bound to the list, giving `Op::CountTrue` over the mask, which `typed::fusion` fuses. Other predicates keep the per-item loop.
 - **Why only `List<F64>` comparisons.** Binding the list to the item name is sound only where every operation means the same elementwise; checked `I64` arithmetic may fail per item, and calls or `match` have no list form. `I64` over `List<I64>` is left out because its declared-`I64` lowering differs from a list comparison.
 - **Kernel.** A one-step program tallies answers as it compares (`tally_compared`); the general path tallies a chunk's lanes in a byte.
-- **Pinned by** `test_tiers::typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic` and `test_values::fused_counts_follow_three_valued_logic`.
+- **Pinned by** `test_tiers::typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic` and `values::fused_counts_follow_three_valued_logic`.
 
 ## The typed `array_filter` benchmark counts with `List.count_if`
 
@@ -614,7 +614,7 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 - **Why a shared list.** A pass fails unless all its list inputs have one length; merging counts over unrelated lists would give up (and rerun) calls that each count alone would pass. A shared list ties the lengths, so the merged pass fails only where one count would.
 - **Why a call keeps them apart.** A count fails on `NA` and gives up the call; moving it before an R call would run that call twice. Calls are the only effect a rerun repeats.
 - **Why the later count moves up**: the earlier count's results may be read in between, and moving up needs only the later count's inputs unchanged over the gap.
-- **Pinned by** `crates/typed/tests/test_fusion.rs`, `fused_counts_follow_three_valued_logic`, and the log-rank cases of `typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic`.
+- **Pinned by** `crates/typed/tests/test_typed/fusion.rs`, `fused_counts_follow_three_valued_logic`, and the log-rank cases of `typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic`.
 
 ## Parsing a number is one instruction with two results
 
@@ -638,7 +638,7 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 - **Which lists.** A group of `List<Str>` variables joined by copies, assigned only by splits or in-group copies, used only by such copies or by `Op::Get` with an index one `I64` constant assigns, from 1 to 32. A list returned, measured, passed on or read at a computed position is kept.
 - **Why the variables hold the string**: locals are variables, so the split's string may be reassigned before a read; copying it at the split makes every read see its split's string on every path, as for a box's fields.
 - **Why cut at the read**: a row rejected early never pays for later pieces (Rust's `split` yields slices too). A read run many times cuts each time; the common shape reads each piece once.
-- **Pinned by** `crates/typed/tests/test_unbox.rs`, `check_split_bounds` in `crates/typed/tests/test_values.rs`, and the split cases of `typed_core_keeps_tier_zero_semantics_for_records_tags_and_text`.
+- **Pinned by** `crates/typed/tests/test_typed/unbox.rs`, `check_split_bounds` in `crates/typed/tests/test_typed/values.rs`, and the split cases of `typed_core_keeps_tier_zero_semantics_for_records_tags_and_text`.
 
 ## A loop that fills a list is fused with the loop that reads it
 
@@ -653,7 +653,7 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 - **Why before `unbox` and ownership**: no `Dup`/`Drop` exists yet to move, and the boxes become removable only after their lists are gone.
 - **Supporting changes**: `List.map` with a named typed function inlines it at `apply` (`lower::typed_function`), because a loop with a call never fuses; `unbox::remove_unread` removes unread instructions that cannot fail; `Op::Piece` at index 1 cannot fail (`ir::Op::can_fail`).
 - **Known limits** are in `backlog.md`.
-- **Pinned by** `crates/typed/tests/test_loops.rs` (each condition, plus a fuzz against an IR evaluator; `FUZZ_SEED=<n> cargo test -p typed --test test_loops` replays), `an_unread_value_goes_with_what_only_it_read_unless_computing_it_can_fail` in `test_unbox.rs`, and the pipeline cases of `typed_core_keeps_tier_zero_semantics_for_records_tags_and_text`.
+- **Pinned by** `crates/typed/tests/test_typed/loops.rs` (each condition, plus a fuzz against an IR evaluator; `FUZZ_SEED=<n> cargo test -p typed --test test_typed loops::` replays), `an_unread_value_goes_with_what_only_it_read_unless_computing_it_can_fail` in `unbox.rs`, and the pipeline cases of `typed_core_keeps_tier_zero_semantics_for_records_tags_and_text`.
 
 ## Whole-number ranges decide which checks typed code needs
 
@@ -665,4 +665,4 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 - **A wrong range is a miscompile**, so each transfer function follows what the backend emits: a length written to an integer keeps the type's whole range, extra assigned locals get their type's range, an operator that gives up on overflow is clamped to its type, and a logical or `Bool` is not assumed to be 0 or 1, because package C code can store another true value and `Op::Truth` passes it on. It relies on two IR contracts: `Op::Step` never overflows, and a `Bool` is never `NA`.
 - **Rejected: SSA value ranges in `crates/ssa`**, which would have to recover the types and the checked operators from emitted code.
 - **Known cost**: Cranelift places a pure value at its first use per dominator branch, so with the overflow test gone `i %% 7 + 1` can be computed twice; the removed checks outweigh it.
-- **Pinned by** `crates/typed/tests/test_ranges.rs` (each rule, plus a fuzz checking every read value lies in its range; `FUZZ_SEED=<n> cargo test -p typed --test test_ranges` replays) and the range cases of `typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic`.
+- **Pinned by** `crates/typed/tests/test_typed/ranges.rs` (each rule, plus a fuzz checking every read value lies in its range; `FUZZ_SEED=<n> cargo test -p typed --test test_typed ranges::` replays) and the range cases of `typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic`.

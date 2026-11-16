@@ -1,7 +1,7 @@
 //! Model tests for the typed core's native values: random operation sequences from one seed,
 //! checked against plain Rust models, plus fixed tables of GNU R's own output.
 //!
-//! Replay a failure with `FUZZ_SEED=<seed> cargo test -p typed --test test_values`, and run
+//! Replay a failure with `FUZZ_SEED=<seed> cargo test -p typed --test test_typed values::`, and run
 //! longer with `FUZZ_ITERS=<n>`.
 
 use {std::collections::HashMap, typed::values::*};
@@ -1869,7 +1869,7 @@ impl Drop for Rng {
     fn drop(&mut self) {
         if std::thread::panicking() {
             eprintln!(
-                "replay: FUZZ_SEED={} cargo test -p typed --test test_values",
+                "replay: FUZZ_SEED={} cargo test -p typed --test test_typed values::",
                 self.seed
             );
         }

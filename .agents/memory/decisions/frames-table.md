@@ -68,7 +68,7 @@ The table is a Polars `DataFrame` held by the `table` crate; this entry holds th
 
 - **Every type ry adds is UpperCamelCase** (`DataFrame`, `LazyFrame`, `GroupBy`, `Expr`, `Record{...}`, `Tuple{...}`, `Result`, `List`, ...) and R's own types stay lowercase, so case is the visible line between them. No lowercase alias was kept: the old names had no users outside this repository, and an alias adds a second spelling to every renderer and fixture.
 - **API: Polars' verbs over expressions as qualified functions used with `|>`** (`DataFrame.select`, `filter`, `group_by` + `GroupBy.agg`, `join`, `lazy`, the `LazyFrame.*` mirror; `Expr.col`, `Expr.lit`, R operators through `Ops.Expr`). No method dispatch: a qualified name always means one function, so the checker and IDE do a plain name lookup. A string names a column wherever a verb takes an expression.
-- **One plan for eager and lazy:** every verb appends a `table::lazy::Step`, and an eager verb collects at once. `crates/table/tests/test_lazy.rs` fuzzes that optimizing never changes a result. Errors name the schema of the longest valid prefix (`Plan::valid_schema`).
+- **One plan for eager and lazy:** every verb appends a `table::lazy::Step`, and an eager verb collects at once. `crates/table/tests/test_table/lazy.rs` fuzzes that optimizing never changes a result. Errors name the schema of the longest valid prefix (`Plan::valid_schema`).
 - **Typing:** `refine_dataframe_call` in `crates/semantics/src/check.rs` refines a verb after the ordinary call checked its arguments against `types/ry.Rtypes`, only when the name reaches the library (`reaches_library`). An argument it cannot read leaves the columns unknown rather than guessing. The refinement reads only the item's recorded types, so incremental analysis is unaffected.
 - **Bracket syntax on a DataFrame stays as compatibility,** typing included; the docs teach the verbs.
 - **The class is `"DataFrame"` alone;** `as.data.frame` and `as.data.table` methods are registered with `registerS3method` into the generics' namespaces, so they work whatever is attached first.
@@ -80,7 +80,7 @@ The table is a Polars `DataFrame` held by the `table` crate; this entry holds th
 - **`Expr.head(n)` inside `agg` keeps up to `n` values per group, as rows,** because ry has no list columns (also data.table's layout). The checker tracks an expression's `Shape` (per row, per group, up to `n` per group) in `check.rs` and accepts `Head` only as a whole `agg` item, since `head(v, 2) + 1` would mix shapes. Sort then aggregate fuses into one query that hits the top-k kernel (`top_k_shape` in `group.rs`).
 - **`join_asof` is `How::Asof(Strategy)`, lowered to the rolling join** with the left frame as data.table's `i`: `"backward"` is `roll = TRUE`, `"forward"` `roll = -Inf`, `"nearest"` `roll = "nearest"`; `by` columns are leading equality keys. One kernel (`rolling` in `join.rs`) serves both APIs.
 - **A grouped median holds `(row, slot)` pairs, one list per run of rows,** reading values from the input during the counting sort, because `(slot, value)` lists concatenated across threads cost hundreds of MB of fresh pages per query.
-- Pinned by `frames.R.test` and `crates/table/tests/test_lazy.rs`.
+- Pinned by `frames.R.test` and `crates/table/tests/test_table/lazy.rs`.
 
 ## data.table's helpers run data.table's own C, and the C API is what makes them fast
 

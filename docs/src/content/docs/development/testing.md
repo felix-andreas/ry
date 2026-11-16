@@ -380,8 +380,8 @@ meant to fail. Behavior that needs base R, such as a warning handler watching a 
 goes in the oracle case `bytecode__hot_loops.R`. `crates/interp/tests/test_linalg.rs` pins base R's linear
 algebra to GNU R's results bit for bit. The matrix products are ry's own kernels, so their bits hold
 on every machine; the LAPACK cases hold only on the reference libraries, so on another BLAS (such as
-OpenBLAS) the test compares them with a GNU R on the same libraries, and skips them without one. `crates/table/tests/test_table.rs` checks the table engine
-against values read from data.table, `test_lazy.rs` there checks the Polars-style verbs, and
+OpenBLAS) the test compares them with a GNU R on the same libraries, and skips them without one. `crates/table/tests/test_table/main.rs` checks the table engine
+against values read from data.table, `lazy.rs` beside it checks the Polars-style verbs, and
 `crates/libr/tests/test_frame_altrep.rs` checks the columns as ALTREP vectors. `crates/interp/tests/test_records.rs` and `test_arrays.rs` and `crates/frames/tests/test_standard_library.rs` cover ry's
 own values at run time, the last one also holding the runtime's function table against the
 declarations in `types/std.Rtypes`. `crates/libr/tests/test_rmath.rs`, `test_numerics.rs` and
