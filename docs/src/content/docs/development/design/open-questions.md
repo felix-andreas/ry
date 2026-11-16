@@ -6,7 +6,7 @@ description: "Type-system design questions that are not yet decided, with the op
 Each entry states a type-system question that is still open, the options on the table, and the
 stopgap ry uses meanwhile. Nothing here is contract until it lands in the
 [type system reference](/reference/type-system/). When a question is resolved, record the decision
-in `.agents/memory/decisions.md` and delete the entry here.
+in `.agents/memory/decisions/` and delete the entry here.
 
 ## 1. S3 dispatch
 
@@ -40,7 +40,7 @@ element, comparable, overloadable with `+`, S3) that subsumes the ad-hoc constra
 overload sets?
 
 **The answer is no.** The type system admits only what is fast to check, which means Hindley-Milner,
-with declaration files carrying the one sanctioned exception; `decisions.md` records this under "The
+with declaration files carrying the one sanctioned exception; `decisions/syntax-semantics.md` records this under "The
 type system is Hindley-Milner, and stays fast to check". Traits are the textbook-correct way to add
 ad-hoc polymorphism to Hindley-Milner. That is exactly what type classes were invented for, and why
 overloading is not Hindley-Milner. But correctness in the textbook sense is not the bar here. The bar
@@ -75,7 +75,7 @@ in a `NAMESPACE` file imports, the order of the search path, and masking warning
 
 **Notes.** ry validates `pkg::name` against each namespace's export set, and `NAMESPACE` and
 `DESCRIPTION` metadata only widen what resolves (an imported name is quiet, a declared dependency is
-a known namespace). Bare names are deliberately not gated on imports; `decisions.md` records why.
+a known namespace). Bare names are deliberately not gated on imports; `decisions/syntax-semantics.md` records why.
 Per-file visibility, attach order, and masking warnings still need the full model, which decides
 when an unresolved name is really unresolved, and so how useful strict mode is on a real project.
 
