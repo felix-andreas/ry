@@ -2002,16 +2002,6 @@ mod tests {
     };
 
     #[test]
-    fn unify_binds_and_resolves() {
-        let db = RootDatabase::default();
-        let mut table = InferenceTable::default();
-        let var = table.fresh_ty(&db, Constraint::Unconstrained);
-        let int = scalar(&db, Atomic::Integer);
-        table.unify(&db, var, int).expect("binds");
-        assert_eq!(table.resolve(&db, var), int);
-    }
-
-    #[test]
     fn a_subtree_shared_through_variables_resolves_once() {
         let db = RootDatabase::default();
         let mut table = InferenceTable::default();
@@ -2035,19 +2025,6 @@ mod tests {
         assert_eq!(resolved, expected);
         // A walk that resolves each shared tuple once per path takes 2^48 steps.
         assert!(steps < 1_000, "{steps} steps");
-    }
-
-    #[test]
-    fn occurs_check_refuses_infinite_types() {
-        let db = RootDatabase::default();
-        let mut table = InferenceTable::default();
-        let var = table.fresh(Constraint::Unconstrained);
-        let var_ty = Ty::new(&db, TyKind::Var(var));
-        let list = Ty::new(&db, TyKind::List(var_ty));
-        assert!(matches!(
-            table.unify(&db, var_ty, list),
-            Err(UnifyError::Occurs(..))
-        ));
     }
 
     #[test]

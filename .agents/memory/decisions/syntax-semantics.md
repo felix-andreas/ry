@@ -704,7 +704,7 @@ shadowing.
 Every namespace R ships pairs with a generated `types/<ns>.exports` manifest of its full export list
 (`scripts/export-manifests.R`), because chasing completeness with typed declarations does not scale.
 Manifest names resolve everywhere a typed name does but type `Unknown` (`known_exports`, consulted by
-`package_scheme_exists` after schemes and nominals).
+`package_scheme_exists_in` after schemes and nominals).
 
 Three tiers mirror R: default-attached namespaces (including `datasets`) are bare-visible
 unconditionally; shipped but unattached ones (`QUALIFIED_ONLY_NAMESPACES`: tools, parallel, compiler,
