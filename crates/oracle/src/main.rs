@@ -39,8 +39,9 @@ enum Command {
     Compare {
         /// The engines compared with GNU R, comma separated: `ry`, `ry-tier0`, `ry-jit`,
         /// `ry-gctorture`, `ry-gctorture-young`, `ry-jit-gctorture`, or a command line
-        /// (default: `$ORACLE_ENGINE`, then `ry-tier0,ry-jit`). Unless `ORACLE_RY` names a binary, a ry
-        /// engine first builds the workspace's `ry` and `libR.so`, so no run sees a stale build.
+        /// (default: `$ORACLE_ENGINE`, then `ry-tier0,ry-jit`). Unless `ORACLE_RY` names a
+        /// binary, a ry engine first builds the workspace's `ry` and `libR.so`, so no run sees a
+        /// stale build.
         #[arg(long)]
         engine: Option<String>,
         /// Run even when cases need packages that are not installed, skip those cases, and
@@ -199,7 +200,7 @@ fn main() -> ExitCode {
     } = &cli.command
         && !gnu_r_available()
     {
-        let Some(engines) = second_engines(engine.as_deref()) else {
+        let Some(engines) = compare_engines(engine.as_deref()) else {
             return ExitCode::from(2);
         };
         eprintln!("GNU R was not found, so the engines are compared with the recorded outcomes");
@@ -222,7 +223,7 @@ fn main() -> ExitCode {
             verbose,
             paths,
         } => {
-            let Some(engines) = second_engines(engine.as_deref()) else {
+            let Some(engines) = compare_engines(engine.as_deref()) else {
                 return ExitCode::from(2);
             };
             compare(
@@ -329,7 +330,10 @@ fn uses_workspace_ry(command: &Command) -> bool {
     match command {
         Command::Compare { engine, .. } => match engine {
             Some(names) => names_ry(names),
-            None => std::env::var("ORACLE_ENGINE").map_or(true, |names| names_ry(&names)),
+            None => std::env::var("ORACLE_ENGINE")
+                .ok()
+                .filter(|names| !names.trim().is_empty())
+                .is_none_or(|names| names_ry(&names)),
         },
         Command::Fuzz { engines, .. } => names_ry(engines),
         Command::Gallery { .. } => true,
@@ -558,7 +562,7 @@ fn check_suites(cases: &[PathBuf], build: &Build, action: &str) -> Result<(), ()
 }
 
 /// The engines `--engine` names, else those [`engines_named`] falls back to.
-fn second_engines(names: Option<&str>) -> Option<Vec<Box<dyn Engine>>> {
+fn compare_engines(names: Option<&str>) -> Option<Vec<Box<dyn Engine>>> {
     match engines_named(names) {
         Ok(engines) => Some(
             engines

@@ -110,13 +110,18 @@ A failure listed in `crates/oracle/known_failures.toml` reports as known rather 
 are the ones `ORACLE_ENGINE` lists, else `ry-tier0,ry-jit`. Without GNU R, `compare` checks the
 engines against the recorded `.expected` files instead.
 
-`cargo test -p oracle` runs the same check whenever ry finds a base R. It first builds the `ry` binary
-and `libR.so` (unless `ORACLE_RY` names a binary), so it never runs a stale runtime; then every case under `ry-tier0` and `ry-jit`, or under
-the engines `ORACLE_ENGINE` lists, must give its recorded outcome, sorted against the known
-failures. It needs no GNU R, since the recordings stand in for it and the GNU R replay checks them
-wherever GNU R is installed. The test asks the runtime which base R release and which BLAS and
-LAPACK it loaded: another release than the recordings' skips the test, and other libraries turn a
-difference in a `# oracle: library-dependent` case into a warning.
+`cargo test -p oracle` runs the same check whenever ry finds a base R. It first builds the `ry`
+binary and `libR.so` (unless `ORACLE_RY` names a binary), so it never runs a stale runtime. Then
+every case under `ry-tier0` and `ry-jit`, or under the engines `ORACLE_ENGINE` lists, must give its
+recorded outcome, sorted against the known failures. It needs no GNU R: the recordings stand in for
+it, and the GNU R replay checks them wherever GNU R is installed. ry loads its own base R here, not
+the GNU R installation `compare` would point it at.
+
+The test asks each engine which base R release and which BLAS and LAPACK it loaded. Another release
+than the recordings' skips the test, or fails it when `ORACLE_ENGINE` is set. Other libraries turn a
+difference in a `# oracle: library-dependent` case into a warning. ry's bundled base R links R's own
+LAPACK (`libRlapack.so`), not the system LAPACK the recordings name, so under it those cases only
+ever warn.
 
 Every engine searches the same libraries: any `R_LIBS` you set, then the corpus library, then the
 reference R's own. The corpus library is `.corpus/library` in the workspace (`$RY_CORPUS_DIR/library`
@@ -369,7 +374,7 @@ On a machine whose `PATH` has another release, set `ORACLE_R` to a 4.6.2 build. 
 to a new release, delete `gnu-r.txt` and record every case. A GNU R killed by a signal before it
 writes its report skips the case with `skip ... this GNU R crashed`, because some hardened builds
 abort with "buffer overflow detected" in graphics cases that the reference build runs; a crash of
-ry's engines stays a failure.
+ry's engines is a failure.
 
 Record with `ORACLE_R=<that R> oracle record crates/oracle/cases` and review every changed
 `.expected` file.

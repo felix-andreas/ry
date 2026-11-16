@@ -299,6 +299,13 @@ impl ProcessEngine {
         self
     }
 
+    /// Lets ry find its base R as it does on its own, rather than in the GNU R installation
+    /// [`gnu_r_home`] picks, for runs compared with the recordings instead of with that GNU R.
+    pub fn with_own_base_r(mut self) -> Self {
+        self.environment.retain(|(name, _)| name != "R_HOME");
+        self
+    }
+
     /// ry's runtime with the JIT off, so every body runs on the tier-0 bytecode interpreter.
     pub fn ry_tier0() -> Self {
         let mut engine = ProcessEngine::ry();
@@ -1002,7 +1009,9 @@ pub const DEFAULT_ENGINES: &str = "ry-tier0,ry-jit";
 /// The engines `names` lists, comma separated, else those `ORACLE_ENGINE` lists, else
 /// [`DEFAULT_ENGINES`]. Each name is one of [`ENGINES`], `gnu-r`, or a command line.
 pub fn engines_named(names: Option<&str>) -> Result<Vec<ProcessEngine>, String> {
-    let from_environment = std::env::var("ORACLE_ENGINE").ok();
+    let from_environment = std::env::var("ORACLE_ENGINE")
+        .ok()
+        .filter(|names| !names.trim().is_empty());
     let names = names
         .or(from_environment.as_deref())
         .unwrap_or(DEFAULT_ENGINES);

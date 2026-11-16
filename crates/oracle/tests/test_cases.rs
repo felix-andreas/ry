@@ -139,7 +139,9 @@ fn recorded_outcomes_match_gnu_r() {
 /// difference in a library-dependent case is a warning.
 #[test]
 fn ry_matches_recorded_outcomes() {
-    let explicit = std::env::var("ORACLE_ENGINE").ok();
+    let explicit = std::env::var("ORACLE_ENGINE")
+        .ok()
+        .filter(|names| !names.trim().is_empty());
     let names = explicit.as_deref().unwrap_or(DEFAULT_ENGINES);
     if names.split(',').any(|name| name.trim().starts_with("ry")) {
         if !workspace_ry_has_base_r() {
@@ -158,35 +160,41 @@ fn ry_matches_recorded_outcomes() {
         build_workspace_ry().unwrap_or_else(|error| panic!("{error}"));
     }
     let timeout = Duration::from_secs(600);
-    let engines: Vec<ProcessEngine> = engines_named(Some(names))
-        .unwrap_or_else(|error| panic!("{error}"))
-        .into_iter()
-        .map(|engine| engine.with_timeout(timeout))
-        .collect();
-    let first = engines
-        .first()
-        .expect("engines_named returns at least one engine");
     let recorded =
         read_build(&case_directory().join(BUILD_FILE)).unwrap_or_else(|error| panic!("{error}"));
-    let build = engine_build(first).unwrap_or_else(|error| panic!("{error}"));
-    if build.release != recorded.release {
-        eprintln!(
-            "skipped: the cases were recorded with GNU R {recorded}, but {} loads base R {}; set \
-             ORACLE_R or R_HOME to an R {} build",
-            first.name(),
-            build.release,
-            recorded.release
-        );
-        return;
+    // Each engine pairs with whether its BLAS or LAPACK differ from the recordings'.
+    let mut engines: Vec<(ProcessEngine, bool)> = Vec::new();
+    for engine in engines_named(Some(names)).unwrap_or_else(|error| panic!("{error}")) {
+        let engine = engine.with_timeout(timeout).with_own_base_r();
+        let name = engine.name();
+        let build = engine_build(&engine).unwrap_or_else(|error| panic!("{error}"));
+        if build.release != recorded.release {
+            let message = format!(
+                "the cases were recorded with GNU R {recorded}, but {name} loads base R {}; set \
+                 R_HOME or RY_BASE_R to an R {} base",
+                build.release, recorded.release
+            );
+            match explicit {
+                Some(_) => panic!("{message}"),
+                None => {
+                    eprintln!("skipped: {message}");
+                    return;
+                }
+            }
+        }
+        let other_libraries = build != recorded;
+        if other_libraries {
+            eprintln!(
+                "warning: the cases were recorded with GNU R {recorded}, but {name} runs on \
+                 {build}, so a difference in a library-dependent case is only a warning"
+            );
+        }
+        engines.push((engine, other_libraries));
     }
-    let other_libraries = build != recorded;
-    if other_libraries {
-        eprintln!(
-            "warning: the cases were recorded with GNU R {recorded}, but {} runs on {build}, so \
-             a difference in a library-dependent case is only a warning",
-            first.name()
-        );
-    }
+    let first = &engines
+        .first()
+        .expect("engines_named returns at least one engine")
+        .0;
     let known = known_failures().unwrap_or_else(|error| panic!("{error}"));
     let (cases, missing) = runnable_cases(find_cases(&case_directory()), || engine_packages(first));
     for (case, needs) in &missing {
@@ -202,7 +210,7 @@ fn ry_matches_recorded_outcomes() {
             return vec![format!("{}: no readable expectation", case.display())];
         };
         let mut found = Vec::new();
-        for engine in &engines {
+        for (engine, other_libraries) in &engines {
             let name = engine.name();
             // Only a difference in the output follows the libraries; a timeout or an engine
             // error fails whatever the libraries are.
@@ -227,7 +235,7 @@ fn ry_matches_recorded_outcomes() {
                     false,
                 ),
             };
-            if differs && other_libraries && library_dependent(case) {
+            if differs && *other_libraries && library_dependent(case) {
                 eprintln!("warning: {failure}");
                 continue;
             }

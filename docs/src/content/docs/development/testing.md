@@ -59,7 +59,7 @@ themselves (a no-op build takes 0.4 s), so they never run a stale `libR.so`.
 | `SCENARIO` | `test_scenarios` `scenarios_hold` | runs the one scenario of that name, and fails if it skips |
 | `RY_TEST_WORKERS` | fixture suites, oracle, scenarios, `test_format_range` | the worker count; failures print the count the run used |
 | `DOCS_PAGE` | `test_docs` | runs the examples of pages whose path contains the value |
-| `ORACLE_ENGINE` | oracle `test_cases` | compares those engines (comma separated: `ry`, `ry-jit`, `ry-gctorture`, ...) instead of `ry-tier0,ry-jit`, and fails if base R is not built |
+| `ORACLE_ENGINE` | oracle `test_cases` | compares those engines (comma separated: `ry`, `ry-jit`, `ry-gctorture`, ...) instead of `ry-tier0,ry-jit`, and fails if base R is not built or is another release than the recordings' |
 | `ORACLE_RY` | the oracle | the `ry` binary to run, which the oracle then does not build |
 | `ORACLE_R`, `ORACLE_RSCRIPT` | the oracle | the GNU R to compare with (default: `R` and `Rscript` on `PATH`) |
 | `RY_BASE_R` | `ry` | the base R tree; a debug `ry` otherwise finds `target/base-r` |
