@@ -47,6 +47,7 @@ BUDGETS = {
 # Longest line each file may hold. A log that is meant to be one line per entry stays that way.
 LINE_LIMITS = {
     ".agents/orchestrator.md": 2048,
+    ".agents/memory/worklog.md": 400,
 }
 
 # Area file name, title, and what belongs there. The order is the index's order.
