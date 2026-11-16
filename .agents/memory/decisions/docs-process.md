@@ -88,3 +88,11 @@ Performance comes first (user directive, `AGENTS.md` "Goals"). The open audit li
 - **Target shape.** `tools/comments.py check` (`just comments`, in `just gate`) flags a `//` or `///` block over 12 lines, a `//!` doc over 25, banners, short section-heading lines, and process words (milestones, phases, pull request numbers, and hashes after "commit", "revert" or the like or in backticks, so hex constants and "Apple M1" pass). The regex leaves out "no longer" and "this session", which are domain terms for R sessions, and GNU R's `PR#` bug references. License headers, `patches/` and `target/` are exempt.
 - **Ratchet.** `tools/comments-baseline.txt` holds per-file counts that may only shrink: `baseline` refuses to raise a count without `--force`, and `check` fails both above and below a count, so a fix is recorded. A block whose facts do not fit the limit stays over it and is carried by the baseline: a fact outranks the line limit, so shortening never drops a reason, an invariant or a measured cost.
 - **Impact.** A new over-long or history comment fails the gate, while files under active edit by other work get time to be cleaned up.
+
+## Each crate's `AGENTS.md` loads through a one-line `CLAUDE.md` beside it
+
+**Status:** built.
+
+- **Shape.** Every `crates/<crate>/AGENTS.md` has a sibling `CLAUDE.md` holding only `@AGENTS.md`, as the repository root does. Claude Code loads a nested `CLAUDE.md` when it reads or edits files in that directory, so a crate's traps reach the agent that works there and cost nothing elsewhere.
+- **Why.** The crate rules moved out of the root `AGENTS.md` to cut what every session pays for, and nothing loaded them, so an agent had to know to open them.
+- **Rule.** A new crate `AGENTS.md` gets its `CLAUDE.md` in the same change. The rules stay in `AGENTS.md`, which other tools read; `CLAUDE.md` never holds text of its own.

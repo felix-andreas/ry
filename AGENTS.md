@@ -240,6 +240,6 @@ Editing or clarifying an existing rule is always welcome. A new rule must be:
 2. **Repeatedly encountered**: it came up more than once (several hits in one session count).
 3. **Specific enough to act on**: a concrete instruction, not a vague principle.
 
-A rule that applies to a single crate belongs in that crate's own `AGENTS.md`, not here. Before you edit a crate, read its `crates/<crate>/AGENTS.md` if it exists.
+A rule that applies to a single crate belongs in that crate's own `AGENTS.md`, not here. The crate's `CLAUDE.md` (`@AGENTS.md`) loads it; other agents read it first.
 
 Do not describe a crate's architecture (module layout, data flow, key types): it goes stale fast, and the code shows it. A rule marks a trap to avoid, not a map to follow.

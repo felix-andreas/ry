@@ -583,3 +583,4 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Landing-page and README samples are captured from the running tools
 - The decision log is one file per area, with a generated index and byte budgets
 - Source comments have length limits, enforced by a ratchet
+- Each crate's `AGENTS.md` loads through a one-line `CLAUDE.md` beside it
