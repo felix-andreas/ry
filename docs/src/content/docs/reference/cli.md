@@ -296,6 +296,10 @@ your code and no data. It lists:
   generic call protocol: the call ran natively or in a slot frame that never made its
   environment, and no argument was a promise;
 - slot frames turned into environments, by what asked for the environment;
+- complex assignments such as `names(x)[2] <- v` that built the calls of their target, by the
+  replacement functions and what the variable held. A replacement function that base R does not
+  define is printed as "(a function)", and a class outside a short list of widely used ones
+  (`data.frame`, `factor`, `Date`, `xts` and the like) as "an object";
 - the refused compile attempts by reason, with the reasons `RY_JIT_LOG=1` prints beside each
   body it refuses (such as "the body runs too rarely to repay compiling it").
 

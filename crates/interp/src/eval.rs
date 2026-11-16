@@ -7299,14 +7299,24 @@ unsafe fn assignment_shape(getters: &[Sexp], base: Sexp, superassign: bool, env:
     let mut shape = String::new();
     for getter in getters {
         let head = getter.car();
-        if head.kind() == SexpType::Symbol {
-            shape.push_str(&format!("`{}<-` ", symbol_name(head)));
-        } else {
-            shape.push_str("(computed) ");
+        // A summary is shared, so only a replacement function base R defines is named.
+        let name = (head.kind() == SexpType::Symbol)
+            .then(|| format!("{}<-", symbol_name(head)))
+            .filter(|name| unsafe {
+                crate::builtins::primitive(name).is_some()
+                    || values::install(name).is_ok_and(|symbol| {
+                        find_var_in_frame(symbol, values::base_namespace())
+                            .is_ok_and(|bound| bound != unbound())
+                    })
+            });
+        match name {
+            Some(name) => shape.push_str(&format!("`{name}` ")),
+            None if head.kind() == SexpType::Symbol => shape.push_str("(a function) "),
+            None => shape.push_str("(computed) "),
         }
     }
     shape.push_str(if superassign { "by `<<-` on " } else { "on " });
-    // A summary is shared, so a class a user's code defines is not named.
+    // Nor is a class a user's code defines.
     const PUBLIC_CLASSES: [&str; 12] = [
         "data.frame",
         "data.table",
