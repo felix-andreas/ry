@@ -747,6 +747,13 @@ fuzz-differential seed="0" count="200" engines="ry-tier0,ry-jit":
     cargo build -q -p ry-lang -p libr -p rcmd -p oracle
     ./target/debug/oracle fuzz --seed {{ seed }} --count {{ count }} --engines {{ engines }}
 
+# Differential fuzzing on real R code: mutated snippets of base R's help examples, R's regression
+# tests and the oracle cases, under GNU R and ry's engines with the deep observer. Snippets that
+# differ before mutation go to target/fuzz-corpus/base-differs.txt instead of the findings.
+fuzz-corpus seed="0" count="200" engines="ry-tier0,ry-jit":
+    cargo build -q -p ry-lang -p libr -p rcmd -p oracle
+    ./target/debug/oracle fuzz --corpus --seed {{ seed }} --count {{ count }} --engines {{ engines }}
+
 # Every oracle case under collection stress (`RY_GC_STRESS`), compared with ry unstressed;
 # `just gc-torture young` keeps survivors collectable (`RY_GC_STRESS=young`), which finds an
 # object only a Rust local holds, and `just gc-torture seeded` collects at random gaps with the

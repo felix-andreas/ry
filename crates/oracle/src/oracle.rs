@@ -7,9 +7,11 @@
 //! GNU R is one such engine, and ry's runtime is another.
 
 pub mod bench;
+pub mod corpus;
 pub mod fuzz;
 pub mod gallery;
 pub mod install;
+pub mod mutate;
 
 use {
     serde::Deserialize,
