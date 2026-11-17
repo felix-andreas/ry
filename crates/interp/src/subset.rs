@@ -2705,8 +2705,10 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
     } else {
         1
     };
+    // The subscripts are read against the object as it was: a vector that became a list has
+    // lost its dimensions, as in GNU R, where the result of `m[1, 2] <- list(v)` is a plain list.
     if indices.len() >= 2 {
-        let Some(dims) = values::dims(result).filter(|dims| dims.len() == indices.len()) else {
+        let Some(dims) = values::dims(object).filter(|dims| dims.len() == indices.len()) else {
             return Err(error_in(
                 call,
                 if indices.len() == 2 {
@@ -2722,7 +2724,7 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
             write_slab(result, value, &dims, &fixed);
             return Ok(result);
         }
-        let dimnames = get_attr(result, symbols().dimnames);
+        let dimnames = get_attr(object, symbols().dimnames);
         let mut selections: SmallVec<[Positions; 4]> = SmallVec::new();
         for (dimension, (&index, &extent)) in indices.iter().zip(dims.iter()).enumerate() {
             let names = if dimnames.kind() == SexpType::List {
@@ -2778,8 +2780,8 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
     let count = length(result);
     let names = values::names(result);
     // A matrix with one column per dimension assigns single elements.
-    if let Some(dims) = values::dims(result)
-        && let Some(positions) = matrix_index_positions(result, &dims, index, call)?
+    if let Some(dims) = values::dims(object)
+        && let Some(positions) = matrix_index_positions(object, &dims, index, call)?
     {
         // As with a vector subscript, a single value skips the NA rows, and a longer one
         // cannot say which of its elements an NA row would have taken.
@@ -3339,8 +3341,10 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
         } else if is_list {
             modifiable(object)?
         } else {
+            // The assignment below reads the dims and then makes the object a list, which a
+            // coercion here would leave without dims.
             atomic_replacement_check(value)?;
-            coerce_vector(object, SexpType::List)?
+            object
         };
         let wrapped = values::list_vector(&[value])?;
         return subassign(list, indices, wrapped, call);

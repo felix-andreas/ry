@@ -204,6 +204,32 @@ fn fuzz_io_round_trips_agree_across_tiers() {
     ));
 }
 
+/// The language programs call closures built from promises, frames, conditions, dispatch and
+/// quoted code one, a few and sixty times. No call may crash or hang the interpreter, and
+/// compiled code must agree with it; `just fuzz-kind language` compares the same programs with
+/// GNU R.
+#[test]
+fn fuzz_language_constructs_agree_across_tiers() {
+    if !ry_runtime_available() {
+        eprintln!("skipped: ry's runtime is not built; run `cargo build -p ry-lang -p libr`");
+        return;
+    }
+    let prepare = |engine: ProcessEngine| {
+        engine
+            .with_timeout(TIMEOUT)
+            .with_memory_limit(MEMORY_LIMIT)
+            .observing()
+    };
+    let tier0 = prepare(ProcessEngine::ry_tier0());
+    let jit = prepare(ProcessEngine::ry_jit());
+    assert_agree(&run_kind(
+        ProgramKind::Language,
+        &tier0,
+        &[&jit],
+        fuzz_iterations(8),
+    ));
+}
+
 #[test]
 fn fuzz_programs_survive_gc_torture() {
     if !gnu_r_available() || !ry_runtime_available() {

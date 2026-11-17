@@ -156,7 +156,7 @@ pub fn signature(reference: &Outcome, outcome: &Result<Outcome, EngineError>) ->
         ))
     } else if reference.messages != outcome.messages {
         Some(Signature::MessagesDiffer)
-    } else if reference.stdout != outcome.stdout {
+    } else if without_addresses(&reference.stdout) != without_addresses(&outcome.stdout) {
         Some(Signature::StdoutDiffers)
     } else if reference.value != outcome.value {
         Some(Signature::ValueDiffers)
@@ -169,6 +169,29 @@ pub fn signature(reference: &Outcome, outcome: &Result<Outcome, EngineError>) ->
     } else {
         None
     }
+}
+
+/// `text` with every address (`0x` and six or more hexadecimal digits) replaced by `0x`. An
+/// address differs between two runs of one engine, so a reduction must not end at a program that
+/// only prints one, such as `new.env()`.
+fn without_addresses(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("0x") {
+        let digits = rest[start + 2..]
+            .bytes()
+            .take_while(u8::is_ascii_hexdigit)
+            .count();
+        let kept = if digits >= 6 {
+            start + 2
+        } else {
+            start + 2 + digits
+        };
+        result.push_str(&rest[..kept]);
+        rest = &rest[start + 2 + digits..];
+    }
+    result.push_str(rest);
+    result
 }
 
 /// A reduced program and what it took to find it.
@@ -817,6 +840,17 @@ mod tests {
         assert_eq!(
             signature(&reference, &printed),
             Some(Signature::StdoutDiffers)
+        );
+        let printed_at = |address: &str| Outcome {
+            stdout: format!("<environment: {address}>\n[1] 0x1F\n"),
+            ..Outcome::default()
+        };
+        assert_eq!(
+            signature(
+                &printed_at("0x55d0c3a81f28"),
+                &Ok(printed_at("0x7f1e2c004410"))
+            ),
+            None
         );
         let boom = Outcome {
             errors: vec!["boom".to_string()],

@@ -1,0 +1,46 @@
+[stdout]
+| [1] "pairlist(alpha_long_name = c(1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, "                          
+| [2] "8.5, 9.5, 10.5), beta_long_name = \"a string that is quite long indeed\", gamma = c(TRUE, "
+| [3] "NA, FALSE), delta = some_function(with, arguments), 5, epsilon = NULL)"                    
+| [1] "pairlist(alpha_long_name = c(1.5, "                                                             
+| [2] "2.5, 3.5, 4.5, 5.5, 6.5, "                                                                      
+| [3] "7.5, 8.5, 9.5, 10.5), beta_long_name = \"a string that is quite long indeed\", gamma = c(TRUE, "
+| [4] "NA, FALSE), delta = some_function(with, "                                                       
+| [5] "    arguments), 5, epsilon = NULL)"                                                             
+| [1] "f(pairlist(alpha_long_name = c(1.5, "                                                           
+| [2] "2.5, 3.5, 4.5, 5.5, 6.5, "                                                                      
+| [3] "7.5, 8.5, 9.5, 10.5), beta_long_name = \"a string that is quite long indeed\", gamma = c(TRUE, "
+| [4] "NA, FALSE), delta = some_function(with, "                                                       
+| [5] "    arguments), 5, epsilon = NULL))"                                                            
+| $alpha_long_name
+|  [1]  1.5  2.5  3.5  4.5  5.5  6.5  7.5  8.5  9.5 10.5
+| 
+| $beta_long_name
+| [1] "a string that is quite long indeed"
+| 
+| $gamma
+| [1]  TRUE    NA FALSE
+| 
+| $delta
+| some_function(with, arguments)
+| 
+| [[5]]
+| [1] 5
+| 
+| $epsilon
+| NULL
+| 
+| [1] "f(... = pairlist(2.5, 0, NA_complex_, \"a long string to pass the width cutoff of sixty characters\", 1:20 + "
+| [2] "    0))"                                                                                                      
+| f(... = pairlist(first = "a long string to pass the width cutoff", second = "another long string to pass it", 3))
+| [1] "as.pairlist(alist(a = , b = 2, cccccccccccccccccccccccccccccc = \"dddddddddddddddddddddddddd\", e = , fffffffffffffffffffffff = 3))"
+| [1] "as.pairlist(alist(aaaaaaaaaaaaaaaaaaaaaaaaaaa = 1, bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb = 2, cccccccccccccccccccccccccc = 3, ddddddd = ))"
+| [1] "f(alpha_long_name = 1, beta_long_name = \"a string that is quite long indeed\", "
+| [2] "    gamma = 3)"                                                                  
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("f(alpha_long_name = 1, beta_long_name = \"a string that is quite long indeed\", ", 
+| "    gamma = 3)")

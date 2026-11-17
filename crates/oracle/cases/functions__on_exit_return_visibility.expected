@@ -1,0 +1,51 @@
+[stdout]
+| $value
+| [1] "replaced"
+| 
+| $visible
+| [1] FALSE
+| 
+| $value
+| [1] 2
+| 
+| $visible
+| [1] FALSE
+| 
+| $value
+| [1] 3
+| 
+| $visible
+| [1] TRUE
+| 
+| [1] 3
+| [1] TRUE
+| [1] FALSE
+| $value
+| [1] "second"
+| 
+| $visible
+| [1] TRUE
+| 
+| [1] "third runs"
+| $value
+| [1] "second"
+| 
+| $visible
+| [1] FALSE
+| 
+| [1] "third runs"
+| [1] FALSE FALSE  TRUE  TRUE
+| [1] FALSE FALSE  TRUE  TRUE
+| [1] FALSE FALSE  TRUE  TRUE
+| $value
+| [1] "recovered"
+| 
+| $visible
+| [1] FALSE
+| 
+[messages]
+[warnings]
+[errors]
+[value]
+list
+| list(value = "recovered", visible = FALSE)

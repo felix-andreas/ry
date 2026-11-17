@@ -247,7 +247,9 @@ unsafe fn real_as_charsxp(value: f64, scipen: i32) -> R<Sexp> {
     })
 }
 
-/// Converts a vector to `kind`, keeping its attributes, as GNU R's `coerceVector` does.
+/// Converts a vector to `kind` as GNU R's `coerceVector` does. All attributes follow between
+/// atomic types and between a list and an expression vector. Between a list and an atomic
+/// vector only the names do, and an atomic vector made an expression vector keeps none.
 pub unsafe fn coerce_vector(object: Sexp, kind: SexpType) -> R<Sexp> {
     let mut warnings = CoercionWarnings::default();
     let result = coerce_vector_quiet(object, kind, &mut warnings)?;
@@ -300,10 +302,16 @@ pub unsafe fn coerce_vector_quiet(
             )));
         }
     };
-    if (source.is_atomic() || matches!(source, SexpType::List | SexpType::Expression))
-        && kind.is_vector()
-    {
+    let generic = |kind| matches!(kind, SexpType::List | SexpType::Expression);
+    if (source.is_atomic() && kind.is_atomic()) || (generic(source) && generic(kind)) {
         values::copy_attributes(object, result)?;
+    } else if (source.is_atomic() && kind == SexpType::List)
+        || (generic(source) && kind.is_atomic())
+    {
+        let names = values::names(object);
+        if names != nil() {
+            values::set_attr(result, symbols().names, names)?;
+        }
     }
     Ok(result)
 }
@@ -752,13 +760,9 @@ pub unsafe fn coerce_atomic(
             }
         }
         SexpType::List | SexpType::Expression => {
-            let names = values::get_attr(object, symbols().names);
             for index in 0..count {
                 let element = crate::subset::vector_element(object, index)?;
                 values::set_elt(result, index, element);
-            }
-            if names != nil() {
-                values::set_attr(result, symbols().names, names)?;
             }
             return Ok(result);
         }
@@ -926,16 +930,6 @@ pub unsafe fn as_vector(object: Sexp, mode: &str) -> R<Sexp> {
         };
         values::clear_attributes(copy);
         return Ok(copy);
-    }
-    if matches!(kind, SexpType::List | SexpType::Expression)
-        && result.is_object()
-        && object.kind() != kind
-    {
-        let names = values::get_attr(result, symbols().names);
-        values::clear_attributes(result);
-        if names != nil() {
-            values::set_attr(result, symbols().names, names)?;
-        }
     }
     Ok(result)
 }
@@ -1346,7 +1340,12 @@ unsafe fn do_set_storage_mode(call: &Call<'_>) -> R<Sexp> {
     if values::inherits(object, "factor") {
         return Err(error("invalid to change the storage mode of a factor"));
     }
-    coerce_vector(object, kind)
+    let result = coerce_vector(object, kind)?;
+    if result != object && result.kind().is_vector() {
+        crate::heap().root(result);
+        values::copy_attributes(object, result)?;
+    }
+    Ok(result)
 }
 
 pub(crate) unsafe fn do_is_vector(call: &Call<'_>) -> R<Sexp> {

@@ -1568,9 +1568,24 @@ unsafe fn change_ascii_case(x: Sexp, upper: bool) -> R<Sexp> {
     Ok(result)
 }
 
-/// `towupper` and `towlower` map one character to one character, so a character whose case
-/// mapping takes several (`ß` to `SS`) is left alone, as in GNU R.
+/// `towupper` and `towlower` are Unicode's simple case mappings, one character to one character.
+/// A character whose full mapping takes several (`ß` to `SS`) has a simple mapping only in the
+/// cases listed here, and is left alone otherwise, as in GNU R.
 fn change_char_case(character: char, upper: bool) -> char {
+    let code = u32::from(character);
+    let simple = if upper {
+        match code {
+            // Greek letters with iota subscript map to their titlecase forms.
+            0x1f80..=0x1f87 | 0x1f90..=0x1f97 | 0x1fa0..=0x1fa7 => Some(code + 8),
+            0x1fb3 | 0x1fc3 | 0x1ff3 => Some(code + 9),
+            _ => None,
+        }
+    } else {
+        (character == 'İ').then_some(u32::from('i'))
+    };
+    if let Some(simple) = simple.and_then(char::from_u32) {
+        return simple;
+    }
     if upper {
         single_char(character.to_uppercase(), character)
     } else {
@@ -2084,9 +2099,12 @@ unsafe fn do_abbreviate(call: &Call<'_>) -> R<Sexp> {
     if minimum == NA_INTEGER {
         return Err(error("invalid 'minlength' argument"));
     }
-    let use_classes = flag(call.arg(2));
+    let use_classes = values::as_logical_scalar(call.arg(2));
+    if use_classes == NA_INTEGER {
+        return Err(error("invalid 'use.classes' argument"));
+    }
     values::refuse_bytes(x)?;
-    let mut warned = false;
+    let mut shortened_non_ascii = false;
     let count = length(x);
     let result = alloc(SexpType::String, count)?;
     for index in 0..count {
@@ -2094,48 +2112,115 @@ unsafe fn do_abbreviate(call: &Call<'_>) -> R<Sexp> {
             set_elt(result, index, na_string());
             continue;
         };
-        if !text.is_ascii() && !warned {
-            warning("abbreviate used with non-ASCII chars")?;
-            warned = true;
+        // GNU R compares an ASCII string's length with the minimum as unsigned numbers, so a
+        // negative minimum leaves it alone, and a non-ASCII string's as signed ones.
+        let longer = if text.is_ascii() {
+            usize::try_from(minimum).is_ok_and(|minimum| text.len() > minimum)
+        } else {
+            text.chars().count() as i64 > i64::from(minimum)
+        };
+        if longer {
+            shortened_non_ascii |= !text.is_ascii();
+            values::set_mkchar(result, index, &abbreviate(&text, minimum, use_classes != 0))?;
+        } else {
+            set_elt(result, index, x.element(index));
         }
-        let abbreviation = abbreviate(&text, minimum.max(0) as usize, use_classes);
-        values::set_mkchar(result, index, &abbreviation)?;
     }
+    if use_classes != 0 && shortened_non_ascii {
+        warning("abbreviate used with non-ASCII chars")?;
+    }
+    values::copy_attributes(x, result)?;
     Ok(result)
 }
 
-/// Shortens `text` to `minimum` characters as `?abbreviate` documents it: lower-case vowels go
-/// first, then lower-case letters, then anything else, each time from the right, and the first
-/// character of every word is always kept. Spaces separate the words and are dropped last.
-fn abbreviate(text: &str, minimum: usize, use_classes: bool) -> String {
-    let mut chars: Vec<char> = text.trim_matches(' ').chars().collect();
-    if chars.len() <= minimum {
-        return chars.into_iter().collect();
-    }
-    let visible = |chars: &[char]| chars.iter().filter(|&&character| character != ' ').count();
-    let word_start = |chars: &[char], index: usize| index == 0 || chars[index - 1] == ' ';
-    let mut classes: Vec<fn(char) -> bool> = Vec::new();
-    if use_classes {
-        classes.push(|character| matches!(character, 'a' | 'e' | 'i' | 'o' | 'u'));
-        classes.push(|character| character.is_lowercase());
-    }
-    classes.push(|character| character != ' ');
-    'classes: for removable in classes {
-        let mut index = chars.len();
-        while index > 1 {
-            index -= 1;
-            if visible(&chars) <= minimum {
-                break 'classes;
+/// GNU R's `stripchars` and `wstripchars`, pass for pass: each pass walks the text from its end
+/// and stops as soon as the characters other than word-separating spaces fit in `minimum`. No
+/// pass removes the first character of the text or of a word.
+fn abbreviate(text: &str, minimum: i32, use_classes: bool) -> String {
+    const VOWELS: &[u32] = &[
+        0x61, 0x65, 0x69, 0x6f, 0x75, 0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe8, 0xe9, 0xea, 0xeb,
+        0xec, 0xed, 0xee, 0xef, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd,
+        0x101, 0x103, 0x105, 0x113, 0x115, 0x117, 0x119, 0x11b, 0x129, 0x12b, 0x12d, 0x12f, 0x131,
+        0x14d, 0x14f, 0x151, 0x169, 0x16b, 0x16d, 0x16f, 0x171, 0x173,
+    ];
+    type Class = fn(char) -> bool;
+    let vowel: Class = |character| VOWELS.contains(&(character as u32));
+    // glibc's lower-case class: a letter Unicode calls lower case, or one whose upper-case form is
+    // another single letter, which adds the title-case digraphs.
+    let lowercase: Class = |character| {
+        let mut upper = character.to_uppercase();
+        character.is_lowercase() || (upper.len() == 1 && upper.next() != Some(character))
+    };
+    let any: Class = |character| !is_space(character);
+    // A pass that removes only at the end of a word, then one that removes anywhere after a
+    // word's first character.
+    let classed: [(Class, bool); 4] = [
+        (vowel, true),
+        (vowel, false),
+        (lowercase, true),
+        (lowercase, false),
+    ];
+    let passes = if use_classes { &classed[..] } else { &[] };
+
+    let mut chars: Vec<char> = text.chars().collect();
+    // GNU R's comparisons with the minimum are unsigned, so a negative minimum always fits.
+    let fits = |length: usize, spaces: usize| {
+        usize::try_from(minimum).map_or(true, |minimum| length - spaces <= minimum)
+    };
+    'strip: {
+        if usize::try_from(minimum).map_or(true, |minimum| chars.len() < minimum) {
+            break 'strip;
+        }
+        let mut spaces = 0;
+        let mut trailing = true;
+        for index in (1..chars.len()).rev() {
+            if !is_space(chars[index]) {
+                trailing = false;
+            } else if trailing {
+                chars.truncate(index);
+            } else {
+                spaces += 1;
             }
-            if removable(chars[index]) && !word_start(&chars, index) {
-                chars.remove(index);
+            if fits(chars.len(), spaces) {
+                break 'strip;
+            }
+        }
+        for &(removable, at_word_end) in passes.iter().chain(&[(any, false)]) {
+            for index in (1..chars.len()).rev() {
+                let after_space = is_space(chars[index - 1]);
+                let before_space = chars.get(index + 1).is_none_or(|&next| is_space(next));
+                let position_allows = if at_word_end {
+                    !after_space && before_space
+                } else {
+                    !after_space
+                };
+                if position_allows
+                    && chars
+                        .get(index)
+                        .is_some_and(|&character| removable(character))
+                {
+                    chars.remove(index);
+                }
+                if fits(chars.len(), spaces) {
+                    break 'strip;
+                }
             }
         }
     }
-    if chars.len() > minimum {
-        chars.retain(|&character| character != ' ');
+    if usize::try_from(minimum).map_or(true, |minimum| chars.len() > minimum) {
+        let mut position = 0;
+        chars.retain(|&character| {
+            position += 1;
+            position == 1 || !is_space(character)
+        });
     }
     chars.into_iter().collect()
+}
+
+/// glibc's `iswspace`: Unicode white space other than the no-break spaces and the next-line
+/// control.
+fn is_space(character: char) -> bool {
+    character.is_whitespace() && !matches!(character, '\u{85}' | '\u{a0}' | '\u{2007}' | '\u{202f}')
 }
 
 fn do_utf8_to_int<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {

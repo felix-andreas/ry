@@ -1168,6 +1168,7 @@ fn run_fuzz(run: FuzzRun) -> ExitCode {
                                             | ProgramKind::Builtins
                                             | ProgramKind::Api
                                             | ProgramKind::Io
+                                            | ProgramKind::Language
                                     )
                                 ) {
                                     println!("STOPS   {label} under GNU R: {error}");

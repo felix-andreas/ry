@@ -11,6 +11,7 @@ pub mod corpus;
 pub mod fuzz;
 pub mod gallery;
 pub mod install;
+pub mod language;
 pub mod metamorphic;
 pub mod mutate;
 pub mod reduce;
