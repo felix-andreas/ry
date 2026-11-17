@@ -15,6 +15,7 @@ use {
         conditions::warning,
         format::{format_complex_alone, format_real_alone_scipen},
         platform,
+        sort::{collator, shell_sort},
         unwind::{R, Unwind, error},
         values::{
             self, alloc, length, na_string, nil, scalar_bool, scalar_integer, scalar_string,
@@ -27,6 +28,7 @@ use {
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp},
         strings::Encoding,
     },
+    rustc_hash::{FxHashMap, FxHashSet},
     std::{
         cell::RefCell,
         collections::BTreeMap,
@@ -2072,7 +2074,7 @@ unsafe fn character_factor(x: Sexp, is_na_string: &dyn Fn(&[u8]) -> bool) -> R<S
     let strings = values::strings(x);
     let mut levels: Vec<&str> = Vec::new();
     let mut level_elements: Vec<Sexp> = Vec::new();
-    let mut seen = rustc_hash::FxHashSet::default();
+    let mut seen = FxHashSet::default();
     for (index, text) in strings.iter().enumerate() {
         let Some(text) = text.as_deref() else {
             continue;
@@ -2084,12 +2086,12 @@ unsafe fn character_factor(x: Sexp, is_na_string: &dyn Fn(&[u8]) -> bool) -> R<S
         level_elements.push(x.element(index));
     }
     let mut order: Vec<usize> = (0..levels.len()).collect();
-    let collator = crate::sort::collator();
-    crate::sort::shell_sort(&mut order, |left, right| {
+    let collator = collator();
+    shell_sort(&mut order, |left, right| {
         collator.compare(levels[left], levels[right]).is_gt()
     });
     drop(collator);
-    let code_of: rustc_hash::FxHashMap<&str, i32> = order
+    let code_of: FxHashMap<&str, i32> = order
         .iter()
         .zip(1..)
         .map(|(&index, code)| (levels[index], code))
@@ -2435,7 +2437,7 @@ unsafe fn object_size(object: Sexp) -> usize {
         SexpType::Char => VECTOR_HEADER + vector_data_size(object.bytes().len() + 1),
         SexpType::String => {
             let count = length(object);
-            let mut seen = rustc_hash::FxHashSet::default();
+            let mut seen = FxHashSet::default();
             let mut strings = 0;
             for index in 0..count {
                 let charsxp = object.element(index);

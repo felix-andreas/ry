@@ -113,6 +113,33 @@ impl Collator {
     }
 }
 
+pub fn sort_strings(names: &mut [String]) {
+    let order = collation_order(names);
+    let sorted: Vec<String> = order
+        .iter()
+        .map(|&index| std::mem::take(&mut names[index as usize]))
+        .collect();
+    for (slot, name) in names.iter_mut().zip(sorted) {
+        *slot = name;
+    }
+}
+
+/// The permutation that sorts `texts` as [`collate`] orders them, keeping equal texts in their
+/// original order.
+pub fn collation_order<Text: AsRef<str>>(texts: &[Text]) -> Vec<u32> {
+    let mut order: Vec<u32> = (0..texts.len() as u32).collect();
+    let text = |index: u32| texts[index as usize].as_ref();
+    if c_collation() {
+        order.sort_by(|&left, &right| text(left).cmp(text(right)));
+    } else if let Some(keys) = AsciiKeys::new(texts) {
+        order.sort_by(|&left, &right| keys.key(left).cmp(keys.key(right)));
+    } else {
+        let collator = collator();
+        order.sort_by(|&left, &right| collator.compare(text(left), text(right)));
+    }
+    order
+}
+
 /// Whether strings collate by code point, so a byte comparison sorts them.
 fn c_collation() -> bool {
     MODE.load(AtomicOrdering::Relaxed) == CODE_POINT
@@ -360,6 +387,9 @@ impl AsciiKeys {
             return None;
         }
         let total: usize = texts.iter().map(|text| 2 * text.as_ref().len() + 1).sum();
+        if u32::try_from(total).is_err() {
+            return None;
+        }
         let mut bytes = Vec::with_capacity(total);
         let mut starts = Vec::with_capacity(texts.len() + 1);
         for text in texts {
@@ -411,10 +441,11 @@ unsafe fn do_icu_set_collate(call: &Call<'_>) -> R<Sexp> {
             return Err(error("all arguments must be named"));
         }
         let name = values::symbol_name(arg.tag);
-        let value = (arg.value.kind() == SexpType::String && length(arg.value) == 1)
-            .then(|| string_at(arg.value, 0))
-            .flatten()
-            .ok_or_else(|| error(format!("invalid '{name}' argument")))?;
+        if arg.value.kind() != SexpType::String || length(arg.value) != 1 {
+            return Err(error(format!("invalid '{name}' argument")));
+        }
+        // GNU R reads `NA` as the string "NA", which names no locale and no setting.
+        let value = string_at(arg.value, 0).unwrap_or(Cow::Borrowed("NA"));
         if name == "locale" {
             install(match &*value {
                 "ASCII" => Collation::CodePoint { ascii: true },
@@ -535,33 +566,6 @@ const ATTRIBUTES: &[(&str, Attribute)] = &[
     ("case_level", Attribute::CaseLevel),
     ("hiragana_quaternary", Attribute::HiraganaQuaternary),
 ];
-
-pub fn sort_strings(names: &mut [String]) {
-    let order = collation_order(names);
-    let sorted: Vec<String> = order
-        .iter()
-        .map(|&index| std::mem::take(&mut names[index as usize]))
-        .collect();
-    for (slot, name) in names.iter_mut().zip(sorted) {
-        *slot = name;
-    }
-}
-
-/// The permutation that sorts `texts` as [`collate`] orders them, keeping equal texts in their
-/// original order.
-pub fn collation_order<Text: AsRef<str>>(texts: &[Text]) -> Vec<u32> {
-    let mut order: Vec<u32> = (0..texts.len() as u32).collect();
-    let text = |index: u32| texts[index as usize].as_ref();
-    if c_collation() {
-        order.sort_by(|&left, &right| text(left).cmp(text(right)));
-    } else if let Some(keys) = AsciiKeys::new(texts) {
-        order.sort_by(|&left, &right| keys.key(left).cmp(keys.key(right)));
-    } else {
-        let collator = collator();
-        order.sort_by(|&left, &right| collator.compare(text(left), text(right)));
-    }
-    order
-}
 
 /// The comparison `identical()` makes, with one field per argument of the R function.
 #[derive(Clone, Copy, Debug)]

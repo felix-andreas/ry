@@ -4778,7 +4778,8 @@ unsafe fn do_esoft_version(_: &Call<'_>) -> R<Sexp> {
         ("bzlib", ""),
         ("xz", ""),
         ("PCRE", "10.42 2022-12-11"),
-        ("ICU", ""),
+        // The ICU release whose collation data ICU4X's compiled data was exported from.
+        ("ICU", "77.1"),
         ("TRE", ""),
         ("iconv", "glibc"),
         ("readline", ""),
