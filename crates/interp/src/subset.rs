@@ -4177,8 +4177,10 @@ pub unsafe fn set_attribute_checked(object: Sexp, symbol: Sexp, value: Sexp, cal
     values::set_attr(object, symbol, value)
 }
 
-/// GNU R's `row_names_gets`: row names `1:n`, and the double `c(NA, n)` that `dput()` writes
-/// and C code builds, are stored in the compact integer form `c(NA, -n)` (or `c(NA, n)`).
+/// GNU R's `row_names_gets`: the double `c(NA, n)` that `dput()` writes is stored as the
+/// integer `c(NA, n)`, and integer row names `1:n` of three rows or more as `c(NA, n)` with a
+/// positive `n`, which `.row_names_info()` then reports as not automatic. Other row names,
+/// `1:2` and `1L` among them, are stored as given; `.set_row_names(n)` passes `c(NA, -n)` itself.
 pub unsafe fn set_row_names(object: Sexp, value: Sexp) -> R<()> {
     let symbol = symbols().row_names;
     let value =
@@ -4190,15 +4192,20 @@ pub unsafe fn set_row_names(object: Sexp, value: Sexp) -> R<()> {
         };
     if value.kind() == SexpType::Integer {
         let data = values::ints(value);
-        let compact = !data.is_empty()
+        let compact = data.len() > 2
             && data
                 .iter()
                 .enumerate()
                 .all(|(index, &row)| row == index as i32 + 1);
         if compact {
-            let stored = values::integer_vector(&[NA_INTEGER, -(data.len() as i32)])?;
+            let stored = values::integer_vector(&[NA_INTEGER, data.len() as i32])?;
             return values::set_attr(object, symbol, stored);
         }
+    } else if value != nil() && value.kind() != SexpType::String {
+        return Err(error(format!(
+            "row names must be 'character' or 'integer', not '{}'",
+            value.kind().name()
+        )));
     }
     values::set_attr(object, symbol, value)
 }
