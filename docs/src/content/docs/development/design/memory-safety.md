@@ -434,11 +434,25 @@ The order:
 `tools/unsafe-baseline.txt` records the count of `unsafe` per source file outside the crates that
 own it. `just gate` fails when a file's count rises (`tools/unsafe.py check`), and a change that
 lowers one lowers the baseline with it, so the count only falls. `interp::handles` is the one
-file that may rise, and only in a change that lowers the total: a migrated builtin that needs a
-helper with no safe form adds the wrapper there and removes more `unsafe` than the wrapper holds.
+file that may rise, and by less than the other files lose in the same change: a migrated builtin
+that needs a helper with no safe form adds the wrapper there and removes more `unsafe` than the
+wrapper holds.
+
+The guarantee covers a function that names neither `Sexp` nor `interp::heap()`. While the raw API
+is public (until step 4), safe code can leave the handle types and come back: `raw()` on any
+pointer yields a `Sexp`, `Sexp` compares by address, `interp::heap()` is a safe function that
+returns the whole heap, and an unwind carries raw values in public fields. A migrated function
+that does any of these compiles, and nothing but review rejects it. Step 4 removes the paths
+(`raw()` becomes visible only to the boundary crates, and an unwind holds `Held` values), and
+until then a migrated file is one in which `tools/unsafe.py` counts no `unsafe` and a reader finds
+no `Sexp`.
 
 ## Open questions
 
+- Whether a kind should refuse a vector that carries the array flag. `dense` and `downcast`
+  admit one, so a migrated fast path over a slice skips the strict checks the array code makes
+  unless it tests the flag itself, as the raw fast paths must. A kind per flagged representation
+  would make the test a type.
 - Whether the bytecode loop's register access measures the same with bounds checks.
 - Which form of the context parameter measures best on the call path: a pointer in a register, a
   field of the activation, or a zero-sized token.

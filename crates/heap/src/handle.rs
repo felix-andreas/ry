@@ -365,7 +365,7 @@ impl<'a, T: Kind> Gc<'a, T> {
 }
 
 impl<'a> Gc<'a, Chars> {
-    /// The string's bytes, which never change.
+    /// The string's bytes.
     #[inline]
     pub fn bytes(self) -> &'a [u8] {
         // SAFETY: a live `CHARSXP` holds `length` bytes, and it is live for `'a`.
@@ -527,10 +527,15 @@ impl<'s, T: Elements> Local<'s, T> {
 }
 
 impl<'s> Local<'s, Chars> {
-    /// The string's bytes, which never change.
+    /// The string's bytes. They borrow the context although the string is rooted, because
+    /// native code can write into a string's bytes in place.
     #[inline]
-    pub fn bytes(self) -> &'s [u8] {
-        // SAFETY: a live `CHARSXP` holds `length` bytes, and it is rooted for `'s`.
+    pub fn bytes<'a>(self, _cx: &'a Cx<'_>) -> &'a [u8]
+    where
+        's: 'a,
+    {
+        // SAFETY: a live `CHARSXP` holds `length` bytes, it is rooted for `'s`, and nothing
+        // runs native code while `_cx` is borrowed.
         unsafe { self.raw.bytes() }
     }
 }
@@ -703,7 +708,7 @@ impl<'r> Reader<'r> {
     /// The elements of `source`, or `None` when `source` is the object being written. The
     /// caller then reads from the mutable slice it already holds.
     #[inline]
-    pub fn slice<T: Atomic>(&self, source: Local<'_, T>) -> Option<&'r [T::Element]> {
+    pub fn slice<'s: 'r, T: Atomic>(&self, source: Local<'s, T>) -> Option<&'r [T::Element]> {
         // SAFETY: the source is rooted, nothing allocates while the write is open, and it is
         // not the object being written.
         (source.raw != self.target).then(|| unsafe { source.raw.slice() })
@@ -712,17 +717,26 @@ impl<'r> Reader<'r> {
     /// One element of `source`, which may be the object being written: a single load never
     /// overlaps a store.
     #[inline]
-    pub fn element<T: Elements>(&self, source: Local<'_, T>, index: usize) -> Gc<'r, T::Element> {
+    pub fn element<'s: 'r, T: Elements>(
+        &self,
+        source: Local<'s, T>,
+        index: usize,
+    ) -> Gc<'r, T::Element> {
         assert!(index < source.len(), "element index out of bounds");
         // SAFETY: as for `Local::get`. Stores made meanwhile free nothing.
         unsafe { Gc::adopt(*(source.raw.data() as *const Sexp).add(index)) }
     }
 }
 
-/// A pointer to a live object of kind `T`, rooted or not.
-pub trait Pointer<T: Kind>: Copy {
+/// A pointer to a live object of kind `T`, rooted or not. Only this module's pointer types
+/// implement it, because whatever does is trusted to name a live object of that kind.
+pub trait Pointer<T: Kind>: Copy + sealed::Sealed {
     fn raw(self) -> Sexp;
 }
+
+impl<T: Kind> sealed::Sealed for Gc<'_, T> {}
+
+impl<T: Kind> sealed::Sealed for Local<'_, T> {}
 
 impl<T: Kind> Pointer<T> for Gc<'_, T> {
     #[inline]
@@ -877,6 +891,6 @@ type Brand<'s> = PhantomData<fn(&'s ()) -> &'s ()>;
 
 #[inline]
 fn admits<T: Kind>(raw: Sexp) -> bool {
-    // SAFETY: both callers hold a live object.
+    // SAFETY: every caller holds a live object.
     unsafe { T::admits(raw.kind(), raw.is_altrep()) }
 }

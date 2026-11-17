@@ -84,7 +84,7 @@
 9 crates/numeric/src/vector_math.rs
 2 crates/oracle/src/oracle.rs
 16 crates/rcmd/src/front_end.rs
-4 crates/rcmd/src/rcmd.rs
+3 crates/rcmd/src/rcmd.rs
 13 crates/repl/src/console.rs
 70 crates/repl/src/libr.rs
 32 crates/repl/src/repl.rs

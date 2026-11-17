@@ -11,8 +11,8 @@ code, so their `unsafe` is not counted. Every other crate reaches the heap throu
 (the `unsafe` keywords outside comments), a file over its count fails, and a file under it asks
 for `baseline` so the lower count is locked in. `baseline` never raises a count, with one
 exception: `crates/interp/src/handles.rs` holds the safe forms of the interpreter's raw helpers,
-so it grows by a wrapper each time a migrated function needs one, and it may rise in a change
-that lowers the total. Any other file that needs more says why in the same change, with its line
+so it grows by a wrapper each time a migrated function needs one, and it may rise by less than
+the other files lose in the same change. Any other file that needs more says why in the same change, with its line
 in the baseline edited by hand.
 """
 
@@ -30,7 +30,8 @@ HEADER = (
     "# Lower: python3 tools/unsafe.py baseline\n"
 )
 KEYWORD = re.compile(r"\bunsafe\b")
-FUNCTION = re.compile(r"\bunsafe\s+(?:extern\s+\"[^\"]*\"\s+)?fn\b")
+# The ABI string of `unsafe extern "C" fn` is blank by the time this runs.
+FUNCTION = re.compile(r"\bunsafe\s+(?:extern\s+)?fn\b")
 BLOCK = re.compile(r"\bunsafe\s*\{")
 SAFETY = re.compile(r"//.*\bSAFETY\b|#\s*Safety\b")
 
@@ -75,11 +76,17 @@ def check(counts):
 
 def write_baseline(counts):
     baseline = read_baseline() if os.path.exists(BASELINE) else None
-    falling = baseline is not None and sum(counts.values()) < sum(baseline.values())
+    removed = 0
+    if baseline is not None:
+        removed = sum(
+            max(0, limit - counts.get(path, 0)) for path, limit in baseline.items() if path != WRAPPERS
+        )
     lines = []
     for path, count in sorted(counts.items()):
-        if baseline is None or (path == WRAPPERS and falling):
+        if baseline is None:
             limit = count
+        elif path == WRAPPERS:
+            limit = min(count, baseline.get(path, 0) + max(0, removed - 1))
         else:
             limit = min(count, baseline.get(path, 0))
         if limit:
@@ -143,11 +150,64 @@ def crate_of(path):
 
 
 def code_lines(path):
-    """The file's lines with `//` comments and string literals blanked."""
+    """The file's lines with comments, string literals and character literals blanked."""
     with open(os.path.join(ROOT, path), encoding="utf-8") as file:
-        for line in file:
-            line = re.sub(r'"(?:[^"\\]|\\.)*"', '""', line)
-            yield line.split("//", 1)[0]
+        return blank_literals(file.read()).split("\n")
+
+
+RAW_STRING = re.compile(r'b?r(#*)"')
+CHARACTER = re.compile(r"b?'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]+\}|.)|[^\\'\n])'")
+
+
+def blank_literals(text):
+    """`text` with everything that is not code replaced by spaces, newlines kept.
+
+    A lexer and not a pattern per line, because a string literal can span lines, hold `//`, and
+    be raw, and a `'"'` character literal would otherwise open a string.
+    """
+    out = []
+    position = 0
+    end = len(text)
+
+    def skip(to):
+        nonlocal position
+        out.append("".join("\n" if character == "\n" else " " for character in text[position:to]))
+        position = to
+
+    while position < end:
+        character = text[position]
+        if text.startswith("//", position):
+            newline = text.find("\n", position)
+            skip(end if newline < 0 else newline)
+        elif text.startswith("/*", position):
+            depth, cursor = 1, position + 2
+            while depth and cursor < end:
+                if text.startswith("/*", cursor):
+                    depth, cursor = depth + 1, cursor + 2
+                elif text.startswith("*/", cursor):
+                    depth, cursor = depth - 1, cursor + 2
+                else:
+                    cursor += 1
+            skip(cursor)
+        elif (raw := RAW_STRING.match(text, position)) and not is_identifier_tail(text, position):
+            close = text.find('"' + raw.group(1), raw.end())
+            skip(end if close < 0 else close + 1 + len(raw.group(1)))
+        elif character == '"':
+            cursor = position + 1
+            while cursor < end and text[cursor] != '"':
+                cursor += 2 if text[cursor] == "\\" else 1
+            skip(min(cursor + 1, end))
+        elif (literal := CHARACTER.match(text, position)) and not is_identifier_tail(text, position):
+            skip(literal.end())
+        else:
+            out.append(character)
+            position += 1
+    return "".join(out)
+
+
+def is_identifier_tail(text, position):
+    """Whether the `b` or `r` at `position` ends an identifier instead of starting a literal."""
+    return position > 0 and (text[position - 1].isalnum() or text[position - 1] == "_") and text[position] != "'"
 
 
 if __name__ == "__main__":
