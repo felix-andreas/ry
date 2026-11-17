@@ -342,13 +342,27 @@ fn check_file(db: &RootDatabase, files: ProjectFiles, file: SourceFile) {
                 {
                     // A smaller expression that ends where the occurrence starts takes the
                     // cursor there, so the occurrence is asked from its end as well.
-                    let from = [occurrence.range.start(), occurrence.range.end()]
+                    let ends = [occurrence.range.start(), occurrence.range.end()];
+                    let from = ends
                         .into_iter()
                         .map(|offset| crate::references(db, files, occurrence.file, offset, true))
                         .find(|from| occurrence_set(from) == set)
                         .unwrap_or_default();
+                    // A read that a local write reaches on some paths only reads the global on
+                    // the others, and is an occurrence of both (`backlog.md`, "A read that may
+                    // be a local or a global").
+                    let is_local = |file, offset| match crate::target_at(db, files, file, offset) {
+                        Some(crate::Target::Slot { .. }) => Some(true),
+                        Some(crate::Target::Global(_)) => Some(false),
+                        _ => None,
+                    };
+                    let cursor = is_local(file, offset);
+                    let shared = cursor.is_some()
+                        && ends.into_iter().any(|end| {
+                            is_local(occurrence.file, end).is_some_and(|end| Some(end) != cursor)
+                        });
                     assert!(
-                        occurrence_set(&from) == set,
+                        occurrence_set(&from) == set || shared,
                         "{}: the references from the occurrence at {:?} are {from:?}, not \
                          {references:?}",
                         at("reference"),
@@ -635,15 +649,26 @@ fn check_rename_keeps_meaning(workbench: &mut Workbench, sources: &[(String, Doc
         };
         let name = unquote(name);
         let bare = name.trim_start_matches(['.', '_']);
-        // A dot inside a name may make it an S3 method, whose name is what dispatch finds it by.
+        // A dot inside a name may make it an S3 method, whose name is what dispatch finds it by,
+        // and a generic's methods keep their names when it is renamed (`backlog.md`, "Rename of
+        // an S3 generic leaves its methods behind").
         // A name the library binds too reads as the library's value ahead of a script's first
-        // write to it, and rename does not tell those reads apart (`backlog.md`, "Rename takes a
-        // script's reads of a library name it later shadows").
+        // write to it and in every file that does not see the script, and rename does not tell
+        // those reads apart (`backlog.md`, "Rename takes a script's reads of a library name it
+        // later shadows" and "Editor targets ignore which files see a global").
         // An operator is spelled between percent signs wherever it is used, and rename does not
         // reach those uses (`backlog.md`, "Rename leaves the uses of a `%op%` behind").
+        // The checker reads rlang's `is_*` type predicates as type tests by their names, whoever
+        // defines them, so a renamed one stops narrowing its argument.
+        let method_prefix = format!("{name}.");
         if bare.contains('.')
             || bare.starts_with('%')
+            || bare.starts_with("is_")
             || crate::stub_target(&workbench.db, name).is_some()
+            || !crate::candidate_packages(&workbench.db, name).is_empty()
+            || sources
+                .iter()
+                .any(|(text, _)| text.contains(&method_prefix))
         {
             continue;
         }

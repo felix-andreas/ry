@@ -279,3 +279,20 @@ hint @6: NULL
 hint @28<T>
 hint @33: T
 hint @34 -> character
+
+#---- call_past_a_project_value_to_an_unstubbed_function_is_not_its_reference
+l10n_$0info <- NULL
+utf8 <- function() l10n_info()$`UTF-8`
+#++++
+hover 0..9: l10n_info: NULL
+hover-definition: global 0..9
+definition 0..9
+references: 0..9*
+rename: 1 edit(s)
+signature: none
+action: Add inferred type annotation for `l10n_info`
+  edit 9..9 -> ": NULL"
+action: Add inferred type annotations for the whole file
+  edit 9..9 -> ": NULL"
+completion (1): l10n_info
+hint @9: NULL

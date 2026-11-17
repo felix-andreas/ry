@@ -3722,6 +3722,22 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
     with the binding.
   - Rename of a `DataFrame` column, or of a list field read through `[["name"]]`, `[, name]` or
     `:=`, is refused, not carried through those reads.
+  - **Rename of an S3 generic leaves its methods behind.** Renaming `value` in
+    `value <- function(x, ...) UseMethod("value")` keeps `value.default` and the `"value"`
+    string, so dispatch finds nothing afterwards.
+- **Editor targets ignore which files see a global.** A script's top-level names are its own,
+  and the checker types a read of `helper` in `scripts/b.R` or `R/c.R` as `Unknown` when only
+  `scripts/a.R` defines it. Definition, references and rename still lead from those reads to
+  `scripts/a.R`, so renaming a script's `step` rewrites a package file's call to `stats::step`.
+  The target of a global should carry the scope that sees it (the package, the test helpers,
+  one script), and occurrences should stay inside it.
+- **A read that may be a local or a global.** In
+  `x <- 1; f <- function(flag) { if (flag) x <- 2; x }` the last `x` reads the local on one path
+  and the global on the other. It is an occurrence of the local only, so a rename of the global
+  leaves `f(FALSE)` reading a name that is gone. In
+  `f <- function() while (x < 3) x <- x + 1` the condition's `x` is listed by the global's
+  references and by the local's, and a rename from either side renames half of what it reads.
+  Rename should take both symbols together or refuse.
 - A field read through a project function that returns `invisible(list(...))` navigates to the
   function, not to the field.
 - `x <- #: integer` followed by `1L` on the next line parses and checks without a finding, and the

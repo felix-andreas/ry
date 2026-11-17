@@ -7727,11 +7727,10 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                         };
                         // A call goes past a binding that holds no function, to the library's
                         // function of the name when there is one.
-                        let library_calls = (!reads.is_empty()
-                            && stub_declaration(db, name).is_some())
-                        .then(|| item_check(db, item))
-                        .flatten()
-                        .map(|check| &check.editor().callee_targets);
+                        let library_calls = (!reads.is_empty())
+                            .then(|| item_check(db, item))
+                            .flatten()
+                            .map(|check| &check.editor().callee_targets);
                         result.extend(
                             reads
                                 .into_iter()
