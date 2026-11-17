@@ -795,16 +795,16 @@ unsafe fn resolve(
                 } else {
                     (0..length(names)).find(|&candidate| {
                         let name = names.element(candidate);
-                        name == wanted && !values::is_blank(name)
+                        values::same_string(name, wanted) && !values::is_blank(name)
                     })
                 };
                 match found {
                     Some(found) => positions.push(found),
                     None => {
                         if assigning {
-                            let existing = appended
-                                .iter()
-                                .position(|&name| name == wanted && wanted != na_string());
+                            let existing = appended.iter().position(|&name| {
+                                wanted != na_string() && values::same_string(name, wanted)
+                            });
                             let slot = match existing {
                                 Some(existing) => extent + existing,
                                 None => {
@@ -1632,35 +1632,41 @@ pub(crate) unsafe fn s4_data_part(object: Sexp) -> Sexp {
     get_attr(object, symbols().dot_xdata)
 }
 
-/// The position `name` matches among `names`: exactly, or with `exact == Some(false)` (or
-/// `None`, which also warns) by a unique partial match.
-unsafe fn match_name(names: Sexp, name: &[u8], exact: Option<bool>) -> R<Option<usize>> {
-    if names == nil() {
+/// The position the `CHARSXP` `name` matches among `names`: exactly, or with `exact ==
+/// Some(false)` (or `None`, which also warns) by a unique partial match. Names compare as text, so
+/// a latin1-marked name matches its UTF-8 spelling, and an `NA` name matches nothing. GNU R's
+/// `get1index` agrees for `[[`, but its `$` matches an `NA` name as the text "NA" (`backlog.md`).
+unsafe fn match_name(names: Sexp, name: Sexp, exact: Option<bool>) -> R<Option<usize>> {
+    if names == nil() || name == na_string() {
         return Ok(None);
     }
     let count = length(names);
     for index in 0..count {
-        if names.element(index).bytes() == name && names.element(index) != na_string() {
+        if values::same_string(names.element(index), name) {
             return Ok(Some(index));
         }
     }
     if exact == Some(true) {
         return Ok(None);
     }
+    let text = char_str(name);
     let mut found = None;
     for index in 0..count {
-        if names.element(index).bytes().starts_with(name) && names.element(index) != na_string() {
+        let element = names.element(index);
+        if element != na_string() && char_str(element).starts_with(&*text) {
             if found.is_some() {
                 return Ok(None);
             }
             found = Some(index);
         }
     }
-    if found.is_some() && exact.is_none() {
+    if let Some(position) = found
+        && exact.is_none()
+    {
         conditions::warning(format!(
             "partial match of '{}' to '{}'",
-            String::from_utf8_lossy(name),
-            char_str(names.element(found.unwrap_or(0)))
+            text,
+            char_str(names.element(position))
         ))?;
     }
     Ok(found)
@@ -1810,7 +1816,7 @@ unsafe fn subset2_level(
     if index.kind() == SexpType::String
         && matches!(object.kind(), SexpType::List | SexpType::Expression)
         && (index.element(0).bytes().is_empty()
-            || match_name(names, index.element(0).bytes(), exact)?.is_none())
+            || match_name(names, index.element(0), exact)?.is_none())
     {
         // A list has no element of that name: `[[` gives `NULL`, unlike for atomic vectors.
         return Ok(nil());
@@ -1871,7 +1877,7 @@ unsafe fn single_position(
             let found = if wanted.bytes().is_empty() {
                 None
             } else {
-                match_name(names, wanted.bytes(), exact)?
+                match_name(names, wanted, exact)?
             };
             match found {
                 Some(position) => Ok(position),
@@ -2087,7 +2093,7 @@ pub unsafe fn dollar(object: Sexp, name: Sexp, call: Sexp) -> R<Sexp> {
     match object.kind() {
         SexpType::List | SexpType::Expression => {
             let names = values::names(object);
-            match match_name(names, name.bytes(), Some(false))? {
+            match match_name(names, name, Some(false))? {
                 Some(position) => {
                     let value = object.element(position);
                     // A complex assignment through a partial name, `v$mi[[1]] <- 2`, assigns
@@ -3526,8 +3532,8 @@ unsafe fn one_index(extent: usize, names: Sexp, index: Sexp) -> R<Slot> {
                     .flatten();
                 return Ok(position.map_or(Slot::Named, Slot::At));
             }
-            let wanted = index.element(0).bytes();
-            if wanted.is_empty() {
+            let wanted = index.element(0);
+            if wanted.bytes().is_empty() {
                 return Ok(Slot::Named);
             }
             Ok(match match_name(names, wanted, Some(true))? {
@@ -4732,9 +4738,9 @@ unsafe fn do_aperm(call: &Call<'_>) -> R<Sexp> {
             }
             for index in 0..rank {
                 let wanted = permutation.element(index);
-                let Some(found) =
-                    (0..rank).find(|&candidate| dimnames_names.element(candidate) == wanted)
-                else {
+                let Some(found) = (0..rank).find(|&candidate| {
+                    values::same_string(dimnames_names.element(candidate), wanted)
+                }) else {
                     return Err(call.error(format!(
                         "'perm[{}]' does not match a dimension name",
                         index + 1

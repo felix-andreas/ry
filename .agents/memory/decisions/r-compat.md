@@ -35,6 +35,11 @@ tests") runs each corpus package's own `tests/` under GNU R and ry. It is the me
   because strings intern by pointer and a second pointer for the same text breaks `==` (desc's `read_dcf` broke on duplicate fields). Latin-1
   strings stay separate; `==` compares them by text (`values::same_text`), `match()` and `unique()`
   do not yet (`backlog.md`).
+- **Names and symbols compare as text across encoding marks**, as GNU R's `installTrChar` and
+  `Seql` do: `install_charsxp` keeps a valid UTF-8 or ASCII `CHARSXP` as the symbol's name and
+  translates a latin1 one to UTF-8, the heap's symbol table finds a spelling under either mark,
+  string-literal tags (`c("aä" = 1)`) keep their UTF-8 mark, and `[`, `[[`, `$` and their
+  replacements match names through `values::same_string` (`subset__non_ascii_names`).
 - **A sink's connection is a GC root** (`connections::Table::trace`), as GNU R preserves it;
   otherwise `capture.output` finalized it.
 - **S4 dispatch on an unsupplied argument dispatches on NULL**, even with a default, as GNU R's

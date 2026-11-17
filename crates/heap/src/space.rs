@@ -1071,6 +1071,17 @@ impl Space {
             .is_some_and(|(page, word, bit)| self.interned[page][word] & bit != 0)
     }
 
+    /// Whether `object` is the start of an allocated slot, or `None` when its address is outside
+    /// the space. Only the heap verifier asks, so a stray pointer into a page is reported
+    /// instead of read.
+    pub fn is_allocated_object(&self, object: Sexp) -> Option<bool> {
+        let (page, word, bit) = self.locate(object)?;
+        let offset = (object.as_ptr() as usize).wrapping_sub(self.base.as_ptr() as usize);
+        let slot_size = SLOT_SIZES[self.page_class[page] as usize];
+        let aligned = (offset & (PAGE_SIZE - 1)) % slot_size == 0;
+        Some(aligned && self.allocated[page][word] & bit != 0)
+    }
+
     /// Whether `object` lives in this space rather than among the large objects.
     pub fn holds(&self, object: Sexp) -> bool {
         self.locate(object).is_some()

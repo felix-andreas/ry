@@ -1,0 +1,39 @@
+[stdout]
+| 2 2 2 0 TRUE 8 8 
+| 7 double 3 3 
+| 7 integer 3 3 
+| 7 logical 3 3 
+| 7 character 3 3 
+| 7 complex 3 3 
+| 7 raw 3 3 
+| 7 list 3 TRUE 
+| 8 double 3 3 
+| 8 integer 3 3 
+| 8 logical 3 3 
+| 8 character 3 3 
+| 8 complex 3 3 
+| 8 raw 3 3 
+| 8 list 3 TRUE 
+| 9 double 3 3 
+| 9 integer 3 3 
+| 9 logical 3 3 
+| 9 character 3 3 
+| 9 complex 3 3 
+| 9 raw 3 3 
+| 9 list 3 TRUE 
+| 16 double 3 3 
+| 16 integer 3 3 
+| 16 logical 3 3 
+| 16 character 3 3 
+| 16 complex 3 3 
+| 16 raw 3 3 
+| 16 list 3 TRUE 
+| 210 0 
+| kept 3 0 
+[messages]
+- ok
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

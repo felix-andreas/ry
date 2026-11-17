@@ -66,8 +66,8 @@ tokio-util = { version = "0.7.15", features = ["compat"] }
 # through locals in a debugger.
 # v0 symbol names, the nightly default, are over half of a debug libR.so (its `.strtab`), and the
 # linker reads and writes every byte of them on each relink after an interpreter edit. Legacy names
-# are shorter and demangle the same way in backtraces, `crash` reports and perf. Release keeps the
-# default: it strips symbols anyway.
+# are shorter and demangle the same way in backtraces, `crash` reports and perf, so release, which
+# ships its symbol table, uses them too.
 [profile.dev]
 debug = "line-tables-only"
 rustflags = ["-Csymbol-mangling-version=legacy", "-Zunstable-options"]
@@ -95,9 +95,12 @@ regalloc2.opt-level = 3
 # and overflow checks stay on.
 heap.opt-level = 2
 
+# Shipped binaries keep their symbol table, which `crash` reads to name the functions of a native
+# stack; only debug info goes.
 [profile.release]
-strip = true
+strip = "debuginfo"
 lto = true
+rustflags = ["-Csymbol-mangling-version=legacy", "-Zunstable-options"]
 
 # Release optimization without cross-crate LTO, for optimized tests (`cargo test-release` is `cargo test
 # --profile iterate`) and for iterating on performance: an edit to the interpreter relinks without a

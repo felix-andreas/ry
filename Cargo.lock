@@ -828,6 +828,7 @@ name = "crash"
 version = "0.5.0"
 dependencies = [
  "libc",
+ "rustc-demangle",
 ]
 
 [[package]]

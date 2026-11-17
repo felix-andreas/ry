@@ -222,10 +222,11 @@ if [ -n "$bolt" ]; then
 	python3 -I tools/layout/gnu_stack.py restore "$runtime"
 fi
 python3 -I tools/layout/gnu_stack.py check "$runtime"
-# `--emit-relocs` leaves static relocation sections, which keep the symbol table alive through a
-# plain strip and double the file. Only those go: the dynamic relocations stay.
+# `--emit-relocs` leaves static relocation sections, which double the file. Only those go: the
+# dynamic relocations stay. The symbol table stays too, because crash reports name functions from it.
 objcopy --remove-relocations='*' "$runtime"
-strip --strip-unneeded "$runtime"
+strip --strip-debug "$runtime"
+size -A "$runtime" | grep -E '^\.(symtab|strtab|text) ' >&2
 # The start image is laid out in the order the training runs first touch its objects: a first
 # write numbers the objects, the runs record their touches against that image, and the second
 # write places each object by its first touch (tools/layout/image_order.py).
@@ -244,7 +245,8 @@ echo "optimize: ry with the runtime and base R embedded" >&2
 : > "$work/build.log"
 RY_EMBED_RUNTIME="$runtime" RY_EMBED_BASE="$base" cargo_logged -p ry-lang
 check_profile
-strip "$optimized/$ry"
+strip --strip-debug "$optimized/$ry"
+size -A "$optimized/$ry" | grep -E '^\.(symtab|strtab|text) ' >&2
 # `just package` and the bench recipes read the release directory, so the optimized binaries
 # replace whatever a plain build left there.
 mkdir -p "$build"
