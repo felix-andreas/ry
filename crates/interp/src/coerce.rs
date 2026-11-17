@@ -342,6 +342,8 @@ unsafe fn coerce_list(
             Ok(result)
         }
         _ if kind.is_atomic() => {
+            // GNU R's `isVectorizable`: every element is a vector, a list included, of length
+            // at most one. An empty vector or a list element becomes NA.
             for index in 0..count {
                 let element = list.element(index);
                 let vector = element.kind().is_atomic()
