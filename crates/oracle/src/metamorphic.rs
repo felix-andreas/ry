@@ -763,7 +763,9 @@ const IO_WRITERS: &[(FileFormat, &str)] = &[
         FileFormat::Image,
         "save(list = \"v\", file = f, compress = FALSE)",
     ),
-    (FileFormat::Image, "save(v, try_, file = f, version = 2)"),
+    // A second object, and not a closure: GNU R saves one its JIT compiled as bytecode, so the
+    // file would depend on how often the closure ran.
+    (FileFormat::Image, "save(v, f, file = f, version = 2)"),
     (FileFormat::Source, "dput(v, f)"),
     (FileFormat::Source, "dput(v, f, control = \"all\")"),
     (FileFormat::Source, "dput(v, f, control = NULL)"),

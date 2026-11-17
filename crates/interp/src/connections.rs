@@ -21,6 +21,8 @@
 use {
     crate::{
         builtins::{BuiltinDef, Call, internal},
+        conditions::warning_call,
+        format::{display_width, encode_string},
         http::{self, FetchError},
         interp,
         platform::{self, Iconv, convert_all},
@@ -2375,20 +2377,44 @@ unsafe fn do_sink_number(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// `cat(list(...), file, sep, fill, labels, append)`.
+///
+/// The line filling follows GNU R's `do_cat` step for step, because its rule is not "break
+/// when the line is full": a piece is measured in bytes and a separator in columns, a newline
+/// inside a piece leaves the running width alone, and an object's first piece is tested
+/// differently from its later ones.
 unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
     let items = call.arg(0);
     let file = call.arg(1);
     let separators = call.arg(2);
     let fill = call.arg(3);
+    let labels = call.arg(4);
+    if separators.kind() != SexpType::String {
+        return Err(error("invalid 'sep' specification"));
+    }
+    let fill_is_number = matches!(fill.kind(), SexpType::Integer | SexpType::Real)
+        && !values::inherits(fill, "factor");
+    if !(fill_is_number || fill.kind() == SexpType::Logical) || values::length(fill) != 1 {
+        return Err(error("invalid 'fill' argument"));
+    }
+    // `None` is no filling. A logical `NA` is no filling too, and a number below one is ignored
+    // with a warning.
     let fill_width = if fill.kind() == SexpType::Logical {
-        if values::as_logical_scalar(fill) == 1 {
-            crate::format::width_option()
-        } else {
-            0
-        }
+        (values::as_logical_scalar(fill) == 1).then(|| crate::format::width_option())
     } else {
-        values::as_integer_scalar(fill).max(0) as usize
+        let width = values::as_integer_scalar(fill);
+        if width <= 0 {
+            warning_call(call.call, "non-positive 'fill' argument will be ignored")?;
+            None
+        } else {
+            Some(width as usize)
+        }
     };
+    if !matches!(labels.kind(), SexpType::String | SexpType::Nil) {
+        return Err(error("invalid 'labels' argument"));
+    }
+    if values::as_logical_scalar(call.arg(5)) == NA_LOGICAL {
+        return Err(error("invalid 'append' specification"));
+    }
     let separator_count = values::length(separators);
     let separator_at = |index: usize| -> String {
         if separator_count == 0 {
@@ -2398,31 +2424,55 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
                 .map_or_else(|| "NA".into(), |text| text.into_owned())
         }
     };
-    // With `fill`, every line starts with the next of `labels` and a space.
-    let labels = call.arg(4);
-    let label_count = if fill_width > 0 && labels.kind() == SexpType::String {
-        values::length(labels)
-    } else {
-        0
+    let separator_width = |index: usize| display_width(&encode_string(&separator_at(index), None));
+    // GNU R divides by the number of labels, so `labels = character(0)` with a line to break
+    // stops it with a floating point exception. Here no labels means no labels.
+    let label_count = values::length(labels);
+    // A label that is `NA` starts the first line as `NA` and a later line as `<NA>`, each four
+    // columns wide: GNU R writes the first label as text and encodes the others.
+    let label_at = |line: usize, first: bool| -> (String, usize) {
+        match values::string_at(labels, line % label_count) {
+            Some(text) => {
+                let encoded = encode_string(&text, None);
+                let width = display_width(&encoded);
+                (if first { text.into_owned() } else { encoded }, width)
+            }
+            None => (if first { "NA" } else { "<NA>" }.into(), 4),
+        }
     };
-    let mut line_index = 0usize;
     let mut output = String::new();
     let mut line_width = 0usize;
-    let mut start_line = |output: &mut String, line_width: &mut usize| {
+    let mut line_count = 0usize;
+    let break_line = |output: &mut String, line_width: &mut usize, line_count: &mut usize| {
+        output.push('\n');
+        *line_width = 0;
         if label_count > 0 {
-            let label = values::string_at(labels, line_index % label_count)
-                .map_or_else(|| "NA".into(), |text| text.into_owned());
+            let (label, width) = label_at(*line_count, false);
+            *line_width = width + 1;
             output.push_str(&label);
             output.push(' ');
-            *line_width = label.len() + 1;
         }
-        line_index += 1;
+        *line_count += 1;
     };
-    start_line(&mut output, &mut line_width);
+    let overflows = |line_width: usize, piece: &str, separator: usize| {
+        // A piece is measured as GNU R's `strlen` measures it, so an invalid byte counts one.
+        let bytes = values::unescape_invalid_bytes(piece).map_or(piece.len(), |bytes| bytes.len());
+        (
+            bytes,
+            fill_width.is_some_and(|fill| line_width + bytes + separator > fill),
+        )
+    };
     let settings = crate::format::Settings::current();
-    let mut separator_index = 0usize;
+    // The number of pieces written, which selects the separator after each one.
+    let mut piece_count = 0usize;
     for item_index in 0..values::length(items) {
         let item = items.element(item_index);
+        // Every object after the first, even an empty one, is preceded by a separator, but a
+        // NULL object is skipped without one.
+        if item_index > 0 && item.kind() != SexpType::Nil {
+            output.push_str(&separator_at(piece_count));
+            piece_count += 1;
+        }
         let texts: Vec<String> = match item.kind() {
             SexpType::Nil => continue,
             SexpType::Symbol => vec![values::symbol_name(item).into_owned()],
@@ -2444,14 +2494,12 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
             }
             // GNU R handles only atomic vectors and names; a list, even of length-one
             // elements, a call and anything else is an error, reported against `cat()`'s own
-            // call. An empty list prints nothing.
-            SexpType::List if values::length(item) == 0 => Vec::new(),
+            // call. An object of length zero, such as an empty list or environment, prints
+            // nothing.
+            _ if values::length(item) == 0 => Vec::new(),
             kind => {
                 // GNU R writes each object as it goes, so the objects before this one and the
                 // separator in front of it are already out when the error is raised.
-                if item_index > 0 {
-                    output.push_str(&separator_at(separator_index));
-                }
                 cat_text(file, output.as_bytes())?;
                 return Err(error(format!(
                     "argument {} (type '{}') cannot be handled by 'cat'",
@@ -2460,44 +2508,41 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
                 )));
             }
         };
-        // Every object after the first, even an empty one, is preceded by a separator, but a
-        // NULL object is skipped without one.
-        if item_index > 0 && texts.is_empty() {
-            output.push_str(&separator_at(separator_index));
-            separator_index += 1;
+        let Some(first) = texts.first() else {
+            continue;
+        };
+        // Only a first object that prints something starts the first line with a label.
+        if item_index == 0 && label_count > 0 && fill_width.is_some() {
+            let (label, width) = label_at(line_count, true);
+            line_width += width + 1;
+            output.push_str(&label);
+            output.push(' ');
+            line_count += 1;
         }
-        for (position, text) in texts.into_iter().enumerate() {
-            // The separator goes before the line break, and a piece only fits on the line if
-            // the separator after it does too.
-            if position > 0 || item_index > 0 {
-                let separator = separator_at(separator_index);
-                separator_index += 1;
-                output.push_str(&separator);
-                line_width += separator.len();
-                if let Some(position) = separator.rfind('\n') {
-                    line_width = separator.len() - position - 1;
+        let mut separator = separator_width(piece_count);
+        let (mut bytes, overflow) = overflows(line_width, first, separator);
+        if item_index > 0 && overflow {
+            break_line(&mut output, &mut line_width, &mut line_count);
+        }
+        for (position, text) in texts.iter().enumerate() {
+            output.push_str(text);
+            line_width += bytes + separator;
+            if let Some(next) = texts.get(position + 1) {
+                output.push_str(&separator_at(piece_count));
+                separator = separator_width(piece_count);
+                let overflow;
+                (bytes, overflow) = overflows(line_width, next, separator);
+                if overflow {
+                    break_line(&mut output, &mut line_width, &mut line_count);
                 }
-                let next_separator = separator_at(separator_index).len();
-                if fill_width > 0
-                    && line_width > 0
-                    && line_width + text.len() + next_separator > fill_width
-                {
-                    output.push('\n');
-                    line_width = 0;
-                    start_line(&mut output, &mut line_width);
-                }
+                piece_count += 1;
             }
-            line_width += text.len();
-            if let Some(position) = text.rfind('\n') {
-                line_width = text.len() - position - 1;
-            }
-            output.push_str(&text);
         }
     }
-    // A separator holding a newline makes the separators terminators, so the output always
-    // ends with one, even when there was nothing to print.
+    // Filling ends the output with a newline, and so does a separator holding one, even when
+    // there was nothing to print.
     let newline_separator = (0..separator_count).any(|index| separator_at(index).contains('\n'));
-    if newline_separator || (fill_width > 0 && !output.ends_with('\n') && !output.is_empty()) {
+    if fill_width.is_some() || newline_separator {
         output.push('\n');
     }
     cat_text(file, output.as_bytes())?;
