@@ -423,3 +423,12 @@ GNU R finalizes an object at the first full `gc()` after its last reference goes
 - **Rule.** A handler stack replaced while a calling handler, `R_ToplevelExec`, `R_tryEval` or `on.exit` code runs must stay traced: a handler closure `.addCondHands` received is referenced by its entry alone, and a Rust local or thread-local is never traced.
 - **Shape.** `conditions::set_aside(handlers, restarts)` pushes the stacks onto `Interp::suspended_handlers`, which the root scan traces, and returns a guard that truncates the list to its earlier length on drop. Every site that hides a stack uses it: the three signalling loops, `run_on_exit`, the help server, libr's `try_eval`, and `ry_handlers_enter`, whose context entry owns the guard until `ry_handlers_leave`. Truncation rather than pop keeps the list consistent when an error drops a guard or a C context is left out of order.
 - Cost: one `Vec` push and truncate per signal, no allocation once the list has grown. Pinned by `caught_twice` in `YOUNG_STRESSED`, `crates/interp/tests/test_rust_allocations.rs` (young stress reproduces the bug every time).
+
+## The verifier checks every traced reference
+
+**Status:** built.
+
+- **Rule.** Under `RY_GC_VERIFY=1` the collector checks each child of every object it traces: a reference that is neither nil, nor the start of an allocated small slot, nor a live large object panics with `heap corrupted`, naming the holder's kind, address and child position.
+- **Why.** A write past an object's storage (a tier-0 store into GNU R's storage-less ALTREP wrapper of a long vector) overwrote its neighbor's header and pointers, and crashed only when that neighbor was next used, far from the write. The check moves the failure to the next collection; `RY_GC_STRESS=1 RY_GC_VERIFY=1` names the damaged object on the first call that writes.
+- **Shape.** `Heap::verify_children` (`#[cold]`) runs in `drain` beside the barrier check and shares `children_of` with it; `Space::is_allocated_object` answers slot alignment and the allocated bit. `HeapObject::slice_mut` also asserts in debug builds that it never hands out an ALTREP's storage.
+- Cost: verification only, one bitmap lookup per traced reference.

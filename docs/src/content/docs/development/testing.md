@@ -527,7 +527,7 @@ which an engine differs. A seed and a kind name a program, so `oracle fuzz --kin
 
 | Kind | A program is | It finds |
 | --- | --- | --- |
-| `grammar` (`oracle::fuzz::program`) | several blocks from a grammar of language features: loops shaped for the JIT, closures, S3 dispatch, conditions and `on.exit`, environments, attributes, `NA` and overflow; about one in eight ends on a deliberate error | interpreter and JIT bugs in control flow and scoping |
+| `grammar` (`oracle::fuzz::program`) | several blocks from a grammar of language features: loops shaped for the JIT, closures, S3 dispatch, conditions and `on.exit`, environments, attributes, `NA` and overflow, and element stores into a function's argument copy on both sides of 64 elements, in a function called three times so its body runs interpreted and compiled; about one in eight ends on a deliberate error | interpreter and JIT bugs in control flow and scoping |
 | `metamorphic` (`oracle::metamorphic::program`) | six to twelve trials; each builds one value, runs one body of updates and reads on it, and runs the same body in other forms that must give an identical result | a result that depends on how often or where code runs, or on how a value is stored |
 | `builtins` (`oracle::metamorphic::builtins_program`) | builtins called on a zoo of values, each call caught | a builtin that accepts, rejects or computes differently from GNU R |
 | `corpus` (`oracle::corpus`) | a snippet of real R code with one to four mutations | what no grammar author thought of |

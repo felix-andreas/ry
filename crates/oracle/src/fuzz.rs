@@ -15,6 +15,12 @@
 //! compiled body must not evaluate them first. The block draws from its own stream, so adding it
 //! left the rest of every seed's program unchanged.
 //!
+//! A last block, from a stream of its own too, assigns elements of a function's argument, so the
+//! function copies the argument once and writes the rest into the copy. The argument's length
+//! falls on both sides of 64, where GNU R's shallow duplicate turns into an ALTREP wrapper with no
+//! element storage of its own, and every function runs three times, because its body compiles on
+//! the second call.
+//!
 //! Every program is deterministic under GNU R: nothing reads the clock, addresses, the
 //! environment or an unseeded random number, and no environment or closure is ever printed.
 
@@ -43,6 +49,9 @@ pub fn program(seed: u64) -> String {
     generator.ill_typed = false;
     text.push_str(&replacement_promises(&mut SplitMix64(
         seed ^ 0x9e37_79b9_7f4a_7c15,
+    )));
+    text.push_str(&argument_element_stores(&mut SplitMix64(
+        seed ^ 0x6a09_e667_f3bc_c909,
     )));
     text.push_str(&generator.ending());
     text
@@ -160,6 +169,53 @@ fn replacement_promises(rng: &mut SplitMix64) -> String {
         let label = format!("rp{shape_number}");
         text.push_str(&format!(
             "{definition}\nfor (n in 1:3) report_rp(\"{label} function\", n, function() {{ {setup}; {assignment}; {observe} }})\nfor (n in 1:3) report_rp(\"{label} loop\", n, function() {{ for (r in 1:3) {{ {setup}; {assignment} }}; {observe} }})\nfor (n in 1:3) {{\n  trace_rp <- character()\n  out <- tryCatch({{ {setup}; {assignment}; {observe} }}, error = function(e) paste(\"error:\", conditionMessage(e)))\n  cat(\"{label} top level\", n, out, \"| trace:\", paste(trace_rp, collapse = \",\"), \"\\n\")\n}}\nreport_rp(\"{label} replicate\", 1, function() replicate(3, {{ {setup}; {assignment}; {observe} }}))\n"
+        ));
+    }
+    text
+}
+
+/// Functions that assign elements of their argument and return it: one to four stores through
+/// `[`, `[[` or a matrix subscript into a vector of every element type, sized around 64 elements.
+/// Each runs three times on the same argument, and the block prints a checksum of every result and
+/// whether the caller's value is unchanged.
+fn argument_element_stores(rng: &mut SplitMix64) -> String {
+    const TYPES: [(&str, &str); 7] = [
+        ("numeric(", "2.5"),
+        ("integer(", "7L"),
+        ("logical(", "TRUE"),
+        ("character(", "\"s\""),
+        ("complex(", "1i"),
+        ("raw(", "as.raw(9)"),
+        ("vector(\"list\", ", "list(1)"),
+    ];
+    let mut text = String::from(
+        "sum_ae <- function(x, value) if (is.list(x)) sum(lengths(x)) else sum(as.character(x) == as.character(value))\n",
+    );
+    for shape in 0..1 + rng.below(3) {
+        let side = [7, 8, 9, 12][rng.below(4)];
+        let (constructor, value) = TYPES[rng.below(TYPES.len())];
+        let list = constructor.starts_with("vector");
+        let matrix = !list && rng.chance(1, 2);
+        let length = side * side;
+        let setup = match matrix {
+            true => format!("{constructor}{length})\ndim(a_ae{shape}) <- c({side}L, {side}L)"),
+            false => format!("{constructor}{})", [63, 64, 65, length][rng.below(4)]),
+        };
+        let stores: Vec<String> = (0..1 + rng.below(4))
+            .map(|store| {
+                let row = 1 + (store * 3 + rng.below(side)) % side;
+                let column = 1 + rng.below(side);
+                match (matrix, rng.below(3)) {
+                    (true, 0) => format!("  x[{row}, {column}] <- {value}"),
+                    (true, 1) => format!("  x[{row}L, {column}L] <- {value}"),
+                    (_, 2) if !list => format!("  x[[{row}]] <- {value}"),
+                    _ => format!("  x[{row}] <- {value}"),
+                }
+            })
+            .collect();
+        let stores = stores.join("\n");
+        text.push_str(&format!(
+            "a_ae{shape} <- {setup}\nkeep_ae{shape} <- a_ae{shape}\nf_ae{shape} <- function(x) {{\n{stores}\n  x\n}}\nfor (n in 1:3) {{\n  r_ae <- f_ae{shape}(a_ae{shape})\n  cat(\"ae{shape}\", n, typeof(r_ae), length(r_ae), sum_ae(r_ae, {value}), identical(a_ae{shape}, keep_ae{shape}), \"\\n\")\n}}\n"
         ));
     }
     text

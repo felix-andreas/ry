@@ -21,3 +21,9 @@ case = "strings__posix_repeated_group"
 engine = "ry-tier0"
 area = "regex"
 reason = "the leftmost-longest backtracker fills the first optional group, where TRE fills the second"
+
+[[failure]]
+case = "strings__posix_repeated_group"
+engine = "ry-jit"
+area = "regex"
+reason = "the leftmost-longest backtracker fills the first optional group, where TRE fills the second"

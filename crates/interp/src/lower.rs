@@ -1880,7 +1880,7 @@ unsafe fn argument_value(node: NodeRef<'_>, context: Lowering<'_>) -> R<(Sexp, S
                 tag = tag_from_node(child)?;
             }
             NodeOrToken::Token(token) if !after_equals => {
-                tag = install(&token_name(token)?)?;
+                tag = tag_from_token(token)?;
             }
             NodeOrToken::Node(child) => value = lower(child, context)?,
             NodeOrToken::Token(token) => value = literal(token)?,
@@ -1897,9 +1897,20 @@ unsafe fn tag_from_node(node: NodeRef<'_>) -> R<Sexp> {
             let token = significant_tokens(node)
                 .next()
                 .ok_or_else(|| error("empty literal"))?;
-            install(&token_name(token)?)
+            tag_from_token(token)
         }
         _ => Err(error("invalid argument name")),
+    }
+}
+
+/// The tag a name token or a string literal gives. A string installs as GNU R's `installTrChar`
+/// installs it, so a non-ASCII one keeps its UTF-8 mark in names such as `c("a\u00e4" = 1)`.
+unsafe fn tag_from_token(token: TokenRef<'_>) -> R<Sexp> {
+    match token.kind() {
+        SyntaxKind::STRING | SyntaxKind::RAW_STRING => {
+            values::install_charsxp(values::mkchar(&token_name(token)?)?)
+        }
+        _ => install(&token_name(token)?),
     }
 }
 

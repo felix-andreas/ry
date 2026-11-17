@@ -556,14 +556,21 @@ pub unsafe fn install_bytes(name: &[u8]) -> R<Sexp> {
     Ok(crate::heap().install(name)?)
 }
 
-/// The symbol named by the `CHARSXP` `name`. An interned ASCII string is already the print name
-/// `install` would intern, so it skips hashing the bytes again; any other string goes through
-/// `install`, which also rejects an empty or overlong name. `NA_STRING` is not the interned
-/// `"NA"`, so it goes through `install` too.
+/// The symbol named by the `CHARSXP` `name`. An interned ASCII or UTF-8 string is a print name
+/// as it is: an ASCII one is what `install` would intern, and a UTF-8 one keeps its mark when
+/// it installs the symbol, as GNU R's `installTrChar` does, which also translates a latin1 string
+/// to its UTF-8 text first. Any other string goes through `install`, which also rejects an empty
+/// or overlong name. `NA_STRING` is not the interned `"NA"`, so it goes through `install` too.
 pub unsafe fn install_charsxp(name: Sexp) -> R<Sexp> {
-    if name != na_string() && name.has_gp(gp::ASCII) && name.has_gp(gp::CACHED) && name.length() > 0
+    if name != na_string()
+        && name.has_gp(gp::CACHED)
+        && name.length() > 0
+        && (name.has_gp(gp::ASCII) || (name.has_gp(gp::UTF8) && name.is_valid_utf8()))
     {
         return Ok(crate::heap().install_char(name)?);
+    }
+    if name.has_gp(gp::LATIN1) {
+        return install(&char_str(name));
     }
     install_bytes(name.bytes())
 }
@@ -1490,7 +1497,9 @@ pub unsafe fn shallow_duplicate(object: Sexp) -> R<Sexp> {
 
 /// GNU R's `R_shallow_duplicate_attr`: a copy of `object` for a caller that changes only its
 /// attributes, which for a long atomic or character vector is a wrapper that shares the data
-/// until something writes to it. Like [`shallow_duplicate`], it drops the Array bit.
+/// until something writes to it through the ALTREP interface. Its storage must never be
+/// written directly (`slice_mut`, `reals_mut`). Like [`shallow_duplicate`], it drops the Array
+/// bit.
 pub unsafe fn shallow_duplicate_attr(object: Sexp) -> R<Sexp> {
     let wrappable = matches!(
         object.kind(),
@@ -1518,7 +1527,8 @@ pub unsafe fn shallow_duplicate_attr(object: Sexp) -> R<Sexp> {
 /// ordinary storage, which means GNU R's in-place change of an unshared instance's attributes is
 /// a copy here; a copy into ordinary storage would drop the class, and with it methods such as
 /// `Serialized_state`. A caller that writes elements into the copy itself must use
-/// [`shallow_duplicate_attr`].
+/// [`shallow_duplicate`], because the wrapper `shallow_duplicate_attr` makes of a long vector
+/// has no storage to write into.
 pub unsafe fn replacement_copy(object: Sexp) -> R<Sexp> {
     if !object.is_altrep() {
         return shallow_duplicate_attr(object);
