@@ -36,7 +36,7 @@
 use {
     crate::{
         dispatch, envir,
-        eval::{self, Reify},
+        eval::{self, Reify, Site},
         interp,
         unwind::{INTERRUPTS_SUSPENDED, R, Unwind, error},
         values::{
@@ -1467,7 +1467,7 @@ unsafe fn caller_env(sys_parent: Sexp) -> R<Sexp> {
     if owner == crate::NO_SLOTS {
         return Ok(global_env());
     }
-    let env = eval::frame_env(owner as usize, Reify::Site("boundary capture"))?;
+    let env = eval::frame_env(owner as usize, Reify::Site(Site::BoundaryCapture))?;
     Ok(if env == nil() { global_env() } else { env })
 }
 
