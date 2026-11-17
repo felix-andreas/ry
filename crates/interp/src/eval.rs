@@ -5034,26 +5034,30 @@ unsafe fn do_expression(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-/// `all.names(expr, functions, max.names, unique)`.
+/// `all.names(expr, functions, max.names, unique)`. Without `functions` the whole function
+/// position of a call is skipped, even when it is a call itself.
 unsafe fn do_all_names(call: &Call<'_>) -> R<Sexp> {
     let functions = values::as_logical_scalar(call.arg(1)) == 1;
-    let maximum = values::as_integer_scalar(call.arg(2));
-    let unique = values::as_logical_scalar(call.arg(3)) == 1;
-    let mut names: Vec<String> = Vec::new();
-    unsafe fn walk(expression: Sexp, functions: bool, names: &mut Vec<String>) {
+    let maximum = match values::as_integer_scalar_warning(call.arg(2))? {
+        -1 => usize::MAX,
+        maximum => usize::try_from(maximum).unwrap_or(0),
+    };
+    let unique = values::as_logical_scalar(call.arg(3)) != 0;
+    unsafe fn walk(expression: Sexp, functions: bool, names: &mut Vec<Sexp>) {
         match expression.kind() {
             SexpType::Symbol => {
-                let name = symbol_name(expression).into_owned();
-                if !name.is_empty() {
+                let name = expression.car();
+                if name.length() != 0 {
                     names.push(name);
                 }
             }
             SexpType::Language => {
-                if functions || expression.car().kind() == SexpType::Language {
-                    walk(expression.car(), functions, names);
-                }
-                let mut cell = expression.cdr();
-                while cell.kind() == SexpType::Pairlist {
+                let mut cell = if functions {
+                    expression
+                } else {
+                    expression.cdr()
+                };
+                while cell != nil() {
                     walk(cell.car(), functions, names);
                     cell = cell.cdr();
                 }
@@ -5066,15 +5070,18 @@ unsafe fn do_all_names(call: &Call<'_>) -> R<Sexp> {
             _ => {}
         }
     }
+    // The names are symbols' print names, which their symbols keep alive.
+    let mut names: Vec<Sexp> = Vec::new();
     walk(call.arg(0), functions, &mut names);
     if unique {
         let mut seen = std::collections::HashSet::new();
-        names.retain(|name| seen.insert(name.clone()));
+        names.retain(|&name| seen.insert(name));
     }
-    if maximum >= 0 && names.len() > maximum as usize {
-        names.truncate(maximum as usize);
-    }
-    values::string_vector(&names)
+    names.truncate(maximum);
+    let result = crate::heap().alloc_vector(SexpType::String, names.len() as isize)?;
+    result.slice_mut::<Sexp>().copy_from_slice(&names);
+    crate::heap().count_written_elements(result);
+    Ok(result)
 }
 
 unsafe fn do_builtins(call: &Call<'_>) -> R<Sexp> {

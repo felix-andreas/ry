@@ -150,7 +150,6 @@ enum Kind {
 
 /// GNU R's precedences.
 mod precedence {
-    pub const FUNCTION: u8 = 0;
     pub const EQ: u8 = 1;
     pub const LEFT: u8 = 2;
     pub const TILDE: u8 = 4;
@@ -745,7 +744,7 @@ impl Deparser {
                             ("[[", "]]")
                         };
                         let target = arguments.car();
-                        let parens = needs_parens(info, target, true);
+                        let parens = needs_parens(info, target, true, left_of);
                         if parens {
                             self.print("(");
                         }
@@ -758,11 +757,22 @@ impl Deparser {
                         self.print(close);
                         return;
                     }
-                    (Kind::Dollar, 2) => {
+                    // Any other right-hand side is written as a call (`` `$`(a, 1) ``).
+                    (Kind::Dollar, 2)
+                        if {
+                            let member = arguments.cdr().car();
+                            member.kind() == SexpType::Symbol
+                                || (member.kind() == SexpType::String
+                                    && length(member) > 0
+                                    && member.element(0) != values::na_string())
+                        } =>
+                    {
                         let target = arguments.car();
-                        let parens = needs_parens(info, target, true);
+                        let parens = needs_parens(info, target, true, left_of);
                         if parens {
                             self.print("(");
+                        } else {
+                            self.left_of = Some(info.precedence);
                         }
                         self.deparse(target);
                         if parens {
@@ -770,13 +780,10 @@ impl Deparser {
                         }
                         self.print(&name_text);
                         let member = arguments.cdr().car();
-                        if member.kind() == SexpType::String && length(member) == 1 {
+                        if member.kind() == SexpType::String {
                             // A syntactic name reads back the same bare, as GNU R prints it.
-                            let text = member.element(0);
-                            match std::str::from_utf8(text.bytes()) {
-                                Ok(name) if text != values::na_string() && is_syntactic(name) => {
-                                    self.print(name)
-                                }
+                            match std::str::from_utf8(member.element(0).bytes()) {
+                                Ok(name) if is_syntactic(name) => self.print(name),
                                 _ => self.vector(member),
                             }
                         } else {
@@ -791,7 +798,7 @@ impl Deparser {
                         if outer_parens {
                             self.print("(");
                         }
-                        let left_parens = needs_parens(info, left, true);
+                        let left_parens = needs_parens(info, left, true, left_of);
                         if left_parens {
                             self.print("(");
                         } else {
@@ -812,8 +819,7 @@ impl Deparser {
                         if info.kind == Kind::Binary {
                             self.line_break(&mut broken);
                         }
-                        let right_parens = needs_parens(info, right, false)
-                            || left_of.is_some_and(|outer| dangles(right, outer));
+                        let right_parens = needs_parens(info, right, false, left_of);
                         if right_parens {
                             self.print("(");
                         } else {
@@ -847,9 +853,11 @@ impl Deparser {
                             info
                         };
                         self.print(&name_text);
-                        let parens = needs_parens(info, operand, false);
+                        let parens = needs_parens(info, operand, false, left_of);
                         if parens {
                             self.print("(");
+                        } else {
+                            self.left_of = left_of;
                         }
                         self.deparse(operand);
                         if parens {
@@ -868,7 +876,7 @@ impl Deparser {
                 };
                 let left = arguments.car();
                 let right = arguments.cdr().car();
-                let left_parens = needs_parens(info, left, true);
+                let left_parens = needs_parens(info, left, true, left_of);
                 if left_parens {
                     self.print("(");
                 } else {
@@ -883,8 +891,7 @@ impl Deparser {
                 self.print(" ");
                 let mut broken = false;
                 self.line_break(&mut broken);
-                let right_parens = needs_parens(info, right, false)
-                    || left_of.is_some_and(|outer| dangles(right, outer));
+                let right_parens = needs_parens(info, right, false, left_of);
                 if right_parens {
                     self.print("(");
                 } else {
@@ -1801,29 +1808,6 @@ unsafe fn is_curly(expression: Sexp) -> bool {
     expression.kind() == SexpType::Language && expression.car() == symbols().brace
 }
 
-/// Whether `argument`, ending the left operand of an operator of precedence `outer`, would
-/// extend past that operand when reparsed: a keyword construct always would, and a unary
-/// operator would when it binds more loosely than `outer`. A function definition would too,
-/// but GNU R leaves it bare, so ry does the same to keep the same text.
-unsafe fn dangles(argument: Sexp, outer: u8) -> bool {
-    if argument.kind() != SexpType::Language || argument.car().kind() != SexpType::Symbol {
-        return false;
-    }
-    let name = argument.car().car().bytes();
-    if matches!(name, b"for" | b"if" | b"while" | b"repeat") {
-        return true;
-    }
-    values::pairlist_length(argument.cdr()) == 1
-        && operator_info(name).is_some_and(|info| {
-            let precedence = if info.precedence == precedence::SUM {
-                precedence::SIGN
-            } else {
-                info.precedence
-            };
-            precedence < outer
-        })
-}
-
 /// GNU R's `parenthesizeCaller`: whether a call's function, when it is not a name, is written
 /// in parentheses. A call of a plain function name, a subset, `$` or `@`, a namespace access,
 /// `(` or `{` is written without them (`f(1)(2)`, `x$f(1)`), and every other call with them
@@ -1870,69 +1854,61 @@ unsafe fn parenthesize_caller(head: Sexp) -> bool {
     }
 }
 
-/// GNU R's `needsparens`: whether an operand of `main` must be parenthesized.
-unsafe fn needs_parens(main: OperatorInfo, argument: Sexp, left: bool) -> bool {
-    if argument.kind() == SexpType::Language {
-        let head = argument.car();
-        if head.kind() == SexpType::Symbol {
-            let name = head.car().bytes();
-            if let Some(mut info) = operator_info(name) {
-                let count = values::pairlist_length(argument.cdr());
-                match info.kind {
-                    Kind::Binary | Kind::Binary2 => {
-                        match count {
-                            1 => {
-                                if !left {
-                                    return false;
-                                }
-                                if info.precedence == precedence::SUM {
-                                    info.precedence = precedence::SIGN;
-                                }
-                            }
-                            2 => {
-                                if main.precedence == precedence::COMPARE
-                                    && info.precedence == precedence::COMPARE
-                                {
-                                    return true;
-                                }
-                            }
-                            _ => return false,
-                        }
-                        return main.precedence > info.precedence
-                            || (main.precedence == info.precedence
-                                && left == main.right_associative);
-                    }
-                    Kind::Subset => {
-                        if main.kind == Kind::Dollar {
-                            return false;
-                        }
-                        return main.precedence > info.precedence
-                            || (main.precedence == info.precedence
-                                && left == main.right_associative);
-                    }
-                    Kind::Assign | Kind::Unary | Kind::Dollar => {
-                        return main.precedence > info.precedence
-                            || (main.precedence == info.precedence
-                                && left == main.right_associative);
-                    }
-                }
-            }
-            if matches!(name, b"for" | b"if" | b"while" | b"repeat") {
-                return left;
-            }
-            if name == b"function" {
-                return left || main.precedence > precedence::FUNCTION && false;
-            }
-            if is_user_binop(name) {
-                return main.precedence > precedence::PERCENT
-                    || (main.precedence == precedence::PERCENT && left == main.right_associative);
-            }
-        }
-    } else if argument.kind() == SexpType::Complex && length(argument) == 1 {
+/// GNU R's `needsparens`: whether an operand of `main` must be parenthesized. `deep_left` is
+/// the precedence of an enclosing operator whose left operand ends with this one, where a
+/// looser unary operator or a keyword construct would take in what follows when read back.
+unsafe fn needs_parens(
+    main: OperatorInfo,
+    argument: Sexp,
+    left: bool,
+    deep_left: Option<u8>,
+) -> bool {
+    if argument.kind() == SexpType::Complex && length(argument) == 1 {
         return main.precedence > precedence::SUM
             || (main.precedence == precedence::SUM && left == main.right_associative);
     }
-    false
+    if argument.kind() != SexpType::Language || argument.car().kind() != SexpType::Symbol {
+        return false;
+    }
+    let name = argument.car().car().bytes();
+    let binds_looser = |precedence: u8| {
+        main.precedence > precedence
+            || (main.precedence == precedence && left == main.right_associative)
+    };
+    if let Some(mut info) = operator_info(name) {
+        if matches!(info.kind, Kind::Binary | Kind::Binary2) {
+            match values::pairlist_length(argument.cdr()) {
+                1 => {
+                    if info.precedence == precedence::SUM {
+                        info.precedence = precedence::SIGN;
+                    }
+                    info.kind = Kind::Unary;
+                }
+                2 => {}
+                _ => return false,
+            }
+        }
+        return match info.kind {
+            // A unary operand on the right reads back the same bare (`a + !b`, `-!a`).
+            Kind::Unary => {
+                (left && main.precedence > info.precedence)
+                    || deep_left.is_some_and(|outer| outer > info.precedence)
+            }
+            Kind::Binary | Kind::Binary2
+                if main.precedence == precedence::COMPARE
+                    && info.precedence == precedence::COMPARE =>
+            {
+                true
+            }
+            Kind::Binary | Kind::Binary2 | Kind::Subset | Kind::Assign | Kind::Dollar => {
+                binds_looser(info.precedence)
+            }
+        };
+    }
+    if matches!(name, b"for" | b"if" | b"while" | b"repeat") {
+        return left || deep_left.is_some();
+    }
+    is_user_binop(name) && binds_looser(precedence::PERCENT)
 }
 
 // The internals.
