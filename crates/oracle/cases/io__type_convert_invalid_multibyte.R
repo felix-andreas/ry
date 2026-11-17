@@ -17,3 +17,8 @@ for (s in c("\xe9t\xe9,0.333", "\xe9,0.333", "\xe9abcdef", "\xe9\xe9abcdef", "a\
   attempt(type.convert(c(s, "1"), as.is = TRUE))
 attempt(type.convert(c("NA", "\xe9"), as.is = TRUE, na.strings = "\xe9"))
 unlink(f)
+
+# Factor codes follow the sorted levels, and white space of any width is blank.
+str(type.convert(c("b", "a", NA, "b", "ä"), as.is = FALSE))
+type.convert(c("  ", "  "), as.is = TRUE)
+type.convert(paste0("1", strrep(" ", 5000)), as.is = TRUE)

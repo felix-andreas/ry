@@ -1237,11 +1237,13 @@ fn is_blank(text: &[u8]) -> R<bool> {
         .map_or(text, |end| &text[..end]);
     let mut rest = text;
     while !rest.is_empty() {
-        let valid = match std::str::from_utf8(rest) {
+        // One character is at most four bytes, so only those are validated per step.
+        let head = &rest[..rest.len().min(4)];
+        let valid = match std::str::from_utf8(head) {
             Ok(valid) => valid,
             Err(failure) => {
                 // SAFETY: `valid_up_to` is the length of a valid UTF-8 prefix.
-                unsafe { std::str::from_utf8_unchecked(&rest[..failure.valid_up_to()]) }
+                unsafe { std::str::from_utf8_unchecked(&head[..failure.valid_up_to()]) }
             }
         };
         if let Some(character) = valid.chars().next() {

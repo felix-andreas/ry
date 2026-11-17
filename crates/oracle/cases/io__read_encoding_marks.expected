@@ -32,9 +32,11 @@
 | [1] "unknown"
 | [1] "UTF-8"
 | [1] "unknown"
+| [1] "unknown"
+| [1] "unknown"
 [messages]
 [warnings]
 [errors]
 [value]
-integer
-| 0L
+character
+| "unknown"

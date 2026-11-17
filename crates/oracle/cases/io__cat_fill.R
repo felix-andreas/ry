@@ -55,3 +55,6 @@ print(tryCatch(cat("a", fill = 3L, labels = "l", append = NA), error = condition
 show(1:12, fill = 9, labels = paste0("{", 1:3, "}"))
 show(c(a="x"), 1e10, 1e-20, pi, fill = TRUE)
 options(width = 12); show(1:9, fill = TRUE)
+
+# The warning names the user's call.
+tryCatch(cat(1, fill = -1), warning = function(w) deparse(conditionCall(w)))

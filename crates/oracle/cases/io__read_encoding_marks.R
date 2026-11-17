@@ -23,3 +23,9 @@ con <- textConnection(c("p,q", "ö,z"))
 x <- read.csv(con)
 print(Encoding(x$p))
 unlink(f)
+
+# A pipe does not re-encode, so its lines carry no mark.
+piped <- tempfile()
+writeLines("äb", piped)
+Encoding(readLines(pipe(paste("cat", piped))))
+Encoding(scan(pipe(paste("cat", piped)), what = "", quiet = TRUE))

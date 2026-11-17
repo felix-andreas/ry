@@ -59,11 +59,12 @@
 | [1] "{1} 1 2 \n{2} 3 4 \n{3} 5 6 \n{1} 7 8 \n{2} 9 10 \n{3} 11 \n{1} 12\n"
 | [1] "x 1e+10 1e-20 3.141593\n"
 | [1] "1 2 3 4 5 6 \n7 8 9\n"
+| [1] "cat(1, fill = -1)"
 [messages]
 - W: non-positive 'fill' argument will be ignored
 - W: non-positive 'fill' argument will be ignored
 [warnings]
 [errors]
 [value]
-NULL
-| NULL
+character
+| "cat(1, fill = -1)"

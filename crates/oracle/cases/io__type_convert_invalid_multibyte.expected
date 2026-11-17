@@ -16,9 +16,12 @@
 | [1] "invalid multibyte string at '<f0><9f><98>abc<64>ef'"
 | [1] "invalid multibyte string at '<e9><80>abcd<65>f'"
 | [1] "NA" NA  
+|  Factor w/ 3 levels "a","ä","b": 3 1 NA 3 2
+| [1] "  " "  "
+| [1] 1
 [messages]
 [warnings]
 [errors]
 [value]
-integer
-| 0L
+double
+| 1

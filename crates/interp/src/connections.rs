@@ -21,7 +21,6 @@
 use {
     crate::{
         builtins::{BuiltinDef, Call, internal},
-        conditions::warning_call,
         format::{display_width, encode_string},
         http::{self, FetchError},
         interp,
@@ -2403,7 +2402,7 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
     } else {
         let width = values::as_integer_scalar(fill);
         if width <= 0 {
-            warning_call(call.call, "non-positive 'fill' argument will be ignored")?;
+            crate::conditions::warning("non-positive 'fill' argument will be ignored")?;
             None
         } else {
             Some(width as usize)
@@ -4448,6 +4447,11 @@ unsafe fn device_open(con: Rconnection) -> R<bool> {
         ))?;
         return Ok(false);
     };
+    // `readLines` and `scan` ask for UTF-8 marks before they open a connection, and only
+    // re-encoded text gets them, which a file connection alone produces.
+    if !matches!(device, Device::File(_)) {
+        (*con).UTF8out = 0;
+    }
     match device {
         Device::File(file) => {
             if file.stream.is_some() {
@@ -4456,9 +4460,7 @@ unsafe fn device_open(con: Rconnection) -> R<bool> {
             match open_file(file, mode) {
                 Ok(stream) => {
                     let text_encoding = file.text_encoding.as_deref().filter(|_| !mode.binary);
-                    // `readLines` and `scan` ask for UTF-8 marks before they open a connection,
-                    // and only re-encoded text gets them. The request outlives the close, as
-                    // in GNU R.
+                    // The request for UTF-8 marks outlives the close, as in GNU R.
                     if text_encoding.is_none() {
                         (*con).UTF8out = 0;
                     }

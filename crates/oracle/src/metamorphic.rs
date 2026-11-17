@@ -1106,10 +1106,19 @@ fn io_episode(zoo: &mut Zoo, number: usize) -> String {
         .filter(|(written, _)| *written == format)
         .map(|(_, writer)| *writer)
         .collect();
-    text.push_str(&format!(
-        "try_({})\n",
-        writers[zoo.rng.below(writers.len())]
-    ));
+    let writer = writers[zoo.rng.below(writers.len())];
+    text.push_str(&format!("try_({writer})\n"));
+    // A gzip stream's bytes depend on the compressor, so no reader of such a file may show the
+    // bytes or their count: it reads through a connection that decompresses.
+    let gzip =
+        writer.contains("gzfile(") || matches!(format, FileFormat::Compressed | FileFormat::Image);
+    const STORED_BYTES: [&str; 5] = [
+        "bytes_(f)",
+        "file.size(f)",
+        "readBin(f,",
+        "readChar(f,",
+        "file(f, \"rb\")",
+    ];
     for _ in 0..2 + zoo.rng.below(3) {
         // One read in eight is of another format's reader: a reader handed a file it does not
         // understand must refuse it the way GNU R does.
@@ -1118,6 +1127,7 @@ fn io_episode(zoo: &mut Zoo, number: usize) -> String {
             .iter()
             .filter(|(read, _)| mismatched || *read == format)
             .map(|(_, reader)| *reader)
+            .filter(|reader| !(gzip && STORED_BYTES.iter().any(|read| reader.contains(read))))
             .collect();
         let reader = readers[zoo.rng.below(readers.len())];
         text.push_str(&io_observed(zoo, reader, long));
