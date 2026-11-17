@@ -1,0 +1,48 @@
+[stdout]
+| as.vector list : list(a = 1L, b = 2L, c = 3L)
+| as.vector list, matrix : list(1L, 2L, 3L, 4L)
+| as.list : list(a = 1L, b = 2L, c = 3L)
+| as.list, matrix : list(1L, 2L, 3L, 4L)
+| as.list, one-dimensional array : list(p = 1L, q = 2L)
+| [<- list : list(a = 1L, b = "B", c = 3L)
+| [<- list, matrix : list(1L, "B", 3L, 4L)
+| [<- list, matrix cell : list(1L, 2L, "B", 4L)
+| [<- list, named cell : list(1L, 2L, 3L, 0+1i)
+| [<- list, matrix row : list("r", 2L, "s", 4L)
+| [<- list, index matrix : list(1L, "m", 3L, 4L)
+| [<- list, array cell : list(1L, 2L, 3L, 4L, 5L, 6L, "q", 8L)
+| [[<- list : list(a = 1L, b = list("B"), c = 3L)
+| $<- : (warning: Coercing LHS to a list ) list(a = 1L, b = "B", c = 3L)
+| $<-, matrix : (warning: Coercing LHS to a list ) list(1L, 2L, 3L, 4L, b = "B")
+| $<-, factor : (warning: Coercing LHS to a list ) list(1L, 2L, new = -1L)
+| $<-, date : (warning: Coercing LHS to a list ) list(19724, y = 1)
+| $<- NULL : (warning: Coercing LHS to a list ) list(a = 1.5, b = 2)
+| storage.mode<- : structure(list(a = 1L, b = 2L, c = 3L), extra = "e", class = "zz")
+| storage.mode<-, matrix : structure(list(1L, 2L, 3L, 4L), dim = c(2L, 2L), dimnames = list(
+|     c("r1", "r2"), c("c1", "c2")), extra = "e")
+| mode<- : structure(list(a = 1L, b = 2L, c = 3L), extra = "e", class = "zz")
+| as.expression : expression(1L, 2L, 3L)
+| as.vector expression : expression(1L, 2L, 3L)
+| as.vector pairlist : pairlist(a = 1L, b = 2L, c = 3L)
+| c : list(a = 1L, b = 2L, c = 3L, 1)
+| append : list(1L, 2L, 3L, 4L, 1)
+| lapply : list(1L, 2L, 3L, 4L)
+| list to integer : 1:2
+| as.integer : 1:2
+| storage.mode<-, list : structure(1:2, names = c("a", "b"), extra = "e", class = "zz")
+| storage.mode<-, list matrix : structure(1:4, dim = c(2L, 2L), extra = "e")
+| unlist : structure(1:2, names = c("a", "b"))
+| list to expression : structure(expression(a = 1L, b = 2L), extra = "e")
+| expression to list : structure(list(a = 1, b = x), extra = "e")
+| list [<- atomic : list(1L, 2L, 3L)
+| [<- character : structure(c(a = "1", b = "B", c = "3"), extra = "e", class = "zz")
+| [[<- character : structure(c(p = "1", q = "2", k = "x"), extra = "e")
+| storage.mode<- double : structure(c(1, 2, 3, 4), dim = c(2L, 2L), dimnames = list(c("r1", 
+| "r2"), c("c1", "c2")), extra = "e")
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| structure(c(1, 2, 3, 4), dim = c(2L, 2L), dimnames = list(c("r1", 
+| "r2"), c("c1", "c2")), extra = "e")

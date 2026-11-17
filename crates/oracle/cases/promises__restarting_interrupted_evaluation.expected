@@ -1,0 +1,65 @@
+[stdout]
+| warning: restarting interrupted promise evaluation 
+| doTryCatch(return(expr), name, parentenv, handler)
+| warning: restarting interrupted promise evaluation 
+| doTryCatch(return(expr), name, parentenv, handler)
+| [[1]]
+| [1] "error: bad argument"
+| 
+| [[2]]
+| [1] "error: bad argument"
+| 
+| [[3]]
+| [1] "error: bad argument"
+| 
+| warning: restarting interrupted promise evaluation 
+| doTryCatch(return(expr), name, parentenv, handler)
+| [[1]]
+| [1] "error: first time"
+| 
+| [[2]]
+| [1] 2
+| 
+| [[3]]
+| [1] 2
+| 
+| warning: restarting interrupted promise evaluation 
+| doTryCatch(return(expr), name, parentenv, handler)
+| [1] "error: default failed" "error: default failed"
+| warning: restarting interrupted promise evaluation 
+| doTryCatch(return(expr), name, parentenv, handler)
+| [[1]]
+| [1] "jumped out"
+| 
+| [[2]]
+| [1] "finished"
+| 
+| [[1]]
+| [1] "caught the warning"
+| 
+| [[2]]
+| [1] "error: promise already under evaluation: recursive default argument reference or earlier problems?"
+| 
+| [1] "error: lazy failed"
+| warning: restarting interrupted promise evaluation 
+| doTryCatch(return(expr), name, parentenv, handler)
+| [1] "error: lazy failed"
+| warning: restarting interrupted promise evaluation 
+| doTryCatch(return(expr), name, parentenv, handler)
+| warning: restarting interrupted promise evaluation 
+| doTryCatch(return(expr), name, parentenv, handler)
+| [[1]]
+| [1] "error: passed on"
+| 
+| [[2]]
+| [1] "error: passed on"
+| 
+| [1] "error: first call"
+| [1] 2
+| [1] "error: third call"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "error: third call"

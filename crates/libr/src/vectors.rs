@@ -496,9 +496,13 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                 let element = element_vector(object, index)?;
                 runtime().heap.set_element(result, index, element);
             }
-            let names = get_attrib(object, R_NamesSymbol.get())?;
-            if names != runtime().nil() {
-                set_names_from(result, names)?;
+            // As GNU R's `coerceToVectorList` and `coerceToExpression`: a list keeps the
+            // names, an expression vector keeps no attribute.
+            if target == SexpType::List {
+                let names = get_attrib(object, R_NamesSymbol.get())?;
+                if names != runtime().nil() {
+                    set_names_from(result, names)?;
+                }
             }
             return Ok(result);
         }

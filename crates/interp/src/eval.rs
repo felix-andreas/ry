@@ -43,6 +43,10 @@ pub type Matched = SmallVec<[Sexp; 8]>;
 /// The promise bit set while its code runs, to report recursive default references.
 pub const PROMISE_SEEN: u16 = 1 << 0;
 
+/// The promise bit set when its code left through an error or another jump, so the next force
+/// warns as GNU R does for a `PRSEEN` of 2.
+const PROMISE_INTERRUPTED: u16 = 1 << 1;
+
 /// Evaluates `expression` in `env`. An error raised below is signalled here, so handlers run
 /// close to where it happened.
 pub unsafe fn eval(expression: Sexp, env: Sexp) -> R<Sexp> {
@@ -470,6 +474,15 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     let mark = heap.handle_mark();
     heap.root(promise);
     promise.set_gp_bits(PROMISE_SEEN, true);
+    if promise.has_gp(PROMISE_INTERRUPTED) {
+        promise.set_gp_bits(PROMISE_INTERRUPTED, false);
+        // A handler that jumps out of this warning leaves the promise marked as under
+        // evaluation, as in GNU R, where the next force reports the recursive reference.
+        if let Err(unwind) = conditions::warning("restarting interrupted promise evaluation") {
+            heap.release_handles(mark);
+            return Err(unwind);
+        }
+    }
     let code = promise.attrib();
     let env = promise.tag();
     // Releasing a promise's last counted reference clears its environment, so an unforced
@@ -505,6 +518,7 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
         }
     };
     promise.set_gp_bits(PROMISE_SEEN, false);
+    promise.set_gp_bits(PROMISE_INTERRUPTED, result.is_err());
     let settled = result.and_then(|value| settle_promise(promise, value));
     heap.release_handles(mark);
     // Releasing dropped the roots made while forcing, and the promise may hold the only
@@ -1065,6 +1079,9 @@ unsafe fn pooled_reference(symbol: Sexp) -> R<Sexp> {
     let reference = match state.references.get(used) {
         Some(&reference) if reference.refcount() <= 1 => {
             heap.set_cdr(reference, symbol);
+            // A call that failed while forcing the reference left it marked, and the mark
+            // belongs to that call's argument, not to the one that takes the reference next.
+            reference.set_gp_bits(PROMISE_INTERRUPTED, false);
             reference
         }
         // A `...` list counts the references it collected until its frame is released
@@ -4325,7 +4342,8 @@ unsafe fn catch_return(env: Sexp, result: R<Sexp>) -> R<Sexp> {
 }
 
 /// Runs the `on.exit` expressions of frame `depth` (one-based), keeping the visibility of the
-/// value. An unwind from an `on.exit` expression replaces the frame's own result.
+/// value. An unwind from an `on.exit` expression replaces the frame's own result, and a
+/// `return()` among them its visibility too.
 unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
     let frame = &mut interp().frames[depth - 1];
     if frame.on_exit.is_empty() {
@@ -4346,7 +4364,7 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
     } else {
         frame_env(depth - 1, Reify::Site("on.exit"))?
     };
-    let visible = interp().visible;
+    let mut visible = interp().visible;
     let mark = crate::heap().handle_mark();
     for &expression in &expressions {
         crate::heap().root(expression);
@@ -4385,6 +4403,7 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
             Err(Unwind::Jump(jump)) if matches!(jump, Jump::Return { env: target, .. } if target == env) => {
                 if let Jump::Return { value, .. } = jump {
                     outcome = Ok(value);
+                    visible = interp().visible;
                     if let Some(top) = interp().returned_values.last_mut() {
                         *top = Some(value);
                     }

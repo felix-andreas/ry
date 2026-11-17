@@ -1504,7 +1504,7 @@ impl Deparser {
             }
         }
         if wrap {
-            if self.length > self.cutoff {
+            if count > 1 && self.length > self.cutoff {
                 self.write_line();
             }
             self.print(")");

@@ -1,0 +1,40 @@
+[stdout]
+| [1] "list(\"a rather long string to fill the line up to the cutoff\", "
+| [2] "    c(key = \"value past the cutoff\"))"                          
+| [1] "list(\"a rather long string to fill the line up to the cutoff\", "
+| [2] "    c(key = \"value\", other = \"value past the cutoff\"))"       
+| [1] "c(\"a name that is long enough to pass the cutoff of sixty characters\" = 1)"
+| [1] "c(\"a name that is long enough to pass the cutoff of sixty characters\" = 1L)"
+| [1] "c(\"a name that is long enough to pass the cutoff of sixty characters\" = TRUE)"
+| [1] "c(\"a name that is long enough to pass the cutoff of sixty characters\" = 0+1i)"
+| [1] "c(\"a name that is long enough to pass the cutoff of sixty characters\" = 1, "
+| [2] "b = 2)"                                                                       
+| [1] "structure(1:2, names = c(\"a name that is long enough to pass the cutoff of sixty characters\", "
+| [2] "\"b\"))"                                                                                         
+| [1] "structure(\"a string that is long enough to pass the cutoff of sixty characters\", class = \"tag\")"
+| [1] "list(c(k = 2), c(k = 2), c(k = 2), c(k = 2), c(k = 2), c(k = 2), "
+| [2] "    c(k = 2), c(k = 2), c(k = 2), c(k = 2), c(k = 2), c(k = 2), " 
+| [3] "    c(k = 2), c(k = 2), c(k = 2), c(k = 2), c(k = 2), c(k = 2), " 
+| [4] "    c(k = 2), c(k = 2))"                                          
+| [1] "list(c(k = 2L), c(k = 2L), c(k = 2L), "
+| [2] "    c(k = 2L), c(k = 2L), c(k = 2L), " 
+| [3] "    c(k = 2L), c(k = 2L), c(k = 2L), " 
+| [4] "    c(k = 2L), c(k = 2L), c(k = 2L), " 
+| [5] "    c(k = 2L), c(k = 2L), c(k = 2L), " 
+| [6] "    c(k = 2L), c(k = 2L), c(k = 2L), " 
+| [7] "    c(k = 2L), c(k = 2L))"             
+| [1] "as.raw(0x01)"
+| [1] "as.raw(c(\"a name that is long enough to pass the cutoff of sixty characters\" = 0x01))"
+| list(alpha = c(k = "v"), beta = c("one value that fills the line", 
+| "and another one that does too"))
+| [1] "structure(1L, levels = \"a level long enough to pass the cutoff of sixty characters wide\", class = \"factor\")"
+| [1] "c(a = NA_character_)"
+| [1] "f(c(k = 1), \"a rather long string to fill the line up to the cutoff\", "
+| [2] "    g(x))"                                                               
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("f(c(k = 1), \"a rather long string to fill the line up to the cutoff\", ", 
+| "    g(x))")
