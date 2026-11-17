@@ -776,6 +776,14 @@ unsafe fn do_qsort(call: &Call<'_>) -> R<Sexp> {
 /// `sorted_fpass(x, decreasing, na.last)`: whether `x` is known to be in the wanted order, so
 /// `sort.int`, `order` and `sort.list` return it (or `seq_along(x)`) without sorting. The flags
 /// go through GNU R's `asInteger`, whose coercion warnings `sort.int` reports.
+///
+/// The check is GNU R's `fastpass_sortcheck`: an ALTREP vector answers from its sortedness metadata, and a
+/// plain integer vector wanted increasing is scanned for non-decreasing order without `NA`.
+///
+/// GNU R's `sort` and `order` put that metadata on every numeric result, which ry's do not,
+/// because a wrapper makes every later read from R code slower. So ry scans the other plain
+/// vectors too, but only for strict order: with distinct values every sorting method gives the
+/// identity permutation, where a tie could come out of `method = "quick"` permuted.
 unsafe fn do_sorted_fpass(call: &Call<'_>) -> R<Sexp> {
     for flag in [call.arg(1), call.arg(2)] {
         let mut warnings = CoercionWarnings::default();
@@ -804,12 +812,23 @@ unsafe fn do_sorted_fpass(call: &Call<'_>) -> R<Sexp> {
         (_, 0) => SORTED_DECR_NA_FIRST,
         _ => SORTED_DECR,
     };
-    values::scalar_bool(known_sorted(call.arg(0), wanted)?)
+    let x = call.arg(0);
+    if !matches!(x.kind(), SexpType::Integer | SexpType::Real) || length(x) == 0 {
+        return values::scalar_bool(false);
+    }
+    if x.is_altrep() {
+        let (sorted, no_na) = (crate::interp().hooks.altrep_sortedness)(x)?;
+        let known = matches!(sorted, -2 | -1 | 1 | 2);
+        return values::scalar_bool(known && (sorted == wanted || (no_na && sorted * wanted > 0)));
+    }
+    // GNU R scans only an integer vector wanted increasing, where ties pass.
+    let ties = x.kind() == SexpType::Integer && wanted > 0;
+    values::scalar_bool(column(x).is_some_and(|x| in_order(&x, wanted < 0, !ties)))
 }
 
-/// Whether a plain integer or double vector without `NA` or NaN is non-decreasing, or
+/// Whether an integer or double column without `NA` or NaN is non-decreasing, or
 /// non-increasing when `decreasing`, and strictly so when `strict`.
-unsafe fn in_order(x: Sexp, decreasing: bool, strict: bool) -> bool {
+fn in_order(x: &Column<'_>, decreasing: bool, strict: bool) -> bool {
     fn ordered<T: PartialOrd>(values: &[T], decreasing: bool, strict: bool) -> bool {
         match (decreasing, strict) {
             (false, false) => values.is_sorted_by(|left, right| left <= right),
@@ -818,17 +837,12 @@ unsafe fn in_order(x: Sexp, decreasing: bool, strict: bool) -> bool {
             (true, true) => values.is_sorted_by(|left, right| left > right),
         }
     }
-    if x.is_altrep() {
-        return false;
-    }
-    match x.kind() {
-        SexpType::Integer => {
-            let values = x.slice::<i32>();
+    match *x {
+        Column::Integer(values) => {
             !values.contains(&NA_INTEGER) && ordered(values, decreasing, strict)
         }
-        SexpType::Real => {
-            // A NaN fails every comparison, so only a lone one could pass as in order.
-            let values = x.slice::<f64>();
+        // A NaN fails every comparison, so only a lone one could pass as in order.
+        Column::Real(values) => {
             !values.first().is_some_and(|value| value.is_nan())
                 && ordered(values, decreasing, strict)
         }
@@ -840,27 +854,6 @@ const SORTED_DECR_NA_FIRST: i32 = -2;
 const SORTED_DECR: i32 = -1;
 const SORTED_INCR: i32 = 1;
 const SORTED_INCR_NA_FIRST: i32 = 2;
-
-/// GNU R's `fastpass_sortcheck`: an ALTREP vector answers from its sortedness metadata, and a
-/// plain integer vector wanted increasing is scanned for non-decreasing order without `NA`.
-///
-/// GNU R's `sort` and `order` put that metadata on every numeric result, which ry's do not,
-/// because a wrapper makes every later read from R code slower. So ry scans the other plain
-/// vectors too, but only for strict order: with distinct values every sorting method gives the
-/// identity permutation, where a tie could come out of `method = "quick"` permuted.
-unsafe fn known_sorted(x: Sexp, wanted: i32) -> R<bool> {
-    if !matches!(x.kind(), SexpType::Integer | SexpType::Real) || length(x) == 0 {
-        return Ok(false);
-    }
-    if x.is_altrep() {
-        let (sorted, no_na) = (crate::interp().hooks.altrep_sortedness)(x)?;
-        let known = matches!(sorted, -2 | -1 | 1 | 2);
-        return Ok(known && (sorted == wanted || (no_na && sorted * wanted > 0)));
-    }
-    // GNU R scans only an integer vector wanted increasing, where ties pass.
-    let ties = x.kind() == SexpType::Integer && wanted > 0;
-    Ok(in_order(x, wanted < 0, !ties))
-}
 
 /// `order(na.last, decreasing, ...)`: the stable permutation that sorts the keys
 /// lexicographically.
@@ -982,10 +975,13 @@ pub(crate) unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
     // order has no ties to keep stable, so it reverses, as GNU R's radix sort does.
     if let [key] = materialized[..]
         && !return_groups
+        && matches!(key.kind(), SexpType::Integer | SexpType::Real)
+        && !key.is_altrep()
+        && let Some(key) = column(key)
     {
-        let reversed = if in_order(key, directions[0], false) {
+        let reversed = if in_order(&key, directions[0], false) {
             Some(false)
-        } else if count > 1 && in_order(key, !directions[0], true) {
+        } else if count > 1 && in_order(&key, !directions[0], true) {
             Some(true)
         } else {
             None
@@ -1187,7 +1183,14 @@ unsafe fn do_rank(call: &Call<'_>) -> R<Sexp> {
             ranks[index] = rank;
         }
     };
-    if let Some(keys) = rank_keys(x, count) {
+    let column = match x.kind() {
+        SexpType::Logical | SexpType::Integer | SexpType::Real => column(x),
+        SexpType::String if count == length(x) => {
+            Some(Column::Ranks(string_ranks(x, TextOrder::Collation)))
+        }
+        _ => None,
+    };
+    if let Some(keys) = column.and_then(|column| rank_keys(column, count)) {
         let mut order: Vec<(u64, u32)> = keys
             .into_iter()
             .enumerate()
@@ -1237,11 +1240,11 @@ unsafe fn do_rank(call: &Call<'_>) -> R<Sexp> {
 /// The first `count` elements of `x` as integers that sort, and tie, as `rank` compares the
 /// elements, or `None` when one is missing, which only the general comparison orders. A double
 /// maps to its bits with the sign folded so that unsigned order is numeric order, with `-0`
-/// read as `0`; a string maps to its collation rank.
-unsafe fn rank_keys(x: Sexp, count: usize) -> Option<Vec<u64>> {
-    match x.kind() {
-        SexpType::Logical | SexpType::Integer => {
-            let data = &values::ints(x)[..count];
+/// read as `0`; strings come as their collation ranks.
+fn rank_keys(x: Column<'_>, count: usize) -> Option<Vec<u64>> {
+    match x {
+        Column::Integer(data) => {
+            let data = data.get(..count)?;
             if data.contains(&NA_INTEGER) {
                 return None;
             }
@@ -1251,8 +1254,8 @@ unsafe fn rank_keys(x: Sexp, count: usize) -> Option<Vec<u64>> {
                     .collect(),
             )
         }
-        SexpType::Real => {
-            let data = &values::reals(x)[..count];
+        Column::Real(data) => {
+            let data = data.get(..count)?;
             if data.iter().any(|value| value.is_nan()) {
                 return None;
             }
@@ -1269,8 +1272,7 @@ unsafe fn rank_keys(x: Sexp, count: usize) -> Option<Vec<u64>> {
                     .collect(),
             )
         }
-        SexpType::String if count == length(x) => {
-            let ranks = string_ranks(x, TextOrder::Collation);
+        Column::Ranks(ranks) => {
             if ranks.contains(&0) {
                 return None;
             }

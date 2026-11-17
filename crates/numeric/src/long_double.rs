@@ -1128,29 +1128,12 @@ fn from_x87(bytes: [u8; 10]) -> LongDouble {
 mod x87 {
     use std::arch::asm;
 
-    pub fn add_all(mut total: [u8; 10], values: &[f64]) -> [u8; 10] {
-        // SAFETY: the loop reads `values.len()` doubles from the slice and writes `total` back;
-        // the x87 stack starts empty under the ABI and is left empty.
-        unsafe {
-            asm!(
-                "fld tbyte ptr [{total}]",
-                "test {count}, {count}",
-                "jz 3f",
-                "2:",
-                "fadd qword ptr [{data}]",
-                "add {data}, 8",
-                "dec {count}",
-                "jnz 2b",
-                "3:",
-                "fstp tbyte ptr [{total}]",
-                total = in(reg) total.as_mut_ptr(),
-                data = inout(reg) values.as_ptr() => _,
-                count = inout(reg) values.len() => _,
-                out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
-                out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
-                options(nostack),
-            );
-        }
+    pub fn add_all(total: [u8; 10], values: &[f64]) -> [u8; 10] {
+        let mut totals = [[0u8; 16]];
+        totals[0][..10].copy_from_slice(&total);
+        column_sums(values, values.len(), &mut totals);
+        let mut total = [0u8; 10];
+        total.copy_from_slice(&totals[0][..10]);
         total
     }
 
@@ -1563,8 +1546,8 @@ mod x87 {
         }
     }
 
-    /// The extended total of each `rows`-long column of `values` into `totals`, for as many
-    /// whole columns as both hold. Each total starts a new chain, so the processor overlaps a
+    /// Adds each `rows`-long column of `values` to its extended total in `totals`, for as many
+    /// whole columns as both hold. Each total is a chain of its own, so the processor overlaps a
     /// column's additions with the end of the previous column's.
     pub(super) fn column_sums(values: &[f64], rows: usize, totals: &mut [[u8; 16]]) {
         let columns = values
@@ -1572,14 +1555,14 @@ mod x87 {
             .checked_div(rows)
             .unwrap_or(0)
             .min(totals.len());
-        // SAFETY: reads `rows * columns` doubles inside `values` and writes the first ten bytes
+        // SAFETY: reads `rows * columns` doubles inside `values` and rewrites the first ten bytes
         // of `columns` totals.
         unsafe {
             asm!(
                 "test {columns}, {columns}",
                 "jz 4f",
                 "2:",
-                "fldz",
+                "fld tbyte ptr [{totals}]",
                 "mov {count}, {rows}",
                 "3:",
                 "fadd qword ptr [{pointer}]",
