@@ -3,438 +3,577 @@
 //! compiled call takes for plain values.
 //!
 //! Attribute tags are symbols whose print names are interned `CHARSXP`s, so a lookup by name
-//! compares pointers (see [`same_text`]) and reads bytes only for a partial match.
+//! compares identities (see [`same_chars`]) and reads bytes only for a partial match.
 
 use {
     crate::{
-        builtins::{BuiltinDef, Call, Generic, builtin, internal, is_native_value, present},
-        dispatch::{self, basic_class},
-        eval,
-        subset::{
-            modifiable, modifiable_attributes, set_attribute_checked, set_names, set_row_names,
+        builtins::{BuiltinDef, Generic, builtin, internal},
+        handles::{
+            self, Args, Chars, Cx, Gc, Integer, Local, Str, Symbol, attribute_cells,
+            attributes_unshared, base_namespace, basic_class, call_function, class_of, dense,
+            environment_names, get_attribute, install_name, integer_sequence, is_na, is_object,
+            is_s4, length, logical_scalar, names_of, null, quoted, s4_classes, safe, safe_direct,
+            safe_unary, set_attribute, set_class, symbol, text, unshared,
         },
-        unwind::R,
-        values::{self, alloc, get_attr, length, nil, symbols},
+        subset::{assign_attribute, assign_names, assign_row_names},
+        unwind::{R, error},
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp},
     smallvec::SmallVec,
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
-    builtin("attr", -1, do_attr).direct(direct_attr),
-    builtin("attr<-", 3, do_set_attr).direct(direct_set_attr),
-    builtin("attributes", 1, do_attributes).unary(|object| unsafe {
-        if is_native_value(object) {
-            return Ok(None);
-        }
-        attributes(object).map(Some)
-    }),
-    builtin("names", 1, do_names)
+    builtin("attr", -1, safe!(do_attr)).direct(safe_direct!(direct_attr)),
+    builtin("attr<-", 3, safe!(do_set_attr)).direct(safe_direct!(direct_set_attr)),
+    builtin("attributes", 1, safe!(do_attributes)).unary(safe_unary!(unary_attributes)),
+    builtin("names", 1, safe!(do_names))
         .generic(Generic::Internal)
-        .unary(|object| unsafe {
-            if !plain(object) || object.kind() == SexpType::Environment {
-                return Ok(None);
-            }
-            Ok(Some(values::names(object)))
-        }),
-    builtin("names<-", 2, do_set_names)
+        .unary(safe_unary!(unary_names)),
+    builtin("names<-", 2, safe!(do_set_names))
         .generic(Generic::Internal)
-        .direct(direct_set_names),
-    builtin("dim", 1, do_dim)
+        .direct(safe_direct!(direct_set_names)),
+    builtin("dim", 1, safe!(do_dim))
         .generic(Generic::Internal)
-        .unary(|object| unsafe {
-            if !plain(object) {
-                return Ok(None);
-            }
-            Ok(Some(get_attr(object, symbols().dim)))
-        }),
-    builtin("class", 1, do_class).unary(|object| unsafe {
-        if is_native_value(object) {
-            return Ok(None);
-        }
-        dispatch::class_of(object).map(Some)
-    }),
-    builtin("oldClass", 1, do_old_class).unary(|object| unsafe {
-        if is_native_value(object) {
-            return Ok(None);
-        }
-        Ok(Some(get_attr(object, symbols().class)))
-    }),
-    internal("inherits", 3, do_inherits),
+        .unary(safe_unary!(unary_dim)),
+    builtin("class", 1, safe!(do_class)).unary(safe_unary!(unary_class)),
+    builtin("oldClass", 1, safe!(do_old_class)).unary(safe_unary!(unary_old_class)),
+    internal("inherits", 3, safe!(do_inherits)),
 ];
 
-/// Whether two `CHARSXP`s hold the same text. Interned ASCII strings are equal exactly when they
-/// are the same object, so bytes are compared only when either side is not ASCII.
+/// Whether two `CHARSXP`s hold the same text, for raw callers.
+///
+/// # Safety
+///
+/// Both are live `CHARSXP`s.
 #[inline]
 pub(crate) unsafe fn same_text(left: Sexp, right: Sexp) -> bool {
-    left == right
-        || (!(left.has_gp(gp::ASCII) && right.has_gp(gp::ASCII)) && left.bytes() == right.bytes())
+    same_chars(Gc::adopt(left), Gc::adopt(right))
 }
 
-/// GNU R's `do_attr` lookup of the attribute named by the `CHARSXP` `which`: a full match on a
-/// tag wins; otherwise, unless `exact`, a unique prefix of one tag, with `names` special because
-/// a pairlist's names are not stored as an attribute. The value is `getAttrib`'s, which expands
-/// compact row names and reads a pairlist's or a one-dimensional array's names.
-pub unsafe fn attribute(object: Sexp, which: Sexp, exact: bool) -> R<Sexp> {
-    let wanted = which.bytes();
-    // One pass finds both kinds of match. Only a strictly longer tag can be a partial match,
-    // because an equal-length prefix is a full match, so tags of the wanted length (every tag,
-    // in a vector used as a map from fixed-width keys) cost one pointer compare and no memcmp.
-    let mut partial = None;
-    let mut ambiguous = false;
-    let mut cell = object.attrib();
-    while cell.kind() == SexpType::Pairlist {
-        let text = cell.tag().car();
-        if same_text(text, which) {
-            return attribute_value(object, cell.tag(), cell.car());
-        }
-        if !exact {
-            let tag_text = text.bytes();
-            if tag_text.len() > wanted.len() && tag_text.starts_with(wanted) {
-                ambiguous |= partial.is_some();
-                partial = Some((cell.tag(), cell.car()));
+/// Whether two strings hold the same bytes. Interned ASCII strings are equal exactly when they
+/// are the same object, so bytes are compared only when either side is not ASCII.
+#[inline]
+fn same_chars(left: Gc<'_, Chars>, right: Gc<'_, Chars>) -> bool {
+    left.value().is(right.value())
+        || (!(left.has_mark(gp::ASCII) && right.has_mark(gp::ASCII))
+            && left.bytes() == right.bytes())
+}
+
+/// GNU R's `do_attr` lookup of the attribute named by the first element of `which`: a full
+/// match on a tag wins; otherwise, unless `exact`, a unique prefix of one tag, with `names`
+/// special because a pairlist's names are not stored as an attribute. The value is
+/// `getAttrib`'s, which expands compact row names and reads a pairlist's or a one-dimensional
+/// array's names.
+pub fn attribute<'s>(
+    context: &mut Cx<'s>,
+    object: Local<'s>,
+    which: Local<'s, Str>,
+    exact: bool,
+) -> R<Local<'s>> {
+    let (full, partial, ambiguous, wants_names, names_prefix) = {
+        let which = which.get(context, 0);
+        let wanted = which.bytes();
+        // One pass finds both kinds of match. Only a strictly longer tag can be a partial
+        // match, because an equal-length prefix is a full match, so tags of the wanted length
+        // (every tag, in a vector used as a map from fixed-width keys) cost one identity
+        // compare and no memcmp.
+        let mut full = None;
+        let mut partial = None;
+        let mut ambiguous = false;
+        for (tag, value) in attribute_cells(context, object) {
+            let Some(tag) = tag.downcast::<Symbol>() else {
+                continue;
+            };
+            let name = tag.name();
+            if same_chars(name, which) {
+                full = Some((Tag::of(tag), context.root(value)));
+                break;
+            }
+            if !exact {
+                let tag_text = name.bytes();
+                if tag_text.len() > wanted.len() && tag_text.starts_with(wanted) {
+                    ambiguous |= partial.is_some();
+                    partial = Some((Tag::of(tag), context.root(value)));
+                }
             }
         }
-        cell = cell.cdr();
+        (
+            full,
+            partial,
+            ambiguous,
+            wanted == b"names",
+            b"names".starts_with(wanted),
+        )
+    };
+    if let Some((tag, value)) = full {
+        return attribute_value(context, object, tag, value);
     }
-    if wanted == b"names" {
-        return Ok(values::names(object));
+    if wants_names {
+        return names_of(context, object);
     }
     if exact || ambiguous {
-        return Ok(nil());
+        return Ok(null());
     }
-    if b"names".starts_with(wanted) {
+    if names_prefix {
         match partial {
-            None => return Ok(values::names(object)),
+            None => return names_of(context, object),
             // A prefix of both `names` and another tag is ambiguous when names exist.
-            Some((tag, _)) if tag != symbols().names && values::names(object) != nil() => {
-                return Ok(nil());
+            Some((tag, _))
+                if tag != Tag::Names && names_of(context, object)?.r_type() != SexpType::Nil =>
+            {
+                return Ok(null());
             }
             Some(_) => {}
         }
     }
     match partial {
-        Some((tag, value)) => attribute_value(object, tag, value),
-        None => Ok(nil()),
+        Some((tag, value)) => attribute_value(context, object, tag, value),
+        None => Ok(null()),
     }
 }
 
-/// `getAttrib`'s value for the attribute `tag`, stored as `value`.
+/// The attributes whose stored value is not the value `getAttrib` reads.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tag {
+    Names,
+    RowNames,
+    Other,
+}
+
+impl Tag {
+    fn of(tag: Gc<'_, Symbol>) -> Tag {
+        if tag.is(symbol(|symbols| symbols.names)) {
+            Tag::Names
+        } else if tag.is(symbol(|symbols| symbols.row_names)) {
+            Tag::RowNames
+        } else {
+            Tag::Other
+        }
+    }
+}
+
+/// `getAttrib`'s value for an attribute stored as `value`.
 #[inline]
-unsafe fn attribute_value(object: Sexp, tag: Sexp, value: Sexp) -> R<Sexp> {
-    let symbols = symbols();
-    if tag == symbols.names {
-        return Ok(values::names(object));
+fn attribute_value<'s>(
+    context: &mut Cx<'s>,
+    object: Local<'s>,
+    tag: Tag,
+    value: Local<'s>,
+) -> R<Local<'s>> {
+    match tag {
+        Tag::Names => names_of(context, object),
+        Tag::RowNames => expand_row_names(context, value),
+        Tag::Other => Ok(value),
     }
-    if tag == symbols.row_names {
-        return expand_row_names(value);
-    }
-    Ok(value)
 }
 
 /// Compact row names (`c(NA, -n)`) read back as `1:n`.
-pub unsafe fn expand_row_names(value: Sexp) -> R<Sexp> {
-    if value.kind() == SexpType::Integer
-        && length(value) == 2
-        && values::ints(value)[0] == NA_INTEGER
+pub fn expand_row_names<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s>> {
+    let Some(rows) = dense::<Integer>(context, value)? else {
+        return Ok(value);
+    };
+    let count = match rows.as_slice(context) {
+        &[NA_INTEGER, count] => count.unsigned_abs() as usize,
+        _ => return Ok(value),
+    };
+    // GNU R's `getAttrib` gives `1:n` as a compact sequence, so reading the row names of a long
+    // data frame allocates nothing.
+    if count > 0
+        && let Some(sequence) = integer_sequence(context, count)?
     {
-        let count = values::ints(value)[1].unsigned_abs() as usize;
-        // GNU R's `getAttrib` gives `1:n` as a compact sequence, so reading the row names of a
-        // long data frame allocates nothing.
-        if count > 0
-            && let Some(sequence) =
-                (crate::interp().hooks.compact_sequence)(SexpType::Integer, count, 1.0, 1.0)?
-        {
-            return Ok(sequence);
-        }
-        let result = alloc(SexpType::Integer, count)?;
-        for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
-            *slot = index as i32 + 1;
-        }
-        return Ok(result);
+        return Ok(sequence);
     }
-    Ok(value)
+    let mut result = context.alloc::<Integer>(count)?;
+    for (index, slot) in result.as_mut_slice().iter_mut().enumerate() {
+        *slot = index as i32 + 1;
+    }
+    Ok(result.finish().value())
+}
+
+/// Whether `object` is a ry record or `I64`, which the attribute builtins refuse.
+#[inline]
+fn is_native(object: Local<'_>) -> bool {
+    matches!(object.r_type(), SexpType::Record | SexpType::I64)
 }
 
 /// Whether `object` is a value the attribute builtins answer without dispatch or a refusal.
 #[inline]
-unsafe fn plain(object: Sexp) -> bool {
-    !object.is_object() && !is_native_value(object)
+fn plain(object: Local<'_>) -> bool {
+    !is_object(object) && !is_native(object)
 }
 
 // `attr` and `attr<-`.
 
-unsafe fn do_attr(call: &Call<'_>) -> R<Sexp> {
-    if !(2..=3).contains(&call.args.len()) {
-        return Err(call.error("either 2 or 3 arguments are required"));
+fn do_attr<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    if !(2..=3).contains(&arguments.len()) {
+        return Err(arguments.error("either 2 or 3 arguments are required"));
     }
-    let (matched, _) = call.match_args(&["x", "which", "exact"])?;
-    let object = present(matched[0]).unwrap_or(nil());
-    let which = present(matched[1]).unwrap_or(nil());
-    if which.kind() != SexpType::String {
-        return Err(call.error("'which' must be of mode character"));
+    let [object, which, exact] = arguments.matched(context, ["x", "which", "exact"])?;
+    let object = object.unwrap_or_else(null);
+    let which = which.unwrap_or_else(null);
+    let Some(which) = dense::<Str>(context, which)? else {
+        return Err(arguments.error("'which' must be of mode character"));
+    };
+    if which.len() != 1 {
+        return Err(arguments.error("exactly one attribute 'which' must be given"));
     }
-    if length(which) != 1 {
-        return Err(call.error("exactly one attribute 'which' must be given"));
-    }
-    let exact = present(matched[2]).is_some_and(|exact| values::as_logical_scalar(exact) == 1);
-    attribute(object, which.element(0), exact)
+    let exact = exact.is_some_and(|exact| logical_scalar(context, exact) == 1);
+    attribute(context, object, which, exact)
 }
 
 /// `attr(x, which)` and `attr(x, which, exact)` for one name and a logical `exact`.
-unsafe fn direct_attr(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
-    let (object, which) = match args {
+fn direct_attr<'s>(context: &mut Cx<'s>, values: &[Local<'s>]) -> R<Option<Local<'s>>> {
+    let (object, which) = match values {
         [object, which] | [object, which, _] => (*object, *which),
         _ => return Ok(None),
     };
-    if which.kind() != SexpType::String || length(which) != 1 || is_native_value(object) {
+    if which.r_type() != SexpType::String || length(context, which) != 1 || is_native(object) {
         return Ok(None);
     }
-    let exact = match args.get(2) {
+    let exact = match values.get(2) {
         None => false,
-        Some(&exact) if exact.kind() == SexpType::Logical && length(exact) == 1 => {
-            let value = values::ints(exact)[0];
+        Some(&exact) if exact.r_type() == SexpType::Logical && length(context, exact) == 1 => {
+            let value = logical_scalar(context, exact);
             value != NA_LOGICAL && value != 0
         }
         Some(_) => return Ok(None),
     };
-    attribute(object, which.element(0), exact).map(Some)
+    let Some(which) = dense::<Str>(context, which)? else {
+        return Ok(None);
+    };
+    attribute(context, object, which, exact).map(Some)
 }
 
-unsafe fn do_set_attr(call: &Call<'_>) -> R<Sexp> {
-    let (matched, _) = call.match_args(&["x", "which", "value"])?;
-    let object = present(matched[0]).unwrap_or(nil());
-    let which = present(matched[1]).unwrap_or(nil());
-    let value = present(matched[2]).unwrap_or(nil());
+fn do_set_attr<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let [object, which, value] = arguments.matched(context, ["x", "which", "value"])?;
+    let object = object.unwrap_or_else(null);
+    let which = which.unwrap_or_else(null);
+    let value = value.unwrap_or_else(null);
     // GNU R's `isValidString`, then its check for one name, which R 4.6 added.
-    if which.kind() != SexpType::String
-        || length(which) == 0
-        || which.element(0) == values::na_string()
-    {
-        return Err(call.error("'name' must be non-null character string"));
+    let which = match dense::<Str>(context, which)? {
+        Some(which) if !which.is_empty() && !is_na(which.get(context, 0)) => which,
+        _ => return Err(arguments.error("'name' must be non-null character string")),
+    };
+    if which.len() != 1 && crate::system::r_at_least(4, 6) {
+        return Err(arguments.error("'name' must be a scalar string"));
     }
-    if length(which) != 1 && crate::system::r_at_least(4, 6) {
-        return Err(call.error("'name' must be a scalar string"));
-    }
-    if object == nil() {
-        if value == nil() {
-            return Ok(nil());
+    if object.r_type() == SexpType::Nil {
+        if value.r_type() == SexpType::Nil {
+            return Ok(null());
         }
-        return Err(call.error("attempt to set an attribute on NULL"));
+        return Err(arguments.error("attempt to set an attribute on NULL"));
     }
-    let object = modifiable_attributes(object)?;
-    let symbol = values::install_charsxp(which.element(0))?;
-    set_attribute_checked(object, symbol, value, call.call)?;
-    Ok(object)
+    let mut object = attributes_unshared(context, object)?;
+    let name = context.root(which.get(context, 0));
+    let name = install_name(context, name)?;
+    assign_attribute(
+        context,
+        &mut object,
+        name,
+        value,
+        Some(arguments.expression()),
+    )?;
+    Ok(object.finish())
 }
 
 /// `attr(x, which) <- value` from a complex assignment, whose target is already unshared, for
 /// any attribute but the dims, which need `dim<-`'s checks, and a class the full call would
 /// refuse.
-unsafe fn direct_set_attr(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
-    let &[object, which, value] = args else {
+fn direct_set_attr<'s>(context: &mut Cx<'s>, values: &[Local<'s>]) -> R<Option<Local<'s>>> {
+    let &[object, which, value] = values else {
         return Ok(None);
     };
-    if which.kind() != SexpType::String
-        || length(which) != 1
-        || which.element(0) == values::na_string()
-        || object == nil()
-        || is_native_value(object)
-        || is_native_value(value)
+    if which.r_type() != SexpType::String
+        || length(context, which) != 1
+        || object.r_type() == SexpType::Nil
+        || is_native(object)
+        || is_native(value)
     {
         return Ok(None);
     }
-    let symbols = symbols();
-    let object = modifiable_attributes(object)?;
-    let symbol = values::install_charsxp(which.element(0))?;
-    if symbol == symbols.names {
-        set_names(object, value)?;
-    } else if symbol == symbols.row_names {
-        set_row_names(object, value)?;
-    } else if symbol == symbols.class {
-        let valid = value == nil()
-            || (value.kind() == SexpType::String
-                && (object.kind() == SexpType::Integer
-                    || !(0..length(value)).any(|index| value.element(index).bytes() == b"factor")));
+    let Some(which) = dense::<Str>(context, which)? else {
+        return Ok(None);
+    };
+    if is_na(which.get(context, 0)) {
+        return Ok(None);
+    }
+    let mut object = attributes_unshared(context, object)?;
+    let name = context.root(which.get(context, 0));
+    let name = install_name(context, name)?;
+    if name.is(symbol(|symbols| symbols.names)) {
+        assign_names(context, &mut object, value)?;
+    } else if name.is(symbol(|symbols| symbols.row_names)) {
+        assign_row_names(context, &mut object, value)?;
+    } else if name.is(symbol(|symbols| symbols.class)) {
+        let valid = match value.r_type() {
+            SexpType::Nil => true,
+            SexpType::String => {
+                object.get().r_type() == SexpType::Integer || !names_factor(context, value)?
+            }
+            _ => false,
+        };
         if !valid {
             return Ok(None);
         }
-        dispatch::set_class_attribute(object, value)?;
-    } else if symbol == symbols.dim || symbol == symbols.dimnames {
+        set_class(context, &mut object, value)?;
+    } else if name.is(symbol(|symbols| symbols.dim)) || name.is(symbol(|symbols| symbols.dimnames))
+    {
         return Ok(None);
     } else {
-        values::set_attr(object, symbol, value)?;
+        set_attribute(context, &mut object, name, value)?;
     }
-    Ok(Some(object))
+    Ok(Some(object.finish()))
+}
+
+/// Whether the character vector `classes` names `"factor"`.
+pub fn names_factor<'s>(context: &mut Cx<'s>, classes: Local<'s>) -> R<bool> {
+    let Some(classes) = dense::<Str>(context, classes)? else {
+        return Ok(false);
+    };
+    Ok(classes
+        .iter(context)
+        .any(|class| class.bytes() == b"factor"))
 }
 
 // `attributes`.
 
-unsafe fn do_attributes(call: &Call<'_>) -> R<Sexp> {
-    attributes(call.arg(0))
+fn do_attributes<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    attributes(context, arguments.value(0))
+}
+
+fn unary_attributes<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Option<Local<'s>>> {
+    if is_native(object) {
+        return Ok(None);
+    }
+    attributes(context, object).map(Some)
 }
 
 /// `attributes(x)`: a named list of the attributes, which shares the tags' print names as its
 /// names.
-unsafe fn attributes(object: Sexp) -> R<Sexp> {
-    let symbols = symbols();
-    let mut items: SmallVec<[(Sexp, Sexp); 8]> = SmallVec::new();
+fn attributes<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Local<'s>> {
+    let names_symbol = symbol(|symbols| symbols.names);
+    let mut items: SmallVec<[(Local<'s, Chars>, Local<'s>, Tag); 8]> = SmallVec::new();
     // GNU R reports tag names only for a pairlist (`isList`): a call's tags are its argument
     // names, which `names()` exposes but `attributes()` does not.
-    if object.kind() == SexpType::Pairlist {
-        let names = values::pairlist_names(object)?;
-        if names != nil() {
-            crate::heap().root(names);
-            items.push((symbols.names.car(), names));
+    if object.r_type() == SexpType::Pairlist {
+        let names = names_of(context, object)?;
+        if names.r_type() != SexpType::Nil {
+            items.push((context.root(names_symbol.name()), names, Tag::Other));
         }
     }
-    let mut cell = object.attrib();
-    while cell.kind() == SexpType::Pairlist {
-        let tag = cell.tag();
-        if tag == symbols.row_names {
-            let expanded = expand_row_names(cell.car())?;
-            crate::heap().root(expanded);
-            items.push((tag.car(), expanded));
-        } else if tag != symbols.names || object.kind() != SexpType::Environment {
-            items.push((tag.car(), cell.car()));
+    let environment = object.r_type() == SexpType::Environment;
+    for (tag, value) in attribute_cells(context, object) {
+        let Some(tag) = tag.downcast::<Symbol>() else {
+            continue;
+        };
+        let kind = Tag::of(tag);
+        if kind != Tag::Names || !environment {
+            items.push((context.root(tag.name()), context.root(value), kind));
         }
-        cell = cell.cdr();
     }
     if items.is_empty() {
-        return Ok(nil());
+        return Ok(null());
     }
-    let result = alloc(SexpType::List, items.len())?;
-    crate::heap().root(result);
-    let names = alloc(SexpType::String, items.len())?;
-    for (index, &(name, value)) in items.iter().enumerate() {
-        values::set_elt(result, index, value);
-        values::set_elt(names, index, name);
+    for item in &mut items {
+        if item.2 == Tag::RowNames {
+            item.1 = expand_row_names(context, item.1)?;
+        }
     }
-    values::set_attr(result, symbols.names, names)?;
-    Ok(result)
+    let mut result = context.alloc::<handles::List>(items.len())?;
+    let mut names = context.alloc::<Str>(items.len())?;
+    for (index, &(name, value, _)) in items.iter().enumerate() {
+        result.set(context, index, value);
+        names.set(context, index, name);
+    }
+    let mut result = result.owned();
+    set_attribute(context, &mut result, names_symbol, names.finish().value())?;
+    Ok(result.finish().value())
 }
 
 // `names`, `names<-` and `dim`.
 
-unsafe fn do_names(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    if object.kind() == SexpType::Environment {
+fn do_names<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let object = arguments.value(0);
+    if let Some(environment) = object.downcast() {
         // GNU R: `names(env)` is `ls(env, all.names = TRUE, sorted = FALSE)`.
-        return crate::envir::env_names(object, true, false);
+        return environment_names(context, environment);
     }
-    Ok(values::names(object))
+    names_of(context, object)
 }
 
-unsafe fn do_set_names(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let names = call.arg(1);
-    if object == nil() {
-        if names == nil() {
-            return Ok(nil());
+fn unary_names<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Option<Local<'s>>> {
+    if !plain(object) || object.r_type() == SexpType::Environment {
+        return Ok(None);
+    }
+    names_of(context, object).map(Some)
+}
+
+fn do_set_names<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let object = arguments.value(0);
+    let names = arguments.value(1);
+    if object.r_type() == SexpType::Nil {
+        if names.r_type() == SexpType::Nil {
+            return Ok(null());
         }
-        return Err(call.error("attempt to set an attribute on NULL"));
+        return Err(arguments.error("attempt to set an attribute on NULL"));
     }
     // A call or pairlist keeps its names as tags, not as a `names` attribute.
-    if names == nil()
-        && get_attr(object, symbols().names) == nil()
-        && !matches!(object.kind(), SexpType::Pairlist | SexpType::Language)
+    if names.r_type() == SexpType::Nil
+        && get_attribute(context, object, symbol(|symbols| symbols.names)).r_type() == SexpType::Nil
+        && !matches!(object.r_type(), SexpType::Pairlist | SexpType::Language)
     {
         return Ok(object);
     }
-    if object.kind() == SexpType::Object {
-        let class = get_attr(object, symbols().class);
-        let class = if class == nil() {
-            "S4".to_string()
-        } else {
-            values::char_str(class.element(0)).to_string()
+    if object.r_type() == SexpType::Object {
+        let class = get_attribute(context, object, symbol(|symbols| symbols.class));
+        let class = match class.downcast::<Str>() {
+            Some(class) if !class.is_empty() => text(class.get(0)).into_owned(),
+            _ => "S4".to_string(),
         };
-        return Err(call.error(format!(
+        return Err(arguments.error(format!(
             "invalid to use names()<- on an S4 object of class '{class}'"
         )));
     }
-    let object = modifiable_attributes(object)?;
+    let mut object = attributes_unshared(context, object)?;
     // GNU R's `names<-` turns any value but a plain character vector into text with a
     // dispatched `as.character(value)`, so a Date names by its formatted dates. The value goes
     // into the call as it is, which evaluates a symbol or a call there, as in GNU R.
-    let names = if names != nil() && !(names.kind() == SexpType::String && names.attrib() == nil())
+    let names = if names.r_type() != SexpType::Nil
+        && !(names.r_type() == SexpType::String
+            && names.attributes(context).r_type() == SexpType::Nil)
     {
-        crate::heap().root(object);
-        let function = values::install("as.character")?;
-        eval::eval(values::call(function, &[names])?, call.env()?)?
+        let environment = arguments.environment(context)?;
+        call_function(context, "as.character", &[names], environment)?
     } else {
         names
     };
-    set_names(object, names)?;
-    Ok(object)
+    assign_names(context, &mut object, names)?;
+    Ok(object.finish())
 }
 
 /// `names(x) <- value` from a complex assignment for a plain vector and a plain character
 /// `value` or `NULL`, which need no conversion.
-unsafe fn direct_set_names(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
-    let &[object, names] = args else {
+fn direct_set_names<'s>(context: &mut Cx<'s>, values: &[Local<'s>]) -> R<Option<Local<'s>>> {
+    let &[object, names] = values else {
         return Ok(None);
     };
-    let vector = object.kind().is_vector() && object.kind() != SexpType::Char;
-    let text = names == nil() || (names.kind() == SexpType::String && names.attrib() == nil());
-    if !vector || !plain(object) || !text || object.is_altrep() {
+    let vector = object.r_type().is_vector() && object.r_type() != SexpType::Char;
+    let text = names.r_type() == SexpType::Nil
+        || (names.r_type() == SexpType::String
+            && names.attributes(context).r_type() == SexpType::Nil);
+    if !vector || !plain(object) || !text || object.downcast::<handles::Alt>().is_some() {
         return Ok(None);
     }
-    if names == nil() && get_attr(object, symbols().names) == nil() {
+    if names.r_type() == SexpType::Nil
+        && get_attribute(context, object, symbol(|symbols| symbols.names)).r_type() == SexpType::Nil
+    {
         return Ok(Some(object));
     }
-    let object = modifiable(object)?;
-    set_names(object, names)?;
-    Ok(Some(object))
+    let mut object = unshared(context, object)?;
+    assign_names(context, &mut object, names)?;
+    Ok(Some(object.finish()))
 }
 
-unsafe fn do_dim(call: &Call<'_>) -> R<Sexp> {
-    Ok(get_attr(call.arg(0), symbols().dim))
+fn do_dim<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let object = arguments.value(0);
+    Ok(context.root(get_attribute(
+        context,
+        object,
+        symbol(|symbols| symbols.dim),
+    )))
+}
+
+fn unary_dim<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Option<Local<'s>>> {
+    if !plain(object) {
+        return Ok(None);
+    }
+    Ok(Some(context.root(get_attribute(
+        context,
+        object,
+        symbol(|symbols| symbols.dim),
+    ))))
 }
 
 // `class`, `oldClass` and `inherits`.
 
-unsafe fn do_class(call: &Call<'_>) -> R<Sexp> {
-    dispatch::class_of(call.arg(0))
+fn do_class<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    class_of(context, arguments.value(0))
 }
 
-unsafe fn do_old_class(call: &Call<'_>) -> R<Sexp> {
-    Ok(get_attr(call.arg(0), symbols().class))
+fn unary_class<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Option<Local<'s>>> {
+    if is_native(object) {
+        return Ok(None);
+    }
+    class_of(context, object).map(Some)
+}
+
+fn do_old_class<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let object = arguments.value(0);
+    Ok(context.root(get_attribute(
+        context,
+        object,
+        symbol(|symbols| symbols.class),
+    )))
+}
+
+fn unary_old_class<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Option<Local<'s>>> {
+    if is_native(object) {
+        return Ok(None);
+    }
+    Ok(Some(context.root(get_attribute(
+        context,
+        object,
+        symbol(|symbols| symbols.class),
+    ))))
 }
 
 /// The classes `inherits` tests, which are `class(x)`'s, or for an S4 object its class and every
 /// class it extends, without allocating for an object that has no class attribute.
-enum Classes {
-    Vector(Sexp),
+enum Classes<'s> {
+    Vector(Local<'s, Str>),
     Fixed(&'static [&'static str]),
     Basic(&'static str),
 }
 
-impl Classes {
-    unsafe fn of(object: Sexp) -> R<Classes> {
-        if object.has_gp(gp::S4_OBJECT) {
-            return dispatch::s4_class_with_superclasses(object).map(Classes::Vector);
+impl<'s> Classes<'s> {
+    fn of(context: &mut Cx<'s>, object: Local<'s>) -> R<Classes<'s>> {
+        if is_s4(object) {
+            let classes = s4_classes(context, object)?;
+            return Ok(dense::<Str>(context, classes)?.map_or(Classes::Fixed(&[]), Classes::Vector));
         }
-        let class = values::class_attr(object);
-        if length(class) > 0 {
-            return Ok(Classes::Vector(class));
+        if is_object(object) {
+            let class = context.root(get_attribute(
+                context,
+                object,
+                symbol(|symbols| symbols.class),
+            ));
+            if length(context, class) > 0 {
+                return Ok(
+                    dense::<Str>(context, class)?.map_or(Classes::Fixed(&[]), Classes::Vector)
+                );
+            }
         }
-        let dim = get_attr(object, symbols().dim);
-        if dim != nil() {
-            return Ok(Classes::Fixed(if length(dim) == 2 {
+        let dim = context.root(get_attribute(
+            context,
+            object,
+            symbol(|symbols| symbols.dim),
+        ));
+        if dim.r_type() != SexpType::Nil {
+            return Ok(Classes::Fixed(if length(context, dim) == 2 {
                 &["matrix", "array"]
             } else {
                 &["array"]
             }));
         }
-        Ok(Classes::Basic(basic_class(object, false)))
+        Ok(Classes::Basic(basic_class(object)))
     }
 
-    /// The zero-based position of the class whose text is the `CHARSXP` `wanted`.
-    unsafe fn position(&self, wanted: Sexp) -> Option<usize> {
+    /// The zero-based position of the class whose text is `wanted`.
+    fn position(&self, context: &Cx<'s>, wanted: Gc<'_, Chars>) -> Option<usize> {
         match *self {
-            Classes::Vector(classes) => {
-                (0..length(classes)).find(|&index| same_text(classes.element(index), wanted))
-            }
+            Classes::Vector(classes) => classes
+                .iter(context)
+                .position(|class| same_chars(class, wanted)),
             Classes::Fixed(classes) => {
                 let bytes = wanted.bytes();
                 classes.iter().position(|class| class.as_bytes() == bytes)
@@ -444,48 +583,62 @@ impl Classes {
     }
 }
 
-pub(crate) unsafe fn do_inherits(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let what = call.arg(1);
-    let which = values::as_logical_scalar(call.arg(2)) == 1;
-    let classes = Classes::of(object)?;
-    if let Classes::Vector(vector) = classes {
-        crate::heap().root(vector);
-    }
+fn do_inherits<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let object = arguments.value(0);
+    let what = arguments.value(1);
+    let which = logical_scalar(context, arguments.value(2)) == 1;
+    let classes = Classes::of(context, object)?;
     // A class generator (an R6 or S4 generator, say) names its class through `nameOfClass()`.
-    let what = if what.kind() == SexpType::String {
+    let what = if what.r_type() == SexpType::String {
         what
     } else {
-        let generic = values::install("nameOfClass")?;
-        let quoted = values::call(symbols().quote, &[what])?;
-        let name_call = values::call(generic, &[quoted])?;
-        let name = eval::eval(name_call, values::base_namespace())?;
-        if name.kind() != SexpType::String {
-            return Err(call.error(
+        let quoted = quoted(context, what)?;
+        let name = call_function(context, "nameOfClass", &[quoted], base_namespace())?;
+        if name.r_type() != SexpType::String {
+            return Err(arguments.error(
                 "'what' must be a character vector or an object with a nameOfClass() method",
             ));
         }
         name
     };
-    inherits(&classes, what, which)
+    inherits(context, &classes, what, which)
 }
 
 /// `inherits(x, what, which)` for a character `what` and an `x` that is not an S4 object, which
 /// `base_fast_paths` calls for the closure `inherits`.
+///
+/// # Safety
+///
+/// The caller is on the interpreter's thread, holds no reference into the heap, both values
+/// are live, and the caller roots the result before it allocates.
 pub(crate) unsafe fn plain_inherits(object: Sexp, what: Sexp, which: bool) -> R<Sexp> {
-    inherits(&Classes::of(object)?, what, which)
+    handles::with(|context| {
+        let object = handles::adopt(context, object);
+        let what = handles::adopt(context, what);
+        let classes = Classes::of(context, object)?;
+        Ok(inherits(context, &classes, what, which)?.raw())
+    })
 }
 
-unsafe fn inherits(classes: &Classes, what: Sexp, which: bool) -> R<Sexp> {
+fn inherits<'s>(
+    context: &mut Cx<'s>,
+    classes: &Classes<'s>,
+    what: Local<'s>,
+    which: bool,
+) -> R<Local<'s>> {
+    let what = dense::<Str>(context, what)?
+        .ok_or_else(|| error("internal error: 'what' is not a character vector"))?;
     if which {
-        let result = alloc(SexpType::Integer, length(what))?;
-        for index in 0..length(what) {
-            values::ints_mut(result)[index] = classes
-                .position(what.element(index))
+        let mut result = context.alloc::<Integer>(what.len())?;
+        for (index, slot) in result.as_mut_slice().iter_mut().enumerate() {
+            *slot = classes
+                .position(context, what.get(context, index))
                 .map_or(0, |position| position as i32 + 1);
         }
-        return Ok(result);
+        return Ok(result.finish().value());
     }
-    let found = (0..length(what)).any(|index| classes.position(what.element(index)).is_some());
-    values::scalar_bool(found)
+    let found = what
+        .iter(context)
+        .any(|class| classes.position(context, class).is_some());
+    handles::logical(context, found)
 }

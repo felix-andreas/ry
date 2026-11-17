@@ -9,8 +9,11 @@ use {
         annotations::Entry,
         builtins::{Arg, BuiltinDef, Call, Generic, Kind, builtin, internal, special},
         eval::{self, Args, apply_closure, call_builtin, forced_promise, value_of},
+        handles::{
+            self, Cx, Local, Str, attribute_copy, attributes_unshared, dense, get_attribute, is_s4,
+            null, safe, set_class, symbol, text, unreferenced,
+        },
         interp,
-        subset::modifiable_attributes,
         unwind::{R, error},
         values::{
             self, char_str, get_attr, length, missing_arg, nil, scalar_string, string_vector,
@@ -29,15 +32,13 @@ use {
 pub const BUILTINS: &[BuiltinDef] = &[
     special("UseMethod", -1, do_usemethod).keep_visibility(),
     internal("NextMethod", -1, do_nextmethod).keep_visibility(),
-    builtin("oldClass<-", 2, do_set_old_class),
-    builtin("class<-", 2, do_set_class),
-    builtin("unclass", 1, do_unclass),
+    builtin("oldClass<-", 2, safe!(do_set_old_class)),
+    builtin("class<-", 2, safe!(do_set_class)),
+    builtin("unclass", 1, safe!(do_unclass)),
     builtin(".class2", 1, |call| unsafe { implicit_class(call.arg(0)) }),
     builtin(".cache_class", 2, |call| unsafe { do_cache_class(call) }),
-    builtin(".isMethodsDispatchOn", -1, do_is_methods_dispatch_on),
-    builtin("isS4", 1, |call| unsafe {
-        values::scalar_bool(call.arg(0).has_gp(gp::S4_OBJECT))
-    }),
+    builtin(".isMethodsDispatchOn", -1, safe!(do_is_methods_dispatch_on)),
+    builtin("isS4", 1, safe!(do_is_s4)),
     internal("setS4Object", 3, do_set_s4_object),
     internal("standardGeneric", -1, do_standard_generic),
 ];
@@ -2506,8 +2507,11 @@ pub unsafe fn deferred_default_marker() -> R<Sexp> {
     values::install("__Deferred_Default_Marker__")
 }
 
-unsafe fn do_is_methods_dispatch_on(_call: &Call<'_>) -> R<Sexp> {
-    values::scalar_bool(interp().globals.methods_dispatch)
+fn do_is_methods_dispatch_on<'s>(
+    context: &mut Cx<'s>,
+    _arguments: &handles::Args<'_, 's>,
+) -> R<Local<'s>> {
+    handles::logical(context, interp().globals.methods_dispatch)
 }
 
 /// `standardGeneric("f")`: hands the call to the dispatcher the methods package installed.
@@ -2573,14 +2577,18 @@ unsafe fn do_set_s4_object(call: &Call<'_>) -> R<Sexp> {
 
 // The class builtins.
 
-unsafe fn do_set_old_class(call: &Call<'_>) -> R<Sexp> {
-    let object = modifiable_attributes(call.arg(0))?;
-    let value = call.arg(1);
-    if value != nil() && value.kind() != SexpType::String {
-        return Err(call.error("attempt to set invalid 'class' attribute"));
+fn do_is_s4<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    handles::logical(context, is_s4(arguments.value(0)))
+}
+
+fn do_set_old_class<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let mut object = attributes_unshared(context, arguments.value(0))?;
+    let value = arguments.value(1);
+    if !matches!(value.r_type(), SexpType::Nil | SexpType::String) {
+        return Err(arguments.error("attempt to set invalid 'class' attribute"));
     }
-    set_class_attribute(object, value)?;
-    Ok(object)
+    set_class(context, &mut object, value)?;
+    Ok(object.finish())
 }
 
 /// Sets the class attribute, keeping the object bit in step.
@@ -2595,111 +2603,117 @@ pub unsafe fn set_class_attribute(object: Sexp, value: Sexp) -> R<()> {
     Ok(())
 }
 
-unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let value = call.arg(1);
-    if object == nil() {
+fn do_set_class<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let object = arguments.value(0);
+    let value = arguments.value(1);
+    if object.r_type() == SexpType::Nil {
         // Removing the class of NULL is a no-op, which `arima` relies on.
-        if value == nil() {
-            return Ok(nil());
+        if value.r_type() == SexpType::Nil {
+            return Ok(null());
         }
-        return Err(call.error("attempt to set an attribute on NULL"));
+        return Err(arguments.error("attempt to set an attribute on NULL"));
     }
-    let object = modifiable_attributes(object)?;
-    if value == nil() || length(value) == 0 {
-        set_class_attribute(object, nil())?;
-        return Ok(object);
+    let mut object = attributes_unshared(context, object)?;
+    let count = handles::length(context, value);
+    if value.r_type() == SexpType::Nil || count == 0 {
+        set_class(context, &mut object, null())?;
+        return Ok(object.finish());
     }
-    if value.kind() != SexpType::String {
-        return Err(call.error("attempt to set invalid 'class' attribute"));
-    }
+    let Some(classes) = dense::<Str>(context, value)? else {
+        return Err(arguments.error("attempt to set invalid 'class' attribute"));
+    };
+    let dims = handles::dims(context, object.get()).map(|dims| dims.len());
     // A matrix's implicit class, as `class(m)` reports it, is no attribute either.
-    if length(value) == 2
-        && values::dims(object).is_some_and(|dims| dims.len() == 2)
-        && char_str(value.element(0)) == "matrix"
-        && char_str(value.element(1)) == "array"
+    if count == 2
+        && dims == Some(2)
+        && text(classes.get(context, 0)) == "matrix"
+        && text(classes.get(context, 1)) == "array"
     {
-        set_class_attribute(object, nil())?;
-        return Ok(object);
+        set_class(context, &mut object, null())?;
+        return Ok(object.finish());
     }
-    if length(value) == 1 {
-        let class = char_str(value.element(0));
+    if count == 1 {
+        let kind = object.get().r_type();
+        let implicit = match text(classes.get(context, 0)).as_ref() {
+            "numeric" => Implicit::Numeric,
+            "matrix" => Implicit::Matrix,
+            "array" => Implicit::Array,
+            name if name == kind.name() && kind != SexpType::Real => Implicit::Own,
+            "integer" => Implicit::Coerce(SexpType::Integer),
+            "double" => Implicit::Coerce(SexpType::Real),
+            "character" => Implicit::Coerce(SexpType::String),
+            "logical" => Implicit::Coerce(SexpType::Logical),
+            "complex" => Implicit::Coerce(SexpType::Complex),
+            "list" => Implicit::Coerce(SexpType::List),
+            "raw" => Implicit::Coerce(SexpType::Raw),
+            _ => Implicit::None,
+        };
         // Setting an implicit class removes the attribute, or coerces.
-        match class.as_ref() {
-            "numeric" => {
-                set_class_attribute(object, nil())?;
-                if !matches!(object.kind(), SexpType::Integer | SexpType::Real) {
-                    return crate::coerce::coerce_vector(object, SexpType::Real);
+        match implicit {
+            Implicit::Numeric => {
+                set_class(context, &mut object, null())?;
+                if !matches!(kind, SexpType::Integer | SexpType::Real) {
+                    return handles::coerce(context, object.finish(), SexpType::Real);
                 }
-                return Ok(object);
+                return Ok(object.finish());
             }
-            "matrix" => {
-                if values::dims(object).is_none_or(|dims| dims.len() != 2) {
-                    return Err(call.error(format!(
-                        "invalid to set the class to matrix unless the dimension attribute is of length 2 (was {})",
-                        values::dims(object).map_or(0, |dims| dims.len())
-                    )));
-                }
-                set_class_attribute(object, nil())?;
-                return Ok(object);
+            Implicit::Matrix if dims != Some(2) => {
+                return Err(arguments.error(format!(
+                    "invalid to set the class to matrix unless the dimension attribute is of length 2 (was {})",
+                    dims.unwrap_or(0)
+                )));
             }
-            "array" => {
-                if values::dims(object).is_none() {
-                    return Err(call.error(
-                        "cannot set class to \"array\" unless the dimension attribute has length > 0",
-                    ));
-                }
-                set_class_attribute(object, nil())?;
-                return Ok(object);
+            Implicit::Array if dims.is_none() => {
+                return Err(arguments.error(
+                    "cannot set class to \"array\" unless the dimension attribute has length > 0",
+                ));
             }
-            name if name == object.kind().name() && object.kind() != SexpType::Real => {
-                set_class_attribute(object, nil())?;
-                return Ok(object);
+            Implicit::Matrix | Implicit::Array | Implicit::Own => {
+                set_class(context, &mut object, null())?;
+                return Ok(object.finish());
             }
-            "integer" | "double" | "character" | "logical" | "complex" | "list" | "raw" => {
-                set_class_attribute(object, nil())?;
-                let kind = match class.as_ref() {
-                    "integer" => SexpType::Integer,
-                    "double" => SexpType::Real,
-                    "character" => SexpType::String,
-                    "logical" => SexpType::Logical,
-                    "complex" => SexpType::Complex,
-                    "raw" => SexpType::Raw,
-                    _ => SexpType::List,
-                };
-                return crate::coerce::coerce_vector(object, kind);
+            Implicit::Coerce(kind) => {
+                set_class(context, &mut object, null())?;
+                return handles::coerce(context, object.finish(), kind);
             }
-            _ => {}
+            Implicit::None => {}
         }
     }
-    set_class_attribute(object, value)?;
-    Ok(object)
+    set_class(context, &mut object, value)?;
+    Ok(object.finish())
 }
 
-unsafe fn do_unclass(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    if values::class_attr(object) == nil() {
+/// What `class(x) <- name` does for a class `x` has implicitly.
+enum Implicit {
+    Numeric,
+    Matrix,
+    Array,
+    Own,
+    Coerce(SexpType),
+    None,
+}
+
+fn do_unclass<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let object = arguments.value(0);
+    let class = get_attribute(context, object, symbol(|symbols| symbols.class));
+    if class.r_type() == SexpType::Nil {
         return Ok(object);
     }
-    if object.kind() == SexpType::Environment || object.kind() == SexpType::ExternalPtr {
-        return Err(call.error(format!(
-            "cannot unclass an {}",
-            if object.kind() == SexpType::Environment {
-                "environment"
-            } else {
-                "external pointer"
-            }
-        )));
+    match object.r_type() {
+        SexpType::Environment => return Err(arguments.error("cannot unclass an environment")),
+        SexpType::ExternalPtr => {
+            return Err(arguments.error("cannot unclass an external pointer"));
+        }
+        _ => {}
     }
     // Unlike a replacement function, unclass may not reuse a value any variable still holds:
     // `lapply(unclass(x), f, oldClass(x))` reads the class of `x` afterwards.
-    let copy = if object.refcount() > 0 {
-        values::shallow_duplicate_attr(object)?
-    } else {
-        object
+    let mut copy = match unreferenced(object) {
+        Some(object) => object,
+        None => attribute_copy(context, object)?,
     };
-    set_class_attribute(copy, nil())?;
-    Ok(copy)
+    set_class(context, &mut copy, null())?;
+    Ok(copy.finish())
 }
 
 /// For an S4 object, its class and every class it extends, as `is()` would list them.

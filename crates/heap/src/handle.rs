@@ -457,6 +457,38 @@ impl<'a> Gc<'a, Chars> {
     }
 }
 
+impl<'a> Gc<'a, Symbol> {
+    /// The symbol's print name.
+    #[inline]
+    pub fn name(self) -> Gc<'a, Chars> {
+        // SAFETY: a symbol's `car` is its print name, a `CHARSXP` that the symbol keeps alive.
+        unsafe { Gc::adopt(self.raw.car()) }
+    }
+}
+
+impl<'a> Gc<'a, Pairlist> {
+    /// The cell's value.
+    #[inline]
+    pub fn head(self) -> Gc<'a> {
+        // SAFETY: the cell is live for `'a` and keeps its fields alive.
+        unsafe { Gc::adopt(self.raw.car()) }
+    }
+
+    /// The cell's tag: a symbol, or `NULL`.
+    #[inline]
+    pub fn tag(self) -> Gc<'a> {
+        // SAFETY: as for `head`.
+        unsafe { Gc::adopt(self.raw.tag()) }
+    }
+
+    /// The next cell, or what ends the list.
+    #[inline]
+    pub fn rest(self) -> Gc<'a> {
+        // SAFETY: as for `head`.
+        unsafe { Gc::adopt(self.raw.cdr()) }
+    }
+}
+
 /// A pointer rooted in the handle scope `'s`.
 pub struct Local<'s, T: Kind = Value> {
     raw: Sexp,
@@ -523,6 +555,19 @@ impl<'s, T: Kind> Local<'s, T> {
             scope: PhantomData,
             kind: PhantomData,
         })
+    }
+
+    /// The object as a pointer that borrows the context, for the readers [`Gc`] has.
+    #[inline]
+    pub fn read<'a>(self, _cx: &'a Cx<'_>) -> Gc<'a, T>
+    where
+        's: 'a,
+    {
+        Gc {
+            raw: self.raw,
+            borrow: PhantomData,
+            kind: PhantomData,
+        }
     }
 
     /// The attribute list, or `NULL`.
