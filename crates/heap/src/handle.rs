@@ -273,8 +273,7 @@ impl<'s> Cx<'s> {
         let heap = unsafe { &mut *self.heap.as_ptr() };
         // SAFETY: `T::TYPE` is a vector type, and a length over `isize::MAX` casts to a
         // negative one, which the heap refuses.
-        let raw = unsafe { heap.alloc_vector(T::TYPE, length as isize)? };
-        heap.root(raw);
+        let raw = unsafe { heap.alloc_vector_rooted(T::TYPE, length as isize)? };
         Ok(Fresh {
             raw,
             scope: PhantomData,

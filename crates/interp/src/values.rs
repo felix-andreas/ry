@@ -412,10 +412,7 @@ pub unsafe fn is_nil(object: Sexp) -> bool {
 
 #[inline]
 pub unsafe fn alloc(kind: SexpType, length: usize) -> R<Sexp> {
-    let heap = crate::heap();
-    let object = heap.alloc_vector(kind, length as isize)?;
-    heap.root(object);
-    Ok(object)
+    Ok(crate::heap().alloc_vector_rooted(kind, length as isize)?)
 }
 
 /// [`alloc`] without zeroing a numeric vector's elements; the caller writes all of them.

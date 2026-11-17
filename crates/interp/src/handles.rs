@@ -150,7 +150,7 @@ pub fn logical_scalar(_context: &mut Cx<'_>, value: Local<'_>) -> i32 {
 
 /// `value` as a standard vector of kind `T`: itself when it is one, its ALTREP class's
 /// standard form when it is an ALTREP object of that type, and `None` for any other type.
-#[inline]
+#[inline(always)]
 pub fn dense<'s, T: Vector>(context: &mut Cx<'s>, value: Local<'s>) -> R<Option<Local<'s, T>>> {
     if value.r_type() != T::TYPE {
         return Ok(None);
@@ -175,19 +175,19 @@ fn expanded<'s, T: Vector>(context: &mut Cx<'s>, value: Local<'s>) -> R<Option<L
 
 /// `value` as a standard character vector, coerced as `as.character` coerces when it is of
 /// another type.
-#[inline]
+#[inline(always)]
 pub fn character_vector<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s, Str>> {
     coerced(context, value)
 }
 
 /// `value` as a standard integer vector, coerced as `as.integer` coerces when it is of another
 /// type.
-#[inline]
+#[inline(always)]
 pub fn integer_vector<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s, Integer>> {
     coerced(context, value)
 }
 
-#[inline]
+#[inline(always)]
 fn coerced<'s, T: Vector>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s, T>> {
     let vector = if value.r_type() == T::TYPE {
         value
@@ -491,7 +491,7 @@ pub fn is_latin1(chars: Gc<'_, Chars>) -> bool {
 }
 
 /// Copies the names, dim and dimnames of `from` onto the new vector `to`.
-#[inline]
+#[inline(always)]
 pub fn copy_shape<T: Vector>(
     context: &mut Cx<'_>,
     from: Local<'_>,
@@ -510,7 +510,7 @@ pub fn copy_shape<T: Vector>(
 }
 
 /// Copies the names of `from` onto the new vector `to`.
-#[inline]
+#[inline(always)]
 pub fn copy_names<T: Vector>(
     context: &mut Cx<'_>,
     from: Local<'_>,
@@ -804,7 +804,16 @@ pub fn writable<'s, T: Vector>(
 /// The position of the first element of `vector` that repeats an earlier one, compared as
 /// `anyDuplicated` compares: strings by text, list elements with `identical`.
 #[inline]
-pub fn first_duplicate(_context: &mut Cx<'_>, vector: Local<'_>) -> R<Option<usize>> {
+pub fn first_duplicate(context: &mut Cx<'_>, vector: Local<'_>) -> R<Option<usize>> {
+    // A few strings compare pairwise in less time than a hash table takes to set up.
+    if let Some(strings) = vector.downcast::<Str>()
+        && strings.len() <= 8
+    {
+        let strings = strings.read(context);
+        return Ok((1..strings.len()).find(|&index| {
+            (0..index).any(|earlier| same_text(strings.get(earlier), strings.get(index)))
+        }));
+    }
     // SAFETY: the vector is rooted, and reading an ALTREP vector may allocate, which `&mut Cx`
     // permits.
     let duplicated = unsafe {
@@ -868,12 +877,18 @@ pub unsafe fn with<T>(body: impl for<'s> FnOnce(&mut Cx<'s>) -> R<T>) -> R<T> {
     // SAFETY: the interpreter's heap lives as long as the process, and `body` cannot keep the
     // context or anything of its scope, because it must accept every `'s`.
     let mut context = unsafe { Cx::enter(NonNull::from(&mut *heap)) };
-    let result = body(&mut context);
-    heap.release_handles(mark);
-    if let Err(unwind) = &result {
-        unwind.root();
+    // Each arm releases for itself, which lets an answer go straight to the caller's result.
+    match body(&mut context) {
+        Ok(answer) => {
+            heap.release_handles(mark);
+            Ok(answer)
+        }
+        Err(unwind) => {
+            heap.release_handles(mark);
+            unwind.root();
+            Err(unwind)
+        }
     }
-    result
 }
 
 /// Roots `raw` in the context's scope.
@@ -972,6 +987,7 @@ impl<'s> Args<'_, 's> {
 
     /// [`Args::matched`] that keeps the empty argument a call passed, for the builtins GNU R
     /// lets read one as a value.
+    #[inline]
     pub fn matched_as_passed<const N: usize>(
         &self,
         _context: &mut Cx<'s>,
@@ -1049,10 +1065,10 @@ pub fn attribute_cells<'a, 's: 'a, T: Kind>(
     context: &'a Cx<'_>,
     object: Local<'s, T>,
 ) -> impl Iterator<Item = (Gc<'a>, Gc<'a>)> {
-    let mut cell = object.value().attributes(context).downcast::<Pairlist>();
+    let mut cell = object.value().attributes(context);
     std::iter::from_fn(move || {
-        let pair = cell?;
-        cell = pair.rest().downcast();
+        let pair = cell.downcast::<Pairlist>()?;
+        cell = pair.rest();
         Some((pair.tag(), pair.head()))
     })
 }
@@ -1108,7 +1124,7 @@ pub fn names_of<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Local<'s>> {
 /// [`names_of`] for an object whose names are not a pairlist's tags, read where they are
 /// stored. It is `None` when only a safepoint can tell: the `dim` is an ALTREP vector, whose
 /// length its class's method reports.
-#[inline]
+#[inline(always)]
 pub fn stored_names<'a, 's: 'a>(context: &'a Cx<'_>, object: Local<'s>) -> Option<Gc<'a>> {
     if object.r_type() == SexpType::Environment {
         return Some(null().read(context));
@@ -1144,8 +1160,13 @@ pub fn unshared<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Owned<'s>> {
     // count is at most one, the binding the caller replaces, and otherwise a new copy that
     // nothing else refers to.
     unsafe {
-        let object = crate::subset::modifiable(object.raw())?;
-        Ok(Owned::assume(rooted(context, object)))
+        let unshared = crate::subset::modifiable(object.raw())?;
+        // The object's own root serves when it is not copied.
+        Ok(Owned::assume(if unshared == object.raw() {
+            object
+        } else {
+            rooted(context, unshared)
+        }))
     }
 }
 
@@ -1156,8 +1177,13 @@ pub fn attributes_unshared<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Own
     // SAFETY: as for `unshared`, with `modifiable_attributes`, whose copy is a new wrapper or
     // vector that nothing else refers to.
     unsafe {
-        let object = crate::subset::modifiable_attributes(object.raw())?;
-        Ok(Owned::assume(rooted(context, object)))
+        let unshared = crate::subset::modifiable_attributes(object.raw())?;
+        // The object's own root serves when it is not copied.
+        Ok(Owned::assume(if unshared == object.raw() {
+            object
+        } else {
+            rooted(context, unshared)
+        }))
     }
 }
 
@@ -1260,6 +1286,19 @@ pub fn install_name(_context: &mut Cx<'_>, name: Local<'_, Chars>) -> R<Gc<'stat
     // SAFETY: the string is rooted and interning may allocate, which `&mut Cx` permits; a
     // symbol lives as long as the heap.
     unsafe { Ok(Gc::adopt(values::install_charsxp(name.raw())?)) }
+}
+
+/// [`install_name`] for element `at` of `names`, which the rooted vector keeps alive, so the
+/// name needs no root of its own.
+#[inline]
+pub fn install_name_at(
+    context: &mut Cx<'_>,
+    names: Local<'_, Str>,
+    at: usize,
+) -> R<Gc<'static, Symbol>> {
+    let name = names.get(context, at).raw();
+    // SAFETY: as for `install_name`, and the vector holds the string.
+    unsafe { Ok(Gc::adopt(values::install_charsxp(name)?)) }
 }
 
 /// The symbol of a string as the heap's `install_char` gives it, which installs `NA` as `NA`.

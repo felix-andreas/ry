@@ -11,7 +11,7 @@ use {
         eval::{self, Args, apply_closure, call_builtin, forced_promise, value_of},
         handles::{
             self, Cx, Local, Str, attribute_copy, attributes_unshared, dense, get_attribute, is_s4,
-            null, safe, set_class, symbol, text, unreferenced,
+            null, safe, set_class, symbol, unreferenced,
         },
         interp,
         unwind::{R, error},
@@ -2622,30 +2622,30 @@ fn do_set_class<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> 
     let Some(classes) = dense::<Str>(context, value)? else {
         return Err(arguments.error("attempt to set invalid 'class' attribute"));
     };
-    let dims = handles::dims(context, object.get()).map(|dims| dims.len());
+    // The implicit class names are ASCII, so their bytes compare whatever the encoding mark.
     // A matrix's implicit class, as `class(m)` reports it, is no attribute either.
     if count == 2
-        && dims == Some(2)
-        && text(classes.get(context, 0)) == "matrix"
-        && text(classes.get(context, 1)) == "array"
+        && classes.get(context, 0).bytes() == b"matrix"
+        && classes.get(context, 1).bytes() == b"array"
+        && handles::dims(context, object.get()).is_some_and(|dims| dims.len() == 2)
     {
         set_class(context, &mut object, null())?;
         return Ok(object.finish());
     }
     if count == 1 {
         let kind = object.get().r_type();
-        let implicit = match text(classes.get(context, 0)).as_ref() {
-            "numeric" => Implicit::Numeric,
-            "matrix" => Implicit::Matrix,
-            "array" => Implicit::Array,
-            name if name == kind.name() && kind != SexpType::Real => Implicit::Own,
-            "integer" => Implicit::Coerce(SexpType::Integer),
-            "double" => Implicit::Coerce(SexpType::Real),
-            "character" => Implicit::Coerce(SexpType::String),
-            "logical" => Implicit::Coerce(SexpType::Logical),
-            "complex" => Implicit::Coerce(SexpType::Complex),
-            "list" => Implicit::Coerce(SexpType::List),
-            "raw" => Implicit::Coerce(SexpType::Raw),
+        let implicit = match classes.get(context, 0).bytes() {
+            b"numeric" => Implicit::Numeric,
+            b"matrix" => Implicit::Matrix,
+            b"array" => Implicit::Array,
+            name if name == kind.name().as_bytes() && kind != SexpType::Real => Implicit::Own,
+            b"integer" => Implicit::Coerce(SexpType::Integer),
+            b"double" => Implicit::Coerce(SexpType::Real),
+            b"character" => Implicit::Coerce(SexpType::String),
+            b"logical" => Implicit::Coerce(SexpType::Logical),
+            b"complex" => Implicit::Coerce(SexpType::Complex),
+            b"list" => Implicit::Coerce(SexpType::List),
+            b"raw" => Implicit::Coerce(SexpType::Raw),
             _ => Implicit::None,
         };
         // Setting an implicit class removes the attribute, or coerces.
@@ -2657,18 +2657,23 @@ fn do_set_class<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> 
                 }
                 return Ok(object.finish());
             }
-            Implicit::Matrix if dims != Some(2) => {
-                return Err(arguments.error(format!(
-                    "invalid to set the class to matrix unless the dimension attribute is of length 2 (was {})",
-                    dims.unwrap_or(0)
-                )));
+            Implicit::Matrix | Implicit::Array => {
+                let dimensions = handles::dims(context, object.get()).map(|dims| dims.len());
+                if matches!(implicit, Implicit::Matrix) && dimensions != Some(2) {
+                    return Err(arguments.error(format!(
+                        "invalid to set the class to matrix unless the dimension attribute is of length 2 (was {})",
+                        dimensions.unwrap_or(0)
+                    )));
+                }
+                if dimensions.is_none() {
+                    return Err(arguments.error(
+                        "cannot set class to \"array\" unless the dimension attribute has length > 0",
+                    ));
+                }
+                set_class(context, &mut object, null())?;
+                return Ok(object.finish());
             }
-            Implicit::Array if dims.is_none() => {
-                return Err(arguments.error(
-                    "cannot set class to \"array\" unless the dimension attribute has length > 0",
-                ));
-            }
-            Implicit::Matrix | Implicit::Array | Implicit::Own => {
+            Implicit::Own => {
                 set_class(context, &mut object, null())?;
                 return Ok(object.finish());
             }

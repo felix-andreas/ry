@@ -1442,6 +1442,25 @@ impl Heap {
     /// because the header and length words are written whole.
     #[inline]
     pub unsafe fn alloc_vector(&mut self, kind: SexpType, length: isize) -> HeapResult<Sexp> {
+        self.alloc_vector_inline(kind, length)
+    }
+
+    /// [`Heap::alloc_vector`] with its result rooted in the current handle scope. Every caller
+    /// that roots a new vector shares this one body, which holds the inline path, so none of
+    /// them pays a second call for it.
+    #[inline(never)]
+    pub unsafe fn alloc_vector_rooted(
+        &mut self,
+        kind: SexpType,
+        length: isize,
+    ) -> HeapResult<Sexp> {
+        let object = self.alloc_vector_inline(kind, length)?;
+        self.root(object);
+        Ok(object)
+    }
+
+    #[inline(always)]
+    unsafe fn alloc_vector_inline(&mut self, kind: SexpType, length: isize) -> HeapResult<Sexp> {
         let shift = small_vector_shift(kind);
         // A negative length casts to a huge one and takes the general path, which refuses it.
         if shift == NOT_SMALL_VECTOR || length as usize > SMALL_VECTOR_DATA_BYTES >> shift {

@@ -11,7 +11,7 @@ use {
         handles::{
             self, Args, Chars, Cx, Gc, Integer, Local, Logical, Str, Symbol, attribute_cells,
             attributes_unshared, base_namespace, basic_class, call_function, class_of, class_read,
-            dense, environment_names, get_attribute, install_name, integer_sequence, is_na,
+            dense, environment_names, get_attribute, install_name_at, integer_sequence, is_na,
             is_object, is_s4, length, logical_scalar, names_of, null, quoted, s4_classes, safe,
             safe_direct, safe_unary, set_attribute, set_class, stored_names, symbol, text,
             unshared,
@@ -308,8 +308,7 @@ fn do_set_attr<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s
         return Err(arguments.error("attempt to set an attribute on NULL"));
     }
     let mut object = attributes_unshared(context, object)?;
-    let name = context.root(which.get(context, 0));
-    let name = install_name(context, name)?;
+    let name = install_name_at(context, which, 0)?;
     assign_attribute(
         context,
         &mut object,
@@ -327,23 +326,20 @@ fn direct_set_attr<'a, 's>(context: &'a mut Cx<'s>, values: &[Local<'s>]) -> R<O
     let &[object, which, value] = values else {
         return Ok(None);
     };
-    if which.r_type() != SexpType::String
-        || length(context, which) != 1
+    // An ALTREP `which` takes the full call, which expands it.
+    let Some(which) = which.downcast::<Str>() else {
+        return Ok(None);
+    };
+    if which.len() != 1
         || object.r_type() == SexpType::Nil
         || is_native(object)
         || is_native(value)
+        || is_na(which.get(context, 0))
     {
         return Ok(None);
     }
-    let Some(which) = dense::<Str>(context, which)? else {
-        return Ok(None);
-    };
-    if is_na(which.get(context, 0)) {
-        return Ok(None);
-    }
     let mut object = attributes_unshared(context, object)?;
-    let name = context.root(which.get(context, 0));
-    let name = install_name(context, name)?;
+    let name = install_name_at(context, which, 0)?;
     if name.is(symbol(|symbols| symbols.names)) {
         assign_names(context, &mut object, value)?;
     } else if name.is(symbol(|symbols| symbols.row_names)) {
@@ -396,38 +392,60 @@ fn unary_attributes<'a, 's>(context: &'a mut Cx<'s>, object: Local<'s>) -> R<Opt
 /// names.
 fn attributes<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Local<'s>> {
     let names_symbol = symbol(|symbols| symbols.names);
-    let mut items: SmallVec<[(Local<'s, Chars>, Local<'s>, Tag); 8]> = SmallVec::new();
     // GNU R reports tag names only for a pairlist (`isList`): a call's tags are its argument
     // names, which `names()` exposes but `attributes()` does not.
-    if object.r_type() == SexpType::Pairlist {
+    let tags = if object.r_type() == SexpType::Pairlist {
         let names = names_of(context, object)?;
-        if names.r_type() != SexpType::Nil {
-            items.push((context.root(names_symbol.name()), names, Tag::Other));
-        }
-    }
+        (names.r_type() != SexpType::Nil).then_some(names)
+    } else {
+        None
+    };
+    // An environment's `names` attribute is not listed, as `names(env)` is its variables.
     let environment = object.r_type() == SexpType::Environment;
+    let listed = move |tag: Gc<'_, Symbol>| !environment || Tag::of(tag) != Tag::Names;
+    let mut count = usize::from(tags.is_some());
+    let mut row_names = None;
     for (tag, value) in attribute_cells(context, object) {
         let Some(tag) = tag.downcast::<Symbol>() else {
             continue;
         };
-        let kind = Tag::of(tag);
-        if kind != Tag::Names || !environment {
-            items.push((context.root(tag.name()), context.root(value), kind));
+        if listed(tag) {
+            count += 1;
+            if Tag::of(tag) == Tag::RowNames {
+                row_names = Some(context.root(value));
+            }
         }
     }
-    if items.is_empty() {
+    if count == 0 {
         return Ok(null());
     }
-    for item in &mut items {
-        if item.2 == Tag::RowNames {
-            item.1 = expand_row_names(context, item.1)?;
-        }
+    let row_names = match row_names {
+        Some(value) => Some(expand_row_names(context, value)?),
+        None => None,
+    };
+    let mut result = context.alloc::<handles::List>(count)?;
+    let mut names = context.alloc::<Str>(count)?;
+    // The object holds its attribute cells, so they are read again after the allocations
+    // instead of being rooted one by one before them.
+    let mut index = 0;
+    if let Some(tags) = tags {
+        result.set(context, 0, tags);
+        names.set(context, 0, names_symbol.name());
+        index = 1;
     }
-    let mut result = context.alloc::<handles::List>(items.len())?;
-    let mut names = context.alloc::<Str>(items.len())?;
-    for (index, &(name, value, _)) in items.iter().enumerate() {
-        result.set(context, index, value);
-        names.set(context, index, name);
+    for (tag, value) in attribute_cells(context, object) {
+        let Some(tag) = tag.downcast::<Symbol>() else {
+            continue;
+        };
+        if !listed(tag) {
+            continue;
+        }
+        match row_names {
+            Some(expanded) if Tag::of(tag) == Tag::RowNames => result.set(context, index, expanded),
+            _ => result.set(context, index, value),
+        }
+        names.set(context, index, tag.name());
+        index += 1;
     }
     let mut result = result.owned();
     set_attribute(context, &mut result, names_symbol, names.finish().value())?;

@@ -13488,7 +13488,7 @@ fn bind_named<'s>(
     value: Local<'s>,
     kind: ElementKind,
 ) -> R<bool> {
-    if kind != ElementKind::Dollar || index.attributes(context).r_type() != SexpType::Nil {
+    if kind != ElementKind::Dollar {
         return Ok(false);
     }
     let Some(text) = index.downcast::<Str>() else {
