@@ -3015,6 +3015,9 @@ enum Cumulative {
 
 unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
     let operand = values::materialize(call.arg(0))?;
+    if operand.kind() == SexpType::Expression {
+        return Err(error("'list' object cannot be coerced to type 'double'"));
+    }
     let count = length(operand);
     let names = values::names(operand);
     let result = match (operand.kind(), kind) {
@@ -3768,6 +3771,9 @@ unsafe fn all_any(call: &Call<'_>, is_all: bool) -> R<Sexp> {
                     item.kind().name()
                 ),
             )?;
+            if item.kind() == SexpType::Expression {
+                return Err(error("'list' object cannot be coerced to type 'logical'"));
+            }
             let flags = coerce_vector(item, SexpType::Logical)?;
             crate::heap().root(flags);
             flags
@@ -4466,14 +4472,15 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
                 let message = "first element used of 'each' argument";
                 crate::conditions::warning_call(call.call, message)?;
             }
-            let (each, out_of_range) = crate::coerce::real_to_int(rep_count(value)?);
-            if out_of_range {
-                crate::conditions::warning("NAs introduced by coercion to integer range")?;
-            }
-            match each {
-                NA_INTEGER => 1,
-                each if each < 0 => return Err(call.error("invalid 'each' argument")),
-                each => each as usize,
+            // `each` is a double truncated toward zero: a non-finite count is 1, and one
+            // below -1 or above the longest vector is an error.
+            let each = rep_count(value)?;
+            if !each.is_finite() {
+                1
+            } else if each <= -1.0 || each > LONGEST_REPETITION as f64 {
+                return Err(call.error("invalid 'each' argument"));
+            } else {
+                each as usize
             }
         }
         None => 1,

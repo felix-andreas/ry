@@ -12,6 +12,10 @@
 # With `ORACLE_OBSERVE` set, the report also holds, in order, the deep observer's dump of every
 # top-level value with its visibility and every condition's classes, message and call (observe.R,
 # which the harness splices in below, so the script cannot see or replace it).
+#
+# The driver's frame encloses in the base environment, not the global one, so a script that
+# rebinds `+` or `length` at top level leaves the driver's own calls alone. A case that prints
+# the driver's frames (conditions__try_catch_fast_path) is recorded again after a change here.
 local({
   # <observe.R>
   observing <- nzchar(Sys.getenv("ORACLE_OBSERVE"))
@@ -121,4 +125,4 @@ local({
     if (failed) break
   }
   write_report()
-})
+}, envir = new.env(parent = baseenv()))

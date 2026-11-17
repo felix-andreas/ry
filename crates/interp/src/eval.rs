@@ -6264,14 +6264,27 @@ unsafe fn call_seeded(
 unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
     let expression = call.arg(0);
     let mut env = call.arg(1);
-    let enclosure = call.arg(2);
-    // GNU R names the type of what `simple_as_environment` made of a bad `enclos`, which is
-    // `NULL` for everything that is not an S4 object.
-    if !matches!(
-        enclosure.kind(),
-        SexpType::Nil | SexpType::Environment | SexpType::Object
-    ) {
-        return Err(error("invalid 'enclos' argument of type 'NULL'"));
+    // An S4 object that extends "environment" stands for the environment in its `.xData`
+    // slot. GNU R names the type of what that conversion made of a bad `enclos`, which is
+    // `NULL`.
+    let enclosure = match call.arg(2) {
+        enclosure if matches!(enclosure.kind(), SexpType::Nil | SexpType::Environment) => enclosure,
+        enclosure => match values::get_attr(enclosure, values::symbols().dot_xdata) {
+            data if enclosure.kind() == SexpType::Object
+                && data.kind() == SexpType::Environment =>
+            {
+                data
+            }
+            _ => return Err(error("invalid 'enclos' argument of type 'NULL'")),
+        },
+    };
+    if env.kind() == SexpType::Object {
+        let data = values::get_attr(env, values::symbols().dot_xdata);
+        env = if data.kind() == SexpType::Environment {
+            data
+        } else {
+            nil()
+        };
     }
     match env.kind() {
         SexpType::Environment => {}

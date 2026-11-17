@@ -431,6 +431,9 @@ unsafe fn do_set_environment(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("replacement object is not an environment"));
     }
     if matches!(object.kind(), SexpType::Builtin | SexpType::Special) {
+        if env == nil() {
+            return Ok(object);
+        }
         crate::conditions::warning(
             "setting environment(<primitive function>) is not possible and trying it is deprecated",
         )?;
