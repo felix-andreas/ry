@@ -15,7 +15,7 @@ use {
         coerce::{CoercionWarnings, real_to_int},
         conditions, deparse, dispatch, interp, moves, scope,
         unwind::{
-            Jump, MissingArgument, R, Rooted, Unwind, error, error_in, jump, missing_argument,
+            ArgumentReader, Jump, R, Rooted, Unwind, error, error_in, jump, missing_argument,
         },
         utils::record_profile_sample,
         values::{
@@ -76,7 +76,7 @@ unsafe fn eval_unsignalled(expression: Sexp, env: Sexp) -> R<Sexp> {
 
 /// The value of a symbol: its binding, with promises forced.
 pub unsafe fn eval_symbol(symbol: Sexp, env: Sexp) -> R<Sexp> {
-    eval_symbol_reporting(symbol, env, || lexical_call(env), MissingArgument::Eval)
+    eval_symbol_reporting(symbol, env, || lexical_call(env), ArgumentReader::Eval)
 }
 
 /// [`eval_symbol`] for a lookup that starts in `env` on behalf of a frame that is not `env`
@@ -89,7 +89,7 @@ pub unsafe fn eval_symbol_reporting(
     symbol: Sexp,
     env: Sexp,
     lexical: impl FnOnce() -> Sexp,
-    reader: MissingArgument,
+    reader: ArgumentReader,
 ) -> R<Sexp> {
     let symbols = symbols();
     if symbol == symbols.dots {
@@ -136,7 +136,7 @@ unsafe fn dot_dot_value(
     index: usize,
     env: Sexp,
     lexical: impl FnOnce() -> Sexp,
-    reader: MissingArgument,
+    reader: ArgumentReader,
 ) -> R<Sexp> {
     if index == 0 {
         return Err(error("indexing '...' with non-positive index 0"));
@@ -370,7 +370,7 @@ pub unsafe fn find_called_fun(symbol: Sexp, mut env: Sexp, call: Sexp) -> R<Sexp
                 return Err(missing_argument(
                     call,
                     &symbol_name(symbol),
-                    MissingArgument::Get,
+                    ArgumentReader::Get,
                 ));
             }
         }
@@ -683,7 +683,7 @@ pub(crate) unsafe fn enclosed_value(symbol: Sexp, enclosure: Sexp) -> R<Sexp> {
 unsafe fn eval_enclosed_name(symbol: Sexp, enclosure: Sexp, owner: usize) -> R<Sexp> {
     interp().visible = true;
     let lexical = || interp().frames.get(owner).map_or(nil(), |frame| frame.call);
-    match eval_symbol_reporting(symbol, enclosure, lexical, MissingArgument::Getvar) {
+    match eval_symbol_reporting(symbol, enclosure, lexical, ArgumentReader::Getvar) {
         Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
         result => result,
     }
@@ -2184,7 +2184,7 @@ unsafe fn collect_evaluated_args(
                             return Err(missing_argument(
                                 lexical_call(env),
                                 "",
-                                MissingArgument::Eval,
+                                ArgumentReader::Eval,
                             ));
                         }
                         missing
@@ -5728,7 +5728,7 @@ pub(crate) enum SwitchSelector {
 /// evaluating the empty argument. Its byte compiler returns an invisible `NULL` instead; code
 /// that relies on that already fails on a closure's first, uncompiled call.
 pub(crate) unsafe fn switch_empty_default() -> Unwind {
-    missing_argument(unbound(), "", MissingArgument::Eval)
+    missing_argument(unbound(), "", ArgumentReader::Eval)
 }
 
 /// Checks a `switch` selector and reads it, with GNU R's warnings for a factor and for a
@@ -5953,7 +5953,7 @@ unsafe fn do_tailcall(call: &Call<'_>) -> R<Sexp> {
         return Err(missing_argument(
             lexical_call(call.env()?),
             "FUN",
-            MissingArgument::TailcallRec,
+            ArgumentReader::TailcallRec,
         ));
     };
     let function = if function.value.kind() == SexpType::String && length(function.value) == 1 {
@@ -5997,7 +5997,7 @@ unsafe fn do_exec(call: &Call<'_>) -> R<Sexp> {
             return Err(missing_argument(
                 lexical_call(call.env()?),
                 "expr",
-                MissingArgument::Tailcall,
+                ArgumentReader::Tailcall,
             ));
         }
     };
@@ -7070,10 +7070,17 @@ pub unsafe fn complex_assign(
     let lookup_env = if superassign { env.enclosure() } else { env };
     let mut base = find_var(inner, lookup_env)?;
     if base == missing_arg() {
+        // GNU R reads the name in the frame when the frame binds it and in the enclosure
+        // otherwise, and the error names the call of the environment the read started in.
+        let reader = if superassign || find_var_in_frame(inner, env)? == unbound() {
+            env.enclosure()
+        } else {
+            env
+        };
         return Err(missing_argument(
-            lexical_call(lookup_env),
+            lexical_call(reader),
             &symbol_name(inner),
-            MissingArgument::Eval,
+            ArgumentReader::Eval,
         ));
     }
     if base == unbound() {

@@ -25,12 +25,14 @@ use {
         builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
         bytecode::Arith,
         coerce::{self, coerce_vector},
-        conditions, interp,
+        conditions,
+        eval::lexical_call,
+        interp,
         kernels::{self, Comparison, Extremes, Integers, Reals},
         long_double::{self, LongDouble},
         rmath,
         system::r_at_least,
-        unwind::{MissingArgument, R, Unwind, error, missing_argument},
+        unwind::{ArgumentReader, R, Unwind, error, missing_argument},
         values::{
             self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real, symbols,
         },
@@ -2763,9 +2765,9 @@ unsafe fn do_log(call: &Call<'_>) -> R<Sexp> {
     let (matched, _) = call.match_args(&["x", "base"])?;
     // GNU R's class for the error says how many arguments the call wrote.
     let reader = if call.len() == 1 {
-        MissingArgument::Log1
+        ArgumentReader::Log1
     } else {
-        MissingArgument::Log2
+        ArgumentReader::Log2
     };
     let operand = present(matched[0]).ok_or_else(|| missing_argument(call.call, "x", reader))?;
     let operand = values::materialize(operand)?;
@@ -2967,7 +2969,7 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
     }
     let (matched, _) = call.match_args(&["x", "digits"])?;
     let operand = present(matched[0])
-        .ok_or_else(|| missing_argument(call.call, "x", MissingArgument::Math))?;
+        .ok_or_else(|| missing_argument(call.call, "x", ArgumentReader::Math))?;
     if let Some(digits) = present(matched[1])
         && !matches!(
             digits.kind(),
@@ -4583,30 +4585,27 @@ fn finite_term(from: f64, index: f64, by: f64) -> f64 {
 /// `rep(x, times, each, length.out)`.
 unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
     let (matched, _) = call.match_args(&["x", "times", "length.out", "each", "..."])?;
-    // GNU R evaluates the call's first argument before it matches any, so that one being
-    // missing is the caller's error, while a missing `x` matched from a later position reaches
-    // the type check as the empty symbol.
-    if call
-        .args
-        .first()
-        .is_some_and(|first| first.value == values::missing_arg())
+    // GNU R evaluates the call's first argument before it matches any, so a name there that is
+    // bound to no argument is the caller's error. Any other missing `x` (one matched from a
+    // later position, or the empty symbol as a call's value) reaches the type check.
+    let arguments = call.call.cdr();
+    if arguments.kind() == SexpType::Pairlist
+        && arguments.car().kind() == SexpType::Symbol
+        && call
+            .args
+            .first()
+            .is_some_and(|first| first.value == values::missing_arg())
     {
-        let arguments = call.call.cdr();
-        let name = match arguments.kind() {
-            SexpType::Pairlist if arguments.car().kind() == SexpType::Symbol => {
-                let first = arguments.car();
-                if first == symbols().dots {
-                    "".into()
-                } else {
-                    values::symbol_name(first)
-                }
-            }
-            _ => "".into(),
+        let first = arguments.car();
+        let name = if first == symbols().dots {
+            "".into()
+        } else {
+            values::symbol_name(first)
         };
         return Err(missing_argument(
-            crate::eval::lexical_call(call.env()?),
+            lexical_call(call.env()?),
             &name,
-            MissingArgument::Eval,
+            ArgumentReader::Eval,
         ));
     }
     let object = match present(matched[0]) {

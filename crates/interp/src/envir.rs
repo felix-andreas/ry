@@ -9,7 +9,7 @@ use {
         eval::{self, define, find_var, find_var_in_frame, value_of},
         interp,
         sort::collation_order,
-        unwind::{MissingArgument, R, error, missing_argument},
+        unwind::{ArgumentReader, R, error, missing_argument},
         values::{
             self, alloc, base_env, base_namespace, char_str, empty_env, get_attr, global_env,
             length, missing_arg, new_env, nil, scalar_bool, scalar_integer, scalar_string,
@@ -676,7 +676,7 @@ unsafe fn do_get(call: &Call<'_>) -> R<Sexp> {
                 return Err(missing_argument(
                     call.call,
                     &symbol_name(symbol),
-                    MissingArgument::Get,
+                    ArgumentReader::Get,
                 ));
             }
             value_of(value)
@@ -703,7 +703,7 @@ unsafe fn do_get0(call: &Call<'_>) -> R<Sexp> {
         Some(value) if value == missing_arg() => Err(missing_argument(
             call.call,
             &symbol_name(symbol),
-            MissingArgument::Get,
+            ArgumentReader::Get,
         )),
         Some(value) => value_of(value),
         None => Ok(call.arg(4)),
@@ -2362,37 +2362,35 @@ unsafe fn do_dots_elt(call: &Call<'_>) -> R<Sexp> {
     }
     // Forcing the element's promise decides the visibility, as evaluating `..n` would.
     interp().visible = true;
-    if let Some(dots) = call.slot_dots() {
-        let mut item = dots;
-        for _ in 1..index {
-            if item.kind() != SexpType::Dots {
-                break;
-            }
-            item = item.cdr();
-        }
-        // A missing or absent element takes the environment path, which reports it.
-        if item.kind() == SexpType::Dots && item.car() != missing_arg() {
-            return eval::value_of(item.car());
-        }
-    }
-    let env = call.env()?;
-    let mut item = find_var(symbols().dots, env)?;
+    let slot_dots = call.slot_dots();
+    let mut item = match slot_dots {
+        Some(dots) => dots,
+        None => find_var(symbols().dots, call.env()?)?,
+    };
+    let holds_element = |item: Sexp| matches!(item.kind(), SexpType::Dots | SexpType::Pairlist);
     for _ in 1..index {
-        if item.kind() != SexpType::Dots {
+        if !holds_element(item) {
             break;
         }
         item = item.cdr();
     }
-    // GNU R evaluates the element itself, so an empty one is a missing argument with no name.
-    if item.kind() == SexpType::Dots && item.car() == missing_arg() {
-        return Err(missing_argument(
-            eval::lexical_call(env),
-            "",
-            MissingArgument::Eval,
-        ));
+    if holds_element(item) {
+        // GNU R evaluates the element itself, so an empty one is a missing argument with no
+        // name.
+        if item.car() == missing_arg() {
+            return Err(missing_argument(
+                eval::lexical_call(call.env()?),
+                "",
+                ArgumentReader::Eval,
+            ));
+        }
+        if slot_dots.is_some() {
+            return eval::value_of(item.car());
+        }
     }
+    // Evaluating `..n` reports an absent element.
     let symbol = values::install(&format!("..{index}"))?;
-    eval::eval_symbol(symbol, env)
+    eval::eval_symbol(symbol, call.env()?)
 }
 
 unsafe fn do_dots_names(call: &Call<'_>) -> R<Sexp> {

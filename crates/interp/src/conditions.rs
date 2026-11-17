@@ -10,7 +10,8 @@ use {
         builtins::{BuiltinDef, Call, internal},
         bytecode, deparse, eval, interp,
         unwind::{
-            ErrorClass, INTERRUPTS_SUSPENDED, Jump, R, RError, Unwind, error, jump, resolve_call,
+            ErrorClass, INTERRUPTS_SUSPENDED, Jump, R, RError, Unwind, condition_classes, error,
+            jump, resolve_call,
         },
         values::{
             self, char_str, global_env, length, list_vector, nil, scalar_string, string_at, symbols,
@@ -207,8 +208,8 @@ pub unsafe fn signal_error(failure: RError) -> Unwind {
     if let Some(nul) = message.find('\0') {
         message.truncate(nul);
     }
-    if let ErrorClass::MissingArgument(reader) = failure.class {
-        let classes = [reader.subclass(), "missingArgError", "error", "condition"];
+    if failure.class != ErrorClass::Simple {
+        let classes = condition_classes(failure.class);
         return classed_error(failure.call, &message, &classes, &[]);
     }
     activity::count(Counter::ConditionsSignalled);
@@ -308,7 +309,6 @@ pub unsafe fn classed_error(
         let mut items = vec![("message", scalar_string(message)?), ("call", call)];
         items.extend_from_slice(fields);
         let condition = values::named_list(&items)?;
-        crate::heap().root(condition);
         values::set_attr(condition, symbols().class, values::string_vector(classes)?)?;
         signal_condition(condition, call)?;
         Ok(())

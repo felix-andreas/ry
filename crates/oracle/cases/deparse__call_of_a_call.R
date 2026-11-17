@@ -1,5 +1,5 @@
-# A call whose function is itself a call takes parentheses unless that inner call's function
-# is a name, a subset or a parenthesized expression.
+# A call whose function is itself a call takes parentheses unless that inner call is a call of
+# a plain function name, a subset, `$` or `@`, `::`, `(` or `{`.
 show <- function(expr) cat(deparse(expr), "\n")
 show(quote(f(1)(2)))
 show(quote(f(1)(2)(3)))

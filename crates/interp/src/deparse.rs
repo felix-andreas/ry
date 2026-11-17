@@ -1822,9 +1822,9 @@ unsafe fn dangles(argument: Sexp, outer: u8) -> bool {
 }
 
 /// GNU R's `parenthesizeCaller`: whether a call's function, when it is not a name, is written
-/// in parentheses. A call of a name, a subset, a namespace access, `(` or `{` reads as the
-/// function without them (`f(1)(2)`, `x$f(1)`), and every other call does not (`(f(1)(2))(3)`,
-/// `(if (a) f else g)(1)`).
+/// in parentheses. A call of a plain function name, a subset, `$` or `@`, a namespace access,
+/// `(` or `{` is written without them (`f(1)(2)`, `x$f(1)`), and every other call with them
+/// (`(f(1)(2))(3)`, `(if (a) f else g)(1)`, `(a + b)(1)`).
 unsafe fn parenthesize_caller(head: Sexp) -> bool {
     if head.kind() != SexpType::Language {
         return head.kind() == SexpType::Closure;

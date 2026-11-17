@@ -12,6 +12,8 @@
 | log1Error | missingArgError error condition | argument "x" is missing, with no default | log(x) 
 | log2Error | missingArgError error condition | argument "x" is missing, with no default | log(x, 2) 
 | log2Error | missingArgError error condition | argument "x" is missing, with no default | log(, 2) 
+| log1Error | missingArgError error condition | argument "x" is missing, with no default | log(x = ) 
+| log2Error | missingArgError error condition | argument "x" is missing, with no default | log(base = 2, ) 
 | MathMissingError | missingArgError error condition | argument "x" is missing, with no default | round(x) 
 | MathMissingError | missingArgError error condition | argument "x" is missing, with no default | signif(x, 2) 
 | evalError or getvarError | missingArgError error condition | argument "..2" is missing, with no default | (function(...) ..2)(1, ) 
@@ -22,6 +24,11 @@
 | evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | (function(x) rep(x))() 
 | evalError or getvarError | missingArgError error condition | argument is missing, with no default | (function(...) rep(...))(, 2) 
 | simpleError | error condition | attempt to replicate an object of type 'symbol' | rep(times = 2, x) 
+| simpleError | error condition | attempt to replicate an object of type 'symbol' | rep(quote(expr = )) 
+| simpleError | error condition | attempt to replicate an object of type 'symbol' | rep(quote(expr = ), 2) 
+| simpleError | error condition | attempt to replicate an object of type 'symbol' | rep((quote(expr = ))) 
+| evalError or getvarError | missingArgError error condition | argument is missing, with no default | eval(expression, globalenv()) 
+| evalError or getvarError | missingArgError error condition | argument "..1" is missing, with no default | (function(...) rep(..1))(, 2) 
 | evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | (function(x) .subset(x, 1))() 
 | evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | (function(x) .subset2(x, 1))() 
 | evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | (function(x) .subset(1:3, x))() 
@@ -33,8 +40,12 @@
 | evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | (function(x) {     attr(x, "a") <- 1     x })() 
 | evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | (function(x) {     length(x) <- 2     x })() 
 | evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | (function(x) (function() x[1] <<- 2)())() 
+| evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | outer() 
+| evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | middle() 
+| evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | outer() 
 | tailcallError | missingArgError error condition | argument "expr" is missing, with no default | (function(x) Exec(x))() 
 | tailcallRecError | missingArgError error condition | argument "FUN" is missing, with no default | (function() Tailcall())() 
+| [1] 0.6931472
 | [1] 0.6931472
 | [1] 0.6931472
 | [1] 2.079442

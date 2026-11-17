@@ -55,7 +55,7 @@ use {
         interp,
         kernels::{self, Element, MAX_NODES, Node, Reduction},
         moves,
-        unwind::{Jump, MissingArgument, R, Unwind, error, error_in, missing_argument},
+        unwind::{ArgumentReader, Jump, R, Unwind, error, error_in, missing_argument},
         values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
     },
     heap::{
@@ -11011,7 +11011,7 @@ unsafe fn slot_special_answer(
             // `UseMethod("generic", object)` dispatches on a local's value.
             "UseMethod" if argument.kind() == SexpType::String && length(argument) == 1 => {
                 match slot_operand(state, rest.car())? {
-                    Some(object) => slot_use_method(state, instruction, argument, Some(object)),
+                    Some(object) => slot_use_method(state, instruction, call, Some(object)),
                     None => Ok(None),
                 }
             }
@@ -11051,7 +11051,7 @@ unsafe fn slot_special_answer(
                 && argument.kind() == SexpType::String
                 && length(argument) == 1 =>
         {
-            slot_use_method(state, instruction, argument, None)
+            slot_use_method(state, instruction, call, None)
         }
         "quote" if arguments.tag() == nil() || values::symbol_name(arguments.tag()) == "expr" => {
             interp().visible = true;
@@ -11226,7 +11226,7 @@ unsafe fn slot_operand(state: &Activation<'_, '_>, expression: Sexp) -> R<Option
 unsafe fn slot_use_method(
     state: &Activation<'_, '_>,
     instruction: Instruction,
-    generic: Sexp,
+    call: Sexp,
     object: Option<Sexp>,
 ) -> R<Option<Sexp>> {
     // `UseMethod` does not return to the body, so the path is only exact when the body would
@@ -11246,7 +11246,7 @@ unsafe fn slot_use_method(
         return Ok(None);
     }
     let owner = (*state.interp).slot_owner as usize;
-    dispatch::use_method_in_slots(generic, owner, object)
+    dispatch::use_method_in_slots(call, owner, object)
 }
 
 /// A builtin call from a slot frame whose arguments the slots answer: `...`, a constant, or a
@@ -11554,7 +11554,7 @@ unsafe fn slot_builtin_args(
                 // An empty item of `...` is the passing frame's error, as GNU R evaluates it
                 // as a symbol there; an empty argument written in the call is the call's.
                 return Err(if passed_on {
-                    missing_argument(lexical.call(), "", MissingArgument::Eval)
+                    missing_argument(lexical.call(), "", ArgumentReader::Eval)
                 } else {
                     error_in(call, format!("argument {} is empty", args.len() + 1))
                 });
@@ -14061,7 +14061,7 @@ unsafe fn lookup_variable(
         if cell.has_gp(gp::ACTIVE_BINDING) || value == missing_arg() || value == unbound() {
             return holding(held, || {
                 let lexical = || eval::lexical_call(env);
-                eval::eval_symbol_reporting(symbol, env, lexical, MissingArgument::Getvar)
+                eval::eval_symbol_reporting(symbol, env, lexical, ArgumentReader::Getvar)
             });
         }
         Some(value)
@@ -14145,7 +14145,7 @@ unsafe fn lookup_outside(
                 return Ok(value.car());
             }
             return holding(held, || {
-                eval::eval_symbol_reporting(symbol, env, || lexical.call(), MissingArgument::Getvar)
+                eval::eval_symbol_reporting(symbol, env, || lexical.call(), ArgumentReader::Getvar)
             });
         }
         Err(FrameBinding::Cell(cell)) => {
@@ -14163,7 +14163,7 @@ unsafe fn lookup_outside(
                         symbol,
                         env,
                         || lexical.call(),
-                        MissingArgument::Getvar,
+                        ArgumentReader::Getvar,
                     )
                 });
             }
@@ -14179,7 +14179,7 @@ unsafe fn lookup_outside(
                 return Ok(value.car());
             }
             return holding(held, || {
-                eval::eval_symbol_reporting(symbol, env, || lexical.call(), MissingArgument::Getvar)
+                eval::eval_symbol_reporting(symbol, env, || lexical.call(), ArgumentReader::Getvar)
             });
         }
         if value != missing_arg() && value != unbound() {
@@ -14192,7 +14192,7 @@ unsafe fn lookup_outside(
         fill_cache(symbol, enclosure, cell, cache, slot);
     }
     holding(held, || {
-        eval::eval_symbol_reporting(symbol, env, || lexical.call(), MissingArgument::Getvar)
+        eval::eval_symbol_reporting(symbol, env, || lexical.call(), ArgumentReader::Getvar)
     })
 }
 
