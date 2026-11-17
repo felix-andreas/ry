@@ -1117,7 +1117,7 @@ unsafe fn extract_item(buffer: &[u8], kind: Option<Kind>, settings: &ScanSetting
         let mut message = format!("scan() expected '{what}', got '").into_bytes();
         message.extend_from_slice(buffer);
         message.push(b'\'');
-        c_error(&message)
+        crate::conditions::c_error(&message)
     };
     if kind == Kind::Character {
         return Ok(if is_na(false) {
@@ -1250,7 +1250,7 @@ fn is_blank(text: &[u8]) -> R<bool> {
             }
             rest = &rest[character.len_utf8()..];
         } else {
-            return Err(invalid_multibyte(rest));
+            return Err(crate::connections::invalid_multibyte(rest));
         }
     }
     Ok(true)
@@ -1271,92 +1271,6 @@ fn is_wide_space(character: char) -> bool {
             | '\u{3000}'
     )
 }
-
-/// GNU R's `Mbrtowc` error for `text`, which starts with an invalid sequence: the text with each
-/// byte the C library refuses spelled `<xx>`. GNU R 4.6 bounds every conversion by one count that
-/// starts at `MB_CUR_MAX` and drops by the bytes consumed, so the byte where it reaches zero is
-/// refused too, and after that the count has wrapped around and bounds nothing.
-fn invalid_multibyte(text: &[u8]) -> Unwind {
-    let mut terminated = text.to_vec();
-    terminated.push(0);
-    let mut shown = Vec::with_capacity(4 * text.len());
-    // SAFETY: an all-zero `mbstate_t` is the initial conversion state.
-    let mut state: libc::mbstate_t = unsafe { std::mem::zeroed() };
-    let mut wide: libc::wchar_t = 0;
-    // SAFETY: `terminated` ends in a NUL, where every conversion stops whatever its bound.
-    let mut used = unsafe {
-        mbrtowc(
-            &mut wide,
-            terminated.as_ptr().cast(),
-            MULTIBYTE_MAXIMUM,
-            &mut state,
-        )
-    };
-    let mut position = 0;
-    let mut left = MULTIBYTE_MAXIMUM;
-    while position < text.len() {
-        if position > 0 {
-            // SAFETY: as above.
-            used = unsafe {
-                mbrtowc(
-                    std::ptr::null_mut(),
-                    terminated[position..].as_ptr().cast(),
-                    left,
-                    &mut state,
-                )
-            };
-        }
-        if used == 0 {
-            break;
-        }
-        if (used as isize) > 0 {
-            let end = (position + used).min(text.len());
-            shown.extend_from_slice(&text[position..end]);
-            left = left.wrapping_sub(end - position);
-            position = end;
-        } else {
-            shown.extend_from_slice(format!("<{:02x}>", text[position]).as_bytes());
-            position += 1;
-            left = left.wrapping_sub(1);
-        }
-    }
-    let mut message = b"invalid multibyte string at '".to_vec();
-    message.extend_from_slice(&shown);
-    message.push(b'\'');
-    c_error(&message)
-}
-
-/// An error raised as GNU R's C `error()` raises it: the message is formatted into a buffer of
-/// `warning.length` bytes, so a longer one loses its tail, and a character the cut splits is
-/// dropped.
-fn c_error(message: &[u8]) -> Unwind {
-    // SAFETY: reading an option needs only the interpreter, which every builtin runs on.
-    let limit = unsafe { crate::conditions::warning_length() }.min(8192) - 1;
-    let mut message = &message[..message.len().min(limit)];
-    if message.len() == limit {
-        let mut last = message.len().saturating_sub(1);
-        while last > 0 && message[last] & 0xc0 == 0x80 {
-            last -= 1;
-        }
-        if let Err(failure) = std::str::from_utf8(&message[last..]) {
-            message = &message[..last + failure.valid_up_to()];
-        }
-    }
-    error(values::escape_invalid_bytes(message).into_owned())
-}
-
-unsafe extern "C" {
-    fn mbrtowc(
-        wide: *mut libc::wchar_t,
-        text: *const libc::c_char,
-        count: usize,
-        state: *mut libc::mbstate_t,
-    ) -> usize;
-}
-
-/// `MB_CUR_MAX` in glibc's UTF-8 locales, which GNU R's `isBlankString` passes as the bound of
-/// its first conversion.
-const MULTIBYTE_MAXIMUM: usize = 6;
 
 /// How `type.convert`'s `numerals` treats a number with more digits than a double holds.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2427,7 +2341,7 @@ unsafe fn write_string(charsxp: Sexp, quoted: bool, escape: bool, output: &mut V
             "translating strings with \"bytes\" encoding is not allowed",
         ));
     } else if charsxp.has_gp(gp::LATIN1) {
-        latin1 = raw.iter().map(|&byte| byte as char).collect::<String>();
+        latin1 = values::char_str(charsxp);
         latin1.as_bytes()
     } else {
         raw

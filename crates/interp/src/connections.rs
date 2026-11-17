@@ -29,7 +29,7 @@ use {
         write_terminal,
     },
     bzip2::{read::MultiBzDecoder, write::BzEncoder},
-    flate2::{Compression, read::MultiGzDecoder, write::GzEncoder},
+    flate2::{Compression, GzBuilder, read::MultiGzDecoder, write::GzEncoder},
     heap::{
         object::{NA_INTEGER, NA_LOGICAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
         strings::Encoding,
@@ -1403,9 +1403,22 @@ unsafe fn do_text_connection(call: &Call<'_>) -> R<Sexp> {
             if object.kind() != SexpType::String {
                 return Err(error("invalid 'text' argument"));
             }
+            // GNU R's `text_init` copies a string's own bytes for `encoding = "bytes"` and
+            // translates it otherwise, which refuses a string declared as bytes.
+            let as_bytes = values::as_integer_scalar(call.arg(4)) == 2;
+            if !as_bytes {
+                values::refuse_bytes(object)?;
+            }
             let mut data = Vec::new();
-            for line in values::strings(object) {
-                data.extend_from_slice(line.as_deref().unwrap_or("NA").as_bytes());
+            for (index, line) in values::strings(object).into_iter().enumerate() {
+                match line.as_deref() {
+                    None => data.extend_from_slice(b"NA"),
+                    Some(_) if as_bytes => data.extend_from_slice(object.element(index).bytes()),
+                    Some(text) => match values::unescape_invalid_bytes(text) {
+                        Some(bytes) => data.extend_from_slice(&bytes),
+                        None => data.extend_from_slice(text.as_bytes()),
+                    },
+                }
                 data.push(b'\n');
             }
             Device::TextInput(TextInput { data, position: 0 })
@@ -3282,7 +3295,7 @@ fn character_count(bytes: &[u8]) -> Option<usize> {
 /// GNU R's error for a character walk that stops at bytes the locale cannot decode, which
 /// `rest` starts with. The message shows `rest` with each byte the replay cannot decode as
 /// `<xx>`.
-fn invalid_multibyte(rest: &[u8]) -> Unwind {
+pub fn invalid_multibyte(rest: &[u8]) -> Unwind {
     // GNU R's `Mbrtowc` replays `rest` through one decoder with a budget of six bytes that it
     // never refills, and steps one byte after each failure whatever the decoder consumed. So a
     // character the budget cuts stays half read in the decoder: `held` of its `whole` bytes.
@@ -3330,10 +3343,10 @@ fn invalid_multibyte(rest: &[u8]) -> Unwind {
             }
         }
     }
-    error(format!(
-        "invalid multibyte string at '{}'",
-        values::escape_invalid_bytes(&shown)
-    ))
+    let mut message = b"invalid multibyte string at '".to_vec();
+    message.extend_from_slice(&shown);
+    message.push(b'\'');
+    crate::conditions::c_error(&message)
 }
 
 /// The bytes a binary writer puts out for one string: `NA` as the text "NA", Latin-1 text
@@ -4605,7 +4618,7 @@ fn open_file(device: &mut FileDevice, mode: Mode) -> std::io::Result<Stream> {
             .open(&device.path)?;
         let level = device.compression;
         let encoder = match encoding {
-            Compressed::Gzip => Encoder::Gzip(GzEncoder::new(file, Compression::new(level))),
+            Compressed::Gzip => Encoder::Gzip(gzip_encoder(file, level)),
             Compressed::Bzip2 => Encoder::Bzip2(BzEncoder::new(
                 file,
                 bzip2::Compression::new(level.clamp(1, 9)),
@@ -4814,7 +4827,7 @@ unsafe fn device_close(con: Rconnection) -> R<()> {
             let data = std::mem::take(&mut gzcon.data);
             gzcon.position = 0;
             let written = if (*con).canwrite != 0 {
-                let mut encoder = GzEncoder::new(Vec::new(), Compression::new(gzcon.level));
+                let mut encoder = gzip_encoder(Vec::new(), gzcon.level);
                 encoder
                     .write_all(&data)
                     .and_then(|()| encoder.finish())
@@ -5122,7 +5135,8 @@ unsafe fn set_text_target_lock(target: TextTarget, locked: bool) {
 /// the target variable also holds it, since R code may have kept the value it read earlier.
 unsafe fn push_text_line(output: &mut TextOutput, line: &[u8]) -> R<()> {
     let heap = crate::heap();
-    let charsxp = values::mkchar_bytes(line, Encoding::Native)?;
+    // GNU R's `mkCharLocal` marks a line of a UTF-8 session UTF-8, whatever its bytes.
+    let charsxp = values::mkchar_bytes(line, Encoding::Utf8)?;
     heap.root(charsxp);
     let count = values::length(output.lines);
     if !heap.is_resizable(output.lines)
@@ -5134,6 +5148,14 @@ unsafe fn push_text_line(output: &mut TextOutput, line: &[u8]) -> R<()> {
     heap.resize_vector(output.lines, count as isize + 1)?;
     heap.set_element(output.lines, count, charsxp);
     Ok(())
+}
+
+/// A gzip writer whose header names Unix as the operating system, the byte zlib writes for
+/// GNU R, so a compressed file has the same bytes on every platform.
+fn gzip_encoder<W: Write>(sink: W, level: u32) -> GzEncoder<W> {
+    GzBuilder::new()
+        .operating_system(3)
+        .write(sink, Compression::new(level))
 }
 
 /// A resizable copy of the first `count` lines of `lines`, with room for `capacity`.

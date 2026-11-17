@@ -358,6 +358,8 @@ unsafe fn do_nchar(call: &Call<'_>) -> R<Sexp> {
         } else {
             match count_type {
                 CountType::Bytes => charsxp.bytes().len() as i32,
+                // GNU R counts a latin1 string's bytes, each one character and one column.
+                _ if charsxp.has_gp(gp::LATIN1) => charsxp.bytes().len() as i32,
                 CountType::Chars => values::char_str(charsxp).chars().count() as i32,
                 CountType::Width => display_width(&values::char_str(charsxp)) as i32,
             }
@@ -1877,7 +1879,24 @@ unsafe fn do_make_names(call: &Call<'_>) -> R<Sexp> {
     }
     let allow_underscore = allow_underscore == 1;
     values::refuse_bytes(names)?;
-    let made: Vec<String> = strings(names)
+    let names = strings(names);
+    // GNU R decodes the first character, and the one after a leading dot, with `Mbrtowc`,
+    // whose error shows the text, and the whole name with `mbstowcs`, whose error counts it.
+    for (index, name) in names.iter().enumerate() {
+        let Some(bytes) = name.as_deref().and_then(values::unescape_invalid_bytes) else {
+            continue;
+        };
+        let checked = usize::from(bytes.first() == Some(&b'.'));
+        return Err(match bytes.get(checked..) {
+            Some(rest)
+                if !rest.is_empty() && crate::connections::multibyte_length(rest).is_none() =>
+            {
+                crate::connections::invalid_multibyte(rest)
+            }
+            _ => error(format!("invalid multibyte string {}", index + 1)),
+        });
+    }
+    let made: Vec<String> = names
         .into_iter()
         .map(|name| {
             let name = name.unwrap_or_else(|| "NA".to_owned());

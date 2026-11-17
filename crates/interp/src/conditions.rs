@@ -402,6 +402,25 @@ pub unsafe fn warning_length() -> usize {
     }
 }
 
+/// An error raised as GNU R's C `error()` raises it: the message is formatted into a buffer of
+/// `warning.length` bytes, so a longer one loses its tail, and a character the cut splits is
+/// dropped.
+pub fn c_error(message: &[u8]) -> Unwind {
+    // SAFETY: reading an option needs only the interpreter, which every builtin runs on.
+    let limit = unsafe { warning_length() }.min(8192) - 1;
+    let mut message = &message[..message.len().min(limit)];
+    if message.len() == limit {
+        let mut last = message.len().saturating_sub(1);
+        while last > 0 && message[last] & 0xc0 == 0x80 {
+            last -= 1;
+        }
+        if let Err(failure) = std::str::from_utf8(&message[last..]) {
+            message = &message[..last + failure.valid_up_to()];
+        }
+    }
+    error(values::escape_invalid_bytes(message).into_owned())
+}
+
 /// `text` cut to at most `limit` bytes, on a character boundary.
 pub fn truncate_at_char(text: &str, limit: usize) -> &str {
     if text.len() <= limit {

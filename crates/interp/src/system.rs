@@ -4442,12 +4442,7 @@ unsafe fn do_enc2utf8(call: &Call<'_>) -> R<Sexp> {
             continue;
         }
         let converted = if charsxp.has_gp(heap::object::gp::LATIN1) {
-            charsxp
-                .bytes()
-                .iter()
-                .map(|&byte| byte as char)
-                .collect::<String>()
-                .into_bytes()
+            values::char_str(charsxp).into_owned().into_bytes()
         } else if std::str::from_utf8(charsxp.bytes()).is_ok() {
             charsxp.bytes().to_vec()
         } else {

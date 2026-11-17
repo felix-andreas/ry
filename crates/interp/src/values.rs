@@ -1061,7 +1061,19 @@ unsafe fn char_str_decoded<'a>(charsxp: Sexp) -> Cow<'a, str> {
         return Cow::Borrowed(text);
     }
     if charsxp.has_gp(gp::LATIN1) {
-        return Cow::Owned(bytes.iter().map(|&byte| byte as char).collect());
+        // GNU R translates a latin1 string as Windows-1252, and spells a byte that code page
+        // leaves undefined `<xx>`.
+        let mut text = String::with_capacity(bytes.len() * 2);
+        for &byte in bytes {
+            match byte {
+                0x80..=0x9f => match WINDOWS_1252_HIGH[usize::from(byte - 0x80)] {
+                    '\0' => text.push_str(&format!("<{byte:02x}>")),
+                    character => text.push(character),
+                },
+                _ => text.push(char::from(byte)),
+            }
+        }
+        return Cow::Owned(text);
     }
     // GNU R reads a string declared as bytes through its `\xNN` spelling wherever it needs
     // text, so printing, formatting and pasting show the escapes rather than decoded characters.
@@ -1078,6 +1090,14 @@ unsafe fn char_str_decoded<'a>(charsxp: Sexp) -> Cow<'a, str> {
     }
     escape_invalid_bytes(bytes)
 }
+
+/// The characters of bytes 0x80 to 0x9F in Windows-1252, with NUL for a byte it leaves undefined.
+const WINDOWS_1252_HIGH: [char; 32] = [
+    '\u{20ac}', '\0', '\u{201a}', '\u{192}', '\u{201e}', '\u{2026}', '\u{2020}', '\u{2021}',
+    '\u{2c6}', '\u{2030}', '\u{160}', '\u{2039}', '\u{152}', '\0', '\u{17d}', '\0', '\0',
+    '\u{2018}', '\u{2019}', '\u{201c}', '\u{201d}', '\u{2022}', '\u{2013}', '\u{2014}', '\u{2dc}',
+    '\u{2122}', '\u{161}', '\u{203a}', '\u{153}', '\0', '\u{17e}', '\u{178}',
+];
 
 /// Decodes bytes that need not be UTF-8 as text. GNU R keeps a string's bytes as they are, so a
 /// Latin-1 string in a UTF-8 session, or a piece `strsplit(useBytes = TRUE)` cut out of a
