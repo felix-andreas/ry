@@ -553,12 +553,14 @@ The order:
    and `interp::heap()` and `interp::interp()` are deleted.
 
 `tools/unsafe-baseline.txt` records the count of `unsafe` per source file outside the crates that
-own it. `just gate` fails when a file's count rises (`tools/unsafe.py check`), and a change that
-lowers one lowers the baseline with it (`tools/unsafe.py baseline`, which lowers counts and
-refuses to raise one), so the count only falls.
+own it. `just gate` and CI's `just ci` fail when a file's count rises (`tools/unsafe.py check`),
+and a change that lowers one lowers the baseline with it (`tools/unsafe.py baseline`, which
+lowers counts and refuses to raise one), so the count only falls.
 
-A count rises only by a hand edit of its line, and `check` accepts a line higher than on main
-only when `.agents/memory/backlog.md` names the functions that hold the new `unsafe`:
+A count rises only by a hand edit of its line. `check` compares each line with two references:
+the baseline's first version, and on a branch the baseline at the commit the branch left main
+at. It accepts a line above either only when `.agents/memory/backlog.md` names the functions
+that hold the new `unsafe` and allows at least that count:
 
 ```
 - `crates/interp/src/handles.rs` 107 to 149: `evaluate`, `force`, `frame_value`

@@ -12,10 +12,15 @@ code, so their `unsafe` is not counted. Every other crate reaches the heap throu
 for `baseline` so the lower count is locked in.
 
 `baseline` only lowers counts. A count rises by a hand edit of its line, and `check` accepts a
-line that is higher than on main only when `.agents/memory/backlog.md` has a line for it that
-names the functions holding the new `unsafe`:
+line that is higher than a reference only when `.agents/memory/backlog.md` has a line for the
+file that names the functions holding the new `unsafe` and allows at least that count:
 
     - `crates/interp/src/handles.rs` 107 to 149: `evaluate`, `force`, ...
+
+The references are the baseline's first version and, on a branch, the baseline at the commit
+the branch left main at, so the backlog names every `unsafe` above where a file started. They
+need the history: CI fails without them, and elsewhere `check` says that raised counts went
+unchecked.
 """
 
 import os
@@ -56,6 +61,12 @@ def check(counts):
     if over:
         return 1
     unexplained = unexplained_raises(baseline)
+    if unexplained is None:
+        print("note: no reference baseline in this checkout, so raised counts go unchecked")
+        if os.environ.get("CI"):
+            print("CI needs it: fetch the full history (`git fetch --unshallow`).")
+            return 1
+        unexplained = []
     for path, before, limit in unexplained:
         print(f"{path}: baseline raised from {before} to {limit} without a backlog line")
     if unexplained:
@@ -105,25 +116,36 @@ def report_over(counts, baseline):
 
 
 def unexplained_raises(baseline):
-    """The baseline lines that are higher than on main and that no backlog line accounts for."""
-    before = main_baseline()
-    if before is None:
-        print("note: main's baseline is not in this checkout, so raised counts go unchecked")
-        return []
+    """The baseline lines above a reference that no backlog line accounts for, or `None` when
+    this checkout has no reference."""
+    references = reference_baselines()
+    if references is None:
+        return None
     with open(os.path.join(ROOT, BACKLOG), encoding="utf-8") as file:
         backlog = file.read()
-    return [
-        (path, before.get(path, 0), limit)
-        for path, limit in sorted(baseline.items())
-        if limit > before.get(path, 0)
-        and not re.search(rf"^\s*- `{re.escape(path)}` \d+ to {limit}: `\w", backlog, re.MULTILINE)
-    ]
+    raised = []
+    for path, limit in sorted(baseline.items()):
+        before = min(reference.get(path, 0) for reference in references)
+        allowed = re.findall(rf"^\s*- `{re.escape(path)}` \d+ to (\d+): `\w", backlog, re.MULTILINE)
+        if limit > before and not any(int(count) >= limit for count in allowed):
+            raised.append((path, before, limit))
+    return raised
 
 
-def main_baseline():
-    """The baseline at the commit this checkout left main at, or `None` without that history."""
-    base = git("merge-base", "HEAD", "origin/main")
-    text = base and git("show", f"{base.strip()}:{BASELINE}")
+def reference_baselines():
+    """The baselines a count must not exceed without a backlog line: the file's first version,
+    and on a branch the one at the commit it left main at. `None` without the first version."""
+    added = git("log", "--diff-filter=A", "--format=%H %P", "--", BASELINE)
+    first, *parents = added.strip().split("\n")[-1].split() if added and added.strip() else [None]
+    # A shallow checkout shows its oldest commit as the one that adds every file.
+    if not parents:
+        return None
+    commits = [first, git("merge-base", "HEAD", "origin/main")]
+    return [baseline for baseline in map(baseline_at, commits) if baseline is not None]
+
+
+def baseline_at(commit):
+    text = commit and git("show", f"{commit.strip()}:{BASELINE}")
     return parse_baseline(text) if text else None
 
 

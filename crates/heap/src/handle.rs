@@ -636,6 +636,15 @@ impl<'s, T: Kind> Local<'s, T> {
         unsafe { self.raw.kind() }
     }
 
+    /// Whether more than one object refers to this one, so that a change must go into a copy.
+    /// An element of a shared list is reachable through that list's other owners even when
+    /// this is false for the element.
+    #[inline]
+    pub fn is_shared(self) -> bool {
+        // SAFETY: the object is rooted.
+        unsafe { self.raw.refcount() > 1 }
+    }
+
     /// Whether this and `other` are one object. Strings have no such test, because one text
     /// can be several objects: compare them with `interp::handles::same_text`.
     #[inline]

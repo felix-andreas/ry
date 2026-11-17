@@ -27,7 +27,7 @@ use {
             symbol_name, symbols, unbound,
         },
     },
-    heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp},
+    heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType},
     smallvec::{SmallVec, smallvec},
 };
 
@@ -2574,50 +2574,81 @@ pub(crate) unsafe fn s4_data_part(object: Sexp) -> Sexp {
     get_attr(object, symbols().dot_xdata)
 }
 
-/// The position `name` matches among `names`: exactly, or with `exact == Some(false)` (or
-/// `None`, which also warns) by a unique partial match. Names compare as text, so a
-/// latin1-marked name matches its UTF-8 spelling, and an `NA` name matches nothing. GNU R's
-/// `get1index` agrees for `[[`, but its `$` matches an `NA` name as the text "NA" (`backlog.md`).
-fn name_position(
-    context: &mut Cx<'_>,
+/// Which of GNU R's name lookups a subscript goes through.
+#[derive(Clone, Copy)]
+enum Lookup<'s> {
+    /// `[[`, GNU R's `get1index`: an `NA` name or subscript matches nothing. `exact` is the
+    /// operator's argument: `Some(false)` accepts a unique partial match, and `None` also
+    /// warns about each partial match against `call`.
+    Element {
+        exact: Option<bool>,
+        call: Option<Local<'s>>,
+    },
+    /// `$`: a unique partial match counts, and an `NA` name is the text "NA".
+    Field,
+    /// `[[<-`, GNU R's `OneIndex`: exact, and an `NA` name or subscript is the text "NA".
+    Store,
+}
+
+/// The position `name` matches among `names`. Names compare as text, so a latin1-marked name
+/// matches its UTF-8 spelling.
+fn name_position<'s>(
+    context: &mut Cx<'s>,
     names: Local<'_>,
     name: Local<'_, Chars>,
-    exact: Option<bool>,
+    lookup: Lookup<'s>,
 ) -> R<Option<usize>> {
     let Some(names) = names.downcast::<Str>() else {
         return Ok(None);
     };
     let name = name.read(context);
-    if is_na(name) {
+    let na_is_text = !matches!(lookup, Lookup::Element { .. });
+    if is_na(name) && !na_is_text {
         return Ok(None);
     }
     let candidates = names.read(context);
-    if let Some(position) =
+    let spells_na = |text: Gc<'_, Chars>| is_na(text) || text.bytes() == b"NA";
+    let exact_match = if na_is_text && spells_na(name) {
+        (0..candidates.len()).find(|&index| spells_na(candidates.get(index)))
+    } else {
         (0..candidates.len()).find(|&index| same_text(candidates.get(index), name))
-    {
-        return Ok(Some(position));
-    }
-    if exact == Some(true) {
-        return Ok(None);
+    };
+    let (partial, warn_in) = match lookup {
+        Lookup::Element { exact, call } => (exact != Some(true), exact.is_none().then_some(call)),
+        Lookup::Field => (true, None),
+        Lookup::Store => (false, None),
+    };
+    if exact_match.is_some() || !partial {
+        return Ok(exact_match);
     }
     let text = handles::text(name).into_owned();
-    let mut found = None;
-    for index in 0..candidates.len() {
-        let candidate = candidates.get(index);
-        if !is_na(candidate) && handles::text(candidate).starts_with(&*text) {
-            if found.is_some() {
-                return Ok(None);
+    let partial_matches: SmallVec<[usize; 2]> = (0..candidates.len())
+        .filter(|&index| {
+            let candidate = candidates.get(index);
+            (na_is_text || !is_na(candidate)) && handles::text(candidate).starts_with(&*text)
+        })
+        .take(2)
+        .collect();
+    if let Some(call) = warn_in {
+        for (rank, &position) in partial_matches.iter().enumerate() {
+            let matched = handles::text(names.get(context, position)).into_owned();
+            // GNU R names the call once: the warning about a second match has none.
+            if rank > 0 {
+                let message = format!("further partial match of '{text}' to '{matched}'");
+                handles::warning_in(context, null(), message)?;
+                continue;
             }
-            found = Some(index);
+            let message = format!("partial match of '{text}' to '{matched}'");
+            match call {
+                Some(call) => handles::warning_in(context, call, message)?,
+                None => handles::warning(context, message)?,
+            }
         }
     }
-    if let Some(position) = found
-        && exact.is_none()
-    {
-        let matched = handles::text(candidates.get(position)).into_owned();
-        handles::warning(context, format!("partial match of '{text}' to '{matched}'"))?;
-    }
-    Ok(found)
+    Ok(match partial_matches[..] {
+        [position] => Some(position),
+        _ => None,
+    })
 }
 
 /// `x[[...]]` without dispatch, for raw callers, which pass the unbound marker for the running
@@ -2791,11 +2822,13 @@ fn subset2_value<'s>(
     if list && let Some(wanted) = index.downcast::<Str>() {
         let wanted = context.root(wanted.get(context, 0));
         // A list has no element of that name: `[[` gives `NULL`, unlike for atomic vectors.
-        if wanted.bytes(context).is_empty()
-            || name_position(context, names, wanted, exact)?.is_none()
-        {
+        if wanted.bytes(context).is_empty() {
             return Ok(null());
         }
+        return match name_position(context, names, wanted, Lookup::Element { exact, call })? {
+            Some(position) => element(context, object, position),
+            None => Ok(null()),
+        };
     }
     if list {
         // A list gives `NULL` for a missing or infinite subscript, where an atomic vector
@@ -2833,7 +2866,14 @@ fn single_index<'s>(
     bounds: OutOfBounds<'s>,
 ) -> R<usize> {
     let matrix = bounds.dimension.is_some();
-    match one_position(context, index, extent, names, exact, matrix)? {
+    match one_position(
+        context,
+        index,
+        extent,
+        names,
+        Lookup::Element { exact, call },
+        matrix,
+    )? {
         Single::At(position) => Ok(position),
         Single::Outside => Err(bounds_error(
             context,
@@ -2875,7 +2915,7 @@ fn one_position<'s>(
     index: Local<'s>,
     extent: usize,
     names: Local<'s>,
-    exact: Option<bool>,
+    lookup: Lookup<'s>,
     matrix: bool,
 ) -> R<Single> {
     let index = materialize(context, index)?;
@@ -2897,7 +2937,7 @@ fn one_position<'s>(
             if wanted.bytes(context).is_empty() {
                 return Ok(Single::Outside);
             }
-            Ok(inside(name_position(context, names, wanted, exact)?))
+            Ok(inside(name_position(context, names, wanted, lookup)?))
         }
         SexpType::Integer | SexpType::Logical => {
             let value = integers(context, index)[0];
@@ -3107,7 +3147,7 @@ fn field_of_value<'s>(
     match object.r_type() {
         SexpType::List | SexpType::Expression => {
             let names = names_of(context, object)?;
-            let Some(position) = name_position(context, names, name, Some(false))? else {
+            let Some(position) = name_position(context, names, name, Lookup::Field)? else {
                 return Ok(null());
             };
             let value = item(context, object, position)?;
@@ -3312,37 +3352,37 @@ fn subscript2_out_of_bounds<'s>(
 }
 
 unsafe fn do_at_assign(call: &Call<'_>) -> R<Sexp> {
-    let object = eval::eval(call.arg(0), call.env()?)?;
-    let symbol = slot_symbol(call.arg(1))?;
-    let value = eval::eval(call.arg(2), call.env()?)?;
-    if object.is_object() && !object.has_gp(gp::S4_OBJECT) {
-        let args = [
-            Arg {
-                tag: nil(),
-                value: object,
-            },
-            Arg {
-                tag: nil(),
-                value: values::scalar_string_charsxp(symbol.car())?,
-            },
-            Arg {
-                tag: symbols().value,
-                value,
-            },
-        ];
-        if let Some(result) =
-            crate::dispatch::dispatch_builtin(symbols().at_assign, call.call, &args, call.env()?)?
-        {
-            return Ok(result);
-        }
-    }
-    // SAFETY: the evaluated arguments are rooted as each is adopted, before anything allocates,
-    // and the result is rooted before the scope ends.
+    // SAFETY: each evaluated argument is adopted before anything else allocates or runs R code,
+    // the name is a symbol, which the heap keeps, and the result is rooted before the scope
+    // ends.
     unsafe {
         handles::with_result(|context| {
-            let object = handles::adopt(context, object);
+            let env = call.env()?;
+            let object = handles::adopt(context, eval::eval(call.arg(0), env)?);
+            let symbol = slot_symbol(call.arg(1))?;
+            let value = handles::adopt(context, eval::eval(call.arg(2), env)?);
+            if handles::is_object(object) && !is_s4(object) {
+                let args = [
+                    Arg {
+                        tag: nil(),
+                        value: object.raw(),
+                    },
+                    Arg {
+                        tag: nil(),
+                        value: values::scalar_string_charsxp(symbol.car())?,
+                    },
+                    Arg {
+                        tag: symbols().value,
+                        value: value.raw(),
+                    },
+                ];
+                if let Some(result) =
+                    crate::dispatch::dispatch_builtin(symbols().at_assign, call.call, &args, env)?
+                {
+                    return Ok(result);
+                }
+            }
             let symbol = handles::permanent(standard::<Symbol>(handles::held(context, symbol))?);
-            let value = handles::adopt(context, value);
             Ok(checked_slot_assign(context, object, symbol, value)?.raw())
         })
     }
@@ -3813,6 +3853,14 @@ fn assign_subset<'s>(
     let names = handles::names_of(context, result.get())?;
     let (mut positions, new_names) =
         resolve_subscript(context, index, count, names, true, Some(call))?;
+    // A single value skips the NA positions, and a longer one cannot say which of its elements
+    // an NA position would have taken.
+    if value_count > 1 && positions.contains(&NA_POSITION) {
+        return Err(handles::error_in(
+            call,
+            "NAs are not allowed in subscripted assignments",
+        ));
+    }
     positions.retain(|position| *position != NA_POSITION);
     let stretch = logical_stretch(context, index);
     if positions.is_empty() && stretch <= count {
@@ -4658,7 +4706,7 @@ fn assign_subset2<'s>(
         return Ok(object);
     }
     if let &[index] = indices {
-        return assign_one(context, object, index, value, call, 1);
+        return assign_one(context, object, index, value, call, 1, false);
     }
     let Some(dims) = handles::dims(context, object).filter(|dims| dims.len() == indices.len())
     else {
@@ -4696,7 +4744,17 @@ fn assign_subset2<'s>(
             _ => null(),
         };
         let index = symbol_text(context, index)?;
-        let position = match one_position(context, index, extent, names, Some(true), true)? {
+        let position = match one_position(
+            context,
+            index,
+            extent,
+            names,
+            Lookup::Element {
+                exact: Some(true),
+                call: None,
+            },
+            true,
+        )? {
             Single::At(position) => position,
             Single::Outside => {
                 return Err(subscript2_out_of_bounds(
@@ -4720,11 +4778,13 @@ fn assign_subset2<'s>(
     }
     // The cell is assigned by its position in the vector, which keeps the dimensions.
     let position = scalar::<Real>(context, offset as f64 + 1.0)?;
-    assign_one(context, object, position, value, call, 1)
+    assign_one(context, object, position, value, call, 1, false)
 }
 
 /// `x[[i]] <- value` with one subscript, which for a list may be a path of several (recursive
 /// assignment); `level` is the depth of that path, which GNU R's error names.
+/// `reached_through_shared` says that a list above `object` on the path is shared, so `object`
+/// is copied before the store.
 fn assign_one<'s>(
     context: &mut Cx<'s>,
     object: Local<'s>,
@@ -4732,6 +4792,7 @@ fn assign_one<'s>(
     value: Local<'s>,
     call: Local<'s>,
     level: usize,
+    reached_through_shared: bool,
 ) -> R<Local<'s>> {
     if matches!(object.r_type(), SexpType::Pairlist | SexpType::Language) {
         return assign_subset2(context, object, &[index], value, call);
@@ -4764,9 +4825,25 @@ fn assign_one<'s>(
                 ));
             }
         };
-        let updated = assign_one(context, inner, rest, value, call, level + 1)?;
-        return assign_one(context, object, first, updated, call, level);
+        // The element of a shared list has other owners through that list, whatever its own
+        // reference count says.
+        let below_shared = reached_through_shared || object.is_shared();
+        let updated = assign_one(context, inner, rest, value, call, level + 1, below_shared)?;
+        return assign_one(
+            context,
+            object,
+            first,
+            updated,
+            call,
+            level,
+            reached_through_shared,
+        );
     }
+    let object = if reached_through_shared && kind != SexpType::Nil {
+        handles::shallow_copy(context, object)?.get()
+    } else {
+        object
+    };
     if !is_list {
         atomic_replacement_check(context, value)?;
     }
@@ -4784,7 +4861,7 @@ fn assign_one<'s>(
         if !value.r_type().is_atomic() {
             // A list or expression value turns the vector into one of its kind.
             let list = handles::coerce(context, object, value.r_type())?;
-            return assign_one(context, list, position, value, call, level);
+            return assign_one(context, list, position, value, call, level, false);
         }
         return assign_subset(context, object, &[position], value, call);
     }
@@ -4942,21 +5019,15 @@ fn one_index<'s>(
         },
     };
     if let Some(wanted) = wanted {
-        // NA selects the first NA name, as GNU R compares the string pointers.
-        if is_na(wanted.read(context)) {
-            let position = match dense::<Str>(context, names)? {
-                Some(names) => names.iter(context).position(is_na),
-                None => None,
-            };
-            return Ok(position.map_or(Slot::Named, Slot::At));
-        }
         if wanted.read(context).bytes().is_empty() {
             return Ok(Slot::Named);
         }
-        return Ok(match name_position(context, names, wanted, Some(true))? {
-            Some(position) => Slot::At(position),
-            None => Slot::Named,
-        });
+        return Ok(
+            match name_position(context, names, wanted, Lookup::Store)? {
+                Some(position) => Slot::At(position),
+                None => Slot::Named,
+            },
+        );
     }
     let integer = match dense::<Integer>(context, index)? {
         Some(index) => Some(index.as_slice(context)[0]),
@@ -5127,6 +5198,14 @@ fn assign_dollar<'s>(
         handles::define(context, symbol, value, environment)?;
         return Ok(object);
     }
+    // GNU R interns the name as a symbol, which rejects an empty one and spells `NA` out.
+    let name = if is_na(name.read(context)) || name.bytes(context).is_empty() {
+        let symbol = handles::install(context, name)?;
+        let name = symbol.read(context).name();
+        context.root(name)
+    } else {
+        name
+    };
     let list = match kind {
         SexpType::List
         | SexpType::Expression
@@ -5139,6 +5218,32 @@ fn assign_dollar<'s>(
         }
         _ => return Err(not_subsettable_error(context, Some(call), object)),
     };
+    // GNU R's `$<-` matches an `NA` name with nothing, where its `[[<-` reads one as the text
+    // "NA", so a list with such a name is assigned by position.
+    if name.bytes(context) == b"NA"
+        && matches!(list.r_type(), SexpType::List | SexpType::Expression)
+        && let names = names_of(context, list)?
+        && let Some(dense_names) = dense::<Str>(context, names)?
+        && dense_names.iter(context).any(is_na)
+    {
+        let exact = Lookup::Element {
+            exact: Some(true),
+            call: None,
+        };
+        let found = name_position(context, names, name, exact)?;
+        if found.is_none() && value.r_type() == SexpType::Nil {
+            return Ok(list);
+        }
+        let extent = handles::length(context, list);
+        let position = scalar::<Real>(context, found.unwrap_or(extent) as f64 + 1.0)?;
+        let assigned = assign_subset2(context, list, &[position], value, call)?;
+        if found.is_some() {
+            return Ok(assigned);
+        }
+        let mut assigned = unshared(context, assigned)?;
+        write_names(context, &mut assigned, extent, &[name])?;
+        return Ok(assigned.finish());
+    }
     let mut index = context.alloc::<Str>(1)?;
     index.set(context, 0, name);
     let index = index.finish().value();

@@ -79,6 +79,11 @@ ci:
     bash tools/oracle-locales.sh
     just base-r dev
     just fmt-check
+    # `just unsafe` reads the first version of its baseline, which a shallow checkout lacks.
+    if [ -n "${CI:-}" ] && [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+        git fetch --quiet --unshallow origin
+    fi
+    just unsafe
     just clippy
     just battery
 
@@ -270,7 +275,8 @@ comments *args="check":
 
 # Fails when a file outside heap, libr, jit, typed and ssa has more `unsafe` than its baseline, e.g.
 # `just unsafe stats` for the counts per crate or `just unsafe baseline` after removing some.
-# `baseline` never raises a count: a raise is a hand edit plus a backlog line naming the functions.
+# `baseline` never raises a count: a raise is a hand edit plus a backlog line naming the functions,
+# which `check` asks for wherever a count is above the baseline's first version.
 unsafe *args="check":
     python3 -I tools/unsafe.py {{ args }}
 
