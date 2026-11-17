@@ -364,7 +364,6 @@ Unverified until a Windows release smoke test runs:
 
 - **lattice's vignettes failed to install (fix landed, unverified on Windows).** The install driver spliced the install directory into the `inst/` paths with `sub("^inst", instdir, ...)`, and a regular-expression replacement drops the backslashes of a Windows path, so the `doc` directory was made in the wrong place and `file(con, "w")` on `doc/index.html` failed. The driver now concatenates, `list.dirs` and `list.files` return `/`-separated names on every platform as GNU R does, and recursive `dir.create` splits on both separators on Windows (`test_system`).
 - **The base code images were not written on Windows (fix landed, unverified).** The Windows front end took a stray `R` first argument; `r_arguments` in `crates/rcmd/src/base.rs` now adds it on Unix only.
-- **Windows findings after lattice (fixes landed, smoke test unverified).** The embedded base archive now keeps file modification times, because a code image is valid only for the lazy-load database's length and mtime and extraction used to reset them. Windows package DLLs link `-lintl -liconv` (`LIBINTL` in the Windows Makeconf), because a package that includes `libintl.h` gets `libintl_vsnprintf`, which GNU R's `R.dll` exports and ry's libR does not. Lock files open with write access (`LockFileEx` rejects append-only handles), and a new home's lock is released before the staging directory is renamed into place and retaken on the final path, because Windows cannot rename a directory holding an open file.
 - Drop `cli.md`'s Windows `R_HOME` note for linear algebra once the no-`R_HOME` smoke check passes on a Windows release.
 - **ry's own base R has never run on Windows.** Earlier Windows releases ran on GNU R's base, so the smoke test after a green base build is the first run of the bundled base there. Behind lattice wait 11 more recommended packages, the archive, and the smoke test.
 - **Landed:** the `fork` module is Unix-only again (a moved `#[cfg(unix)]` broke the Windows compile); the `Sys.which` fast path is Unix-only, because Windows base R defines its own `Sys.which`; the base tree carries GNU R's `Rblas.dll` and `Rlapack.dll`; it writes `etc/Rcmd_environ` and base's `Rprofile` with the lines GNU R's installer uncomments, so Rtools comes first on `PATH`; `shlib` runs `make` on the `PATH` that `Rcmd_environ` sets, which got grid and splines compiling (`shlib_runs_make_on_the_path_rcmd_environ_sets`).
@@ -665,32 +664,14 @@ About seven in ten of the hot suite's closure calls from compiled code take `cal
 
 ## Open: the handle migration
 
-`decisions/heap-gc.md`, "Interpreter code holds values through handles the borrow checker
-checks", is the rule, and `development/design/memory-safety.md` the design. `heap::handle` and
-`interp::handles` exist, and six string builtins use them (`nchar`, `substr<-`, `strrep`,
-`strtoi`, `utf8ToInt`, `charToRaw`). Everything else in `interp`, `stats`, `graphics` and
-`frames` holds raw `Sexp` values: `python3 tools/unsafe.py stats` prints the counts per crate, and
-`tools/unsafe-baseline.txt` the count per file, which `just gate` lets only fall.
+Rule: `decisions/heap-gc.md`, "Interpreter code holds values through handles the borrow checker
+checks". Order and method: `development/design/memory-safety.md`, "Migration" and "Cost". Six
+string builtins are migrated (`nchar`, `substr<-`, `strrep`, `strtoi`, `utf8ToInt`, `charToRaw`);
+`python3 tools/unsafe.py stats` counts the rest.
 
-- **Order.** `interp` leaf builtins first (the rest of `strings.rs`, then numbers, sorting and the
-  arithmetic kernels), then `values.rs`, then subsetting and assignment, then the evaluator and the
-  bytecode loop; then `stats`, `graphics` and `frames`; then the `libr`, `jit` and `typed` entry
-  points; last, `heap` stops exporting the raw accessors and `interp::heap()` and
-  `interp::interp()` go.
-- **How one file goes.** A builtin gets the signature `fn(&mut Cx<'s>, &Args<'_, 's>) ->
-  R<Local<'s>>` and its table entry `safe!(name)`. A raw helper it calls gets a safe form in
-  `interp::handles` that says why the handle types make the call sound, and the wrapper goes when
-  the helper under it migrates. Run the file's oracle cases on `ry`, `ry-tier0`, `ry-jit` and
-  `ry-repeat-gctorture-seeded`, then `python3 tools/unsafe.py baseline`.
-- **Measure each file.** Count instructions for one call of a migrated builtin against its raw
-  form before the raw form is deleted (callgrind on a release build with
-  `CARGO_PROFILE_RELEASE_STRIP=false`). A wrapper that tests a common case keeps the test
-  `#[inline]` and its slow path `#[inline(never)]`: LLVM leaves a generic wrapper with a loop out
-  of line, and each such call costs 20 to 60 instructions on a scalar builtin.
 - **Not built.** The replacement path's ownership checks as the callers of `assume_exclusive`
-  (`Write` exists and only its tests use it), the bytecode loop's register accessor,
-  `Held<T>` fields in structures the collector traces, and a bulk fill for a new list or character
-  vector (`memory-safety.md`, "Open questions").
+  (only tests use `Write`), the bytecode loop's register accessor, `Held<T>` fields in traced
+  structures, and a bulk fill for a new list or character vector.
 
 ## Open: failing tests on main
 
