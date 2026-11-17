@@ -1,0 +1,29 @@
+[stdout]
+| [1] 3
+| [1] 3
+| [1] 3
+| [1] 3
+| [1] 3
+| [1] 3
+| [1] 3
+| [1] 0 1
+| [1] 3
+| $value
+| [1] 3
+| 
+| $visible
+| [1] FALSE
+| 
+| error: invalid first argument | delayedAssign(1, 2) 
+| error: invalid first argument | delayedAssign(character(0), 2) 
+| error: use of NULL environment is defunct | delayedAssign("x", 2, NULL) 
+| error: invalid 'eval.env' argument | delayedAssign("x", 2, 1) 
+| error: invalid 'assign.env' argument | delayedAssign("x", 2, assign.env = 1) 
+| NULL
+| [1] 3
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 3

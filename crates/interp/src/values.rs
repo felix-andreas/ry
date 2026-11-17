@@ -1820,6 +1820,71 @@ pub unsafe fn as_integer_scalar(object: Sexp) -> i32 {
     }
 }
 
+/// The first element as an integer, or `NA`, with the coercion warnings of GNU R's `asInteger`:
+/// text that is no number and a double outside the integer range warn.
+pub unsafe fn as_integer_scalar_warning(object: Sexp) -> R<i32> {
+    if length(object) == 0 {
+        return Ok(NA_INTEGER);
+    }
+    let mut warnings = crate::coerce::CoercionWarnings::default();
+    let value = match object.kind() {
+        SexpType::Real => {
+            let (value, out_of_range) = crate::coerce::real_to_int(reals(object)[0]);
+            warnings.integer_range = out_of_range;
+            value
+        }
+        SexpType::Complex => {
+            let value = complexes(object)[0];
+            let (integer, out_of_range) = crate::coerce::real_to_int(value.r);
+            warnings.integer_range = out_of_range;
+            warnings.imaginary = !value.r.is_nan() && !value.i.is_nan() && value.i != 0.0;
+            integer
+        }
+        SexpType::String => match string_at(object, 0) {
+            Some(text) => match crate::coerce::parse_real(&text) {
+                Some(real) => {
+                    let (value, out_of_range) = crate::coerce::real_to_int(real);
+                    warnings.integer_range = out_of_range;
+                    value
+                }
+                None => {
+                    warnings.na = true;
+                    NA_INTEGER
+                }
+            },
+            None => NA_INTEGER,
+        },
+        _ => as_integer_scalar(object),
+    };
+    warnings.report()?;
+    Ok(value)
+}
+
+/// The first element as a double, or `NA`, with the coercion warnings of GNU R's `asReal`.
+pub unsafe fn as_real_scalar_warning(object: Sexp) -> R<f64> {
+    if length(object) == 0 {
+        return Ok(NA_REAL);
+    }
+    let mut warnings = crate::coerce::CoercionWarnings::default();
+    let value = match object.kind() {
+        SexpType::Complex => {
+            let value = complexes(object)[0];
+            warnings.imaginary = !value.r.is_nan() && !value.i.is_nan() && value.i != 0.0;
+            value.r
+        }
+        SexpType::String => match string_at(object, 0) {
+            Some(text) => crate::coerce::parse_real(&text).unwrap_or_else(|| {
+                warnings.na = true;
+                NA_REAL
+            }),
+            None => NA_REAL,
+        },
+        _ => as_real_scalar(object),
+    };
+    warnings.report()?;
+    Ok(value)
+}
+
 /// The first element as a double, or `NA`.
 pub unsafe fn as_real_scalar(object: Sexp) -> f64 {
     if length(object) == 0 {

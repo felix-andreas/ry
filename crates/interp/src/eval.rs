@@ -5838,6 +5838,11 @@ unsafe fn do_invisible(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_nargs(call: &Call<'_>) -> R<Sexp> {
     let state = interp();
     let count = call.frame_index().map_or(NA_INTEGER, |index| {
+        // `eval`'s own frame counts its three arguments, as GNU R's context for it keeps them,
+        // so `nargs()` in code that `eval` or `source` runs at top level answers 3.
+        if state.frames[index].function.kind() != SexpType::Closure {
+            return 3;
+        }
         crate::frame_args(state, index).len() as i32
     });
     // Outside any closure, such as at top level, GNU R finds no call to count and answers NA.
@@ -6424,11 +6429,22 @@ unsafe fn do_tilde(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_delayed_assign(call: &Call<'_>) -> R<Sexp> {
-    let name = values::require_str(call.arg(0), "x")?;
-    let symbol = values::install(&name)?;
+    let names = call.arg(0);
+    if names.kind() != SexpType::String || length(names) == 0 {
+        return Err(error("invalid first argument"));
+    }
+    let symbol = values::install_charsxp_text(names.element(0))?;
     let value = call.arg(1);
     let eval_env = call.arg(2);
     let assign_env = call.arg(3);
+    for (env, name) in [(eval_env, "eval.env"), (assign_env, "assign.env")] {
+        if env == nil() {
+            return Err(error("use of NULL environment is defunct"));
+        }
+        if env.kind() != SexpType::Environment {
+            return Err(error(format!("invalid '{name}' argument")));
+        }
+    }
     let promise = make_promise(value, eval_env)?;
     define(symbol, promise, assign_env)?;
     Ok(nil())

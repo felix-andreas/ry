@@ -183,6 +183,15 @@ unsafe fn matrix_product(call: &Call<'_>, product: Product) -> R<Sexp> {
             error(message)
         }
     };
+    if !internal && call.len() > 2 {
+        crate::conditions::warning_call(
+            call.call,
+            format!(
+                "more than 2 arguments passed to default method of '{}'",
+                call.name()
+            ),
+        )?;
+    }
     let x = values::materialize(call.arg(0))?;
     let symmetric = product != Product::Matrix && call.arg(1) == nil();
     let y = if symmetric {

@@ -74,7 +74,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("rawToBits", 1, |call| unsafe {
         let raw = call.arg(0);
         if raw.kind() != SexpType::Raw {
-            return Err(call.error("argument 'x' must be a raw vector"));
+            return Err(error("argument 'x' must be a raw vector"));
         }
         let source = values::raws(raw);
         let result = alloc(SexpType::Raw, source.len() * 8)?;
@@ -86,10 +86,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
         Ok(result)
     }),
     internal("numToBits", 1, |call| unsafe {
-        let reals = call.arg(0);
-        if reals.kind() != SexpType::Real {
-            return Err(call.error("argument 'x' must be a numeric vector"));
-        }
+        let reals = crate::coerce::coerce_vector(call.arg(0), SexpType::Real)?;
+        crate::heap().root(reals);
         let source = values::reals(reals);
         let result = alloc(SexpType::Raw, source.len() * 64)?;
         for (index, value) in source.iter().enumerate() {
@@ -101,10 +99,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
         Ok(result)
     }),
     internal("numToInts", 1, |call| unsafe {
-        let reals = call.arg(0);
-        if reals.kind() != SexpType::Real {
-            return Err(call.error("argument 'x' must be a numeric vector"));
-        }
+        let reals = crate::coerce::coerce_vector(call.arg(0), SexpType::Real)?;
+        crate::heap().root(reals);
         let source = values::reals(reals);
         let result = alloc(SexpType::Integer, source.len() * 2)?;
         for (index, value) in source.iter().enumerate() {
@@ -117,20 +113,20 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("packBits", 2, do_pack_bits),
     internal("rawShift", 2, |call| unsafe {
         let raw = call.arg(0);
-        let shift = values::as_integer_scalar(call.arg(1));
+        let shift = values::as_integer_scalar_warning(call.arg(1))?;
         if raw.kind() != SexpType::Raw {
-            return Err(call.error("argument 'x' must be a raw vector"));
+            return Err(error("argument 'x' must be a raw vector"));
         }
         if !(-8..=8).contains(&shift) {
-            return Err(call.error("argument 'n' must be a small integer"));
+            return Err(error("argument 'n' must be a small integer"));
         }
-        let source = values::raws(raw);
-        let result = alloc(SexpType::Raw, source.len())?;
-        for (index, value) in source.iter().enumerate() {
-            values::raws_mut(result)[index] = if shift >= 0 {
+        // The result is a copy of `x`, so it keeps its names and other attributes.
+        let result = values::shallow_duplicate(raw)?;
+        for value in values::raws_mut(result).iter_mut() {
+            *value = if shift >= 0 {
                 ((*value as u32) << shift) as u8
             } else {
-                value >> -shift
+                *value >> -shift
             };
         }
         Ok(result)
@@ -552,17 +548,75 @@ unsafe fn do_compare_numeric_version(call: &Call<'_>) -> R<Sexp> {
 /// `colSums(x, n, p, na.rm)` and friends over an `n` by `p` matrix.
 unsafe fn margin_sums(call: &Call<'_>, rows: bool, mean: bool) -> R<Sexp> {
     let matrix = values::materialize(call.arg(0))?;
-    let row_count = values::as_integer_scalar(call.arg(1)).max(0) as usize;
-    let col_count = values::as_integer_scalar(call.arg(2)).max(0) as usize;
-    let na_rm = values::as_logical_scalar(call.arg(3)) == 1;
-    if !matches!(
-        matrix.kind(),
-        SexpType::Logical | SexpType::Integer | SexpType::Real
-    ) {
-        return Err(call.error("'x' must be numeric"));
+    let row_count = values::as_integer_scalar(call.arg(1));
+    if row_count == NA_INTEGER || row_count < 0 {
+        return Err(error("invalid 'n' argument"));
+    }
+    let col_count = values::as_integer_scalar(call.arg(2));
+    if col_count == NA_INTEGER || col_count < 0 {
+        return Err(error("invalid 'p' argument"));
+    }
+    let na_rm = values::as_logical_scalar(call.arg(3));
+    if na_rm == NA_LOGICAL {
+        return Err(error("invalid 'na.rm' argument"));
+    }
+    let (row_count, col_count, na_rm) = (row_count as usize, col_count as usize, na_rm == 1);
+    // GNU R 4.6 sums complex matrices too.
+    let complex = matrix.kind() == SexpType::Complex && crate::system::r_at_least(4, 6);
+    if !complex
+        && !matches!(
+            matrix.kind(),
+            SexpType::Logical | SexpType::Integer | SexpType::Real
+        )
+    {
+        return Err(error(if crate::system::r_at_least(4, 6) {
+            "'x' must be numeric or complex"
+        } else {
+            "'x' must be numeric"
+        }));
+    }
+    if (row_count as f64) * (col_count as f64) > length(matrix) as f64 {
+        return Err(error("'x' is too short"));
     }
     let outer = if rows { row_count } else { col_count };
     let inner = if rows { col_count } else { row_count };
+    if complex {
+        let data = values::complexes(matrix);
+        let mut totals = vec![(LongDouble::ZERO, LongDouble::ZERO, 0usize); outer];
+        for along in 0..inner {
+            for (position, total) in totals.iter_mut().enumerate() {
+                let index = if rows {
+                    position + along * row_count
+                } else {
+                    along + position * row_count
+                };
+                let value = data[index];
+                if na_rm && (value.r.is_nan() || value.i.is_nan()) {
+                    continue;
+                }
+                total.0 += value.r;
+                total.1 += value.i;
+                total.2 += 1;
+            }
+        }
+        let result = alloc(SexpType::Complex, outer)?;
+        for (slot, (real, imaginary, counted)) in
+            values::complexes_mut(result).iter_mut().zip(totals)
+        {
+            *slot = if mean {
+                Rcomplex {
+                    r: (real / counted).to_f64(),
+                    i: (imaginary / counted).to_f64(),
+                }
+            } else {
+                Rcomplex {
+                    r: real.to_f64(),
+                    i: imaginary.to_f64(),
+                }
+            };
+        }
+        return Ok(result);
+    }
     let result = alloc(SexpType::Real, outer)?;
     let finish = |total: LongDouble, counted: usize| {
         if mean {
@@ -2686,13 +2740,19 @@ unsafe fn do_log(call: &Call<'_>) -> R<Sexp> {
     let (matched, _) = call.match_args(&["x", "base"])?;
     let operand = present(matched[0])
         .ok_or_else(|| call.error("argument \"x\" is missing, with no default"))?;
-    let base = present(matched[1]).map(|base| values::as_real_scalar(base));
     let operand = values::materialize(operand)?;
+    if let Some(base) = present(matched[1]) {
+        let base = values::materialize(base)?;
+        if operand.kind() == SexpType::Complex || base.kind() == SexpType::Complex {
+            return complex_log_base(operand, base);
+        }
+        return math2_values(operand, base, Some(call.call), log_base);
+    }
     match operand.kind() {
         SexpType::Integer | SexpType::Logical | SexpType::Real => {
             let count = length(operand);
             let result = alloc(SexpType::Real, count)?;
-            if base.is_none() && operand.kind() == SexpType::Real {
+            if operand.kind() == SexpType::Real {
                 let source = Reals::Doubles(values::reals(operand));
                 let output = values::reals_mut(result);
                 if let Some(produced_nan) =
@@ -2708,16 +2768,7 @@ unsafe fn do_log(call: &Call<'_>) -> R<Sexp> {
             let mut produced_nan = false;
             for index in 0..count {
                 let x = real_at(operand, index);
-                let value = if is_na_real(x) {
-                    NA_REAL
-                } else {
-                    match base {
-                        Some(10.0) => x.log10(),
-                        Some(2.0) => x.log2(),
-                        Some(base) => x.ln() / base.ln(),
-                        None => x.ln(),
-                    }
-                };
+                let value = if is_na_real(x) { NA_REAL } else { x.ln() };
                 if value.is_nan() && !x.is_nan() {
                     produced_nan = true;
                 }
@@ -2729,9 +2780,71 @@ unsafe fn do_log(call: &Call<'_>) -> R<Sexp> {
             }
             Ok(result)
         }
-        SexpType::Complex => complex_log(call, operand, base),
+        SexpType::Complex => complex_log(call, operand, None),
         _ => Err(call.error("non-numeric argument to mathematical function")),
     }
+}
+
+/// GNU R's `logbase`: bases 10 and 2 take the exact `log10` and `log2`, and any other base
+/// divides logarithms that are `-Inf` at zero and `NaN` below it.
+fn log_base(x: f64, base: f64) -> f64 {
+    let log = |value: f64| {
+        if value > 0.0 {
+            value.ln()
+        } else if value == 0.0 {
+            f64::NEG_INFINITY
+        } else {
+            f64::NAN
+        }
+    };
+    if base == 10.0 && x > 0.0 {
+        x.log10()
+    } else if base == 2.0 && x > 0.0 {
+        x.log2()
+    } else if base == 10.0 || base == 2.0 {
+        log(x)
+    } else {
+        log(x) / log(base)
+    }
+}
+
+/// `log(x, base)` when either operand is complex, GNU R's `complex_math2`: both are recycled
+/// and divided as `clog(x) / clog(base)`, and only a pair of complex `NA`s gives `NA`.
+unsafe fn complex_log_base(operand: Sexp, base: Sexp) -> R<Sexp> {
+    let left = coerce_vector(operand, SexpType::Complex)?;
+    crate::heap().root(left);
+    let right = coerce_vector(base, SexpType::Complex)?;
+    crate::heap().root(right);
+    let (left_length, right_length) = (length(left), length(right));
+    if left_length == 0 || right_length == 0 {
+        return alloc(SexpType::Complex, 0);
+    }
+    let count = left_length.max(right_length);
+    let result = values::alloc_uninit(SexpType::Complex, count)?;
+    let mut produced_nan = false;
+    let is_na = |z: Rcomplex| is_na_real(z.r) && is_na_real(z.i);
+    let is_nan = |z: Rcomplex| z.r.is_nan() || z.i.is_nan();
+    for index in 0..count {
+        let z = values::complexes(left)[index % left_length];
+        let b = values::complexes(right)[index % right_length];
+        let value = if is_na(z) && is_na(b) {
+            Rcomplex {
+                r: NA_REAL,
+                i: NA_REAL,
+            }
+        } else {
+            let value = complex_divide(clog(z), clog(b));
+            produced_nan |= is_nan(value) && !(is_nan(z) || is_nan(b));
+            value
+        };
+        values::complexes_mut(result)[index] = value;
+    }
+    if produced_nan {
+        conditions::warning("NaNs produced in function \"log\"")?;
+    }
+    let source = if count == left_length { left } else { right };
+    values::copy_most_attributes(source, result, true)?;
+    Ok(result)
 }
 
 /// `log` of a complex vector: GNU R takes `clog` for one argument and `clog(x) / clog(base)`
@@ -4174,7 +4287,7 @@ unsafe fn do_seq_len(call: &Call<'_>) -> R<Sexp> {
     if length(value) != 1 {
         conditions::warning_call(call.call, "first element used of 'length.out' argument")?;
     }
-    let count = values::as_real_scalar(value);
+    let count = values::as_real_scalar_warning(value)?;
     if !count.is_finite() || count < 0.0 {
         return Err(call.error("argument must be coercible to non-negative integer"));
     }
@@ -4784,15 +4897,11 @@ unsafe fn do_atan2(call: &Call<'_>) -> R<Sexp> {
     if left.kind() != SexpType::Complex && right.kind() != SexpType::Complex {
         return math2(call, f64::atan2);
     }
-    let numeric = |kind| {
-        matches!(
-            kind,
-            SexpType::Integer | SexpType::Real | SexpType::Logical | SexpType::Complex
-        )
-    };
-    if !numeric(left.kind()) || !numeric(right.kind()) {
-        return Err(call.error("non-numeric argument to mathematical function"));
-    }
+    // GNU R's `complex_math2` coerces both operands, so text parses with a warning.
+    let left = coerce_vector(left, SexpType::Complex)?;
+    crate::heap().root(left);
+    let right = coerce_vector(right, SexpType::Complex)?;
+    crate::heap().root(right);
     let left_length = length(left);
     let right_length = length(right);
     let count = recycled_length(call.call, left_length, right_length)?;
@@ -4836,31 +4945,69 @@ unsafe fn do_atan2(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn math2(call: &Call<'_>, function: fn(f64, f64) -> f64) -> R<Sexp> {
-    let left = values::materialize(call.arg(0))?;
-    let right = values::materialize(call.arg(1))?;
-    if !matches!(
-        left.kind(),
-        SexpType::Integer | SexpType::Real | SexpType::Logical
-    ) || !matches!(
-        right.kind(),
-        SexpType::Integer | SexpType::Real | SexpType::Logical
-    ) {
-        return Err(call.error("non-numeric argument to mathematical function"));
+    math2_values(call.arg(0), call.arg(1), None, function)
+}
+
+/// GNU R's `math2`: both operands numeric (a factor is not), recycled to the longer without
+/// the length warning of arithmetic, `NA` before `NaN` in either operand, a warning when the
+/// function makes a `NaN`, and the attributes of the operand as long as the result. A type
+/// error names `call`, or the closure that calls the `.Internal` when there is none.
+unsafe fn math2_values(
+    left: Sexp,
+    right: Sexp,
+    call: Option<Sexp>,
+    function: impl Fn(f64, f64) -> f64,
+) -> R<Sexp> {
+    let numeric = |value: Sexp| {
+        matches!(
+            value.kind(),
+            SexpType::Integer | SexpType::Real | SexpType::Logical
+        ) && !values::inherits(value, "factor")
+    };
+    if !numeric(left) || !numeric(right) {
+        let message = "non-numeric argument to mathematical function";
+        return Err(match call {
+            Some(call) => crate::unwind::error_in(call, message),
+            None => error(message),
+        });
     }
-    let left_length = length(left);
-    let right_length = length(right);
-    let count = recycled_length(call.call, left_length, right_length)?;
+    let left = values::materialize(left)?;
+    let right = values::materialize(right)?;
+    let (left_length, right_length) = (length(left), length(right));
+    if left_length == 0 || right_length == 0 {
+        let result = alloc(SexpType::Real, 0)?;
+        if left_length == 0 {
+            values::copy_most_attributes(left, result, true)?;
+        }
+        return Ok(result);
+    }
+    let count = left_length.max(right_length);
     let result = alloc(SexpType::Real, count)?;
-    for index in 0..count {
+    let mut produced_nan = false;
+    for (index, slot) in values::reals_mut(result).iter_mut().enumerate() {
         let a = real_at(left, index % left_length);
         let b = real_at(right, index % right_length);
-        values::reals_mut(result)[index] = if is_na_real(a) || is_na_real(b) {
+        *slot = if is_na_real(a) || is_na_real(b) {
             NA_REAL
+        } else if a.is_nan() || b.is_nan() {
+            f64::NAN
         } else {
-            function(a, b)
+            let value = function(a, b);
+            produced_nan |= value.is_nan();
+            value
         };
     }
-    binary_attributes(left, right, result, call.call)?;
+    for message in rmath::take_warnings() {
+        conditions::warning(message)?;
+    }
+    if produced_nan {
+        conditions::warning("NaNs produced")?;
+    }
+    if count == left_length {
+        values::copy_most_attributes(left, result, true)?;
+    } else {
+        values::copy_most_attributes(right, result, true)?;
+    }
     Ok(result)
 }
 
@@ -5330,20 +5477,30 @@ unsafe fn do_pack_bits(call: &Call<'_>) -> R<Sexp> {
 /// come out in the order it finds them: zeros at the origin first, then by deflation, roughly
 /// smallest modulus first.
 unsafe fn do_polyroot(call: &Call<'_>) -> R<Sexp> {
-    let input = coerce_vector(call.arg(0), SexpType::Complex)?;
+    let input = call.arg(0);
+    if !matches!(
+        input.kind(),
+        SexpType::Complex | SexpType::Real | SexpType::Integer | SexpType::Logical
+    ) {
+        return Err(crate::sort::unimplemented_type(input, "polyroot"));
+    }
+    let input = coerce_vector(input, SexpType::Complex)?;
     let coefficients: Vec<Rcomplex> = values::complexes(input).to_vec();
-    if coefficients
+    // An `NA` counts as a nonzero coefficient, and a polynomial of degree 0 has no roots
+    // whatever its constant, so only the coefficients of a higher degree must be finite.
+    let degree = coefficients
+        .iter()
+        .rposition(|value| value.r != 0.0 || value.i != 0.0)
+        .unwrap_or(0);
+    if degree == 0 {
+        return alloc(SexpType::Complex, 0);
+    }
+    if coefficients[..=degree]
         .iter()
         .any(|value| !value.r.is_finite() || !value.i.is_finite())
     {
-        return Err(call.error("invalid polynomial coefficient"));
+        return Err(error("invalid polynomial coefficient"));
     }
-    let Some(degree) = coefficients
-        .iter()
-        .rposition(|value| value.r != 0.0 || value.i != 0.0)
-    else {
-        return alloc(SexpType::Complex, 0);
-    };
     let highest_first: Vec<(f64, f64)> = coefficients[..=degree]
         .iter()
         .rev()

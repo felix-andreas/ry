@@ -2576,7 +2576,8 @@ unsafe fn do_set_s4_object(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_set_old_class(call: &Call<'_>) -> R<Sexp> {
     let object = modifiable_attributes(call.arg(0))?;
     let value = call.arg(1);
-    if value != nil() && value.kind() != SexpType::String {
+    // GNU R removes the attribute for any zero-length value before it checks the type.
+    if value != nil() && value.kind() != SexpType::String && length(value) != 0 {
         return Err(call.error("attempt to set invalid 'class' attribute"));
     }
     set_class_attribute(object, value)?;
@@ -2606,13 +2607,21 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("attempt to set an attribute on NULL"));
     }
     let object = modifiable_attributes(object)?;
-    if value == nil() || length(value) == 0 {
+    if value == nil() || (value.kind() == SexpType::String && length(value) == 0) {
         set_class_attribute(object, nil())?;
         return Ok(object);
     }
-    if value.kind() != SexpType::String {
-        return Err(call.error("attempt to set invalid 'class' attribute"));
-    }
+    // Any other vector, such as `class(x) <- 1L`, names the class by its text, as in GNU R.
+    let value = if value.kind() == SexpType::String {
+        value
+    } else {
+        let text = crate::coerce::coerce_vector(value, SexpType::String)?;
+        if length(text) == 0 {
+            return Err(call.error("attempt to set invalid 'class' attribute"));
+        }
+        text
+    };
+    crate::heap().root(value);
     // A matrix's implicit class, as `class(m)` reports it, is no attribute either.
     if length(value) == 2
         && values::dims(object).is_some_and(|dims| dims.len() == 2)

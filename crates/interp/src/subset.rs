@@ -5066,6 +5066,31 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
     if items.iter().all(|arg| arg.value == nil()) {
         return Ok(nil());
     }
+    // An argument that is no vector makes the result a list, as in GNU R: a call or pairlist
+    // binds its elements, and anything else (a symbol, a function) is one element.
+    for arg in &mut items {
+        match arg.value.kind() {
+            SexpType::Nil
+            | SexpType::Raw
+            | SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::String
+            | SexpType::List
+            | SexpType::Expression => {}
+            SexpType::Language | SexpType::Pairlist => {
+                arg.value = coerce::coerce_vector(arg.value, SexpType::List)?;
+                crate::heap().root(arg.value);
+            }
+            _ => {
+                let wrapped = alloc(SexpType::List, 1)?;
+                values::set_elt(wrapped, 0, arg.value);
+                crate::heap().root(wrapped);
+                arg.value = wrapped;
+            }
+        }
+    }
     // Starting below raw, so that binding only raw vectors gives a raw matrix.
     let mut kind = SexpType::Nil;
     for arg in &items {
@@ -5073,6 +5098,11 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
     }
     if kind == SexpType::Nil {
         kind = SexpType::Logical;
+    }
+    if kind == SexpType::Expression {
+        return Err(crate::unwind::error(
+            "cannot create a matrix from type 'expression'",
+        ));
     }
     let (along, across) = if by_row { (1, 0) } else { (0, 1) };
     let matrix_dims = |value: Sexp| values::dims(value).filter(|dims| dims.len() == 2);

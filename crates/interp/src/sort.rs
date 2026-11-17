@@ -885,8 +885,7 @@ unsafe fn do_any_duplicated(call: &Call<'_>) -> R<Sexp> {
 pub(crate) unsafe fn do_match(call: &Call<'_>) -> R<Sexp> {
     let x = match_operand(call.arg(0), call)?;
     let table = match_operand(call.arg(1), call)?;
-    let nomatch = coerce_vector(call.arg(2), SexpType::Integer)?;
-    let nomatch = values::ints(nomatch).first().copied().unwrap_or(NA_INTEGER);
+    let nomatch = values::as_integer_scalar_warning(call.arg(2))?;
     let count = length(x);
     if count == 0 {
         return alloc(SexpType::Integer, 0);
@@ -1282,7 +1281,7 @@ unsafe fn check_sortable(x: Sexp) -> R<()> {
     Ok(())
 }
 
-unsafe fn unimplemented_type(object: Sexp, routine: &str) -> crate::unwind::Unwind {
+pub(crate) unsafe fn unimplemented_type(object: Sexp, routine: &str) -> crate::unwind::Unwind {
     error(format!(
         "unimplemented type '{}' in '{routine}'\n",
         object.kind().name()
