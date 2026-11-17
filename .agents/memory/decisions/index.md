@@ -582,7 +582,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The interpreter stays one crate, because the edit loop is bound by links
 - Agent-written notes are not mass-rewritten for brevity
 - Shipped binaries keep their symbol table, and crash reports name functions from it
-- The differential fuzzer compares canonical dumps, over four kinds of program
+- The differential fuzzer compares canonical dumps, over five kinds of program
 
 ## Docs, process and positioning
 

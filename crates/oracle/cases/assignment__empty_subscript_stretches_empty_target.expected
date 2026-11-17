@@ -1,0 +1,36 @@
+[stdout]
+| [1]  1  2  3 NA NA
+| List of 1
+|  $ : NULL
+| List of 3
+|  $ : num 1
+|  $ : NULL
+|  $ : NULL
+| List of 2
+|  $ a: num 1
+|  $  : NULL
+|  list()
+| List of 1
+|  $ : NULL
+|  list()
+|  chr NA
+|  chr NA
+|  num NA
+|  NULL
+|  NULL
+|  NULL
+|  chr "replacement has length zero"
+|      [,1]
+| [1,] NULL
+| List of 1
+|  $ : NULL
+| List of 1
+|  $ : NULL
+| List of 1
+|  $ : NULL
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

@@ -1,0 +1,58 @@
+[stdout]
+| sum(r) -> error: invalid 'type' (raw) of argument 
+| sum(raw()) -> error: invalid 'type' (raw) of argument 
+| sum(r, 1L) -> error: invalid 'type' (raw) of argument 
+| sum(1L, r) -> error: invalid 'type' (raw) of argument 
+| sum(1, r) -> error: invalid 'type' (raw) of argument 
+| sum(r, "a") -> error: invalid 'type' (raw) of argument 
+| sum("a", r) -> error: invalid 'type' (character) of argument 
+| prod(r) -> error: invalid 'type' (raw) of argument 
+| prod(raw()) -> error: invalid 'type' (raw) of argument 
+| prod(1i, r) -> error: invalid 'type' (raw) of argument 
+| prod(character()) -> error: invalid 'type' (character) of argument 
+| max(r) -> error: invalid 'type' (raw) of argument 
+| min(r) -> error: invalid 'type' (raw) of argument 
+| max(1, r) -> error: invalid 'type' (raw) of argument 
+| min("a", r) -> error: invalid 'type' (raw) of argument 
+| max(raw()) -> error: invalid 'type' (raw) of argument 
+| max(1i) -> error: invalid 'type' (complex) of argument 
+| min(complex()) -> error: invalid 'type' (complex) of argument 
+| max(1L, 1i) -> error: invalid 'type' (complex) of argument 
+| max("a", 1i) -> error: invalid 'type' (complex) of argument 
+| max(list(1)) -> error: invalid 'type' (list) of argument 
+| max(character()) -> warning: no non-missing arguments, returning NA |  chr NA
+| min(character()) -> warning: no non-missing arguments, returning NA |  chr NA
+| max(NA_character_, na.rm = TRUE) -> warning: no non-missing arguments, returning NA |  chr NA
+| min(1, character()) ->  chr "1"
+| range(r) -> error: invalid 'type' (raw) of argument 
+| range(1i) -> error: invalid 'type' (complex) of argument 
+| range(complex()) -> error: invalid 'type' (complex) of argument 
+| range(character()) -> warning: no non-missing arguments, returning NA | warning: no non-missing arguments, returning NA |  chr [1:2] NA NA
+| range(TRUE, "a") ->  chr [1:2] "a" "TRUE"
+| range(1L, as.raw(2)) ->  int [1:2] 1 2
+| range(as.raw(2), 1) ->  num [1:2] 1 2
+| range(as.raw(2), logical()) ->  int [1:2] 1 1
+| range(as.raw(2), NULL) -> error: invalid 'type' (raw) of argument 
+| range(as.raw(2), factor("x")) ->  int [1:2] 1 2
+| range(list(1, 2)) ->  num [1:2] 1 2
+| range(c("b", NA, "a"), finite = TRUE) ->  chr [1:2] "a" "b"
+| mean(r) -> warning: argument is not numeric or logical: returning NA |  num NA
+| mean("a") -> warning: argument is not numeric or logical: returning NA |  num NA
+| f(r) -> error: invalid 'type' (raw) of argument 
+| f(r) -> error: invalid 'type' (raw) of argument 
+| f(r) -> error: invalid 'type' (raw) of argument 
+| g(1, r) -> error: invalid 'type' (raw) of argument 
+| g(1, r) -> error: invalid 'type' (raw) of argument 
+| g(1, r) -> error: invalid 'type' (raw) of argument 
+| g(1i, 2) -> error: invalid 'type' (complex) of argument 
+| g(1i, 2) -> error: invalid 'type' (complex) of argument 
+| g(1i, 2) -> error: invalid 'type' (complex) of argument 
+| h(r) -> error: invalid 'type' (raw) of argument 
+| h(r) -> error: invalid 'type' (raw) of argument 
+| h(r) -> error: invalid 'type' (raw) of argument 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

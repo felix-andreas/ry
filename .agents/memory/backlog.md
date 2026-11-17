@@ -1543,6 +1543,18 @@ overhead, not allocation.
 
 ## Open: untyped R against GNU R
 
+- **Differences the `api` and `metamorphic` fuzz kinds report** (`oracle fuzz --kind api|metamorphic`):
+  - *The call an error or warning of a primitive names.* A primitive called directly inside another call reports itself (`` tryCatch(`dimnames<-`(1:3, list()), error = conditionCall) `` is the `dimnames<-` call), where GNU R's `error()` names the enclosing closure call (`doTryCatch(...)`) unless the caller is byte-compiled. The same for `"sum"(1, 2)` ("attempt to apply non-function"), `` `attr<-`(1, "comment", 2) ``, `` `length<-`(NULL, 2) ``, `` `units<-`(NULL, "a") `` (GNU R names `UseMethod("units<-")`) and `` `Encoding<-`(NULL, "UTF-8") `` (ry names `setEncoding(x, value)`). The oracle cases compare messages only for these.
+  - `matrix(sum)` and `matrix(quote(a))` fail in `.Internal(matrix())` ("'data' must be of a vector type"), where GNU R's `as.vector(x, mode)` fails first ("cannot coerce type 'builtin' to vector of type 'any'").
+  - `x <- NULL; x[3] <- sum` has another message.
+  - `print(1:10, max = 0)` prints one element, where GNU R prints none (`print.rs` clamps `max` to 1 because the array paths divide by it).
+  - `D(expression(), "x")` returns `NA`, where GNU R fails with "attempt access index 0/0 in VECTOR_ELT"; `forceAndCall("a", sum, 1, 2)` gives no "NAs introduced by coercion" warning.
+  - `iconv("\u00e9", "UTF-8", "latin1")` prints as `é`, where GNU R prints `<e9>` in a UTF-8 session for an unmarked result (`mark = FALSE` paths).
+  - `qr.influence(1:3, 2)` reports another message.
+  - Condition classes: a missing argument is not a `missingArgError`, and an `eval` error is not an `evalError`.
+  - A `\u` escape inside backticks is not read as the character.
+  - `structure(1:.Machine$integer.max, names = letters[1:8])` is killed for memory, where GNU R reports "cannot allocate".
+  - GNU R artifacts the fuzzers must not learn: a closure compiled at its third call changes the call of a `<<-` warning to `<-` and merges the constants `-0` and `0`, and `x[1, 2L, 1] <- sum` on a list array is undefined there. Compiling each generated closure up front (`compiler::cmpfun`) in the fuzz programs would remove the timing noise.
 - A builtin generic passes an S3 method promises of the call's code where GNU R passes values: with `length.cls <- function(x) deparse(substitute(x))`, `length(obj)` is `"obj"` on ry and the deparsed object on GNU R, and `` `names<-.cls` `` sees `substitute(value)` as `v` where GNU R sees `"a"`. The same in every tier (`dispatch.rs`, `internal_dispatch`).
 - `mapply` and `Map` pass the function values, where GNU R passes promises whose code is `dots[[2L]][[1L]]`: `Map(function(a, b) deparse(substitute(b)), 1:2, 3:4)` gives `"3L"` and `"4L"` on ry (`envir.rs`, `do_mapply`).
 - A compiled `x[i] <- v` decides between the builtin and a method by reading `x` before the subscripts run (`bytecode.rs`, `element_assignment`). A subscript that turns `x` into an object as a side effect (`x[{class(x) <<- "k"; 1}] <- v` from a nested function) dispatches on GNU R and runs the builtin compiled. Nothing real is known to do this. A subscript that is a local the compiler counts as bound (`Compiler::assigned`) is read before the target, so with `drop_k <- function() rm("k", envir = parent.frame())`, `k <- 1; drop_k(); z[k] <- v` on an object `z` fails from the second call on with "object 'k' not found" where GNU R's method may never force `k`. A body that calls `rm()` itself records no bound locals.

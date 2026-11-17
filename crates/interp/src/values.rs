@@ -1263,8 +1263,21 @@ pub unsafe fn has_attributes(object: Sexp) -> bool {
     object.attrib() != nil()
 }
 
-/// Sets an attribute without validating it, or removes it when `value` is `NULL`. The object
-/// bit follows the class attribute.
+/// GNU R's `setAttrib` refuses `NULL` and the primitive functions: each is one object for the
+/// whole session, so an attribute on it would show on every use.
+pub unsafe fn check_attributable(object: Sexp) -> R<()> {
+    match object.kind() {
+        SexpType::Nil => Err(error("attempt to set an attribute on NULL")),
+        kind @ (SexpType::Builtin | SexpType::Special | SexpType::Symbol) => Err(error(format!(
+            "cannot set an attribute on a '{}'",
+            kind.name()
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// Sets an attribute without validating its value, or removes it when `value` is `NULL`. The
+/// object bit follows the class attribute.
 pub unsafe fn set_attr(object: Sexp, name: Sexp, value: Sexp) -> R<()> {
     let heap = crate::heap();
     let nil = nil();
@@ -1272,6 +1285,7 @@ pub unsafe fn set_attr(object: Sexp, name: Sexp, value: Sexp) -> R<()> {
         remove_attr(object, name);
         return Ok(());
     }
+    check_attributable(object)?;
     // An object cannot carry itself as an attribute: the cycle would make `serialize`, `identical`
     // and printing recurse forever, so GNU R's `R_FixupRHS` attaches a copy instead.
     let value = if value == object {

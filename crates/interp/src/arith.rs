@@ -30,7 +30,7 @@ use {
         long_double::{self, LongDouble},
         rmath,
         system::r_at_least,
-        unwind::{R, error},
+        unwind::{R, Unwind, error},
         values::{
             self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real, symbols,
         },
@@ -448,23 +448,23 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("beta", 2, |call| unsafe { math2(call, rmath::beta) }),
     internal("lbeta", 2, |call| unsafe { math2(call, rmath::lbeta) }),
     internal("bitwiseAnd", 2, |call| unsafe {
-        bitwise(call, |a, b| a & b)
+        bitwise(call, Some("bitwAnd"), |a, b| a & b)
     }),
     internal("bitwiseOr", 2, |call| unsafe {
-        bitwise(call, |a, b| a | b)
+        bitwise(call, Some("bitwOr"), |a, b| a | b)
     }),
     internal("bitwiseXor", 2, |call| unsafe {
-        bitwise(call, |a, b| a ^ b)
+        bitwise(call, Some("bitwXor"), |a, b| a ^ b)
     }),
     internal("bitwiseNot", 1, do_bitw_not),
     internal("bitwiseShiftL", 2, |call| unsafe {
-        bitwise(call, |a, b| match u32::try_from(b) {
+        bitwise(call, None, |a, b| match u32::try_from(b) {
             Ok(shift) if shift <= 31 => ((a as u32) << shift) as i32,
             _ => NA_INTEGER,
         })
     }),
     internal("bitwiseShiftR", 2, |call| unsafe {
-        bitwise(call, |a, b| match u32::try_from(b) {
+        bitwise(call, None, |a, b| match u32::try_from(b) {
             Ok(shift) if shift <= 31 => ((a as u32) >> shift) as i32,
             _ => NA_INTEGER,
         })
@@ -2545,6 +2545,27 @@ unsafe fn complex_math(call: &Call<'_>, function: Math, operand: Sexp) -> R<Sexp
         values::copy_most_attributes(operand, result, true)?;
         return Ok(result);
     }
+    // GNU R names an unimplemented function before it reads any element, so an empty vector
+    // fails too.
+    match function {
+        Math::Log2 => return complex_log(call, operand, Some(2.0)),
+        Math::Log10 => return complex_log(call, operand, Some(10.0)),
+        Math::Sqrt
+        | Math::Exp
+        | Math::Cos
+        | Math::Sin
+        | Math::Tan
+        | Math::Acos
+        | Math::Asin
+        | Math::Atan
+        | Math::Cosh
+        | Math::Sinh
+        | Math::Tanh
+        | Math::Acosh
+        | Math::Asinh
+        | Math::Atanh => {}
+        _ => return Err(call.error("unimplemented complex function")),
+    }
     let result = values::alloc_uninit(SexpType::Complex, count)?;
     let mut produced_nan = false;
     for index in 0..count {
@@ -2708,38 +2729,39 @@ unsafe fn do_log(call: &Call<'_>) -> R<Sexp> {
             }
             Ok(result)
         }
-        // GNU R takes `clog` for one argument and `clog(x) / clog(base)` for two, and only the
-        // first passes `NA` through.
-        SexpType::Complex => {
-            let count = length(operand);
-            let result = values::alloc_uninit(SexpType::Complex, count)?;
-            let divisor = base.map(|base| clog(Rcomplex { r: base, i: 0.0 }));
-            let mut produced_nan = false;
-            for index in 0..count {
-                let z = values::complexes(operand)[index];
-                if divisor.is_none() && (is_na_real(z.r) || is_na_real(z.i)) {
-                    values::complexes_mut(result)[index] = Rcomplex {
-                        r: NA_REAL,
-                        i: NA_REAL,
-                    };
-                    continue;
-                }
-                let value = match divisor {
-                    Some(divisor) => complex_divide(clog(z), divisor),
-                    None => clog(z),
-                };
-                produced_nan |=
-                    (value.r.is_nan() || value.i.is_nan()) && !(z.r.is_nan() || z.i.is_nan());
-                values::complexes_mut(result)[index] = value;
-            }
-            values::copy_most_attributes(operand, result, true)?;
-            if produced_nan {
-                conditions::warning_call(call.call, "NaNs produced in function \"log\"")?;
-            }
-            Ok(result)
-        }
+        SexpType::Complex => complex_log(call, operand, base),
         _ => Err(call.error("non-numeric argument to mathematical function")),
     }
+}
+
+/// `log` of a complex vector: GNU R takes `clog` for one argument and `clog(x) / clog(base)`
+/// for two, and only the first passes `NA` through. `log2` and `log10` are the second.
+unsafe fn complex_log(call: &Call<'_>, operand: Sexp, base: Option<f64>) -> R<Sexp> {
+    let count = length(operand);
+    let result = values::alloc_uninit(SexpType::Complex, count)?;
+    let divisor = base.map(|base| clog(Rcomplex { r: base, i: 0.0 }));
+    let mut produced_nan = false;
+    for index in 0..count {
+        let z = values::complexes(operand)[index];
+        if divisor.is_none() && (is_na_real(z.r) || is_na_real(z.i)) {
+            values::complexes_mut(result)[index] = Rcomplex {
+                r: NA_REAL,
+                i: NA_REAL,
+            };
+            continue;
+        }
+        let value = match divisor {
+            Some(divisor) => complex_divide(clog(z), divisor),
+            None => clog(z),
+        };
+        produced_nan |= (value.r.is_nan() || value.i.is_nan()) && !(z.r.is_nan() || z.i.is_nan());
+        values::complexes_mut(result)[index] = value;
+    }
+    values::copy_most_attributes(operand, result, true)?;
+    if produced_nan {
+        conditions::warning_call(call.call, "NaNs produced in function \"log\"")?;
+    }
+    Ok(result)
 }
 
 /// `signif` of a complex number, GNU R's `z_prec_r`: both parts are rounded to the same
@@ -2993,6 +3015,9 @@ enum Cumulative {
 
 unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
     let operand = values::materialize(call.arg(0))?;
+    if operand.kind() == SexpType::Expression {
+        return Err(error("'list' object cannot be coerced to type 'double'"));
+    }
     let count = length(operand);
     let names = values::names(operand);
     let result = match (operand.kind(), kind) {
@@ -3131,9 +3156,19 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
             }
             result
         }
+        (SexpType::Complex, _) => {
+            if count == 0 {
+                alloc(SexpType::Complex, 0)?
+            } else {
+                return Err(
+                    call.error(format!("'{}' not defined for complex numbers", call.name()))
+                );
+            }
+        }
+        (SexpType::Nil, _) => return alloc(SexpType::Real, 0),
         // GNU R coerces anything but integers and complexes to double first, so a list of
-        // numbers (`cumprod(lapply(x, length))`) works.
-        (SexpType::String | SexpType::List, _) => {
+        // numbers (`cumprod(lapply(x, length))`) or raw bytes work.
+        _ => {
             let converted = coerce_vector(operand, SexpType::Real)?;
             let args = [Arg {
                 tag: nil(),
@@ -3148,14 +3183,6 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
                 reusable: None,
             };
             return cumulative(&inner, kind);
-        }
-        (SexpType::Nil, _) => return alloc(SexpType::Real, 0),
-        _ => {
-            return Err(call.error(format!(
-                "'{}' not defined for \"{}\" objects",
-                call.name(),
-                operand.kind().name()
-            )));
         }
     };
     if names != nil() {
@@ -3271,10 +3298,15 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
         },
     )?;
     for item in &items {
-        if !(item.kind().is_atomic() || *item == nil())
-            || (item.kind() == SexpType::String
-                && matches!(function, Summary::Sum | Summary::Product))
-        {
+        // GNU R's types: `sum` and `prod` take complex but not character, `min` and `max` the
+        // reverse, and none takes raw.
+        let valid = match item.kind() {
+            SexpType::Logical | SexpType::Integer | SexpType::Real => true,
+            SexpType::Complex => matches!(function, Summary::Sum | Summary::Product),
+            SexpType::String => matches!(function, Summary::Max | Summary::Min),
+            _ => false,
+        };
+        if !valid {
             return Err(call.error(format!(
                 "invalid 'type' ({}) of argument",
                 item.kind().name()
@@ -3502,10 +3534,13 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
                 }
                 return match best {
                     Some(text) => values::scalar_string(&text),
-                    None => Err(call.error(format!(
-                        "no non-missing arguments to {}",
-                        if is_max { "max" } else { "min" }
-                    ))),
+                    None => {
+                        conditions::warning_call(
+                            call.call,
+                            "no non-missing arguments, returning NA",
+                        )?;
+                        values::scalar_string_charsxp(values::na_string())
+                    }
                 };
             }
             extreme(call.call, &numeric_extremes(&items, kind)?, na_rm, is_max)
@@ -3637,8 +3672,15 @@ unsafe fn do_range(call: &Call<'_>) -> R<Sexp> {
             items.push(*arg);
         }
     }
-    // `range.default` starts from `c(..., recursive = TRUE)`, so lists are flattened.
-    let mut args = if items.iter().any(|arg| arg.value.kind() == SexpType::List) {
+    // `range.default` starts from `c(..., recursive = TRUE)`, which flattens lists and gives
+    // mixed arguments one type (`range(TRUE, "a")` compares "TRUE"). Numeric arguments alone
+    // skip the copy, as min and max of each give the same answer.
+    let mut args = if items.iter().any(|arg| {
+        !matches!(
+            arg.value.kind(),
+            SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Nil
+        )
+    }) {
         vec![Arg {
             tag: nil(),
             value: crate::combine::combine_args(&items, true, false)?,
@@ -3712,28 +3754,16 @@ unsafe fn all_any(call: &Call<'_>, is_all: bool) -> R<Sexp> {
     let (items, na_rm) = summary_args(call, SequenceRead::Contents)?;
     let mut saw_na = false;
     for item in items {
-        // GNU R skips an empty list as it skips `NULL`.
-        if item == nil() || (item.kind() == SexpType::List && length(item) == 0) {
+        // GNU R skips every empty argument, so `any(character())` and `all(list())` neither
+        // warn nor fail.
+        if length(item) == 0 {
             continue;
         }
-        if !matches!(
-            item.kind(),
-            SexpType::Logical
-                | SexpType::Integer
-                | SexpType::Real
-                | SexpType::Complex
-                | SexpType::Raw
-                | SexpType::String
-        ) {
-            return Err(call.error(format!(
-                "invalid 'type' ({}) of argument",
-                item.kind().name()
-            )));
-        }
-        if item.kind() == SexpType::String {
-            return Err(call.error("invalid 'type' (character) of argument"));
-        }
-        if !matches!(item.kind(), SexpType::Logical | SexpType::Integer) && length(item) > 0 {
+        // Anything but a logical or an integer is coerced as `as.logical` would, after a
+        // warning: a string reads "TRUE" or "T", a raw byte any nonzero value.
+        let flags = if matches!(item.kind(), SexpType::Logical | SexpType::Integer) {
+            item
+        } else {
             conditions::warning_call(
                 call.call,
                 format!(
@@ -3741,26 +3771,19 @@ unsafe fn all_any(call: &Call<'_>, is_all: bool) -> R<Sexp> {
                     item.kind().name()
                 ),
             )?;
-        }
-        if matches!(item.kind(), SexpType::Logical | SexpType::Integer) {
-            // One pass over the slice, without converting each element through `logical_at`;
-            // any nonzero integer counts as TRUE.
-            match kernels::any_all(!is_all, values::ints(item)) {
-                NA_LOGICAL => saw_na = true,
-                decided if decided == i32::from(!is_all) => return scalar_bool(!is_all),
-                _ => {}
+            if item.kind() == SexpType::Expression {
+                return Err(error("'list' object cannot be coerced to type 'logical'"));
             }
-            continue;
-        }
-        for index in 0..length(item) {
-            let value = logical_at(item, index);
-            if value == NA_LOGICAL {
-                saw_na = true;
-            } else if is_all && value == 0 {
-                return scalar_bool(false);
-            } else if !is_all && value == 1 {
-                return scalar_bool(true);
-            }
+            let flags = coerce_vector(item, SexpType::Logical)?;
+            crate::heap().root(flags);
+            flags
+        };
+        // One pass over the slice, without converting each element through `logical_at`; any
+        // nonzero integer counts as TRUE.
+        match kernels::any_all(!is_all, values::ints(flags)) {
+            NA_LOGICAL => saw_na = true,
+            decided if decided == i32::from(!is_all) => return scalar_bool(!is_all),
+            _ => {}
         }
     }
     if saw_na && !na_rm {
@@ -4149,9 +4172,6 @@ pub unsafe fn colon(start: f64, end: f64) -> R<Sexp> {
 unsafe fn do_seq_len(call: &Call<'_>) -> R<Sexp> {
     let value = call.arg(0);
     if length(value) != 1 {
-        if length(value) == 0 {
-            return Err(call.error("argument of length 0"));
-        }
         conditions::warning_call(call.call, "first element used of 'length.out' argument")?;
     }
     let count = values::as_real_scalar(value);
@@ -4429,17 +4449,42 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
         }
         other => other,
     };
-    let length_out = present(matched[2])
-        .map(|value| values::as_real_scalar(value))
-        .filter(|value| !value.is_nan());
-    let each = present(matched[3])
-        .map(|value| values::as_integer_scalar(value))
-        .filter(|&value| value != NA_INTEGER)
-        .unwrap_or(1)
-        .max(0) as usize;
     if object.kind() == SexpType::Pairlist {
         return Err(call.error("replication of pairlists is defunct"));
     }
+    let length_out = match present(matched[2]) {
+        Some(value) => {
+            let length_out = rep_count(value)?;
+            if length_out <= -1.0 {
+                return Err(call.error("invalid 'length.out' argument"));
+            }
+            if length(value) != 1 {
+                let message = "first element used of 'length.out' argument";
+                crate::conditions::warning_call(call.call, message)?;
+            }
+            Some(length_out).filter(|out| out.is_finite())
+        }
+        None => None,
+    };
+    let each = match present(matched[3]) {
+        Some(value) => {
+            if length(value) != 1 {
+                let message = "first element used of 'each' argument";
+                crate::conditions::warning_call(call.call, message)?;
+            }
+            // `each` is a double truncated toward zero: a non-finite count is 1, and one
+            // below -1 or above the longest vector is an error.
+            let each = rep_count(value)?;
+            if !each.is_finite() {
+                1
+            } else if each <= -1.0 || each > LONGEST_REPETITION as f64 {
+                return Err(call.error("invalid 'each' argument"));
+            } else {
+                each as usize
+            }
+        }
+        None => 1,
+    };
     // GNU R returns an empty `x` before it checks the type, so `rep(new.env(), 2)` is the
     // environment itself.
     if !is_replicable(object) && object != nil() && length(object) == 0 {
@@ -4543,6 +4588,20 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
         result.set_gp_bits(gp::S4_OBJECT, true);
     }
     Ok(result)
+}
+
+/// The first element of `rep`'s `length.out` or `each` as a number, NA when it has none. A
+/// string that is no number warns, as GNU R's `asReal` does.
+unsafe fn rep_count(value: Sexp) -> R<f64> {
+    let number = values::as_real_scalar(value);
+    if value.kind() == SexpType::String
+        && length(value) > 0
+        && number.is_nan()
+        && value.element(0) != values::na_string()
+    {
+        crate::conditions::warning("NAs introduced by coercion")?;
+    }
+    Ok(number)
 }
 
 /// Which element of `x` each element of `rep`'s result repeats, before `each` is applied:
@@ -4805,9 +4864,25 @@ unsafe fn math2(call: &Call<'_>, function: fn(f64, f64) -> f64) -> R<Sexp> {
     Ok(result)
 }
 
-unsafe fn bitwise(call: &Call<'_>, function: impl Fn(i32, i32) -> i32) -> R<Sexp> {
-    let left = coerce_vector(call.arg(0), SexpType::Integer)?;
-    let right = coerce_vector(call.arg(1), SexpType::Integer)?;
+/// A bitwise function of two operands. `name` is the R function an operand of an unsupported
+/// type is reported against; a shift has none, because GNU R coerces a shift count of any type
+/// to integer and then finds every unsupported first operand to differ from it in type.
+unsafe fn bitwise(
+    call: &Call<'_>,
+    name: Option<&str>,
+    function: impl Fn(i32, i32) -> i32,
+) -> R<Sexp> {
+    let left = bitwise_operand(call.arg(0))?;
+    let right = match name {
+        Some(_) => bitwise_operand(call.arg(1))?,
+        None => values::materialize(coerce_vector(call.arg(1), SexpType::Integer)?)?,
+    };
+    if left.kind() != right.kind() {
+        return Err(error("'a' and 'b' must have the same type"));
+    }
+    if left.kind() != SexpType::Integer {
+        return Err(unimplemented_bitwise_type(left, name.unwrap_or("bitwAnd")));
+    }
     let left_length = length(left);
     let right_length = length(right);
     let count = if left_length == 0 || right_length == 0 {
@@ -4831,7 +4906,10 @@ unsafe fn bitwise(call: &Call<'_>, function: impl Fn(i32, i32) -> i32) -> R<Sexp
 }
 
 unsafe fn do_bitw_not(call: &Call<'_>) -> R<Sexp> {
-    let operand = coerce_vector(call.arg(0), SexpType::Integer)?;
+    let operand = bitwise_operand(call.arg(0))?;
+    if operand.kind() != SexpType::Integer {
+        return Err(unimplemented_bitwise_type(operand, "bitwNot"));
+    }
     let count = length(operand);
     let result = values::alloc_uninit(SexpType::Integer, count)?;
     for (slot, &value) in values::ints_mut(result)
@@ -4847,18 +4925,43 @@ unsafe fn do_bitw_not(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
+/// An operand of a bitwise function as GNU R takes it: a double vector is coerced to integer,
+/// and a value of any other type is left for the caller's type check, so a logical or a string
+/// is an error rather than a number.
+unsafe fn bitwise_operand(operand: Sexp) -> R<Sexp> {
+    if operand.kind() == SexpType::Real {
+        coerce_vector(operand, SexpType::Integer)
+    } else {
+        values::materialize(operand)
+    }
+}
+
+unsafe fn unimplemented_bitwise_type(operand: Sexp, name: &str) -> Unwind {
+    error(format!(
+        "unimplemented type '{}' in '{name}'\n",
+        operand.kind().name()
+    ))
+}
+
 unsafe fn complex_part(call: &Call<'_>, part: u8) -> R<Sexp> {
     let operand = values::materialize(call.arg(0))?;
     let count = length(operand);
-    if !matches!(
-        operand.kind(),
-        SexpType::Complex | SexpType::Real | SexpType::Integer | SexpType::Logical
-    ) {
+    // GNU R's `isNumeric`, which a factor is not.
+    let numeric = match operand.kind() {
+        SexpType::Complex | SexpType::Real | SexpType::Logical => true,
+        SexpType::Integer => !values::inherits(operand, "factor"),
+        _ => false,
+    };
+    if !numeric {
         return Err(call.error("non-numeric argument to function"));
     }
     if part == 4 {
-        if operand.kind() != SexpType::Complex {
-            return Ok(operand);
+        match operand.kind() {
+            SexpType::Real => return Ok(operand),
+            SexpType::Integer | SexpType::Logical => {
+                return coerce_vector(operand, SexpType::Real);
+            }
+            _ => {}
         }
         let result = alloc(SexpType::Complex, count)?;
         for index in 0..count {
@@ -4921,21 +5024,37 @@ unsafe fn parallel_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
         .iter()
         .map(|arg| values::materialize(arg.value))
         .collect::<R<_>>()?;
-    if items.is_empty() {
+    let Some((&first, rest)) = items.split_first() else {
         return Err(error("no arguments"));
+    };
+    let input_type = |item: Sexp| match item.kind() {
+        SexpType::Nil
+        | SexpType::Logical
+        | SexpType::Integer
+        | SexpType::Real
+        | SexpType::String => Ok(item.kind()),
+        _ => Err(error("invalid input type")),
+    };
+    let mut kind = input_type(first)?;
+    if rest.is_empty() {
+        return Ok(first);
     }
-    let mut kind = SexpType::Integer;
-    for &item in &items {
-        match item.kind() {
-            SexpType::Nil => {}
-            SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::String => {
-                kind = coerce::higher_type(kind, item.kind());
-            }
-            _ => return Err(error("invalid input type")),
+    // As in GNU R, the first empty argument after a non-empty one, or the reverse, ends the
+    // scan, so later arguments are neither checked nor counted.
+    let mut count = length(first);
+    for &item in rest {
+        kind = coerce::higher_type(kind, input_type(item)?);
+        let item_count = length(item);
+        if (count > 0) != (item_count > 0) {
+            count = 0;
+            break;
         }
+        count = count.max(item_count);
     }
-    let count = items.iter().map(|&item| length(item)).max().unwrap_or(0);
-    if items.iter().any(|&item| length(item) == 0) {
+    if matches!(kind, SexpType::Nil | SexpType::Logical) {
+        kind = SexpType::Integer;
+    }
+    if count == 0 {
         return alloc(kind, 0);
     }
     if items.iter().any(|&item| count % length(item) != 0) {
@@ -5103,23 +5222,10 @@ unsafe fn which_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
             };
             extreme.and_then(|extreme| ints.iter().position(|&value| value == extreme))
         }
+        // GNU R coerces anything else to double, with that coercion's warnings.
         _ => {
-            let mut best: Option<(usize, f64)> = None;
-            for index in 0..length(operand) {
-                let value = real_at(operand, index);
-                let better = !value.is_nan()
-                    && best.is_none_or(|(_, current)| {
-                        if is_max {
-                            value > current
-                        } else {
-                            value < current
-                        }
-                    });
-                if better {
-                    best = Some((index, value));
-                }
-            }
-            best.map(|(index, _)| index)
+            let reals = coerce_vector(operand, SexpType::Real)?;
+            kernels::real_extreme_position(values::reals(reals), is_max)
         }
     };
     match found {

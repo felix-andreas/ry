@@ -1,0 +1,5 @@
+# `comment<-` and `dimnames<-` validate their value: a comment is a character vector or `NULL`,
+# and dimnames are a list on an array.
+t <- function(e) { r <- withCallingHandlers(tryCatch(e, error = function(e) paste("error:", conditionMessage(e))), warning = function(w) { cat("warning:", conditionMessage(w), "\n"); invokeRestart("muffleWarning") }); cat(deparse(r)[1], "\n") }
+cat("dimnames\n"); t(`dimnames<-`(1:3, list())); t(`dimnames<-`(1:3, NULL)); t(`dimnames<-`(1:3, 1)); t(`dimnames<-`(matrix(1:4, 2), 1)); t(`dimnames<-`(matrix(1:4, 2), list())); t(`dimnames<-`(matrix(1:4, 2), list(NULL, NULL, NULL))); t(`dimnames<-`(list(1), list())); t(`dimnames<-`(NULL, list())); t(`dimnames<-`(NULL, NULL)); t(`dimnames<-`(sum, NULL)); t(`dimnames<-`(sum, list()))
+cat("comment\n"); t(`comment<-`(1, 2)); t(`comment<-`(1, NULL)); t(`comment<-`(1, "a")); t(`comment<-`(1, c("a", "b"))); t(`comment<-`(NULL, "a")); t(`comment<-`(1, list("a"))); t(`comment<-`(1, NA)); t(`comment<-`(sum, "a")); t(attr(`attr<-`(1, "comment", 2), "comment")); t(structure(1, comment = 2))

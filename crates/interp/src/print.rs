@@ -3,15 +3,16 @@
 use {
     crate::{
         builtins::{BuiltinDef, Call, internal},
+        coerce::integer_scalar,
         deparse,
         eval::{self, value_of},
         format::{self, Settings, display_width, encode_element, encode_string, pad},
         interp,
-        unwind::R,
+        unwind::{R, error},
         values::{self, char_str, get_attr, length, nil, symbol_name, symbols},
         write_console,
     },
-    heap::object::{Sexp, SexpType, gp},
+    heap::object::{NA_LOGICAL, Sexp, SexpType, gp},
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -174,8 +175,8 @@ pub unsafe fn print_value(value: Sexp, options: &PrintOptions, tag: &mut String)
             print_list(list, options, tag)?;
         }
         SexpType::List => {
-            if values::dims(value).is_some_and(|dims| dims.len() == 2) {
-                print_list_matrix(value, options)?;
+            if let Some(dims) = values::dims(value).filter(|dims| dims.len() > 1) {
+                print_list_array(value, &dims, options)?;
             } else {
                 print_list(value, options, tag)?;
                 return Ok(());
@@ -359,7 +360,7 @@ pub unsafe fn print_vector(vector: Sexp, options: &PrintOptions) -> R<()> {
             &items,
             &measures,
             names,
-            vector.kind() == SexpType::Complex,
+            (vector.kind() == SexpType::Complex).then_some(vector),
             options,
         );
     } else {
@@ -419,7 +420,7 @@ unsafe fn print_named_vector(
     items: &[String],
     measures: &[Measure],
     names: Sexp,
-    complex: bool,
+    complex: Option<Sexp>,
     options: &PrintOptions,
 ) {
     let name_texts: Vec<String> = (0..items.len())
@@ -440,10 +441,19 @@ unsafe fn print_named_vector(
             text.push_str(&" ".repeat(options.gap));
         }
         text.push('\n');
-        if complex {
+        if let Some(vector) = complex {
             // GNU R prints named complex values at their own width, unpadded to the names and
-            // without a trailing gap.
-            text.push_str(&items[chunk_start..chunk_end].join(&" ".repeat(options.gap)));
+            // without a trailing gap, but an NA at the common width.
+            for index in chunk_start..chunk_end {
+                if index > chunk_start {
+                    text.push_str(&" ".repeat(options.gap));
+                }
+                let value = values::complexes(vector)[index];
+                match values::is_na(value.r) || values::is_na(value.i) {
+                    true => text.push_str(&pad(&items[index], width, true)),
+                    false => text.push_str(&items[index]),
+                }
+            }
         } else {
             for index in chunk_start..chunk_end {
                 text.push_str(&pad_measured(&items[index], measures[index], width, true));
@@ -887,35 +897,69 @@ unsafe fn print_array(array: Sexp, dims: &[usize], options: &PrintOptions) -> R<
     Ok(())
 }
 
-unsafe fn print_list_matrix(list: Sexp, options: &PrintOptions) -> R<()> {
-    // A list with dims prints each cell's summary, as GNU R does.
-    let dims = values::dims(list).unwrap_or_default();
+unsafe fn print_list_array(list: Sexp, dims: &[usize], options: &PrintOptions) -> R<()> {
+    // A list with two or more dims prints each cell's summary, as GNU R does.
     let count = length(list);
     let texts = values::alloc(SexpType::String, count)?;
     for index in 0..count {
         let element = list.element(index);
-        let text = summarize_cell(element)?;
+        let text = summarize_cell(element, options)?;
         values::set_elt(texts, index, values::mkchar(&text)?);
     }
     values::copy_most_attributes(list, texts, true)?;
     let mut options = options.clone();
     options.quote = false;
-    print_matrix(texts, dims[0], dims[1], &options, true)
+    match dims {
+        [rows, cols] => print_matrix(texts, *rows, *cols, &options, true),
+        _ => {
+            options.right = false;
+            print_array(texts, dims, &options)
+        }
+    }
 }
 
-unsafe fn summarize_cell(element: Sexp) -> R<String> {
+/// The text of one cell of a list array: a scalar's value, an object's one-line `format()`, or
+/// the type and length.
+unsafe fn summarize_cell(element: Sexp, options: &PrintOptions) -> R<String> {
+    if element.is_object() {
+        let function = eval::find_fun(values::install("format")?, values::base_namespace())?;
+        let symbol = values::install("x")?;
+        let env = values::new_env(options.env)?;
+        crate::eval::define(symbol, element, env)?;
+        let call = values::pairlist(&[(nil(), function), (nil(), symbol)], SexpType::Language)?;
+        let formatted = eval::eval(call, env)?;
+        if formatted.kind() == SexpType::String
+            && length(formatted) == 1
+            && let Some(text) = values::string_at(formatted, 0).filter(|text| text.len() < 100)
+        {
+            return Ok(text.into_owned());
+        }
+        let class = get_attr(element, symbols().class);
+        let class = values::string_at(class, 0).map(|text| text.into_owned());
+        return Ok(format!("{},{}", class.unwrap_or_default(), length(element)));
+    }
+    let count = length(element);
     Ok(match element.kind() {
         SexpType::Nil => "NULL".into(),
-        kind if kind.is_atomic() && length(element) == 1 => {
+        SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex
+            if count == 1 =>
+        {
             let items = format::format_vector(element, Settings::current(), true, "NA")?;
-            items.into_iter().next().unwrap_or_default()
+            let item = items.into_iter().next().unwrap_or_default();
+            item.trim_start().to_owned()
         }
-        SexpType::Logical => format!("logical,{}", length(element)),
-        SexpType::Integer => format!("integer,{}", length(element)),
-        SexpType::Real => format!("numeric,{}", length(element)),
-        SexpType::String => format!("character,{}", length(element)),
-        SexpType::List => format!("list,{}", length(element)),
-        SexpType::Closure => "?".into(),
+        SexpType::String if count == 1 => {
+            let text = values::string_at(element, 0).map(|text| text.into_owned());
+            format!("\"{}\"", text.unwrap_or_else(|| "NA".to_owned()))
+        }
+        SexpType::Logical => format!("logical,{count}"),
+        SexpType::Integer => format!("integer,{count}"),
+        SexpType::Real => format!("numeric,{count}"),
+        SexpType::Complex => format!("complex,{count}"),
+        SexpType::String => format!("character,{count}"),
+        SexpType::Raw => format!("raw,{count}"),
+        SexpType::List | SexpType::Pairlist => format!("list,{count}"),
+        SexpType::Language => "expression".into(),
         _ => "?".into(),
     })
 }
@@ -991,10 +1035,12 @@ unsafe fn print_list(list: Sexp, options: &PrintOptions, tag: &mut String) -> R<
 /// Prints the attributes `print.default` shows after a value.
 unsafe fn print_attributes(value: Sexp, options: &PrintOptions, tag: &mut String) -> R<()> {
     let symbols = symbols();
+    // An array's names are no part of how it prints, so they print as an attribute.
+    let array = value.kind().is_vector() && get_attr(value, symbols.dim) != nil();
     let mut cell = value.attrib();
     while cell.kind() == SexpType::Pairlist {
         let name = cell.tag();
-        let skip = name == symbols.names
+        let skip = (name == symbols.names && !array)
             || name == symbols.dim
             || name == symbols.dimnames
             || name == symbols.srcref
@@ -1055,20 +1101,18 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
         match name.as_str() {
             "digits" => {
                 if argument != nil() {
-                    let digits = values::as_integer_scalar(argument);
+                    let digits = integer_scalar(argument)?;
                     if !(1..=22).contains(&digits) {
-                        return Err(call.error("invalid digits parameter (1 <= digits <= 22)"));
+                        return Err(error(format!("invalid printing digits {digits}")));
                     }
                     options.settings.digits = digits as usize;
                 }
             }
-            "quote" => {
-                options.quote = values::as_logical_scalar(argument) != 0;
-            }
+            "quote" => options.quote = logical_argument(argument, "quote")?,
             "na.print" => {
                 if argument != nil() {
                     if argument.kind() != SexpType::String || values::length(argument) == 0 {
-                        return Err(call.error("invalid 'na.print' specification"));
+                        return Err(error("invalid 'na.print' specification"));
                     }
                     let text = values::first_string(argument)
                         .map(|text| text.into_owned())
@@ -1079,21 +1123,33 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
             }
             "print.gap" => {
                 if argument != nil() {
-                    options.gap = values::as_integer_scalar(argument).max(0) as usize;
+                    let gap = integer_scalar(argument)?;
+                    if gap < 0 {
+                        return Err(error("'gap' must be non-negative integer"));
+                    }
+                    options.gap = gap as usize;
                 }
             }
-            "right" => options.right = values::as_logical_scalar(argument) == 1,
+            "right" => options.right = logical_argument(argument, "right")?,
             "max" => {
                 if argument != nil() {
-                    options.max = values::as_integer_scalar(argument).max(1) as usize;
+                    let max = integer_scalar(argument)?;
+                    if max < 0 {
+                        return Err(error("invalid 'max' argument"));
+                    }
+                    options.max = max.max(1) as usize;
                 }
             }
             "width" => {
                 if argument != nil() {
-                    options.width = values::as_integer_scalar(argument).max(10) as usize;
+                    let width = integer_scalar(argument)?;
+                    if !(10..=10000).contains(&width) {
+                        return Err(error("invalid printing width"));
+                    }
+                    options.width = width as usize;
                 }
             }
-            "useSource" => options.use_source = values::as_logical_scalar(argument) != 0,
+            "useSource" => options.use_source = logical_argument(argument, "useSource")?,
             _ => {}
         }
     }
@@ -1107,6 +1163,13 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
         print_value(value, &options, &mut String::new())?;
     }
     Ok(value)
+}
+
+unsafe fn logical_argument(argument: Sexp, name: &str) -> R<bool> {
+    match values::as_logical_scalar(argument) {
+        NA_LOGICAL => Err(error(format!("invalid '{name}' argument"))),
+        value => Ok(value != 0),
+    }
 }
 
 /// `print.function(x, useSource, ...)`.

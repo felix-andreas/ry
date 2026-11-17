@@ -523,13 +523,14 @@ released. A second battery drives random API sequences under collection stress a
 
 `oracle fuzz` runs whole R programs under GNU R and ry's engines and reports every program on
 which an engine differs. A seed and a kind name a program, so `oracle fuzz --kind K --seed N
---print` prints it and `--engines` replays it. The four kinds find different bugs:
+--print` prints it and `--engines` replays it. The five kinds find different bugs:
 
 | Kind | A program is | It finds |
 | --- | --- | --- |
 | `grammar` (`oracle::fuzz::program`) | several blocks from a grammar of language features: loops shaped for the JIT, closures, S3 dispatch, conditions and `on.exit`, environments, attributes, `NA` and overflow, and element stores into a function's argument copy on both sides of 64 elements, in a function called three times so its body runs interpreted and compiled; about one in eight ends on a deliberate error | interpreter and JIT bugs in control flow and scoping |
 | `metamorphic` (`oracle::metamorphic::program`) | six to twelve trials; each builds one value, runs one body of updates and reads on it, and runs the same body in other forms that must give an identical result | a result that depends on how often or where code runs, or on how a value is stored |
 | `builtins` (`oracle::metamorphic::builtins_program`) | builtins called on a zoo of values, each call caught | a builtin that accepts, rejects or computes differently from GNU R |
+| `api` (`oracle::metamorphic::api_program`) | calls of functions drawn from everything base, stats and utils export, on two zoo values and constants of other types, each call caught | a function nobody listed: one that crashes, or accepts, rejects or computes differently from GNU R |
 | `corpus` (`oracle::corpus`) | a snippet of real R code with one to four mutations | what no grammar author thought of |
 
 A metamorphic trial draws its value from a zoo: every atomic type and lists, with `NA`, `NaN`,
@@ -570,6 +571,19 @@ recorded with its classes, message and call. A non-ASCII string shows the same m
 is flagged UTF-8 or unflagged, because the two are the same text in a UTF-8 session;
 `ORACLE_OBSERVE=strict` tells them apart.
 
+The `builtins` kind calls a hand-written list of functions with arguments that suit them. The
+`api` kind takes its functions from a table instead, `crates/oracle/src/api_functions.txt`, which
+`api_functions.R` writes from GNU R's namespaces (regenerate it after a GNU R upgrade:
+`Rscript crates/oracle/src/api_functions.R > crates/oracle/src/api_functions.txt`). The script
+leaves out what cannot be compared: functions that read or write files, connections, the terminal,
+the clock, the session or the graphics device, most dot-prefixed internals, and one function on
+which GNU R corrupts its own memory. A formal that names a file or a package is never passed. A
+call gets up to three positional arguments (the first is usually the zoo value `v`, the second
+`w`, the third a small count) and sometimes one named argument, and a replacement function is
+often called through replacement syntax (`x <- v; names(x) <- w`). A third of the calls print
+their result, so `print` methods run too. Most calls are errors in both engines, and then the
+messages are compared.
+
 The report of a diverging seed names each top-level expression that differs and how:
 
 | Difference | Meaning |
@@ -583,16 +597,46 @@ The report of a diverging seed names each top-level expression that differs and 
 
 `--jobs N` runs N programs at once, `--minutes M` keeps taking seeds until the time is up,
 `--findings DIR` writes each diverging program and its report to a directory, and the summary
-counts the differences by kind. `just fuzz-differential` runs the grammar, `just fuzz-kind KIND`
-any kind, and `just fuzz-long HOURS BASE` all four for a time budget, under tier 0, the forced JIT
-and seeded collection stress.
+counts the differences by kind. For the `builtins` and `api` kinds it also counts them by the
+function called and writes `DIR/functions.txt`, one `count`, kind and function per line, most
+frequent first, which ranks the gaps:
+
+```
+14	accepts	type.convert
+10	rejects	aregexec
+7	value	nargs
+```
+
+`oracle fuzz --kind all --count 500 --coverage` (`just fuzz-coverage`) runs no engine. It generates
+the programs and reports how many of the table's callable functions each kind names in a call, so
+a generator change shows what it added to the reach:
+
+```
+kind           all   base  stats  utils
+(the table)   1479   1000    427     52
+grammar        144    143      0      1
+metamorphic    131    129      1      1
+builtins       297    285      7      5
+api           1473    995    426     52
+corpus         649    458    178     13
+together      1474    995    427     52
+```
+
+The count is a close upper bound, because a name inside a string literal counts as a call.
+
+Every fuzzed engine runs with at most 2 GiB of writable memory (`oracle::fuzz::MEMORY_LIMIT`,
+`RLIMIT_DATA`), so a call that asks for a huge vector gets R's "cannot allocate" error in GNU R
+and in ry instead of taking the machine's memory. `just fuzz-differential` runs the grammar,
+`just fuzz-kind KIND` any kind, and `just fuzz-long HOURS BASE` all five for a time budget, under
+tier 0, the forced JIT and seeded collection stress.
 
 `crates/oracle/tests/test_differential.rs` holds the bounded passes. Grammar programs run under
-GNU R, tier 0 and the JIT, and under collection stress against ry unstressed. Metamorphic and
-builtin programs run under tier 0 and the forced JIT, which must agree with each other and print
-no `DIFFERENT` (`fuzz_metamorphic_forms_agree_across_tiers`, `fuzz_builtins_agree_across_tiers`);
-their comparison with GNU R is the long run's, because ry differs from GNU R on many builtin
-programs and a default test must pass.
+GNU R, tier 0 and the JIT, and under collection stress against ry unstressed. Metamorphic,
+builtin and api programs run under tier 0 and the forced JIT, which must agree with each other,
+print no `DIFFERENT` and never crash (`fuzz_metamorphic_forms_agree_across_tiers`,
+`fuzz_builtins_agree_across_tiers`, `fuzz_api_calls_agree_across_tiers`); their comparison with
+GNU R is the long run's, because ry differs from GNU R on many builtin and api programs and a
+default test must pass.
 
 A divergent program is 50 to 300 lines, so a finding is reduced before it becomes an oracle case.
 `oracle reduce FILE --engine NAME` (`just fuzz-reduce FILE ENGINE`, or `oracle fuzz --reduce` for

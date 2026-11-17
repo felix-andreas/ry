@@ -1155,12 +1155,20 @@ pub enum ProgramKind {
     /// [`metamorphic::builtins_program`](crate::metamorphic::builtins_program): builtins called
     /// on values from the zoo.
     Builtins,
+    /// [`metamorphic::api_program`](crate::metamorphic::api_program): calls drawn from every
+    /// function base, stats and utils export, on values from the zoo.
+    Api,
 }
 
-pub const KINDS: [ProgramKind; 3] = [
+/// The writable memory a fuzzed engine may map. GNU R and ry both run every generated program
+/// in a fraction of it, and a program that asks for more gets R's allocation error.
+pub const MEMORY_LIMIT: u64 = 2 << 30;
+
+pub const KINDS: [ProgramKind; 4] = [
     ProgramKind::Grammar,
     ProgramKind::Metamorphic,
     ProgramKind::Builtins,
+    ProgramKind::Api,
 ];
 
 impl ProgramKind {
@@ -1169,6 +1177,7 @@ impl ProgramKind {
             ProgramKind::Grammar => "grammar",
             ProgramKind::Metamorphic => "metamorphic",
             ProgramKind::Builtins => "builtins",
+            ProgramKind::Api => "api",
         }
     }
 
@@ -1182,6 +1191,7 @@ impl ProgramKind {
             ProgramKind::Grammar => program(seed),
             ProgramKind::Metamorphic => crate::metamorphic::program(seed),
             ProgramKind::Builtins => crate::metamorphic::builtins_program(seed),
+            ProgramKind::Api => crate::metamorphic::api_program(seed),
         }
     }
 }
@@ -1203,7 +1213,7 @@ pub struct Divergence {
     pub engine: String,
     /// A unified diff against the reference, or why the engine produced no outcome.
     pub detail: String,
-    /// The first top-level expressions whose observed values or conditions differ, when both
+    /// The top-level expressions whose observed values or conditions differ (at most 64), when both
     /// engines were observed.
     pub expressions: Vec<DifferingExpression>,
     /// The engine finished the program and reported an outcome.
@@ -1363,7 +1373,7 @@ pub fn compare_engines(
                 ) {
                     let expressions = differing_expressions(reference_outcome, &outcome)
                         .iter()
-                        .take(8)
+                        .take(64)
                         .filter_map(|difference| {
                             Some(DifferingExpression {
                                 source: top_level.get(difference.position.checked_sub(1)?)?.clone(),

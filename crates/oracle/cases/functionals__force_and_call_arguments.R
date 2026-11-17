@@ -1,0 +1,11 @@
+# forceAndCall without a function to call is an R error, and `n` may exceed the argument count.
+t <- function(e) tryCatch(e, error = function(e) paste("error:", conditionMessage(e)))
+t(forceAndCall(1))
+t(forceAndCall(1:3))
+t(forceAndCall())
+t(forceAndCall(1, 2))
+t(forceAndCall(1, sum))
+t(forceAndCall(NA, sum, 1))
+t(forceAndCall(2, function(a, b) a + b, 1, 2))
+t(forceAndCall(5, function(a, b) a + b, 1, 2))
+t(forceAndCall(1, "sum", 1, 2))

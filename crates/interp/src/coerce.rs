@@ -55,6 +55,60 @@ pub fn real_to_int(value: f64) -> (i32, bool) {
     (value.trunc() as i32, false)
 }
 
+/// A complex as an integer. The discarded imaginary part is reported only for a value that
+/// converts, as in GNU R.
+fn complex_to_int(value: Rcomplex, warnings: &mut CoercionWarnings) -> i32 {
+    if value.i.is_nan() {
+        return NA_INTEGER;
+    }
+    let (converted, out_of_range) = real_to_int(value.r);
+    warnings.integer_range |= out_of_range;
+    if converted != NA_INTEGER && value.i != 0.0 {
+        warnings.imaginary = true;
+    }
+    converted
+}
+
+/// The first element as an integer, with the coercion warnings GNU R's `asInteger` gives.
+pub unsafe fn integer_scalar(object: Sexp) -> R<i32> {
+    let mut warnings = CoercionWarnings::default();
+    let value = match object.kind() {
+        _ if values::length(object) == 0 => NA_INTEGER,
+        SexpType::Real => {
+            let (converted, out_of_range) = real_to_int(values::reals(object)[0]);
+            warnings.integer_range = out_of_range;
+            converted
+        }
+        SexpType::Complex => complex_to_int(values::complexes(object)[0], &mut warnings),
+        SexpType::String => match values::string_at(object, 0) {
+            Some(text) => match parse_real(&text) {
+                Some(real) => {
+                    let (converted, out_of_range) = real_to_int(real);
+                    warnings.integer_range = out_of_range;
+                    converted
+                }
+                None => {
+                    warnings.na = true;
+                    NA_INTEGER
+                }
+            },
+            None => NA_INTEGER,
+        },
+        _ => values::as_integer_scalar(object),
+    };
+    warnings.report()?;
+    Ok(value)
+}
+
+/// An integer on its way to a raw: `NA` becomes a value outside the raw range.
+fn raw_candidate(value: i32) -> i64 {
+    if value == NA_INTEGER {
+        -1
+    } else {
+        value as i64
+    }
+}
+
 /// R's string-to-double rule: surrounding whitespace is ignored, decimal and hexadecimal
 /// notation and `Inf`, `NaN` and `NA` are read; anything else is `None`.
 pub fn parse_real(text: &str) -> Option<f64> {
@@ -342,9 +396,13 @@ unsafe fn coerce_list(
             Ok(result)
         }
         _ if kind.is_atomic() => {
+            // GNU R's `isVectorizable`: every element is a vector, a list included, of length
+            // at most one. An empty vector or a list element becomes NA.
             for index in 0..count {
                 let element = list.element(index);
-                if !(element.kind().is_atomic() && length(element) == 1) {
+                let vector = element.kind().is_atomic()
+                    || matches!(element.kind(), SexpType::List | SexpType::Expression);
+                if !(vector && length(element) <= 1) {
                     return Err(error(format!(
                         "'{}' object cannot be coerced to type '{}'",
                         source.name(),
@@ -354,8 +412,50 @@ unsafe fn coerce_list(
             }
             let result = alloc(kind, count)?;
             for index in 0..count {
-                let element = coerce_atomic(list.element(index), kind, warnings)?;
-                crate::subset::copy_element(element, 0, result, index)?;
+                let element = list.element(index);
+                // GNU R converts each element with `asInteger` and its kin, which warn once per
+                // element; an empty or list element is NA. Raw goes through `asInteger` and
+                // collects its range warning for the whole list.
+                let atomic = element.kind().is_atomic() && length(element) == 1;
+                if kind == SexpType::Raw {
+                    let value = if atomic {
+                        let mut element_warnings = CoercionWarnings::default();
+                        let integer =
+                            coerce_atomic(element, SexpType::Integer, &mut element_warnings)?;
+                        element_warnings.report()?;
+                        values::ints(integer)[0]
+                    } else {
+                        NA_INTEGER
+                    };
+                    values::raws_mut(result)[index] = match u8::try_from(value) {
+                        Ok(byte) => byte,
+                        Err(_) => {
+                            warnings.raw_range = true;
+                            0
+                        }
+                    };
+                } else if atomic {
+                    let mut element_warnings = CoercionWarnings::default();
+                    let converted = coerce_atomic(element, kind, &mut element_warnings)?;
+                    if kind != SexpType::Logical {
+                        element_warnings.report()?;
+                    }
+                    crate::subset::copy_element(converted, 0, result, index)?;
+                } else {
+                    match kind {
+                        SexpType::Logical | SexpType::Integer => {
+                            values::ints_mut(result)[index] = NA_INTEGER;
+                        }
+                        SexpType::Real => values::reals_mut(result)[index] = NA_REAL,
+                        SexpType::Complex => {
+                            values::complexes_mut(result)[index] = Rcomplex {
+                                r: NA_REAL,
+                                i: NA_REAL,
+                            };
+                        }
+                        _ => {}
+                    }
+                }
             }
             Ok(result)
         }
@@ -466,15 +566,7 @@ pub unsafe fn coerce_atomic(
                         warnings.integer_range |= out_of_range;
                         value
                     }
-                    SexpType::Complex => {
-                        let value = values::complexes(object)[index];
-                        if value.i != 0.0 && !value.i.is_nan() {
-                            warnings.imaginary = true;
-                        }
-                        let (converted, out_of_range) = real_to_int(value.r);
-                        warnings.integer_range |= out_of_range;
-                        converted
-                    }
+                    SexpType::Complex => complex_to_int(values::complexes(object)[index], warnings),
                     SexpType::String => match values::string_at(object, index) {
                         Some(text) => match parse_real(&text) {
                             Some(value) if is_na_real(value) => NA_INTEGER,
@@ -626,18 +718,29 @@ pub unsafe fn coerce_atomic(
                         }
                     }
                     SexpType::Real => {
-                        let value = values::reals(object)[index];
-                        if value.is_nan() {
-                            -1
-                        } else {
-                            value.trunc() as i64
-                        }
+                        let (converted, out_of_range) = real_to_int(values::reals(object)[index]);
+                        warnings.integer_range |= out_of_range;
+                        raw_candidate(converted)
                     }
-                    SexpType::String => values::string_at(object, index)
-                        .and_then(|text| parse_real(&text))
-                        .filter(|value| !value.is_nan())
-                        .map_or(-1, |value| value.trunc() as i64),
-                    SexpType::Complex => values::complexes(object)[index].r as i64,
+                    SexpType::String => match values::string_at(object, index) {
+                        Some(text) => match parse_real(&text) {
+                            Some(value) => {
+                                let (converted, out_of_range) = real_to_int(value);
+                                warnings.integer_range |= out_of_range;
+                                raw_candidate(converted)
+                            }
+                            None => {
+                                if !text.trim().is_empty() {
+                                    warnings.na = true;
+                                }
+                                -1
+                            }
+                        },
+                        None => -1,
+                    },
+                    SexpType::Complex => {
+                        raw_candidate(complex_to_int(values::complexes(object)[index], warnings))
+                    }
                     _ => -1,
                 };
                 *slot = if (0..=255).contains(&value) {
@@ -1135,8 +1238,17 @@ unsafe fn do_as_function(call: &Call<'_>) -> R<Sexp> {
     if values::is_function(list) {
         return Ok(list);
     }
-    if list.kind() != SexpType::List || length(list) == 0 {
-        return Err(call.error("argument must have length at least 1"));
+    if list.kind() != SexpType::List {
+        return Err(error("list argument expected"));
+    }
+    if env == nil() {
+        return Err(error("use of NULL environment is defunct"));
+    }
+    if env.kind() != SexpType::Environment {
+        return Err(error("invalid environment"));
+    }
+    if length(list) == 0 {
+        return Err(error("argument must have length at least 1"));
     }
     let count = length(list);
     let names = values::names(list);
@@ -1148,7 +1260,7 @@ unsafe fn do_as_function(call: &Call<'_>) -> R<Sexp> {
             String::new()
         };
         if name.is_empty() {
-            return Err(call.error("invalid formal argument list for \"function\""));
+            return Err(error("invalid formal argument list for \"as.function\""));
         }
         let value = list.element(index);
         let value = if value.kind() == SexpType::Symbol && value.car().bytes().is_empty() {
@@ -1176,7 +1288,7 @@ unsafe fn do_as_function(call: &Call<'_>) -> R<Sexp> {
             | SexpType::Expression
             | SexpType::Bytecode
     ) {
-        return Err(call.error("invalid body for function"));
+        return Err(error("invalid body for function"));
     }
     crate::eval::make_closure(formals, body, values::nil(), env)
 }

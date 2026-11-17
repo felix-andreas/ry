@@ -1,0 +1,48 @@
+[stdout]
+| NULL
+| $dim
+| [1] 2
+| 
+| $names
+| [1] "a" "b"
+| 
+| $dim
+| [1] 2
+| 
+| $names
+| [1] "a" "b"
+| 
+| $tag
+| [1] "t"
+| 
+| NULL
+| $dim
+| [1] 4
+| 
+| $dim
+| [1] 1 4
+| 
+| NULL
+| $a
+| [1] 1
+| 
+| [[2]]
+| [1] 2
+| 
+| List of 2
+|  $ : num 1
+|  $ : chr "q"
+| List of 2
+|  $ : num 1
+|  $ : chr "q"
+|  - attr(*, "dim")= int 2
+|  chr "dims [product 3] do not match the length of object [2]"
+| [1] 0+1i 0+2i
+| [1] 0+1i 0+2i
+| [1] 0+1i 0+2i
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

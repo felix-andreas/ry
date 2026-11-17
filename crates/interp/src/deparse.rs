@@ -321,7 +321,8 @@ impl Deparser {
             }
         }
         self.line.push_str(text);
-        self.length += text.chars().count();
+        // GNU R measures the line in bytes, so non-ASCII text breaks lines sooner.
+        self.length += text.len();
     }
 
     fn write_line(&mut self) {
@@ -1444,11 +1445,17 @@ impl Deparser {
                         } else {
                             "NA".to_owned()
                         }
-                    } else if !value.r.is_finite() || !value.i.is_finite() {
-                        // `Inf+Infi` would not parse back, so a non-finite part needs the call.
+                    } else if value.r.is_nan() || !value.i.is_finite() {
+                        // `1+Infi` would not parse back, so a NaN real part or a non-finite
+                        // imaginary part needs the call; `Inf+0i` parses. GNU R formats both
+                        // parts together, and an `NA` in either leaves no digits for the other,
+                        // which is then rounded to an integer.
+                        let has_na = is_na_real(value.r) || is_na_real(value.i);
                         let part = |part: f64| {
                             if is_na_real(part) {
                                 "NA".to_owned()
+                            } else if has_na && part.is_finite() {
+                                format!("{part:.0}")
                             } else {
                                 format::format_real_alone(part, 15)
                             }
@@ -1458,7 +1465,7 @@ impl Deparser {
                             part(value.r),
                             part(value.i)
                         )
-                    } else if self.opts & options::DIGITS17 != 0 {
+                    } else if self.opts & options::DIGITS17 != 0 && value.r.is_finite() {
                         // GNU R writes each part with `%.17g`, so the value parses back exactly.
                         let imaginary = format::c_general(value.i, 17, false);
                         let sign = if imaginary.starts_with('-') { "" } else { "+" };
