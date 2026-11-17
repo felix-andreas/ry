@@ -353,7 +353,7 @@ unsafe fn writable(value: Sexp) -> bool {
 }
 
 /// Whether a vector has no attributes and is neither ALTREP nor an Array.
-unsafe fn bare(value: Sexp) -> bool {
+fn bare(value: Sexp) -> bool {
     value.attrib() == values::nil() && !value.is_altrep() && !value.is_array()
 }
 
@@ -1420,10 +1420,29 @@ pub struct Extremes<T> {
     pub nan: bool,
 }
 
-/// The extremes of integers or logicals, `NA` aside. The lanes are independent, with every
-/// operation a select or a compare, so the loop compiles to vector compares and selects (or
-/// vector minimum and maximum instructions where the target has them).
+/// The extremes of integers or logicals, `NA` aside. The baseline x86-64 target has only SSE2,
+/// which lacks packed 32-bit minimum and maximum, so the loop there compiles to a compare and a
+/// select per operation, about three times slower than AVX2's `vpminsd` and `vpmaxsd` on a long
+/// vector. A CPU with AVX2 runs the same loop compiled for it.
 pub fn integer_extremes(values: &[i32]) -> Extremes<i32> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the CPU supports AVX2, as just checked.
+        return unsafe { integer_extremes_avx2(values) };
+    }
+    integer_extremes_lanes(values)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn integer_extremes_avx2(values: &[i32]) -> Extremes<i32> {
+    integer_extremes_lanes(values)
+}
+
+/// [`integer_extremes`] in independent lanes, every operation a compare, a select, a minimum or
+/// a maximum, so the loop vectorizes.
+#[inline(always)]
+fn integer_extremes_lanes(values: &[i32]) -> Extremes<i32> {
     const LANES: usize = 16;
     let mut least = [i32::MAX; LANES];
     let mut greatest = [i32::MIN; LANES];
