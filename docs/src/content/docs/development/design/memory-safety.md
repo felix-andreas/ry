@@ -477,19 +477,21 @@ The four higher rows, by cause:
   changes with unrelated code. Moving the fallback to the replacement builtin out of line made
   the row six instructions longer, because the split passes the operands again.
 
-`[`, `[[`, `$`, `@` and their replacement forms measure the same way: of 105 rows, 93 are within
-half a percent of the raw forms, 9 are lower and 3 are higher.
+`[`, `[[`, `$`, `@` and their replacement forms measure the same way: of 105 rows, 95 are within
+half a percent of the raw forms, 7 are lower and 3 are higher.
 
 | Operation | Raw | On handles | Change |
 | --- | ---: | ---: | ---: |
-| `x[name]` | 1,642 | 1,576 | -4.0% |
+| `x[name]` | 1,639 | 1,576 | -3.8% |
 | `names(x) <- value` | 3,275 | 3,198 | -2.4% |
-| `length(x) <- value` | 1,269 | 1,247 | -1.7% |
-| a new field of a list argument | 3,304 | 3,266 | -1.1% |
-| three appends to a new vector | 4,676 | 4,629 | -1.0% |
-| `unlist` of a short list | 6,425 | 6,471 | +0.7% |
-| `x$name` dispatched to a method | 4,264 | 4,298 | +0.8% |
-| `list` with a name | 1,277 | 1,292 | +1.2% |
+| `length(x) <- value` | 1,255 | 1,231 | -1.9% |
+| a new field of a list argument | 3,304 | 3,266 | -1.2% |
+| three appends to a new vector | 4,649 | 4,602 | -1.0% |
+| `nchar` | 1,521 | 1,506 | -1.0% |
+| string element of a local vector | 572 | 567 | -0.9% |
+| `x$name` dispatched to a method | 4,246 | 4,275 | +0.7% |
+| `unlist` of a short list | 6,346 | 6,391 | +0.7% |
+| `list` with a name | 1,279 | 1,294 | +1.2% |
 
 The three higher rows, by cause:
 
