@@ -3,20 +3,20 @@
   "suite": "codebases",
   "name": "Benchmark code bases",
   "meta": {
-    "date": "2026-11-15",
-    "ry_commit": null,
+    "date": "2026-11-17",
+    "ry_commit": "62985f41d849fb362e41614e9a58114f6a7178c5",
     "release": {
-      "tag": "0.4.5",
+      "tag": "0.5.0",
       "archive": "ry-x86_64-unknown-linux-gnu.tar.gz",
-      "sha256": "bb64321298f71a887abb468bac3dd285402d1e1088cce9917373b0cf588b66bb"
+      "sha256": "575ad8ad890b64c929eee4a9fab76262ffcea879c8e29070dfdcaad9d6b5c3dc"
     },
     "libr_text_bytes": {},
     "machine": {
       "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
       "cores": 4,
-      "kernel": "Linux 6.18.44-fc-v470"
+      "kernel": "Linux 6.18.44-fc-v553"
     },
-    "command": "tools/bench/bench.py codebases --release /tmp/claude-0/rel/ry-x86_64-unknown-linux-gnu.tar.gz --rscript /opt/R/4.6.2/bin/Rscript --extra-rounds 0 --write",
+    "command": "tools/bench/bench.py codebases --release /tmp/claude-0/-home-user-ry/154b171f-2090-585f-8f16-cbe3f4d1ab5f/scratchpad/rel050/ry-x86_64-unknown-linux-gnu.tar.gz --rscript /opt/R/4.6.2/bin/Rscript --extra-rounds 0 --write --samples /tmp/claude-0/-home-user-ry/154b171f-2090-585f-8f16-cbe3f4d1ab5f/scratchpad/bench050/samples-codebases",
     "gnu_r": {
       "version": "4.6.2",
       "blas": "/opt/R/4.6.2/lib/R/lib/libRblas.so"
@@ -38,20 +38,20 @@
       "id": "finbench",
       "display": "Finance",
       "seconds": {
-        "gnu_r": 197.175,
-        "ry": 96.451,
-        "ry_nojit": 96.119
+        "gnu_r": 204.617,
+        "ry": 100.59,
+        "ry_nojit": 94.4355
       },
       "ratio": {
         "ry": {
-          "median": 1.9903,
-          "low": 1.9571,
-          "high": 2.0572
+          "median": 2.1666,
+          "low": 2.0463,
+          "high": 2.1813
         },
         "ry_nojit": {
-          "median": 1.9977,
-          "low": 1.9801,
-          "high": 2.0405
+          "median": 2.1877,
+          "low": 2.1441,
+          "high": 2.2099
         }
       },
       "flags": [],
@@ -63,12 +63,12 @@
         "ry": {
           "blocks": 9592,
           "of": 9592,
-          "geomean": 1.8713
+          "geomean": 2.0351
         },
         "ry_nojit": {
           "blocks": 9592,
           "of": 9592,
-          "geomean": 1.8713
+          "geomean": 2.0478
         }
       }
     },
@@ -76,20 +76,20 @@
       "id": "dsbench",
       "display": "Data science",
       "seconds": {
-        "gnu_r": 91.87,
-        "ry": 49.594,
-        "ry_nojit": 48.8455
+        "gnu_r": 101.649,
+        "ry": 52.412,
+        "ry_nojit": 52.588
       },
       "ratio": {
         "ry": {
-          "median": 1.8722,
-          "low": 1.8014,
-          "high": 1.9181
+          "median": 1.9447,
+          "low": 1.9157,
+          "high": 1.9666
         },
         "ry_nojit": {
-          "median": 1.8589,
-          "low": 1.8182,
-          "high": 1.9206
+          "median": 1.9616,
+          "low": 1.9089,
+          "high": 1.9882
         }
       },
       "flags": [],
@@ -101,12 +101,12 @@
         "ry": {
           "blocks": 9416,
           "of": 9416,
-          "geomean": 1.8668
+          "geomean": 1.9232
         },
         "ry_nojit": {
           "blocks": 9416,
           "of": 9416,
-          "geomean": 1.8819
+          "geomean": 1.9591
         }
       }
     },
@@ -114,20 +114,20 @@
       "id": "biobench",
       "display": "Biostatistics",
       "seconds": {
-        "gnu_r": 108.353,
-        "ry": 56.9685,
-        "ry_nojit": 56.062
+        "gnu_r": 116.01,
+        "ry": 57.993,
+        "ry_nojit": 57.3755
       },
       "ratio": {
         "ry": {
-          "median": 1.8521,
-          "low": 1.7575,
-          "high": 1.9717
+          "median": 2.0529,
+          "low": 2.0134,
+          "high": 2.0984
         },
         "ry_nojit": {
-          "median": 1.9047,
-          "low": 1.8458,
-          "high": 1.9352
+          "median": 2.0432,
+          "low": 2.0001,
+          "high": 2.1008
         }
       },
       "flags": [],
@@ -139,38 +139,38 @@
         "ry": {
           "blocks": 8927,
           "of": 8927,
-          "geomean": 1.8346
+          "geomean": 2.0561
         },
         "ry_nojit": {
           "blocks": 8927,
           "of": 8927,
-          "geomean": 1.87
+          "geomean": 2.0604
         }
       }
     }
   ],
   "geomean": {
     "ry": {
-      "median": 1.9039,
-      "low": 1.8601,
-      "high": 1.9514,
+      "median": 2.0527,
+      "low": 2.0182,
+      "high": 2.0728,
       "programs": 3
     },
     "ry_nojit": {
-      "median": 1.9195,
-      "low": 1.8923,
-      "high": 1.9452,
+      "median": 2.0621,
+      "low": 2.0378,
+      "high": 2.0839,
       "programs": 3
     }
   },
   "worst": {
     "ry": {
-      "id": "biobench",
-      "ratio": 1.8521
+      "id": "dsbench",
+      "ratio": 1.9447
     },
     "ry_nojit": {
       "id": "dsbench",
-      "ratio": 1.8589
+      "ratio": 1.9616
     }
   }
 }
