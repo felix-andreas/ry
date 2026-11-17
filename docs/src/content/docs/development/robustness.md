@@ -285,7 +285,7 @@ the damaged object is used. The report says what holds the reference, what the r
 at, and where it is stored:
 
 ```
-heap corrupted: handle 0 of 1 is 0x2000000200c0, which is an object that collection 1 freed. Found by collection 2.
+heap corrupted: protect stack entry 0 of 1 is 0x2000000200c0, which is an object that collection 1 freed. Found by collection 2.
 
 heap corrupted: a reachable List of length 1 at 0x2000000200f0 holds 0x2000000200c0 as element 0,
 which is an object that collection 1 freed. The reference is the word at 0x200000020110. Found by
@@ -307,12 +307,15 @@ Small objects live at fixed addresses, so a run with the same seed reports the s
 the same collection number for them. A large object's address changes from run to run.
 
 A build with debug assertions also checks the mutator between collections: a store into an object,
-a stored value and a value being rooted must each be an allocated object. A builtin that allocates
-its result without rooting it, then fills it while allocating each element, fails at its first store
-after the collection that freed the result:
+a stored value and a value being rooted as a handle must each be an allocated object. A builtin
+that allocates its result without rooting it, then fills it while allocating each element, fails
+at its first store after the collection that freed the result, and one that roots a value too late
+fails where it roots it:
 
 ```
 heap corrupted: the object a store writes into is 0x200000b15000, which is an object that collection 2 freed.
+
+heap corrupted: a value being rooted is 0x2000000200c0, which is an object that collection 1 freed.
 ```
 
 The panic's backtrace names the builtin. A release build leaves this case to the poison, because
@@ -379,7 +382,7 @@ object, while plain `RY_GC_STRESS=1` passed 3 of 3, since it tenures the object 
 | `just fuzz-corpus SEED COUNT ENGINES` | Mutated snippets of real R code (base help examples, R's regression tests, the oracle cases) under GNU R and ry's engines, observing. |
 | `just gc-torture [young\|seeded\|repeat]` | Every oracle case under collection stress, under `RY_GC_STRESS=young`, under `RY_GC_STRESS=seed:N` with the heap checked, or under the last with each case evaluated twice in one process. |
 | `just asan [ARGS]` | The `heap` and `interp` tests under AddressSanitizer, which stops at a read or write of a freed object. |
-| `just ci-stress` | The release gate's stress job: `just gc-torture repeat` for three seeds, then generated programs under GNU R, tier 0, the JIT and the repeated seeded stress. |
+| `just ci-stress SEED` | One of the release gate's stress jobs: `just gc-torture repeat` with `FUZZ_SEED=SEED`, then 300 generated programs under GNU R, tier 0, the JIT and the repeated seeded stress. CI runs seeds 0, 1 and 2. |
 | `just fuzz-deep [MINUTES] [BASE] [DEPTH]` | Every seeded harness at a deep budget until the time limit, described below. |
 | `just fuzz-run TARGET` | One `cargo fuzz` target under libFuzzer. |
 | `just fuzz-all SECONDS [FEATURES]` | Every `cargo fuzz` target for `SECONDS` of wall clock each, after seeding the corpora and building the targets. `FEATURES` limits the targets: `runtime` leaves out the two that link Polars. |

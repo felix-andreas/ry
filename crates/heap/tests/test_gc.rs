@@ -2507,7 +2507,23 @@ fn stress_quarantines_and_poisons_freed_objects() {
 }
 
 #[test]
-#[should_panic(expected = "handle 0 of 1 is")]
+#[should_panic(expected = "protect stack entry 0 of 1 is")]
+fn the_verifier_names_a_protect_stack_entry_that_holds_a_freed_object() {
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| policy.verify = true);
+    unsafe {
+        let stale = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        heap.collect(Collection::Minor);
+        heap.roots.protect.protect(stale).expect("protect");
+        heap.collect(Collection::Minor);
+    }
+}
+
+// A build with debug assertions reports the freed object when it is rooted, and any other build
+// at the next collection.
+#[test]
+#[cfg_attr(debug_assertions, should_panic(expected = "a value being rooted is"))]
+#[cfg_attr(not(debug_assertions), should_panic(expected = "handle 0 of 1 is"))]
 fn the_verifier_names_a_handle_to_a_freed_object() {
     let mut heap = Heap::new();
     heap.update_policy(|policy| policy.verify = true);

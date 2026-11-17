@@ -76,12 +76,12 @@ ci:
     just clippy
     just battery
 
-# CI's collection-stress job (ci.yml, job `stress`), which the release gate requires next to
-# `just ci` (docs: development/releasing.md, "The release gate"). It runs in the same shell with
-# the same variables. Every oracle case runs twice in one process under seeded stress with the
-# heap checked, for three seeds, and the generated programs run under GNU R, tier 0, the JIT and
-# the same repeated stress.
-ci-stress:
+# CI's collection-stress job (ci.yml, job `stress`, once per seed), which the release gate requires
+# next to `just ci` (docs: development/releasing.md, "The release gate"). It runs in the same shell
+# with the same variables. Every oracle case runs twice in one process under stress seeded with
+# `seed` with the heap checked, and 300 generated programs of their own per seed run under GNU R,
+# tier 0, the JIT and the same repeated stress.
+ci-stress seed="0":
     #!/usr/bin/env bash
     set -euo pipefail
     export TZ=UTC NOT_CRAN=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0
@@ -89,10 +89,8 @@ ci-stress:
     export R_HOME
     bash tools/oracle-locales.sh
     just base-r dev
-    for seed in 0 1 2; do
-        FUZZ_SEED=$seed just gc-torture repeat
-    done
-    just fuzz-differential 0 300 ry-tier0,ry-jit,ry-repeat-gctorture-seeded
+    FUZZ_SEED={{ seed }} just gc-torture repeat
+    just fuzz-differential $(({{ seed }} * 300)) 300 ry-tier0,ry-jit,ry-repeat-gctorture-seeded
 
 # Workspace tests; `zed_ry` needs a wasm toolchain, so it is excluded.
 battery *args:
