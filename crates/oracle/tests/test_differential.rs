@@ -84,6 +84,59 @@ fn fuzz_programs_agree_across_tiers() {
     assert_agree(&reports);
 }
 
+/// A metamorphic program compares its own forms and prints `DIFFERENT` for one that disagrees,
+/// so it needs no GNU R: no form may disagree under the interpreter, and compiled code must
+/// give the interpreter's values, conditions and printed text.
+#[test]
+fn fuzz_metamorphic_forms_agree_across_tiers() {
+    if !ry_runtime_available() {
+        eprintln!("skipped: ry's runtime is not built; run `cargo build -p ry-lang -p libr`");
+        return;
+    }
+    let tier0 = ProcessEngine::ry_tier0().with_timeout(TIMEOUT).observing();
+    let jit = ProcessEngine::ry_jit().with_timeout(TIMEOUT).observing();
+    let reports = run_kind(ProgramKind::Metamorphic, &tier0, &[&jit], fuzz_iterations(8));
+    let disagreeing: Vec<String> = reports
+        .iter()
+        .filter(|report| report.reference.stdout.contains("DIFFERENT"))
+        .map(|report| {
+            format!(
+                "metamorphic seed {} under {}:\n{}\nprogram: cargo run -q -p oracle -- fuzz --kind metamorphic --seed {} --print",
+                report.seed,
+                tier0.name(),
+                report
+                    .reference
+                    .stdout
+                    .lines()
+                    .filter(|line| line.contains("DIFFERENT"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                report.seed
+            )
+        })
+        .collect();
+    assert!(
+        disagreeing.is_empty(),
+        "forms that must agree differ:\n{}",
+        disagreeing.join("\n")
+    );
+    assert_agree(&reports);
+}
+
+/// The builtins programs call a few hundred base functions on the value zoo. Without GNU R the
+/// values prove nothing, but every call must return or signal an R error under the interpreter,
+/// and compiled code must agree with it.
+#[test]
+fn fuzz_builtins_agree_across_tiers() {
+    if !ry_runtime_available() {
+        eprintln!("skipped: ry's runtime is not built; run `cargo build -p ry-lang -p libr`");
+        return;
+    }
+    let tier0 = ProcessEngine::ry_tier0().with_timeout(TIMEOUT).observing();
+    let jit = ProcessEngine::ry_jit().with_timeout(TIMEOUT).observing();
+    assert_agree(&run_kind(ProgramKind::Builtins, &tier0, &[&jit], fuzz_iterations(8)));
+}
+
 #[test]
 fn fuzz_programs_survive_gc_torture() {
     if !gnu_r_available() || !ry_runtime_available() {
@@ -108,6 +161,15 @@ fn fuzz_programs_survive_gc_torture() {
 }
 
 fn run_seeds(reference: &dyn Engine, engines: &[&dyn Engine], count: usize) -> Vec<SeedReport> {
+    run_kind(ProgramKind::Grammar, reference, engines, count)
+}
+
+fn run_kind(
+    kind: ProgramKind,
+    reference: &dyn Engine,
+    engines: &[&dyn Engine],
+    count: usize,
+) -> Vec<SeedReport> {
     let first: u64 = std::env::var("FUZZ_SEED")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -116,13 +178,20 @@ fn run_seeds(reference: &dyn Engine, engines: &[&dyn Engine], count: usize) -> V
     let started = Instant::now();
     let reports: Vec<SeedReport> = (first..first + count as u64)
         .map(|seed| {
-            check_seed(ProgramKind::Grammar, seed, reference, engines, &directory)
-                .unwrap_or_else(|error| panic!("seed {seed}: {} failed: {error}", reference.name()))
+            check_seed(kind, seed, reference, engines, &directory).unwrap_or_else(|error| {
+                panic!(
+                    "{} seed {seed}: {} failed: {error}\nprogram: cargo run -q -p oracle -- fuzz --kind {} --seed {seed} --print",
+                    kind.name(),
+                    reference.name(),
+                    kind.name()
+                )
+            })
         })
         .collect();
     std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
     eprintln!(
-        "{count} programs from seed {first} under {} and {} in {:.1} s",
+        "{count} {} programs from seed {first} under {} and {} in {:.1} s",
+        kind.name(),
         reference.name(),
         engines
             .iter()

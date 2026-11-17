@@ -4082,6 +4082,9 @@ unsafe fn do_colon(call: &Call<'_>) -> R<Sexp> {
     if start.is_nan() || end.is_nan() {
         return Err(call.error("NA/NaN argument"));
     }
+    if (end - start).abs() >= heap::MAX_VECTOR_LENGTH as f64 {
+        return Err(call.error("result would be too long a vector"));
+    }
     colon(start, end)
 }
 

@@ -1,0 +1,10 @@
+[stdout]
+| [1] "result would be too long a vector"
+| [1] 2 3 4 5
+| [1] 5.5 4.5 3.5 2.5
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| c(5.5, 4.5, 3.5, 2.5)
