@@ -843,8 +843,9 @@ fn in_order(x: &Column<'_>, decreasing: bool, strict: bool) -> bool {
         }
     }
     match *x {
+        // The order check stops at the first pair out of order, so it runs first.
         Column::Integer(values) => {
-            !values.contains(&NA_INTEGER) && ordered(values, decreasing, strict)
+            ordered(values, decreasing, strict) && !values.contains(&NA_INTEGER)
         }
         // A NaN fails every comparison, so only a lone one could pass as in order.
         Column::Real(values) => {
@@ -1188,14 +1189,14 @@ unsafe fn do_rank(call: &Call<'_>) -> R<Sexp> {
             ranks[index] = rank;
         }
     };
-    let column = match x.kind() {
+    let rank_column = match x.kind() {
         SexpType::Logical | SexpType::Integer | SexpType::Real => column(x),
         SexpType::String if count == length(x) => {
             Some(Column::Ranks(string_ranks(x, TextOrder::Collation)))
         }
         _ => None,
     };
-    if let Some(keys) = column.and_then(|column| rank_keys(column, count)) {
+    if let Some(keys) = rank_column.and_then(|column| rank_keys(column, count)) {
         let mut order: Vec<(u64, u32)> = keys
             .into_iter()
             .enumerate()
@@ -2190,22 +2191,40 @@ impl Column<'_> {
     }
 }
 
-/// Each element of one radix sort key as an unsigned integer whose natural order is the key's
-/// order: decreasing when `decreasing` is set (except for first-appearance codes, which keep
-/// their order), with every NA equal to every other and placed last or first. `None` for a key
-/// the radix sort does not read.
 /// One key's radix sort keys. Every key but a double fits 32 bits, and since these sorts are
 /// bound by memory bandwidth, the narrower keys halve what each pass reads.
 enum SortKeys {
-    Narrow(Vec<u32>),
-    Wide(Vec<u64>),
+    Narrow(Keys<u32>),
+    Wide(Keys<u64>),
+}
+
+/// A key's values, with the least and greatest found in the pass that builds them, which spares
+/// the sort of every row a pass of its own to find its range.
+struct Keys<K> {
+    values: Vec<K>,
+    low: u64,
+    high: u64,
+}
+
+impl<K: RadixKey> FromIterator<K> for Keys<K> {
+    fn from_iter<I: IntoIterator<Item = K>>(keys: I) -> Keys<K> {
+        let (mut low, mut high) = (u64::MAX, 0);
+        let values = keys
+            .into_iter()
+            .inspect(|key| {
+                low = low.min(key.wide());
+                high = high.max(key.wide());
+            })
+            .collect();
+        Keys { values, low, high }
+    }
 }
 
 impl SortKeys {
     fn compare(&self, left: usize, right: usize) -> Ordering {
         match self {
-            SortKeys::Narrow(keys) => keys[left].cmp(&keys[right]),
-            SortKeys::Wide(keys) => keys[left].cmp(&keys[right]),
+            SortKeys::Narrow(keys) => keys.values[left].cmp(&keys.values[right]),
+            SortKeys::Wide(keys) => keys.values[left].cmp(&keys.values[right]),
         }
     }
 
@@ -2214,6 +2233,10 @@ impl SortKeys {
     }
 }
 
+/// Each element of one radix sort key as an unsigned integer whose natural order is the key's
+/// order: decreasing when `decreasing` is set (except for first-appearance codes, which keep
+/// their order), with every NA equal to every other and placed last or first. `None` for a key
+/// the radix sort does not read.
 fn sort_keys(column: &Column<'_>, decreasing: bool, na_last: bool) -> Option<SortKeys> {
     // Non-NA keys lie strictly between 0 and `top`, so NAs take one end of the range.
     let place = |key: Option<u64>, top: u64| match key {
@@ -2338,11 +2361,12 @@ fn fill_identity(order: &mut [u32]) {
 /// digit radix sort of those pairs. Every pass counts, since these sorts are bound by memory
 /// bandwidth.
 fn sort_by_key<K: RadixKey>(
-    key: &[K],
+    keys: &Keys<K>,
     order: &mut [u32],
     identity: bool,
     want_runs: bool,
 ) -> Vec<(usize, usize)> {
+    let key = &keys.values[..];
     let count = order.len();
     // The keys gather once into row order, so every pass below streams one contiguous slice
     // instead of chasing rows through the key column.
@@ -2361,11 +2385,13 @@ fn sort_by_key<K: RadixKey>(
         }
         return runs;
     }
-    let (low, high) = values
-        .iter()
-        .fold((u64::MAX, 0), |(low, high), value| {
+    let (low, high) = if identity {
+        (keys.low, keys.high)
+    } else {
+        values.iter().fold((u64::MAX, 0), |(low, high), value| {
             (low.min(value.wide()), high.max(value.wide()))
-        });
+        })
+    };
     let span = high - low;
     // Past about a million buckets the counting passes miss cache on every row, and the radix
     // sort's sequential scatters win. A short slice counts only while its buckets are few

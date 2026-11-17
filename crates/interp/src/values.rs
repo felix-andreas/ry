@@ -1032,6 +1032,17 @@ pub unsafe fn same_string(left: Sexp, right: Sexp) -> bool {
     char_str(left) == char_str(right)
 }
 
+/// Where `byte` first occurs in `haystack`. Most R strings are a few bytes long, where
+/// `memchr`'s vector setup costs more than a plain scan.
+#[inline]
+pub fn find_byte(byte: u8, haystack: &[u8]) -> Option<usize> {
+    if haystack.len() < 16 {
+        haystack.iter().position(|&candidate| candidate == byte)
+    } else {
+        memchr(byte, haystack)
+    }
+}
+
 /// A `CHARSXP` as text. A byte that is not valid UTF-8 becomes its private-use stand-in (see
 /// [`escape_invalid_bytes`]), which [`mkchar`] turns back into the byte.
 #[inline]
@@ -1040,7 +1051,7 @@ pub unsafe fn char_str<'a>(charsxp: Sexp) -> Cow<'a, str> {
         // GNU R reads `CHAR()` as a C string, so native code that trims a string in place by
         // writing a NUL into it (udunits' `ut_trim`, called by units) shortens the text R sees.
         let bytes = charsxp.bytes();
-        let bytes = memchr(0, bytes).map_or(bytes, |end| &bytes[..end]);
+        let bytes = find_byte(0, bytes).map_or(bytes, |end| &bytes[..end]);
         // SAFETY: the heap validated these bytes when it interned them, and a prefix that ends
         // before a NUL byte is still valid UTF-8.
         return Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(bytes) });

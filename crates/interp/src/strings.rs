@@ -2970,7 +2970,7 @@ fn regexpr<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>, global: bool) -> 
     };
     let count = text.len();
     if !global {
-        let mut table = MatchTable::new(groups);
+        let mut table = MatchTable::new(groups, report.ascii);
         for index in 0..count {
             if handles::is_na(text.get(context, index)) {
                 table.push_na();
@@ -3003,7 +3003,7 @@ fn regexpr<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>, global: bool) -> 
             result.set(context, index, positions);
             continue;
         }
-        let mut table = MatchTable::new(groups);
+        let mut table = MatchTable::new(groups, report.ascii);
         if valid_subject(
             context,
             Some(pattern),
@@ -3217,6 +3217,8 @@ fn do_regexec<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>
 struct MatchReport {
     bytes: bool,
     annotated: bool,
+    /// Whether the pattern and every text are ASCII, so byte offsets are character positions.
+    ascii: bool,
 }
 
 impl MatchReport {
@@ -3228,6 +3230,7 @@ impl MatchReport {
         MatchReport {
             bytes: use_bytes,
             annotated: use_bytes || ascii,
+            ascii,
         }
     }
 
@@ -3253,6 +3256,8 @@ impl MatchReport {
 /// groups as matrix columns.
 struct MatchTable {
     groups: usize,
+    /// As in [`MatchReport`].
+    ascii: bool,
     rows: usize,
     starts: Vec<i32>,
     lengths: Vec<i32>,
@@ -3262,9 +3267,10 @@ struct MatchTable {
 }
 
 impl MatchTable {
-    fn new(groups: usize) -> MatchTable {
+    fn new(groups: usize, ascii: bool) -> MatchTable {
         MatchTable {
             groups,
+            ascii,
             rows: 0,
             starts: Vec::new(),
             lengths: Vec::new(),
@@ -3274,10 +3280,17 @@ impl MatchTable {
     }
 
     fn push(&mut self, text: &str, found: &[Option<(usize, usize)>]) {
+        let position = |offset: usize| {
+            if self.ascii {
+                offset as i32
+            } else {
+                position_of(text, offset)
+            }
+        };
         let span = |group: Option<&Option<(usize, usize)>>| match group {
             Some(Some((start, end))) => {
-                let first = position_of(text, *start);
-                (first + 1, position_of(text, *end) - first)
+                let first = position(*start);
+                (first + 1, position(*end) - first)
             }
             _ => (0, 0),
         };
@@ -3658,7 +3671,7 @@ fn find_literal(finder: &memmem::Finder<'_>, haystack: &[u8]) -> Option<usize> {
         return Some(0);
     };
     let mut from = 0;
-    while let Some(offset) = memchr(first, &haystack[from..]) {
+    while let Some(offset) = values::find_byte(first, &haystack[from..]) {
         let start = from + offset;
         if haystack
             .get(start + 1..start + needle.len())
