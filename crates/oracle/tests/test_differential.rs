@@ -528,6 +528,32 @@ fn fuzz_parse_data_matches_gnu_r() {
     std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
 }
 
+/// Parser programs: fragments of every construct, literal and name, well formed and damaged,
+/// each handed to `parse(text =)`. A fragment must give GNU R's tree (the type of every node, a
+/// number's bits, a string's bytes and encoding mark) and warnings, or be rejected as GNU R
+/// rejects it, and a string or number fragment must give GNU R's whole error message. Parsing
+/// happens before any tier runs code, so tier 0 alone covers it.
+#[test]
+fn fuzz_parser_matches_gnu_r() {
+    if !gnu_r_available() || !ry_runtime_available() {
+        eprintln!("skipped: GNU R or ry's runtime is not available");
+        return;
+    }
+    let gnu_r = ProcessEngine::gnu_r().with_timeout(TIMEOUT);
+    let ry = ProcessEngine::ry_tier0().with_timeout(TIMEOUT);
+    let reports = run_kind(ProgramKind::Parser, &gnu_r, &[&ry], fuzz_iterations(12));
+    // A prelude that failed would print nothing to compare.
+    for report in &reports {
+        assert!(
+            report.reference.errors.is_empty() && report.reference.stdout.lines().count() >= 60,
+            "seed {}: GNU R did not run the parser program: {:?}",
+            report.seed,
+            report.reference.errors
+        );
+    }
+    assert_agree(&reports);
+}
+
 /// `format` of random doubles must match GNU R byte for byte: the digits GNU R keeps follow its
 /// extended-precision scaling, not the correctly rounded decimal, and every argument and option
 /// combination shares one width and notation across the vector.

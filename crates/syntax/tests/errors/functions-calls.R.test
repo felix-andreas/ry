@@ -151,3 +151,32 @@ error: unclosed `(`; expected `)` to close it
 f(1, )
 #++++
 no errors
+
+#---- lambda_cut_at_statement_start
+x <- 1
+\
+(y) y + 1
+#++++
+error: expected `(` on the same line as `\`: R does not continue a lambda that starts a statement across a line break
+ --> 2:1
+  | \
+  | ^
+
+#---- lambda_across_lines_after_operator
+x <- \
+(y) y + 1
+{
+  \
+  (y) y
+}
+#++++
+no errors
+
+#---- namespace_name_on_next_line
+pkg::
+name
+#++++
+error: expected a name after `::`, found end of line
+ --> 1:5
+  | pkg::
+  |     ^

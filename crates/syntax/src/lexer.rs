@@ -3,7 +3,7 @@
 //! arrive as ordinary tokens.
 
 use {
-    crate::{SyntaxError, kind::SyntaxKind},
+    crate::{SyntaxError, Unexpected, kind::SyntaxKind},
     SyntaxKind::*,
     memchr::memchr2,
     text_size::{TextRange, TextSize},
@@ -139,6 +139,24 @@ impl Lexer<'_> {
         self.errors.push(SyntaxError::new(message, range));
     }
 
+    /// An error on a token R's own lexer refuses, which R's parser then names as what it did
+    /// not expect.
+    fn refused_token(&mut self, message: impl Into<String>, start: usize) -> SyntaxKind {
+        self.error(message, start);
+        if let Some(error) = self.errors.last_mut() {
+            error.unexpected = Unexpected::Token(error.range);
+        }
+        ERROR_TOKEN
+    }
+
+    /// An error on text R reads as something else and only ry's rules refuse.
+    fn error_rule(&mut self, message: impl Into<String>, start: usize) {
+        self.error(message, start);
+        if let Some(error) = self.errors.last_mut() {
+            error.unexpected = Unexpected::Nothing;
+        }
+    }
+
     fn peek(&self) -> Option<char> {
         match *self.text.as_bytes().get(self.pos)? {
             byte if byte.is_ascii() => Some(char::from(byte)),
@@ -255,10 +273,7 @@ impl Lexer<'_> {
             '&' => self.operator(&[("&", AMP2)], AMP),
             '|' => self.operator(&[("|", PIPE2), (">", PIPE_GREATER)], PIPE),
             ':' => self.operator(&[("::", COLON3), (":", COLON2), ("=", COLON_EQ)], COLON),
-            _ => {
-                self.error(unexpected_character_message(first), start);
-                ERROR_TOKEN
-            }
+            _ => self.refused_token(unexpected_character_message(first), start),
         }
     }
 
@@ -307,23 +322,22 @@ impl Lexer<'_> {
                 self.eat_while(|c| c.is_ascii_hexdigit());
             }
             if digits == 0 && !fraction {
-                self.error("missing digits after `0x`", start);
-                return ERROR_TOKEN;
+                return self.refused_token("missing digits after `0x`", start);
             }
-            // Hex-float exponent: `0x1Fp3`, which a hexadecimal fraction like `0x1.8p1` requires.
-            let before_exponent = self.pos;
-            self.exponent(['p', 'P']);
-            if fraction && self.pos == before_exponent {
-                self.error("a hexadecimal fraction needs a `p` exponent", start);
-                return ERROR_TOKEN;
+            if self.peek() == Some('.') {
+                return self.refused_token("a hex literal has at most one `.`", start);
+            }
+            if !self.exponent(['p', 'P']) {
+                return self.refused_token("missing digits after the exponent's `p`", start);
             }
         } else {
             self.eat_while(|c| c.is_ascii_digit());
             if self.eat(".") {
                 self.eat_while(|c| c.is_ascii_digit());
             }
-            // `1e` lexes as `1` then the name `e`.
-            self.exponent(['e', 'E']);
+            if !self.exponent(['e', 'E']) {
+                return self.refused_token("missing digits after the exponent's `e`", start);
+            }
         }
         if let Some(kind) = self.number_suffix(start, hex) {
             return kind;
@@ -364,7 +378,7 @@ impl Lexer<'_> {
         } else {
             "use i64 or f64, the two number types ry has"
         };
-        self.error(
+        self.error_rule(
             format!("`{suffix}` is not a number type suffix; {expected}"),
             start,
         );
@@ -402,7 +416,7 @@ impl Lexer<'_> {
                 b'}' => {
                     let brace = self.pos;
                     self.pos += 1;
-                    self.error("a `}` in an f-string's text is written `}}`", brace);
+                    self.error_rule("a `}` in an f-string's text is written `}}`", brace);
                 }
                 _ => self.pos += 1,
             }
@@ -426,21 +440,19 @@ impl Lexer<'_> {
         }
     }
 
-    /// An exponent marker with no digits after it is left for the next token.
-    fn exponent(&mut self, markers: [char; 2]) {
+    /// Reads an exponent if one starts here. `false` for a marker without digits, which R's
+    /// lexer refuses: `1e` is not the number `1` and the name `e`.
+    fn exponent(&mut self, markers: [char; 2]) -> bool {
         if !self.peek().is_some_and(|c| markers.contains(&c)) {
-            return;
+            return true;
         }
-        let before = self.pos;
         self.bump();
         if matches!(self.peek(), Some('+' | '-')) {
             self.bump();
         }
         let digits_start = self.pos;
         self.eat_while(|c| c.is_ascii_digit());
-        if self.pos == digits_start {
-            self.pos = before;
-        }
+        self.pos != digits_start
     }
 
     /// R strings may span lines, except inside an annotation, which ends with
@@ -541,8 +553,7 @@ impl Lexer<'_> {
         if self.eat("%") {
             SPECIAL
         } else {
-            self.error("unterminated `%` operator; expected a closing `%`", start);
-            ERROR_TOKEN
+            self.refused_token("unterminated `%` operator; expected a closing `%`", start)
         }
     }
 }

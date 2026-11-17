@@ -52,6 +52,38 @@ error: missing digits after `0x`
   | mask <- 0x
   |         ^^
 
+#---- hex_second_dot
+ratio <- 0x1.8.2
+#++++
+error: a hex literal has at most one `.`
+ --> 1:10
+  | ratio <- 0x1.8.2
+  |          ^^^^^
+
+#---- hex_exponent_without_digits
+scale <- 0x1.8p
+#++++
+error: missing digits after the exponent's `p`
+ --> 1:10
+  | scale <- 0x1.8p
+  |          ^^^^^^
+
+#---- exponent_without_digits
+rate <- 1e+
+#++++
+error: missing digits after the exponent's `e`
+ --> 1:9
+  | rate <- 1e+
+  |         ^^^
+
+#---- exponent_runs_into_a_name
+if (flag) 1else 2
+#++++
+error: missing digits after the exponent's `e`
+ --> 1:11
+  | if (flag) 1else 2
+  |           ^^
+
 #==== operators
 #---- unterminated_percent_operator
 z <- 1 %o 2

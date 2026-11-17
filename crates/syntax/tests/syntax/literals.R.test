@@ -60,11 +60,9 @@ SOURCE_FILE@0..25
 1e
 #++++
 SOURCE_FILE@0..2
-  LITERAL@0..1
-    DOUBLE@0..1 "1"
-  ERROR@1..2
-    IDENT@1..2 "e"
-err: 1..2: unexpected identifier after this expression; expected a newline or `;`
+  ERROR@0..2
+    ERROR_TOKEN@0..2 "1e"
+err: 0..2: missing digits after the exponent's `e`
 
 #---- hex_forms
 c(0x1F, 0xaL, 0X0)

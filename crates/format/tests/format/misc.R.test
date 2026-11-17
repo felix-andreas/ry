@@ -298,24 +298,24 @@ x <- list(ang
   = 1L)
 
 #---- annotation_between_namespace_operator_and_name
-pkg::
+(pkg::
 #: }
-x <- lis
+x <- lis)
  fn(a, b = 2, ...)
 #++++
-pkg::
+(pkg::
   #: }
-  x <- lis
+  x <- lis)
 fn(a, b = 2, ...)
 
 #---- namespace_comment
-pkg::
+(pkg::
 # note
-name
+name)
 #++++
-pkg::
+(pkg::
   # note
-  name
+  name)
 
 #---- annotation_inside_or_pattern
 match (s) {

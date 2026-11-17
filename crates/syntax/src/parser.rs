@@ -46,6 +46,7 @@ pub fn parse(text: &str) -> Parse {
         spread_allowed: false,
         examined: Cell::new(0),
         statement_start: None,
+        lambda_on_one_line: None,
         format_string_end: 0,
         lookahead: Vec::new(),
     };
@@ -103,6 +104,8 @@ struct Parser<'a> {
     examined: Cell<usize>,
     /// Where the top-level statement being parsed starts.
     statement_start: Option<usize>,
+    /// The token of a lambda's `\` whose `(` must follow on the same line.
+    lambda_on_one_line: Option<usize>,
     /// The token that closes the outermost f-string last opened, or the token count when
     /// nothing closes it.
     format_string_end: usize,
@@ -311,6 +314,18 @@ impl Parser<'_> {
         if let Some(error) = self.errors.get_mut(reported) {
             error.incomplete = false;
             error.unexpected = Unexpected::Nothing;
+        }
+    }
+
+    /// Reports an error on the line break the parser stands on, where GNU R's parser stops
+    /// too: the break itself is the unexpected token, not what the next line starts with.
+    fn error_at_line_break(&mut self, message: impl Into<String>) {
+        let reported = self.errors.len();
+        let line_break = self.token_range(self.pos);
+        self.error_at(line_break, message);
+        if let Some(error) = self.errors.get_mut(reported) {
+            error.incomplete = false;
+            error.unexpected = Unexpected::Token(line_break);
         }
     }
 
@@ -1263,8 +1278,19 @@ impl Parser<'_> {
                 self.examined.set(self.pos);
             }
 
+            // GNU R's lexer skips the line break after a lambda's `\` only where it skips one
+            // before it, which at a statement start is right after `{`.
+            if self.at(BACKSLASH)
+                && self.tokens[..self.pos]
+                    .iter()
+                    .rev()
+                    .find(|token| !matches!(token.kind, WHITESPACE | COMMENT | NEWLINE | SEMICOLON))
+                    .is_none_or(|token| token.kind != L_BRACE)
+            {
+                self.lambda_on_one_line = Some(self.pos);
+            }
             let statement_start = self.pos;
-            if !self.statement() {
+            if !self.statement(0) {
                 match self.current() {
                     Some(ELSE_KW) => self.error_here(
                         "unexpected `else`: it must stay on the same line as the `if` branch it belongs to (or the `if` must be inside braces)",
@@ -1341,13 +1367,13 @@ impl Parser<'_> {
     /// A statement is an expression, or an annotated binding `name: TYPE <- value`.
     /// R reads that binding as `` `:<-` `` on `name:TYPE`, a replacement function
     /// base R does not define, so no working R program has this shape.
-    fn statement(&mut self) -> bool {
+    fn statement(&mut self, min_bp: u8) -> bool {
         if self.type_definition_ahead() {
             self.type_definition();
             return true;
         }
         let Some(assignment) = self.annotated_binding_ahead() else {
-            return self.expression(0);
+            return self.expression(min_bp);
         };
         if self.depth >= MAX_DEPTH {
             self.error_here("expression nesting is too deep");
@@ -1393,7 +1419,7 @@ impl Parser<'_> {
             self.finish();
         }
         self.finish();
-        self.operators(checkpoint, 0);
+        self.operators(checkpoint, min_bp);
         self.depth -= 1;
         true
     }
@@ -1660,7 +1686,8 @@ impl Parser<'_> {
                 COLON2 | COLON3 if NAMESPACE_BP >= min_bp => {
                     self.start_at(checkpoint, NAMESPACE_EXPR);
                     self.bump();
-                    self.eat_trivia(true);
+                    // GNU R ends the statement at a line break after `::`.
+                    self.eat_trivia(false);
                     self.field_name(kind);
                     self.finish();
                 }
@@ -1692,6 +1719,12 @@ impl Parser<'_> {
         match self.current() {
             Some(IDENT | DOTS | DOTDOTI) => self.wrap(NAME),
             Some(STRING) => self.wrap(LITERAL),
+            Some(NEWLINE) => {
+                self.error_at_line_break(format!(
+                    "expected a name after {}, found end of line",
+                    operator.display()
+                ));
+            }
             _ => {
                 self.error_expected(&format!("a name after {}", operator.display()));
             }
@@ -1776,7 +1809,7 @@ impl Parser<'_> {
                 self.start(REPEAT_EXPR);
                 self.bump();
                 self.eat_trivia(true);
-                if !self.statement() {
+                if !self.statement(BODY_BP) {
                     self.error_here("expected a body after `repeat`");
                 }
                 self.finish();
@@ -1896,7 +1929,7 @@ impl Parser<'_> {
         self.eat_trivia(true);
         self.condition_parens("if");
         self.eat_trivia(true);
-        if !self.statement() {
+        if !self.statement(BODY_BP) {
             self.error_expected("a branch after the `if` condition");
         }
         let across = self.else_allowed_across_newline();
@@ -1905,7 +1938,7 @@ impl Parser<'_> {
             debug_assert!(self.at(ELSE_KW));
             self.bump();
             self.eat_trivia(true);
-            if !self.statement() {
+            if !self.statement(BODY_BP) {
                 self.error_expected("an expression after `else`");
             }
         }
@@ -1921,10 +1954,18 @@ impl Parser<'_> {
             self.open_group();
             self.bump();
             self.eat_trivia(true);
-            if self.at(IDENT) {
+            if matches!(self.current(), Some(IDENT | DOTS | DOTDOTI)) {
                 self.wrap(NAME);
             } else {
                 self.error_expected("a loop variable after `for (`");
+                // One mistake, one finding: what stands in the variable's place before `in`
+                // is skipped, so the rest of the head reads as written.
+                let next = self.peek_significant(self.pos + 1, true);
+                if !self.at(IN_KW) && matches!(next, Some((IN_KW, _))) {
+                    self.start(ERROR);
+                    self.bump();
+                    self.finish();
+                }
             }
             self.eat_trivia(true);
             if self.at(IN_KW) {
@@ -1950,7 +1991,7 @@ impl Parser<'_> {
             self.error_expected("`(` after `for`");
         }
         self.eat_trivia(true);
-        if !self.statement() {
+        if !self.statement(BODY_BP) {
             self.error_here("expected a body for the `for` loop");
         }
         self.finish();
@@ -1962,7 +2003,7 @@ impl Parser<'_> {
         self.eat_trivia(true);
         self.condition_parens("while");
         self.eat_trivia(true);
-        if !self.statement() {
+        if !self.statement(BODY_BP) {
             self.error_here("expected a body for the `while` loop");
         }
         self.finish();
@@ -2019,15 +2060,23 @@ impl Parser<'_> {
             self.eat_trivia(false);
         }
         let keyword_range = self.token_range(self.pos);
+        let on_one_line = self.lambda_on_one_line == Some(self.pos);
         self.bump();
-        self.eat_trivia(true);
+        self.eat_trivia(!on_one_line);
+        let cut = on_one_line && self.at(NEWLINE);
+        if cut {
+            self.error_at_line_break(
+                "expected `(` on the same line as `\\`: R does not continue a lambda that starts a statement across a line break",
+            );
+            self.eat_trivia(true);
+        }
         if self.at(LESS) {
             self.inline_type(|parser, end| parser.ann_binder_list(end));
             self.eat_trivia(true);
         }
         if self.at(L_PAREN) {
             self.parameter_list();
-        } else {
+        } else if !cut {
             self.error_expected("`(` to open the parameter list");
         }
         self.eat_trivia(true);
@@ -2038,7 +2087,7 @@ impl Parser<'_> {
             self.finish();
             self.eat_trivia(true);
         }
-        if !self.statement() && !self.statement_left_group_open {
+        if !self.statement(BODY_BP) && !self.statement_left_group_open {
             // Blamed on the keyword: where the body search stopped can be a
             // zero-width spot past the last statement.
             self.error_at(keyword_range, "expected a function body");
@@ -3025,6 +3074,9 @@ const LEFT_ASSIGN_BP: u8 = 10;
 // its precedence declarations: `a = b <- c` is `a = (b <- c)`.
 const EQ_ASSIGN_BP: u8 = 8;
 const HELP_BP: u8 = 2;
+// The body of a function, a branch or a loop ends before `?`: `function(x) x ? f` asks for help
+// on the function.
+const BODY_BP: u8 = HELP_BP + 1;
 
 /// How tightly an infix operator binds its left and right operands: an operand stays with the
 /// operator whose power on its side is higher. Editors use it to parenthesize only where an
