@@ -23,8 +23,10 @@ use {
         Heap,
         handle::Reroot,
         object::{Sexp, SexpType, gp},
+        strings::Encoding,
     },
-    std::{borrow::Cow, marker::PhantomData, ptr::NonNull},
+    smallvec::SmallVec,
+    std::{borrow::Cow, marker::PhantomData, ops::Range, ptr::NonNull},
 };
 
 /// A builtin in safe Rust: it reaches the heap only through the context, and its arguments and
@@ -94,6 +96,30 @@ impl<'s> Args<'_, 's> {
     pub fn error(&self, message: impl Into<String>) -> Unwind {
         self.call.error(message)
     }
+
+    /// The arguments of a builtin that matches them as a closure would: one per formal, `None`
+    /// where none matched.
+    pub fn matched(
+        &self,
+        _context: &mut Cx<'s>,
+        formals: &[&str],
+    ) -> R<SmallVec<[Option<Local<'s>>; 8]>> {
+        // SAFETY: matching may allocate an error, which `&mut Cx` permits, and every value it
+        // returns is one of the call's arguments, which `enter`'s caller keeps rooted.
+        unsafe {
+            let (matched, _) = self.call.match_args(formals)?;
+            Ok(matched
+                .into_iter()
+                .map(|value| value.map(|value| Local::adopt(value)))
+                .collect())
+        }
+    }
+}
+
+/// Whether `value` is the empty argument, as an empty symbol in a call evaluates.
+#[inline]
+pub fn is_missing_argument(value: Local<'_>) -> bool {
+    value.raw() == values::missing_arg()
 }
 
 // SAFETY: `Unwind::root` roots the call an error names and every value a jump carries.
@@ -198,6 +224,13 @@ pub fn integer_scalar(_context: &mut Cx<'_>, value: Local<'_>) -> i32 {
     // SAFETY: the value is rooted, and reading an ALTREP's first element may allocate, which
     // `&mut Cx` permits.
     unsafe { values::as_integer_scalar(value.raw()) }
+}
+
+/// The shared `TRUE`, `FALSE` or `NA` the heap keeps for as long as it lives.
+#[inline]
+pub fn logical_constant<'s>(_context: &Cx<'s>, value: i32) -> R<Local<'s>> {
+    // SAFETY: the shared logical values are permanent roots of the heap.
+    Ok(unsafe { Local::adopt(values::scalar_logical(value)?) })
 }
 
 /// A new integer vector of one element.
@@ -312,6 +345,122 @@ pub fn set_text(
     unsafe { values::set_mkchar(vector.raw(), index, text) }
 }
 
+/// Stores a string of `bytes` with the encoding mark `encoding` as element `index` of a new
+/// character vector.
+#[inline]
+pub fn set_bytes(
+    _context: &mut Cx<'_>,
+    vector: &mut Fresh<'_, Str>,
+    index: usize,
+    bytes: &[u8],
+    encoding: Encoding,
+) -> R<()> {
+    assert!(index < vector.len(), "element index out of bounds");
+    // SAFETY: as for `set_text`.
+    unsafe { values::set_mkchar_bytes(vector.raw(), index, bytes, encoding) }
+}
+
+/// [`set_bytes`] with the bytes `range` of the raw vector `source`, which a slice could not lend
+/// across the allocation.
+pub fn set_raw_bytes(
+    _context: &mut Cx<'_>,
+    vector: &mut Fresh<'_, Str>,
+    index: usize,
+    source: Local<'_, Raw>,
+    range: Range<usize>,
+    encoding: Encoding,
+) -> R<()> {
+    assert!(index < vector.len(), "element index out of bounds");
+    assert!(range.end <= source.len(), "byte range out of bounds");
+    // SAFETY: the source is rooted, and making a string writes into no raw vector, so its bytes
+    // stay valid through the allocation; the rest is as for `set_text`.
+    unsafe {
+        let bytes = &source.raw().slice::<u8>()[range];
+        values::set_mkchar_bytes(vector.raw(), index, bytes, encoding)
+    }
+}
+
+/// A new character vector filled in order, each element once. Since no element is overwritten,
+/// a string stored earlier lives as long as the vector, which lets the fill hand out that string
+/// again for the same bytes instead of probing the heap's string table
+/// ([`values::StringMemo`]).
+pub struct StringFill<'s> {
+    vector: Fresh<'s, Str>,
+    next: usize,
+    memo: values::StringMemo<'s>,
+}
+
+impl<'s> StringFill<'s> {
+    pub fn new(context: &mut Cx<'s>, length: usize) -> R<StringFill<'s>> {
+        Ok(StringFill {
+            vector: context.alloc::<Str>(length)?,
+            next: 0,
+            memo: values::StringMemo::default(),
+        })
+    }
+
+    #[inline]
+    pub fn push(&mut self, context: &Cx<'_>, chars: impl Pointer<Chars>) {
+        self.vector.set(context, self.next, chars);
+        self.next += 1;
+    }
+
+    #[inline]
+    pub fn push_text(&mut self, context: &mut Cx<'_>, text: &str) -> R<()> {
+        set_text(context, &mut self.vector, self.next, text)?;
+        self.next += 1;
+        Ok(())
+    }
+
+    /// Pushes the string of the bytes `range` of element `index` of `source`, marked
+    /// `encoding`. A native string goes through the memo.
+    pub fn push_part(
+        &mut self,
+        context: &mut Cx<'_>,
+        source: Local<'_, Str>,
+        index: usize,
+        range: Range<usize>,
+        encoding: Encoding,
+    ) -> R<()> {
+        assert!(self.next < self.vector.len(), "element index out of bounds");
+        let chars = source.get(context, index).raw();
+        // SAFETY: the source is rooted, so its element lives through the allocation, which
+        // moves no string. The new string is stored before anything else allocates, and a
+        // string the memo hands out was stored at an earlier index of this vector, which is
+        // rooted for `'s` and never overwritten.
+        unsafe {
+            let bytes = &chars.bytes()[range];
+            let made = if encoding == Encoding::Native {
+                self.memo.mk_char(bytes)?
+            } else {
+                crate::heap().mk_char(bytes, encoding)?
+            };
+            crate::heap().set_element(self.vector.raw(), self.next, made);
+        }
+        self.next += 1;
+        Ok(())
+    }
+
+    #[inline]
+    pub fn finish(self) -> Fresh<'s, Str> {
+        self.vector
+    }
+}
+
+/// The encoding `chars` is marked with, as `Rf_getCharCE` reports it.
+#[inline]
+pub fn encoding(chars: Gc<'_, Chars>) -> Encoding {
+    if chars.has_mark(gp::UTF8) {
+        Encoding::Utf8
+    } else if chars.has_mark(gp::LATIN1) {
+        Encoding::Latin1
+    } else if chars.has_mark(gp::BYTES) {
+        Encoding::Bytes
+    } else {
+        Encoding::Native
+    }
+}
+
 /// Whether `chars` is `NA_character_`.
 #[inline]
 pub fn is_na(chars: Gc<'_, Chars>) -> bool {
@@ -360,6 +509,55 @@ pub fn copy_names<T: Vector>(
         return Ok(());
     }
     copy_named(context, from, to, &[values::symbols().names])
+}
+
+/// Copies every attribute of `from` onto the new vector `to`, with the object and S4 bits.
+#[inline]
+pub fn copy_attributes<T: Vector>(
+    context: &mut Cx<'_>,
+    from: Local<'_>,
+    to: &mut Fresh<'_, T>,
+) -> R<()> {
+    // Both bits follow the class attribute, so an object without attributes has neither.
+    if from.attributes(context).r_type() == SexpType::Nil {
+        return Ok(());
+    }
+    copied_attributes(context, from, to)
+}
+
+#[inline(never)]
+fn copied_attributes<T: Vector>(
+    _context: &mut Cx<'_>,
+    from: Local<'_>,
+    to: &mut Fresh<'_, T>,
+) -> R<()> {
+    // SAFETY: both objects are rooted, `to` is visible to nothing else, and setting an
+    // attribute may allocate, which `&mut Cx` permits.
+    unsafe { values::copy_attributes(from.raw(), to.raw()) }
+}
+
+/// The names attribute of a vector, or `NULL`.
+#[inline]
+pub fn names_attribute<'s>(context: &Cx<'s>, value: Local<'_>) -> Local<'s> {
+    // SAFETY: the value is rooted, and the lookup only reads its attribute list.
+    unsafe {
+        rooted(
+            context,
+            values::get_attr(value.raw(), values::symbols().names),
+        )
+    }
+}
+
+/// Sets the attribute `name` of the new vector `to` to `value`.
+pub fn set_attribute<T: Vector>(
+    _context: &mut Cx<'_>,
+    to: &mut Fresh<'_, T>,
+    name: &str,
+    value: Local<'_>,
+) -> R<()> {
+    // SAFETY: both objects are rooted, `to` is visible to nothing else, and interning the name
+    // and setting the attribute may allocate, which `&mut Cx` permits.
+    unsafe { values::set_attr(to.raw(), values::install(name)?, value.raw()) }
 }
 
 /// Whether `value` has no attribute and no tags that read as names, which is the common case
