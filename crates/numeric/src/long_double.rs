@@ -617,7 +617,10 @@ pub fn covariance(x: &[f64], x_offset: f64, y: &[f64], y_offset: f64, divisor: i
 /// on each NaN operand, never sees one.
 pub fn running_sums(values: &[f64], out: &mut [f64]) {
     let count = values.len().min(out.len());
-    let first = values[..count].iter().position(|value| value.is_nan()).unwrap_or(count);
+    let first = values[..count]
+        .iter()
+        .position(|value| value.is_nan())
+        .unwrap_or(count);
     #[cfg(all(target_arch = "x86_64", not(windows)))]
     x87::running_sums(&values[..first], &mut out[..first]);
     #[cfg(not(all(target_arch = "x86_64", not(windows))))]
@@ -635,7 +638,10 @@ pub fn running_sums(values: &[f64], out: &mut [f64]) {
 /// `out`, for the shorter of the two. NA and NaN end the products as in `running_sums`.
 pub fn running_products(values: &[f64], out: &mut [f64]) {
     let count = values.len().min(out.len());
-    let first = values[..count].iter().position(|value| value.is_nan()).unwrap_or(count);
+    let first = values[..count]
+        .iter()
+        .position(|value| value.is_nan())
+        .unwrap_or(count);
     #[cfg(all(target_arch = "x86_64", not(windows)))]
     x87::running_products(&values[..first], &mut out[..first]);
     #[cfg(not(all(target_arch = "x86_64", not(windows))))]

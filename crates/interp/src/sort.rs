@@ -812,31 +812,30 @@ unsafe fn do_sorted_fpass(call: &Call<'_>) -> R<Sexp> {
     values::scalar_bool(known_sorted(call.arg(0), wanted)?)
 }
 
-/// Whether a plain integer or double vector without missing values is non-decreasing, or
-/// non-increasing when `decreasing`.
-unsafe fn in_order(x: Sexp, decreasing: bool) -> bool {
+/// Whether a plain integer or double vector without `NA` or NaN is non-decreasing, or
+/// non-increasing when `decreasing`, and strictly so when `strict`.
+unsafe fn in_order(x: Sexp, decreasing: bool, strict: bool) -> bool {
+    fn ordered<T: PartialOrd>(values: &[T], decreasing: bool, strict: bool) -> bool {
+        match (decreasing, strict) {
+            (false, false) => values.is_sorted_by(|left, right| left <= right),
+            (false, true) => values.is_sorted_by(|left, right| left < right),
+            (true, false) => values.is_sorted_by(|left, right| left >= right),
+            (true, true) => values.is_sorted_by(|left, right| left > right),
+        }
+    }
     if x.is_altrep() {
         return false;
     }
     match x.kind() {
         SexpType::Integer => {
             let values = x.slice::<i32>();
-            !values.contains(&NA_INTEGER)
-                && if decreasing {
-                    values.is_sorted_by(|left, right| left >= right)
-                } else {
-                    values.is_sorted()
-                }
+            !values.contains(&NA_INTEGER) && ordered(values, decreasing, strict)
         }
         SexpType::Real => {
-            // `is_sorted_by` fails on a NaN anywhere but alone, so a lone one is refused too.
+            // A NaN fails every comparison, so only a lone one could pass as in order.
             let values = x.slice::<f64>();
             !values.first().is_some_and(|value| value.is_nan())
-                && if decreasing {
-                    values.is_sorted_by(|left, right| left >= right)
-                } else {
-                    values.is_sorted_by(|left, right| left <= right)
-                }
+                && ordered(values, decreasing, strict)
         }
         _ => false,
     }
@@ -863,29 +862,9 @@ unsafe fn known_sorted(x: Sexp, wanted: i32) -> R<bool> {
         let known = matches!(sorted, -2 | -1 | 1 | 2);
         return Ok(known && (sorted == wanted || (no_na && sorted * wanted > 0)));
     }
-    Ok(match x.kind() {
-        SexpType::Integer => {
-            let values = x.slice::<i32>();
-            if values.contains(&NA_INTEGER) {
-                false
-            } else if wanted > 0 {
-                values.is_sorted()
-            } else {
-                values.windows(2).all(|pair| pair[0] > pair[1])
-            }
-        }
-        _ => {
-            // A NaN fails every comparison, so only a lone one could pass as sorted.
-            let values = x.slice::<f64>();
-            if values.len() == 1 {
-                !values[0].is_nan()
-            } else if wanted > 0 {
-                values.windows(2).all(|pair| pair[0] < pair[1])
-            } else {
-                values.windows(2).all(|pair| pair[0] > pair[1])
-            }
-        }
-    })
+    // GNU R scans only an integer vector wanted increasing, where ties pass.
+    let ties = x.kind() == SexpType::Integer && wanted > 0;
+    Ok(in_order(x, wanted < 0, !ties))
 }
 
 /// `order(na.last, decreasing, ...)`: the stable permutation that sorts the keys
@@ -1007,7 +986,7 @@ pub(crate) unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
     // the radix sort is stable and keeps signed zeros as ties.
     if let [key] = materialized[..]
         && !return_groups
-        && in_order(key, directions[0])
+        && in_order(key, directions[0], false)
     {
         let permutation = alloc(SexpType::Integer, count)?;
         for (slot, row) in values::ints_mut(permutation).iter_mut().zip(1..) {

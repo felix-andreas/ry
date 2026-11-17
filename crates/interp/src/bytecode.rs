@@ -47,7 +47,7 @@ use {
         Frame, Interp,
         arith::{MATHS, math_index},
         builtins::{Arg, BuiltinDef, Call, Generic, Replacement, internal},
-        conditions,
+        conditions, deparse,
         dispatch::{self, Caller},
         effects, element_access,
         envir::namespace_binding,
@@ -2973,9 +2973,15 @@ unsafe fn switch_arm(selector: Sexp, table: Sexp) -> R<usize> {
     let position_arms = values::ints(table.element(SWITCH_POSITION_ARMS));
     let arm = match eval::switch_selector(selector, table.element(SWITCH_CALL))? {
         SwitchSelector::Name(_) if position_arms[0] == SWITCH_DUPLICATE_DEFAULTS => {
-            return Err(eval::duplicate_switch_defaults(
-                table.element(SWITCH_CALL).cdr().cdr(),
-            ));
+            let alternatives = values::pairlist_items(table.element(SWITCH_CALL).cdr().cdr());
+            let mut defaults = alternatives
+                .into_iter()
+                .filter(|(tag, _)| *tag == nil() || symbol_name(*tag).is_empty())
+                .map(|(_, value)| deparse::deparse_one_line(value));
+            return Err(match (defaults.next(), defaults.next()) {
+                (Some(first), Some(second)) => eval::duplicate_defaults_error(&first, &second),
+                _ => error("duplicate 'switch' defaults"),
+            });
         }
         SwitchSelector::Name(text) => {
             let names = table.element(SWITCH_NAMES);

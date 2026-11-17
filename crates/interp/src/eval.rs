@@ -5717,7 +5717,10 @@ pub(crate) unsafe fn switch_alternative(
         .filter(|arg| arg.tag == nil() || symbol_name(arg.tag).is_empty());
     let default = defaults.next();
     if let (Some(first), Some(second)) = (default, defaults.next()) {
-        return Err(duplicate_defaults_error(first.value, second.value));
+        return Err(duplicate_defaults_error(
+            &deparse::deparse_one_line(first.value),
+            &deparse::deparse_one_line(second.value),
+        ));
     }
     for (position, arg) in alternatives.iter().enumerate() {
         if arg.tag.kind() == SexpType::Symbol && switch_name_matches(arg.tag.car(), text) {
@@ -5788,27 +5791,11 @@ pub(crate) unsafe fn switch_selector(selector: Sexp, call: Sexp) -> R<SwitchSele
     Ok(SwitchSelector::Position(position))
 }
 
-/// The error a string selector raises for a `switch` whose `alternatives` (the call's arguments
-/// after the selector, as a pairlist) have more than one default.
-pub(crate) unsafe fn duplicate_switch_defaults(alternatives: Sexp) -> Unwind {
-    let mut defaults = values::pairlist_items(alternatives)
-        .into_iter()
-        .filter(|(tag, _)| *tag == nil() || symbol_name(*tag).is_empty())
-        .map(|(_, value)| value);
-    match (defaults.next(), defaults.next()) {
-        (Some(first), Some(second)) => duplicate_defaults_error(first, second),
-        _ => error("duplicate 'switch' defaults"),
-    }
-}
-
-unsafe fn duplicate_defaults_error(first: Sexp, second: Sexp) -> Unwind {
-    error(
-        "duplicate 'switch' defaults: '".to_string()
-            + &deparse::deparse_one_line(first)
-            + "' and '"
-            + &deparse::deparse_one_line(second)
-            + "'",
-    )
+/// The error for a `switch` with two defaults, given their deparsed texts.
+pub(crate) fn duplicate_defaults_error(first: &str, second: &str) -> Unwind {
+    error(format!(
+        "duplicate 'switch' defaults: '{first}' and '{second}'"
+    ))
 }
 
 /// Whether the alternative named `name` is the one the string selector `text` picks. GNU R
