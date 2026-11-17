@@ -4166,9 +4166,6 @@ pub unsafe fn colon(start: f64, end: f64) -> R<Sexp> {
 unsafe fn do_seq_len(call: &Call<'_>) -> R<Sexp> {
     let value = call.arg(0);
     if length(value) != 1 {
-        if length(value) == 0 {
-            return Err(call.error("argument of length 0"));
-        }
         conditions::warning_call(call.call, "first element used of 'length.out' argument")?;
     }
     let count = values::as_real_scalar(value);
