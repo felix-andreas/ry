@@ -26,7 +26,13 @@
 //!
 //! Every program is deterministic under GNU R, and none prints an environment or a closure.
 
-use {std::sync::LazyLock, syntax::testing::SplitMix64};
+use {
+    std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::LazyLock,
+    },
+    syntax::testing::SplitMix64,
+};
 
 /// One thing a program may contain. A seed enables each with probability one half.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -446,6 +452,67 @@ pub fn called_function(expression: &str) -> Option<String> {
         Some(quoted) => Some(quoted.split_once('`')?.0.to_owned()),
         None => Some(call.split_once('(')?.0.to_owned()),
     }
+}
+
+/// The functions a program names in a call: each name or backticked name before `(`, `name<-`
+/// when the call is assigned to, and each operator of the table that occurs in the text. It
+/// reads text inside string literals as code, so it is a close upper bound, which is what a
+/// coverage report over thousands of programs needs.
+pub fn called_names(program: &str) -> BTreeSet<&str> {
+    static OPERATORS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+        api_functions()
+            .iter()
+            .map(|function| function.name)
+            .filter(|name| !name.contains(|c: char| c.is_ascii_alphanumeric()))
+            .collect()
+    });
+    static REPLACEMENTS: LazyLock<BTreeMap<&'static str, &'static str>> = LazyLock::new(|| {
+        api_functions()
+            .iter()
+            .filter_map(|function| Some((function.name.strip_suffix("<-")?, function.name)))
+            .collect()
+    });
+    let mut names: BTreeSet<&str> = OPERATORS
+        .iter()
+        .copied()
+        .filter(|operator| program.contains(operator))
+        .collect();
+    let bytes = program.as_bytes();
+    let is_name = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'_';
+    for (open, _) in program.match_indices('(') {
+        let name = if open > 0 && bytes[open - 1] == b'`' {
+            let Some(start) = program[..open - 1].rfind('`') else {
+                continue;
+            };
+            &program[start + 1..open - 1]
+        } else {
+            let start = bytes[..open]
+                .iter()
+                .rposition(|&byte| !is_name(byte))
+                .map_or(0, |position| position + 1);
+            &program[start..open]
+        };
+        if name.is_empty() {
+            continue;
+        }
+        names.insert(name);
+        let mut depth = 0usize;
+        let close = bytes[open..].iter().position(|&byte| {
+            match byte {
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                _ => {}
+            }
+            depth == 0
+        });
+        if let Some(close) = close
+            && program[open + close + 1..].trim_start().starts_with("<-")
+            && let Some(replacement) = REPLACEMENTS.get(name)
+        {
+            names.insert(replacement);
+        }
+    }
+    names
 }
 
 /// `name` as R source: itself when it is a syntactic name, in backticks otherwise.
@@ -2085,6 +2152,11 @@ mod tests {
             Some("names<-")
         );
         assert_eq!(name("v <- try_(c(1, 2))"), None);
+        let names = called_names("r <- try_({ x <- v; names(x) <- `[[`(w, 1L) + sum(v) })");
+        for name in ["try_", "names", "names<-", "[[", "+", "sum"] {
+            assert!(names.contains(name), "{name} is missing from {names:?}");
+        }
+        assert!(!names.contains("mean"));
         assert_eq!(syntactic("is.na<-"), "`is.na<-`");
         assert_eq!(syntactic("if"), "`if`");
         assert_eq!(syntactic("rowSums"), "rowSums");

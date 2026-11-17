@@ -314,6 +314,7 @@ object, while plain `RY_GC_STRESS=1` passed 3 of 3, since it tenures the object 
 | `just scenarios [NAME]` | Every scenario, or one. |
 | `just fuzz-differential SEED COUNT ENGINES` | Generated grammar programs under GNU R and ry's engines. |
 | `just fuzz-kind KIND SEED COUNT ENGINES` | One kind of program (`grammar`, `metamorphic`, `builtins`, `api`, `corpus`) or `all`, with each diverging program and its report written to `target/fuzz-findings`. |
+| `just fuzz-coverage COUNT` | No engine: how many of the functions base, stats and utils export the programs of `COUNT` seeds of each kind name in a call. |
 | `just fuzz-long HOURS BASE ENGINES` | Every kind for `HOURS` of wall clock from seed `BASE`, under tier 0, the forced JIT and seeded collection stress unless `ENGINES` says otherwise. The staged Fuzz workflow runs it. |
 | `just fuzz-reduce FILE ENGINE` | One diverging program shrunk to a minimal one that diverges the same way (`oracle reduce`), the form a finding takes as an oracle case. |
 | `just fuzz-corpus SEED COUNT ENGINES` | Mutated snippets of real R code (base help examples, R's regression tests, the oracle cases) under GNU R and ry's engines, observing. |

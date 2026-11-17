@@ -607,6 +607,23 @@ frequent first, which ranks the gaps:
 7	value	nargs
 ```
 
+`oracle fuzz --kind all --count 500 --coverage` (`just fuzz-coverage`) runs no engine. It generates
+the programs and reports how many of the table's callable functions each kind names in a call, so
+a generator change shows what it added to the reach:
+
+```
+kind           all   base  stats  utils
+(the table)   1479   1000    427     52
+grammar        144    143      0      1
+metamorphic    131    129      1      1
+builtins       297    285      7      5
+api           1473    995    426     52
+corpus         649    458    178     13
+together      1474    995    427     52
+```
+
+The count is a close upper bound, because a name inside a string literal counts as a call.
+
 Every fuzzed engine runs with at most 2 GiB of writable memory (`oracle::fuzz::MEMORY_LIMIT`,
 `RLIMIT_DATA`), so a call that asks for a huge vector gets R's "cannot allocate" error in GNU R
 and in ry instead of taking the machine's memory. `just fuzz-differential` runs the grammar,
