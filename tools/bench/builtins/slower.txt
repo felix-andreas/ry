@@ -109,7 +109,6 @@ base::lfactorial
 base::memCompress
 base::memDecompress
 base::mget
-base::min
 base::months
 base::months.Date
 base::months.POSIXt
