@@ -456,8 +456,10 @@ pub fn check_element_access_agreement(entropy: &mut impl Entropy) {
 /// `BOUND_ELSEWHERE` bit, the enclosure's `DETACHED` bit and the base value) is live until the
 /// first rebinding. Three closures call the name: one at top level, one nested in a function
 /// frame, and one whose environment the case moves around; a fourth function, already compiled,
-/// rebinds the name in its own frame after its nested closure ran. Every call runs compiled and
-/// must agree with the same call evaluated directly in the closure's environment.
+/// rebinds the name in its own frame after its nested closure ran, and a fifth binds the name for
+/// the first time on a call that runs compiled, so the name sits in a slot of the live frame its
+/// nested closure looks through. Every call runs compiled and must agree with the same call
+/// evaluated directly in the closure's environment.
 pub fn check_shadowing_agreement(entropy: &mut impl Entropy) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static CASES: AtomicUsize = AtomicUsize::new(0);
@@ -479,6 +481,15 @@ pub fn check_shadowing_agreement(entropy: &mut impl Entropy) {
            shadow_g2 <- function(x) {name}(x)
            environment(shadow_g2) <- shadow_e
            shadow_rebinder <- function(v) {{ g <- function(x) {name}(x); g(1); {name} <- v; g }}
+           shadow_late <- function(bind, v, a) {{
+             if (bind) {name} <- v
+             g <- function(x) {name}(x)
+             compiled <- g(a)
+             shadow_direct <<- .Internal(eval(quote({name}(a)), .Internal(environment(g)), NULL))
+             compiled
+           }}
+           shadow_late(FALSE, NULL, 1)
+           shadow_late(FALSE, NULL, 1)
            NULL }}"
     );
     with_interpreter(|| {
@@ -488,7 +499,7 @@ pub fn check_shadowing_agreement(entropy: &mut impl Entropy) {
             let mut log = vec![setup.clone()];
             for step in 0..16 {
                 // Every closure runs compiled on the fast path before anything rebinds the name.
-                let choice = if step < 3 { 0 } else { entropy.below(17) };
+                let choice = if step < 3 { 0 } else { entropy.below(19) };
                 let value = values[entropy.below(values.len())];
                 let target = targets[entropy.below(targets.len())];
                 let statement = match choice {
@@ -512,6 +523,22 @@ pub fn check_shadowing_agreement(entropy: &mut impl Entropy) {
                                 log.join("\n")
                             );
                         }
+                        continue;
+                    }
+                    17 | 18 => {
+                        let argument = arguments[entropy.below(arguments.len())];
+                        let call = format!("shadow_late(TRUE, {value}, {argument})");
+                        // A call that fails leaves the direct answer unset, which reads as an
+                        // error too.
+                        run("shadow_direct <- quote(error)");
+                        let compiled = run(&call);
+                        assert_eq!(
+                            run("shadow_direct"),
+                            compiled,
+                            "{call} after:\n{}",
+                            log.join("\n")
+                        );
+                        log.push(call);
                         continue;
                     }
                     5 => format!("{name} <- {value}"),
@@ -561,7 +588,8 @@ pub fn check_shadowing_agreement(entropy: &mut impl Entropy) {
             }
             run(&format!(
                 "{{ .Internal(remove(c(\"{name}\", \"shadow_g0\", \"shadow_g1\", \"shadow_g2\", \
-                 \"shadow_maker\", \"shadow_e\", \"shadow_rebinder\"), globalenv(), FALSE)) }}"
+                 \"shadow_maker\", \"shadow_e\", \"shadow_rebinder\", \"shadow_late\", \
+                 \"shadow_direct\"), globalenv(), FALSE)) }}"
             ));
         }
     });
@@ -570,7 +598,8 @@ pub fn check_shadowing_agreement(entropy: &mut impl Entropy) {
 /// S3 dispatch finds the method a full walk of the scope finds while the method names are bound,
 /// rebound and unbound by every route a program has: in the global frame, a function frame, an
 /// argument, a child environment, a methods table attached to base or detached from it, base
-/// itself, a delayed or active binding, and a frame bound while detached and attached later.
+/// itself, a delayed or active binding, a frame bound while detached and attached later, and a
+/// slot of a compiled function's live frame that no earlier call bound.
 /// Each case uses a fresh generic, so every name starts bound nowhere and its lookups take the
 /// path that reads only the base binding until something binds it. With invariants on, that
 /// path checks each answer against the full walk, so a disagreement fails the case; the log of
@@ -606,6 +635,9 @@ pub fn check_s3_lookup_agreement(entropy: &mut impl Entropy) {
            lk_nested <- function() {{ inner <- function() {generic}(lk_obj); inner() }}
            lk_binder <- function(v) {{ {generic}.lka <- v; {generic}(lk_obj) }}
            lk_argument <- function({generic}.lkb) {generic}(lk_obj)
+           lk_late <- function(bind, v) {{ if (bind) {generic}.lka <- v; {generic}(lk_obj) }}
+           lk_late(FALSE, NULL)
+           lk_late(FALSE, NULL)
            NULL }}"
     );
     with_interpreter(|| {
@@ -617,7 +649,8 @@ pub fn check_s3_lookup_agreement(entropy: &mut impl Entropy) {
                 let name = format!("{generic}.{}", classes[entropy.below(classes.len())]);
                 let value = values[entropy.below(values.len())];
                 let target = targets[entropy.below(targets.len())];
-                let statement = match entropy.below(16) {
+                let statement = match entropy.below(18) {
+                    16 | 17 => format!("lk_late(TRUE, {value})"),
                     0 => format!("{generic}(lk_obj)"),
                     1 => "lk_caller()".to_owned(),
                     2 => "lk_nested()".to_owned(),
@@ -671,7 +704,7 @@ pub fn check_s3_lookup_agreement(entropy: &mut impl Entropy) {
                 "{{ .Internal(remove(c(\"{generic}\", \"{generic}.default\", \"{generic}.lka\", \
                  \"{generic}.lkb\", \"lk_obj\", \"lk_table\", \".__S3MethodsTable__.\", \"lk_e\", \
                  \"lk_d\", \"lk_caller\", \"lk_nested\", \"lk_binder\", \"lk_argument\", \
-                 \"length.lka\", \"length.lkb\"), globalenv(), FALSE)) }}"
+                 \"lk_late\", \"length.lka\", \"length.lkb\"), globalenv(), FALSE)) }}"
             ));
             run(&format!(
                 "{{ .Internal(remove(c(\"{generic}.lka\", \"{generic}.lkb\"), baseenv(), FALSE)) }}"
