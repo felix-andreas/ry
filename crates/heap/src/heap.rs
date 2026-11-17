@@ -2230,6 +2230,7 @@ impl Heap {
 
     #[inline(always)]
     unsafe fn store(&mut self, parent: Sexp, old: Sexp, new: Sexp) {
+        self.verify_store(parent, new);
         self.count_store(parent, old, new);
         self.write_barrier(parent, new);
     }
@@ -2393,6 +2394,7 @@ impl Heap {
 
     #[inline(always)]
     pub unsafe fn set_element(&mut self, vector: Sexp, index: usize, value: Sexp) {
+        self.verify_store(vector, value);
         if vector.is_altrep()
             && let Some(elements) = crate::object::altrep_elements()
         {
@@ -3410,6 +3412,12 @@ impl Heap {
     /// Keeps `object` alive until the current handle scope ends.
     #[inline]
     pub fn root(&mut self, object: Sexp) {
+        #[cfg(debug_assertions)]
+        if self.policy.verify {
+            // SAFETY: the check reads only the heap's own tables and, for an address inside the
+            // heap, the header of its slot.
+            unsafe { self.verify_live(object, || "a value being rooted".into()) };
+        }
         self.roots.handles.push(object);
     }
 
@@ -4693,6 +4701,38 @@ impl Heap {
                 root.as_ptr(),
                 self.describe_stray(root),
                 self.space.sweeping,
+            );
+        }
+    }
+
+    /// Under `RY_GC_VERIFY` in a build with debug assertions, panics when a store writes into
+    /// a freed object or stores one. A release build leaves the store to the next collection's
+    /// check, because the test would cost every store a branch.
+    #[inline(always)]
+    #[cfg_attr(not(debug_assertions), allow(unused_variables))]
+    unsafe fn verify_store(&self, parent: Sexp, child: Sexp) {
+        #[cfg(debug_assertions)]
+        if self.policy.verify {
+            self.verify_live(parent, || "the object a store writes into".into());
+            self.verify_live(child, || {
+                format!(
+                    "the value stored into the {:?} at {:p}",
+                    parent.kind(),
+                    parent.as_ptr()
+                )
+            });
+        }
+    }
+
+    /// Panics when `object`, which the mutator is using, is not an allocated object.
+    #[cfg(debug_assertions)]
+    unsafe fn verify_live(&self, object: Sexp, name: impl FnOnce() -> String) {
+        if object != self.known.nil && !self.is_allocated_object(object) {
+            panic!(
+                "heap corrupted: {} is {:p}, which is {}.",
+                name(),
+                object.as_ptr(),
+                self.describe_stray(object),
             );
         }
     }

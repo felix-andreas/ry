@@ -275,11 +275,48 @@ runs once per as many allocations as there are live objects. With `RY_GC_VERIFY=
 collection short of a major one first checks the barrier's invariant: every old object that
 points at a young one is remembered, has the element on a dirty card, or is escaped (see the
 barrier contract in [R runtime](/development/design/r-runtime/)). A missed barrier then panics
-at the next collection instead of freeing a live object only when the timing is unlucky. The same
-verification also checks every reference a reachable object holds as the collector traces it: a
-reference that is not nil and not the start of an allocated object panics with `heap corrupted`,
-naming the holder, so a write that runs past an object's storage into its neighbor fails at the
-next collection instead of when the damaged neighbor is used.
+at the next collection instead of freeing a live object only when the timing is unlucky.
+
+The same verification checks every root before the collector traces it, and every reference a
+reachable object holds as it is traced. A root or reference that is not nil and not the start of
+an allocated object panics with `heap corrupted`. A value kept without a root, and a write that
+runs past an object's storage into its neighbor, then fail at the next collection instead of when
+the damaged object is used. The report says what holds the reference, what the reference points
+at, and where it is stored:
+
+```
+heap corrupted: handle 0 of 1 is 0x2000000200c0, which is an object that collection 1 freed. Found by collection 2.
+
+heap corrupted: a reachable List of length 1 at 0x2000000200f0 holds 0x2000000200c0 as element 0,
+which is an object that collection 1 freed. The reference is the word at 0x200000020110. Found by
+collection 2.
+
+heap corrupted: a reachable List of length 2 at 0x2000000200c0 holds 0x3ff0000000000000 as
+element 1, which is no address of the heap (the bits of the double 1). The reference is the word
+at 0x2000000200e8. Found by collection 1.
+```
+
+| The report says | What happened |
+| --- | --- |
+| `an object that collection N freed` | Something kept the reference without a root across collection `N`. The holder names where: a protect stack entry, a handle, a handed-out value, a value the interpreter's root source names, or a field of another object. |
+| `no address of the heap (the integer N)` or `(the bits of the double X)` | A write ran past the end of a neighboring object and stored data over the reference. |
+| `an address N bytes into the S-byte slot of a live object` | The reference was computed, or a write overlapped it by part of a word. |
+| `a free S-byte slot` | The slot holds no object: none was allocated there yet, or one was freed before poisoning was on. |
+
+Small objects live at fixed addresses, so a run with the same seed reports the same address and
+the same collection number for them. A large object's address changes from run to run.
+
+A build with debug assertions also checks the mutator between collections: a store into an object,
+a stored value and a value being rooted must each be an allocated object. A builtin that allocates
+its result without rooting it, then fills it while allocating each element, fails at its first store
+after the collection that freed the result:
+
+```
+heap corrupted: the object a store writes into is 0x200000b15000, which is an object that collection 2 freed.
+```
+
+The panic's backtrace names the builtin. A release build leaves this case to the poison, because
+the check would cost every store and every root a branch.
 
 The default suite runs a seeded sample of the oracle cases (`cases_survive_gc_torture`,
 `cases_survive_young_gc_torture`) and of the generated programs (`fuzz_programs_survive_gc_torture`)
@@ -306,6 +343,24 @@ runtime, so there a freed object reads as `FREESXP` and its other fields as pois
 or verification, debug builds poison freed slots but reuse them at once, and release builds do
 neither.
 
+`just asan` runs the `heap` and `interp` tests in a build with AddressSanitizer. The heap maps its
+own memory, which the sanitizer knows nothing about, so in such a build the collector tells it:
+a freed object's memory past its first word, which holds the kind, is marked unaddressable, and a
+slot is marked addressable again when the allocator hands it out. A read or write of a freed object's fields or elements then
+stops at the access, in Rust or in C, instead of reading poison:
+
+```
+ERROR: AddressSanitizer: use-after-poison on address 0x2000000200d0 ...
+READ of size 8 ...
+    #1 heap::object::Sexp::length crates/heap/src/object.rs:995
+    #2 heap::object::Sexp::slice crates/heap/src/object.rs:1039
+```
+
+The sanitizer sees no boundary between two live objects, because slots sit side by side with no
+gap, so a write past one object into the next is left to the verifier's reference check above.
+Code the JIT generates and a package's compiled code are not instrumented, which is why the recipe
+covers the two crates' tests and not the oracle cases.
+
 Before the argument-reference rooting fix, `datetime__year_overflow` crashed unstressed under the
 oracle harness. In a debug build of that tree, `RY_GC_STRESS=young` with quarantine panicked
 with the message above in 3 of 3 runs, when a collection traced a root that still held a freed
@@ -319,6 +374,7 @@ object, while plain `RY_GC_STRESS=1` passed 3 of 3, since it tenures the object 
 | `just scenarios [NAME]` | Every scenario, or one. |
 | `just fuzz-differential SEED COUNT ENGINES` | Generated programs under GNU R and ry's engines. |
 | `just gc-torture [young\|seeded\|repeat]` | Every oracle case under collection stress, under `RY_GC_STRESS=young`, under `RY_GC_STRESS=seed:N` with the heap checked, or under the last with each case evaluated twice in one process. |
+| `just asan [ARGS]` | The `heap` and `interp` tests under AddressSanitizer, which stops at a read or write of a freed object. |
 | `just ci-stress` | The release gate's stress job: `just gc-torture repeat` for three seeds, then generated programs under GNU R, tier 0, the JIT and the repeated seeded stress. |
 | `just fuzz-deep [MINUTES] [BASE] [DEPTH]` | Every seeded harness at a deep budget until the time limit, described below. |
 | `just fuzz-run TARGET` | One `cargo fuzz` target under libFuzzer. |

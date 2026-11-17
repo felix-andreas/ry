@@ -779,6 +779,14 @@ gc-torture mode="plain":
         {{ if mode == "young" { "cases_survive_young_gc_torture" } else if mode == "seeded" { "native_cases_keep_the_write_barrier_under_seeded_gc_torture" } else if mode == "repeat" { "cases_survive_a_second_pass_under_seeded_gc_torture" } else { "cases_survive_gc_torture" } }} \
         -- --exact --nocapture
 
+# The heap's and the interpreter's tests under AddressSanitizer (docs: development/robustness.md,
+# "Each layer"). The heap tells the sanitizer which memory holds no object, so a read or write of
+# a freed object stops at the access. `--target` keeps the flag off build scripts and proc macros,
+# and leaks are not reported because the interpreter lives as long as its process.
+asan *args:
+    RUSTFLAGS="-Zsanitizer=address" ASAN_OPTIONS=detect_leaks=0 cargo test -p heap -p interp \
+        --target "$(rustc -vV | sed -n 's/^host: //p')" --target-dir target/asan {{ args }}
+
 # The language-server simulator over many seeds: `just simulate 1000 120` runs seeds 0 to 999 with
 # 120 actions each. Replay one failure with `SIMULATION_SEED=<seed> cargo test -p ry-lang --test test_simulation`.
 simulate count="200" actions="60" base="0":
