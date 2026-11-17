@@ -710,6 +710,7 @@ fn split_text(matcher: &Matcher, text: &str, pieces: &mut Pieces) -> R<()> {
 /// Runs `body` with the interpreter's text buffer, empty. A nested call (a `%s` conversion that
 /// runs an `as.character` method that calls `sprintf`, say) finds the buffer taken and starts
 /// its own, and the larger of the two is kept.
+#[inline(always)]
 pub fn with_byte_buffer<T>(body: impl FnOnce(&mut Vec<u8>) -> R<T>) -> R<T> {
     let mut buffer = std::mem::take(&mut crate::interp().text_buffer);
     buffer.clear();
@@ -722,6 +723,7 @@ pub fn with_byte_buffer<T>(body: impl FnOnce(&mut Vec<u8>) -> R<T>) -> R<T> {
 }
 
 /// [`with_byte_buffer`] for text that is UTF-8.
+#[inline(always)]
 pub fn with_text_buffer<T>(body: impl FnOnce(&mut String) -> R<T>) -> R<T> {
     with_byte_buffer(|bytes| {
         // SAFETY: the buffer arrives empty, and an empty buffer is valid UTF-8.
@@ -2573,8 +2575,11 @@ fn substitute<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>, global: bool) 
     };
     let matcher = compiled.map_err(|failure| compile_failure(context, failure))?;
     // The replacement is read for every element, across the allocations that make the results,
-    // so it is copied out of the heap once.
-    let replacement_text = subject(replacement.get(context, 0), use_bytes).map(Cow::into_owned);
+    // so its string is rooted.
+    let replacement_text = subject(
+        context.root(replacement.get(context, 0)).rooted(),
+        use_bytes,
+    );
     let replacement = replacement_text
         .as_deref()
         .map(|text| parse_replacement(text, options));

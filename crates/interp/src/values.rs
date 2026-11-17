@@ -1188,6 +1188,7 @@ pub unsafe fn same_text(left: Sexp, right: Sexp) -> bool {
 }
 
 /// The text of a symbol's name.
+#[inline]
 pub unsafe fn symbol_name<'a>(symbol: Sexp) -> Cow<'a, str> {
     char_str(symbol.car())
 }
