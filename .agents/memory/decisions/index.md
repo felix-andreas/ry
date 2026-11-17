@@ -378,6 +378,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Marking a traced object costs a few table loads (built, with exceptions)
 - Peak RSS is judged as anonymous, image and code size, not as one number
 - A handler stack set aside is traced
+- The verifier checks every traced reference
 
 ## C API, R home and packages
 
@@ -580,6 +581,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The edit-to-signal loop is tuned for agents
 - The interpreter stays one crate, because the edit loop is bound by links
 - Agent-written notes are not mass-rewritten for brevity
+- Shipped binaries keep their symbol table, and crash reports name functions from it
 
 ## Docs, process and positioning
 

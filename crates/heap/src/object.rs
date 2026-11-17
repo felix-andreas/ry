@@ -1027,8 +1027,15 @@ impl Sexp {
         unsafe { std::slice::from_raw_parts(self.data() as *const T, self.length() as usize) }
     }
 
+    /// The elements to write. An ALTREP instance has no element storage: its data would land
+    /// on its fields and the next slots.
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn slice_mut<'a, T>(self) -> &'a mut [T] {
+        debug_assert!(
+            !unsafe { self.is_altrep() },
+            "an element write into an ALTREP {:?}",
+            unsafe { self.kind() }
+        );
         unsafe { std::slice::from_raw_parts_mut(self.data() as *mut T, self.length() as usize) }
     }
 

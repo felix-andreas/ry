@@ -1,0 +1,58 @@
+[stdout]
+|  aä 
+| "x" 
+| [1] "x"
+| [1] "UTF-8"   "unknown"
+| [1] "UTF-8"
+| [1]  TRUE FALSE
+| [1] 1
+| [1] 1
+| [1] 1
+| $über
+| [1] 1
+| 
+| List of 3
+|  $ über : num 10
+|  $ plain: num 2
+|  $ neuß : num 3
+| été 
+|   1 
+|   été hiver 
+|     5     6 
+| å 
+| 1 
+| [1] "UTF-8"   "unknown"
+|  aä 
+| "x" 
+| [1] 1
+| [1] TRUE
+| [1] "aä" "ø" 
+| $aä
+| [1] 1
+| 
+| $ø
+| [1] 2
+| 
+| [1] "UTF-8"   "unknown"
+| [1] 1
+| $ä
+| [1] 2
+| 
+| [1] "latin1"
+| aä 
+|  1 
+| [1] 1
+| [1] 1
+| [1] 1
+| [1] 3
+| aä  b 
+|  9  2 
+| [1] TRUE
+| [1] 5
+| [1] TRUE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| TRUE
