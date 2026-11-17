@@ -3196,14 +3196,12 @@ unsafe fn do_at_assign(call: &Call<'_>) -> R<Sexp> {
     // SAFETY: the evaluated arguments are rooted as each is adopted, before anything allocates,
     // and the result is rooted before the scope ends.
     unsafe {
-        let result = handles::with(|context| {
+        handles::with_result(|context| {
             let object = handles::adopt(context, object);
             let symbol = handles::permanent(standard::<Symbol>(handles::held(context, symbol))?);
             let value = handles::adopt(context, value);
             Ok(checked_slot_assign(context, object, symbol, value)?.raw())
-        })?;
-        crate::heap().root(result);
-        Ok(result)
+        })
     }
 }
 
@@ -3271,15 +3269,13 @@ pub unsafe fn set_slot(object: Sexp, symbol: Sexp, value: Sexp) -> R<Sexp> {
     // SAFETY: the caller's roots hold the arguments, and the result is rooted before anything
     // else allocates.
     unsafe {
-        let result = handles::with(|context| {
+        handles::with_result(|context| {
             let object = handles::held(context, object);
             let slot = handles::permanent(standard::<Symbol>(handles::held(context, symbol))?);
             let value = handles::held(context, value);
             let mut object = unshared(context, object)?;
             Ok(store_slot(context, &mut object, slot, value)?.raw())
-        })?;
-        crate::heap().root(result);
-        Ok(result)
+        })
     }
 }
 
@@ -3295,15 +3291,13 @@ pub unsafe fn assign_slot(object: Sexp, symbol: Sexp, value: Sexp) -> R<Sexp> {
     // SAFETY: the caller's roots hold the arguments, its contract accepts a write into a shared
     // `object`, and the result is rooted before anything else allocates.
     unsafe {
-        let result = handles::with(|context| {
+        handles::with_result(|context| {
             let object = handles::held(context, object);
             let slot = handles::permanent(standard::<Symbol>(handles::held(context, symbol))?);
             let value = handles::held(context, value);
             let mut object = Owned::assume(object);
             Ok(store_slot(context, &mut object, slot, value)?.raw())
-        })?;
-        crate::heap().root(result);
-        Ok(result)
+        })
     }
 }
 
@@ -3355,7 +3349,7 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
     // SAFETY: the caller's roots hold the arguments for the whole call, and the result is
     // rooted before anything else allocates.
     unsafe {
-        let result = handles::with(|context| {
+        handles::with_result(|context| {
             let object = handles::held(context, object);
             let indices: SmallVec<[Local<'_>; 4]> = indices
                 .iter()
@@ -3364,9 +3358,7 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
             let value = handles::held(context, value);
             let call = handles::held(context, call);
             Ok(assign_subset(context, object, &indices, value, call)?.raw())
-        })?;
-        crate::heap().root(result);
-        Ok(result)
+        })
     }
 }
 
@@ -4334,7 +4326,7 @@ pub(crate) unsafe fn append_named(vector: Sexp, name: Sexp, value: Sexp, reuse: 
     // SAFETY: the caller's roots hold the arguments, its claim makes `vector` owned under
     // `reuse`, and the result is rooted before anything else allocates.
     unsafe {
-        let result = handles::with(|context| {
+        handles::with_result(|context| {
             let vector = handles::held(context, vector);
             let name = handles::held(context, name)
                 .downcast::<handles::Chars>()
@@ -4344,9 +4336,7 @@ pub(crate) unsafe fn append_named(vector: Sexp, name: Sexp, value: Sexp, reuse: 
             Ok(append_element(context, vector, owned, name, value)?
                 .finish()
                 .raw())
-        })?;
-        crate::heap().root(result);
-        Ok(result)
+        })
     }
 }
 
@@ -4403,7 +4393,7 @@ pub(crate) unsafe fn append_copy(vector: Sexp, reuse: bool) -> R<Sexp> {
     // SAFETY: the caller's root holds `vector`, its claim makes it owned under `reuse`, and the
     // result is rooted before anything else allocates.
     unsafe {
-        let result = handles::with(|context| {
+        handles::with_result(|context| {
             let vector = handles::held(context, vector);
             let (vector, owned) = if altrep(vector) {
                 (handles::materialize(context, vector)?, None)
@@ -4414,9 +4404,7 @@ pub(crate) unsafe fn append_copy(vector: Sexp, reuse: bool) -> R<Sexp> {
             Ok(grow(context, vector, owned, count + 1, true)?
                 .finish()
                 .raw())
-        })?;
-        crate::heap().root(result);
-        Ok(result)
+        })
     }
 }
 
@@ -4517,7 +4505,7 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
     // SAFETY: the caller's roots hold the arguments for the whole call, and the result is
     // rooted before anything else allocates.
     unsafe {
-        let result = handles::with(|context| {
+        handles::with_result(|context| {
             let object = handles::held(context, object);
             let indices: SmallVec<[Local<'_>; 4]> = indices
                 .iter()
@@ -4526,9 +4514,7 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
             let value = handles::held(context, value);
             let call = handles::held(context, call);
             Ok(assign_subset2(context, object, &indices, value, call)?.raw())
-        })?;
-        crate::heap().root(result);
-        Ok(result)
+        })
     }
 }
 
@@ -5055,7 +5041,7 @@ pub unsafe fn dollar_assign(object: Sexp, name: Sexp, value: Sexp, call: Sexp) -
     // SAFETY: the caller's roots hold the arguments for the whole call, and the result is
     // rooted before anything else allocates.
     unsafe {
-        let result = handles::with(|context| {
+        handles::with_result(|context| {
             let object = handles::held(context, object);
             let name = handles::held(context, name)
                 .downcast::<handles::Chars>()
@@ -5063,9 +5049,7 @@ pub unsafe fn dollar_assign(object: Sexp, name: Sexp, value: Sexp, call: Sexp) -
             let value = handles::held(context, value);
             let call = handles::held(context, call);
             Ok(assign_dollar(context, object, name, value, call)?.raw())
-        })?;
-        crate::heap().root(result);
-        Ok(result)
+        })
     }
 }
 
