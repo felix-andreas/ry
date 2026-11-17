@@ -5849,10 +5849,12 @@ unsafe fn do_force_and_call(call: &Call<'_>) -> R<Sexp> {
     // The callee's arguments are the call's own cells after `n` and `FUN` whenever the special
     // received them unchanged, which is every call written in source, so `Reduce` and the
     // apply family pay no pairlist per call. GNU R conses the same tail into one new call.
-    let rest = match call_tail(call.call, &call.args[2..]) {
+    // A call without `FUN` reaches the "attempt to apply non-function" error below, as in GNU R.
+    let arguments = call.args.get(2..).unwrap_or(&[]);
+    let rest = match call_tail(call.call, arguments) {
         Some(rest) => rest,
         None => values::pairlist(
-            &call.args[2..]
+            &arguments
                 .iter()
                 .map(|arg| (arg.tag, arg.value))
                 .collect::<SmallVec<[(Sexp, Sexp); 8]>>(),
