@@ -379,6 +379,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Peak RSS is judged as anonymous, image and code size, not as one number
 - A handler stack set aside is traced
 - The verifier checks every root and every traced reference
+- Interpreter code holds values through handles the borrow checker checks
 
 ## C API, R home and packages
 

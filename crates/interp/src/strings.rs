@@ -18,6 +18,7 @@ use {
         conditions::warning,
         eval,
         format::{display_width, push_fixed, push_general, push_scientific},
+        handles::{self, Args, Cx, Integer, Local, Raw, Str, safe},
         pcre::{CompileError, PerlRegex},
         unwind::{R, error},
         values::{
@@ -45,10 +46,10 @@ use {
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("paste", 4, do_paste),
     internal("paste0", 3, do_paste0),
-    internal("nchar", 4, do_nchar),
+    internal("nchar", 4, safe!(do_nchar)),
     builtin("nzchar", -1, do_nzchar),
     internal("substr", 3, do_substr),
-    internal("substr<-", 4, do_set_substr),
+    internal("substr<-", 4, safe!(do_set_substr)),
     internal("strsplit", 5, do_strsplit),
     internal("sprintf", -1, do_sprintf),
     internal("toupper", 1, |call| unsafe { change_case(call, true) }),
@@ -61,14 +62,14 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("endsWith", 2, |call| unsafe {
         starts_or_ends_with(call, false)
     }),
-    internal("strrep", 2, do_strrep),
-    internal("strtoi", 2, do_strtoi),
+    internal("strrep", 2, safe!(do_strrep)),
+    internal("strtoi", 2, safe!(do_strtoi)),
     internal("make.names", 2, do_make_names),
     internal("make.unique", 2, do_make_unique),
     internal("abbreviate", 3, do_abbreviate),
-    internal("utf8ToInt", 1, do_utf8_to_int),
+    internal("utf8ToInt", 1, safe!(do_utf8_to_int)),
     internal("intToUtf8", 3, do_int_to_utf8),
-    internal("charToRaw", 1, do_char_to_raw),
+    internal("charToRaw", 1, safe!(do_char_to_raw)),
     internal("rawToChar", 2, do_raw_to_char),
     internal("pmatch", 4, do_pmatch),
     internal("charmatch", 3, do_charmatch),
@@ -301,33 +302,28 @@ enum CountType {
     Width,
 }
 
-unsafe fn do_nchar(call: &Call<'_>) -> R<Sexp> {
-    let x = call.arg(0);
-    if values::inherits(x, "factor") {
+fn do_nchar<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let x = arguments.value(0);
+    if handles::inherits(context, x, "factor") {
         return Err(error("'nchar()' requires a character vector"));
     }
-    let count_type = match values::first_string(call.arg(1)).as_deref() {
+    let count_type = match handles::first_string(context, arguments.value(1)).as_deref() {
         Some(name) if !name.is_empty() && "bytes".starts_with(name) => CountType::Bytes,
         Some(name) if !name.is_empty() && "chars".starts_with(name) => CountType::Chars,
         Some(name) if !name.is_empty() && "width".starts_with(name) => CountType::Width,
         _ => return Err(error("invalid 'type' argument")),
     };
-    let keep_na = values::as_logical_scalar(call.arg(3));
+    let keep_na = handles::logical_scalar(context, arguments.value(3));
     let na_count = match (keep_na, count_type) {
         (1, _) | (NA_LOGICAL, CountType::Bytes | CountType::Chars) => NA_INTEGER,
         _ => 2,
     };
-    let allow_na = values::as_logical_scalar(call.arg(2)) == 1;
-    let text = character_vector(x)?;
-    let count = length(text);
-    let result = alloc(SexpType::Integer, count)?;
-    let counts = values::ints_mut(result);
-    for (index, slot) in counts.iter_mut().enumerate() {
-        let charsxp = text.element(index);
-        if count_type != CountType::Bytes
-            && charsxp.has_gp(gp::BYTES)
-            && !charsxp.bytes().is_ascii()
-        {
+    let allow_na = handles::logical_scalar(context, arguments.value(2)) == 1;
+    let text = handles::character_vector(context, x)?;
+    let mut result = context.alloc::<Integer>(text.len())?;
+    let counts = result.as_mut_slice().iter_mut();
+    for (index, (slot, chars)) in counts.zip(text.iter(context)).enumerate() {
+        if count_type != CountType::Bytes && handles::is_bytes(chars) && !chars.bytes().is_ascii() {
             if !allow_na {
                 let what = if count_type == CountType::Chars {
                     "number of characters"
@@ -343,9 +339,9 @@ unsafe fn do_nchar(call: &Call<'_>) -> R<Sexp> {
             continue;
         }
         let invalid = count_type != CountType::Bytes
-            && !charsxp.has_gp(gp::LATIN1)
-            && std::str::from_utf8(charsxp.bytes()).is_err();
-        *slot = if charsxp == na_string() {
+            && !handles::is_latin1(chars)
+            && std::str::from_utf8(chars.bytes()).is_err();
+        *slot = if handles::is_na(chars) {
             na_count
         } else if invalid {
             if !allow_na {
@@ -357,14 +353,14 @@ unsafe fn do_nchar(call: &Call<'_>) -> R<Sexp> {
             NA_INTEGER
         } else {
             match count_type {
-                CountType::Bytes => charsxp.bytes().len() as i32,
-                CountType::Chars => values::char_str(charsxp).chars().count() as i32,
-                CountType::Width => display_width(&values::char_str(charsxp)) as i32,
+                CountType::Bytes => chars.bytes().len() as i32,
+                CountType::Chars => handles::text(chars).chars().count() as i32,
+                CountType::Width => display_width(&handles::text(chars)) as i32,
             }
         };
     }
-    copy_shape(x, result)?;
-    Ok(result)
+    handles::copy_shape(context, x, &mut result)?;
+    Ok(result.finish().value())
 }
 
 unsafe fn do_nzchar(call: &Call<'_>) -> R<Sexp> {
@@ -466,48 +462,47 @@ unsafe fn do_substr(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-unsafe fn do_set_substr(call: &Call<'_>) -> R<Sexp> {
-    let x = call.arg(0);
-    let value = call.arg(3);
-    if x.kind() != SexpType::String {
+fn do_set_substr<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let Some(text) = handles::dense::<Str>(context, arguments.value(0))? else {
         return Err(error("replacing substrings in a non-character object"));
+    };
+    let mut result = handles::shallow_duplicate(context, text)?;
+    if text.is_empty() {
+        return Ok(result.finish().value());
     }
-    let count = length(x);
-    let result = values::shallow_duplicate(x)?;
-    if count == 0 {
-        return Ok(result);
-    }
-    let starts = integer_argument(call.arg(1))?;
+    let starts = handles::integer_vector(context, arguments.value(1))?;
     // From R 4.5 on, `substring(x, first) <- value` passes a NULL stop, which means the end of
     // each string.
-    let stops = if call.arg(2) == nil() {
-        vec![i32::MAX]
+    let stops = if arguments.value(2).r_type() == SexpType::Nil {
+        None
     } else {
-        integer_argument(call.arg(2))?
+        Some(handles::integer_vector(context, arguments.value(2))?)
     };
-    if starts.is_empty() || stops.is_empty() {
+    if starts.is_empty() || stops.is_some_and(|stops| stops.is_empty()) {
         return Err(error("invalid substring arguments"));
     }
-    if value.kind() != SexpType::String || length(value) == 0 {
-        return Err(error("invalid value"));
-    }
-    let value_count = length(value);
-    for index in 0..count {
-        let start = starts[index % starts.len()];
-        let stop = stops[index % stops.len()];
-        let charsxp = x.element(index);
-        let replacement = value.element(index % value_count);
-        if charsxp == na_string()
-            || replacement == na_string()
+    let value = match handles::dense::<Str>(context, arguments.value(3))? {
+        Some(value) if !value.is_empty() => value,
+        _ => return Err(error("invalid value")),
+    };
+    for index in 0..text.len() {
+        let start = starts.as_slice(context)[index % starts.len()];
+        let stop = stops.map_or(i32::MAX, |stops| {
+            stops.as_slice(context)[index % stops.len()]
+        });
+        let chars = text.get(context, index);
+        let replacement = value.get(context, index % value.len());
+        if handles::is_na(chars)
+            || handles::is_na(replacement)
             || start == NA_INTEGER
             || stop == NA_INTEGER
         {
-            set_elt(result, index, na_string());
+            result.set(context, index, handles::na());
             continue;
         }
-        let text = values::char_str(charsxp);
-        let replacement = values::char_str(replacement);
-        let length_in_chars = text.chars().count() as i64;
+        let current = handles::text(chars);
+        let replacement = handles::text(replacement);
+        let length_in_chars = current.chars().count() as i64;
         let first = i64::from(start).max(1);
         let last = i64::from(stop)
             .min(length_in_chars)
@@ -515,18 +510,18 @@ unsafe fn do_set_substr(call: &Call<'_>) -> R<Sexp> {
         if first > last {
             continue;
         }
-        let mut edited = String::with_capacity(text.len());
+        let mut edited = String::with_capacity(current.len());
         let mut replacement_chars = replacement.chars();
-        for (position, character) in (1..).zip(text.chars()) {
+        for (position, character) in (1..).zip(current.chars()) {
             if (first..=last).contains(&position) {
                 edited.extend(replacement_chars.next());
             } else {
                 edited.push(character);
             }
         }
-        values::set_mkchar(result, index, &edited)?;
+        handles::set_text(context, &mut result, index, &edited)?;
     }
-    Ok(result)
+    Ok(result.finish().value())
 }
 
 /// The byte range of characters `start..=stop` (1-based, clamped to the text).
@@ -1742,61 +1737,56 @@ unsafe fn utf8_bytes<'a>(charsxp: Sexp) -> Option<&'a [u8]> {
     memchr::memchr(0, bytes).is_none().then_some(bytes)
 }
 
-unsafe fn do_strrep(call: &Call<'_>) -> R<Sexp> {
-    let x = call.arg(0);
-    if x.kind() != SexpType::String {
+fn do_strrep<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let x = arguments.value(0);
+    let Some(text) = handles::dense::<Str>(context, x)? else {
         return Err(error("invalid 'x' argument"));
-    }
-    let times = integer_argument(call.arg(1))?;
-    let (text_count, times_count) = (length(x), times.len());
+    };
+    let times = handles::integer_vector(context, arguments.value(1))?;
+    let (text_count, times_count) = (text.len(), times.len());
     let count = if text_count == 0 || times_count == 0 {
         0
     } else {
         text_count.max(times_count)
     };
-    let result = alloc(SexpType::String, count)?;
+    let mut result = context.alloc::<Str>(count)?;
     for index in 0..count {
-        let repeat = times[index % times_count];
-        let charsxp = x.element(index % text_count);
-        if repeat == NA_INTEGER || charsxp == na_string() {
-            set_elt(result, index, na_string());
+        let repeat = times.as_slice(context)[index % times_count];
+        let chars = text.get(context, index % text_count);
+        if repeat == NA_INTEGER || handles::is_na(chars) {
+            result.set(context, index, handles::na());
             continue;
         }
         if repeat < 0 {
             return Err(error("invalid 'times' value"));
         }
-        values::set_mkchar(
-            result,
-            index,
-            &values::char_str(charsxp).repeat(repeat as usize),
-        )?;
+        let repeated = handles::text(chars).repeat(repeat as usize);
+        handles::set_text(context, &mut result, index, &repeated)?;
     }
     if text_count >= times_count {
-        let names = get_attr(x, symbols().names);
-        if names != nil() {
-            set_attr(result, symbols().names, names)?;
-        }
+        handles::copy_names(context, x, &mut result)?;
     }
-    Ok(result)
+    Ok(result.finish().value())
 }
 
-unsafe fn do_strtoi(call: &Call<'_>) -> R<Sexp> {
-    let x = call.arg(0);
-    let base = values::as_integer_scalar(call.arg(1));
+fn do_strtoi<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let base = handles::integer_scalar(context, arguments.value(1));
     if base == NA_INTEGER || base == 1 || !(0..=36).contains(&base) {
         return Err(error("invalid 'base' argument"));
     }
-    if x.kind() != SexpType::String {
+    let Some(text) = handles::dense::<Str>(context, arguments.value(0))? else {
         return Err(error("invalid 'x' argument"));
+    };
+    let mut result = context.alloc::<Integer>(text.len())?;
+    let numbers = result.as_mut_slice().iter_mut();
+    for (slot, chars) in numbers.zip(text.iter(context)) {
+        *slot = if handles::is_na(chars) {
+            NA_INTEGER
+        } else {
+            parse_c_integer(&handles::text(chars), base as u32).unwrap_or(NA_INTEGER)
+        };
     }
-    let count = length(x);
-    let result = alloc(SexpType::Integer, count)?;
-    for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
-        *slot = string_at(x, index)
-            .and_then(|text| parse_c_integer(&text, base as u32))
-            .unwrap_or(NA_INTEGER);
-    }
-    Ok(result)
+    Ok(result.finish().value())
 }
 
 /// C's `strtol`, requiring the whole text to be a number that fits an R integer. Base 0 reads
@@ -2118,27 +2108,34 @@ fn abbreviate(text: &str, minimum: usize, use_classes: bool) -> String {
     chars.into_iter().collect()
 }
 
-unsafe fn do_utf8_to_int(call: &Call<'_>) -> R<Sexp> {
-    let x = call.arg(0);
-    if x.kind() != SexpType::String || length(x) == 0 {
-        return Err(error("argument must be a character vector of length 1"));
+fn do_utf8_to_int<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let text = single_string(context, arguments)?;
+    let first = text.get(context, 0);
+    let count = match std::str::from_utf8(first.bytes()) {
+        Ok(decoded) if !handles::is_na(first) => decoded.chars().count(),
+        _ => return handles::integer(context, NA_INTEGER),
+    };
+    let mut result = context.alloc::<Integer>(count)?;
+    let decoded = std::str::from_utf8(text.get(context, 0).bytes()).unwrap_or_default();
+    for (slot, character) in result.as_mut_slice().iter_mut().zip(decoded.chars()) {
+        *slot = character as i32;
     }
-    if length(x) > 1 {
-        warning(
+    Ok(result.finish().value())
+}
+
+/// The argument of `utf8ToInt` and `charToRaw`, which read its first element.
+fn single_string<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s, Str>> {
+    let text = match handles::dense::<Str>(context, arguments.value(0))? {
+        Some(text) if !text.is_empty() => text,
+        _ => return Err(error("argument must be a character vector of length 1")),
+    };
+    if text.len() > 1 {
+        handles::warning(
+            context,
             "argument should be a character vector of length 1\nall but the first element will be ignored",
         )?;
     }
-    let charsxp = x.element(0);
-    if charsxp == na_string() {
-        return scalar_integer(NA_INTEGER);
-    }
-    match std::str::from_utf8(charsxp.bytes()) {
-        Ok(text) => {
-            let points: Vec<i32> = text.chars().map(|character| character as i32).collect();
-            values::integer_vector(&points)
-        }
-        Err(_) => scalar_integer(NA_INTEGER),
-    }
+    Ok(text)
 }
 
 unsafe fn do_int_to_utf8(call: &Call<'_>) -> R<Sexp> {
@@ -2197,20 +2194,14 @@ unsafe fn do_int_to_utf8(call: &Call<'_>) -> R<Sexp> {
     values::scalar_string_charsxp(values::mkchar_bytes(text.as_bytes(), Encoding::Utf8)?)
 }
 
-unsafe fn do_char_to_raw(call: &Call<'_>) -> R<Sexp> {
-    let x = call.arg(0);
-    if x.kind() != SexpType::String || length(x) == 0 {
-        return Err(error("argument must be a character vector of length 1"));
-    }
-    if length(x) > 1 {
-        warning(
-            "argument should be a character vector of length 1\nall but the first element will be ignored",
-        )?;
-    }
-    let bytes = x.element(0).bytes();
-    let result = alloc(SexpType::Raw, bytes.len())?;
-    values::raws_mut(result).copy_from_slice(bytes);
-    Ok(result)
+fn do_char_to_raw<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let text = single_string(context, arguments)?;
+    let length = text.get(context, 0).bytes().len();
+    let mut result = context.alloc::<Raw>(length)?;
+    result
+        .as_mut_slice()
+        .copy_from_slice(text.get(context, 0).bytes());
+    Ok(result.finish().value())
 }
 
 unsafe fn do_raw_to_char(call: &Call<'_>) -> R<Sexp> {
@@ -4398,25 +4389,6 @@ unsafe fn character_vector(x: Sexp) -> R<Sexp> {
     } else {
         coerce_vector(x, SexpType::String)
     }
-}
-
-/// Copies the names, dim and dimnames of `from` onto `to`.
-unsafe fn copy_shape(from: Sexp, to: Sexp) -> R<()> {
-    let symbols = symbols();
-    for symbol in [symbols.names, symbols.dim, symbols.dimnames] {
-        // GNU R reads the names through `getAttrib`, which turns a pairlist's tags into names.
-        let value = if symbol == symbols.names
-            && matches!(from.kind(), SexpType::Pairlist | SexpType::Language)
-        {
-            values::names(from)
-        } else {
-            get_attr(from, symbol)
-        };
-        if value != nil() {
-            set_attr(to, symbol, value)?;
-        }
-    }
-    Ok(())
 }
 
 unsafe fn integer_argument(value: Sexp) -> R<Vec<i32>> {

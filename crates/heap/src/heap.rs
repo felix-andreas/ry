@@ -24,6 +24,7 @@
 pub mod activity;
 pub mod arena;
 pub mod env;
+pub mod handle;
 pub mod image;
 pub use image::{Fixed, ImageError, Relocation};
 pub mod large;

@@ -42,16 +42,17 @@ integer vector with element storage. `text.element` runs a native method when `t
 string vector, and that method can allocate while `counts` is borrowed. The whole function is
 `unsafe fn`, so the compiler marks none of these.
 
-The runtime has six such rules. Each has produced a crash or a wrong answer that a test now pins:
+The runtime has seven such rules. Each has produced a crash or a wrong answer that a test now pins:
 
 | Rule kept by hand | What breaks | Pinned by |
 | --- | --- | --- |
 | A value held across an allocation or a call is rooted | a freed object is read | `datetime__year_overflow`, `apply__lapply_closure_results_stay_rooted` |
 | A store into an old object runs the write barrier | a young object is freed while an old one points at it | `datatable__setcolorder_young_columns`, `datatable__setorder_young_strings` |
-| An element write goes to an object of the right kind that has element storage | the write lands on the next object | `assignment__long_argument_copy_element_stores` |
+| An element read or write goes to an object of the right kind that has element storage | the write lands on the next object, or the read takes another type's bytes for pointers | `assignment__long_argument_copy_element_stores`, `strings__encoding_rejects_non_character` |
 | An object is modified in place only when nothing else can see it | another variable changes | `assignment__dollar_in_place` |
 | A frame's slots and its environment agree about each variable | a stale or missing binding | `environments__unread_loop_variable` |
 | A new object is filled before anything can read or trace it | uninitialized elements are traced | the collector's seeded tests (`heap` `test_gc`) |
+| Two strings are compared by their text, not their address | a name that is there is not found | `subset__non_ascii_names` |
 
 The scale is the reason review does not hold these rules. Counted over each crate's `src`:
 
@@ -107,7 +108,7 @@ All four are one machine word, the same word a `SEXP` is, because the heap does 
 | --- | --- | --- | --- |
 | `Gc<'a, T>` | read from the heap, not rooted | a load through `&'a Cx` | the next safepoint: it borrows the context |
 | `Local<'s, T>` | rooted in scope `'s` | `cx.root(gc)`, every constructor, every argument, every register operand | the scope ends |
-| `Fresh<'s, T>` | a new object nothing else can see | `cx.alloc_*`, `cx.duplicate` | `finish()` turns it into a `Local` |
+| `Fresh<'s, T>` | a new object nothing else can see | `cx.alloc::<T>(n)`, `handles::duplicate` | `finish()` turns it into a `Local` |
 | `Write<'a, 's, T>` | exclusive access to an existing object | the interpreter's ownership checks | it borrows the context mutably |
 
 `Gc` and `Local` are `Copy`. `Fresh` and `Write` are not: each is the only way to reach its object
@@ -117,7 +118,7 @@ Holding an unrooted value across a safepoint does not compile:
 
 ```rust
 let first = list.get(cx, 0);        // Gc<'_, Value>, borrows cx
-let copy = cx.alloc_real(n)?;       // error[E0502]: cannot borrow `*cx` as mutable
+let copy = cx.alloc::<Real>(n)?;    // error[E0502]: cannot borrow `*cx` as mutable
 use_both(first, copy);              //   because it is also borrowed as immutable
 ```
 
@@ -125,7 +126,7 @@ The fix is the root the hand-written rule asks for, and it is the same push:
 
 ```rust
 let first = cx.root(list.get(cx, 0));   // Local<'s, Value>
-let copy = cx.alloc_real(n)?;
+let copy = cx.alloc::<Real>(n)?;
 ```
 
 `cx.root` takes `&Cx`, not `&mut Cx`: pushing onto the handle stack is not a safepoint, and it must
@@ -133,8 +134,9 @@ be callable while the `Gc` it roots still borrows the context.
 
 ### A kind names a representation
 
-`T` is the object's kind: `Real`, `Int`, `Lgl`, `Cplx`, `Raw`, `Str`, `Chars`, `List`, `Sym`,
-`Env`, `Closure`, `Promise`, `Lang`, `Pairlist`, `Alt` and `Value` for any of them. A vector kind
+`T` is the object's kind: `Real`, `Integer`, `Logical`, `Complex`, `Raw`, `Str`, `Chars`, `List`,
+`Expression`, `Symbol`, `Environment`, `Closure`, `Promise`, `Language`, `Pairlist`, `Alt` and
+`Value` for any of them. A vector kind
 means a standard vector, with its length in the header and its elements behind it. An ALTREP
 object is an `Alt`, whatever R type it reports, so a `Local<Real>` always has elements and
 `len()`, `get(cx, i)` and `as_slice(cx)` on it are plain loads.
@@ -144,16 +146,18 @@ makes when it dispatches on `kind()`. Code that accepts "a double vector" asks f
 work with:
 
 ```rust
-match cx.reals(value)? {                              // one test of the kind and the ALTREP bit
+match reals(cx, value)? {                             // one test of the kind and the ALTREP bit
     Reals::Standard(vector) => sum(vector.as_slice(cx)),
     Reals::Sequence { first, step, len } => closed_form(first, step, len),
     Reals::Lazy(alt) => each(cx, alt),                // alt.get(cx, i) takes &mut Cx
 }
-let dense = cx.dense_reals(value)?;                   // &mut Cx: Local<Real>, materialized once
+let dense = dense::<Real>(cx, value)?;                // &mut Cx: Local<Real>, materialized once
 let slice: &[f64] = dense.as_slice(cx);               // borrows cx, so no safepoint while it lives
 ```
 
-`dense_*` always returns a standard vector, as `values::materialize` does: the vector itself, the
+The views live in `interp::handles`, because expanding an ALTREP object runs the hook `libr`
+installs, and `heap` knows only that an `Alt` is not a vector. `dense` always returns a standard
+vector, as `values::materialize` does: the vector itself, the
 one a wrapper wraps, the one a compact sequence or deferred string vector expands into and keeps,
 or a copy for a class a package registers. No slice ever points at memory a class owns. A loop
 that only reads a few elements uses the `Lazy` arm, so a class's `Elt` method runs for the
@@ -163,13 +167,37 @@ This replaces a test of the ALTREP bit on every `Sexp::element` call with one te
 and it is the rule that removes the write into an object without storage: element writes exist
 only on standard kinds.
 
+**A copy says which kind it returns.** R has two copies, and by hand they look alike:
+
+| Copy | Raw function | Typed form | Returns |
+| --- | --- | --- | --- |
+| An owning copy, for a caller that writes elements | `values::duplicate`, `values::shallow_duplicate` | `handles::duplicate(cx, vector)`, `handles::shallow_duplicate(cx, vector)` | `Fresh<'s, T>`: a standard vector nothing else sees |
+| A copy for a caller that changes only attributes | `values::shallow_duplicate_attr` | `handles::attribute_copy(cx, value)` | `Local<'s, Value>`: for a vector of 64 or more elements, a wrapper that shares the original's data |
+
+The second has no storage of its own when it is a wrapper, so a `Sexp::slice_mut` on it is an
+empty slice, and an indexed write through that slice lands on the next object in the heap. That
+is the write `assignment__long_argument_copy_element_stores` pins: tier 0's matrix element store
+copied a shared argument with the attribute copy and then stored into it.
+
+With the typed forms that store has no spelling. A `Local<Value>` has no element access at all.
+The two ways from it to a mutable slice both refuse a wrapper:
+
+- `downcast::<Real>()` returns `None` for an ALTREP object, so there is no `Local<Real>` to hand
+  to an ownership check, and `Cx::assume_exclusive` accepts only vector kinds.
+- `dense::<Real>` returns the standard vector the wrapper shares, as a `Local<Real>`, which reads
+  but does not write. Writing needs a `Write`, and the ownership check fails because the wrapper
+  holds a reference to that vector, so the caller takes `handles::shallow_duplicate`, the owning copy.
+
+The attribute setters accept any `Local<Value>`, so a caller that only changes attributes keeps
+the cheap copy.
+
 ### Writes
 
 | Write | API | Why it is sound |
 | --- | --- | --- |
 | Fill a new atomic vector | `fresh.as_mut_slice()` | `Fresh` is the only pointer and takes `&mut self`. No context is needed, because the object holds no pointers |
 | Fill a new list, string vector or pairlist | `fresh.set(cx, i, value)` with `&Cx` | the store runs the barrier and the count inside `heap`. A safepoint between two stores can promote the object, and the barrier covers that. There is no `&mut [Gc]` to fill without it |
-| Change an existing object in place | `let (elements, reader) = write.split()` | `Write` holds `&mut Cx`, so no slice taken earlier is alive, no R code runs, and nothing can share the object meanwhile |
+| Change an existing object in place | `write.split()`, or `write.split_elements()` for a list | `Write` holds `&mut Cx`, so no slice taken earlier is alive, no R code runs, and nothing can share the object meanwhile |
 | Store into an object with reference semantics | `cx.define(env, sym, value)` (`&mut Cx`), promise and external-pointer fields (`&Cx`) | the barrier and the count run inside `heap` |
 
 A store is not a safepoint: a count that drops to zero is only noted, and the object is freed at
@@ -177,7 +205,7 @@ the next allocation. That is why element stores need only `&Cx`, and why copying
 list into a new one roots nothing:
 
 ```rust
-let mut out = cx.alloc_list(n)?;
+let mut out = cx.alloc::<List>(n)?;
 for index in 0..n {
     out.set(cx, index, input.get(cx, index));
 }
@@ -191,40 +219,72 @@ interpreter: its count is one, and no register, handle or escaped list holds it 
 (`slot_owns`, a call's `reusable` test). The functions that establish that fact live in `interp`
 and are the only callers of `Cx::assume_exclusive`, an `unsafe` constructor that returns the
 `Write`. Because a `Write` borrows the context mutably, the fact cannot go stale: no R code runs
-between the check and the write. When the check fails, the caller duplicates (`cx.duplicate`
+between the check and the write. When the check fails, the caller duplicates (`handles::duplicate`
 returns a `Fresh`, never an ALTREP wrapper), stores the copy in the variable and checks again.
 
-`write.split()` gives the element storage and a `reader` for the sources. For an atomic vector
-the reader compares storage addresses and returns `None` for a source that shares the target's
+`write.split()` gives an atomic vector's element storage and a `reader` for the sources. The
+reader compares storage addresses and returns `None` for a source that shares the target's
 storage, which also covers a wrapper around the target. The caller then reads from the mutable
-slice itself, so `x[i] <- x[j]` is `elements.copy_within(..)`. For a list the reader returns
-single elements, and the same object may be read and written.
+slice itself, so `x[i] <- x[j]` is `elements.copy_within(..)`. For a list,
+`write.split_elements()` gives barriered single stores and a reader of single elements, and the
+same object may be read and written.
 
 ```rust
 let mut write = own_slot(cx, state, slot)?;       // interp: the ownership check
 let (elements, reader) = write.split();
-match reader.reals(value) {
+match reader.slice(value) {
     Some(source) => elements[position] = source[0],
     None => elements.copy_within(0..1, position),
 }
 ```
 
 `Write` also carries the operations that change an object's shape: setting attributes, and
-shortening or growing within capacity. `Lgl` and `Int` share a storage trait, so a copy that is
-generic over the element type serves both.
+shortening or growing within capacity. `Logical` and `Integer` have the same `Atomic::Element`,
+so a copy that is generic over the element type serves both.
 
-`do_nchar` in this shape:
+`nchar` is written in this shape (`crates/interp/src/strings.rs`). Its core:
 
 ```rust
-fn do_nchar<'s>(cx: &mut Cx<'s>, call: &Call<'s>) -> R<Local<'s, Value>> {
-    let text = cx.dense_strings(character_vector(cx, call.arg(0))?)?;
-    let mut result = cx.alloc_int(text.len())?;
-    for (slot, chars) in result.as_mut_slice().iter_mut().zip(text.iter(cx)) {
+fn do_nchar<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let x = arguments.value(0);
+    let text = handles::character_vector(context, x)?;      // a standard Local<Str>
+    let mut result = context.alloc::<Integer>(text.len())?;
+    for (slot, chars) in result.as_mut_slice().iter_mut().zip(text.iter(context)) {
         *slot = chars.bytes().len() as i32;
     }
-    copy_shape(cx, call.arg(0), result.finish())
+    handles::copy_shape(context, x, &mut result)?;          // attributes go onto the Fresh
+    Ok(result.finish().value())
 }
 ```
+
+### Strings compare by text, symbols by identity
+
+Two strings with the same text can be two objects: the heap interns a text once per encoding
+mark, so `"é"` marked latin1 and `"é"` marked UTF-8 differ as pointers. A name lookup that
+compares pointers therefore misses a name that is there (`subset__non_ascii_names`). The
+bug is not a memory error, but it has the same cause: a `Sexp` compares with `==`, and nothing
+says whether identity is the question.
+
+A handle has no `==`. `Gc` and `Local` implement `Copy` and nothing else, and each comparison
+names what it compares:
+
+| Question | Spelling | Defined for |
+| --- | --- | --- |
+| Do two strings hold the same text? | `handles::same_text(left, right)` | `Chars` |
+| Is a string `NA`? | `handles::is_na(chars)` | `Chars` |
+| Are these the same object? | `left.is(right)` | every kind except `Chars` |
+
+`same_text` is `values::same_string`: equal pointers are equal text, two interned ASCII strings
+with different pointers differ, `NA` equals only itself, and any other pair compares its decoded
+text, so the common case stays one compare.
+
+A `Symbol` compares by identity, and that is correct by construction: the only way to make one
+from a string is `handles::install(cx, chars)`, which installs a string of any encoding under its
+UTF-8 text. Two spellings of one name are then one symbol, so code that matches names against
+symbols (argument matching, `$` on an environment) needs no text comparison.
+
+A `Gc<Chars>` still widens to `Gc<Value>`, and `is` accepts that, so an identity comparison of
+two strings can be written on purpose. It cannot be written by reaching for `==`.
 
 ### Scopes, registers and unwinds
 
@@ -241,8 +301,9 @@ let total = cx.scope(|cx| {            // cx: &mut Cx<'inner>
 
 The closure is generic over `'inner`, so a `Local<'inner, _>` cannot leave it except as the result.
 This is `interp::scope` with the lifetime that proves what its comment asks for. An unwind
-(`Error`, `Return`, `Break`) carries values under the same brand and leaves a scope the way a
-result does, rooted again in the enclosing one.
+(`Error`, `Return`, `Break`) carries its values unbranded, and the scope it leaves roots them
+again in the enclosing one, as it does a result: the error type implements `Reroot`, whose one
+`unsafe impl` for `Unwind` says that every object it gives access to is rooted afterwards.
 
 The bytecode loop does not pay that second root. Its registers are traced, so an instruction that
 can root runs in `cx.scope_to(register, ..)`, which writes the result into the destination
@@ -287,12 +348,29 @@ comment.
 | Views | one test of the ALTREP bit per vector | one test per element | less work |
 | Element stores | barrier and count | the same | equal by construction |
 | `Write` | one address compare per source vector | hand-written alias checks | to measure |
-| `&mut Cx` parameter | one more live register through every call | a load from a static in `heap()`; the bytecode loop keeps the heap pointer in its activation | **to measure**: register pressure has cost this interpreter before (`lookup_outside` is forced inline for that reason) |
-| Slice access | bounds checks where an index is not an iterator | mostly slices already | to measure |
+| `&mut Cx` parameter | one more live register through every call | a load from a static in `heap()`; the bytecode loop keeps the heap pointer in its activation | no cost in a builtin (measured below); **to measure** on the call path and in the bytecode loop, where register pressure has cost this interpreter before (`lookup_outside` is forced inline for that reason) |
+| Slice access | bounds checks where an index is not an iterator | mostly slices already | no cost in an element walk (measured below) |
 
-Each migration change reports `just bench hot`, the kernel and code-base suites, and tier 1's
-instruction counts (`test_tiers`) before and after. A regression is fixed by changing the API (for
-the context parameter: keeping it in the activation, or making `Cx` a zero-sized token whose
+`nchar` is measured against its raw form, both compiled into one release build and counted with
+callgrind:
+
+| Program | Raw form | Safe form |
+| --- | --- | --- |
+| `nchar(s)` on one string, 200,000 calls: instructions in the builtin per call | 249 | 233 |
+| The same, with the `.Internal` call around it | 1,390 | 1,374 |
+| `sum(nchar(y))` on 100,000 strings, 20 times: instructions per element | 284.8 | 278.8 |
+
+The safe form is shorter because a dense view tests the ALTREP bit once per vector, where the raw
+accessors test it per element. One rule came out of the measurement: a wrapper in
+`interp::handles` whose common case is a test keeps the test `#[inline]` and its slow path
+`#[inline(never)]`. With the whole wrapper generic and out of line (the attribute copy for a
+value that has no attributes, the coercion of an argument that is already a character vector),
+the safe `nchar` ran 42 instructions per call longer than the raw one.
+
+Each migration change measures its builtins the same way before the raw form is deleted, and a
+change that reaches the call path or the bytecode loop reports `just bench-mechanisms` and tier
+1's instruction counts (`test_tiers`) before and after. A regression is fixed by changing the API
+(for the context parameter: keeping it in the activation, or making `Cx` a zero-sized token whose
 methods load the static as `heap()` does), not by keeping the raw version.
 
 ## Candidates
@@ -304,7 +382,7 @@ methods load the static as `heap()` does), not by keeping the raw version.
 | `Rooted` and `Handle`, with a static analysis for hazards (SpiderMonkey) | explicit roots on the stack; a separate tool finds values held across a call that can collect | **Adopt the model, replace the tool.** SpiderMonkey's Rust bindings mark "can collect" with `&mut JSContext`; borrowing does the hazard analysis in the compiler. Josephine (Servo) and shifgrethor have the same shape, a context borrow plus branded roots, and their known difficulty is a second context made on re-entry from foreign code, which is why `Cx` is a capability and not a reference |
 | `CAMLparam` and `CAMLlocal` (OCaml) | every local is registered by macro | **Reject.** It is the `PROTECT` discipline, unchecked. `ocaml-interop` shows the borrow-checked form of the same idea |
 | Reference counting with in-place mutation when unique (Roc) | the count | **Reject for liveness, adopt uniqueness.** Environments and closures form cycles, and native code, registers and handles hold pointers they never count, so a count cannot free at the decrement: ry frees from counts only at an allocation, after checking the roots. `Write` is the type-level form of Roc's "mutate when unique" |
-| Conservative stack scanning (JavaScriptCore, Ruby) | the collector treats every word on the native stack as a possible pointer | **Reject.** It needs no roots and would remove the handle pushes, and the heap can afford it because nothing moves. But a dead value in a stale stack slot stays alive for as long as the compiler happens to leave it there, which breaks finalizer timing that R6 and lgr rely on and that the `evaluation__*finalizer*` cases pin, and it makes that timing depend on code generation. It also covers one rule of six, does not see values in Rust heap containers, and rests on the optimizer keeping a recognizable pointer |
+| Conservative stack scanning (JavaScriptCore, Ruby) | the collector treats every word on the native stack as a possible pointer | **Reject.** It needs no roots and would remove the handle pushes, and the heap can afford it because nothing moves. But a dead value in a stale stack slot stays alive for as long as the compiler happens to leave it there, which breaks finalizer timing that R6 and lgr rely on and that the `evaluation__*finalizer*` cases pin, and it makes that timing depend on code generation. It also covers one rule of seven, does not see values in Rust heap containers, and rests on the optimizer keeping a recognizable pointer |
 | Borrow-checked safepoints with scope-branded direct handles | a root-stack slot, proved by the type | **Adopt.** Described above |
 
 The expectation going in was branded handles at no runtime cost, and it holds with one correction.
@@ -335,23 +413,46 @@ between it and the object, and native code needs the object's address.
 
 ## Migration
 
-The handle types and `Cx` land in `heap` with compile-fail tests for each rule above. The builtin
-table accepts both signatures while files move. A migrated function that calls an unmigrated one
-does it in an `unsafe` block, so the boundary between the two halves is visible and counted.
+`heap::handle` holds the handle types and `Cx`, with a compile-fail doctest for each rule above
+and `crates/heap/tests/test_handles.rs` running them on a heap that collects before every
+allocation. `interp::handles` is the interpreter's side: a safe builtin has the signature
+`fn(&mut Cx<'s>, &Args<'_, 's>) -> R<Local<'s>>`, the `safe!` macro makes the raw entry the
+builtin table holds, and each value helper a safe builtin calls has a safe form there that wraps
+the raw one and says why the handle types make the call sound. The wrappers are where a migrated
+function meets an unmigrated one, so that boundary is visible and counted, and a wrapper
+disappears when the helper under it is migrated.
 
-1. `heap`: the handle module, `Cx`, typed constructors, views, `Write`, scopes.
-2. `interp` leaf builtins (strings, numbers, sorting, arithmetic kernels), then `values.rs`, then
+The order:
+
+1. `interp` leaf builtins (strings, numbers, sorting, arithmetic kernels), then `values.rs`, then
    subsetting and assignment, then the evaluator and the bytecode loop.
-3. `stats`, `graphics`, `frames`.
-4. `libr`, `jit`, `typed`: entry points make a `Cx`; raw access leaves their bodies.
-5. `heap` stops exporting the raw accessors outside a `raw` module that only the boundary imports,
+2. `stats`, `graphics`, `frames`.
+3. `libr`, `jit`, `typed`: entry points make a `Cx`; raw access leaves their bodies.
+4. `heap` stops exporting the raw accessors outside a `raw` module that only the boundary imports,
    and `interp::heap()` and `interp::interp()` are deleted.
 
-A budget file records the count of `unsafe` per source file. `just gate` fails when a file's count
-rises, and a change that lowers one lowers the budget with it, so the count only falls.
+`tools/unsafe-baseline.txt` records the count of `unsafe` per source file outside the crates that
+own it. `just gate` fails when a file's count rises (`tools/unsafe.py check`), and a change that
+lowers one lowers the baseline with it, so the count only falls. `interp::handles` is the one
+file that may rise, and by less than the other files lose in the same change: a migrated builtin
+that needs a helper with no safe form adds the wrapper there and removes more `unsafe` than the
+wrapper holds.
+
+The guarantee covers a function that names neither `Sexp` nor `interp::heap()`. While the raw API
+is public (until step 4), safe code can leave the handle types and come back: `raw()` on any
+pointer yields a `Sexp`, `Sexp` compares by address, `interp::heap()` is a safe function that
+returns the whole heap, and an unwind carries raw values in public fields. A migrated function
+that does any of these compiles, and nothing but review rejects it. Step 4 removes the paths
+(`raw()` becomes visible only to the boundary crates, and an unwind holds `Held` values), and
+until then a migrated file is one in which `tools/unsafe.py` counts no `unsafe` and a reader finds
+no `Sexp`.
 
 ## Open questions
 
+- Whether a kind should refuse a vector that carries the array flag. `dense` and `downcast`
+  admit one, so a migrated fast path over a slice skips the strict checks the array code makes
+  unless it tests the flag itself, as the raw fast paths must. A kind per flagged representation
+  would make the test a type.
 - Whether the bytecode loop's register access measures the same with bounds checks.
 - Which form of the context parameter measures best on the call path: a pointer in a register, a
   field of the activation, or a zero-sized token.
@@ -359,3 +460,7 @@ rises, and a change that lowers one lowers the budget with it, so the count only
   pointer protection) share one definition with `libr`.
 - The spelling for linking a pairlist cell after it is visible to other code, which the evaluator
   does when it builds argument lists incrementally.
+- A bulk fill for a new list or character vector. `fresh.set` runs the barrier and the count per
+  element, and the raw code fills such a vector through its slice and counts once
+  (`Heap::count_written_elements`), which measured several times faster in `as.character` and
+  `strsplit`-style builders. The safe form is one call that takes an iterator of elements.
