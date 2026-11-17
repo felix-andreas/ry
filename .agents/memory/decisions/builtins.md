@@ -562,7 +562,7 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 - **Ties.** Strings the collator calls equal tie: `order` keeps input order and `rank` averages, and `sort` reorders tied runs with GNU R's Shell sort (`ssort2`'s gaps), so its placement of ties matches.
 - **`icuSetCollate`** applies `case_first`, `alternate_handling`, `case_level` and `strength` (GNU R spells the strength values with a trailing space, so `"primary"` is ignored there too), accepts `hiragana_quaternary` and `normalization` as no-ops, and reports `french_collation`, which ICU4X lacks.
 - **Gaps.** ICU4X always normalizes, and GNU R's ICU runs with normalization off, so a string with combining marks out of canonical order can order differently. ICU4X carries CLDR 47 and GNU R 4.6.2's ICU 74 carries CLDR 44.
-- **Measured** (5 sorts, release, seconds; ry, GNU R): `sprintf("key%07d", sample(2e5))` 0.34, 4.27; a 2e5 mixed-case ASCII vector 0.26, 3.11, and `order` of it 0.32, 3.98; 2e4 strings with é, ß and ж 0.17, 0.18 when every pair was collated; with sort keys, 1e5 such strings sort, order and rank 6 to 9 times faster than GNU R.
+- **Measured** (5 sorts, release, seconds; ry, GNU R): `sprintf("key%07d", sample(2e5))` 0.34, 4.27; a 2e5 mixed-case ASCII vector 0.26, 3.11, and `order` of it 0.32, 3.98. One call on 1e5 words of 4 to 10 letters from a to z, é, ü, ß, ø and Å (seconds; ry, GNU R): `sort` 0.062, 0.37; `order` 0.049, 0.44; `rank` 0.070, 0.47.
 - **Contract.** `sort__icu_collation.R` pins ignorables, ß, case, punctuation, scripts, ties, invalid bytes, comparisons and `icuSetCollate`; `sort__collation_keys_large.R` pins the key path on thousands of strings.
 
 ## `abbreviate` is GNU R's `stripchars`, pass for pass

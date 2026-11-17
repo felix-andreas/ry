@@ -1273,6 +1273,9 @@ fn complete_prefix(x: Column<'_>, count: usize) -> Option<Column<'_>> {
 /// (string ranks, small integers) needs no sort: counting each key gives the positions its
 /// rows take.
 fn rank_by_keys(keys: &SortKeys, rank_of: &dyn Fn(usize, usize) -> f64, ranks: &mut [f64]) {
+    if ranks.is_empty() {
+        return;
+    }
     if let SortKeys::Narrow(keys) = keys
         && keys.high - keys.low < ranks.len() as u64
     {
@@ -1969,9 +1972,9 @@ fn collation_ranks(texts: &[Cow<'_, str>], compare: &dyn Fn(&str, &str) -> Order
 
 /// The rank of each text (from 1) in byte order. Eight bytes of each text, zero-padded, form a
 /// big-endian key that orders like the bytes themselves, because no R string holds a NUL (and
-/// no [`CollationKeys`] key is another followed by zeros). The
-/// keys start past the prefix every text shares, are sorted as integers, and a run of equal
-/// keys is sorted again on the next eight bytes, so a text's bytes are read once per eight
+/// no [`CollationKeys`] key is another followed by zeros). The keys start past the prefix
+/// every text shares, are sorted as integers, and a run of equal keys is sorted again on the
+/// next eight bytes, so a text's bytes are read once per eight
 /// rather than once per comparison.
 fn byte_ranks(texts: &[&[u8]]) -> Vec<u32> {
     let mut rank_of_code = vec![0u32; texts.len()];
