@@ -2,8 +2,8 @@
 """Deep fuzz campaign: every seeded harness in the workspace at a deep budget, within a time limit.
 
 A seeded harness is a `#[test]`, or the `main` of a `harness = false` test binary, that loops
-through `syntax::testing::for_each_seed`, `fuzz_seeds` or `fuzz_iterations`, directly or through a
-function of the same file. They are found by reading the sources, so a new harness joins the
+through `syntax::testing::for_each_seed`, `fuzz_seeds` or `fuzz_iterations`, or a crate's
+`for_each_session` built on them, directly or through a function of the same file. They are found by reading the sources, so a new harness joins the
 campaign without an entry here, and each is resolved against the test binary's own `--list`, so a
 test inside a module is run by its full path. Each round runs every harness once with
 `FUZZ_SEED=<start> FUZZ_DEPTH=<depth>`, which makes the harness run `depth` times its own default
@@ -64,7 +64,7 @@ TEST = re.compile(r"#\[test\]\s*((?:#\[[^\]]*\]\s*)*)fn (\w+)\(\)\s*\{")
 # A `harness = false` test binary's own `main`, which runs its seeds when started bare.
 MAIN = re.compile(r"\bfn (main)\(\)[^{]*\{")
 FUNCTION = re.compile(r"\bfn (\w+)\s*(?:<[^>]*>)?\([^)]*\)[^{;]*\{")
-SEEDED = re.compile(r"\b(?:for_each_seed|fuzz_seeds|fuzz_iterations)\(")
+SEEDED = re.compile(r"\b(?:for_each_seed|for_each_session|fuzz_seeds|fuzz_iterations)\(")
 REPLAY = re.compile(r"replay with\n\s+(.+)")
 
 

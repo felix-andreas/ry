@@ -132,6 +132,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - An item's syntax has a stamp, so an edit lowers only the items it changed
 - The analysis core's per-item and per-file tables after the type store
 - A function has one signature, resolved in `syntax::annotation`
+- A splice reparse shares what the parser's recorded lookahead proves untouched
 
 ## Editor and language server
 
@@ -166,6 +167,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Call hierarchy and workspace symbols are measured against the reference oracle
 - Completion pushes down names whose declared type cannot fit, and never promotes
 - The console's crossterm is patched to drain the terminal, and R reads console input one line per chunk
+- An editor target is what the code means, and rename refuses what it cannot trace
 
 ## Interpreter
 
@@ -598,6 +600,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Shipped binaries keep their symbol table, and crash reports name functions from it
 - The differential fuzzer compares canonical dumps, over five kinds of program
 - A test user's application workload is a suite scored by total time
+- The analysis batteries share one generator and check sessions on warm databases
 
 ## Docs, process and positioning
 

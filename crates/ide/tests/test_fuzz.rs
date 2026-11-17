@@ -1,9 +1,14 @@
-//! Every feature runs at sampled offsets under the contract in `ide::testing`. Each generated
-//! case is one seed of [`for_each_seed`], so `FUZZ_SEED` replays a failure.
+//! Every feature runs at sampled offsets under the contract in `ide::testing`, on a database
+//! that moves from one project to the next as an editor's does. Each generated case is one seed
+//! of [`for_each_session`], so `FUZZ_SEED` replays a failure.
 
 use {
-    ide::testing::{check_ide_invariants as sweep, check_refactor_invariants},
-    syntax::testing::{SplitMix64, for_each_seed, mutate_seed},
+    ide::testing::{Project, check_refactor_invariants, for_each_session},
+    semantics::{DocumentKind, testing::fixture_state},
+    syntax::testing::{
+        SplitMix64, fixture_case_sources, for_each_seed, generate_project, mutate_seed,
+        program_corpus_sources, small_edit,
+    },
 };
 
 const SEEDS: &[&str] = &[
@@ -32,25 +37,94 @@ const REGRESSIONS: &[&str] = &[
     "pick <- function(dt) {\n  columns <- c(\"a\", \"b\")\n  dt[, ..columns]\n}\n",
 ];
 
+fn package(source: &str) -> Vec<Project> {
+    vec![vec![(source.to_owned(), DocumentKind::Package)]]
+}
+
 #[test]
-fn seeds_never_panic() {
-    for seed in SEEDS {
-        sweep(seed);
-    }
+fn seeds_hold_invariants() {
+    for_each_session(SEEDS.len(), |seed| {
+        package(SEEDS[seed as usize % SEEDS.len()])
+    });
 }
 
 #[test]
 fn fuzz_regressions_hold_invariants() {
-    for input in REGRESSIONS {
-        sweep(input);
-    }
+    for_each_session(REGRESSIONS.len(), |seed| {
+        package(REGRESSIONS[seed as usize % REGRESSIONS.len()])
+    });
 }
 
 #[test]
 fn fuzz_seed_mutations() {
-    for_each_seed(300, |seed| {
+    for_each_session(200, |seed| {
         let mut rng = SplitMix64(0x01DE_F022 ^ seed);
-        sweep(&mutate_seed(&mut rng, SEEDS, 24));
+        package(&mutate_seed(&mut rng, SEEDS, 24))
+    });
+}
+
+/// A project of one to three generated files, then the same project after one small edit, as
+/// an editor's database sees a keystroke.
+#[test]
+fn fuzz_generated_projects() {
+    const KINDS: [DocumentKind; 6] = [
+        DocumentKind::Package,
+        DocumentKind::Package,
+        DocumentKind::Package,
+        DocumentKind::Script,
+        DocumentKind::Test,
+        DocumentKind::TestHelper,
+    ];
+    for_each_session(90, |seed| {
+        let mut rng = SplitMix64(0x01DE_F024 ^ seed);
+        let count = 1 + rng.below(3);
+        let project: Project = generate_project(&mut rng, count)
+            .into_iter()
+            .map(|text| (text, KINDS[rng.below(KINDS.len())]))
+            .collect();
+        let mut edited = project.clone();
+        let target = rng.below(edited.len());
+        let donor = SEEDS[rng.below(SEEDS.len())];
+        edited[target].0 = small_edit(&mut rng, &project[target].0, donor);
+        vec![project, edited]
+    });
+}
+
+/// A sample of the cases of every fixture suite, which hold the constructs someone thought worth
+/// a test. A case's files have the document kinds their paths give them, and the script suite's
+/// cases are scripts.
+#[test]
+fn fixture_sources_hold_invariants() {
+    let cases = fixture_case_sources();
+    for_each_session(FIXTURE_CASES, |seed| {
+        let mut rng = SplitMix64(0x01DE_F025 ^ seed);
+        let (id, source) = &cases[rng.below(cases.len())];
+        let kind = if id.starts_with("semantics/tests/typing-scripts::") {
+            DocumentKind::Script
+        } else {
+            DocumentKind::Package
+        };
+        let state = fixture_state(source, kind);
+        vec![
+            state
+                .files
+                .into_iter()
+                .map(|(_, text, kind)| (text, kind))
+                .collect(),
+        ]
+    });
+}
+
+const FIXTURE_CASES: usize = 250;
+
+/// Whole programs from the oracle corpus, as scripts.
+#[test]
+fn program_corpus_holds_invariants() {
+    let programs = program_corpus_sources();
+    for_each_session(60, |seed| {
+        let mut rng = SplitMix64(0x01DE_F026 ^ seed);
+        let (_, source) = &programs[rng.below(programs.len())];
+        vec![vec![(source.clone(), DocumentKind::Script)]]
     });
 }
 
@@ -58,14 +132,14 @@ fn fuzz_seed_mutations() {
 #[test]
 #[ignore = "deep fuzz; run explicitly with a large FUZZ_ITERS"]
 fn fuzz_deep() {
-    for_each_seed(5000, |seed| {
+    for_each_session(5000, |seed| {
         let mut rng = SplitMix64(0x01DE_F023 ^ seed);
         let pieces = 1 + rng.below(12);
         let mut text = String::new();
         for _ in 0..pieces {
             text.push_str(SEEDS[rng.below(SEEDS.len())]);
         }
-        sweep(&text);
+        package(&text)
     });
 }
 

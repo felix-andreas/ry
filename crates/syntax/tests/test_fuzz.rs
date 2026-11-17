@@ -1,15 +1,17 @@
 //! Each generated case is one seed of [`for_each_seed`], so `FUZZ_SEED` replays a failure and
-//! `FUZZ_ITERS` sets the budget. The edit stream is one stateful sequence and keeps its own seed.
+//! `FUZZ_ITERS` sets the budget.
 
 use {
-    std::panic::catch_unwind,
+    std::{panic::catch_unwind, sync::LazyLock},
     syntax::{
         NodeOrToken, Parse, SyntaxNode, TextRange, TextSize, lex,
         literate::r_source_of_literate,
         parse, reparse,
         testing::{
-            SplitMix64, check_parse_invariants as check_invariants, corpus_sample, for_each_seed,
-            mutate_bytes, mutate_seed, program_corpus_sources, random_bytes, token_soup,
+            SplitMix64, check_parse_invariants as check_invariants, corpus_sample,
+            fixture_case_sources, for_each_seed, generate_program, mutate_bytes, mutate_seed,
+            program_corpus_sources, random_bytes, small_edit, splice_of, split_files,
+            statement_ranges, token_soup,
         },
     },
 };
@@ -182,7 +184,12 @@ const ALPHABET: &[&str] = &[
 
 /// Inputs the coverage-guided `parse` target has broken. Unlike `SEEDS` these may hold syntax
 /// errors; only the invariants must hold.
-const REGRESSIONS: &[&str] = &[];
+const REGRESSIONS: &[&str] = &[
+    // A `#:` behind a type definition: erasure must not leave it as a second annotation on the
+    // definition's comment line, nor alone above the next statement.
+    "alias Shape = :Circle(radius: double) |\n      :Rect(width: double, height: double)#: character\ny <- x\n",
+    "#: @alias Size integer\nalias Size = integer #: character\ny <- 1L\n",
+];
 
 const ITERATIONS: usize = 1500;
 
@@ -200,8 +207,8 @@ fn fuzz_regressions_hold_invariants() {
     }
 }
 
-/// Edits the language-server simulator found where a splice reparse disagreed with a full
-/// parse: `(old text, new text, deleted range in the old text, inserted length)`.
+/// Edits the language-server simulator and the small-edit arm found where a splice reparse
+/// disagreed with a full parse: `(old text, new text, deleted range in the old text, inserted length)`.
 const SPLICE_REGRESSIONS: &[(&str, &str, (u32, u32), u32)] = &[
     (
         // The middle's quote opens a string the suffix's first quote closes; the lexer had ended
@@ -234,6 +241,90 @@ const SPLICE_REGRESSIONS: &[(&str, &str, (u32, u32), u32)] = &[
         "x[[1]\ny <- 2\nz <- 3]\n",
         (19, 19),
         1,
+    ),
+    (
+        // A list type that breaks off reports its error on the next line, which is in the middle,
+        // where only the statement before the prefix's line break can report it.
+        "alias S = list{\n  kind: char\nacter, # c\n  size: T,\n}",
+        "alias S = list{\n  kind: char\nacter,# c\n  size: T,\n}",
+        (35, 36),
+        0,
+    ),
+    (
+        // A type continues onto a line that starts with `|`, so the line break after the alias is
+        // a statement boundary only while the next line starts with something else.
+        "alias A = integer\nfoo\nx <- 1\n",
+        "alias A = integer\n| character\nx <- 1\n",
+        (18, 21),
+        11,
+    ),
+    (
+        // The record type on the first line is open, and the edit closes it on the second.
+        "type P = Record{x: double\nz\ny <- 1\n",
+        "type P = Record{x: double\n, y: double}\ny <- 1\n",
+        (26, 27),
+        12,
+    ),
+    (
+        // The body of the function is the next line until the edit makes that line part of the
+        // return type; the middle alone then ends without a body.
+        "f <- function(x) -> integer\nfoo\ny <- 1\n",
+        "f <- function(x) -> integer\n| character\ny <- 1\n",
+        (28, 31),
+        11,
+    ),
+    (
+        // The unclosed call ends where a line assigns; once that line no longer assigns, the call
+        // runs on into the suffix.
+        "f(a,\nb c\ny <- 2\nz\n",
+        "f(a,\nb c\ny + 2\nz\n",
+        (11, 13),
+        1,
+    ),
+    (
+        // The definition's error sits at the end of the file, in the suffix, and the edit removes
+        // the definition.
+        "type UserId = \n# f <- function(id) id",
+        "# type UserId = \n# f <- function(id) id",
+        (0, 0),
+        2,
+    ),
+    (
+        // The tag type's error sits on the next line, in the suffix, and the edit removes the type.
+        "type Shape = :Circle(radius: double | :Empty\ns <- 1\narea <- 1\n",
+        "\ns <- 1\narea <- 1\n",
+        (0, 44),
+        0,
+    ),
+    (
+        // The annotation's error names the token its region stopped at, which the edit replaces.
+        "#: @alias A {integer\n\n# c\norigin <- list(v = 1)\ny <- 2\n",
+        "#: @alias A {integer\n\n# c\nalias <- list(v = 1)\ny <- 2\n",
+        (26, 32),
+        5,
+    ),
+    (
+        // The `#:` function type runs to the end of the text, so its unclosed `(` is blamed on
+        // the end of input before the edit and on the appended `{` after it.
+        "#: fn(#   a : integer,\n# #:   b : double\n# )->logical",
+        "#: fn(#   a : integer,\n# #:   b : double\n# )->logical{\n  {\n    1L\n  }\n}",
+        (53, 53),
+        18,
+    ),
+    (
+        // An f-string's `{}` spans lines, so the last line lexes as its closing quote only
+        // while the first line opens it.
+        "g <in- f\"Hello {naif (a > 1) b else cmz <- 2i + 0x1FLe}, {{n}} {f'{nbase**size + 1}'}{\n  if (a) 1\n  else 2\n}\"coux <<- y ->> znt:m[, y ~ a + b1]:= integerL",
+        "g <in- fHello {naif (a > 1) b else cmz <- 2i + 0x1FLe}, {{n}} {f'{nbase**size + 1}'}{\n  if (a) 1\n  else 2\n}\"coux <<- y ->> znt:m[, y ~ a + b1]:= integerL",
+        (8, 9),
+        0,
+    ),
+    (
+        // Deleting the `]` between a lone `\r` and a `\n` leaves one `\r\n` line break.
+        "a ~repeat/ Wbm[, 1x <- 1\r\ny <- 2\r]\nfo",
+        "a ~repeat/ Wbm[, 1x <- 1\r\ny <- 2\r\nfo",
+        (33, 34),
+        0,
     ),
 ];
 
@@ -378,7 +469,44 @@ fn fuzz_token_level_mutations() {
 
 #[test]
 fn fuzz_edit_stream() {
-    run_edit_stream(400);
+    run_edit_stream(40);
+}
+
+#[test]
+fn fuzz_generated_programs() {
+    run_generated_programs(400);
+}
+
+/// An edit moves a statement together with the `#:` and comment lines above it, so those lines
+/// are part of its range. A comment behind code stays with that code, and one above a blank
+/// line belongs to no statement.
+#[test]
+fn a_statement_range_holds_the_lines_directly_above_it() {
+    let source = "x <- 1 # trailing\n#: integer\n# why\ny <- 2L\n# loose\n\nz <- 3\n";
+    let texts: Vec<&str> = statement_ranges(source)
+        .into_iter()
+        .map(|range| &source[range])
+        .collect();
+    assert_eq!(
+        texts,
+        ["x <- 1 # trailing", "#: integer\n# why\ny <- 2L", "z <- 3"]
+    );
+}
+
+#[test]
+fn fuzz_small_edits() {
+    run_small_edits(300);
+}
+
+#[test]
+fn fixture_sources_hold_invariants() {
+    for (id, source) in fixture_case_sources() {
+        let files = split_files(&source).unwrap_or_else(|| vec![(String::new(), source)]);
+        for (_, text) in files {
+            catch_unwind(|| check_invariants(&text))
+                .unwrap_or_else(|_| panic!("fixture case `{id}` broke a parse invariant"));
+        }
+    }
 }
 
 #[test]
@@ -406,7 +534,9 @@ fn fuzz_deep() {
     run_token_soup(budget);
     run_seed_mutations(budget);
     run_token_level_mutations(budget);
-    run_edit_stream(budget / 20);
+    run_edit_stream(budget / 40);
+    run_generated_programs(budget / 4);
+    run_small_edits(budget / 4);
 }
 
 #[test]
@@ -449,7 +579,7 @@ fn run_seed_mutations(budget: usize) {
 fn run_token_level_mutations(budget: usize) {
     for_each_seed(budget, |seed| {
         let mut rng = SplitMix64(0x70C3_2015 ^ seed);
-        let sample = SEEDS[rng.below(SEEDS.len())];
+        let sample = POOL[rng.below(POOL.len())].as_str();
         let (tokens, _) = lex(sample);
         if tokens.is_empty() {
             return;
@@ -483,68 +613,129 @@ fn run_token_level_mutations(budget: usize) {
     });
 }
 
-fn run_edit_stream(steps: usize) {
-    let mut rng = SplitMix64(0xED17_57EA);
-    let mut buffer = String::from("f <- function(x, y) {\n  total <- x + y\n  total * 2\n}\n");
-    let mut previous = parse(&buffer);
-    for _ in 0..steps {
-        let (deleted, inserted) = match rng.below(4) {
-            0 if !buffer.is_empty() => {
-                let at = buffer.floor_char_boundary(rng.below(buffer.len()));
-                let end = buffer.ceil_char_boundary((at + 1 + rng.below(3)).min(buffer.len()));
-                buffer.replace_range(at..end, "");
-                (at..end, 0usize)
-            }
-            1 => {
-                let at = buffer.floor_char_boundary(rng.below(buffer.len() + 1));
-                let piece = ALPHABET[rng.below(ALPHABET.len())];
-                buffer.insert_str(at, piece);
-                (at..at, piece.len())
-            }
-            2 => {
-                let at = buffer.floor_char_boundary(rng.below(buffer.len() + 1));
-                let character = (0x20 + (rng.next_u64() % 0x5F) as u8) as char;
-                buffer.insert(at, character);
-                (at..at, character.len_utf8())
-            }
-            _ => {
-                let seed = SEEDS[rng.below(SEEDS.len())];
-                let at = buffer.floor_char_boundary(rng.below(buffer.len() + 1));
-                buffer.insert_str(at, seed);
-                (at..at, seed.len())
-            }
+/// A generated program is valid by construction, so a syntax error in one is a bug in the
+/// parser or in the generator.
+fn run_generated_programs(budget: usize) {
+    for_each_seed(budget, |seed| {
+        let mut rng = SplitMix64(0x6E4E_0001 ^ seed);
+        let program = generate_program(&mut rng);
+        let parsed = parse(&program);
+        assert!(
+            parsed.errors().is_empty(),
+            "a generated program does not parse: {:?}\n{program}",
+            parsed.errors()
+        );
+        check_invariants(&program);
+    });
+}
+
+/// Sessions of edits the size a keystroke or a refactoring step makes, each from a real or a
+/// generated program: every state holds the parse invariants, and the splice reparse of each
+/// edit equals a full parse.
+fn run_small_edits(budget: usize) {
+    for_each_seed(budget, |seed| {
+        let mut rng = SplitMix64(0x5A11_ED17 ^ seed);
+        let mut text = match rng.below(3) {
+            0 => generate_program(&mut rng),
+            _ => POOL[rng.below(POOL.len())].clone(),
         };
-        check_invariants(&buffer);
+        let mut previous = parse(&text);
+        for _ in 0..8 {
+            let donor = POOL[rng.below(POOL.len())].as_str();
+            let edited = small_edit(&mut rng, &text, donor);
+            check_invariants(&edited);
+            let (deleted, inserted) = splice_of(&text, &edited);
+            assert_splice_matches(&previous, &edited, deleted, inserted);
+            previous = parse(&edited);
+            text = edited;
+        }
+    });
+}
 
-        let deleted_range = TextRange::new(
-            TextSize::from(deleted.start as u32),
-            TextSize::from(deleted.end as u32),
-        );
-        let spliced = reparse(
-            &previous,
-            &buffer,
-            deleted_range,
-            TextSize::from(inserted as u32),
-        );
-        let scratch = parse(&buffer);
-        assert_eq!(
-            spliced.tree(),
-            scratch.tree(),
-            "splice != from-scratch tree: previous {:?}, deleted {deleted:?}, inserted {inserted}, now {buffer:?}",
-            previous.text(),
-        );
-        assert_eq!(
-            spliced.errors(),
-            scratch.errors(),
-            "splice errors != from-scratch errors after editing to {buffer:?}"
-        );
-        previous = scratch;
-
-        // Truncation is an out-of-band edit, so the baseline is reparsed.
-        if buffer.len() > 4096 {
-            let cut = buffer.floor_char_boundary(2048);
-            buffer.truncate(cut);
+/// Sessions of twenty byte-level edits, each from a program of the pool. A session is short
+/// because random byte edits degrade a program into token soup within a few dozen steps, and
+/// the splice reparse matters on text that still has statements to keep.
+fn run_edit_stream(sessions: usize) {
+    for_each_seed(sessions, |seed| {
+        let mut rng = SplitMix64(0xED17_57EA ^ seed);
+        let mut buffer = POOL[rng.below(POOL.len())].clone();
+        buffer.truncate(buffer.floor_char_boundary(4096));
+        let mut previous = parse(&buffer);
+        for _ in 0..20 {
+            let (deleted, inserted) = match rng.below(4) {
+                0 if !buffer.is_empty() => {
+                    let at = buffer.floor_char_boundary(rng.below(buffer.len()));
+                    let end = buffer.ceil_char_boundary((at + 1 + rng.below(3)).min(buffer.len()));
+                    buffer.replace_range(at..end, "");
+                    (at..end, 0usize)
+                }
+                1 => {
+                    let at = buffer.floor_char_boundary(rng.below(buffer.len() + 1));
+                    let piece = ALPHABET[rng.below(ALPHABET.len())];
+                    buffer.insert_str(at, piece);
+                    (at..at, piece.len())
+                }
+                2 => {
+                    let at = buffer.floor_char_boundary(rng.below(buffer.len() + 1));
+                    let character = (0x20 + (rng.next_u64() % 0x5F) as u8) as char;
+                    buffer.insert(at, character);
+                    (at..at, character.len_utf8())
+                }
+                _ => {
+                    let seed = SEEDS[rng.below(SEEDS.len())];
+                    let at = buffer.floor_char_boundary(rng.below(buffer.len() + 1));
+                    buffer.insert_str(at, seed);
+                    (at..at, seed.len())
+                }
+            };
+            check_invariants(&buffer);
+            let deleted = TextRange::new(
+                TextSize::from(deleted.start as u32),
+                TextSize::from(deleted.end as u32),
+            );
+            assert_splice_matches(&previous, &buffer, deleted, TextSize::from(inserted as u32));
             previous = parse(&buffer);
         }
-    }
+    });
 }
+
+fn assert_splice_matches(previous: &Parse, text: &str, deleted: TextRange, inserted: TextSize) {
+    let spliced = reparse(previous, text, deleted, inserted);
+    let scratch = parse(text);
+    assert_eq!(
+        spliced.tree(),
+        scratch.tree(),
+        "splice != from-scratch tree: previous {:?}, deleted {deleted:?}, inserted {inserted:?}, now {text:?}",
+        previous.text(),
+    );
+    assert_eq!(
+        spliced.errors(),
+        scratch.errors(),
+        "splice errors != from-scratch errors: previous {:?}, deleted {deleted:?}, inserted {inserted:?}, now {text:?}",
+        previous.text(),
+    );
+    assert_eq!(
+        spliced.lookahead(),
+        scratch.lookahead(),
+        "splice lookahead != from-scratch lookahead: previous {:?}, deleted {deleted:?}, inserted {inserted:?}, now {text:?}",
+        previous.text(),
+    );
+}
+
+/// The programs the mutating arms start from: the hand-written seeds, every fixture case of
+/// every suite (a multi-file case as its files), and the mined program corpus.
+static POOL: LazyLock<Vec<String>> = LazyLock::new(|| {
+    let mut pool: Vec<String> = SEEDS.iter().map(|seed| (*seed).to_owned()).collect();
+    for (_, source) in fixture_case_sources() {
+        match split_files(&source) {
+            Some(files) => pool.extend(files.into_iter().map(|(_, text)| text)),
+            None => pool.push(source),
+        }
+    }
+    pool.extend(
+        program_corpus_sources()
+            .into_iter()
+            .map(|(_, source)| source),
+    );
+    pool
+});
