@@ -42,7 +42,7 @@ integer vector with element storage. `text.element` runs a native method when `t
 string vector, and that method can allocate while `counts` is borrowed. The whole function is
 `unsafe fn`, so the compiler marks none of these.
 
-The runtime has six such rules. Each has produced a crash or a wrong answer that a test now pins:
+The runtime has seven such rules. Each has produced a crash or a wrong answer that a test now pins:
 
 | Rule kept by hand | What breaks | Pinned by |
 | --- | --- | --- |
@@ -52,6 +52,7 @@ The runtime has six such rules. Each has produced a crash or a wrong answer that
 | An object is modified in place only when nothing else can see it | another variable changes | `assignment__dollar_in_place` |
 | A frame's slots and its environment agree about each variable | a stale or missing binding | `environments__unread_loop_variable` |
 | A new object is filled before anything can read or trace it | uninitialized elements are traced | the collector's seeded tests (`heap` `test_gc`) |
+| Two strings are compared by their text, not their address | a name that is there is not found | `subset__non_ascii_names` |
 
 The scale is the reason review does not hold these rules. Counted over each crate's `src`:
 
@@ -166,6 +167,30 @@ This replaces a test of the ALTREP bit on every `Sexp::element` call with one te
 and it is the rule that removes the write into an object without storage: element writes exist
 only on standard kinds.
 
+**A copy says which kind it returns.** R has two copies, and by hand they look alike:
+
+| Copy | Raw function | Typed form | Returns |
+| --- | --- | --- | --- |
+| An owning copy, for a caller that writes elements | `values::duplicate`, `values::shallow_duplicate` | `cx.duplicate(vector)`, `cx.shallow_duplicate(vector)` | `Fresh<'s, T>`: a standard vector nothing else sees |
+| A copy for a caller that changes only attributes | `values::shallow_duplicate_attr` | `handles::attribute_copy(cx, value)` | `Local<'s, Value>`: for a vector of 64 or more elements, a wrapper that shares the original's data |
+
+The second has no storage of its own when it is a wrapper, so a `Sexp::slice_mut` on it is an
+empty slice, and an indexed write through that slice lands on the next object in the heap. That
+is the write `assignment__long_argument_copy_element_stores` pins: tier 0's matrix element store
+copied a shared argument with the attribute copy and then stored into it.
+
+With the typed forms that store has no spelling. A `Local<Value>` has no element access at all.
+The two ways from it to a mutable slice both refuse a wrapper:
+
+- `downcast::<Real>()` returns `None` for an ALTREP object, so there is no `Local<Real>` to hand
+  to an ownership check, and `Cx::assume_exclusive` accepts only vector kinds.
+- `dense::<Real>` returns the standard vector the wrapper shares, as a `Local<Real>`, which reads
+  but does not write. Writing needs a `Write`, and the ownership check fails because the wrapper
+  holds a reference to that vector, so the caller takes `cx.shallow_duplicate`, the owning copy.
+
+The attribute setters accept any `Local<Value>`, so a caller that only changes attributes keeps
+the cheap copy.
+
 ### Writes
 
 | Write | API | Why it is sound |
@@ -231,6 +256,35 @@ fn do_nchar<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> 
     Ok(result.finish().value())
 }
 ```
+
+### Strings compare by text, symbols by identity
+
+Two strings with the same text can be two objects: the heap interns a text once per encoding
+mark, so `"é"` marked latin1 and `"é"` marked UTF-8 differ as pointers. A name lookup that
+compares pointers therefore misses a name that is there (`subset__non_ascii_names`). The
+bug is not a memory error, but it has the same cause: a `Sexp` compares with `==`, and nothing
+says whether identity is the question.
+
+A handle has no `==`. `Gc` and `Local` implement `Copy` and nothing else, and each comparison
+names what it compares:
+
+| Question | Spelling | Defined for |
+| --- | --- | --- |
+| Do two strings hold the same text? | `handles::same_text(left, right)` | `Chars` |
+| Is a string `NA`? | `handles::is_na(chars)` | `Chars` |
+| Are these the same object? | `left.is(right)` | every kind except `Chars` |
+
+`same_text` is `values::same_string`: equal pointers are equal text, two interned ASCII strings
+with different pointers differ, `NA` equals only itself, and any other pair compares its decoded
+text, so the common case stays one compare.
+
+A `Symbol` compares by identity, and that is correct by construction: the only way to make one
+from a string is `handles::install(cx, chars)`, which installs a string of any encoding under its
+UTF-8 text. Two spellings of one name are then one symbol, so code that matches names against
+symbols (argument matching, `$` on an environment) needs no text comparison.
+
+A `Gc<Chars>` still widens to `Gc<Value>`, and `is` accepts that, so an identity comparison of
+two strings can be written on purpose. It cannot be written by reaching for `==`.
 
 ### Scopes, registers and unwinds
 
@@ -311,7 +365,7 @@ methods load the static as `heap()` does), not by keeping the raw version.
 | `Rooted` and `Handle`, with a static analysis for hazards (SpiderMonkey) | explicit roots on the stack; a separate tool finds values held across a call that can collect | **Adopt the model, replace the tool.** SpiderMonkey's Rust bindings mark "can collect" with `&mut JSContext`; borrowing does the hazard analysis in the compiler. Josephine (Servo) and shifgrethor have the same shape, a context borrow plus branded roots, and their known difficulty is a second context made on re-entry from foreign code, which is why `Cx` is a capability and not a reference |
 | `CAMLparam` and `CAMLlocal` (OCaml) | every local is registered by macro | **Reject.** It is the `PROTECT` discipline, unchecked. `ocaml-interop` shows the borrow-checked form of the same idea |
 | Reference counting with in-place mutation when unique (Roc) | the count | **Reject for liveness, adopt uniqueness.** Environments and closures form cycles, and native code, registers and handles hold pointers they never count, so a count cannot free at the decrement: ry frees from counts only at an allocation, after checking the roots. `Write` is the type-level form of Roc's "mutate when unique" |
-| Conservative stack scanning (JavaScriptCore, Ruby) | the collector treats every word on the native stack as a possible pointer | **Reject.** It needs no roots and would remove the handle pushes, and the heap can afford it because nothing moves. But a dead value in a stale stack slot stays alive for as long as the compiler happens to leave it there, which breaks finalizer timing that R6 and lgr rely on and that the `evaluation__*finalizer*` cases pin, and it makes that timing depend on code generation. It also covers one rule of six, does not see values in Rust heap containers, and rests on the optimizer keeping a recognizable pointer |
+| Conservative stack scanning (JavaScriptCore, Ruby) | the collector treats every word on the native stack as a possible pointer | **Reject.** It needs no roots and would remove the handle pushes, and the heap can afford it because nothing moves. But a dead value in a stale stack slot stays alive for as long as the compiler happens to leave it there, which breaks finalizer timing that R6 and lgr rely on and that the `evaluation__*finalizer*` cases pin, and it makes that timing depend on code generation. It also covers one rule of seven, does not see values in Rust heap containers, and rests on the optimizer keeping a recognizable pointer |
 | Borrow-checked safepoints with scope-branded direct handles | a root-stack slot, proved by the type | **Adopt.** Described above |
 
 The expectation going in was branded handles at no runtime cost, and it holds with one correction.
