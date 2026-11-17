@@ -416,7 +416,9 @@ The order:
 
 `tools/unsafe-baseline.txt` records the count of `unsafe` per source file outside the crates that
 own it. `just gate` fails when a file's count rises (`tools/unsafe.py check`), and a change that
-lowers one lowers the baseline with it, so the count only falls.
+lowers one lowers the baseline with it, so the count only falls. `interp::handles` is the one
+file that may rise, and only in a change that lowers the total: a migrated builtin that needs a
+helper with no safe form adds the wrapper there and removes more `unsafe` than the wrapper holds.
 
 ## Open questions
 

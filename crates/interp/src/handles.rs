@@ -15,6 +15,7 @@ use {
     crate::{
         builtins::Call,
         coerce::coerce_vector,
+        conditions,
         unwind::{R, Unwind, error},
         values,
     },
@@ -153,16 +154,47 @@ pub fn dense<'s, T: Vector>(context: &mut Cx<'s>, value: Local<'s>) -> R<Option<
 /// `value` as a standard character vector, coerced as `as.character` coerces when it is of
 /// another type.
 pub fn character_vector<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s, Str>> {
-    let text = if value.r_type() == SexpType::String {
+    coerced(context, value)
+}
+
+/// `value` as a standard integer vector, coerced as `as.integer` coerces when it is of another
+/// type.
+pub fn integer_vector<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s, Integer>> {
+    coerced(context, value)
+}
+
+fn coerced<'s, T: Vector>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s, T>> {
+    let vector = if value.r_type() == T::TYPE {
         value
     } else {
         // SAFETY: the value is rooted, and coercion allocates, which `&mut Cx` permits.
-        let coerced = unsafe { coerce_vector(value.raw(), SexpType::String)? };
+        let coerced = unsafe { coerce_vector(value.raw(), T::TYPE)? };
         // SAFETY: coercion returned a live object and nothing has allocated since.
         unsafe { rooted(context, coerced) }
     };
-    dense::<Str>(context, text)?
-        .ok_or_else(|| error("internal error: a character vector has no standard form"))
+    dense::<T>(context, vector)?
+        .ok_or_else(|| error("internal error: a coerced vector has no standard form"))
+}
+
+/// The first element as an integer: `NA` for an empty vector or a type with no integer reading.
+pub fn integer_scalar(_context: &mut Cx<'_>, value: Local<'_>) -> i32 {
+    // SAFETY: the value is rooted, and reading an ALTREP's first element may allocate, which
+    // `&mut Cx` permits.
+    unsafe { values::as_integer_scalar(value.raw()) }
+}
+
+/// A new integer vector of one element.
+pub fn integer<'s>(context: &mut Cx<'s>, value: i32) -> R<Local<'s>> {
+    let mut result = context.alloc::<Integer>(1)?;
+    result.as_mut_slice().fill(value);
+    Ok(result.finish().value())
+}
+
+/// Raises a warning against the running call.
+pub fn warning(_context: &mut Cx<'_>, message: impl Into<String>) -> R<()> {
+    // SAFETY: a warning may run a calling handler, which is R code and so needs the `&mut Cx`
+    // this takes.
+    unsafe { conditions::warning(message) }
 }
 
 /// A copy of `vector` with its own element storage, which the caller may fill or change. List
@@ -239,6 +271,26 @@ pub fn text<'a>(chars: Gc<'a, Chars>) -> Cow<'a, str> {
     unsafe { values::char_str(chars.raw()) }
 }
 
+/// `NA_character_`, which the heap keeps for as long as it lives.
+#[inline]
+pub fn na() -> Gc<'static, Chars> {
+    // SAFETY: the `NA` string is a permanent root of the heap.
+    unsafe { Gc::adopt(values::na_string()) }
+}
+
+/// Stores `text` as element `index` of a new character vector.
+pub fn set_text(
+    _context: &mut Cx<'_>,
+    vector: &mut Fresh<'_, Str>,
+    index: usize,
+    text: &str,
+) -> R<()> {
+    assert!(index < vector.len(), "element index out of bounds");
+    // SAFETY: the vector is rooted and a standard character vector, the index is in bounds,
+    // and making the string allocates, which `&mut Cx` permits.
+    unsafe { values::set_mkchar(vector.raw(), index, text) }
+}
+
 /// Whether `chars` is `NA_character_`.
 #[inline]
 pub fn is_na(chars: Gc<'_, Chars>) -> bool {
@@ -259,19 +311,43 @@ pub fn is_latin1(chars: Gc<'_, Chars>) -> bool {
 
 /// Copies the names, dim and dimnames of `from` onto the new vector `to`.
 pub fn copy_shape<T: Vector>(
-    _context: &mut Cx<'_>,
+    context: &mut Cx<'_>,
     from: Local<'_>,
     to: &mut Fresh<'_, T>,
 ) -> R<()> {
     let symbols = values::symbols();
-    for symbol in [symbols.names, symbols.dim, symbols.dimnames] {
+    copy_named(
+        context,
+        from,
+        to,
+        &[symbols.names, symbols.dim, symbols.dimnames],
+    )
+}
+
+/// Copies the names of `from` onto the new vector `to`.
+pub fn copy_names<T: Vector>(
+    context: &mut Cx<'_>,
+    from: Local<'_>,
+    to: &mut Fresh<'_, T>,
+) -> R<()> {
+    copy_named(context, from, to, &[values::symbols().names])
+}
+
+fn copy_named<T: Vector>(
+    _context: &mut Cx<'_>,
+    from: Local<'_>,
+    to: &mut Fresh<'_, T>,
+    attributes: &[Sexp],
+) -> R<()> {
+    let names = values::symbols().names;
+    for &symbol in attributes {
         // SAFETY: both objects are rooted, `to` is visible to nothing else, and reading or
         // setting an attribute may allocate, which `&mut Cx` permits. `set_attr` roots
         // nothing it must keep: the attribute hangs off `to` once it returns.
         unsafe {
             // GNU R reads the names through `getAttrib`, which turns a pairlist's tags into
             // names.
-            let value = if symbol == symbols.names
+            let value = if symbol == names
                 && matches!(from.r_type(), SexpType::Pairlist | SexpType::Language)
             {
                 values::names(from.raw())

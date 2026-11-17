@@ -9,8 +9,11 @@
 code, so their `unsafe` is not counted. Every other crate reaches the heap through
 `heap::handle`, and a file there may only lose `unsafe`: the baseline holds one count per file
 (the `unsafe` keywords outside comments), a file over its count fails, and a file under it asks
-for `baseline` so the lower count is locked in. `baseline` never raises a count. A file that
-needs more says why in the same change, with its line in the baseline edited by hand.
+for `baseline` so the lower count is locked in. `baseline` never raises a count, with one
+exception: `crates/interp/src/handles.rs` holds the safe forms of the interpreter's raw helpers,
+so it grows by a wrapper each time a migrated function needs one, and it may rise in a change
+that lowers the total. Any other file that needs more says why in the same change, with its line
+in the baseline edited by hand.
 """
 
 import os
@@ -21,6 +24,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BASELINE = os.path.join(ROOT, "tools", "unsafe-baseline.txt")
 OWNERS = ("heap", "libr", "jit", "typed", "ssa")
+WRAPPERS = "crates/interp/src/handles.rs"
 HEADER = (
     "# `unsafe` keywords per file outside heap, libr, jit, typed and ssa, which may only shrink.\n"
     "# Lower: python3 tools/unsafe.py baseline\n"
@@ -45,12 +49,13 @@ def main():
 
 def check(counts):
     baseline = read_baseline()
+    falling = sum(counts.values()) < sum(baseline.values())
     over = [
         (path, count, baseline.get(path, 0))
         for path, count in sorted(counts.items())
-        if count > baseline.get(path, 0)
+        if count > baseline.get(path, 0) and not (path == WRAPPERS and falling)
     ]
-    under = [path for path, limit in baseline.items() if counts.get(path, 0) < limit]
+    under = [path for path, limit in baseline.items() if counts.get(path, 0) != limit]
     for path, count, limit in over:
         print(f"{path}: {count} `unsafe`, baseline {limit}")
     if over:
@@ -61,7 +66,7 @@ def check(counts):
         return 1
     if under:
         print(
-            f"{len(under)} file(s) have less `unsafe` than the baseline;"
+            f"{len(under)} file(s) differ from the baseline in a way it allows;"
             " run `python3 tools/unsafe.py baseline` to lock that in."
         )
         return 1
@@ -70,9 +75,13 @@ def check(counts):
 
 def write_baseline(counts):
     baseline = read_baseline() if os.path.exists(BASELINE) else None
+    falling = baseline is not None and sum(counts.values()) < sum(baseline.values())
     lines = []
     for path, count in sorted(counts.items()):
-        limit = count if baseline is None else min(count, baseline.get(path, 0))
+        if baseline is None or (path == WRAPPERS and falling):
+            limit = count
+        else:
+            limit = min(count, baseline.get(path, 0))
         if limit:
             lines.append(f"{limit} {path}\n")
     with open(BASELINE, "w", encoding="utf-8") as file:
