@@ -118,6 +118,8 @@ Human engineers stage work, keep diffs small, and avoid rewrites that look scary
 
 An in-session worker commits directly to main. A separate cloud session delivers one large pull request (at least about 2,000 changed lines, always one whole logical step) that a reviewer agent checks, and agents may merge pull requests. Commit and push after each logical step. Commit messages and pull request titles follow Conventional Commits (`refactor: drop the legacy resolver`).
 
+A release is cut only from a commit whose CI is green, including the stress job (`docs/src/content/docs/development/releasing.md`, "The release gate"). Landing on main stays fast; the gate sits at the release.
+
 `.agents/orchestrator.md` is for the orchestrating session only; every other agent ignores it.
 
 ## Ownership
