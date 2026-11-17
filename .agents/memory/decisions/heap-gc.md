@@ -475,3 +475,21 @@ GNU R finalizes an object at the first full `gc()` after its last reference goes
 - **Shapes the same measurement fixed.** A wrapper called from a very large function is `#[inline(always)]`, because LLVM declines `#[inline]` there. An attribute list is walked through the `attribute_cells` iterator, never collected first. A rooted allocation has one out-of-line body with the allocator inlined into it (`Heap::alloc_vector_rooted`, `values::alloc`). Text kept for the length of a call goes to a stack buffer, since `Cow::into_owned` is a `malloc` and a `free`.
 - **Rejected: a string's bytes for the whole scope** (`Local<Chars>` to `Gc<'s, Chars>`). Rooting keeps the string alive, but native code writes into a string in place (a package trims one by storing a NUL), so a slice that outlives the context borrow can change under its reader. `sub` and `gsub` copy the replacement text instead.
 - **Impact.** Performance: the table in `memory-safety.md`, "Cost"; the migrated rows are equal to or faster than the raw forms except a few that pay about ten instructions in their entry. Correctness: an entry cannot return a value read before a collection. Simplicity: an entry has no mark, root or release to balance by hand.
+
+## A raw entry into handle code picks its scope by who releases
+
+**Status:** built for `subset.rs` (`[`, `[[`, `$`, `@` and their replacement forms). Design: `development/design/memory-safety.md`, "Migration" and "Writes".
+
+- **Rule.** A function unmigrated code calls with `Sexp` arguments enters the handle types through one of three helpers in `interp::handles`, chosen by what its caller does with the handle stack.
+
+  | Helper | Scope | For |
+  | --- | --- | --- |
+  | `with` | marks and releases; the result leaves unrooted | an entry whose caller roots the result or drops it |
+  | `with_result` | marks and releases; the result is rooted again in the caller's scope | an entry that allocates its result and whose caller keeps raw operands across the next allocation (the replacement entries) |
+  | `in_caller_scope` with `held` operands | no mark, no release, no operand root | an entry called once per instruction or loop iteration, whose caller already roots the operands and releases (`subset::vector_element`, tier 0's `$` entries) |
+
+- **Why three.** One helper cannot serve all callers at the measured costs (callgrind, one release build): a root is about 7 instructions, a mark and release with the result rooted again about 15, and a call that returns `R<Local>` out of line 20 to 30. An element read is about 40 instructions in all, so `vector_element` through `with_result` and an out-of-line `element` ran twice as long as the raw form, which showed as 1.3% to 1.7% on the apply rows. `$` on an environment lost about 54 instructions to a root in `materialize` and two in `frame_value`.
+- **Shapes the same measurement fixed.** A test that answers "nothing to do" for almost every value runs before the root (`handles::is_altrep` at the top of `materialize`). A function with one caller per loop body has an `#[inline(always)]` twin (`element_inline`) and an out-of-line name for everything else. `Cx::alloc_unfilled` for a list or string vector calls the heap's inline allocation path, one call deep, as for a number vector.
+- **A new vector is filled once.** `cx.alloc_unfilled::<T>(n)` returns an `Unfilled`, whose `fill` (plain elements) or `fill_elements` (references, counted once at the end) is the only way to the vector. It replaces `set_elt` per element, which pays a count and a barrier each, and the raw `slice_mut` plus `count_written_elements` pair, where forgetting the count leaves the references uncounted.
+- **Contract of `held`.** The caller's root or register keeps the value alive for the whole call. It is `unsafe` to reach from raw code for that reason, and each use states which root holds the value.
+- **Impact.** Correctness: the subscript resolvers, the element reads and stores and the four operators with their replacement forms hold no raw pointer across an allocation. Performance: the per-operation table in the change that built it; the residue is one root per name lookup (`handles::names_of`, about 17 instructions against `values::names`). Simplicity: `subset.rs` holds 59 `unsafe fn` where it held 100, all of them entries unmigrated callers reach.

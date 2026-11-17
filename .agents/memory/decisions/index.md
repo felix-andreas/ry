@@ -387,6 +387,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Interpreter code holds values through handles the borrow checker checks
 - Whether a vector may be written in place is a value, `Owned`
 - A builtin's fast-path entry runs in its caller's handle scope and answers unrooted
+- A raw entry into handle code picks its scope by who releases
 
 ## C API, R home and packages
 
