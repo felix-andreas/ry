@@ -1114,10 +1114,10 @@ unsafe fn extract_item(buffer: &[u8], kind: Option<Kind>, settings: &ScanSetting
         (empty_is_na && buffer.is_empty()) || settings.na_strings.iter().any(|na| na == buffer)
     };
     let expected = |what: &str| {
-        error(format!(
-            "scan() expected '{what}', got '{}'",
-            values::escape_invalid_bytes(buffer)
-        ))
+        let mut message = format!("scan() expected '{what}', got '").into_bytes();
+        message.extend_from_slice(buffer);
+        message.push(b'\'');
+        c_error(&message)
     };
     if kind == Kind::Character {
         return Ok(if is_na(false) {
@@ -1320,10 +1320,29 @@ fn invalid_multibyte(text: &[u8]) -> Unwind {
             left = left.wrapping_sub(1);
         }
     }
-    error(format!(
-        "invalid multibyte string at '{}'",
-        values::escape_invalid_bytes(&shown)
-    ))
+    let mut message = b"invalid multibyte string at '".to_vec();
+    message.extend_from_slice(&shown);
+    message.push(b'\'');
+    c_error(&message)
+}
+
+/// An error raised as GNU R's C `error()` raises it: the message is formatted into a buffer of
+/// `warning.length` bytes, so a longer one loses its tail, and a character the cut splits is
+/// dropped.
+fn c_error(message: &[u8]) -> Unwind {
+    // SAFETY: reading an option needs only the interpreter, which every builtin runs on.
+    let limit = unsafe { crate::conditions::warning_length() }.min(8192) - 1;
+    let mut message = &message[..message.len().min(limit)];
+    if message.len() == limit {
+        let mut last = message.len().saturating_sub(1);
+        while last > 0 && message[last] & 0xc0 == 0x80 {
+            last -= 1;
+        }
+        if let Err(failure) = std::str::from_utf8(&message[last..]) {
+            message = &message[..last + failure.valid_up_to()];
+        }
+    }
+    error(values::escape_invalid_bytes(message).into_owned())
 }
 
 unsafe extern "C" {
