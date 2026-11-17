@@ -804,9 +804,10 @@ pub enum Signalling {
     /// Not here: an error a builtin raises is returned unsignalled, for the tier to signal
     /// once the call has its frame.
     Deferred,
-    /// As `Deferred`, after the instruction raised a warning whose signalling runs R code,
-    /// as under `options(warn = 2)`. The instruction gave up with an error that stands for
-    /// nothing, and runs again once the call has its frame.
+    /// As `Deferred`, after the instruction raised a condition that is signalled where it is
+    /// raised: a warning whose signalling runs R code, as under `options(warn = 2)`, or an
+    /// error with a class of its own, as a subscript out of bounds. The instruction gave up
+    /// with an error that stands for nothing, and runs again once the call has its frame.
     Abandoned,
 }
 

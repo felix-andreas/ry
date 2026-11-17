@@ -805,7 +805,9 @@ unsafe fn compile_in<'a>(
             exits,
             declined_frames: Cell::new(0),
             declined_loads: Cell::new(0),
-            compiled_at: values::ints(machine.code.cdr().element(PROFILE))[profile::ENTRIES],
+            leaves_since: Cell::new(
+                values::ints(machine.code.cdr().element(PROFILE))[profile::ENTRIES],
+            ),
             leaves: Cell::new(0),
             retired: Cell::new(false),
         });

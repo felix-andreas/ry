@@ -5,27 +5,37 @@ description: "How the optimizing tier pays off on closure bodies that call built
 
 Generic code is a closure body that does no numeric work of its own: it checks its arguments,
 reads fields of a list or slots of an object, compares strings and calls small helpers. An
-application's test suite is almost all generic code. A test user's suite of about 400 files spent
-36% of its time in tier-0 bytecode and none in compiled code, and turning the JIT off cost it
-nothing.
+application's test suite is almost all generic code. The profile summary of a test user's suite of
+about 400 files attributed 36% of its time to tier-0 bytecode and none to compiled code, and
+turning the JIT off changed the time of one of its files by 4%.
 
-Tier 1 pays off on generic code through three things, in this order of value:
+The design has tier 1 pay off on generic code through three things, in this order of value:
 
-1. **A call of a small closure runs without a frame**, in the caller's compiled code. This removes
-   the largest cost tier 0 has there.
+1. **A call of a small closure runs in the caller's compiled code**, on a window of registers and
+   with no frame in the interpreter. This removes the largest cost tier 0 has there. It is built.
 2. **A builtin that only inspects a value runs as a few machine instructions** on the boxed value
-   (`is.null(x)`, `length(x)`, `x$name` on a plain list, `a == "b"` on strings).
-3. **What compiled code cannot do itself costs what it costs in tier 0**, so that compiling a body
-   with one call without a frame and ten other instructions is a gain and not a loss.
+   (`is.null(x)`, `length(x)`, `x$name` on a plain list, `a == "b"` on strings). It is planned.
+3. **What compiled code cannot do itself costs about what it costs in tier 0**, so that compiling
+   a body with one inlined call and ten other instructions is a gain and not a loss. The call
+   that cannot be inlined is built this way, and runs of other instructions are planned.
 
-No third compiler is added. "Steps" at the end says which parts are built. The sections before it
+No third compiler is added. "Stages" at the end says which parts exist. The sections before it
 give the evidence, then the design of each part.
+
+Three terms recur. A **step** is one instruction that compiled code hands to tier 0. An **inlined
+frame** (`Action::Frame`) is a callee's plan run on a window of registers above the caller's, with
+exits that build the interpreter's frames when something needs them. An **inlined body**
+(`Action::Inline`) is a callee whose instructions have no effect, compiled into the caller as if
+written there.
 
 ## Where generic code spends its time
 
 The table splits the instructions of the app-suite workload (`tools/bench/appsuite`) with the JIT
 off by what the function that ran them does. The counts are callgrind's, each function's own
-instructions, on an unoptimized-link build, so they order the costs and do not time them.
+instructions, on an unoptimized-link build, so they order the costs and do not time them. The
+profile summary's tier-0 share is larger than the handlers' row here because it is a share of
+time, and it counts as tier 0 everything a running body does that no other category of the summary
+claims, allocation included.
 
 | What runs | Share of instructions |
 |---|---|
@@ -44,9 +54,10 @@ compiled code costs 380 more than entering the body in tier 0 (next section), so
 would need about 40 instructions per call before a baseline compile broke even, and a compiled
 body's builtin and closure calls are handed back to tier 0 at a cost above that saving. ry built
 that tier once and it ran more instructions than tier 0 (`decisions/jit-ssa.md`, "No baseline
-tier, and code images hold bytecode only"). Tier 0 already has what a baseline tier gives
-JavaScriptCore and V8: quickened handlers and inline caches for variable reads, function lookups,
-fields and calls.
+tier, and code images hold bytecode only"). The baseline tiers of JavaScriptCore and V8 remove
+their interpreters' dispatch and operand decoding and reuse the interpreters' inline caches. Tier 0
+has quickened handlers and inline caches for variable reads, function lookups, fields and calls,
+so the dispatch share is all a baseline tier could remove here.
 
 **The call is the cost to remove.** A closure call in tier 0 takes about 900 instructions for a
 callee that does nothing, and about 1,900 while a calling handler is established, because the
@@ -76,19 +87,21 @@ small callee is worth compiling only narrowly, and a body with two inlined calls
 
 ## The design
 
-### A call compiles one of three ways
+### A call compiles one of four ways
 
 | The callee | Compiles to | Cost against tier 0's call |
 |---|---|---|
-| Has a plan that runs without a frame | An inlined frame (`Action::Frame`) | Saves the call |
+| Has no effect and reads only its arguments | An inlined body (`Action::Inline`) | Saves the call |
+| Has a plan that runs on registers until something needs its frame | An inlined frame (`Action::Frame`) | Saves the call |
 | Is a typed or numeric closure with a native function | A native call (`Action::NativeCall`) | Saves the call and the boxing |
 | Anything else | Tier 0's own call instruction, entered in place | A step |
 
-Compiled code has no call path of its own for the third row. An earlier design evaluated the
-arguments in compiled code and pushed the callee's frame through the interpreter's general entry,
-which cost about 940 instructions more than tier 0's call while the cost model credited it as a
-saving. Tier 0's call instruction already skips the promises at a site whose arguments are effect
-free.
+Compiled code has no call path of its own for the last row. A call path of its own was measured
+and rejected: it evaluated the arguments in compiled code and pushed the callee's frame through
+the interpreter's general entry, and a body that made one such call ran about 940 instructions
+more than in tier 0, the entry included, while the cost model credited the call as a saving
+("Before" in the tables below). Tier 0's call instruction skips the promises at a site whose
+arguments are effect free, so it is the cheaper call.
 
 ### Inlined frames for generic callees
 
@@ -98,26 +111,40 @@ look at the call is an exit that builds the frames first (`decisions/jit-ssa.md`
 compiled code through frame states"). Generic callees qualify under these rules:
 
 - **A callee without type feedback is planned from its instructions alone.** Tier 0 runs a
-  one-expression closure without an activation and records nothing about it. Its values are boxed
-  and its unobserved instructions are exits, as in a callee with feedback. The count of exits per
-  inlined call gives up on a callee whose exits are frequent, so a wrong guess costs a bounded
-  number of exits and one recompile.
+  one-expression closure without an activation and records nothing about it. Every call of such a
+  body runs the instructions before its first branch, so those count as run, and whatever follows
+  the branch is planned as never run: an instruction there that needs the frame is an exit. Its
+  values are boxed. A callee whose exits turn out frequent is no longer inlined (see "Code that
+  keeps leaving is retired"), so a wrong guess costs a bounded number of exits and one recompile.
 - **An argument may be any constant.** A string, `NULL` or a constant vector is passed as the
   object the call's syntax tree holds, which is what tier 0 binds. The callee treats it like any
   value a caller passes: its first element store copies.
 - **A calling handler does not stop an inlined call.** While a call has no frame, an instruction
-  run for it signals nothing: an error comes back unsignalled and a warning that would run R code
-  abandons the instruction, and the exit then repeats the instruction in tier 0 under the rebuilt
-  frames. That mechanism does not depend on whether a handler is established, so neither the
-  call's start nor the quiet steps inside it test for one. A handler's R code runs only after an
-  exit, where it finds every frame and every promise as tier 0 would have left them.
+  run for it signals nothing. A plain error comes back unsignalled. A condition that is signalled
+  where it is raised (a warning, or an error with a class of its own such as a subscript out of
+  bounds) abandons the instruction instead, because its handler is R code that would see a stack
+  without the call. Either way the exit repeats the instruction in tier 0 under the rebuilt
+  frames, where it signals. That mechanism does not depend on whether a handler is established, so
+  neither the call's start nor the quiet steps inside it test for one. A handler's R code runs
+  only after an exit, where it finds every frame and every promise as tier 0 would have left them.
 - **A profile summary does not stop an inlined call.** A profile that changes which path runs
   measures another program. The summary attributes an inlined callee's time to compiled code and
   to its caller's row.
 
-Callees with a loop, `...`, a default that is code and is read, an instruction only tier 0 has, or
-a call that needs its own frame keep their frame. On the app-suite workload these are most
-callees, which is the limit step 4 lifts.
+These callees keep their frame, and their call is a step:
+
+| The callee or the call | Why |
+|---|---|
+| The callee loops | A loop needs a counter and an entry of its own |
+| The callee takes `...`, or the call passes or collects it | The arguments are not known at the site |
+| A formal the call leaves out has a default that is code | The default runs in the callee's frame |
+| An argument the callee reads may have an effect | The effect must happen where a promise would be forced |
+| The callee is longer than 512 instruction words, the nesting is deeper than 3, or the call is recursive | The compile is bounded |
+| The callee is typed, or has more than 64 formals | A typed callee has its native function |
+| The callee's environment may not outlive the compiled code | The code holds the callee by its address |
+| The callee runs an instruction only tier 0 has, or a call that needs its own frame, on every path | Every call would exit |
+
+On the app-suite workload these are most callees, which is the limit stage 4 lifts.
 
 ### Steps run on a view of the activation that is kept
 
@@ -151,12 +178,22 @@ recompiles without the speculation. An exit for another reason says nothing agai
 instruction failed, or an inline fast path of the body's own frame did not apply. Such an exit
 costs more than several entries save, and some bodies take one on most calls: `tryCatchOne` leaves
 whenever its expression signals, and `is()` returns through `return()` inside `switch`, which
-unwinds through a step. On the app-suite workload these two bodies took 95,000 exits.
+unwinds through a step.
 
-So every such exit counts against the code (`runtime::count_leave`). Code whose exits are frequent
-among the body's entries since it was compiled is discarded, and the body is marked to stay in
-tier 0. A body with a loop is exempt, because a loop entered by on-stack replacement runs compiled
-without an entry being counted, so its entries do not say how much the code ran.
+So every such exit counts, and "frequent" has one meaning throughout: at least 16 exits, and more
+than one for every eight entries (`runtime::frequent`).
+
+| What keeps leaving | Counted by | When frequent |
+|---|---|---|
+| An inlined frame that needs its real frame | `count_handoff`, per callee | The callee is marked to keep its frame, and the caller recompiles with the call as a step |
+| The compiled body itself, through a pending unwind or a hand-off | `count_leave`, per body | The code is discarded and the body stays in tier 0 for good |
+
+The body's count covers a window: when 16 exits were not frequent among the entries since the
+count began, the count starts again, so exits spread thinly over a long run never add up to a
+retirement. A retirement is final, because the model has no evidence that a second compile of the
+same body would leave less often. A body with a loop is exempt, because a loop entered by on-stack
+replacement runs compiled without an entry being counted, so its entries do not say how much the
+code ran.
 
 ### The cost model counts the work saved
 
@@ -166,23 +203,26 @@ the compile (`jit.rs`, `unpaid`). The saving is counted in tier-0 instructions t
 | The plan has | Saving per activation |
 |---|---|
 | An inlined frame | `SAVING_PER_FRAME`, plus what the callee's own plan saves |
-| A call inlined without a frame, a native call, a traversal | `SAVING_PER_CALL` |
+| An inlined body, a native call, a traversal | `SAVING_PER_CALL` |
 | A native instruction | `SAVING_PER_NATIVE` |
 | A step | Minus `STEP_COST` |
 | The entry | Minus `ENTRY_COST` |
 
-Three kinds of step cost nothing in the model, because they cost nothing when the body runs:
+Three kinds of step count as zero in the model, because compiled code runs them at about tier 0's
+cost:
 
 - a call that never ran while tier 0 recorded, such as the `stop()` under an argument check, and
   the function lookup that feeds it;
 - an element read or store that compiled code runs through tier 0's fast handler;
 - a builtin call that runs no R code and so needs no variables written back.
 
-A body whose saving per call is zero or less is refused for good. A body with a positive saving
-that runs too rarely waits and is asked again. A body with an inlined frame is planned before the
-model is asked, because only the plan knows what its callees save.
+A body is refused for good when its saving per call would not cover the compile even if it were
+called `HORIZON_CALLS` times, which includes every body whose saving is zero or less. A body that
+passes that test and is called too rarely waits and is asked again, and each refusal doubles the
+wait. A body with an inlined frame is planned before the model is asked, because only the plan
+knows what its callees save.
 
-### Native forms on boxed values (step 2)
+### Native forms on boxed values (stage 2, planned)
 
 The planner's types describe numbers and numeric vectors, and every other value is `Boxed`. Generic
 code needs three more facts about a boxed value, each of which tier 0's feedback already records
@@ -202,7 +242,7 @@ under the guard on the builtin's binding that every speculated function has:
 A value of an unexpected kind takes the instruction's tier-0 step, not an exit, so a call site
 that sees two kinds keeps its compiled code.
 
-### Stretches (step 3)
+### Stretches (stage 3, planned)
 
 Consecutive steps run as one stretch: compiled code writes back the variables once, tier 0's
 dispatch loop runs from the first instruction to the last, and compiled code reloads once. A body
@@ -211,7 +251,7 @@ whose plan is one stretch is not compiled.
 `RY_JIT=force` compiles every body at its second entry, so its total time includes every compile.
 The rule it must meet is per compiled body: in the steady state a compiled activation runs at most
 the instructions tier 0 runs for it. The "Forced" columns below measure that directly. The rows
-above tier 0 there are bodies of steps, which stretches bring to tier 0's cost.
+above tier 0 there are bodies of steps, and stretches are designed to bring them to tier 0's cost.
 
 ## Measured
 
@@ -264,21 +304,21 @@ closure that needs its own frame. Steps 2 and 4 are what move that share.
 
 | System | What it does for generic code | ry |
 |---|---|---|
-| JavaScriptCore DFG, V8 Maglev | Inline small callees by feedback, replace property reads by a shape check and a load, keep values in registers | The same three, on R's values: calls without a frame, kind checks, the list-names position cache |
-| Ř | Elides environments and promises, and specializes a callee per call context | A call without a frame is both elisions at once. A context is the call site itself, since the callee's plan is built per site |
-| JavaScriptCore Baseline, V8 Sparkplug | A template per bytecode, with inline caches | Rejected after measurement: tier 0 already quickens and caches, and dispatch is a small share |
+| JavaScriptCore DFG, V8 Maglev | Inline small callees by feedback, replace property reads by a shape check and a load, keep values in registers | Inlined frames and registers are built. Kind checks and the position cached for a list's names are stage 2 |
+| Ř | Elides environments and promises, and specializes a callee per call context | An inlined frame is both elisions at once. A callee's plan is built once per compilation of a caller, with the arguments of each site checked against it |
+| JavaScriptCore Baseline, V8 Sparkplug | A template per bytecode, reusing the interpreter's inline caches | Rejected after measurement: dispatch and decoding are a small share, and tier 0 already quickens and caches |
 | YJIT | A block version per type context | Not adopted: generic R values need a kind test per use, which the guard on entry to a native form already is |
-| LuaJIT | Traces through calls | Not adopted: R's calls are lazy and observable, so a call needs the frame-state exits that method inlining already has |
+| LuaJIT | Traces through calls, each exit with a snapshot of the interpreter's state | Not adopted: a trace through an R call needs the same snapshots as an inlined frame's exits, and method inlining has them without a trace recorder |
 
-## Steps
+## Stages
 
-Each step is one change, measured with the app-suite workload's total time and compiled share, the
-per-pattern instruction counts above, and the kernels, public and code-bases suites.
+Each stage is one change, measured with the app-suite workload's total time and compiled share,
+the per-pattern instruction counts above, and the kernels, public and code-bases suites.
 
-1. **Built.** Frames for generic callees (no feedback, constant arguments, calling handlers, the
-   profile summary), tier 0's own call in place of compiled code's, steps on a kept view, the
-   leaner entry, retiring code that keeps leaving, and the cost model in saved work.
-2. Boxed kinds in the planner and the native forms in the table.
-3. Stretches of tier-0 instructions, and forced compilation checked per body.
-4. Calls with a frame made from a call without one, `...` passed through, and argument expressions
-   that are effect-free builtin calls.
+1. **Built.** Inlined frames for generic callees (no feedback, constant arguments, calling
+   handlers, the profile summary), tier 0's own call in place of compiled code's, steps on a kept
+   view, the leaner entry, retiring code that keeps leaving, and the cost model in saved work.
+2. Planned. Boxed kinds in the planner and the native forms in the table.
+3. Planned. Stretches of tier-0 instructions, and forced compilation checked per body.
+4. Planned. Calls with a frame made from an inlined frame, `...` passed through, and argument
+   expressions that are effect-free builtin calls.

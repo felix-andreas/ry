@@ -133,3 +133,34 @@ print(withCallingHandlers(
   custom = function(c) log <<- c(log, conditionMessage(c))
 ))
 print(log)
+
+# An error with a class of its own is signalled where it is raised, so a calling handler must
+# find the inlined callee's frame and the caller's variables.
+element <- function(x, i) x[[i]]
+column <- function(x, i) x[, i]
+show <- function(e) {
+  cat(class(e)[1], conditionMessage(e), "\n")
+  calls <- sys.calls()
+  print(calls[seq(length(calls) - 2L, length(calls) - 1L)])
+  print(get("n", envir = sys.frame(-2)))
+}
+probe <- function(callee, good, bad) {
+  caller <- eval(substitute(
+    function(r, k) { n <- length(r); v <- CALLEE(r, k); list(n, v) },
+    list(CALLEE = as.name(callee))
+  ))
+  environment(caller) <- globalenv()
+  for (i in 1:40) do.call(callee, good)
+  for (i in 1:40) do.call(caller, good)
+  for (class in c("error", "condition", "subscriptOutOfBoundsError", "simpleError")) {
+    handlers <- structure(list(show), names = class)
+    tryCatch(
+      do.call(withCallingHandlers, c(list(quote(caller(bad[[1]], bad[[2]]))), handlers)),
+      error = function(e) cat("caught", class(e)[1], "\n")
+    )
+  }
+}
+probe("element", list(list(1, 2, 3), 3L), list(list(1), 3L))
+probe("element", list(c(a = 1, b = 2), "b"), list(c(a = 1), "b"))
+probe("element", list(c("a", "b", "c"), 3L), list("a", 3L))
+probe("column", list(matrix(1:6, 3), 2L), list(matrix(1:6, 3), 9L))

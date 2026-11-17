@@ -10,7 +10,7 @@
 51 crates/graphics/src/render.rs
 154 crates/graphics/src/routines.rs
 14 crates/interp/src/ahead.rs
-40 crates/interp/src/annotations.rs
+39 crates/interp/src/annotations.rs
 3 crates/interp/src/apply_results.rs
 7 crates/interp/src/approximate.rs
 181 crates/interp/src/arith.rs
@@ -33,7 +33,7 @@
 45 crates/interp/src/deparse.rs
 72 crates/interp/src/dispatch.rs
 21 crates/interp/src/distributions.rs
-12 crates/interp/src/effects.rs
+11 crates/interp/src/effects.rs
 9 crates/interp/src/element_access.rs
 127 crates/interp/src/envir.rs
 267 crates/interp/src/eval.rs

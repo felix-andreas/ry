@@ -593,16 +593,17 @@ Why one body compiled up to four times, each fixed at its source:
 
 ## Tier 1 on generic code is frames for generic callees, not a third compiler
 
-**Status:** built (step 1 of `development/design/generic-tier.md`); native forms on boxed values, stretches and framed calls from frameless calls are planned there.
+**Status:** built (stage 1 of `development/design/generic-tier.md`); native forms on boxed values, stretches and framed calls from frameless calls are planned there.
 
 - **Problem.** A test user's application test suite ran no compiled code, and forcing compilation made it slower. Its bodies call builtins and small closures on lists, objects and strings, so the numeric speculation has nothing to win, and the measured costs sat in three places: the call compiled code made itself, inlining rules that refused generic callees, and the cost of what compiled code hands back.
 - **Rejected: a baseline compiler.** Dispatch and operand decoding are a small share of a generic body's instructions, and entering compiled code costs more than they save on a short body (measurements in the design note; same verdict as "No baseline tier, and code images hold bytecode only").
 - **Previous shape and what was weak.** A call the planner could not inline became a direct call (`Action::Call`, `jit_call`): compiled code evaluated the arguments and pushed the callee's frame through the interpreter's general entry. It cost more than tier 0's in-place call while the cost model credited it as a saved call, so wrappers compiled and ran slower. An inlined frame was refused for a callee without feedback and for a constant argument that is not a number, and declined at run time while a calling handler was established or the activity log was on, so a test suite, which runs every expectation under a calling handler, inlined nothing.
 - **Target shape.** A call compiles as an inlined frame, a native call, or tier 0's own call instruction entered in place; compiled code has no call path of its own. A callee without feedback is planned from its instructions, with boxed values and its unobserved instructions as exits. Any constant argument is passed as the object the call holds (`ArgumentSource::Literal`), which is what tier 0 binds.
-- **Why a calling handler does not need the frame.** An instruction run for a frameless call signals nothing (`Signalling::Deferred`, `step_unsignalled`): an error comes back unsignalled and a warning that would run R code abandons the instruction, and the exit repeats it in tier 0 under rebuilt frames. A handler therefore runs only after an exit. `runs_no_r_code` tests the established handler only under `Signalling::Immediate`.
+- **Why a calling handler does not need the frame.** An instruction run for a frameless call signals nothing (`Signalling::Deferred`, `step_unsignalled`): a plain error comes back unsignalled, and a condition signalled where it is raised (a warning, or an error with a class of its own such as a subscript out of bounds) abandons the instruction (`Signalling::Abandoned`), and the exit repeats it in tier 0 under rebuilt frames. A handler therefore runs only after an exit. `runs_no_r_code` tests the established handler only under `Signalling::Immediate`.
+- **Every signal entry point asks `conditions::waits_for_frame` first** (`signal_error`, `signal_condition`, `warning_call`). A classed error that skipped the test ran its calling handler on a stack without the inlined callee. A new entry point that can reach a handler must ask it too.
 - **Why the activity log does not need it.** A profile that changes which path runs measures another program. An inlined callee's time counts as compiled code in its caller's row.
-- **Expected impact.** Correctness: unchanged contract, pinned by the oracle cases below on all engines. Performance: call-shaped patterns gain with the JIT on, most under a handler; the workload's compiled share moves little until frames apply to callees with `...`, tier-0-only instructions and framed calls (step 4).
-- Pinned by `inlined_frames_run_under_calling_handlers` (`test_tiers.rs`) and the oracle cases `jit__inlined_frames_under_handlers` and `jit__inlined_frames_constant_arguments`.
+- **Expected impact.** Correctness: unchanged contract, pinned by the oracle cases below on all engines. Performance: call-shaped patterns gain with the JIT on, most under a handler; the workload's compiled share moves little until frames apply to callees with `...`, tier-0-only instructions and framed calls (stage 4).
+- Pinned by `inlined_frames_run_under_calling_handlers` (`test_tiers.rs`) and the oracle cases `jit__inlined_frames_under_handlers` (which shows a classed error's handler the callee's frame) and `jit__inlined_frames_constant_arguments`.
 
 ## A stepped instruction runs on a kept view of the activation
 
@@ -618,11 +619,12 @@ Why one body compiled up to four times, each fixed at its source:
 
 **Status:** built.
 
-- **Rule.** An exit of the body's own frame for `reason::PENDING` or `reason::HANDOFF`, and an inlined call's failed materialization, count in `Compiled::leaves` (`runtime::count_leave`). Past `MAX_FRAME_HANDOFFS`, when the leaves are `frequent` among the entries since `Compiled::compiled_at`, the code is retired and the body's tier state refused, so it runs in tier 0 for the session.
+- **Rule.** An exit of the body's own frame for `reason::PENDING` or `reason::HANDOFF`, and an inlined call's failed materialization, count in `Compiled::leaves` (`runtime::count_leave`). Past `MAX_FRAME_HANDOFFS`, when the leaves are `frequent` among the entries since `Compiled::leaves_since`, the code is retired and the body's tier state refused, so it runs in tier 0 for the session. When they are not frequent the count and its entry mark start again, so only leaves close together retire the code: counted from the compile, sixteen leaves spread over a long run would retire code that gains on nearly every entry.
+- **Retirement is final.** A recompile of the same body from the same feedback leaves at the same instructions, and the model has no evidence for a second attempt. A callee whose inlined frame keeps handing off is a different case with a different remedy: `count_handoff` marks the callee and the caller recompiles with the call as a step.
 - **Why.** Such an exit is not a failed speculation, so nothing recompiled or discarded the code, and each one costs more than several entries save. `tryCatchOne` leaves whenever its expression signals and `is()` returns through `return()` inside `switch`; the two took nearly every exit of the application workload.
-- **Loops are exempt** (`compiled.loops != 0`): a loop entered by on-stack replacement runs compiled without an entry being counted, so entries do not measure how much the code ran.
+- **Loops are exempt** (`compiled.loops != 0`): a loop entered by on-stack replacement runs compiled without an entry being counted, so entries do not measure how much the code ran. A loop body that leaves on every call therefore keeps its code; counting its leaves against the loop's iterations is open (`backlog.md`).
 - **Counted at the exit sites, not in `jit_deopt`**, which an inlined call's hand-off also passes through with its own counter (`count_handoff`).
-- Pinned by the oracle case `jit__code_that_keeps_leaving`.
+- Pinned by the oracle case `jit__code_that_keeps_leaving` and by `a_body_that_leaves_on_every_call_is_retired` (`test_tiers.rs`), which bounds the exits of a body whose inlined callee fails and of one that fails itself.
 
 ## The cost model counts frames, and free steps count nothing
 
@@ -632,5 +634,5 @@ Why one body compiled up to four times, each fixed at its source:
 - **Steps that cost nothing count nothing**: a call that never ran while tier 0 recorded and the `GetFun` that feeds it, an element instruction with a tier-0 fast handler, and a builtin call that runs no R code. Counting them refused bodies that gain (two guards with `stop()` around native work).
 - **`unpaid` gives both refusals.** A saving per call of zero or less over the whole horizon is `SMALL` and final; a positive saving that the expected calls do not cover is `RARE` and asked again. A `RARE` verdict for a body that could never pay made it record and ask all session.
 - **A body with an inlined frame is planned before the model is asked**, because only the plan knows what the callees save; the pre-plan filter (`Shape::work`) applies to bodies whose shape has no closure call. Refusing single-frame wrappers before planning lost the bodies whose frames nest.
-- **Forced mode is not at tier 0's cost per body**: a body of steps runs more instructions compiled than in tier 0, which stretches fix (step 3 of the design note).
+- **Forced mode is not at tier 0's cost per body**: a body of steps runs more instructions compiled than in tier 0, which stretches fix (stage 3 of the design note).
 

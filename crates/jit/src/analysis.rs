@@ -574,8 +574,9 @@ pub enum Effect {
     Pure,
     /// Runs no R code unless one of these registers holds an object or an ALTREP vector (whose
     /// methods a package may write in R) or an environment (whose promises and active bindings
-    /// a read may run), or a calling handler is established, since a warning runs the handler;
-    /// in each case it is opaque.
+    /// a read may run), or a handler is established while the activation has its frame, since
+    /// a warning runs the handler; in each case it is opaque. In a call inlined without its
+    /// frame nothing is signalled, so a handler does not matter there.
     PureUnlessObserved,
     /// May run arbitrary R code, which may read or rebind the frame's variables.
     Opaque,
@@ -1333,8 +1334,8 @@ pub struct Work {
     /// The instructions compiled code runs itself, other than [`Work::calls`].
     pub native: usize,
     /// The calls compiled code makes itself other than [`Work::frames`]: closure calls it
-    /// inlines into the caller's frame or enters directly, and calls of a builtin it runs as
-    /// a loop over their argument.
+    /// inlines into the caller's frame, native calls, and calls of a builtin it runs as a loop
+    /// over their argument.
     pub calls: usize,
     /// The closure calls compiled code inlines with a frame of their own in its register
     /// window, which save the call's setup and return but run the callee's instructions as
@@ -1979,7 +1980,6 @@ struct Builder<'a> {
     modified: List<'a, bool>,
     /// By slot, the type the closure's signature declares for a formal, `Boxed` for anything else.
     declared: List<'a, Ty>,
-    /// Whether each closure called directly is frame-safe, so each body is walked once.
     /// The plan of each closure asked to be inlined with a frame of its own and the type of
     /// its value, or `None` for one that cannot be, so each body is planned once however many
     /// calls of it the body makes.

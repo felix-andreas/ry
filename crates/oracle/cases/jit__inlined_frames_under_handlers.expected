@@ -45,10 +45,121 @@
 | [1] 465
 | [1] "seven divides 7"  "eleven 11"        "seven divides 14" "seven divides 21"
 | [5] "eleven 22"        "seven divides 28"
+| subscriptOutOfBoundsError subscript out of bounds 
+| [[1]]
+| caller(bad[[1]], bad[[2]])
+| 
+| [[2]]
+| element(r, k)
+| 
+| [1] 1
+| caught subscriptOutOfBoundsError 
+| subscriptOutOfBoundsError subscript out of bounds 
+| [[1]]
+| caller(bad[[1]], bad[[2]])
+| 
+| [[2]]
+| element(r, k)
+| 
+| [1] 1
+| caught subscriptOutOfBoundsError 
+| subscriptOutOfBoundsError subscript out of bounds 
+| [[1]]
+| caller(bad[[1]], bad[[2]])
+| 
+| [[2]]
+| element(r, k)
+| 
+| [1] 1
+| caught subscriptOutOfBoundsError 
+| caught subscriptOutOfBoundsError 
+| subscriptOutOfBoundsError subscript out of bounds 
+| [[1]]
+| caller(bad[[1]], bad[[2]])
+| 
+| [[2]]
+| element(r, k)
+| 
+| [1] 1
+| caught subscriptOutOfBoundsError 
+| subscriptOutOfBoundsError subscript out of bounds 
+| [[1]]
+| caller(bad[[1]], bad[[2]])
+| 
+| [[2]]
+| element(r, k)
+| 
+| [1] 1
+| caught subscriptOutOfBoundsError 
+| subscriptOutOfBoundsError subscript out of bounds 
+| [[1]]
+| caller(bad[[1]], bad[[2]])
+| 
+| [[2]]
+| element(r, k)
+| 
+| [1] 1
+| caught subscriptOutOfBoundsError 
+| caught subscriptOutOfBoundsError 
+| subscriptOutOfBoundsError subscript out of bounds 
+| [[1]]
+| caller(bad[[1]], bad[[2]])
+| 
+| [[2]]
+| element(r, k)
+| 
+| [1] 1
+| caught subscriptOutOfBoundsError 
+| subscriptOutOfBoundsError subscript out of bounds 
+| [[1]]
+| caller(bad[[1]], bad[[2]])
+| 
+| [[2]]
+| element(r, k)
+| 
+| [1] 1
+| caught subscriptOutOfBoundsError 
+| subscriptOutOfBoundsError subscript out of bounds 
+| [[1]]
+| caller(bad[[1]], bad[[2]])
+| 
+| [[2]]
+| element(r, k)
+| 
+| [1] 1
+| caught subscriptOutOfBoundsError 
+| caught subscriptOutOfBoundsError 
+| subscriptOutOfBoundsError subscript out of bounds 
+| [[1]]
+| caller(bad[[1]], bad[[2]])
+| 
+| [[2]]
+| column(r, k)
+| 
+| [1] 6
+| caught subscriptOutOfBoundsError 
+| subscriptOutOfBoundsError subscript out of bounds 
+| [[1]]
+| caller(bad[[1]], bad[[2]])
+| 
+| [[2]]
+| column(r, k)
+| 
+| [1] 6
+| caught subscriptOutOfBoundsError 
+| subscriptOutOfBoundsError subscript out of bounds 
+| [[1]]
+| caller(bad[[1]], bad[[2]])
+| 
+| [[2]]
+| column(r, k)
+| 
+| [1] 6
+| caught subscriptOutOfBoundsError 
+| caught subscriptOutOfBoundsError 
 [messages]
 [warnings]
 [errors]
 [value]
-character
-| c("seven divides 7", "eleven 11", "seven divides 14", "seven divides 21", 
-| "eleven 22", "seven divides 28")
+NULL
+| NULL

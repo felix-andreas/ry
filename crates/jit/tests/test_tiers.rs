@@ -1510,7 +1510,41 @@ fn inlined_frames_run_under_calling_handlers() {
     });
 }
 
-
+/// A body stops leaving compiled code once it has left on most of its entries, after 16 exits
+/// for each reason. Where an inlined call needs its frame every time, as a class test that
+/// always takes the branch its callee's profile never saw, the body recompiles with the callee
+/// called in tier 0. Where an error unwinds through the body on every call, as under a
+/// `tryCatch` that catches one each time, the code is retired and the body runs in tier 0: the
+/// caller is counted once for its inlined callee and once for itself, and the callee once.
+#[test]
+fn a_body_that_leaves_on_every_call_is_retired() {
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::Force);
+        run("kind <- function(x) { if (x < 0) return('negative'); 'other' }
+             test <- function(x) { if (x < 0) return(TRUE); FALSE }
+             classify <- function(x) { label <- kind(x); if (test(x)) label else 'none' }
+             raise <- function(x) { if (x < 0) stop('negative'); x }
+             failing <- function(x) { value <- raise(x); value + 1 }");
+        for callee in ["kind", "test", "raise"] {
+            run(&format!("for (i in 1:5) {callee}(1)"));
+        }
+        for (caller, most, retired) in [("classify", 16, false), ("failing", 48, true)] {
+            for _ in 0..3 {
+                run(&format!("{caller}(1)"));
+            }
+            assert!(has_compiled_code(caller), "{caller} compiles");
+            let expected = run(&format!("{caller}(-1)"));
+            let before = jit::deoptimizations();
+            for _ in 0..500 {
+                assert_eq!(run(&format!("{caller}(-1)")), expected);
+            }
+            let left = jit::deoptimizations() - before;
+            assert!(left <= most, "{caller} left compiled code {left} times in 500 calls");
+            assert_eq!(has_compiled_code(caller), !retired, "{caller}");
+        }
+        jit::install_mode(Mode::Off);
+    });
+}
 
 /// Random callers that loop over a call of a random three-formal closure. The callee computes
 /// with its arguments and two globals, may pass a formal on to a second closure that reads it

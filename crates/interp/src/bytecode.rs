@@ -2877,7 +2877,7 @@ unsafe fn guard_compiles_in_place(guard: Sexp, names: &[Sexp]) -> bool {
 /// argument, there are alternatives (the special warns when there are none), no alternative is
 /// `...` (whose alternatives are only known at run time), and at most one alternative is a
 /// default (the special reports a second one as an error).
-unsafe fn switch_compiles(args: &[(Sexp, Sexp)]) -> bool {
+fn switch_compiles(args: &[(Sexp, Sexp)]) -> bool {
     let Some(((selector_tag, selector), alternatives)) = args.split_first() else {
         return false;
     };
@@ -3674,7 +3674,7 @@ impl Compiler {
         }
     }
 
-    unsafe fn frame_may_bind(&self, symbol: Sexp) -> bool {
+    fn frame_may_bind(&self, symbol: Sexp) -> bool {
         self.local_symbols
             .as_ref()
             .is_none_or(|found| found.contains(&symbol))
@@ -3788,7 +3788,7 @@ impl Compiler {
         Ok(())
     }
 
-    unsafe fn fallback(&mut self, expression: Sexp, dst: u32) -> R<()> {
+    fn fallback(&mut self, expression: Sexp, dst: u32) -> R<()> {
         let constant = self.constant(expression);
         self.evaluate(dst, constant);
         Ok(())
@@ -7228,7 +7228,7 @@ pub enum StepEnd {
 }
 
 #[inline(always)]
-unsafe fn step_end(state: &Activation<'_, '_>) -> StepEnd {
+fn step_end(state: &Activation<'_, '_>) -> StepEnd {
     if state.exit.is_err() {
         StepEnd::Failed
     } else if state.stepped == STOP {
@@ -7318,8 +7318,9 @@ impl Default for Stepper {
 }
 
 /// Runs the builtin call at `pc` for the optimizing tier, which calls it only where the call
-/// runs no R code: the builtin is one that calls none, no argument dispatches, and no calling
-/// handler is established. The handler's body runs here directly rather than through the step
+/// runs no R code: the builtin is one that calls none, no argument dispatches, and no handler
+/// is established unless the call's activation has no frame, where nothing is signalled. The
+/// handler's body runs here directly rather than through the step
 /// table, so only the parts of the activation the call reads are loaded, and the call costs
 /// what tier 0's handler costs. A builtin's direct entry records the result's type when
 /// `record` is set, and otherwise only while tier 0 profiles; any other call records it, as
@@ -10750,7 +10751,7 @@ impl CallPlans {
     /// Whether the spread plan `id` holds for `args`, a call's arguments with `...` spread
     /// out: `...` held as many arguments as the plan was made for, with the same names, and
     /// no argument is the empty one, which would take a formal's default.
-    unsafe fn spread_holds(&self, id: usize, args: &[Arg]) -> bool {
+    fn spread_holds(&self, id: usize, args: &[Arg]) -> bool {
         let spread = self.spread(id);
         let (at, count) = (spread[SPREAD_AT] as usize, spread[SPREAD_COUNT] as usize);
         let missing = missing_arg();

@@ -36,7 +36,7 @@ use {
 pub struct Speculation {
     pub symbol: Sexp,
     /// The environment the lookup starts from, which differs from the compiled body's enclosure
-    /// for a function an inlined or directly called closure looks up from its own environment.
+    /// for a function an inlined closure looks up from its own environment.
     pub env: Sexp,
     /// The binding cell the lookup found.
     pub cell: Sexp,
