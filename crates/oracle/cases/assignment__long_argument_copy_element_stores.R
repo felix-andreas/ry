@@ -66,4 +66,26 @@ k <- function(x) {
 }
 for (call in 1:3) out <- k(a)
 cat(attr(out, "extra"), sum(out), sum(a), "\n")
+
+# A single store per call is enough: the copy is the compiled call's first and only write.
+single <- function(x) {
+  x[1, 1] <- 1
+  x
+}
+for (call in 1:3) out <- single(matrix(0, 8, 8))
+single_integer <- function(x) {
+  x[1, 1] <- 1L
+  x
+}
+for (call in 1:3) out_integer <- single_integer(matrix(1:64, 8, 8))
+cat(sum(out), sum(out_integer), "\n")
+
+# A store past the first column with mixed integer and double subscripts lands where it should.
+late <- function(x) {
+  x[8L, 14] <- TRUE
+  x
+}
+m <- matrix(FALSE, 8, 16)
+for (call in 1:3) cat(which(late(m)), "")
+cat(sum(m), "\n")
 message("ok")
