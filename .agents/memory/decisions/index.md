@@ -206,6 +206,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `[[<-` reports a wrong subscript count in GNU R's order
 - A call site that passes `...` keeps a plan for what `...` held
 - A lazily signalled error carries its condition class (settled)
+- `coerce_vector` applies GNU R's attribute rule in one place (settled)
+- A promise whose evaluation was left warns when it is forced again (settled)
 
 ## Builtins and base R
 
@@ -260,6 +262,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `x[] <- value` and `x[a:b] <- value` write whole copies of the value
 - `order`, `sort.int` and `sort.default` run natively on plain vectors
 - Strings collate with ICU4X's CLDR collator, as GNU R's ICU does
+- `abbreviate` is GNU R's `stripchars`, pass for pass (settled)
 
 ## R compatibility
 

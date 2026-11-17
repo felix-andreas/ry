@@ -1,0 +1,113 @@
+[stdout]
+| c(ü = "ü")
+| c(abcdefghü = "abcdefghü")
+| c(ab = "a", ü = "ü")
+| warning: abbreviate used with non-ASCII chars 
+| c(`überlang und mehr` = "übum")
+| warning: abbreviate used with non-ASCII chars 
+| c(überlang = "übrln", international = "intrn", été = "été"
+| )
+| warning: abbreviate used with non-ASCII chars 
+| "abcdü"
+| c(üäö = "üäö")
+| warning: abbreviate used with non-ASCII chars 
+| c(üäö = "üä")
+| c(ü = "")
+| warning: abbreviate used with non-ASCII chars 
+| warning: abbreviate used with non-ASCII chars 
+| c(`über alles` = "übra", `über allem` = "rllm")
+| warning: abbreviate used with non-ASCII chars 
+| c(`über alles` = "übra", `über allem` = "übra")
+| c(`Überlänge Straße` = "ÜberlS")
+| warning: abbreviate used with non-ASCII chars 
+| c(`Überlänge Straße` = "ÜbrlnS.")
+| warning: abbreviate used with non-ASCII chars 
+| c(überlang = "übrl")
+| c(überlang = "überlang")
+| warning: abbreviate used with non-ASCII chars 
+| " ü"
+| c(NA, "ü")
+| warning: abbreviate used with non-ASCII chars 
+| c("ibm", "aeiou", "q", "ab", "A", "MR", "x", "tbontb", "tsw", 
+| "e", "ér", "řú", "nc", "日文", "ns")
+| c("ibm", "aeiou", "q", "ab", "A", "MR", "x", "tbontb", "tsw", 
+| "e", "ér", "řú", "nc", "日文", "ns")
+| warning: abbreviate used with non-ASCII chars 
+| c("ibm", "aeiou", "q", "ab", "A", "MR", "x", "tbontb", "tsw", 
+| "e", "ér", "řú", "nc", "日文", "ns")
+| warning: abbreviate used with non-ASCII chars 
+| c("ibm", "aeiou", "qu", "ab", "AB", "MR", "x", "tbontb", "tsw", 
+| "e.", "ér", "řú", "nc", "日文", "ns")
+| c("ibm", "aeiou", "qu", "ab", "AB", "MR", "x", "tbontb", "tsw", 
+| "en", "ér", "řú", "nc", "日文", "ns")
+| warning: abbreviate used with non-ASCII chars 
+| c("ibm", "aeiou", "qu", "ab", "AB", "MR", "x", "tbontb", "tsw", 
+| "e.", "ér", "řú", "nc", "日文", "ns")
+| warning: abbreviate used with non-ASCII chars 
+| c("ibm", "aeiou", "que", "abb", "ABC", "MsR", "x", "tbontb", 
+| "tsw", "e.-", "élr", "řšú", "nvc", "日本文", "n s")
+| c("ibm", "aeiou", "que", "aab", "ABC", "MiR", "x", "tbontb", 
+| "tsw", "end", "élr", "řeú", "nac", "日本文", "nos")
+| warning: abbreviate used with non-ASCII chars 
+| c("ibm", "aeiou", "que", "abb", "ABC", "MsR", "x", "tbontb", 
+| "tsw", "e.-", "élr", "řšú", "nvc", "日本文", "n s")
+| warning: abbreviate used with non-ASCII chars 
+| c("intbm", "aeiou", "queue", "abbbb", "ABCDE", "MsssR", "x", 
+| "tbontb", "tbspw", "end.-", "élphr", "řšnúl", "navcf", "日本語文字", 
+| "n brs")
+| c("intbm", "aeiou", "queue", "aaaab", "ABCDE", "MissR", "x", 
+| "tbontb", "tabsw", "end.o", "élépr", "řešeú", "naïvc", 
+| "日本語文字", "no bs")
+| warning: abbreviate used with non-ASCII chars 
+| c("intbm", "aeiou", "queue", "abbbb", "ABCDE", "MsssR", "x", 
+| "tbontb", "tbspw", "end.-", "élphr", "řšnúl", "navcf", "日本語文字", 
+| "n brs")
+| warning: abbreviate used with non-ASCII chars 
+| c("intrntbm", "aeiou", "queue", "aaaabbbb", "ABCDEFGH", "MssssppR", 
+| "x", "tbornttb", "tbsprtdw", "end.f-ln", "élphntrs", "řešnúlhy", 
+| "naïvecaf", "日本語 文字列", "n brkspc")
+| c("internbm", "aeiou", "queue", "aaaabbbb", "ABCDEFGH", "MississR", 
+| "x", "tobeontb", "tabsepaw", "end.of-l", "éléphanr", "řešeníúl", 
+| "naïvecaf", "日本語 文字列", "no breas")
+| warning: abbreviate used with non-ASCII chars 
+| c("intrntbm", "aeiou", "queue", "aaaabbbb", "ABCDEFGH", "MssssppR", 
+| "x", "tbornttb", "tbsprtdw", "end.f-ln", "élphntrs", "řešnúlhy", 
+| "naïvecaf", "日本語 文字列", "n brkspc")
+| warning: abbreviate used with non-ASCII chars 
+| c("intrntnlbsnm", "a e i o u", "queue", "aaaa bbbb", "ABCDEFGH", 
+| "MississppRvr", "x", "tobeornottob", "tabsprtdwrds", "end.of-line", 
+| "éléphantrose", "řešení úlohy", "naïve café", "日本語 文字列", 
+| "no breakspac")
+| c("internatiobm", "a e i o u", "queue", "aaaa bbbb", "ABCDEFGH", 
+| "MississippiR", "x", "tobeornottob", "tabseparatew", "end.of-line", 
+| "éléphantrose", "řešení úlohy", "naïve café", "日本語 文字列", 
+| "no breakspac")
+| warning: abbreviate used with non-ASCII chars 
+| c("intrntnlbsnm", "a e i o u", "queue", "aaaa bbbb", "ABCDEFGH", 
+| "MississppRvr", "x", "tobeornottob", "tabsprtdwrds", "end.of-line", 
+| "éléphantrose", "řešení úlohy", "naïve café", "日本語 文字列", 
+| "no breakspac")
+| warning: abbreviate used with non-ASCII chars 
+| c("inbm", "aeiou", "queu", "abbb", "ABCD", "MssR", "x", "tbontb", 
+| "tbsw", "en.-", "élpr", "řšnú", "nvcf", "日本語文", "n bs"
+| )
+| structure(c("pd", "dp", "dp", NA), names = c("padded", "dup", 
+| "dup", NA))
+| warning: abbreviate used with non-ASCII chars 
+| structure(c(a = "alb", b = "übu"), class = "tag")
+| structure(c("al", "be", "ga", "de"), dim = c(2L, 2L))
+| warning: abbreviate used with non-ASCII chars 
+| c("one two", "ündeux", " lead ", " üx")
+| warning: abbreviate used with non-ASCII chars 
+| c("ot", "üd")
+| "invalid 'use.classes' argument"
+| "invalid 'minlength' argument"
+| warning: abbreviate used with non-ASCII chars 
+| c("UTF-8", "UTF-8", "unknown")
+| c("latin1", "latin1", "unknown")
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("latin1", "latin1", "unknown")

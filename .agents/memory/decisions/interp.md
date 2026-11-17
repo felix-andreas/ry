@@ -1124,3 +1124,21 @@ without cells, promise forcing in the loop, and one observer word on the general
 - **The call is the lexical call**, the frame whose code named the argument (`eval::lexical_call`), as GNU R's `getLexicalCall(rho)`: `f <- function(a) g(a)` reports `f()`, not `g(a)`. A complex assignment `x[i] <- v` reads `x` in the frame when the frame binds it and in the enclosure otherwise (GNU R's `EnsureLocal`), so from a nested function the error names the enclosure's call.
 - **`evalError` against `getvarError` depends on GNU R's tier** (its AST evaluator against its compiled code), so a test prints one name for both (`conditions__missing_argument_classes`).
 - **Which builtins keep a missing argument** follows GNU R's `evalListKeepMissing` users, among them `log`, `round`, `signif`, `rep` (after its first argument, which `DispatchOrEval` evaluates: a name there bound to no argument is the caller's error, and any other missing `x` reaches the type check) and `Exec`. `.subset` and `.subset2` are plain builtins there, so an empty argument is an error.
+
+## `coerce_vector` applies GNU R's attribute rule in one place
+
+**Status:** settled.
+
+- **Previous shape.** `coerce_vector_quiet` copied every attribute to every result, and callers cleared what GNU R drops case by case (`as_vector` stripped after the fact), so `as.list` of a matrix kept `dim`, `x[1, 2] <- list(v)` on an atomic matrix kept a `dim` GNU R drops, and `as.expression` of a named vector kept names.
+- **Target shape.** The tail of `coerce_vector_quiet` (`coerce.rs`) applies `coerceVector`'s rule: atomic to atomic keeps all attributes, list to and from expression keeps all, atomic to list keeps names only, atomic to expression keeps none, list or expression to atomic keeps names only. `coerce_atomic` sets no attribute itself. `storage.mode<-` and `mode<-` copy all attributes themselves, as GNU R's R code does. libr's own `Rf_coerceVector` (`libr/src/vectors.rs`) follows the same rule.
+- **A subassignment reads its subscripts against the object as it was** (`subset.rs`): `dim` and `dimnames` are taken before the coercion that a list value forces, as GNU R's `MatrixAssign` reads them before `SubassignTypeFix`, so `m[1, 2] <- list(v)` assigns the cell and returns a plain list.
+- Oracle case: `coerce__list_coercion_attributes`.
+
+## A promise whose evaluation was left warns when it is forced again
+
+**Status:** settled.
+
+- **Rule.** GNU R's `forcePromise` sets `PRSEEN` to 2 when a jump leaves a promise's code, and the next force warns "restarting interrupted promise evaluation". ry keeps the mark in the promise's gp bits (`PROMISE_INTERRUPTED` beside `PROMISE_SEEN`, `eval.rs`): set when a force fails, read and cleared at the next force.
+- **Each promise on a forwarded chain warns**, because an argument passed on is a promise of its own in GNU R; ry's forwarded reference carries the mark the same way.
+- **An argument reference is pooled**, so `pooled_reference` clears the mark when it hands a reference to the next call. Without that, an argument that failed in one call made an unrelated argument of a later call warn.
+- Oracle case: `promises__restarting_interrupted_evaluation`.
