@@ -12,7 +12,10 @@ use {
         unwind::{R, error, error_in},
         values::{self, nil},
     },
-    heap::object::{Sexp, SexpType},
+    heap::{
+        activity,
+        object::{Sexp, SexpType},
+    },
     smallvec::{SmallVec, smallvec},
     std::borrow::Cow,
     syntax::native_values::ACCEPTS_NATIVE,
@@ -527,6 +530,10 @@ unsafe fn register_in(definitions: &[BuiltinDef], env: Sexp) {
             existing.object = object;
             continue;
         }
+        assert!(
+            state.builtins.len() < activity::BUILTIN_SLOTS,
+            "more builtins than a profile summary has counters for"
+        );
         let index = state.builtins.len() as u32;
         let object_kind = match definition.kind {
             Kind::Builtin | Kind::Internal => SexpType::Builtin,

@@ -8561,8 +8561,8 @@ unsafe fn leave_stepped(state: &mut Activation<'_, '_>, value: Sexp) -> bool {
 /// [`eval::referenced_args_into`], then
 /// [`eval::bind_plan`], [`eval::enter`] and [`enter_in_place`], and leaves every call that
 /// needs anything else to them: a debugger, an `Rprof` profile, a tracked move or a refused
-/// object system ([`activity::observers`]), a closure flagged for debugging or with a native entry, the
-/// namespace loader, `do.call`, a frame stack or register file that is full.
+/// object system ([`activity::observers`]), a closure flagged for debugging or with a native
+/// entry, the namespace loader, `do.call`, a frame stack or register file that is full.
 ///
 /// `HOOKS` is how the copy treats the hook flags ([`GUARDING`]); under [`SUMMARIZED`] it counts
 /// the call and the callee's entry.
@@ -9401,6 +9401,7 @@ unsafe fn read_altrep_element_call(state: &mut Activation<'_, '_>, at: usize) ->
         || index.is_altrep()
         || index.attrib() != heap.known().nil
         || index.length() != 1
+        || activity::observers() != 0
     {
         return None;
     }

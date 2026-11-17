@@ -1832,8 +1832,8 @@ unsafe fn call_builtin_blaming(
 }
 
 /// [`call_builtin`] with arguments that are all untagged and none empty, as at a call site tier 0
-/// quickened: the names check cannot fail, so only a hook, a wrong arity or a shared replacement
-/// target takes the checked path.
+/// quickened: the names check cannot fail, so only a wrong arity or a shared replacement target
+/// takes the checked path, and a hook the observed one.
 #[inline(always)]
 pub(crate) unsafe fn call_builtin_positional(
     definition: &BuiltinDef,
