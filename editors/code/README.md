@@ -104,12 +104,12 @@ non-exhaustive-match
 How much faster ry's runtime is than GNU R, for each benchmark suite:
 
 <!-- bench-summary -->
-- **[Public R JIT benchmarks](https://ry-lang.org/benchmarks#public-r-jit-benchmarks): 3.69x, 19x in typed ry.** 54 standard programs from R compiler research (Ř, rcp).
-- **[Package test suites](https://ry-lang.org/benchmarks#package-test-suites): 2.55x.** 26 pinned CRAN packages, each running its own test suite.
-- **[Numeric kernels](https://ry-lang.org/benchmarks#numeric-kernels-ours): 5.78x, 25x in typed ry.** 16 small programs we wrote whose time goes into loops, recursion and arithmetic on numbers.
-- **[Application workloads](https://ry-lang.org/benchmarks#application-workloads-ours): 3.56x, 68x in typed ry.** 15 programs we wrote in the shape of package and business code: calls, dispatch, conditions, records, tables.
+- **[Public R JIT benchmarks](https://ry-lang.org/benchmarks#public-r-jit-benchmarks): 3.76x, 20x in typed ry.** 54 standard programs from R compiler research (Ř, rcp).
+- **[Package test suites](https://ry-lang.org/benchmarks#package-test-suites): 2.75x.** 26 pinned CRAN packages, each running its own test suite.
+- **[Numeric kernels](https://ry-lang.org/benchmarks#numeric-kernels-ours): 6.06x, 26x in typed ry.** 16 small programs we wrote whose time goes into loops, recursion and arithmetic on numbers.
+- **[Application workloads](https://ry-lang.org/benchmarks#application-workloads-ours): 3.77x, 72x in typed ry.** 15 programs we wrote in the shape of package and business code: calls, dispatch, conditions, records, tables.
 
-Each number is the geometric-mean speed-up over GNU R 4.6.2 (above 1x is faster), from 10 paired rounds of the ry 0.4.5 release archive on Linux. [Benchmarks](https://ry-lang.org/benchmarks) shows every program and how it is measured.
+Each number is the geometric-mean speed-up over GNU R 4.6.2 (above 1x is faster), from 10 paired rounds of the ry 0.5.0 release archive on Linux. [Benchmarks](https://ry-lang.org/benchmarks) shows every program and how it is measured.
 <!-- /bench-summary -->
 
 ## Settings

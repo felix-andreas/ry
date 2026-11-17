@@ -1,6 +1,7 @@
 # Collection on every allocation, inside compiled functions whose registers a deeper call that
 # already returned used before them. The values the deeper call left behind are garbage, and
 # each collection must neither keep a reader of them alive nor trip over them.
+# oracle: sets collection stress
 deep <- function(n) {
   words <- paste0("w", seq_len(n))
   upper <- lapply(words, toupper)

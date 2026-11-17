@@ -1,0 +1,22 @@
+[stdout]
+| [1] FALSE FALSE FALSE
+| [1] FALSE FALSE FALSE
+| [1] FALSE  TRUE FALSE FALSE
+| [1] FALSE FALSE FALSE  TRUE
+| [1] FALSE FALSE FALSE
+| [1] FALSE  TRUE FALSE FALSE
+| [[1]]
+| [1] 1
+| 
+| [[2]]
+| [1] 2
+| 
+| [[3]]
+| [1] 2
+| 
+[messages]
+[warnings]
+[errors]
+[value]
+list
+| list(1, 2, 2)

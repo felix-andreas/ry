@@ -9,7 +9,13 @@ together. The editor extensions live in `editors/code` (VS Code) and `editors/ze
 
 ## Set up a machine
 
-On Ubuntu 24.04, one script provisions everything the build, the tests, the oracle and the
+With nix installed, nothing needs provisioning for the build, the tests and the oracle:
+`source tools/env.sh` loads the flake's `default` dev shell (the Rust toolchain, the reference GNU R,
+`just`, mold), and a Claude cloud container needs no setup script. The first run downloads 8.8 GB and
+takes about 100 seconds; [the fast loop](/development/testing/#the-fast-loop) has the details.
+
+The package corpus and the benchmarks against GNU R need the host's libraries. On Ubuntu 24.04, one
+script provisions everything the build, the tests, the oracle and the
 benchmarks need, and `just doctor` checks the result:
 
 ```sh
@@ -63,8 +69,7 @@ executables.
 
 The flake's dev shells carry the same toolchain and a GNU R built like the reference one, and CI
 runs in them: `nix develop .#ci` holds what `just ci` needs, and `nix develop` adds the editing
-tools. The script stays the default for cloud sessions, because it restores the reference R and
-the oracle's packages from the binary cache in seconds and needs no nix store.
+tools. `tools/env.sh` loads the `default` shell for agents.
 
 ## Build and test
 

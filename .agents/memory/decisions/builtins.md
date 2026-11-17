@@ -524,6 +524,13 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 - **Measured** (a million elements, release, ms per call, GNU R 4.6.2 first): `c(x, x)` of strings with 2,000 distinct values 42.9 against 24.6 before and 10.0 after; `unlist(list(x, x))` 22.8, 33.1, 14.2; `rep(x, 2)` 26.6, 31.8, 16.5; `rep_len` 15.7, 22.7, 6.2; `x[perm]` of a million distinct strings 79.8, 26.2, 11.9; `lst[perm]` 71.7, 30.2, 11.3.
 - **Contract.** `builtins__bulk_handle_copies.R` pins the results, sharing after a copy is modified, and loops that make the collector run between copies.
 
+## The radix string order ranks bytes with integer keys, and plain POSIX patterns capture on the automata
+
+**Status:** built.
+
+- **`byte_ranks` (`crates/interp/src/sort.rs`)** ranks the distinct strings of a radix sort by their stored `CHAR()` bytes, untranslated, which is GNU R's rule (`StrCmp2` is `strcmp`), so a latin1 string and its UTF-8 twin rank apart. It skips the prefix all strings share, packs the next eight bytes into a big-endian `u64` (zero padding orders correctly because no R string holds a NUL), sorts the keys with an LSD radix that skips constant bytes, and re-keys only runs of equal keys. A comparison sort over the strings chased pointers per comparison and took 185 ms on 1e6 strings against GNU R's 170 ms; the key sort takes about GNU R's time. `order()` under a collation keeps the comparison sort.
+- **POSIX captures without backtracking:** when a pattern has no alternation, no lazy quantifier and repeats only single characters (`greedy_single_width` in `crates/interp/src/strings.rs`), the leftmost-first captures of the `regex` crate equal TRE's whenever the leftmost-first match ends where the leftmost-longest one does. `captures_at` checks that end against the longest automaton and falls back to the backtracker otherwise, so `sub`/`gsub` with back-references and `regexec` on such patterns run at GNU R's speed. A repeated group (`(a)?(ab)?b*`) still differs from TRE on the backtracker (`crates/oracle/known_failures.toml`).
+
 ## `x[] <- value` and `x[a:b] <- value` write whole copies of the value
 
 **Status:** built.
@@ -543,3 +550,27 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 - **Kernel fixes found by the oracle cases.** `.Internal(order())` reports a key that is no vector (`NULL`, a function, an environment) as "argument N is not a vector" before it compares lengths, and `sorted_fpass` coerces its flags with `asInteger`'s warnings (`sort(x, na.last = "x")` warns twice in GNU R). `sorted_fpass` answers `FALSE` for every input and `wrap_meta` wraps nothing; only `.Internal(inspect())` shows the difference.
 - **Measured** (µs per call, min of three runs of 50,000 calls, release; GNU R 4.6.2, before, after): `order(m)` on ten integers 13.4, 5.4, 0.62; `order(a, m)` 14.4, 5.9, 0.76; `order(chr)` 13.3, 5.6, 0.96; `sort(m)` 24.6, 8.7, 1.04; `sort(m, decreasing = TRUE)` 24.1, 9.5, 1.06; `sort(chr)` 12.5, 4.9, 1.72; `sort(dbl)` 25.7, 8.4, 1.14; `m[order(m)]` 13.0, 5.8, 0.76. A factor declines and dispatches (37.8, 16.6, 13.8). On a million integers the kernel dominates: `sort` 36, 32, 29 ms.
 - **Contract.** `sort__order_prologue.R` and `sort__sort_prologue.R` pin every type with `NA`, `NaN` and `-0`, names, several keys and ties, each method and flag, `index.return`, objects that dispatch, errors and warnings with their calls, and the forcing order.
+
+## Strings collate with ICU4X's CLDR collator, as GNU R's ICU does
+
+**Status:** built.
+
+- **Before.** `sort.rs` approximated a UTF-8 locale's order with hand-made primary weights (`ASCII_PRIMARY_WEIGHTS`, `base_letter` and a few non-ASCII ranges) and `capabilities("ICU")` was `FALSE`. It got ß, ignorables (U+FEFF, U+00AD, ASCII controls), most scripts and canonical equivalence wrong, and `icuSetCollate` was a stub.
+- **Shape.** `refresh_collation` follows GNU R's `Scollate` and `resetICUcollator` and builds one `icu_collator` 2.x collator (compiled data) per locale change: `LC_ALL`/`LC_COLLATE` equal to `C`, or a C locale, gives code-point order (or `strcoll`); anything else maps the POSIX name to a BCP 47 tag (`@collation=` to `-u-co-`) and falls back to root when the tag has no data. `R_ICU_LOCALE` overrides the name. An invalid UTF-8 byte compares as U+FFFD, as in GNU R.
+- **ASCII fast path.** Printable ASCII under root or an untailored language (en, de, fr, it, nl, pt) compares by a 95-entry rank table, then the first case difference; controls take the collator because ICU ignores them. A unit test checks the table against ICU4X, and 24,500 random strings gave GNU R's `order` and `rank`. Sorting an all-printable-ASCII vector builds byte keys once (`AsciiKeys`) and compares slices.
+- **Ties.** Strings the collator calls equal tie: `order` keeps input order and `rank` averages, and `sort` reorders tied runs with GNU R's Shell sort (`ssort2`'s gaps), so its placement of ties matches.
+- **`icuSetCollate`** applies `case_first`, `alternate_handling`, `case_level` and `strength` (GNU R spells the strength values with a trailing space, so `"primary"` is ignored there too), accepts `hiragana_quaternary` and `normalization` as no-ops, and reports `french_collation`, which ICU4X lacks.
+- **Gaps.** ICU4X always normalizes, and GNU R's ICU runs with normalization off, so a string with combining marks out of canonical order can order differently. ICU4X carries CLDR 47 and GNU R 4.6.2's ICU 74 carries CLDR 44.
+- **Measured** (5 sorts, release, seconds; ry, GNU R): `sprintf("key%07d", sample(2e5))` 0.34, 4.27; a 2e5 mixed-case ASCII vector 0.26, 3.11, and `order` of it 0.32, 3.98; 2e4 strings with é, ß and ж 0.17, 0.18. Each comparison off the fast path runs the full collator; ICU4X 2.0 has no sort keys.
+- **Contract.** `sort__icu_collation.R` pins ignorables, ß, case, punctuation, scripts, ties, invalid bytes, comparisons and `icuSetCollate`.
+
+## `abbreviate` is GNU R's `stripchars`, pass for pass
+
+**Status:** settled.
+
+- **Previous shape.** One loop per class over the whole text, with ASCII vowels and Unicode lower case, and a warning for any non-ASCII element. Results differed from GNU R wherever a word-end pass decides (`"Überlänge Straße"` to 6), and the warning fired for strings GNU R leaves alone.
+- **Target shape.** `strings::abbreviate` runs GNU R's passes in order (vowels at a word's end, vowels, lower case at a word's end, lower case, any character), each from the end of the text and each stopping when the text fits. The vowel table is `wstripchars`' (ASCII and accented Latin vowels), lower case is glibc's class (Unicode lower case, or a single-letter upper-case form), and white space is glibc's `iswspace` (no no-break spaces, no U+0085).
+- **The warning** is raised once, after the loop, only with `use.classes` and only when a non-ASCII element longer than the minimum was shortened. An element that is not shortened is returned as it is, encoding mark included, and the result keeps the argument's attributes.
+- **A negative minimum** (reachable through `.Internal` only) follows GNU R's unsigned comparisons: an ASCII element is returned unchanged, and a non-ASCII one loses its inner spaces.
+- **Lower case can differ from GNU R by Unicode version** for letters added or reclassified between the Unicode of Rust's standard library and of the system's glibc (U+0295 and the letters Unicode 16 added are examples).
+- Oracle case: `strings__abbreviate_non_ascii`.

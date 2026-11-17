@@ -1,0 +1,19 @@
+[stdout]
+| error: 'value' must be non-null character string | storage.mode(x) <- FALSE 
+| error: 'value' must be non-null character string | print(expr) 
+| error: 'value' must be non-null character string | print(expr) 
+| error: use of 'real' is defunct: use 'double' instead | print(expr) 
+| error: use of 'single' is defunct: use mode<- instead | print(expr) 
+| error: invalid value | print(expr) 
+| a 
+| 1 
+|      [,1] [,2]
+| [1,]    1    3
+| [2,]    2    4
+| error: invalid to change the storage mode of a factor | print(expr) 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

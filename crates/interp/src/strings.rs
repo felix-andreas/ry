@@ -13,16 +13,20 @@ use {
         approximate::{
             ApproximateMatch, ApproximateRegex, ApproximateSettings, SCOPE_GROUP, UNBOUNDED,
         },
-        builtins::{BuiltinDef, Call, builtin, internal, require},
+        builtins::{BuiltinDef, Call, builtin, internal},
         coerce::{coerce_vector, integer_digits},
         conditions::warning,
         eval,
         format::{display_width, push_fixed, push_general, push_scientific},
+        handles::{
+            self, Args, Chars, Cx, Fresh, Gc, Integer, List, Local, Logical, Raw, Str, StringFill,
+            safe,
+        },
         pcre::{CompileError, PerlRegex},
-        unwind::{R, error},
+        unwind::{R, Unwind, error},
         values::{
-            self, alloc, get_attr, length, na_string, nil, scalar_integer, scalar_string, set_attr,
-            set_elt, string_at, string_vector, string_vector_na, strings, symbols,
+            self, alloc, get_attr, length, na_string, nil, set_attr, set_elt, string_at, strings,
+            symbols,
         },
     },
     fancy_regex::{Regex, RegexBuilder},
@@ -45,41 +49,37 @@ use {
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("paste", 4, do_paste),
     internal("paste0", 3, do_paste0),
-    internal("nchar", 4, do_nchar),
-    builtin("nzchar", -1, do_nzchar),
-    internal("substr", 3, do_substr),
-    internal("substr<-", 4, do_set_substr),
+    internal("nchar", 4, safe!(do_nchar)),
+    builtin("nzchar", -1, safe!(do_nzchar)),
+    internal("substr", 3, safe!(do_substr)),
+    internal("substr<-", 4, safe!(do_set_substr)),
     internal("strsplit", 5, do_strsplit),
     internal("sprintf", -1, do_sprintf),
-    internal("toupper", 1, |call| unsafe { change_case(call, true) }),
-    internal("tolower", 1, |call| unsafe { change_case(call, false) }),
-    internal("chartr", 3, do_chartr),
-    internal("strtrim", 2, do_strtrim),
-    internal("startsWith", 2, |call| unsafe {
-        starts_or_ends_with(call, true)
-    }),
-    internal("endsWith", 2, |call| unsafe {
-        starts_or_ends_with(call, false)
-    }),
-    internal("strrep", 2, do_strrep),
-    internal("strtoi", 2, do_strtoi),
-    internal("make.names", 2, do_make_names),
+    internal("toupper", 1, safe!(do_toupper)),
+    internal("tolower", 1, safe!(do_tolower)),
+    internal("chartr", 3, safe!(do_chartr)),
+    internal("strtrim", 2, safe!(do_strtrim)),
+    internal("startsWith", 2, safe!(do_starts_with)),
+    internal("endsWith", 2, safe!(do_ends_with)),
+    internal("strrep", 2, safe!(do_strrep)),
+    internal("strtoi", 2, safe!(do_strtoi)),
+    internal("make.names", 2, safe!(do_make_names)),
     internal("make.unique", 2, do_make_unique),
-    internal("abbreviate", 3, do_abbreviate),
-    internal("utf8ToInt", 1, do_utf8_to_int),
-    internal("intToUtf8", 3, do_int_to_utf8),
-    internal("charToRaw", 1, do_char_to_raw),
-    internal("rawToChar", 2, do_raw_to_char),
-    internal("pmatch", 4, do_pmatch),
-    internal("charmatch", 3, do_charmatch),
-    internal("grepl", 8, |call| unsafe { grep(call, true) }),
-    internal("grep", 8, |call| unsafe { grep(call, false) }),
-    internal("sub", 7, |call| unsafe { substitute(call, false) }),
-    internal("gsub", 7, |call| unsafe { substitute(call, true) }),
-    internal("regexpr", 6, |call| unsafe { regexpr(call, false) }),
-    internal("grepRaw", 8, do_grep_raw),
-    internal("gregexpr", 6, |call| unsafe { regexpr(call, true) }),
-    internal("regexec", 5, do_regexec),
+    internal("abbreviate", 3, safe!(do_abbreviate)),
+    internal("utf8ToInt", 1, safe!(do_utf8_to_int)),
+    internal("intToUtf8", 3, safe!(do_int_to_utf8)),
+    internal("charToRaw", 1, safe!(do_char_to_raw)),
+    internal("rawToChar", 2, safe!(do_raw_to_char)),
+    internal("pmatch", 4, safe!(do_pmatch)),
+    internal("charmatch", 3, safe!(do_charmatch)),
+    internal("grepl", 8, safe!(do_grepl)),
+    internal("grep", 8, safe!(do_grep)),
+    internal("sub", 7, safe!(do_sub)),
+    internal("gsub", 7, safe!(do_gsub)),
+    internal("regexpr", 6, safe!(do_regexpr)),
+    internal("grepRaw", 8, safe!(do_grep_raw)),
+    internal("gregexpr", 6, safe!(do_gregexpr)),
+    internal("regexec", 5, safe!(do_regexec)),
 ];
 
 /// The pattern `list.files` filters names by: an extended regular expression, or the literal
@@ -88,8 +88,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
 pub(crate) struct NamePattern(Matcher);
 
 impl NamePattern {
-    pub(crate) unsafe fn compile(pattern: &str, ignore_case: bool, fixed: bool) -> R<NamePattern> {
-        let invalid = |_| error("invalid 'pattern' regular expression");
+    pub(crate) fn compile(pattern: &str, ignore_case: bool, fixed: bool) -> R<NamePattern> {
+        // A pattern compiled for wide text fails without a warning.
+        let invalid = |_: CompileFailure| error("invalid 'pattern' regular expression");
         let compiled = if fixed && ignore_case {
             // A literal has no case-insensitive search, so the escaped text is a pattern.
             let options = PatternOptions {
@@ -301,33 +302,28 @@ enum CountType {
     Width,
 }
 
-unsafe fn do_nchar(call: &Call<'_>) -> R<Sexp> {
-    let x = call.arg(0);
-    if values::inherits(x, "factor") {
+fn do_nchar<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let x = arguments.value(0);
+    if handles::inherits(context, x, "factor") {
         return Err(error("'nchar()' requires a character vector"));
     }
-    let count_type = match values::first_string(call.arg(1)).as_deref() {
+    let count_type = match handles::first_string(context, arguments.value(1)).as_deref() {
         Some(name) if !name.is_empty() && "bytes".starts_with(name) => CountType::Bytes,
         Some(name) if !name.is_empty() && "chars".starts_with(name) => CountType::Chars,
         Some(name) if !name.is_empty() && "width".starts_with(name) => CountType::Width,
         _ => return Err(error("invalid 'type' argument")),
     };
-    let keep_na = values::as_logical_scalar(call.arg(3));
+    let keep_na = handles::logical_scalar(context, arguments.value(3));
     let na_count = match (keep_na, count_type) {
         (1, _) | (NA_LOGICAL, CountType::Bytes | CountType::Chars) => NA_INTEGER,
         _ => 2,
     };
-    let allow_na = values::as_logical_scalar(call.arg(2)) == 1;
-    let text = character_vector(x)?;
-    let count = length(text);
-    let result = alloc(SexpType::Integer, count)?;
-    let counts = values::ints_mut(result);
-    for (index, slot) in counts.iter_mut().enumerate() {
-        let charsxp = text.element(index);
-        if count_type != CountType::Bytes
-            && charsxp.has_gp(gp::BYTES)
-            && !charsxp.bytes().is_ascii()
-        {
+    let allow_na = handles::logical_scalar(context, arguments.value(2)) == 1;
+    let text = handles::character_vector(context, x)?;
+    let mut result = context.alloc::<Integer>(text.len())?;
+    let counts = result.as_mut_slice().iter_mut();
+    for (index, (slot, chars)) in counts.zip(text.iter(context)).enumerate() {
+        if count_type != CountType::Bytes && handles::is_bytes(chars) && !chars.bytes().is_ascii() {
             if !allow_na {
                 let what = if count_type == CountType::Chars {
                     "number of characters"
@@ -343,9 +339,9 @@ unsafe fn do_nchar(call: &Call<'_>) -> R<Sexp> {
             continue;
         }
         let invalid = count_type != CountType::Bytes
-            && !charsxp.has_gp(gp::LATIN1)
-            && std::str::from_utf8(charsxp.bytes()).is_err();
-        *slot = if charsxp == na_string() {
+            && !handles::is_latin1(chars)
+            && std::str::from_utf8(chars.bytes()).is_err();
+        *slot = if handles::is_na(chars) {
             na_count
         } else if invalid {
             if !allow_na {
@@ -357,157 +353,170 @@ unsafe fn do_nchar(call: &Call<'_>) -> R<Sexp> {
             NA_INTEGER
         } else {
             match count_type {
-                CountType::Bytes => charsxp.bytes().len() as i32,
-                CountType::Chars => values::char_str(charsxp).chars().count() as i32,
-                CountType::Width => display_width(&values::char_str(charsxp)) as i32,
+                CountType::Bytes => chars.bytes().len() as i32,
+                // GNU R counts a latin1 string's bytes, each one character and one column.
+                _ if handles::is_latin1(chars) => chars.bytes().len() as i32,
+                CountType::Chars => handles::text(chars).chars().count() as i32,
+                CountType::Width => display_width(&handles::text(chars)) as i32,
             }
         };
     }
-    copy_shape(x, result)?;
-    Ok(result)
+    handles::copy_shape(context, x, &mut result)?;
+    Ok(result.finish().value())
 }
 
-unsafe fn do_nzchar(call: &Call<'_>) -> R<Sexp> {
-    let (matched, _) = call.match_args(&["x", "keepNA"])?;
+fn do_nzchar<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let matched = arguments.matched_as_passed(context, ["x", "keepNA"])?;
     // The empty symbol, as `lapply` hands over an empty argument taken from a call, evaluates to
     // `R_MissingArg`, which GNU R coerces to `""` rather than reporting a missing argument.
-    if matched[0] == Some(values::missing_arg()) {
-        return values::scalar_logical(0);
+    if matched[0].is_some_and(handles::is_missing_argument) {
+        return handles::logical_constant(context, 0);
     }
-    let x = require(matched[0], "x")?;
-    let keep_na = matched[1].is_some_and(|value| flag(value));
-    if values::inherits(x, "factor") {
+    let Some(x) = matched[0] else {
+        return Err(error("argument \"x\" is missing, with no default"));
+    };
+    let keep_na = matched[1].is_some_and(|value| is_true(context, value));
+    if handles::inherits(context, x, "factor") {
         return Err(error("'nzchar()' requires a character vector"));
     }
-    let text = character_vector(x)?;
-    let count = length(text);
-    let result = alloc(SexpType::Logical, count)?;
-    for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
-        let charsxp = text.element(index);
-        *slot = if charsxp == na_string() {
+    let text = handles::character_vector(context, x)?;
+    let mut result = context.alloc::<Logical>(text.len())?;
+    for (slot, chars) in result.as_mut_slice().iter_mut().zip(text.iter(context)) {
+        *slot = if handles::is_na(chars) {
             if keep_na { NA_LOGICAL } else { 1 }
         } else {
-            (!charsxp.bytes().is_empty()) as i32
+            (!chars.bytes().is_empty()) as i32
         };
     }
-    Ok(result)
+    Ok(result.finish().value())
 }
 
-unsafe fn do_substr(call: &Call<'_>) -> R<Sexp> {
-    let x = call.arg(0);
-    if x.kind() != SexpType::String {
+fn do_substr<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let x = arguments.value(0);
+    let Some(text) = handles::dense::<Str>(context, x)? else {
         return Err(error("extracting substrings from a non-character object"));
-    }
-    let count = length(x);
-    let result = alloc(SexpType::String, count)?;
+    };
+    let count = text.len();
+    let mut result = StringFill::new(context, count)?;
     if count > 0 {
-        let starts = integer_argument(call.arg(1))?;
+        let starts = handles::integer_vector(context, arguments.value(1))?;
         // From R 4.5 on, `substr(x, start, NULL)` and `substring(x, first)` pass a NULL stop,
         // which means the end of each string.
-        let stops = if call.arg(2) == nil() {
-            vec![i32::MAX]
+        let stops = if arguments.value(2).r_type() == SexpType::Nil {
+            None
         } else {
-            integer_argument(call.arg(2))?
+            Some(handles::integer_vector(context, arguments.value(2))?)
         };
-        if starts.is_empty() || stops.is_empty() {
+        if starts.is_empty() || stops.is_some_and(|stops| stops.is_empty()) {
             return Err(error("invalid substring arguments"));
         }
-        let mut memo = values::StringMemo::default();
+        let (start_count, stop_count) = (starts.len(), stops.map_or(1, |stops| stops.len()));
+        let mut buffer = String::new();
         // Recycling by counters rather than `index % len` keeps two divisions out of every
         // element, which on short strings cost as much as the extraction.
         let (mut start_at, mut stop_at) = (0, 0);
         for index in 0..count {
-            let start = starts[start_at];
-            let stop = stops[stop_at];
-            start_at = if start_at + 1 == starts.len() {
+            let start = starts.as_slice(context)[start_at];
+            let stop = stops.map_or(i32::MAX, |stops| stops.as_slice(context)[stop_at]);
+            start_at = if start_at + 1 == start_count {
                 0
             } else {
                 start_at + 1
             };
-            stop_at = if stop_at + 1 == stops.len() {
+            stop_at = if stop_at + 1 == stop_count {
                 0
             } else {
                 stop_at + 1
             };
-            let charsxp = x.element(index);
-            if charsxp == na_string() || start == NA_INTEGER || stop == NA_INTEGER {
-                set_elt(result, index, na_string());
+            let chars = text.get(context, index);
+            if handles::is_na(chars) || start == NA_INTEGER || stop == NA_INTEGER {
+                result.push(context, handles::na());
                 continue;
             }
-            // The intern table marks ASCII strings, whose characters are bytes, so the span needs no decoding.
-            if charsxp.has_gp(gp::ASCII) {
-                let bytes = charsxp.bytes();
-                let first = (start.max(1) as usize - 1).min(bytes.len());
-                let last = (stop.max(0) as usize).min(bytes.len()).max(first);
-                if first == 0 && last == bytes.len() {
-                    set_elt(result, index, charsxp);
+            // The intern table marks ASCII strings, whose characters are bytes, so the span
+            // needs no decoding; neither does a string of bytes.
+            let ascii = chars.has_mark(gp::ASCII);
+            if ascii || handles::encoding(chars) == Encoding::Bytes {
+                let length = chars.bytes().len();
+                let first = (start.max(1) as usize - 1).min(length);
+                let last = (stop.max(0) as usize).min(length).max(first);
+                if ascii && first == 0 && last == length {
+                    result.push(context, chars);
                 } else {
-                    set_elt(result, index, memo.mk_char(&bytes[first..last])?);
+                    let encoding = if ascii {
+                        Encoding::Native
+                    } else {
+                        Encoding::Bytes
+                    };
+                    result.push_part(context, text, index, first..last, encoding)?;
                 }
                 continue;
             }
-            if Encoding::of(charsxp) == Encoding::Bytes {
-                let bytes = charsxp.bytes();
-                let first = (start.max(1) as usize - 1).min(bytes.len());
-                let last = (stop.max(0) as usize).min(bytes.len()).max(first);
-                values::set_mkchar_bytes(result, index, &bytes[first..last], Encoding::Bytes)?;
-                continue;
-            }
-            let text = values::char_str(charsxp);
-            let (first, last) = char_span(&text, start, stop);
-            if first == 0 && last == text.len() {
-                set_elt(result, index, charsxp);
+            // The span is copied out because making its string allocates, which the text,
+            // borrowed from the heap, cannot outlive.
+            let whole = {
+                let decoded = handles::text(chars);
+                let (first, last) = char_span(&decoded, start, stop);
+                let whole = first == 0 && last == decoded.len();
+                if !whole {
+                    buffer.clear();
+                    buffer.push_str(&decoded[first..last]);
+                }
+                whole
+            };
+            if whole {
+                result.push(context, chars);
             } else {
-                values::set_mkchar(result, index, &text[first..last])?;
+                result.push_text(context, &buffer)?;
             }
         }
     }
-    values::copy_attributes(x, result)?;
-    Ok(result)
+    let mut result = result.finish();
+    handles::copy_attributes(context, x, &mut result)?;
+    Ok(result.finish().value())
 }
 
-unsafe fn do_set_substr(call: &Call<'_>) -> R<Sexp> {
-    let x = call.arg(0);
-    let value = call.arg(3);
-    if x.kind() != SexpType::String {
+fn do_set_substr<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let Some(text) = handles::dense::<Str>(context, arguments.value(0))? else {
         return Err(error("replacing substrings in a non-character object"));
+    };
+    let mut result = handles::shallow_duplicate(context, text)?;
+    if text.is_empty() {
+        return Ok(result.finish().value());
     }
-    let count = length(x);
-    let result = values::shallow_duplicate(x)?;
-    if count == 0 {
-        return Ok(result);
-    }
-    let starts = integer_argument(call.arg(1))?;
+    let starts = handles::integer_vector(context, arguments.value(1))?;
     // From R 4.5 on, `substring(x, first) <- value` passes a NULL stop, which means the end of
     // each string.
-    let stops = if call.arg(2) == nil() {
-        vec![i32::MAX]
+    let stops = if arguments.value(2).r_type() == SexpType::Nil {
+        None
     } else {
-        integer_argument(call.arg(2))?
+        Some(handles::integer_vector(context, arguments.value(2))?)
     };
-    if starts.is_empty() || stops.is_empty() {
+    if starts.is_empty() || stops.is_some_and(|stops| stops.is_empty()) {
         return Err(error("invalid substring arguments"));
     }
-    if value.kind() != SexpType::String || length(value) == 0 {
-        return Err(error("invalid value"));
-    }
-    let value_count = length(value);
-    for index in 0..count {
-        let start = starts[index % starts.len()];
-        let stop = stops[index % stops.len()];
-        let charsxp = x.element(index);
-        let replacement = value.element(index % value_count);
-        if charsxp == na_string()
-            || replacement == na_string()
+    let value = match handles::dense::<Str>(context, arguments.value(3))? {
+        Some(value) if !value.is_empty() => value,
+        _ => return Err(error("invalid value")),
+    };
+    for index in 0..text.len() {
+        let start = starts.as_slice(context)[index % starts.len()];
+        let stop = stops.map_or(i32::MAX, |stops| {
+            stops.as_slice(context)[index % stops.len()]
+        });
+        let chars = text.get(context, index);
+        let replacement = value.get(context, index % value.len());
+        if handles::is_na(chars)
+            || handles::is_na(replacement)
             || start == NA_INTEGER
             || stop == NA_INTEGER
         {
-            set_elt(result, index, na_string());
+            result.set(context, index, handles::na());
             continue;
         }
-        let text = values::char_str(charsxp);
-        let replacement = values::char_str(replacement);
-        let length_in_chars = text.chars().count() as i64;
+        let current = handles::text(chars);
+        let replacement = handles::text(replacement);
+        let length_in_chars = current.chars().count() as i64;
         let first = i64::from(start).max(1);
         let last = i64::from(stop)
             .min(length_in_chars)
@@ -515,18 +524,18 @@ unsafe fn do_set_substr(call: &Call<'_>) -> R<Sexp> {
         if first > last {
             continue;
         }
-        let mut edited = String::with_capacity(text.len());
+        let mut edited = String::with_capacity(current.len());
         let mut replacement_chars = replacement.chars();
-        for (position, character) in (1..).zip(text.chars()) {
+        for (position, character) in (1..).zip(current.chars()) {
             if (first..=last).contains(&position) {
                 edited.extend(replacement_chars.next());
             } else {
                 edited.push(character);
             }
         }
-        values::set_mkchar(result, index, &edited)?;
+        handles::set_text(context, &mut result, index, &edited)?;
     }
-    Ok(result)
+    Ok(result.finish().value())
 }
 
 /// The byte range of characters `start..=stop` (1-based, clamped to the text).
@@ -556,8 +565,16 @@ unsafe fn do_strsplit(call: &Call<'_>) -> R<Sexp> {
     if x.kind() != SexpType::String {
         return Err(error("non-character argument"));
     }
-    let options = pattern_options(false, flag(call.arg(3)), flag(call.arg(2)))?;
-    let forced_bytes = has_bytes(&[x, split]);
+    let (perl, fixed) = (flag(call.arg(3)), flag(call.arg(2)));
+    for message in overridden_flags(false, perl, fixed) {
+        warning(message)?;
+    }
+    let options = effective_options(false, perl, fixed);
+    let forced_bytes = [x, split].iter().any(|&vector| {
+        vector.kind() == SexpType::String
+            && (0..length(vector))
+                .any(|index| Encoding::of(vector.element(index)) == Encoding::Bytes)
+    });
     let use_bytes = flag(call.arg(4)) || forced_bytes;
     let splits: SmallVec<[Option<Cow<str>>; 1]> = if split.kind() == SexpType::String {
         (0..length(split))
@@ -578,6 +595,26 @@ unsafe fn do_strsplit(call: &Call<'_>) -> R<Sexp> {
             continue;
         };
         let position = index % splits.len().max(1);
+        // Splitting into characters reports an invalid string as the Perl matcher does.
+        let by_character =
+            !matches!(splits.get(position), Some(Some(separator)) if !separator.is_empty());
+        let reported = PatternOptions {
+            perl: options.perl || by_character,
+            ..options
+        };
+        let valid = use_bytes
+            || x.element(index).is_valid_utf8()
+            || handles::with(|context| {
+                let split = handles::dense::<Str>(context, handles::held(context, split))?;
+                match handles::dense::<Str>(context, handles::held(context, x))? {
+                    Some(x) => valid_subject(context, split, x, index, use_bytes, reported, false),
+                    None => Ok(true),
+                }
+            })?;
+        if !valid {
+            set_elt(result, index, values::scalar_string_charsxp(na_string())?);
+            continue;
+        }
         pieces.clear();
         match splits.get(position) {
             None => split_chars(&text, &mut pieces),
@@ -588,8 +625,13 @@ unsafe fn do_strsplit(call: &Call<'_>) -> R<Sexp> {
             }
             Some(Some(separator)) => {
                 if matchers[position].is_none() {
-                    matchers[position] =
-                        Some(Matcher::compile(separator, options, CompileErrors::Quoted)?);
+                    let compiled = Matcher::compile(separator, options, CompileErrors::Quoted);
+                    matchers[position] = Some(compiled.or_else(|failure| {
+                        if let Some(message) = failure.warning {
+                            warning(message)?;
+                        }
+                        Err(failure.error)
+                    })?);
                 }
                 match &matchers[position] {
                     Some(matcher) => split_text(matcher, &text, &mut pieces)?,
@@ -690,7 +732,8 @@ fn split_text(matcher: &Matcher, text: &str, pieces: &mut Pieces) -> R<()> {
 /// Runs `body` with the interpreter's text buffer, empty. A nested call (a `%s` conversion that
 /// runs an `as.character` method that calls `sprintf`, say) finds the buffer taken and starts
 /// its own, and the larger of the two is kept.
-pub unsafe fn with_byte_buffer<T>(body: impl FnOnce(&mut Vec<u8>) -> R<T>) -> R<T> {
+#[inline(always)]
+pub fn with_byte_buffer<T>(body: impl FnOnce(&mut Vec<u8>) -> R<T>) -> R<T> {
     let mut buffer = std::mem::take(&mut crate::interp().text_buffer);
     buffer.clear();
     let result = body(&mut buffer);
@@ -702,7 +745,8 @@ pub unsafe fn with_byte_buffer<T>(body: impl FnOnce(&mut Vec<u8>) -> R<T>) -> R<
 }
 
 /// [`with_byte_buffer`] for text that is UTF-8.
-pub unsafe fn with_text_buffer<T>(body: impl FnOnce(&mut String) -> R<T>) -> R<T> {
+#[inline(always)]
+pub fn with_text_buffer<T>(body: impl FnOnce(&mut String) -> R<T>) -> R<T> {
     with_byte_buffer(|bytes| {
         // SAFETY: the buffer arrives empty, and an empty buffer is valid UTF-8.
         let mut text = unsafe { String::from_utf8_unchecked(std::mem::take(bytes)) };
@@ -1493,25 +1537,32 @@ pub fn hexadecimal_form(magnitude: f64, precision: Option<usize>, alternate: boo
     format!("0x{lead}{point}{hex}p{sign}{}", exponent.unsigned_abs())
 }
 
-unsafe fn change_case(call: &Call<'_>, upper: bool) -> R<Sexp> {
-    let x = call.arg(0);
-    if x.kind() != SexpType::String {
+fn do_toupper<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    change_case(context, arguments, true)
+}
+
+fn do_tolower<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    change_case(context, arguments, false)
+}
+
+fn change_case<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>, upper: bool) -> R<Local<'s>> {
+    let x = arguments.value(0);
+    let Some(text) = handles::dense::<Str>(context, x)? else {
         return Err(error("non-character argument"));
+    };
+    if all_ascii(context, text) {
+        return change_ascii_case(context, x, text, upper);
     }
-    if all_ascii(x) {
-        return change_ascii_case(x, upper);
-    }
-    values::refuse_bytes(x)?;
-    for index in 0..length(x) {
-        let charsxp = x.element(index);
-        if charsxp != na_string()
-            && !charsxp.has_gp(gp::LATIN1)
-            && std::str::from_utf8(charsxp.bytes()).is_err()
+    refuse_bytes(context, text)?;
+    for (index, chars) in text.iter(context).enumerate() {
+        if !handles::is_na(chars)
+            && !chars.has_mark(gp::LATIN1)
+            && std::str::from_utf8(chars.bytes()).is_err()
         {
             return Err(error(format!("invalid multibyte string {}", index + 1)));
         }
     }
-    map_strings(x, |text| {
+    map_strings(context, x, text, |text| {
         Some(
             text.chars()
                 .map(|character| change_char_case(character, upper))
@@ -1520,21 +1571,23 @@ unsafe fn change_case(call: &Call<'_>, upper: bool) -> R<Sexp> {
     })
 }
 
-/// Whether every non-missing string of `x` is ASCII, where case mapping is a byte map.
-unsafe fn all_ascii(x: Sexp) -> bool {
-    (0..length(x)).all(|index| {
-        let charsxp = x.element(index);
-        charsxp == na_string() || charsxp.has_gp(gp::ASCII)
-    })
+/// Whether every non-missing string of `text` is ASCII, where case mapping is a byte map.
+fn all_ascii(context: &Cx<'_>, text: Local<'_, Str>) -> bool {
+    text.iter(context)
+        .all(|chars| handles::is_na(chars) || chars.has_mark(gp::ASCII))
 }
 
-unsafe fn change_ascii_case(x: Sexp, upper: bool) -> R<Sexp> {
-    let count = length(x);
-    let result = alloc(SexpType::String, count)?;
+fn change_ascii_case<'s>(
+    context: &mut Cx<'s>,
+    x: Local<'s>,
+    text: Local<'s, Str>,
+    upper: bool,
+) -> R<Local<'s>> {
+    let mut result = context.alloc::<Str>(text.len())?;
     let mut buffer = Vec::new();
-    for index in 0..count {
-        let charsxp = x.element(index);
-        let bytes = charsxp.bytes();
+    for index in 0..text.len() {
+        let chars = text.get(context, index);
+        let bytes = chars.bytes();
         let changes = |byte: &u8| {
             if upper {
                 byte.is_ascii_lowercase()
@@ -1542,8 +1595,8 @@ unsafe fn change_ascii_case(x: Sexp, upper: bool) -> R<Sexp> {
                 byte.is_ascii_uppercase()
             }
         };
-        if charsxp == na_string() || !bytes.iter().any(changes) {
-            set_elt(result, index, charsxp);
+        if handles::is_na(chars) || !bytes.iter().any(changes) {
+            result.set(context, index, chars);
             continue;
         }
         buffer.clear();
@@ -1554,15 +1607,30 @@ unsafe fn change_ascii_case(x: Sexp, upper: bool) -> R<Sexp> {
                 byte.to_ascii_lowercase()
             }
         }));
-        values::set_mkchar_bytes(result, index, &buffer, Encoding::Native)?;
+        handles::set_bytes(context, &mut result, index, &buffer, Encoding::Native)?;
     }
-    values::copy_attributes(x, result)?;
-    Ok(result)
+    handles::copy_attributes(context, x, &mut result)?;
+    Ok(result.finish().value())
 }
 
-/// `towupper` and `towlower` map one character to one character, so a character whose case
-/// mapping takes several (`ß` to `SS`) is left alone, as in GNU R.
+/// `towupper` and `towlower` are Unicode's simple case mappings, one character to one character.
+/// A character whose full mapping takes several (`ß` to `SS`) has a simple mapping only in the
+/// cases listed here, and is left alone otherwise, as in GNU R.
 fn change_char_case(character: char, upper: bool) -> char {
+    let code = u32::from(character);
+    let simple = if upper {
+        match code {
+            // Greek letters with iota subscript map to their titlecase forms.
+            0x1f80..=0x1f87 | 0x1f90..=0x1f97 | 0x1fa0..=0x1fa7 => Some(code + 8),
+            0x1fb3 | 0x1fc3 | 0x1ff3 => Some(code + 9),
+            _ => None,
+        }
+    } else {
+        (character == 'İ').then_some(u32::from('i'))
+    };
+    if let Some(simple) = simple.and_then(char::from_u32) {
+        return simple;
+    }
     if upper {
         single_char(character.to_uppercase(), character)
     } else {
@@ -1577,18 +1645,18 @@ fn single_char(mut mapped: impl Iterator<Item = char>, fallback: char) -> char {
     }
 }
 
-unsafe fn do_chartr(call: &Call<'_>) -> R<Sexp> {
-    let old = expand_character_ranges(&translation_spec(call.arg(0), "old")?);
-    let new = expand_character_ranges(&translation_spec(call.arg(1), "new")?);
-    let x = call.arg(2);
+fn do_chartr<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let old = expand_character_ranges(&translation_spec(context, arguments.value(0), "old")?);
+    let new = expand_character_ranges(&translation_spec(context, arguments.value(1), "new")?);
+    let x = arguments.value(2);
     if old.len() > new.len() {
         return Err(error("'old' is longer than 'new'"));
     }
-    if x.kind() != SexpType::String {
+    let Some(text) = handles::dense::<Str>(context, x)? else {
         return Err(error("invalid 'x' argument"));
-    }
-    values::refuse_bytes(x)?;
-    map_strings(x, |text| {
+    };
+    refuse_bytes(context, text)?;
+    map_strings(context, x, text, |text| {
         Some(
             text.chars()
                 .map(|character| {
@@ -1603,9 +1671,9 @@ unsafe fn do_chartr(call: &Call<'_>) -> R<Sexp> {
     })
 }
 
-unsafe fn translation_spec(value: Sexp, what: &str) -> R<String> {
-    match values::first_string(value) {
-        Some(text) if value.kind() == SexpType::String => Ok(text.into_owned()),
+fn translation_spec(context: &mut Cx<'_>, value: Local<'_>, what: &str) -> R<String> {
+    match handles::first_string(context, value) {
+        Some(text) if value.r_type() == SexpType::String => Ok(text.into_owned()),
         _ => Err(error(format!("invalid '{what}' argument"))),
     }
 }
@@ -1630,133 +1698,186 @@ fn expand_character_ranges(spec: &str) -> Vec<char> {
     expanded
 }
 
-unsafe fn do_strtrim(call: &Call<'_>) -> R<Sexp> {
-    let x = call.arg(0);
-    if x.kind() != SexpType::String {
+fn do_strtrim<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let x = arguments.value(0);
+    let Some(text) = handles::dense::<Str>(context, x)? else {
         return Err(error("strtrim() requires a character vector"));
-    }
-    let widths = integer_argument(call.arg(1))?;
-    if length(x) > 0
-        && (widths.is_empty() || widths.iter().any(|&width| width == NA_INTEGER || width < 0))
+    };
+    let widths = handles::integer_vector(context, arguments.value(1))?;
+    if !text.is_empty()
+        && (widths.is_empty()
+            || widths
+                .as_slice(context)
+                .iter()
+                .any(|&width| width == NA_INTEGER || width < 0))
     {
         return Err(error("invalid 'width' argument"));
     }
-    let count = length(x);
-    let result = alloc(SexpType::String, count)?;
-    for index in 0..count {
-        let charsxp = x.element(index);
-        if charsxp == na_string() {
-            set_elt(result, index, charsxp);
+    let mut result = context.alloc::<Str>(text.len())?;
+    for index in 0..text.len() {
+        let chars = text.get(context, index);
+        if handles::is_na(chars) {
+            result.set(context, index, chars);
             continue;
         }
-        let limit = widths[index % widths.len()] as usize;
-        let text = values::char_str(charsxp);
+        let limit = widths.as_slice(context)[index % widths.len()] as usize;
+        let current = handles::text(chars);
         let mut used = 0;
-        let mut end = text.len();
-        for (offset, character) in text.char_indices() {
+        let mut end = current.len();
+        for (offset, character) in current.char_indices() {
             used += display_width(character.encode_utf8(&mut [0; 4]));
             if used > limit {
                 end = offset;
                 break;
             }
         }
-        if end == text.len() {
-            set_elt(result, index, charsxp);
+        if end == current.len() {
+            result.set(context, index, chars);
         } else {
-            values::set_mkchar(result, index, &text[..end])?;
+            handles::set_text_range(context, &mut result, index, text, index, 0..end)?;
         }
     }
-    values::copy_attributes(x, result)?;
-    Ok(result)
+    handles::copy_attributes(context, x, &mut result)?;
+    Ok(result.finish().value())
 }
 
-unsafe fn starts_or_ends_with(call: &Call<'_>, starts: bool) -> R<Sexp> {
-    let x = call.arg(0);
-    let affix = call.arg(1);
-    if x.kind() != SexpType::String || affix.kind() != SexpType::String {
+fn do_starts_with<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    starts_or_ends_with(context, arguments, true)
+}
+
+fn do_ends_with<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    starts_or_ends_with(context, arguments, false)
+}
+
+fn starts_or_ends_with<'s>(
+    context: &mut Cx<'s>,
+    arguments: &Args<'_, 's>,
+    starts: bool,
+) -> R<Local<'s>> {
+    let (x, affix) = (arguments.value(0), arguments.value(1));
+    if x.r_type() != SexpType::String || affix.r_type() != SexpType::String {
         return Err(error("non-character object(s)"));
     }
-    let (text_count, affix_count) = (length(x), length(affix));
+    let (Some(x), Some(affix)) = (
+        handles::dense::<Str>(context, x)?,
+        handles::dense::<Str>(context, affix)?,
+    ) else {
+        return Err(error("non-character object(s)"));
+    };
+    let (text_count, affix_count) = (x.len(), affix.len());
     let count = if text_count == 0 || affix_count == 0 {
         0
     } else {
         text_count.max(affix_count)
     };
-    let result = alloc(SexpType::Logical, count)?;
-    for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
-        *slot = match (
-            string_at(x, index % text_count),
-            string_at(affix, index % affix_count),
-        ) {
-            (Some(text), Some(affix)) => {
-                let found = if starts {
-                    text.starts_with(affix.as_ref())
-                } else {
-                    text.ends_with(affix.as_ref())
-                };
-                found as i32
-            }
-            _ => NA_LOGICAL,
-        };
+    let mut result = context.alloc::<Logical>(count)?;
+    let affixes: Vec<Option<&[u8]>> = affix
+        .iter(context)
+        .map(|chars| {
+            (!handles::is_na(chars))
+                .then(|| utf8_bytes(chars))
+                .flatten()
+        })
+        .collect();
+    let test = |text: Gc<'_, Chars>, affix_index: usize| -> i32 {
+        let affix_chars = affix.get(context, affix_index);
+        if handles::is_na(text) || handles::is_na(affix_chars) {
+            return NA_LOGICAL;
+        }
+        // Valid UTF-8 matches a prefix or suffix byte for byte exactly when it matches
+        // character for character. An affix without NUL matches a text's prefix exactly when it
+        // matches the text cut at its first NUL, as `handles::text` reads it, but a suffix match
+        // must check the text holds no NUL.
+        if let (Some(affix), true) = (affixes[affix_index], text.is_valid_utf8())
+            && !text.has_mark(gp::LATIN1 | gp::BYTES)
+        {
+            let bytes = text.bytes();
+            return if starts {
+                bytes.starts_with(affix) as i32
+            } else {
+                (bytes.ends_with(affix) && memchr::memchr(0, bytes).is_none()) as i32
+            };
+        }
+        let (text, affix) = (handles::text(text), handles::text(affix_chars));
+        if starts {
+            text.starts_with(affix.as_ref()) as i32
+        } else {
+            text.ends_with(affix.as_ref()) as i32
+        }
+    };
+    let out = result.as_mut_slice();
+    if affixes.len() == 1 && text_count == count {
+        for (slot, text) in out.iter_mut().zip(x.iter(context)) {
+            *slot = test(text, 0);
+        }
+    } else {
+        for (index, slot) in out.iter_mut().enumerate() {
+            *slot = test(x.get(context, index % text_count), index % affix_count);
+        }
     }
-    Ok(result)
+    Ok(result.finish().value())
 }
 
-unsafe fn do_strrep(call: &Call<'_>) -> R<Sexp> {
-    let x = call.arg(0);
-    if x.kind() != SexpType::String {
-        return Err(error("invalid 'x' argument"));
+/// The bytes of `chars` when they are its text as UTF-8 as they stand: valid UTF-8 not declared
+/// Latin-1 or bytes, and without the NUL that [`handles::text`] would end the text at.
+fn utf8_bytes(chars: Gc<'_, Chars>) -> Option<&[u8]> {
+    if !chars.is_valid_utf8() || chars.has_mark(gp::LATIN1 | gp::BYTES) {
+        return None;
     }
-    let times = integer_argument(call.arg(1))?;
-    let (text_count, times_count) = (length(x), times.len());
+    let bytes = chars.bytes();
+    memchr::memchr(0, bytes).is_none().then_some(bytes)
+}
+
+fn do_strrep<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let x = arguments.value(0);
+    let Some(text) = handles::dense::<Str>(context, x)? else {
+        return Err(error("invalid 'x' argument"));
+    };
+    let times = handles::integer_vector(context, arguments.value(1))?;
+    let (text_count, times_count) = (text.len(), times.len());
     let count = if text_count == 0 || times_count == 0 {
         0
     } else {
         text_count.max(times_count)
     };
-    let result = alloc(SexpType::String, count)?;
+    let mut result = context.alloc::<Str>(count)?;
     for index in 0..count {
-        let repeat = times[index % times_count];
-        let charsxp = x.element(index % text_count);
-        if repeat == NA_INTEGER || charsxp == na_string() {
-            set_elt(result, index, na_string());
+        let repeat = times.as_slice(context)[index % times_count];
+        let chars = text.get(context, index % text_count);
+        if repeat == NA_INTEGER || handles::is_na(chars) {
+            result.set(context, index, handles::na());
             continue;
         }
         if repeat < 0 {
             return Err(error("invalid 'times' value"));
         }
-        values::set_mkchar(
-            result,
-            index,
-            &values::char_str(charsxp).repeat(repeat as usize),
-        )?;
+        let repeated = handles::text(chars).repeat(repeat as usize);
+        handles::set_text(context, &mut result, index, &repeated)?;
     }
     if text_count >= times_count {
-        let names = get_attr(x, symbols().names);
-        if names != nil() {
-            set_attr(result, symbols().names, names)?;
-        }
+        handles::copy_names(context, x, &mut result)?;
     }
-    Ok(result)
+    Ok(result.finish().value())
 }
 
-unsafe fn do_strtoi(call: &Call<'_>) -> R<Sexp> {
-    let x = call.arg(0);
-    let base = values::as_integer_scalar(call.arg(1));
+fn do_strtoi<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let base = handles::integer_scalar(context, arguments.value(1));
     if base == NA_INTEGER || base == 1 || !(0..=36).contains(&base) {
         return Err(error("invalid 'base' argument"));
     }
-    if x.kind() != SexpType::String {
+    let Some(text) = handles::dense::<Str>(context, arguments.value(0))? else {
         return Err(error("invalid 'x' argument"));
+    };
+    let mut result = context.alloc::<Integer>(text.len())?;
+    let numbers = result.as_mut_slice().iter_mut();
+    for (slot, chars) in numbers.zip(text.iter(context)) {
+        *slot = if handles::is_na(chars) {
+            NA_INTEGER
+        } else {
+            parse_c_integer(&handles::text(chars), base as u32).unwrap_or(NA_INTEGER)
+        };
     }
-    let count = length(x);
-    let result = alloc(SexpType::Integer, count)?;
-    for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
-        *slot = string_at(x, index)
-            .and_then(|text| parse_c_integer(&text, base as u32))
-            .unwrap_or(NA_INTEGER);
-    }
-    Ok(result)
+    Ok(result.finish().value())
 }
 
 /// C's `strtol`, requiring the whole text to be a number that fits an R integer. Base 0 reads
@@ -1815,23 +1936,45 @@ const RESERVED_WORDS: &[&str] = &[
     "in",
 ];
 
-unsafe fn do_make_names(call: &Call<'_>) -> R<Sexp> {
-    let names = call.arg(0);
-    if names.kind() != SexpType::String {
+fn do_make_names<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let Some(names) = handles::dense::<Str>(context, arguments.value(0))? else {
         return Err(error("non-character names"));
-    }
-    let allow_underscore = values::as_logical_scalar(call.arg(1));
+    };
+    let allow_underscore = handles::logical_scalar(context, arguments.value(1));
     if allow_underscore == NA_LOGICAL {
         return Err(error("invalid 'allow_' value"));
     }
     let allow_underscore = allow_underscore == 1;
-    values::refuse_bytes(names)?;
-    let made: Vec<String> = strings(names)
-        .into_iter()
-        .map(|name| {
-            let name = name.unwrap_or_else(|| "NA".to_owned());
-            let mut chars = name.chars();
-            let needs_prefix = match (chars.next(), chars.next()) {
+    refuse_bytes(context, names)?;
+    // GNU R decodes the first character, and the one after a leading dot, with `Mbrtowc`,
+    // whose error shows the text, and the whole name with `mbstowcs`, whose error counts it.
+    for (index, chars) in names.iter(context).enumerate() {
+        if handles::is_na(chars) {
+            continue;
+        }
+        let Some(bytes) = values::unescape_invalid_bytes(&handles::text(chars)) else {
+            continue;
+        };
+        let checked = usize::from(bytes.first() == Some(&b'.'));
+        return Err(match bytes.get(checked..) {
+            Some(rest)
+                if !rest.is_empty() && crate::connections::multibyte_length(rest).is_none() =>
+            {
+                crate::connections::invalid_multibyte(rest)
+            }
+            _ => error(format!("invalid multibyte string {}", index + 1)),
+        });
+    }
+    let made: Vec<String> = names
+        .iter(context)
+        .map(|chars| {
+            let name = if handles::is_na(chars) {
+                Cow::Borrowed("NA")
+            } else {
+                handles::text(chars)
+            };
+            let mut characters = name.chars();
+            let needs_prefix = match (characters.next(), characters.next()) {
                 (None, _) => true,
                 (Some('.'), Some(second)) => second.is_ascii_digit(),
                 (Some(first), _) => !(first.is_alphabetic() || first == '.'),
@@ -1857,7 +2000,11 @@ unsafe fn do_make_names(call: &Call<'_>) -> R<Sexp> {
             made
         })
         .collect();
-    string_vector(&made)
+    let mut result = context.alloc::<Str>(made.len())?;
+    for (index, name) in made.iter().enumerate() {
+        handles::set_text(context, &mut result, index, name)?;
+    }
+    Ok(result.finish().value())
 }
 
 unsafe fn do_make_unique(call: &Call<'_>) -> R<Sexp> {
@@ -2015,243 +2162,339 @@ unsafe fn make_unique_interned(names: Sexp, separator: &[u8]) -> R<Sexp> {
     }
 }
 
-unsafe fn do_abbreviate(call: &Call<'_>) -> R<Sexp> {
-    let x = call.arg(0);
-    if x.kind() != SexpType::String {
+fn do_abbreviate<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let Some(text) = handles::dense::<Str>(context, arguments.value(0))? else {
         return Err(error("the first argument must be a character vector"));
-    }
-    let minimum = values::as_integer_scalar(call.arg(1));
+    };
+    let minimum = handles::integer_scalar(context, arguments.value(1));
     if minimum == NA_INTEGER {
         return Err(error("invalid 'minlength' argument"));
     }
-    let use_classes = flag(call.arg(2));
-    values::refuse_bytes(x)?;
-    let mut warned = false;
-    let count = length(x);
-    let result = alloc(SexpType::String, count)?;
-    for index in 0..count {
-        let Some(text) = string_at(x, index) else {
-            set_elt(result, index, na_string());
-            continue;
-        };
-        if !text.is_ascii() && !warned {
-            warning("abbreviate used with non-ASCII chars")?;
-            warned = true;
-        }
-        let abbreviation = abbreviate(&text, minimum.max(0) as usize, use_classes);
-        values::set_mkchar(result, index, &abbreviation)?;
+    let use_classes = handles::logical_scalar(context, arguments.value(2));
+    if use_classes == NA_INTEGER {
+        return Err(error("invalid 'use.classes' argument"));
     }
-    Ok(result)
+    refuse_bytes(context, text)?;
+    let mut shortened_non_ascii = false;
+    let mut result = context.alloc::<Str>(text.len())?;
+    for index in 0..text.len() {
+        let chars = text.get(context, index);
+        if handles::is_na(chars) {
+            result.set(context, index, handles::na());
+            continue;
+        }
+        let abbreviation = {
+            let current = handles::text(chars);
+            // GNU R compares an ASCII string's length with the minimum as unsigned numbers, so
+            // a negative minimum leaves it alone, and a non-ASCII string's as signed ones.
+            let longer = if current.is_ascii() {
+                usize::try_from(minimum).is_ok_and(|minimum| current.len() > minimum)
+            } else {
+                current.chars().count() as i64 > i64::from(minimum)
+            };
+            longer.then(|| {
+                shortened_non_ascii |= !current.is_ascii();
+                abbreviate(&current, minimum, use_classes != 0)
+            })
+        };
+        match abbreviation {
+            Some(abbreviation) => handles::set_text(context, &mut result, index, &abbreviation)?,
+            None => {
+                let chars = text.get(context, index);
+                result.set(context, index, chars);
+            }
+        }
+    }
+    if use_classes != 0 && shortened_non_ascii {
+        handles::warning(context, "abbreviate used with non-ASCII chars")?;
+    }
+    handles::copy_attributes(context, arguments.value(0), &mut result)?;
+    Ok(result.finish().value())
 }
 
-/// Shortens `text` to `minimum` characters as `?abbreviate` documents it: lower-case vowels go
-/// first, then lower-case letters, then anything else, each time from the right, and the first
-/// character of every word is always kept. Spaces separate the words and are dropped last.
-fn abbreviate(text: &str, minimum: usize, use_classes: bool) -> String {
-    let mut chars: Vec<char> = text.trim_matches(' ').chars().collect();
-    if chars.len() <= minimum {
-        return chars.into_iter().collect();
-    }
-    let visible = |chars: &[char]| chars.iter().filter(|&&character| character != ' ').count();
-    let word_start = |chars: &[char], index: usize| index == 0 || chars[index - 1] == ' ';
-    let mut classes: Vec<fn(char) -> bool> = Vec::new();
-    if use_classes {
-        classes.push(|character| matches!(character, 'a' | 'e' | 'i' | 'o' | 'u'));
-        classes.push(|character| character.is_lowercase());
-    }
-    classes.push(|character| character != ' ');
-    'classes: for removable in classes {
-        let mut index = chars.len();
-        while index > 1 {
-            index -= 1;
-            if visible(&chars) <= minimum {
-                break 'classes;
+/// GNU R's `stripchars` and `wstripchars`, pass for pass: each pass walks the text from its end
+/// and stops as soon as the characters other than word-separating spaces fit in `minimum`. No
+/// pass removes the first character of the text or of a word.
+fn abbreviate(text: &str, minimum: i32, use_classes: bool) -> String {
+    const VOWELS: &[u32] = &[
+        0x61, 0x65, 0x69, 0x6f, 0x75, 0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe8, 0xe9, 0xea, 0xeb,
+        0xec, 0xed, 0xee, 0xef, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd,
+        0x101, 0x103, 0x105, 0x113, 0x115, 0x117, 0x119, 0x11b, 0x129, 0x12b, 0x12d, 0x12f, 0x131,
+        0x14d, 0x14f, 0x151, 0x169, 0x16b, 0x16d, 0x16f, 0x171, 0x173,
+    ];
+    type Class = fn(char) -> bool;
+    let vowel: Class = |character| VOWELS.contains(&(character as u32));
+    // glibc's lower-case class: a letter Unicode calls lower case, or one whose upper-case form is
+    // another single letter, which adds the title-case digraphs.
+    let lowercase: Class = |character| {
+        let mut upper = character.to_uppercase();
+        character.is_lowercase() || (upper.len() == 1 && upper.next() != Some(character))
+    };
+    let any: Class = |character| !is_space(character);
+    // A pass that removes only at the end of a word, then one that removes anywhere after a
+    // word's first character.
+    let classed: [(Class, bool); 4] = [
+        (vowel, true),
+        (vowel, false),
+        (lowercase, true),
+        (lowercase, false),
+    ];
+    let passes = if use_classes { &classed[..] } else { &[] };
+
+    let mut chars: Vec<char> = text.chars().collect();
+    // GNU R's comparisons with the minimum are unsigned, so a negative minimum always fits.
+    let fits = |length: usize, spaces: usize| {
+        usize::try_from(minimum).map_or(true, |minimum| length - spaces <= minimum)
+    };
+    'strip: {
+        if usize::try_from(minimum).map_or(true, |minimum| chars.len() < minimum) {
+            break 'strip;
+        }
+        let mut spaces = 0;
+        let mut trailing = true;
+        for index in (1..chars.len()).rev() {
+            if !is_space(chars[index]) {
+                trailing = false;
+            } else if trailing {
+                chars.truncate(index);
+            } else {
+                spaces += 1;
             }
-            if removable(chars[index]) && !word_start(&chars, index) {
-                chars.remove(index);
+            if fits(chars.len(), spaces) {
+                break 'strip;
+            }
+        }
+        for &(removable, at_word_end) in passes.iter().chain(&[(any, false)]) {
+            for index in (1..chars.len()).rev() {
+                let after_space = is_space(chars[index - 1]);
+                let before_space = chars.get(index + 1).is_none_or(|&next| is_space(next));
+                let position_allows = if at_word_end {
+                    !after_space && before_space
+                } else {
+                    !after_space
+                };
+                if position_allows
+                    && chars
+                        .get(index)
+                        .is_some_and(|&character| removable(character))
+                {
+                    chars.remove(index);
+                }
+                if fits(chars.len(), spaces) {
+                    break 'strip;
+                }
             }
         }
     }
-    if chars.len() > minimum {
-        chars.retain(|&character| character != ' ');
+    if usize::try_from(minimum).map_or(true, |minimum| chars.len() > minimum) {
+        let mut position = 0;
+        chars.retain(|&character| {
+            position += 1;
+            position == 1 || !is_space(character)
+        });
     }
     chars.into_iter().collect()
 }
 
-unsafe fn do_utf8_to_int(call: &Call<'_>) -> R<Sexp> {
-    let x = call.arg(0);
-    if x.kind() != SexpType::String || length(x) == 0 {
-        return Err(error("argument must be a character vector of length 1"));
+/// glibc's `iswspace`: Unicode white space other than the no-break spaces and the next-line
+/// control.
+fn is_space(character: char) -> bool {
+    character.is_whitespace() && !matches!(character, '\u{85}' | '\u{a0}' | '\u{2007}' | '\u{202f}')
+}
+
+fn do_utf8_to_int<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let text = single_string(context, arguments)?;
+    let first = text.get(context, 0);
+    let count = match std::str::from_utf8(first.bytes()) {
+        Ok(decoded) if !handles::is_na(first) => decoded.chars().count(),
+        _ => return handles::integer(context, NA_INTEGER),
+    };
+    let mut result = context.alloc::<Integer>(count)?;
+    let decoded = std::str::from_utf8(text.get(context, 0).bytes()).unwrap_or_default();
+    for (slot, character) in result.as_mut_slice().iter_mut().zip(decoded.chars()) {
+        *slot = character as i32;
     }
-    if length(x) > 1 {
-        warning(
+    Ok(result.finish().value())
+}
+
+/// The argument of `utf8ToInt` and `charToRaw`, which read its first element.
+fn single_string<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s, Str>> {
+    let text = match handles::dense::<Str>(context, arguments.value(0))? {
+        Some(text) if !text.is_empty() => text,
+        _ => return Err(error("argument must be a character vector of length 1")),
+    };
+    if text.len() > 1 {
+        handles::warning(
+            context,
             "argument should be a character vector of length 1\nall but the first element will be ignored",
         )?;
     }
-    let charsxp = x.element(0);
-    if charsxp == na_string() {
-        return scalar_integer(NA_INTEGER);
-    }
-    match std::str::from_utf8(charsxp.bytes()) {
-        Ok(text) => {
-            let points: Vec<i32> = text.chars().map(|character| character as i32).collect();
-            values::integer_vector(&points)
-        }
-        Err(_) => scalar_integer(NA_INTEGER),
-    }
+    Ok(text)
 }
 
-unsafe fn do_int_to_utf8(call: &Call<'_>) -> R<Sexp> {
-    let points = coerce_vector(call.arg(0), SexpType::Integer)?;
-    let multiple = flag(call.arg(1));
-    let surrogate_pairs = flag(call.arg(2));
-    let points = values::ints(points);
+fn do_int_to_utf8<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let points = handles::integer_vector(context, arguments.value(0))?;
+    let multiple = is_true(context, arguments.value(1));
+    let surrogate_pairs = is_true(context, arguments.value(2));
     if multiple {
-        let texts: Vec<Option<String>> = points
-            .iter()
-            .map(|&point| match point {
-                0 => Some(String::new()),
+        let mut result = context.alloc::<Str>(points.len())?;
+        let mut encoded = [0; 4];
+        for index in 0..points.len() {
+            let point = points.as_slice(context)[index];
+            let bytes: Option<&[u8]> = match point {
+                0 => Some(&[]),
                 NA_INTEGER => None,
-                _ => char::from_u32(point as u32).map(String::from),
-            })
-            .collect();
-        let result = alloc(SexpType::String, texts.len())?;
-        crate::heap().root(result);
-        for (index, text) in texts.iter().enumerate() {
-            match text {
-                Some(text) => {
-                    let charsxp = values::mkchar_bytes(text.as_bytes(), Encoding::Utf8)?;
-                    values::set_elt(result, index, charsxp);
+                _ => match char::from_u32(point as u32) {
+                    Some(character) => Some(character.encode_utf8(&mut encoded).as_bytes()),
+                    None => None,
+                },
+            };
+            match bytes {
+                Some(bytes) => {
+                    handles::set_bytes(context, &mut result, index, bytes, Encoding::Utf8)?
                 }
-                None => values::set_elt(result, index, na_string()),
+                None => result.set(context, index, handles::na()),
             }
         }
-        return Ok(result);
+        return Ok(result.finish().value());
     }
-    let mut text = String::with_capacity(points.len());
-    let mut index = 0;
-    while index < points.len() {
-        let point = points[index];
-        index += 1;
-        if point == 0 {
-            continue;
-        }
-        if point == NA_INTEGER {
-            return values::scalar_string_charsxp(na_string());
-        }
-        let high_surrogate = (0xD800..0xDC00).contains(&point);
-        let next = points.get(index).copied().unwrap_or(0);
-        let character = if surrogate_pairs && high_surrogate && (0xDC00..0xE000).contains(&next) {
+    let text = 'text: {
+        let points = points.as_slice(context);
+        let mut text = String::with_capacity(points.len());
+        let mut index = 0;
+        while index < points.len() {
+            let point = points[index];
             index += 1;
-            char::from_u32((((point - 0xD800) << 10) | (next - 0xDC00)) as u32 + 0x10000)
-        } else {
-            char::from_u32(point as u32)
-        };
-        match character {
-            Some(character) => text.push(character),
-            None => return values::scalar_string_charsxp(na_string()),
+            if point == 0 {
+                continue;
+            }
+            if point == NA_INTEGER {
+                break 'text None;
+            }
+            let high_surrogate = (0xD800..0xDC00).contains(&point);
+            let next = points.get(index).copied().unwrap_or(0);
+            let character = if surrogate_pairs && high_surrogate && (0xDC00..0xE000).contains(&next)
+            {
+                index += 1;
+                char::from_u32((((point - 0xD800) << 10) | (next - 0xDC00)) as u32 + 0x10000)
+            } else {
+                char::from_u32(point as u32)
+            };
+            match character {
+                Some(character) => text.push(character),
+                None => break 'text None,
+            }
         }
+        Some(text)
+    };
+    let mut result = context.alloc::<Str>(1)?;
+    match text {
+        // The code points are the text, so one in the range that stands in for a byte elsewhere
+        // (`values::escape_invalid_bytes`) stays that character rather than turning into the byte.
+        Some(text) => handles::set_bytes(context, &mut result, 0, text.as_bytes(), Encoding::Utf8)?,
+        None => result.set(context, 0, handles::na()),
     }
-    // The code points are the text, so one in the range that stands in for a byte elsewhere
-    // (`values::escape_invalid_bytes`) stays that character rather than turning into the byte.
-    values::scalar_string_charsxp(values::mkchar_bytes(text.as_bytes(), Encoding::Utf8)?)
+    Ok(result.finish().value())
 }
 
-unsafe fn do_char_to_raw(call: &Call<'_>) -> R<Sexp> {
-    let x = call.arg(0);
-    if x.kind() != SexpType::String || length(x) == 0 {
-        return Err(error("argument must be a character vector of length 1"));
-    }
-    if length(x) > 1 {
-        warning(
-            "argument should be a character vector of length 1\nall but the first element will be ignored",
-        )?;
-    }
-    let bytes = x.element(0).bytes();
-    let result = alloc(SexpType::Raw, bytes.len())?;
-    values::raws_mut(result).copy_from_slice(bytes);
-    Ok(result)
+fn do_char_to_raw<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let text = single_string(context, arguments)?;
+    let length = text.get(context, 0).bytes().len();
+    let mut result = context.alloc::<Raw>(length)?;
+    result
+        .as_mut_slice()
+        .copy_from_slice(text.get(context, 0).bytes());
+    Ok(result.finish().value())
 }
 
-unsafe fn do_raw_to_char(call: &Call<'_>) -> R<Sexp> {
-    let x = call.arg(0);
-    if x.kind() != SexpType::Raw {
+fn do_raw_to_char<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let Some(x) = handles::dense::<Raw>(context, arguments.value(0))? else {
         return Err(error("argument 'x' must be a raw vector"));
-    }
-    let multiple = values::as_logical_scalar(call.arg(1));
+    };
+    let multiple = handles::logical_scalar(context, arguments.value(1));
     if multiple == NA_LOGICAL {
         return Err(error("argument 'multiple' must be TRUE or FALSE"));
     }
-    let bytes = values::raws(x);
     if multiple == 1 {
-        let result = alloc(SexpType::String, bytes.len())?;
-        for (index, &byte) in bytes.iter().enumerate() {
+        let mut result = context.alloc::<Str>(x.len())?;
+        for index in 0..x.len() {
+            let byte = x.as_slice(context)[index];
             let piece: &[u8] = if byte == 0 {
                 &[]
             } else {
                 std::slice::from_ref(&byte)
             };
-            values::set_mkchar_bytes(result, index, piece, Encoding::Native)?;
+            handles::set_bytes(context, &mut result, index, piece, Encoding::Native)?;
         }
-        return Ok(result);
+        return Ok(result.finish().value());
     }
-    let end = bytes
-        .iter()
-        .rposition(|&byte| byte != 0)
-        .map_or(0, |last| last + 1);
-    let bytes = &bytes[..end];
-    if bytes.contains(&0) {
-        let shown: String = bytes
+    let end = {
+        let bytes = x.as_slice(context);
+        let end = bytes
             .iter()
-            .map(|&byte| {
-                if byte == 0 {
-                    "\\0".to_owned()
-                } else {
-                    (byte as char).to_string()
-                }
-            })
-            .collect();
-        return Err(error(format!("embedded nul in string: '{shown}'")));
-    }
-    values::scalar_string_charsxp(values::mkchar_bytes(bytes, Encoding::Native)?)
+            .rposition(|&byte| byte != 0)
+            .map_or(0, |last| last + 1);
+        let bytes = &bytes[..end];
+        if bytes.contains(&0) {
+            let shown: String = bytes
+                .iter()
+                .map(|&byte| {
+                    if byte == 0 {
+                        "\\0".to_owned()
+                    } else {
+                        (byte as char).to_string()
+                    }
+                })
+                .collect();
+            return Err(error(format!("embedded nul in string: '{shown}'")));
+        }
+        end
+    };
+    let mut result = context.alloc::<Str>(1)?;
+    handles::set_raw_bytes(context, &mut result, 0, x, 0..end, Encoding::Native)?;
+    Ok(result.finish().value())
 }
 
-unsafe fn do_pmatch(call: &Call<'_>) -> R<Sexp> {
-    let targets = match_texts(call.arg(0))?;
-    let table = match_texts(call.arg(1))?;
-    let no_match = values::as_integer_scalar(call.arg(2));
-    let duplicates = flag(call.arg(3));
+fn do_pmatch<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let targets = match_vector(context, arguments.value(0))?;
+    let table = match_vector(context, arguments.value(1))?;
+    let no_match = handles::integer_scalar(context, arguments.value(2));
+    let duplicates = is_true(context, arguments.value(3));
     // A match is its 1-based table position, so 0 marks a target without one.
     let mut matched: SmallVec<[i32; 8]> = smallvec![0; targets.len()];
-    let mut used: SmallVec<[u64; 2]> = smallvec![0; table.len().div_ceil(64)];
-    let is_free = |used: &[u64], position: usize| {
-        duplicates || used[position / 64] & (1 << (position % 64)) == 0
-    };
-    let claim = |used: &mut [u64], slot: &mut i32, position: usize| {
-        *slot = position as i32 + 1;
-        if !duplicates {
-            used[position / 64] |= 1 << (position % 64);
+    {
+        let targets = match_texts(context, targets);
+        let table = match_texts(context, table);
+        let mut used: SmallVec<[u64; 2]> = smallvec![0; table.len().div_ceil(64)];
+        let is_free = |used: &[u64], position: usize| {
+            duplicates || used[position / 64] & (1 << (position % 64)) == 0
+        };
+        let claim = |used: &mut [u64], slot: &mut i32, position: usize| {
+            *slot = position as i32 + 1;
+            if !duplicates {
+                used[position / 64] |= 1 << (position % 64);
+            }
+        };
+        for (target, slot) in targets.iter().zip(matched.iter_mut()) {
+            if target.is_empty() {
+                continue;
+            }
+            if let Some(position) = (0..table.len())
+                .find(|&position| is_free(&used, position) && table[position] == *target)
+            {
+                claim(&mut used, slot, position);
+            }
         }
-    };
-    for (target, slot) in targets.iter().zip(matched.iter_mut()) {
-        if target.is_empty() {
-            continue;
-        }
-        if let Some(position) = (0..table.len())
-            .find(|&position| is_free(&used, position) && table[position] == *target)
-        {
-            claim(&mut used, slot, position);
-        }
-    }
-    for (target, slot) in targets.iter().zip(matched.iter_mut()) {
-        if target.is_empty() || *slot != 0 {
-            continue;
-        }
-        let mut candidates = (0..table.len()).filter(|&position| {
-            is_free(&used, position) && table[position].starts_with(target.as_ref())
-        });
-        if let (Some(position), None) = (candidates.next(), candidates.next()) {
-            claim(&mut used, slot, position);
+        for (target, slot) in targets.iter().zip(matched.iter_mut()) {
+            if target.is_empty() || *slot != 0 {
+                continue;
+            }
+            let mut candidates = (0..table.len()).filter(|&position| {
+                is_free(&used, position) && table[position].starts_with(target.as_ref())
+            });
+            if let (Some(position), None) = (candidates.next(), candidates.next()) {
+                claim(&mut used, slot, position);
+            }
         }
     }
     for slot in &mut matched {
@@ -2259,170 +2502,266 @@ unsafe fn do_pmatch(call: &Call<'_>) -> R<Sexp> {
             *slot = no_match;
         }
     }
-    values::integer_vector(&matched)
+    Ok(integers(context, &matched)?.finish().value())
 }
 
-unsafe fn do_charmatch(call: &Call<'_>) -> R<Sexp> {
-    let targets = match_texts(call.arg(0))?;
-    let table = match_texts(call.arg(1))?;
-    let no_match = values::as_integer_scalar(call.arg(2));
-    let indices: SmallVec<[i32; 8]> = targets
-        .iter()
-        .map(|target| {
-            let (mut exact, mut exact_count, mut partial, mut partial_count) = (0, 0, 0, 0);
-            for (position, entry) in table.iter().enumerate() {
-                if entry.starts_with(target.as_ref()) {
-                    partial = position as i32 + 1;
-                    partial_count += 1;
-                    if entry.len() == target.len() {
-                        exact = partial;
-                        exact_count += 1;
+fn do_charmatch<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let targets = match_vector(context, arguments.value(0))?;
+    let table = match_vector(context, arguments.value(1))?;
+    let no_match = handles::integer_scalar(context, arguments.value(2));
+    let indices: SmallVec<[i32; 8]> = {
+        let table = match_texts(context, table);
+        match_texts(context, targets)
+            .iter()
+            .map(|target| {
+                let (mut exact, mut exact_count, mut partial, mut partial_count) = (0, 0, 0, 0);
+                for (position, entry) in table.iter().enumerate() {
+                    if entry.starts_with(target.as_ref()) {
+                        partial = position as i32 + 1;
+                        partial_count += 1;
+                        if entry.len() == target.len() {
+                            exact = partial;
+                            exact_count += 1;
+                        }
                     }
                 }
-            }
-            match (exact_count, partial_count) {
-                (1, _) => exact,
-                (0, 1) => partial,
-                (0, 0) => no_match,
-                _ => 0,
-            }
-        })
-        .collect();
-    values::integer_vector(&indices)
+                match (exact_count, partial_count) {
+                    (1, _) => exact,
+                    (0, 1) => partial,
+                    (0, 0) => no_match,
+                    _ => 0,
+                }
+            })
+            .collect()
+    };
+    Ok(integers(context, &indices)?.finish().value())
+}
+
+/// An argument of `pmatch` or `charmatch`: a character vector, with `NULL` as an empty one.
+fn match_vector<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s, Str>> {
+    strings_or_null(context, value, "argument is not of mode character")
 }
 
 /// The strings of a matching argument, with `NA` read as the text `"NA"`, as GNU R does. Text
-/// that is already UTF-8 is borrowed from its `CHARSXP`, which the call's arguments keep alive.
-unsafe fn match_texts<'a>(value: Sexp) -> R<SmallVec<[Cow<'a, str>; 8]>> {
-    if value.kind() != SexpType::String && value != nil() {
-        return Err(error("argument is not of mode character"));
-    }
-    let na = na_string();
-    Ok((0..length(value))
-        .map(|index| match value.element(index) {
-            charsxp if charsxp == na => Cow::Borrowed("NA"),
-            charsxp => values::char_str(charsxp),
+/// that is already UTF-8 is borrowed from its string.
+fn match_texts<'a, 's: 'a>(
+    context: &'a Cx<'_>,
+    value: Local<'s, Str>,
+) -> SmallVec<[Cow<'a, str>; 8]> {
+    value
+        .iter(context)
+        .map(|chars| {
+            if handles::is_na(chars) {
+                Cow::Borrowed("NA")
+            } else {
+                handles::text(chars)
+            }
         })
-        .collect())
+        .collect()
 }
 
-unsafe fn grep(call: &Call<'_>, logical: bool) -> R<Sexp> {
-    let text = call.arg(1);
-    let value = flag(call.arg(3));
-    let invert = flag(call.arg(7));
-    let options = pattern_options(flag(call.arg(2)), flag(call.arg(4)), flag(call.arg(5)))?;
-    let use_bytes = flag(call.arg(6)) || has_bytes(&[call.arg(0), text]);
-    let pattern = pattern_argument(call.arg(0), use_bytes)?;
-    if text.kind() != SexpType::String && text != nil() {
-        return Err(error("invalid 'text' argument"));
-    }
-    let count = length(text);
-    let Some(pattern) = pattern else {
+fn do_grepl<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    grep(context, arguments, true)
+}
+
+fn do_grep<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    grep(context, arguments, false)
+}
+
+fn grep<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>, logical: bool) -> R<Local<'s>> {
+    let value = is_true(context, arguments.value(3));
+    let invert = is_true(context, arguments.value(7));
+    let ignore_case = is_true(context, arguments.value(2));
+    let perl = is_true(context, arguments.value(4));
+    let fixed = is_true(context, arguments.value(5));
+    let options = pattern_options(context, ignore_case, perl, fixed)?;
+    let pattern = handles::dense::<Str>(context, arguments.value(0))?;
+    let text = handles::dense::<Str>(context, arguments.value(1))?;
+    let use_bytes = is_true(context, arguments.value(6)) || has_bytes(context, &[pattern, text]);
+    let pattern = pattern_argument(context, pattern)?;
+    let text = text_argument(context, arguments.value(1), text)?;
+    let count = text.len();
+    if handles::is_na(pattern.get(context, 0)) {
         return match (logical, value) {
-            (true, _) => values::logical_vector(&vec![NA_LOGICAL; count]),
-            (false, true) => string_vector_na(&vec![None; count]),
-            (false, false) => values::integer_vector(&vec![NA_INTEGER; count]),
+            (true, _) => {
+                let mut result = context.alloc::<Logical>(count)?;
+                result.as_mut_slice().fill(NA_LOGICAL);
+                Ok(result.finish().value())
+            }
+            (false, true) => {
+                let mut result = context.alloc::<Str>(count)?;
+                for index in 0..count {
+                    result.set(context, index, handles::na());
+                }
+                Ok(result.finish().value())
+            }
+            (false, false) => {
+                let mut result = context.alloc::<Integer>(count)?;
+                result.as_mut_slice().fill(NA_INTEGER);
+                Ok(result.finish().value())
+            }
         };
+    }
+    let compiled = {
+        let pattern = pattern_text(context, pattern, use_bytes);
+        let errors = CompileErrors::for_text(context, &pattern, text, use_bytes);
+        Matcher::compile(&pattern, options, errors)
     };
-    let matcher = Matcher::compile(
-        &pattern,
-        options,
-        CompileErrors::for_text(&pattern, text, use_bytes),
-    )?;
-    let hit = |index: usize| -> R<bool> {
-        let found = match subject_at(text, index, use_bytes) {
-            Some(_) if !valid_subject(text, index, use_bytes, options, false)? => false,
-            Some(element) => matcher.find_at(&element, 0)?.is_some(),
-            None => false,
+    let matcher = compiled.map_err(|failure| compile_failure(context, failure))?;
+    let hit = |context: &mut Cx<'_>, index: usize| -> R<bool> {
+        let found = if handles::is_na(text.get(context, index))
+            || !valid_subject(
+                context,
+                Some(pattern),
+                text,
+                index,
+                use_bytes,
+                options,
+                false,
+            )? {
+            false
+        } else {
+            let element = subject(text.get(context, index), use_bytes).unwrap_or_default();
+            matcher.find_at(&element, 0)?.is_some()
         };
         Ok(found != invert)
     };
     if logical {
-        let result = values::alloc_uninit(SexpType::Logical, count)?;
-        for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
-            *slot = i32::from(hit(index)?);
+        let mut result = context.alloc::<Logical>(count)?;
+        for index in 0..count {
+            let found = hit(context, index)?;
+            result.as_mut_slice()[index] = i32::from(found);
         }
-        return Ok(result);
+        return Ok(result.finish().value());
     }
-    let hits = (0..count).map(hit).collect::<R<Vec<bool>>>()?;
-    let selected: Vec<usize> = (0..count).filter(|&index| hits[index]).collect();
+    let mut selected: Vec<usize> = Vec::new();
+    for index in 0..count {
+        if hit(context, index)? {
+            selected.push(index);
+        }
+    }
     if !value {
         let indices: Vec<i32> = selected.iter().map(|&index| index as i32 + 1).collect();
-        return values::integer_vector(&indices);
+        return Ok(integers(context, &indices)?.finish().value());
     }
-    let result = alloc(SexpType::String, selected.len())?;
+    let mut result = context.alloc::<Str>(selected.len())?;
     for (position, &index) in selected.iter().enumerate() {
-        set_elt(result, position, text.element(index));
+        result.set(context, position, text.get(context, index));
     }
-    let names = get_attr(text, symbols().names);
-    if names != nil() {
-        let selected_names = alloc(SexpType::String, selected.len())?;
+    let names = handles::names_attribute(context, arguments.value(1));
+    if let Some(names) = handles::dense::<Str>(context, names)? {
+        let mut selected_names = context.alloc::<Str>(selected.len())?;
         for (position, &index) in selected.iter().enumerate() {
-            set_elt(selected_names, position, names.element(index));
+            selected_names.set(context, position, names.get(context, index));
         }
-        set_attr(result, symbols().names, selected_names)?;
+        handles::set_attribute_named(
+            context,
+            &mut result,
+            "names",
+            selected_names.finish().value(),
+        )?;
     }
-    Ok(result)
+    Ok(result.finish().value())
 }
 
-unsafe fn substitute(call: &Call<'_>, global: bool) -> R<Sexp> {
-    let replacement = call.arg(1);
-    let text = call.arg(2);
-    let options = pattern_options(flag(call.arg(3)), flag(call.arg(4)), flag(call.arg(5)))?;
-    let forced_bytes = has_bytes(&[call.arg(0), replacement, text]);
-    let use_bytes = flag(call.arg(6)) || forced_bytes;
-    let pattern = pattern_argument(call.arg(0), use_bytes)?;
-    if replacement.kind() != SexpType::String || length(replacement) == 0 {
-        return Err(error("invalid 'replacement' argument"));
-    }
-    if length(replacement) > 1 {
-        warning("argument 'replacement' has length > 1 and only the first element will be used")?;
-    }
-    if text.kind() != SexpType::String && text != nil() {
-        return Err(error("invalid 'text' argument"));
-    }
-    let count = length(text);
-    let result = alloc(SexpType::String, count)?;
-    values::copy_attributes(text, result)?;
-    let Some(pattern) = pattern else {
-        for index in 0..count {
-            set_elt(result, index, na_string());
-        }
-        return Ok(result);
+fn do_sub<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    substitute(context, arguments, false)
+}
+
+fn do_gsub<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    substitute(context, arguments, true)
+}
+
+fn substitute<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>, global: bool) -> R<Local<'s>> {
+    let ignore_case = is_true(context, arguments.value(3));
+    let perl = is_true(context, arguments.value(4));
+    let fixed = is_true(context, arguments.value(5));
+    let options = pattern_options(context, ignore_case, perl, fixed)?;
+    let pattern = handles::dense::<Str>(context, arguments.value(0))?;
+    let replacement = handles::dense::<Str>(context, arguments.value(1))?;
+    let text = handles::dense::<Str>(context, arguments.value(2))?;
+    let forced_bytes = has_bytes(context, &[pattern, replacement, text]);
+    let use_bytes = is_true(context, arguments.value(6)) || forced_bytes;
+    let pattern = pattern_argument(context, pattern)?;
+    let replacement = match replacement {
+        Some(replacement) if !replacement.is_empty() => replacement,
+        _ => return Err(error("invalid 'replacement' argument")),
     };
-    if options.fixed && pattern.is_empty() {
-        return Err(error("zero-length pattern"));
+    if replacement.len() > 1 {
+        handles::warning(
+            context,
+            "argument 'replacement' has length > 1 and only the first element will be used",
+        )?;
     }
-    let matcher = Matcher::compile(&pattern, options, CompileErrors::Quoted)?;
-    let replacement_text = subject_at(replacement, 0, use_bytes);
+    let text = text_argument(context, arguments.value(2), text)?;
+    let count = text.len();
+    let mut result = context.alloc::<Str>(count)?;
+    handles::copy_attributes(context, arguments.value(2), &mut result)?;
+    if handles::is_na(pattern.get(context, 0)) {
+        for index in 0..count {
+            result.set(context, index, handles::na());
+        }
+        return Ok(result.finish().value());
+    }
+    let compiled = {
+        let pattern = pattern_text(context, pattern, use_bytes);
+        if options.fixed && pattern.is_empty() {
+            return Err(error("zero-length pattern"));
+        }
+        Matcher::compile(&pattern, options, CompileErrors::Quoted)
+    };
+    let matcher = compiled.map_err(|failure| compile_failure(context, failure))?;
+    // The replacement is read for every element, across the allocations that make the results,
+    // so its text is copied out of the heap once.
+    let replacement_bytes: Option<SmallVec<[u8; 64]>> =
+        subject(replacement.get(context, 0), use_bytes)
+            .map(|text| SmallVec::from_slice(text.as_bytes()));
+    let replacement_text = replacement_bytes.as_deref().map(String::from_utf8_lossy);
     let replacement = replacement_text
         .as_deref()
         .map(|text| parse_replacement(text, options));
-    for index in 0..count {
-        let charsxp = text.element(index);
-        if charsxp == na_string() {
-            set_elt(result, index, na_string());
-            continue;
+    with_text_buffer(|output| {
+        for index in 0..count {
+            if handles::is_na(text.get(context, index)) {
+                result.set(context, index, handles::na());
+                continue;
+            }
+            valid_subject(
+                context,
+                Some(pattern),
+                text,
+                index,
+                use_bytes,
+                options,
+                true,
+            )?;
+            let Some(replacement) = &replacement else {
+                let found = {
+                    let element = subject(text.get(context, index), use_bytes).unwrap_or_default();
+                    matcher.find_at(&element, 0)?.is_some()
+                };
+                let substituted = if found {
+                    handles::na()
+                } else {
+                    text.get(context, index)
+                };
+                result.set(context, index, substituted);
+                continue;
+            };
+            output.clear();
+            let matched = {
+                let element = subject(text.get(context, index), use_bytes).unwrap_or_default();
+                replace(&matcher, &element, replacement, global, output)?
+            };
+            if matched {
+                set_regex_result(context, &mut result, index, output, forced_bytes)?;
+            } else {
+                result.set(context, index, text.get(context, index));
+            }
         }
-        valid_subject(text, index, use_bytes, options, true)?;
-        let element = if use_bytes {
-            values::escape_high_bytes(charsxp.bytes())
-        } else {
-            values::char_str(charsxp)
-        };
-        let substituted = match &replacement {
-            Some(replacement) => with_text_buffer(|output| {
-                if !replace(&matcher, &element, replacement, global, output)? {
-                    return Ok(charsxp);
-                }
-                regex_result(output, forced_bytes)
-            })?,
-            None if matcher.find_at(&element, 0)?.is_some() => na_string(),
-            None => charsxp,
-        };
-        set_elt(result, index, substituted);
-    }
-    Ok(result)
+        Ok(())
+    })?;
+    Ok(result.finish().value())
 }
 
 /// One part of a replacement string.
@@ -2560,23 +2899,37 @@ fn replace(
     Ok(matched)
 }
 
+fn do_regexpr<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    regexpr(context, arguments, false)
+}
+
+fn do_gregexpr<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    regexpr(context, arguments, true)
+}
+
 /// `regexpr` and `gregexpr`: match positions, with the attributes base R's `regmatches` reads.
-unsafe fn regexpr(call: &Call<'_>, global: bool) -> R<Sexp> {
-    let text = call.arg(1);
-    let options = pattern_options(flag(call.arg(2)), flag(call.arg(3)), flag(call.arg(4)))?;
-    let use_bytes = flag(call.arg(5)) || has_bytes(&[call.arg(0), text]);
-    let Some(pattern) = pattern_argument(call.arg(0), use_bytes)? else {
+fn regexpr<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>, global: bool) -> R<Local<'s>> {
+    let ignore_case = is_true(context, arguments.value(2));
+    let perl = is_true(context, arguments.value(3));
+    let fixed = is_true(context, arguments.value(4));
+    let options = pattern_options(context, ignore_case, perl, fixed)?;
+    let pattern = handles::dense::<Str>(context, arguments.value(0))?;
+    let text = handles::dense::<Str>(context, arguments.value(1))?;
+    let use_bytes = is_true(context, arguments.value(5)) || has_bytes(context, &[pattern, text]);
+    let pattern = pattern_argument(context, pattern)?;
+    if handles::is_na(pattern.get(context, 0)) {
         return Err(error("invalid 'pattern' argument"));
-    };
-    if text.kind() != SexpType::String && text != nil() {
-        return Err(error("invalid 'text' argument"));
     }
-    let matcher = Matcher::compile(
-        &pattern,
-        options,
-        CompileErrors::for_text(&pattern, text, use_bytes),
-    )?;
-    let report = MatchReport::new(&pattern, text, use_bytes);
+    let text = text_argument(context, arguments.value(1), text)?;
+    let (compiled, report) = {
+        let pattern = pattern_text(context, pattern, use_bytes);
+        let errors = CompileErrors::for_text(context, &pattern, text, use_bytes);
+        (
+            Matcher::compile(&pattern, options, errors),
+            MatchReport::new(context, &pattern, text, use_bytes),
+        )
+    };
+    let matcher = compiled.map_err(|failure| compile_failure(context, failure))?;
     let groups = if options.perl {
         matcher.group_count()
     } else {
@@ -2594,93 +2947,119 @@ unsafe fn regexpr(call: &Call<'_>, global: bool) -> R<Sexp> {
             matcher.captures_at(element, position)
         }
     };
-    let count = length(text);
+    let count = text.len();
     if !global {
         let mut table = MatchTable::new(groups);
         for index in 0..count {
-            match subject_at(text, index, use_bytes) {
-                None => table.push_na(),
-                Some(_) if !valid_subject(text, index, use_bytes, options, false)? => {
-                    table.push_none()
-                }
-                Some(element) => match search(&element, 0)? {
-                    Some(found) => table.push(&element, &found),
-                    None => table.push_none(),
-                },
+            if handles::is_na(text.get(context, index)) {
+                table.push_na();
+                continue;
+            }
+            if !valid_subject(
+                context,
+                Some(pattern),
+                text,
+                index,
+                use_bytes,
+                options,
+                false,
+            )? {
+                table.push_none();
+                continue;
+            }
+            let element = subject(text.get(context, index), use_bytes).unwrap_or_default();
+            match search(&element, 0)? {
+                Some(found) => table.push(&element, &found),
+                None => table.push_none(),
             }
         }
-        return table.finish(&report, &names);
+        return table.finish(context, &report, &names);
     }
-    let result = alloc(SexpType::List, count)?;
+    let mut result = context.alloc::<List>(count)?;
     for index in 0..count {
-        let mut table = MatchTable::new(groups);
-        let Some(element) = subject_at(text, index, use_bytes) else {
-            set_elt(result, index, na_match()?);
-            continue;
-        };
-        if !valid_subject(text, index, use_bytes, options, false)? {
-            table.push_none();
-            set_elt(result, index, table.finish(&report, &names)?);
+        if handles::is_na(text.get(context, index)) {
+            let positions = context.scope(na_match)?;
+            result.set(context, index, positions);
             continue;
         }
-        let mut position = 0;
-        // PCRE and fixed matching find the empty match in an empty string, and TRE does not.
-        let searches_empty = options.perl || options.fixed;
-        while position < element.len() || (searches_empty && element.is_empty() && table.rows == 0)
-        {
-            let Some(found) = search(&element, position)? else {
-                break;
-            };
-            let Some((start, end)) = found.first().copied().flatten() else {
-                break;
-            };
-            table.push(&element, &found);
-            position = if start == end {
-                next_boundary(&element, end)
-            } else {
-                end
-            };
+        let mut table = MatchTable::new(groups);
+        if valid_subject(
+            context,
+            Some(pattern),
+            text,
+            index,
+            use_bytes,
+            options,
+            false,
+        )? {
+            let element = subject(text.get(context, index), use_bytes).unwrap_or_default();
+            let mut position = 0;
+            // PCRE and fixed matching find the empty match in an empty string, and TRE does not.
+            let searches_empty = options.perl || options.fixed;
+            while position < element.len()
+                || (searches_empty && element.is_empty() && table.rows == 0)
+            {
+                let Some(found) = search(&element, position)? else {
+                    break;
+                };
+                let Some((start, end)) = found.first().copied().flatten() else {
+                    break;
+                };
+                table.push(&element, &found);
+                position = if start == end {
+                    next_boundary(&element, end)
+                } else {
+                    end
+                };
+            }
         }
         if table.rows == 0 {
             table.push_none();
         }
-        set_elt(result, index, table.finish(&report, &names)?);
+        // Each text's positions are stored before the next are made, so a scope releases the
+        // handles that made them rather than holding them for the whole call.
+        let positions = context.scope(|inner: &mut Cx<'_>| table.finish(inner, &report, &names))?;
+        result.set(context, index, positions);
     }
-    Ok(result)
+    Ok(result.finish().value())
 }
 
 /// `grepRaw(pattern, x, offset, ignore.case, fixed, value, all, invert)`, matching bytes. The
 /// matches are non-overlapping and start at the 1-based `offset`; `value` returns the matched
 /// bytes, or with `invert` the bytes around them.
-unsafe fn do_grep_raw(call: &Call<'_>) -> R<Sexp> {
-    let (pattern, x) = (call.arg(0), call.arg(1));
-    if pattern.kind() != SexpType::Raw || x.kind() != SexpType::Raw {
-        return Err(call.error("invalid 'pattern' or 'x' argument"));
-    }
-    let offset = values::as_integer_scalar(call.arg(2));
+fn do_grep_raw<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let (Some(pattern), Some(x)) = (
+        handles::dense::<Raw>(context, arguments.value(0))?,
+        handles::dense::<Raw>(context, arguments.value(1))?,
+    ) else {
+        return Err(arguments.error("invalid 'pattern' or 'x' argument"));
+    };
+    let offset = handles::integer_scalar(context, arguments.value(2));
     if offset == NA_INTEGER || offset < 1 {
-        return Err(call.error("invalid 'offset' argument"));
+        return Err(arguments.error("invalid 'offset' argument"));
     }
-    let flag = |index: usize| values::as_logical_scalar(call.arg(index)) == 1;
-    let (ignore_case, fixed, value, all, mut invert) =
-        (flag(3), flag(4), flag(5), flag(6), flag(7));
+    let ignore_case = is_true(context, arguments.value(3));
+    let fixed = is_true(context, arguments.value(4));
+    let value = is_true(context, arguments.value(5));
+    let all = is_true(context, arguments.value(6));
+    let mut invert = is_true(context, arguments.value(7));
     if invert && !value {
-        warning("argument 'invert = TRUE' will be ignored")?;
+        handles::warning(context, "argument 'invert = TRUE' will be ignored")?;
         invert = false;
     }
-    let needle = values::raws(pattern).to_vec();
-    let haystack = values::raws(x).to_vec();
+    let needle = pattern.as_slice(context).to_vec();
+    let haystack = x.as_slice(context).to_vec();
     let start = offset as usize - 1;
     let regex = if fixed {
         if ignore_case {
-            warning("argument 'ignore.case = TRUE' will be ignored")?;
+            handles::warning(context, "argument 'ignore.case = TRUE' will be ignored")?;
         }
         None
     } else {
         let text = translate_byte_regex(&String::from_utf8_lossy(&needle));
         let flags = if ignore_case { "(?i-u)" } else { "(?-u)" };
         let compiled = regex::bytes::Regex::new(&format!("{flags}{text}")).map_err(|failure| {
-            call.error(format!(
+            arguments.error(format!(
                 "invalid regular expression '{}': {failure}",
                 String::from_utf8_lossy(&needle)
             ))
@@ -2712,86 +3091,103 @@ unsafe fn do_grep_raw(call: &Call<'_>) -> R<Sexp> {
         // An empty match moves on by one byte, or the search would never advance.
         from = if end > begin { end } else { end + 1 };
     }
-    let raw = |bytes: &[u8]| -> R<Sexp> {
-        let result = alloc(SexpType::Raw, bytes.len())?;
-        values::raws_mut(result).copy_from_slice(bytes);
-        Ok(result)
-    };
     if !value {
         let positions: Vec<i32> = matches.iter().map(|&(begin, _)| begin as i32 + 1).collect();
-        return values::integer_vector(&positions);
+        return Ok(integers(context, &positions)?.finish().value());
     }
+    let single = |context: &mut Cx<'s>, bytes: &[u8]| -> R<Local<'s>> {
+        Ok(raw_vector(context, bytes)?.finish().value())
+    };
     match (all, invert) {
         (false, false) => match matches.first() {
-            Some(&(begin, end)) => raw(&haystack[begin..end]),
-            None => raw(&[]),
+            Some(&(begin, end)) => single(context, &haystack[begin..end]),
+            None => single(context, &[]),
         },
         (false, true) => match matches.first() {
-            Some(&(begin, end)) => raw(&[&haystack[..begin], &haystack[end..]].concat()),
-            None => raw(&haystack),
+            Some(&(begin, end)) => {
+                single(context, &[&haystack[..begin], &haystack[end..]].concat())
+            }
+            None => single(context, &haystack),
         },
         (true, false) => {
-            let pieces = matches
-                .iter()
-                .map(|&(begin, end)| raw(&haystack[begin..end]))
-                .collect::<R<Vec<_>>>()?;
-            values::list_vector(&pieces)
+            let mut result = context.alloc::<List>(matches.len())?;
+            for (index, &(begin, end)) in matches.iter().enumerate() {
+                let piece = raw_vector(context, &haystack[begin..end])?.finish().value();
+                result.set(context, index, piece);
+            }
+            Ok(result.finish().value())
         }
         (true, true) => {
-            let mut pieces = Vec::with_capacity(matches.len() + 1);
+            let mut result = context.alloc::<List>(matches.len() + 1)?;
             let mut previous = 0;
-            for &(begin, end) in &matches {
-                pieces.push(raw(&haystack[previous..begin])?);
+            for (index, &(begin, end)) in matches.iter().enumerate() {
+                let piece = raw_vector(context, &haystack[previous..begin])?
+                    .finish()
+                    .value();
+                result.set(context, index, piece);
                 previous = end;
             }
-            pieces.push(raw(&haystack[previous..])?);
-            values::list_vector(&pieces)
+            let piece = raw_vector(context, &haystack[previous..])?.finish().value();
+            result.set(context, matches.len(), piece);
+            Ok(result.finish().value())
         }
     }
 }
 
-unsafe fn do_regexec(call: &Call<'_>) -> R<Sexp> {
-    let text = call.arg(1);
-    let options = pattern_options(flag(call.arg(2)), false, flag(call.arg(3)))?;
-    let use_bytes = flag(call.arg(4)) || has_bytes(&[call.arg(0), text]);
-    let Some(pattern) = pattern_argument(call.arg(0), use_bytes)? else {
+fn do_regexec<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let ignore_case = is_true(context, arguments.value(2));
+    let fixed = is_true(context, arguments.value(3));
+    let options = pattern_options(context, ignore_case, false, fixed)?;
+    let pattern = handles::dense::<Str>(context, arguments.value(0))?;
+    let text = handles::dense::<Str>(context, arguments.value(1))?;
+    let use_bytes = is_true(context, arguments.value(4)) || has_bytes(context, &[pattern, text]);
+    let pattern = pattern_argument(context, pattern)?;
+    if handles::is_na(pattern.get(context, 0)) {
         return Err(error("invalid 'pattern' argument"));
+    }
+    let text = text_argument(context, arguments.value(1), text)?;
+    let (compiled, report) = {
+        let pattern = pattern_text(context, pattern, use_bytes);
+        (
+            Matcher::compile(&pattern, options, CompileErrors::Regexec),
+            MatchReport::new(context, &pattern, text, use_bytes),
+        )
     };
-    if text.kind() != SexpType::String && text != nil() {
-        return Err(error("invalid 'text' argument"));
-    }
-    let matcher = Matcher::compile(&pattern, options, CompileErrors::Regexec)?;
-    let report = MatchReport::new(&pattern, text, use_bytes);
-    let count = length(text);
-    let result = alloc(SexpType::List, count)?;
+    let matcher = compiled.map_err(|failure| compile_failure(context, failure))?;
+    let count = text.len();
+    let mut result = context.alloc::<List>(count)?;
     for index in 0..count {
-        let Some(element) = subject_at(text, index, use_bytes) else {
-            set_elt(result, index, na_match()?);
+        if handles::is_na(text.get(context, index)) {
+            let positions = context.scope(na_match)?;
+            result.set(context, index, positions);
             continue;
+        }
+        let (starts, lengths): (Vec<i32>, Vec<i32>) = {
+            let element = subject(text.get(context, index), use_bytes).unwrap_or_default();
+            match matcher.captures_at(&element, 0)? {
+                Some(found) => found
+                    .iter()
+                    .map(|group| match group {
+                        Some((start, end)) => (
+                            position_of(&element, *start) + 1,
+                            position_of(&element, *end) - position_of(&element, *start),
+                        ),
+                        None => (0, 0),
+                    })
+                    .unzip(),
+                None => (vec![-1], vec![-1]),
+            }
         };
-        let (starts, lengths) = match matcher.captures_at(&element, 0)? {
-            Some(found) => found
-                .iter()
-                .map(|group| match group {
-                    Some((start, end)) => (
-                        position_of(&element, *start) + 1,
-                        position_of(&element, *end) - position_of(&element, *start),
-                    ),
-                    None => (0, 0),
-                })
-                .unzip(),
-            None => (vec![-1], vec![-1]),
-        };
-        let positions = values::integer_vector(&starts)?;
-        set_attr(
-            positions,
-            values::install("match.length")?,
-            values::integer_vector(&lengths)?,
-        )?;
-        report.annotate(positions)?;
-        set_elt(result, index, positions);
+        let positions = context.scope(|inner: &mut Cx<'_>| {
+            let mut positions = integers(inner, &starts)?;
+            let lengths = integers(inner, &lengths)?.finish().value();
+            handles::set_attribute_named(inner, &mut positions, "match.length", lengths)?;
+            report.annotate(inner, &mut positions)?;
+            Ok::<_, Unwind>(positions.finish().value())
+        })?;
+        result.set(context, index, positions);
     }
-    Ok(result)
+    Ok(result.finish().value())
 }
 
 /// How match positions are reported: in characters, or in bytes when `useBytes = TRUE`. GNU R
@@ -2803,31 +3199,30 @@ struct MatchReport {
 }
 
 impl MatchReport {
-    unsafe fn new(pattern: &str, text: Sexp, use_bytes: bool) -> MatchReport {
+    fn new(context: &Cx<'_>, pattern: &str, text: Local<'_, Str>, use_bytes: bool) -> MatchReport {
         let ascii = pattern.is_ascii()
-            && (0..length(text)).all(|index| {
-                let charsxp = text.element(index);
-                charsxp == na_string() || charsxp.bytes().is_ascii()
-            });
+            && text
+                .iter(context)
+                .all(|chars| handles::is_na(chars) || chars.bytes().is_ascii());
         MatchReport {
             bytes: use_bytes,
             annotated: use_bytes || ascii,
         }
     }
 
-    unsafe fn annotate(&self, vector: Sexp) -> R<()> {
+    fn annotate(&self, context: &mut Cx<'_>, vector: &mut Fresh<'_, Integer>) -> R<()> {
         if self.annotated {
-            let index_type = if self.bytes { "bytes" } else { "chars" };
-            set_attr(
+            let mut index_type = context.alloc::<Str>(1)?;
+            let kind = if self.bytes { "bytes" } else { "chars" };
+            handles::set_text(context, &mut index_type, 0, kind)?;
+            handles::set_attribute_named(
+                context,
                 vector,
-                values::install("index.type")?,
-                scalar_string(index_type)?,
+                "index.type",
+                index_type.finish().value(),
             )?;
-            set_attr(
-                vector,
-                values::install("useBytes")?,
-                values::scalar_logical(1)?,
-            )?;
+            let use_bytes = handles::logical_constant(context, 1)?;
+            handles::set_attribute_named(context, vector, "useBytes", use_bytes)?;
         }
         Ok(())
     }
@@ -2894,48 +3289,70 @@ impl MatchTable {
         self.rows += 1;
     }
 
-    unsafe fn finish(&self, report: &MatchReport, names: &[String]) -> R<Sexp> {
-        let positions = values::integer_vector(&self.starts)?;
-        set_attr(
-            positions,
-            values::install("match.length")?,
-            values::integer_vector(&self.lengths)?,
-        )?;
-        report.annotate(positions)?;
+    fn finish<'s>(
+        &self,
+        context: &mut Cx<'s>,
+        report: &MatchReport,
+        names: &[String],
+    ) -> R<Local<'s>> {
+        let mut positions = integers(context, &self.starts)?;
+        let lengths = integers(context, &self.lengths)?.finish().value();
+        handles::set_attribute_named(context, &mut positions, "match.length", lengths)?;
+        report.annotate(context, &mut positions)?;
         if self.groups > 0 {
-            let column_names = string_vector(names)?;
-            let dimnames = values::list_vector(&[nil(), column_names])?;
-            let dim = values::integer_vector(&[self.rows as i32, self.groups as i32])?;
+            let mut column_names = context.alloc::<Str>(names.len())?;
+            for (index, name) in names.iter().enumerate() {
+                handles::set_text(context, &mut column_names, index, name)?;
+            }
+            let column_names = column_names.finish().value();
+            let mut dimnames = context.alloc::<List>(2)?;
+            dimnames.set(context, 1, column_names);
+            let dimnames = dimnames.finish().value();
+            let dim = integers(context, &[self.rows as i32, self.groups as i32])?
+                .finish()
+                .value();
             for (attribute, row_major) in [
                 ("capture.start", &self.capture_starts),
                 ("capture.length", &self.capture_lengths),
             ] {
-                let matrix = alloc(SexpType::Integer, self.rows * self.groups)?;
-                let cells = values::ints_mut(matrix);
+                let mut matrix = context.alloc::<Integer>(self.rows * self.groups)?;
+                let cells = matrix.as_mut_slice();
                 for row in 0..self.rows {
                     for group in 0..self.groups {
                         cells[group * self.rows + row] = row_major[row * self.groups + group];
                     }
                 }
-                set_attr(matrix, symbols().dim, dim)?;
-                set_attr(matrix, symbols().dimnames, dimnames)?;
-                set_attr(positions, values::install(attribute)?, matrix)?;
+                handles::set_attribute_named(context, &mut matrix, "dim", dim)?;
+                handles::set_attribute_named(context, &mut matrix, "dimnames", dimnames)?;
+                let matrix = matrix.finish().value();
+                handles::set_attribute_named(context, &mut positions, attribute, matrix)?;
             }
-            set_attr(positions, values::install("capture.names")?, column_names)?;
+            handles::set_attribute_named(context, &mut positions, "capture.names", column_names)?;
         }
-        Ok(positions)
+        Ok(positions.finish().value())
     }
 }
 
 /// The result for an `NA` text in `gregexpr` and `regexec`: `NA` with only a match length.
-unsafe fn na_match() -> R<Sexp> {
-    let positions = scalar_integer(NA_INTEGER)?;
-    set_attr(
-        positions,
-        values::install("match.length")?,
-        scalar_integer(NA_INTEGER)?,
-    )?;
-    Ok(positions)
+fn na_match<'s>(context: &mut Cx<'s>) -> R<Local<'s>> {
+    let mut positions = integers(context, &[NA_INTEGER])?;
+    let lengths = integers(context, &[NA_INTEGER])?.finish().value();
+    handles::set_attribute_named(context, &mut positions, "match.length", lengths)?;
+    Ok(positions.finish().value())
+}
+
+/// A new integer vector holding `values`.
+fn integers<'s>(context: &mut Cx<'s>, values: &[i32]) -> R<Fresh<'s, Integer>> {
+    let mut vector = context.alloc::<Integer>(values.len())?;
+    vector.as_mut_slice().copy_from_slice(values);
+    Ok(vector)
+}
+
+/// A new raw vector holding `bytes`.
+fn raw_vector<'s>(context: &mut Cx<'s>, bytes: &[u8]) -> R<Fresh<'s, Raw>> {
+    let mut vector = context.alloc::<Raw>(bytes.len())?;
+    vector.as_mut_slice().copy_from_slice(bytes);
+    Ok(vector)
 }
 
 /// The character position of byte `offset` in `text`. With `useBytes = TRUE` the text holds one
@@ -2957,49 +3374,141 @@ struct PatternOptions {
 }
 
 /// Reads the pattern flags, warning as GNU R does about the ones `fixed = TRUE` overrides.
-unsafe fn pattern_options(ignore_case: bool, perl: bool, fixed: bool) -> R<PatternOptions> {
-    if fixed && ignore_case {
-        warning("argument 'ignore.case = TRUE' will be ignored")?;
+fn pattern_options(
+    context: &mut Cx<'_>,
+    ignore_case: bool,
+    perl: bool,
+    fixed: bool,
+) -> R<PatternOptions> {
+    for message in overridden_flags(ignore_case, perl, fixed) {
+        handles::warning(context, message)?;
     }
-    if fixed && perl {
-        warning("argument 'perl = TRUE' will be ignored")?;
-    }
-    Ok(PatternOptions {
+    Ok(effective_options(ignore_case, perl, fixed))
+}
+
+/// The warnings for the flags `fixed = TRUE` overrides.
+fn overridden_flags(
+    ignore_case: bool,
+    perl: bool,
+    fixed: bool,
+) -> impl Iterator<Item = &'static str> {
+    [
+        (fixed && ignore_case).then_some("argument 'ignore.case = TRUE' will be ignored"),
+        (fixed && perl).then_some("argument 'perl = TRUE' will be ignored"),
+    ]
+    .into_iter()
+    .flatten()
+}
+
+fn effective_options(ignore_case: bool, perl: bool, fixed: bool) -> PatternOptions {
+    PatternOptions {
         ignore_case: ignore_case && !fixed,
         perl: perl && !fixed,
         fixed,
-    })
+    }
 }
 
 /// Whether any string in `vectors` is marked as bytes. GNU R then matches every input byte by
 /// byte, as if `useBytes = TRUE` had been given, because bytes have no characters to match.
-unsafe fn has_bytes(vectors: &[Sexp]) -> bool {
-    vectors.iter().any(|&vector| {
-        vector.kind() == SexpType::String
-            && (0..length(vector))
-                .any(|index| Encoding::of(vector.element(index)) == Encoding::Bytes)
+fn has_bytes(context: &Cx<'_>, vectors: &[Option<Local<'_, Str>>]) -> bool {
+    vectors.iter().flatten().any(|vector| {
+        vector
+            .iter(context)
+            .any(|chars| handles::encoding(chars) == Encoding::Bytes)
     })
 }
 
-/// A string built from matched text. When bytes-marked input forced byte matching, GNU R marks
-/// a result that is not ASCII as bytes too.
-unsafe fn regex_result(text: &str, forced_bytes: bool) -> R<Sexp> {
+/// The bytes of a string built from matched text when it is marked as bytes: when bytes-marked
+/// input forced byte matching, GNU R marks a result that is not ASCII as bytes too. `None`
+/// means the string is made from the text as [`values::mkchar`] makes it.
+fn regex_bytes(text: &str, forced_bytes: bool) -> Option<Cow<'_, [u8]>> {
     match (forced_bytes, values::unescape_invalid_bytes(text)) {
-        (true, Some(bytes)) => values::mkchar_bytes(&bytes, Encoding::Bytes),
-        (true, None) if !text.is_ascii() => values::mkchar_bytes(text.as_bytes(), Encoding::Bytes),
-        _ => values::mkchar(text),
+        (true, Some(bytes)) => Some(Cow::Owned(bytes)),
+        (true, None) if !text.is_ascii() => Some(Cow::Borrowed(text.as_bytes())),
+        _ => None,
     }
 }
 
-/// The pattern's first element, or `None` for `NA`, read as [`subject_at`] reads text.
-unsafe fn pattern_argument<'a>(pattern: Sexp, bytes: bool) -> R<Option<Cow<'a, str>>> {
-    if pattern.kind() != SexpType::String || length(pattern) == 0 {
-        return Err(error("invalid 'pattern' argument"));
+/// [`regex_bytes`] as a new string.
+unsafe fn regex_result(text: &str, forced_bytes: bool) -> R<Sexp> {
+    match regex_bytes(text, forced_bytes) {
+        Some(bytes) => values::mkchar_bytes(&bytes, Encoding::Bytes),
+        None => values::mkchar(text),
     }
-    if length(pattern) > 1 {
-        warning("argument 'pattern' has length > 1 and only the first element will be used")?;
+}
+
+/// [`regex_bytes`] stored as element `index` of `vector`.
+fn set_regex_result(
+    context: &mut Cx<'_>,
+    vector: &mut Fresh<'_, Str>,
+    index: usize,
+    text: &str,
+    forced_bytes: bool,
+) -> R<()> {
+    match regex_bytes(text, forced_bytes) {
+        Some(bytes) => handles::set_bytes(context, vector, index, &bytes, Encoding::Bytes),
+        None => handles::set_text(context, vector, index, text),
     }
-    Ok(subject_at(pattern, 0, bytes))
+}
+
+/// The `pattern` argument, warning when it has more than the one element that is used.
+fn pattern_argument<'s>(
+    context: &mut Cx<'_>,
+    pattern: Option<Local<'s, Str>>,
+) -> R<Local<'s, Str>> {
+    let pattern = match pattern {
+        Some(pattern) if !pattern.is_empty() => pattern,
+        _ => return Err(error("invalid 'pattern' argument")),
+    };
+    if pattern.len() > 1 {
+        handles::warning(
+            context,
+            "argument 'pattern' has length > 1 and only the first element will be used",
+        )?;
+    }
+    Ok(pattern)
+}
+
+/// The text a regular expression function searches: a character vector, with `NULL` as an
+/// empty one.
+fn text_argument<'s>(
+    context: &mut Cx<'s>,
+    value: Local<'s>,
+    text: Option<Local<'s, Str>>,
+) -> R<Local<'s, Str>> {
+    match text {
+        Some(text) => Ok(text),
+        None => strings_or_null(context, value, "invalid 'text' argument"),
+    }
+}
+
+/// `value` as a character vector when it is one, an empty one for `NULL`, and the error
+/// `message` otherwise.
+fn strings_or_null<'s>(context: &mut Cx<'s>, value: Local<'s>, message: &str) -> R<Local<'s, Str>> {
+    if value.r_type() == SexpType::Nil {
+        return Ok(context.alloc::<Str>(0)?.finish());
+    }
+    handles::dense::<Str>(context, value)?.ok_or_else(|| error(message))
+}
+
+/// The first element of a pattern, read as [`subject`] reads text, and empty for `NA`.
+fn pattern_text<'a, 's: 'a>(
+    context: &'a Cx<'_>,
+    pattern: Local<'s, Str>,
+    use_bytes: bool,
+) -> Cow<'a, str> {
+    subject(pattern.get(context, 0), use_bytes).unwrap_or_default()
+}
+
+/// A string as the regular expression engine sees it, as [`subject_at`] reads it.
+fn subject(chars: Gc<'_, Chars>, use_bytes: bool) -> Option<Cow<'_, str>> {
+    if handles::is_na(chars) {
+        None
+    } else if use_bytes {
+        Some(values::escape_high_bytes(chars.bytes()))
+    } else {
+        Some(handles::text(chars))
+    }
 }
 
 /// Element `index` of a character vector as the regular expression engine sees it, or `None`
@@ -3022,40 +3531,65 @@ pub(crate) unsafe fn subject_at<'a>(
     (charsxp != na_string()).then(|| values::escape_high_bytes(charsxp.bytes()))
 }
 
-/// Whether element `index` of `text` can be matched. GNU R refuses a string marked as UTF-8
-/// whose bytes are not UTF-8: the regex functions warn and treat it as unmatched, and `sub`
-/// and `gsub` (`fatal`) fail. TRE first fails to convert it to wide characters.
-unsafe fn valid_subject(
-    text: Sexp,
+/// Whether element `index` of `text` can be matched. GNU R refuses a string that is read as
+/// UTF-8 (marked so, or unmarked in the UTF-8 session) whose bytes are not UTF-8: the regex
+/// functions and `strsplit` warn and treat it as unmatched, and `sub` and `gsub` (`fatal`) fail.
+/// TRE first fails to convert it to wide characters.
+fn valid_subject(
+    context: &mut Cx<'_>,
+    pattern: Option<Local<'_, Str>>,
+    text: Local<'_, Str>,
     index: usize,
     use_bytes: bool,
     options: PatternOptions,
     fatal: bool,
 ) -> R<bool> {
-    let charsxp = text.element(index);
-    if use_bytes
-        || Encoding::of(charsxp) != Encoding::Utf8
-        || std::str::from_utf8(charsxp.bytes()).is_ok()
-    {
-        return Ok(true);
-    }
-    let message = if options.fixed || options.perl {
-        format!("input string {} is invalid UTF-8", index + 1)
-    } else {
-        let mut shown = String::new();
-        for chunk in charsxp.bytes().utf8_chunks() {
-            shown.push_str(chunk.valid());
-            for byte in chunk.invalid() {
-                shown.push_str(&format!("<{byte:02x}>"));
-            }
+    let (translation, message) = {
+        let chars = text.get(context, index);
+        if use_bytes
+            || chars.is_valid_utf8()
+            || matches!(handles::encoding(chars), Encoding::Latin1 | Encoding::Bytes)
+            || std::str::from_utf8(chars.bytes()).is_ok()
+        {
+            return Ok(true);
         }
-        warning(format!("unable to translate '{shown}' to a wide string"))?;
-        format!("input string {} is invalid", index + 1)
+        // Fixed matching compares UTF-8 only when the pattern or a text is marked as UTF-8,
+        // and otherwise reads the strings in the session's encoding.
+        let marked_utf8 = |vector: Local<'_, Str>| {
+            vector
+                .iter(context)
+                .any(|chars| handles::encoding(chars) == Encoding::Utf8)
+        };
+        if options.perl
+            || (options.fixed && (pattern.is_some_and(marked_utf8) || marked_utf8(text)))
+        {
+            (None, format!("input string {} is invalid UTF-8", index + 1))
+        } else if options.fixed {
+            (
+                None,
+                format!("input string {} is invalid in this locale", index + 1),
+            )
+        } else {
+            let mut shown = String::new();
+            for chunk in chars.bytes().utf8_chunks() {
+                shown.push_str(chunk.valid());
+                for byte in chunk.invalid() {
+                    shown.push_str(&format!("<{byte:02x}>"));
+                }
+            }
+            (
+                Some(format!("unable to translate '{shown}' to a wide string")),
+                format!("input string {} is invalid", index + 1),
+            )
+        }
     };
+    if let Some(translation) = translation {
+        handles::warning(context, translation)?;
+    }
     if fatal {
         return Err(error(message));
     }
-    warning(message)?;
+    handles::warning(context, message)?;
     Ok(false)
 }
 
@@ -3075,11 +3609,14 @@ enum CompileErrors {
 }
 
 impl CompileErrors {
-    unsafe fn for_text(pattern: &str, text: Sexp, use_bytes: bool) -> CompileErrors {
+    fn for_text(
+        context: &Cx<'_>,
+        pattern: &str,
+        text: Local<'_, Str>,
+        use_bytes: bool,
+    ) -> CompileErrors {
         let wide = !use_bytes
-            && (!pattern.is_ascii()
-                || (text.kind() == SexpType::String
-                    && (0..length(text)).any(|index| !text.element(index).bytes().is_ascii())));
+            && (!pattern.is_ascii() || text.iter(context).any(|chars| !chars.bytes().is_ascii()));
         if wide {
             CompileErrors::Wide
         } else {
@@ -3130,6 +3667,9 @@ struct LazyAutomata {
 struct Automata {
     first: meta::Regex,
     longest: meta::Regex,
+    /// Whether `first`'s capture groups are TRE's whenever its match spans as far as the
+    /// longest one; see [`greedy_single_width`].
+    greedy_groups: bool,
 }
 
 impl LazyAutomata {
@@ -3147,13 +3687,74 @@ impl LazyAutomata {
                         .build(&self.pattern)
                         .ok()
                 };
+                let greedy_groups = regex_syntax::ParserBuilder::new()
+                    .case_insensitive(self.ignore_case)
+                    .build()
+                    .parse(&self.pattern)
+                    .is_ok_and(|hir| greedy_single_width(&hir));
                 Some(Automata {
                     first: build(MatchKind::LeftmostFirst)?,
                     longest: build(MatchKind::All)?,
+                    greedy_groups,
                 })
             })
             .as_ref()
     }
+}
+
+/// Whether every repetition in `hir` is greedy and repeats a single character, with no
+/// alternation anywhere. A backtracking match of such a pattern makes each repetition, in
+/// pattern order, as long as the rest of the pattern allows, so when it ends where the longest
+/// match ends its groups are the POSIX ones TRE reports. A repeated group or an alternation
+/// breaks this: `(a)?(ab)?b*` on `"abb"` spans the same text either way, but TRE gives the
+/// second group `"ab"` and a backtracker gives the first one `"a"`.
+fn greedy_single_width(hir: &regex_syntax::hir::Hir) -> bool {
+    use regex_syntax::hir::HirKind;
+    match hir.kind() {
+        HirKind::Empty | HirKind::Literal(_) | HirKind::Class(_) | HirKind::Look(_) => true,
+        HirKind::Repetition(repetition) => {
+            repetition.greedy
+                && match repetition.sub.kind() {
+                    HirKind::Class(_) => true,
+                    HirKind::Literal(literal) => {
+                        std::str::from_utf8(&literal.0).is_ok_and(|text| text.chars().count() == 1)
+                    }
+                    _ => false,
+                }
+        }
+        HirKind::Capture(capture) => greedy_single_width(&capture.sub),
+        HirKind::Concat(items) => items.iter().all(greedy_single_width),
+        HirKind::Alternation(_) => false,
+    }
+}
+
+/// The groups of the leftmost match from `first`, or `None` (inner) when there is no match;
+/// `None` (outer) when the match ends before the longest one does, so only the backtracker
+/// can tell TRE's groups.
+fn greedy_captures(
+    first: &meta::Regex,
+    longest: &meta::Regex,
+    text: &str,
+    from: usize,
+) -> Option<Option<Groups>> {
+    let mut captures = first.create_captures();
+    first.search_captures(&Input::new(text).range(from..), &mut captures);
+    let Some(found) = captures.get_match() else {
+        return Some(None);
+    };
+    let anchored = Input::new(text)
+        .range(found.start()..)
+        .anchored(Anchored::Yes);
+    let end = longest
+        .search(&anchored)
+        .map_or(found.end(), |longest| longest.end());
+    (end == found.end()).then(|| {
+        Some(
+            (0..captures.group_len())
+                .map(|group| captures.get_group(group).map(|span| (span.start, span.end)))
+                .collect(),
+        )
+    })
 }
 
 /// How many compiled patterns [`Matcher::compile`] keeps. R code calls `grepl` and `sub` with the
@@ -3168,7 +3769,11 @@ thread_local! {
 }
 
 impl Matcher {
-    unsafe fn compile(pattern: &str, options: PatternOptions, errors: CompileErrors) -> R<Matcher> {
+    fn compile(
+        pattern: &str,
+        options: PatternOptions,
+        errors: CompileErrors,
+    ) -> Result<Matcher, CompileFailure> {
         let slot = if options.fixed {
             4
         } else {
@@ -3190,22 +3795,20 @@ impl Matcher {
             return Ok(matcher);
         }
         let translated = translate(pattern);
-        let failure = |reason: String| -> crate::unwind::Unwind {
+        let failure = |reason: String| -> CompileFailure {
             match errors {
-                CompileErrors::Quoted => {
-                    if let Err(unwind) =
-                        warning(format!("TRE pattern compilation error '{reason}'"))
-                    {
-                        return unwind;
-                    }
-                    error(format!(
+                CompileErrors::Quoted => CompileFailure {
+                    warning: Some(format!("TRE pattern compilation error '{reason}'")),
+                    error: error(format!(
                         "invalid regular expression '{pattern}', reason '{reason}'"
-                    ))
+                    )),
+                },
+                CompileErrors::Wide => CompileFailure::error(error(format!(
+                    "invalid regular expression, reason '{reason}'"
+                ))),
+                CompileErrors::Regexec => {
+                    CompileFailure::error(error(format!("regcomp error: '{reason}'")))
                 }
-                CompileErrors::Wide => {
-                    error(format!("invalid regular expression, reason '{reason}'"))
-                }
-                CompileErrors::Regexec => error(format!("regcomp error: '{reason}'")),
             }
         };
         if !translated.scopes.is_empty() && translated.problem.is_none() {
@@ -3299,7 +3902,7 @@ impl Matcher {
                 shortest,
                 ..
             } => {
-                let Some(Automata { first, longest }) = automata.get() else {
+                let Some(Automata { first, longest, .. }) = automata.get() else {
                     return regex
                         .find_from_pos(text, from)
                         .map(|found| found.map(|found| (found.start(), found.end())))
@@ -3358,6 +3961,19 @@ impl Matcher {
                         .map(|group| captures.get_group(group).map(|span| (span.start, span.end)))
                         .collect(),
                 ))
+            }
+            Matcher::Automaton {
+                automata,
+                shortest: false,
+                ..
+            } if let Some(Automata {
+                first,
+                longest,
+                greedy_groups: true,
+            }) = automata.get()
+                && let Some(groups) = greedy_captures(first, longest, text, from) =>
+            {
+                Ok(groups)
             }
             Matcher::Pattern { regex, .. } | Matcher::Automaton { regex, .. } => {
                 let Some(captures) = regex
@@ -3463,16 +4079,18 @@ fn remember((pattern, slot): (&str, usize), matcher: &Matcher) {
 /// Compiles a `perl = TRUE` pattern as GNU R's `R_pcre2_prepare` does: UTF mode, caseless when
 /// asked, and JIT-compiled when PCRE2 supports it. Text is always valid UTF-8 here, so UTF mode
 /// is right even for ASCII input, where it makes no difference.
-unsafe fn compile_perl(pattern: &str, ignore_case: bool) -> R<Matcher> {
+fn compile_perl(pattern: &str, ignore_case: bool) -> Result<Matcher, CompileFailure> {
     match PerlRegex::new(pattern, ignore_case) {
         Ok(regex) => Ok(Matcher::Perl(Rc::new(regex))),
         Err(CompileError { message, offset }) => {
             // GNU R prints the message and the rest of the pattern from the error's byte offset.
             let rest = pattern.get(offset..).unwrap_or_default();
-            warning(format!(
-                "PCRE pattern compilation error\n\t'{message}'\n\tat '{rest}'"
-            ))?;
-            Err(error(format!("invalid regular expression '{pattern}'")))
+            Err(CompileFailure {
+                warning: Some(format!(
+                    "PCRE pattern compilation error\n\t'{message}'\n\tat '{rest}'"
+                )),
+                error: error(format!("invalid regular expression '{pattern}'")),
+            })
         }
     }
 }
@@ -4274,59 +4892,84 @@ unsafe fn as_character(value: Sexp, env: impl FnOnce() -> R<Sexp>) -> R<Sexp> {
     }
 }
 
-/// A character version of `x`, as `nchar` and `nzchar` read their argument.
-unsafe fn character_vector(x: Sexp) -> R<Sexp> {
-    if x.kind() == SexpType::String {
-        Ok(x)
-    } else {
-        coerce_vector(x, SexpType::String)
-    }
+/// Whether a flag argument is `TRUE`.
+#[inline]
+fn is_true(context: &mut Cx<'_>, value: Local<'_>) -> bool {
+    handles::logical_scalar(context, value) == 1
 }
 
-/// Copies the names, dim and dimnames of `from` onto `to`.
-unsafe fn copy_shape(from: Sexp, to: Sexp) -> R<()> {
-    let symbols = symbols();
-    for symbol in [symbols.names, symbols.dim, symbols.dimnames] {
-        // GNU R reads the names through `getAttrib`, which turns a pairlist's tags into names.
-        let value = if symbol == symbols.names
-            && matches!(from.kind(), SexpType::Pairlist | SexpType::Language)
-        {
-            values::names(from)
-        } else {
-            get_attr(from, symbol)
-        };
-        if value != nil() {
-            set_attr(to, symbol, value)?;
-        }
+/// Fails as GNU R does when a string marked as bytes and not ASCII would need a character
+/// reading.
+fn refuse_bytes(context: &Cx<'_>, text: Local<'_, Str>) -> R<()> {
+    if text
+        .iter(context)
+        .any(|chars| handles::is_bytes(chars) && !chars.bytes().is_ascii())
+    {
+        return Err(error(
+            "translating strings with \"bytes\" encoding is not allowed",
+        ));
     }
     Ok(())
 }
 
-unsafe fn integer_argument(value: Sexp) -> R<Vec<i32>> {
-    let integers = coerce_vector(value, SexpType::Integer)?;
-    Ok(values::ints(integers).to_vec())
-}
-
-/// Maps every non-`NA` element of a character vector through `edit` (`None` for `NA`), keeping
-/// the attributes.
-unsafe fn map_strings(x: Sexp, edit: impl Fn(&str) -> Option<String>) -> R<Sexp> {
-    let count = length(x);
-    let result = alloc(SexpType::String, count)?;
-    for index in 0..count {
-        let charsxp = x.element(index);
-        if charsxp == na_string() {
-            set_elt(result, index, charsxp);
+/// Maps every non-`NA` element of the character vector `text`, which is `x` or its standard
+/// form, through `edit` (`None` for `NA`), keeping the attributes of `x`.
+fn map_strings<'s>(
+    context: &mut Cx<'s>,
+    x: Local<'s>,
+    text: Local<'s, Str>,
+    edit: impl Fn(&str) -> Option<String>,
+) -> R<Local<'s>> {
+    let mut result = context.alloc::<Str>(text.len())?;
+    for index in 0..text.len() {
+        let chars = text.get(context, index);
+        if handles::is_na(chars) {
+            result.set(context, index, chars);
             continue;
         }
-        let text = values::char_str(charsxp);
-        match edit(&text) {
-            Some(edited) if edited == *text => set_elt(result, index, charsxp),
-            Some(edited) => values::set_mkchar(result, index, &edited)?,
-            None => set_elt(result, index, na_string()),
+        let edited = {
+            let current = handles::text(chars);
+            match edit(&current) {
+                Some(edited) if edited == *current => Ok(()),
+                other => Err(other),
+            }
+        };
+        match edited {
+            Ok(()) => result.set(context, index, chars),
+            Err(Some(edited)) => handles::set_text(context, &mut result, index, &edited)?,
+            Err(None) => result.set(context, index, handles::na()),
         }
     }
-    values::copy_attributes(x, result)?;
-    Ok(result)
+    handles::copy_attributes(context, x, &mut result)?;
+    Ok(result.finish().value())
+}
+
+/// A pattern that does not compile: the error, and the warning GNU R gives first on some paths.
+/// The warning is raised by the caller, which holds the context a warning needs.
+struct CompileFailure {
+    warning: Option<String>,
+    error: Unwind,
+}
+
+impl CompileFailure {
+    fn error(error: Unwind) -> CompileFailure {
+        CompileFailure {
+            warning: None,
+            error,
+        }
+    }
+}
+
+/// Raises the failure's warning, then returns the error, or the unwind a handler of the
+/// warning started.
+fn compile_failure(context: &mut Cx<'_>, failure: CompileFailure) -> Unwind {
+    match failure
+        .warning
+        .map(|message| handles::warning(context, message))
+    {
+        Some(Err(unwind)) => unwind,
+        _ => failure.error,
+    }
 }
 
 /// The byte index after the character at `index`, or `index + 1` at the end of the text.

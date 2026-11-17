@@ -1000,7 +1000,7 @@ const ERRORS: &[(&str, &str)] = &[
         "`list` must be a list, not a double vector of length 2",
     ),
     ("List.len()", "`List.len()` needs the argument `list`"),
-    ("List.get(xs, 1L, 2L)", "unused argument (2L)"),
+    ("List.get(xs, 1L, 2L)", "unused argument (2)"),
     (
         "List.get(xs, 1.5)",
         "`index` must be a whole number, not a double value",

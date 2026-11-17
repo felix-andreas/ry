@@ -1,0 +1,16 @@
+id = "builtins"
+name = "Builtins of base, stats and utils"
+harness = "tools/bench/builtins/harness.R"
+summary = "calls of the exported functions of base, stats and utils, a few inputs each"
+description = """
+Every exported function of base, stats and utils, called on a few representative inputs: a scalar,
+a vector of 1,000 and one of 1,000,000 elements where the function is vectorised, and character,
+list, factor, matrix or data frame inputs where it takes them. The cases live in
+`tools/bench/builtins/cases/`, one `bench()` per function, and functions whose time is not the
+builtin's (files, the network, clocks, the session's state) are skipped with the reason.
+`tools/bench/builtins/harness.R` times every case of a round in one process per engine: it calls
+the case in a loop until a batch takes at least 10 ms, then times five batches, and a case's time is
+the median per call. The result's checksum is compared with GNU R's, and a difference is a flag,
+not a failure. A function's ratio is that of its slowest case. `tools/bench/builtins/slower.txt`
+lists the functions slower than GNU R, and `sweep.py ratchet` keeps that list from growing.
+"""

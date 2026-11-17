@@ -27,6 +27,25 @@ pub unsafe fn do_d(call: &NativeCall<'_>) -> R<Sexp> {
             nil()
         };
     }
+    if !matches!(
+        expression.kind(),
+        SexpType::Nil
+            | SexpType::Language
+            | SexpType::Symbol
+            | SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex
+    ) || values::inherits(expression, "factor")
+    {
+        return Err(call.error(format!(
+            "expression must not be type '{}'",
+            expression.kind().name()
+        )));
+    }
+    if expression == nil() {
+        return constant(NA_REAL);
+    }
     let names = call.arg(1);
     if names.kind() != SexpType::String || length(names) < 1 {
         return Err(call.error("variable must be a character string"));
@@ -34,9 +53,8 @@ pub unsafe fn do_d(call: &NativeCall<'_>) -> R<Sexp> {
     if length(names) > 1 {
         call.warning("only the first element is used as variable name")?;
     }
-    let name = values::string_at(names, 0)
-        .map(|name| name.into_owned())
-        .unwrap_or_default();
+    let name =
+        values::string_at(names, 0).map_or_else(|| "NA".to_owned(), |name| name.into_owned());
     let variable = values::install(&name)?;
     let derivative = differentiate(call, expression, variable)?;
     add_parens(derivative)

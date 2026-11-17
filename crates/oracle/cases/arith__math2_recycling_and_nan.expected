@@ -1,0 +1,39 @@
+[stdout]
+| [1]  0  0  3  4 10
+|  a  b 
+| 10 15 
+|  a  b  c 
+| 10 10  5 
+| [1] NA
+| [1] NA
+| [1] NA
+| warning: NaNs produced | beta(-1, 1) 
+| [1] NaN
+| warning: NaNs produced | lbeta(-1, 2) 
+| [1] NaN
+| [1] 0.6286087
+| numeric(0)
+| numeric(0)
+| numeric(0)
+| attr(,"foo")
+| [1] "x"
+|           [,1]       [,2]
+| [1,] 1.0000000 0.03333333
+| [2,] 0.1666667 0.25000000
+| error: non-numeric argument to mathematical function | beta(factor(1), 1) 
+| error: non-numeric argument to mathematical function | choose("a", 1) 
+| [1] 0.7853982 0.7853982 1.2490458
+|         a         b 
+| 0.7853982 1.1071487 
+|           [,1]     [,2]
+| [1,] 0.7853982 1.249046
+| [2,] 0.7853982 1.107149
+| error: non-numeric argument to mathematical function | atan2("a", 1) 
+| warning: NAs introduced by coercion | atan2(0+1i, "a") 
+| [1] NaN+NaNi
+[messages]
+[warnings]
+[errors]
+[value]
+complex
+| complex(real=NaN, imaginary=NaN)

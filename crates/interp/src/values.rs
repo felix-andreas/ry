@@ -410,10 +410,12 @@ pub unsafe fn is_nil(object: Sexp) -> bool {
 
 // Allocation. Every constructor roots its result.
 
-#[inline]
+// Out of line with the heap's inline path in its body, so a caller pays one call for a rooted
+// vector.
+#[inline(never)]
 pub unsafe fn alloc(kind: SexpType, length: usize) -> R<Sexp> {
     let heap = crate::heap();
-    let object = heap.alloc_vector(kind, length as isize)?;
+    let object = heap.alloc_vector_inline(kind, length as isize)?;
     heap.root(object);
     Ok(object)
 }
@@ -548,22 +550,34 @@ impl StringMemo<'_> {
     }
 }
 
+/// The symbol named `name`, whose stand-ins (see [`escape_invalid_bytes`]) name the bytes they
+/// stand for, as [`mkchar`] interns them.
 pub unsafe fn install(name: &str) -> R<Sexp> {
-    Ok(crate::heap().install(name.as_bytes())?)
+    Ok(match unescape_invalid_bytes(name) {
+        Some(bytes) => crate::heap().install(&bytes)?,
+        None => crate::heap().install(name.as_bytes())?,
+    })
 }
 
 pub unsafe fn install_bytes(name: &[u8]) -> R<Sexp> {
     Ok(crate::heap().install(name)?)
 }
 
-/// The symbol named by the `CHARSXP` `name`. An interned ASCII string is already the print name
-/// `install` would intern, so it skips hashing the bytes again; any other string goes through
-/// `install`, which also rejects an empty or overlong name. `NA_STRING` is not the interned
-/// `"NA"`, so it goes through `install` too.
+/// The symbol named by the `CHARSXP` `name`. An interned ASCII or UTF-8 string is a print name
+/// as it is: an ASCII one is what `install` would intern, and a UTF-8 one keeps its mark when
+/// it installs the symbol, as GNU R's `installTrChar` does, which also translates a latin1 string
+/// to its UTF-8 text first. Any other string goes through `install`, which also rejects an empty
+/// or overlong name. `NA_STRING` is not the interned `"NA"`, so it goes through `install` too.
 pub unsafe fn install_charsxp(name: Sexp) -> R<Sexp> {
-    if name != na_string() && name.has_gp(gp::ASCII) && name.has_gp(gp::CACHED) && name.length() > 0
+    if name != na_string()
+        && name.has_gp(gp::CACHED)
+        && name.length() > 0
+        && (name.has_gp(gp::ASCII) || (name.has_gp(gp::UTF8) && name.is_valid_utf8()))
     {
         return Ok(crate::heap().install_char(name)?);
+    }
+    if name.has_gp(gp::LATIN1) {
+        return install(&char_str(name));
     }
     install_bytes(name.bytes())
 }
@@ -1049,7 +1063,19 @@ unsafe fn char_str_decoded<'a>(charsxp: Sexp) -> Cow<'a, str> {
         return Cow::Borrowed(text);
     }
     if charsxp.has_gp(gp::LATIN1) {
-        return Cow::Owned(bytes.iter().map(|&byte| byte as char).collect());
+        // GNU R translates a latin1 string as Windows-1252, and spells a byte that code page
+        // leaves undefined `<xx>`.
+        let mut text = String::with_capacity(bytes.len() * 2);
+        for &byte in bytes {
+            match byte {
+                0x80..=0x9f => match WINDOWS_1252_HIGH[usize::from(byte - 0x80)] {
+                    '\0' => text.push_str(&format!("<{byte:02x}>")),
+                    character => text.push(character),
+                },
+                _ => text.push(char::from(byte)),
+            }
+        }
+        return Cow::Owned(text);
     }
     // GNU R reads a string declared as bytes through its `\xNN` spelling wherever it needs
     // text, so printing, formatting and pasting show the escapes rather than decoded characters.
@@ -1066,6 +1092,14 @@ unsafe fn char_str_decoded<'a>(charsxp: Sexp) -> Cow<'a, str> {
     }
     escape_invalid_bytes(bytes)
 }
+
+/// The characters of bytes 0x80 to 0x9F in Windows-1252, with NUL for a byte it leaves undefined.
+const WINDOWS_1252_HIGH: [char; 32] = [
+    '\u{20ac}', '\0', '\u{201a}', '\u{192}', '\u{201e}', '\u{2026}', '\u{2020}', '\u{2021}',
+    '\u{2c6}', '\u{2030}', '\u{160}', '\u{2039}', '\u{152}', '\0', '\u{17d}', '\0', '\0',
+    '\u{2018}', '\u{2019}', '\u{201c}', '\u{201d}', '\u{2022}', '\u{2013}', '\u{2014}', '\u{2dc}',
+    '\u{2122}', '\u{161}', '\u{203a}', '\u{153}', '\0', '\u{17e}', '\u{178}',
+];
 
 /// Decodes bytes that need not be UTF-8 as text. GNU R keeps a string's bytes as they are, so a
 /// Latin-1 string in a UTF-8 session, or a piece `strsplit(useBytes = TRUE)` cut out of a
@@ -1096,7 +1130,7 @@ pub fn stand_in(byte: u8) -> char {
 /// Whether `text` holds a character in the stand-in range. Each one encodes as `F4 8F BE xx` or
 /// `F4 8F BF xx` in UTF-8, and `F4` leads only the last plane of the code space, so most text is
 /// rejected by the byte scan alone.
-fn holds_stand_in(text: &str) -> bool {
+pub fn holds_stand_in(text: &str) -> bool {
     text.as_bytes().contains(&0xF4)
         && text
             .chars()
@@ -1150,6 +1184,38 @@ pub fn unescape_invalid_bytes(text: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// Text on its way out of the session (to the console or a connection) with every stand-in
+/// turned back into its byte, so a string that is not valid UTF-8 is written as the bytes it
+/// holds. Every stand-in encodes as `F4 8F BE xx` or `F4 8F BF xx`.
+pub fn unescape_output(bytes: &[u8]) -> Cow<'_, [u8]> {
+    let stand_in_at = |from: usize| {
+        memchr::memchr_iter(0xF4, &bytes[from..])
+            .map(|offset| from + offset)
+            .find(|&start| {
+                matches!(
+                    bytes.get(start + 1..start + 4),
+                    Some([0x8F, 0xBE | 0xBF, 0x80..=0xBF])
+                )
+            })
+    };
+    let Some(mut next) = stand_in_at(0) else {
+        return Cow::Borrowed(bytes);
+    };
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut position = 0;
+    loop {
+        output.extend_from_slice(&bytes[position..next]);
+        output.push(((bytes[next + 2] & 0x03) << 6) | (bytes[next + 3] & 0x3F));
+        position = next + 4;
+        match stand_in_at(position) {
+            Some(start) => next = start,
+            None => break,
+        }
+    }
+    output.extend_from_slice(&bytes[position..]);
+    Cow::Owned(output)
+}
+
 /// Whether two distinct interned strings hold the same text. Strings intern by bytes and
 /// encoding, so a native string and a UTF-8 one with the same bytes are distinct objects, and so
 /// are a latin1 string and its UTF-8 translation; GNU R's `Seql` calls both pairs equal because
@@ -1179,6 +1245,7 @@ pub unsafe fn same_text(left: Sexp, right: Sexp) -> bool {
 }
 
 /// The text of a symbol's name.
+#[inline]
 pub unsafe fn symbol_name<'a>(symbol: Sexp) -> Cow<'a, str> {
     char_str(symbol.car())
 }
@@ -1256,8 +1323,21 @@ pub unsafe fn has_attributes(object: Sexp) -> bool {
     object.attrib() != nil()
 }
 
-/// Sets an attribute without validating it, or removes it when `value` is `NULL`. The object
-/// bit follows the class attribute.
+/// GNU R's `setAttrib` refuses `NULL` and the primitive functions: each is one object for the
+/// whole session, so an attribute on it would show on every use.
+pub fn check_attributable(kind: SexpType) -> R<()> {
+    match kind {
+        SexpType::Nil => Err(error("attempt to set an attribute on NULL")),
+        kind @ (SexpType::Builtin | SexpType::Special | SexpType::Symbol) => Err(error(format!(
+            "cannot set an attribute on a '{}'",
+            kind.name()
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// Sets an attribute without validating its value, or removes it when `value` is `NULL`. The
+/// object bit follows the class attribute.
 pub unsafe fn set_attr(object: Sexp, name: Sexp, value: Sexp) -> R<()> {
     let heap = crate::heap();
     let nil = nil();
@@ -1265,6 +1345,7 @@ pub unsafe fn set_attr(object: Sexp, name: Sexp, value: Sexp) -> R<()> {
         remove_attr(object, name);
         return Ok(());
     }
+    check_attributable(object.kind())?;
     // An object cannot carry itself as an attribute: the cycle would make `serialize`, `identical`
     // and printing recurse forever, so GNU R's `R_FixupRHS` attaches a copy instead.
     let value = if value == object {
@@ -1490,7 +1571,9 @@ pub unsafe fn shallow_duplicate(object: Sexp) -> R<Sexp> {
 
 /// GNU R's `R_shallow_duplicate_attr`: a copy of `object` for a caller that changes only its
 /// attributes, which for a long atomic or character vector is a wrapper that shares the data
-/// until something writes to it. Like [`shallow_duplicate`], it drops the Array bit.
+/// until something writes to it through the ALTREP interface. Its storage must never be
+/// written directly (`slice_mut`, `reals_mut`). Like [`shallow_duplicate`], it drops the Array
+/// bit.
 pub unsafe fn shallow_duplicate_attr(object: Sexp) -> R<Sexp> {
     let wrappable = matches!(
         object.kind(),
@@ -1518,7 +1601,8 @@ pub unsafe fn shallow_duplicate_attr(object: Sexp) -> R<Sexp> {
 /// ordinary storage, which means GNU R's in-place change of an unshared instance's attributes is
 /// a copy here; a copy into ordinary storage would drop the class, and with it methods such as
 /// `Serialized_state`. A caller that writes elements into the copy itself must use
-/// [`shallow_duplicate_attr`].
+/// [`shallow_duplicate`], because the wrapper `shallow_duplicate_attr` makes of a long vector
+/// has no storage to write into.
 pub unsafe fn replacement_copy(object: Sexp) -> R<Sexp> {
     if !object.is_altrep() {
         return shallow_duplicate_attr(object);
@@ -1570,7 +1654,7 @@ pub unsafe fn unwrap_assigned(value: Sexp, bound: bool) -> Sexp {
 }
 
 /// GNU R's `WRAP_THRESHOLD`: a shorter vector is cheaper to copy than to wrap.
-const WRAP_THRESHOLD: usize = 64;
+pub(crate) const WRAP_THRESHOLD: usize = 64;
 
 unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
     let heap = crate::heap();
@@ -1631,6 +1715,16 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
             let count = source.length() as usize;
             let copy = alloc(kind, count)?;
             match kind {
+                // The elements are shared, so the slots copy as one block and are then counted
+                // and barriered together.
+                SexpType::String | SexpType::List | SexpType::Expression if !deep => {
+                    std::ptr::copy_nonoverlapping(
+                        source.data() as *const Sexp,
+                        copy.data() as *mut Sexp,
+                        count,
+                    );
+                    heap.count_written_elements(copy);
+                }
                 SexpType::String => {
                     for index in 0..count {
                         heap.set_element(copy, index, source.element(index));
@@ -1747,6 +1841,71 @@ pub unsafe fn as_integer_scalar(object: Sexp) -> i32 {
         SexpType::Raw => raws(object)[0] as i32,
         _ => NA_INTEGER,
     }
+}
+
+/// The first element as an integer, or `NA`, with the coercion warnings of GNU R's `asInteger`:
+/// text that is no number and a double outside the integer range warn.
+pub unsafe fn as_integer_scalar_warning(object: Sexp) -> R<i32> {
+    if length(object) == 0 {
+        return Ok(NA_INTEGER);
+    }
+    let mut warnings = crate::coerce::CoercionWarnings::default();
+    let value = match object.kind() {
+        SexpType::Real => {
+            let (value, out_of_range) = crate::coerce::real_to_int(reals(object)[0]);
+            warnings.integer_range = out_of_range;
+            value
+        }
+        SexpType::Complex => {
+            let value = complexes(object)[0];
+            let (integer, out_of_range) = crate::coerce::real_to_int(value.r);
+            warnings.integer_range = out_of_range;
+            warnings.imaginary = !value.r.is_nan() && !value.i.is_nan() && value.i != 0.0;
+            integer
+        }
+        SexpType::String => match string_at(object, 0) {
+            Some(text) => match crate::coerce::parse_real(&text) {
+                Some(real) => {
+                    let (value, out_of_range) = crate::coerce::real_to_int(real);
+                    warnings.integer_range = out_of_range;
+                    value
+                }
+                None => {
+                    warnings.na = true;
+                    NA_INTEGER
+                }
+            },
+            None => NA_INTEGER,
+        },
+        _ => as_integer_scalar(object),
+    };
+    warnings.report()?;
+    Ok(value)
+}
+
+/// The first element as a double, or `NA`, with the coercion warnings of GNU R's `asReal`.
+pub unsafe fn as_real_scalar_warning(object: Sexp) -> R<f64> {
+    if length(object) == 0 {
+        return Ok(NA_REAL);
+    }
+    let mut warnings = crate::coerce::CoercionWarnings::default();
+    let value = match object.kind() {
+        SexpType::Complex => {
+            let value = complexes(object)[0];
+            warnings.imaginary = !value.r.is_nan() && !value.i.is_nan() && value.i != 0.0;
+            value.r
+        }
+        SexpType::String => match string_at(object, 0) {
+            Some(text) => crate::coerce::parse_real(&text).unwrap_or_else(|| {
+                warnings.na = true;
+                NA_REAL
+            }),
+            None => NA_REAL,
+        },
+        _ => as_real_scalar(object),
+    };
+    warnings.report()?;
+    Ok(value)
 }
 
 /// The first element as a double, or `NA`.

@@ -156,13 +156,23 @@ Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and be
 
 - Every input is `git+https://github.com/owner/repo?shallow=1` (nixpkgs with `ref=nixos-unstable`), because the cloud sessions' proxy serves git clones but answers `github:` tarball URLs with 403, so `nix develop` could not start. Only the git form pins a commit, and a shallow nixpkgs clone took 16 s against 29 s for the tarball; `flake.lock` keeps the same revs and narHashes, so pinned trees are byte-identical. **Do not switch back to `github:` inputs.**
 
-## Cloud sessions are provisioned by tools/dev-setup.sh, not the nix shell
+## Agents work in the nix dev shell, loaded by tools/env.sh
 
 **Status:** built.
 
+- **Previous shape:** cloud containers ran `tools/dev-setup.sh` (apt, `just` from PyPI, GNU R restored into `/opt/R`), and mold needed a further environment setup script. Two provisioning paths described the same toolchain, and the container one drifted from CI's.
+- **Chosen shape:** every cloud container has nix, so `source tools/env.sh` loads the flake's `default` shell, which carries the toolchain, the reference GNU R, `just` and mold (`pkgs.mold`, the wrapped linker, which sees the shell's library paths). No environment setup script.
+- **Why sourced, not `nix develop -c`:** an agent's commands each start a new shell. `nix develop -c` costs 4.7 s per command; sourcing the saved `nix print-dev-env` (`target/nix-dev-env.sh`) costs 0.06 s.
+- **Measured, 4 cores:** first load 98 s and 8.8 GB of store, nothing built (both binary caches cover it); first debug build in the shell 5 min 20 s.
+- **Limits:** shell builds link nix's glibc, so a target directory is either shell-built or host-built. The package corpus links Ubuntu libraries the shell lacks, so that work uses `RY_ENV=system` and `tools/dev-setup.sh` (unverified in the shell).
+
+## tools/dev-setup.sh provisions the host for package-corpus work
+
+**Status:** built. Superseded as the default for agents by the entry above.
+
 - `tools/dev-setup.sh` (idempotent) installs apt libraries, `just` 1.59.0 from PyPI, and through `tools/reference-r.sh` the reference GNU R 4.6.2 in `/opt/R/4.6.2` with the oracle's packages (rlang 1.3.0); `just doctor` (`tools/doctor.py`) checks each, plus binary freshness by recomputing the runtime identity, and names the fix.
 - **`--enable-R-shlib` is required:** without `libR.so` ry's GNU R console cannot load that R and Posit's binary packages cannot link. **Posit's mirror serves binaries only to a user agent starting `R/<version>`,** which R's default lacks (about 10 s for the set against 5 minutes compiling).
-- **Why not nix here:** the binary cache restores the prebuilt R in seconds without a nix store in the container's 40 GB quota. CI uses the flake's `ci` shell, whose R is built the same way.
+- CI uses the flake's `ci` shell, whose R is built the same way.
 
 ## CI runs in the flake's dev shell
 
@@ -275,6 +285,17 @@ Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and be
 - **Cache directory, not the project's `.ry/`,** because a file in the project can be committed and `ry run` writes nothing else there. Two machines label differently; `RY_PROFILE_KEY` from a CI secret gives a fleet one key.
 - **Randomness seam:** tests call `package_display` with a fixed key, and the scenario sets `RY_PROFILE_KEY`.
 
+## The builtins sweep times every export of base, stats and utils, behind a shrinking ratchet
+
+**Status:** built.
+
+- **`tools/bench/builtins`** holds one or more cases per exported function (`cases/*.R`, a scalar, a 1e3 and a 1e6 input where meaningful, plus character, list, matrix and data frame variants) and a skip with a reason for the rest (I/O, nondeterminism, language constructs, session changes). `sweep.py list` and `check` keep every export covered, so a new export in base R fails the check until it gets a case or a skip.
+- **Why per function:** suites and kernels find a slow builtin only when a workload happens to hit it. The sweep finds it by construction, and `sweep.py weights` (call counts in the code-base templates and the oracle corpus) orders the fixes.
+- **The ratchet is `slower.txt`,** the functions slower than GNU R in any case on ry with or without the JIT. `ratchet` fails on an unlisted function below `1 / (1 + tolerance)` after confirming rounds, `--update` removes functions that pass, and `check` refuses a list longer than main's. `--seed` rewrites it, which only a change to the cases justifies. `--ci` drops the 1e5+ inputs and shortens the batches; the workflow is `.github/workflows/builtins.yml`, run by hand like `ci.yml`.
+- **bench.py runs it as the `builtins` suite** with its own round counts (`SUITE_ROUNDS`), because the harness repeats each case in five batches inside one process and a round takes most of an hour.
+- **The large fixtures are dropped after each case and rebuilt on demand**, with a collection between cases. Hundreds of megabytes of live 1e6 inputs made every allocating case on ry pay for collections that rescan them, so allocation-heavy calls measured 2 to 4 times slower than they run in real code: before the change 577 functions looked slower than GNU R, after it 81 did. A case's time must not depend on which cases ran before it.
+- **Harness traps:** `bench(.name, ...)` so a variant named `n` or `na` is not partially matched to the name; every timed call reads a variable, because both engines fold calls of constants; a connection left open in one case warns inside a later one. `compare --parallel` runs the engines side by side for a fast triage, at the cost of noise.
+
 ## The edit-to-signal loop is tuned for agents
 
 **Status:** built. Commands and timings live in `docs/src/content/docs/development/testing.md`, "The fast loop".
@@ -306,3 +327,28 @@ Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and be
 
 - **What happened.** A terse rewrite of the decision log by agents that had not written it halved its size and dropped a load-bearing fact (a number behind a decision, a rejected alternative, a trap, a code pointer) from about 421 of 509 entries; an entry-by-entry comparison against the old text put them back. A rewrite of long source comments lost invariants and the reasons behind constants in about a dozen blocks while saving 20 KB of 3.26 MB.
 - **Rule.** Cut context cost by structure (area files, an index of headings, byte budgets, a comment lint that ratchets) and by deleting what is superseded, not by rewording dense notes. A rewording pass needs an entry-by-entry comparison against the original, which costs more than it saves.
+
+## Shipped binaries keep their symbol table, and crash reports name functions from it
+
+**Status:** built; the release size cost is unmeasured.
+
+- **Rule.** Release builds strip debug info only (`[profile.release] strip = "debuginfo"`, `strip --strip-debug` in `tools/layout/optimize.sh` after BOLT), so `.symtab` ships in `ry` and `libR`. Release uses legacy symbol mangling, like dev, because v0 names roughly double `.strtab`.
+- **Why.** `dladdr` sees only `.dynsym`, which names the few exported functions, so a stripped report attributed every internal frame to the nearest export, and a test user's crash report could not be read.
+- **Shape.** On Linux with glibc, `crash` maps each frame's file read-only in the signal handler (the executable through `/proc/self/exe`, since R's `setwd` breaks a relative `argv[0]`), scans `.symtab` for the `STT_FUNC` symbol holding the address, and demangles it with `rustc-demangle` without its hash, allocating nothing. macOS keeps `backtrace_symbols_fd`.
+- **Rejected.** Separate symbol files published as release assets: smaller archives, but every report needs an offline symbolization step with the matching build, which a user filing a report does not have. `optimize.sh` prints `.symtab` and `.strtab` sizes so the cost shows in each release build log.
+
+## The differential fuzzer compares canonical dumps, over five kinds of program
+
+**Status:** built.
+
+- **What was weak.** `oracle fuzz` generated one kind of program from an ASCII grammar and compared printed output and deparse text. Two bugs a test user hit were out of its reach: a crash on a closure's second call with a matrix of 64 or more elements (no program called one closure twice on a value at a storage threshold), and a lookup by a non-ASCII name that returned `NA` (printing shows no encoding mark, and no name was non-ASCII).
+- **The observer is R code in the driver** (`crates/oracle/src/observe.R`), not `serialize()` bytes: a text dump diffs, names the differing node, and can leave out what is not a contract (an environment's address, a compact sequence's storage). It dumps each top-level value, its visibility and each condition's classes, message and call, numbered by top-level expression so a report names the expression. A long vector's middle is a pair of position-weighted checksums, because an unordered sum hides a permutation.
+- **A non-ASCII string's mark is lenient by default** (`u` for marked UTF-8 and for unmarked valid UTF-8). Which of the two a builtin returns differs between ry and GNU R in dozens of builtins and changes no result in a UTF-8 session, so strict comparison buried every other finding; `ORACLE_OBSERVE=strict` is the audit mode. The name bug is found through its result (`x[name]` is `NA`), not through the mark.
+- **Metamorphic programs need no reference engine.** A trial runs one body on one value in several forms (repeated calls, other scopes, a warmed closure, a shared or serialized value) and prints `DIFFERENT` when a form disagrees with the first run by `identical()`. That is a bug in the engine that printed it, so the default suite checks the kind on ry alone, tier 0 against the forced JIT, and the comparison with GNU R is the long run's. Why not GNU R in the default suite: ry differs from GNU R on about half of the builtin programs (error messages, accepted types), and a default test must pass.
+- **Programs are dense.** An engine takes about 0.6 s to start in a debug build and a trial takes milliseconds, so a program holds six to twelve trials. At two to four trials, 440 seeds found neither user bug; at six to twelve, both are found in seeds 0 to 99.
+- **Swarm testing.** Each seed enables each of 33 generator features with probability one half, so a feature pair that is rare under uniform choice dominates some programs.
+- **A corpus seed is a finding only when the unmutated snippet agrees.** Real code already differs from GNU R in known ways; those snippets go to `target/fuzz-corpus/base-differs.txt`, and a diverging mutant runs twice under GNU R so a snippet that depends on the run is dropped.
+- **The reducer is delta debugging over the syntax tree with a signature** (which of crash, error, warnings, messages, output, value or dump differs), so a reduction cannot drift from a crash to an unrelated message difference. It is slow on a large program (about one candidate per second in a debug build), so cut a metamorphic finding to its failing trial by hand before reducing it.
+- **The api kind's function list is generated, not written.** `builtins_program` calls functions someone listed, so its coverage is what someone thought of. `api_program` draws from `api_functions.txt`, every export of base, stats and utils as GNU R's namespaces list them (`api_functions.R`), minus what cannot be compared (files, connections, the clock, the session, graphics). Arguments are deliberately of any type: most calls are errors in both engines, and the finding is a crash, an error only one engine raises, or a different message. The first 400 seeds found two crashes from missing argument checks (`rapply` with a non-character `classes`, `forceAndCall` without a function) that no hand-written list reached. The summary's per-function counts (`functions.txt`) are the triage order. `oracle fuzz --coverage` measures the reach statically: over 500 seeds the other four kinds together name 696 of the 1,479 callable functions in a call, and the api kind 1,473.
+- **Fuzzed engines run under `RLIMIT_DATA`, not `RLIMIT_AS`.** A random call can ask for gigabytes (`numeric(1e10)`), and one such program per worker exhausts the machine. ry reserves several GiB of address space for its heap at start, so a 3 GiB address-space limit stops it before it runs a line; a data limit counts only memory actually mapped writable, and both engines answer it with R's allocation error.
+- **One runner for every kind** (`oracle fuzz --kind`): workers take (seed, kind) pairs from one counter, so `--minutes` covers a prefix of the seeds whatever `--jobs` is, and a run is replayed from its base seed.

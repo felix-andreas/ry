@@ -1,0 +1,22 @@
+[stdout]
+| [1] NaN  NA  NA  NA   5 NaN
+| [1] NaN  NA  NA  NA   1 NaN
+| [1]   1   2  NA   4   5 NaN
+| [1]   1   2 NaN   4   1  NA
+| [1]  2 NA  3  7
+| [1] 1 5 3 5
+| [1]  1  0 NA
+| [1] 2.5 2.0 3.0 4.0 5.0 6.0
+| [1] 0.5 1.0 2.0
+| [1] "b" NA  NA 
+| [1] "b" "c" "a"
+| [1] 1 2 3
+| numeric(0)
+| [1] -Inf    0    0
+[messages]
+[warnings]
+- an argument will be fractionally recycled (in pmax(c(1, 2, 3), 1:2))
+[errors]
+[value]
+double
+| c(-Inf, 0, 0)

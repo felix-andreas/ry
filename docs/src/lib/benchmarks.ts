@@ -13,7 +13,7 @@ const sourceFiles = import.meta.glob(['../../../tools/bench/**/*.R', '../../../t
 export const repository = 'https://github.com/felix-andreas/ry/blob/main';
 
 // The order of the summary, the page and the README.
-const suiteOrder = ['public', 'packages', 'codebases', 'kernels', 'applications', 'hot', 'typed'];
+const suiteOrder = ['public', 'packages', 'codebases', 'kernels', 'applications', 'hot', 'typed', 'builtins'];
 
 export type Interval = { median: number; low?: number; high?: number };
 export type Flag = { kind: string; engine?: string; reason?: string };
@@ -77,7 +77,20 @@ export type Results = {
   geomean: Record<string, Interval & { programs: number }>;
   // Each engine's slowest counted program and its ratio.
   worst: Record<string, { id: string; ratio: number }>;
+  // The builtins suite's verdict per function: its slowest case on each engine, worst first.
+  functions?: BuiltinFunction[];
+  // The functions the builtins suite skips, with the reason.
+  skips?: { id: string; reason: string }[];
+  // Per engine, how many functions fail or are slower than the baseline in some case.
+  slower?: Record<string, number>;
   meta: Meta;
+};
+export type BuiltinFunction = {
+  id: string;
+  cases: number;
+  worst: Record<string, { case: string; ratio: number }>;
+  failures?: { engine: string; case: string }[];
+  differs?: string[];
 };
 export type RatioKind = 'speedup' | 'slowdown';
 export type Suite = {
@@ -127,7 +140,7 @@ export function measuredSuites(): Suite[] {
 
 // Suites the benchmarks page shows in a section of their own, outside the summary table, the landing
 // page and the README.
-const outsideSummary = ['codebases'];
+const outsideSummary = ['codebases', 'builtins'];
 
 // The measured suites that compare ry with GNU R. Their speed-ups share one scale, so the summary
 // table, the landing page and the README chart show them together.
@@ -318,7 +331,9 @@ export function mixedMachines(): boolean {
   const machines = new Set(
     gnuRSuites().map((suite) => {
       const meta = suite.results?.meta;
-      return JSON.stringify([meta?.machine.cpu, meta?.machine.kernel, meta?.gnuR?.blas]);
+      // A Firecracker guest kernel carries a host build tag (`-fc-v553`) that changes on a container restart.
+      const kernel = meta?.machine.kernel?.replace(/-fc-v\d+$/, '');
+      return JSON.stringify([meta?.machine.cpu, kernel, meta?.gnuR?.blas]);
     }),
   );
   return machines.size > 1;
@@ -476,6 +491,7 @@ export function chartMarkdown(suite: Suite): string {
 export type TableView = { label: string; columns: string[]; rows: string[][]; note?: string };
 
 export function tableViews(suite: Suite): TableView[] {
+  if (suite.results?.functions !== undefined) return builtinsViews(suite, suite.results.functions);
   const engines = suite.results?.engines ?? [];
   const compared = comparedEngines(suite);
   const programs = measuredPrograms(suite);
@@ -590,6 +606,32 @@ export function tableViews(suite: Suite): TableView[] {
     });
   }
   return views;
+}
+
+// The builtins suite has thousands of cases, so its table holds only the functions that fail or are
+// slower than the baseline in some case, each with its slowest case per engine.
+function builtinsViews(suite: Suite, functions: BuiltinFunction[]): TableView[] {
+  const compared = comparedEngines(suite);
+  const baseline = engineLabel(baselineOf(suite));
+  const variant = (id: string) => id.slice(id.lastIndexOf('/') + 1);
+  const slower = functions.filter((entry) =>
+    (entry.failures?.length ?? 0) > 0 || compared.some((engine) => (entry.worst[engine]?.ratio ?? Infinity) < 1));
+  const counts = compared.map((engine) => `${engineLabel(engine)}: ${suite.results?.slower?.[engine] ?? 0}`).join(', ');
+  return [{
+    label: 'Slower functions',
+    columns: ['function', 'cases', ...compared.map((engine) => `${engineLabel(engine)}, slowest case`)],
+    rows: slower.map((entry) => [
+      entry.id,
+      String(entry.cases),
+      ...compared.map((engine) => {
+        const failure = entry.failures?.find((found) => found.engine === engine);
+        if (failure !== undefined) return `fails in ${variant(failure.case)}`;
+        const worst = entry.worst[engine];
+        return worst === undefined ? 'n/a' : `${formatRatio(worst.ratio)} in ${variant(worst.case)}`;
+      }),
+    ]),
+    note: `A ratio is ${baseline}'s time per call over the engine's, for the function's slowest case. Of ${functions.length} functions, these fail or are slower than ${baseline} in some case (${counts}); every other function is at least as fast in every case. The sweep skips ${suite.results?.skips?.length ?? 0} functions whose time is not the builtin's, such as those that read files or the clock.`,
+  }];
 }
 
 export function tableMarkdown(suite: Suite, headingLevel: number): string {
@@ -750,6 +792,9 @@ type RawResults = {
   }[];
   geomean: Record<string, Interval & { programs: number }>;
   worst?: Record<string, { id: string; ratio: number }>;
+  functions?: BuiltinFunction[];
+  skips?: { id: string; reason: string }[];
+  slower?: Record<string, number>;
 };
 
 function loadSuites(): Suite[] {
@@ -793,6 +838,9 @@ function loadSuites(): Suite[] {
             ratioKind: results.ratio_kind ?? 'speedup',
             geomean: results.geomean,
             worst: results.worst ?? {},
+            functions: results.functions,
+            skips: results.skips,
+            slower: results.slower,
             meta: meta(results.meta),
           },
     } satisfies Suite;

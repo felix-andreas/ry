@@ -24,6 +24,12 @@ use {
         },
         records::NativeKind,
     },
+    icu_collator::{
+        CollatorBorrowed, CollatorPreferences,
+        options::{AlternateHandling, CaseLevel, CollatorOptions, Strength},
+        preferences::CollationCaseFirst,
+    },
+    icu_locale_core::Locale,
     rustc_hash::{FxHashMap, FxHashSet, FxHasher},
     smallvec::{SmallVec, smallvec},
     std::{
@@ -31,7 +37,10 @@ use {
         cell::Cell,
         cmp::Ordering,
         hash::{Hash, Hasher},
-        sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
+        sync::{
+            PoisonError, RwLock, RwLockReadGuard,
+            atomic::{AtomicU8, Ordering as AtomicOrdering},
+        },
     },
 };
 
@@ -52,148 +61,56 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("split", 2, do_split),
     internal("identical", 9, do_identical),
     internal("sorted_fpass", 3, do_sorted_fpass),
+    internal("icuSetCollate", -1, do_icu_set_collate).invisible(),
+    internal("icuGetCollate", 1, do_icu_get_collate),
     // The libR host replaces this with a real wrapper for package code.
     internal("wrap_meta", 3, |call| Ok(call.arg(0))),
 ];
 
-/// Compares two strings as GNU R's `sort` and `order` do. In the `C` and `POSIX` locales that is
-/// code point order. Otherwise GNU R collates with ICU's root collation, which this approximates
-/// for the scripts R code commonly sorts: spaces, then punctuation and symbols, then digits, then
-/// letters compared without case or accents; ties go to accents, then lowercase before uppercase.
+/// Compares two strings as GNU R's `Scollate` does. In the `C` locale that is code point order.
+/// Otherwise GNU R collates with an ICU collator for the collation locale, which is the CLDR
+/// root collation for `C.UTF-8` and `en_US.UTF-8`; strings that collator calls equal (`"é"` and
+/// `"e\u{301}"`, or a string and itself with a zero-width space) compare equal.
 pub fn collate(left: &str, right: &str) -> Ordering {
-    if c_collation() {
-        return left.cmp(right);
-    }
-    root_collate(left, right)
-}
-
-fn root_collate(left: &str, right: &str) -> Ordering {
-    if left == right {
-        return Ordering::Equal;
-    }
-    // Each level compares lazily, so the common case of strings that differ early never looks
-    // past the first differing character.
-    let accent = |character| base_letter(character).1;
-    (left.chars().map(primary_weight))
-        .cmp(right.chars().map(primary_weight))
-        .then_with(|| left.chars().map(accent).cmp(right.chars().map(accent)))
-        .then_with(|| {
-            (left.chars().map(char::is_uppercase)).cmp(right.chars().map(char::is_uppercase))
-        })
-        .then_with(|| left.cmp(right))
-}
-
-/// Whether strings collate by code point: the C library's `LC_COLLATE` is `C` or `POSIX`, or, as
-/// in GNU R's `Scollate`, the `LC_ALL` environment variable (`LC_COLLATE` when `LC_ALL` is unset
-/// or empty) is exactly `C`. The C library owns the locale; this mirrors it so a comparison need
-/// not ask, and `refresh_collation` runs wherever the session changes the locale, which is also
-/// when GNU R reads the variables again.
-static C_COLLATION: AtomicBool = AtomicBool::new(true);
-
-fn c_collation() -> bool {
-    C_COLLATION.load(AtomicOrdering::Relaxed)
-}
-
-pub fn refresh_collation() {
-    // SAFETY: querying with a null locale only reads the current setting.
-    let current = unsafe { libc::setlocale(libc::LC_COLLATE, std::ptr::null()) };
-    let c = current.is_null() || {
-        // SAFETY: a non-null result is a NUL-terminated string the C library owns.
-        let name = unsafe { std::ffi::CStr::from_ptr(current) }.to_bytes();
-        name == b"C" || name == b"POSIX"
-    };
-    // With the variable at `C` and another collation locale, GNU R skips ICU and uses the C
-    // library's `strcoll`, which is code point order in the `C.UTF-8` locales ry runs under.
-    let variable = std::env::var_os("LC_ALL")
-        .filter(|value| !value.is_empty())
-        .or_else(|| std::env::var_os("LC_COLLATE"));
-    let c = c || variable.is_some_and(|value| value == "C");
-    C_COLLATION.store(c, AtomicOrdering::Relaxed);
-}
-
-/// The root collation's primary weight of a character, as a (group, value) pair.
-fn primary_weight(character: char) -> (u8, u32) {
-    match ASCII_PRIMARY_WEIGHTS.get(character as usize) {
-        Some(&weight) => weight,
-        None => non_ascii_primary_weight(character),
+    match MODE.load(AtomicOrdering::Relaxed) {
+        CODE_POINT => left.cmp(right),
+        ROOT_ASCII if is_printable_ascii(left) && is_printable_ascii(right) => {
+            ascii_collate(left.as_bytes(), right.as_bytes())
+        }
+        _ => collator().compare(left, right),
     }
 }
 
-/// The punctuation and symbols of ASCII, in the order the root collation sorts them.
-const PUNCTUATION: &[u8] = b"_-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$";
+/// The session's collation, held for a run of comparisons so a sort reads it once.
+pub struct Collator(RwLockReadGuard<'static, Collation>);
 
-/// `primary_weight` of every ASCII character, because sorting is dominated by ASCII text.
-const ASCII_PRIMARY_WEIGHTS: [(u8, u32); 128] = {
-    let mut table = [(0u8, 0u32); 128];
-    let mut code = 0;
-    while code < 128 {
-        let byte = code as u8;
-        table[code] = if byte.is_ascii_whitespace() || byte == 0x0b {
-            (0, code as u32)
-        } else if byte.is_ascii_digit() {
-            (3, (byte - b'0') as u32)
-        } else if byte.is_ascii_alphabetic() {
-            (4, byte.to_ascii_lowercase() as u32)
-        } else {
-            let mut position = 0;
-            while position < PUNCTUATION.len() && PUNCTUATION[position] != byte {
-                position += 1;
+pub fn collator() -> Collator {
+    Collator(COLLATION.read().unwrap_or_else(PoisonError::into_inner))
+}
+
+impl Collator {
+    pub fn compare(&self, left: &str, right: &str) -> Ordering {
+        match &*self.0 {
+            Collation::CodePoint { .. } => left.cmp(right),
+            Collation::Strcoll => strcoll(left, right),
+            Collation::Icu(icu) => {
+                if icu.ascii_order && is_printable_ascii(left) && is_printable_ascii(right) {
+                    return ascii_collate(left.as_bytes(), right.as_bytes());
+                }
+                // ICU reads an invalid UTF-8 sequence as U+FFFD, as `compare_utf8` does.
+                match (
+                    values::unescape_invalid_bytes(left),
+                    values::unescape_invalid_bytes(right),
+                ) {
+                    (None, None) => icu.collator.compare(left, right),
+                    (left_bytes, right_bytes) => icu.collator.compare_utf8(
+                        left_bytes.as_deref().unwrap_or(left.as_bytes()),
+                        right_bytes.as_deref().unwrap_or(right.as_bytes()),
+                    ),
+                }
             }
-            if position < PUNCTUATION.len() {
-                (1, position as u32)
-            } else {
-                (2, code as u32)
-            }
-        };
-        code += 1;
-    }
-    table
-};
-
-fn non_ascii_primary_weight(character: char) -> (u8, u32) {
-    if character.is_whitespace() {
-        return (0, character as u32);
-    }
-    if let Some(digit) = character.to_digit(10) {
-        return (3, digit);
-    }
-    let (base, _) = base_letter(character);
-    if base.is_alphabetic() {
-        return (4, base.to_lowercase().next().unwrap_or(base) as u32);
-    }
-    if character.is_ascii() || !character.is_alphanumeric() {
-        return (2, character as u32);
-    }
-    (5, character as u32)
-}
-
-/// A Latin letter without its accent, and an accent rank (0 for none).
-fn base_letter(character: char) -> (char, u32) {
-    if character.is_ascii() {
-        return (character, 0);
-    }
-    const ACCENTED: [(&str, char); 14] = [
-        ("àáâãäåāăą", 'a'),
-        ("ÀÁÂÃÄÅĀĂĄ", 'A'),
-        ("çćĉċč", 'c'),
-        ("ÇĆĈĊČ", 'C'),
-        ("èéêëēĕėęě", 'e'),
-        ("ÈÉÊËĒĔĖĘĚ", 'E'),
-        ("ìíîïĩīĭįı", 'i'),
-        ("ÌÍÎÏĨĪĬĮİ", 'I'),
-        ("ñńņňŉ", 'n'),
-        ("ÑŃŅŇ", 'N'),
-        ("òóôõöøōŏő", 'o'),
-        ("ÒÓÔÕÖØŌŎŐ", 'O'),
-        ("ùúûüũūŭůűų", 'u'),
-        ("ÙÚÛÜŨŪŬŮŰŲ", 'U'),
-    ];
-    for (variants, base) in ACCENTED {
-        if let Some(position) = variants.chars().position(|variant| variant == character) {
-            return (base, position as u32 + 1);
         }
     }
-    (character, 0)
 }
 
 pub fn sort_strings(names: &mut [String]) {
@@ -208,105 +125,447 @@ pub fn sort_strings(names: &mut [String]) {
 }
 
 /// The permutation that sorts `texts` as [`collate`] orders them, keeping equal texts in their
-/// original order. Each text's collation key is built once, into one buffer shared by all texts,
-/// so a comparison is a slice comparison instead of a walk through every collation level.
+/// original order.
 pub fn collation_order<Text: AsRef<str>>(texts: &[Text]) -> Vec<u32> {
-    order_by_collation(texts, c_collation())
-}
-
-fn order_by_collation<Text: AsRef<str>>(texts: &[Text], c: bool) -> Vec<u32> {
     let mut order: Vec<u32> = (0..texts.len() as u32).collect();
     let text = |index: u32| texts[index as usize].as_ref();
-    if c {
+    if c_collation() {
         order.sort_by(|&left, &right| text(left).cmp(text(right)));
-        return order;
+    } else if let Some(keys) = AsciiKeys::new(texts) {
+        order.sort_by(|&left, &right| keys.key(left).cmp(keys.key(right)));
+    } else {
+        let collator = collator();
+        order.sort_by(|&left, &right| collator.compare(text(left), text(right)));
     }
-    if texts.iter().all(|text| text.as_ref().is_ascii()) {
-        // Names are almost always ASCII, where a key fits in bytes and compares with memcmp.
-        // An ASCII character's primary weight is unique up to case and its accent weight is
-        // zero, so a tie on the primary level means the same letters ignoring case, and the
-        // case level then settles everything the code point level would.
-        let mut keys: Vec<u8> = Vec::new();
-        let mut starts: Vec<u32> = Vec::with_capacity(texts.len() + 1);
-        for text in texts {
-            let bytes = text.as_ref().as_bytes();
-            starts.push(keys.len() as u32);
-            keys.extend(bytes.iter().map(|&byte| ASCII_RANKS[byte as usize]));
-            keys.push(0);
-            keys.extend(
-                bytes
-                    .iter()
-                    .map(|&byte| byte.is_ascii_uppercase() as u8 + 1),
-            );
-        }
-        starts.push(keys.len() as u32);
-        let key = |index: u32| {
-            let index = index as usize;
-            &keys[starts[index] as usize..starts[index + 1] as usize]
-        };
-        order.sort_by(|&left, &right| key(left).cmp(key(right)));
-        return order;
-    }
-    let mut keys: Vec<u32> = Vec::new();
-    let mut starts: Vec<u32> = Vec::with_capacity(texts.len() + 1);
-    for text in texts {
-        starts.push(keys.len() as u32);
-        collation_key(text.as_ref(), &mut keys);
-    }
-    starts.push(keys.len() as u32);
-    let key = |index: u32| {
-        let index = index as usize;
-        &keys[starts[index] as usize..starts[index + 1] as usize]
-    };
-    order.sort_by(|&left, &right| key(left).cmp(key(right)));
     order
 }
 
-/// One plus the rank of each ASCII character's primary weight among all ASCII primary weights,
-/// so it orders as `primary_weight` does and leaves zero free to end a level.
+/// Whether strings collate by code point, so a byte comparison sorts them.
+fn c_collation() -> bool {
+    MODE.load(AtomicOrdering::Relaxed) == CODE_POINT
+}
+
+/// How strings compare, as GNU R's `collator` and `collationLocaleSet` in `util.c` decide.
+pub enum Collation {
+    /// Byte order: the `C` locale, or `icuSetCollate(locale = "ASCII")` (`ascii`).
+    CodePoint {
+        ascii: bool,
+    },
+    /// The C library's `strcoll`, where GNU R has no ICU collator but the locale is not `C`.
+    Strcoll,
+    Icu(IcuCollation),
+}
+
+pub struct IcuCollation {
+    collator: CollatorBorrowed<'static>,
+    /// The locale `icuGetCollate()` reports: `root`, or the name the collator was opened for.
+    locale: String,
+    preferences: CollatorPreferences,
+    options: CollatorOptions,
+    /// Whether the locale orders printable ASCII as the root collation does.
+    root_ascii_locale: bool,
+    /// Whether two strings of printable ASCII order as `ascii_collate` orders them: the locale
+    /// does, and no attribute changes it.
+    ascii_order: bool,
+}
+
+/// The one collation object, rebuilt only when the collation locale or `icuSetCollate` changes
+/// it. `MODE` mirrors its kind so a comparison of two ASCII strings needs no lock.
+static COLLATION: RwLock<Collation> = RwLock::new(Collation::CodePoint { ascii: false });
+static MODE: AtomicU8 = AtomicU8::new(CODE_POINT);
+const CODE_POINT: u8 = 0;
+const ROOT_ASCII: u8 = 1;
+const GENERAL: u8 = 2;
+
+fn install(collation: Collation) {
+    let mode = match &collation {
+        Collation::CodePoint { .. } => CODE_POINT,
+        Collation::Icu(icu) if icu.ascii_order => ROOT_ASCII,
+        _ => GENERAL,
+    };
+    let mut current = COLLATION.write().unwrap_or_else(PoisonError::into_inner);
+    *current = collation;
+    MODE.store(mode, AtomicOrdering::Relaxed);
+}
+
+/// Chooses the collation as GNU R's `Scollate` does after the locale changes: no ICU collator
+/// when the `LC_ALL` environment variable (`LC_COLLATE` when `LC_ALL` is unset or empty) is
+/// exactly `C`, or when the collation locale is `C`; otherwise ICU's collator for that locale.
+/// It runs wherever the session sets `LC_ALL` or `LC_COLLATE`, which is where GNU R calls
+/// `resetICUcollator`, and so drops what `icuSetCollate` set.
+pub fn refresh_collation() {
+    let variable = std::env::var_os("LC_ALL")
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var_os("LC_COLLATE"));
+    let locale = icu_locale_name();
+    let collation = if variable.is_some_and(|value| value == "C") || locale == "C" {
+        without_collator()
+    } else {
+        icu_collation(&locale, CollatorOptions::default())
+    };
+    install(collation);
+}
+
+/// GNU R's `getLocale`: `R_ICU_LOCALE` when it is set, else the C library's collation locale.
+fn icu_locale_name() -> String {
+    if let Some(name) = std::env::var_os("R_ICU_LOCALE").filter(|value| !value.is_empty()) {
+        return name.to_string_lossy().into_owned();
+    }
+    collation_locale()
+}
+
+fn collation_locale() -> String {
+    // SAFETY: querying with a null locale only reads the current setting.
+    let current = unsafe { libc::setlocale(libc::LC_COLLATE, std::ptr::null()) };
+    if current.is_null() {
+        return "C".to_owned();
+    }
+    // SAFETY: a non-null result is a NUL-terminated string the C library owns.
+    let name = unsafe { std::ffi::CStr::from_ptr(current) };
+    match name.to_string_lossy() {
+        name if name == "POSIX" => "C".to_owned(),
+        name => name.into_owned(),
+    }
+}
+
+/// The collation without an ICU collator: `strcoll`, which orders by code point in the `C` and
+/// `C.UTF-8` locales.
+fn without_collator() -> Collation {
+    let locale = collation_locale();
+    if locale == "C" || locale.starts_with("C.") {
+        Collation::CodePoint { ascii: false }
+    } else {
+        Collation::Strcoll
+    }
+}
+
+fn strcoll(left: &str, right: &str) -> Ordering {
+    let text = |text: &str| {
+        let bytes =
+            values::unescape_invalid_bytes(text).unwrap_or_else(|| text.as_bytes().to_vec());
+        // An R string holds no NUL, so this keeps every byte.
+        std::ffi::CString::new(bytes).unwrap_or_default()
+    };
+    let (left, right) = (text(left), text(right));
+    // SAFETY: both are NUL-terminated strings that outlive the call.
+    unsafe { libc::strcoll(left.as_ptr(), right.as_ptr()) }.cmp(&0)
+}
+
+/// The ICU collation for a POSIX or ICU locale name such as `de_DE.UTF-8` or
+/// `de@collation=phonebook`. A name ICU4X has no data for, `C.UTF-8` among them, gets the root
+/// collation, as ICU's locale fallback gives it.
+fn icu_collation(name: &str, options: CollatorOptions) -> Collation {
+    let (tag, label) = icu_locale_tag(name);
+    let locale = Locale::try_from_str(&tag).ok();
+    let preferences = locale
+        .as_ref()
+        .map(CollatorPreferences::from)
+        .unwrap_or_default();
+    let root_ascii_locale = locale
+        .as_ref()
+        .is_none_or(|locale| root_ascii_order(locale, &preferences));
+    let label = if locale.is_some() && label != "und" {
+        label
+    } else {
+        "root".to_owned()
+    };
+    build_icu_collation(label, preferences, options, root_ascii_locale)
+}
+
+fn build_icu_collation(
+    locale: String,
+    preferences: CollatorPreferences,
+    options: CollatorOptions,
+    root_ascii_locale: bool,
+) -> Collation {
+    let (collator, locale, preferences) = match CollatorBorrowed::try_new(preferences, options) {
+        Ok(collator) => (collator, locale, preferences),
+        Err(_) => {
+            let root = CollatorPreferences::default();
+            match CollatorBorrowed::try_new(root, options) {
+                Ok(collator) => (collator, "root".to_owned(), root),
+                Err(problem) => panic!("ICU4X's compiled root collation is missing: {problem}"),
+            }
+        }
+    };
+    let default_options = options.strength.is_none()
+        && options.alternate_handling.is_none()
+        && options.case_level.is_none()
+        && preferences.case_first.is_none()
+        && preferences.numeric_ordering.is_none();
+    Collation::Icu(IcuCollation {
+        collator,
+        locale,
+        preferences,
+        options,
+        root_ascii_locale,
+        ascii_order: root_ascii_locale && default_options,
+    })
+}
+
+/// A BCP 47 tag for a POSIX locale name, without its codeset (`.UTF-8`) and with ICU's
+/// `@collation=` keyword as the `-u-co-` extension, and the name `icuGetCollate()` reports.
+fn icu_locale_tag(name: &str) -> (String, String) {
+    let (base, keywords) = name.split_once('@').unwrap_or((name, ""));
+    let base = base.split_once('.').map_or(base, |(base, _)| base);
+    let mut tag = base.replace('_', "-");
+    let mut label = base.to_owned();
+    let collation = keywords
+        .split(';')
+        .find_map(|keyword| keyword.strip_prefix("collation="));
+    if let Some(collation) = collation {
+        let short = match collation {
+            "phonebook" => "phonebk",
+            "traditional" => "trad",
+            "dictionary" => "dict",
+            "gb2312han" => "gb2312",
+            other => other,
+        };
+        tag.push_str("-u-co-");
+        tag.push_str(short);
+        label.push_str("@collation=");
+        label.push_str(collation);
+    }
+    (tag, label)
+}
+
+/// Whether the locale's collation orders printable ASCII exactly as the root collation does.
+/// These languages have no CLDR tailoring that touches ASCII; the test
+/// `ascii_collation_matches_icu` checks each against ICU4X's data.
+fn root_ascii_order(locale: &Locale, preferences: &CollatorPreferences) -> bool {
+    const ROOT_ORDER_LANGUAGES: &[&str] = &["und", "en", "de", "fr", "it", "nl", "pt"];
+    ROOT_ORDER_LANGUAGES.contains(&locale.id.language.as_str())
+        && locale.id.variants.is_empty()
+        && preferences.collation_type.is_none()
+}
+
+fn is_printable_ascii(text: &str) -> bool {
+    text.bytes().all(|byte| (b' '..=b'~').contains(&byte))
+}
+
+/// The root collation of two strings of printable ASCII. Each such character has one collation
+/// element: its primary weight is unique up to case, its secondary weight is common, and its
+/// tertiary weight puts lowercase first. So the primary weights decide unless the strings are
+/// the same letters up to case, and then the first case difference decides.
+fn ascii_collate(left: &[u8], right: &[u8]) -> Ordering {
+    let mut case = Ordering::Equal;
+    for (&left_byte, &right_byte) in left.iter().zip(right) {
+        if left_byte == right_byte {
+            continue;
+        }
+        let (left_rank, right_rank) = (
+            ASCII_RANKS[left_byte as usize],
+            ASCII_RANKS[right_byte as usize],
+        );
+        if left_rank != right_rank {
+            return left_rank.cmp(&right_rank);
+        }
+        if case.is_eq() {
+            case = left_byte
+                .is_ascii_uppercase()
+                .cmp(&right_byte.is_ascii_uppercase());
+        }
+    }
+    left.len().cmp(&right.len()).then(case)
+}
+
+/// Byte keys whose order is [`ascii_collate`]'s, built once per text so a sort compares slices:
+/// the primary ranks, a zero, then 1 for each lowercase-or-caseless character and 2 for each
+/// uppercase one. Distinct texts have distinct keys.
+struct AsciiKeys {
+    bytes: Vec<u8>,
+    starts: Vec<u32>,
+}
+
+impl AsciiKeys {
+    /// The keys of `texts`, when the session collates printable ASCII as the root collation
+    /// does and every text is printable ASCII.
+    fn new<Text: AsRef<str>>(texts: &[Text]) -> Option<AsciiKeys> {
+        let eligible = MODE.load(AtomicOrdering::Relaxed) == ROOT_ASCII
+            && texts.iter().all(|text| is_printable_ascii(text.as_ref()));
+        if !eligible {
+            return None;
+        }
+        let total: usize = texts.iter().map(|text| 2 * text.as_ref().len() + 1).sum();
+        if u32::try_from(total).is_err() {
+            return None;
+        }
+        let mut bytes = Vec::with_capacity(total);
+        let mut starts = Vec::with_capacity(texts.len() + 1);
+        for text in texts {
+            let text = text.as_ref().as_bytes();
+            starts.push(bytes.len() as u32);
+            bytes.extend(text.iter().map(|&byte| ASCII_RANKS[byte as usize]));
+            bytes.push(0);
+            bytes.extend(text.iter().map(|&byte| byte.is_ascii_uppercase() as u8 + 1));
+        }
+        starts.push(bytes.len() as u32);
+        Some(AsciiKeys { bytes, starts })
+    }
+
+    fn key(&self, index: u32) -> &[u8] {
+        let index = index as usize;
+        &self.bytes[self.starts[index] as usize..self.starts[index + 1] as usize]
+    }
+}
+
+/// Printable ASCII in the root collation's order, each letter's lowercase first.
+const ROOT_ASCII_ORDER: &[u8] = b" _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$0123456789\
+    aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrRsStTuUvVwWxXyYzZ";
+
+/// One plus each printable ASCII character's rank in the root collation's primary order, which
+/// a letter's two cases share; zero for any other byte.
 const ASCII_RANKS: [u8; 128] = {
     let mut ranks = [0u8; 128];
-    let mut code = 0;
-    while code < 128 {
-        let (group, value) = ASCII_PRIMARY_WEIGHTS[code];
-        let mut rank = 1u8;
-        let mut other = 0;
-        while other < 128 {
-            let (other_group, other_value) = ASCII_PRIMARY_WEIGHTS[other];
-            let lower = other_group < group || (other_group == group && other_value < value);
-            // Upper and lower case letters share a weight, so count each weight once.
-            let first = !(other as u8).is_ascii_uppercase();
-            if lower && first {
-                rank += 1;
-            }
-            other += 1;
+    let mut position = 0;
+    let mut rank = 0u8;
+    while position < ROOT_ASCII_ORDER.len() {
+        let byte = ROOT_ASCII_ORDER[position];
+        if !byte.is_ascii_uppercase() {
+            rank += 1;
         }
-        ranks[code] = rank;
-        code += 1;
+        ranks[byte as usize] = rank;
+        position += 1;
     }
     ranks
 };
 
-/// Appends a key for `text` whose lexicographic order is [`collate`]'s order. A key is the
-/// sequence of each collation level's weights, every weight shifted up by one and each level
-/// ended by a zero, so a text that is a prefix of another sorts first within that level, and a
-/// tie on one level moves on to the next exactly where `collate` does. The last level is the
-/// code points, whose order is the byte order `str::cmp` breaks ties with.
-fn collation_key(text: &str, keys: &mut Vec<u32>) {
-    keys.extend(text.chars().map(|character| {
-        let (group, value) = primary_weight(character);
-        ((group as u32) << 24 | value) + 1
-    }));
-    keys.push(0);
-    keys.extend(text.chars().map(|character| base_letter(character).1 + 1));
-    keys.push(0);
-    keys.extend(
-        text.chars()
-            .map(|character| character.is_uppercase() as u32 + 1),
-    );
-    keys.push(0);
-    keys.extend(text.chars().map(|character| character as u32 + 1));
+/// `icuSetCollate(...)`: as GNU R's `do_ICUset`, `locale` opens a new collator (`"ASCII"`
+/// compares bytes, `"none"` uses `strcoll`, `"default"` the collation locale) and the other
+/// arguments set an attribute of the open collator. A name or value outside GNU R's table is
+/// ignored, and so are `"default"` and the strength values, which that table spells with a
+/// trailing space.
+unsafe fn do_icu_set_collate(call: &Call<'_>) -> R<Sexp> {
+    for arg in call.args {
+        if arg.tag == nil() {
+            return Err(error("all arguments must be named"));
+        }
+        let name = values::symbol_name(arg.tag);
+        if arg.value.kind() != SexpType::String || length(arg.value) != 1 {
+            return Err(error(format!("invalid '{name}' argument")));
+        }
+        // GNU R reads `NA` as the string "NA", which names no locale and no setting.
+        let value = string_at(arg.value, 0).unwrap_or(Cow::Borrowed("NA"));
+        if name == "locale" {
+            install(match &*value {
+                "ASCII" => Collation::CodePoint { ascii: true },
+                "none" => without_collator(),
+                "default" => icu_collation(&icu_locale_name(), CollatorOptions::default()),
+                other => icu_collation(other, CollatorOptions::default()),
+            });
+            continue;
+        }
+        let attribute = ATTRIBUTES.iter().find(|entry| entry.0 == name);
+        let setting = ATTRIBUTES.iter().find(|entry| entry.0 == value);
+        let (Some(&(_, attribute)), Some(&(_, setting))) = (attribute, setting) else {
+            continue;
+        };
+        let current = COLLATION.read().unwrap_or_else(PoisonError::into_inner);
+        let Collation::Icu(icu) = &*current else {
+            continue;
+        };
+        let (mut preferences, mut options) = (icu.preferences, icu.options);
+        match (attribute, setting) {
+            (Attribute::Strength, Attribute::StrengthValue(strength)) => {
+                options.strength = Some(strength)
+            }
+            // `ucol_setStrength` ignores a value that is not a strength.
+            (Attribute::Strength, _) => continue,
+            (Attribute::CaseFirst, Attribute::Off) => {
+                preferences.case_first = Some(CollationCaseFirst::False)
+            }
+            (Attribute::CaseFirst, Attribute::Upper) => {
+                preferences.case_first = Some(CollationCaseFirst::Upper)
+            }
+            (Attribute::CaseFirst, Attribute::Lower) => {
+                preferences.case_first = Some(CollationCaseFirst::Lower)
+            }
+            (Attribute::AlternateHandling, Attribute::NonIgnorable) => {
+                options.alternate_handling = Some(AlternateHandling::NonIgnorable)
+            }
+            (Attribute::AlternateHandling, Attribute::Shifted) => {
+                options.alternate_handling = Some(AlternateHandling::Shifted)
+            }
+            (Attribute::CaseLevel, Attribute::On) => options.case_level = Some(CaseLevel::On),
+            (Attribute::CaseLevel, Attribute::Off) => options.case_level = Some(CaseLevel::Off),
+            // ICU ignores the Hiragana quaternary mode, and ICU4X always normalizes, which gives
+            // ICU's order with normalization on, and with it off for all text in FCD form.
+            (
+                Attribute::HiraganaQuaternary | Attribute::Normalization,
+                Attribute::On | Attribute::Off,
+            ) => continue,
+            (Attribute::FrenchCollation, Attribute::On | Attribute::Off) => {
+                return Err(error(
+                    "ry's collator does not support the 'french_collation' attribute",
+                ));
+            }
+            _ => return Err(error("failed to set ICU collator attribute")),
+        }
+        let (locale, root_ascii_locale) = (icu.locale.clone(), icu.root_ascii_locale);
+        drop(current);
+        install(build_icu_collation(
+            locale,
+            preferences,
+            options,
+            root_ascii_locale,
+        ));
+    }
+    Ok(nil())
 }
+
+/// `icuGetCollate(type)`: the locale of the open collator, `"ASCII"`, or `"ICU not in use"`.
+unsafe fn do_icu_get_collate(_call: &Call<'_>) -> R<Sexp> {
+    let label = match &*collator().0 {
+        Collation::CodePoint { ascii: true } => "ASCII".to_owned(),
+        Collation::CodePoint { ascii: false } | Collation::Strcoll => "ICU not in use".to_owned(),
+        Collation::Icu(icu) => icu.locale.clone(),
+    };
+    values::scalar_string(&label)
+}
+
+/// GNU R's `ATtable`: the names and values `icuSetCollate` accepts. Its `"default "` entry is
+/// left out because `UCOL_DEFAULT` is negative, which `do_ICUset` treats as not found.
+#[derive(Clone, Copy)]
+enum Attribute {
+    CaseFirst,
+    Upper,
+    Lower,
+    Strength,
+    StrengthValue(Strength),
+    FrenchCollation,
+    On,
+    Off,
+    Normalization,
+    AlternateHandling,
+    NonIgnorable,
+    Shifted,
+    CaseLevel,
+    HiraganaQuaternary,
+}
+
+const ATTRIBUTES: &[(&str, Attribute)] = &[
+    ("case_first", Attribute::CaseFirst),
+    ("upper", Attribute::Upper),
+    ("lower", Attribute::Lower),
+    ("strength", Attribute::Strength),
+    ("primary ", Attribute::StrengthValue(Strength::Primary)),
+    ("secondary ", Attribute::StrengthValue(Strength::Secondary)),
+    ("tertiary ", Attribute::StrengthValue(Strength::Tertiary)),
+    (
+        "quaternary ",
+        Attribute::StrengthValue(Strength::Quaternary),
+    ),
+    ("identical ", Attribute::StrengthValue(Strength::Identical)),
+    ("french_collation", Attribute::FrenchCollation),
+    ("on", Attribute::On),
+    ("off", Attribute::Off),
+    ("normalization", Attribute::Normalization),
+    ("alternate_handling", Attribute::AlternateHandling),
+    ("non_ignorable", Attribute::NonIgnorable),
+    ("shifted", Attribute::Shifted),
+    ("case_level", Attribute::CaseLevel),
+    ("hiragana_quaternary", Attribute::HiraganaQuaternary),
+];
 
 /// The comparison `identical()` makes, with one field per argument of the R function.
 #[derive(Clone, Copy, Debug)]
@@ -397,13 +656,34 @@ pub(crate) unsafe fn do_sort(call: &Call<'_>) -> R<Sexp> {
             // Sorting the strings' collation ranks compares each distinct string once. `NA`
             // sorts last, or first when decreasing, as the reversed comparison put it.
             let source = values::materialize(x)?;
-            let ranks = Column::Ranks(string_ranks(source, collate));
+            let ranks = Column::Ranks(string_ranks(source, TextOrder::Collation));
             let Some(keys) = sort_keys(&ranks, decreasing, !decreasing) else {
                 unreachable!("string ranks always have radix keys");
             };
-            drop(ranks);
             let mut order = vec![0u32; length(x)];
             radix_order(&[keys], &mut order);
+            let Column::Ranks(ranks) = ranks else {
+                unreachable!("the column was built from ranks");
+            };
+            // GNU R sorts strings with a shell sort, which is not stable, so where the collation
+            // calls two different strings equal (`"é"` and `"e\u{301}"`) only that sort puts
+            // them where GNU R does.
+            let tied = order.windows(2).any(|pair| {
+                let (left, right) = (pair[0] as usize, pair[1] as usize);
+                ranks[left] == ranks[right] && source.element(left) != source.element(right)
+            });
+            if tied {
+                let key = |row: u32| match ranks[row as usize] {
+                    0 => u32::MAX,
+                    rank => rank,
+                };
+                order = (0..length(x) as u32).collect();
+                if decreasing {
+                    shell_sort(&mut order, |left, right| key(left) < key(right));
+                } else {
+                    shell_sort(&mut order, |left, right| key(left) > key(right));
+                }
+            }
             for (index, &row) in order.iter().enumerate() {
                 values::set_elt(result, index, source.element(row as usize));
             }
@@ -435,25 +715,25 @@ unsafe fn do_psort(call: &Call<'_>) -> R<Sexp> {
     // other and after every number, as `rcmp(nalast = TRUE)` orders them.
     match x.kind() {
         SexpType::Real => {
-            let mut items = values::reals(x).to_vec();
+            let result = values::alloc_uninit(SexpType::Real, count)?;
+            let items = values::reals_mut(result);
+            items.copy_from_slice(values::reals(x));
             let compare = |left: f64, right: f64| match (left.is_nan(), right.is_nan()) {
                 (false, false) => left.partial_cmp(&right).unwrap_or(Ordering::Equal),
                 (true, true) => Ordering::Equal,
                 (true, false) => Ordering::Greater,
                 (false, true) => Ordering::Less,
             };
-            partial_sort(&mut items, 0, count as isize - 1, &positions, &compare);
-            let result = values::alloc_uninit(SexpType::Real, count)?;
-            values::reals_mut(result).copy_from_slice(&items);
+            partial_sort(items, 0, count as isize - 1, &positions, &compare);
             return Ok(result);
         }
         SexpType::Integer | SexpType::Logical => {
-            let mut items = values::ints(x).to_vec();
+            let result = values::alloc_uninit(x.kind(), count)?;
+            let items = values::ints_mut(result);
+            items.copy_from_slice(values::ints(x));
             // `NA_integer_` is the smallest `i32`, so flipping it above every number orders it last.
             let compare = |left: i32, right: i32| left.wrapping_sub(1).cmp(&right.wrapping_sub(1));
-            partial_sort(&mut items, 0, count as isize - 1, &positions, &compare);
-            let result = values::alloc_uninit(x.kind(), count)?;
-            values::ints_mut(result).copy_from_slice(&items);
+            partial_sort(items, 0, count as isize - 1, &positions, &compare);
             return Ok(result);
         }
         _ => {}
@@ -560,7 +840,7 @@ pub(crate) unsafe fn do_order(call: &Call<'_>) -> R<Sexp> {
         .iter()
         .map(|&key| match key.kind() {
             SexpType::Raw => None,
-            SexpType::String => Some(Column::Ranks(string_ranks(key, collate))),
+            SexpType::String => Some(Column::Ranks(string_ranks(key, TextOrder::Collation))),
             _ => column(key),
         })
         .collect();
@@ -885,8 +1165,7 @@ unsafe fn do_any_duplicated(call: &Call<'_>) -> R<Sexp> {
 pub(crate) unsafe fn do_match(call: &Call<'_>) -> R<Sexp> {
     let x = match_operand(call.arg(0), call)?;
     let table = match_operand(call.arg(1), call)?;
-    let nomatch = coerce_vector(call.arg(2), SexpType::Integer)?;
-    let nomatch = values::ints(nomatch).first().copied().unwrap_or(NA_INTEGER);
+    let nomatch = values::as_integer_scalar_warning(call.arg(2))?;
     let count = length(x);
     if count == 0 {
         return alloc(SexpType::Integer, 0);
@@ -1282,7 +1561,7 @@ unsafe fn check_sortable(x: Sexp) -> R<()> {
     Ok(())
 }
 
-unsafe fn unimplemented_type(object: Sexp, routine: &str) -> crate::unwind::Unwind {
+pub(crate) unsafe fn unimplemented_type(object: Sexp, routine: &str) -> crate::unwind::Unwind {
     error(format!(
         "unimplemented type '{}' in '{routine}'\n",
         object.kind().name()
@@ -1345,17 +1624,23 @@ unsafe fn radix_column<'a>(vector: Sexp, sort_strings: bool) -> Option<Column<'a
                 .collect();
             Some(Column::Grouped(codes))
         }
-        SexpType::String => Some(Column::Ranks(string_ranks(vector, Ord::cmp))),
+        SexpType::String => Some(Column::Ranks(string_ranks(vector, TextOrder::Bytes))),
         _ => column(vector),
     }
 }
 
-/// Each element's rank in [`Column::Ranks`], with texts ordered by `compare`. R interns its strings, so equal strings are one
-/// CHARSXP, and only the distinct CHARSXPs are sorted: each is numbered the first time it is
+/// Each element's rank in [`Column::Ranks`], with texts ordered as `order` says. R interns its
+/// strings, so equal strings are one CHARSXP, and only the distinct CHARSXPs are sorted: each is numbered the first time it is
 /// met, with the number negated in its truelength as data.table's C marks strings, which costs
 /// one load per row and no table. The saved truelengths are put back before anything else can
 /// run.
-unsafe fn string_ranks(vector: Sexp, compare: fn(&str, &str) -> Ordering) -> Vec<u32> {
+unsafe fn string_ranks(vector: Sexp, order: TextOrder) -> Vec<u32> {
+    let bytewise = matches!(order, TextOrder::Bytes) || c_collation();
+    let collator = (!bytewise).then(collator);
+    let compare = |left: &str, right: &str| match &collator {
+        Some(collator) => collator.compare(left, right),
+        None => left.cmp(right),
+    };
     let na = na_string();
     let rows = length(vector);
     let mut ranks: Vec<u32> = Vec::with_capacity(rows);
@@ -1392,13 +1677,64 @@ unsafe fn string_ranks(vector: Sexp, compare: fn(&str, &str) -> Ordering) -> Vec
         charsxp.set_char_truelength(*mark);
     }
     if stale {
-        return string_ranks_by_text(vector, compare);
+        return string_ranks_by_text(vector, order, &compare);
     }
-    // Strings intern by encoding, so one text can be several CHARSXPs, which share a rank.
-    let texts: Vec<Cow<'_, str>> = saved
-        .iter()
-        .map(|&(charsxp, _)| char_str(charsxp))
-        .collect();
+    let rank_of_code = match order {
+        // GNU R's radix sort compares `CHAR()` bytes untranslated, so a latin1 string and its
+        // UTF-8 twin rank apart.
+        TextOrder::Bytes => {
+            let texts: Vec<&[u8]> = saved
+                .iter()
+                .map(|&(charsxp, _)| {
+                    let bytes = charsxp.bytes();
+                    memchr::memchr(0, bytes).map_or(bytes, |end| &bytes[..end])
+                })
+                .collect();
+            byte_ranks(&texts)
+        }
+        // Strings intern by encoding, so one text can be several CHARSXPs, which share a rank.
+        TextOrder::Collation => {
+            let texts: Vec<Cow<'_, str>> = saved
+                .iter()
+                .map(|&(charsxp, _)| char_str(charsxp))
+                .collect();
+            if bytewise {
+                let texts: Vec<&[u8]> = texts.iter().map(|text| text.as_bytes()).collect();
+                byte_ranks(&texts)
+            } else {
+                collation_ranks(&texts, &compare)
+            }
+        }
+    };
+    for slot in ranks.iter_mut().filter(|slot| **slot != 0) {
+        *slot = rank_of_code[*slot as usize - 1];
+    }
+    ranks
+}
+
+/// How [`string_ranks`] orders texts: by their stored bytes, as the radix sort does whatever
+/// the locale, or by the session's collation.
+#[derive(Clone, Copy)]
+enum TextOrder {
+    Bytes,
+    Collation,
+}
+
+/// The rank of each text (from 1) in collation order, through a comparison sort.
+fn collation_ranks(texts: &[Cow<'_, str>], compare: &dyn Fn(&str, &str) -> Ordering) -> Vec<u32> {
+    if let Some(keys) = AsciiKeys::new(texts) {
+        let mut by_text: Vec<u32> = (0..texts.len() as u32).collect();
+        by_text.sort_unstable_by(|&left, &right| keys.key(left).cmp(keys.key(right)));
+        let mut rank_of_code = vec![0u32; texts.len()];
+        let mut rank = 0;
+        for (position, &code) in by_text.iter().enumerate() {
+            if position == 0 || keys.key(by_text[position - 1]) != keys.key(code) {
+                rank += 1;
+            }
+            rank_of_code[code as usize] = rank;
+        }
+        return rank_of_code;
+    }
     let mut by_text: Vec<u32> = (0..texts.len() as u32).collect();
     by_text
         .sort_unstable_by(|&left, &right| compare(&texts[left as usize], &texts[right as usize]));
@@ -1416,15 +1752,153 @@ unsafe fn string_ranks(vector: Sexp, compare: fn(&str, &str) -> Ordering) -> Vec
         }
         rank_of_code[code as usize] = rank;
     }
-    for slot in ranks.iter_mut().filter(|slot| **slot != 0) {
-        *slot = rank_of_code[*slot as usize - 1];
+    rank_of_code
+}
+
+/// The rank of each text (from 1) in byte order. Eight bytes of each text, zero-padded, form a
+/// big-endian key that orders like the bytes themselves, because no R string holds a NUL. The
+/// keys start past the prefix every text shares, are sorted as integers, and a run of equal
+/// keys is sorted again on the next eight bytes, so a text's bytes are read once per eight
+/// rather than once per comparison.
+fn byte_ranks(texts: &[&[u8]]) -> Vec<u32> {
+    let mut rank_of_code = vec![0u32; texts.len()];
+    let Some(&first) = texts.first() else {
+        return rank_of_code;
+    };
+    let mut entries: Vec<(u64, u32)> = Vec::with_capacity(texts.len());
+    let mut common = first.len();
+    for (code, &text) in texts.iter().enumerate() {
+        common = common.min(
+            first[..common.min(text.len())]
+                .iter()
+                .zip(text)
+                .take_while(|(left, right)| left == right)
+                .count(),
+        );
+        entries.push((0, code as u32));
     }
-    ranks
+    let mut scratch = Vec::new();
+    let mut rank = 0;
+    // Runs still to rank, in reverse order, each with the offset its keys start at; `None`
+    // marks a run of equal texts.
+    let mut pending: Vec<(usize, usize, Option<usize>)> = vec![(0, entries.len(), Some(common))];
+    while let Some((start, end, offset)) = pending.pop() {
+        let run = &mut entries[start..end];
+        let Some(offset) = offset else {
+            rank += 1;
+            for &(_, code) in run.iter() {
+                rank_of_code[code as usize] = rank;
+            }
+            continue;
+        };
+        for entry in run.iter_mut() {
+            entry.0 = byte_key(texts[entry.1 as usize], offset);
+        }
+        sort_by_key_bytes(run, &mut scratch);
+        let mut runs = Vec::new();
+        let mut at = 0;
+        while at < run.len() {
+            let key = run[at].0;
+            let length = run[at..].iter().take_while(|entry| entry.0 == key).count();
+            let longer = length > 1
+                && run[at..at + length]
+                    .iter()
+                    .any(|&(_, code)| texts[code as usize].len() > offset + KEY_BYTES);
+            runs.push((
+                start + at,
+                start + at + length,
+                longer.then_some(offset + KEY_BYTES),
+            ));
+            at += length;
+        }
+        pending.extend(runs.into_iter().rev());
+    }
+    rank_of_code
+}
+
+const KEY_BYTES: usize = 8;
+
+/// The bytes of `text` from `offset`, eight of them zero-padded, as a big-endian integer.
+fn byte_key(text: &[u8], offset: usize) -> u64 {
+    let mut bytes = [0u8; KEY_BYTES];
+    if let Some(rest) = text.get(offset..) {
+        let length = rest.len().min(KEY_BYTES);
+        bytes[..length].copy_from_slice(&rest[..length]);
+    }
+    u64::from_be_bytes(bytes)
+}
+
+/// Sorts `entries` by key: a short run by comparison, a long one by an LSD radix sort that
+/// skips each byte every key shares.
+fn sort_by_key_bytes(entries: &mut [(u64, u32)], scratch: &mut Vec<(u64, u32)>) {
+    if entries.len() < 256 {
+        entries.sort_unstable_by_key(|entry| entry.0);
+        return;
+    }
+    let mut counts = [[0usize; 256]; KEY_BYTES];
+    for &(key, _) in entries.iter() {
+        for (byte, histogram) in counts.iter_mut().enumerate() {
+            histogram[(key >> (8 * byte)) as usize & 0xff] += 1;
+        }
+    }
+    scratch.clear();
+    scratch.resize(entries.len(), (0, 0));
+    let mut in_scratch = false;
+    for (byte, histogram) in counts.iter_mut().enumerate() {
+        if histogram.contains(&entries.len()) {
+            continue;
+        }
+        let mut offset = 0;
+        for count in histogram.iter_mut() {
+            let size = *count;
+            *count = offset;
+            offset += size;
+        }
+        let (source, target) = if in_scratch {
+            (&scratch[..], &mut *entries)
+        } else {
+            (&*entries, &mut scratch[..])
+        };
+        for &entry in source {
+            let bucket = (entry.0 >> (8 * byte)) as usize & 0xff;
+            target[histogram[bucket]] = entry;
+            histogram[bucket] += 1;
+        }
+        in_scratch = !in_scratch;
+    }
+    if in_scratch {
+        entries.copy_from_slice(scratch);
+    }
 }
 
 /// [`string_ranks`] through a table of the texts, for a vector whose strings carry truelength
 /// marks the CHARSXP numbering cannot use.
-unsafe fn string_ranks_by_text(vector: Sexp, compare: fn(&str, &str) -> Ordering) -> Vec<u32> {
+unsafe fn string_ranks_by_text(
+    vector: Sexp,
+    order: TextOrder,
+    compare: &dyn Fn(&str, &str) -> Ordering,
+) -> Vec<u32> {
+    if let TextOrder::Bytes = order {
+        let na = na_string();
+        let bytes_at = |index: usize| {
+            let charsxp = vector.element(index);
+            (charsxp != na).then(|| {
+                let bytes = charsxp.bytes();
+                memchr::memchr(0, bytes).map_or(bytes, |end| &bytes[..end])
+            })
+        };
+        let mut sorted: Vec<&[u8]> = (0..length(vector)).filter_map(bytes_at).collect();
+        sorted.sort_unstable();
+        sorted.dedup();
+        let rank_of: FxHashMap<&[u8], u32> = sorted
+            .iter()
+            .zip(1..)
+            .map(|(&text, rank)| (text, rank))
+            .collect();
+        return (0..length(vector))
+            .map(|index| bytes_at(index).map_or(0, |text| rank_of[text]))
+            .collect();
+    }
     let mut distinct: FxHashMap<Cow<'_, str>, u32> = FxHashMap::default();
     for index in 0..length(vector) {
         if let Some(text) = string_at(vector, index) {
@@ -2053,7 +2527,7 @@ pub fn rsort_with_index<T: Copy>(items: &mut [(f64, T)]) {
 
 /// Shell sort with Sedgewick's gaps 4^k + 3 * 2^(k - 1) + 1 (1, 8, 23, 77, 281, ...), moving an
 /// element while its predecessor is `greater`.
-fn shell_sort<T: Copy>(items: &mut [T], greater: impl Fn(T, T) -> bool) {
+pub(crate) fn shell_sort<T: Copy>(items: &mut [T], greater: impl Fn(T, T) -> bool) {
     let count = items.len();
     let mut gaps = vec![1usize];
     for exponent in 1..16u32 {
@@ -2340,21 +2814,25 @@ fn real_key(value: f64) -> u64 {
 
 /// The `incomparables` argument as keys of `kind`, or `None` for `NULL` and `FALSE`.
 unsafe fn incomparable_keys<'a>(incomparables: Sexp, kind: SexpType) -> R<Option<Vec<Key<'a>>>> {
-    if incomparables == nil()
-        || (incomparables.kind() == SexpType::Logical
-            && length(incomparables) == 1
-            && values::ints(incomparables)[0] == 0)
-    {
+    if !incomparable_keys_given(incomparables) {
         return Ok(None);
     }
     let converted = values::materialize(coerce_vector(incomparables, kind)?)?;
     Ok(Some(element_keys(converted)))
 }
 
+/// Whether `incomparables` names values at all: `NULL` and `FALSE` do not.
+unsafe fn incomparable_keys_given(incomparables: Sexp) -> bool {
+    !(incomparables == nil()
+        || (incomparables.kind() == SexpType::Logical
+            && length(incomparables) == 1
+            && values::ints(incomparables)[0] == 0))
+}
+
 /// Which elements of `x` repeat an earlier one (a later one with `from_last`). Lists compare
 /// their elements with `identical()`. With `first_only`, only the first duplicate in visiting
 /// order is sure to be flagged, and a hashed scan may stop there.
-unsafe fn duplicated_elements(
+pub(crate) unsafe fn duplicated_elements(
     x: Sexp,
     incomparables: Sexp,
     from_last: bool,
@@ -2367,6 +2845,15 @@ unsafe fn duplicated_elements(
     let x = values::materialize(x)?;
     let count = length(x);
     let list = matches!(x.kind(), SexpType::List | SexpType::Expression);
+    // A list's incomparables are elements compared with `identical()`, as GNU R coerces them to
+    // the type of `x`.
+    let incomparable_elements = if list && incomparable_keys_given(incomparables) {
+        let converted = coerce_vector(incomparables, x.kind())?;
+        crate::heap().root(converted);
+        Some(converted)
+    } else {
+        None
+    };
     let incomparables = if list {
         None
     } else {
@@ -2394,7 +2881,13 @@ unsafe fn duplicated_elements(
                 .iter()
                 .any(|&seen| identical(x.element(seen), element, &flags))
             {
-                duplicated.insert(index);
+                let incomparable = incomparable_elements.is_some_and(|elements| {
+                    (0..length(elements))
+                        .any(|position| identical(elements.element(position), element, &flags))
+                });
+                if !incomparable {
+                    duplicated.insert(index);
+                }
             } else {
                 bucket.push(index);
             }
@@ -2672,7 +3165,7 @@ fn visit_in_order(count: usize, from_last: bool, mut flag: impl FnMut(usize) -> 
 }
 
 /// A set of indices below `len`, one bit each.
-struct Bits {
+pub(crate) struct Bits {
     words: Vec<u64>,
     len: usize,
 }
@@ -2703,7 +3196,7 @@ impl Bits {
             .sum()
     }
 
-    fn first(&self) -> Option<usize> {
+    pub(crate) fn first(&self) -> Option<usize> {
         let (index, word) = self
             .words
             .iter()
@@ -3245,17 +3738,11 @@ unsafe fn do_merge(call: &Call<'_>) -> R<Sexp> {
 mod tests {
     use super::*;
 
-    /// The collation order must sort texts exactly as a stable sort by `root_collate` or
-    /// `str::cmp` does, including texts that are prefixes of one another and that differ only
-    /// in accents or case, on both the general and the ASCII key.
+    /// The printable-ASCII shortcut must order exactly as ICU4X's collator does for every locale
+    /// it is used for, including strings that are prefixes of each other or differ only in case.
     #[test]
-    fn collation_order_matches_collate() {
-        const MIXED: &[char] = &[
-            'a', 'A', 'b', '_', '.', '1', ' ', 'é', 'É', 'z', 'ß', '-', '9', 'Ω',
-        ];
-        const ASCII: &[char] = &[
-            'a', 'A', 'b', 'B', '_', '.', '1', ' ', 'z', 'Z', '-', '9', '~', '$',
-        ];
+    fn ascii_collation_matches_icu() {
+        let printable: Vec<u8> = (b' '..=b'~').collect();
         let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
         let mut next = || {
             state ^= state << 13;
@@ -3263,35 +3750,54 @@ mod tests {
             state ^= state << 17;
             state
         };
-        for alphabet in [MIXED, ASCII] {
-            let texts: Vec<String> = (0..400)
-                .map(|_| {
-                    let length = (next() % 5) as usize;
-                    (0..length)
-                        .map(|_| alphabet[(next() % alphabet.len() as u64) as usize])
-                        .collect()
-                })
-                .collect();
-            for c in [false, true] {
-                let mut expected: Vec<u32> = (0..texts.len() as u32).collect();
-                expected.sort_by(|&left, &right| {
-                    let (left, right) = (&texts[left as usize], &texts[right as usize]);
-                    if c {
-                        left.cmp(right)
-                    } else {
-                        root_collate(left, right)
-                    }
-                });
-                let expected: Vec<&String> = expected
-                    .iter()
-                    .map(|&index| &texts[index as usize])
-                    .collect();
-                let actual: Vec<&String> = order_by_collation(&texts, c)
-                    .iter()
-                    .map(|&index| &texts[index as usize])
-                    .collect();
-                assert_eq!(actual, expected, "C collation {c}");
+        let mut texts: Vec<String> = Vec::new();
+        for &first in &printable {
+            texts.push(String::from(first as char));
+            for &second in &printable {
+                texts.push(String::from_iter([first as char, second as char]));
             }
         }
+        for _ in 0..4000 {
+            let length = (next() % 6) as usize;
+            let alphabet = if next() % 2 == 0 {
+                &b"aAbB1 -_."[..]
+            } else {
+                &printable[..]
+            };
+            texts.push(
+                (0..length)
+                    .map(|_| alphabet[(next() % alphabet.len() as u64) as usize] as char)
+                    .collect(),
+            );
+        }
+        for language in ["und", "en", "en-US", "de", "fr", "fr-CA", "it", "nl", "pt"] {
+            let locale = Locale::try_from_str(language).expect("a valid tag");
+            let preferences = CollatorPreferences::from(&locale);
+            assert!(root_ascii_order(&locale, &preferences), "{language}");
+            let collator = CollatorBorrowed::try_new(preferences, CollatorOptions::default())
+                .expect("compiled data");
+            for (index, left) in texts.iter().enumerate() {
+                for right in texts.iter().skip(index % 397).step_by(397) {
+                    assert_eq!(
+                        ascii_collate(left.as_bytes(), right.as_bytes()),
+                        collator.compare(left, right),
+                        "{language}: {left:?} and {right:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn locale_names_become_icu_tags() {
+        assert_eq!(icu_locale_tag("de_DE.UTF-8").0, "de-DE");
+        assert_eq!(icu_locale_tag("C.UTF-8").0, "C");
+        assert_eq!(
+            icu_locale_tag("de@collation=phonebook"),
+            (
+                "de-u-co-phonebk".to_owned(),
+                "de@collation=phonebook".to_owned()
+            )
+        );
     }
 }

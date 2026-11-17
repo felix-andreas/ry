@@ -14,15 +14,33 @@ the next reader.
 
 ## The fast loop
 
-Run `source tools/env.sh` once per shell. It puts the reference GNU R (`/opt/R/<version>/bin`) on
-`PATH` when no `R` is there, links Linux builds with mold when it runs on Linux and mold is installed
-(through `RUSTC_WRAPPER=tools/mold-rustc`, which cargo leaves out of its fingerprints, so switching it
-rebuilds nothing), and reports whether ry's base R (`target/base-r`) is built:
+Start every command with `source tools/env.sh &&`. Where nix is installed, which includes every
+Claude cloud container, it loads the flake's `default` dev shell: the Rust toolchain, the reference
+GNU R, `just` and mold, the same versions CI tests with. It then selects mold for Linux links
+(through `RUSTC_WRAPPER=tools/mold-rustc`, which cargo leaves out of its fingerprints) and reports
+whether ry's base R (`target/base-r`) is built:
 
 ```text
 $ source tools/env.sh
-ry env: GNU R 4.6.2 at /opt/R/4.6.2/bin; base R built; mold linker
+ry env: nix dev shell; GNU R 4.6.2 at /nix/store/...-gnu-r-4.6.2/bin; base R built; mold linker
 ```
+
+| Step | Time on a 4-core cloud container |
+| --- | --- |
+| First `source tools/env.sh` in a fresh container | 98 s, 8.8 GB downloaded into `/nix/store`, nothing built |
+| Every later `source tools/env.sh` | 0.06 s |
+| `nix develop -c <command>`, for comparison | 4.7 s per command |
+| First debug build of `ry`, `libR` and `ry-rcmd` in the shell | 5 min 20 s |
+
+The script saves `nix print-dev-env` in `target/nix-dev-env.sh` and sources that file, which is why
+later runs are fast; it rewrites the file when `flake.nix`, `flake.lock`, `rust-toolchain.toml` or
+the GNU R pin in `tools/base-r` is newer. Binaries built in the shell link nix's glibc, so do not mix shell and host builds in one
+target directory: cargo rebuilds everything when you switch.
+
+`RY_ENV=system source tools/env.sh` skips nix and uses the host's tools, with the reference GNU R
+from `/opt/R/<version>/bin`. Use it for the package corpus (`just bench-packages`), whose packages
+link the Ubuntu libraries that `sudo tools/dev-setup.sh` installs and the shell does not carry.
+Without nix the script behaves the same way.
 
 Every command below is plain cargo, so it works without `just`. A passing run prints only cargo's
 summary, and a failure prints a rerun command for just the failing case.
@@ -503,17 +521,186 @@ non-local exit native code can set up (`Rf_eval`, `R_tryEval`, `R_ToplevelExec`,
 checks the outcome, which cleanups ran, and that every C context, protection and `R_alloc` block was
 released. A second battery drives random API sequences under collection stress against a model.
 
-`crates/oracle/tests/test_differential.rs` runs whole generated R programs (`oracle::fuzz::program`)
-under GNU R, ry's tier 0 and ry's JIT, and under collection stress against ry unstressed, and every
-engine must print the same output, warnings and errors. The generator covers loops shaped for the
-JIT, closures, S3 dispatch, conditions and `on.exit`, environments, attributes, `NA` and overflow,
-and about one program in eight ends on a deliberate error. `cargo run -p oracle -- fuzz --seed N
---count K --engines ry-tier0,ry-jit,ry-gctorture` runs any range, prints each divergent program and
-its replay command, and `just fuzz-differential` and `just gc-torture` are the long runs.
+`oracle fuzz` runs whole R programs under GNU R and ry's engines and reports every program on
+which an engine differs. A seed and a kind name a program, so `oracle fuzz --kind K --seed N
+--print` prints it and `--engines` replays it. The seven kinds find different bugs:
+
+| Kind | A program is | It finds |
+| --- | --- | --- |
+| `grammar` (`oracle::fuzz::program`) | several blocks from a grammar of language features: loops shaped for the JIT, closures, S3 dispatch, conditions and `on.exit`, environments, attributes, `NA` and overflow, and element stores into a function's argument copy on both sides of 64 elements, in a function called three times so its body runs interpreted and compiled; about one in eight ends on a deliberate error | interpreter and JIT bugs in control flow and scoping |
+| `metamorphic` (`oracle::metamorphic::program`) | six to twelve trials; each builds one value, runs one body of updates and reads on it, and runs the same body in other forms that must give an identical result | a result that depends on how often or where code runs, or on how a value is stored |
+| `builtins` (`oracle::metamorphic::builtins_program`) | builtins called on a zoo of values, each call caught | a builtin that accepts, rejects or computes differently from GNU R |
+| `api` (`oracle::metamorphic::api_program`) | calls of functions drawn from everything base, stats and utils export, on two zoo values and constants of other types, each call caught | a function nobody listed: one that crashes, or accepts, rejects or computes differently from GNU R |
+| `io` (`oracle::metamorphic::io_program`) | round trips through files and connections: a zoo value written by one writer (`writeLines`, `cat`, `writeBin`, `write.table`, `dput`, `saveRDS`, `save`, compressed and re-encoding connections) and read back by several readers | bytes on disk that differ from GNU R's, and readers that decode, mark, warn about or reject a file differently |
+| `language` (`oracle::language::program`) | a few closures, each built from statements of the construct families its seed enables (`on.exit`, frame inspection, `...`, promises, replacement functions, `<<-`, conditions and restarts, S3, S4 and Reference Class dispatch, `eval` and quoted code, environments, regular expressions over Unicode text, control flow) and called one, a few or sixty times; the first and the last call's visible value, log entries and warnings are recorded | a difference in evaluation order, in what a frame or a condition reports, or in dispatch, and one that appears only on a later call |
+| `corpus` (`oracle::corpus`) | a snippet of real R code with one to four mutations | what no grammar author thought of |
+
+A metamorphic trial draws its value from a zoo: every atomic type and lists, with `NA`, `NaN`,
+`Inf` and `-0`; zero-length vectors and lengths on both sides of the sizes where storage changes
+(the inline capacities, the 512-byte small-vector limit, the 64 KiB arena chunk, a compact `1:n`); names that are empty, `NA`, duplicated or
+non-ASCII, attached through `names<-`, `setNames`, `structure`, argument tags and `do.call`;
+strings marked UTF-8, latin1 and bytes; matrices, arrays, data frames, factors and dates. The body
+is a few statements over `x`: element, slice, matrix and name assignments, attribute and
+replacement-function calls, `<<-`, loops, and reads by position and by name. The trial computes
+the reference result once, then compares it by `identical()` with the body's result in each
+other form and prints `same` or `DIFFERENT`:
+
+| Form | The body runs |
+| --- | --- |
+| `again xK` | K times in a row in the same closure, K from 1 to 300 |
+| `warmed`, `cold` | in the closure after it ran on values of other types and sizes, and in a copy of it that never ran |
+| `local`, `inline`, `evaluated`, `on.exit` | inside `local()`, in an anonymous closure, through `eval(quote())` in a new environment, or in a closure with an `on.exit` handler |
+| `top level` | as top-level statements on a global variable |
+| `renamed NAME` | with `x` under another name, among them a non-syntactic one, a non-ASCII one, `T` and `c` |
+| `caller` | called through `do.call`, `lapply`, `Map`, `Reduce`, `replicate` or `tryCatch` |
+| `shared` | on a value that a second variable, a list, an environment, a closure or an attribute also holds, whose copy must come out unchanged |
+| `collected` | with a `gc()` after every statement |
+| `serialized v2`, `serialized v3` | on the value after `unserialize(serialize())` |
+
+A `DIFFERENT` line is a bug in the engine that printed it, whatever GNU R says, so the kind is
+also a test without GNU R. Each seed turns on a random subset of 33 features (the value types,
+the name and encoding sources, the statement families, the forms), so a rare pair of features
+gets programs of its own instead of drowning in the common ones.
+
+Printed output hides much of a value, so every engine runs with the deep observer on
+(`crates/oracle/src/observe.R`, `ProcessEngine::observing`, off with `--no-observe`). After each
+top-level expression the driver records a canonical dump of its value and whether it was
+visible: the type, length and object bits, every element (a double by its bits, a string by its
+encoding mark and bytes), the attributes in the order `attributes()` gives them, and the
+structure of calls, closures and environments. A vector of more than 96 elements shows its ends
+and, for the middle, checksums that depend on the position of every element. Each condition is
+recorded with its classes, message and call. A non-ASCII string shows the same mark whether it
+is flagged UTF-8 or unflagged, because the two are the same text in a UTF-8 session;
+`ORACLE_OBSERVE=strict` tells them apart.
+
+The `builtins` kind calls a hand-written list of functions with arguments that suit them. The
+`api` kind takes its functions from a table instead, `crates/oracle/src/api_functions.txt`, which
+`api_functions.R` writes from GNU R's namespaces (regenerate it after a GNU R upgrade:
+`Rscript crates/oracle/src/api_functions.R > crates/oracle/src/api_functions.txt`). The script
+leaves out what cannot be compared: functions that read or write files, connections, the terminal,
+the clock, the session or the graphics device, most dot-prefixed internals, and one function on
+which GNU R corrupts its own memory. A formal that names a file or a package is never passed. A
+call gets up to three positional arguments (the first is usually the zoo value `v`, the second
+`w`, the third a small count) and sometimes one named argument, and a replacement function is
+often called through replacement syntax (`x <- v; names(x) <- w`). A third of the calls print
+their result, so `print` methods run too. Most calls are errors in both engines, and then the
+messages are compared.
+
+The report of a diverging seed names each top-level expression that differs and how:
+
+| Difference | Meaning |
+| --- | --- |
+| `crash` | the engine died of a signal or a panic |
+| `value` | the expression's value or visibility differs |
+| `accepts`, `rejects` | one engine signals an error where the other returns |
+| `message` | both signal an error, with another message, call or class |
+| `conditions` | the values agree; a warning's or message's text, call or classes differ |
+| `printed` | the values and conditions agree and the printed text does not |
+
+`--jobs N` runs N programs at once, `--minutes M` keeps taking seeds until the time is up,
+`--findings DIR` writes each diverging program and its report to a directory, and the summary
+counts the differences by kind. For the `builtins` and `api` kinds it also counts them by the
+function called and writes `DIR/functions.txt`, one `count`, kind and function per line, most
+frequent first, which ranks the gaps:
+
+```
+14	accepts	type.convert
+10	rejects	aregexec
+7	value	nargs
+```
+
+`oracle fuzz --kind all --count 500 --coverage` (`just fuzz-coverage`) runs no engine. It generates
+the programs and reports how many of the table's callable functions each kind names in a call, so
+a generator change shows what it added to the reach:
+
+```
+kind           all   base  stats  utils
+(the table)   1479   1000    427     52
+grammar        144    143      0      1
+metamorphic    131    129      1      1
+builtins       297    285      7      5
+api           1473    995    426     52
+io              94     87      1      6
+language       279    274      2      3
+corpus         667    478    170     19
+together      1473    995    426     52
+```
+
+The count is a close upper bound, because a name inside a string literal counts as a call.
+
+Every fuzzed engine runs with at most 2 GiB of writable memory (`oracle::fuzz::MEMORY_LIMIT`,
+`RLIMIT_DATA`), so a call that asks for a huge vector gets R's "cannot allocate" error in GNU R
+and in ry instead of taking the machine's memory. `just fuzz-differential` runs the grammar,
+`just fuzz-kind KIND` any kind, and `just fuzz-long HOURS BASE` all seven for a time budget, under
+tier 0, the forced JIT and seeded collection stress.
+
+`crates/oracle/tests/test_differential.rs` holds the bounded passes. Grammar programs run under
+GNU R, tier 0 and the JIT, and under collection stress against ry unstressed. Metamorphic,
+builtin, api, io and language programs run under tier 0 and the forced JIT, which must agree with
+each other, print no `DIFFERENT` and never crash (`fuzz_metamorphic_forms_agree_across_tiers`,
+`fuzz_builtins_agree_across_tiers`, `fuzz_api_calls_agree_across_tiers`,
+`fuzz_io_round_trips_agree_across_tiers`, `fuzz_language_constructs_agree_across_tiers`); their
+comparison with GNU R is the long run's, because ry differs from GNU R on many builtin and api
+programs and a default test must pass.
+
+A divergent program is 50 to 300 lines, so a finding is reduced before it becomes an oracle case.
+`oracle reduce FILE --engine NAME` (`just fuzz-reduce FILE ENGINE`, or `oracle fuzz --reduce` for
+every diverging seed) shrinks it by delta debugging over the syntax tree: it removes statements,
+block items, arguments and parameters in halving chunks, replaces a construct by one of its parts
+(an `if` by a branch, a call by an argument, a loop by its body), replaces compound expressions by
+`NULL`, `0`, `1L`, `""` or `TRUE`, and shrinks string and number literals. A candidate counts only
+when GNU R parses it, GNU R runs it to completion if it ran the original to completion, and the
+engine still diverges with the same signature: the same crash signal, a timeout, or the first of
+errors, warnings, messages, stdout, value and the deep observer's dump that differs. A difference
+in errors or warnings also keeps both engines' messages, and a difference in the dump keeps the
+way its first expression differs (the table above), so a reduction seldom slides to another bug;
+a difference in printed output or the last value keeps only its channel, so read the reduced
+program against the original report. Both engines run with the observer on. For example, a segfault of `ry-tier0` in a replacement on a matrix,
+buried in a 130-line fuzz program, reduces in about 300 candidates (a few minutes in a debug build)
+to:
+
+```r
+f <- function(m) { m[1, 1] <- 0; m }
+f(matrix())
+f(matrix(0, 8, 8))
+```
+
+The command prints the reduced program, its signature and a replay command (with
+`ORACLE_OBSERVE=1` when only the observer's dump differs), and `--output` writes it. `--budget`
+caps the candidates (2000 by default), and the reduction is deterministic unless a candidate
+runs into the timeout. `oracle fuzz --reduce` starts no candidate after the time budget and
+leaves a timeout unreduced, because each candidate that still hangs costs the whole timeout.
+`oracle::reduce::reduce` takes any predicate, so its unit tests run without an engine.
+
+A grammar only covers what its author thought of, so a second source of programs is real R code,
+mutated (`oracle::corpus`, `oracle::mutate`). The corpus is extracted at run time into
+`target/fuzz-corpus` and never committed: the examples of every base package's help pages
+(`tools::Rd2ex`), the `tests/*.R` of the R source for the installed release (downloaded from CRAN
+once by `oracle fuzz --kind corpus`), the oracle cases, and the tests of corpus packages that ship
+them. Each file splits into snippets, runs of top-level expressions cut at blank lines, without
+the paragraphs that touch graphics, files, the clock, the environment, addresses or unseeded
+random numbers. A seed picks a snippet and applies one to four mutations on the syntax tree:
+boundary values for literals, materialized `a:b`, named, reversed or emptied `c()`, a statement
+wrapped in a closure, `local`, `identity`, a serialization round trip or `eval(quote())`,
+repeated calls, swapped, dropped or duplicated arguments, and neighboring operators. Every engine
+runs under the deep observer. The unmutated snippet runs first: an engine that already differs on
+it is a plain compatibility gap, listed in `target/fuzz-corpus/base-differs.txt`, and only a
+mutant that diverges while its snippet agrees is a finding. A diverging mutant runs under GNU R a
+second time and is dropped when GNU R disagrees with itself. `just fuzz-corpus SEED COUNT ENGINES`
+runs a range of seeds. The bounded pass, `fuzz_corpus_mutants_never_crash`, fails only when a
+mutant crashes ry and prints the other divergences, because the snippet a seed picks depends on
+the corpus on disk: it changes whenever an oracle case is added, and with the R source and the
+packages a machine has. A corpus seed therefore replays only against the same corpus, and a
+report carries the mutant's text for that reason.
+
 `crates/oracle/tests/test_gallery.rs` renders a seeded sample of the plot gallery under both
 engines and compares the images ([Corpus and oracle](/development/corpus-and-oracle)).
 `just gc-torture` runs every oracle case on every core and takes about ten minutes on four cores
-in a debug build, and `just gc-torture young` runs them under `ry-gctorture-young`. The generated
+in a debug build, and `just gc-torture young` runs them under `ry-gctorture-young`.
+`just gc-torture repeat` runs them twice in one process under seeded stress with the heap checked
+(`ry-repeat-gctorture-seeded`), takes about forty minutes on four cores in a debug build, and
+prints each case that takes over a minute. A case is killed after fifteen minutes for each pass
+it makes. The generated
 programs run under both torture engines. `RY_GC_STRESS=1` stresses from the script's start and
 `RY_GC_STRESS=startup` from the first allocation, which takes about seven seconds on an empty script
 in a debug build ([Robustness](/development/robustness) lists the modes).
@@ -554,7 +741,8 @@ A crash is never a known failure. When an engine is killed by a signal, the run 
 as `CRASHED` and counts it as new even if the file lists it, because a crash is a memory-safety
 bug and blocks until it is fixed. Where it shows can depend on the host, since it depends on
 where the collector happens to run, which is why the gctorture engines (`ry-gctorture`,
-`ry-gctorture-young` and `ry-jit-gctorture`) exist. The file has no mark that lets a case pass on
+`ry-gctorture-young`, `ry-gctorture-seeded`, `ry-repeat-gctorture-seeded` and `ry-jit-gctorture`)
+exist. The file has no mark that lets a case pass on
 some runs and fail on others. A beta release requires the file to be empty.
 
 A count is only trustworthy if it covers every case, so `oracle compare` also refuses to start when
@@ -601,7 +789,7 @@ kernel whose checksum differs from GNU R's is marked `MISMATCH`. With `--memory`
 runs in its own process, and the table adds both engines' peak RSS. zoo and xts load from
 `RY_BENCH_RLIB` (default `~/R/library`).
 
-`just bench-ci [--only k1,k3 --runs 2 --scale 1]` runs fourteen kernels cut from a user's profiles
+`just bench-ci [--only k1,k3 --runs 2 --scale 1]` runs fifteen kernels cut from a user's profiles
 of a large package's test suite (`tools/bench/internal/ci/kernels.R`) under GNU R and `ry run`.
 Each kernel is one code shape a profile ranked high: creating an S4 object with a validity method
 (`k1`), `as.Date` on a character scalar (`k2`), scalar calls of `ifelse`, `isTRUE` and `unname`
@@ -609,10 +797,10 @@ Each kernel is one code shape a profile ranked high: creating an S4 object with 
 an xts merge (`k6`), a data.table grown by `rbind` (`k7`), `pmin`/`pmax` on matrices (`k8`), and
 `parse` with source references (`k9`), `readLines` (`k10`) and a recursive `list.files` (`k11`)
 over forty generated source files, `new()` on a class of two plain slots (`k12`) and on a class
-whose prototype holds a million doubles (`k13`), and forcing every object of three installed
-packages' lazy-load databases (`k14`). The table shows
-the fastest of `--runs` runs on each engine and the speed-up, and a kernel whose checksum differs
-from GNU R's is marked `DIFFERS` and fails the run. The packages (xts, zoo, data.table, purrr) load
+whose prototype holds a million doubles (`k13`), forcing every object of three installed
+packages' lazy-load databases (`k14`), and a grouped data.table `j` that calls a function
+(`k15`). The table shows the fastest of `--runs` runs on each engine and the speed-up, and a
+kernel whose checksum differs from GNU R's is marked `DIFFERS` and fails the run. The packages (xts, zoo, data.table, purrr) load
 from `R_LIBS`, by default the corpus library that `just bench-packages install` fills. The file
 says which kernels follow code a user sent and which are reconstructions.
 

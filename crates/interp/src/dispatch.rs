@@ -9,9 +9,12 @@ use {
         annotations::Entry,
         builtins::{Arg, BuiltinDef, Call, Generic, Kind, builtin, internal, special},
         eval::{self, Args, apply_closure, call_builtin, forced_promise, value_of},
+        handles::{
+            self, Cx, Local, Str, attribute_copy, attributes_unshared, dense, get_attribute, is_s4,
+            null, safe, set_class, symbol, unreferenced,
+        },
         interp,
-        subset::modifiable_attributes,
-        unwind::{R, error},
+        unwind::{R, error, error_in},
         values::{
             self, char_str, get_attr, length, missing_arg, nil, scalar_string, string_vector,
             symbol_name, symbols, unbound,
@@ -29,15 +32,13 @@ use {
 pub const BUILTINS: &[BuiltinDef] = &[
     special("UseMethod", -1, do_usemethod).keep_visibility(),
     internal("NextMethod", -1, do_nextmethod).keep_visibility(),
-    builtin("oldClass<-", 2, do_set_old_class),
-    builtin("class<-", 2, do_set_class),
-    builtin("unclass", 1, do_unclass),
+    builtin("oldClass<-", 2, safe!(do_set_old_class)),
+    builtin("class<-", 2, safe!(do_set_class)),
+    builtin("unclass", 1, safe!(do_unclass)),
     builtin(".class2", 1, |call| unsafe { implicit_class(call.arg(0)) }),
     builtin(".cache_class", 2, |call| unsafe { do_cache_class(call) }),
-    builtin(".isMethodsDispatchOn", -1, do_is_methods_dispatch_on),
-    builtin("isS4", 1, |call| unsafe {
-        values::scalar_bool(call.arg(0).has_gp(gp::S4_OBJECT))
-    }),
+    builtin(".isMethodsDispatchOn", -1, safe!(do_is_methods_dispatch_on)),
+    builtin("isS4", 1, safe!(do_is_s4)),
     internal("setS4Object", 3, do_set_s4_object),
     internal("standardGeneric", -1, do_standard_generic),
 ];
@@ -902,7 +903,14 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
     } else {
         dispatch_argument(function, &promargs)?
     };
-    let found = generic_method(generic, object, env.enclosure(), sys_parent, sys_parent)?;
+    let found = generic_method(
+        call.call,
+        generic,
+        object,
+        env.enclosure(),
+        sys_parent,
+        sys_parent,
+    )?;
     let mut vars = found.vars;
     let dispatch_vars = vars.len();
     // Through R 4.3, local variables the generic defined before dispatching are visible to the
@@ -959,19 +967,21 @@ unsafe fn innermost_frame_of(env: Sexp) -> Option<usize> {
     frames[position].owns(env).then_some(position)
 }
 
-/// `UseMethod(generic)` from the slot frame at `position`, as the call its body returns,
-/// without giving the frame an environment: GNU R's dispatch reads only the frame's arguments
-/// and its call. `explicit` is the object `UseMethod(generic, object)` names. Through R 4.3 the
+/// The `UseMethod` call `site`, whose first argument is the generic's name, from the slot frame
+/// at `position`, as the call its body returns, without giving the frame an environment: GNU
+/// R's dispatch reads only the frame's arguments and its call. `explicit` is the object
+/// `UseMethod(generic, object)` names. Through R 4.3 the
 /// method sees the generic's locals, so the caller checks there are none. `None` when the frame
 /// is not the innermost call, which the generic path reports as an error.
 pub(crate) unsafe fn use_method_in_slots(
-    generic: Sexp,
+    site: Sexp,
     position: usize,
     explicit: Option<Sexp>,
 ) -> R<Option<Sexp>> {
     if position + 1 != interp().frames.len() {
         return Ok(None);
     }
+    let generic = site.cdr().car();
     activity::count(Counter::S3Dispatches);
     let dispatching = activity::enter(Activity::S3Dispatch, 0);
     let (frame_call, function) = {
@@ -992,7 +1002,14 @@ pub(crate) unsafe fn use_method_in_slots(
         None => dispatch_argument(function, &promargs)?,
     };
     let Some((owner, enclosure)) = caller else {
-        let found = generic_method(generic, object, function.tag(), sys_parent, sys_parent)?;
+        let found = generic_method(
+            site,
+            generic,
+            object,
+            function.tag(),
+            sys_parent,
+            sys_parent,
+        )?;
         let new_call = renamed_call(frame_call, found.method_name)?;
         drop(dispatching);
         return apply_method(
@@ -1010,7 +1027,7 @@ pub(crate) unsafe fn use_method_in_slots(
     // method finds it as its caller by position, and `.GenericCallEnv` is recorded as unbound:
     // whoever reads the variable asks the caller for its environment
     // (`eval::method_var_value`).
-    let found = generic_method(generic, object, function.tag(), enclosure, unbound())?;
+    let found = generic_method(site, generic, object, function.tag(), enclosure, unbound())?;
     let new_call = renamed_call(frame_call, found.method_name)?;
     drop(dispatching);
     if found.method.kind() != SexpType::Closure {
@@ -1087,11 +1104,13 @@ unsafe fn lazy_caller(position: usize, generic: Sexp) -> R<Option<(usize, Sexp)>
     Ok((!probed).then(|| (owner, function.tag())))
 }
 
-/// The method `UseMethod` calls for `object`, or the error GNU R gives when there is none.
+/// The method `UseMethod` calls for `object`, or the error GNU R gives when there is none,
+/// whose call is the `UseMethod` call `site`.
 /// `enclosure` is the generic's enclosure, where the generic's own definition is looked up first;
 /// methods are looked up from `lookup`, the caller's environment or, for a caller without one,
 /// its enclosure; `call_env` is what the method's `.GenericCallEnv` holds.
 unsafe fn generic_method(
+    site: Sexp,
     generic: Sexp,
     object: Sexp,
     enclosure: Sexp,
@@ -1123,9 +1142,10 @@ unsafe fn generic_method(
     } else {
         format!("\"c('{}')\"", classes.join("', '"))
     };
-    Err(error(format!(
-        "no applicable method for '{generic_name}' applied to an object of class {shown}"
-    )))
+    Err(error_in(
+        site,
+        format!("no applicable method for '{generic_name}' applied to an object of class {shown}"),
+    ))
 }
 
 /// The generic function named `name` as seen from the generic's frame, whose enclosure is
@@ -1704,7 +1724,7 @@ pub unsafe fn try_builtin_dispatch(
         let passed = args.len().min(2);
         if passed < required {
             let noun = if passed == 1 { "argument" } else { "arguments" };
-            return Err(crate::unwind::error_in(
+            return Err(error_in(
                 call,
                 format!(
                     "{passed} {noun} passed to '{}' which requires at least {required}",
@@ -2599,8 +2619,11 @@ pub unsafe fn deferred_default_marker() -> R<Sexp> {
     values::install("__Deferred_Default_Marker__")
 }
 
-unsafe fn do_is_methods_dispatch_on(_call: &Call<'_>) -> R<Sexp> {
-    values::scalar_bool(interp().globals.methods_dispatch)
+fn do_is_methods_dispatch_on<'s>(
+    context: &mut Cx<'s>,
+    _arguments: &handles::Args<'_, 's>,
+) -> R<Local<'s>> {
+    handles::logical_constant(context, i32::from(interp().globals.methods_dispatch))
 }
 
 /// `standardGeneric("f")`: hands the call to the dispatcher the methods package installed.
@@ -2666,14 +2689,21 @@ unsafe fn do_set_s4_object(call: &Call<'_>) -> R<Sexp> {
 
 // The class builtins.
 
-unsafe fn do_set_old_class(call: &Call<'_>) -> R<Sexp> {
-    let object = modifiable_attributes(call.arg(0))?;
-    let value = call.arg(1);
-    if value != nil() && value.kind() != SexpType::String {
-        return Err(call.error("attempt to set invalid 'class' attribute"));
+fn do_is_s4<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    handles::logical_constant(context, i32::from(is_s4(arguments.value(0))))
+}
+
+fn do_set_old_class<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let mut object = attributes_unshared(context, arguments.value(0))?;
+    let value = arguments.value(1);
+    // GNU R removes the attribute for any zero-length value before it checks the type.
+    if !matches!(value.r_type(), SexpType::Nil | SexpType::String)
+        && handles::length(context, value) != 0
+    {
+        return Err(arguments.error("attempt to set invalid 'class' attribute"));
     }
-    set_class_attribute(object, value)?;
-    Ok(object)
+    set_class(context, &mut object, value)?;
+    Ok(object.finish())
 }
 
 /// Sets the class attribute, keeping the object bit in step.
@@ -2688,111 +2718,127 @@ pub unsafe fn set_class_attribute(object: Sexp, value: Sexp) -> R<()> {
     Ok(())
 }
 
-unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let value = call.arg(1);
-    if object == nil() {
+fn do_set_class<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let object = arguments.value(0);
+    let value = arguments.value(1);
+    if object.r_type() == SexpType::Nil {
         // Removing the class of NULL is a no-op, which `arima` relies on.
-        if value == nil() {
-            return Ok(nil());
+        if value.r_type() == SexpType::Nil {
+            return Ok(null());
         }
-        return Err(call.error("attempt to set an attribute on NULL"));
+        return Err(arguments.error("attempt to set an attribute on NULL"));
     }
-    let object = modifiable_attributes(object)?;
-    if value == nil() || length(value) == 0 {
-        set_class_attribute(object, nil())?;
-        return Ok(object);
-    }
-    if value.kind() != SexpType::String {
-        return Err(call.error("attempt to set invalid 'class' attribute"));
-    }
-    // A matrix's implicit class, as `class(m)` reports it, is no attribute either.
-    if length(value) == 2
-        && values::dims(object).is_some_and(|dims| dims.len() == 2)
-        && char_str(value.element(0)) == "matrix"
-        && char_str(value.element(1)) == "array"
+    let mut object = attributes_unshared(context, object)?;
+    if value.r_type() == SexpType::Nil
+        || (value.r_type() == SexpType::String && handles::length(context, value) == 0)
     {
-        set_class_attribute(object, nil())?;
-        return Ok(object);
+        set_class(context, &mut object, null())?;
+        return Ok(object.finish());
     }
-    if length(value) == 1 {
-        let class = char_str(value.element(0));
+    // Any other vector, such as `class(x) <- 1L`, names the class by its text, as in GNU R.
+    let value = handles::coerce(context, value, SexpType::String)?;
+    let classes = match dense::<Str>(context, value)? {
+        Some(classes) if !classes.is_empty() => classes,
+        _ => return Err(arguments.error("attempt to set invalid 'class' attribute")),
+    };
+    let count = classes.len();
+    // The implicit class names are ASCII, so their bytes compare whatever the encoding mark.
+    // A matrix's implicit class, as `class(m)` reports it, is no attribute either.
+    if count == 2
+        && classes.get(context, 0).bytes() == b"matrix"
+        && classes.get(context, 1).bytes() == b"array"
+        && handles::dims(context, object.get()).is_some_and(|dims| dims.len() == 2)
+    {
+        set_class(context, &mut object, null())?;
+        return Ok(object.finish());
+    }
+    if count == 1 {
+        let kind = object.get().r_type();
+        let implicit = match classes.get(context, 0).bytes() {
+            b"numeric" => Implicit::Numeric,
+            b"matrix" => Implicit::Matrix,
+            b"array" => Implicit::Array,
+            name if name == kind.name().as_bytes() && kind != SexpType::Real => Implicit::Own,
+            b"integer" => Implicit::Coerce(SexpType::Integer),
+            b"double" => Implicit::Coerce(SexpType::Real),
+            b"character" => Implicit::Coerce(SexpType::String),
+            b"logical" => Implicit::Coerce(SexpType::Logical),
+            b"complex" => Implicit::Coerce(SexpType::Complex),
+            b"list" => Implicit::Coerce(SexpType::List),
+            b"raw" => Implicit::Coerce(SexpType::Raw),
+            _ => Implicit::None,
+        };
         // Setting an implicit class removes the attribute, or coerces.
-        match class.as_ref() {
-            "numeric" => {
-                set_class_attribute(object, nil())?;
-                if !matches!(object.kind(), SexpType::Integer | SexpType::Real) {
-                    return crate::coerce::coerce_vector(object, SexpType::Real);
+        match implicit {
+            Implicit::Numeric => {
+                set_class(context, &mut object, null())?;
+                if !matches!(kind, SexpType::Integer | SexpType::Real) {
+                    return handles::coerce(context, object.finish(), SexpType::Real);
                 }
-                return Ok(object);
+                return Ok(object.finish());
             }
-            "matrix" => {
-                if values::dims(object).is_none_or(|dims| dims.len() != 2) {
-                    return Err(call.error(format!(
+            Implicit::Matrix | Implicit::Array => {
+                let dimensions = handles::dims(context, object.get()).map(|dims| dims.len());
+                if matches!(implicit, Implicit::Matrix) && dimensions != Some(2) {
+                    return Err(arguments.error(format!(
                         "invalid to set the class to matrix unless the dimension attribute is of length 2 (was {})",
-                        values::dims(object).map_or(0, |dims| dims.len())
+                        dimensions.unwrap_or(0)
                     )));
                 }
-                set_class_attribute(object, nil())?;
-                return Ok(object);
-            }
-            "array" => {
-                if values::dims(object).is_none() {
-                    return Err(call.error(
+                if dimensions.is_none() {
+                    return Err(arguments.error(
                         "cannot set class to \"array\" unless the dimension attribute has length > 0",
                     ));
                 }
-                set_class_attribute(object, nil())?;
-                return Ok(object);
+                set_class(context, &mut object, null())?;
+                return Ok(object.finish());
             }
-            name if name == object.kind().name() && object.kind() != SexpType::Real => {
-                set_class_attribute(object, nil())?;
-                return Ok(object);
+            Implicit::Own => {
+                set_class(context, &mut object, null())?;
+                return Ok(object.finish());
             }
-            "integer" | "double" | "character" | "logical" | "complex" | "list" | "raw" => {
-                set_class_attribute(object, nil())?;
-                let kind = match class.as_ref() {
-                    "integer" => SexpType::Integer,
-                    "double" => SexpType::Real,
-                    "character" => SexpType::String,
-                    "logical" => SexpType::Logical,
-                    "complex" => SexpType::Complex,
-                    "raw" => SexpType::Raw,
-                    _ => SexpType::List,
-                };
-                return crate::coerce::coerce_vector(object, kind);
+            Implicit::Coerce(kind) => {
+                set_class(context, &mut object, null())?;
+                return handles::coerce(context, object.finish(), kind);
             }
-            _ => {}
+            Implicit::None => {}
         }
     }
-    set_class_attribute(object, value)?;
-    Ok(object)
+    set_class(context, &mut object, value)?;
+    Ok(object.finish())
 }
 
-unsafe fn do_unclass(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    if values::class_attr(object) == nil() {
+/// What `class(x) <- name` does for a class `x` has implicitly.
+enum Implicit {
+    Numeric,
+    Matrix,
+    Array,
+    Own,
+    Coerce(SexpType),
+    None,
+}
+
+fn do_unclass<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let object = arguments.value(0);
+    let class = get_attribute(context, object, symbol(|symbols| symbols.class));
+    if class.r_type() == SexpType::Nil {
         return Ok(object);
     }
-    if object.kind() == SexpType::Environment || object.kind() == SexpType::ExternalPtr {
-        return Err(call.error(format!(
-            "cannot unclass an {}",
-            if object.kind() == SexpType::Environment {
-                "environment"
-            } else {
-                "external pointer"
-            }
-        )));
+    match object.r_type() {
+        SexpType::Environment => return Err(arguments.error("cannot unclass an environment")),
+        SexpType::ExternalPtr => {
+            return Err(arguments.error("cannot unclass an external pointer"));
+        }
+        _ => {}
     }
     // Unlike a replacement function, unclass may not reuse a value any variable still holds:
     // `lapply(unclass(x), f, oldClass(x))` reads the class of `x` afterwards.
-    let copy = if object.refcount() > 0 {
-        values::shallow_duplicate_attr(object)?
-    } else {
-        object
+    let mut copy = match unreferenced(object) {
+        Some(object) => object,
+        None => attribute_copy(context, object)?,
     };
-    set_class_attribute(copy, nil())?;
-    Ok(copy)
+    set_class(context, &mut copy, null())?;
+    Ok(copy.finish())
 }
 
 /// For an S4 object, its class and every class it extends, as `is()` would list them.

@@ -1,0 +1,12 @@
+[stdout]
+| [1] "result would be too long a vector"
+| [1] 2 3 4 5
+| [1] 5.5 4.5 3.5 2.5
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| structure("Error in from:to : result would be too long a vector\n", class = "try-error", condition = structure(list(
+|     message = "result would be too long a vector", call = from:to), class = c("simpleError", 
+| "error", "condition")))

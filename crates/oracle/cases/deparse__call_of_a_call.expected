@@ -1,0 +1,38 @@
+[stdout]
+| f(1)(2) 
+| (f(1)(2))(3) 
+| (f()())() 
+| ((f(1)(2))(3))(4) 
+| a$b() 
+| (a$b())() 
+| ((a$b())())() 
+| (a[[1]]())(2) 
+| (a[1](2))(3) 
+| (a::b())() 
+| (f)(1) 
+| ((f)(1))(2) 
+| (function() 1)() 
+| ((function(x) function() x)())() 
+| (a + b)() 
+| ((a + b)())() 
+| (-a)() 
+| (f %o% g)(1) 
+| {     f }(1) 
+| ({     f }(1))(2) 
+| if (a) f else g 
+| (f(1)(2))(3) 
+| (f(1)(2))(x) 
+| (if (a) f else g)(1) 
+| (function(x) x)(1) 
+| (function (x)  x)(1) 
+| .Primitive("sum")(1) 
+| h(0)()
+| (k()())()
+| (f(1)(2))(3)
+| [1] "quote((f(1)(2))(3))"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "quote((f(1)(2))(3))"

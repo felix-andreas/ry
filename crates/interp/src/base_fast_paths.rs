@@ -1073,7 +1073,8 @@ unsafe fn unnamed(obj: Sexp) -> R<Option<Sexp>> {
     if !names && !dimnames {
         return Ok(Some(obj));
     }
-    let copy = values::shallow_duplicate(obj)?;
+    // The copy `names<-` takes, which shares a long vector's data rather than copying it.
+    let copy = values::replacement_copy(obj)?;
     crate::heap().root(copy);
     values::remove_attr(copy, symbols.names);
     values::remove_attr(copy, symbols.dimnames);
@@ -1328,6 +1329,7 @@ unsafe fn native_get_option(args: &[Arg]) -> R<Option<Sexp>> {
     if name.kind() != SexpType::String
         || length(name) != 1
         || name.element(0) == values::na_string()
+        || name.element(0).bytes().is_empty()
     {
         return Ok(None);
     }
@@ -3076,7 +3078,11 @@ unsafe fn do_unlist(call: &Call<'_>) -> R<Sexp> {
     if x.is_object() {
         return decline();
     }
-    let factors = kernel(crate::subset::do_is_list_factor, &[x, recursive], frame)?;
+    let factors = kernel(
+        crate::handles::safe!(crate::subset::do_is_list_factor),
+        &[x, recursive],
+        frame,
+    )?;
     if values::as_logical_scalar(factors) != 0 {
         return decline();
     }
@@ -3187,7 +3193,8 @@ unsafe fn parallel_extreme(call: &Call<'_>, internal: BuiltinFn) -> R<Sexp> {
         Err(Unwind::Error(_)) => return decline(),
         Err(other) => return Err(other),
     };
-    if !most_attributes_from(args[1], result)? {
+    // One argument comes back as itself, whose attributes are already its own.
+    if result != args[1] && !most_attributes_from(args[1], result)? {
         return decline();
     }
     finish(frame, result, true)

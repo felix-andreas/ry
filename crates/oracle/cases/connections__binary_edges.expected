@@ -1,0 +1,74 @@
+[stdout]
+|   [1] 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 80 ff
+|  [26] 3f 00 00 00 00 00 00 00 00 00 00 00 00 00 80 ff bf 00 00 00 00 00 00 00 00
+|  [51] 00 00 00 00 00 c0 ff 3f 00 00 00 00 00 00 00 c0 68 21 a2 da 0f c9 00 40 00
+|  [76] 00 00 00 00 00 00 e0 ac 03 40 e4 21 bf e3 43 00 00 00 00 00 00 00 c8 9a c7
+| [101] 17 fe 70 ab 1a bc 00 00 00 00 00 00 00 00 00 00 00 00 00 80 cd 3b 00 00 00
+| [126] 00 00 00 00 00 00 00 00 00 00 80 01 3c 00 00 00 00 00 00 00 00 00 00 00 00
+| [151] 00 80 ff 7f 00 00 00 00 00 00 00 00 00 00 00 00 00 80 ff ff 00 00 00 00 00
+| [176] 00 00 00 00 00 00 00 00 c0 ff 7f 00 00 00 00 00 00 00 10 3d 00 00 00 00 c0
+| [201] ff 7f 00 00 00 00 00 00 00 f8 ff ff ff ff ff ff fe 43 00 00 00 00 00 00 00
+| [226] d0 cc cc cc cc cc cc fb 3f 00 00 00 00 00 00 00 a8 5b f3 a3 a2 79 eb 19 40
+| [251] 00 00 00 00 00 00
+| [1] TRUE
+|  [1]   0.000000e+00   1.000000e+00  -1.000000e+00   1.500000e+00   3.141593e+00
+|  [6]  1.000000e+300 -1.000000e-300  4.940656e-324  2.225074e-308            Inf
+| [11]           -Inf            NaN             NA  1.797693e+308   1.000000e-01
+| [16]   1.234568e+08
+|   [1] 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 3f ff 80
+|  [26] 00 00 00 00 00 00 00 00 00 00 00 00 00 bf ff 80 00 00 00 00 00 00 00 00 00
+|  [51] 00 00 00 00 3f ff c0 00 00 00 00 00 00 00 00 00 00 00 00 00 40 00 c9 0f da
+|  [76] a2 21 68 c0 00 00 00 00 00 00 00 43 e3 bf 21 e4 40 03 ac e0 00 00 00 00 00
+| [101] 00 00 bc 1a ab 70 fe 17 c7 9a c8 00 00 00 00 00 00 00 3b cd 80 00 00 00 00
+| [126] 00 00 00 00 00 00 00 00 00 3c 01 80 00 00 00 00 00 00 00 00 00 00 00 00 00
+| [151] 7f ff 80 00 00 00 00 00 00 00 00 00 00 00 00 00 ff ff 80 00 00 00 00 00 00
+| [176] 00 00 00 00 00 00 00 7f ff c0 00 00 00 00 00 00 00 00 00 00 00 00 00 7f ff
+| [201] c0 00 00 00 00 3d 10 00 00 00 00 00 00 00 43 fe ff ff ff ff ff ff f8 00 00
+| [226] 00 00 00 00 00 3f fb cc cc cc cc cc cc d0 00 00 00 00 00 00 00 40 19 eb 79
+| [251] a2 a3 f3 5b a8 00
+|  [1]   0.000000e+00   1.000000e+00  -1.000000e+00   1.500000e+00   3.141593e+00
+|  [6]  1.000000e+300 -1.000000e-300  4.940656e-324  2.225074e-308            Inf
+| [11]           -Inf            NaN             NA  1.797693e+308   1.000000e-01
+| [16]   1.234568e+08
+| [1] NaN
+| [1] Inf
+| [1] Inf
+| [1] Inf
+| [1] TRUE
+| [1] TRUE
+| [1] 4.440892e-16
+| [1] "0x1p-1021"
+| [1] "0x0.0000000000002p-1022"
+| (invisible)\n[1] f5 80 80 80 61
+| (invisible)\n[1] f7 bf bf bf 61
+| (invisible)\n[1] f4 8f bf bf 61
+| (invisible)\n[1] ef bf bf 61
+| error: invalid UTF-8 input in readChar() \n(invisible)\nerror: invalid UTF-8 input in readChar() \n(invisible)\n(invisible)\n[1] f8 88 80 80 80 61
+| error: invalid UTF-8 input in readChar() \n(invisible)\n(invisible)\n[1] ed 9f bf 61
+| error: invalid UTF-8 input in readChar() \n(invisible)\nerror: invalid UTF-8 input in readChar() \n(invisible)\nerror: unsupported conversion from 'foo' to '' \n(invisible)\nerror: invalid connection \n(invisible)\n(invisible)\n(invisible)\nerror: invalid UTF-8 input in readChar() \n(invisible)\n(invisible)\nerror: unsupported conversion from 'foo' to '' \n(invisible)\nerror: invalid connection \n(invisible)\nerror: invalid multibyte string at '<c3>' \n(invisible)\nerror: invalid multibyte string at '<e2><82>' \n(invisible)\n[1] f4 90 80 80 78 00
+| error: invalid multibyte string at '<ff>abcd<c3><a4><66><67><fe>' \n(invisible)\nerror: invalid multibyte string at '<ff>abc<e2>�<ac>fg<fe>' \n(invisible)\nerror: translating strings with "bytes" encoding is not allowed \n(invisible)\nerror: invalid multibyte string at '<e4>' \n(invisible)\nerror: translating strings with "bytes" encoding is not allowed \n(invisible)\n[1] 61 e4 00
+| error: translating strings with "bytes" encoding is not allowed \n(invisible)\nerror: 'object' is too short \n(invisible)\nerror: invalid 'sep' argument \n(invisible)\nerror: invalid 'sep' argument \n(invisible)\n(invisible)\n[1] 61 62 63 4e 41 00
+| error: invalid 'nchars' argument \n(invisible)\nraw(0)
+| error: invalid 'nchars' argument \n(invisible)\nerror: invalid multibyte string at '<ff>e' \n(invisible)\nraw(0)
+| warning: null terminator not found: breaking string at 10000 bytes \n(invisible)\n[1] 10000     5     1
+| warning: incomplete string at end of file has been discarded \n[1] "a"
+| character(0)
+| warning: 'signed = FALSE' is only valid for integers of sizes 1 and 2 \n[1]  67305985 134678021
+| warning: 'signed = FALSE' is only valid for integers of sizes 1 and 2 \n[1] 5.447604e-270
+| [1] 01
+| [1] TRUE
+| [1] 5.447604e-270+2.500364e-231i
+| [1] "\001\002\003\004\005\006\a\b"
+| error: size 3 is unknown on this machine \n(invisible)\nerror: size 0 is unknown on this machine \n(invisible)\nerror: size -1 is unknown on this machine \n(invisible)\nerror: raw is always of size 1 \n(invisible)\nerror: size 2 is unknown on this machine \n(invisible)\n[1] "\001\002\003\004\005\006\a\b" ""                            
+| error: size 3 is unknown on this machine \n(invisible)\nerror: size changing is not supported for raw vectors \n(invisible)\nerror: size changing is not supported for complex vectors \n(invisible)\nerror: size 2 is unknown on this machine \n(invisible)\n[1] 61 00
+| [1] 01
+| [1] 00 00 00 80 ff ff ff ff
+| [1] 00 00
+| error: can only write vector objects \n(invisible)\nerror: can only write vector objects \n(invisible)\nerror: can only write vector objects \n(invisible)\nerror: can only write to a binary connection \n(invisible)\nerror: invalid connection \n(invisible)\n
+\ no newline at end of output
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

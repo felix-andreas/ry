@@ -219,7 +219,6 @@ fn operator_info(name: &[u8]) -> Option<OperatorInfo> {
         b"$" | b"@" => (Kind::Dollar, DOLLAR, false),
         b"[" | b"[[" => (Kind::Subset, SUBSET, false),
         b"::" | b":::" => (Kind::Binary2, NAMESPACE, false),
-        b"?" => (Kind::Binary, 3, false),
         _ => return None,
     };
     Some(OperatorInfo {
@@ -293,6 +292,9 @@ struct Deparser {
     /// precedence. Whatever ends that operand without parentheses (an `if`, a loop, or a
     /// low-precedence unary operator) would swallow the rest of the expression on reparsing.
     left_of: Option<u8>,
+    /// Set just before deparsing a call's argument: an `=` assignment there takes parentheses,
+    /// since `f(a = b)` would read as a named argument.
+    argument: bool,
     incomplete: bool,
     /// The first error GNU R's deparser would raise. Deparsing goes on with the plain value, so
     /// callers that cannot fail still get text.
@@ -315,6 +317,7 @@ impl Deparser {
             max_lines: usize::MAX,
             depth: 0,
             left_of: None,
+            argument: false,
             incomplete: false,
             failure: None,
         }
@@ -344,7 +347,8 @@ impl Deparser {
             }
         }
         self.line.push_str(text);
-        self.length += text.chars().count();
+        // GNU R measures the line in bytes, so non-ASCII text breaks lines sooner.
+        self.length += text.len();
     }
 
     fn write_line(&mut self) {
@@ -370,6 +374,7 @@ impl Deparser {
 
     unsafe fn deparse(&mut self, object: Sexp) {
         let left_of = self.left_of.take();
+        let argument = std::mem::take(&mut self.argument);
         if self.stopped() {
             return;
         }
@@ -418,7 +423,7 @@ impl Deparser {
         if attributes {
             self.print("structure(");
         }
-        self.deparse_inner(object, if attributes { None } else { left_of });
+        self.deparse_inner(object, if attributes { None } else { left_of }, argument);
         if attributes {
             self.attributes(object);
             self.print(")");
@@ -426,7 +431,7 @@ impl Deparser {
         self.depth -= 1;
     }
 
-    unsafe fn deparse_inner(&mut self, object: Sexp, left_of: Option<u8>) {
+    unsafe fn deparse_inner(&mut self, object: Sexp, left_of: Option<u8>, argument: bool) {
         match object.kind() {
             SexpType::Nil => self.print("NULL"),
             SexpType::Symbol => {
@@ -483,7 +488,7 @@ impl Deparser {
                 if object.attrib() != nil() {
                     self.incomplete = true;
                 }
-                self.language(object, left_of)
+                self.language(object, left_of, argument)
             }
             SexpType::Pairlist | SexpType::Dots => {
                 // `pairlist()` evaluates its arguments, so an empty one only survives `alist()`.
@@ -499,7 +504,7 @@ impl Deparser {
                     "pairlist("
                 });
                 self.in_list += 1;
-                self.arguments(object, false);
+                self.arguments(object, false, false);
                 self.in_list -= 1;
                 self.print(if has_missing { "))" } else { ")" });
             }
@@ -626,8 +631,9 @@ impl Deparser {
         }
     }
 
-    /// The arguments of a call: `tag = value`, with GNU R's line breaks.
-    unsafe fn arguments(&mut self, mut list: Sexp, formals: bool) {
+    /// The arguments of a call: `tag = value`, with GNU R's line breaks. A pairlist's elements
+    /// are written the same way but never break the line (`breaks` is false).
+    unsafe fn arguments(&mut self, mut list: Sexp, formals: bool, breaks: bool) {
         let mut broken = false;
         while matches!(
             list.kind(),
@@ -644,15 +650,18 @@ impl Deparser {
                 if formals {
                     if list.car() != values::missing_arg() {
                         self.print(" = ");
+                        self.argument = true;
                         self.deparse(list.car());
                     }
                 } else {
                     self.print(" = ");
                     if list.car() != values::missing_arg() {
+                        self.argument = true;
                         self.deparse(list.car());
                     }
                 }
             } else {
+                self.argument = true;
                 self.deparse(list.car());
             }
             list = list.cdr();
@@ -661,7 +670,9 @@ impl Deparser {
                 SexpType::Pairlist | SexpType::Language | SexpType::Dots
             ) {
                 self.print(", ");
-                self.line_break(&mut broken);
+                if breaks {
+                    self.line_break(&mut broken);
+                }
             }
         }
         if broken {
@@ -669,7 +680,7 @@ impl Deparser {
         }
     }
 
-    unsafe fn language(&mut self, call: Sexp, left_of: Option<u8>) {
+    unsafe fn language(&mut self, call: Sexp, left_of: Option<u8>, argument: bool) {
         // `quote()` wraps the outermost call once, and a formula evaluates to itself, so it needs
         // no wrapping at all.
         if self.opts & options::QUOTE_EXPRESSIONS != 0 {
@@ -678,7 +689,7 @@ impl Deparser {
             if !formula {
                 self.print("quote(");
             }
-            self.language(call, None);
+            self.language(call, None, argument);
             if !formula {
                 self.print(")");
             }
@@ -731,11 +742,12 @@ impl Deparser {
                 self.ry_call(form, arguments);
                 return;
             }
-            if head == symbols.break_ && argument_count == 0 {
+            // GNU R prints the keyword alone whatever arguments the call holds.
+            if head == symbols.break_ {
                 self.print("break");
                 return;
             }
-            if head == symbols.next && argument_count == 0 {
+            if head == symbols.next {
                 self.print("next");
                 return;
             }
@@ -765,7 +777,7 @@ impl Deparser {
                             self.print(")");
                         }
                         self.print(open);
-                        self.arguments(arguments.cdr(), false);
+                        self.arguments(arguments.cdr(), false, true);
                         self.print(close);
                         return;
                     }
@@ -798,6 +810,10 @@ impl Deparser {
                     (Kind::Binary | Kind::Binary2 | Kind::Assign, 2) => {
                         let left = arguments.car();
                         let right = arguments.cdr().car();
+                        let outer_parens = argument && name == b"=";
+                        if outer_parens {
+                            self.print("(");
+                        }
                         let left_parens = needs_parens(info, left, true);
                         if left_parens {
                             self.print("(");
@@ -830,6 +846,9 @@ impl Deparser {
                         if right_parens {
                             self.print(")");
                         }
+                        if outer_parens {
+                            self.print(")");
+                        }
                         if broken {
                             self.indent -= 1;
                         }
@@ -839,7 +858,7 @@ impl Deparser {
                     // prefix, so `` `%*%`(x) `` is `%*%x`, as GNU R prints it.
                     (Kind::Binary | Kind::Binary2 | Kind::Unary, 1)
                         if info.kind == Kind::Binary
-                            || matches!(name, b"+" | b"-" | b"!" | b"~" | b"?") =>
+                            || matches!(name, b"+" | b"-" | b"!" | b"~") =>
                     {
                         let operand = arguments.car();
                         let info = if info.precedence == precedence::SUM {
@@ -907,16 +926,7 @@ impl Deparser {
             return;
         }
         // A call whose function is itself an expression.
-        let needs = matches!(head.kind(), SexpType::Language)
-            && (head.car() == symbols().function
-                || head.car().kind() == SexpType::Symbol
-                    && operator_info(head.car().car().bytes()).is_some_and(|info| {
-                        info.kind != Kind::Subset
-                            && info.kind != Kind::Dollar
-                            && !(info.kind == Kind::Binary2
-                                && info.precedence == precedence::NAMESPACE)
-                    }));
-        if needs || head.kind() == SexpType::Closure {
+        if parenthesize_caller(head) {
             self.print("(");
             self.deparse(head);
             self.print(")");
@@ -924,7 +934,7 @@ impl Deparser {
             self.deparse(head);
         }
         self.print("(");
-        self.arguments(arguments, false);
+        self.arguments(arguments, false, true);
         self.print(")");
     }
 
@@ -1080,7 +1090,7 @@ impl Deparser {
             RyForm::Record | RyForm::Tuple => {
                 self.print("(");
                 self.in_list += 1;
-                self.arguments(arguments, false);
+                self.arguments(arguments, false, true);
                 self.in_list -= 1;
                 if values::pairlist_length(arguments) == 1 {
                     self.print(",");
@@ -1090,7 +1100,7 @@ impl Deparser {
             RyForm::Array => {
                 self.print("[");
                 self.in_list += 1;
-                self.arguments(arguments, false);
+                self.arguments(arguments, false, true);
                 self.in_list -= 1;
                 self.print("]");
             }
@@ -1101,7 +1111,7 @@ impl Deparser {
                 if payload != nil() {
                     self.print("(");
                     self.in_list += 1;
-                    self.arguments(payload, false);
+                    self.arguments(payload, false, true);
                     self.in_list -= 1;
                     self.print(")");
                 }
@@ -1253,7 +1263,7 @@ impl Deparser {
         if primitive {
             self.in_list += 1;
         }
-        self.arguments(arguments, false);
+        self.arguments(arguments, false, true);
         if primitive {
             self.in_list -= 1;
         }
@@ -1467,11 +1477,17 @@ impl Deparser {
                         } else {
                             "NA".to_owned()
                         }
-                    } else if !value.r.is_finite() || !value.i.is_finite() {
-                        // `Inf+Infi` would not parse back, so a non-finite part needs the call.
+                    } else if value.r.is_nan() || !value.i.is_finite() {
+                        // `1+Infi` would not parse back, so a NaN real part or a non-finite
+                        // imaginary part needs the call; `Inf+0i` parses. GNU R formats both
+                        // parts together, and an `NA` in either leaves no digits for the other,
+                        // which is then rounded to an integer.
+                        let has_na = is_na_real(value.r) || is_na_real(value.i);
                         let part = |part: f64| {
                             if is_na_real(part) {
                                 "NA".to_owned()
+                            } else if has_na && part.is_finite() {
+                                format!("{part:.0}")
                             } else {
                                 format::format_real_alone(part, 15)
                             }
@@ -1481,7 +1497,7 @@ impl Deparser {
                             part(value.r),
                             part(value.i)
                         )
-                    } else if self.opts & options::DIGITS17 != 0 {
+                    } else if self.opts & options::DIGITS17 != 0 && value.r.is_finite() {
                         // GNU R writes each part with `%.17g`, so the value parses back exactly.
                         let imaginary = format::c_general(value.i, 17, false);
                         let sign = if imaginary.starts_with('-') { "" } else { "+" };
@@ -1514,7 +1530,7 @@ impl Deparser {
             }
         }
         if wrap {
-            if self.length > self.cutoff {
+            if count > 1 && self.length > self.cutoff {
                 self.write_line();
             }
             self.print(")");
@@ -1829,6 +1845,52 @@ unsafe fn dangles(argument: Sexp, outer: u8) -> bool {
             };
             precedence < outer
         })
+}
+
+/// GNU R's `parenthesizeCaller`: whether a call's function, when it is not a name, is written
+/// in parentheses. A call of a plain function name, a subset, `$` or `@`, a namespace access,
+/// `(` or `{` is written without them (`f(1)(2)`, `x$f(1)`), and every other call with them
+/// (`(f(1)(2))(3)`, `(if (a) f else g)(1)`, `(a + b)(1)`).
+unsafe fn parenthesize_caller(head: Sexp) -> bool {
+    if head.kind() != SexpType::Language {
+        return head.kind() == SexpType::Closure;
+    }
+    let function = head.car();
+    if function.kind() != SexpType::Symbol {
+        return true;
+    }
+    let name = function.car().bytes();
+    match operator_info(name) {
+        Some(info) => {
+            !matches!(info.kind, Kind::Subset | Kind::Dollar)
+                && info.precedence != precedence::NAMESPACE
+        }
+        None => {
+            is_user_binop(name)
+                || matches!(
+                    name,
+                    b"if"
+                        | b"while"
+                        | b"for"
+                        | b"repeat"
+                        | b"break"
+                        | b"next"
+                        | b"return"
+                        | b"function"
+                        | b"[<-"
+                        | b"[[<-"
+                        | b"$<-"
+                        | b"@<-"
+                        | b".C"
+                        | b".Fortran"
+                        | b".External"
+                        | b".External2"
+                        | b".Call"
+                        | b".External.graphics"
+                        | b".Call.graphics"
+                )
+        }
+    }
 }
 
 /// GNU R's `needsparens`: whether an operand of `main` must be parenthesized.

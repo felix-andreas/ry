@@ -14,7 +14,9 @@ use {
         bytecode,
         coerce::{CoercionWarnings, real_to_int},
         conditions, deparse, dispatch, interp, moves, scope,
-        unwind::{Jump, R, Rooted, Unwind, error, error_in, jump},
+        unwind::{
+            ArgumentReader, Jump, R, Rooted, Unwind, error, error_in, jump, missing_argument,
+        },
         utils::record_profile_sample,
         values::{
             self, alloc, cons_tagged, length, missing_arg, nil, symbol_name, symbols, triple,
@@ -40,6 +42,11 @@ pub type Matched = SmallVec<[Sexp; 8]>;
 
 /// The promise bit set while its code runs, to report recursive default references.
 pub const PROMISE_SEEN: u16 = 1 << 0;
+
+/// The promise bit set when its code left through an error or another jump, so the next force
+/// warns as GNU R does for a `PRSEEN` of 2. A read that settles a promise without forcing it
+/// leaves such a promise to forcing, which gives the warning.
+pub const PROMISE_INTERRUPTED: u16 = 1 << 1;
 
 /// Evaluates `expression` in `env`. An error raised below is signalled here, so handlers run
 /// close to where it happened.
@@ -74,24 +81,27 @@ unsafe fn eval_unsignalled(expression: Sexp, env: Sexp) -> R<Sexp> {
 
 /// The value of a symbol: its binding, with promises forced.
 pub unsafe fn eval_symbol(symbol: Sexp, env: Sexp) -> R<Sexp> {
-    eval_symbol_reporting(symbol, env, || lexical_call(env))
+    eval_symbol_reporting(symbol, env, || lexical_call(env), ArgumentReader::Eval)
 }
 
 /// [`eval_symbol`] for a lookup that starts in `env` on behalf of a frame that is not `env`
 /// itself, such as a slot frame that has no environment or a frame whose own bindings were
 /// already searched: an unbound symbol is reported against `lexical()`, the call of the frame
-/// the code runs in, as GNU R's `getLexicalCall` does.
+/// the code runs in, as GNU R's `getLexicalCall` does. `reader` says whether the AST evaluator
+/// or compiled code reads the name, which GNU R tells apart in the class of the error for a
+/// missing argument.
 pub unsafe fn eval_symbol_reporting(
     symbol: Sexp,
     env: Sexp,
     lexical: impl FnOnce() -> Sexp,
+    reader: ArgumentReader,
 ) -> R<Sexp> {
     let symbols = symbols();
     if symbol == symbols.dots {
         return Err(error("'...' used in an incorrect context"));
     }
     if let Some(index) = dot_dot_index(symbol) {
-        return dot_dot_value(index, env);
+        return dot_dot_value(index, env, lexical, reader);
     }
     // The empty symbol is `R_MissingArg`, whose value in GNU R is itself, so evaluating it is
     // a missing argument without a name rather than an unbound object.
@@ -107,12 +117,7 @@ pub unsafe fn eval_symbol_reporting(
         ));
     }
     if value == missing_arg() {
-        let name = symbol_name(symbol);
-        return Err(error(if name.is_empty() {
-            "argument is missing, with no default".to_string()
-        } else {
-            format!("argument \"{name}\" is missing, with no default")
-        }));
+        return Err(missing_argument(lexical(), &symbol_name(symbol), reader));
     }
     if value.kind() == SexpType::Promise {
         let forced = force_promise(value)?;
@@ -132,7 +137,12 @@ pub unsafe fn dot_dot_index(symbol: Sexp) -> Option<usize> {
     std::str::from_utf8(digits).ok()?.parse().ok()
 }
 
-unsafe fn dot_dot_value(index: usize, env: Sexp) -> R<Sexp> {
+unsafe fn dot_dot_value(
+    index: usize,
+    env: Sexp,
+    lexical: impl FnOnce() -> Sexp,
+    reader: ArgumentReader,
+) -> R<Sexp> {
     if index == 0 {
         return Err(error("indexing '...' with non-positive index 0"));
     }
@@ -148,9 +158,7 @@ unsafe fn dot_dot_value(index: usize, env: Sexp) -> R<Sexp> {
         if position == index {
             let value = cell.car();
             if value == missing_arg() {
-                return Err(error(format!(
-                    "argument \"..{index}\" is missing, with no default"
-                )));
+                return Err(missing_argument(lexical(), &format!("..{index}"), reader));
             }
             return if value.kind() == SexpType::Promise {
                 force_promise(value)
@@ -364,17 +372,21 @@ pub unsafe fn find_called_fun(symbol: Sexp, mut env: Sexp, call: Sexp) -> R<Sexp
                 return Ok(value);
             }
             if value == missing_arg() {
-                return Err(error(format!(
-                    "argument \"{}\" is missing, with no default",
-                    symbol_name(symbol)
-                )));
+                return Err(missing_argument(
+                    call,
+                    &symbol_name(symbol),
+                    ArgumentReader::Get,
+                ));
             }
         }
         env = env.enclosure();
     }
     Err(error_in(
         call,
-        format!("could not find function \"{}\"", symbol_name(symbol)),
+        format!(
+            "could not find function \"{}\"",
+            crate::format::encode_string(&symbol_name(symbol), None)
+        ),
     ))
 }
 
@@ -463,6 +475,15 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     let mark = heap.handle_mark();
     heap.root(promise);
     promise.set_gp_bits(PROMISE_SEEN, true);
+    if promise.has_gp(PROMISE_INTERRUPTED) {
+        promise.set_gp_bits(PROMISE_INTERRUPTED, false);
+        // A handler that jumps out of this warning leaves the promise marked as under
+        // evaluation, as in GNU R, where the next force reports the recursive reference.
+        if let Err(unwind) = conditions::warning("restarting interrupted promise evaluation") {
+            heap.release_handles(mark);
+            return Err(unwind);
+        }
+    }
     let code = promise.attrib();
     let env = promise.tag();
     // Releasing a promise's last counted reference clears its environment, so an unforced
@@ -498,6 +519,7 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
         }
     };
     promise.set_gp_bits(PROMISE_SEEN, false);
+    promise.set_gp_bits(PROMISE_INTERRUPTED, result.is_err());
     let settled = result.and_then(|value| settle_promise(promise, value));
     heap.release_handles(mark);
     // Releasing dropped the roots made while forcing, and the promise may hold the only
@@ -676,7 +698,7 @@ pub(crate) unsafe fn enclosed_value(symbol: Sexp, enclosure: Sexp) -> R<Sexp> {
 unsafe fn eval_enclosed_name(symbol: Sexp, enclosure: Sexp, owner: usize) -> R<Sexp> {
     interp().visible = true;
     let lexical = || interp().frames.get(owner).map_or(nil(), |frame| frame.call);
-    match eval_symbol_reporting(symbol, enclosure, lexical) {
+    match eval_symbol_reporting(symbol, enclosure, lexical, ArgumentReader::Getvar) {
         Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
         result => result,
     }
@@ -1058,6 +1080,9 @@ unsafe fn pooled_reference(symbol: Sexp) -> R<Sexp> {
     let reference = match state.references.get(used) {
         Some(&reference) if reference.refcount() <= 1 => {
             heap.set_cdr(reference, symbol);
+            // A call that failed while forcing the reference left it marked, and the mark
+            // belongs to that call's argument, not to the one that takes the reference next.
+            reference.set_gp_bits(PROMISE_INTERRUPTED, false);
             reference
         }
         // A `...` list counts the references it collected until its frame is released
@@ -1211,7 +1236,7 @@ pub unsafe fn settled_without_code(promise: Sexp) -> R<Option<Sexp>> {
     // Longer chains are rare, and a chain that loops back (`function(x = y, y = x)`) must end
     // in the error forcing raises, so it is left to forcing.
     const CHAIN_LIMIT: usize = 16;
-    if promise.has_gp(PROMISE_SEEN) {
+    if promise.has_gp(PROMISE_SEEN | PROMISE_INTERRUPTED) {
         return Ok(None);
     }
     let mut chain: SmallVec<[Sexp; 4]> = smallvec![promise];
@@ -1231,7 +1256,7 @@ pub unsafe fn settled_without_code(promise: Sexp) -> R<Option<Sexp>> {
         if next.car() != unbound() {
             break next.car();
         }
-        if chain.len() == CHAIN_LIMIT || next.has_gp(PROMISE_SEEN) {
+        if chain.len() == CHAIN_LIMIT || next.has_gp(PROMISE_SEEN | PROMISE_INTERRUPTED) {
             return Ok(None);
         }
         chain.push(next);
@@ -2174,7 +2199,11 @@ unsafe fn collect_evaluated_args(
                         if !keep_missing {
                             // GNU R evaluates the empty item as a symbol, in the frame that
                             // passes `...` on, so the error is that frame's, not the call's.
-                            return Err(error("argument is missing, with no default"));
+                            return Err(missing_argument(
+                                lexical_call(env),
+                                "",
+                                ArgumentReader::Eval,
+                            ));
                         }
                         missing
                     } else {
@@ -4314,7 +4343,8 @@ unsafe fn catch_return(env: Sexp, result: R<Sexp>) -> R<Sexp> {
 }
 
 /// Runs the `on.exit` expressions of frame `depth` (one-based), keeping the visibility of the
-/// value. An unwind from an `on.exit` expression replaces the frame's own result.
+/// value. An unwind from an `on.exit` expression replaces the frame's own result, and a
+/// `return()` among them its visibility too.
 unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
     let frame = &mut interp().frames[depth - 1];
     if frame.on_exit.is_empty() {
@@ -4335,7 +4365,7 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
     } else {
         frame_env(depth - 1, Reify::Site("on.exit"))?
     };
-    let visible = interp().visible;
+    let mut visible = interp().visible;
     let mark = crate::heap().handle_mark();
     for &expression in &expressions {
         crate::heap().root(expression);
@@ -4374,6 +4404,7 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
             Err(Unwind::Jump(jump)) if matches!(jump, Jump::Return { env: target, .. } if target == env) => {
                 if let Jump::Return { value, .. } = jump {
                     outcome = Ok(value);
+                    visible = interp().visible;
                     if let Some(top) = interp().returned_values.last_mut() {
                         *top = Some(value);
                     }
@@ -5445,11 +5476,13 @@ unsafe fn skips_loop_context(expression: Sexp, jumps_allowed: bool) -> bool {
 }
 
 unsafe fn do_break(call: &Call<'_>) -> R<Sexp> {
+    call.check_arity(0)?;
     reachable_loop(call.env()?)?;
     Err(jump(Jump::Break { env: call.env()? }))
 }
 
 unsafe fn do_next(call: &Call<'_>) -> R<Sexp> {
+    call.check_arity(0)?;
     reachable_loop(call.env()?)?;
     Err(jump(Jump::Next { env: call.env()? }))
 }
@@ -5563,16 +5596,13 @@ pub unsafe fn logical_operand_of(value: Sexp, call: Sexp, operator: &str, side: 
 
 #[inline(never)]
 unsafe fn general_logical_operand(value: Sexp, call: Sexp, operator: &str, side: &str) -> R<i32> {
-    if !matches!(
-        value.kind(),
-        SexpType::Logical
-            | SexpType::Integer
-            | SexpType::Real
-            | SexpType::Complex
-            | SexpType::Nil
-            | SexpType::String
-            | SexpType::Raw
-    ) {
+    // GNU R's `isNumber`: a factor is an integer vector but not a number.
+    let number = match value.kind() {
+        SexpType::Logical | SexpType::Real | SexpType::Complex => true,
+        SexpType::Integer => !values::inherits(value, "factor"),
+        _ => false,
+    };
+    if !number {
         return Err(error_in(
             call,
             format!("invalid '{side}' type in 'x {operator} y'"),
@@ -5584,16 +5614,6 @@ unsafe fn general_logical_operand(value: Sexp, call: Sexp, operator: &str, side:
             call,
             format!("'length = {count}' in coercion to 'logical(1)'"),
         ));
-    }
-    if value.kind() == SexpType::String {
-        let result = values::as_logical_scalar(value);
-        if count == 1 && result == heap::object::NA_LOGICAL {
-            return Err(error_in(
-                call,
-                format!("invalid '{side}' type in 'x {operator} y'"),
-            ));
-        }
-        return Ok(result);
     }
     Ok(values::as_logical_scalar(value))
 }
@@ -5710,7 +5730,7 @@ pub(crate) unsafe fn switch_alternative(
         }
     }
     match defaults.first() {
-        Some(default) if default.value == missing => Err(error(SWITCH_EMPTY_DEFAULT)),
+        Some(default) if default.value == missing => Err(switch_empty_default()),
         Some(default) => Ok(Some(default.value)),
         None => Ok(None),
     }
@@ -5728,7 +5748,9 @@ pub(crate) enum SwitchSelector {
 /// The error GNU R's AST `switch` raises when no name matches and the default is empty, from
 /// evaluating the empty argument. Its byte compiler returns an invisible `NULL` instead; code
 /// that relies on that already fails on a closure's first, uncompiled call.
-pub(crate) const SWITCH_EMPTY_DEFAULT: &str = "argument is missing, with no default";
+pub(crate) unsafe fn switch_empty_default() -> Unwind {
+    missing_argument(unbound(), "", ArgumentReader::Eval)
+}
 
 /// Checks a `switch` selector and reads it, with GNU R's warnings for a factor and for a
 /// number that does not fit an integer. Errors and the factor warning name `call`, the
@@ -5849,6 +5871,11 @@ unsafe fn do_invisible(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_nargs(call: &Call<'_>) -> R<Sexp> {
     let state = interp();
     let count = call.frame_index().map_or(NA_INTEGER, |index| {
+        // `eval`'s own frame counts its three arguments, as GNU R's context for it keeps them,
+        // so `nargs()` in code that `eval` or `source` runs at top level answers 3.
+        if state.frames[index].function.kind() != SexpType::Closure {
+            return 3;
+        }
         crate::frame_args(state, index).len() as i32
     });
     // Outside any closure, such as at top level, GNU R finds no call to count and answers NA.
@@ -5863,10 +5890,12 @@ unsafe fn do_force_and_call(call: &Call<'_>) -> R<Sexp> {
     // The callee's arguments are the call's own cells after `n` and `FUN` whenever the special
     // received them unchanged, which is every call written in source, so `Reduce` and the
     // apply family pay no pairlist per call. GNU R conses the same tail into one new call.
-    let rest = match call_tail(call.call, &call.args[2..]) {
+    // A call without `FUN` reaches the "attempt to apply non-function" error below, as in GNU R.
+    let arguments = call.args.get(2..).unwrap_or(&[]);
+    let rest = match call_tail(call.call, arguments) {
         Some(rest) => rest,
         None => values::pairlist(
-            &call.args[2..]
+            &arguments
                 .iter()
                 .map(|arg| (arg.tag, arg.value))
                 .collect::<SmallVec<[(Sexp, Sexp); 8]>>(),
@@ -5939,12 +5968,15 @@ unsafe fn call_tail(call: Sexp, args: &[Arg]) -> Option<Sexp> {
 /// and otherwise evaluates the call normally, which is what this does every time: the value is
 /// the same, but deep recursion still grows the stack.
 unsafe fn do_tailcall(call: &Call<'_>) -> R<Sexp> {
-    let Some((function, rest)) = call.args.split_first() else {
-        return Err(error("argument \"FUN\" is missing, with no default"));
+    let function = call.args.split_first();
+    let Some((function, rest)) = function.filter(|(function, _)| function.value != missing_arg())
+    else {
+        return Err(missing_argument(
+            lexical_call(call.env()?),
+            "FUN",
+            ArgumentReader::TailcallRec,
+        ));
     };
-    if function.value == values::missing_arg() {
-        return Err(error("argument \"FUN\" is missing, with no default"));
-    }
     let function = if function.value.kind() == SexpType::String && length(function.value) == 1 {
         values::install(&values::string_at(function.value, 0).unwrap_or_default())?
     } else {
@@ -5979,8 +6011,16 @@ unsafe fn do_exec(call: &Call<'_>) -> R<Sexp> {
     if positional.next().is_some() {
         return Err(error("unused argument"));
     }
-    let Some(expr) = expr.filter(|expr| *expr != values::missing_arg()) else {
-        return Err(error("argument \"expr\" is missing, with no default"));
+    // GNU R keeps a missing argument passed on as `expr` missing instead of evaluating it.
+    let expr = match expr.filter(|expr| *expr != values::missing_arg()) {
+        Some(expr) if !argument_is_missing(expr, call.env()?)? => expr,
+        _ => {
+            return Err(missing_argument(
+                lexical_call(call.env()?),
+                "expr",
+                ArgumentReader::Tailcall,
+            ));
+        }
     };
     let mut expr = eval(expr, call.env()?)?;
     if expr.kind() == SexpType::Expression && length(expr) == 1 {
@@ -6276,7 +6316,28 @@ unsafe fn call_seeded(
 unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
     let expression = call.arg(0);
     let mut env = call.arg(1);
-    let enclosure = call.arg(2);
+    // An S4 object that extends "environment" stands for the environment in its `.xData`
+    // slot. GNU R names the type of what that conversion made of a bad `enclos`, which is
+    // `NULL`.
+    let enclosure = match call.arg(2) {
+        enclosure if matches!(enclosure.kind(), SexpType::Nil | SexpType::Environment) => enclosure,
+        enclosure => match values::get_attr(enclosure, values::symbols().dot_xdata) {
+            data if enclosure.kind() == SexpType::Object
+                && data.kind() == SexpType::Environment =>
+            {
+                data
+            }
+            _ => return Err(error("invalid 'enclos' argument of type 'NULL'")),
+        },
+    };
+    if env.kind() == SexpType::Object {
+        let data = values::get_attr(env, values::symbols().dot_xdata);
+        env = if data.kind() == SexpType::Environment {
+            data
+        } else {
+            nil()
+        };
+    }
     match env.kind() {
         SexpType::Environment => {}
         SexpType::Nil => {
@@ -6294,14 +6355,16 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
             env = crate::envir::list_to_env(list, enclosure)?;
         }
         SexpType::Integer | SexpType::Real => {
+            if length(env) != 1 {
+                return Err(error("numeric 'envir' arg not of length one"));
+            }
             let which = values::as_integer_scalar(env);
+            if which == NA_INTEGER {
+                return Err(invalid_envir(env));
+            }
             env = crate::envir::sys_frame(which, call.env()?)?;
         }
-        _ => {
-            return Err(call.error(
-                "invalid 'envir' argument of type '".to_string() + env.kind().name() + "'",
-            ));
-        }
+        _ => return Err(invalid_envir(env)),
     }
     // `eval` runs its expression in a context of its own, as GNU R's does: it counts as a frame
     // for `sys.call` and friends, and a `return` in the expression returns from `eval`.
@@ -6354,6 +6417,13 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
     result
 }
 
+unsafe fn invalid_envir(env: Sexp) -> Unwind {
+    error(format!(
+        "invalid 'envir' argument of type '{}'",
+        env.kind().name()
+    ))
+}
+
 unsafe fn do_with_visible(call: &Call<'_>) -> R<Sexp> {
     let value = call.arg(0);
     let visible = interp().visible;
@@ -6403,11 +6473,22 @@ unsafe fn do_tilde(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_delayed_assign(call: &Call<'_>) -> R<Sexp> {
-    let name = values::require_str(call.arg(0), "x")?;
-    let symbol = values::install(&name)?;
+    let names = call.arg(0);
+    if names.kind() != SexpType::String || length(names) == 0 {
+        return Err(error("invalid first argument"));
+    }
+    let symbol = values::install_charsxp_text(names.element(0))?;
     let value = call.arg(1);
     let eval_env = call.arg(2);
     let assign_env = call.arg(3);
+    for (env, name) in [(eval_env, "eval.env"), (assign_env, "assign.env")] {
+        if env == nil() {
+            return Err(error("use of NULL environment is defunct"));
+        }
+        if env.kind() != SexpType::Environment {
+            return Err(error(format!("invalid '{name}' argument")));
+        }
+    }
     let promise = make_promise(value, eval_env)?;
     define(symbol, promise, assign_env)?;
     Ok(nil())
@@ -7009,6 +7090,20 @@ pub unsafe fn complex_assign(
     }
     let lookup_env = if superassign { env.enclosure() } else { env };
     let mut base = find_var(inner, lookup_env)?;
+    if base == missing_arg() {
+        // GNU R reads the name in the frame when the frame binds it and in the enclosure
+        // otherwise, and the error names the call of the environment the read started in.
+        let reader = if superassign || find_var_in_frame(inner, env)? == unbound() {
+            env.enclosure()
+        } else {
+            env
+        };
+        return Err(missing_argument(
+            lexical_call(reader),
+            &symbol_name(inner),
+            ArgumentReader::Eval,
+        ));
+    }
     if base == unbound() {
         // GNU R evaluates the name in the enclosure and names the call whose frame that is, or
         // no call when the enclosure is not a frame's.

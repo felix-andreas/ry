@@ -89,7 +89,7 @@ def load_suites():
     return sorted(suites, key=rank)
 
 # Suites that the benchmarks page shows in a section of their own, outside the summary.
-outside_summary = ["codebases"]
+outside_summary = ["codebases", "builtins"]
 
 def against_gnu_r(suites):
     """The suites whose ratios are speed-ups over GNU R and that belong in the summary. A results
@@ -152,7 +152,9 @@ def mixed_machines(suites):
     machines = set()
     for suite in suites:
         meta = suite["results"]["meta"]
-        machines.add((meta["machine"]["cpu"], meta["machine"].get("kernel"), meta["gnu_r"].get("blas")))
+        # A Firecracker guest kernel carries a host build tag (`-fc-v553`) that changes on a container restart.
+        kernel = re.sub(r"-fc-v\d+$", "", meta["machine"].get("kernel") or "")
+        machines.add((meta["machine"]["cpu"], kernel, meta["gnu_r"].get("blas")))
     if len(machines) < 2:
         return []
     return ["**Warning:** the suites ran on different machines or BLAS libraries, so their numbers are not directly comparable."]

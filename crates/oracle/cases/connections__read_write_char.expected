@@ -1,0 +1,118 @@
+[stdout]
+| error: can only write to a binary connection 
+| (invisible)
+| [1] FALSE
+|  [1] 01 00 00 00 02 00 00 00 03 00 00 00
+| error: can only read from a binary connection 
+| (invisible)
+| warning: truncating string with embedded nuls 
+| [1] "\001"
+| (invisible)
+| [1] 61 62 00
+| (invisible)
+| [1] 12
+| [1] 1 2 3
+| (invisible)
+| (invisible)
+| error: can only read from a binary connection 
+| (invisible)
+| error: can only write to a binary connection 
+| (invisible)
+| error: can only read from a binary connection 
+| (invisible)
+| error: invalid UTF-8 input in readChar() 
+| (invisible)
+| [1] "a\xffb"
+| error: invalid UTF-8 input in readChar() 
+| (invisible)
+| error: invalid UTF-8 input in readChar() 
+| (invisible)
+| [1] "a\x80\xbfb"
+| [1] "a\x80\xbfb"
+| error: invalid UTF-8 input in readChar() 
+| (invisible)
+| warning: truncating string with embedded nuls 
+| [1] "a"
+| warning: truncating string with embedded nuls 
+| [1] "a" ""  "b" "c"
+| warning: truncating string with embedded nuls 
+| [1] "a"
+| warning: truncating string with embedded nuls 
+| [1] "a"  "bc"
+| warning: truncating string with embedded nuls 
+| [1] ""  "a" ""  "b"
+| warning: truncating string with embedded nuls 
+| [1] ""  "a" ""  "b"
+| error: invalid UTF-8 input in readChar() 
+| (invisible)
+| [1] "a\xed\xa0\x80b"
+| [1] "\xf4\x90\x80\x80b"
+| error: invalid UTF-8 input in readChar() 
+| (invisible)
+| [1] "\xc0\x80b"
+| [1] ""  ""  "a" ""  "b"
+| error: invalid 'nchars' argument 
+| (invisible)
+| error: can only read from a binary connection 
+| (invisible)
+| error: can only read from a binary connection 
+| (invisible)
+| error: invalid connection 
+| (invisible)
+| warning: text connection used with readChar(), results may be incorrect 
+| [1] ""
+| error: 'write' not enabled for this connection 
+| (invisible)
+| error: 'write' not enabled for this connection 
+| (invisible)
+| error: invalid connection 
+| (invisible)
+| error: invalid multibyte string at '<ff>bcdef<67>hijkä<fe>' 
+| (invisible)
+| error: invalid multibyte string at '<ff>bää<c3><a4>äz' 
+| (invisible)
+| warning: writeChar: more characters requested than are in the string - will zero-pad 
+| [1] 61 58 00 63 64 00 58 00
+| [1] 61 62 00
+| [1] 61 00
+| [1] 61 00
+| error: invalid 'sep' argument 
+| (invisible)
+| error: invalid 'sep' argument 
+| (invisible)
+| [1] 61 62 4e 41 00
+| raw(0)
+| [1] 61 00 4e 41 00 62 00
+| [1] 4e 41 00
+| [1] 67305985
+| [1] -1
+| [1] TRUE TRUE TRUE TRUE TRUE TRUE TRUE TRUE
+| [1] FALSE  TRUE  TRUE  TRUE  TRUE
+| [1] NA
+| [1] NA
+| [1] 01 00 00
+|  [1] 01 00 00 00 00 00 00 00 00 00 00 80 ff ff ff ff 00 00 00 00 00 00 00 00
+| [1] 00 00 00 80 ff ff ff ff
+| [1] 00 00
+| error: size 0 is unknown on this machine 
+| (invisible)
+| error: size -1 is unknown on this machine 
+| (invisible)
+| [1] 01 00 02 00 03 00
+| [1] 01 00 02 00 03 00
+| [1] 01 02 03
+| error: size 0 is unknown on this machine 
+| (invisible)
+| error: size -4 is unknown on this machine 
+| (invisible)
+| error: invalid 'signed' argument 
+| (invisible)
+| [1] 67305985
+| error: 'length = 2' in coercion to 'logical(1)' 
+| (invisible)
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

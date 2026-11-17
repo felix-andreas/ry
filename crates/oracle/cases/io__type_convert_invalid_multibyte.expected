@@ -1,0 +1,27 @@
+[stdout]
+| [1] "invalid multibyte string at '<c3>'"
+| [1] "invalid multibyte string at '<c3>'"
+| [1] "1"         "\xc3"      "\xe9t\xe9" "2"        
+| [1] "invalid multibyte string at '<e9>t<e9>'"
+| [1] "invalid multibyte string at '<e9>t<e9>'"
+| [1] "invalid multibyte string at '<e9>t<e9>'"
+| [1] "invalid multibyte string at '<e9>t<e9>,0.<33>33'"
+| [1] "invalid multibyte string at '<e9>,0.33<33>'"
+| [1] "invalid multibyte string at '<e9>abcde<66>'"
+| [1] "invalid multibyte string at '<e9><e9>abcd<65>f'"
+| [1] "a\xe9b\xe9cdefgh" "1"               
+| [1] "invalid multibyte string at '<c3>'"
+| [1] "é\xff" "1"    
+| [1] "invalid multibyte string at '<e9>xyzwv<75>'"
+| [1] "invalid multibyte string at '<f0><9f><98>abc<64>ef'"
+| [1] "invalid multibyte string at '<e9><80>abcd<65>f'"
+| [1] "NA" NA  
+|  Factor w/ 3 levels "a","ä","b": 3 1 NA 3 2
+| [1] "  " "  "
+| [1] 1
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 1

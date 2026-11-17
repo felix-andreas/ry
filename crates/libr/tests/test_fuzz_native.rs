@@ -3,7 +3,9 @@
 //! R_tryCatchError, R_UnwindProtect, R_ExecWithCleanup and a cpp11-style C++ unwind) around
 //! values and errors, and checks the outcome, the cleanups that ran, and that every C context,
 //! protection and `R_alloc` block was released. The other drives random API sequences under
-//! collection pressure and checks every stored object against a model. `FUZZ_ITERS` scales both.
+//! collection pressure and checks every stored object against a model. Another changes a call
+//! in place between repeated evaluations and checks each result against the tree walker's.
+//! `FUZZ_ITERS` scales them all.
 
 #![cfg(unix)]
 
@@ -513,4 +515,146 @@ fn native_code_forces_a_kept_promise_after_its_slot_frame_returned() {
         assert_eq!(r.integers(forced), vec![round + 1], "round {round}");
     }
     r.stress(false);
+}
+
+/// Native code evaluates one call object many times, as data.table evaluates a grouped `j`, and
+/// changes it in place between evaluations the ways C code can: `SETCADR` of an argument or of
+/// a nested call, a write through `INTEGER()` into a constant, an argument cell retyped to
+/// `LANGSXP` as `LCONS` builds it, a different function, and a rebound variable. The call
+/// compiles from its third evaluation, so each result is checked against the tree walker's
+/// result for a fresh duplicate, which is evaluated once and never compiles.
+#[test]
+fn fuzz_native_code_reevaluates_a_changing_call() {
+    let r = r_with_base();
+    r.eval_text(
+        "native_eval_pick <- function(x, y) if (length(x) > 1L) x[2L] + y else x - y\n\
+         native_eval_a <- 3L\nnative_eval_b <- c(1L, 2L, 3L)",
+    )
+    .expect("the helpers define");
+    for_each_seed(60, |seed| {
+        let mut rng = SplitMix64(0xe7a1 ^ seed);
+        let mark = r.protected.get();
+        r.stress(seed % 10 == 9);
+        // A call that changed shape three times runs on the walker for good, so each seed takes
+        // several calls through a few steps each, and most steps leave the shape alone.
+        for round in 0..6 {
+            let call = random_call(&r, &mut rng, 3);
+            for step in 0..8 {
+                change_call(&r, &mut rng, call);
+                for _ in 0..1 + rng.below(4) {
+                    let fresh = r.keep(unsafe { (r.api().Rf_duplicate)(call) });
+                    let expected = r.eval_expression(fresh);
+                    let actual = r.eval_expression(call);
+                    let agree = match (&expected, &actual) {
+                        (Ok(expected), Ok(actual)) => unsafe {
+                            (r.api().R_compute_identical)(*expected, *actual, 16) != 0
+                        },
+                        (Err(expected), Err(actual)) => expected == actual,
+                        _ => false,
+                    };
+                    assert!(
+                        agree,
+                        "seed {seed}, call {round}, step {step}: the walker gave {} and the \
+                         evaluated call {}",
+                        describe(&r, &expected),
+                        describe(&r, &actual)
+                    );
+                }
+            }
+        }
+        r.stress(false);
+        r.release_to(mark);
+    });
+}
+
+const LANGSXP: c_int = 6;
+const FUNCTIONS: [&str; 6] = ["+", "-", "*", "c", "max", "native_eval_pick"];
+
+/// One in-place change to `call` or to the variables it reads, or none.
+fn change_call(r: &R, rng: &mut SplitMix64, call: Sexp) {
+    let api = r.api();
+    let cells = argument_cells(r, call);
+    let cell = cells[rng.below(cells.len())];
+    let value = unsafe { (api.CAR)(cell) };
+    match rng.below(16) {
+        0 => {
+            let leaf = random_leaf(r, rng);
+            unsafe { (api.SETCAR)(cell, leaf) };
+        }
+        1 => {
+            let nested = random_call(r, rng, 1);
+            unsafe { (api.SETCAR)(cell, nested) };
+        }
+        2..=4 if unsafe { (api.TYPEOF)(value) } == INTSXP => {
+            let length = unsafe { (api.XLENGTH)(value) } as usize;
+            let index = rng.below(length);
+            unsafe { *(api.INTEGER)(value).add(index) = rng.below(50) as c_int };
+        }
+        5 => unsafe { (api.SET_TYPEOF)(cell, LANGSXP as u32) },
+        6 => {
+            let function = r.symbol(FUNCTIONS[rng.below(FUNCTIONS.len())]);
+            unsafe { (api.SETCAR)(call, function) };
+        }
+        7..=10 => {
+            let name = r.symbol("native_eval_a");
+            let value = r.integer(rng.below(20) as c_int);
+            let assignment = r.call_expression("<-", &[(None, name), (None, value)]);
+            r.eval_expression(assignment).expect("the assignment runs");
+        }
+        _ => {}
+    }
+}
+
+/// A call to one of [`FUNCTIONS`] with two arguments, each a leaf or, above depth zero, a call.
+fn random_call(r: &R, rng: &mut SplitMix64, depth: usize) -> Sexp {
+    let mut arguments = Vec::new();
+    for _ in 0..2 {
+        let argument = if depth > 0 && rng.chance(1, 3) {
+            random_call(r, rng, depth - 1)
+        } else {
+            random_leaf(r, rng)
+        };
+        arguments.push((None, argument));
+    }
+    r.call_expression(FUNCTIONS[rng.below(FUNCTIONS.len())], &arguments)
+}
+
+/// An integer scalar, a three-element integer vector, or a variable.
+fn random_leaf(r: &R, rng: &mut SplitMix64) -> Sexp {
+    match rng.below(4) {
+        0 => r.integer(rng.below(100) as c_int),
+        1 => {
+            let vector = r.keep(unsafe { (r.api().Rf_allocVector)(INTSXP, 3) });
+            for index in 0..3 {
+                unsafe { *(r.api().INTEGER)(vector).add(index) = rng.below(100) as c_int };
+            }
+            vector
+        }
+        2 => r.symbol("native_eval_a"),
+        _ => r.symbol("native_eval_b"),
+    }
+}
+
+/// The argument cells of `call` and of every call nested in its arguments.
+fn argument_cells(r: &R, call: Sexp) -> Vec<Sexp> {
+    let api = r.api();
+    let mut cells = Vec::new();
+    let mut cell = unsafe { (api.CDR)(call) };
+    while cell != r.nil() {
+        cells.push(cell);
+        let value = unsafe { (api.CAR)(cell) };
+        if unsafe { (api.TYPEOF)(value) } == LANGSXP {
+            cells.extend(argument_cells(r, value));
+        }
+        cell = unsafe { (api.CDR)(cell) };
+    }
+    cells
+}
+
+fn describe(r: &R, outcome: &Result<Sexp, String>) -> String {
+    match outcome {
+        Ok(value) if r.type_of(*value) == INTSXP => format!("{:?}", r.integers(*value)),
+        Ok(value) => format!("a value of type {}", r.type_of(*value)),
+        Err(message) => format!("the error {message:?}"),
+    }
 }

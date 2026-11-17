@@ -1,0 +1,63 @@
+[stdout]
+| cumsum(r) ->  Named num [1:3] 1 19 22
+|  - attr(*, "names")= chr [1:3] "a" "b" "c"
+| cumprod(r) ->  Named num [1:3] 1 18 54
+|  - attr(*, "names")= chr [1:3] "a" "b" "c"
+| cummax(r) ->  Named num [1:3] 1 18 18
+|  - attr(*, "names")= chr [1:3] "a" "b" "c"
+| cummin(r) ->  Named num [1:3] 1 1 1
+|  - attr(*, "names")= chr [1:3] "a" "b" "c"
+| cumsum(raw()) ->  num(0) 
+| cummax(raw()) ->  num(0) 
+| cumsum(list(1, 2)) ->  num [1:2] 1 3
+| cummin(c("3", "1")) ->  num [1:2] 3 1
+| cumsum(NULL) ->  num(0) 
+| cumsum(sum) -> error: cannot coerce type 'builtin' to vector of type 'double' 
+| cummax(c(1i, 2i)) -> error: 'cummax' not defined for complex numbers 
+| cummin(1i) -> error: 'cummin' not defined for complex numbers 
+| cummax(complex()) ->  cplx(0) 
+| cumsum(c(1i, 2i)) ->  cplx [1:2] 0+1i 0+3i
+| which.max(r) ->  Named int 2
+|  - attr(*, "names")= chr "b"
+| which.min(r) ->  Named int 1
+|  - attr(*, "names")= chr "a"
+| which.max(c(1i, 2+0i)) -> warning: imaginary parts discarded in coercion |  int 2
+| which.max(c("b", "a")) -> warning: NAs introduced by coercion |  int(0) 
+| which.max(list(TRUE, 2)) ->  int 2
+| which.min(list(p = 3, q = 1)) ->  Named int 2
+|  - attr(*, "names")= chr "q"
+| pmax(c(TRUE, NA, FALSE)) ->  logi [1:3] TRUE NA FALSE
+| pmin(NULL) ->  NULL
+| pmax(logical()) ->  logi(0) 
+| pmax(c(a = 1L, b = 2L)) ->  Named int [1:2] 1 2
+|  - attr(*, "names")= chr [1:2] "a" "b"
+| pmax(1i) -> error: invalid input type 
+| pmax(1, 1i) -> error: invalid input type 
+| pmin(TRUE, FALSE) ->  int 0
+| pmax(1, numeric(), list()) ->  num(0) 
+| Conj(c(TRUE, NA)) ->  num [1:2] 1 NA
+| Conj(matrix(1:4, 2)) ->  num [1:2, 1:2] 1 2 3 4
+| Re(factor("x")) -> error: non-numeric argument to function 
+| Conj(factor("x")) -> error: non-numeric argument to function 
+| sign(complex()) -> error: unimplemented complex function 
+| floor(complex()) -> error: unimplemented complex function 
+| log2(c(1i, 2+0i)) ->  cplx [1:2] 0+2.27i 1+0i
+| log10(c(1i, 2+0i)) ->  cplx [1:2] 0+0.682i 0.301+0i
+| f(r) ->  Named num [1:3] 1 19 22
+|  - attr(*, "names")= chr [1:3] "a" "b" "c"
+| f(r) ->  Named num [1:3] 1 19 22
+|  - attr(*, "names")= chr [1:3] "a" "b" "c"
+| f(r) ->  Named num [1:3] 1 19 22
+|  - attr(*, "names")= chr [1:3] "a" "b" "c"
+| g(r) ->  Named int 2
+|  - attr(*, "names")= chr "b"
+| g(r) ->  Named int 2
+|  - attr(*, "names")= chr "b"
+| g(r) ->  Named int 2
+|  - attr(*, "names")= chr "b"
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

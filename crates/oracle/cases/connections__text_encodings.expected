@@ -1,0 +1,23 @@
+[stdout]
+| warning: invalid char string in output conversion 
+| [1] 61 e4 0a 78 7a 0a
+| [1] 61 e4 0a 62 0a
+|  [1] ff fe 61 00 0a 00 62 00 0a 00
+| [1] 61 00 e4 00 0a 00
+| warning: invalid char string in output conversion 
+| [1] 61 63 0a
+| [1] "aä" "b" 
+|  [1] 5b 31 5d 20 22 61 e4 22 20 22 62 22 20 0a
+| [1] 61 c3 a4 0a
+| [1] 61 e4 0a
+| [1] 61 e4 0a
+|  [1] 61 c3 a4 0a 20 6c 61 74 69 6e 31
+|  [1] 22 61 22 0a 22 31 22 20 22 61 e4 22 0a
+| [1] 61 c3 a4 0a
+| [1] 61 e4 0a
+| warning: text connection used with writeChar(), results may be incorrect 
+[messages]
+[warnings]
+[errors]
+- can only write to a binary connection (in writeBin("aä", con))
+[value]

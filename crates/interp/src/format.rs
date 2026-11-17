@@ -818,6 +818,10 @@ fn encode_into(result: &mut String, text: &str, quote: Option<char>) {
             character if ('\u{80}'..='\u{9f}').contains(&character) => {
                 result.push_str(&format!("\\u{:04x}", character as u32));
             }
+            // A byte that is not valid UTF-8, carried as its stand-in character.
+            character if let Some(byte) = values::escaped_byte(character) => {
+                result.push_str(&format!("\\x{byte:02x}"));
+            }
             character => result.push(character),
         }
     }
@@ -1466,6 +1470,28 @@ unsafe fn do_format_info(call: &Call<'_>) -> R<Sexp> {
                 imaginary.decimals as i32,
                 exponent(&imaginary),
             ])
+        }
+        // GNU R's `formatInteger`: the widest of the extremes, or of `NA`.
+        SexpType::Integer => {
+            let mut extremes: Option<(i32, i32)> = None;
+            let mut na = false;
+            for &value in values::ints(vector) {
+                if value == NA_INTEGER {
+                    na = true;
+                } else {
+                    let (low, high) = extremes.get_or_insert((value, value));
+                    *low = (*low).min(value);
+                    *high = (*high).max(value);
+                }
+            }
+            let digits = |value: i32| {
+                usize::from(value < 0)
+                    + value.unsigned_abs().checked_ilog10().unwrap_or(0) as usize
+                    + 1
+            };
+            let numbers = extremes.map_or(1, |(low, high)| digits(low).max(digits(high)));
+            let width = if na { numbers.max(2) } else { numbers };
+            values::integer_vector(&[width as i32])
         }
         _ => {
             let items = format_vector(vector, settings, false, "NA")?;

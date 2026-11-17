@@ -1057,3 +1057,89 @@ without cells, promise forcing in the loop, and one observer word on the general
   `y[g(), , 1] <- 2`, reaches the same message as a constant one.
 - `islistfactor` refuses an `NA` for `recursive` from R 4.5 on, which earlier releases took as true.
 - Pinned by the oracle case `replacement__subscript_count_errors`.
+
+## A call site that passes `...` keeps a plan for what `...` held
+
+**Status:** built.
+
+- **Previous source of truth.** A call site's plan says which argument fills which of the callee's
+  slots, and it is made once from the site's own arguments. A site that passes `...` had the plan
+  `MATCH_PER_CALL` instead: every call collected its arguments with `...` spread out, matched them
+  against the formals (`matched_sources`), and entered the callee through the generic handler.
+- **What was weak.** Matching reads only the formals and the arguments' count and names, and a
+  wrapper is called with the same shape of `...` again and again, so each call derived the same
+  sources as the one before. The mechanism row "call: forwards `...`" cost 3,531 instructions
+  against 1,213 for a call with three arguments, and 4.7% of the hot suite's closure calls
+  matched per call.
+- **Chosen shape.** A site that passes `...` once keeps a spread plan (`PLAN_SPREAD`,
+  `spread_plan` in `bytecode.rs`): the sources matched for one call, and beside them how many
+  arguments `...` held and their names. A call for which that holds binds like any planned call.
+  From a frame on its slots it takes `call_fast::<false, true>`, which compares the chain in the
+  frame's `...` slot with the plan and writes the chain's items where the site has `...`. Those
+  items are the caller's promises and values and pass on unchanged.
+- **When the plan does not hold.** A call whose `...` holds another count or other names replans
+  the site, which counts as a miss on the count that a callee with other formals or body also
+  uses, and after `PLAN_MISSES` misses the site keeps its last plan and matches every other call
+  per call. A call with an empty argument, in `...` or beside it, is never planned for and never
+  uses a plan, because matching gives an empty argument's formal its default: `call_fast` keeps
+  an eager argument whose value is the empty argument as a reference for the same reason. A site
+  that passes `...` twice, or whose `...` holds a name that is no symbol, matches per call.
+- **An unset `...` slot is not an empty `...`.** A function without the formal that assigns
+  `...` somewhere has a `...` slot, and while it is unset the function's `...` is an enclosing
+  function's. The slot paths (`forwardable_dots`, `slot_builtin_call`, `call_fast`) leave such a
+  call to the generic path, which looks `...` up. Taking the unset slot as empty passed no
+  arguments where GNU R passes the enclosing function's.
+- **Why a plan per site and not a table per shape.** A site with several shapes of `...` could
+  keep one plan for each. How many sites alternate between shapes is not measured. The single
+  plan with a miss count is the smaller design, and a site with alternating shapes replans up
+  to the miss limit and then matches per call whatever its last plan does not hold for.
+- **One representation for both tiers.** Tier 1 does not inline a call that passes `...`. The
+  row is what such inlining is to read: the count, the names and the sources, copied at compile
+  time and guarded by the chain's shape and the callee, because a plan can be replaced or freed
+  while compiled code lives.
+- **Kept apart from the common call.** `call_fast` takes `SPREAD` as a constant parameter, so the
+  path of a site without `...` carries none of its tests (`crates/interp/AGENTS.md`, the trap
+  about rare branches in the call handlers). `call_generic_by_name` tries the spread path for a
+  frame on its slots after the plain one declined.
+- **Checked by.** With invariants on, every use of a spread plan is compared with matching the
+  call afresh, in both the generic handler and `call_fast`. The oracle case
+  `calls__dots_spread_plans` pins the shapes that change a plan: a count or a name that differs,
+  an empty argument, `..N`, `...` twice, an empty `...`, a callee that reads `...length()`,
+  `match.call()` and `sys.call()`, a site past its miss limit, partial names, a frame that
+  leaves its slots between two calls, an unset and an assigned `...`, changed formals, `do.call`
+  and S3 dispatch behind two wrappers. `check_argument_reference_agreement` generates forwarding
+  calls of varying counts and names with invariants on.
+- **Measured** (`profiling` builds, like for like). "call: forwards `...`" 3,531 to 2,036
+  instructions; no other `call:` row moved by more than 0.8%. `just bench hot` weighted
+  instructions: finbench -2.1%, dsbench -2.6%, biobench -2.3%. The code-base suites' seconds
+  did not move beyond their run-to-run noise (finbench 107.9 and 108.0).
+
+## A lazily signalled error carries its condition class
+
+**Status:** settled.
+
+- **Previous shape.** `RError` held a message and a call, so every error that left `eval` was signalled as a `simpleError`. GNU R classes a missing argument's error since 4.5 (`c(<reader>Error, "missingArgError", "error", "condition")`), and a classed handler (`tryCatch(f(), missingArgError = ...)`) never ran. `classed_error` signals eagerly, which fits a subscript error raised inside a builtin but not a variable read, whose error the optimizing tier defers past its frameless inlined calls.
+- **Target shape.** `RError` has a `class: ErrorClass` (`unwind.rs`): `Simple`, or `MissingArgument(ArgumentReader)` where the reader is GNU R's subclass (`evalError`, `getvarError`, `getMissingError`, `tailcallError`, `tailcallRecError`, `MathMissingError`, `log1Error`, `log2Error`). `conditions::signal_error` builds the classed condition where the error leaves the activation, natively, so no `stop()` frame shows in `sys.calls()`; `unwind::condition_classes` is the one place that maps a class to its condition classes, for R handlers and for the C API's `R_tryCatchError`. `Unwind` fits in 40 bytes (asserted in `unwind.rs`).
+- **The class is gated on the emulated release** (`r_at_least(4, 5)` in `unwind::missing_argument`): an older base R gets a `simpleError` whose call is the innermost closure call, as that release gives.
+- **The call is the lexical call**, the frame whose code named the argument (`eval::lexical_call`), as GNU R's `getLexicalCall(rho)`: `f <- function(a) g(a)` reports `f()`, not `g(a)`. A complex assignment `x[i] <- v` reads `x` in the frame when the frame binds it and in the enclosure otherwise (GNU R's `EnsureLocal`), so from a nested function the error names the enclosure's call.
+- **`evalError` against `getvarError` depends on GNU R's tier** (its AST evaluator against its compiled code), so a test prints one name for both (`conditions__missing_argument_classes`).
+- **Which builtins keep a missing argument** follows GNU R's `evalListKeepMissing` users, among them `log`, `round`, `signif`, `rep` (after its first argument, which `DispatchOrEval` evaluates: a name there bound to no argument is the caller's error, and any other missing `x` reaches the type check) and `Exec`. `.subset` and `.subset2` are plain builtins there, so an empty argument is an error.
+
+## `coerce_vector` applies GNU R's attribute rule in one place
+
+**Status:** settled.
+
+- **Previous shape.** `coerce_vector_quiet` copied every attribute to every result, and callers cleared what GNU R drops case by case (`as_vector` stripped after the fact), so `as.list` of a matrix kept `dim`, `x[1, 2] <- list(v)` on an atomic matrix kept a `dim` GNU R drops, and `as.expression` of a named vector kept names.
+- **Target shape.** The tail of `coerce_vector_quiet` (`coerce.rs`) applies `coerceVector`'s rule: atomic to atomic keeps all attributes, list to and from expression keeps all, atomic to list keeps names only, atomic to expression keeps none, list or expression to atomic keeps names only. `coerce_atomic` sets no attribute itself. `storage.mode<-` and `mode<-` copy all attributes themselves, as GNU R's `do_storage_mode` (`SHALLOW_DUPLICATE_ATTRIB` after `coerceVector`) and the R code of `mode<-` (`attributes(x) <- atr`) do. libr's own `Rf_coerceVector` (`libr/src/vectors.rs`) follows the same rule.
+- **A subassignment reads its subscripts against the object as it was** (`subset.rs`): `dim` and `dimnames` are taken before the coercion that a list value forces, as GNU R's `MatrixAssign` reads them before `SubassignTypeFix`, so `m[1, 2] <- list(v)` assigns the cell and returns a plain list. `m[[1, 2]] <- list(v)` hands the atomic matrix to the same assignment with the value wrapped in a list.
+- Oracle case: `coerce__list_coercion_attributes`.
+
+## A promise whose evaluation was left warns when it is forced again
+
+**Status:** settled.
+
+- **Rule.** GNU R's `forcePromise` sets `PRSEEN` to 2 when a jump leaves a promise's code, and the next force warns "restarting interrupted promise evaluation". ry keeps the mark in the promise's gp bits (`PROMISE_INTERRUPTED` beside `PROMISE_SEEN`, `eval.rs`): set when a force fails, read and cleared at the next force.
+- **Each promise on a forwarded chain warns**, because an argument passed on is a promise of its own in GNU R; ry's forwarded reference carries the mark the same way.
+- **A read that settles a promise without forcing it leaves a marked promise to forcing** (`eval::settled_without_code`, the JIT's `pure_value`), so `typeof(x)` on such an argument warns as a force does.
+- **An argument reference is pooled**, so `pooled_reference` clears the mark when it hands a reference to the next call. Without that, an argument that failed in one call made an unrelated argument of a later call warn.
+- Oracle case: `promises__restarting_interrupted_evaluation`.

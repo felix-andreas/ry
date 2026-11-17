@@ -55,6 +55,60 @@ pub fn real_to_int(value: f64) -> (i32, bool) {
     (value.trunc() as i32, false)
 }
 
+/// A complex as an integer. The discarded imaginary part is reported only for a value that
+/// converts, as in GNU R.
+fn complex_to_int(value: Rcomplex, warnings: &mut CoercionWarnings) -> i32 {
+    if value.i.is_nan() {
+        return NA_INTEGER;
+    }
+    let (converted, out_of_range) = real_to_int(value.r);
+    warnings.integer_range |= out_of_range;
+    if converted != NA_INTEGER && value.i != 0.0 {
+        warnings.imaginary = true;
+    }
+    converted
+}
+
+/// The first element as an integer, with the coercion warnings GNU R's `asInteger` gives.
+pub unsafe fn integer_scalar(object: Sexp) -> R<i32> {
+    let mut warnings = CoercionWarnings::default();
+    let value = match object.kind() {
+        _ if values::length(object) == 0 => NA_INTEGER,
+        SexpType::Real => {
+            let (converted, out_of_range) = real_to_int(values::reals(object)[0]);
+            warnings.integer_range = out_of_range;
+            converted
+        }
+        SexpType::Complex => complex_to_int(values::complexes(object)[0], &mut warnings),
+        SexpType::String => match values::string_at(object, 0) {
+            Some(text) => match parse_real(&text) {
+                Some(real) => {
+                    let (converted, out_of_range) = real_to_int(real);
+                    warnings.integer_range = out_of_range;
+                    converted
+                }
+                None => {
+                    warnings.na = true;
+                    NA_INTEGER
+                }
+            },
+            None => NA_INTEGER,
+        },
+        _ => values::as_integer_scalar(object),
+    };
+    warnings.report()?;
+    Ok(value)
+}
+
+/// An integer on its way to a raw: `NA` becomes a value outside the raw range.
+fn raw_candidate(value: i32) -> i64 {
+    if value == NA_INTEGER {
+        -1
+    } else {
+        value as i64
+    }
+}
+
 /// R's string-to-double rule: surrounding whitespace is ignored, decimal and hexadecimal
 /// notation and `Inf`, `NaN` and `NA` are read; anything else is `None`.
 pub fn parse_real(text: &str) -> Option<f64> {
@@ -193,7 +247,9 @@ unsafe fn real_as_charsxp(value: f64, scipen: i32) -> R<Sexp> {
     })
 }
 
-/// Converts a vector to `kind`, keeping its attributes, as GNU R's `coerceVector` does.
+/// Converts a vector to `kind` as GNU R's `coerceVector` does. All attributes follow between
+/// atomic types and between a list and an expression vector. Between a list and an atomic
+/// vector only the names do, and an atomic vector made an expression vector keeps none.
 pub unsafe fn coerce_vector(object: Sexp, kind: SexpType) -> R<Sexp> {
     let mut warnings = CoercionWarnings::default();
     let result = coerce_vector_quiet(object, kind, &mut warnings)?;
@@ -246,10 +302,16 @@ pub unsafe fn coerce_vector_quiet(
             )));
         }
     };
-    if (source.is_atomic() || matches!(source, SexpType::List | SexpType::Expression))
-        && kind.is_vector()
-    {
+    let generic = |kind| matches!(kind, SexpType::List | SexpType::Expression);
+    if (source.is_atomic() && kind.is_atomic()) || (generic(source) && generic(kind)) {
         values::copy_attributes(object, result)?;
+    } else if (source.is_atomic() && kind == SexpType::List)
+        || (generic(source) && kind.is_atomic())
+    {
+        let names = values::names(object);
+        if names != nil() {
+            values::set_attr(result, symbols().names, names)?;
+        }
     }
     Ok(result)
 }
@@ -342,9 +404,13 @@ unsafe fn coerce_list(
             Ok(result)
         }
         _ if kind.is_atomic() => {
+            // GNU R's `isVectorizable`: every element is a vector, a list included, of length
+            // at most one. An empty vector or a list element becomes NA.
             for index in 0..count {
                 let element = list.element(index);
-                if !(element.kind().is_atomic() && length(element) == 1) {
+                let vector = element.kind().is_atomic()
+                    || matches!(element.kind(), SexpType::List | SexpType::Expression);
+                if !(vector && length(element) <= 1) {
                     return Err(error(format!(
                         "'{}' object cannot be coerced to type '{}'",
                         source.name(),
@@ -354,8 +420,50 @@ unsafe fn coerce_list(
             }
             let result = alloc(kind, count)?;
             for index in 0..count {
-                let element = coerce_atomic(list.element(index), kind, warnings)?;
-                crate::subset::copy_element(element, 0, result, index)?;
+                let element = list.element(index);
+                // GNU R converts each element with `asInteger` and its kin, which warn once per
+                // element; an empty or list element is NA. Raw goes through `asInteger` and
+                // collects its range warning for the whole list.
+                let atomic = element.kind().is_atomic() && length(element) == 1;
+                if kind == SexpType::Raw {
+                    let value = if atomic {
+                        let mut element_warnings = CoercionWarnings::default();
+                        let integer =
+                            coerce_atomic(element, SexpType::Integer, &mut element_warnings)?;
+                        element_warnings.report()?;
+                        values::ints(integer)[0]
+                    } else {
+                        NA_INTEGER
+                    };
+                    values::raws_mut(result)[index] = match u8::try_from(value) {
+                        Ok(byte) => byte,
+                        Err(_) => {
+                            warnings.raw_range = true;
+                            0
+                        }
+                    };
+                } else if atomic {
+                    let mut element_warnings = CoercionWarnings::default();
+                    let converted = coerce_atomic(element, kind, &mut element_warnings)?;
+                    if kind != SexpType::Logical {
+                        element_warnings.report()?;
+                    }
+                    crate::subset::copy_element(converted, 0, result, index)?;
+                } else {
+                    match kind {
+                        SexpType::Logical | SexpType::Integer => {
+                            values::ints_mut(result)[index] = NA_INTEGER;
+                        }
+                        SexpType::Real => values::reals_mut(result)[index] = NA_REAL,
+                        SexpType::Complex => {
+                            values::complexes_mut(result)[index] = Rcomplex {
+                                r: NA_REAL,
+                                i: NA_REAL,
+                            };
+                        }
+                        _ => {}
+                    }
+                }
             }
             Ok(result)
         }
@@ -379,6 +487,45 @@ pub unsafe fn coerce_atomic(
         return Ok(object);
     }
     let result = alloc(kind, count)?;
+    match (source, kind) {
+        (SexpType::Real, SexpType::Integer) => {
+            let mut out_of_range = false;
+            for (slot, &value) in values::ints_mut(result)
+                .iter_mut()
+                .zip(values::reals(object))
+            {
+                // `as i32` saturates and maps NaN to 0, so range and NaN are decided first.
+                *slot = if value.is_nan() {
+                    NA_INTEGER
+                } else if value >= 2147483648.0 || value <= -2147483648.0 {
+                    out_of_range = true;
+                    NA_INTEGER
+                } else {
+                    value as i32
+                };
+            }
+            warnings.integer_range |= out_of_range;
+            return Ok(result);
+        }
+        (SexpType::Logical, SexpType::Integer) => {
+            values::ints_mut(result).copy_from_slice(values::ints(object));
+            return Ok(result);
+        }
+        (SexpType::Integer | SexpType::Logical, SexpType::Real) => {
+            for (slot, &value) in values::reals_mut(result)
+                .iter_mut()
+                .zip(values::ints(object))
+            {
+                *slot = if value == NA_INTEGER {
+                    NA_REAL
+                } else {
+                    f64::from(value)
+                };
+            }
+            return Ok(result);
+        }
+        _ => {}
+    }
     match kind {
         SexpType::Logical => {
             let target = values::ints_mut(result);
@@ -427,15 +574,7 @@ pub unsafe fn coerce_atomic(
                         warnings.integer_range |= out_of_range;
                         value
                     }
-                    SexpType::Complex => {
-                        let value = values::complexes(object)[index];
-                        if value.i != 0.0 && !value.i.is_nan() {
-                            warnings.imaginary = true;
-                        }
-                        let (converted, out_of_range) = real_to_int(value.r);
-                        warnings.integer_range |= out_of_range;
-                        converted
-                    }
+                    SexpType::Complex => complex_to_int(values::complexes(object)[index], warnings),
                     SexpType::String => match values::string_at(object, index) {
                         Some(text) => match parse_real(&text) {
                             Some(value) if is_na_real(value) => NA_INTEGER,
@@ -550,6 +689,24 @@ pub unsafe fn coerce_atomic(
             let object = values::materialize(object)?;
             write_number_strings(object, result, crate::format::Settings::current_scipen())?;
         }
+        SexpType::String if source == SexpType::Logical => {
+            let object = values::materialize(object)?;
+            let true_text = values::mkchar("TRUE")?;
+            let false_text = values::mkchar("FALSE")?;
+            let missing = na_string();
+            for (slot, &value) in result
+                .slice_mut::<Sexp>()
+                .iter_mut()
+                .zip(values::ints(object))
+            {
+                *slot = match value {
+                    NA_LOGICAL => missing,
+                    0 => false_text,
+                    _ => true_text,
+                };
+            }
+            crate::heap().count_written_elements(result);
+        }
         SexpType::String => {
             for index in 0..count {
                 let charsxp = element_as_charsxp(object, index)?;
@@ -569,18 +726,29 @@ pub unsafe fn coerce_atomic(
                         }
                     }
                     SexpType::Real => {
-                        let value = values::reals(object)[index];
-                        if value.is_nan() {
-                            -1
-                        } else {
-                            value.trunc() as i64
-                        }
+                        let (converted, out_of_range) = real_to_int(values::reals(object)[index]);
+                        warnings.integer_range |= out_of_range;
+                        raw_candidate(converted)
                     }
-                    SexpType::String => values::string_at(object, index)
-                        .and_then(|text| parse_real(&text))
-                        .filter(|value| !value.is_nan())
-                        .map_or(-1, |value| value.trunc() as i64),
-                    SexpType::Complex => values::complexes(object)[index].r as i64,
+                    SexpType::String => match values::string_at(object, index) {
+                        Some(text) => match parse_real(&text) {
+                            Some(value) => {
+                                let (converted, out_of_range) = real_to_int(value);
+                                warnings.integer_range |= out_of_range;
+                                raw_candidate(converted)
+                            }
+                            None => {
+                                if !text.trim().is_empty() {
+                                    warnings.na = true;
+                                }
+                                -1
+                            }
+                        },
+                        None => -1,
+                    },
+                    SexpType::Complex => {
+                        raw_candidate(complex_to_int(values::complexes(object)[index], warnings))
+                    }
                     _ => -1,
                 };
                 *slot = if (0..=255).contains(&value) {
@@ -592,13 +760,9 @@ pub unsafe fn coerce_atomic(
             }
         }
         SexpType::List | SexpType::Expression => {
-            let names = values::get_attr(object, symbols().names);
             for index in 0..count {
                 let element = crate::subset::vector_element(object, index)?;
                 values::set_elt(result, index, element);
-            }
-            if names != nil() {
-                values::set_attr(result, symbols().names, names)?;
             }
             return Ok(result);
         }
@@ -766,16 +930,6 @@ pub unsafe fn as_vector(object: Sexp, mode: &str) -> R<Sexp> {
         };
         values::clear_attributes(copy);
         return Ok(copy);
-    }
-    if matches!(kind, SexpType::List | SexpType::Expression)
-        && result.is_object()
-        && object.kind() != kind
-    {
-        let names = values::get_attr(result, symbols().names);
-        values::clear_attributes(result);
-        if names != nil() {
-            values::set_attr(result, symbols().names, names)?;
-        }
     }
     Ok(result)
 }
@@ -1041,7 +1195,17 @@ unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
 
 unsafe fn do_as_vector(call: &Call<'_>) -> R<Sexp> {
     let mode = values::require_str(call.arg(1), "mode")?;
-    as_vector(call.arg(0), &mode)
+    let object = call.arg(0);
+    // GNU R's `coerceVector` makes a number vector without attributes into deferred strings, as
+    // `as.character` does.
+    if mode == "character"
+        && matches!(object.kind(), SexpType::Integer | SexpType::Real)
+        && !values::has_attributes(object)
+        && let Some(deferred) = (crate::interp().hooks.defer_strings)(object)?
+    {
+        return Ok(deferred);
+    }
+    as_vector(object, &mode)
 }
 
 unsafe fn do_as_call(call: &Call<'_>) -> R<Sexp> {
@@ -1068,8 +1232,17 @@ unsafe fn do_as_function(call: &Call<'_>) -> R<Sexp> {
     if values::is_function(list) {
         return Ok(list);
     }
-    if list.kind() != SexpType::List || length(list) == 0 {
-        return Err(call.error("argument must have length at least 1"));
+    if list.kind() != SexpType::List {
+        return Err(error("list argument expected"));
+    }
+    if env == nil() {
+        return Err(error("use of NULL environment is defunct"));
+    }
+    if env.kind() != SexpType::Environment {
+        return Err(error("invalid environment"));
+    }
+    if length(list) == 0 {
+        return Err(error("argument must have length at least 1"));
     }
     let count = length(list);
     let names = values::names(list);
@@ -1081,7 +1254,7 @@ unsafe fn do_as_function(call: &Call<'_>) -> R<Sexp> {
             String::new()
         };
         if name.is_empty() {
-            return Err(call.error("invalid formal argument list for \"function\""));
+            return Err(error("invalid formal argument list for \"as.function\""));
         }
         let value = list.element(index);
         let value = if value.kind() == SexpType::Symbol && value.car().bytes().is_empty() {
@@ -1109,49 +1282,70 @@ unsafe fn do_as_function(call: &Call<'_>) -> R<Sexp> {
             | SexpType::Expression
             | SexpType::Bytecode
     ) {
-        return Err(call.error("invalid body for function"));
+        return Err(error("invalid body for function"));
     }
     crate::eval::make_closure(formals, body, values::nil(), env)
 }
 
 unsafe fn do_vector(call: &Call<'_>) -> R<Sexp> {
-    let mode = values::require_str(call.arg(0), "mode")?;
     let length = call.arg(1);
-    let count = if values::length(length) == 1 {
-        values::as_real_scalar(length)
-    } else {
-        f64::NAN
-    };
-    if count.is_nan() || count < 0.0 {
+    if values::length(length) != 1 {
+        return Err(error("invalid 'length' argument"));
+    }
+    let count = crate::random::vector_size(length)?;
+    if count < 0 {
         return Err(error("invalid 'length' argument"));
     }
     let count = count as usize;
+    let modes = coerce_vector(call.arg(0), SexpType::String)?;
+    crate::heap().root(modes);
+    if values::length(modes) != 1 {
+        return Err(error("invalid 'mode' argument"));
+    }
+    let mode = char_str(modes.element(0));
     let kind = match mode.as_ref() {
         "any" => SexpType::Logical,
         mode => mode_type(mode)
-            .ok_or_else(|| call.error(format!("vector: cannot make a vector of mode '{mode}'.")))?,
+            .ok_or_else(|| error(format!("vector: cannot make a vector of mode '{mode}'.")))?,
     };
     if kind == SexpType::Pairlist {
         let items = vec![(nil(), nil()); count];
         return values::pairlist(&items, SexpType::Pairlist);
     }
     if !kind.is_vector() {
-        return Err(call.error(format!("vector: cannot make a vector of mode '{mode}'.")));
+        return Err(error(format!(
+            "vector: cannot make a vector of mode '{mode}'."
+        )));
     }
     alloc(kind, count)
 }
 
 unsafe fn do_set_storage_mode(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
-    let mode = values::require_str(call.arg(1), "value")?;
-    let kind = mode_type(&mode).ok_or_else(|| call.error("invalid value"))?;
+    let value = call.arg(1);
+    if value.kind() != SexpType::String || length(value) == 0 || value.element(0) == na_string() {
+        return Err(error("'value' must be non-null character string"));
+    }
+    let mode = char_str(value.element(0));
+    let kind = mode_type(&mode).ok_or_else(|| {
+        error(match mode.as_ref() {
+            "real" => "use of 'real' is defunct: use 'double' instead",
+            "single" => "use of 'single' is defunct: use mode<- instead",
+            _ => "invalid value",
+        })
+    })?;
     if object.kind() == kind {
         return Ok(object);
     }
     if values::inherits(object, "factor") {
-        return Err(call.error("invalid to change the storage mode of a factor"));
+        return Err(error("invalid to change the storage mode of a factor"));
     }
-    coerce_vector(object, kind)
+    let result = coerce_vector(object, kind)?;
+    if result != object && result.kind().is_vector() {
+        crate::heap().root(result);
+        values::copy_attributes(object, result)?;
+    }
+    Ok(result)
 }
 
 pub(crate) unsafe fn do_is_vector(call: &Call<'_>) -> R<Sexp> {

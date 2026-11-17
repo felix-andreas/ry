@@ -1,0 +1,82 @@
+[stdout]
+| [1] 61 ff 62
+| [1] 61 ff 62 7c 61 ff 62 7c 0a
+| [1] 61 ff 62 0a
+| [1] 61 ff 62 0a
+| [1] 61 ff 62
+| [1] 61 ff 62
+| [1] 61 ff 62 61 ff 62
+| [1] 61 ff 62
+| [1] 61 ff 62 61 ff 62 0a
+| [[1]]
+| [1] NA
+| 
+| [[2]]
+| [1] "o" "k"
+| 
+| [[1]]
+| [1] NA
+| 
+| [[2]]
+| [1] "ok"
+| 
+| [[1]]
+| [1] NA
+| 
+| [[2]]
+| [1] "ok"
+| 
+| [[1]]
+| [1] 61 ff
+| 
+| [[1]]
+| [1] 61 e4 3b 62
+| 
+| [[2]]
+| [1] 63 3b fc
+| 
+| [[1]]
+| [1] 61 e4
+| 
+| [[2]]
+| [1] 62
+| 
+| [[3]]
+| [1] 63
+| 
+| [[4]]
+| [1] fc
+| 
+| [[1]]
+| [1] 61 e4
+| 
+| [[2]]
+| [1] 63
+| 
+| [1] "aä" "c" 
+| [1] "aä" "b"  "c"  "ü" 
+| [1] "aä" "c" 
+| [1] 2 1
+|   V1 V2
+| 1 aä  b
+| 2  c  ü
+| [1] "aä" "b"  "c"  "ü" 
+| [1] "aä" "b"  "c"  "ü" 
+| [[1]]
+| [1] 61 e4 3b 62
+| 
+| [[2]]
+| [1] 61 e4 3b 62
+| 
+| [1] 61 c3 a4
+| [1] 61 e4
+[messages]
+[warnings]
+- input string 1 is invalid UTF-8 (in strsplit(c(x, "ok"), ""))
+- unable to translate 'a<ff>b' to a wide string (in strsplit(c(x, "ok"), "b"))
+- input string 1 is invalid (in strsplit(c(x, "ok"), "b"))
+- input string 1 is invalid in this locale (in strsplit(c(x, "ok"), "b", fixed = TRUE))
+[errors]
+[value]
+integer
+| 0L

@@ -1,0 +1,26 @@
+[stdout]
+| local function, nested call : local 
+| second call : local 
+| through sapply : local 
+| two closures deep : local 
+| a formal : local 
+| a formal, supplied : supplied 
+| a loop variable : local 
+| bound after the closure exists : A     local 
+| a base generic : local method 
+| local print method
+| a user generic : local method 
+| an internal generic : 99 
+| unbound : a 
+| unbound : a 
+| bound on the third call : local 
+| unbound again : a 
+| no method : 3 2 1 
+| no method : 3 2 1 
+| a method on the third call : local method 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

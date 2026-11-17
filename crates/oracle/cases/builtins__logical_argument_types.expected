@@ -1,0 +1,48 @@
+[stdout]
+| any(r) -> warning: coercing argument of type 'raw' to logical |  logi TRUE
+| all(r) -> warning: coercing argument of type 'raw' to logical |  logi TRUE
+| all(as.raw(0:1)) -> warning: coercing argument of type 'raw' to logical |  logi FALSE
+| any(as.raw(2), 1) -> warning: coercing argument of type 'raw' to logical |  logi TRUE
+| all(as.raw(2), NULL) -> warning: coercing argument of type 'raw' to logical |  logi TRUE
+| all("a") -> warning: coercing argument of type 'character' to logical |  logi NA
+| any("TRUE") -> warning: coercing argument of type 'character' to logical |  logi TRUE
+| all(c("T", "F")) -> warning: coercing argument of type 'character' to logical |  logi FALSE
+| any(NA_character_) -> warning: coercing argument of type 'character' to logical |  logi NA
+| any(NA_character_, na.rm = TRUE) -> warning: coercing argument of type 'character' to logical |  logi FALSE
+| any(character()) ->  logi FALSE
+| all(list()) ->  logi TRUE
+| any(list(TRUE)) -> warning: coercing argument of type 'list' to logical |  logi TRUE
+| all(list(1, 0)) -> warning: coercing argument of type 'list' to logical |  logi FALSE
+| any(list(1:2)) -> warning: coercing argument of type 'list' to logical | error: 'list' object cannot be coerced to type 'logical' 
+| any("a", TRUE) -> warning: coercing argument of type 'character' to logical |  logi TRUE
+| all(1, "a") -> warning: coercing argument of type 'double' to logical | warning: coercing argument of type 'character' to logical |  logi NA
+| any(sum) -> warning: coercing argument of type 'builtin' to logical | error: cannot coerce type 'builtin' to vector of type 'logical' 
+| r[1] && r[2] -> error: invalid 'x' type in 'x && y' 
+| TRUE && r[1] -> error: invalid 'y' type in 'x && y' 
+| r[1] || TRUE -> error: invalid 'x' type in 'x || y' 
+| NULL && TRUE -> error: invalid 'x' type in 'x && y' 
+| TRUE && NULL -> error: invalid 'y' type in 'x && y' 
+| NULL || TRUE -> error: invalid 'x' type in 'x || y' 
+| "TRUE" && TRUE -> error: invalid 'x' type in 'x && y' 
+| "a" || TRUE -> error: invalid 'x' type in 'x || y' 
+| factor("x") && TRUE -> error: invalid 'x' type in 'x && y' 
+| FALSE || factor("x") -> error: invalid 'y' type in 'x || y' 
+| logical() && TRUE ->  logi NA
+| 1i && TRUE ->  logi TRUE
+| c(TRUE, FALSE) && TRUE -> error: 'length = 2' in coercion to 'logical(1)' 
+| list(TRUE) && TRUE -> error: invalid 'x' type in 'x && y' 
+| f(r[1], r[2]) -> error: invalid 'x' type in 'x && y' 
+| f(r[1], r[2]) -> error: invalid 'x' type in 'x && y' 
+| f(r[1], r[2]) -> error: invalid 'x' type in 'x && y' 
+| f(TRUE, NULL) -> error: invalid 'y' type in 'x && y' 
+| f(TRUE, NULL) -> error: invalid 'y' type in 'x && y' 
+| f(TRUE, NULL) -> error: invalid 'y' type in 'x && y' 
+| g(r) -> warning: coercing argument of type 'raw' to logical |  logi TRUE
+| g(r) -> warning: coercing argument of type 'raw' to logical |  logi TRUE
+| g(r) -> warning: coercing argument of type 'raw' to logical |  logi TRUE
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests of bench.py: its release-archive mode (what results.json records about the archive, and
 which images the run accepts), the typed suite, which scores typed ry against Rust, and the hot
-suite's runner and its generator, tooling/hot.py.
+suite's runner and its generator, tooling/hot.py, and the builtins suite's runner and summary.
 
 A fake archive stands in for a release: its `ry` is a shell script that, like the real one,
 extracts a runtime library (a C library built here that exports `ry_runtime_id`) and a base R tree
@@ -497,6 +497,100 @@ class HotSelection(unittest.TestCase):
         self.assertAlmostEqual(r, 1.0)
         self.assertAlmostEqual(slope, 0.5)
 
+
+class BuiltinsSuite(unittest.TestCase):
+    """The builtins suite's runner and summary, fed by a stand-in harness and by rounds written by hand."""
+
+    def setUp(self):
+        self.args = argparse.Namespace(seed=1, rounds=3, extra_rounds=0)
+        self.table = [bench.Engine("gnu_r", "GNU R", None, {}), bench.Engine("ry", "ry", None, {}),
+                      bench.Engine("ry_nojit", "ry, JIT off", None, {})]
+
+    def summarize(self, cases, rounds=3):
+        """`cases` maps a case id to its `(seconds, checksum)` or None on each engine of the table."""
+        programs = [{"id": name, "display": name, "group": name.rsplit("/", 1)[0]} for name in cases]
+        def result(found):
+            return {"seconds": None, "reason": "no such function"} if found is None else \
+                {"seconds": found[0], "min": found[0], "checksum": found[1], "calls": 100}
+        state = {"rounds": [{name: {engine.key: result(found) for engine, found in zip(self.table, per_engine)}
+                             for name, per_engine in cases.items()} for _ in range(rounds)]}
+        manifest = {"name": "Builtins", "skips": [{"package": "base", "function": "file.create", "reason": "writes files"}]}
+        return bench.summarize(bench.BUILTINS_SUITE, manifest, programs, self.table, state, self.args, {}, None)
+
+    def test_a_function_is_as_fast_as_its_slowest_case(self):
+        results = self.summarize({
+            "base::abs/scalar": ((2e-7, "1"), (1e-7, "1"), (1e-7, "1")),
+            "base::abs/dbl_1e6": ((1e-3, "2"), (2e-3, "2"), (1e-3, "2")),
+            "base::sum/dbl_1e3": ((1e-6, "3"), (5e-7, "3"), (5e-7, "3")),
+        })
+        functions = {entry["id"]: entry for entry in results["functions"]}
+        self.assertEqual(functions["base::abs"]["worst"], {"ry": {"case": "base::abs/dbl_1e6", "ratio": 0.5},
+                                                           "ry_nojit": {"case": "base::abs/dbl_1e6", "ratio": 1.0}})
+        self.assertEqual(functions["base::abs"]["cases"], 2)
+        self.assertEqual([entry["id"] for entry in results["functions"]], ["base::abs", "base::sum"])
+        self.assertEqual(results["slower"], {"ry": 1, "ry_nojit": 0})
+        self.assertEqual(results["skips"], [{"id": "base::file.create", "reason": "writes files"}])
+        # A call of a few nanoseconds keeps its digits.
+        self.assertEqual(results["programs"][0]["seconds"]["gnu_r"], 2e-7)
+
+    def test_a_failure_on_ry_is_recorded_and_a_different_result_is_a_flag(self):
+        results = self.summarize({
+            "base::paste/chr_1e3": ((1e-4, "4"), (1e-4, "4"), None),
+            "stats::sd/dbl_1e3": ((1e-5, "num:1:0:1.5:1"), (5e-6, "num:1:0:2.5:1"), (5e-6, "num:1:0:1.5:1")),
+        })
+        paste, sd = results["programs"]
+        self.assertEqual(paste["failures"], [{"engine": "ry_nojit", "reason": "no such function"}])
+        self.assertEqual(sd["flags"], [{"kind": "result_differs", "engine": "ry",
+                                        "reason": "GNU R: num:1:0:1.5:1; ry: num:1:0:2.5:1"}])
+        self.assertEqual(sd["ratio"]["ry"]["median"], 2.0)
+        functions = {entry["id"]: entry for entry in results["functions"]}
+        self.assertEqual(functions["base::paste"]["failures"], [{"engine": "ry_nojit", "case": "base::paste/chr_1e3"}])
+        self.assertEqual(functions["stats::sd"]["differs"], ["stats::sd/dbl_1e3"])
+        # Failures sort first.
+        self.assertEqual(results["functions"][0]["id"], "base::paste")
+        self.assertEqual(results["slower"], {"ry": 0, "ry_nojit": 1})
+
+    def stand_in(self, lines, error=""):
+        """An engine whose harness writes `lines` for the cases it is given and `error` on standard error."""
+        code = ("import os, sys\n"
+                f"sys.stderr.write({error!r})\n"
+                "cases = open(os.environ['RY_SWEEP_CASES']).read().split()\n"
+                f"lines = {lines!r}\n"
+                "with open(os.environ['RY_SWEEP_OUT'], 'a') as out:\n"
+                "    for case in cases:\n"
+                "        if case in lines: out.write(case + '\\t' + lines[case] + '\\n')\n")
+        return bench.Engine("ry", "ry", [sys.executable, "-c", code], dict(os.environ))
+
+    def test_the_runner_reads_a_time_and_a_failure_from_the_harness(self):
+        runner = bench.SweepRunner(bench.BUILTINS_SUITE, self.args)
+        engine = self.stand_in({"base::abs/scalar": "num:1:0:1:1\t1.0000e-07\t1.2000e-07\t1000",
+                                "base::log/scalar": "failed\tthe call warns: NaNs produced"})
+        programs = [{"id": "base::abs/scalar"}, {"id": "base::log/scalar"}]
+        measured = runner.run_batch(programs, engine)
+        self.assertEqual(measured["base::abs/scalar"],
+                         {"checksum": "num:1:0:1:1", "seconds": 1.2e-7, "min": 1e-7, "calls": 1000})
+        self.assertEqual(measured["base::log/scalar"], {"seconds": None, "reason": "the call warns: NaNs produced"})
+
+    def test_a_process_without_its_image_fails_every_case(self):
+        runner = bench.SweepRunner(bench.BUILTINS_SUITE, self.args)
+        engine = self.stand_in({"base::abs/scalar": "num:1:0:1:1\t1.0000e-07\t1.2000e-07\t1000"},
+                               error=bench.IMAGE_UNUSED + "base start-up image\n")
+        measured = runner.run_batch([{"id": "base::abs/scalar"}], engine)
+        self.assertIsNone(measured["base::abs/scalar"]["seconds"])
+
+
+    def test_the_ratchet_judges_a_function_by_its_worst_case_on_any_engine(self):
+        sweep = bench.sweep
+        def run(seconds):
+            return {"seconds": seconds, "reason": "gone"} if seconds is None else {"seconds": seconds, "checksum": "1"}
+        measured = {"gnu_r": [{"base::abs/scalar": run(1e-7), "base::abs/dbl_1e3": run(1e-6), "base::nchar/chr_1e3": run(1e-5)}] * 3,
+                    "ry": [{"base::abs/scalar": run(5e-8), "base::abs/dbl_1e3": run(2e-6), "base::nchar/chr_1e3": run(None)}] * 3}
+        ratios, broken = sweep.case_ratios(measured, ["base::abs/scalar", "base::abs/dbl_1e3", "base::nchar/chr_1e3"])
+        self.assertEqual(broken, {})
+        self.assertEqual(sweep.function_ratios(ratios), {"base::abs": (0.5, "base::abs/dbl_1e3", "ry"),
+                                                         "base::nchar": (None, "base::nchar/chr_1e3", "ry")})
+        self.assertTrue(sweep.LARGE.search("dbl_1e6") and sweep.LARGE.search("chr_1e5"))
+        self.assertFalse(sweep.LARGE.search("dbl_1e3"))
 
 class BuildProfile(unittest.TestCase):
     def test_names_a_build_that_is_not_a_release(self):

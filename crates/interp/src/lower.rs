@@ -12,8 +12,9 @@
 use {
     crate::{
         builtins::{BuiltinDef, Call, internal},
+        connections::{multibyte_length, utf8_sequence_length},
         unwind::{R, Unwind, error},
-        values::{self, alloc, install, missing_arg, nil, symbols},
+        values::{self, alloc, escaped_byte, holds_stand_in, install, missing_arg, nil, symbols},
     },
     heap::{
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType},
@@ -125,6 +126,9 @@ pub struct SyntaxFailure {
 pub struct ParseCondition {
     pub class: &'static str,
     pub value: ConditionValue,
+    /// The offset of the last character GNU R's lexer read before it raised the condition,
+    /// whose line and column the message reports.
+    pub position: usize,
     /// The expression the condition names as its call, lowered with each pipe placeholder as
     /// the string `"_"`, as GNU R reports it.
     pub call: Option<SyntaxNode>,
@@ -152,15 +156,14 @@ pub unsafe fn parse_script<'text>(
             &failure,
             source_name,
             condition_file,
-            0,
+            None,
         )),
     }
 }
 
-/// Parses `text` as far as it goes: the expressions that end before the line holding the first
-/// syntax error, and that error. GNU R reads a script one line at a time and runs each
-/// expression once it is complete, so everything before a broken line runs before the error
-/// stops the script.
+/// Parses `text` as far as it goes: the expressions a newline or `;` ends before the first
+/// syntax error, and that error. GNU R runs each expression of a script once it is complete,
+/// so those run before the error stops the script.
 pub unsafe fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailure>) {
     let parse = syntax::parse(text);
     let root = parse.syntax_node();
@@ -184,17 +187,6 @@ pub unsafe fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailu
                         };
                     }
                 };
-                // An unterminated string runs to the end of the input, where ry's parser stops,
-                // but GNU R's lexer reports it as a token of its own.
-                let found = found.or_else(|| {
-                    root.descendants_with_tokens()
-                        .filter_map(SyntaxElement::into_token)
-                        .find(|token| {
-                            token.kind() == SyntaxKind::STRING
-                                && !is_terminated_string(token.text())
-                        })
-                        .map(|token| token.text_range())
-                });
                 let unexpected = found.map_or(text.len()..text.len(), |found| {
                     usize::from(found.start()).min(text.len())
                         ..usize::from(found.end()).min(text.len())
@@ -207,12 +199,33 @@ pub unsafe fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailu
                 }
             })
         });
-    // GNU R's lexer resolves escapes as it reads a string, so a bad escape in a string that
-    // starts before the grammar error, the unterminated string itself included, is the one
+    // GNU R's lexer raises its own errors as it reads a token, so the first of them in a token
+    // that starts before the grammar error, an unterminated string included, is the one
     // reported.
-    let mut failure = match (grammar_failure, escape_failure(&root)) {
-        (Some(grammar), Some((start, escape))) if start <= grammar.offset => Some(escape),
-        (None, escape) => escape.map(|(_, escape)| escape),
+    let unterminated = if parse.errors().is_empty() {
+        None
+    } else {
+        unterminated_failure(&root, text)
+    };
+    let lexical = [
+        nul_failure(&root, text),
+        multibyte_failure(&root, text),
+        escape_failure(&root),
+        empty_statement_failure(&root),
+    ]
+    .into_iter()
+    .flatten()
+    .min_by_key(|(_, failure)| failure.offset);
+    // Every later byte belongs to the unterminated token in GNU R's reading, so a lexical
+    // failure counts only when it comes before that token.
+    let lexical = match (unterminated, lexical) {
+        (Some((start, _)), Some(lexical)) if lexical.1.offset < start => Some(lexical),
+        (Some(unterminated), _) => Some(unterminated),
+        (None, lexical) => lexical,
+    };
+    let mut failure = match (grammar_failure, lexical) {
+        (Some(grammar), Some((start, lexical))) if start <= grammar.offset => Some(lexical),
+        (None, lexical) => lexical.map(|(_, lexical)| lexical),
         (grammar, _) => grammar,
     };
     // Most files hold no pipe and no placeholder, and `_` and `function` are common in names
@@ -228,10 +241,16 @@ pub unsafe fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailu
         }
         let start = usize::from(child.text_range().start()).min(text.len());
         if let Some(failure) = &failure {
-            let failed_line = text[..failure.offset]
-                .rfind('\n')
-                .map_or(0, |newline| newline + 1);
-            if usize::from(child.text_range().end()) > failed_line {
+            // GNU R runs an expression once it reads the newline or `;` that ends it.
+            let ended = std::iter::successors(child.next_sibling_or_token(), |element| {
+                element.next_sibling_or_token()
+            })
+            .find(|element| !matches!(element.kind(), SyntaxKind::WHITESPACE | SyntaxKind::COMMENT))
+            .is_some_and(|element| {
+                matches!(element.kind(), SyntaxKind::NEWLINE | SyntaxKind::SEMICOLON)
+                    && usize::from(element.text_range().start()) < failure.offset
+            });
+            if !ended {
                 break;
             }
         }
@@ -247,6 +266,7 @@ pub unsafe fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailu
                 condition: Some(ParseCondition {
                     class: "invalidPlaceholder",
                     value: ConditionValue::Null,
+                    position: start,
                     call: Some(child),
                 }),
             });
@@ -264,27 +284,27 @@ pub unsafe fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailu
     )
 }
 
-/// GNU R's message for a plain `failure` in `text`, whose first line is line `line_offset + 1`
-/// of the source, in the form `parse()` reports it: the location, then the last one or two
+/// GNU R's message for a plain `failure` in `text`, in the form `parse()` reports it: the location, then the last one or two
 /// lines read, with a caret under the column.
-pub fn syntax_failure_message(
-    text: &str,
-    failure: &SyntaxFailure,
-    source_name: &str,
-    line_offset: usize,
-) -> String {
+pub fn syntax_failure_message(text: &str, failure: &SyntaxFailure, source_name: &str) -> String {
+    // GNU R leaves the name and its colon out when the parse has no srcfile.
+    let prefix = if source_name.is_empty() {
+        String::new()
+    } else {
+        format!("{source_name}:")
+    };
     let Some(unexpected) = &failure.unexpected else {
         let before = &text[..failure.offset.min(text.len())];
-        let line = line_offset + before.matches('\n').count() + 1;
+        let line = before.matches('\n').count() + 1;
         let column = before
             .rsplit('\n')
             .next()
             .map_or(0, |line| line.chars().count());
-        return format!("{source_name}:{line}:{column}: {}", failure.message);
+        return format!("{prefix}{line}:{column}: {}", failure.message);
     };
-    let report = grammar_error_report(text, unexpected, 0, line_offset);
+    let report = grammar_error_report(text, unexpected, 0, failure.message == INCOMPLETE_STRING);
     let location = format!(
-        "{source_name}:{}:{}: {}",
+        "{prefix}{}:{}: {}",
         report.line, report.column, failure.message
     );
     match report.context.as_slice() {
@@ -313,10 +333,14 @@ pub fn syntax_failure_message(
 pub fn script_syntax_failure_message(script: &Script<'_>, failure: &SyntaxFailure) -> String {
     let text = script.text;
     let Some(unexpected) = &failure.unexpected else {
-        return syntax_failure_message(text, failure, "<text>", 0);
+        return syntax_failure_message(text, failure, "<text>");
     };
     if unexpected.is_empty() && unexpected.start >= text.len() {
         return failure.message.clone();
+    }
+    // A string the script's end cuts short leaves GNU R's console waiting for more input.
+    if failure.message == INCOMPLETE_STRING {
+        return "unexpected end of input".to_owned();
     }
     let context_start = script
         .root
@@ -327,7 +351,7 @@ pub fn script_syntax_failure_message(script: &Script<'_>, failure: &SyntaxFailur
         .take_while(|&end| end <= unexpected.start)
         .last()
         .unwrap_or(0);
-    let report = grammar_error_report(text, unexpected, context_start, 0);
+    let report = grammar_error_report(text, unexpected, context_start, false);
     match report.context.as_slice() {
         [] => failure.message.clone(),
         [only] => format!("{} in \"{only}\"", failure.message),
@@ -351,26 +375,24 @@ struct GrammarErrorReport {
 /// through the failing token split into lines, each with its tabs expanded and cut at 192
 /// bytes. GNU R reads every line with its newline, and the text here has the last one dropped,
 /// as the whole-parse source reference assumes, so the end of the input is the start of the
-/// line after the last.
+/// line after the last. With `through_end` the lexer read all of the input for the token.
 fn grammar_error_report(
     text: &str,
     unexpected: &std::ops::Range<usize>,
     context_start: usize,
-    line_offset: usize,
+    through_end: bool,
 ) -> GrammarErrorReport {
     let at_end = unexpected.is_empty() && unexpected.start >= text.len();
-    let read = if at_end {
+    let read = if at_end || through_end {
         format!("{text}\n")
     } else {
         text[..unexpected.end.min(text.len())].to_owned()
     };
-    let line = line_offset
-        + if at_end {
-            read.matches('\n').count()
-        } else {
-            text[..unexpected.start].matches('\n').count()
-        }
-        + 1;
+    let line = if at_end {
+        read.matches('\n').count()
+    } else {
+        text[..unexpected.start].matches('\n').count()
+    } + 1;
     let column = if at_end {
         0
     } else {
@@ -394,8 +416,12 @@ fn grammar_error_report(
     while !read.is_char_boundary(start) {
         start += 1;
     }
+    // GNU R keeps what it read as a C string, so it quotes only what follows the last NUL.
+    if let Some(nul) = read[start..].rfind('\0') {
+        start += nul + 1;
+    }
     let mut context: Vec<&str> = read[start..].split('\n').collect();
-    let mut context_line = line_offset + read.matches('\n').count() + 1;
+    let mut context_line = read.matches('\n').count() + 1;
     if context.last().is_some_and(|last| last.is_empty()) {
         context.pop();
         context_line -= 1;
@@ -492,41 +518,87 @@ fn is_terminated_string(text: &str) -> bool {
 }
 
 /// The error `failure` raises: a plain error with GNU R's message, or the signalled
-/// `parseError` condition, whose location names `condition_file`.
+/// `parseError` condition, whose location names `condition_file`. GNU R's console parses one
+/// top-level expression at a time, so for a failure in `console` text the lines count from the
+/// one the failing expression starts on.
 pub unsafe fn syntax_failure_unwind(
     text: &str,
     failure: &SyntaxFailure,
     source_name: &str,
     condition_file: &str,
-    line_offset: usize,
+    console: Option<&Script<'_>>,
 ) -> Unwind {
     let Some(condition) = &failure.condition else {
-        return error(syntax_failure_message(
-            text,
-            failure,
-            source_name,
-            line_offset,
-        ));
+        return error(syntax_failure_message(text, failure, source_name));
     };
-    let offset = failure.offset.min(text.len());
-    let before = &text[..offset];
-    let line = line_offset + before.matches('\n').count() + 1;
-    // GNU R reports a placeholder left over after the whole expression at column 0, and every
-    // other parse error at the 1-based column of the character it stopped on.
+    // A console parses one top-level expression at a time, so its lexer counts lines and
+    // columns from the newline or `;` that ended the expression before the failing one.
+    let first = console.map_or(0, |script| {
+        let expression = script
+            .root
+            .children()
+            .filter(|child| !is_skipped(child.kind()))
+            .map(|child| usize::from(child.text_range().start()))
+            .take_while(|&start| start <= failure.offset)
+            .last()
+            .unwrap_or(0);
+        script
+            .root
+            .children_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .filter(|token| matches!(token.kind(), SyntaxKind::NEWLINE | SyntaxKind::SEMICOLON))
+            .map(|token| usize::from(token.text_range().end()))
+            .take_while(|&end| end <= expression)
+            .last()
+            .unwrap_or(0)
+    });
+    // GNU R's lexer counts a column per byte of text it does not know to be UTF-8, which text
+    // holding a byte that starts no character never is outside the console.
+    let bytes = console.is_none() && holds_stand_in(text);
+    let (line, column) = lexer_position(text, first, condition.position, bytes);
+    // GNU R reports a placeholder left over after the whole expression at column 0.
     let column = if condition.class == "invalidPlaceholder" {
         0
     } else {
-        before
-            .rsplit('\n')
-            .next()
-            .map_or(0, |line| line.chars().count())
-            + 1
+        column
     };
     let message = format!("{} ({condition_file}:{line}:{column})", failure.message);
     match signal_parse_condition(condition, &message, condition_file, line, column) {
         Ok(()) => error(message),
         Err(unwind) => unwind,
     }
+}
+
+/// The line and column GNU R's lexer stands at once it has read the character at `offset`,
+/// having started at `first` on line 1, column 0. A newline starts the next line at column 0, a tab
+/// advances to the next multiple of 8, and a continuation byte that follows no lead byte takes
+/// no column. With `bytes`, every byte takes one. The end of the text reads as the newline GNU
+/// R ends it with.
+fn lexer_position(text: &str, first: usize, offset: usize, bytes: bool) -> (usize, usize) {
+    let offset = offset.min(text.len());
+    let line = text[first.min(offset)..offset].matches('\n').count() + 1;
+    let line_start = text[..offset]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1)
+        .max(first.min(offset));
+    let Some(through) = text[offset..]
+        .chars()
+        .next()
+        .filter(|&through| through != '\n')
+    else {
+        return (line + 1, 0);
+    };
+    let read = offset + through.len_utf8();
+    let mut column = 0;
+    for character in text[line_start..read].chars() {
+        column = match (character, escaped_byte(character)) {
+            ('\t', _) => (column + 8) & !7,
+            (_, Some(0x80..=0xBF)) if !bytes => column,
+            (_, None) if bytes => column + character.len_utf8(),
+            _ => column + 1,
+        };
+    }
+    (line, column)
 }
 
 unsafe fn signal_parse_condition(
@@ -592,9 +664,132 @@ fn pipe_bind_failure(text: &str, offset: usize) -> Option<SyntaxFailure> {
         condition: Some(ParseCondition {
             class: "pipebindDisabled",
             value: ConditionValue::Null,
+            position: offset,
             call: None,
         }),
     })
+}
+
+/// GNU R's lexer hands a NUL outside a string or comment to the grammar as the end-of-file
+/// token, which no rule accepts, so the first one read stops the parse. The result pairs the
+/// failure with the offset of its token.
+fn nul_failure(root: &SyntaxNode, text: &str) -> Option<(usize, SyntaxFailure)> {
+    memchr::memchr(0, text.as_bytes())?;
+    root.node_ref()
+        .tokens_outside(is_skipped, |kind| kind == SyntaxKind::ERROR_TOKEN)
+        .find(|token| token.text().starts_with('\0'))
+        .map(|token| {
+            let offset = usize::from(token.range().start());
+            (
+                offset,
+                SyntaxFailure {
+                    message: "unexpected end of file".to_owned(),
+                    unexpected: Some(offset..offset + 1),
+                    offset,
+                    condition: None,
+                },
+            )
+        })
+}
+
+/// The first top-level `;` that ends no expression. GNU R's grammar has an empty statement only
+/// inside braces, where ry's parser takes one anywhere.
+fn empty_statement_failure(root: &SyntaxNode) -> Option<(usize, SyntaxFailure)> {
+    if !root
+        .node_ref()
+        .any_kind(|kind| kind == SyntaxKind::SEMICOLON)
+    {
+        return None;
+    }
+    let mut ends_expression = false;
+    for element in root.children_with_tokens() {
+        match element.kind() {
+            SyntaxKind::WHITESPACE | SyntaxKind::COMMENT => {}
+            SyntaxKind::SEMICOLON if !ends_expression => {
+                let offset = usize::from(element.text_range().start());
+                let failure = SyntaxFailure {
+                    message: "unexpected ';'".to_owned(),
+                    unexpected: Some(offset..offset + 1),
+                    offset,
+                    condition: None,
+                };
+                return Some((offset, failure));
+            }
+            SyntaxKind::SEMICOLON | SyntaxKind::NEWLINE => ends_expression = false,
+            kind if is_skipped(kind) => {}
+            _ => ends_expression = true,
+        }
+    }
+    None
+}
+
+/// The first byte outside a comment and a `%` operator that starts no character. GNU R's lexer
+/// reads as many bytes as that lead byte announces before it decodes them, and reports the
+/// place it stands at then. A sequence glibc decodes, such as a code point past U+10FFFF, is
+/// kept as the bytes it is.
+fn multibyte_failure(root: &SyntaxNode, text: &str) -> Option<(usize, SyntaxFailure)> {
+    if !holds_stand_in(text) {
+        return None;
+    }
+    let tokens = root.node_ref().tokens_outside(is_skipped, |kind| {
+        kind != SyntaxKind::SPECIAL && !kind.is_trivia()
+    });
+    for token in tokens {
+        let start = usize::from(token.range().start());
+        let mut characters = token.text().char_indices();
+        while let Some((index, character)) = characters.next() {
+            let Some(lead) = escaped_byte(character) else {
+                continue;
+            };
+            let length = utf8_sequence_length(lead);
+            let mut sequence = SmallVec::<[u8; 8]>::new();
+            let mut last = start + index;
+            for (offset, following) in text[start + index..].char_indices() {
+                if sequence.len() >= length {
+                    break;
+                }
+                match escaped_byte(following) {
+                    Some(byte) => sequence.push(byte),
+                    None => {
+                        sequence.extend_from_slice(following.encode_utf8(&mut [0u8; 4]).as_bytes())
+                    }
+                }
+                last = start + index + offset;
+            }
+            // GNU R ends the text with a newline of its own, which the lexer reads too.
+            if sequence.len() < length && !text.ends_with('\n') {
+                sequence.push(b'\n');
+                last = text.len();
+            }
+            if multibyte_length(&sequence).is_some_and(|decoded| decoded == length) {
+                // Every byte of a sequence only glibc decodes is a stand-in of its own.
+                for _ in 1..length {
+                    characters.next();
+                }
+                continue;
+            }
+            // GNU R reads the end of the input inside a sequence as the end of the input, which
+            // the grammar error reports.
+            if sequence.len() < length {
+                return None;
+            }
+            return Some((
+                start,
+                SyntaxFailure {
+                    unexpected: None,
+                    offset: start + index,
+                    message: "invalid multibyte character in parser".to_owned(),
+                    condition: Some(ParseCondition {
+                        class: "invalidMBCS",
+                        value: ConditionValue::Null,
+                        position: last,
+                        call: None,
+                    }),
+                },
+            ));
+        }
+    }
+    None
 }
 
 /// The first string literal or backquoted name whose escapes GNU R's lexer rejects, with the
@@ -617,20 +812,118 @@ fn escape_failure(root: &SyntaxNode) -> Option<(usize, SyntaxFailure)> {
             };
             let failure = unescape_bytes(inner).err()?;
             let start = usize::from(token.range().start());
-            Some((
-                start,
-                SyntaxFailure {
-                    unexpected: None,
-                    offset: start + 1 + failure.offset,
-                    message: failure.message,
-                    condition: Some(ParseCondition {
-                        class: failure.class,
-                        value: failure.value,
-                        call: None,
-                    }),
-                },
-            ))
+            Some((start, escape_syntax_failure(start, failure)))
         })
+}
+
+/// The parse error for an escape GNU R's lexer rejects in the quoted token at `start`.
+fn escape_syntax_failure(start: usize, failure: EscapeFailure) -> SyntaxFailure {
+    let offset = start + 1 + failure.offset;
+    SyntaxFailure {
+        unexpected: None,
+        offset,
+        message: failure.message,
+        condition: Some(ParseCondition {
+            class: failure.class,
+            value: failure.value,
+            position: offset,
+            call: None,
+        }),
+    }
+}
+
+/// GNU R's error for the first token that lacks a delimiter, with the offset where the token
+/// starts. GNU R's lexer reads a string, a raw string or a backquoted name through to the end
+/// of the input, so the token it reports reaches there, where ry's lexer ends it with its
+/// line. An escape GNU R rejects anywhere in that stretch is the error instead. A `%` operator
+/// ends with its line in both, and a raw string without its opening bracket is an error of
+/// GNU R's lexer.
+fn unterminated_failure(root: &SyntaxNode, text: &str) -> Option<(usize, SyntaxFailure)> {
+    root.node_ref()
+        .tokens_outside(is_skipped, |kind| {
+            matches!(
+                kind,
+                SyntaxKind::STRING
+                    | SyntaxKind::RAW_STRING
+                    | SyntaxKind::IDENT
+                    | SyntaxKind::ERROR_TOKEN
+            )
+        })
+        .find_map(|token| {
+            let token_text = token.text();
+            let start = usize::from(token.range().start());
+            let escapes = match token.kind() {
+                SyntaxKind::STRING if !is_terminated_string(token_text) => true,
+                SyntaxKind::IDENT
+                    if token_text.starts_with('`') && !is_terminated_string(token_text) =>
+                {
+                    true
+                }
+                SyntaxKind::RAW_STRING if !is_terminated_raw_string(token_text) => false,
+                SyntaxKind::ERROR_TOKEN
+                    if token_text.starts_with(['r', 'R'])
+                        && token_text[1..].starts_with(['"', '\'']) =>
+                {
+                    // The token ends before the character that should open the raw string's
+                    // body, which is the last one GNU R reads.
+                    let failure = SyntaxFailure {
+                        message: "malformed raw string literal".to_owned(),
+                        unexpected: None,
+                        offset: start,
+                        condition: Some(ParseCondition {
+                            class: "invalidRawLiteral",
+                            value: ConditionValue::Null,
+                            position: start + token_text.len(),
+                            call: None,
+                        }),
+                    };
+                    return Some((start, failure));
+                }
+                SyntaxKind::ERROR_TOKEN if token_text.starts_with('%') => {
+                    let failure = SyntaxFailure {
+                        message: "unexpected input".to_owned(),
+                        unexpected: Some(start..start + token_text.len()),
+                        offset: start,
+                        condition: None,
+                    };
+                    return Some((start, failure));
+                }
+                _ => return None,
+            };
+            if escapes && let Err(failure) = unescape_bytes(&text[start + 1..]) {
+                return Some((start, escape_syntax_failure(start, failure)));
+            }
+            let failure = SyntaxFailure {
+                message: INCOMPLETE_STRING.to_owned(),
+                unexpected: Some(start..text.len()),
+                offset: start,
+                condition: None,
+            };
+            Some((start, failure))
+        })
+}
+
+/// GNU R's message for a string, raw string or backquoted name the input ends inside.
+const INCOMPLETE_STRING: &str = "unexpected INCOMPLETE_STRING";
+
+/// Whether a raw string literal's text ends with the delimiter that mirrors its opening one.
+fn is_terminated_raw_string(text: &str) -> bool {
+    let mut characters = text.chars().skip(1);
+    let Some(quote) = characters.next() else {
+        return false;
+    };
+    let dashes = characters
+        .clone()
+        .take_while(|&character| character == '-')
+        .count();
+    let close = match characters.nth(dashes) {
+        Some('(') => ')',
+        Some('[') => ']',
+        Some('{') => '}',
+        _ => return false,
+    };
+    let closer = format!("{close}{}{quote}", "-".repeat(dashes));
+    text.len() >= 2 + dashes + 1 + closer.len() && text.ends_with(&closer)
 }
 
 /// The first error GNU R's grammar actions raise in `node`, in the order its parser reduces:
@@ -686,13 +979,15 @@ fn repeated_formal(parameters: NodeRef<'_>) -> Option<SyntaxFailure> {
         let name = identifier_name(text);
         if seen.contains(&name) {
             let last = text.chars().next_back().map_or(0, char::len_utf8);
+            let offset = usize::from(range.end()) - last;
             return Some(SyntaxFailure {
                 unexpected: None,
-                offset: usize::from(range.end()) - last,
+                offset,
                 message: format!("repeated formal argument '{name}'"),
                 condition: Some(ParseCondition {
                     class: "repeatedFormal",
                     value: ConditionValue::Text(name.into_owned()),
+                    position: offset,
                     call: None,
                 }),
             });
@@ -715,6 +1010,7 @@ unsafe fn pipe_failure(node: &SyntaxNode) -> Option<SyntaxFailure> {
             condition: Some(ParseCondition {
                 class,
                 value,
+                position: offset,
                 call: call.then(|| right.clone()),
             }),
         })
@@ -1880,7 +2176,7 @@ unsafe fn argument_value(node: NodeRef<'_>, context: Lowering<'_>) -> R<(Sexp, S
                 tag = tag_from_node(child)?;
             }
             NodeOrToken::Token(token) if !after_equals => {
-                tag = install(&token_name(token)?)?;
+                tag = tag_from_token(token)?;
             }
             NodeOrToken::Node(child) => value = lower(child, context)?,
             NodeOrToken::Token(token) => value = literal(token)?,
@@ -1897,9 +2193,20 @@ unsafe fn tag_from_node(node: NodeRef<'_>) -> R<Sexp> {
             let token = significant_tokens(node)
                 .next()
                 .ok_or_else(|| error("empty literal"))?;
-            install(&token_name(token)?)
+            tag_from_token(token)
         }
         _ => Err(error("invalid argument name")),
+    }
+}
+
+/// The tag a name token or a string literal gives. A string installs as GNU R's `installTrChar`
+/// installs it, so a non-ASCII one keeps its UTF-8 mark in names such as `c("a\u00e4" = 1)`.
+unsafe fn tag_from_token(token: TokenRef<'_>) -> R<Sexp> {
+    match token.kind() {
+        SyntaxKind::STRING | SyntaxKind::RAW_STRING => {
+            values::install_charsxp(values::mkchar(&token_name(token)?)?)
+        }
+        _ => install(&token_name(token)?),
     }
 }
 
@@ -2135,11 +2442,11 @@ fn raw_string(text: &str) -> String {
     text.get(body_start..body_end).unwrap_or("").to_owned()
 }
 
-/// Resolves R's string escapes, with invalid UTF-8 from byte escapes replaced.
+/// Resolves R's string escapes, with each byte a byte escape leaves outside UTF-8 as its
+/// stand-in.
 pub fn unescape(text: &str) -> Result<String, String> {
     let (bytes, _) = unescape_bytes(text).map_err(|failure| failure.message)?;
-    Ok(String::from_utf8(bytes)
-        .unwrap_or_else(|invalid| String::from_utf8_lossy(invalid.as_bytes()).into_owned()))
+    Ok(values::escape_invalid_bytes(&bytes).into_owned())
 }
 
 /// A string escape GNU R's lexer rejects: the class of its parse error, the message, and the
@@ -2207,8 +2514,16 @@ pub fn unescape_bytes(text: &str) -> Result<(Vec<u8>, bool), EscapeFailure> {
                         ConditionValue::Null,
                     ));
                 }
+                if value > 0xFF {
+                    return Err(failure(
+                        "invalidOctal",
+                        format!("\\{value:o} exceeds maximum allowed octal value \\377"),
+                        last,
+                        ConditionValue::Integer(value as i32),
+                    ));
+                }
                 bytes.extend_from_slice(std::mem::take(&mut result).as_bytes());
-                bytes.push((value & 0xFF) as u8);
+                bytes.push(value as u8);
                 high_byte |= value >= 0x80;
             }
             'x' => {
@@ -2240,9 +2555,6 @@ pub fn unescape_bytes(text: &str) -> Result<(Vec<u8>, bool), EscapeFailure> {
                     last = offset;
                 }
                 let (value, count) = escape_digits(&mut characters, 16, limit, &mut last);
-                if braced && let Some((offset, _)) = characters.next_if(|&(_, next)| next == '}') {
-                    last = offset;
-                }
                 if count == 0 {
                     return Err(failure(
                         "badUnicodeHex",
@@ -2250,6 +2562,26 @@ pub fn unescape_bytes(text: &str) -> Result<(Vec<u8>, bool), EscapeFailure> {
                         last,
                         ConditionValue::Null,
                     ));
+                }
+                if braced {
+                    // GNU R reads the character after the digits to see whether it closes the
+                    // brace, so that character is where it reports one that does not.
+                    match characters.next() {
+                        Some((offset, '}')) => last = offset,
+                        unclosed => {
+                            let form = if escape == 'u' {
+                                "\\u{xxxx}"
+                            } else {
+                                "\\U{xxxxxxxx}"
+                            };
+                            return Err(failure(
+                                "invalidUnicode",
+                                format!("invalid {form} sequence"),
+                                unclosed.map_or(text.len(), |(offset, _)| offset),
+                                ConditionValue::Null,
+                            ));
+                        }
+                    }
                 }
                 let Some(decoded) = char::from_u32(value).or_else(|| {
                     // GNU R keeps a lone surrogate, which is not a Rust `char`.
@@ -2332,19 +2664,49 @@ unsafe fn do_parse(call: &Call<'_>) -> R<Sexp> {
     let file = call.arg(0);
     let count = values::as_integer_scalar(call.arg(1));
     let text = call.arg(2);
-    let (source, name) = if text != nil() {
+    let encoding = call.arg(5);
+    if encoding.kind() != SexpType::String || values::length(encoding) != 1 {
+        return Err(error("invalid 'encoding' value"));
+    }
+    // The session's text is UTF-8 whatever the argument says, as in GNU R's UTF-8 locales.
+    match &*values::char_str(encoding.element(0)) {
+        "unknown" | "native.enc" | "UTF-8" => {}
+        "latin1" => {
+            crate::conditions::warning("argument encoding=\"latin1\" is ignored in MBCS locales")?
+        }
+        other => crate::conditions::warning(format!(
+            "argument 'encoding = \"{other}\"' will be ignored"
+        ))?,
+    }
+    let source = if text != nil() {
         let lines: Vec<String> =
             values::strings(crate::coerce::coerce_vector(text, SexpType::String)?)
                 .into_iter()
                 .map(|line| line.unwrap_or_else(|| "NA".into()))
                 .collect();
-        (lines.join("\n"), "<text>".to_owned())
+        lines.join("\n")
     } else {
-        let content = crate::connections::read_all_text(file)?;
-        let name = crate::connections::description(file).unwrap_or_else(|| "<file>".into());
-        (content, name)
+        let mut content = crate::connections::read_all_text(file)?;
+        // A text argument comes without the newline of its last line, and the error locations
+        // count lines the same way for a file.
+        if content.ends_with('\n') {
+            content.pop();
+        }
+        content
     };
-    let expressions = parse_with_srcfile(&source, &name, call.arg(4))?;
+    // GNU R names the srcfile in a grammar error, and nothing without one: the name `parse`
+    // passes, or the `filename` of a srcfile environment.
+    let srcfile = call.arg(4);
+    let filename = match srcfile.kind() {
+        SexpType::Environment => crate::eval::find_var_in_frame(install("filename")?, srcfile)?,
+        _ => srcfile,
+    };
+    let name = match filename.kind() {
+        SexpType::String if values::length(filename) > 0 => values::string_at(filename, 0)
+            .map_or_else(|| "NA".to_owned(), |filename| filename.into_owned()),
+        _ => String::new(),
+    };
+    let expressions = parse_with_srcfile(&source, &name, srcfile)?;
     if text == nil() && count < 0 {
         crate::heap().root(expressions);
         crate::ahead::parsed_file(expressions, call.env()?)?;

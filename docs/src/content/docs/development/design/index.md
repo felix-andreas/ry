@@ -115,6 +115,14 @@ Which loops the tree walker evaluates in the global environment compile, how the
 environment's bindings without a call frame, and what compiling loops in `eval()`, `local()` and
 `test_that` environments would take.
 
+### [Memory safety in the runtime](/development/design/memory-safety/)
+
+How the interpreter becomes safe Rust without a runtime cost: a context parameter that marks every
+point where the heap can free an object, rooted and unrooted pointer types that make an unrooted
+value held across such a point a compile error, typed kinds and dense views, and where `unsafe`
+remains. It compares V8's handle scopes, `gc-arena`, SpiderMonkey's rooting, OCaml's macros, Roc's
+reference counts and conservative stack scanning.
+
 ### [Architecture critique](/development/design/architecture-critique/)
 
 A review of ry's architecture and code quality from outside the tracks that build it: twelve ranked

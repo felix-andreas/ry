@@ -1,0 +1,14 @@
+[stdout]
+| error: no index specified | 1[[]] 
+| error: no index specified | .subset2(1) 
+| error: no index specified | .subset2(l) 
+| error: no index specified | .subset2(NULL) 
+| error: no index specified | l[[exact = TRUE]] 
+| error: no index specified | .subset2(1, exact = FALSE) 
+| error: missing subscript | l[[]] 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

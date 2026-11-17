@@ -1,0 +1,51 @@
+[stdout]
+| error: simpleError FILE:1:7: unexpected end of file 
+| error: simpleError FILE:1:7: unexpected end of file 
+| error: simpleError FILE:1:1: unexpected end of file 
+| error: simpleError FILE:1:1: unexpected end of file 
+| error: simpleError embedded nul in string: 'a\0b' 
+| error: simpleError embedded nul in string: 'a\0b' 
+| expression(1)
+| 
+| > 1
+| [1] 1
+| error: simpleError FILE:2:3: unexpected end of file 
+| error: simpleError FILE:2:3: unexpected end of file 
+| error: simpleError FILE:2:1: unexpected ')'
+| 1: 1 +
+| 2: )
+|    ^ 
+| error: simpleError FILE:2:1: unexpected ')'
+| 1: 1 +
+| 2: )
+|    ^ 
+| error: simpleError FILE:2:1: unexpected SPECIAL
+| 2: b%
+|     ^ 
+| error: simpleError FILE:2:1: unexpected SPECIAL
+| 2: b%
+|     ^ 
+| error: simpleError embedded nul in string: 'b\0b' 
+| error: simpleError embedded nul in string: 'b\0b' 
+| error: simpleError FILE:2:1: unexpected end of file 
+| error: simpleError FILE:2:1: unexpected end of file 
+| error: simpleError FILE:2:6: unexpected end of file 
+| error: simpleError FILE:2:6: unexpected end of file 
+| error: nulNotAllowed nul character not allowed (<input>:1:6) 
+| error: nulNotAllowed nul character not allowed (<input>:1:6) 
+| error: simpleError FILE:2:11: unexpected end of file 
+| error: simpleError FILE:2:11: unexpected end of file 
+| error: simpleError FILE:1:1: unexpected end of file 
+| error: simpleError FILE:1:1: unexpected end of file 
+| [1] FALSE
+| error: simpleError FILE:1:7: unexpected end of file 
+| warning: line 1 appears to contain an embedded nul 
+| warning: incomplete final line found on 'FILE' 
+| [1] "a <- 1" "b"     
+| expression(a <- 1, b)
+[messages]
+[warnings]
+[errors]
+[value]
+expression
+| expression(a <- 1, b)

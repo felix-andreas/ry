@@ -59,7 +59,7 @@ test *args:
     cargo test {{ args }}
 
 # The pre-landing check: tests, clippy at -D warnings, fmt, the licence notices, the memory layout and comment length.
-gate: battery clippy fmt-check (notices "--check") (readme "--check") (memory "check") comments
+gate: battery clippy fmt-check (notices "--check") (readme "--check") (memory "check") comments unsafe
 
 # CI's test job, step for step: .github/workflows/ci.yml runs `nix develop .#ci -c just ci`. Run it
 # in that shell, whose GNU R, compiler, glibc and locales are the ones CI has. The variables are
@@ -75,6 +75,22 @@ ci:
     just fmt-check
     just clippy
     just battery
+
+# CI's collection-stress job (ci.yml, job `stress`, once per seed), which the release gate requires
+# next to `just ci` (docs: development/releasing.md, "The release gate"). It runs in the same shell
+# with the same variables. Every oracle case runs twice in one process under stress seeded with
+# `seed` with the heap checked, and 300 generated programs of their own per seed run under GNU R,
+# tier 0, the JIT and the same repeated stress.
+ci-stress seed="0":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export TZ=UTC NOT_CRAN=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0
+    R_HOME=$(R RHOME)
+    export R_HOME
+    bash tools/oracle-locales.sh
+    just base-r dev
+    FUZZ_SEED={{ seed }} just gc-torture repeat
+    just fuzz-differential $(({{ seed }} * 300)) 300 ry-tier0,ry-jit,ry-repeat-gctorture-seeded
 
 # Workspace tests; `zed_ry` needs a wasm toolchain, so it is excluded.
 battery *args:
@@ -187,6 +203,23 @@ bench suite *args:
     case " {{ args }} " in *" --release "*|*" --ry "*) ;; *) cargo build --release -p ry-lang -p libr -p rcmd ;; esac
     python3 -I tools/bench/bench.py {{ suite }} {{ args }}
 
+# The builtins sweep, every exported function of base, stats and utils timed on GNU R and ry (tools/bench/builtins/sweep.py):
+# `just bench-builtins check` (coverage and slower.txt, seconds), `just bench-builtins ratchet --ci` (the CI subset, minutes),
+# `just bench-builtins compare --filter '^base::paste'`, `just bench-builtins validate --filter '^stats::' --with-ry`.
+bench-builtins command *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case {{ quote(command) }} in list | check | weights) ;; *) cargo build --release -p ry-lang -p libr -p rcmd ;; esac
+    python3 -I tools/bench/builtins/sweep.py {{ command }} {{ args }}
+
+# The builtins ratchet as .github/workflows/builtins.yml runs it: a release build with its base R, then the CI subset
+# of the sweep, which fails when a function that tools/bench/builtins/slower.txt does not list is slower than GNU R.
+builtins-ci:
+    just base-r release
+    cargo build --release -p ry-lang -p libr -p rcmd
+    python3 -I tools/bench/builtins/sweep.py check
+    python3 -I tools/bench/builtins/sweep.py ratchet --ci
+
 # Generates the hot suite (tools/bench/hot/suite.toml and samples/) from the code bases that tooling/generate.py wrote
 # to DIR: captures their package calls on ry, validates and calibrates the samples under GNU R, then selects and weighs
 # the programs, e.g. `just bench-hot-capture /tmp/codebases`. CAPTURES keeps the raw capture for another selection.
@@ -228,6 +261,11 @@ memory *args="check":
 # e.g. `just comments report 20` for the worst blocks or `just comments baseline` after shortening some.
 comments *args="check":
     python3 -I tools/comments.py {{ args }}
+
+# Fails when a file outside heap, libr, jit, typed and ssa has more `unsafe` than its baseline, e.g.
+# `just unsafe stats` for the counts per crate or `just unsafe baseline` after removing some.
+unsafe *args="check":
+    python3 -I tools/unsafe.py {{ args }}
 
 # Regenerates what the READMEs show: the benchmark blocks and chart from the committed results files,
 # and the diagnostic panels docs/public/diagnostic*.svg from real `ry check` runs on the README's examples.
@@ -730,17 +768,80 @@ fuzz-differential seed="0" count="200" engines="ry-tier0,ry-jit":
     cargo build -q -p ry-lang -p libr -p rcmd -p oracle
     ./target/debug/oracle fuzz --seed {{ seed }} --count {{ count }} --engines {{ engines }}
 
+# The other program kinds of the differential fuzzer: `metamorphic` (one value, one body, and the
+# forms that must agree), `builtins` (builtins on a zoo of values), `api` (calls drawn from every
+# function of base, stats and utils), `io` (round trips through files and connections), `language`
+# (closures over promises, frames, conditions, dispatch and quoted code, called repeatedly),
+# `corpus`, or `all`, e.g. `just fuzz-kind metamorphic 0 500`.
+# Diverging programs and their reports go to target/fuzz-findings.
+fuzz-kind kind="all" seed="0" count="200" engines="ry-tier0,ry-jit":
+    cargo build -q -p ry-lang -p libr -p rcmd -p oracle
+    ./target/debug/oracle fuzz --kind {{ kind }} --seed {{ seed }} --count {{ count }} --engines {{ engines }} --findings target/fuzz-findings
+
+# How many of the functions base, stats and utils export the programs of COUNT seeds of each kind
+# name in a call. It runs no engine, so it measures the generators' reach in seconds.
+fuzz-coverage count="500":
+    cargo build -q -p oracle
+    ./target/debug/oracle fuzz --kind all --seed 0 --count {{ count }} --coverage
+
+# Every program kind of the differential fuzzer against GNU R for HOURS of wall clock, from seed
+# BASE on. A scheduled run passes a fresh base, e.g. `just fuzz-long 8 $(date +%s)`. Diverging
+# programs and their reports go to target/fuzz-findings, and the run exits 1 when there are any.
+fuzz-long hours="1" base="1000000" engines="ry-tier0,ry-jit,ry-gctorture-seeded":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build -q -p ry-lang -p libr -p rcmd -p oracle
+    minutes=$(python3 -I -c 'import sys; print(max(1, round(float(sys.argv[1]) * 60)))' "{{ hours }}")
+    ./target/debug/oracle fuzz --kind all --seed {{ base }} --minutes "$minutes" --engines {{ engines }} --findings target/fuzz-findings
+
+# The Fuzz workflow's job (.github/workflows/fuzz.yml), in the `ci` dev shell: `just fuzz-long`
+# after the set-up `just ci` does, from the start time as the seed base unless one is given.
+fuzz-ci hours="4" base="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export TZ=UTC NOT_CRAN=true
+    R_HOME=$(R RHOME)
+    export R_HOME
+    bash tools/oracle-locales.sh
+    just base-r dev
+    base="{{ base }}"
+    just fuzz-long "{{ hours }}" "${base:-$(date +%s)}"
+
+# Shrink a program on which an engine diverges from GNU R to a minimal one that diverges the same
+# way, e.g. `just fuzz-reduce fuzz_7.R ry-jit`; the result goes to target/fuzz-findings/reduced.R.
+fuzz-reduce file engine="ry-tier0":
+    cargo build -q -p ry-lang -p libr -p rcmd -p oracle
+    mkdir -p target/fuzz-findings
+    ./target/debug/oracle reduce --engine {{ engine }} --output target/fuzz-findings/reduced.R {{ file }}
+
+# Differential fuzzing on real R code: mutated snippets of base R's help examples, R's regression
+# tests and the oracle cases, under GNU R and ry's engines with the deep observer. Snippets that
+# differ before mutation go to target/fuzz-corpus/base-differs.txt instead of the findings.
+fuzz-corpus seed="0" count="200" engines="ry-tier0,ry-jit":
+    cargo build -q -p ry-lang -p libr -p rcmd -p oracle
+    ./target/debug/oracle fuzz --kind corpus --seed {{ seed }} --count {{ count }} --engines {{ engines }}
+
 # Every oracle case under collection stress (`RY_GC_STRESS`), compared with ry unstressed;
 # `just gc-torture young` keeps survivors collectable (`RY_GC_STRESS=young`), which finds an
 # object only a Rust local holds, and `just gc-torture seeded` collects at random gaps with the
 # write barrier checked (`RY_GC_STRESS=seed:N`, `RY_GC_VERIFY`), which finds a store that skipped
-# the barrier; `FUZZ_SEED` picks its gaps. `ORACLE_ENGINE=ry-gctorture cargo test -p oracle`
-# compares the cases with their recorded outcomes instead.
+# the barrier; `FUZZ_SEED` picks its gaps. `just gc-torture repeat` adds a second pass to the
+# seeded mode: each case runs twice in one process, which finds what a closure's first call left
+# behind for its second (a reused frame, a call site's plan). `ORACLE_ENGINE=ry-gctorture cargo
+# test -p oracle` compares the cases with their recorded outcomes instead.
 gc-torture mode="plain":
     cargo build -q -p ry-lang -p libr -p rcmd
     FUZZ_ITERS=1000000 cargo test -p oracle --test test_cases \
-        {{ if mode == "young" { "cases_survive_young_gc_torture" } else if mode == "seeded" { "native_cases_keep_the_write_barrier_under_seeded_gc_torture" } else { "cases_survive_gc_torture" } }} \
+        {{ if mode == "young" { "cases_survive_young_gc_torture" } else if mode == "seeded" { "native_cases_keep_the_write_barrier_under_seeded_gc_torture" } else if mode == "repeat" { "cases_survive_a_second_pass_under_seeded_gc_torture" } else { "cases_survive_gc_torture" } }} \
         -- --exact --nocapture
+
+# The heap's and the interpreter's tests under AddressSanitizer (docs: development/robustness.md,
+# "Each layer"). The heap tells the sanitizer which memory holds no object, so a read or write of
+# a freed object stops at the access. `--target` keeps the flag off build scripts and proc macros,
+# and leaks are not reported because the interpreter lives as long as its process.
+asan *args:
+    RUSTFLAGS="-Zsanitizer=address" ASAN_OPTIONS=detect_leaks=0 cargo test -p heap -p interp \
+        --target "$(rustc -vV | sed -n 's/^host: //p')" --target-dir target/asan {{ args }}
 
 # The language-server simulator over many seeds: `just simulate 1000 120` runs seeds 0 to 999 with
 # 120 actions each. Replay one failure with `SIMULATION_SEED=<seed> cargo test -p ry-lang --test test_simulation`.

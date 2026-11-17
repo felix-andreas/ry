@@ -242,6 +242,31 @@ time over Rust's.
 
 </BenchmarkSection>
 
+<BenchmarkSection suite="builtins">
+
+The suites above time programs. This one times single calls: every exported function of base,
+stats and utils, each called on a few inputs that real code gives it, such as a scalar, a vector of
+1,000 and one of 1,000,000 elements, and character, list, factor, matrix or data frame inputs where
+the function takes them. A function is as fast as its slowest case, so the table lists only the
+functions that fail on ry or are slower than GNU R in some case, with that case. Functions whose time
+is not the builtin's own, such as those that read files, reach the network or read the clock, are
+skipped, and the cases in `tools/bench/builtins/cases/` name each skip with its reason.
+
+One process per engine times every case of a round: it calls the case in a loop until a batch takes
+at least 10 ms, then times five batches, and the case's time is the median per call. ry runs with the
+JIT and without it. A result that differs from GNU R's is flagged, not failed, because the oracle
+owns correctness and the time still says how fast the call is. The geometric mean over thousands of
+cases says little about real code, so the suite stays out of the summary.
+
+<details>
+<summary>The functions slower than GNU R</summary>
+
+<BenchmarkTable suite="builtins" />
+
+</details>
+
+</BenchmarkSection>
+
 ## How it was measured
 
 The published numbers measure the build you download: the official Linux x86_64 archive of a
@@ -297,5 +322,5 @@ file name and sha256, and the commit the tag names, and `just readme` rewrites t
 from it. `--write` refuses a nightly archive, a local build, and a working tree with a change to a
 tracked file or an untracked file under `crates/` or `tools/bench/`, so the stored programs
 reproduce the measurement. The README summary warns when the suites were measured on different machines (CPU
-model or kernel) or against a GNU R on a different BLAS, because their ratios are then not
+model or kernel release, ignoring a Firecracker guest's `-fc-vNNN` build tag) or against a GNU R on a different BLAS, because their ratios are then not
 comparable.

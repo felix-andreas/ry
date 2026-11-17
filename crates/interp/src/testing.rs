@@ -6,7 +6,7 @@ use {
     crate::{bytecode, code_image, deparse, eval, lower, serialize, unwind::Unwind, values},
     heap::{
         Heap,
-        object::{Sexp, SexpType},
+        object::{CARD_ELEMENTS, LARGEST_SMALL_BYTES, Sexp, SexpType, VECTOR_DATA_OFFSET},
     },
     std::sync::{Mutex, Once},
     syntax::testing::Entropy,
@@ -329,7 +329,9 @@ pub fn check_fused_agreement(entropy: &mut impl Entropy) {
 /// evaluator, whose calls make ordinary promises. The callees force their arguments late or not at
 /// all, write the caller's variable through `parent.frame` before forcing, keep an argument in a
 /// closure that outlives the call, and pass `...` on whole or as `..1` and `..2`, which a slot
-/// frame cannot express as references, so building the call's arguments gives up part way. Each
+/// frame cannot express as references, so building the call's arguments gives up part way. The
+/// forwarding sites meet a `...` of ever different counts and names, some of which do not match
+/// the callee, so each site's plan for what `...` held is made, checked, refused and remade. Each
 /// call's references go back to the pool when it returns, so later calls reuse references that
 /// earlier ones forced, and the runs before and after the frame gets its environment check
 /// references made both ways.
@@ -339,7 +341,7 @@ pub fn check_argument_reference_agreement(entropy: &mut impl Entropy) {
     let mut statements = vec!["x <- a".to_owned(), "y <- b".to_owned()];
     for _ in 0..1 + entropy.below(5) {
         let target = ["x", "y"][entropy.below(2)];
-        let statement = match entropy.below(4) {
+        let statement = match entropy.below(5) {
             0 => format!(
                 "kept <- keep({}); {target} <- {target} + 1L; {target} <- kept()",
                 reference_argument(entropy, 1)
@@ -350,6 +352,19 @@ pub fn check_argument_reference_agreement(entropy: &mut impl Entropy) {
                 reference_argument(entropy, 1),
                 reference_argument(entropy, 1)
             ),
+            2 => {
+                let arguments: Vec<String> = (0..entropy.below(4))
+                    .map(|_| {
+                        let name = ["", "", "p = ", "q = "][entropy.below(4)];
+                        format!("{name}{}", reference_argument(entropy, 1))
+                    })
+                    .collect();
+                format!(
+                    "{target} <- {}({})",
+                    ["forward", "around"][entropy.below(2)],
+                    arguments.join(", ")
+                )
+            }
             _ => format!("{target} <- {}", reference_call(entropy, 2)),
         };
         statements.push(statement);
@@ -369,6 +384,7 @@ pub fn check_argument_reference_agreement(entropy: &mut impl Entropy) {
             run("keep <- function(p) function() p");
             run("dots <- function(...) late(..2, ..1)");
             run("forward <- function(...) late(...)");
+            run("around <- function(first, ...) lazy(..., q = first)");
             run("x <- 0L; y <- 0L");
             outcomes(&body, a, b)
         };
@@ -433,6 +449,55 @@ pub fn check_element_access_agreement(entropy: &mut impl Entropy) {
     });
 }
 
+/// A closure that writes elements of its argument answers on every call what the same statements
+/// answer once at top level, and leaves the caller's value as it was. A second and a third call
+/// run the closure's reused frame and its call sites' plans, and the argument's length sits at a
+/// storage threshold (`storage_lengths`), where a value changes its representation.
+pub fn check_replacement_agreement(entropy: &mut impl Entropy) {
+    let lengths = storage_lengths();
+    let length = lengths[entropy.below(lengths.len())];
+    let kind = &REPLACEMENT_KINDS[entropy.below(REPLACEMENT_KINDS.len())];
+    let columns = match length % 8 == 0 && length >= 16 && entropy.chance(1, 2) {
+        true => Some(length / 8),
+        false => None,
+    };
+    let vector = kind.subject.replace('N', &length.to_string());
+    let subject = match columns {
+        Some(columns) => format!("{{ m <- {vector}; attr(m, \"dim\") <- c(8L, {columns}L); m }}"),
+        None => vector,
+    };
+    let body = replacement_program(entropy, length, kind, columns);
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed.
+        unsafe {
+            let case = format!("`{body}` with x = {subject}");
+            assert_ne!(
+                run(&format!("a0 <- {subject}")),
+                "error",
+                "the subject does not evaluate: {subject}"
+            );
+            let before = run("a0");
+            let direct = run(&format!(
+                "x <- a0\nlocal_value <- {{ {body} }}\nlocal_value"
+            ));
+            assert_eq!(
+                before,
+                run("a0"),
+                "the direct run changed its source: {case}"
+            );
+            run(&format!("f <- function(x) {{ {body} }}"));
+            for call in 1..=3 {
+                assert_eq!(direct, run("f(a0)"), "call {call}: {case}");
+                assert_eq!(
+                    before,
+                    run("a0"),
+                    "call {call} changed its argument: {case}"
+                );
+            }
+        }
+    });
+}
+
 /// A guarded call to a base builtin answers what a fresh lookup finds while its name is bound,
 /// rebound and unbound by every route a program has, and while its closure's environment is
 /// detached from the base frames and attached again. Each case binds a fresh name in base to
@@ -440,8 +505,10 @@ pub fn check_element_access_agreement(entropy: &mut impl Entropy) {
 /// `BOUND_ELSEWHERE` bit, the enclosure's `DETACHED` bit and the base value) is live until the
 /// first rebinding. Three closures call the name: one at top level, one nested in a function
 /// frame, and one whose environment the case moves around; a fourth function, already compiled,
-/// rebinds the name in its own frame after its nested closure ran. Every call runs compiled and
-/// must agree with the same call evaluated directly in the closure's environment.
+/// rebinds the name in its own frame after its nested closure ran, and a fifth binds the name for
+/// the first time on a call that runs compiled, so the name sits in a slot of the live frame its
+/// nested closure looks through. Every call runs compiled and must agree with the same call
+/// evaluated directly in the closure's environment.
 pub fn check_shadowing_agreement(entropy: &mut impl Entropy) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static CASES: AtomicUsize = AtomicUsize::new(0);
@@ -463,6 +530,15 @@ pub fn check_shadowing_agreement(entropy: &mut impl Entropy) {
            shadow_g2 <- function(x) {name}(x)
            environment(shadow_g2) <- shadow_e
            shadow_rebinder <- function(v) {{ g <- function(x) {name}(x); g(1); {name} <- v; g }}
+           shadow_late <- function(bind, v, a) {{
+             if (bind) {name} <- v
+             g <- function(x) {name}(x)
+             compiled <- g(a)
+             shadow_direct <<- .Internal(eval(quote({name}(a)), .Internal(environment(g)), NULL))
+             compiled
+           }}
+           shadow_late(FALSE, NULL, 1)
+           shadow_late(FALSE, NULL, 1)
            NULL }}"
     );
     with_interpreter(|| {
@@ -472,7 +548,7 @@ pub fn check_shadowing_agreement(entropy: &mut impl Entropy) {
             let mut log = vec![setup.clone()];
             for step in 0..16 {
                 // Every closure runs compiled on the fast path before anything rebinds the name.
-                let choice = if step < 3 { 0 } else { entropy.below(17) };
+                let choice = if step < 3 { 0 } else { entropy.below(19) };
                 let value = values[entropy.below(values.len())];
                 let target = targets[entropy.below(targets.len())];
                 let statement = match choice {
@@ -496,6 +572,22 @@ pub fn check_shadowing_agreement(entropy: &mut impl Entropy) {
                                 log.join("\n")
                             );
                         }
+                        continue;
+                    }
+                    17 | 18 => {
+                        let argument = arguments[entropy.below(arguments.len())];
+                        let call = format!("shadow_late(TRUE, {value}, {argument})");
+                        // A call that fails leaves the direct answer unset, which reads as an
+                        // error too.
+                        run("shadow_direct <- quote(error)");
+                        let compiled = run(&call);
+                        assert_eq!(
+                            run("shadow_direct"),
+                            compiled,
+                            "{call} after:\n{}",
+                            log.join("\n")
+                        );
+                        log.push(call);
                         continue;
                     }
                     5 => format!("{name} <- {value}"),
@@ -545,7 +637,8 @@ pub fn check_shadowing_agreement(entropy: &mut impl Entropy) {
             }
             run(&format!(
                 "{{ .Internal(remove(c(\"{name}\", \"shadow_g0\", \"shadow_g1\", \"shadow_g2\", \
-                 \"shadow_maker\", \"shadow_e\", \"shadow_rebinder\"), globalenv(), FALSE)) }}"
+                 \"shadow_maker\", \"shadow_e\", \"shadow_rebinder\", \"shadow_late\", \
+                 \"shadow_direct\"), globalenv(), FALSE)) }}"
             ));
         }
     });
@@ -554,7 +647,8 @@ pub fn check_shadowing_agreement(entropy: &mut impl Entropy) {
 /// S3 dispatch finds the method a full walk of the scope finds while the method names are bound,
 /// rebound and unbound by every route a program has: in the global frame, a function frame, an
 /// argument, a child environment, a methods table attached to base or detached from it, base
-/// itself, a delayed or active binding, and a frame bound while detached and attached later.
+/// itself, a delayed or active binding, a frame bound while detached and attached later, and a
+/// slot of a compiled function's live frame that no earlier call bound.
 /// Each case uses a fresh generic, so every name starts bound nowhere and its lookups take the
 /// path that reads only the base binding until something binds it. With invariants on, that
 /// path checks each answer against the full walk, so a disagreement fails the case; the log of
@@ -590,6 +684,9 @@ pub fn check_s3_lookup_agreement(entropy: &mut impl Entropy) {
            lk_nested <- function() {{ inner <- function() {generic}(lk_obj); inner() }}
            lk_binder <- function(v) {{ {generic}.lka <- v; {generic}(lk_obj) }}
            lk_argument <- function({generic}.lkb) {generic}(lk_obj)
+           lk_late <- function(bind, v) {{ if (bind) {generic}.lka <- v; {generic}(lk_obj) }}
+           lk_late(FALSE, NULL)
+           lk_late(FALSE, NULL)
            NULL }}"
     );
     with_interpreter(|| {
@@ -601,7 +698,8 @@ pub fn check_s3_lookup_agreement(entropy: &mut impl Entropy) {
                 let name = format!("{generic}.{}", classes[entropy.below(classes.len())]);
                 let value = values[entropy.below(values.len())];
                 let target = targets[entropy.below(targets.len())];
-                let statement = match entropy.below(16) {
+                let statement = match entropy.below(18) {
+                    16 | 17 => format!("lk_late(TRUE, {value})"),
                     0 => format!("{generic}(lk_obj)"),
                     1 => "lk_caller()".to_owned(),
                     2 => "lk_nested()".to_owned(),
@@ -655,7 +753,7 @@ pub fn check_s3_lookup_agreement(entropy: &mut impl Entropy) {
                 "{{ .Internal(remove(c(\"{generic}\", \"{generic}.default\", \"{generic}.lka\", \
                  \"{generic}.lkb\", \"lk_obj\", \"lk_table\", \".__S3MethodsTable__.\", \"lk_e\", \
                  \"lk_d\", \"lk_caller\", \"lk_nested\", \"lk_binder\", \"lk_argument\", \
-                 \"length.lka\", \"length.lkb\"), globalenv(), FALSE)) }}"
+                 \"lk_late\", \"length.lka\", \"length.lkb\"), globalenv(), FALSE)) }}"
             ));
             run(&format!(
                 "{{ .Internal(remove(c(\"{generic}.lka\", \"{generic}.lkb\"), baseenv(), FALSE)) }}"
@@ -1608,6 +1706,115 @@ fn element_program(entropy: &mut impl Entropy) -> String {
         statements.push(statement);
     }
     statements.push("list(x, attributes(x), v)".to_owned());
+    statements.join("\n")
+}
+
+/// A vector kind the replacement programs write into: how to build one of `N` elements without
+/// base R, a value of its own type, and a value that forces the vector to another type.
+struct ReplacementKind {
+    subject: &'static str,
+    same: &'static str,
+    other: &'static str,
+}
+
+const REPLACEMENT_KINDS: [ReplacementKind; 7] = [
+    ReplacementKind {
+        subject: "0 * (1:N)",
+        same: "1.5",
+        other: "\"s\"",
+    },
+    ReplacementKind {
+        subject: "(1:N) + 0L",
+        same: "7L",
+        other: "1.5",
+    },
+    // A compact sequence, which a write must expand first.
+    ReplacementKind {
+        subject: "1:N",
+        same: "7L",
+        other: "1.5",
+    },
+    ReplacementKind {
+        subject: "(1:N) > 0L",
+        same: "NA",
+        other: "2L",
+    },
+    ReplacementKind {
+        subject: "as.character(1:N)",
+        same: "\"s\"",
+        other: "list(1)",
+    },
+    ReplacementKind {
+        subject: "(1:N) * 1i",
+        same: "2i",
+        other: "\"s\"",
+    },
+    ReplacementKind {
+        subject: "as.raw((1:N) %% 256L)",
+        same: "as.raw(9L)",
+        other: "as.raw(255L)",
+    },
+];
+
+/// The lengths one below, at and one above each length at which a vector's storage changes:
+/// a copy becomes a wrapper, a handle vector gets a second card, and a vector of each element
+/// size leaves the small-object pages for an allocation of its own.
+fn storage_lengths() -> Vec<usize> {
+    let room = LARGEST_SMALL_BYTES - VECTOR_DATA_OFFSET;
+    let mut lengths = vec![1, 2, 8];
+    for threshold in [
+        values::WRAP_THRESHOLD,
+        CARD_ELEMENTS,
+        room,
+        room / 4,
+        room / 8,
+        room / 16,
+    ] {
+        lengths.extend([threshold - 1, threshold, threshold + 1]);
+    }
+    // Lengths a matrix of eight rows can have, on both sides of the same thresholds.
+    lengths.extend([16, 72, room / 8 / 8 * 8, room / 8 / 8 * 8 + 8]);
+    lengths
+}
+
+fn replacement_program(
+    entropy: &mut impl Entropy,
+    length: usize,
+    kind: &ReplacementKind,
+    columns: Option<usize>,
+) -> String {
+    let (same, other) = (kind.same, kind.other);
+    let mut statements = Vec::new();
+    for _ in 0..entropy.below(4) + 2 {
+        let index = [1, 2, length, length + 1, length + 70][entropy.below(5)];
+        let statement = match (entropy.below(12), columns) {
+            (0..=3, Some(columns)) => {
+                let row = [1, 2, 8][entropy.below(3)];
+                let column = [1, 2, columns][entropy.below(3)];
+                match entropy.below(4) {
+                    0 | 1 => format!("x[{row}L, {column}L] <- {same}"),
+                    2 => format!("x[{row}L, ] <- {same}"),
+                    _ => format!("x[, {column}L] <- {same}"),
+                }
+            }
+            (0 | 1, None) | (4, _) => format!("x[{index}L] <- {same}"),
+            (2, None) | (5, _) => format!("x[[{index}L]] <- {same}"),
+            (3, None) => format!("x[c(1L, {length}L)] <- {same}"),
+            (6, _) => format!("x[{index}L] <- {other}"),
+            (7, _) => format!("for (k in 1:3) x[k] <- {same}"),
+            (8, _) => format!("y <- x; y[1L] <- {same}; x[{length}L] <- y[[1L]]"),
+            (9, _) => format!("g <- function(z) {{ z[1L] <- {same}; z }}; x <- g(x); x <- g(x)"),
+            (10, _) => format!("x <- c(x, {same})"),
+            _ => [
+                "names(x) <- NULL",
+                "attr(x, \"n\") <- 1L",
+                "x[2L] <- x[[1L]]",
+            ][entropy.below(3)]
+            .to_owned(),
+        };
+        statements.push(statement);
+    }
+    statements.push("list(x, attributes(x))".to_owned());
     statements.join("\n")
 }
 

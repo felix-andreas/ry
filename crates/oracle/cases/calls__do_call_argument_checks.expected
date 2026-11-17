@@ -1,0 +1,24 @@
+[stdout]
+| 'args' must be a list | do.call(el, as.pairlist(list(1:3, 2))) 
+| second argument must be a list | do.call(el, 1:3) 
+| [1] 2
+| 'what' must be a function or character string | do.call(1, list()) 
+| 'what' must be a function or character string | do.call(c("a", "b"), list()) 
+| 'envir' must be an environment | do.call(el, list(1:3, 2), envir = 1) 
+| second argument must be a list | do.call(el, NULL) 
+| could not find function "no such function" | `no such function`() 
+| attempt to use zero-length variable name | do.call("", list()) 
+| could not find function "NA" | `NA`() 
+| second argument must be a list | do.call(1, 1:3, envir = 1) 
+| second argument must be a list | do.call(el, 1:3, envir = NULL) 
+| 'args' must be a list | do.call(el, as.pairlist(list(1:3, 2)), envir = NULL) 
+| 'envir' must be an environment | do.call(el, list(1:3, 2), envir = NULL) 
+| 'envir' must be an environment | do.call(el, list(1:3, 2), envir = list(a = 1)) 
+| 'what' must be a function or character string | do.call(quote(el), list(1:3, 2)) 
+| x
+[messages]
+[warnings]
+[errors]
+[value]
+symbol
+| x

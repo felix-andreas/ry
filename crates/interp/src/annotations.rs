@@ -26,7 +26,7 @@
 use {
     crate::{
         RError, conditions, interp,
-        unwind::R,
+        unwind::{ErrorClass, R},
         values::{self, nil},
     },
     heap::{
@@ -884,7 +884,11 @@ unsafe fn lacks_item_type(mask: Mask, value: Sexp) -> bool {
 }
 
 unsafe fn failure(call: Sexp, message: String) -> crate::unwind::Unwind {
-    conditions::signal_error(RError { message, call })
+    conditions::signal_error(RError {
+        message,
+        call,
+        class: ErrorClass::Simple,
+    })
 }
 
 unsafe fn mask_at(masks: Sexp, slot: usize) -> Mask {

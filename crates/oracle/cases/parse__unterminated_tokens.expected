@@ -1,0 +1,221 @@
+[stdout]
+| simpleError | <text>:1:6: unexpected INCOMPLETE_STRING
+| 1: x <- "abc
+|          ^ | 
+| simpleError | <text>:2:6: unexpected INCOMPLETE_STRING
+| 2: x <- "abc
+| 3: print(3)
+|         ^ | 
+| simpleError | <text>:2:6: unexpected INCOMPLETE_STRING
+| 3: 
+| 4: 
+|         ^ | 
+| simpleError | <text>:2:6: unexpected INCOMPLETE_STRING
+| 2: x <- `abc
+| 3: y
+|         ^ | 
+| simpleError | <text>:2:6: unexpected INCOMPLETE_STRING
+| 2: x <- r"(abc
+| 3: y
+|         ^ | 
+| simpleError | <text>:1:6: unexpected INCOMPLETE_STRING
+| 1: x <- r"-(abc)"
+|          ^ | 
+| simpleError | <text>:2:4: unexpected INCOMPLETE_STRING
+| 2: b' 'c
+| 3: d
+|       ^ | 
+| simpleError | <text>:2:4: unexpected string constant
+| 2: b' 'c
+| 3: d'
+|       ^ | 
+| simpleError | <text>:1:6: unexpected ')'
+| 1: x <- )
+|          ^ | 
+| simpleError | <text>:1:6: unexpected INCOMPLETE_STRING
+| 1: x <- `a\`
+| 2: b
+|         ^ | 
+| simpleError | <text>:5:6: unexpected INCOMPLETE_STRING
+| 6: 
+| 7: y
+|         ^ | 
+| simpleError | <text>:1:1: unexpected INCOMPLETE_STRING
+| 1: '
+|     ^ | 
+| simpleError | <text>:1:1: unexpected INCOMPLETE_STRING
+| 1: `
+|     ^ | 
+| simpleError | <text>:1:1: unexpected INCOMPLETE_STRING
+| 1: r'(
+|     ^ | 
+| simpleError | <text>:1:6: unexpected INCOMPLETE_STRING
+| 2: 
+| 3: b
+|         ^ | 
+| simpleError | <text>:2:8: unexpected input
+| 1: cat(1)
+| 2: x <- 5 %abc
+|           ^ | 
+| simpleError | <text>:1:8: unexpected input
+| 1: x <- 1 %a
+|            ^ | 
+| simpleError | <text>:1:1: unexpected input
+| 1: %
+|     ^ | 
+| simpleError | <text>:1:6: unexpected SPECIAL
+| 1: x <- %a%
+|          ^ | 
+| badHex | '\x' used without hex digits in character string (<input>:1:9) | 1 9 
+| invalidOctal | \777 exceeds maximum allowed octal value \377 (<input>:1:5) | 1 5 
+| invalidOctal | \777 exceeds maximum allowed octal value \377 (<input>:1:5) | 1 5 
+| invalidOctal | \400 exceeds maximum allowed octal value \377 (<input>:1:13) | 1 13 
+| expression("\xff")
+| invalidUnicode | invalid \U{xxxxxxxx} sequence (<input>:2:0) | 2 0 
+| invalidUnicode | invalid \U{xxxxxxxx} sequence (<input>:1:7) | 1 7 
+| expression("AB")
+| invalidRawLiteral | malformed raw string literal (<input>:2:0) | 2 0 
+| invalidRawLiteral | malformed raw string literal (<input>:1:3) | 1 3 
+| invalidRawLiteral | malformed raw string literal (<input>:1:10) | 1 10 
+| invalidRawLiteral | malformed raw string literal (<input>:2:0) | 2 0 
+| invalidRawLiteral | malformed raw string literal (<input>:1:4) | 1 4 
+| invalidRawLiteral | malformed raw string literal (<input>:1:7) | 1 7 
+| invalidRawLiteral | malformed raw string literal (<input>:2:0) | 2 0 
+| invalidRawLiteral | malformed raw string literal (<input>:1:10) | 1 10 
+| simpleError | <text>:1:3: unexpected string constant
+| 1: r 'x'
+|       ^ | 
+| simpleError | <text>:1:1: unexpected INCOMPLETE_STRING
+| 1: r'(a)-'
+| 2: 
+|    ^ | 
+| simpleError | <text>:1:3: unexpected ';'
+| 1: 1;;
+|       ^ | 
+| expression({
+|     1
+|     2
+| })
+| simpleError | <text>:1:1: unexpected ';'
+| 1: ;
+|     ^ | 
+| expression(1)
+| simpleError | <text>:2:1: unexpected ';'
+| 1: 1
+| 2: ;
+|    ^ | 
+| simpleError | <text>:1:4: unexpected ';'
+| 1: 1; ;
+|        ^ | 
+| expression(function() {
+| })
+| simpleError | <text>:2:1: unexpected ';'
+| 1: 1;
+| 2: ;
+|    ^ | 
+| simpleError | <text>:1:8: unexpected ';'
+| 1: x <- 1;;
+|            ^ | 
+| simpleError | FILE:2:0: unexpected end of input
+| 1: 1 +
+|    ^ | 
+| simpleError | FILE:2:0: unexpected end of input
+| 1: 1 +
+|    ^ | 
+| simpleError | FILE:2:0: unexpected end of input
+| 1: 1 +
+|    ^ | 
+| simpleError | FILE:2:0: unexpected end of input
+| 1: 1 +
+|    ^ | 
+| simpleError | FILE:4:0: unexpected end of input
+| 2: 
+| 3: 
+|   ^ | 
+| simpleError | FILE:4:0: unexpected end of input
+| 2: 
+| 3: 
+|   ^ | 
+| simpleError | FILE:1:6: unexpected INCOMPLETE_STRING
+| 1: x <- 'a
+|          ^ | 
+| simpleError | FILE:1:6: unexpected INCOMPLETE_STRING
+| 1: x <- 'a
+|          ^ | 
+| simpleError | FILE:1:6: unexpected INCOMPLETE_STRING
+| 1: x <- 'a
+|          ^ | 
+| simpleError | FILE:1:6: unexpected INCOMPLETE_STRING
+| 1: x <- 'a
+|          ^ | 
+| simpleError | FILE:1:6: unexpected INCOMPLETE_STRING
+| 1: x <- 'a
+| 2: 
+|         ^ | 
+| simpleError | FILE:1:6: unexpected INCOMPLETE_STRING
+| 1: x <- 'a
+| 2: 
+|         ^ | 
+| simpleError | FILE:2:6: unexpected INCOMPLETE_STRING
+| 2: x <- 'a
+| 3: b
+|         ^ | 
+| simpleError | FILE:2:6: unexpected INCOMPLETE_STRING
+| 2: x <- 'a
+| 3: b
+|         ^ | 
+| simpleError | FILE:1:3: unexpected numeric constant
+| 1: 1 2
+|       ^ | 
+| simpleError | FILE:1:3: unexpected numeric constant
+| 1: 1 2
+|       ^ | 
+| simpleError | FILE:1:3: unexpected numeric constant
+| 1: 1 2
+|       ^ | 
+| simpleError | FILE:1:3: unexpected numeric constant
+| 1: 1 2
+|       ^ | 
+| simpleError | FILE:1:3: unexpected numeric constant
+| 1: 1 2
+|       ^ | 
+| simpleError | abc:2:0: unexpected end of input
+| 1: 1 +
+|    ^ | 
+| simpleError | 2:0: unexpected end of input
+| 1: 1 +
+|    ^ | 
+| simpleError | 2:0: unexpected end of input
+| 1: 1 +
+|    ^ | 
+| simpleError | 2:0: unexpected end of input
+| 1: 1 +
+|    ^ | 
+| simpleError | zz:2:0: unexpected end of input
+| 1: 1 +
+|    ^ | 
+| simpleError | NA:2:0: unexpected end of input
+| 1: 1 +
+|    ^ | 
+| simpleError | 2:0: unexpected end of input
+| 1: 1 +
+|    ^ | 
+| simpleError | q:2:0: unexpected end of input
+| 1: 1 +
+|    ^ | 
+| simpleError | 2:0: unexpected end of input
+| 1: 1 +
+|    ^ | 
+| simpleError | <text>:2:0: unexpected end of input
+| 1: 1 +
+|    ^ | 
+| simpleError | <text>:3:0: unexpected end of input
+| 1: 1
+| 2: 2 +
+|   ^ | 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

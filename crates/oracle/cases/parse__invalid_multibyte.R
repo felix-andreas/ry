@@ -1,0 +1,66 @@
+# Bytes that are not valid UTF-8 in parsed text, and where the lexer reports them.
+f <- tempfile()
+show <- function(expr) {
+  result <- withVisible(tryCatch(
+    withCallingHandlers(expr, warning = function(w) {
+      cat("warning:", gsub(f, "FILE", conditionMessage(w), fixed = TRUE), "\n")
+      invokeRestart("muffleWarning")
+    }),
+    error = function(e) {
+      cat("error:", class(e)[1], gsub(f, "FILE", conditionMessage(e), fixed = TRUE), "|", e$lineno, e$colno, sub(f, "FILE", e$filename, fixed = TRUE), "\n")
+      invisible(NULL)
+    }
+  ))
+  if (result$visible) print(result$value)
+}
+show(parse(text = "x <- \'a\xe4\'"))
+show(parse(text = "1 +\n2\n\t\xe4 <- 3"))
+show(parse(text = "\'a\xf8\x88\x80\x80\x80b\'"))
+show(parse(text = "\'\xed\xa0\x80\'"))
+show(parse(text = "a <- ) \xe4"))
+show(parse(text = "'\\xZ' ; '\xe4'"))
+show(parse(text = "'\xe4' ; '\\xZ'"))
+show(parse(text = "# \xe4\n'\xc3\n'"))
+show(parse(text = "1 %\xe4% 2"))
+show(parse(text = "5 -> '\xe4\xb8'"))
+show(parse(text = "'\xf4\x90\x80\x80'"))
+show(parse(text = "\x80"))
+show(parse(text = "'\xc0\x80'"))
+show(parse(text = "y <- 1; `a\xe4` <- 3"))
+show(parse(text = "r\"(a\xe4)\""))
+show(parse(text = "\t'\\xZ'"))
+show(parse(text = "'ä\\xZ'"))
+show(parse(text = c("x <- 1", "\t'ää\\xZ'")))
+show(parse(text = "function(a,\n\tä, ä) 1"))
+show(parse(text = c("'\xe4", "'")))
+# A file is read as bytes, so the same errors come from parse() and source().
+writeBin(charToRaw("x <- 'a\xe4'\n"), f)
+show(parse(f))
+show(source(f))
+show(source(f, encoding = "latin1"))
+show(x)
+show(Encoding(x))
+writeBin(charToRaw("1 +\n2\n\xe4 <- 3\n"), f)
+show(parse(f))
+show(parse(f, keep.source = TRUE))
+writeBin(charToRaw("z <- 1 # \xe4\n"), f)
+show(parse(f))
+show(source(f))
+show(z)
+show(`%\xe4%`(1, 2))
+# A byte escape in a backquoted name gives that byte.
+show(charToRaw(as.character(quote(`a\xe4`))))
+`b\xe4` <- 1
+show(ls(pattern = "^b"))
+show(charToRaw(ls(pattern = "^b")))
+# The encoding argument of parse().
+show(parse(text = "1", encoding = "latin1"))
+show(parse(text = "1", encoding = "bytes"))
+show(parse(text = "1", encoding = "UTF-8"))
+show(parse(text = "1", encoding = "native.enc"))
+show(parse(text = "1", encoding = c("a", "b")))
+show(parse(text = "1", encoding = NA))
+show(parse(text = "1", encoding = 1))
+show(parse(text = "1", encoding = character()))
+show(parse(f, encoding = "latin1"))
+show(parse(f, encoding = "x"))

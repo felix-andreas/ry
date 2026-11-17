@@ -11,6 +11,7 @@ The suites, each described by the suite.toml in its directory:
   codebases     The three 300,000-line benchmark code bases, each running its test suite.
   hot           Hot package entries: the package calls that dominate the code bases, replayed in a loop.
   typed         Typed ry against Rust: every typed kernel and application beside its Rust twin.
+  builtins      Every exported function of base, stats and utils, each called on a few inputs.
 
 In the first four the engines are GNU R, ry, ry typed, and ry typed with `--aot`: a program whose
 suite.toml entry names a `typed_source` (its own `<name>.typed.R`, or a variant's identical one)
@@ -98,7 +99,7 @@ it is a release number.
 
 `--samples FILE` keeps every round's raw samples in FILE as it goes, and a later run with the same
 FILE and options resumes after the last complete round. A run of several suites keeps each suite's
-in FILE with the suite's name before its extension (`samples.kernels.json`). `--write` needs at least 10 rounds and
+in FILE with the suite's name before its extension (`samples.kernels.json`). `--write` needs at least 10 rounds (3 of the builtins suite, which repeats each case inside its process) and
 every program, and stores results.json; tools/bench/readme.py renders the README from it.
 
 The hot suite (hot/suite.toml, which tooling/hot.py generates from a capture of the code bases)
@@ -128,17 +129,22 @@ here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent
 sys.path.insert(0, str(here / "tooling"))
 sys.path.insert(0, str(here))
+sys.path.insert(0, str(here / "builtins"))
 import packages as corpus  # noqa: E402
+import sweep  # noqa: E402
 import typed_package  # noqa: E402
 from evict import evict  # noqa: E402
 
-SUITES = ["public", "packages", "kernels", "applications", "codebases", "hot", "typed"]
+SUITES = ["public", "packages", "kernels", "applications", "codebases", "hot", "typed", "builtins"]
 # The suites whose programs may have a typed version, which the `ry typed` engine runs.
 TYPED_SUITES = ("public", "kernels", "applications")
 # The suite that times typed ry against Rust, where every other suite times ry against GNU R.
 RUST_SUITE = "typed"
 # The suite of captured package entries, whose runner times every program in one process.
 HOT_SUITE = "hot"
+# The per-function sweep of base, stats and utils, whose cases come from builtins/cases/*.R rather
+# than from suite.toml, and whose runner times every case of a round in one process per engine.
+BUILTINS_SUITE = "builtins"
 # `rustc -O` is opt-level 3, the level of cargo's release profile, and names no target CPU, so a
 # Rust twin is built the way a released Rust program is.
 RUSTC_FLAGS = ["-O", "--edition", "2024"]
@@ -146,6 +152,10 @@ SCHEMA = 1
 # The fewest rounds a published run may have: fewer cannot separate a 10% change from noise on a
 # shared cloud machine, where one fixed C loop varies by about 25% between processes.
 PUBLISHED_ROUNDS = 10
+# The builtins suite times each case in five batches inside every process and keeps the median, and a
+# round of its thousands of cases takes most of an hour on each engine, so three rounds are enough to
+# judge a function against the ratchet's tolerance.
+SUITE_ROUNDS = {"builtins": (3, 2)}
 # Below this many seconds a time mostly measures start-up and the timer.
 SHORT = 0.1
 # The codebases suite compares each test block's time, and only blocks GNU R runs in at least this
@@ -159,6 +169,9 @@ CODEBASE_TIMEOUT = 7200
 HOT_SHORT = 0.001
 # One process runs every program of the suite, and under callgrind ry runs about 50 times slower.
 HOT_TIMEOUT = 3600
+# The builtins harness times batches of at least 10 ms of calls with a clock that resolves to the
+# microsecond, so no case of it is too short; a call's own time may be a few nanoseconds.
+BUILTINS_SHORT = 0.0
 # The harness processes one instruction pass deals the suite's programs over (`instructions_of`).
 INSTRUCTION_SHARDS = 4
 # The same floor for the typed suite. Both of its harnesses time a warm run inside the process, so
@@ -192,10 +205,10 @@ def main():
                        help="the release archive under test, which --write requires")
     parser.add_argument("--rscript", default=os.environ.get("ORACLE_R_RSCRIPT", "Rscript"),
                         help="GNU R's Rscript")
-    parser.add_argument("--rounds", type=int, default=PUBLISHED_ROUNDS)
+    parser.add_argument("--rounds", type=int, help=f"rounds per suite (default {PUBLISHED_ROUNDS}, and fewer for the builtins suite)")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--filter", default="", help="only programs whose id contains this, or whose group is this")
-    parser.add_argument("--extra-rounds", type=int, default=10,
+    parser.add_argument("--extra-rounds", type=int,
                         help="more rounds for each program with a wide interval")
     parser.add_argument("--samples", help="keep raw samples here and resume from them")
     parser.add_argument("--write", action="store_true", help="store each suite's results.json")
@@ -229,19 +242,23 @@ def main():
         sys.exit("error: --save-instructions, --baseline-instructions, --functions and --save-dumps go with --instructions")
     if (args.breakdown or args.instructions) and suites != [HOT_SUITE]:
         sys.exit(f"error: --breakdown and --instructions measure the {HOT_SUITE} suite alone")
-    if args.rounds < 0 or (args.rounds == 0 and not (args.breakdown or args.instructions)):
+    if args.rounds is not None and (args.rounds < 0 or (args.rounds == 0 and not (args.breakdown or args.instructions))):
         sys.exit("error: --rounds must be at least 1, or 0 for only a --breakdown or --instructions pass")
     release = None
+    args.ry_identity = args.ry
     if args.release:
         args.ry, release = unpack_release(args.release)
+        # The archive unpacks into a fresh temporary directory each run, so resuming keys on its hash.
+        args.ry_identity = f"release sha256 {release['sha256']}"
     if args.write:
         if release is None:
             sys.exit("error: --write records the official release archive; pass --release ARCHIVE, "
                      "the ry-x86_64-unknown-linux-gnu.tar.gz of the tagged release")
         if release["nightly"]:
             sys.exit(f"error: --write records a tagged release, and {release['tag']} is a nightly build")
-        if args.rounds < PUBLISHED_ROUNDS:
-            sys.exit(f"error: --write needs at least {PUBLISHED_ROUNDS} rounds")
+        for suite in suites:
+            if suite_args(args, suite).rounds < suite_rounds(suite)[0]:
+                sys.exit(f"error: --write needs at least {suite_rounds(suite)[0]} rounds of the {suite} suite")
         if args.filter or args.baseline or args.jit_off:
             sys.exit("error: --write records every program on the published engines only")
         if args.partial:
@@ -256,7 +273,7 @@ def main():
         sys.exit("error: " + "; ".join(unreleased) + "; benchmarks time release builds only, so build it "
                  "with `cargo build --release -p ry-lang -p libr`, or pass --any-build for a quick look")
     refuse_foreign_images(list(filter(None, [args.ry, args.baseline])))
-    manifests = {suite: load_suite(suite) for suite in suites}
+    manifests = {suite: load_suite(suite, args.rscript) for suite in suites}
     missing = {suite: missing_packages(suite, selected(manifest, args), args.rscript) for suite, manifest in manifests.items()}
     if any(missing.values()) and not args.partial:
         sys.exit("error: the corpus library lacks packages the suites load; run "
@@ -280,11 +297,23 @@ def main():
     failed = False
     for suite in suites:
         key = baseline_key(suite)
-        failed |= run_suite(suite, manifests[suite], missing[suite], args, dict(meta, **{key: baselines[key]}))
+        failed |= run_suite(suite, manifests[suite], missing[suite], suite_args(args, suite), dict(meta, **{key: baselines[key]}))
         if warning:
             print(f"{warning}\n")
     if failed:
         sys.exit("error: a program failed or disagreed with its suite's baseline engine; nothing was written")
+
+
+def suite_rounds(suite):
+    """The published rounds and extra rounds of a suite."""
+    return SUITE_ROUNDS.get(suite, (PUBLISHED_ROUNDS, 10))
+
+
+def suite_args(args, suite):
+    """The options with the suite's rounds and extra rounds filled in where the command line left them out."""
+    rounds, extra = suite_rounds(suite)
+    return argparse.Namespace(**dict(vars(args), rounds=rounds if args.rounds is None else args.rounds,
+                                     extra_rounds=extra if args.extra_rounds is None else args.extra_rounds))
 
 
 # Suites and engines.
@@ -311,7 +340,7 @@ def ratio_kind(suite):
 
 
 def short_floor(suite):
-    return {RUST_SUITE: RUST_SHORT, HOT_SUITE: HOT_SHORT}.get(suite, SHORT)
+    return {RUST_SUITE: RUST_SHORT, HOT_SUITE: HOT_SHORT, BUILTINS_SUITE: BUILTINS_SHORT}.get(suite, SHORT)
 
 
 def engines(args, suite):
@@ -339,7 +368,7 @@ def engines(args, suite):
         table.append(Engine("ry_typed_aot", "ry typed, AOT", ry + ["--aot"], ry_env, typed=True, ahead=True))
     if suite in ("kernels", "applications"):
         table.append(Engine("ry_typed_file", "ry typed, installed", ry, ry_env, typed=True, installed=True))
-    if args.jit_off or suite == "codebases":
+    if args.jit_off or suite in ("codebases", BUILTINS_SUITE):
         table.append(Engine("ry_nojit", "ry, JIT off", ry, dict(ry_env, RY_JIT="off")))
     if args.baseline:
         baseline = [args.baseline, "run", "--runtime", "ry"]
@@ -452,9 +481,11 @@ def runtime_library_name():
     return {"Darwin": "libR.dylib", "Windows": "R.dll"}.get(platform.system(), "libR.so")
 
 
-def load_suite(suite):
+def load_suite(suite, rscript="Rscript"):
     if suite == HOT_SUITE:
         return load_hot_suite(here / suite)
+    if suite == BUILTINS_SUITE:
+        return load_builtins_suite(here / suite, rscript)
     manifest = tomllib.loads((here / suite / "suite.toml").read_text())
     if suite == RUST_SUITE:
         check_rust_suite(manifest)
@@ -500,6 +531,22 @@ def load_hot_suite(directory):
         for sample in program["samples"]:
             if not (directory / sample).is_file():
                 sys.exit(f"error: {path} names {sample}, which does not exist")
+    return manifest
+
+
+def load_builtins_suite(directory, rscript):
+    """The builtins suite's manifest, with a program per case that GNU R lists from cases/*.R, after
+    checking that the cases and skips cover every export."""
+    manifest = tomllib.loads((directory / "suite.toml").read_text())
+    listing = sweep.list_cases(rscript)
+    problems = ([f"{name} has neither a case nor a skip" for name in listing["missing"]]
+                + [f"{name} is not an exported function" for name in listing["unknown"]]
+                + [f"a case file does not load: {problem}" for problem in listing["broken"]])
+    if problems:
+        sys.exit(f"error: the {BUILTINS_SUITE} cases do not cover the exports:\n  " + "\n  ".join(problems))
+    manifest["programs"] = [{"id": case["id"], "display": case["display"], "group": sweep.function_of(case["id"])}
+                            for case in listing["cases"]]
+    manifest["skips"] = listing["skips"]
     return manifest
 
 
@@ -584,7 +631,7 @@ def run_suite(suite, manifest, missing, args, meta):
     table = engines(args, suite)
     programs = selected(manifest, args)
     runners = {"public": PublicRunner, "packages": PackageRunner, "codebases": CodebaseRunner, RUST_SUITE: RustRunner,
-               HOT_SUITE: HotRunner}
+               HOT_SUITE: HotRunner, BUILTINS_SUITE: SweepRunner}
     runner = runners.get(suite, WorkloadRunner)(suite, args)
     samples_path = samples_file(args, suite)
     state = load_samples(samples_path, args, table, programs)
@@ -622,7 +669,10 @@ def run_suite(suite, manifest, missing, args, meta):
             hot_passes(runner, programs, table, args, results)
     finally:
         runner.close()
-    print_table(results, table)
+    if suite == BUILTINS_SUITE:
+        print_builtins(results)
+    else:
+        print_table(results, table)
     if suite == HOT_SUITE:
         print_hot(results)
     for key, found in results["worst"].items():
@@ -641,8 +691,11 @@ def run_suite(suite, manifest, missing, args, meta):
         print("the tests reached for the network, which skews both engines' times; add each test file "
               "to NETWORK_TESTS in tooling/packages.py:\n  " + "\n  ".join(sorted(set(runner.network))))
     # A package's own test suite failing is a compatibility result, recorded in its row like
-    # tests_differ. One of our programs failing means the measurement itself is broken.
-    blocking = [] if suite == "packages" else failures
+    # tests_differ, and so is a builtin that ry lacks. One of our programs failing, or a builtins
+    # case failing on GNU R, means the measurement itself is broken.
+    blocking = ([] if suite == "packages" else
+                [(program, failure) for program, failure in failures if failure["engine"] == "gnu_r"]
+                if suite == BUILTINS_SUITE else failures)
     if args.write and not blocking and not runner.network:
         (here / suite / "results.json").write_text(json.dumps(results, indent=2, ensure_ascii=False) + "\n")
         print(f"wrote {here / suite / 'results.json'}")
@@ -674,6 +727,14 @@ def run_round(runner, plan, state):
         for program, engines_here in plan:
             for engine in engines_here:
                 measured[program["id"]][engine.key] = runner.run(program, engine)
+    if getattr(runner, "quiet", False):
+        # Thousands of cases: a count per engine, and the failures by name.
+        for key in sorted({key for results in measured.values() for key in results}):
+            failed = sorted(name for name, results in measured.items() if results.get(key, {}).get("seconds", 0) is None)
+            print(f"  {key}: {len(measured) - len(failed)} of {len(measured)} cases timed"
+                  + (f", failed: {', '.join(failed[:20])}{' and more' if len(failed) > 20 else ''}" if failed else ""),
+                  flush=True)
+        return measured
     for name, results in measured.items():
         line = " ".join(f"{key} {describe(result)}" for key, result in sorted(results.items()))
         print(f"  {name}: {line}", flush=True)
@@ -1200,6 +1261,35 @@ class HotRunner:
         shutil.rmtree(self.work, ignore_errors=True)
 
 
+class SweepRunner:
+    """The builtins suite: builtins/harness.R, after hot/replay.R, times the round's cases in one
+    process per engine and prints a line per case with the checksum of its result and its median
+    and fastest seconds per call over its batches (`sweep.run_cases`). A case that kills or hangs
+    the process fails alone, and a new process times the cases after it."""
+
+    batched = True
+    quiet = True
+
+    def __init__(self, suite, args):
+        self.network = []
+
+    def run(self, program, engine):
+        return self.run_batch([program], engine)[program["id"]]
+
+    def run_batch(self, programs, engine):
+        names = [program["id"] for program in programs]
+        results, errors = sweep.run_cases(engine.command, engine.env, names)
+        # A process that could not use its start-up image measures a slow start in every case.
+        unused = next((line for line in errors.splitlines() if line.startswith((IMAGE_UNUSED, IMAGE_WRITTEN))), None)
+        if unused is not None:
+            return {name: {"seconds": None, "reason": unused} for name in names}
+        return {name: results.get(name, {"seconds": None, "reason": "the harness printed no line for it"})
+                for name in names}
+
+    def close(self):
+        pass
+
+
 def hot_program_table(programs):
     """The program table hot/harness.R reads: a header, then per program its id and
     comma-separated lists of its sample files, iterations, rng, threw and fresh flags and namespaces."""
@@ -1651,7 +1741,7 @@ def samples_file(args, suite):
 
 
 def load_samples(path, args, table, programs):
-    key = {"rounds": args.rounds, "seed": args.seed, "filter": args.filter, "ry": args.ry,
+    key = {"rounds": args.rounds, "seed": args.seed, "filter": args.filter, "ry": args.ry_identity,
            "engines": [engine.key for engine in table], "programs": [program["id"] for program in programs]}
     if path is not None and path.exists():
         state = json.loads(path.read_text())
@@ -1765,14 +1855,19 @@ def summarize(suite, manifest, programs, table, state, args, meta, runner):
             if engine is baseline:
                 reference = checksums[0]
             elif reference is not None and not same_checksum(checksums[0], reference):
-                if suite == "packages":
+                if suite == BUILTINS_SUITE:
+                    # A builtin whose result differs from GNU R's is a compatibility bug, which the
+                    # oracle owns; its time still says how fast the call is.
+                    row["flags"].append({"kind": "result_differs", "engine": engine.key,
+                                         "reason": f"GNU R: {reference}; {engine.label}: {checksums[0]}"})
+                elif suite == "packages":
                     row["flags"].append({"kind": "tests_differ", "engine": engine.key,
                                          "reason": f"GNU R: {reference}; {engine.label}: {checksums[0]}"})
                 else:
                     failures.append({"engine": engine.key,
                                      "reason": f"checksum {checksums[0]}, {baseline.label} printed {reference}"})
             median = statistics.median(run["seconds"] for run in runs)
-            row["seconds"][engine.key] = round(median, 6)
+            row["seconds"][engine.key] = stored_seconds(median)
             if all("first" in run for run in runs):
                 row.setdefault("first_seconds", {})[engine.key] = round(statistics.median(run["first"] for run in runs), 6)
             for field in MEMORY_PARTS.values():
@@ -1848,7 +1943,78 @@ def summarize(suite, manifest, programs, table, state, args, meta, runner):
         results["paired_geomean"] = geomeans(paired_included)
     if suite == HOT_SUITE:
         hot_summary(results, programs, table, state, args)
+    if suite == BUILTINS_SUITE:
+        builtins_summary(results, manifest, table)
     return results
+
+
+def stored_seconds(seconds):
+    """A time for results.json: to the microsecond, or to six significant digits below a second,
+    where the builtins suite stores a call's time of a few nanoseconds."""
+    return round(seconds, 6) if seconds >= 1 else float(f"{seconds:.6g}")
+
+
+def builtins_summary(results, manifest, table):
+    """Adds what the builtins suite records beside the common fields: per function, its slowest
+    case on each engine (`functions`), and the functions the sweep skips with the reason.
+
+    A function's ratio on an engine is the lowest median ratio among its cases, because a builtin
+    is as slow as its slowest input. A case that fails on the engine makes the function fail there."""
+    functions = {}
+    for row in results["programs"]:
+        name = row["id"].rsplit("/", 1)[0]
+        entry = functions.setdefault(name, {"id": name, "cases": 0, "worst": {}, "failures": [], "differs": []})
+        entry["cases"] += 1
+        failed = {failure["engine"] for failure in row.get("failures", [])}
+        for engine in table[1:]:
+            if engine.key in failed:
+                entry["failures"].append({"engine": engine.key, "case": row["id"]})
+                continue
+            ratio = row["ratio"].get(engine.key)
+            if ratio is None:
+                continue
+            worst = entry["worst"].get(engine.key)
+            if worst is None or ratio["median"] < worst["ratio"]:
+                entry["worst"][engine.key] = {"case": row["id"], "ratio": ratio["median"]}
+        if any(flag["kind"] == "result_differs" for flag in row["flags"]):
+            entry["differs"].append(row["id"])
+    rows = sorted(functions.values(), key=lambda entry: (
+        -len(entry["failures"]), min((found["ratio"] for found in entry["worst"].values()), default=math.inf)))
+    for entry in rows:
+        for key in ("failures", "differs"):
+            if not entry[key]:
+                del entry[key]
+    results["functions"] = rows
+    results["skips"] = [{"id": f"{skip['package']}::{skip['function']}", "reason": skip["reason"]}
+                        for skip in manifest["skips"]]
+    results["slower"] = {engine.key: sum(1 for entry in rows if any(
+        failure["engine"] == engine.key for failure in entry.get("failures", []))
+        or entry["worst"].get(engine.key, {}).get("ratio", math.inf) < 1) for engine in table[1:]}
+
+
+def print_builtins(results):
+    """The builtins suite in brief: each engine's count of functions slower than GNU R, then the
+    functions that fail or are slower on some engine, worst first."""
+    engines = [key for key in results["engines"] if key != results["baseline"]]
+    label = results["engines"]
+    print("| function | cases | " + " | ".join(f"{ratio_label(results, key)}, slowest case" for key in engines) + " |")
+    print("| --- | ---: |" + " --- |" * len(engines))
+    for entry in results["functions"]:
+        failed = {failure["engine"]: failure["case"] for failure in entry.get("failures", [])}
+        if not failed and all(found["ratio"] >= 1 for found in entry["worst"].values()):
+            continue
+        cells = [f"fails in {failed[key].rsplit('/', 1)[1]}" if key in failed else
+                 f"{entry['worst'][key]['ratio']:.2f}x in {entry['worst'][key]['case'].rsplit('/', 1)[1]}"
+                 if key in entry["worst"] else "" for key in engines]
+        print(f"| {entry['id']} | {entry['cases']} | " + " | ".join(cells) + " |")
+    print()
+    for key in engines:
+        print(f"{label[key]}: {results['slower'][key]} of {len(results['functions'])} functions fail or are "
+              f"slower than {label[results['baseline']]} in some case")
+    for key, mean in results["geomean"].items():
+        print(f"Geometric mean of {ratio_label(results, key)} over {mean['programs']} cases: "
+              f"{mean['median']:.2f}x (95% interval {mean['low']:.2f} to {mean['high']:.2f})")
+    print(f"{len(results['skips'])} functions skipped")
 
 
 def ratio_label(results, key):

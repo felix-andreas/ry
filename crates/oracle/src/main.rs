@@ -4,16 +4,27 @@ use {
         BUILD_FILE, Build, BuildCheck, CaseRun, Engine, EngineError, KNOWN_FAILURES_FILE,
         ProcessEngine, Verdict,
         bench::{self, Summary},
-        build_file, check_build, diff, engine_packages, engines_named, expected_path, fails_run,
-        find_cases, gallery, gnu_r_available, gnu_r_build, install, installed_packages,
-        known_failure, known_failures, packages, parse, read_build, render, runnable_cases,
-        verdict, write_build,
+        build_file, check_build,
+        corpus::Snippet,
+        diff, engine_packages, engines_named, expected_path, fails_run, find_cases,
+        fuzz::{Divergence, MEMORY_LIMIT, ProgramKind},
+        gallery, gnu_r_available, gnu_r_build, install, installed_packages, known_failure,
+        known_failures,
+        metamorphic::{api_functions, called_function, called_names},
+        packages, parse, read_build,
+        reduce::{Signature, reduce_divergence},
+        render, runnable_cases, verdict, write_build,
     },
     packages::{PackageOutcome, Runtime, Settings},
     std::{
+        collections::{BTreeMap, BTreeSet},
         path::{Path, PathBuf},
         process::ExitCode,
-        time::Duration,
+        sync::{
+            Mutex,
+            atomic::{AtomicBool, AtomicU64, Ordering},
+        },
+        time::{Duration, Instant},
     },
 };
 
@@ -97,6 +108,51 @@ enum Command {
         /// Print the program for `--seed` and exit, without running anything.
         #[arg(long)]
         print: bool,
+        /// The programs to run: `grammar` (generated blocks of language features), `metamorphic`
+        /// (one value, one body, and the forms that must agree), `builtins` (builtins on a
+        /// zoo of values), `api` (calls drawn from every function of base, stats and utils),
+        /// `corpus` (mutated snippets of real R code, `oracle::corpus`), a comma-separated
+        /// list of them, or `all` for each of them on every seed.
+        #[arg(long, default_value = "grammar")]
+        kind: String,
+        /// Compare only what a program prints, without the deep observer's dump of every
+        /// top-level value.
+        #[arg(long)]
+        no_observe: bool,
+        /// How many programs run at once (default: one per core).
+        #[arg(long)]
+        jobs: Option<usize>,
+        /// Keep running consecutive seeds for this many minutes instead of `--count` seeds.
+        #[arg(long)]
+        minutes: Option<u64>,
+        /// A directory that receives each diverging program and its report.
+        #[arg(long)]
+        findings: Option<PathBuf>,
+        /// Reduce every diverging program against the first engine that diverges on it, and
+        /// print the reduced program under the divergence.
+        #[arg(long)]
+        reduce: bool,
+        /// Run nothing: generate the programs of `--seed` and `--count` and report how many of
+        /// the functions base, stats and utils export each kind names in a call.
+        #[arg(long)]
+        coverage: bool,
+    },
+    /// Shrink a program on which an engine diverges from GNU R to a small one on which it
+    /// diverges the same way, and print it with the command that replays it.
+    Reduce {
+        file: PathBuf,
+        /// The engine that diverges, named as for `fuzz --engines`.
+        #[arg(long)]
+        engine: String,
+        /// Seconds one engine may take on one candidate.
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
+        /// The most candidates to run.
+        #[arg(long, default_value_t = 2000)]
+        budget: usize,
+        /// Where to write the reduced program.
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
     /// Run packages' testthat suites under GNU R and ry's runtime (both through `ry load`) and
     /// compare them test by test.
@@ -178,11 +234,25 @@ enum Command {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     if let Command::Fuzz {
-        seed, print: true, ..
-    } = cli.command
+        seed,
+        print: true,
+        kind,
+        ..
+    } = &cli.command
     {
-        print!("{}", oracle::fuzz::program(seed));
-        return ExitCode::SUCCESS;
+        return match fuzz_kinds(kind).as_deref() {
+            Some([FuzzKind::Generated(kind)]) => {
+                print!("{}", kind.program(*seed));
+                ExitCode::SUCCESS
+            }
+            Some([FuzzKind::Corpus]) => print_corpus_program(*seed),
+            _ => {
+                eprintln!(
+                    "--print takes one --kind: grammar, metamorphic, builtins, api, io or corpus"
+                );
+                ExitCode::from(2)
+            }
+        };
     }
     if uses_workspace_ry(&cli.command)
         && let Err(error) = oracle::build_workspace_ry()
@@ -295,7 +365,39 @@ fn main() -> ExitCode {
             engines,
             timeout,
             print: _,
-        } => run_fuzz(seed, count, &engines, Duration::from_secs(timeout)),
+            kind,
+            no_observe,
+            jobs,
+            minutes,
+            findings,
+            reduce,
+            coverage,
+        } => run_fuzz(FuzzRun {
+            first: seed,
+            count,
+            engines: &engines,
+            timeout: Duration::from_secs(timeout),
+            kind: &kind,
+            observe: !no_observe,
+            jobs,
+            budget: minutes.map(|minutes| Duration::from_secs(minutes * 60)),
+            findings,
+            reduce,
+            coverage,
+        }),
+        Command::Reduce {
+            file,
+            engine,
+            timeout,
+            budget,
+            output,
+        } => run_reduce(
+            &file,
+            &engine,
+            Duration::from_secs(timeout),
+            budget,
+            output.as_deref(),
+        ),
         Command::Gallery {
             seed,
             count,
@@ -336,6 +438,7 @@ fn uses_workspace_ry(command: &Command) -> bool {
                 .is_none_or(|names| names_ry(&names)),
         },
         Command::Fuzz { engines, .. } => names_ry(engines),
+        Command::Reduce { engine, .. } => names_ry(engine),
         Command::Gallery { .. } => true,
         Command::Bench { ry, .. } => ry.is_none(),
         _ => false,
@@ -837,71 +940,620 @@ struct Tally {
     fails: bool,
 }
 
-fn run_fuzz(first: u64, count: u64, engines: &str, timeout: Duration) -> ExitCode {
-    let mut parsed = Vec::new();
-    for name in engines
-        .split(',')
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-    {
-        match ProcessEngine::named(name) {
-            Some(engine) => parsed.push(engine.with_timeout(timeout)),
-            None => {
-                eprintln!("unknown engine `{name}`");
-                return ExitCode::from(2);
-            }
+struct FuzzRun<'a> {
+    first: u64,
+    count: u64,
+    engines: &'a str,
+    timeout: Duration,
+    kind: &'a str,
+    observe: bool,
+    jobs: Option<usize>,
+    budget: Option<Duration>,
+    findings: Option<PathBuf>,
+    reduce: bool,
+    coverage: bool,
+}
+
+/// What a fuzz run draws one program from.
+#[derive(Clone, Copy, PartialEq)]
+enum FuzzKind {
+    Generated(ProgramKind),
+    /// A mutated snippet of real R code ([`oracle::corpus`]).
+    Corpus,
+}
+
+/// The kinds `--kind` names, or `None` for a name that is none of them.
+fn fuzz_kinds(name: &str) -> Option<Vec<FuzzKind>> {
+    if name == "all" {
+        let mut kinds: Vec<FuzzKind> = oracle::fuzz::KINDS
+            .into_iter()
+            .map(FuzzKind::Generated)
+            .collect();
+        kinds.push(FuzzKind::Corpus);
+        return Some(kinds);
+    }
+    name.split(',')
+        .map(|name| match name.trim() {
+            "corpus" => Some(FuzzKind::Corpus),
+            name => ProgramKind::named(name).map(FuzzKind::Generated),
+        })
+        .collect()
+}
+
+/// What one seed did, in the terms a fuzz run reports and counts.
+struct Checked {
+    /// `metamorphic seed 7`, or `corpus seed 7 (from a snippet's name)`.
+    label: String,
+    program: String,
+    divergences: Vec<Divergence>,
+    /// The report to print when `divergences` is not empty.
+    rendered: String,
+    unavailable: Vec<String>,
+    /// The error that ended the program under GNU R.
+    stopped: Option<String>,
+    /// Why a seed without divergences was not a comparison either.
+    skipped: Option<&'static str>,
+    /// `engine<TAB>snippet` for each engine that differs on the unmutated snippet.
+    base_differs: Vec<String>,
+}
+
+fn check_fuzz_seed(
+    kind: FuzzKind,
+    seed: u64,
+    snippets: &[Snippet],
+    gnu_r: &dyn Engine,
+    engines: &[&dyn Engine],
+    directory: &Path,
+) -> Result<Checked, EngineError> {
+    match kind {
+        FuzzKind::Generated(kind) => {
+            let report = oracle::fuzz::check_seed(kind, seed, gnu_r, engines, directory)?;
+            Ok(Checked {
+                label: format!("{} seed {seed}", kind.name()),
+                rendered: oracle::fuzz::render_divergences(&report),
+                stopped: report.reference.errors.first().cloned(),
+                program: report.program,
+                divergences: report.divergences,
+                unavailable: report.unavailable,
+                skipped: None,
+                base_differs: Vec::new(),
+            })
+        }
+        FuzzKind::Corpus => {
+            let report =
+                oracle::corpus::check_corpus_seed(seed, snippets, gnu_r, engines, directory)?;
+            let skipped = if report.noisy {
+                Some("GNU R disagrees with itself")
+            } else if !report.base_differs.is_empty()
+                && report.base_differs.len() + report.unavailable.len() == engines.len()
+            {
+                Some("the snippet differs unmutated")
+            } else if report.unchanged {
+                Some("no mutation applied")
+            } else {
+                None
+            };
+            Ok(Checked {
+                label: format!("corpus seed {seed} (from {})", report.source),
+                rendered: oracle::corpus::render_corpus_divergences(&report),
+                base_differs: report
+                    .base_differs
+                    .iter()
+                    .map(|divergence| format!("{}\t{}", divergence.engine, report.source))
+                    .collect(),
+                stopped: report.stopped,
+                skipped,
+                program: report.mutant,
+                divergences: report.divergences,
+                unavailable: report.unavailable,
+            })
         }
     }
+}
+
+fn run_fuzz(run: FuzzRun) -> ExitCode {
+    let Some(kinds) = fuzz_kinds(run.kind) else {
+        eprintln!(
+            "unknown --kind `{}`: grammar, metamorphic, builtins, api, io, corpus or all",
+            run.kind
+        );
+        return ExitCode::from(2);
+    };
+    let Some((gnu_r, parsed)) = fuzz_engines(run.engines, run.timeout, run.observe) else {
+        return ExitCode::from(2);
+    };
     let engines: Vec<&dyn Engine> = parsed.iter().map(|engine| engine as &dyn Engine).collect();
-    let gnu_r = ProcessEngine::gnu_r().with_timeout(timeout);
+    let snippets = if kinds.contains(&FuzzKind::Corpus) {
+        let corpus = match oracle::corpus::load_corpus(true) {
+            Ok(corpus) => corpus,
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        for note in &corpus.notes {
+            eprintln!("{note}");
+        }
+        for (source, count) in oracle::corpus::source_counts(&corpus.snippets) {
+            println!("corpus: {count} snippets from {source}");
+        }
+        corpus.snippets
+    } else {
+        Vec::new()
+    };
+    if run.coverage {
+        print_fuzz_coverage(&kinds, &snippets, run.first, run.count);
+        return ExitCode::SUCCESS;
+    }
     let directory = std::env::temp_dir().join(format!("ry-oracle-fuzz-{}", std::process::id()));
     if let Err(error) = std::fs::create_dir_all(&directory) {
         eprintln!("{}: {error}", directory.display());
         return ExitCode::FAILURE;
     }
-    let started = std::time::Instant::now();
-    let mut diverging = Vec::new();
-    let mut ended_in_error = 0;
-    for seed in first..first.saturating_add(count) {
-        match oracle::fuzz::check_seed(seed, &gnu_r, &engines, &directory) {
-            Ok(report) => {
-                if !report.reference.errors.is_empty() {
-                    ended_in_error += 1;
-                }
-                for reason in &report.unavailable {
-                    eprintln!("unavailable: {reason}");
-                }
-                if report.divergences.is_empty() {
-                    println!("ok      seed {seed}");
-                } else {
-                    println!("DIFFERS {}", oracle::fuzz::render_divergences(&report));
-                    diverging.push(seed);
-                }
-                if !report.unavailable.is_empty() && report.unavailable.len() == engines.len() {
-                    eprintln!("no engine besides GNU R can run here");
-                    return ExitCode::from(2);
-                }
-            }
-            Err(error) => {
-                println!("ERROR   seed {seed}: GNU R: {error}");
-                diverging.push(seed);
-            }
-        }
+    if let Some(findings) = &run.findings
+        && let Err(error) = std::fs::create_dir_all(findings)
+    {
+        eprintln!("{}: {error}", findings.display());
+        return ExitCode::FAILURE;
     }
+    let started = Instant::now();
+    let jobs = run
+        .jobs
+        .or_else(|| std::thread::available_parallelism().ok().map(usize::from))
+        .unwrap_or(1)
+        .max(1);
+    // Workers take the next (seed, kind) pair from one counter, so a run with a time budget
+    // covers a prefix of the seeds whatever the number of workers.
+    let next = AtomicU64::new(0);
+    let total = match run.budget {
+        Some(_) => u64::MAX,
+        None => run.count.saturating_mul(kinds.len() as u64),
+    };
+    // Set when no engine can run here, which no later seed changes.
+    let stop = AtomicBool::new(false);
+    let deadline = run.budget.map(|budget| started + budget);
+    let state = Mutex::new(FuzzTally::default());
+    std::thread::scope(|scope| {
+        for _ in 0..jobs {
+            scope.spawn(|| {
+                loop {
+                    if stop.load(Ordering::Relaxed)
+                        || deadline.is_some_and(|deadline| Instant::now() >= deadline)
+                    {
+                        return;
+                    }
+                    let position = next.fetch_add(1, Ordering::Relaxed);
+                    if position >= total {
+                        return;
+                    }
+                    let kind = kinds[(position % kinds.len() as u64) as usize];
+                    let seed = run.first.saturating_add(position / kinds.len() as u64);
+                    let name = match kind {
+                        FuzzKind::Generated(kind) => kind.name(),
+                        FuzzKind::Corpus => "corpus",
+                    };
+                    let stem = format!("{name}_{seed}");
+                    let result =
+                        check_fuzz_seed(kind, seed, &snippets, &gnu_r, &engines, &directory);
+                    // A reduction runs hundreds of candidates, so it happens before this
+                    // worker takes the lock the others print under.
+                    let reduced = match &result {
+                        Ok(checked) if run.reduce && !checked.divergences.is_empty() => {
+                            reduce_seed(
+                                checked,
+                                &parsed,
+                                run.timeout,
+                                &directory.join(&stem),
+                                deadline,
+                            )
+                        }
+                        _ => None,
+                    };
+                    let mut tally = state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    tally.ran += 1;
+                    match result {
+                        Ok(checked) => {
+                            let label = &checked.label;
+                            if let Some(error) = &checked.stopped {
+                                tally.ended_in_error += 1;
+                                // Every kind but the grammar's catches its own errors, so
+                                // a program that stops GNU R says the generator wrote
+                                // something it did not mean.
+                                if matches!(
+                                    kind,
+                                    FuzzKind::Generated(
+                                        ProgramKind::Metamorphic
+                                            | ProgramKind::Builtins
+                                            | ProgramKind::Api
+                                            | ProgramKind::Io
+                                            | ProgramKind::Language
+                                    )
+                                ) {
+                                    println!("STOPS   {label} under GNU R: {error}");
+                                }
+                            }
+                            for reason in &checked.unavailable {
+                                eprintln!("unavailable: {reason}");
+                            }
+                            tally.base_differs.extend(checked.base_differs);
+                            if !checked.unavailable.is_empty()
+                                && checked.unavailable.len() == engines.len()
+                            {
+                                tally.unavailable = true;
+                                stop.store(true, Ordering::Relaxed);
+                            } else if let Some(reason) =
+                                checked.skipped.filter(|_| checked.divergences.is_empty())
+                            {
+                                tally.skipped += 1;
+                                println!("skipped {label}: {reason}");
+                            } else if checked.divergences.is_empty() {
+                                println!("ok      {label}");
+                            } else {
+                                let mut rendered = checked.rendered;
+                                if let Some(reduced) = &reduced {
+                                    rendered.push_str(reduced);
+                                }
+                                let crashed = checked
+                                    .divergences
+                                    .iter()
+                                    .any(|divergence| divergence.crashed);
+                                println!(
+                                    "{} {rendered}",
+                                    if crashed { "CRASHES" } else { "DIFFERS" }
+                                );
+                                for name in checked
+                                    .divergences
+                                    .iter()
+                                    .flat_map(|divergence| divergence.kinds())
+                                {
+                                    *tally.kinds.entry(name).or_default() += 1;
+                                }
+                                for divergence in &checked.divergences {
+                                    for expression in &divergence.expressions {
+                                        if let Some(function) = called_function(&expression.source)
+                                        {
+                                            *tally
+                                                .functions
+                                                .entry((function, expression.difference.name()))
+                                                .or_default() += 1;
+                                        }
+                                    }
+                                }
+                                if let Some(findings) = &run.findings {
+                                    for (extension, text) in
+                                        [("R", &checked.program), ("report", &rendered)]
+                                    {
+                                        let path = findings.join(format!("{stem}.{extension}"));
+                                        if let Err(error) = std::fs::write(&path, text) {
+                                            eprintln!("{}: {error}", path.display());
+                                        }
+                                    }
+                                }
+                                tally.diverging.push((name, seed));
+                            }
+                        }
+                        Err(error) => {
+                            println!("ERROR   {name} seed {seed}: GNU R: {error}");
+                            tally.diverging.push((name, seed));
+                        }
+                    }
+                }
+            });
+        }
+    });
+    let mut tally = state
+        .into_inner()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Err(error) = std::fs::remove_dir_all(&directory) {
         eprintln!("could not remove {}: {error}", directory.display());
     }
+    if tally.unavailable {
+        eprintln!("no engine besides GNU R can run here");
+        return ExitCode::from(2);
+    }
+    if !tally.base_differs.is_empty() {
+        // Read last, so runs that end at about the same time keep each other's entries.
+        let file = oracle::corpus::corpus_directory().join("base-differs.txt");
+        if let Ok(text) = std::fs::read_to_string(&file) {
+            tally.base_differs.extend(text.lines().map(str::to_string));
+        }
+        let listing: String = tally
+            .base_differs
+            .iter()
+            .map(|line| format!("{line}\n"))
+            .collect();
+        match std::fs::write(&file, listing) {
+            Ok(()) => println!(
+                "snippets that differ unmutated are listed in {}",
+                file.display()
+            ),
+            Err(error) => eprintln!("{}: {error}", file.display()),
+        }
+    }
     println!(
-        "{} of {count} seeds agree ({ended_in_error} ended in an error under GNU R) in {:.1} s",
-        count as usize - diverging.len(),
+        "{} of {} programs agree ({} ended in an error under GNU R, {} skipped) in {:.1} s",
+        tally.ran - tally.diverging.len() - tally.skipped,
+        tally.ran,
+        tally.ended_in_error,
+        tally.skipped,
         started.elapsed().as_secs_f64()
     );
-    if diverging.is_empty() {
+    if tally.diverging.is_empty() {
         ExitCode::SUCCESS
     } else {
-        println!("diverging seeds: {diverging:?}");
+        tally.diverging.sort();
+        let listed: Vec<String> = tally
+            .diverging
+            .iter()
+            .map(|(name, seed)| format!("{name}:{seed}"))
+            .collect();
+        println!("diverging: {}", listed.join(" "));
+        let kinds: Vec<String> = tally
+            .kinds
+            .iter()
+            .map(|(name, count)| format!("{name} {count}"))
+            .collect();
+        println!("by kind: {}", kinds.join(", "));
+        if !tally.functions.is_empty() {
+            let mut functions: Vec<_> = tally.functions.iter().collect();
+            functions.sort_by(|left, right| right.1.cmp(left.1).then(left.0.cmp(right.0)));
+            let listing: String = functions
+                .iter()
+                .map(|((function, kind), count)| format!("{count}\t{kind}\t{function}\n"))
+                .collect();
+            match &run.findings {
+                Some(findings) => {
+                    let file = findings.join("functions.txt");
+                    match std::fs::write(&file, listing) {
+                        Ok(()) => println!(
+                            "{} differing functions are listed in {}",
+                            functions.len(),
+                            file.display()
+                        ),
+                        Err(error) => eprintln!("{}: {error}", file.display()),
+                    }
+                }
+                None => print!("by function:\n{listing}"),
+            }
+        }
         ExitCode::FAILURE
     }
+}
+
+/// Prints, for each kind and for all of them together, how many of the callable functions of the
+/// api table (`oracle::metamorphic::api_functions`) the programs of `count` seeds name in a call.
+/// It runs no engine, so it measures what the generators can reach, not what ry gets right.
+fn print_fuzz_coverage(kinds: &[FuzzKind], snippets: &[Snippet], first: u64, count: u64) {
+    const PACKAGES: [&str; 3] = ["base", "stats", "utils"];
+    let callable: BTreeMap<&str, &str> = api_functions()
+        .iter()
+        .filter(|function| function.positional.is_some())
+        .map(|function| (function.name, function.package))
+        .collect();
+    let by_package = |names: &BTreeSet<&str>| -> String {
+        let mut text = format!("{:>6}", names.len());
+        for package in PACKAGES {
+            let covered = names
+                .iter()
+                .filter(|name| callable.get(*name) == Some(&package))
+                .count();
+            text.push_str(&format!("{covered:>7}"));
+        }
+        text
+    };
+    println!("functions named in a call by {count} seeds of each kind, from seed {first}:");
+    println!("{:<12}   all   base  stats  utils", "kind");
+    let universe: BTreeSet<&str> = callable.keys().copied().collect();
+    println!("{:<12}{}", "(the table)", by_package(&universe));
+    let mut together = BTreeSet::new();
+    for &kind in kinds {
+        let mut covered = BTreeSet::new();
+        for seed in first..first.saturating_add(count) {
+            let program = match kind {
+                FuzzKind::Generated(kind) => kind.program(seed),
+                FuzzKind::Corpus => match oracle::corpus::corpus_program(snippets, seed) {
+                    Some((_, program)) => program,
+                    None => continue,
+                },
+            };
+            for name in called_names(&program) {
+                if let Some((&name, _)) = callable.get_key_value(name) {
+                    covered.insert(name);
+                }
+            }
+        }
+        let name = match kind {
+            FuzzKind::Generated(kind) => kind.name(),
+            FuzzKind::Corpus => "corpus",
+        };
+        println!("{name:<12}{}", by_package(&covered));
+        together.extend(covered);
+    }
+    if kinds.len() > 1 {
+        println!("{:<12}{}", "together", by_package(&together));
+    }
+}
+
+/// GNU R and the engines a comma-separated `--engines` names, each with the timeout and, when
+/// `observe`, the deep observer. `None` after naming an unknown engine on standard error.
+fn fuzz_engines(
+    names: &str,
+    timeout: Duration,
+    observe: bool,
+) -> Option<(ProcessEngine, Vec<ProcessEngine>)> {
+    let prepare = |engine: ProcessEngine| {
+        let engine = engine.with_timeout(timeout).with_memory_limit(MEMORY_LIMIT);
+        if observe { engine.observing() } else { engine }
+    };
+    let mut engines = Vec::new();
+    for name in names
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        match ProcessEngine::named(name) {
+            Some(engine) => engines.push(prepare(engine)),
+            None => {
+                eprintln!("unknown engine `{name}`");
+                return None;
+            }
+        }
+    }
+    Some((prepare(ProcessEngine::gnu_r()), engines))
+}
+
+fn print_corpus_program(seed: u64) -> ExitCode {
+    let corpus = match oracle::corpus::load_corpus(true) {
+        Ok(corpus) => corpus,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match oracle::corpus::corpus_program(&corpus.snippets, seed) {
+        Some((snippet, mutant)) => {
+            print!("# from {}\n{mutant}", snippet.name);
+            ExitCode::SUCCESS
+        }
+        None => {
+            eprintln!("the fuzz corpus is empty");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[derive(Default)]
+struct FuzzTally {
+    ran: usize,
+    ended_in_error: usize,
+    /// The kind's name and the seed of every program with a divergence.
+    diverging: Vec<(&'static str, u64)>,
+    /// Seeds that compared nothing: a corpus snippet that differs unmutated, did not mutate, or
+    /// depends on the run.
+    skipped: usize,
+    /// The corpus snippets that differ before mutation, as `engine<TAB>snippet`.
+    base_differs: BTreeSet<String>,
+    /// How many engine runs differ in each way ([`oracle::fuzz::Divergence::kinds`]).
+    kinds: BTreeMap<&'static str, usize>,
+    /// How many expressions of api programs differ, by the function called and the way.
+    functions: BTreeMap<(String, &'static str), usize>,
+    unavailable: bool,
+}
+
+/// Reduces a diverging seed's program against the first engine that diverges on it, and
+/// returns the section a report ends with.
+fn reduce_seed(
+    report: &Checked,
+    engines: &[ProcessEngine],
+    timeout: Duration,
+    directory: &Path,
+    deadline: Option<Instant>,
+) -> Option<String> {
+    let divergence = report.divergences.first()?;
+    let engine = engines
+        .iter()
+        .find(|engine| engine.name() == divergence.engine)?;
+    // Every candidate that still hangs costs the whole timeout.
+    if divergence.detail.contains("was killed after") {
+        return Some(
+            "--- not reduced: a timeout, which `oracle reduce` shrinks on request ---\n"
+                .to_string(),
+        );
+    }
+    if let Err(error) = std::fs::create_dir_all(directory) {
+        return Some(format!(
+            "--- not reduced: {}: {error} ---\n",
+            directory.display()
+        ));
+    }
+    let gnu_r = ProcessEngine::gnu_r().with_timeout(timeout).observing();
+    let observing = engine.clone().observing();
+    Some(
+        match reduce_divergence(
+            &report.program,
+            &gnu_r,
+            &observing,
+            directory,
+            2000,
+            deadline,
+        ) {
+            Ok(reduction) => format!(
+                "--- reduced under {} ({}, {} candidates) ---\n{}",
+                engine.name(),
+                reduction.signature,
+                reduction.calls,
+                reduction.program
+            ),
+            Err(error) => format!("--- not reduced: {error} ---\n"),
+        },
+    )
+}
+
+/// Reduces `file` against the engine `name`, prints the result and the command that replays it,
+/// and writes it to `output`.
+fn run_reduce(
+    file: &Path,
+    name: &str,
+    timeout: Duration,
+    budget: usize,
+    output: Option<&Path>,
+) -> ExitCode {
+    let Some(engine) = ProcessEngine::named(name) else {
+        eprintln!("unknown engine `{name}`");
+        return ExitCode::from(2);
+    };
+    let engine = engine.with_timeout(timeout).observing();
+    let gnu_r = ProcessEngine::gnu_r().with_timeout(timeout).observing();
+    let program = match std::fs::read_to_string(file) {
+        Ok(program) => program,
+        Err(error) => {
+            eprintln!("{}: {error}", file.display());
+            return ExitCode::from(2);
+        }
+    };
+    let directory = std::env::temp_dir().join(format!("ry-oracle-reduce-{}", std::process::id()));
+    if let Err(error) = std::fs::create_dir_all(&directory) {
+        eprintln!("{}: {error}", directory.display());
+        return ExitCode::FAILURE;
+    }
+    let started = Instant::now();
+    let reduction = reduce_divergence(&program, &gnu_r, &engine, &directory, budget, None);
+    if let Err(error) = std::fs::remove_dir_all(&directory) {
+        eprintln!("could not remove {}: {error}", directory.display());
+    }
+    let reduction = match reduction {
+        Ok(reduction) => reduction,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    print!("{}", reduction.program);
+    println!(
+        "--- {name} {}: {} to {} bytes, {} candidates in {:.1} s ---",
+        reduction.signature,
+        reduction.bytes_before,
+        reduction.bytes_after,
+        reduction.calls,
+        started.elapsed().as_secs_f64()
+    );
+    if let Some(output) = output
+        && let Err(error) = std::fs::write(output, &reduction.program)
+    {
+        eprintln!("{}: {error}", output.display());
+        return ExitCode::FAILURE;
+    }
+    let observe = match reduction.signature {
+        Signature::ObservedDiffers(_) => "ORACLE_OBSERVE=1 ",
+        _ => "",
+    };
+    println!(
+        "replay: {observe}cargo run -q -p oracle -- compare --engine {name} {}",
+        output.unwrap_or(Path::new("reduced.R")).display()
+    );
+    ExitCode::SUCCESS
 }
 
 fn corpus_directory(corpus: Option<PathBuf>) -> PathBuf {

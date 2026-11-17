@@ -1780,6 +1780,33 @@ fn inlined_program(rng: &mut SplitMix64) -> (String, Vec<String>) {
     (setup, calls.iter().map(|&call| call.to_owned()).collect())
 }
 
+/// A loop that calls a function argument named like a global function compiles once. The call's
+/// lookup stops at the frame, so the code holds no speculation on the global, which would fail
+/// at every loop entry while the argument is a function and invalidate the code.
+#[test]
+fn a_loop_calling_an_argument_named_like_a_global_compiles_once() {
+    let (value, compiles) = with_interpreter(|| unsafe {
+        use heap::activity::{self, Counter};
+        jit::install_mode(Mode::Force);
+        run("f <- function(x) x");
+        run(
+            "repeat_call <- function(n, f) { s <- 0L\ni <- 0L\nwhile (i < n) { s <- s + f(i)\ni <- i + 1L }\ns }",
+        );
+        activity::set_enabled(true);
+        let before = activity::counter(Counter::JitCompiles);
+        let value = run("repeat_call(30000L, function(x) 2L)");
+        let compiles = activity::counter(Counter::JitCompiles) - before;
+        activity::set_enabled(false);
+        jit::install_mode(Mode::Off);
+        (value, compiles)
+    });
+    assert_eq!(value, "60000L");
+    assert!(
+        compiles <= 2,
+        "{compiles} compiles: the loop's code was invalidated"
+    );
+}
+
 /// Compiled code calls an active binding at every read, as tier 0 does. The first compiled run
 /// that meets the binding hands its activation to tier 0 once, after the load, and the body
 /// compiled again loads the variable at each read, so calls after the first neither compile nor

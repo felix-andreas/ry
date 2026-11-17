@@ -6,6 +6,8 @@
 //!   branch and loop programs, including NA, integer overflow and errors, and on random reads and
 //!   writes of attributes, names and elements and `c()` calls, whose compiled calls take the
 //!   builtins' direct entries;
+//! - a closure that writes elements of an argument whose length sits at a storage threshold
+//!   answers the same on its first, second and third call, and leaves the argument unchanged;
 //! - tier 0 resumes a call at every pc it reaches with the result it gives alone, the way it
 //!   resumes after the optimizing tier deoptimizes;
 //! - a compiled call to a base function agrees with the AST evaluator while random code shadows,
@@ -28,8 +30,8 @@ use {
             check_code_image_load, check_code_image_round_trip, check_element_access_agreement,
             check_environment_agreement, check_frame_stack, check_fused_agreement,
             check_image_bodies_round_trip, check_lowering_input, check_quickening_agreement,
-            check_resume_at_every_pc, check_s3_lookup_agreement, check_shadowing_agreement,
-            check_unserialize_input, with_interpreter,
+            check_replacement_agreement, check_resume_at_every_pc, check_s3_lookup_agreement,
+            check_shadowing_agreement, check_unserialize_input, with_interpreter,
         },
         values,
     },
@@ -339,6 +341,13 @@ fn fuzz_tier_zero_resumes_at_every_pc() {
 fn fuzz_element_access_agrees_with_the_ast_evaluator() {
     for_each_seed(300, |seed| {
         check_element_access_agreement(&mut SplitMix64(seed))
+    });
+}
+
+#[test]
+fn fuzz_replacements_agree_across_repeated_calls() {
+    for_each_seed(300, |seed| {
+        check_replacement_agreement(&mut SplitMix64(seed))
     });
 }
 

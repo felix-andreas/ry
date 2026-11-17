@@ -21,14 +21,16 @@
 use {
     crate::{
         builtins::{BuiltinDef, Call, internal},
+        format::{display_width, encode_string},
         http::{self, FetchError},
-        interp, platform,
+        interp,
+        platform::{self, Iconv, convert_all},
         unwind::{R, Unwind, error},
         values::{self, nil, scalar_bool, scalar_integer, symbols},
         write_terminal,
     },
     bzip2::{read::MultiBzDecoder, write::BzEncoder},
-    flate2::{Compression, read::MultiGzDecoder, write::GzEncoder},
+    flate2::{Compression, GzBuilder, read::MultiGzDecoder, write::GzEncoder},
     heap::{
         object::{NA_INTEGER, NA_LOGICAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
         strings::Encoding,
@@ -544,6 +546,9 @@ pub unsafe fn flush_pending_writes() -> R<()> {
 pub unsafe fn with_input<T>(file: Sexp, read: impl FnOnce(&[u8], &mut usize) -> T) -> R<T> {
     let con = resolve_con(file)?.1;
     let was_open = (*con).isopen != 0;
+    if !was_open {
+        (*con).UTF8out = 1;
+    }
     let text = with_open(con, "rt", || {
         if (*con).canread == 0 {
             return Err(error("cannot read from this connection"));
@@ -570,11 +575,11 @@ pub unsafe fn read_all_text(file: Sexp) -> R<String> {
         })?;
         let bytes = decompress(&bytes)
             .map_err(|failure| error(format!("cannot read compressed file '{path}': {failure}")))?;
-        return Ok(String::from_utf8_lossy(&bytes).into_owned());
+        return Ok(values::escape_invalid_bytes(&bytes).into_owned());
     }
     let mut text = String::new();
     with_input(file, |input, position| {
-        text = String::from_utf8_lossy(input).into_owned();
+        text = values::escape_invalid_bytes(input).into_owned();
         *position = input.len();
     })?;
     Ok(text)
@@ -657,7 +662,8 @@ pub unsafe fn write_text(file: Sexp, text: &str) -> R<()> {
             crate::write_console(text.as_bytes(), false);
             return Ok(());
         }
-        return std::fs::write(expand_path(&path), text).map_err(|failure| {
+        let bytes = values::unescape_output(text.as_bytes());
+        return std::fs::write(expand_path(&path), bytes).map_err(|failure| {
             error(format!(
                 "cannot open file '{path}': {}",
                 os_message(&failure)
@@ -697,9 +703,7 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
     let open = values::require_str(call.arg(1), "open")?.into_owned();
     let blocking = values::require_flag(call.arg(2), "blocking")?;
     let mut raw = values::require_flag(call.arg(5), "raw")?;
-    let text_encoding = values::first_string(call.arg(3))
-        .map(|name| name.into_owned())
-        .filter(|name| !name.is_empty() && name != "native.enc");
+    let text_encoding = text_encoding(call.arg(3));
     if ["http://", "https://", "ftp://", "ftps://"]
         .iter()
         .any(|scheme| description.starts_with(scheme))
@@ -755,6 +759,7 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
         temporary,
         encoding: compression,
         text_encoding,
+        output_converter: None,
         invalid_input: false,
         raw: raw || description == "stdin",
         compression: 6,
@@ -786,6 +791,14 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
     Ok(object)
 }
 
+/// The `encoding` argument of a connection constructor: the encoding its text converts from and
+/// to, or `None` for the session's own.
+unsafe fn text_encoding(encoding: Sexp) -> Option<String> {
+    values::first_string(encoding)
+        .map(|name| name.into_owned())
+        .filter(|name| !name.is_empty() && name != "native.enc")
+}
+
 /// `gzfile`, `bzfile` and `xzfile(description, open, encoding, compression)`: reads decompress
 /// gzip, bzip2 or xz data, whichever the magic bytes announce, and pass anything else through,
 /// as GNU R's do. Writes use the connection's own format.
@@ -813,7 +826,8 @@ unsafe fn compressed_file(call: &Call<'_>, encoding: Compressed) -> R<Sexp> {
         path: PathBuf::from(expand_path(&description)),
         temporary: false,
         encoding: Some(encoding),
-        text_encoding: None,
+        text_encoding: text_encoding(call.arg(2)),
+        output_converter: None,
         invalid_input: false,
         raw: false,
         compression: compression.unsigned_abs(),
@@ -1390,9 +1404,22 @@ unsafe fn do_text_connection(call: &Call<'_>) -> R<Sexp> {
             if object.kind() != SexpType::String {
                 return Err(error("invalid 'text' argument"));
             }
+            // GNU R's `text_init` copies a string's own bytes for `encoding = "bytes"` and
+            // translates it otherwise, which refuses a string declared as bytes.
+            let as_bytes = values::as_integer_scalar(call.arg(4)) == 2;
+            if !as_bytes {
+                values::refuse_bytes(object)?;
+            }
             let mut data = Vec::new();
-            for line in values::strings(object) {
-                data.extend_from_slice(line.as_deref().unwrap_or("NA").as_bytes());
+            for (index, line) in values::strings(object).into_iter().enumerate() {
+                match line.as_deref() {
+                    None => data.extend_from_slice(b"NA"),
+                    Some(_) if as_bytes => data.extend_from_slice(object.element(index).bytes()),
+                    Some(text) => match values::unescape_invalid_bytes(text) {
+                        Some(bytes) => data.extend_from_slice(&bytes),
+                        None => data.extend_from_slice(text.as_bytes()),
+                    },
+                }
                 data.push(b'\n');
             }
             Device::TextInput(TextInput { data, position: 0 })
@@ -1467,6 +1494,7 @@ unsafe fn do_open(call: &Call<'_>) -> R<Sexp> {
         set_mode(con, mode.as_bytes());
     }
     (*con).blocking = blocking as Rboolean;
+    drop_unconvertible(con)?;
     open_con(con)?;
     Ok(nil())
 }
@@ -1548,7 +1576,7 @@ unsafe fn do_read_lines(call: &Call<'_>) -> R<Sexp> {
         n => n as i64,
     };
     let ok = values::require_flag(call.arg(2), "ok")?;
-    let warn_incomplete = values::require_flag(call.arg(3), "warn")?;
+    let warn = values::require_flag(call.arg(3), "warn")?;
     let encoding = match values::first_string(call.arg(4)).as_deref() {
         Some("UTF-8" | "utf8") => Encoding::Utf8,
         Some("latin1") => Encoding::Latin1,
@@ -1556,6 +1584,9 @@ unsafe fn do_read_lines(call: &Call<'_>) -> R<Sexp> {
         _ => Encoding::Native,
     };
     let skip_nul = values::require_flag(call.arg(5), "skipNul")?;
+    if (*con).isopen == 0 {
+        (*con).UTF8out = 1;
+    }
     with_open(con, "rt", || {
         if (*con).canread == 0 {
             return Err(error("cannot read from this connection"));
@@ -1576,7 +1607,7 @@ unsafe fn do_read_lines(call: &Call<'_>) -> R<Sexp> {
                 Some(text) => text_line(text, &mut offset, skip_nul, &mut line),
                 None => connection_line(con, skip_nul, &mut line)?,
             };
-            if nul {
+            if nul && warn {
                 crate::conditions::warning(format!(
                     "line {} appears to contain an embedded nul",
                     lines.len() + 1
@@ -1592,7 +1623,7 @@ unsafe fn do_read_lines(call: &Call<'_>) -> R<Sexp> {
                         (*con).incomplete = 1;
                     } else {
                         lines.push(std::mem::take(&mut line));
-                        if warn_incomplete {
+                        if warn {
                             crate::conditions::warning(format!(
                                 "incomplete final line found on '{}'",
                                 description_of(con)
@@ -1602,12 +1633,16 @@ unsafe fn do_read_lines(call: &Call<'_>) -> R<Sexp> {
                 }
                 break;
             }
+            // GNU R drops a UTF-8 byte order mark from the first line each call reads.
+            if lines.is_empty() && line.starts_with(b"\xef\xbb\xbf") {
+                line.drain(..3);
+            }
             lines.push(std::mem::take(&mut line));
         }
         if n > 0 && (lines.len() as i64) < n && !ok {
             return Err(error("too few lines read in readLines"));
         }
-        let encoding = if (*con).UTF8out != 0 && encoding == Encoding::Native {
+        let encoding = if (*con).UTF8out != 0 {
             Encoding::Utf8
         } else {
             encoding
@@ -1822,19 +1857,22 @@ unsafe fn do_read_dcf(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_read_char(call: &Call<'_>) -> R<Sexp> {
     let source = call.arg(0);
     let counts = values::ints(call.arg(1)).to_vec();
-    let use_bytes = values::require_flag(call.arg(2), "useBytes")?;
     if source.kind() == SexpType::Raw {
-        let bytes = values::raws(source);
-        let mut position = 0;
-        return read_char_strings(&counts, use_bytes, &mut |buffer| {
-            let available = bytes.get(position..).unwrap_or_default();
-            let count = available.len().min(buffer.len());
-            buffer[..count].copy_from_slice(&available[..count]);
-            position += count;
-            Ok(count)
-        });
+        if counts.is_empty() {
+            return values::alloc(SexpType::String, 0);
+        }
+        let use_bytes = values::require_flag(call.arg(2), "useBytes")?;
+        let strings = raw_fixed_strings(values::raws(source), &counts, use_bytes)?;
+        return strings_vector(&strings, Encoding::Native);
     }
-    let con = resolve_con(source)?.1;
+    let con = resolve_number(source)?.1;
+    if (*con).canread == 0 {
+        return Err(error("cannot read from this connection"));
+    }
+    if counts.is_empty() {
+        return values::alloc(SexpType::String, 0);
+    }
+    let use_bytes = values::require_flag(call.arg(2), "useBytes")?;
     with_open(con, "rb", || {
         if (*con).canread == 0 {
             return Err(error("cannot read from this connection"));
@@ -1844,69 +1882,107 @@ unsafe fn do_read_char(call: &Call<'_>) -> R<Sexp> {
                 "text connection used with readChar(), results may be incorrect",
             )?;
         }
-        read_char_strings(&counts, use_bytes, &mut |buffer| method_read(con, buffer))
+        let strings = read_fixed_strings(con, &counts, use_bytes)?;
+        strings_vector(&strings, Encoding::Native)
     })
 }
 
-/// `writeChar(object, con, nchars, eos, useBytes)`: each string cut or zero-padded to its count,
-/// then `eos` and a nul unless `eos` is `NULL`. A raw vector `con` gets the bytes as a new raw
-/// vector instead.
+/// `writeChar(object, con, nchars, eos, useBytes)`: the first `nchars[i]` characters of each
+/// string, zero-padded when it has fewer, then `eos` and a nul unless `eos` is `NULL`. A raw
+/// vector `con` gets the bytes as a new raw vector instead.
 unsafe fn do_write_char(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     if object.kind() != SexpType::String {
         return Err(error("can only write character objects"));
     }
     let target = call.arg(1);
+    let con = if target.kind() == SexpType::Raw {
+        None
+    } else {
+        let con = resolve_number(target)?.1;
+        if (*con).canwrite == 0 {
+            return Err(error("cannot write to this connection"));
+        }
+        Some(con)
+    };
     let counts = values::ints(call.arg(2)).to_vec();
+    let use_bytes = values::require_flag(call.arg(4), "useBytes")?;
     let terminator = match call.arg(3) {
         eos if eos == nil() => None,
-        eos => Some(values::require_str(eos, "eos")?),
+        eos if eos.kind() == SexpType::String && values::length(eos) == 1 => {
+            Some(translated_bytes(eos.element(0), use_bytes)?)
+        }
+        _ => return Err(error("invalid 'sep' argument")),
     };
-    let use_bytes = values::require_flag(call.arg(4), "useBytes")?;
-    let strings = values::strings(object);
-    if counts.len() < strings.len() {
+    if values::length(object) < counts.len() {
+        return Err(error("'object' is too short"));
+    }
+    if counts.is_empty() {
+        interp().visible = true;
+        return match con {
+            None => raw_vector(&[]),
+            Some(_) => Ok(nil()),
+        };
+    }
+    if counts.iter().any(|&count| count == NA_INTEGER || count < 0) {
         return Err(error("invalid 'nchars' argument"));
     }
+    // Every string is cut before the first byte goes out, so a failure writes nothing.
     let mut bytes = Vec::new();
-    for (text, &count) in strings.iter().zip(&counts) {
-        let text = text.as_deref().unwrap_or("NA");
-        if count == NA_INTEGER || count < 0 {
-            return Err(error("invalid 'nchars' argument"));
-        }
+    for (index, &count) in counts.iter().enumerate() {
+        let text = translated_bytes(object.element(index), use_bytes)?;
         let wanted = count as usize;
-        let available = if use_bytes {
-            text.len()
-        } else {
-            text.chars().count()
-        };
-        if wanted > available {
-            crate::conditions::warning(
-                "writeChar: more characters requested than are in the string - will zero-pad",
-            )?;
-            bytes.extend_from_slice(text.as_bytes());
-            bytes.resize(bytes.len() + (wanted - available), 0);
-        } else if use_bytes {
-            bytes.extend_from_slice(text.as_bytes().get(..wanted).unwrap_or_default());
-        } else {
-            let end = text
-                .char_indices()
-                .nth(wanted)
-                .map_or(text.len(), |(index, _)| index);
-            bytes.extend_from_slice(text.as_bytes().get(..end).unwrap_or_default());
+        // A string the locale cannot decode has no character count, so it is never padded
+        // and the walk over its first `wanted` characters fails at the undecodable byte.
+        match character_count(&text) {
+            Some(available) if wanted >= available => {
+                if wanted > available {
+                    crate::conditions::warning(
+                        "writeChar: more characters requested than are in the string - will zero-pad",
+                    )?;
+                }
+                bytes.extend_from_slice(&text);
+                bytes.resize(bytes.len() + (wanted - available), 0);
+            }
+            _ => {
+                let mut end = 0;
+                for _ in 0..wanted {
+                    let rest = text.get(end..).unwrap_or_default();
+                    if rest.is_empty() {
+                        break;
+                    }
+                    end += multibyte_length(rest).ok_or_else(|| invalid_multibyte(rest))?;
+                }
+                bytes.extend_from_slice(text.get(..end).unwrap_or_default());
+            }
         }
         if let Some(terminator) = &terminator {
-            bytes.extend_from_slice(terminator.as_bytes());
+            bytes.extend_from_slice(terminator);
             bytes.push(0);
         }
     }
-    if target.kind() == SexpType::Raw {
+    let Some(con) = con else {
         interp().visible = true;
         return raw_vector(&bytes);
-    }
-    let con = resolve_con(target)?.1;
+    };
     with_open(con, "wb", || {
         if (*con).canwrite == 0 {
             return Err(error("cannot write to this connection"));
+        }
+        let builtin = (*con)
+            .write
+            .is_some_and(|method| is_method(method, builtin_write as WriteMethod));
+        match device(con) {
+            // The console connections print text and have no method for bytes.
+            Ok(Device::Standard(_)) if builtin => return Err(missing("write")),
+            Ok(Device::File(file))
+                if builtin && (*con).text != 0 && file.output_converter.is_some() =>
+            {
+                crate::conditions::warning(
+                    "text connection used with writeChar(), results may be incorrect",
+                )?;
+            }
+            _ => {}
         }
         write_all(con, &bytes)
     })?;
@@ -1917,6 +1993,15 @@ unsafe fn do_write_char(call: &Call<'_>) -> R<Sexp> {
 /// `readBin(con, what, n, size, signed, swap)`, from a connection or from a raw vector.
 unsafe fn do_read_bin(call: &Call<'_>) -> R<Sexp> {
     let source = call.arg(0);
+    let con = if source.kind() == SexpType::Raw {
+        None
+    } else {
+        let con = resolve_number(source)?.1;
+        if (*con).text != 0 {
+            return Err(error("can only read from a binary connection"));
+        }
+        Some(con)
+    };
     let kind = match values::require_str(call.arg(1), "what")?.as_ref() {
         "numeric" | "double" => BinaryType::Double,
         "integer" | "int" => BinaryType::Integer,
@@ -1931,27 +2016,34 @@ unsafe fn do_read_bin(call: &Call<'_>) -> R<Sexp> {
         return Err(error("invalid 'n' argument"));
     }
     let count = count as usize;
-    let size = size_argument(call.arg(3))?;
+    let size = size_argument(call.arg(3));
     let signed = values::require_flag(call.arg(4), "signed")?;
     let swap = values::require_flag(call.arg(5), "swap")?;
-    if source.kind() == SexpType::Raw {
+    let Some(con) = con else {
         return read_bin_bytes(values::raws(source), kind, count, size, signed, swap);
-    }
-    let con = resolve_con(source)?.1;
+    };
     with_open(con, "rb", || {
         if (*con).canread == 0 {
             return Err(error("cannot read from this connection"));
-        }
-        if (*con).text != 0 {
-            return Err(error("can only read from a binary connection"));
         }
         if kind == BinaryType::Character {
             let mut strings = Vec::new();
             'strings: for _ in 0..count {
                 let mut text = Vec::new();
                 loop {
+                    if text.len() == STRING_LIMIT {
+                        crate::conditions::warning(format!(
+                            "null terminator not found: breaking string at {STRING_LIMIT} bytes"
+                        ))?;
+                        break;
+                    }
                     let mut byte = [0u8];
                     if method_read(con, &mut byte)? == 0 {
+                        if !text.is_empty() {
+                            crate::conditions::warning(
+                                "incomplete string at end of file has been discarded",
+                            )?;
+                        }
                         break 'strings;
                     }
                     if byte[0] == 0 {
@@ -1963,41 +2055,88 @@ unsafe fn do_read_bin(call: &Call<'_>) -> R<Sexp> {
             }
             return strings_vector(&strings, Encoding::Native);
         }
-        let size = binary_size(kind, size)?;
+        let size = binary_size(kind, size, true)?;
+        warn_unsigned(kind, size, signed)?;
         let total = count
             .checked_mul(size)
             .ok_or_else(|| error("too many items"))?;
-        let mut bytes = vec![0u8; total];
-        let got = read_all(con, &mut bytes)? / size;
-        decode_binary(
-            bytes.get(..got * size).unwrap_or_default(),
-            kind,
-            size,
-            signed,
-            swap,
-        )
+        // The buffer grows with the data, because `n` is an upper bound that callers set far
+        // above what the connection holds.
+        let mut bytes = Vec::new();
+        while bytes.len() < total {
+            let start = bytes.len();
+            bytes.resize(total.min(start + READ_CHUNK), 0);
+            let wanted = bytes.len() - start;
+            let got = read_all(con, &mut bytes[start..])?;
+            if got < wanted {
+                bytes.truncate(start + got);
+                break;
+            }
+        }
+        let whole = bytes.len() / size * size;
+        decode_binary(&bytes[..whole], kind, size, signed, swap)
     })
 }
+
+/// The longest string `readBin(what = "character")` reads from a connection before it breaks
+/// the string, as in GNU R.
+const STRING_LIMIT: usize = 10000;
 
 /// `writeBin(object, con, size, swap, useBytes)`. A raw vector `con` gets the bytes as a new raw
 /// vector instead.
 unsafe fn do_write_bin(call: &Call<'_>) -> R<Sexp> {
     let object = values::materialize(call.arg(0))?;
-    let target = call.arg(1);
-    let size = size_argument(call.arg(2))?;
-    let swap = values::require_flag(call.arg(3), "swap")?;
-    let bytes = encode_binary(object, size, swap)?;
-    if target.kind() == SexpType::Raw {
-        interp().visible = true;
-        return raw_vector(&bytes);
+    if !matches!(
+        object.kind(),
+        SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::String
+            | SexpType::Raw
+    ) {
+        return Err(error("'x' is not an atomic vector type"));
     }
-    let con = resolve_con(target)?.1;
-    with_open(con, "wb", || {
+    let target = call.arg(1);
+    let con = if target.kind() == SexpType::Raw {
+        None
+    } else {
+        let con = resolve_number(target)?.1;
+        if (*con).text != 0 {
+            return Err(error("can only write to a binary connection"));
+        }
         if (*con).canwrite == 0 {
             return Err(error("cannot write to this connection"));
         }
-        if (*con).text != 0 {
-            return Err(error("can only write to a binary connection"));
+        Some(con)
+    };
+    let size = size_argument(call.arg(2));
+    let swap = values::require_flag(call.arg(3), "swap")?;
+    let use_bytes = values::require_flag(call.arg(4), "useBytes")?;
+    let Some(con) = con else {
+        interp().visible = true;
+        if values::length(object) == 0 {
+            return raw_vector(&[]);
+        }
+        let mut result = nil();
+        encode_binary(object, size, swap, use_bytes, |total| {
+            result = values::alloc_uninit(SexpType::Raw, total)?;
+            Ok(values::raws_mut(result))
+        })?;
+        return Ok(result);
+    };
+    if values::length(object) == 0 {
+        interp().visible = true;
+        return Ok(nil());
+    }
+    let mut bytes = Vec::new();
+    encode_binary(object, size, swap, use_bytes, |total| {
+        bytes.resize(total, 0);
+        Ok(bytes.as_mut_slice())
+    })?;
+    with_open(con, "wb", || {
+        if (*con).canwrite == 0 {
+            return Err(error("cannot write to this connection"));
         }
         write_all(con, &bytes)
     })?;
@@ -2005,11 +2144,11 @@ unsafe fn do_write_bin(call: &Call<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
-unsafe fn size_argument(value: Sexp) -> R<Option<usize>> {
+/// The `size` argument of `readBin` and `writeBin`, `None` for the type's natural size.
+unsafe fn size_argument(value: Sexp) -> Option<i32> {
     match values::as_integer_scalar(value) {
-        NA_INTEGER => Ok(None),
-        size if size <= 0 => Err(error(format!("size {size} is unknown on this machine"))),
-        size => Ok(Some(size as usize)),
+        NA_INTEGER => None,
+        size => Some(size),
     }
 }
 
@@ -2090,10 +2229,19 @@ unsafe fn do_push_back(call: &Call<'_>) -> R<Sexp> {
     }
     let con = resolve_con(call.arg(1))?.1;
     let newline = values::require_flag(call.arg(2), "newLine")?;
-    let lines: Vec<Vec<u8>> = values::strings(data)
-        .into_iter()
-        .map(|line| {
-            let mut line = line.unwrap_or_else(|| "NA".into()).into_bytes();
+    // `encoding = "bytes"` (type 2) pushes every string back as the bytes it holds. The other
+    // two re-encode Latin-1 text for the UTF-8 session and leave any other string's bytes alone.
+    let as_bytes = values::as_integer_scalar(call.arg(3)) == 2;
+    let lines: Vec<Vec<u8>> = (0..values::length(data))
+        .map(|index| {
+            let charsxp = data.element(index);
+            let mut line = if charsxp == values::na_string() {
+                b"NA".to_vec()
+            } else if !as_bytes && charsxp.has_gp(heap::object::gp::LATIN1) {
+                values::char_str(charsxp).into_owned().into_bytes()
+            } else {
+                charsxp.bytes().to_vec()
+            };
             if newline {
                 line.push(b'\n');
             }
@@ -2228,20 +2376,44 @@ unsafe fn do_sink_number(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// `cat(list(...), file, sep, fill, labels, append)`.
+///
+/// The line filling follows GNU R's `do_cat` step for step, because its rule is not "break
+/// when the line is full": a piece is measured in bytes and a separator in columns, a newline
+/// inside a piece leaves the running width alone, and an object's first piece is tested
+/// differently from its later ones.
 unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
     let items = call.arg(0);
     let file = call.arg(1);
     let separators = call.arg(2);
     let fill = call.arg(3);
+    let labels = call.arg(4);
+    if separators.kind() != SexpType::String {
+        return Err(error("invalid 'sep' specification"));
+    }
+    let fill_is_number = matches!(fill.kind(), SexpType::Integer | SexpType::Real)
+        && !values::inherits(fill, "factor");
+    if !(fill_is_number || fill.kind() == SexpType::Logical) || values::length(fill) != 1 {
+        return Err(error("invalid 'fill' argument"));
+    }
+    // `None` is no filling. A logical `NA` is no filling too, and a number below one is ignored
+    // with a warning.
     let fill_width = if fill.kind() == SexpType::Logical {
-        if values::as_logical_scalar(fill) == 1 {
-            crate::format::width_option()
-        } else {
-            0
-        }
+        (values::as_logical_scalar(fill) == 1).then(|| crate::format::width_option())
     } else {
-        values::as_integer_scalar(fill).max(0) as usize
+        let width = values::as_integer_scalar(fill);
+        if width <= 0 {
+            crate::conditions::warning("non-positive 'fill' argument will be ignored")?;
+            None
+        } else {
+            Some(width as usize)
+        }
     };
+    if !matches!(labels.kind(), SexpType::String | SexpType::Nil) {
+        return Err(error("invalid 'labels' argument"));
+    }
+    if values::as_logical_scalar(call.arg(5)) == NA_LOGICAL {
+        return Err(error("invalid 'append' specification"));
+    }
     let separator_count = values::length(separators);
     let separator_at = |index: usize| -> String {
         if separator_count == 0 {
@@ -2251,31 +2423,55 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
                 .map_or_else(|| "NA".into(), |text| text.into_owned())
         }
     };
-    // With `fill`, every line starts with the next of `labels` and a space.
-    let labels = call.arg(4);
-    let label_count = if fill_width > 0 && labels.kind() == SexpType::String {
-        values::length(labels)
-    } else {
-        0
+    let separator_width = |index: usize| display_width(&encode_string(&separator_at(index), None));
+    // GNU R divides by the number of labels, so `labels = character(0)` with a line to break
+    // stops it with a floating point exception. Here no labels means no labels.
+    let label_count = values::length(labels);
+    // A label that is `NA` starts the first line as `NA` and a later line as `<NA>`, each four
+    // columns wide: GNU R writes the first label as text and encodes the others.
+    let label_at = |line: usize, first: bool| -> (String, usize) {
+        match values::string_at(labels, line % label_count) {
+            Some(text) => {
+                let encoded = encode_string(&text, None);
+                let width = display_width(&encoded);
+                (if first { text.into_owned() } else { encoded }, width)
+            }
+            None => (if first { "NA" } else { "<NA>" }.into(), 4),
+        }
     };
-    let mut line_index = 0usize;
     let mut output = String::new();
     let mut line_width = 0usize;
-    let mut start_line = |output: &mut String, line_width: &mut usize| {
+    let mut line_count = 0usize;
+    let break_line = |output: &mut String, line_width: &mut usize, line_count: &mut usize| {
+        output.push('\n');
+        *line_width = 0;
         if label_count > 0 {
-            let label = values::string_at(labels, line_index % label_count)
-                .map_or_else(|| "NA".into(), |text| text.into_owned());
+            let (label, width) = label_at(*line_count, false);
+            *line_width = width + 1;
             output.push_str(&label);
             output.push(' ');
-            *line_width = label.len() + 1;
         }
-        line_index += 1;
+        *line_count += 1;
     };
-    start_line(&mut output, &mut line_width);
+    let overflows = |line_width: usize, piece: &str, separator: usize| {
+        // A piece is measured as GNU R's `strlen` measures it, so an invalid byte counts one.
+        let bytes = values::unescape_invalid_bytes(piece).map_or(piece.len(), |bytes| bytes.len());
+        (
+            bytes,
+            fill_width.is_some_and(|fill| line_width + bytes + separator > fill),
+        )
+    };
     let settings = crate::format::Settings::current();
-    let mut separator_index = 0usize;
+    // The number of pieces written, which selects the separator after each one.
+    let mut piece_count = 0usize;
     for item_index in 0..values::length(items) {
         let item = items.element(item_index);
+        // Every object after the first, even an empty one, is preceded by a separator, but a
+        // NULL object is skipped without one.
+        if item_index > 0 && item.kind() != SexpType::Nil {
+            output.push_str(&separator_at(piece_count));
+            piece_count += 1;
+        }
         let texts: Vec<String> = match item.kind() {
             SexpType::Nil => continue,
             SexpType::Symbol => vec![values::symbol_name(item).into_owned()],
@@ -2297,14 +2493,12 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
             }
             // GNU R handles only atomic vectors and names; a list, even of length-one
             // elements, a call and anything else is an error, reported against `cat()`'s own
-            // call. An empty list prints nothing.
-            SexpType::List if values::length(item) == 0 => Vec::new(),
+            // call. An object of length zero, such as an empty list or environment, prints
+            // nothing.
+            _ if values::length(item) == 0 => Vec::new(),
             kind => {
                 // GNU R writes each object as it goes, so the objects before this one and the
                 // separator in front of it are already out when the error is raised.
-                if item_index > 0 {
-                    output.push_str(&separator_at(separator_index));
-                }
                 cat_text(file, output.as_bytes())?;
                 return Err(error(format!(
                     "argument {} (type '{}') cannot be handled by 'cat'",
@@ -2313,44 +2507,41 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
                 )));
             }
         };
-        // Every object after the first, even an empty one, is preceded by a separator, but a
-        // NULL object is skipped without one.
-        if item_index > 0 && texts.is_empty() {
-            output.push_str(&separator_at(separator_index));
-            separator_index += 1;
+        let Some(first) = texts.first() else {
+            continue;
+        };
+        // Only a first object that prints something starts the first line with a label.
+        if item_index == 0 && label_count > 0 && fill_width.is_some() {
+            let (label, width) = label_at(line_count, true);
+            line_width += width + 1;
+            output.push_str(&label);
+            output.push(' ');
+            line_count += 1;
         }
-        for (position, text) in texts.into_iter().enumerate() {
-            // The separator goes before the line break, and a piece only fits on the line if
-            // the separator after it does too.
-            if position > 0 || item_index > 0 {
-                let separator = separator_at(separator_index);
-                separator_index += 1;
-                output.push_str(&separator);
-                line_width += separator.len();
-                if let Some(position) = separator.rfind('\n') {
-                    line_width = separator.len() - position - 1;
+        let mut separator = separator_width(piece_count);
+        let (mut bytes, overflow) = overflows(line_width, first, separator);
+        if item_index > 0 && overflow {
+            break_line(&mut output, &mut line_width, &mut line_count);
+        }
+        for (position, text) in texts.iter().enumerate() {
+            output.push_str(text);
+            line_width += bytes + separator;
+            if let Some(next) = texts.get(position + 1) {
+                output.push_str(&separator_at(piece_count));
+                separator = separator_width(piece_count);
+                let overflow;
+                (bytes, overflow) = overflows(line_width, next, separator);
+                if overflow {
+                    break_line(&mut output, &mut line_width, &mut line_count);
                 }
-                let next_separator = separator_at(separator_index).len();
-                if fill_width > 0
-                    && line_width > 0
-                    && line_width + text.len() + next_separator > fill_width
-                {
-                    output.push('\n');
-                    line_width = 0;
-                    start_line(&mut output, &mut line_width);
-                }
+                piece_count += 1;
             }
-            line_width += text.len();
-            if let Some(position) = text.rfind('\n') {
-                line_width = text.len() - position - 1;
-            }
-            output.push_str(&text);
         }
     }
-    // A separator holding a newline makes the separators terminators, so the output always
-    // ends with one, even when there was nothing to print.
+    // Filling ends the output with a newline, and so does a separator holding one, even when
+    // there was nothing to print.
     let newline_separator = (0..separator_count).any(|index| separator_at(index).contains('\n'));
-    if newline_separator || (fill_width > 0 && !output.ends_with('\n') && !output.is_empty()) {
+    if fill_width.is_some() || newline_separator {
         output.push('\n');
     }
     cat_text(file, output.as_bytes())?;
@@ -2793,14 +2984,35 @@ unsafe fn unsupported_conversion(con: Rconnection) -> R<Option<String>> {
     let Some(mode) = parse_mode(&mode_of(con)) else {
         return Ok(None);
     };
-    if mode.binary || crate::system::convert_to_utf8_prefix(encoding, b"").is_some() {
+    let reads_marked = encoding == "UTF-8-BOM" && !mode.write;
+    if mode.binary || reads_marked || Iconv::open(encoding, "UTF-8").is_some() {
         return Ok(None);
     }
-    Ok(Some(if mode.write {
-        format!("unsupported conversion from 'UTF-8' to '{encoding}'")
-    } else {
-        format!("unsupported conversion from '{encoding}' to 'UTF-8'")
-    }))
+    Ok(Some(format!(
+        "unsupported conversion from '{encoding}' to ''"
+    )))
+}
+
+/// Fails for a connection of ry's own whose text encoding cannot convert in its current mode,
+/// and destroys it first, as GNU R does when it opens one: the object names no connection
+/// afterwards, so `con` must not be used after an error.
+unsafe fn drop_unconvertible(con: Rconnection) -> R<()> {
+    let builtin = (*con)
+        .open
+        .is_some_and(|method| is_method(method, builtin_open as OpenMethod));
+    if !builtin {
+        return Ok(());
+    }
+    let Some(message) = unsupported_conversion(con)? else {
+        return Ok(());
+    };
+    let slot = entries()
+        .iter()
+        .position(|entry| entry.as_ref().is_some_and(|entry| entry.con == con));
+    if let Some(slot) = slot {
+        close_slot(slot)?;
+    }
+    Err(error(message))
 }
 
 /// Runs `body` with the connection open in `mode`, opening it first and closing it afterwards
@@ -2811,6 +3023,7 @@ unsafe fn with_open<T>(con: Rconnection, mode: &str, body: impl FnOnce() -> R<T>
     }
     let saved = mode_of(con);
     set_mode(con, mode.as_bytes());
+    drop_unconvertible(con)?;
     let opened = open_con(con);
     set_mode(con, &saved);
     opened?;
@@ -2986,59 +3199,225 @@ unsafe fn push_back_bytes(con: Rconnection, line: &[u8]) {
     (*con).nPushBack = count as c_int;
 }
 
-/// `readChar`'s strings, one per count, from `read`, which fills a buffer and returns how much
-/// it filled.
-unsafe fn read_char_strings(
-    counts: &[i32],
-    use_bytes: bool,
-    read: &mut dyn FnMut(&mut [u8]) -> R<usize>,
-) -> R<Sexp> {
+/// `readChar`'s strings from a connection, one per count. Without `use_bytes` a count is in
+/// characters, each read by its lead byte and then checked. A string ends at its first nul,
+/// and the reading stops at the first count that finds the connection at its end.
+unsafe fn read_fixed_strings(con: Rconnection, counts: &[i32], use_bytes: bool) -> R<Vec<Vec<u8>>> {
     let mut strings = Vec::new();
+    let mut warned = false;
+    'strings: for &count in counts {
+        if count == NA_INTEGER || count < 0 {
+            return Err(error("invalid 'nchars' argument"));
+        }
+        let count = count as usize;
+        let mut text = Vec::new();
+        if use_bytes {
+            text.resize(count, 0);
+            let filled = read_all(con, &mut text)?;
+            text.truncate(filled);
+            if count > 0 && filled == 0 {
+                break;
+            }
+        } else {
+            for index in 0..count {
+                let mut sequence = [0u8; 6];
+                if method_read(con, &mut sequence[..1])? == 0 {
+                    if index == 0 {
+                        break 'strings;
+                    }
+                    break;
+                }
+                let length = utf8_sequence_length(sequence[0]);
+                if length > 1
+                    && (read_all(con, &mut sequence[1..length])? < length - 1
+                        || multibyte_length(&sequence[..length]) != Some(length))
+                {
+                    return Err(error("invalid UTF-8 input in readChar()"));
+                }
+                text.extend_from_slice(&sequence[..length]);
+            }
+        }
+        if let Some(end) = memchr(0, &text) {
+            text.truncate(end);
+            if !warned {
+                warned = true;
+                crate::conditions::warning("truncating string with embedded nuls")?;
+            }
+        }
+        strings.push(text);
+    }
+    Ok(strings)
+}
+
+/// `readChar`'s strings from bytes in memory. A count is clipped to the bytes that remain,
+/// and a character is taken by its lead byte alone, so only one that runs past the end fails.
+fn raw_fixed_strings<'a>(bytes: &'a [u8], counts: &[i32], use_bytes: bool) -> R<Vec<&'a [u8]>> {
+    let mut strings = Vec::new();
+    let mut position = 0;
     for &count in counts {
         if count == NA_INTEGER || count < 0 {
             return Err(error("invalid 'nchars' argument"));
         }
-        let mut text = Vec::new();
-        let mut wanted = count as usize;
-        while wanted > 0 {
-            let mut lead = [0u8];
-            if read(&mut lead)? == 0 {
+        let remaining = bytes.len() - position;
+        let mut count = count as usize;
+        if count > remaining {
+            if remaining == 0 {
                 break;
             }
-            text.push(lead[0]);
-            if !use_bytes {
-                let mut rest = vec![0u8; utf8_continuation_bytes(lead[0])];
-                let mut filled = 0;
-                while filled < rest.len() {
-                    let got = read(&mut rest[filled..])?;
-                    if got == 0 {
-                        break;
-                    }
-                    filled += got;
+            count = remaining;
+        }
+        let start = position;
+        if use_bytes {
+            position += count;
+        } else {
+            for _ in 0..count {
+                let Some(&lead) = bytes.get(position) else {
+                    break;
+                };
+                position += utf8_sequence_length(lead);
+                if position > bytes.len() {
+                    return Err(error("invalid UTF-8 input in readChar()"));
                 }
-                text.extend_from_slice(&rest[..filled]);
             }
-            wanted -= 1;
         }
-        if text.is_empty() && count > 0 {
-            break;
-        }
-        if let Some(end) = text.iter().position(|&byte| byte == 0) {
-            text.truncate(end);
-            crate::conditions::warning("truncating string with embedded nuls")?;
-        }
-        strings.push(text);
+        strings.push(&bytes[start..position]);
     }
-    strings_vector(&strings, Encoding::Native)
+    Ok(strings)
 }
 
-fn utf8_continuation_bytes(lead: u8) -> usize {
+/// The length a lead byte announces, as GNU R's `utf8clen` reads it: a continuation byte
+/// counts as a character of its own, and the lead bytes of the five and six byte forms count.
+pub fn utf8_sequence_length(lead: u8) -> usize {
     match lead {
-        0xc0..=0xdf => 1,
-        0xe0..=0xef => 2,
-        0xf0..=0xf7 => 3,
-        _ => 0,
+        0xc0..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf7 => 4,
+        0xf8..=0xfb => 5,
+        0xfc..=0xff => 6,
+        _ => 1,
     }
+}
+
+/// The length of the character glibc's `mbrtowc` decodes at the start of `bytes` in a UTF-8
+/// locale, or `None` for a sequence it rejects or that `bytes` cuts short. It rejects overlong
+/// forms and surrogates, but accepts code points above U+10FFFF, the five and six byte forms
+/// included.
+pub fn multibyte_length(bytes: &[u8]) -> Option<usize> {
+    let lead = *bytes.first()?;
+    let (length, least_second) = match lead {
+        0..=0x7f => return Some(1),
+        0xc2..=0xdf => (2, 0x80),
+        0xe0 => (3, 0xa0),
+        0xe1..=0xef => (3, 0x80),
+        0xf0 => (4, 0x90),
+        0xf1..=0xf7 => (4, 0x80),
+        0xf8 => (5, 0x88),
+        0xf9..=0xfb => (5, 0x80),
+        0xfc => (6, 0x84),
+        0xfd => (6, 0x80),
+        _ => return None,
+    };
+    let rest = bytes.get(1..length)?;
+    let second = *rest.first()?;
+    let accepted = rest.iter().all(|byte| byte & 0xc0 == 0x80)
+        && second >= least_second
+        && !(lead == 0xed && second >= 0xa0);
+    accepted.then_some(length)
+}
+
+/// How many characters `mbstowcs` counts in `bytes`, or `None` when it cannot decode them.
+fn character_count(bytes: &[u8]) -> Option<usize> {
+    let mut count = 0;
+    let mut position = 0;
+    while position < bytes.len() {
+        position += multibyte_length(&bytes[position..])?;
+        count += 1;
+    }
+    Some(count)
+}
+
+/// GNU R's error for a character walk that stops at bytes the locale cannot decode, which
+/// `rest` starts with. The message shows `rest` with each byte the replay cannot decode as
+/// `<xx>`.
+pub fn invalid_multibyte(rest: &[u8]) -> Unwind {
+    // GNU R's `Mbrtowc` replays `rest` through one decoder with a budget of six bytes that it
+    // never refills, and steps one byte after each failure whatever the decoder consumed. So a
+    // character the budget cuts stays half read in the decoder: `held` of its `whole` bytes.
+    let mut shown = Vec::new();
+    let mut budget = 6usize;
+    let (mut held, mut whole) = (0, 0);
+    let mut position = 0;
+    while let Some(tail) = rest.get(position..).filter(|tail| !tail.is_empty()) {
+        let decoded = if position == 0 || budget == 0 {
+            None
+        } else if held > 0 {
+            let continuation = tail
+                .iter()
+                .take(budget.min(whole - held))
+                .take_while(|&&byte| byte & 0xc0 == 0x80)
+                .count();
+            if held + continuation == whole {
+                held = 0;
+                Some(continuation)
+            } else {
+                if continuation == budget {
+                    held += continuation;
+                }
+                None
+            }
+        } else {
+            match multibyte_length(tail) {
+                Some(length) if length > budget => {
+                    (held, whole) = (budget, length);
+                    None
+                }
+                length => length,
+            }
+        };
+        match decoded {
+            Some(length) => {
+                shown.extend_from_slice(&tail[..length]);
+                position += length;
+                budget -= length;
+            }
+            None => {
+                shown.extend_from_slice(format!("<{:02x}>", tail[0]).as_bytes());
+                position += 1;
+                budget = budget.wrapping_sub(1);
+            }
+        }
+    }
+    let mut message = b"invalid multibyte string at '".to_vec();
+    message.extend_from_slice(&shown);
+    message.push(b'\'');
+    crate::conditions::c_error(&message)
+}
+
+/// The bytes a binary writer puts out for one string: `NA` as the text "NA", Latin-1 text
+/// re-encoded for the UTF-8 session unless `use_bytes`, and any other string as the bytes it
+/// holds, valid text or not.
+unsafe fn output_bytes<'a>(charsxp: Sexp, use_bytes: bool) -> Cow<'a, [u8]> {
+    if charsxp == values::na_string() {
+        Cow::Borrowed(b"NA")
+    } else if !use_bytes && charsxp.has_gp(gp::LATIN1) {
+        match values::char_str(charsxp) {
+            Cow::Borrowed(text) => Cow::Borrowed(text.as_bytes()),
+            Cow::Owned(text) => Cow::Owned(text.into_bytes()),
+        }
+    } else {
+        Cow::Borrowed(charsxp.bytes())
+    }
+}
+
+/// [`output_bytes`] for a writer that needs the characters of the string, which GNU R's
+/// `translateChar` refuses to give for one declared as bytes unless it is ASCII.
+unsafe fn translated_bytes<'a>(charsxp: Sexp, use_bytes: bool) -> R<Cow<'a, [u8]>> {
+    if !use_bytes && charsxp.has_gp(gp::BYTES) && !charsxp.bytes().is_ascii() {
+        return Err(error(
+            "translating strings with \"bytes\" encoding is not allowed",
+        ));
+    }
+    Ok(output_bytes(charsxp, use_bytes))
 }
 
 /// Fills `buffer`, short only at the end of the input.
@@ -3107,10 +3486,10 @@ unsafe fn write_all(con: Rconnection, bytes: &[u8]) -> R<()> {
     Ok(())
 }
 
-unsafe fn strings_vector(lines: &[Vec<u8>], encoding: Encoding) -> R<Sexp> {
+unsafe fn strings_vector(lines: &[impl AsRef<[u8]>], encoding: Encoding) -> R<Sexp> {
     let vector = values::alloc(SexpType::String, lines.len())?;
     for (index, line) in lines.iter().enumerate() {
-        let charsxp = values::mkchar_bytes(line, encoding)?;
+        let charsxp = values::mkchar_bytes(line.as_ref(), encoding)?;
         crate::heap().set_element(vector, index, charsxp);
     }
     Ok(vector)
@@ -3122,21 +3501,38 @@ unsafe fn raw_vector(bytes: &[u8]) -> R<Sexp> {
     Ok(vector)
 }
 
-/// The size each `readBin`/`writeBin` element type takes by default, and the sizes it allows.
-fn binary_size(kind: BinaryType, size: Option<usize>) -> R<usize> {
-    let (default, allowed): (usize, &[usize]) = match kind {
-        BinaryType::Integer => (4, &[1, 2, 4, 8]),
-        BinaryType::Logical => (4, &[1, 2, 4, 8]),
+/// The bytes each `readBin`/`writeBin` element takes: the type's natural size, or `size` when
+/// the type allows it.
+fn binary_size(kind: BinaryType, size: Option<i32>, reading: bool) -> R<usize> {
+    let (natural, allowed): (usize, &[i32]) = match kind {
+        BinaryType::Integer | BinaryType::Logical => (4, &[1, 2, 4, 8]),
+        BinaryType::Double if cfg!(target_arch = "x86_64") => (8, &[4, 8, 16]),
         BinaryType::Double => (8, &[4, 8]),
         BinaryType::Complex => (16, &[16]),
-        BinaryType::Raw => (1, &[1]),
-        BinaryType::Character => (1, &[1]),
+        BinaryType::Raw | BinaryType::Character => (1, &[1]),
     };
     match size {
-        None => Ok(default),
-        Some(size) if allowed.contains(&size) => Ok(size),
-        Some(size) => Err(error(format!("size {size} is unknown on this machine"))),
+        None => Ok(natural),
+        Some(size) if allowed.contains(&size) => Ok(size as usize),
+        Some(size) => Err(error(match kind {
+            BinaryType::Complex => "size changing is not supported for complex vectors".to_owned(),
+            BinaryType::Raw if reading => "raw is always of size 1".to_owned(),
+            BinaryType::Raw => "size changing is not supported for raw vectors".to_owned(),
+            _ => format!("size {size} is unknown on this machine"),
+        })),
     }
+}
+
+/// `readBin`'s warning for `signed = FALSE` on a type or size that has no unsigned reading.
+unsafe fn warn_unsigned(kind: BinaryType, size: usize, signed: bool) -> R<()> {
+    let integral = matches!(
+        kind,
+        BinaryType::Integer | BinaryType::Logical | BinaryType::Raw
+    );
+    if !signed && (kind == BinaryType::Double || (integral && size > 2)) {
+        crate::conditions::warning("'signed = FALSE' is only valid for integers of sizes 1 and 2")?;
+    }
+    Ok(())
 }
 
 /// `readBin` on bytes in memory, as for a raw vector argument.
@@ -3144,24 +3540,23 @@ unsafe fn read_bin_bytes(
     bytes: &[u8],
     kind: BinaryType,
     n: usize,
-    size: Option<usize>,
+    size: Option<i32>,
     signed: bool,
     swap: bool,
 ) -> R<Sexp> {
     if kind == BinaryType::Character {
         // Unlike a connection, a raw vector always yields `n` strings, as GNU R's `rawOneString`
         // does: an unterminated tail is the last string, and reading past the end gives "".
-        let mut pieces = bytes.split_inclusive(|&byte| byte == 0);
-        let strings: Vec<Vec<u8>> = (0..n)
-            .map(|_| {
-                pieces.next().map_or_else(Vec::new, |piece| {
-                    piece.strip_suffix(&[0]).unwrap_or(piece).to_vec()
-                })
-            })
-            .collect();
-        return strings_vector(&strings, Encoding::Native);
+        let vector = values::alloc(SexpType::String, n)?;
+        for (index, piece) in bytes.split_inclusive(|&byte| byte == 0).take(n).enumerate() {
+            let text = piece.strip_suffix(&[0]).unwrap_or(piece);
+            let charsxp = values::mkchar_bytes(text, Encoding::Native)?;
+            crate::heap().set_element(vector, index, charsxp);
+        }
+        return Ok(vector);
     }
-    let size = binary_size(kind, size)?;
+    let size = binary_size(kind, size, true)?;
+    warn_unsigned(kind, size, signed)?;
     let count = (bytes.len() / size).min(n);
     decode_binary(&bytes[..count * size], kind, size, signed, swap)
 }
@@ -3211,12 +3606,12 @@ unsafe fn decode_binary(
             let vector = values::alloc(SexpType::Real, count)?;
             for (index, target) in vector.slice_mut::<f64>().iter_mut().enumerate() {
                 let raw = element(index);
-                *target = if size == 4 {
-                    f32::from_ne_bytes([raw[0], raw[1], raw[2], raw[3]]) as f64
-                } else {
-                    f64::from_ne_bytes([
+                *target = match size {
+                    4 => f32::from_ne_bytes([raw[0], raw[1], raw[2], raw[3]]) as f64,
+                    16 => double_from_extended(raw),
+                    _ => f64::from_ne_bytes([
                         raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
-                    ])
+                    ]),
                 };
             }
             Ok(vector)
@@ -3244,60 +3639,145 @@ unsafe fn decode_binary(
 }
 
 /// The bytes `writeBin(object, size, endian)` writes. `object` must not be ALTREP.
-unsafe fn encode_binary(object: Sexp, size: Option<usize>, swap: bool) -> R<Vec<u8>> {
+/// Encodes what `writeBin` writes for `object` into the buffer `buffer` gives for the byte
+/// count: each element in `size` bytes, byte-reversed when `swap`, or for a character vector
+/// each string followed by a NUL.
+unsafe fn encode_binary<'a>(
+    object: Sexp,
+    size: Option<i32>,
+    swap: bool,
+    use_bytes: bool,
+    buffer: impl FnOnce(usize) -> R<&'a mut [u8]>,
+) -> R<()> {
     let kind = match object.kind() {
         SexpType::Integer => BinaryType::Integer,
         SexpType::Logical => BinaryType::Logical,
         SexpType::Real => BinaryType::Double,
         SexpType::Complex => BinaryType::Complex,
-        SexpType::Raw => return Ok(values::raws(object).to_vec()),
+        SexpType::Raw => {
+            binary_size(BinaryType::Raw, size, false)?;
+            let raws = values::raws(object);
+            buffer(raws.len())?.copy_from_slice(raws);
+            return Ok(());
+        }
         SexpType::String => {
-            let mut bytes = Vec::new();
-            for element in values::strings(object) {
-                bytes.extend_from_slice(element.as_deref().unwrap_or("NA").as_bytes());
-                bytes.push(0);
+            let count = object.length() as usize;
+            let total = (0..count)
+                .map(|index| output_bytes(object.element(index), use_bytes).len() + 1)
+                .sum();
+            let out = buffer(total)?;
+            let mut position = 0;
+            for index in 0..count {
+                let text = output_bytes(object.element(index), use_bytes);
+                let end = position + text.len();
+                out[position..end].copy_from_slice(&text);
+                out[end] = 0;
+                position = end + 1;
             }
-            return Ok(bytes);
+            return Ok(());
         }
         _ => return Err(error("can only write vector objects")),
     };
-    let size = binary_size(kind, size)?;
-    let mut bytes = Vec::with_capacity(object.length() as usize * size);
-    let mut push = |mut element: Vec<u8>| {
-        if swap {
-            element.reverse();
-        }
-        bytes.extend_from_slice(&element);
-    };
+    let size = binary_size(kind, size, false)?;
+    let count = object.length() as usize;
     match kind {
         BinaryType::Integer | BinaryType::Logical => {
-            for &value in object.slice::<i32>() {
-                push(match size {
-                    1 => vec![value as u8],
-                    2 => (value as i16).to_ne_bytes().to_vec(),
-                    8 => (value as i64).to_ne_bytes().to_vec(),
-                    _ => value.to_ne_bytes().to_vec(),
-                });
+            let ints = object.slice::<i32>();
+            let out = buffer(count * size)?;
+            match size {
+                1 => encode(out, ints, swap, |value| [value as u8]),
+                2 => encode(out, ints, swap, |value| (value as i16).to_ne_bytes()),
+                8 => encode(out, ints, swap, |value| i64::from(value).to_ne_bytes()),
+                _ => encode(out, ints, swap, i32::to_ne_bytes),
             }
         }
         BinaryType::Double => {
-            for &value in object.slice::<f64>() {
-                push(if size == 4 {
-                    (value as f32).to_ne_bytes().to_vec()
-                } else {
-                    value.to_ne_bytes().to_vec()
-                });
+            let out = buffer(count * size)?;
+            let doubles = object.slice::<f64>();
+            match size {
+                4 => encode(out, doubles, swap, |value| (value as f32).to_ne_bytes()),
+                16 => encode(out, doubles, swap, extended_from_double),
+                _ => encode(out, doubles, swap, f64::to_ne_bytes),
             }
         }
         BinaryType::Complex => {
-            for value in object.slice::<Rcomplex>() {
-                push(value.r.to_ne_bytes().to_vec());
-                push(value.i.to_ne_bytes().to_vec());
-            }
+            // Each part is written, and swapped, as its own double.
+            let parts = std::slice::from_raw_parts(object.data() as *const f64, 2 * count);
+            encode(buffer(2 * count * 8)?, parts, swap, f64::to_ne_bytes);
         }
         BinaryType::Raw | BinaryType::Character => {}
     }
-    Ok(bytes)
+    Ok(())
+}
+
+/// A double as an x86 `long double`, which `size = 16` reads and writes: the 80-bit extended
+/// format (a 64-bit mantissa with an explicit leading bit, then sign and a 15-bit exponent)
+/// in sixteen bytes, the last six zero.
+fn extended_from_double(value: f64) -> [u8; 16] {
+    let bits = value.to_bits();
+    let fraction = bits & ((1 << 52) - 1);
+    let (exponent, mantissa) = match (bits >> 52) & 0x7ff {
+        0 if fraction == 0 => (0, 0),
+        0 => {
+            let shift = fraction.leading_zeros();
+            (15372 - shift as u16, fraction << shift)
+        }
+        // The widening quiets a signalling NaN, which `NA_real_` is.
+        0x7ff if fraction != 0 => (0x7fff, (0b11 << 62) | (fraction << 11)),
+        0x7ff => (0x7fff, 1 << 63),
+        exponent => (
+            exponent as u16 + (16383 - 1023),
+            (1 << 63) | (fraction << 11),
+        ),
+    };
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&mantissa.to_le_bytes());
+    bytes[8..10].copy_from_slice(&(exponent | ((bits >> 63) as u16) << 15).to_le_bytes());
+    bytes
+}
+
+/// The double nearest to an x86 `long double`.
+fn double_from_extended(bytes: [u8; 16]) -> f64 {
+    let mantissa = u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]);
+    let tag = u16::from_le_bytes([bytes[8], bytes[9]]);
+    let exponent = i32::from(tag & 0x7fff);
+    let magnitude = if exponent != 0 && mantissa >> 63 == 0 {
+        // The processor rejects a nonzero exponent without the leading mantissa bit.
+        f64::NAN
+    } else if exponent == 0x7fff {
+        if mantissa << 1 == 0 {
+            f64::INFINITY
+        } else {
+            f64::from_bits((0x7ff8 << 48) | ((mantissa >> 11) & ((1 << 52) - 1)))
+        }
+    } else {
+        // Scaled in two steps so that neither power of two leaves the double range before the
+        // product does.
+        let power = exponent.max(1) - 16383 - 63;
+        mantissa as f64 * 2f64.powi(power / 2) * 2f64.powi(power - power / 2)
+    };
+    if tag >> 15 == 0 {
+        magnitude
+    } else {
+        -magnitude
+    }
+}
+
+fn encode<T: Copy, const N: usize>(
+    out: &mut [u8],
+    values: &[T],
+    swap: bool,
+    bytes: impl Fn(T) -> [u8; N],
+) {
+    for (chunk, &value) in out.chunks_exact_mut(N).zip(values) {
+        let mut element = bytes(value);
+        if swap {
+            element.reverse();
+        }
+        chunk.copy_from_slice(&element);
+    }
 }
 
 // Method dispatch. A method pointer that is ry's own runs its device directly; any other is
@@ -3496,6 +3976,7 @@ unsafe fn method_write(con: Rconnection, bytes: &[u8]) -> R<usize> {
 /// calls `write`, so the default goes straight to `write`. ry's own connections print through
 /// the device, because a text output connection takes text but has no `write` method.
 unsafe fn method_print(con: Rconnection, text: &[u8]) -> R<()> {
+    let text = &*values::unescape_output(text);
     let default = default_vfprintf();
     match (*con).vfprintf {
         Some(method) if default.is_none_or(|default| !is_method(method, default)) => {
@@ -3684,8 +4165,12 @@ struct FileDevice {
     /// `gzfile()`, `bzfile()` and `xzfile()`: writes compress in this format; reads decompress
     /// whatever format the file is in.
     encoding: Option<Compressed>,
-    /// `file(encoding =)`: text reads re-encode from this encoding to UTF-8.
+    /// The `encoding` argument: text reads re-encode from this encoding to UTF-8, and printed
+    /// text re-encodes to it.
     text_encoding: Option<String>,
+    /// The conversion of printed text to `text_encoding`, while open for writing in text mode.
+    /// It lives as long as the stream, so a stateful encoding writes its byte order mark once.
+    output_converter: Option<Iconv>,
     /// The re-encoded text stops at input that is invalid in `text_encoding`; the read that
     /// reaches that point warns.
     invalid_input: bool,
@@ -3962,6 +4447,11 @@ unsafe fn device_open(con: Rconnection) -> R<bool> {
         ))?;
         return Ok(false);
     };
+    // `readLines` and `scan` ask for UTF-8 marks before they open a connection, and only
+    // re-encoded text gets them, which a file connection alone produces.
+    if !matches!(device, Device::File(_)) {
+        (*con).UTF8out = 0;
+    }
     match device {
         Device::File(file) => {
             if file.stream.is_some() {
@@ -3969,18 +4459,27 @@ unsafe fn device_open(con: Rconnection) -> R<bool> {
             }
             match open_file(file, mode) {
                 Ok(stream) => {
-                    // Re-encoded text is UTF-8, and text reads mark it so.
-                    (*con).UTF8out = matches!(stream, Stream::Inflate(_)
-                        if file.text_encoding.is_some() && mode.read && !mode.binary)
-                        as Rboolean;
+                    let text_encoding = file.text_encoding.as_deref().filter(|_| !mode.binary);
+                    // The request for UTF-8 marks outlives the close, as in GNU R.
+                    if text_encoding.is_none() {
+                        (*con).UTF8out = 0;
+                    }
+                    file.output_converter = text_encoding
+                        .filter(|_| mode.write)
+                        .and_then(|encoding| Iconv::open("UTF-8", encoding));
                     file.stream = Some(stream);
                 }
                 Err(failure) => {
-                    crate::conditions::warning(format!(
-                        "cannot open file '{}': {}",
-                        description_of(con),
-                        os_message(&failure)
-                    ))?;
+                    let (path, reason) = (description_of(con), os_message(&failure));
+                    crate::conditions::warning(match file.encoding {
+                        None => format!("cannot open file '{path}': {reason}"),
+                        Some(Compressed::Bzip2) => format!(
+                            "cannot open bzip2-ed file '{path}', probable reason '{reason}'"
+                        ),
+                        Some(_) => format!(
+                            "cannot open compressed file '{path}', probable reason '{reason}'"
+                        ),
+                    })?;
                     return Ok(false);
                 }
             }
@@ -4166,7 +4665,7 @@ fn open_file(device: &mut FileDevice, mode: Mode) -> std::io::Result<Stream> {
             .open(&device.path)?;
         let level = device.compression;
         let encoder = match encoding {
-            Compressed::Gzip => Encoder::Gzip(GzEncoder::new(file, Compression::new(level))),
+            Compressed::Gzip => Encoder::Gzip(gzip_encoder(file, level)),
             Compressed::Bzip2 => Encoder::Bzip2(BzEncoder::new(
                 file,
                 bzip2::Compression::new(level.clamp(1, 9)),
@@ -4191,7 +4690,15 @@ fn open_file(device: &mut FileDevice, mode: Mode) -> std::io::Result<Stream> {
     {
         let mut bytes = Vec::new();
         open_inflate(&device.path)?.reader.read_to_end(&mut bytes)?;
-        let (text, complete) = crate::system::convert_to_utf8_prefix(text_encoding, &bytes)
+        // GNU R skips a byte order mark itself for the encodings whose iconv conversion would
+        // keep it as a character.
+        let (text_encoding, mark): (&str, &[u8]) = match text_encoding {
+            "UTF-8-BOM" => ("UTF-8", b"\xef\xbb\xbf"),
+            "UCS-2LE" | "UTF-16LE" => (text_encoding, b"\xff\xfe"),
+            _ => (text_encoding, b""),
+        };
+        let bytes = bytes.strip_prefix(mark).unwrap_or(&bytes);
+        let (text, complete) = crate::system::convert_to_utf8_prefix(text_encoding, bytes)
             .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL))?;
         device.invalid_input = !complete;
         return Ok(Stream::Inflate(Inflate {
@@ -4313,6 +4820,7 @@ unsafe fn device_close(con: Rconnection) -> R<()> {
     (*con).isopen = 0;
     match device(con)? {
         Device::File(file) => {
+            file.output_converter = None;
             let stream = file.stream.take();
             let finished = match stream {
                 // GNU R reports a plain file's close status, but not a compressed stream's.
@@ -4366,7 +4874,7 @@ unsafe fn device_close(con: Rconnection) -> R<()> {
             let data = std::mem::take(&mut gzcon.data);
             gzcon.position = 0;
             let written = if (*con).canwrite != 0 {
-                let mut encoder = GzEncoder::new(Vec::new(), Compression::new(gzcon.level));
+                let mut encoder = gzip_encoder(Vec::new(), gzcon.level);
                 encoder
                     .write_all(&data)
                     .and_then(|()| encoder.finish())
@@ -4556,28 +5064,45 @@ unsafe fn device_write(con: Rconnection, bytes: &[u8], printing: bool) -> R<usiz
             write_message(bytes);
             Ok(bytes.len())
         }
-        Device::File(file) => match &mut file.stream {
-            Some(Stream::Plain(plain)) => {
-                if !plain.last_was_write {
-                    plain.read_buffer.clear();
-                    plain.read_offset = 0;
-                    plain.last_was_write = true;
+        Device::File(file) => {
+            let length = bytes.len();
+            // Printed text is one conversion unit, as each `Rconn_printf` is in GNU R: what
+            // follows a character the encoding cannot hold is dropped with a warning.
+            let mut converted = Vec::new();
+            let mut unconvertible = false;
+            let bytes = match file.output_converter.as_mut().filter(|_| printing) {
+                Some(converter) => {
+                    let mut rest = bytes;
+                    unconvertible = convert_all(converter, &mut rest, &mut converted).is_err();
+                    &converted[..]
                 }
-                plain.write_buffer.extend_from_slice(bytes);
-                plain.write_position += bytes.len() as u64;
-                if plain.write_buffer.len() >= READ_CHUNK {
-                    flush_writes(plain).map_err(io_error)?;
+                None => bytes,
+            };
+            match &mut file.stream {
+                Some(Stream::Plain(plain)) => {
+                    if !plain.last_was_write {
+                        plain.read_buffer.clear();
+                        plain.read_offset = 0;
+                        plain.last_was_write = true;
+                    }
+                    plain.write_buffer.extend_from_slice(bytes);
+                    plain.write_position += bytes.len() as u64;
+                    if plain.write_buffer.len() >= READ_CHUNK {
+                        flush_writes(plain).map_err(io_error)?;
+                    }
                 }
-                Ok(bytes.len())
+                Some(Stream::Deflate { encoder, position }) => {
+                    encoder.write_all(bytes).map_err(io_error)?;
+                    *position += bytes.len() as u64;
+                }
+                Some(Stream::Inflate(_)) => return Err(error("cannot write to this connection")),
+                None => return Err(error("connection is not open")),
             }
-            Some(Stream::Deflate { encoder, position }) => {
-                encoder.write_all(bytes).map_err(io_error)?;
-                *position += bytes.len() as u64;
-                Ok(bytes.len())
+            if unconvertible {
+                crate::conditions::warning("invalid char string in output conversion")?;
             }
-            Some(Stream::Inflate(_)) => Err(error("cannot write to this connection")),
-            None => Err(error("connection is not open")),
-        },
+            Ok(length)
+        }
         Device::Raw(raw) => {
             let end = raw.position + bytes.len();
             if end > raw.data.len() {
@@ -4657,7 +5182,8 @@ unsafe fn set_text_target_lock(target: TextTarget, locked: bool) {
 /// the target variable also holds it, since R code may have kept the value it read earlier.
 unsafe fn push_text_line(output: &mut TextOutput, line: &[u8]) -> R<()> {
     let heap = crate::heap();
-    let charsxp = values::mkchar_bytes(line, Encoding::Native)?;
+    // GNU R's `mkCharLocal` marks a line of a UTF-8 session UTF-8, whatever its bytes.
+    let charsxp = values::mkchar_bytes(line, Encoding::Utf8)?;
     heap.root(charsxp);
     let count = values::length(output.lines);
     if !heap.is_resizable(output.lines)
@@ -4669,6 +5195,14 @@ unsafe fn push_text_line(output: &mut TextOutput, line: &[u8]) -> R<()> {
     heap.resize_vector(output.lines, count as isize + 1)?;
     heap.set_element(output.lines, count, charsxp);
     Ok(())
+}
+
+/// A gzip writer whose header names Unix as the operating system, the byte zlib writes for
+/// GNU R, so a compressed file has the same bytes on every platform.
+fn gzip_encoder<W: Write>(sink: W, level: u32) -> GzEncoder<W> {
+    GzBuilder::new()
+        .operating_system(3)
+        .write(sink, Compression::new(level))
 }
 
 /// A resizable copy of the first `count` lines of `lines`, with room for `capacity`.

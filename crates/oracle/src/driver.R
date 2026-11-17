@@ -8,7 +8,40 @@
 # syntax error hides the output of the lines before it; the driver's own frames show up in
 # sys.nframe() and sys.calls(); commandArgs(TRUE) holds the two paths; and quit() ends the
 # run without a report.
+#
+# With ORACLE_PASSES above 1 the driver evaluates the same parsed expressions that many times in
+# the one process. The report describes the first pass alone and is written after the last, so a
+# crash in a later pass leaves no report. A later pass starts from the state the passes before it
+# left, so what it prints is not compared: it follows a marker line on standard output, which
+# the oracle cuts at.
+#
+# With `ORACLE_OBSERVE` set, the report also holds, in order, the deep observer's dump of every
+# top-level value with its visibility and every condition's classes, message and call (observe.R,
+# which the harness splices in below, so the script cannot see or replace it).
+#
+# The driver's frame encloses in the base environment, not the global one, so a script that
+# rebinds `+` or `length` at top level leaves the driver's own calls alone. A visible value is
+# printed the way R's top level prints it: base's `print` called on `x` in a frame that encloses
+# in the global environment, so a print method the script defines is found. A case that prints
+# the driver's frames (conditions__try_catch_fast_path) is recorded again after a change here.
 local({
+  # <observe.R>
+  observing <- nzchar(Sys.getenv("ORACLE_OBSERVE"))
+  observed <- character()
+  observe_value <- function(result) {
+    dump <- tryCatch(.oracle_observe(result$value), error = function(condition) {
+      paste("the observer failed:", conditionMessage(condition))
+    })
+    observe_note(paste0(if (result$visible) "visible " else "invisible ", dump))
+  }
+  # Each entry starts with the number of the top-level expression it belongs to, so a
+  # difference names the expression.
+  position <- 0L
+  observe_note <- function(text) observed <<- c(observed, paste0("[", position, "] ", text))
+  observe_condition <- function(kind, condition) {
+    observe_note(paste0(.oracle_observe_condition(kind, condition), " ", describe(condition)))
+  }
+
   argv <- commandArgs(trailingOnly = TRUE)
   script <- argv[1L]
   report <- argv[2L]
@@ -42,7 +75,7 @@ local({
   }
   json_array <- function(items) paste0("[", paste(vapply(items, json_string, ""), collapse = ","), "]")
 
-  write_report <- function() {
+  report_text <- function() {
     value <- "null"
     if (!is.null(last)) {
       deparsed <- paste(
@@ -51,12 +84,11 @@ local({
       )
       value <- sprintf("{\"kind\":%s,\"deparsed\":%s}", json_string(typeof(last$value)), json_string(deparsed))
     }
-    body <- sprintf(
-      "{\"messages\":%s,\"warnings\":%s,\"errors\":%s,\"value\":%s,\"libraries\":%s}\n",
+    sprintf(
+      "{\"messages\":%s,\"warnings\":%s,\"errors\":%s,\"value\":%s,\"libraries\":%s,\"observed\":%s}\n",
       json_array(messages), json_array(warnings), json_array(errors), value,
-      json_string(Sys.getenv("R_LIBS"))
+      json_string(Sys.getenv("R_LIBS")), json_array(observed)
     )
-    writeLines(body, report, useBytes = TRUE)
   }
 
   expressions <- tryCatch(
@@ -68,31 +100,71 @@ local({
   )
 
   for (expression in expressions) {
+    position <- position + 1L
     failed <- FALSE
     withCallingHandlers(
       tryCatch(
         {
           result <- withVisible(eval(expression, globalenv()))
           last <- list(value = result$value)
-          if (result$visible) print(result$value)
+          if (observing) observe_value(result)
+          if (result$visible) {
+            frame <- new.env(parent = globalenv())
+            frame$x <- result$value
+            eval(as.call(list(print, quote(x))), frame)
+          }
         },
         error = function(condition) {
+          if (observing) observe_condition("error", condition)
           errors <<- c(errors, describe(condition))
           last <<- NULL
           failed <<- TRUE
         }
       ),
       warning = function(condition) {
+        if (observing) observe_condition("warning", condition)
         warnings <<- c(warnings, describe(condition))
         if (isTRUE(getOption("warn") >= 2)) return(invisible())
         invokeRestart("muffleWarning")
       },
       message = function(condition) {
+        if (observing) observe_condition("message", condition)
         messages <<- c(messages, sub("\n$", "", conditionMessage(condition)))
         invokeRestart("muffleMessage")
       }
     )
     if (failed) break
   }
-  write_report()
-})
+  # The text is made before a later pass can change what the last value refers to.
+  body <- report_text()
+
+  passes <- suppressWarnings(as.integer(Sys.getenv("ORACLE_PASSES", "1")))
+  if (!is.na(passes) && passes > 1L) {
+    for (pass in 2:passes) {
+      cat("\001oracle: pass ", pass, "\001\n", sep = "")
+      for (expression in expressions) {
+        failed <- FALSE
+        withCallingHandlers(
+          tryCatch(
+            {
+              result <- withVisible(eval(expression, globalenv()))
+              if (result$visible) {
+                frame <- new.env(parent = globalenv())
+                frame$x <- result$value
+                eval(as.call(list(print, quote(x))), frame)
+              }
+            },
+            error = function(condition) failed <<- TRUE
+          ),
+          warning = function(condition) {
+            if (isTRUE(getOption("warn") >= 2)) return(invisible())
+            invokeRestart("muffleWarning")
+          },
+          message = function(condition) invokeRestart("muffleMessage")
+        )
+        if (failed) break
+      }
+    }
+  }
+  writeLines(body, report, useBytes = TRUE)
+}, envir = new.env(parent = baseenv()))

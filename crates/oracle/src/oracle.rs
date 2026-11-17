@@ -7,9 +7,14 @@
 //! GNU R is one such engine, and ry's runtime is another.
 
 pub mod bench;
+pub mod corpus;
 pub mod fuzz;
 pub mod gallery;
 pub mod install;
+pub mod language;
+pub mod metamorphic;
+pub mod mutate;
+pub mod reduce;
 
 use {
     serde::Deserialize,
@@ -30,6 +35,12 @@ use {
 pub mod packages;
 
 const DRIVER: &str = include_str!("driver.R");
+const OBSERVER: &str = include_str!("observe.R");
+
+/// `driver.R` with the deep observer spliced into its local scope.
+fn driver_text() -> String {
+    DRIVER.replacen("  # <observe.R>\n", OBSERVER, 1)
+}
 
 /// `Sync`, because a run hands every engine to one worker per core.
 pub trait Engine: Sync {
@@ -60,6 +71,9 @@ pub struct Outcome {
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
     pub value: Option<Value>,
+    /// The deep observer's dump of every top-level value, and the classes of every condition, in
+    /// the order they happened. Empty unless the engine observes ([`ProcessEngine::observing`]).
+    pub observed: Vec<String>,
     /// `R_LIBS` as the script saw it, when the engine reports it. It is not part of the
     /// behavior: [`diff`] refuses to compare runs that searched different libraries, because a
     /// package installed by one engine makes the other warn that it was built under another R.
@@ -75,6 +89,7 @@ impl PartialEq for Outcome {
             && self.warnings == other.warnings
             && self.errors == other.errors
             && self.value == other.value
+            && self.observed == other.observed
     }
 }
 
@@ -94,10 +109,12 @@ struct Report {
     value: Option<Value>,
     #[serde(default)]
     libraries: Option<String>,
+    #[serde(default)]
+    observed: Vec<String>,
 }
 
 /// The modes of ry's runtime that `--engine` names, which [`KnownFailure::engine`] must be one of.
-pub const ENGINES: [&str; 7] = [
+pub const ENGINES: [&str; 9] = [
     "ry",
     "ry-tier0",
     "ry-jit",
@@ -105,6 +122,8 @@ pub const ENGINES: [&str; 7] = [
     "ry-gctorture-young",
     "ry-gctorture-seeded",
     "ry-jit-gctorture",
+    "ry-repeat",
+    "ry-repeat-gctorture-seeded",
 ];
 
 /// A case that fails on main under one engine, listed in [`KNOWN_FAILURES_FILE`] so that a run
@@ -237,6 +256,7 @@ pub fn known_failure<'a>(
         .find(|entry| entry.case == name && entry.engine == engine)
 }
 
+#[derive(Clone)]
 pub struct ProcessEngine {
     name: String,
     program: String,
@@ -252,7 +272,15 @@ pub struct ProcessEngine {
     /// A run that takes longer is killed and fails, so a hang under fuzzing is a finding
     /// rather than a stuck harness.
     timeout: Option<Duration>,
+    /// How many times the driver evaluates the script in the one process
+    /// ([`ProcessEngine::repeated`]).
+    passes: u32,
+    /// The most private writable memory the engine's process may map, in bytes.
+    memory_limit: Option<u64>,
 }
+
+/// What the driver prints before each pass after the first, up to the pass number.
+const PASS_MARKER: &str = "\u{1}oracle: pass ";
 
 /// How an engine is handed `driver.R`.
 #[derive(Clone, Copy)]
@@ -275,6 +303,8 @@ impl ProcessEngine {
             erases_annotations: true,
             environment: Vec::new(),
             timeout: None,
+            passes: 1,
+            memory_limit: None,
         }
     }
 
@@ -289,13 +319,45 @@ impl ProcessEngine {
             "ry-gctorture-young" => Some(ProcessEngine::ry_gc_torture_young()),
             "ry-gctorture-seeded" => Some(ProcessEngine::ry_gc_torture_seeded(0)),
             "ry-jit-gctorture" => Some(ProcessEngine::ry_jit_gc_torture()),
+            "ry-repeat" => Some(ProcessEngine::ry_repeat()),
+            "ry-repeat-gctorture-seeded" => Some(ProcessEngine::ry_repeat_gc_torture_seeded(0)),
             command => ProcessEngine::from_command(command),
         }
     }
 
-    /// Kills a run that takes longer than `timeout` and reports it as failed.
+    /// Kills a run that takes longer than `timeout` for each pass it makes ([`Self::repeated`])
+    /// and reports it as failed.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    /// Evaluates the script `passes` times in the one process. The outcome is the first pass's:
+    /// a later pass starts from the state the earlier ones left, so only its survival is
+    /// checked. A crash or a failed runtime check in any pass fails the run. The later passes
+    /// run each function body again from a new closure over the same code, which is where a
+    /// compiled body, a call-site plan or a reused frame first meets values it did not create.
+    /// A case marked `# oracle: runs once` ([`runs_once`]) runs once all the same.
+    pub fn repeated(mut self, passes: u32) -> Self {
+        self.passes = passes;
+        self
+    }
+
+    /// Caps the writable memory of the engine's process at `bytes`, so a generated program that
+    /// asks for a huge vector gets R's allocation error instead of the machine's memory. The
+    /// limit is on data (`RLIMIT_DATA`), not on address space, because ry reserves gigabytes
+    /// of address space it never writes and GNU R does not.
+    pub fn with_memory_limit(mut self, bytes: u64) -> Self {
+        self.memory_limit = Some(bytes);
+        self
+    }
+
+    /// Makes the driver report the deep observer's dump of every top-level value
+    /// ([`Outcome::observed`]), which shows what printing and deparsing hide: encoding marks,
+    /// attribute order, NA kinds, negative zero, and the object and S4 bits.
+    pub fn observing(mut self) -> Self {
+        self.environment
+            .push(("ORACLE_OBSERVE".to_string(), "1".to_string()));
         self
     }
 
@@ -371,6 +433,22 @@ impl ProcessEngine {
         engine
     }
 
+    /// ry's runtime running every script twice in one process ([`ProcessEngine::repeated`]).
+    pub fn ry_repeat() -> Self {
+        let mut engine = ProcessEngine::ry().repeated(2);
+        engine.name = "ry-repeat".to_string();
+        engine
+    }
+
+    /// [`ProcessEngine::ry_gc_torture_seeded`] running every script twice in one process, so the
+    /// second pass's reused code and frames meet collections at the seed's random gaps with
+    /// the heap's invariants checked.
+    pub fn ry_repeat_gc_torture_seeded(seed: u64) -> Self {
+        let mut engine = ProcessEngine::ry_gc_torture_seeded(seed).repeated(2);
+        engine.name = "ry-repeat-gctorture-seeded".to_string();
+        engine
+    }
+
     /// ry's runtime with its JIT forced on, so every body that runs twice and every loop runs
     /// compiled. Comparing it against GNU R checks the compiled tier on every case.
     pub fn ry_jit() -> Self {
@@ -397,6 +475,8 @@ impl ProcessEngine {
                 .map(|home| vec![("R_HOME".to_string(), home)])
                 .unwrap_or_default(),
             timeout: None,
+            passes: 1,
+            memory_limit: None,
         }
     }
 
@@ -412,6 +492,8 @@ impl ProcessEngine {
             erases_annotations: false,
             environment: Vec::new(),
             timeout: None,
+            passes: 1,
+            memory_limit: None,
         })
     }
 }
@@ -480,7 +562,7 @@ impl Engine for ProcessEngine {
         command.args(&self.arguments);
         if let Some(driver) = self.driver {
             let driver_path = scratch.path().join("driver.R");
-            std::fs::write(&driver_path, DRIVER)
+            std::fs::write(&driver_path, driver_text())
                 .map_err(|error| EngineError::Failed(error.to_string()))?;
             match driver {
                 Driver::GnuR => {
@@ -491,7 +573,14 @@ impl Engine for ProcessEngine {
                 }
             }
         }
+        let passes = match runs_once(&script) {
+            true => 1,
+            false => self.passes,
+        };
         command.arg(&script).arg(&report_path);
+        if passes > 1 {
+            command.env("ORACLE_PASSES", passes.to_string());
+        }
         command
             .current_dir(&directory)
             .env("LANG", "C.UTF-8")
@@ -504,17 +593,30 @@ impl Engine for ProcessEngine {
             .envs(library_environment().iter().cloned())
             .envs(self.environment.iter().map(|(name, value)| (name, value)));
 
-        let output = run_command(command, self.timeout).map_err(|error| match error.kind() {
-            std::io::ErrorKind::NotFound => {
-                EngineError::Unavailable(format!("`{}` was not found", self.program))
+        let timeout = self.timeout.map(|timeout| timeout * passes);
+        let output = run_command(command, timeout, self.memory_limit).map_err(|error| {
+            match error.kind() {
+                std::io::ErrorKind::NotFound => {
+                    EngineError::Unavailable(format!("`{}` was not found", self.program))
+                }
+                _ => EngineError::Failed(format!("`{}`: {error}", self.program)),
             }
-            _ => EngineError::Failed(format!("`{}`: {error}", self.program)),
         })?;
         if output.timed_out {
             return Err(EngineError::Failed(format!(
                 "{} was killed after {} seconds",
                 self.name,
-                self.timeout.map_or(0, |timeout| timeout.as_secs())
+                timeout.map_or(0, |timeout| timeout.as_secs())
+            )));
+        }
+        // A report does not excuse a crash: the driver writes it before the process exits, and
+        // finalizers and the runtime's own shutdown run after that.
+        if killed_by_signal(output.status) && report_path.exists() {
+            return Err(EngineError::Crashed(format!(
+                "{} crashed after writing its report ({}): {}",
+                self.name,
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
             )));
         }
         let report = std::fs::read_to_string(&report_path);
@@ -533,12 +635,26 @@ impl Engine for ProcessEngine {
         let report: Report = serde_json::from_str(&report).map_err(|error| {
             EngineError::Failed(format!("{} wrote an unreadable report: {error}", self.name))
         })?;
+        let mut stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        if passes > 1 {
+            match stdout.find(PASS_MARKER) {
+                Some(first_pass_end) => stdout.truncate(first_pass_end),
+                None => {
+                    return Err(EngineError::Failed(format!(
+                        "{} printed no pass marker: the script left standard output diverted, \
+                         so it cannot run twice in one process (mark it `{RUNS_ONCE}`)",
+                        self.name
+                    )));
+                }
+            }
+        }
         Ok(Outcome {
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stdout,
             messages: report.messages,
             warnings: report.warnings,
             errors: report.errors,
             value: report.value,
+            observed: report.observed,
             libraries: report.libraries,
         })
     }
@@ -558,18 +674,32 @@ struct CommandOutput {
 /// (`&`) with both ignored, an ignored disposition survives `exec`, and GNU R keeps an ignored
 /// SIGINT instead of installing its handler, so a case that interrupts itself with
 /// `tools::pskill` would never see the interrupt under a detached run.
-fn run_command(mut command: Command, timeout: Option<Duration>) -> std::io::Result<CommandOutput> {
+#[cfg_attr(not(unix), allow(unused_variables))]
+fn run_command(
+    mut command: Command,
+    timeout: Option<Duration>,
+    memory_limit: Option<u64>,
+) -> std::io::Result<CommandOutput> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(unix)]
-    // SAFETY: the closure runs between fork and exec, and calls only `signal`, which is
-    // async-signal-safe.
+    // SAFETY: the closure runs between fork and exec, and calls only `signal` and `setrlimit`,
+    // which are async-signal-safe.
     unsafe {
-        std::os::unix::process::CommandExt::pre_exec(&mut command, || {
+        std::os::unix::process::CommandExt::pre_exec(&mut command, move || {
             for signal in [libc::SIGINT, libc::SIGQUIT] {
                 if libc::signal(signal, libc::SIG_DFL) == libc::SIG_ERR {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            if let Some(bytes) = memory_limit {
+                let limit = libc::rlimit {
+                    rlim_cur: bytes as libc::rlim_t,
+                    rlim_max: bytes as libc::rlim_t,
+                };
+                if libc::setrlimit(libc::RLIMIT_DATA, &limit) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
             }
@@ -808,7 +938,7 @@ fn ry_default_version() -> Option<String> {
     std::fs::write(&script, "cat(format(getRversion()))").ok()?;
     let mut command = Command::new(ry_program());
     command.args(["run", "--runtime", "ry"]).arg(&script);
-    let output = run_command(command, Some(Duration::from_secs(60))).ok()?;
+    let output = run_command(command, Some(Duration::from_secs(60)), None).ok()?;
     if output.timed_out {
         return None;
     }
@@ -1124,6 +1254,33 @@ pub fn library_dependent(case: &Path) -> bool {
 
 const LIBRARY_DEPENDENT: &str = "# oracle: library-dependent";
 
+/// Whether `case` declares, in a leading `# oracle: runs once` comment, that a second evaluation
+/// in the same process says nothing about the runtime: the script ends the process, leaves
+/// standard output diverted, or waits for something its first pass used up. An engine made with
+/// [`ProcessEngine::repeated`] runs such a case once.
+pub fn runs_once(case: &Path) -> bool {
+    std::fs::read_to_string(case).is_ok_and(|text| {
+        text.lines()
+            .take_while(|line| line.starts_with('#'))
+            .any(|line| line.trim_end() == RUNS_ONCE)
+    })
+}
+
+const RUNS_ONCE: &str = "# oracle: runs once";
+
+/// Whether `case` declares, in a leading `# oracle: sets collection stress` comment, that it
+/// reads or changes the collection stress setting itself, so its output under a stressed
+/// engine differs by design and the stress passes leave it out.
+pub fn sets_collection_stress(case: &Path) -> bool {
+    std::fs::read_to_string(case).is_ok_and(|text| {
+        text.lines()
+            .take_while(|line| line.starts_with('#'))
+            .any(|line| line.trim_end() == SETS_COLLECTION_STRESS)
+    })
+}
+
+const SETS_COLLECTION_STRESS: &str = "# oracle: sets collection stress";
+
 fn case_requirements(case: &Path) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(case) else {
         return Vec::new();
@@ -1222,6 +1379,17 @@ pub fn render(outcome: &Outcome) -> String {
             text.push_str(&format!("| {line}\n"));
         }
     }
+    // Recorded outcomes come from engines that do not observe, so the section is written
+    // only when there is something in it.
+    if !outcome.observed.is_empty() {
+        text.push_str("[observed]\n");
+        for (index, entry) in outcome.observed.iter().enumerate() {
+            text.push_str(&format!("#{}\n", index + 1));
+            for line in entry.split('\n') {
+                text.push_str(&format!("| {line}\n"));
+            }
+        }
+    }
     text
 }
 
@@ -1241,8 +1409,21 @@ pub fn parse(text: &str) -> Option<Outcome> {
                 "warnings" => "warnings",
                 "errors" => "errors",
                 "value" => "value",
+                "observed" => "observed",
                 _ => return None,
             };
+        } else if section == "observed" {
+            // An editor that strips trailing spaces leaves an empty line as a bare `|`.
+            match line.strip_prefix("| ").or((line == "|").then_some("")) {
+                Some(content) => {
+                    let entry = outcome.observed.last_mut()?;
+                    if !entry.is_empty() {
+                        entry.push('\n');
+                    }
+                    entry.push_str(content);
+                }
+                None => outcome.observed.push(String::new()),
+            }
         } else if line == "\\ no newline at end of output" {
             if outcome.stdout.ends_with('\n') {
                 outcome.stdout.pop();
@@ -1296,6 +1477,67 @@ fn unescape(text: &str) -> String {
         }
     }
     result
+}
+
+/// A top-level expression whose observed entries differ between two outcomes.
+pub struct ExpressionDifference {
+    /// The expression's number, from one.
+    pub position: usize,
+    /// The reference's entries for it and the other outcome's, without the number.
+    pub reference: Vec<String>,
+    pub other: Vec<String>,
+}
+
+/// The top-level expressions whose observed entries differ between two outcomes, in order.
+/// Empty when either outcome was not observed.
+pub fn differing_expressions(reference: &Outcome, other: &Outcome) -> Vec<ExpressionDifference> {
+    fn by_expression(outcome: &Outcome) -> Vec<(usize, Vec<String>)> {
+        let mut groups: Vec<(usize, Vec<String>)> = Vec::new();
+        for entry in &outcome.observed {
+            let Some((position, text)) = entry
+                .strip_prefix('[')
+                .and_then(|rest| rest.split_once("] "))
+                .and_then(|(position, text)| Some((position.parse::<usize>().ok()?, text)))
+            else {
+                continue;
+            };
+            match groups.last_mut() {
+                Some((last, texts)) if *last == position => texts.push(text.to_string()),
+                _ => groups.push((position, vec![text.to_string()])),
+            }
+        }
+        groups
+    }
+    if reference.observed.is_empty() || other.observed.is_empty() {
+        return Vec::new();
+    }
+    let mut reference = by_expression(reference).into_iter().peekable();
+    let mut other = by_expression(other).into_iter().peekable();
+    let mut differing = Vec::new();
+    loop {
+        let (first, second) = match (reference.peek(), other.peek()) {
+            (None, None) => return differing,
+            (Some((first, _)), Some((second, _))) => (*first, *second),
+            (Some((first, _)), None) => (*first, usize::MAX),
+            (None, Some((second, _))) => (usize::MAX, *second),
+        };
+        let position = first.min(second);
+        let reference = reference
+            .next_if(|(candidate, _)| *candidate == position)
+            .map(|(_, texts)| texts)
+            .unwrap_or_default();
+        let other = other
+            .next_if(|(candidate, _)| *candidate == position)
+            .map(|(_, texts)| texts)
+            .unwrap_or_default();
+        if reference != other {
+            differing.push(ExpressionDifference {
+                position,
+                reference,
+                other,
+            });
+        }
+    }
 }
 
 /// A unified diff of two outcomes, or `None` when they are equal.
