@@ -29,7 +29,7 @@ use {
         object::{NA_INTEGER, Sexp, SexpType, gp},
     },
     smallvec::{SmallVec, smallvec},
-    std::{cell::Cell, mem::MaybeUninit},
+    std::{borrow::Cow, cell::Cell, mem::MaybeUninit},
     thin_vec::ThinVec,
 };
 
@@ -2093,8 +2093,8 @@ unsafe fn check_argument_names(definition: &BuiltinDef, call: Sexp, args: &[Arg]
             ),
             [formal] => format!("supplied argument name '{name}' does not match '{formal}'"),
             _ => format!(
-                "unused argument ({name} = {})",
-                crate::deparse::deparse_unused_argument(arg.value)
+                "unused argument {}",
+                crate::deparse::unused_arguments(&[(Some(&name), arg.value)])
             ),
         };
         return Err(error_in(call, message));
@@ -4644,28 +4644,29 @@ unsafe fn match_plan(formals: Sexp, args: &[Arg], call: Sexp) -> R<Plan> {
         }
     }
     if !unused.is_empty() {
-        let texts: Vec<String> = unused
+        let names: Vec<Option<Cow<'_, str>>> = unused
             .iter()
-            .map(|&index| {
-                let arg = &args[index];
-                let code = if arg.value.kind() == SexpType::Promise {
-                    arg.value.cdr()
+            .map(|&index| arg_names[index].map(String::from_utf8_lossy))
+            .collect();
+        let arguments: Vec<(Option<&str>, Sexp)> = unused
+            .iter()
+            .zip(&names)
+            .map(|(&index, name)| {
+                let value = args[index].value;
+                let code = if value.kind() == SexpType::Promise {
+                    value.cdr()
                 } else {
-                    arg.value
+                    value
                 };
-                let text = deparse::deparse_unused_argument(code);
-                match arg_names[index] {
-                    Some(name) => format!("{} = {text}", String::from_utf8_lossy(name)),
-                    None => text,
-                }
+                (name.as_deref(), code)
             })
             .collect();
         return Err(error_in(
             call,
             format!(
-                "unused argument{} ({})",
-                if texts.len() == 1 { "" } else { "s" },
-                texts.join(", ")
+                "unused argument{} {}",
+                if unused.len() == 1 { "" } else { "s" },
+                deparse::unused_arguments(&arguments)
             ),
         ));
     }
@@ -7137,9 +7138,6 @@ pub unsafe fn complex_assign(
     };
     let heap = crate::heap();
     let local_cell = heap.frame_cell(env, inner);
-    // A locked binding rejects the final assignment, so the replacement must not have modified
-    // its value in place by then.
-    let locked = local_cell.is_some_and(|cell| cell.has_gp(gp::BINDING_LOCKED));
     // An index that assigns, as in `x[{x[2] <- 3; 1}] <- 2`, rebinds the variable while the
     // replacement still holds the old value, which therefore must be a copy. The `*tmp*`
     // promise deliberately counts no reference, so the inner assignment cannot see the share.
@@ -7149,9 +7147,22 @@ pub unsafe fn complex_assign(
         })
     });
     let mut binding_env = lookup_env;
-    while binding_env != heap.known().empty_env && heap.frame_cell(binding_env, inner).is_none() {
+    let mut binding_cell = None;
+    while binding_env != heap.known().empty_env {
+        binding_cell = heap.frame_cell(binding_env, inner);
+        if binding_cell.is_some() {
+            break;
+        }
         binding_env = binding_env.enclosure();
     }
+    // A locked binding rejects the final assignment, so the replacement must not have modified
+    // its value in place by then. `<<-` writes the binding it found, `<-` the local one.
+    let written = if superassign {
+        binding_cell
+    } else {
+        local_cell
+    };
+    let locked = written.is_some_and(|cell| cell.has_gp(gp::BINDING_LOCKED));
     // Ending a move into this frame hands the caller `base` back, which makes it shared, and
     // must come before any level changes in place, since an inner level is an element of it.
     crate::moves::modifying(base)?;
@@ -7240,11 +7251,18 @@ pub unsafe fn complex_assign(
                     .assignment_call
                     .replace((*getter, reported, frame_depth));
                 let level_arguments = if depth == 0 { evaluated } else { &[] };
+                // An inner level belongs to the variable's value, which the level's own arguments
+                // may share, as `names(x)[{ keep <- x; 2 }]` does after the getters ran.
+                let owner = if depth + 1 < levels.len() {
+                    base
+                } else {
+                    nil()
+                };
                 let result = replace_through_primitive(
                     function,
                     *getter,
                     (object, replacement),
-                    reported,
+                    (reported, owner),
                     env,
                     level_arguments,
                 );
@@ -7331,7 +7349,7 @@ unsafe fn replace_through_primitive(
     function: Sexp,
     getter: Sexp,
     (object, value): (Sexp, Sexp),
-    reported: Sexp,
+    (reported, owner): (Sexp, Sexp),
     env: Sexp,
     evaluated: &[Sexp],
 ) -> R<Option<Sexp>> {
@@ -7428,6 +7446,15 @@ unsafe fn replace_through_primitive(
             });
             item = item.cdr();
         }
+    }
+    // GNU R's getter marks an attribute it returns as not mutable, so the level is a copy by
+    // the time it is written. Here it is copied only when its owner became shared meanwhile.
+    if owner != nil() && values::maybe_shared(owner) && args[0].value == object {
+        let was_array = object.is_array();
+        let copy = values::shallow_duplicate(object)?;
+        copy.set_array(was_array);
+        crate::heap().root(copy);
+        args[0].value = copy;
     }
     args.push(Arg {
         tag: symbols.value,

@@ -1,6 +1,6 @@
 ---
 import Venn from "../components/Venn.astro";
-import { formatRatio, gnuRSuites, mixedMachines, suiteSpeeds } from "../lib/benchmarks";
+import { formatRatio, gnuRSuites, mixedMachines, speedMeasure, suiteSpeeds } from "../lib/benchmarks";
 import "@fontsource/geist-sans/400.css";
 import "@fontsource/geist-sans/500.css";
 import "@fontsource/geist-sans/600.css";
@@ -160,7 +160,7 @@ Str.join_with(loud, " ")`,
     },
 ];
 
-// One row per measured suite, as in the README summary: ry's geometric-mean speed-up over GNU R,
+// One row per measured suite, as in the README summary: ry's speed-up over GNU R (`speedMeasure`),
 // untyped and typed. The speed-ups span 1x to over 20x, so a bar's width is logarithmic, and the
 // 1x tick sits at log(2) of the scale.
 const speeds = suiteSpeeds();
@@ -800,7 +800,7 @@ const year = new Date().getFullYear();
                             <span class="ftabs"><span class="ftab is-active">benchmarks</span></span>
                         </div>
                         <table class="bench-table" style={`--one: ${speedWidth(1)}`}>
-                            <caption class="visually-hidden">The geometric-mean speed-up of ry over GNU R in each benchmark suite, untyped and typed.</caption>
+                            <caption class="visually-hidden">The speed-up of ry over GNU R in each benchmark suite, untyped and typed.</caption>
                             <thead>
                                 <tr>
                                     <th scope="col">suite</th>
@@ -829,7 +829,7 @@ const year = new Date().getFullYear();
                             </tbody>
                         </table>
                         <p class="bench-foot">
-                            Geometric-mean speed-up over GNU R {gnuRVersions}, bars on a logarithmic scale.{" "}
+                            {speedMeasure}, against GNU R {gnuRVersions}; bars on a logarithmic scale.{" "}
                             {mixedMachines() && <>The suites ran on different machines or BLAS libraries, so compare within a suite.{" "}</>}
                             <a href="/benchmarks">Full table, programs and method</a>
                         </p>

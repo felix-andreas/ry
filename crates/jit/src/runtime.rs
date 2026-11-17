@@ -870,14 +870,14 @@ pub unsafe extern "C" fn jit_fused(activation: *mut Activation, pc: i64) -> i32 
     }
 }
 
-/// Loads the variable `GetVar` or `Argument` at `pc` reads into its slot. Returns the slot's
-/// status. A missing formal an `Argument` would pass on as the empty argument declines with
+/// Loads the variable `GetVar`, `Argument` or `Subscript` at `pc` reads into its slot. Returns
+/// the slot's status. A load tier 0 must run ([`bytecode::load_declines`]) declines with
 /// [`outcome::LOAD_FAILED`] and no error, which hands the instruction to tier 0.
 pub unsafe extern "C" fn jit_load(activation: *mut Activation, pc: i64, slot: i64) -> i32 {
     unsafe {
         checked(activation, outcome::LOAD_FAILED, |activation| {
             let machine = machine(activation);
-            match scoped(|| bytecode::passes_missing_argument(machine, pc as usize)) {
+            match scoped(|| bytecode::load_declines(machine, pc as usize)) {
                 Ok(false) => {}
                 Ok(true) => return outcome::LOAD_FAILED,
                 Err(unwind) => {

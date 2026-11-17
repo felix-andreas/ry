@@ -1203,7 +1203,7 @@ pub(crate) unsafe fn clear_options() -> R<()> {
 }
 
 unsafe fn set_options(list: Sexp) -> R<()> {
-    crate::heap().define(base_env(), symbols().dot_options, list)?;
+    crate::heap().define_base_variable(symbols().dot_options, list)?;
     Ok(())
 }
 

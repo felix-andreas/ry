@@ -10,11 +10,12 @@ import BenchmarkSummary from '../../components/BenchmarkSummary.astro';
 import BenchmarkTable from '../../components/BenchmarkTable.astro';
 import SpeedChart from '../../components/SpeedChart.astro';
 
-Four suites compare ry's runtime with GNU R. Two run code that others wrote: the programs that
-R compiler research measures itself on, and the test suites of CRAN packages. The other two run
-code we wrote: small numeric kernels, each also written in typed ry, and programs in the shape of
-package and business code. A fifth section times the three benchmark code bases, outside this
-summary. Each suite's geometric mean of ry's speed-ups over GNU R:
+Five suites compare ry's runtime with GNU R. Two run code that others wrote: the programs that
+R compiler research measures itself on, and the test suites of CRAN packages. Two run code we
+wrote: small numeric kernels, each also written in typed ry, and programs in the shape of package
+and business code. The fifth is a workload that a test user reduced from the test suite of their
+application. Another section times the three benchmark code bases, outside this summary. Each
+suite's speed-up over GNU R:
 
 <BenchmarkSummary />
 
@@ -170,6 +171,45 @@ the interpreter, and the flag under the bar names what was refused.
 
 <BenchmarkPrograms suite="applications" />
 
+<BenchmarkSection suite="appsuite">
+
+A test user measured ry on the test suite of a large business application and reduced that suite to
+a workload anyone can run, `tools/bench/appsuite/app_workload.R`. It has 13 sections, one per kind
+of code the test suite spends its time in: plain function bodies, S4 objects, string keys,
+functionals, dates, conditions, small data.table and xts objects, data frames, closure objects,
+large inputs, testthat expectations and storage. Each section repeats its code a number of times
+chosen so that its share of GNU R's time in the workload is the share that kind of code has in the
+test suite.
+
+The score is GNU R's total time over ry's, not a geometric mean of the sections, because in a test
+suite time adds up: a section ten times as fast does not make up for one that is no faster. The
+chart shows each section's speed-up and, last, the total's.
+
+<SpeedChart suite="appsuite" />
+
+One process per engine runs every section, each with a warm-up of a twentieth of its rounds before
+the timed rounds, and a section's time is the CPU time of its timed rounds. Beside the score, the
+Tracked table follows four things:
+
+- **The profile summary's cost**: ry's total with `RY_PROFILE_SUMMARY` set, over its total without.
+- **Compiled code**: the share of that profiled run spent in JIT-compiled code.
+- **Patterns**: 236 calls reduced from the same test suite, each timed in a loop of its own (the
+  files in `tools/bench/appsuite/patterns/`), and how many of them ry runs at under 1.5 times and
+  under 1 times GNU R's speed. The Patterns table gives each one's time per call.
+- **Contention**: the test user's CI runs one test process per core, so the suite also starts one
+  copy of the workload per core at once, on each engine, and compares each engine's total with its
+  own uncontended total, by CPU time and by the processes' wall time. In the Total table, the
+  contended ry column is compared with contended GNU R.
+
+<details>
+<summary>The numbers: sections, patterns and tracked measures</summary>
+
+<BenchmarkTable suite="appsuite" />
+
+</details>
+
+</BenchmarkSection>
+
 <BenchmarkSection suite="hot">
 
 The suites above are programs somebody chose. This one is derived from a measurement of the three
@@ -282,7 +322,7 @@ recorded seed. Each ratio is formed inside one round, GNU R's time over the engi
 reported speed-up is the median of those per-round ratios. Pairing matters because the measuring
 machines are shared cloud VMs whose effective CPU speed drifts with other tenants' load: a slow
 drift moves both engines of one round together, so it cancels in the ratio. Each speed-up and each
-geometric mean carries a 95% bootstrap interval over the rounds.
+geometric mean or total carries a 95% bootstrap interval over the rounds.
 
 What one timed run covers differs by suite:
 
@@ -291,6 +331,7 @@ What one timed run covers differs by suite:
 | Public R JIT benchmarks | the program once | byte compilation and JIT tier-up, not start-up |
 | Package test suites | the package's tests | start-up and loading the package and its imports |
 | Numeric kernels, application workloads | the program once cold, then five times warm | the median warm run only |
+| Application test suite | every section, each after a warm-up; a pattern's whole file | the CPU time of a section's timed rounds; a pattern's time per call |
 
 The runner, not this page, judges the data:
 

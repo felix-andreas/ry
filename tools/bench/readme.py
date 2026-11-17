@@ -5,14 +5,15 @@ the VS Code Marketplace show a README as it is, so the block is generated text, 
 when a README differs from what this script would write.
 
 The block is one bullet per measured suite that compares ry with GNU R, in a fixed order, giving
-the geometric means the runner stored and what the suite measures, then one sentence on how they
-were measured. The suite that compares typed ry with Rust follows as a paragraph of its own,
+the suite's score and what the suite measures, then one sentence on how they were measured. A
+suite's score is the geometric mean the runner stored, or, for a suite that stores a `total` (the
+application test suite), the ratio of GNU R's total time to ry's. The suite that compares typed ry with Rust follows as a paragraph of its own,
 because its ratio is a time relative to Rust's, where lower is faster, and must not be read as one
 of the speed-ups. Ratios have two decimals below 10x and none from 10x up, as on the benchmarks
 page, which `docs/src/lib/benchmarks.ts` renders from the same files. A suite without a results
 file is left out.
 
-A vertical grouped bar chart of the geometric means over GNU R, in a light and a dark SVG under
+A vertical grouped bar chart of the scores over GNU R, in a light and a dark SVG under
 `docs/public/`, is shown by the root README through `<picture>`. It has one group per suite with
 bars for GNU R (always 1x), ry and, where the suite has a typed column, ry typed. `--check` also
 fails when either SVG differs from what this script would write.
@@ -25,7 +26,7 @@ from decimal import ROUND_HALF_UP, Decimal
 root = pathlib.Path(__file__).resolve().parent.parent.parent
 bench = root / "tools/bench"
 readmes = [root / "README.md", root / "editors/code/README.md"]
-suite_order = ["public", "packages", "kernels", "applications", "typed"]
+suite_order = ["public", "packages", "kernels", "applications", "appsuite", "typed"]
 marker = "bench-summary"
 chart_dir = root / "docs/public"
 # Series colors of docs/src/components/SpeedChart.astro, with a neutral gray for the GNU R baseline.
@@ -105,17 +106,31 @@ def summary_block(suites):
     compared = against_gnu_r(suites)
     lines = []
     for suite in compared:
-        geomean = suite["results"]["geomean"]
-        speeds = [ratio(geomean["ry"]["median"]) if "ry" in geomean else "not measured"]
-        if "ry_typed" in geomean:
-            speeds.append(f"{ratio(geomean['ry_typed']['median'])} in typed ry")
+        found = scores(suite)
+        speeds = [ratio(found["ry"]) if "ry" in found else "not measured"]
+        if "ry_typed" in found:
+            speeds.append(f"{ratio(found['ry_typed'])} in typed ry")
         title = f"[{short_name(suite['name'])}](https://ry-lang.org/benchmarks#{section_anchor(suite['name'])})"
-        lines.append(f"- **{title}: {', '.join(speeds)}.** {len(suite['results']['programs'])} {suite['summary']}.")
+        lines.append(f"- **{title}: {', '.join(speeds)}.** {scored_count(suite)} {suite['summary']}.")
     paragraphs = [" ".join([measured_sentence(compared)] + mixed_machines(compared))]
     paragraphs += [slowdown_paragraph(suite) for suite in suites
                    if suite["results"].get("baseline", "gnu_r") != "gnu_r"]
     paragraphs[-1] += " [Benchmarks](https://ry-lang.org/benchmarks) shows every program and how it is measured."
     return "\n".join(lines + [line for paragraph in paragraphs for line in ("", paragraph)])
+
+def scores(suite):
+    """Each engine's score: its geometric mean, or for a suite scored by total time, the ratio of
+    GNU R's total to the engine's."""
+    results = suite["results"]
+    found = results["total"]["ratio"] if "total" in results else results["geomean"]
+    return {key: value["median"] for key, value in found.items()}
+
+def scored_count(suite):
+    """The measured programs outside the groups marked `scored = false`, which only the
+    benchmarks page's tables show."""
+    unscored = {group["id"] for group in suite.get("groups", []) if group.get("scored") is False}
+    group_of = {program["id"]: program.get("group") for program in suite.get("programs", [])}
+    return sum(group_of.get(program["id"]) not in unscored for program in suite["results"]["programs"])
 
 def slowdown_paragraph(suite):
     """The suite whose ratio is the engine's time over its baseline's, such as `**Typed ry against
@@ -142,7 +157,9 @@ def measured_sentence(suites):
     # A suite recorded on a release archive names it; one recorded on a local build names nothing.
     tags = sorted({meta["release"]["tag"] for meta in metas if meta.get("release")})
     build = f" of the ry {' and '.join(tags)} release archive{'s' if len(tags) > 1 else ''}" if tags else ""
-    return (f"Each number is the geometric-mean speed-up over GNU R {' and '.join(versions)} (above 1x is faster), "
+    totals = [suite["name"].lower() for suite in suites if "total" in suite["results"]]
+    exception = f", except for the {' and '.join(totals)}, which is GNU R's total time over ry's" if totals else ""
+    return (f"Each number is the geometric-mean speed-up over GNU R {' and '.join(versions)} (above 1x is faster){exception}, "
             f"from {count} paired rounds{build} on {' and '.join(kernels)}.")
 
 def mixed_machines(suites):
@@ -162,15 +179,16 @@ def mixed_machines(suites):
 def chart_svg(suites, theme):
     """Vertical grouped bars, one group per suite, each bar labeled with its value."""
     colors = themes[theme]
-    width, height = 760, 300
     left, right, top, bottom = 16, 16, 44, 44
+    # A group of three bars needs about 150 px, and a long suite name a little more.
+    width, height = max(760, left + right + 180 * len(suites)), 300
     plot_h = height - top - bottom
     bar_w, gap, inner_gap = 44, 36, 6
     series = [("gnu_r", "GNU R"), ("ry", "ry"), ("ry_typed", "ry typed")]
     groups = []
     for suite in suites:
-        geomean = suite["results"]["geomean"]
-        values = [("gnu_r", 1.0)] + [(key, geomean[key]["median"]) for key in ("ry", "ry_typed") if key in geomean]
+        found = scores(suite)
+        values = [("gnu_r", 1.0)] + [(key, found[key]) for key in ("ry", "ry_typed") if key in found]
         groups.append((short_name(suite["name"]), values))
     peak = max(value for _, values in groups for _, value in values)
     ceiling = peak * 1.12
@@ -179,14 +197,14 @@ def chart_svg(suites, theme):
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="{width}" height="{height}" role="img" aria-labelledby="t d" font-family="-apple-system, \'Segoe UI\', Helvetica, Arial, sans-serif">']
     out.append('<title id="t">ry speed-up over GNU R by benchmark suite</title>')
     summary = "; ".join(f"{name}: " + ", ".join(f"{dict(series)[key]} {ratio(value)}" for key, value in values) for name, values in groups)
-    out.append(f'<desc id="d">Geometric mean speed-up over GNU R. {escape(summary)}.</desc>')
+    out.append(f'<desc id="d">Speed-up over GNU R. {escape(summary)}.</desc>')
     # Legend, top left.
     cursor = left
     for key, label in series:
         out.append(f'<rect x="{cursor}" y="12" width="12" height="12" rx="2" fill="{colors[key]}"/>')
         out.append(f'<text x="{cursor + 18}" y="22.5" font-size="13" fill="{colors["ink"]}">{label}</text>')
         cursor += 18 + 8 * len(label) + 18
-    out.append(f'<text x="{width - right}" y="22.5" font-size="12" text-anchor="end" fill="{colors["muted"]}">Geometric mean speed-up over GNU R, higher is faster</text>')
+    out.append(f'<text x="{width - right}" y="22.5" font-size="12" text-anchor="end" fill="{colors["muted"]}">Speed-up over GNU R, higher is faster</text>')
     base = y(1.0)
     for index, (name, values) in enumerate(groups):
         span = len(values) * bar_w + (len(values) - 1) * inner_gap

@@ -1,0 +1,1528 @@
+id = "appsuite"
+name = "Application test suite"
+summary = "sections of a test user's application test suite, each weighted by its share of GNU R's time there"
+description = """
+A workload modelled on the test suite of a large business application, which a test user measured on
+GNU R and ry. It has 13 sections, one per kind of code the suite spends its time in, and each section
+runs a number of rounds chosen so that its share of GNU R's time is the share that kind of code has
+in the suite. The score is the workload's total time, because in a test suite time adds up. Beside it,
+236 patterns reduced from the same suite time one kind of call each, in nanoseconds per call.
+"""
+
+[[groups]]
+id = "sections"
+name = "Workload sections"
+description = "The 13 sections of app_workload.R. A section's time is the CPU time of its timed rounds, after a warm-up of a twentieth of them."
+
+[[groups]]
+id = "patterns"
+name = "Patterns"
+scored = false
+description = "One kind of call each, timed in a loop that doubles its calls until a batch takes 0.3 s of CPU time; the time is per call."
+
+[[programs]]
+id = "bodies"
+display = "Plain function bodies"
+group = "sections"
+summary = "Small functions with argument and type checks, defaults, list fields, guards and short loops."
+source = "tools/bench/appsuite/app_workload.R"
+
+[[programs]]
+id = "objects"
+display = "S4 objects"
+group = "sections"
+summary = "new() with initialize and validity, a replacement generic, is(), isVirtualClass(), slotNames() and slot()."
+source = "tools/bench/appsuite/app_workload.R"
+
+[[programs]]
+id = "keys"
+display = "String keys"
+group = "sections"
+summary = "paste, sprintf, %in%, match, unique, grepl and setdiff on short character vectors."
+source = "tools/bench/appsuite/app_workload.R"
+
+[[programs]]
+id = "functionals"
+display = "Functionals"
+group = "sections"
+summary = "lapply, sapply, vapply, Map, Reduce and do.call over a list of 10 numbers."
+source = "tools/bench/appsuite/app_workload.R"
+
+[[programs]]
+id = "dates"
+display = "Dates"
+group = "sections"
+summary = "Date and POSIXct formatting and parsing, POSIXlt fields, weekdays() and seq() by month."
+source = "tools/bench/appsuite/app_workload.R"
+
+[[programs]]
+id = "conditions"
+display = "Conditions"
+group = "sections"
+summary = "tryCatch, withCallingHandlers, try, warnings, on.exit and sys.calls around a small function."
+source = "tools/bench/appsuite/app_workload.R"
+
+[[programs]]
+id = "tables"
+display = "Small data.table objects"
+group = "sections"
+summary = "A 40-row data.table created, updated by reference, filtered, grouped, keyed, merged, bound and copied."
+source = "tools/bench/appsuite/app_workload.R"
+
+[[programs]]
+id = "series"
+display = "Small xts objects"
+group = "sections"
+summary = "Two short xts series subset by date, merged, lagged and bound."
+source = "tools/bench/appsuite/app_workload.R"
+
+[[programs]]
+id = "frames"
+display = "Data frames"
+group = "sections"
+summary = "A 20-row data frame created, extended, filtered and bound."
+source = "tools/bench/appsuite/app_workload.R"
+
+[[programs]]
+id = "closures"
+display = "Closure objects"
+group = "sections"
+summary = "S3 operators that build a model of terms in a fastmap."
+source = "tools/bench/appsuite/app_workload.R"
+
+[[programs]]
+id = "native"
+display = "Large inputs"
+group = "sections"
+summary = "Large inputs whose time is in compiled code: binding, keying, grouping and merging 20,000-row data.tables, qt() of 20,000 probabilities and cov() of a matrix."
+source = "tools/bench/appsuite/app_workload.R"
+
+[[programs]]
+id = "expectations"
+display = "testthat expectations"
+group = "sections"
+summary = "expect_equal, expect_true, expect_identical, expect_length and expect_error."
+source = "tools/bench/appsuite/app_workload.R"
+
+[[programs]]
+id = "storage"
+display = "Storage"
+group = "sections"
+summary = "saveRDS, readRDS, serialize and unserialize of a 400-row data.table, 1,000 dates and 2,000 strings."
+source = "tools/bench/appsuite/app_workload.R"
+
+[[programs]]
+id = "s4: new() with initialize and validity"
+display = "s4: new() with initialize and validity"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r01_s4_objects.R"
+
+[[programs]]
+id = "s4: generic with one argument"
+display = "s4: generic with one argument"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r01_s4_objects.R"
+
+[[programs]]
+id = "s4: method with extra arguments (.local)"
+display = "s4: method with extra arguments (.local)"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r01_s4_objects.R"
+
+[[programs]]
+id = "s4: callNextMethod()"
+display = "s4: callNextMethod()"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r01_s4_objects.R"
+
+[[programs]]
+id = "s4: slot read x@value"
+display = "s4: slot read x@value"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r01_s4_objects.R"
+
+[[programs]]
+id = "s4: replacement generic value(x) <- v"
+display = "s4: replacement generic value(x) <- v"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r01_s4_objects.R"
+
+[[programs]]
+id = "s4: slot write x@value <- v in a function"
+display = "s4: slot write x@value <- v in a function"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r01_s4_objects.R"
+
+[[programs]]
+id = "s4: is(x, 'Base')"
+display = "s4: is(x, 'Base')"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r01_s4_objects.R"
+
+[[programs]]
+id = "s4: slotNames(x)"
+display = "s4: slotNames(x)"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r01_s4_objects.R"
+
+[[programs]]
+id = "s4: slot(x, name)"
+display = "s4: slot(x, name)"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r01_s4_objects.R"
+
+[[programs]]
+id = "s4: validObject(x)"
+display = "s4: validObject(x)"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r01_s4_objects.R"
+
+[[programs]]
+id = "s4: isVirtualClass('Base')"
+display = "s4: isVirtualClass('Base')"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r01_s4_objects.R"
+
+[[programs]]
+id = "s4: sapply over 20 objects, one generic each"
+display = "s4: sapply over 20 objects, one generic each"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r01_s4_objects.R"
+
+[[programs]]
+id = "s4: lapply over the slots of one object"
+display = "s4: lapply over the slots of one object"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r01_s4_objects.R"
+
+[[programs]]
+id = "checks: function with an argument check"
+display = "checks: function with an argument check"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r02_argument_checks.R"
+
+[[programs]]
+id = "checks: check_args(...) alone"
+display = "checks: check_args(...) alone"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r02_argument_checks.R"
+
+[[programs]]
+id = "checks: list(...) of three values"
+display = "checks: list(...) of three values"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r02_argument_checks.R"
+
+[[programs]]
+id = "checks: ifelse() on a scalar"
+display = "checks: ifelse() on a scalar"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r02_argument_checks.R"
+
+[[programs]]
+id = "checks: nested ifelse() with is.na()"
+display = "checks: nested ifelse() with is.na()"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r02_argument_checks.R"
+
+[[programs]]
+id = "checks: isTRUE()"
+display = "checks: isTRUE()"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r02_argument_checks.R"
+
+[[programs]]
+id = "checks: inherits(x, 'Date')"
+display = "checks: inherits(x, 'Date')"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r02_argument_checks.R"
+
+[[programs]]
+id = "checks: is(x, 'character')"
+display = "checks: is(x, 'character')"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r02_argument_checks.R"
+
+[[programs]]
+id = "checks: missing() and default arguments"
+display = "checks: missing() and default arguments"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r02_argument_checks.R"
+
+[[programs]]
+id = "checks: match.arg()"
+display = "checks: match.arg()"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r02_argument_checks.R"
+
+[[programs]]
+id = "checks: stopifnot() with two conditions"
+display = "checks: stopifnot() with two conditions"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r02_argument_checks.R"
+
+[[programs]]
+id = "checks: identical() of two short vectors"
+display = "checks: identical() of two short vectors"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r02_argument_checks.R"
+
+[[programs]]
+id = "keys: paste(a, b, sep = '|') of 20 strings"
+display = "keys: paste(a, b, sep = '|') of 20 strings"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r03_keys_and_sets.R"
+
+[[programs]]
+id = "keys: paste0() of two scalars"
+display = "keys: paste0() of two scalars"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r03_keys_and_sets.R"
+
+[[programs]]
+id = "keys: paste(..., collapse = ', ') of 20 strings"
+display = "keys: paste(..., collapse = ', ') of 20 strings"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r03_keys_and_sets.R"
+
+[[programs]]
+id = "keys: scalar %in% 20 strings"
+display = "keys: scalar %in% 20 strings"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r03_keys_and_sets.R"
+
+[[programs]]
+id = "keys: 20 strings %in% 20 strings"
+display = "keys: 20 strings %in% 20 strings"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r03_keys_and_sets.R"
+
+[[programs]]
+id = "keys: match() of a scalar"
+display = "keys: match() of a scalar"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r03_keys_and_sets.R"
+
+[[programs]]
+id = "keys: unique() of 20 strings"
+display = "keys: unique() of 20 strings"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r03_keys_and_sets.R"
+
+[[programs]]
+id = "keys: which() of 20 logicals"
+display = "keys: which() of 20 logicals"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r03_keys_and_sets.R"
+
+[[programs]]
+id = "keys: names(which(named logicals))"
+display = "keys: names(which(named logicals))"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r03_keys_and_sets.R"
+
+[[programs]]
+id = "keys: list element by name x[[key]]"
+display = "keys: list element by name x[[key]]"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r03_keys_and_sets.R"
+
+[[programs]]
+id = "keys: subset a named list by 5 names"
+display = "keys: subset a named list by 5 names"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r03_keys_and_sets.R"
+
+[[programs]]
+id = "keys: unlist(lapply(list, names))"
+display = "keys: unlist(lapply(list, names))"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r03_keys_and_sets.R"
+
+[[programs]]
+id = "keys: setdiff() of short vectors"
+display = "keys: setdiff() of short vectors"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r03_keys_and_sets.R"
+
+[[programs]]
+id = "keys: sprintf() with two values"
+display = "keys: sprintf() with two values"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r03_keys_and_sets.R"
+
+[[programs]]
+id = "keys: gsub() on a scalar"
+display = "keys: gsub() on a scalar"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r03_keys_and_sets.R"
+
+[[programs]]
+id = "keys: nchar() and substr()"
+display = "keys: nchar() and substr()"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r03_keys_and_sets.R"
+
+[[programs]]
+id = "keys: toupper() and trimws()"
+display = "keys: toupper() and trimws()"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r03_keys_and_sets.R"
+
+[[programs]]
+id = "destructure: c(a, b) %<-% f()"
+display = "destructure: c(a, b) %<-% f()"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r04_destructuring.R"
+
+[[programs]]
+id = "destructure: three names, nested value"
+display = "destructure: three names, nested value"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r04_destructuring.R"
+
+[[programs]]
+id = "destructure: the same with plain assignments"
+display = "destructure: the same with plain assignments"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r04_destructuring.R"
+
+[[programs]]
+id = "data.table: data.table() with 4 columns"
+display = "data.table: data.table() with 4 columns"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r05_data_table_small.R"
+
+[[programs]]
+id = "data.table: rbindlist() of 3 tables"
+display = "data.table: rbindlist() of 3 tables"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r05_data_table_small.R"
+
+[[programs]]
+id = "data.table: rbind() of 2 tables"
+display = "data.table: rbind() of 2 tables"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r05_data_table_small.R"
+
+[[programs]]
+id = "data.table: Reduce(rbind) over 50 tables"
+display = "data.table: Reduce(rbind) over 50 tables"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r05_data_table_small.R"
+
+[[programs]]
+id = "data.table: dt[col1 == 'k3']"
+display = "data.table: dt[col1 == 'k3']"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r05_data_table_small.R"
+
+[[programs]]
+id = "data.table: dt[col1 == 'k3', col3]"
+display = "data.table: dt[col1 == 'k3', col3]"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r05_data_table_small.R"
+
+[[programs]]
+id = "data.table: dt[, sum(col3), by = col4]"
+display = "data.table: dt[, sum(col3), by = col4]"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r05_data_table_small.R"
+
+[[programs]]
+id = "data.table: dt[, .(col1, col3)]"
+display = "data.table: dt[, .(col1, col3)]"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r05_data_table_small.R"
+
+[[programs]]
+id = "data.table: copy and := one column"
+display = "data.table: copy and := one column"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r05_data_table_small.R"
+
+[[programs]]
+id = "data.table: set() one column"
+display = "data.table: set() one column"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r05_data_table_small.R"
+
+[[programs]]
+id = "data.table: dt$col3 and dt[['col3']]"
+display = "data.table: dt$col3 and dt[['col3']]"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r05_data_table_small.R"
+
+[[programs]]
+id = "data.table: dt[order(col3)]"
+display = "data.table: dt[order(col3)]"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r05_data_table_small.R"
+
+[[programs]]
+id = "data.table: as.data.table(data.frame)"
+display = "data.table: as.data.table(data.frame)"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r05_data_table_small.R"
+
+[[programs]]
+id = "data.table: merge() of two tables on one key"
+display = "data.table: merge() of two tables on one key"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r05_data_table_small.R"
+
+[[programs]]
+id = "data.table: nrow() and names()"
+display = "data.table: nrow() and names()"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r05_data_table_small.R"
+
+[[programs]]
+id = "data.table: col1 %chin% keys"
+display = "data.table: col1 %chin% keys"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r05_data_table_small.R"
+
+[[programs]]
+id = "xts: xts() from a matrix and dates"
+display = "xts: xts() from a matrix and dates"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r06_xts_small.R"
+
+[[programs]]
+id = "xts: x[day] with a Date"
+display = "xts: x[day] with a Date"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r06_xts_small.R"
+
+[[programs]]
+id = "xts: x[day, 'a']"
+display = "xts: x[day, 'a']"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r06_xts_small.R"
+
+[[programs]]
+id = "xts: x['2024-03'] with a text range"
+display = "xts: x['2024-03'] with a text range"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r06_xts_small.R"
+
+[[programs]]
+id = "xts: x[10:20, ]"
+display = "xts: x[10:20, ]"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r06_xts_small.R"
+
+[[programs]]
+id = "xts: coredata(x)"
+display = "xts: coredata(x)"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r06_xts_small.R"
+
+[[programs]]
+id = "xts: index(x)"
+display = "xts: index(x)"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r06_xts_small.R"
+
+[[programs]]
+id = "xts: as.numeric(x[day, 'a'])"
+display = "xts: as.numeric(x[day, 'a'])"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r06_xts_small.R"
+
+[[programs]]
+id = "xts: merge(x, y)"
+display = "xts: merge(x, y)"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r06_xts_small.R"
+
+[[programs]]
+id = "xts: rbind() of two halves"
+display = "xts: rbind() of two halves"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r06_xts_small.R"
+
+[[programs]]
+id = "xts: lag(y) and diff(y)"
+display = "xts: lag(y) and diff(y)"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r06_xts_small.R"
+
+[[programs]]
+id = "xts: x * 2 + x"
+display = "xts: x * 2 + x"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r06_xts_small.R"
+
+[[programs]]
+id = "xts: first(x) and last(x)"
+display = "xts: first(x) and last(x)"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r06_xts_small.R"
+
+[[programs]]
+id = "xts: window by dates index(x) <= day"
+display = "xts: window by dates index(x) <= day"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r06_xts_small.R"
+
+[[programs]]
+id = "xts: zoo::na.locf(y)"
+display = "xts: zoo::na.locf(y)"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r06_xts_small.R"
+
+[[programs]]
+id = "dates: as.Date() of a text"
+display = "dates: as.Date() of a text"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r07_dates.R"
+
+[[programs]]
+id = "dates: as.Date() of 20 texts"
+display = "dates: as.Date() of 20 texts"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r07_dates.R"
+
+[[programs]]
+id = "dates: format(day, '%Y-%m-%d')"
+display = "dates: format(day, '%Y-%m-%d')"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r07_dates.R"
+
+[[programs]]
+id = "dates: as.character() of 20 dates"
+display = "dates: as.character() of 20 dates"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r07_dates.R"
+
+[[programs]]
+id = "dates: as.POSIXlt(day)$year"
+display = "dates: as.POSIXlt(day)$year"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r07_dates.R"
+
+[[programs]]
+id = "dates: as.POSIXlt() of 20 dates, $mon"
+display = "dates: as.POSIXlt() of 20 dates, $mon"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r07_dates.R"
+
+[[programs]]
+id = "dates: as.POSIXlt() of a POSIXct"
+display = "dates: as.POSIXlt() of a POSIXct"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r07_dates.R"
+
+[[programs]]
+id = "dates: weekdays() of 20 dates"
+display = "dates: weekdays() of 20 dates"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r07_dates.R"
+
+[[programs]]
+id = "dates: day + 1 and difference in days"
+display = "dates: day + 1 and difference in days"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r07_dates.R"
+
+[[programs]]
+id = "dates: day %in% holidays"
+display = "dates: day %in% holidays"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r07_dates.R"
+
+[[programs]]
+id = "dates: seq() of dates by day"
+display = "dates: seq() of dates by day"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r07_dates.R"
+
+[[programs]]
+id = "dates: seq() of dates by month"
+display = "dates: seq() of dates by month"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r07_dates.R"
+
+[[programs]]
+id = "dates: max() and range() of 20 dates"
+display = "dates: max() and range() of 20 dates"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r07_dates.R"
+
+[[programs]]
+id = "dates: is.na(day) and day > other"
+display = "dates: is.na(day) and day > other"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r07_dates.R"
+
+[[programs]]
+id = "dates: as.numeric(format(day, '%Y'))"
+display = "dates: as.numeric(format(day, '%Y'))"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r07_dates.R"
+
+[[programs]]
+id = "dates: Sys.time() and Sys.Date()"
+display = "dates: Sys.time() and Sys.Date()"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r07_dates.R"
+
+[[programs]]
+id = "dates: lubridate::year() and month()"
+display = "dates: lubridate::year() and month()"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r07_dates.R"
+
+[[programs]]
+id = "dates: lubridate::ymd() of a text"
+display = "dates: lubridate::ymd() of a text"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r07_dates.R"
+
+[[programs]]
+id = "dates: c() of two dates"
+display = "dates: c() of two dates"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r07_dates.R"
+
+[[programs]]
+id = "data.frame: data.frame() with 3 columns"
+display = "data.frame: data.frame() with 3 columns"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r08_data_frame.R"
+
+[[programs]]
+id = "data.frame: rbind() of 2 frames"
+display = "data.frame: rbind() of 2 frames"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r08_data_frame.R"
+
+[[programs]]
+id = "data.frame: do.call(rbind, 5 frames)"
+display = "data.frame: do.call(rbind, 5 frames)"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r08_data_frame.R"
+
+[[programs]]
+id = "data.frame: df[['col3']]"
+display = "data.frame: df[['col3']]"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r08_data_frame.R"
+
+[[programs]]
+id = "data.frame: df$col3"
+display = "data.frame: df$col3"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r08_data_frame.R"
+
+[[programs]]
+id = "data.frame: df$col4 <- value"
+display = "data.frame: df$col4 <- value"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r08_data_frame.R"
+
+[[programs]]
+id = "data.frame: df[df$col1 == 'k3', ]"
+display = "data.frame: df[df$col1 == 'k3', ]"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r08_data_frame.R"
+
+[[programs]]
+id = "data.frame: df[, c('col1', 'col3')]"
+display = "data.frame: df[, c('col1', 'col3')]"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r08_data_frame.R"
+
+[[programs]]
+id = "data.frame: df[3, 'col3']"
+display = "data.frame: df[3, 'col3']"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r08_data_frame.R"
+
+[[programs]]
+id = "data.frame: nrow() and colnames()"
+display = "data.frame: nrow() and colnames()"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r08_data_frame.R"
+
+[[programs]]
+id = "data.frame: as.data.frame() of a list"
+display = "data.frame: as.data.frame() of a list"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r08_data_frame.R"
+
+[[programs]]
+id = "data.frame: merge() on one key"
+display = "data.frame: merge() on one key"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r08_data_frame.R"
+
+[[programs]]
+id = "data.frame: df[order(df$col3), ]"
+display = "data.frame: df[order(df$col3), ]"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r08_data_frame.R"
+
+[[programs]]
+id = "data.frame: cbind() of a frame and a vector"
+display = "data.frame: cbind() of a frame and a vector"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r08_data_frame.R"
+
+[[programs]]
+id = "data.frame: apply() over the rows of a matrix"
+display = "data.frame: apply() over the rows of a matrix"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r08_data_frame.R"
+
+[[programs]]
+id = "closures: build an object of 3 closures"
+display = "closures: build an object of 3 closures"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r09_closure_objects.R"
+
+[[programs]]
+id = "closures: method that assigns with <<-"
+display = "closures: method that assigns with <<-"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r09_closure_objects.R"
+
+[[programs]]
+id = "closures: method that reads"
+display = "closures: method that reads"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r09_closure_objects.R"
+
+[[programs]]
+id = "closures: fastmap()"
+display = "closures: fastmap()"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r09_closure_objects.R"
+
+[[programs]]
+id = "closures: fastmap set() of one key"
+display = "closures: fastmap set() of one key"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r09_closure_objects.R"
+
+[[programs]]
+id = "closures: fastmap get() of one key"
+display = "closures: fastmap get() of one key"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r09_closure_objects.R"
+
+[[programs]]
+id = "closures: fastmap new map, 3 sets, as_list()"
+display = "closures: fastmap new map, 3 sets, as_list()"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r09_closure_objects.R"
+
+[[programs]]
+id = "closures: environment assign() and get()"
+display = "closures: environment assign() and get()"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r09_closure_objects.R"
+
+[[programs]]
+id = "closures: local() block"
+display = "closures: local() block"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r09_closure_objects.R"
+
+[[programs]]
+id = "closures: fastmap set() of an old key, 10,000 keys"
+display = "closures: fastmap set() of an old key, 10,000 keys"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r09_closure_objects.R"
+
+[[programs]]
+id = "closures: fastmap set() of a new key, 10,000 keys"
+display = "closures: fastmap set() of a new key, 10,000 keys"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r09_closure_objects.R"
+
+[[programs]]
+id = "closures: fastmap get(), 10,000 keys"
+display = "closures: fastmap get(), 10,000 keys"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r09_closure_objects.R"
+
+[[programs]]
+id = "closures: fastmap has(), 10,000 keys"
+display = "closures: fastmap has(), 10,000 keys"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r09_closure_objects.R"
+
+[[programs]]
+id = "closures: values[i] <<- v on 10,000 elements"
+display = "closures: values[i] <<- v on 10,000 elements"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r09_closure_objects.R"
+
+[[programs]]
+id = "closures: values[[n]] <<- v appends to 10,000"
+display = "closures: values[[n]] <<- v appends to 10,000"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r09_closure_objects.R"
+
+[[programs]]
+id = "closures: new fastmap, 200 sets, as_list()"
+display = "closures: new fastmap, 200 sets, as_list()"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r09_closure_objects.R"
+
+[[programs]]
+id = "conditions: tryCatch(f(i), error = h)"
+display = "conditions: tryCatch(f(i), error = h)"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r10_conditions.R"
+
+[[programs]]
+id = "conditions: tryCatch(f(i), finally = g)"
+display = "conditions: tryCatch(f(i), finally = g)"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r10_conditions.R"
+
+[[programs]]
+id = "conditions: tryCatch() with error and warning"
+display = "conditions: tryCatch() with error and warning"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r10_conditions.R"
+
+[[programs]]
+id = "conditions: withCallingHandlers(f(i), warning = h)"
+display = "conditions: withCallingHandlers(f(i), warning = h)"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r10_conditions.R"
+
+[[programs]]
+id = "conditions: tryCatch around withCallingHandlers"
+display = "conditions: tryCatch around withCallingHandlers"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r10_conditions.R"
+
+[[programs]]
+id = "conditions: an error caught by tryCatch()"
+display = "conditions: an error caught by tryCatch()"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r10_conditions.R"
+
+[[programs]]
+id = "conditions: a warning muffled by a handler"
+display = "conditions: a warning muffled by a handler"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r10_conditions.R"
+
+[[programs]]
+id = "conditions: suppressWarnings(f(i))"
+display = "conditions: suppressWarnings(f(i))"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r10_conditions.R"
+
+[[programs]]
+id = "conditions: on.exit() in a function"
+display = "conditions: on.exit() in a function"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r10_conditions.R"
+
+[[programs]]
+id = "conditions: try(f(i), silent = TRUE)"
+display = "conditions: try(f(i), silent = TRUE)"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r10_conditions.R"
+
+[[programs]]
+id = "conditions: sys.call() and match.call()"
+display = "conditions: sys.call() and match.call()"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r10_conditions.R"
+
+[[programs]]
+id = "conditions: sys.calls() 10 frames deep"
+display = "conditions: sys.calls() 10 frames deep"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r10_conditions.R"
+
+[[programs]]
+id = "functionals: lapply() over 10 values"
+display = "functionals: lapply() over 10 values"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r11_functionals.R"
+
+[[programs]]
+id = "functionals: sapply() over 10 values"
+display = "functionals: sapply() over 10 values"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r11_functionals.R"
+
+[[programs]]
+id = "functionals: vapply() over 10 values"
+display = "functionals: vapply() over 10 values"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r11_functionals.R"
+
+[[programs]]
+id = "functionals: mapply() over two lists"
+display = "functionals: mapply() over two lists"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r11_functionals.R"
+
+[[programs]]
+id = "functionals: Map() over two lists"
+display = "functionals: Map() over two lists"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r11_functionals.R"
+
+[[programs]]
+id = "functionals: do.call() with a named list"
+display = "functionals: do.call() with a named list"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r11_functionals.R"
+
+[[programs]]
+id = "functionals: do.call('c', list)"
+display = "functionals: do.call('c', list)"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r11_functionals.R"
+
+[[programs]]
+id = "functionals: Reduce(`+`, 10 values)"
+display = "functionals: Reduce(`+`, 10 values)"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r11_functionals.R"
+
+[[programs]]
+id = "functionals: Filter() over 10 values"
+display = "functionals: Filter() over 10 values"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r11_functionals.R"
+
+[[programs]]
+id = "functionals: unlist() of 10 values"
+display = "functionals: unlist() of 10 values"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r11_functionals.R"
+
+[[programs]]
+id = "functionals: unlist() of a named list"
+display = "functionals: unlist() of a named list"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r11_functionals.R"
+
+[[programs]]
+id = "functionals: setNames() and names()"
+display = "functionals: setNames() and names()"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r11_functionals.R"
+
+[[programs]]
+id = "functionals: structure() with a class"
+display = "functionals: structure() with a class"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r11_functionals.R"
+
+[[programs]]
+id = "functionals: call forwarding ..."
+display = "functionals: call forwarding ..."
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r11_functionals.R"
+
+[[programs]]
+id = "functionals: call with 5 named arguments"
+display = "functionals: call with 5 named arguments"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r11_functionals.R"
+
+[[programs]]
+id = "functionals: seq_along() loop that fills a list"
+display = "functionals: seq_along() loop that fills a list"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r11_functionals.R"
+
+[[programs]]
+id = "functionals: c() that grows a vector 10 times"
+display = "functionals: c() that grows a vector 10 times"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r11_functionals.R"
+
+[[programs]]
+id = "functionals: rev(), sort() and order() of 10 values"
+display = "functionals: rev(), sort() and order() of 10 values"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r11_functionals.R"
+
+[[programs]]
+id = "functionals: sum(), mean(), max() of 10 values"
+display = "functionals: sum(), mean(), max() of 10 values"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r11_functionals.R"
+
+[[programs]]
+id = "functionals: rep(), seq() and length()"
+display = "functionals: rep(), seq() and length()"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r11_functionals.R"
+
+[[programs]]
+id = "math: qt() of 10,000 probabilities, df = 5"
+display = "math: qt() of 10,000 probabilities, df = 5"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r12_native_math.R"
+
+[[programs]]
+id = "math: qnorm() of 10,000 probabilities"
+display = "math: qnorm() of 10,000 probabilities"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r12_native_math.R"
+
+[[programs]]
+id = "math: pnorm() of 10,000 values"
+display = "math: pnorm() of 10,000 values"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r12_native_math.R"
+
+[[programs]]
+id = "math: pt() of 10,000 values, df = 5"
+display = "math: pt() of 10,000 values, df = 5"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r12_native_math.R"
+
+[[programs]]
+id = "math: exp(), log() and sqrt() of 10,000 values"
+display = "math: exp(), log() and sqrt() of 10,000 values"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r12_native_math.R"
+
+[[programs]]
+id = "math: cumprod(1 + x) of 10,000 values"
+display = "math: cumprod(1 + x) of 10,000 values"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r12_native_math.R"
+
+[[programs]]
+id = "math: matrix %*% vector, 250 x 20"
+display = "math: matrix %*% vector, 250 x 20"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r12_native_math.R"
+
+[[programs]]
+id = "math: cov() of a 250 x 20 matrix"
+display = "math: cov() of a 250 x 20 matrix"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r12_native_math.R"
+
+[[programs]]
+id = "math: colMeans() and apply(m, 2, sd)"
+display = "math: colMeans() and apply(m, 2, sd)"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r12_native_math.R"
+
+[[programs]]
+id = "math: quantile() of 10,000 values"
+display = "math: quantile() of 10,000 values"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r12_native_math.R"
+
+[[programs]]
+id = "math: sort() of 10,000 values"
+display = "math: sort() of 10,000 values"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r12_native_math.R"
+
+[[programs]]
+id = "math: pmin() and pmax() of 10,000 values"
+display = "math: pmin() and pmax() of 10,000 values"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r12_native_math.R"
+
+[[programs]]
+id = "math: scalar loop with 1,000 steps"
+display = "math: scalar loop with 1,000 steps"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r12_native_math.R"
+
+[[programs]]
+id = "s3: UseMethod() to a class method"
+display = "s3: UseMethod() to a class method"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r13_s3_dispatch.R"
+
+[[programs]]
+id = "s3: UseMethod() to the default method"
+display = "s3: UseMethod() to the default method"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r13_s3_dispatch.R"
+
+[[programs]]
+id = "s3: method that calls NextMethod()"
+display = "s3: method that calls NextMethod()"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r13_s3_dispatch.R"
+
+[[programs]]
+id = "s3: operator method a + b"
+display = "s3: operator method a + b"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r13_s3_dispatch.R"
+
+[[programs]]
+id = "s3: `[` method with NextMethod()"
+display = "s3: `[` method with NextMethod()"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r13_s3_dispatch.R"
+
+[[programs]]
+id = "s3: length() method"
+display = "s3: length() method"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r13_s3_dispatch.R"
+
+[[programs]]
+id = "s3: format() method"
+display = "s3: format() method"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r13_s3_dispatch.R"
+
+[[programs]]
+id = "s3: x$v on a classed list"
+display = "s3: x$v on a classed list"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r13_s3_dispatch.R"
+
+[[programs]]
+id = "s3: structure() of a classed list"
+display = "s3: structure() of a classed list"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r13_s3_dispatch.R"
+
+[[programs]]
+id = "s3: inherits(x, 'expr')"
+display = "s3: inherits(x, 'expr')"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r13_s3_dispatch.R"
+
+[[programs]]
+id = "s3: class(x)[1] and oldClass<-"
+display = "s3: class(x)[1] and oldClass<-"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r13_s3_dispatch.R"
+
+[[programs]]
+id = "s3: print() of a classed object to a string"
+display = "s3: print() of a classed object to a string"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r13_s3_dispatch.R"
+
+[[programs]]
+id = "large: paste(a, b, sep = '|') of 5,000 strings"
+display = "large: paste(a, b, sep = '|') of 5,000 strings"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: paste0('id', 1:5000)"
+display = "large: paste0('id', 1:5000)"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: 5,000 strings %in% 5,000 strings"
+display = "large: 5,000 strings %in% 5,000 strings"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: match() of 5,000 strings"
+display = "large: match() of 5,000 strings"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: unique() of 5,000 strings"
+display = "large: unique() of 5,000 strings"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: order() of 5,000 strings"
+display = "large: order() of 5,000 strings"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: which() of 5,000 logicals"
+display = "large: which() of 5,000 logicals"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: x[logical index] of 5,000 numbers"
+display = "large: x[logical index] of 5,000 numbers"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: unlist() of a list of 5,000 numbers"
+display = "large: unlist() of a list of 5,000 numbers"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: lapply() over 5,000 numbers"
+display = "large: lapply() over 5,000 numbers"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: as.POSIXlt() of 5,000 dates"
+display = "large: as.POSIXlt() of 5,000 dates"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: format() of 5,000 dates"
+display = "large: format() of 5,000 dates"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: as.Date() of 5,000 texts"
+display = "large: as.Date() of 5,000 texts"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: ifelse() on 5,000 values"
+display = "large: ifelse() on 5,000 values"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: qt() of 5,000 probabilities, df = 4.5"
+display = "large: qt() of 5,000 probabilities, df = 4.5"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: Reduce(rbind) over 200 tables of 100 rows"
+display = "large: Reduce(rbind) over 200 tables of 100 rows"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: rbindlist() of 200 tables of 100 rows"
+display = "large: rbindlist() of 200 tables of 100 rows"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: rbindlist() of two tables of 5,000 rows"
+display = "large: rbindlist() of two tables of 5,000 rows"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: unique() of a table of 5,000 rows"
+display = "large: unique() of a table of 5,000 rows"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: table[kind == 'x'] of 5,000 rows"
+display = "large: table[kind == 'x'] of 5,000 rows"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: table[, sum(value), by = kind]"
+display = "large: table[, sum(value), by = kind]"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: merge() of two tables of 5,000 rows"
+display = "large: merge() of two tables of 5,000 rows"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: setkey() on a text column"
+display = "large: setkey() on a text column"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: serialize() of a table of 5,000 rows"
+display = "large: serialize() of a table of 5,000 rows"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: unserialize() of that table"
+display = "large: unserialize() of that table"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: saveRDS() and readRDS() of that table"
+display = "large: saveRDS() and readRDS() of that table"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: copy of a numeric vector, one element set"
+display = "large: copy of a numeric vector, one element set"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "large: sum(), cumsum() and diff() of 5,000 numbers"
+display = "large: sum(), cumsum() and diff() of 5,000 numbers"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r14_large_vectors.R"
+
+[[programs]]
+id = "body: f() with no argument"
+display = "body: f() with no argument"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"
+
+[[programs]]
+id = "body: f(a) with one argument"
+display = "body: f(a) with one argument"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"
+
+[[programs]]
+id = "body: f(a, b, c) by position"
+display = "body: f(a, b, c) by position"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"
+
+[[programs]]
+id = "body: f(a, b = , c = ) by name"
+display = "body: f(a, b = , c = ) by name"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"
+
+[[programs]]
+id = "body: f(a) with two default arguments"
+display = "body: f(a) with two default arguments"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"
+
+[[programs]]
+id = "body: a function that passes 3 arguments on"
+display = "body: a function that passes 3 arguments on"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"
+
+[[programs]]
+id = "body: a chain of 5 calls"
+display = "body: a chain of 5 calls"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"
+
+[[programs]]
+id = "body: a function that tests missing(b)"
+display = "body: a function that tests missing(b)"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"
+
+[[programs]]
+id = "body: a function that returns early"
+display = "body: a function that returns early"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"
+
+[[programs]]
+id = "body: a function that defines and calls a function"
+display = "body: a function that defines and calls a function"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"
+
+[[programs]]
+id = "body: lapply over 3 with a function that reads a local"
+display = "body: lapply over 3 with a function that reads a local"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"
+
+[[programs]]
+id = "body: two argument guards with stop()"
+display = "body: two argument guards with stop()"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"
+
+[[programs]]
+id = "body: a function that passes ... on"
+display = "body: a function that passes ... on"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"
+
+[[programs]]
+id = "body: field(x, name) as x[[name]]"
+display = "body: field(x, name) as x[[name]]"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"
+
+[[programs]]
+id = "body: 10 scalar assignments"
+display = "body: 10 scalar assignments"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"
+
+[[programs]]
+id = "body: if / else if chain on a string"
+display = "body: if / else if chain on a string"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"
+
+[[programs]]
+id = "body: switch() on a string"
+display = "body: switch() on a string"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"
+
+[[programs]]
+id = "body: reads of x$a, x$a$b, x[['a']][['b']]"
+display = "body: reads of x$a, x$a$b, x[['a']][['b']]"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"
+
+[[programs]]
+id = "body: writes of x$a, x[['a']], x$a$b"
+display = "body: writes of x$a, x[['a']], x$a$b"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"
+
+[[programs]]
+id = "body: for loop that sums 10 elements"
+display = "body: for loop that sums 10 elements"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"
+
+[[programs]]
+id = "body: for loop that fills 10 elements"
+display = "body: for loop that fills 10 elements"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"
+
+[[programs]]
+id = "body: for loop that copies 5 list fields"
+display = "body: for loop that copies 5 list fields"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"
+
+[[programs]]
+id = "body: list() of 4 named fields with paste0()"
+display = "body: list() of 4 named fields with paste0()"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"
+
+[[programs]]
+id = "body: helper of 20 lines"
+display = "body: helper of 20 lines"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"

@@ -66,6 +66,55 @@ show(vapply(1:2, FUN.VALUE = , function(i) i * 2, numeric(1)))
 
 # A builtin that matches its arguments by name follows it as well.
 show(round(digits = , 2.567))
+for (round in 1:3) {
+  show(log(x = , 8))
+  show(log(base = , 8))
+  show(log(8, base = ))
+  show(log(, 8))
+  show(log(x = , base = 2, 8))
+  show(log(base = , 8, 2))
+}
+
+# `rep` evaluates its first argument to dispatch on it, whatever its name, and an empty one is
+# the error of the calling frame.
+in_frame <- function() rep(times = , 1:2)
+relay_rep <- function(...) rep(...)
+for (round in 1:3) {
+  show(rep(times = , 1:2))
+  show(rep(x = , 1:2, 2))
+  show(rep(each = , 1:2, 2))
+  show(in_frame())
+  show(relay_rep(times = , 1:2))
+  show(rep(1:2, times = ))
+  show(rep(1:2, each = , 2))
+}
+
+# `NextMethod` patches the method's arguments as GNU R's `patchArgsByActuals` does: an empty
+# argument matched by name reads its formal, and the positional argument that filled the
+# formal is passed on empty.
+nm <- function(x, ...) UseMethod("nm")
+nm.default <- function(x, y, ...) c(y = if (missing(y)) NA else y, n = ...length())
+nm.k <- function(x, y, ...) NextMethod()
+nm3 <- function(x, ...) UseMethod("nm3")
+nm3.default <- function(x, y, z) c(missing(y), missing(z))
+nm3.k <- function(x, y, z) NextMethod()
+nm_set <- function(x, ...) UseMethod("nm_set")
+nm_set.default <- function(x, y, ...) c(y = y, n = ...length())
+nm_set.k <- function(x, y, ...) {
+  y <- 10
+  NextMethod()
+}
+obj <- structure(1, class = "k")
+for (round in 1:3) {
+  show(nm(y = , obj, 2))
+  show(nm(y = , obj, 2, 5))
+  show(nm(obj, y = , 2))
+  show(nm(obj, 2))
+  show(nm3(y = , obj, 2, 3))
+  show(nm3(obj, y = , 2))
+  show(nm_set(y = , obj, 2))
+  show(nm_set(obj, 2, 3))
+}
 
 # An unused argument is reported without an integer's `L`.
 two <- function(a, b) a
@@ -86,3 +135,23 @@ show(.Internal(islistfactor(list(factor("a"), factor("b")), FALSE)))
 two <- function(a, b) a
 show(do.call(two, list(1L, 2L, list(a = 1L, 2L))))
 show(round(1L, 2L, c(a = 1L)))
+
+# An unused argument list is deparsed as a pairlist on one line: an empty argument makes it an
+# `alist()`, a name that is not syntactic keeps its backticks, and a block keeps its newlines.
+for (round in 1:3) {
+  show(two(1, w = ))
+  show(two(1, 2, ))
+  show(two(1, w = , v = 3))
+  show(two(1, `my arg` = 2))
+  show(two(1, 2, 3, `if` = 4, `a b`))
+  show(two(1, 2, {
+    x
+    y
+  }))
+  show(two(1, w = {
+    x
+  }))
+  show(round(1, 2, w = ))
+  show(round(1, 2, `my arg` = 3))
+  show(do.call(two, alist(1, 2, w = )))
+}

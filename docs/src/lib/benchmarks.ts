@@ -13,14 +13,15 @@ const sourceFiles = import.meta.glob(['../../../tools/bench/**/*.R', '../../../t
 export const repository = 'https://github.com/felix-andreas/ry/blob/main';
 
 // The order of the summary, the page and the README.
-const suiteOrder = ['public', 'packages', 'codebases', 'kernels', 'applications', 'hot', 'typed', 'builtins'];
+const suiteOrder = ['public', 'packages', 'codebases', 'kernels', 'applications', 'appsuite', 'hot', 'typed', 'builtins'];
 
 export type Interval = { median: number; low?: number; high?: number };
 export type Flag = { kind: string; engine?: string; reason?: string };
 // An engine on which a program did not run to the end. It has no time or ratio there.
 export type Failure = { engine: string; reason: string };
 export type TestCounts = { passed: number; failed: number; errors: number };
-export type Group = { id: string; name: string; description?: string; url?: string; license?: string };
+// A group with `scored: false` stays out of its suite's score and charts, and shows only in its tables.
+export type Group = { id: string; name: string; description?: string; url?: string; license?: string; scored?: boolean };
 export type Meta = {
   date: string;
   ryCommit?: string;
@@ -75,6 +76,13 @@ export type Results = {
   // is faster.
   ratioKind: RatioKind;
   geomean: Record<string, Interval & { programs: number }>;
+  // The engine each engine's ratios compare with, where that is not the suite's baseline.
+  versus: Record<string, string>;
+  // A suite scored by total time, rather than by the geometric mean: per engine, the sum of its
+  // scored programs' seconds and the ratio of the totals.
+  total?: { seconds: Record<string, number>; ratio: Record<string, Interval> };
+  // What the application test suite tracks beside its score.
+  tracked?: Tracked;
   // Each engine's slowest counted program and its ratio.
   worst: Record<string, { id: string; ratio: number }>;
   // The builtins suite's verdict per function: its slowest case on each engine, worst first.
@@ -84,6 +92,17 @@ export type Results = {
   // Per engine, how many functions fail or are slower than the baseline in some case.
   slower?: Record<string, number>;
   meta: Meta;
+};
+export type Contention = { gnu_r: Interval; ry: Interval; ry_over_gnu_r: Interval; processes: number };
+export type Tracked = {
+  // Profiled ry's total over ry's.
+  profile_cost?: Interval;
+  // The share of profiled ry's run in JIT-compiled code, from 0 to 1.
+  tier1_share?: number;
+  patterns?: { count: number; below_1_5: number; below_1: number };
+  // Each engine's contended total over its own, by CPU time and by wall time.
+  contention?: Contention;
+  contention_wall?: Contention;
 };
 export type BuiltinFunction = {
   id: string;
@@ -150,7 +169,20 @@ export function gnuRSuites(): Suite[] {
 
 // The engines a suite compares against its baseline, in the order of its results file.
 export function comparedEngines(suite: Suite): string[] {
-  return (suite.results?.engines ?? []).filter((engine) => engine !== baselineOf(suite));
+  const versus = suite.results?.versus ?? {};
+  const own = Object.keys(versus).length > 0;
+  return (suite.results?.engines ?? []).filter((engine) => engine !== baselineOf(suite) && (!own || engine in versus));
+}
+
+// The engine an engine's ratios compare with.
+export function versusOf(suite: Suite, engine: string): string {
+  return suite.results?.versus[engine] ?? baselineOf(suite);
+}
+
+// The programs that count toward the suite's score.
+function scoredPrograms(suite: Suite): (Program & { measurement: Measurement })[] {
+  const unscored = new Set(suite.groups.filter((group) => group.scored === false).map((group) => group.id));
+  return measuredPrograms(suite).filter((program) => program.group === undefined || !unscored.has(program.group));
 }
 
 // Typed ry compiled before the program starts (`ry run --aot`), and typed ry run from an
@@ -158,9 +190,15 @@ export function comparedEngines(suite: Suite): string[] {
 // so their bars would repeat the typed one: the charts leave them out, and the tables show them.
 const typedAhead = 'ry_typed_aot';
 const typedInstalled = 'ry_typed_file';
+// ry run with the profile summary on measures the summary's cost, not ry, so the charts leave it
+// out too.
+const profiled = 'ry_profiled';
 
+// The charts share one axis, a speed against the suite's baseline, so an engine compared with
+// another engine shows only in the tables.
 function chartedEngines(suite: Suite): string[] {
-  return comparedEngines(suite).filter((engine) => engine !== typedAhead && engine !== typedInstalled);
+  return comparedEngines(suite).filter((engine) =>
+    engine !== typedAhead && engine !== typedInstalled && engine !== profiled && versusOf(suite, engine) === baselineOf(suite));
 }
 
 // What the time of typed ry compiled ahead holds. A program that times a warm run has no compile
@@ -296,7 +334,7 @@ export function machine(meta: Meta): string {
   return parts.join(', ');
 }
 
-// The headline of one measured suite that compares ry with GNU R: ry's geometric-mean speed-up,
+// The headline of one measured suite that compares ry with GNU R: ry's score (`speedMeasure`),
 // untyped and, where the suite has a typed column, typed in strict mode. tools/bench/readme.py writes the same numbers into
 // the READMEs, and the landing page draws them as bars.
 export type SuiteSpeed = {
@@ -313,14 +351,18 @@ export type SuiteSpeed = {
 export function suiteSpeeds(): SuiteSpeed[] {
   return gnuRSuites().map((suite) => {
     const geomean = suite.results?.geomean ?? {};
+    const total = suite.results?.total;
+    const score = (engine: string) => (total === undefined
+      ? geomean[engine]
+      : total.ratio[engine] === undefined ? undefined : { ...total.ratio[engine], programs: scoredPrograms(suite).length });
     return {
       id: suite.id,
       name: suite.name,
       shortName: suite.name.replace(/\s*\(ours\)/, ''),
-      programs: measuredPrograms(suite).length,
+      programs: scoredPrograms(suite).length,
       summary: suite.summary,
-      ry: geomean.ry,
-      typed: geomean.ry_typed,
+      ry: score('ry'),
+      typed: score('ry_typed'),
     };
   });
 }
@@ -353,7 +395,7 @@ export function slowdownSummaries(): string[] {
     });
 }
 
-// One row per measured suite that compares ry with GNU R: what it is and ry's geometric-mean speed
+// One row per measured suite that compares ry with GNU R: what it is and ry's score (`speedMeasure`)
 // against GNU R, untyped and typed in strict mode.
 export const summaryColumns = ['Suite', 'What it is', 'ry vs GNU R', 'ry typed'];
 
@@ -366,7 +408,16 @@ export function summaryRows(): string[][] {
   ]);
 }
 
-export const summaryNote = 'Geometric means of the speed-ups over GNU R; above 1x means ry is faster.';
+// What a suite's number in the summary is: the geometric mean of its speed-ups, or for a suite
+// scored by total time, GNU R's total over ry's.
+export const speedMeasure = (() => {
+  const totals = gnuRSuites().filter((suite) => suite.results?.total !== undefined).map((suite) => suite.name.toLowerCase());
+  return totals.length === 0
+    ? 'Geometric means of the speed-ups over GNU R'
+    : `Geometric means of the speed-ups over GNU R, except for the ${totals.join(' and ')}, which is GNU R's total time over ry's`;
+})();
+
+export const summaryNote = `${speedMeasure}; above 1x means ry is faster.`;
 
 export function summaryMarkdown(): string {
   return [
@@ -401,6 +452,7 @@ export function suiteCharts(suite: Suite): Chart[] {
     return median === undefined ? Infinity : slowdown ? median : -median;
   };
   const charts: Chart[] = groups.flatMap((group) => {
+    if (group?.scored === false) return [];
     const members = group === undefined ? programs : programs.filter((program) => program.group === group.id);
     if (members.length === 0) return [];
     const rows: ChartRow[] = members.map((program) => chartRow(suite, program, engines)).sort((a, b) => rank(a) - rank(b));
@@ -416,8 +468,8 @@ export function suiteCharts(suite: Suite): Chart[] {
       metadata: suiteMetadata(suite),
     }];
   });
-  // The geometric mean spans the whole suite, so it closes the last chart.
-  charts.at(-1)?.rows.push(geomeanRow(suite, engines, groups.length > 1));
+  // The score spans the whole suite, so it closes the last chart.
+  charts.at(-1)?.rows.push(suite.results?.total === undefined ? geomeanRow(suite, engines, groups.length > 1) : totalRow(suite, engines));
   return charts;
 }
 
@@ -466,6 +518,30 @@ function geomeanRow(suite: Suite, engines: string[], grouped: boolean): ChartRow
   };
 }
 
+function totalRow(suite: Suite, engines: string[]): ChartRow {
+  const total = suite.results?.total;
+  const baseline = baselineOf(suite);
+  return {
+    label: 'total',
+    flags: [],
+    summary: true,
+    bars: engines.map((engine) => {
+      const ratio = total?.ratio[engine];
+      const seconds = total?.seconds[engine];
+      const against = total?.seconds[baseline];
+      return {
+        engine,
+        ratio,
+        faded: false,
+        title: ratio === undefined
+          ? `${engineLabel(engine)}: no total`
+          : `${engineLabel(engine)}: ${formatInterval(ratio)} the speed of ${engineLabel(baseline)} over the total of ${scoredPrograms(suite).length} programs` +
+            (seconds === undefined || against === undefined ? '' : `, ${seconds.toFixed(2)} s against ${against.toFixed(2)} s`),
+      };
+    }),
+  };
+}
+
 export function chartMarkdown(suite: Suite): string {
   if (suite.results === undefined) return '';
   return suiteCharts(suite)
@@ -492,6 +568,7 @@ export type TableView = { label: string; columns: string[]; rows: string[][]; no
 
 export function tableViews(suite: Suite): TableView[] {
   if (suite.results?.functions !== undefined) return builtinsViews(suite, suite.results.functions);
+  if (suite.results?.total !== undefined) return workloadViews(suite, suite.results.total);
   const engines = suite.results?.engines ?? [];
   const compared = comparedEngines(suite);
   const programs = measuredPrograms(suite);
@@ -603,6 +680,84 @@ export function tableViews(suite: Suite): TableView[] {
         }),
       ]),
       note: `Each test block is timed on its own. The speed-up is the geometric mean over the blocks that GNU R runs in 1 ms or more of GNU R's median time over the engine's, so it weighs every test alike, where the Time table weighs the tests by how long they take.${worstNote === '' ? '' : ` The slowest code base against the mean of the suite: ${worstNote}.`}`,
+    });
+  }
+  return views;
+}
+
+// A suite scored by total time: its scored programs in seconds with the total, each unscored group
+// per call, and what the suite tracks beside its score.
+function workloadViews(suite: Suite, total: NonNullable<Results['total']>): TableView[] {
+  const engines = suite.results?.engines ?? [];
+  const compared = comparedEngines(suite);
+  const ratioColumn = (engine: string) => `${engineLabel(versusOf(suite, engine))} / ${engineLabel(engine)}`;
+  const ratioCell = (program: Program & { measurement: Measurement }, engine: string) => {
+    const ratio = program.measurement.ratio[engine];
+    const failure = program.measurement.failures.find((found) => found.engine === engine || found.engine === versusOf(suite, engine));
+    return failure !== undefined ? failureText(failure) : ratio === undefined ? 'n/a' : formatInterval(ratio);
+  };
+  const scored = scoredPrograms(suite);
+  const views: TableView[] = [{
+    label: 'Total',
+    columns: ['program', ...engines.map(engineLabel), ...compared.map(ratioColumn)],
+    rows: [
+      ...scored.map((program) => [
+        program.display,
+        ...engines.map((engine) => {
+          const value = program.measurement.seconds[engine];
+          return value === undefined ? 'n/a' : seconds(value);
+        }),
+        ...compared.map((engine) => ratioCell(program, engine)),
+      ]),
+      [
+        'total',
+        ...engines.map((engine) => (total.seconds[engine] === undefined ? 'n/a' : seconds(total.seconds[engine]))),
+        ...compared.map((engine) => (total.ratio[engine] === undefined ? 'n/a' : formatInterval(total.ratio[engine]))),
+      ],
+    ],
+    note: `Each time is CPU seconds, the median over the rounds. Each ratio is the median of the per-round ratios of the first engine's time over the second's, with its 95% interval in parentheses, so above 1x the second engine is faster. The suite's score is the total's ratio, which weighs each program by the time it takes.`,
+  }];
+  const perCall = (value: number) => (value >= 0.001 ? seconds(value) : value >= 1e-6 ? `${(value * 1e6).toFixed(1)} µs` : `${(value * 1e9).toFixed(0)} ns`);
+  for (const group of suite.groups.filter((candidate) => candidate.scored === false)) {
+    const members = measuredPrograms(suite).filter((program) => program.group === group.id);
+    const ratioed = compared.filter((engine) => members.some((program) => program.measurement.ratio[engine] !== undefined));
+    const timed = engines.filter((engine) => members.some((program) => program.measurement.seconds[engine] !== undefined));
+    views.push({
+      label: group.name,
+      columns: ['program', ...timed.map(engineLabel), ...ratioed.map(ratioColumn)],
+      rows: members.map((program) => [
+        program.display,
+        ...timed.map((engine) => {
+          const value = program.measurement.seconds[engine];
+          return value === undefined ? 'n/a' : perCall(value);
+        }),
+        ...ratioed.map((engine) => ratioCell(program, engine)),
+      ]),
+      note: group.description,
+    });
+  }
+  const tracked = suite.results?.tracked ?? {};
+  const rows: string[][] = [];
+  const ry = total.ratio.ry;
+  if (ry !== undefined) rows.push(['Speed-up of the total over GNU R', formatInterval(ry)]);
+  if (tracked.profile_cost !== undefined) rows.push(['Time with the profile summary on, over the time without', formatInterval(tracked.profile_cost)]);
+  if (tracked.tier1_share !== undefined) rows.push(['Share of the profiled time in JIT-compiled code', `${(tracked.tier1_share * 100).toFixed(1)}%`]);
+  if (tracked.patterns !== undefined) {
+    rows.push([`Patterns slower than 1.5x GNU R's speed, of ${tracked.patterns.count}`, String(tracked.patterns.below_1_5)]);
+    rows.push([`Patterns slower than GNU R, of ${tracked.patterns.count}`, String(tracked.patterns.below_1)]);
+  }
+  for (const [found, measure] of [[tracked.contention, 'CPU time'], [tracked.contention_wall, 'wall time']] as const) {
+    if (found === undefined) continue;
+    rows.push([`GNU R's ${measure} in ${found.processes} processes at once, over its own`, formatInterval(found.gnu_r)]);
+    rows.push([`ry's ${measure} in ${found.processes} processes at once, over its own`, formatInterval(found.ry)]);
+    rows.push([`ry's slowdown under contention over GNU R's, by ${measure}`, formatInterval(found.ry_over_gnu_r)]);
+  }
+  if (rows.length > 0) {
+    views.push({
+      label: 'Tracked',
+      columns: ['measure', 'value'],
+      rows,
+      note: 'Medians of the per-round ratios, with their 95% intervals. A contended run starts one process per core, each running the whole workload; a slowdown above 1x means the processes slow each other down.',
     });
   }
   return views;
@@ -791,6 +946,9 @@ type RawResults = {
     failures?: Failure[];
   }[];
   geomean: Record<string, Interval & { programs: number }>;
+  versus?: Record<string, string>;
+  total?: { seconds: Record<string, number>; ratio: Record<string, Interval> };
+  tracked?: Tracked;
   worst?: Record<string, { id: string; ratio: number }>;
   functions?: BuiltinFunction[];
   skips?: { id: string; reason: string }[];
@@ -837,6 +995,9 @@ function loadSuites(): Suite[] {
             baseline: results.baseline ?? gnuR,
             ratioKind: results.ratio_kind ?? 'speedup',
             geomean: results.geomean,
+            versus: results.versus ?? {},
+            total: results.total,
+            tracked: results.tracked,
             worst: results.worst ?? {},
             functions: results.functions,
             skips: results.skips,

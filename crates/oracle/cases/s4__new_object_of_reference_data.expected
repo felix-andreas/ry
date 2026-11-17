@@ -1,0 +1,28 @@
+[stdout]
+| [1] "symbol"
+| NULL
+| [1] FALSE
+| `<UNDEFINED>`
+| NULL
+| [1] "environment"
+| NULL
+| [1] FALSE
+| [1] "externalptr"
+| NULL
+| [1] FALSE
+| [1] "S4"
+| [1] "value" "class"
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] FALSE
+| [1] "S4"
+| [1] TRUE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| TRUE
