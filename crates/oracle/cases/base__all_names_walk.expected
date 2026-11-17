@@ -1,0 +1,89 @@
+[stdout]
+| [1] "q"
+| [1] "("        "function" "p"        "q"       
+| [1] "q"
+| [1] "y"
+| [1] "f" "x" "y"
+| [1] "y"
+| [1] "c"
+| [1] "$" "a" "b" "c"
+| [1] "c"
+| [1] "y"
+| [1] "[[" "x"  "y" 
+| [1] "y"
+| [1] "x" "z"
+| [1] "f" "g" "x" "h" "y" "z"
+| [1] "x" "z"
+| [1] "x" "y"
+| [1] "+" "+" "x" "x" "y"
+| [1] "x" "y"
+| [1] "a" "b" "c"
+| [1] "+" "a" "b" "f" "c"
+| [1] "a" "b" "c"
+| [1] "x" "w"
+| [1] "function" "+"        "x"        "w"       
+| [1] "x" "w"
+| [1] "é"   "a b"
+| [1] "+"   "é"   "a b"
+| [1] "é"   "a b"
+| character(0)
+| [1] "f"
+| character(0)
+| [1] "x"
+| [1] "x"
+| [1] "x"
+| character(0)
+| character(0)
+| character(0)
+| character(0)
+| character(0)
+| character(0)
+| character(0)
+| character(0)
+| character(0)
+| [1] "x"
+| [1] "::"   "base" "f"    "x"   
+| [1] "x"
+| [1] "x"
+| [1] "-" "x"
+| [1] "x"
+| [1] "x"
+| [1] "(" "x"
+| [1] "x"
+| [1] "x" "y"
+| [1] "{" "x" "y"
+| [1] "x" "y"
+| [1] "x" "y"
+| [1] "<-" "x"  "y" 
+| [1] "x" "y"
+| [1] "b" "c"
+| [1] "f" "b" "c"
+| [1] "b" "c"
+| [1] "x"
+| [1] "x"
+| [1] "x"
+| [1] "x"
+| [1] "f" "x"
+| [1] "x"
+| [1] "+" "+"
+| [1] "+" "x"
+| character(0)
+| [1] "+" "+" "+" "x" "x" "y" "z" "w"
+| character(0)
+| character(0)
+| [1] "+" "+"
+| [1] "+" "x" "y" "z" "w"
+| [1] "x" "x" "y" "w"
+| [1] "x"
+| [1] "x" "x" "y" "w"
+| [1] "+" "x" "y" "z" "w"
+| [1] "unknown" "unknown"
+| [1] "a" "b" "c"
+| [1] "y" "x" "z"
+| [1] "NAs introduced by coercion"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "NAs introduced by coercion"

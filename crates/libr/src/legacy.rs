@@ -789,7 +789,7 @@ pub unsafe extern "C" fn R_FileExists(path: *const std::ffi::c_char) -> crate::R
 #[unsafe(no_mangle)]
 pub extern "C" fn Ri18n_wcwidth(code: u32) -> c_int {
     char::from_u32(code).map_or(1, |character| {
-        unicode_width::UnicodeWidthChar::width(character).unwrap_or(0) as c_int
+        interp::format::char_width(character) as c_int
     })
 }
 

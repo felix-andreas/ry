@@ -208,6 +208,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A lazily signalled error carries its condition class (settled)
 - `coerce_vector` applies GNU R's attribute rule in one place (settled)
 - A promise whose evaluation was left warns when it is forced again (settled)
+- An assignment with several subscripts checks them before the value (settled)
+- A condition names a superassignment inside a function with the plain arrow (settled)
 - A direct call of an attribute replacement wraps its target
 
 ## Builtins and base R
@@ -344,6 +346,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Parked: cheaper global bindings in top-level loops (tier 0) (planned)
 - A compiled replacement probes the target before any subscript runs
 - A call native code evaluates repeatedly compiles at its third evaluation
+- A handler compiled code steps outside `scoped` leaves no handle behind
 
 ## Heap and collector
 
@@ -388,6 +391,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Interpreter code holds values through handles the borrow checker checks
 - Whether a vector may be written in place is a value, `Owned`
 - A builtin's fast-path entry runs in its caller's handle scope and answers unrooted
+- An allocation failure reports the size of the vector's data
 - A list of inert elements skips its children when it dies
 
 ## C API, R home and packages

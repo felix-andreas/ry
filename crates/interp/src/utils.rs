@@ -11,7 +11,7 @@ use {
     crate::{
         builtin_libraries::{NativeCall, NativeFn},
         builtins::{Arg, BuiltinDef, Call, internal},
-        coerce::coerce_vector,
+        coerce::{coerce_vector, is_blank, is_c_space},
         conditions::warning,
         format::{format_complex_alone, format_real_alone_scipen},
         platform,
@@ -28,6 +28,7 @@ use {
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp},
         strings::Encoding,
     },
+    numeric::long_double::{Exactness, strtod},
     rustc_hash::{FxHashMap, FxHashSet},
     std::{
         cell::RefCell,
@@ -1224,66 +1225,6 @@ fn parse_integer(text: &[u8]) -> Option<i32> {
     (value > i32::MIN as i64 && value <= i32::MAX as i64).then_some(value as i32)
 }
 
-/// C's `isspace` in a UTF-8 locale, for one byte.
-fn is_c_space(byte: u8) -> bool {
-    matches!(byte, b' ' | b'\t' | b'\n' | 11 | 12 | b'\r')
-}
-
-/// GNU R's `isBlankString` in a UTF-8 locale: only white space characters as `iswspace` knows
-/// them. Like GNU R, it stops at the first character that is not white space, and an invalid
-/// multibyte sequence before any such character is an error.
-fn is_blank(text: &[u8]) -> R<bool> {
-    let text = text
-        .iter()
-        .position(|&byte| byte == 0)
-        .map_or(text, |end| &text[..end]);
-    let mut rest = text;
-    while !rest.is_empty() {
-        // One character is at most four bytes, so only those are validated per step.
-        let head = &rest[..rest.len().min(4)];
-        let valid = match std::str::from_utf8(head) {
-            Ok(valid) => valid,
-            Err(failure) => {
-                // SAFETY: `valid_up_to` is the length of a valid UTF-8 prefix.
-                unsafe { std::str::from_utf8_unchecked(&head[..failure.valid_up_to()]) }
-            }
-        };
-        if let Some(character) = valid.chars().next() {
-            if !is_wide_space(character) {
-                return Ok(false);
-            }
-            rest = &rest[character.len_utf8()..];
-        } else {
-            return Err(crate::connections::invalid_multibyte(rest));
-        }
-    }
-    Ok(true)
-}
-
-/// `iswspace` in glibc's UTF-8 locales.
-fn is_wide_space(character: char) -> bool {
-    matches!(
-        character,
-        '\t'..='\r'
-            | ' '
-            | '\u{1680}'
-            | '\u{2000}'..='\u{2006}'
-            | '\u{2008}'..='\u{200a}'
-            | '\u{2028}'
-            | '\u{2029}'
-            | '\u{205f}'
-            | '\u{3000}'
-    )
-}
-
-/// How `type.convert`'s `numerals` treats a number with more digits than a double holds.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Exactness {
-    Allow,
-    Warn,
-    Refuse,
-}
-
 /// GNU R's `R_strtod5`: the double at the start of `text` and the bytes it spans, 0 when there
 /// is none. With `na`, `NA` reads as missing.
 unsafe fn parse_double_prefix(
@@ -1292,164 +1233,14 @@ unsafe fn parse_double_prefix(
     na: bool,
     exactness: Exactness,
 ) -> R<(f64, usize)> {
-    let mut position = text.iter().take_while(|&&byte| is_c_space(byte)).count();
-    let rest = &text[position..];
-    if na && rest.starts_with(b"NA") {
-        return Ok((NA_REAL, position + 2));
+    let number = strtod(text, decimal, na, exactness);
+    if number.accuracy_lost {
+        warning(format!(
+            "accuracy loss in conversion from \"{}\" to numeric",
+            values::escape_invalid_bytes(text)
+        ))?;
     }
-    let sign = match rest.first() {
-        Some(b'-') => {
-            position += 1;
-            -1.0
-        }
-        Some(b'+') => {
-            position += 1;
-            1.0
-        }
-        _ => 1.0,
-    };
-    let rest = &text[position..];
-    let starts_with = |prefix: &[u8]| {
-        rest.len() >= prefix.len() && rest[..prefix.len()].eq_ignore_ascii_case(prefix)
-    };
-    if starts_with(b"nan") {
-        return Ok((f64::NAN, position + 3));
-    }
-    if starts_with(b"infinity") {
-        return Ok((sign * f64::INFINITY, position + 8));
-    }
-    if starts_with(b"inf") {
-        return Ok((sign * f64::INFINITY, position + 3));
-    }
-    let too_exact = |mantissa: f64| -> R<bool> {
-        if mantissa <= 9_007_199_254_740_991.0 {
-            return Ok(false);
-        }
-        match exactness {
-            Exactness::Allow => Ok(false),
-            Exactness::Warn => {
-                warning(format!(
-                    "accuracy loss in conversion from \"{}\" to numeric",
-                    values::escape_invalid_bytes(text)
-                ))?;
-                Ok(false)
-            }
-            Exactness::Refuse => Ok(true),
-        }
-    };
-    if rest.len() > 2 && rest[0] == b'0' && matches!(rest[1], b'x' | b'X') {
-        position += 2;
-        let mut mantissa = 0.0f64;
-        let mut fraction_bits: i32 = -1;
-        while let Some(&byte) = text.get(position) {
-            if let Some(digit) = (byte as char).to_digit(16) {
-                mantissa = 16.0 * mantissa + digit as f64;
-            } else if byte == decimal {
-                fraction_bits = 0;
-                position += 1;
-                continue;
-            } else {
-                break;
-            }
-            if fraction_bits >= 0 {
-                fraction_bits += 4;
-            }
-            position += 1;
-        }
-        if too_exact(mantissa)? {
-            return Ok((NA_REAL, 0));
-        }
-        let mut exponent: i32 = 0;
-        if matches!(text.get(position), Some(b'p' | b'P')) {
-            position += 1;
-            let (value, digits, end) = exponent_digits(text, position);
-            if digits == 0 {
-                return Ok((NA_REAL, 0));
-            }
-            exponent = value;
-            position = end;
-        }
-        if mantissa != 0.0 {
-            if fraction_bits > 0 {
-                exponent -= fraction_bits;
-            }
-            mantissa = scale_by_two(mantissa, exponent);
-        }
-        return Ok((sign * mantissa, position));
-    }
-    let mut digits = String::new();
-    let mut exponent: i64 = 0;
-    while let Some(&byte) = text.get(position).filter(|byte| byte.is_ascii_digit()) {
-        digits.push(byte as char);
-        position += 1;
-    }
-    if text.get(position) == Some(&decimal) {
-        position += 1;
-        while let Some(&byte) = text.get(position).filter(|byte| byte.is_ascii_digit()) {
-            digits.push(byte as char);
-            exponent -= 1;
-            position += 1;
-        }
-    }
-    if digits.is_empty() {
-        return Ok((NA_REAL, 0));
-    }
-    let significant = digits.trim_start_matches('0');
-    let mantissa_exceeds =
-        significant.len() > 16 || (significant.len() == 16 && significant > "9007199254740991");
-    if too_exact(if mantissa_exceeds { f64::INFINITY } else { 0.0 })? {
-        return Ok((NA_REAL, 0));
-    }
-    if matches!(text.get(position), Some(b'e' | b'E')) {
-        position += 1;
-        let (value, count, end) = exponent_digits(text, position);
-        if count == 0 {
-            return Ok((NA_REAL, 0));
-        }
-        exponent += value as i64;
-        position = end;
-    }
-    let value: f64 = format!("{digits}e{exponent}").parse().unwrap_or(f64::NAN);
-    Ok((sign * value, position))
-}
-
-/// An exponent's optional sign and digits from `position`: its value (capped as GNU R caps
-/// it), the number of digits and where it ends.
-fn exponent_digits(text: &[u8], mut position: usize) -> (i32, usize, usize) {
-    let sign = match text.get(position) {
-        Some(b'-') => {
-            position += 1;
-            -1
-        }
-        Some(b'+') => {
-            position += 1;
-            1
-        }
-        _ => 1,
-    };
-    let mut value: i32 = 0;
-    let mut digits = 0;
-    while let Some(&byte) = text.get(position).filter(|byte| byte.is_ascii_digit()) {
-        if value < 9999 {
-            value = value * 10 + (byte - b'0') as i32;
-        }
-        digits += 1;
-        position += 1;
-    }
-    (sign * value, digits, position)
-}
-
-/// `value * 2^exponent` without overflowing an intermediate power of two.
-fn scale_by_two(mut value: f64, mut exponent: i32) -> f64 {
-    while exponent > 1000 {
-        value *= 2f64.powi(1000);
-        exponent -= 1000;
-    }
-    while exponent < -1000 {
-        value *= 2f64.powi(-1000);
-        exponent += 1000;
-    }
-    value * 2f64.powi(exponent)
+    Ok((number.value, number.length))
 }
 
 /// GNU R's `strtoc`: the complex number at the start of `text` (`a`, `bi` or `a+bi`) and the

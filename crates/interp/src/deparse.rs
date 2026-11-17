@@ -7,7 +7,7 @@ use {
     crate::{
         builtins::{BuiltinDef, Call, internal},
         format, records, standard_library, strings,
-        unwind::{R, Unwind},
+        unwind::{R, Unwind, error},
         values::{self, char_str, get_attr, length, nil, symbol_name, symbols},
     },
     heap::{
@@ -56,6 +56,15 @@ pub unsafe fn deparse_lines_with(
     deparse_checked(object, cutoff, opts, backtick, usize::MAX).0
 }
 
+/// [`deparse_lines`] for printing a call, which raises the error a deparse raises.
+pub unsafe fn deparse_lines_checked(object: Sexp, cutoff: usize, opts: u32) -> R<Vec<String>> {
+    let (lines, _, failure) = deparse_checked(object, cutoff, opts, true, usize::MAX);
+    match failure {
+        Some(failure) => Err(failure),
+        None => Ok(lines),
+    }
+}
+
 /// Deparses, and also reports whether the text cannot reparse to the object because it holds
 /// an environment, pointer, or other value with no source form, and the first error that
 /// `deparse` itself raises (an S4 object whose class is not defined). The deparse stops after
@@ -77,9 +86,10 @@ unsafe fn deparse_checked(
     (deparser.finish(), incomplete, failure)
 }
 
-/// Deparses for `deparse`, `dput` and `dump`, warning as `warnIncomplete` asks. Only these
-/// and coercion ([`deparse_for_coercion`]) raise a deparse error; the text an error message
-/// or `print` shows falls back to the plain value, because a message must never fail.
+/// Deparses for `deparse`, `dput` and `dump`, warning as `warnIncomplete` asks. Only these,
+/// coercion ([`deparse_for_coercion`]) and printing a call ([`deparse_lines_checked`]) raise a
+/// deparse error; the text an error message shows falls back to the plain value, because a
+/// message must never fail.
 unsafe fn deparse_warning(
     object: Sexp,
     cutoff: usize,
@@ -173,7 +183,6 @@ enum Kind {
 
 /// GNU R's precedences.
 mod precedence {
-    pub const FUNCTION: u8 = 0;
     pub const EQ: u8 = 1;
     pub const LEFT: u8 = 2;
     pub const TILDE: u8 = 4;
@@ -269,7 +278,17 @@ pub fn quote_name(name: &str) -> String {
     if is_syntactic(name) {
         name.to_owned()
     } else {
-        format!("`{}`", name.replace('\\', "\\\\").replace('`', "\\`"))
+        format::encode_string(name, Some('`'))
+    }
+}
+
+/// An argument's tag: a non-syntactic one is written in backticks under `backtick`, and in
+/// double quotes otherwise.
+fn tag_text(name: &str, backtick: bool) -> String {
+    if is_syntactic(name) {
+        name.to_owned()
+    } else {
+        format::encode_string(name, Some(if backtick { '`' } else { '"' }))
     }
 }
 
@@ -436,17 +455,21 @@ impl Deparser {
             SexpType::Nil => self.print("NULL"),
             SexpType::Symbol => {
                 let name = symbol_name(object);
-                if name.is_empty() {
-                    // The empty symbol, `R_MissingArg`, prints as nothing even when quoted.
-                } else if self.opts & options::QUOTE_EXPRESSIONS != 0 {
-                    self.print("quote(");
-                    self.print(&quote_name(&name));
-                    self.print(")");
-                } else if self.backtick {
-                    self.print(&quote_name(&name));
-                } else {
+                // The empty symbol, `R_MissingArg`, prints as nothing even when quoted.
+                if !name.is_empty() {
+                    let quoted = self.opts & options::QUOTE_EXPRESSIONS != 0;
+                    if quoted {
+                        self.print("quote(");
+                    }
                     // `backtick = FALSE`, the default for a symbol, prints a non-syntactic name bare.
-                    self.print(&name);
+                    if self.backtick {
+                        self.print(&quote_name(&name));
+                    } else {
+                        self.print(&name);
+                    }
+                    if quoted {
+                        self.print(")");
+                    }
                 }
             }
             SexpType::Closure => self.closure(object),
@@ -504,7 +527,23 @@ impl Deparser {
                     "pairlist("
                 });
                 self.in_list += 1;
-                self.arguments(object, false, false);
+                // A tag is written as a symbol is, so it is bare unless `backtick` is set, and
+                // the line never breaks between elements.
+                let saved = self.opts;
+                let mut cell = object;
+                while matches!(cell.kind(), SexpType::Pairlist | SexpType::Dots) {
+                    if cell.tag() != nil() {
+                        self.opts = 0;
+                        self.deparse(cell.tag());
+                        self.opts = saved;
+                        self.print(" = ");
+                    }
+                    self.deparse(cell.car());
+                    cell = cell.cdr();
+                    if matches!(cell.kind(), SexpType::Pairlist | SexpType::Dots) {
+                        self.print(", ");
+                    }
+                }
                 self.in_list -= 1;
                 self.print(if has_missing { "))" } else { ")" });
             }
@@ -602,50 +641,33 @@ impl Deparser {
         // in the formals and body show without their attributes.
         self.opts &= !(options::QUOTE_EXPRESSIONS | options::SHOW_ATTRIBUTES | options::USE_SOURCE);
         self.print("function (");
-        self.formals(function.car());
+        self.arguments(function.car(), true);
         self.print(") ");
         self.write_line();
         self.deparse(crate::bytecode::closure_body(function));
         self.opts = saved;
     }
 
-    unsafe fn formals(&mut self, formals: Sexp) {
+    /// The arguments of a call or the formals of a function: `tag = value`, with GNU R's line
+    /// breaks.
+    unsafe fn arguments(&mut self, mut list: Sexp, formals: bool) {
         let mut broken = false;
-        let mut cell = formals;
-        while cell.kind() == SexpType::Pairlist {
-            let name = symbol_name(cell.tag());
-            self.print(&quote_name(&name));
-            let default = cell.car();
-            if default != values::missing_arg() {
-                self.print(" = ");
-                self.deparse(default);
+        while list != nil() {
+            if !matches!(
+                list.kind(),
+                SexpType::Pairlist | SexpType::Language | SexpType::Dots
+            ) {
+                self.failure
+                    .get_or_insert(error("badly formed function expression"));
+                break;
             }
-            cell = cell.cdr();
-            if cell.kind() == SexpType::Pairlist {
-                self.print(", ");
-                self.line_break(&mut broken);
-            }
-        }
-        if broken {
-            self.indent -= 1;
-        }
-    }
-
-    /// The arguments of a call: `tag = value`, with GNU R's line breaks. A pairlist's elements
-    /// are written the same way but never break the line (`breaks` is false).
-    unsafe fn arguments(&mut self, mut list: Sexp, formals: bool, breaks: bool) {
-        let mut broken = false;
-        while matches!(
-            list.kind(),
-            SexpType::Pairlist | SexpType::Language | SexpType::Dots
-        ) {
             let tag = list.tag();
             if tag != nil() && tag.kind() == SexpType::Symbol {
                 let name = symbol_name(tag);
                 if name.is_empty() {
                     self.print("``");
                 } else {
-                    self.print(&quote_name(&name));
+                    self.print(&tag_text(&name, self.backtick));
                 }
                 if formals {
                     if list.car() != values::missing_arg() {
@@ -665,14 +687,9 @@ impl Deparser {
                 self.deparse(list.car());
             }
             list = list.cdr();
-            if matches!(
-                list.kind(),
-                SexpType::Pairlist | SexpType::Language | SexpType::Dots
-            ) {
+            if list != nil() {
                 self.print(", ");
-                if breaks {
-                    self.line_break(&mut broken);
-                }
+                self.line_break(&mut broken);
             }
         }
         if broken {
@@ -707,35 +724,40 @@ impl Deparser {
                 self.curly(arguments);
                 return;
             }
-            if head == symbols.paren && argument_count == 1 {
+            // A keyword's call is written in the keyword's form whatever arguments it holds,
+            // with `NULL` for each one it lacks.
+            let first = argument_at(arguments, 0);
+            let second = argument_at(arguments, 1);
+            let third = argument_at(arguments, 2);
+            if head == symbols.paren {
                 self.print("(");
-                self.deparse(arguments.car());
+                self.deparse(first);
                 self.print(")");
                 return;
             }
-            if head == symbols.if_ && (2..=3).contains(&argument_count) {
-                self.if_expression(arguments);
+            if head == symbols.if_ {
+                self.if_expression(first, second, (argument_count > 2).then_some(third));
                 return;
             }
-            if head == symbols.for_ && argument_count == 3 {
+            if head == symbols.for_ {
                 self.print("for (");
-                self.deparse(arguments.car());
+                self.deparse(first);
                 self.print(" in ");
-                self.deparse(arguments.cdr().car());
+                self.deparse(second);
                 self.print(") ");
-                self.deparse(arguments.cdr().cdr().car());
+                self.deparse(third);
                 return;
             }
-            if head == symbols.while_ && argument_count == 2 {
+            if head == symbols.while_ {
                 self.print("while (");
-                self.deparse(arguments.car());
+                self.deparse(first);
                 self.print(") ");
-                self.deparse(arguments.cdr().car());
+                self.deparse(second);
                 return;
             }
-            if head == symbols.repeat && argument_count == 1 {
+            if head == symbols.repeat {
                 self.print("repeat ");
-                self.deparse(arguments.car());
+                self.deparse(first);
                 return;
             }
             if let Some(form) = ry_form(name, arguments) {
@@ -751,41 +773,59 @@ impl Deparser {
                 self.print("next");
                 return;
             }
-            if head == symbols.function && argument_count >= 2 {
-                self.print("function(");
-                let formals = arguments.car();
-                self.formals(formals);
-                self.print(") ");
-                self.deparse(arguments.cdr().car());
+            if head == symbols.function {
+                if self.opts & options::USE_SOURCE != 0 && third.kind() == SexpType::String {
+                    for index in 0..length(third) {
+                        self.print(&char_str(third.element(index)));
+                        self.write_line();
+                    }
+                } else {
+                    self.print("function(");
+                    self.arguments(first, true);
+                    self.print(") ");
+                    self.deparse(second);
+                }
                 return;
             }
             if let Some(info) = operator_info(name) {
                 match (info.kind, argument_count) {
-                    (Kind::Subset, count) if count >= 1 => {
+                    (Kind::Subset, _) => {
                         let (open, close) = if name == b"[" {
                             ("[", "]")
                         } else {
                             ("[[", "]]")
                         };
-                        let target = arguments.car();
-                        let parens = needs_parens(info, target, true);
+                        let parens = needs_parens(info, first, true, left_of);
                         if parens {
                             self.print("(");
                         }
-                        self.deparse(target);
+                        self.deparse(first);
                         if parens {
                             self.print(")");
                         }
                         self.print(open);
-                        self.arguments(arguments.cdr(), false, true);
+                        if arguments != nil() {
+                            self.arguments(arguments.cdr(), false);
+                        }
                         self.print(close);
                         return;
                     }
-                    (Kind::Dollar, 2) => {
+                    // Any other right-hand side is written as a call (`` `$`(a, 1) ``).
+                    (Kind::Dollar, 2)
+                        if {
+                            let member = arguments.cdr().car();
+                            member.kind() == SexpType::Symbol
+                                || (member.kind() == SexpType::String
+                                    && length(member) > 0
+                                    && member.element(0) != values::na_string())
+                        } =>
+                    {
                         let target = arguments.car();
-                        let parens = needs_parens(info, target, true);
+                        let parens = needs_parens(info, target, true, left_of);
                         if parens {
                             self.print("(");
+                        } else {
+                            self.left_of = Some(info.precedence);
                         }
                         self.deparse(target);
                         if parens {
@@ -793,13 +833,10 @@ impl Deparser {
                         }
                         self.print(&name_text);
                         let member = arguments.cdr().car();
-                        if member.kind() == SexpType::String && length(member) == 1 {
+                        if member.kind() == SexpType::String {
                             // A syntactic name reads back the same bare, as GNU R prints it.
-                            let text = member.element(0);
-                            match std::str::from_utf8(text.bytes()) {
-                                Ok(name) if text != values::na_string() && is_syntactic(name) => {
-                                    self.print(name)
-                                }
+                            match std::str::from_utf8(member.element(0).bytes()) {
+                                Ok(name) if is_syntactic(name) => self.print(name),
                                 _ => self.vector(member),
                             }
                         } else {
@@ -807,14 +844,14 @@ impl Deparser {
                         }
                         return;
                     }
-                    (Kind::Binary | Kind::Binary2 | Kind::Assign, 2) => {
-                        let left = arguments.car();
-                        let right = arguments.cdr().car();
+                    (Kind::Binary | Kind::Binary2, 2) | (Kind::Assign, _) => {
+                        let left = first;
+                        let right = second;
                         let outer_parens = argument && name == b"=";
                         if outer_parens {
                             self.print("(");
                         }
-                        let left_parens = needs_parens(info, left, true);
+                        let left_parens = needs_parens(info, left, true, left_of);
                         if left_parens {
                             self.print("(");
                         } else {
@@ -835,8 +872,7 @@ impl Deparser {
                         if info.kind == Kind::Binary {
                             self.line_break(&mut broken);
                         }
-                        let right_parens = needs_parens(info, right, false)
-                            || left_of.is_some_and(|outer| dangles(right, outer));
+                        let right_parens = needs_parens(info, right, false, left_of);
                         if right_parens {
                             self.print("(");
                         } else {
@@ -856,11 +892,8 @@ impl Deparser {
                     }
                     // Every `PP_BINARY` operator called with one argument deparses as a
                     // prefix, so `` `%*%`(x) `` is `%*%x`, as GNU R prints it.
-                    (Kind::Binary | Kind::Binary2 | Kind::Unary, 1)
-                        if info.kind == Kind::Binary
-                            || matches!(name, b"+" | b"-" | b"!" | b"~") =>
-                    {
-                        let operand = arguments.car();
+                    (Kind::Binary, 1) | (Kind::Unary, _) => {
+                        let operand = first;
                         let info = if info.precedence == precedence::SUM {
                             OperatorInfo {
                                 precedence: precedence::SIGN,
@@ -870,9 +903,11 @@ impl Deparser {
                             info
                         };
                         self.print(&name_text);
-                        let parens = needs_parens(info, operand, false);
+                        let parens = needs_parens(info, operand, false, left_of);
                         if parens {
                             self.print("(");
+                        } else {
+                            self.left_of = left_of;
                         }
                         self.deparse(operand);
                         if parens {
@@ -883,7 +918,12 @@ impl Deparser {
                     _ => {}
                 }
             }
-            if is_user_binop(name) && argument_count == 2 {
+            let user_binop = is_user_binop(name);
+            if user_binop
+                && argument_count == 2
+                && arguments.tag() == nil()
+                && arguments.cdr().tag() == nil()
+            {
                 let info = OperatorInfo {
                     kind: Kind::Binary,
                     precedence: precedence::PERCENT,
@@ -891,7 +931,7 @@ impl Deparser {
                 };
                 let left = arguments.car();
                 let right = arguments.cdr().car();
-                let left_parens = needs_parens(info, left, true);
+                let left_parens = needs_parens(info, left, true, left_of);
                 if left_parens {
                     self.print("(");
                 } else {
@@ -906,8 +946,7 @@ impl Deparser {
                 self.print(" ");
                 let mut broken = false;
                 self.line_break(&mut broken);
-                let right_parens = needs_parens(info, right, false)
-                    || left_of.is_some_and(|outer| dangles(right, outer));
+                let right_parens = needs_parens(info, right, false, left_of);
                 if right_parens {
                     self.print("(");
                 } else {
@@ -922,7 +961,17 @@ impl Deparser {
                 }
                 return;
             }
-            self.plain_call(&quote_name(&name_text), arguments);
+            // A primitive's name and a `%op%` follow `backtick`, as an argument's tag does, and
+            // any other function's name is written in backticks.
+            let primitive = crate::builtins::primitive(&name_text).is_some();
+            let quoted = if matches!(name, b"[<-" | b"[[<-" | b"$<-" | b"@<-") {
+                format!("`{name_text}`")
+            } else if primitive || user_binop {
+                tag_text(&name_text, self.backtick)
+            } else {
+                quote_name(&name_text)
+            };
+            self.plain_call(&quoted, primitive, arguments);
             return;
         }
         // A call whose function is itself an expression.
@@ -934,7 +983,7 @@ impl Deparser {
             self.deparse(head);
         }
         self.print("(");
-        self.arguments(arguments, false, true);
+        self.arguments(arguments, false);
         self.print(")");
     }
 
@@ -1090,7 +1139,7 @@ impl Deparser {
             RyForm::Record | RyForm::Tuple => {
                 self.print("(");
                 self.in_list += 1;
-                self.arguments(arguments, false, true);
+                self.arguments(arguments, false);
                 self.in_list -= 1;
                 if values::pairlist_length(arguments) == 1 {
                     self.print(",");
@@ -1100,7 +1149,7 @@ impl Deparser {
             RyForm::Array => {
                 self.print("[");
                 self.in_list += 1;
-                self.arguments(arguments, false, true);
+                self.arguments(arguments, false);
                 self.in_list -= 1;
                 self.print("]");
             }
@@ -1111,7 +1160,7 @@ impl Deparser {
                 if payload != nil() {
                     self.print("(");
                     self.in_list += 1;
-                    self.arguments(payload, false, true);
+                    self.arguments(payload, false);
                     self.in_list -= 1;
                     self.print(")");
                 }
@@ -1254,16 +1303,15 @@ impl Deparser {
         }
     }
 
-    unsafe fn plain_call(&mut self, name: &str, arguments: Sexp) {
+    unsafe fn plain_call(&mut self, name: &str, primitive: bool, arguments: Sexp) {
         self.print(name);
         self.print("(");
         // GNU R keeps a braced `if` on one line inside the arguments of a call to a
         // primitive (`c`, `list`, `quote`), but breaks it inside any other call's.
-        let primitive = crate::builtins::primitive(name).is_some();
         if primitive {
             self.in_list += 1;
         }
-        self.arguments(arguments, false, true);
+        self.arguments(arguments, false);
         if primitive {
             self.in_list -= 1;
         }
@@ -1285,10 +1333,12 @@ impl Deparser {
         self.in_curly -= 1;
     }
 
-    unsafe fn if_expression(&mut self, arguments: Sexp) {
-        let condition = arguments.car();
-        let consequent = arguments.cdr().car();
-        let alternative = arguments.cdr().cdr();
+    unsafe fn if_expression(
+        &mut self,
+        condition: Sexp,
+        consequent: Sexp,
+        alternative: Option<Sexp>,
+    ) {
         self.print("if (");
         self.deparse(condition);
         self.print(") ");
@@ -1298,14 +1348,14 @@ impl Deparser {
                 self.write_line();
                 self.indent += 1;
             }
-            if alternative.kind() == SexpType::Pairlist {
+            if let Some(alternative) = alternative {
                 self.deparse(consequent);
                 self.write_line();
                 if !curly_ahead {
                     self.indent -= 1;
                 }
                 self.print("else ");
-                self.deparse(alternative.car());
+                self.deparse(alternative);
             } else {
                 self.deparse(consequent);
                 if !curly_ahead {
@@ -1314,9 +1364,9 @@ impl Deparser {
             }
         } else {
             self.deparse(consequent);
-            if alternative.kind() == SexpType::Pairlist {
+            if let Some(alternative) = alternative {
                 self.print(" else ");
-                self.deparse(alternative.car());
+                self.deparse(alternative);
             }
         }
     }
@@ -1351,15 +1401,17 @@ impl Deparser {
             self.print("\"NA\" = ");
             return;
         }
+        // GNU R writes the name as it is between the quotes, with no escapes.
         let text = char_str(name);
         if !text.is_empty() {
-            if is_syntactic(&text) {
-                self.print(&text);
-            } else if self.backtick {
-                self.print(&quote_name(&text));
-            } else {
-                self.print(&format::encode_string(&text, Some('"')));
-            }
+            let quote = match (is_syntactic(&text), self.backtick) {
+                (true, _) => "",
+                (false, true) => "`",
+                (false, false) => "\"",
+            };
+            self.print(quote);
+            self.print(&text);
+            self.print(quote);
             self.print(" = ");
         }
     }
@@ -1461,12 +1513,10 @@ impl Deparser {
                             "{sign}{}",
                             strings::hexadecimal_form(value.abs(), None, false)
                         )
+                    } else if self.opts & options::DIGITS17 != 0 && value.is_finite() {
+                        format::c_general(value, 17, false)
                     } else {
-                        if self.opts & options::DIGITS17 != 0 {
-                            format::c_general(value, 17, false)
-                        } else {
-                            format::format_real_alone(value, 15)
-                        }
+                        format::format_real_alone(value, 15)
                     }
                 }
                 SexpType::Complex => {
@@ -1497,6 +1547,17 @@ impl Deparser {
                             part(value.r),
                             part(value.i)
                         )
+                    } else if self.opts & options::HEX_NUMERIC != 0 && value.r.is_finite() {
+                        // GNU R writes `%a + %ai`, so a negative imaginary part keeps its own
+                        // sign after the plus.
+                        let hexadecimal = |part: f64| {
+                            let sign = if part.is_sign_negative() { "-" } else { "" };
+                            format!(
+                                "{sign}{}",
+                                strings::hexadecimal_form(part.abs(), None, false)
+                            )
+                        };
+                        format!("{} + {}i", hexadecimal(value.r), hexadecimal(value.i))
                     } else if self.opts & options::DIGITS17 != 0 && value.r.is_finite() {
                         // GNU R writes each part with `%.17g`, so the value parses back exactly.
                         let imaginary = format::c_general(value.i, 17, false);
@@ -1564,7 +1625,8 @@ impl Deparser {
                             // GNU R quotes the backticked name: `structure(1, "`a b`" = 2)`.
                             format!("\"{}\"", quote_name(other))
                         } else {
-                            format::encode_string(other, Some('"'))
+                            // The name as it is between the quotes, with no escapes.
+                            format!("\"{other}\"")
                         }
                     }
                 };
@@ -1696,7 +1758,7 @@ unsafe fn s4_parts(object: Sexp, class: Sexp) -> R<Option<S4Parts>> {
     let definition_call = values::call(get_class_def, &[class])?;
     let definition = crate::eval::eval(definition_call, values::base_env())?;
     if definition == nil() {
-        return Err(crate::unwind::error(
+        return Err(error(
             "cannot get a slot (\"slots\") from an object of type \"NULL\"",
         ));
     }
@@ -1820,31 +1882,23 @@ unsafe fn ry_call_form(expression: Sexp) -> Option<RyForm> {
     ry_form(expression.car().car().bytes(), expression.cdr())
 }
 
-unsafe fn is_curly(expression: Sexp) -> bool {
-    expression.kind() == SexpType::Language && expression.car() == symbols().brace
+/// The argument at `index`, or `NULL` past the end, as GNU R reads the `CAR` of an empty list.
+unsafe fn argument_at(mut arguments: Sexp, index: usize) -> Sexp {
+    for _ in 0..index {
+        if arguments == nil() {
+            return nil();
+        }
+        arguments = arguments.cdr();
+    }
+    if arguments == nil() {
+        nil()
+    } else {
+        arguments.car()
+    }
 }
 
-/// Whether `argument`, ending the left operand of an operator of precedence `outer`, would
-/// extend past that operand when reparsed: a keyword construct always would, and a unary
-/// operator would when it binds more loosely than `outer`. A function definition would too,
-/// but GNU R leaves it bare, so ry does the same to keep the same text.
-unsafe fn dangles(argument: Sexp, outer: u8) -> bool {
-    if argument.kind() != SexpType::Language || argument.car().kind() != SexpType::Symbol {
-        return false;
-    }
-    let name = argument.car().car().bytes();
-    if matches!(name, b"for" | b"if" | b"while" | b"repeat") {
-        return true;
-    }
-    values::pairlist_length(argument.cdr()) == 1
-        && operator_info(name).is_some_and(|info| {
-            let precedence = if info.precedence == precedence::SUM {
-                precedence::SIGN
-            } else {
-                info.precedence
-            };
-            precedence < outer
-        })
+unsafe fn is_curly(expression: Sexp) -> bool {
+    expression.kind() == SexpType::Language && expression.car() == symbols().brace
 }
 
 /// GNU R's `parenthesizeCaller`: whether a call's function, when it is not a name, is written
@@ -1893,69 +1947,61 @@ unsafe fn parenthesize_caller(head: Sexp) -> bool {
     }
 }
 
-/// GNU R's `needsparens`: whether an operand of `main` must be parenthesized.
-unsafe fn needs_parens(main: OperatorInfo, argument: Sexp, left: bool) -> bool {
-    if argument.kind() == SexpType::Language {
-        let head = argument.car();
-        if head.kind() == SexpType::Symbol {
-            let name = head.car().bytes();
-            if let Some(mut info) = operator_info(name) {
-                let count = values::pairlist_length(argument.cdr());
-                match info.kind {
-                    Kind::Binary | Kind::Binary2 => {
-                        match count {
-                            1 => {
-                                if !left {
-                                    return false;
-                                }
-                                if info.precedence == precedence::SUM {
-                                    info.precedence = precedence::SIGN;
-                                }
-                            }
-                            2 => {
-                                if main.precedence == precedence::COMPARE
-                                    && info.precedence == precedence::COMPARE
-                                {
-                                    return true;
-                                }
-                            }
-                            _ => return false,
-                        }
-                        return main.precedence > info.precedence
-                            || (main.precedence == info.precedence
-                                && left == main.right_associative);
-                    }
-                    Kind::Subset => {
-                        if main.kind == Kind::Dollar {
-                            return false;
-                        }
-                        return main.precedence > info.precedence
-                            || (main.precedence == info.precedence
-                                && left == main.right_associative);
-                    }
-                    Kind::Assign | Kind::Unary | Kind::Dollar => {
-                        return main.precedence > info.precedence
-                            || (main.precedence == info.precedence
-                                && left == main.right_associative);
-                    }
-                }
-            }
-            if matches!(name, b"for" | b"if" | b"while" | b"repeat") {
-                return left;
-            }
-            if name == b"function" {
-                return left || main.precedence > precedence::FUNCTION && false;
-            }
-            if is_user_binop(name) {
-                return main.precedence > precedence::PERCENT
-                    || (main.precedence == precedence::PERCENT && left == main.right_associative);
-            }
-        }
-    } else if argument.kind() == SexpType::Complex && length(argument) == 1 {
+/// GNU R's `needsparens`: whether an operand of `main` must be parenthesized. `deep_left` is
+/// the precedence of an enclosing operator whose left operand ends with this one, where a
+/// looser unary operator or a keyword construct would take in what follows when read back.
+unsafe fn needs_parens(
+    main: OperatorInfo,
+    argument: Sexp,
+    left: bool,
+    deep_left: Option<u8>,
+) -> bool {
+    if argument.kind() == SexpType::Complex && length(argument) == 1 {
         return main.precedence > precedence::SUM
             || (main.precedence == precedence::SUM && left == main.right_associative);
     }
-    false
+    if argument.kind() != SexpType::Language || argument.car().kind() != SexpType::Symbol {
+        return false;
+    }
+    let name = argument.car().car().bytes();
+    let binds_looser = |precedence: u8| {
+        main.precedence > precedence
+            || (main.precedence == precedence && left == main.right_associative)
+    };
+    if let Some(mut info) = operator_info(name) {
+        if matches!(info.kind, Kind::Binary | Kind::Binary2) {
+            match values::pairlist_length(argument.cdr()) {
+                1 => {
+                    if info.precedence == precedence::SUM {
+                        info.precedence = precedence::SIGN;
+                    }
+                    info.kind = Kind::Unary;
+                }
+                2 => {}
+                _ => return false,
+            }
+        }
+        return match info.kind {
+            // A unary operand on the right reads back the same bare (`a + !b`, `-!a`).
+            Kind::Unary => {
+                (left && main.precedence > info.precedence)
+                    || deep_left.is_some_and(|outer| outer > info.precedence)
+            }
+            Kind::Binary | Kind::Binary2
+                if main.precedence == precedence::COMPARE
+                    && info.precedence == precedence::COMPARE =>
+            {
+                true
+            }
+            Kind::Binary | Kind::Binary2 | Kind::Subset | Kind::Assign | Kind::Dollar => {
+                binds_looser(info.precedence)
+            }
+        };
+    }
+    if matches!(name, b"for" | b"if" | b"while" | b"repeat") {
+        return left || deep_left.is_some();
+    }
+    is_user_binop(name) && binds_looser(precedence::PERCENT)
 }
 
 // The internals.

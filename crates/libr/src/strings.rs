@@ -432,8 +432,3 @@ pub unsafe extern "C" fn Riconv_close(descriptor: *mut std::ffi::c_void) -> c_in
     }
     0
 }
-
-/// The number of terminal columns `text` takes, counting East Asian wide characters as two.
-pub fn display_width(text: &str) -> usize {
-    unicode_width::UnicodeWidthStr::width(text)
-}

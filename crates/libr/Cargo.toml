@@ -20,6 +20,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 heap = { path = "../heap" }
 interp = { path = "../interp" }
+numeric = { path = "../numeric" }
 stats = { path = "../stats" }
 graphics = { path = "../graphics" }
 frames = { path = "../frames" }
@@ -37,7 +38,6 @@ rcmd = { path = "../rcmd" }
 rustc-hash.workspace = true
 semantics = { path = "../semantics" }
 smallvec = { version = "1.15", features = ["union"] }
-unicode-width.workspace = true
 stacker.workspace = true
 syntax = { path = "../syntax" }
 table = { path = "../table" }

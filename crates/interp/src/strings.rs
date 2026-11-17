@@ -4417,6 +4417,11 @@ fn translate_pass(chars: &[char], unicode: bool, approximate: bool) -> (Translat
 const POSIX_SPACE: &str =
     r"\t\n\x0B\f\r \x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}\x{3000}";
 const POSIX_BLANK: &str = r"\t \x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{205F}\x{3000}";
+/// glibc counts every digit but the ASCII ones as a letter, so that `iswalnum` holds for them.
+const POSIX_ALPHA: &str = r"\p{Alphabetic}[\p{Nd}--[0-9]]";
+/// What glibc gives no class but `cntrl`: control characters, and code points Unicode has not
+/// assigned.
+const NOT_GRAPHIC: &str = r"\p{Cc}\p{Cn}\p{Cs}";
 const WORD: &str = r"\p{Alphabetic}\p{Nd}_";
 /// TRE's `\d` is ASCII even though its other classes follow the locale.
 const DIGIT: &str = "0-9";
@@ -4658,9 +4663,11 @@ fn bracket_term(chars: &[char], index: usize) -> Option<(char, String, usize)> {
     None
 }
 
-/// The class contents for `[:name:]`, or `None` for an unknown name. The classes follow the
-/// Unicode properties, as glibc's do in a UTF-8 locale, or are ASCII, which the `regex`
-/// crate's own `[:name:]` classes match.
+/// The class contents for `[:name:]`, or `None` for an unknown name. The Unicode classes are
+/// glibc's in a UTF-8 locale, which TRE asks through `iswctype`: every other script's digit is
+/// alphabetic, a titlecase letter is both upper and lower case, the line and paragraph
+/// separators are control characters, and punctuation is every graphic character that is not
+/// alphanumeric. The ASCII ones are the `regex` crate's own `[:name:]` classes.
 fn posix_class(name: &str, unicode: bool) -> Option<String> {
     const NAMES: &[&str] = &[
         "alnum", "alpha", "blank", "cntrl", "digit", "graph", "lower", "print", "punct", "space",
@@ -4672,24 +4679,21 @@ fn posix_class(name: &str, unicode: bool) -> Option<String> {
     if !unicode {
         return Some(format!("[:{name}:]"));
     }
-    Some(
-        match name {
-            "alpha" => r"\p{Alphabetic}",
-            "digit" => "0-9",
-            "alnum" => r"\p{Alphabetic}\p{Nd}",
-            "upper" => r"\p{Uppercase}",
-            "lower" => r"\p{Lowercase}",
-            "space" => POSIX_SPACE,
-            "blank" => POSIX_BLANK,
-            "punct" => r"\p{P}\p{S}",
-            "cntrl" => r"\p{Cc}",
-            "print" => r"\P{C}",
-            "graph" => r"[^\p{C}\p{Z}]",
-            "xdigit" => "0-9A-Fa-f",
-            _ => WORD,
-        }
-        .to_owned(),
-    )
+    Some(match name {
+        "alpha" => POSIX_ALPHA.to_owned(),
+        "digit" => "0-9".to_owned(),
+        "alnum" => r"\p{Alphabetic}\p{Nd}".to_owned(),
+        "upper" => r"\p{Uppercase}\p{Lt}".to_owned(),
+        "lower" => r"\p{Lowercase}\x{1C5}\x{1C8}\x{1CB}\x{1F2}".to_owned(),
+        "space" => POSIX_SPACE.to_owned(),
+        "blank" => POSIX_BLANK.to_owned(),
+        "punct" => format!(r"[[^{NOT_GRAPHIC}{POSIX_SPACE}]--[\p{{Alphabetic}}\p{{Nd}}]]"),
+        "cntrl" => r"\p{Cc}\x{2028}\x{2029}".to_owned(),
+        "print" => format!(r"[^{NOT_GRAPHIC}\x{{2028}}\x{{2029}}]"),
+        "graph" => format!("[^{NOT_GRAPHIC}{POSIX_SPACE}]"),
+        "xdigit" => "0-9A-Fa-f".to_owned(),
+        _ => WORD.to_owned(),
+    })
 }
 
 fn push_class_literal(output: &mut String, character: char) {

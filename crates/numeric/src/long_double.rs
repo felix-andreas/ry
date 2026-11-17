@@ -752,6 +752,265 @@ pub fn finite_column_means(
     }
 }
 
+/// What `strtod` does with a number whose digits exceed the 53 bits a double holds exactly.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Exactness {
+    Allow,
+    Warn,
+    Refuse,
+}
+
+/// The number `strtod` read: its value, the bytes it spans (0 when the text starts with no
+/// number, and the value is then `NA`), and whether `Exactness::Warn` met digits a double
+/// cannot hold.
+#[derive(Clone, Copy, Debug)]
+pub struct Number {
+    pub value: f64,
+    pub length: usize,
+    pub accuracy_lost: bool,
+}
+
+/// GNU R's `R_strtod5`, bit for bit: the number at the start of `text` after C white space,
+/// with `decimal` as the decimal point and, under `accept_na`, `NA` as the missing value.
+///
+/// The digits accumulate in a `long double` that is then scaled by a power of ten or two and
+/// rounded to double, so about one decimal text in five thousand reads one unit in the last
+/// place away from the correctly rounded double, and every reader of numbers in GNU R (the
+/// parser, `as.numeric`, `scan`, `type.convert`) agrees on it.
+pub fn strtod(text: &[u8], decimal: u8, accept_na: bool, exactness: Exactness) -> Number {
+    let at = |position: usize| text.get(position).copied().unwrap_or(0);
+    let mut position = 0;
+    while matches!(at(position), b' ' | b'\t'..=b'\r') {
+        position += 1;
+    }
+    let found = |value: f64, length: usize| Number {
+        value,
+        length,
+        accuracy_lost: false,
+    };
+    if accept_na && text[position..].starts_with(b"NA") {
+        return found(heap::object::NA_REAL, position + 2);
+    }
+    let negative = at(position) == b'-';
+    if negative || at(position) == b'+' {
+        position += 1;
+    }
+    let signed = |value: f64| if negative { -value } else { value };
+    let rest = &text[position..];
+    for (word, value) in [
+        (&b"nan"[..], f64::NAN),
+        (b"infinity", f64::INFINITY),
+        (b"inf", f64::INFINITY),
+    ] {
+        if rest.len() >= word.len() && rest[..word.len()].eq_ignore_ascii_case(word) {
+            return found(signed(value), position + word.len());
+        }
+    }
+    let not_a_number = found(signed(heap::object::NA_REAL), 0);
+    let largest_exact = LongDouble::from(9_007_199_254_740_991.0);
+    let mut accuracy_lost = false;
+    let mut exponent: i32 = 0;
+
+    if rest.len() > 2 && rest[0] == b'0' && matches!(rest[1], b'x' | b'X') {
+        position += 2;
+        let mut digits = Digits::default();
+        let mut fraction_bits: i32 = -1;
+        loop {
+            if let Some(digit) = (at(position) as char).to_digit(16) {
+                digits.push(16, u64::from(digit));
+                if fraction_bits >= 0 {
+                    fraction_bits += 4;
+                }
+            } else if at(position) == decimal {
+                fraction_bits = 0;
+            } else {
+                break;
+            }
+            position += 1;
+        }
+        let mut total = digits.total();
+        if exactness != Exactness::Allow && total > largest_exact {
+            if exactness == Exactness::Refuse {
+                return not_a_number;
+            }
+            accuracy_lost = true;
+        }
+        if matches!(at(position), b'p' | b'P') {
+            let Some(power) = exponent_digits(text, &mut position) else {
+                return not_a_number;
+            };
+            exponent += power;
+        }
+        if total != LongDouble::ZERO {
+            if fraction_bits > 0 {
+                if exponent - fraction_bits < -122 {
+                    total = total / power_of_two(fraction_bits as u32);
+                } else {
+                    exponent -= fraction_bits;
+                }
+            }
+            total = if exponent < 0 {
+                total / power_of_two(exponent.unsigned_abs())
+            } else {
+                total * power_of_two(exponent as u32)
+            };
+        }
+        return Number {
+            value: signed(total.to_f64()),
+            length: position,
+            accuracy_lost,
+        };
+    }
+
+    let mut digits = Digits::default();
+    let mut count: i32 = 0;
+    while at(position).is_ascii_digit() {
+        digits.push(10, u64::from(at(position) - b'0'));
+        count += 1;
+        position += 1;
+    }
+    if at(position) == decimal {
+        position += 1;
+        while at(position).is_ascii_digit() {
+            digits.push(10, u64::from(at(position) - b'0'));
+            count += 1;
+            exponent -= 1;
+            position += 1;
+        }
+    }
+    if count == 0 {
+        return not_a_number;
+    }
+    let mut total = digits.total();
+    if exactness != Exactness::Allow && total > largest_exact {
+        if exactness == Exactness::Refuse {
+            return not_a_number;
+        }
+        accuracy_lost = true;
+    }
+    if matches!(at(position), b'e' | b'E') {
+        let Some(power) = exponent_digits(text, &mut position) else {
+            return not_a_number;
+        };
+        exponent += power;
+    }
+    let ten = LongDouble::from(10.0);
+    // Dividing first keeps a long run of digits with a large negative exponent from
+    // underflowing in the scale factor.
+    if exponent + count < -300 {
+        for _ in 0..count {
+            total = total / ten;
+        }
+        exponent += count;
+    }
+    if exponent < -307 {
+        let (mut factor, mut power, mut remaining) =
+            (LongDouble::from(1.0), ten, exponent.unsigned_abs());
+        while remaining != 0 {
+            if remaining & 1 == 1 {
+                factor = factor / power;
+            }
+            remaining >>= 1;
+            power = power * power;
+        }
+        total = total * factor;
+    } else if exponent < 0 {
+        total = total / power_of_ten(exponent.unsigned_abs());
+    } else if total != LongDouble::ZERO {
+        total = total * power_of_ten(exponent as u32);
+    }
+    let value = if total > LongDouble::from(f64::MAX) {
+        f64::INFINITY
+    } else {
+        total.to_f64()
+    };
+    Number {
+        value: signed(value),
+        length: position,
+        accuracy_lost,
+    }
+}
+
+/// The digits read so far as `base * total + digit` leaves them in a `long double`: an exact
+/// integer while it fits the 64-bit significand, rounded after each step beyond that.
+#[derive(Default)]
+struct Digits {
+    exact: u64,
+    rounded: Option<LongDouble>,
+}
+
+impl Digits {
+    fn push(&mut self, base: u64, digit: u64) {
+        let wide = match self.rounded {
+            Some(total) => total,
+            None => {
+                if let Some(exact) = self
+                    .exact
+                    .checked_mul(base)
+                    .and_then(|scaled| scaled.checked_add(digit))
+                {
+                    self.exact = exact;
+                    return;
+                }
+                LongDouble::from_u64(self.exact)
+            }
+        };
+        self.rounded = Some(wide * LongDouble::from_u64(base) + LongDouble::from_u64(digit));
+    }
+
+    fn total(&self) -> LongDouble {
+        self.rounded
+            .unwrap_or_else(|| LongDouble::from_u64(self.exact))
+    }
+}
+
+/// The exponent after the `e` or `p` at `position`: an optional sign and at least one digit,
+/// capped where GNU R caps it. `None` when no digit follows.
+fn exponent_digits(text: &[u8], position: &mut usize) -> Option<i32> {
+    let at = |position: usize| text.get(position).copied().unwrap_or(0);
+    *position += 1;
+    let negative = at(*position) == b'-';
+    if negative || at(*position) == b'+' {
+        *position += 1;
+    }
+    let start = *position;
+    let mut value: i32 = 0;
+    while at(*position).is_ascii_digit() {
+        if value < 9999 {
+            value = value * 10 + i32::from(at(*position) - b'0');
+        }
+        *position += 1;
+    }
+    (*position > start).then_some(if negative { -value } else { value })
+}
+
+/// `10^power`, multiplied up from repeated squares in GNU R's order.
+fn power_of_ten(mut power: u32) -> LongDouble {
+    let (mut factor, mut square) = (LongDouble::from(1.0), LongDouble::from(10.0));
+    while power != 0 {
+        if power & 1 == 1 {
+            factor = factor * square;
+        }
+        power >>= 1;
+        square = square * square;
+    }
+    factor
+}
+
+/// `2^power` as GNU R's hexadecimal reader builds it: the repeated squares are doubles, so
+/// they overflow to infinity from `2^1024`, and a text such as `0x1p-1074` reads as zero.
+fn power_of_two(mut power: u32) -> LongDouble {
+    let (mut factor, mut square) = (LongDouble::from(1.0), 2.0f64);
+    while power != 0 {
+        if power & 1 == 1 {
+            factor = factor * LongDouble::from(square);
+        }
+        power >>= 1;
+        square *= square;
+    }
+    factor
+}
+
 impl LongDouble {
     /// The value when it is finite before any rounding to double, so that a finite total too
     /// large for a double still counts, as it does in x87 registers. A sum of doubles never
@@ -763,14 +1022,30 @@ impl LongDouble {
 
     /// From an integer, exactly when it fits 64 significand bits, as an x87 `fild` loads it.
     pub fn from_i64(value: i64) -> LongDouble {
-        let magnitude = value.unsigned_abs();
-        if magnitude == 0 {
+        let LongDouble(magnitude) = LongDouble::from_u64(value.unsigned_abs());
+        match magnitude {
+            Repr::Finite {
+                significand,
+                exponent,
+                ..
+            } => LongDouble(Repr::Finite {
+                negative: value < 0 && significand != 0,
+                significand,
+                exponent,
+            }),
+            special => LongDouble(special),
+        }
+    }
+
+    /// From an unsigned integer, exactly.
+    pub fn from_u64(value: u64) -> LongDouble {
+        if value == 0 {
             return LongDouble::ZERO;
         }
-        let shift = magnitude.leading_zeros();
+        let shift = value.leading_zeros();
         LongDouble(Repr::Finite {
-            negative: value < 0,
-            significand: magnitude << shift,
+            negative: false,
+            significand: value << shift,
             exponent: -(shift as i32),
         })
     }
@@ -1717,5 +1992,100 @@ mod tests {
         assert!(LongDouble::from(-1.0) < LongDouble::ZERO);
         assert!(LongDouble::from(-0.0) == LongDouble::ZERO);
         assert!(LongDouble::from(-2.0) < LongDouble::from(-1.0));
+    }
+
+    fn read(text: &str) -> f64 {
+        strtod(text.as_bytes(), b'.', false, Exactness::Allow).value
+    }
+
+    /// Values GNU R 4.6.2 prints with `sprintf("%a", as.numeric(text))`. The first two are one
+    /// unit in the last place below the correctly rounded double.
+    #[test]
+    fn strtod_reads_what_gnu_r_reads() {
+        let pinned: [(&str, u64); 12] = [
+            ("0.5127050331204", 0x3fe0681462b7e516),
+            ("9.8045974e-6", 0x3ee48fcd9b1a50c2),
+            ("0.1", 0x3fb999999999999a),
+            ("1e23", 0x44b52d02c7e14af6),
+            ("1e-320", 0x00000000000007e8),
+            ("4.9e-324", 0x0000000000000001),
+            ("2.4e-324", 0x0000000000000000),
+            ("1.7976931348623157e308", 0x7fefffffffffffff),
+            ("1.7976931348623159e308", 0x7ff0000000000000),
+            ("0x1p-1074", 0x0000000000000000),
+            ("0x1.8p1", 0x4008000000000000),
+            ("-0", 0x8000000000000000),
+        ];
+        for (text, bits) in pinned {
+            assert_eq!(read(text).to_bits(), bits, "{text}");
+        }
+        assert_ne!(
+            read("0.5127050331204"),
+            "0.5127050331204".parse::<f64>().unwrap_or(f64::NAN)
+        );
+
+        let number = strtod(b"  12.5e1xyz", b'.', false, Exactness::Allow);
+        assert_eq!((number.value, number.length), (125.0, 8));
+        let number = strtod(b"1,5", b',', false, Exactness::Allow);
+        assert_eq!((number.value, number.length), (1.5, 3));
+        assert_eq!(strtod(b"abc", b'.', false, Exactness::Allow).length, 0);
+        assert_eq!(strtod(b"NA", b'.', false, Exactness::Allow).length, 0);
+        let missing = strtod(b"NA", b'.', true, Exactness::Allow);
+        assert!(missing.value.is_nan() && missing.length == 2);
+        assert!(strtod(b"9007199254740992", b'.', false, Exactness::Warn).accuracy_lost);
+        assert!(!strtod(b"9007199254740991", b'.', false, Exactness::Warn).accuracy_lost);
+    }
+
+    /// Seeded decimal texts: the whole text is consumed, the value is within one unit in the
+    /// last place of the correctly rounded double, and a text whose digits fit the 64-bit
+    /// significand without scaling is exact.
+    #[test]
+    fn fuzz_strtod_stays_within_one_unit_of_the_nearest_double() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state ^ (state >> 29)
+        };
+        let mut off_by_one = 0;
+        for iteration in 0..40_000 {
+            let digits = 1 + next() % 25;
+            let mut text = String::new();
+            if next() % 4 == 0 {
+                text.push('-');
+            }
+            let point = next() % (digits + 1);
+            for position in 0..digits {
+                if position == point && next() % 2 == 0 {
+                    text.push('.');
+                }
+                text.push(char::from(b'0' + (next() % 10) as u8));
+            }
+            let scaled = next() % 3 != 0;
+            if scaled {
+                let exponent = (next() % 660) as i64 - 330;
+                text.push_str(&format!("e{exponent}"));
+            }
+            let number = strtod(text.as_bytes(), b'.', false, Exactness::Allow);
+            assert_eq!(number.length, text.len(), "iteration {iteration}: {text}");
+            let nearest = text.parse::<f64>().unwrap_or(f64::NAN);
+            let exact = !scaled && !text.contains('.') && digits <= 19;
+            if number.value == nearest {
+                continue;
+            }
+            assert!(!exact, "iteration {iteration}: {text} is not exact");
+            let distance = (number.value.to_bits() as i64 - nearest.to_bits() as i64).abs();
+            assert!(
+                number.value.is_finite() && nearest.is_finite() && distance == 1,
+                "iteration {iteration}: {text} reads {:e}, the nearest double is {nearest:e}",
+                number.value
+            );
+            off_by_one += 1;
+        }
+        assert!(
+            off_by_one > 0,
+            "no text exercised the extended-precision rounding"
+        );
     }
 }

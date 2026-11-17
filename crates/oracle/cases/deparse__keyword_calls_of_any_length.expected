@@ -1,0 +1,419 @@
+[stdout]
+| == if 
+| if (NULL) NULL
+| if (1) NULL
+| if (a) b
+| if (a) b else c
+| if (a) b else c
+| if (a + b) if (a) b
+| if (1) 2
+| if (NULL) NULL
+| if (as.pairlist(alist(a = 1, b = ))) a
+| if (NULL) a else "src"
+| if (list(a = 1)) a
+| if (f(a = 1, b)) a
+| == while 
+| while (NULL) NULL
+| while (1) NULL
+| while (a) b
+| while (a) b
+| while (a) b
+| while (a + b) if (a) b
+| while (1) 2
+| while (NULL) NULL
+| while (as.pairlist(alist(a = 1, b = ))) a
+| while (NULL) a
+| while (list(a = 1)) a
+| while (f(a = 1, b)) a
+| == for 
+| for (NULL in NULL) NULL
+| for (1 in NULL) NULL
+| for (a in b) NULL
+| for (a in b) c
+| for (a in b) c
+| for (a + b in if (a) b) NULL
+| for (1 in 2) NULL
+| for (NULL in NULL) NULL
+| for (as.pairlist(alist(a = 1, b = )) in a) NULL
+| for (NULL in a) "src"
+| for (list(a = 1) in a) NULL
+| for (f(a = 1, b) in a) NULL
+| == repeat 
+| repeat NULL
+| repeat 1
+| repeat a
+| repeat a
+| repeat a
+| repeat a + b
+| repeat 1
+| repeat NULL
+| repeat as.pairlist(alist(a = 1, b = ))
+| repeat NULL
+| repeat list(a = 1)
+| repeat f(a = 1, b)
+| == ( 
+| (NULL)
+| (1)
+| (a)
+| (a)
+| (a)
+| (a + b)
+| (1)
+| (NULL)
+| (as.pairlist(alist(a = 1, b = )))
+| (NULL)
+| (list(a = 1))
+| (f(a = 1, b))
+| == { 
+| {
+| }
+| {
+|     1
+| }
+| {
+|     a
+|     b
+| }
+| {
+|     a
+|     b
+|     c
+| }
+| {
+|     a
+|     b
+|     c
+|     d
+| }
+| {
+|     a + b
+|     if (a) 
+|         b
+| }
+| {
+|     1
+|     2
+| }
+| {
+|     NULL
+| }
+| {
+|     as.pairlist(alist(a = 1, b = ))
+|     a
+| }
+| {
+|     NULL
+|     a
+|     "src"
+| }
+| {
+|     list(a = 1)
+|     a
+| }
+| {
+|     f(a = 1, b)
+|     a
+| }
+| == function 
+| function() NULL
+| E: badly formed function expression 
+| E: badly formed function expression 
+| E: badly formed function expression 
+| E: badly formed function expression 
+| function(`+`, a, b) if (a) b
+| E: badly formed function expression 
+| function() NULL
+| function(a = 1, b) a
+| function() a
+| E: badly formed function expression 
+| function(f, a = 1, b) a
+| == break 
+| break
+| break
+| break
+| break
+| break
+| break
+| break
+| break
+| break
+| break
+| break
+| break
+| == next 
+| next
+| next
+| next
+| next
+| next
+| next
+| next
+| next
+| next
+| next
+| next
+| next
+| == return 
+| return()
+| return(1)
+| return(a, b)
+| return(a, b, c)
+| return(a, b, c, d)
+| return(a + b, if (a) b)
+| return(x = 1, y = 2)
+| return(NULL)
+| return(as.pairlist(alist(a = 1, b = )), a)
+| return(NULL, a, "src")
+| return(list(a = 1), a)
+| return(f(a = 1, b), a)
+| == [ 
+| NULL[]
+| 1[]
+| a[b]
+| a[b, c]
+| a[b, c, d]
+| (a + b)[if (a) b]
+| 1[y = 2]
+| NULL[]
+| as.pairlist(alist(a = 1, b = ))[a]
+| NULL[a, "src"]
+| list(a = 1)[a]
+| f(a = 1, b)[a]
+| == [[ 
+| NULL[[]]
+| 1[[]]
+| a[[b]]
+| a[[b, c]]
+| a[[b, c, d]]
+| (a + b)[[if (a) b]]
+| 1[[y = 2]]
+| NULL[[]]
+| as.pairlist(alist(a = 1, b = ))[[a]]
+| NULL[[a, "src"]]
+| list(a = 1)[[a]]
+| f(a = 1, b)[[a]]
+| == $ 
+| `$`()
+| `$`(1)
+| a$b
+| `$`(a, b, c)
+| `$`(a, b, c, d)
+| `$`(a + b, if (a) b)
+| `$`(x = 1, y = 2)
+| `$`(NULL)
+| as.pairlist(alist(a = 1, b = ))$a
+| `$`(NULL, a, "src")
+| list(a = 1)$a
+| f(a = 1, b)$a
+| == @ 
+| `@`()
+| `@`(1)
+| a@b
+| `@`(a, b, c)
+| `@`(a, b, c, d)
+| `@`(a + b, if (a) b)
+| `@`(x = 1, y = 2)
+| `@`(NULL)
+| as.pairlist(alist(a = 1, b = ))@a
+| `@`(NULL, a, "src")
+| list(a = 1)@a
+| f(a = 1, b)@a
+| == <- 
+| NULL <- NULL
+| 1 <- NULL
+| a <- b
+| a <- b
+| a <- b
+| a + b <- if (a) b
+| 1 <- 2
+| NULL <- NULL
+| as.pairlist(alist(a = 1, b = )) <- a
+| NULL <- a
+| list(a = 1) <- a
+| f(a = 1, b) <- a
+| == = 
+| NULL = NULL
+| 1 = NULL
+| a = b
+| a = b
+| a = b
+| a + b = if (a) b
+| 1 = 2
+| NULL = NULL
+| as.pairlist(alist(a = 1, b = )) = a
+| NULL = a
+| list(a = 1) = a
+| f(a = 1, b) = a
+| == + 
+| `+`()
+| +1
+| a + b
+| `+`(a, b, c)
+| `+`(a, b, c, d)
+| a + b + if (a) b
+| 1 + 2
+| +NULL
+| as.pairlist(alist(a = 1, b = )) + a
+| `+`(NULL, a, "src")
+| list(a = 1) + a
+| f(a = 1, b) + a
+| == ! 
+| !NULL
+| !1
+| !a
+| !a
+| !a
+| !a + b
+| !1
+| !NULL
+| !as.pairlist(alist(a = 1, b = ))
+| !NULL
+| !list(a = 1)
+| !f(a = 1, b)
+| == ~ 
+| `~`()
+| ~1
+| a ~ b
+| `~`(a, b, c)
+| `~`(a, b, c, d)
+| a + b ~ if (a) b
+| 1 ~ 2
+| ~NULL
+| as.pairlist(alist(a = 1, b = )) ~ a
+| `~`(NULL, a, "src")
+| list(a = 1) ~ a
+| f(a = 1, b) ~ a
+| == ? 
+| `?`()
+| `?`(1)
+| `?`(a, b)
+| `?`(a, b, c)
+| `?`(a, b, c, d)
+| `?`(a + b, if (a) b)
+| `?`(x = 1, y = 2)
+| `?`(NULL)
+| `?`(as.pairlist(alist(a = 1, b = )), a)
+| `?`(NULL, a, "src")
+| `?`(list(a = 1), a)
+| `?`(f(a = 1, b), a)
+| == : 
+| `:`()
+| `:`(1)
+| a:b
+| `:`(a, b, c)
+| `:`(a, b, c, d)
+| (a + b):if (a) b
+| 1:2
+| `:`(NULL)
+| as.pairlist(alist(a = 1, b = )):a
+| `:`(NULL, a, "src")
+| list(a = 1):a
+| f(a = 1, b):a
+| == :: 
+| `::`()
+| `::`(1)
+| a::b
+| `::`(a, b, c)
+| `::`(a, b, c, d)
+| (a + b)::if (a) b
+| 1::2
+| `::`(NULL)
+| as.pairlist(alist(a = 1, b = ))::a
+| `::`(NULL, a, "src")
+| list(a = 1)::a
+| f(a = 1, b)::a
+| == %in% 
+| `%in%`()
+| `%in%`(1)
+| a %in% b
+| `%in%`(a, b, c)
+| `%in%`(a, b, c, d)
+| (a + b) %in% if (a) b
+| `%in%`(x = 1, y = 2)
+| `%in%`(NULL)
+| as.pairlist(alist(a = 1, b = )) %in% a
+| `%in%`(NULL, a, "src")
+| list(a = 1) %in% a
+| f(a = 1, b) %in% a
+| == && 
+| `&&`()
+| &&1
+| a && b
+| `&&`(a, b, c)
+| `&&`(a, b, c, d)
+| a + b && if (a) b
+| 1 && 2
+| &&NULL
+| as.pairlist(alist(a = 1, b = )) && a
+| `&&`(NULL, a, "src")
+| list(a = 1) && a
+| f(a = 1, b) && a
+| == - 
+| `-`()
+| -1
+| a - b
+| `-`(a, b, c)
+| `-`(a, b, c, d)
+| a + b - if (a) b
+| 1 - 2
+| -NULL
+| as.pairlist(alist(a = 1, b = )) - a
+| `-`(NULL, a, "src")
+| list(a = 1) - a
+| f(a = 1, b) - a
+| == ^ 
+| `^`()
+| `^`(1)
+| a^b
+| `^`(a, b, c)
+| `^`(a, b, c, d)
+| (a + b)^if (a) b
+| 1^2
+| `^`(NULL)
+| as.pairlist(alist(a = 1, b = ))^a
+| `^`(NULL, a, "src")
+| list(a = 1)^a
+| f(a = 1, b)^a
+| == quote 
+| quote()
+| quote(1)
+| quote(a, b)
+| quote(a, b, c)
+| quote(a, b, c, d)
+| quote(a + b, if (a) b)
+| quote(x = 1, y = 2)
+| quote(NULL)
+| quote(as.pairlist(alist(a = 1, b = )), a)
+| quote(NULL, a, "src")
+| quote(list(a = 1), a)
+| quote(f(a = 1, b), a)
+| == c 
+| c()
+| c(1)
+| c(a, b)
+| c(a, b, c)
+| c(a, b, c, d)
+| c(a + b, if (a) b)
+| c(x = 1, y = 2)
+| c(NULL)
+| c(as.pairlist(alist(a = 1, b = )), a)
+| c(NULL, a, "src")
+| c(list(a = 1), a)
+| c(f(a = 1, b), a)
+| [1] "badly formed function expression"
+| `+`(1, 2, 3)
+| `%in%`(x = 1, y = 2)
+| `[<-`(x, 1, 2)
+| `names<-`(x, "a")
+| `my fun`(1)
+| "+"(1, 2, 3)
+| "%in%"(x = 1, y = 2)
+| `[<-`(x, 1, 2)
+| "names<-"(x, "a")
+| `my fun`(1)
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

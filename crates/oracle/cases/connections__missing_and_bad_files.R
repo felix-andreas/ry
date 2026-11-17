@@ -2,7 +2,7 @@
 show <- function(expr) {
   result <- withVisible(tryCatch(
     withCallingHandlers(expr, warning = function(w) {
-      cat("warning:", gsub("'[^']*/([a-z]+)[0-9a-f]*'", "'\\1'", gsub("‘[a-z0-9]+’", "‘FILE’", conditionMessage(w))), "\n")
+      cat("warning:", gsub("'[^']*/([a-z]+)(_[0-9a-f]*)?'", "'\\1'", gsub("‘[a-z0-9_]+’", "‘FILE’", conditionMessage(w))), "\n")
       invokeRestart("muffleWarning")
     }),
     error = function(e) {
@@ -12,7 +12,7 @@ show <- function(expr) {
   ))
   if (result$visible) print(result$value)
 }
-g <- tempfile("nofile")
+g <- tempfile("nofile_")
 show(gzfile(g, "rb"))
 show(open(gzfile(g), "r"))
 show(readLines(gzfile(g)))
@@ -24,7 +24,7 @@ show(bzfile(file.path(g, "sub"), "wb"))
 show(xzfile(file.path(g, "sub"), "wb"))
 show(readRDS(g))
 show(load(g))
-h <- tempfile("img")
+h <- tempfile("img_")
 writeLines("list(a = 1, 2)", h)
 show(load(h))
 show(readRDS(h))

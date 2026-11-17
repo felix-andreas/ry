@@ -1,0 +1,124 @@
+[stdout]
+| alpha : 41-5A 61-7A AA-AA B5-B5 BA-BA C0-D6 D8-F6 F8-2C1 2C6-2D1 2E0-2E4 2EC-2EC 2EE-2EE 370-374 376-377 37A-37D 37F-37F 386-386 388-38A 38C-38C 38E-3A1 3A3-3F5 3F7-481 48A-52F 
+| alpha negated : 1-40 5B-60 7B-A9 AB-B4 B6-B9 BB-BF D7-D7 F7-F7 2C2-2C5 2D2-2DF 2E5-2EB 2ED-2ED 2EF-2FF 375-375 378-379 37E-37E 380-385 387-387 38B-38B 38D-38D 3A2-3A2 3F6-3F6 482-489 
+| digit : 30-39 
+| digit negated : 1-2F 3A-2FF 370-52F 
+| alnum : 30-39 41-5A 61-7A AA-AA B5-B5 BA-BA C0-D6 D8-F6 F8-2C1 2C6-2D1 2E0-2E4 2EC-2EC 2EE-2EE 370-374 376-377 37A-37D 37F-37F 386-386 388-38A 38C-38C 38E-3A1 3A3-3F5 3F7-481 48A-52F 
+| alnum negated : 1-2F 3A-40 5B-60 7B-A9 AB-B4 B6-B9 BB-BF D7-D7 F7-F7 2C2-2C5 2D2-2DF 2E5-2EB 2ED-2ED 2EF-2FF 375-375 378-379 37E-37E 380-385 387-387 38B-38B 38D-38D 3A2-3A2 3F6-3F6 482-489 
+| upper : 41-5A C0-D6 D8-DE 100-100 102-102 104-104 106-106 108-108 10A-10A 10C-10C 10E-10E 110-110 112-112 114-114 116-116 118-118 11A-11A 11C-11C 11E-11E 120-120 122-122 124-124 126-126 128-128 12A-12A 12C-12C 12E-12E 130-130 132-132 134-134 136-136 139-139 13B-13B 13D-13D 13F-13F 141-141 143-143 145-145 147-147 14A-14A 14C-14C 14E-14E 150-150 152-152 154-154 156-156 158-158 15A-15A 15C-15C 15E-15E 160-160 162-162 164-164 166-166 168-168 16A-16A 16C-16C 16E-16E 170-170 172-172 174-174 176-176 178-179 17B-17B 17D-17D 181-182 184-184 186-187 189-18B 18E-191 193-194 196-198 19C-19D 19F-1A0 1A2-1A2 1A4-1A4 1A6-1A7 1A9-1A9 1AC-1AC 1AE-1AF 1B1-1B3 1B5-1B5 1B7-1B8 1BC-1BC 1C4-1C5 1C7-1C8 1CA-1CB 1CD-1CD 1CF-1CF 1D1-1D1 1D3-1D3 1D5-1D5 1D7-1D7 1D9-1D9 1DB-1DB 1DE-1DE 1E0-1E0 1E2-1E2 1E4-1E4 1E6-1E6 1E8-1E8 1EA-1EA 1EC-1EC 1EE-1EE 1F1-1F2 1F4-1F4 1F6-1F8 1FA-1FA 1FC-1FC 1FE-1FE 200-200 202-202 204-204 206-206 208-208 20A-20A 20C-20C 20E-20E 210-210 212-212 214-214 216-216 218-218 21A-21A 21C-21C 21E-21E 220-220 222-222 224-224 226-226 228-228 22A-22A 22C-22C 22E-22E 230-230 232-232 23A-23B 23D-23E 241-241 243-246 248-248 24A-24A 24C-24C 24E-24E 370-370 372-372 376-376 37F-37F 386-386 388-38A 38C-38C 38E-38F 391-3A1 3A3-3AB 3CF-3CF 3D2-3D4 3D8-3D8 3DA-3DA 3DC-3DC 3DE-3DE 3E0-3E0 3E2-3E2 3E4-3E4 3E6-3E6 3E8-3E8 3EA-3EA 3EC-3EC 3EE-3EE 3F4-3F4 3F7-3F7 3F9-3FA 3FD-42F 460-460 462-462 464-464 466-466 468-468 46A-46A 46C-46C 46E-46E 470-470 472-472 474-474 476-476 478-478 47A-47A 47C-47C 47E-47E 480-480 48A-48A 48C-48C 48E-48E 490-490 492-492 494-494 496-496 498-498 49A-49A 49C-49C 49E-49E 4A0-4A0 4A2-4A2 4A4-4A4 4A6-4A6 4A8-4A8 4AA-4AA 4AC-4AC 4AE-4AE 4B0-4B0 4B2-4B2 4B4-4B4 4B6-4B6 4B8-4B8 4BA-4BA 4BC-4BC 4BE-4BE 4C0-4C1 4C3-4C3 4C5-4C5 4C7-4C7 4C9-4C9 4CB-4CB 4CD-4CD 4D0-4D0 4D2-4D2 4D4-4D4 4D6-4D6 4D8-4D8 4DA-4DA 4DC-4DC 4DE-4DE 4E0-4E0 4E2-4E2 4E4-4E4 4E6-4E6 4E8-4E8 4EA-4EA 4EC-4EC 4EE-4EE 4F0-4F0 4F2-4F2 4F4-4F4 4F6-4F6 4F8-4F8 4FA-4FA 4FC-4FC 4FE-4FE 500-500 502-502 504-504 506-506 508-508 50A-50A 50C-50C 50E-50E 510-510 512-512 514-514 516-516 518-518 51A-51A 51C-51C 51E-51E 520-520 522-522 524-524 526-526 528-528 52A-52A 52C-52C 52E-52E 
+| upper negated : 1-40 5B-BF D7-D7 DF-FF 101-101 103-103 105-105 107-107 109-109 10B-10B 10D-10D 10F-10F 111-111 113-113 115-115 117-117 119-119 11B-11B 11D-11D 11F-11F 121-121 123-123 125-125 127-127 129-129 12B-12B 12D-12D 12F-12F 131-131 133-133 135-135 137-138 13A-13A 13C-13C 13E-13E 140-140 142-142 144-144 146-146 148-149 14B-14B 14D-14D 14F-14F 151-151 153-153 155-155 157-157 159-159 15B-15B 15D-15D 15F-15F 161-161 163-163 165-165 167-167 169-169 16B-16B 16D-16D 16F-16F 171-171 173-173 175-175 177-177 17A-17A 17C-17C 17E-180 183-183 185-185 188-188 18C-18D 192-192 195-195 199-19B 19E-19E 1A1-1A1 1A3-1A3 1A5-1A5 1A8-1A8 1AA-1AB 1AD-1AD 1B0-1B0 1B4-1B4 1B6-1B6 1B9-1BB 1BD-1C3 1C6-1C6 1C9-1C9 1CC-1CC 1CE-1CE 1D0-1D0 1D2-1D2 1D4-1D4 1D6-1D6 1D8-1D8 1DA-1DA 1DC-1DD 1DF-1DF 1E1-1E1 1E3-1E3 1E5-1E5 1E7-1E7 1E9-1E9 1EB-1EB 1ED-1ED 1EF-1F0 1F3-1F3 1F5-1F5 1F9-1F9 1FB-1FB 1FD-1FD 1FF-1FF 201-201 203-203 205-205 207-207 209-209 20B-20B 20D-20D 20F-20F 211-211 213-213 215-215 217-217 219-219 21B-21B 21D-21D 21F-21F 221-221 223-223 225-225 227-227 229-229 22B-22B 22D-22D 22F-22F 231-231 233-239 23C-23C 23F-240 242-242 247-247 249-249 24B-24B 24D-24D 24F-2FF 371-371 373-375 377-37E 380-385 387-387 38B-38B 38D-38D 390-390 3A2-3A2 3AC-3CE 3D0-3D1 3D5-3D7 3D9-3D9 3DB-3DB 3DD-3DD 3DF-3DF 3E1-3E1 3E3-3E3 3E5-3E5 3E7-3E7 3E9-3E9 3EB-3EB 3ED-3ED 3EF-3F3 3F5-3F6 3F8-3F8 3FB-3FC 430-45F 461-461 463-463 465-465 467-467 469-469 46B-46B 46D-46D 46F-46F 471-471 473-473 475-475 477-477 479-479 47B-47B 47D-47D 47F-47F 481-489 48B-48B 48D-48D 48F-48F 491-491 493-493 495-495 497-497 499-499 49B-49B 49D-49D 49F-49F 4A1-4A1 4A3-4A3 4A5-4A5 4A7-4A7 4A9-4A9 4AB-4AB 4AD-4AD 4AF-4AF 4B1-4B1 4B3-4B3 4B5-4B5 4B7-4B7 4B9-4B9 4BB-4BB 4BD-4BD 4BF-4BF 4C2-4C2 4C4-4C4 4C6-4C6 4C8-4C8 4CA-4CA 4CC-4CC 4CE-4CF 4D1-4D1 4D3-4D3 4D5-4D5 4D7-4D7 4D9-4D9 4DB-4DB 4DD-4DD 4DF-4DF 4E1-4E1 4E3-4E3 4E5-4E5 4E7-4E7 4E9-4E9 4EB-4EB 4ED-4ED 4EF-4EF 4F1-4F1 4F3-4F3 4F5-4F5 4F7-4F7 4F9-4F9 4FB-4FB 4FD-4FD 4FF-4FF 501-501 503-503 505-505 507-507 509-509 50B-50B 50D-50D 50F-50F 511-511 513-513 515-515 517-517 519-519 51B-51B 51D-51D 51F-51F 521-521 523-523 525-525 527-527 529-529 52B-52B 52D-52D 52F-52F 
+| lower : 61-7A AA-AA B5-B5 BA-BA DF-F6 F8-FF 101-101 103-103 105-105 107-107 109-109 10B-10B 10D-10D 10F-10F 111-111 113-113 115-115 117-117 119-119 11B-11B 11D-11D 11F-11F 121-121 123-123 125-125 127-127 129-129 12B-12B 12D-12D 12F-12F 131-131 133-133 135-135 137-138 13A-13A 13C-13C 13E-13E 140-140 142-142 144-144 146-146 148-149 14B-14B 14D-14D 14F-14F 151-151 153-153 155-155 157-157 159-159 15B-15B 15D-15D 15F-15F 161-161 163-163 165-165 167-167 169-169 16B-16B 16D-16D 16F-16F 171-171 173-173 175-175 177-177 17A-17A 17C-17C 17E-180 183-183 185-185 188-188 18C-18D 192-192 195-195 199-19B 19E-19E 1A1-1A1 1A3-1A3 1A5-1A5 1A8-1A8 1AA-1AB 1AD-1AD 1B0-1B0 1B4-1B4 1B6-1B6 1B9-1BA 1BD-1BF 1C5-1C6 1C8-1C9 1CB-1CC 1CE-1CE 1D0-1D0 1D2-1D2 1D4-1D4 1D6-1D6 1D8-1D8 1DA-1DA 1DC-1DD 1DF-1DF 1E1-1E1 1E3-1E3 1E5-1E5 1E7-1E7 1E9-1E9 1EB-1EB 1ED-1ED 1EF-1F0 1F2-1F3 1F5-1F5 1F9-1F9 1FB-1FB 1FD-1FD 1FF-1FF 201-201 203-203 205-205 207-207 209-209 20B-20B 20D-20D 20F-20F 211-211 213-213 215-215 217-217 219-219 21B-21B 21D-21D 21F-21F 221-221 223-223 225-225 227-227 229-229 22B-22B 22D-22D 22F-22F 231-231 233-239 23C-23C 23F-240 242-242 247-247 249-249 24B-24B 24D-24D 24F-293 295-2B8 2C0-2C1 2E0-2E4 371-371 373-373 377-377 37A-37D 390-390 3AC-3CE 3D0-3D1 3D5-3D7 3D9-3D9 3DB-3DB 3DD-3DD 3DF-3DF 3E1-3E1 3E3-3E3 3E5-3E5 3E7-3E7 3E9-3E9 3EB-3EB 3ED-3ED 3EF-3F3 3F5-3F5 3F8-3F8 3FB-3FC 430-45F 461-461 463-463 465-465 467-467 469-469 46B-46B 46D-46D 46F-46F 471-471 473-473 475-475 477-477 479-479 47B-47B 47D-47D 47F-47F 481-481 48B-48B 48D-48D 48F-48F 491-491 493-493 495-495 497-497 499-499 49B-49B 49D-49D 49F-49F 4A1-4A1 4A3-4A3 4A5-4A5 4A7-4A7 4A9-4A9 4AB-4AB 4AD-4AD 4AF-4AF 4B1-4B1 4B3-4B3 4B5-4B5 4B7-4B7 4B9-4B9 4BB-4BB 4BD-4BD 4BF-4BF 4C2-4C2 4C4-4C4 4C6-4C6 4C8-4C8 4CA-4CA 4CC-4CC 4CE-4CF 4D1-4D1 4D3-4D3 4D5-4D5 4D7-4D7 4D9-4D9 4DB-4DB 4DD-4DD 4DF-4DF 4E1-4E1 4E3-4E3 4E5-4E5 4E7-4E7 4E9-4E9 4EB-4EB 4ED-4ED 4EF-4EF 4F1-4F1 4F3-4F3 4F5-4F5 4F7-4F7 4F9-4F9 4FB-4FB 4FD-4FD 4FF-4FF 501-501 503-503 505-505 507-507 509-509 50B-50B 50D-50D 50F-50F 511-511 513-513 515-515 517-517 519-519 51B-51B 51D-51D 51F-51F 521-521 523-523 525-525 527-527 529-529 52B-52B 52D-52D 52F-52F 
+| lower negated : 1-60 7B-A9 AB-B4 B6-B9 BB-DE F7-F7 100-100 102-102 104-104 106-106 108-108 10A-10A 10C-10C 10E-10E 110-110 112-112 114-114 116-116 118-118 11A-11A 11C-11C 11E-11E 120-120 122-122 124-124 126-126 128-128 12A-12A 12C-12C 12E-12E 130-130 132-132 134-134 136-136 139-139 13B-13B 13D-13D 13F-13F 141-141 143-143 145-145 147-147 14A-14A 14C-14C 14E-14E 150-150 152-152 154-154 156-156 158-158 15A-15A 15C-15C 15E-15E 160-160 162-162 164-164 166-166 168-168 16A-16A 16C-16C 16E-16E 170-170 172-172 174-174 176-176 178-179 17B-17B 17D-17D 181-182 184-184 186-187 189-18B 18E-191 193-194 196-198 19C-19D 19F-1A0 1A2-1A2 1A4-1A4 1A6-1A7 1A9-1A9 1AC-1AC 1AE-1AF 1B1-1B3 1B5-1B5 1B7-1B8 1BB-1BC 1C0-1C4 1C7-1C7 1CA-1CA 1CD-1CD 1CF-1CF 1D1-1D1 1D3-1D3 1D5-1D5 1D7-1D7 1D9-1D9 1DB-1DB 1DE-1DE 1E0-1E0 1E2-1E2 1E4-1E4 1E6-1E6 1E8-1E8 1EA-1EA 1EC-1EC 1EE-1EE 1F1-1F1 1F4-1F4 1F6-1F8 1FA-1FA 1FC-1FC 1FE-1FE 200-200 202-202 204-204 206-206 208-208 20A-20A 20C-20C 20E-20E 210-210 212-212 214-214 216-216 218-218 21A-21A 21C-21C 21E-21E 220-220 222-222 224-224 226-226 228-228 22A-22A 22C-22C 22E-22E 230-230 232-232 23A-23B 23D-23E 241-241 243-246 248-248 24A-24A 24C-24C 24E-24E 294-294 2B9-2BF 2C2-2DF 2E5-2FF 370-370 372-372 374-376 378-379 37E-38F 391-3AB 3CF-3CF 3D2-3D4 3D8-3D8 3DA-3DA 3DC-3DC 3DE-3DE 3E0-3E0 3E2-3E2 3E4-3E4 3E6-3E6 3E8-3E8 3EA-3EA 3EC-3EC 3EE-3EE 3F4-3F4 3F6-3F7 3F9-3FA 3FD-42F 460-460 462-462 464-464 466-466 468-468 46A-46A 46C-46C 46E-46E 470-470 472-472 474-474 476-476 478-478 47A-47A 47C-47C 47E-47E 480-480 482-48A 48C-48C 48E-48E 490-490 492-492 494-494 496-496 498-498 49A-49A 49C-49C 49E-49E 4A0-4A0 4A2-4A2 4A4-4A4 4A6-4A6 4A8-4A8 4AA-4AA 4AC-4AC 4AE-4AE 4B0-4B0 4B2-4B2 4B4-4B4 4B6-4B6 4B8-4B8 4BA-4BA 4BC-4BC 4BE-4BE 4C0-4C1 4C3-4C3 4C5-4C5 4C7-4C7 4C9-4C9 4CB-4CB 4CD-4CD 4D0-4D0 4D2-4D2 4D4-4D4 4D6-4D6 4D8-4D8 4DA-4DA 4DC-4DC 4DE-4DE 4E0-4E0 4E2-4E2 4E4-4E4 4E6-4E6 4E8-4E8 4EA-4EA 4EC-4EC 4EE-4EE 4F0-4F0 4F2-4F2 4F4-4F4 4F6-4F6 4F8-4F8 4FA-4FA 4FC-4FC 4FE-4FE 500-500 502-502 504-504 506-506 508-508 50A-50A 50C-50C 50E-50E 510-510 512-512 514-514 516-516 518-518 51A-51A 51C-51C 51E-51E 520-520 522-522 524-524 526-526 528-528 52A-52A 52C-52C 52E-52E 
+| punct : 21-2F 3A-40 5B-60 7B-7E A0-A9 AB-B4 B6-B9 BB-BF D7-D7 F7-F7 2C2-2C5 2D2-2DF 2E5-2EB 2ED-2ED 2EF-2FF 375-375 37E-37E 384-385 387-387 3F6-3F6 482-489 
+| punct negated : 1-20 30-39 41-5A 61-7A 7F-9F AA-AA B5-B5 BA-BA C0-D6 D8-F6 F8-2C1 2C6-2D1 2E0-2E4 2EC-2EC 2EE-2EE 370-374 376-37D 37F-383 386-386 388-3F5 3F7-481 48A-52F 
+| space : 9-D 20-20 
+| space negated : 1-8 E-1F 21-2FF 370-52F 
+| blank : 9-9 20-20 
+| blank negated : 1-8 A-1F 21-2FF 370-52F 
+| cntrl : 1-1F 7F-9F 
+| cntrl negated : 20-7E A0-2FF 370-52F 
+| graph : 21-7E A0-2FF 370-377 37A-37F 384-38A 38C-38C 38E-3A1 3A3-52F 
+| graph negated : 1-20 7F-9F 378-379 380-383 38B-38B 38D-38D 3A2-3A2 
+| print : 20-7E A0-2FF 370-377 37A-37F 384-38A 38C-38C 38E-3A1 3A3-52F 
+| print negated : 1-1F 7F-9F 378-379 380-383 38B-38B 38D-38D 3A2-3A2 
+| xdigit : 30-39 41-46 61-66 
+| xdigit negated : 1-2F 3A-40 47-60 67-2FF 370-52F 
+| \w : 30-39 41-5A 5F-5F 61-7A AA-AA B5-B5 BA-BA C0-D6 D8-F6 F8-2C1 2C6-2D1 2E0-2E4 2EC-2EC 2EE-2EE 370-374 376-377 37A-37D 37F-37F 386-386 388-38A 38C-38C 38E-3A1 3A3-3F5 3F7-481 48A-52F 
+| \W : 1-2F 3A-40 5B-5E 60-60 7B-A9 AB-B4 B6-B9 BB-BF D7-D7 F7-F7 2C2-2C5 2D2-2DF 2E5-2EB 2ED-2ED 2EF-2FF 375-375 378-379 37E-37E 380-385 387-387 38B-38B 38D-38D 3A2-3A2 3F6-3F6 482-489 
+| \d : 30-39 
+| \D : 1-2F 3A-2FF 370-52F 
+| \s : 9-D 20-20 
+| \S : 1-8 E-1F 21-2FF 370-52F 
+|                       alpha digit alnum upper lower punct space blank cntrl
+| no-break space        .     .     .     .     .     x     .     .     .    
+| soft hyphen           .     .     .     .     .     x     .     .     .    
+| superscript two       .     .     .     .     .     x     .     .     .    
+| one half              .     .     .     .     .     x     .     .     .    
+| combining acute       .     .     .     .     .     x     .     .     .    
+| arabic-indic digit    x     .     x     .     .     .     .     .     .    
+| devanagari digit      x     .     x     .     .     .     .     .     .    
+| titlecase dz          x     .     x     x     x     .     .     .     .    
+| greek titlecase       x     .     x     x     .     .     .     .     .    
+| sharp s               x     .     x     .     x     .     .     .     .    
+| line separator        .     .     .     .     .     .     x     .     x    
+| paragraph separator   .     .     .     .     .     .     x     .     x    
+| en space              .     .     .     .     .     .     x     x     .    
+| narrow no-break space .     .     .     .     .     x     .     .     .    
+| ideographic space     .     .     .     .     .     .     x     x     .    
+| zero width space      .     .     .     .     .     x     .     .     .    
+| zero width joiner     .     .     .     .     .     x     .     .     .    
+| euro                  .     .     .     .     .     x     .     .     .    
+| degree                .     .     .     .     .     x     .     .     .    
+| roman numeral         x     .     x     x     .     .     .     .     .    
+| circled letter        x     .     x     x     .     .     .     .     .    
+| han                   x     .     x     .     .     .     .     .     .    
+| hiragana              x     .     x     .     .     .     .     .     .    
+| thai vowel            x     .     x     .     .     .     .     .     .    
+| thai mark             x     .     x     .     .     .     .     .     .    
+| arabic number sign    .     .     .     .     .     x     .     .     .    
+| private use           .     .     .     .     .     x     .     .     .    
+| unassigned            .     .     .     .     .     .     .     .     .    
+| byte order mark       .     .     .     .     .     x     .     .     .    
+| replacement           .     .     .     .     .     x     .     .     .    
+| emoji                 .     .     .     .     .     x     .     .     .    
+| mathematical bold a   x     .     x     x     .     .     .     .     .    
+| variation selector    .     .     .     .     .     x     .     .     .    
+| fullwidth digit       x     .     x     .     .     .     .     .     .    
+| tag space             .     .     .     .     .     x     .     .     .    
+|                       graph print xdigit
+| no-break space        x     x     .     
+| soft hyphen           x     x     .     
+| superscript two       x     x     .     
+| one half              x     x     .     
+| combining acute       x     x     .     
+| arabic-indic digit    x     x     .     
+| devanagari digit      x     x     .     
+| titlecase dz          x     x     .     
+| greek titlecase       x     x     .     
+| sharp s               x     x     .     
+| line separator        .     .     .     
+| paragraph separator   .     .     .     
+| en space              .     x     .     
+| narrow no-break space x     x     .     
+| ideographic space     .     x     .     
+| zero width space      x     x     .     
+| zero width joiner     x     x     .     
+| euro                  x     x     .     
+| degree                x     x     .     
+| roman numeral         x     x     .     
+| circled letter        x     x     .     
+| han                   x     x     .     
+| hiragana              x     x     .     
+| thai vowel            x     x     .     
+| thai mark             x     x     .     
+| arabic number sign    x     x     .     
+| private use           x     x     .     
+| unassigned            .     .     .     
+| byte order mark       x     x     .     
+| replacement           x     x     .     
+| emoji                 x     x     .     
+| mathematical bold a   x     x     .     
+| variation selector    x     x     .     
+| fullwidth digit       x     x     .     
+| tag space             x     x     .     
+| [1] "naive café 5 ١٢"
+| [1] "ÄA A — €5² A"
+| [1] "naive café 5 ١٢"
+| [[1]]
+| [1] "nai"  "ve"   "café"
+| 
+| [[1]]
+| [1] "naïve"  "café —" "€5²"    "١٢"    
+| 
+| [1] 2
+| attr(,"match.length")
+| [1] 1
+| [1]  TRUE FALSE  TRUE FALSE
+| [1] "Ǆ ß ᾈ"
+| [1] "ǆ ß ᾀ"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "ǆ ß ᾀ"

@@ -1,0 +1,31 @@
+[stdout]
+| numeric(0)
+| [1] 2
+| [1] "E: invalid 'times' argument"
+| [1] "E: invalid 'times' argument"
+| [1] 1 1
+| W: NAs introduced by coercion 
+| [1] "E: invalid 'times' argument"
+| [1] 1 1
+| W: NAs introduced by coercion 
+| [1] "E: invalid 'times' argument"
+| [1] 1 2 2
+| [1] 1 1
+| [1] 1 2 2
+| [1] 1
+| [1] "E: invalid 'times' argument"
+| [1] "E: invalid 'times' argument"
+| [1] 1 1
+| W: imaginary parts discarded in coercion 
+| [1] 1 1
+| [1] 1 1
+| [1] 1 2 2
+| [1] "E: cannot allocate vector of size 22.4 Gb"
+| [1] "E: invalid 'times' argument"
+| [1] "E: invalid 'times' argument"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "E: invalid 'times' argument"

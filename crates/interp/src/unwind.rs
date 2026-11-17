@@ -423,28 +423,45 @@ impl Unwind {
     }
 }
 
-/// The message of an error as R reports it, with its call resolved.
+/// The call a condition raised against `call` names: `call` itself, the innermost closure
+/// call for an error raised without one, or the whole assignment when `call` is the generated
+/// replacement call of a complex assignment in progress. Inside a function GNU R's compiled
+/// code names `x[i] <<- value` with the plain arrow, and compiled code is what a closure runs
+/// from its second call on (`.agents/memory/decisions/interp.md`, "A condition names a
+/// superassignment inside a function with the plain arrow").
 pub unsafe fn resolve_call(call: Sexp) -> Sexp {
-    if call == crate::heap().known().unbound {
-        current_call()
-    } else {
-        match interp().assignment_call {
-            Some((replacement, whole, _)) if replacement == call => whole,
-            _ => call,
+    let state = interp();
+    let innermost = call == crate::heap().known().unbound;
+    let whole = match state.assignment_call {
+        Some((_, whole, depth)) if innermost && depth == state.frames.len() => whole,
+        Some((replacement, whole, _)) if !innermost && replacement == call => whole,
+        _ if innermost => {
+            return state
+                .frames
+                .last()
+                .map_or(crate::heap().nil(), |frame| frame.call);
         }
+        _ => return call,
+    };
+    let superassignment = whole.kind() == SexpType::Language
+        && whole.car().kind() == SexpType::Symbol
+        && whole.car().car().bytes() == b"<<-";
+    if !superassignment || state.frames.is_empty() {
+        return whole;
+    }
+    let plain =
+        crate::values::install("<-").and_then(|arrow| crate::values::lcons(arrow, whole.cdr()));
+    match plain {
+        Ok(call) => {
+            crate::heap().root(call);
+            call
+        }
+        // Out of memory while reporting: the condition names the assignment as written.
+        Err(_) => whole,
     }
 }
 
 /// The call of the innermost closure frame, or `NULL` at top level.
 pub unsafe fn current_call() -> Sexp {
-    let state = interp();
-    if let Some((_, whole, depth)) = state.assignment_call
-        && depth == state.frames.len()
-    {
-        return whole;
-    }
-    state
-        .frames
-        .last()
-        .map_or(crate::heap().nil(), |frame| frame.call)
+    resolve_call(crate::heap().known().unbound)
 }

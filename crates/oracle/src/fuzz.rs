@@ -1164,19 +1164,23 @@ pub enum ProgramKind {
     /// [`language::program`](crate::language::program): closures built from the constructs
     /// that depend on the call stack, evaluation order and dispatch, called repeatedly.
     Language,
+    /// A grammar, metamorphic or language program after [`mutate::perturb`](crate::mutate::perturb):
+    /// the same computation in bodies the compiler sees differently.
+    Perturbed,
 }
 
 /// The writable memory a fuzzed engine may map. GNU R and ry both run every generated program
 /// in a fraction of it, and a program that asks for more gets R's allocation error.
 pub const MEMORY_LIMIT: u64 = 2 << 30;
 
-pub const KINDS: [ProgramKind; 6] = [
+pub const KINDS: [ProgramKind; 7] = [
     ProgramKind::Grammar,
     ProgramKind::Metamorphic,
     ProgramKind::Builtins,
     ProgramKind::Api,
     ProgramKind::Io,
     ProgramKind::Language,
+    ProgramKind::Perturbed,
 ];
 
 impl ProgramKind {
@@ -1188,6 +1192,7 @@ impl ProgramKind {
             ProgramKind::Api => "api",
             ProgramKind::Io => "io",
             ProgramKind::Language => "language",
+            ProgramKind::Perturbed => "perturbed",
         }
     }
 
@@ -1204,6 +1209,14 @@ impl ProgramKind {
             ProgramKind::Api => crate::metamorphic::api_program(seed),
             ProgramKind::Io => crate::metamorphic::io_program(seed),
             ProgramKind::Language => crate::language::program(seed),
+            ProgramKind::Perturbed => {
+                let base = match seed % 3 {
+                    0 => program(seed),
+                    1 => crate::metamorphic::program(seed),
+                    _ => crate::language::program(seed),
+                };
+                crate::mutate::perturb(&base, seed)
+            }
         }
     }
 }

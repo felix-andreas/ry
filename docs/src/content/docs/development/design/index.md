@@ -134,3 +134,9 @@ below the state of the art, a measured cold build, and the order in which to act
 A profile of the three real-world code bases against GNU R, closure by closure: where ry is slower
 than GNU R, why package code gains less than the other suites, an Amdahl table of the causes, the
 ceiling with all of them fixed, and the order to fix them in.
+
+### [The runtime fuzzer](/development/design/fuzzing/)
+
+The differential fuzzer measured against Csmith, YARPGen, Fuzzilli, jsfunfuzz, Hypothesis,
+libFuzzer, swarm testing, EMI and deterministic simulation: which ideas it takes, which it
+declines, and what is left to build.
