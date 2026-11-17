@@ -230,7 +230,7 @@ refers to its steps.
 | One description of each instruction generates the interpreter and the baseline JIT | Deegen (LuaJIT Remake)[^deegen] | **Adopt the principle** (steps 3 and 4); **reject the generator** | Tier 0's handlers are the semantics, and the baseline calls them |
 | Profiles from a training run shipped with precompiled code, so the JIT starts warm | HHVM Jump-Start[^jump-start], Project Leyden[^leyden] | **Adopt, planned** (step 5) | Per-package images carry profiles from the package's tests and examples, run at install time |
 | Types added to a large dynamic codebase, then used for speed | HHVM and Hack[^hack], Static Python[^static-python], Sorbet[^sorbet] | **Adopt as the strategy** | Typed ry: checked boundaries, per-file strict mode, compiled typed closures |
-| Reference counting with Immix and occasional concurrent tracing for cycles | LXR[^lxr] | **Defer** (step 5); freeing on count zero is rejected | ry's counts are R's sharing counts, which native code does not keep exact |
+| Reference counting with Immix and occasional concurrent tracing for cycles | LXR[^lxr] | **Adopt** freeing from counts for lists and large vectors, checked against the roots; **defer** Immix lines and concurrent tracing (step 5) | Native code holds objects without counting them, so a count of zero frees an object only once no root names it |
 | Deferred, fused vector arithmetic | Riposte[^riposte], pqR (task merging)[^pqr] | **Adopt, scoped** (step 3) | A lazy ALTREP vector for `x * y + z` on doubles, computed in one pass when read |
 
 ## Roc
@@ -1035,17 +1035,20 @@ trace and the remembered sets. On 17 workloads in a moderate heap it beats OpenJ
 **How ry's heap compares.** ry's heap also combines counts and tracing, but with the roles
 reversed. Every R object carries a 16-bit saturating count (`refcount` in
 `crates/heap/src/object.rs`), maintained by the stores R's C API makes, and the count only answers
-R's sharing question (`MAYBE_SHARED`) for copy-on-modify; it never frees anything. Memory is
-reclaimed by a non-moving, generational tracing collector with sticky mark bits and a write
-barrier, over size-segregated pages (`crates/heap/src/heap.rs`). Typed ry's own values are the
-exception: they are freed by exact counts and never traced (`typed-runtime.md`, "Memory").
+R's sharing question (`MAYBE_SHARED`) for copy-on-modify. The same count frees lists, large
+atomic vectors and returned frames early: an object whose count falls to zero is listed, and at an
+allocation every listed object that no root names is freed (`reconcile`). Everything else, and
+every cycle, is reclaimed by a non-moving, generational tracing collector with sticky mark bits
+and a write barrier, over size-segregated pages (`crates/heap/src/heap.rs`). Typed ry's own values
+are freed by exact counts and never traced (`typed-runtime.md`, "Memory").
 
 **What ry defers.** Concurrent tracing and Immix's line-level reuse (step 5). Both pay off when
 collector pauses or fragmentation are measured problems, and neither is measured yet.
 
-**What ry rejects.** Freeing an R object when its count reaches zero. Native code holds objects in C
-locals and on the `PROTECT` stack without counting them, so a count of zero does not mean the
-object is dead.
+**What ry rejects.** Freeing an R object at the store that takes its count to zero. Native code
+holds objects in C locals and on the `PROTECT` stack without counting them, so a count of zero
+does not mean the object is dead. The free waits for the next allocation, which is the first
+point where C code may no longer hold an unprotected object, and for a pass over the roots.
 
 ### Riposte and pqR
 

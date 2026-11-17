@@ -74,6 +74,7 @@ pub mod file_removal;
 #[cfg(unix)]
 pub mod fork;
 pub mod format;
+pub mod handles;
 pub mod help_server;
 pub mod http;
 pub mod image;

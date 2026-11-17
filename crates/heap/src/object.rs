@@ -717,14 +717,14 @@ const _: () = assert!(RECORD_DATA_OFFSET == 32);
 /// The size class of an object too large for the small-object pages, which gets an allocation
 /// of its own.
 pub(crate) const LARGE_CLASS: u8 = u8::MAX;
-const LARGEST_SMALL_BYTES: usize = 2048;
+pub const LARGEST_SMALL_BYTES: usize = 2048;
 
 /// The elements one card of a large handle vector covers. A large character vector, list or
 /// expression vector keeps a card byte per this many elements after its data, and storing a younger
 /// child into it while old dirties the child's card, so a minor collection rescans only dirty
 /// cards: a list grown to a million elements, remembered on every store, otherwise cost each minor
 /// collection time proportional to the whole list.
-pub(crate) const CARD_ELEMENTS: usize = 128;
+pub const CARD_ELEMENTS: usize = 128;
 /// A card whose elements are no younger than its vector.
 pub(crate) const CARD_CLEAN: u8 = 0;
 /// A card of a tenured vector that may hold children of the younger old generation but no young
@@ -823,6 +823,18 @@ impl Sexp {
     /// and diagnostics.
     pub unsafe fn is_poisoned(self) -> bool {
         unsafe { self.header().kind.get() == crate::space::POISONED_KIND }
+    }
+
+    /// The number of the collection that freed this poisoned object.
+    pub unsafe fn freed_by(self) -> u64 {
+        unsafe {
+            let stamp = self
+                .as_ptr()
+                .cast::<u8>()
+                .add(crate::space::FREED_BY_OFFSET);
+            crate::space::sanitizer::allow(stamp, size_of::<u64>());
+            stamp.cast::<u64>().read()
+        }
     }
 
     pub unsafe fn attrib(self) -> Sexp {
@@ -1417,9 +1429,21 @@ impl Sexp {
 #[cold]
 #[inline(never)]
 fn freed_object(object: Sexp) -> ! {
+    // SAFETY: `Sexp::kind` read the header already.
+    if unsafe { !object.is_poisoned() } {
+        panic!(
+            "read the kind of {:p}, which is no object: its kind byte is {:#x}",
+            object.as_ptr(),
+            // SAFETY: as above.
+            unsafe { object.header().kind.get() },
+        )
+    }
     panic!(
-        "read the kind of a freed object at {:p}: something used a reference after the collector \
-         freed it",
-        object.as_ptr()
+        "read the kind of a freed object at {:p}: something used a reference after collection \
+         {} freed it",
+        object.as_ptr(),
+        // SAFETY: the collector poisoned the object, and a poisoned object is longer than
+        // the two words read here.
+        unsafe { object.freed_by() },
     )
 }

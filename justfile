@@ -59,7 +59,7 @@ test *args:
     cargo test {{ args }}
 
 # The pre-landing check: tests, clippy at -D warnings, fmt, the licence notices, the memory layout and comment length.
-gate: battery clippy fmt-check (notices "--check") (readme "--check") (memory "check") comments
+gate: battery clippy fmt-check (notices "--check") (readme "--check") (memory "check") comments unsafe
 
 # CI's test job, step for step: .github/workflows/ci.yml runs `nix develop .#ci -c just ci`. Run it
 # in that shell, whose GNU R, compiler, glibc and locales are the ones CI has. The variables are
@@ -75,6 +75,22 @@ ci:
     just fmt-check
     just clippy
     just battery
+
+# CI's collection-stress job (ci.yml, job `stress`, once per seed), which the release gate requires
+# next to `just ci` (docs: development/releasing.md, "The release gate"). It runs in the same shell
+# with the same variables. Every oracle case runs twice in one process under stress seeded with
+# `seed` with the heap checked, and 300 generated programs of their own per seed run under GNU R,
+# tier 0, the JIT and the same repeated stress.
+ci-stress seed="0":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export TZ=UTC NOT_CRAN=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0
+    R_HOME=$(R RHOME)
+    export R_HOME
+    bash tools/oracle-locales.sh
+    just base-r dev
+    FUZZ_SEED={{ seed }} just gc-torture repeat
+    just fuzz-differential $(({{ seed }} * 300)) 300 ry-tier0,ry-jit,ry-repeat-gctorture-seeded
 
 # Workspace tests; `zed_ry` needs a wasm toolchain, so it is excluded.
 battery *args:
@@ -245,6 +261,11 @@ memory *args="check":
 # e.g. `just comments report 20` for the worst blocks or `just comments baseline` after shortening some.
 comments *args="check":
     python3 -I tools/comments.py {{ args }}
+
+# Fails when a file outside heap, libr, jit, typed and ssa has more `unsafe` than its baseline, e.g.
+# `just unsafe stats` for the counts per crate or `just unsafe baseline` after removing some.
+unsafe *args="check":
+    python3 -I tools/unsafe.py {{ args }}
 
 # Regenerates what the READMEs show: the benchmark blocks and chart from the committed results files,
 # and the diagnostic panels docs/public/diagnostic*.svg from real `ry check` runs on the README's examples.
@@ -803,13 +824,23 @@ fuzz-corpus seed="0" count="200" engines="ry-tier0,ry-jit":
 # `just gc-torture young` keeps survivors collectable (`RY_GC_STRESS=young`), which finds an
 # object only a Rust local holds, and `just gc-torture seeded` collects at random gaps with the
 # write barrier checked (`RY_GC_STRESS=seed:N`, `RY_GC_VERIFY`), which finds a store that skipped
-# the barrier; `FUZZ_SEED` picks its gaps. `ORACLE_ENGINE=ry-gctorture cargo test -p oracle`
-# compares the cases with their recorded outcomes instead.
+# the barrier; `FUZZ_SEED` picks its gaps. `just gc-torture repeat` adds a second pass to the
+# seeded mode: each case runs twice in one process, which finds what a closure's first call left
+# behind for its second (a reused frame, a call site's plan). `ORACLE_ENGINE=ry-gctorture cargo
+# test -p oracle` compares the cases with their recorded outcomes instead.
 gc-torture mode="plain":
     cargo build -q -p ry-lang -p libr -p rcmd
     FUZZ_ITERS=1000000 cargo test -p oracle --test test_cases \
-        {{ if mode == "young" { "cases_survive_young_gc_torture" } else if mode == "seeded" { "native_cases_keep_the_write_barrier_under_seeded_gc_torture" } else { "cases_survive_gc_torture" } }} \
+        {{ if mode == "young" { "cases_survive_young_gc_torture" } else if mode == "seeded" { "native_cases_keep_the_write_barrier_under_seeded_gc_torture" } else if mode == "repeat" { "cases_survive_a_second_pass_under_seeded_gc_torture" } else { "cases_survive_gc_torture" } }} \
         -- --exact --nocapture
+
+# The heap's and the interpreter's tests under AddressSanitizer (docs: development/robustness.md,
+# "Each layer"). The heap tells the sanitizer which memory holds no object, so a read or write of
+# a freed object stops at the access. `--target` keeps the flag off build scripts and proc macros,
+# and leaks are not reported because the interpreter lives as long as its process.
+asan *args:
+    RUSTFLAGS="-Zsanitizer=address" ASAN_OPTIONS=detect_leaks=0 cargo test -p heap -p interp \
+        --target "$(rustc -vV | sed -n 's/^host: //p')" --target-dir target/asan {{ args }}
 
 # The language-server simulator over many seeds: `just simulate 1000 120` runs seeds 0 to 999 with
 # 120 actions each. Replay one failure with `SIMULATION_SEED=<seed> cargo test -p ry-lang --test test_simulation`.

@@ -420,16 +420,17 @@ impl Heap {
             .map(|object| (object.as_ptr() as usize - base, self.size_of(object)))
             .collect();
         let page_bytes = self.space.write_image(&mut out);
-        let mut pages = vec![0u64; page_bytes.len() / 8];
-        std::ptr::copy_nonoverlapping(
-            page_bytes.as_ptr(),
-            pages.as_mut_ptr().cast::<u8>(),
-            page_bytes.len(),
-        );
+        let (source, page_length) = (page_bytes.as_ptr(), page_bytes.len());
+        let mut pages = vec![0u64; page_length / 8];
         let copy = pages.as_mut_ptr().cast::<u8>();
+        // A free slot is zero in the image. Its bytes are skipped rather than copied and
+        // cleared, because a sanitizer build forbids reading a freed object.
+        let mut copied = 0;
         for (start, length) in self.space.free_ranges() {
-            std::ptr::write_bytes(copy.add(start), 0, length);
+            std::ptr::copy_nonoverlapping(source.add(copied), copy.add(copied), start - copied);
+            copied = start + length;
         }
+        std::ptr::copy_nonoverlapping(source.add(copied), copy.add(copied), page_length - copied);
         for frame in &frames {
             let offset = frame.env.frame_ptr() as usize - base;
             // An empty frame leaves its inline storage uninitialized, which here would keep the

@@ -7,7 +7,6 @@ license = "UPL-1.0"
 publish = false
 
 [lib]
-doctest = false
 path = "src/heap.rs"
 
 [dependencies]
