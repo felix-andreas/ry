@@ -701,6 +701,10 @@ fn hover_definition<'db>(
     if !naming.non_locals.contains_key(&expression) {
         return None;
     }
+    let hir = item_hir(db, item).as_ref()?;
+    if frame_column_reads(db, item, hir, naming).contains(&hir.range(expression)) {
+        return None;
+    }
     global_hover_definition(db, files, name, None).or_else(|| bare_stub_hover_definition(db, name))
 }
 
@@ -7324,6 +7328,11 @@ fn expression_target<'db>(
         .get(&expression)
         .or_else(|| naming.quiet_reads.get(&expression))
     {
+        // A bare name a frame query reads as a column is no read of the global of that name.
+        let hir = item_hir(db, item).as_ref()?;
+        if frame_column_reads(db, item, hir, naming).contains(&hir.range(expression)) {
+            return None;
+        }
         return Some(non_local_target(db, files, name));
     }
     None
@@ -7656,6 +7665,12 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
         // An occurrence spells the name, so a text search skips nearly all of a large project
         // before any item is lowered or named.
         Target::Global(name) => {
+            // A call goes past a binding that holds no function, to the library's function of
+            // the name when there is one, so a call head is the global's occurrence only where
+            // the checker sends it to the project. A name every item defines as a function
+            // takes all of its calls, and no caller is checked to list them.
+            let mut holds_value = false;
+            let mut calls: Vec<(Item<'_>, ExprId, Occurrence)> = Vec::new();
             for &file in files.files(db) {
                 let text = file.text(db);
                 if !may_spell(text, name.as_str()) {
@@ -7694,6 +7709,7 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                     };
                     for (binding, info) in &naming.bindings {
                         if binds_global(naming, *binding, info) && info.name == *name {
+                            holds_value |= *item.kind(db) != ItemKind::Function;
                             slot_occurrences(db, item, *binding, &mut result);
                         }
                     }
@@ -7712,40 +7728,43 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                     }
                     if let Some(hir) = item_hir(db, item) {
                         let item_offset = node.text_range().start();
-                        let reads: Vec<ExprId> = naming
+                        let mut reads: Vec<ExprId> = naming
                             .non_locals
                             .iter()
                             .chain(&naming.quiet_reads)
                             .filter(|(_, non_local)| *non_local == name)
                             .map(|(expression, _)| *expression)
                             .collect();
+                        reads.sort_unstable();
                         // A bare name in a frame query that names a column reads the column.
                         let columns = if reads.is_empty() {
                             Vec::new()
                         } else {
                             frame_column_reads(db, item, hir, naming)
                         };
-                        // A call goes past a binding that holds no function, to the library's
-                        // function of the name when there is one.
-                        let library_calls = (!reads.is_empty())
-                            .then(|| item_check(db, item))
-                            .flatten()
-                            .map(|check| &check.editor().callee_targets);
-                        result.extend(
-                            reads
-                                .into_iter()
-                                .filter(|expression| !columns.contains(&hir.range(*expression)))
-                                .filter(|expression| {
-                                    library_calls.is_none_or(|targets| {
-                                        targets.get(expression) != Some(&CalleeTarget::Library)
-                                    })
-                                })
-                                .map(|expression| Occurrence {
-                                    file,
-                                    range: name_range(hir, expression, name) + item_offset,
-                                    is_declaration: false,
-                                }),
-                        );
+                        let mut callees: Vec<ExprId> = hir
+                            .expressions()
+                            .filter_map(|expression| match &expression.kind {
+                                ExpressionKind::Call { callee, .. } => Some(*callee),
+                                _ => None,
+                            })
+                            .filter(|callee| reads.binary_search(callee).is_ok())
+                            .collect();
+                        callees.sort_unstable();
+                        for expression in reads {
+                            if columns.contains(&hir.range(expression)) {
+                                continue;
+                            }
+                            let occurrence = Occurrence {
+                                file,
+                                range: name_range(hir, expression, name) + item_offset,
+                                is_declaration: false,
+                            };
+                            match callees.binary_search(&expression) {
+                                Ok(_) => calls.push((item, expression, occurrence)),
+                                Err(_) => result.push(occurrence),
+                            }
+                        }
                         // A call head bound locally to a value falls through to the global.
                         let named_here = |expression: &ExprId| {
                             naming
@@ -7780,6 +7799,18 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                     }
                 }
             }
+            result.extend(
+                calls
+                    .into_iter()
+                    .filter(|(item, expression, _)| {
+                        !holds_value
+                            || item_check(db, *item).is_none_or(|check| {
+                                check.editor().callee_targets.get(expression)
+                                    != Some(&CalleeTarget::Library)
+                            })
+                    })
+                    .map(|(_, _, occurrence)| occurrence),
+            );
         }
     }
     let file_order: HashMap<SourceFile, usize> = files

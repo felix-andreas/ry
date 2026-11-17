@@ -10,7 +10,8 @@ use {
         testing::{
             SplitMix64, check_parse_invariants as check_invariants, corpus_sample,
             fixture_case_sources, for_each_seed, generate_program, mutate_bytes, mutate_seed,
-            program_corpus_sources, random_bytes, small_edit, splice_of, split_files, token_soup,
+            program_corpus_sources, random_bytes, small_edit, splice_of, split_files,
+            statement_ranges, token_soup,
         },
     },
 };
@@ -474,6 +475,22 @@ fn fuzz_edit_stream() {
 #[test]
 fn fuzz_generated_programs() {
     run_generated_programs(400);
+}
+
+/// An edit moves a statement together with the `#:` and comment lines above it, so those lines
+/// are part of its range. A comment behind code stays with that code, and one above a blank
+/// line belongs to no statement.
+#[test]
+fn a_statement_range_holds_the_lines_directly_above_it() {
+    let source = "x <- 1 # trailing\n#: integer\n# why\ny <- 2L\n# loose\n\nz <- 3\n";
+    let texts: Vec<&str> = statement_ranges(source)
+        .into_iter()
+        .map(|range| &source[range])
+        .collect();
+    assert_eq!(
+        texts,
+        ["x <- 1 # trailing", "#: integer\n# why\ny <- 2L", "z <- 3"]
+    );
 }
 
 #[test]

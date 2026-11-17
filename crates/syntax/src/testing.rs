@@ -912,7 +912,7 @@ pub fn statement_ranges(source: &str) -> Vec<Range<usize>> {
             }
             _ if matches!(child, NodeOrToken::Node(_)) => {
                 ranges.push(leading.take().unwrap_or(start)..u32::from(range.end()) as usize);
-                line_breaks = -1;
+                line_breaks = 0;
             }
             _ => {}
         }

@@ -176,6 +176,27 @@ hint @5: character
 hint @30: DataFrame{id: integer[], price: double[]}
 hint @81: double[]
 
+#---- column_read_named_like_a_variable_does_not_navigate_to_the_variable
+price <- "not a number"
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
+doubled <- prices[, pri$0ce * 2]
+#++++
+hover 94..99: price: double[]
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotation for `doubled`
+  edit 81..81 -> ": double[]"
+action: Add inferred type annotations for the whole file
+  edit 5..5 -> ": character"
+  edit 30..30 -> ": DataFrame{id: integer[], price: double[]}"
+  edit 81..81 -> ": double[]"
+completion (128+): price, prices, princomp, print, print.AsIs, print.by, print.condition, print.connection
+hint @5: character
+hint @30: DataFrame{id: integer[], price: double[]}
+hint @81: double[]
+
 #---- field_read_by_a_string_subscript_is_refused
 p <- (x = 1, y$0 = 2L)
 y <- p[["y"]]

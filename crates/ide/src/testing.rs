@@ -207,11 +207,15 @@ fn check_file(db: &RootDatabase, files: ProjectFiles, file: SourceFile) {
         if let Some(hover) = &hover {
             check_range(db, file, hover.range, &at("hover"));
             // The range leaves out trailing blanks, which an unterminated string keeps in its
-            // token, so the cursor may sit in them.
+            // token, so the cursor may sit in them. A vertical tab is a blank to the lexer.
             let covered = hover.range.start() <= offset
                 && source
+                    .as_bytes()
                     .get(usize::from(hover.range.end())..usize::from(offset))
-                    .is_none_or(|rest| rest.trim().is_empty());
+                    .is_none_or(|rest| {
+                        rest.iter()
+                            .all(|byte| byte.is_ascii_whitespace() || *byte == 0x0B)
+                    });
             assert!(
                 covered,
                 "{}: the hover range {:?} does not cover the cursor",
@@ -539,11 +543,19 @@ fn check_file(db: &RootDatabase, files: ProjectFiles, file: SourceFile) {
         }
     }
 
-    // Every quick fix stays in the file, and the safe ones applied together leave it parsing.
+    // A quick fix leaves the file parsing, alone and with the other safe ones.
     let diagnostics = file_diagnostics(db, file);
     let everywhere = TextRange::new(TextSize::from(0), TextSize::from(source.len() as u32));
     for action in crate::diagnostic_fixes(&diagnostics, everywhere) {
-        apply_edits(db, file, &action.edits, &action.title);
+        let fixed = apply_edits(db, file, &action.edits, &action.title);
+        if clean {
+            let errors = parse(&fixed).errors().to_vec();
+            assert!(
+                errors.is_empty(),
+                "the fix {:?} leaves {errors:?} in\n{fixed}",
+                action.title
+            );
+        }
     }
     if let Some(action) = crate::fix_all(&diagnostics) {
         let fixed = apply_edits(db, file, &action.edits, &action.title);

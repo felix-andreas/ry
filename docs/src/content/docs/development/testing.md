@@ -431,8 +431,8 @@ independent line oracle.
 
 `crates/ide/tests/test_fuzz.rs` checks projects on one warm database, as an editor holds them:
 generated projects of one to three files of mixed kinds (package, script, test, test helper), each
-then with one small edit, every fixture case as the project its suite checks it as, the program
-corpus as scripts, and mutated seeds. After the first project of a session only the files that
+then with one small edit, a sample of the fixture cases (each a package project, or a script for
+the script suite), the program corpus as scripts, and mutated seeds. After the first project of a session only the files that
 changed are swept, and a failure is retried on a fresh database to tell whether it needs the
 sessions before it.
 
@@ -456,16 +456,18 @@ must hold between answers:
   An editor rejects the whole answer otherwise.
 - **Semantic tokens are sorted and do not overlap**, folds lie inside the file, and call hierarchy
   items, symbols, code lenses and inlay hints have ranges in bounds.
-- **An inserted annotation parses.** On a file without syntax errors, the text with every inferred
-  annotation applied has none either, and the same holds for every quick fix.
+- **An inserted annotation parses.** On a file without syntax errors, the text with any one
+  inferred annotation applied has none either, and the same holds for each quick fix alone and
+  for "fix all".
 
 Once per project, and only when every file parses, the sweep also **renames** two names and checks
 the project it leaves: every file parses, no file gains a finding, and the references asked from
 the renamed cursor are as many as before. This is the check that catches a rename that misses a
 read or takes one that belongs to something else, which every per-answer check passes. Names the
-library binds, S3-style dotted names and operators are left out, and a renamed record or column
-name is held to the first and the last of the three checks only (the backlog's "Open: editor
-parity" says why).
+library binds, S3-style dotted names, generics with a method in the project, operators and
+rlang-style `is_*` predicates are left out, and a renamed record or column name is held to the
+first and the last of the three checks only (the backlog's "Open: editor parity" says why; the
+checker narrows by a predicate's name on purpose).
 
 An off-by-one injected where item-relative ranges convert back to absolute offsets passes the
 containment check and fails name identity on the first seed.

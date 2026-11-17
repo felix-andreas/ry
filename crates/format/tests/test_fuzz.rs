@@ -181,7 +181,7 @@ fn check_whole_file(input: &str) {
     if let Err(error) = format(input, Config::default()) {
         let errors = parse(input).errors().to_vec();
         assert!(
-            errors.iter().any(|error| !error.in_annotation)
+            errors.iter().any(|parse_error| !parse_error.in_annotation)
                 || error.message.contains("cannot interrupt an expression"),
             "the formatter refused code that parses ({error}): {input:?}"
         );

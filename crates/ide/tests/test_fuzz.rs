@@ -90,15 +90,21 @@ fn fuzz_generated_projects() {
     });
 }
 
-/// The cases of every fixture suite, which hold the constructs someone thought worth a test,
-/// each with the document kinds its paths give its files.
+/// A sample of the cases of every fixture suite, which hold the constructs someone thought worth
+/// a test. A case's files have the document kinds their paths give them, and the script suite's
+/// cases are scripts.
 #[test]
 fn fixture_sources_hold_invariants() {
     let cases = fixture_case_sources();
     for_each_session(FIXTURE_CASES, |seed| {
         let mut rng = SplitMix64(0x01DE_F025 ^ seed);
-        let (_, source) = &cases[rng.below(cases.len())];
-        let state = fixture_state(source, DocumentKind::Package);
+        let (id, source) = &cases[rng.below(cases.len())];
+        let kind = if id.starts_with("semantics/tests/typing-scripts::") {
+            DocumentKind::Script
+        } else {
+            DocumentKind::Package
+        };
+        let state = fixture_state(source, kind);
         vec![
             state
                 .files

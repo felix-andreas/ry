@@ -259,7 +259,7 @@ fn check_fixture_sources(parity: usize) {
         "expected every fixture suite, found {} cases",
         cases.len()
     );
-    for_each_session(cases.len() / 2, |seed| {
+    for_each_session(cases.len().div_ceil(2), |seed| {
         let (id, source) = &cases[(seed as usize * 2 + parity) % cases.len()];
         let kind = if id.starts_with("semantics/tests/typing-scripts::") {
             DocumentKind::Script

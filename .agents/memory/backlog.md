@@ -1870,7 +1870,13 @@ The IDE battery asks what must hold between answers (`testing.md`, "The editor f
 relations nobody asks yet, each one extra call with no expected output:
 
 - hover at the definition target names the same symbol as hover at the cursor;
-- completion at a name's first character offers that name.
+- completion at a name's first character offers that name;
+- the link a hover carries is one of the targets "go to definition" gives. `hover_definition`
+  resolves a name by its own copy of `expression_target`'s rules, and a default pass of the battery
+  with this check finds about ten disagreements: `x[[1]] <- 3` with the cursor on `x` links the hover
+  to the statement while the definition is empty; the others, in generated projects of several
+  files, are not reduced. The end shape is one resolution (`target_at`) that the hover's link
+  reads, with the check in the battery.
 
 ### Run the pinned CRAN corpus as a test, one project per package
 
@@ -1904,9 +1910,9 @@ budgets, and from real `-C instrument-coverage` region counts. A default battery
 `syntax::testing::generate_program` grows typed programs from sorts and whole-statement snippets
 (aliases, records, tags, generics, the object systems, a data.table and a data.frame statement).
 It writes no `DataFrame` code, so frame queries, `Expr.col` and `GroupBy` reach the batteries only
-through fixture cases, and the editor bugs in frame queries were all found there. A `DataFrame`
-sort with its verbs is the next addition. The coverage figures of the earlier generators
-(`parser.rs` 87%, 60 diagnostic shapes, `ide.rs` 53%) have not been measured again.
+through fixture cases. A `DataFrame` sort with its verbs is the next addition. The generator's
+coverage is unmeasured: the figures on record (`parser.rs` 87%, 60 diagnostic shapes, `ide.rs`
+53%) are those of the generators it replaced.
 
 ### Smaller items, each with its measurement
 
@@ -3717,6 +3723,12 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
     `points <- [(x = 1, y = 2), (x = 3, y = 4)]` edits one literal, and a `match` pattern
     `(x = horizontal, y = vertical)` or an `Expr.col("x")` string that names the field is left
     behind. A record field belongs to its type, so the target is the field of the type.
+  - **Rename of a field is refused for any same-named spelling in any subscript.** The screen
+    (`SpellingKind::Untraced` in `crates/ide/src/fields.rs`) is by name across the project, so a
+    global `n` read as `x[n]` on a plain vector refuses the rename of a record's field `n`, and
+    references from a field leave out the `"y"` of `x[["y"]]` that causes a refusal. Typing the
+    indexed value would tell a frame query and a list read from a vector subscript, and would
+    let the string and column reads be occurrences.
   - **Rename leaves the uses of a `%op%` behind.** After `` `%plus%` <- function(x, y) x + y ``,
     references and rename from the definition list only the definition, not `a %plus% b`.
   - **Rename takes a script's reads of a library name it later shadows.** In

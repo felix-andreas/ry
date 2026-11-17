@@ -9,8 +9,10 @@
 
 use {
     crate::{NavigationTarget, Occurrence, declaring_item, position_in_item},
+    bumpalo::Bump,
     semantics::{
         Db, Item, ItemKind, ProjectFiles, SourceFile,
+        dense::Bitset,
         hir::{Argument, AssignSpelling, ExprId, ExpressionKind, LiteralKind, Module, Symbol},
         item_hir, item_naming, item_node, item_tree,
         naming::BindingKind,
@@ -492,9 +494,9 @@ enum SpellingKind {
     /// The field of `receiver$name <- value`, which is also an access.
     Write,
     Access,
-    /// A spelling inside a subscript that may read the field and cannot be followed to it: the
-    /// string of `x[["name"]]`, or a bare name nothing binds, which a frame query reads as a
-    /// column (`x[, name]`).
+    /// A spelling anywhere inside a subscript that may read the field and cannot be followed to
+    /// it: a string (`x[["name"]]`, `x[c("name", "other")]`), or a bare name the item does not
+    /// bind and does not call, which a frame query reads as a column (`x[, sum(name)]`).
     Untraced,
 }
 
@@ -568,7 +570,10 @@ fn file_fields(db: &dyn Db, file: SourceFile) -> FileFields {
                     .collect(),
             });
         }
-        let subscripts: Vec<TextRange> = hir
+        // Nested subscripts lie inside the outer one, so the ranges sorted by start and merged
+        // are disjoint, and one binary search places an expression.
+        let mut subscripts: Vec<TextRange> = Vec::new();
+        let mut arguments: Vec<TextRange> = hir
             .expressions()
             .filter_map(|expression| match &expression.kind {
                 ExpressionKind::Index { arguments, .. } => Some(&hir[arguments]),
@@ -577,23 +582,41 @@ fn file_fields(db: &dyn Db, file: SourceFile) -> FileFields {
             .flatten()
             .filter_map(|argument| argument.value.map(|value| hir.range(value)))
             .collect();
+        arguments.sort_unstable_by_key(|range| (range.start(), range.end()));
+        for range in arguments {
+            match subscripts.last_mut() {
+                Some(last) if last.end() >= range.start() => *last = last.cover(range),
+                _ => subscripts.push(range),
+            }
+        }
         if !subscripts.is_empty() {
             let naming = item_naming(db, item).as_ref();
+            let arena = Bump::new();
+            let mut callees: Bitset<ExprId> = Bitset::new_in(&arena, hir.expression_count());
+            for expression in hir.expressions() {
+                if let ExpressionKind::Call { callee, .. } = &expression.kind {
+                    callees.insert(*callee);
+                }
+            }
             for (index, expression) in hir.expressions().enumerate() {
+                let id = ExprId::new(index);
                 let name = match &expression.kind {
                     ExpressionKind::NameRef(name)
-                        if naming.is_none_or(|naming| {
-                            !naming.resolutions.contains_key(&ExprId::new(index))
-                        }) =>
+                        if !callees.contains(id)
+                            && naming
+                                .is_none_or(|naming| !naming.resolutions.contains_key(&id)) =>
                     {
                         name.as_str()
                     }
                     ExpressionKind::Literal(LiteralKind::String(text)) => &hir[text],
                     _ => continue,
                 };
-                if subscripts
-                    .iter()
-                    .any(|subscript| subscript.contains_range(expression.range))
+                let after = subscripts
+                    .partition_point(|subscript| subscript.start() <= expression.range.start());
+                if after
+                    .checked_sub(1)
+                    .and_then(|before| subscripts.get(before))
+                    .is_some_and(|subscript| subscript.contains_range(expression.range))
                 {
                     spellings.push(FieldSpelling {
                         name: name.to_owned(),
