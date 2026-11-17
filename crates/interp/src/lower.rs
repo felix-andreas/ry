@@ -2315,13 +2315,13 @@ unsafe fn literal(token: TokenRef<'_>) -> R<Sexp> {
         SyntaxKind::INTEGER => {
             let body = &text[..text.len() - 1];
             let value = parse_number(body);
-            let decimal = body.contains('.');
+            // GNU R's lexer words both warnings by whether it saw a point and no exponent, and a
+            // hexadecimal literal's exponent starts with `p`.
+            let hex = body.starts_with("0x") || body.starts_with("0X");
+            let exponent = if hex { ['p', 'P'] } else { ['e', 'E'] };
+            let bare_point = body.contains('.') && !body.contains(exponent);
             if value.fract() == 0.0 && value.abs() <= i32::MAX as f64 {
-                let hex = body.starts_with("0x") || body.starts_with("0X");
-                if decimal
-                    && (hex || !body.contains(['e', 'E']))
-                    && !crate::ahead::holds_back_warning()
-                {
+                if bare_point && !crate::ahead::holds_back_warning() {
                     crate::conditions::warning(format!(
                         "integer literal {text} contains unnecessary decimal point"
                     ))?;
@@ -2329,7 +2329,7 @@ unsafe fn literal(token: TokenRef<'_>) -> R<Sexp> {
                 values::scalar_integer(value as i32)
             } else {
                 if !crate::ahead::holds_back_warning() {
-                    crate::conditions::warning(if decimal {
+                    crate::conditions::warning(if bare_point {
                         format!("integer literal {text} contains decimal; using numeric value")
                     } else {
                         format!("non-integer value {text} qualified with L; using numeric value")

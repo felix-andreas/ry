@@ -4383,7 +4383,13 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
         {
             frame.env
         } else {
-            frame_env(depth - 1, Reify::Site("on.exit"))?
+            match frame_env(depth - 1, Reify::Site("on.exit")) {
+                Ok(env) => env,
+                Err(unwind) => {
+                    outcome = Err(unwind);
+                    break;
+                }
+            }
         };
         for &expression in &expressions {
             crate::heap().root(expression);
@@ -4462,7 +4468,10 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
     if let Some(value) = returned {
         value.decrement_refcount();
     }
-    interp().returned_values.pop();
+    // The first pass pushes the entry, and a pass that fails before that leaves none to pop.
+    if !first {
+        interp().returned_values.pop();
+    }
     crate::heap().release_handles(mark);
     match &outcome {
         Ok(value) => crate::heap().root(*value),
