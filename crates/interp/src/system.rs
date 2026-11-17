@@ -1959,11 +1959,17 @@ impl Column<'_> {
             return Column::Missing;
         }
         let vector = list.element(index);
-        match vector.kind() {
-            _ if length(vector) == 0 => Column::Missing,
+        // An ALTREP component whose data pointer fails reads as empty and parks its error,
+        // which the builtin raises on return.
+        let column = match vector.kind() {
             SexpType::Integer | SexpType::Logical => Column::Integers(values::ints(vector)),
             SexpType::Real => Column::Reals(values::reals(vector)),
             _ => Column::Missing,
+        };
+        if column.length() == 0 {
+            Column::Missing
+        } else {
+            column
         }
     }
 
