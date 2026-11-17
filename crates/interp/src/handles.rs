@@ -141,13 +141,22 @@ pub fn logical_scalar(_context: &mut Cx<'_>, value: Local<'_>) -> i32 {
 
 /// `value` as a standard vector of kind `T`: itself when it is one, its ALTREP class's
 /// standard form when it is an ALTREP object of that type, and `None` for any other type.
+#[inline]
 pub fn dense<'s, T: Vector>(context: &mut Cx<'s>, value: Local<'s>) -> R<Option<Local<'s, T>>> {
     if value.r_type() != T::TYPE {
         return Ok(None);
     }
-    if let Some(vector) = value.downcast::<T>() {
-        return Ok(Some(vector));
+    match value.downcast::<T>() {
+        Some(vector) => Ok(Some(vector)),
+        None => expanded(context, value),
     }
+}
+
+/// The standard form of an ALTREP object of `T`'s type. It is compiled apart so that the test
+/// for a standard vector inlines into each caller.
+#[cold]
+#[inline(never)]
+fn expanded<'s, T: Vector>(context: &mut Cx<'s>, value: Local<'s>) -> R<Option<Local<'s, T>>> {
     // SAFETY: the object is rooted, and expanding it may allocate or run its class's
     // methods, which `&mut Cx` permits.
     let vector = unsafe { values::materialize(value.raw())? };
@@ -328,6 +337,9 @@ pub fn copy_shape<T: Vector>(
     from: Local<'_>,
     to: &mut Fresh<'_, T>,
 ) -> R<()> {
+    if is_bare(context, from) {
+        return Ok(());
+    }
     let symbols = values::symbols();
     copy_named(
         context,
@@ -344,22 +356,29 @@ pub fn copy_names<T: Vector>(
     from: Local<'_>,
     to: &mut Fresh<'_, T>,
 ) -> R<()> {
+    if is_bare(context, from) {
+        return Ok(());
+    }
     copy_named(context, from, to, &[values::symbols().names])
 }
 
+/// Whether `value` has no attribute and no tags that read as names, which is the common case
+/// a caller tests inline before it pays the call to [`copy_named`].
 #[inline]
+fn is_bare(context: &Cx<'_>, value: Local<'_>) -> bool {
+    !matches!(value.r_type(), SexpType::Pairlist | SexpType::Language)
+        && value.attributes(context).r_type() == SexpType::Nil
+}
+
+#[inline(never)]
 fn copy_named<T: Vector>(
     _context: &mut Cx<'_>,
     from: Local<'_>,
     to: &mut Fresh<'_, T>,
     attributes: &[Sexp],
 ) -> R<()> {
-    let tagged = matches!(from.r_type(), SexpType::Pairlist | SexpType::Language);
-    // SAFETY: `from` is rooted, and reading its attribute list allocates nothing.
-    if !tagged && unsafe { from.raw().attrib() } == values::nil() {
-        return Ok(());
-    }
     let names = values::symbols().names;
+    let tagged = matches!(from.r_type(), SexpType::Pairlist | SexpType::Language);
     for &symbol in attributes {
         // SAFETY: both objects are rooted, `to` is visible to nothing else, and reading or
         // setting an attribute may allocate, which `&mut Cx` permits. `set_attr` roots
