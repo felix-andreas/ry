@@ -334,6 +334,25 @@ builtin's arguments arrive the same way. That accessor is one `unsafe` adoption 
 bytecode's own invariant. A variable slot is different: a nested closure's `<<-` can overwrite
 it during a call, so a slot read is a `Gc` and reaches an operand through an expression register.
 
+A builtin's fast path (its unary or direct entry, which answers the common case without the
+call's argument matching) takes no scope and no root of its own. Its caller holds the operands
+and releases the handle stack once the entry returns: tier 0 after the instruction, compiled code
+and the evaluator's direct call around the entry. So the entry adopts its operands without a
+root (`handles::held`), enters the context in the caller's scope (`handles::in_caller_scope`),
+and returns an answer that borrows the context:
+
+```rust
+fn unary_names<'a, 's>(cx: &'a mut Cx<'s>, x: Local<'s>) -> R<Option<Gc<'a>>>
+```
+
+A value the fast path read from the heap goes back unrooted, because the signature proves that
+nothing can collect between the read and the return. Where the answer is either read or built,
+`cx.read_or(read, build)` tries the read under a shared borrow and runs `build` with the context
+only when the read declines. A `Gc<'a>` that a `&'a mut Cx` function returned cannot be rooted
+afterwards, since the context is borrowed for as long as the value lives, so a helper that both
+kinds of caller need exists in a rooted and an unrooted form (`handles::class_of`,
+`handles::class_read`).
+
 Values kept in the interpreter's own state (frames, the handler stack, caches) sit in `Held<T>`
 fields, readable as `Gc` through `&Cx`. Each such structure has one `unsafe impl Trace` that marks
 its fields.
