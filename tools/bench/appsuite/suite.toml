@@ -17,7 +17,7 @@ description = "The 13 sections of app_workload.R. A section's time is the CPU ti
 [[groups]]
 id = "patterns"
 name = "Patterns"
-chart = false
+scored = false
 description = "One kind of call each, timed in a loop that doubles its calls until a batch takes 0.3 s of CPU time; the time is per call."
 
 [[programs]]

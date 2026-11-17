@@ -36,7 +36,7 @@ How much faster ry's runtime is than GNU R, for each benchmark suite:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/public/bench-summary-dark.svg">
-  <img alt="Grouped bars of the geometric mean speed-up over GNU R for each benchmark suite, for ry and, where the suite has typed programs, ry typed" src="docs/public/bench-summary-light.svg">
+  <img alt="Grouped bars of the speed-up over GNU R for each benchmark suite, for ry and, where the suite has typed programs, ry typed" src="docs/public/bench-summary-light.svg">
 </picture>
 
 <!-- bench-summary -->

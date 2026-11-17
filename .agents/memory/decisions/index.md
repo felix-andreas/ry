@@ -591,6 +591,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Agent-written notes are not mass-rewritten for brevity
 - Shipped binaries keep their symbol table, and crash reports name functions from it
 - The differential fuzzer compares canonical dumps, over five kinds of program
+- A test user's application workload is a suite scored by total time
 
 ## Docs, process and positioning
 
