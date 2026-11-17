@@ -4403,6 +4403,9 @@ unsafe fn do_enc2native(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_encoding(call: &Call<'_>) -> R<Sexp> {
     let strings = call.arg(0);
+    if strings.kind() != SexpType::String {
+        return Err(call.error("a character vector argument expected"));
+    }
     let count = length(strings);
     let result = alloc(SexpType::String, count)?;
     for index in 0..count {

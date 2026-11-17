@@ -643,6 +643,10 @@ fn rendering_round_trips() {
             deparsed: "c(1,\n2)".to_string(),
         }),
         libraries: None,
+        observed: vec![
+            "visible double[2] 1 2\n  @\"names\": character[2] -\"a\" -\"b\"".to_string(),
+            "warning <simpleWarning/warning/condition>".to_string(),
+        ],
     };
     assert_eq!(parse(&render(&outcome)), Some(outcome));
 }
