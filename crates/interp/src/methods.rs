@@ -632,8 +632,14 @@ pub unsafe fn new_object_copying(class_def: Sexp, deep: bool) -> R<Sexp> {
     } else {
         values::shallow_duplicate(prototype)?
     };
+    // Duplicating an environment, a symbol or an external pointer gives the object itself, so a
+    // class set here would land on the one shared object. GNU R's `R_do_new_object` skips them.
+    let reference_data = matches!(
+        value.kind(),
+        SexpType::Environment | SexpType::Symbol | SexpType::ExternalPtr
+    );
     let package = values::get_attr(class_name, symbols().package);
-    if value.kind() == SexpType::Object || package != nil() {
+    if (value.kind() == SexpType::Object || package != nil()) && !reference_data {
         values::set_attr(value, symbols().class, class_name)?;
         value.set_gp_bits(gp::S4_OBJECT, true);
     }
