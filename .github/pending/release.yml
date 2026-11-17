@@ -2,7 +2,8 @@
 # or when someone starts it from the Actions tab with a version. With `publish` unticked it builds
 # and smoke-tests every archive without publishing anything. A run started by hand can also limit
 # the release to Linux, or to Linux and macOS (`platforms`), and leave out the VS Code extension
-# (`vscode`). Every run also runs the tests of test.yml, and nothing is published unless they pass.
+# (`vscode`). Every run also runs the tests of test.yml and the full gate of ci.yml on the release
+# commit, and nothing is published unless both pass.
 # The checklist and the one-time Marketplace setup are in
 # docs/src/content/docs/development/releasing.md. Past runner setup, every step runs a `just`
 # recipe or tools/smoke-test.sh, so each one also runs locally.
@@ -43,6 +44,12 @@ jobs:
   # nothing.
   tests:
     uses: ./.github/workflows/test.yml
+
+  # The release gate: ci.yml's comparison with GNU R and its collection-stress pass, on the commit
+  # being released. `publish` needs it, so a release from a commit that fails it publishes nothing.
+  gate:
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
 
   build:
     name: build ${{ matrix.target }}
@@ -132,7 +139,7 @@ jobs:
 
   publish:
     name: publish
-    needs: [build, tests]
+    needs: [build, tests, gate]
     if: github.event_name == 'push' || inputs.publish
     runs-on: ubuntu-latest
     permissions:

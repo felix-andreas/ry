@@ -6,6 +6,7 @@
 //! state, the native boundary (`boundary`, with its C half in `native.c`), and the API itself,
 //! grouped by subsystem. The API is single-threaded, as GNU R's is.
 
+#![feature(cfg_sanitize)]
 // The exported names are R's, so they follow C conventions rather than Rust's.
 #![allow(non_snake_case, non_upper_case_globals, non_camel_case_types)]
 // Every exported function dereferences handles that native code passes in, so the crate is one
@@ -20,6 +21,9 @@
 // vector paid for page faults and a memset. The binary's allocator does not reach this library,
 // which is a separate shared object, so the library declares its own. Blocks of a megabyte and
 // more get mappings of their own, which go back to the kernel when freed (`heap::large::Mapped`).
+// A build with AddressSanitizer keeps the system allocator, which is the one the sanitizer
+// tracks.
+#[cfg(not(sanitize = "address"))]
 #[global_allocator]
 static ALLOCATOR: heap::large::Mapped<mimalloc::MiMalloc> = heap::large::Mapped(mimalloc::MiMalloc);
 

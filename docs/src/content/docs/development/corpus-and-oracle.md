@@ -103,7 +103,25 @@ holds fails an assertion that is on in release builds too, so the case reports a
 `RY_GC_STRESS=1`, which collects before every allocation once the script starts, and
 `ry-gctorture-young` with `RY_GC_STRESS=young`, which also keeps the survivors collectable.
 `ry-jit-gctorture` combines `RY_JIT=force` with `RY_GC_STRESS=1`, so it checks that compiled code
-keeps every object it holds rooted. `--engine` takes a comma-separated list, such as
+keeps every object it holds rooted. `ry-gctorture-seeded` runs with `RY_GC_STRESS=seed:0` and
+`RY_GC_VERIFY=1`, which collects at random gaps and checks the heap's invariants before each
+collection ([Robustness](/development/robustness) lists the modes).
+
+`ry-repeat` evaluates each script twice in one process, and `ry-repeat-gctorture-seeded` does so
+under the seeded stress. The second pass defines every function again over the same code and calls
+it with the values the first pass left, so it runs what only a later call reaches: a compiled
+body, a call site's plan, a reused frame. Only the first pass's outcome is compared, because the
+second starts from another state. The second pass must finish: a crash or a failed runtime check
+in it fails the case. The driver does this when `ORACLE_PASSES` is above 1, printing a marker line
+before each later pass, which the oracle cuts standard output at. A case that cannot run twice in
+one process (it leaves standard output diverted, or consumes something the first pass used up)
+says so in a leading `# oracle: runs once` comment, and these engines run it once.
+
+A case that reads or changes the collection stress setting itself (`gctorture`, `gctorture2`)
+prints something else under a stressed engine by design. It says so in a leading
+`# oracle: sets collection stress` comment, and the stress passes of `test_cases` leave it out.
+
+`--engine` takes a comma-separated list, such as
 `--engine ry,ry-jit-gctorture`, which runs GNU R once per case and prints a summary line per engine.
 A failure listed in `crates/oracle/known_failures.toml` reports as known rather than failing the run
 ([Testing](/development/testing#known-oracle-failures) has the rule). Without `--engine`, the engines

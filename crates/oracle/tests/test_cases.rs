@@ -4,10 +4,11 @@
 //! `cases/gnu-r.txt` names. On other BLAS or LAPACK libraries it skips the cases marked
 //! `# oracle: library-dependent`.
 //!
-//! When ry's runtime is built, a rotating subset of the cases also runs under each collection
-//! stress (`ry-gctorture` and `ry-gctorture-young`) and must give what ry gives unstressed.
-//! `FUZZ_SEED` picks the subset and `FUZZ_ITERS` its size; `ORACLE_ENGINE=ry-gctorture` runs
-//! every case against the recordings.
+//! When ry's runtime is built, a seeded subset of the cases also runs under each collection
+//! stress (`ry-gctorture`, `ry-gctorture-young`, `ry-gctorture-seeded` and, twice in one
+//! process, `ry-repeat-gctorture-seeded`) and must give what ry gives unstressed. `FUZZ_SEED`
+//! picks the subset and `FUZZ_ITERS` its size; `ORACLE_ENGINE=ry-gctorture` runs every case
+//! against the recordings.
 
 use {
     oracle::{
@@ -16,7 +17,8 @@ use {
         engine_packages, engines_named, expected_path, fails_run, find_cases, gnu_r_available,
         gnu_r_build, installed_packages, known_failure, known_failures,
         libraries_ahead_of_reference, library_dependent, parse, parse_known_failures, read_build,
-        render, runnable_cases, ry_runtime_available, target_directory, verdict, write_build,
+        render, runnable_cases, ry_runtime_available, sets_collection_stress, target_directory,
+        verdict, write_build,
     },
     std::{
         ffi::OsStr,
@@ -31,10 +33,13 @@ fn case_directory() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cases")
 }
 
-/// Cases that once read a freed argument reference after it left the pool, run on every stress
-/// pass whatever the seed picks. `apply__lapply_closure_results_stay_rooted` crashed only under
-/// collection stress; `datetime__year_overflow` crashed unstressed in S3 dispatch from a slot
-/// builtin call; the other two crashed now and then with the JIT forced.
+/// Cases that once read freed memory or lost a live object, run on every stress pass whatever
+/// the seed picks. `apply__lapply_closure_results_stay_rooted` crashed only under collection
+/// stress; `datetime__year_overflow` crashed unstressed in S3 dispatch from a slot builtin call;
+/// the next two crashed now and then with the JIT forced; the two data.table cases moved young
+/// elements through a pointer the write barrier did not see; and the last one wrote elements
+/// through a long argument's copy that had no storage, into the next object, on a function's
+/// second call.
 const REGRESSION_CASES: &[&str] = &[
     "apply__lapply_closure_results_stay_rooted",
     "datetime__year_overflow",
@@ -42,6 +47,7 @@ const REGRESSION_CASES: &[&str] = &[
     "environments__unread_loop_variable",
     "datatable__setcolorder_young_columns",
     "datatable__setorder_young_strings",
+    "assignment__long_argument_copy_element_stores",
 ];
 
 fn cases() -> Vec<PathBuf> {
@@ -504,12 +510,21 @@ fn a_case_can_interrupt_itself_when_the_oracle_inherits_an_ignored_sigint() {
 
 #[test]
 fn cases_survive_gc_torture() {
-    cases_survive(|_| ProcessEngine::ry_gc_torture(), &[], 0);
+    cases_survive(|_| ProcessEngine::ry_gc_torture(), &[], 0, 1);
 }
 
 #[test]
 fn cases_survive_young_gc_torture() {
-    cases_survive(|_| ProcessEngine::ry_gc_torture_young(), &[], 0);
+    cases_survive(|_| ProcessEngine::ry_gc_torture_young(), &[], 0, 1);
+}
+
+/// Each case evaluated twice in one process, under seeded stress with the heap's invariants
+/// checked. The first pass must give what ry gives unstressed, and the second must finish: it
+/// calls every function again through the code, plans and frames the first pass left, which is
+/// where a pointer kept from the first call is used.
+#[test]
+fn cases_survive_a_second_pass_under_seeded_gc_torture() {
+    cases_survive(ProcessEngine::ry_repeat_gc_torture_seeded, &[], 0, 12);
 }
 
 /// The groups whose cases run the most native code through the C API, where a pointer handed
@@ -521,13 +536,18 @@ const NATIVE_GROUPS: &[&str] = &["datatable", "packages", "altrep", "serialize"]
 /// random gap so the objects involved are often still young.
 #[test]
 fn native_cases_keep_the_write_barrier_under_seeded_gc_torture() {
-    cases_survive(ProcessEngine::ry_gc_torture_seeded, NATIVE_GROUPS, 3);
+    cases_survive(ProcessEngine::ry_gc_torture_seeded, NATIVE_GROUPS, 3, 1);
 }
 
 /// A seeded subset of the cases under the stressed engine `torture` makes for the seed gives
 /// what ry gives unstressed: every regression case, `focused` cases from the `focus` groups,
-/// and one more from anywhere.
-fn cases_survive(torture: fn(u64) -> ProcessEngine, focus: &[&str], focused: usize) {
+/// and `sampled` more from anywhere.
+fn cases_survive(
+    torture: fn(u64) -> ProcessEngine,
+    focus: &[&str],
+    focused: usize,
+    sampled: usize,
+) {
     if !ry_runtime_available() {
         eprintln!("skipped: ry's runtime is not built; run `cargo build -p ry-lang -p libr`");
         return;
@@ -537,7 +557,10 @@ fn cases_survive(torture: fn(u64) -> ProcessEngine, focus: &[&str], focused: usi
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
     let torture = torture(seed);
-    let (mut chosen, rest): (Vec<PathBuf>, Vec<PathBuf>) = cases().into_iter().partition(|case| {
+    let stressable = cases()
+        .into_iter()
+        .filter(|case| !sets_collection_stress(case));
+    let (mut chosen, rest): (Vec<PathBuf>, Vec<PathBuf>) = stressable.partition(|case| {
         case.file_stem()
             .is_some_and(|stem| REGRESSION_CASES.iter().any(|name| stem == *name))
     });
@@ -553,10 +576,12 @@ fn cases_survive(torture: fn(u64) -> ProcessEngine, focus: &[&str], focused: usi
         chosen.push(focused_cases.swap_remove(rng.below(focused_cases.len())));
     }
     all.extend(focused_cases);
-    for _ in 0..fuzz_iterations(1).min(all.len()) {
+    for _ in 0..fuzz_iterations(sampled).min(all.len()) {
         chosen.push(all.swap_remove(rng.below(all.len())));
     }
-    let timeout = Duration::from_secs(600);
+    // The slowest cases take about seven minutes a pass under seeded stress with the heap
+    // checked, in a debug build on four busy cores.
+    let timeout = Duration::from_secs(900);
     let ry = ProcessEngine::ry().with_timeout(timeout);
     let torture = torture.with_timeout(timeout);
     let started = Instant::now();
@@ -571,7 +596,18 @@ fn cases_survive(torture: fn(u64) -> ProcessEngine, focus: &[&str], focused: usi
                 return None;
             }
         };
-        match torture.run(case) {
+        let stressed = Instant::now();
+        let outcome = torture.run(case);
+        // The cases that set a full pass's length, for whoever has to shorten one.
+        if stressed.elapsed() > Duration::from_secs(60) {
+            eprintln!(
+                "{}: {:.0} s under {}",
+                case.display(),
+                stressed.elapsed().as_secs_f64(),
+                torture.name()
+            );
+        }
+        match outcome {
             Ok(stressed) => diff("ry", &unstressed, &torture.name(), &stressed)
                 .map(|difference| format!("{}\n{difference}", case.display())),
             Err(error) => Some(format!("{}: {error}", case.display())),

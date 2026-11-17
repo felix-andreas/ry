@@ -1,5 +1,6 @@
 # gctorture2 collects before every step-th allocation and returns the previous step; a
 # negative or missing step leaves the setting alone. gctorture returns whether stress was on.
+# oracle: sets collection stress
 print(gctorture2(100))
 print(gctorture2(NA))
 print(gctorture2(-1))

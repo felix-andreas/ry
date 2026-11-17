@@ -378,7 +378,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Marking a traced object costs a few table loads (built, with exceptions)
 - Peak RSS is judged as anonymous, image and code size, not as one number
 - A handler stack set aside is traced
-- The verifier checks every traced reference
+- The verifier checks every root and every traced reference
 
 ## C API, R home and packages
 
