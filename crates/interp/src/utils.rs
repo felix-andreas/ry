@@ -1142,7 +1142,7 @@ unsafe fn extract_item(buffer: &[u8], kind: Option<Kind>, settings: &ScanSetting
         Kind::Double => {
             let (value, end) =
                 parse_double_prefix(buffer, settings.decimal, false, Exactness::Allow)?;
-            if !is_blank(&buffer[end..]) {
+            if !is_blank(&buffer[end..])? {
                 return Err(expected("a real"));
             }
             Value::Double(value)
@@ -1150,7 +1150,7 @@ unsafe fn extract_item(buffer: &[u8], kind: Option<Kind>, settings: &ScanSetting
         Kind::Complex => {
             let (value, end) =
                 parse_complex_prefix(buffer, settings.decimal, false, Exactness::Allow, false)?;
-            if !is_blank(&buffer[end..]) {
+            if !is_blank(&buffer[end..])? {
                 return Err(expected("a complex"));
             }
             Value::Complex(value)
@@ -1177,7 +1177,7 @@ unsafe fn extract_item(buffer: &[u8], kind: Option<Kind>, settings: &ScanSetting
                     }
                 }
             }
-            if !is_blank(&buffer[end..]) {
+            if !is_blank(&buffer[end..])? {
                 return Err(expected("a raw"));
             }
             Value::Raw(value as u8)
@@ -1228,26 +1228,116 @@ fn is_c_space(byte: u8) -> bool {
 }
 
 /// GNU R's `isBlankString` in a UTF-8 locale: only white space characters as `iswspace` knows
-/// them.
-fn is_blank(text: &[u8]) -> bool {
-    let Ok(text) = std::str::from_utf8(text) else {
-        return false;
-    };
-    text.chars().all(|character| {
-        matches!(
-            character,
-            '\t'..='\r'
-                | ' '
-                | '\u{1680}'
-                | '\u{2000}'..='\u{2006}'
-                | '\u{2008}'..='\u{200a}'
-                | '\u{2028}'
-                | '\u{2029}'
-                | '\u{205f}'
-                | '\u{3000}'
-        )
-    })
+/// them. Like GNU R, it stops at the first character that is not white space, and an invalid
+/// multibyte sequence before any such character is an error.
+fn is_blank(text: &[u8]) -> R<bool> {
+    let text = text
+        .iter()
+        .position(|&byte| byte == 0)
+        .map_or(text, |end| &text[..end]);
+    let mut rest = text;
+    while !rest.is_empty() {
+        let valid = match std::str::from_utf8(rest) {
+            Ok(valid) => valid,
+            Err(failure) => {
+                // SAFETY: `valid_up_to` is the length of a valid UTF-8 prefix.
+                unsafe { std::str::from_utf8_unchecked(&rest[..failure.valid_up_to()]) }
+            }
+        };
+        if let Some(character) = valid.chars().next() {
+            if !is_wide_space(character) {
+                return Ok(false);
+            }
+            rest = &rest[character.len_utf8()..];
+        } else {
+            return Err(invalid_multibyte(rest));
+        }
+    }
+    Ok(true)
 }
+
+/// `iswspace` in glibc's UTF-8 locales.
+fn is_wide_space(character: char) -> bool {
+    matches!(
+        character,
+        '\t'..='\r'
+            | ' '
+            | '\u{1680}'
+            | '\u{2000}'..='\u{2006}'
+            | '\u{2008}'..='\u{200a}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{205f}'
+            | '\u{3000}'
+    )
+}
+
+/// GNU R's `Mbrtowc` error for `text`, which starts with an invalid sequence: the text with each
+/// byte the C library refuses spelled `<xx>`. GNU R 4.6 bounds every conversion by one count that
+/// starts at `MB_CUR_MAX` and drops by the bytes consumed, so the byte where it reaches zero is
+/// refused too, and after that the count has wrapped around and bounds nothing.
+fn invalid_multibyte(text: &[u8]) -> Unwind {
+    let mut terminated = text.to_vec();
+    terminated.push(0);
+    let mut shown = Vec::with_capacity(4 * text.len());
+    // SAFETY: an all-zero `mbstate_t` is the initial conversion state.
+    let mut state: libc::mbstate_t = unsafe { std::mem::zeroed() };
+    let mut wide: libc::wchar_t = 0;
+    // SAFETY: `terminated` ends in a NUL, where every conversion stops whatever its bound.
+    let mut used = unsafe {
+        mbrtowc(
+            &mut wide,
+            terminated.as_ptr().cast(),
+            MULTIBYTE_MAXIMUM,
+            &mut state,
+        )
+    };
+    let mut position = 0;
+    let mut left = MULTIBYTE_MAXIMUM;
+    while position < text.len() {
+        if position > 0 {
+            // SAFETY: as above.
+            used = unsafe {
+                mbrtowc(
+                    std::ptr::null_mut(),
+                    terminated[position..].as_ptr().cast(),
+                    left,
+                    &mut state,
+                )
+            };
+        }
+        if used == 0 {
+            break;
+        }
+        if (used as isize) > 0 {
+            let end = (position + used).min(text.len());
+            shown.extend_from_slice(&text[position..end]);
+            left = left.wrapping_sub(end - position);
+            position = end;
+        } else {
+            shown.extend_from_slice(format!("<{:02x}>", text[position]).as_bytes());
+            position += 1;
+            left = left.wrapping_sub(1);
+        }
+    }
+    error(format!(
+        "invalid multibyte string at '{}'",
+        values::escape_invalid_bytes(&shown)
+    ))
+}
+
+unsafe extern "C" {
+    fn mbrtowc(
+        wide: *mut libc::wchar_t,
+        text: *const libc::c_char,
+        count: usize,
+        state: *mut libc::mbstate_t,
+    ) -> usize;
+}
+
+/// `MB_CUR_MAX` in glibc's UTF-8 locales, which GNU R's `isBlankString` passes as the bound of
+/// its first conversion.
+const MULTIBYTE_MAXIMUM: usize = 6;
 
 /// How `type.convert`'s `numerals` treats a number with more digits than a double holds.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1437,7 +1527,7 @@ unsafe fn parse_complex_prefix(
 ) -> R<(Rcomplex, usize)> {
     let failed = if missing_on_failure { NA_REAL } else { 0.0 };
     let (real, end) = parse_double_prefix(text, decimal, na, exactness)?;
-    if is_blank(&text[end..]) {
+    if is_blank(&text[end..])? {
         return Ok((Rcomplex { r: real, i: 0.0 }, end));
     }
     if text[end] == b'i' {
@@ -1873,7 +1963,12 @@ unsafe fn do_type_convert(call: &NativeCall<'_>) -> R<Sexp> {
     let is_na_string = |text: &[u8]| na_strings.iter().any(|na| na == text);
     let missing = |index: usize| {
         let text = elements[index];
-        x.element(index) == na_string() || text.is_empty() || is_na_string(text) || is_blank(text)
+        R::Ok(
+            x.element(index) == na_string()
+                || text.is_empty()
+                || is_na_string(text)
+                || is_blank(text)?,
+        )
     };
     let mut possible = Possible {
         logical: try_logical,
@@ -1881,15 +1976,18 @@ unsafe fn do_type_convert(call: &NativeCall<'_>) -> R<Sexp> {
         real: true,
         complex: true,
     };
-    if let Some(first) = (0..count).find(|&index| !missing(index)) {
-        possible.rule_out(elements[first], decimal, refuse)?;
+    for index in 0..count {
+        if !missing(index)? {
+            possible.rule_out(elements[index], decimal, refuse)?;
+            break;
+        }
     }
     let mut result = None;
     if possible.logical {
         let vector = alloc(SexpType::Logical, count)?;
         for index in 0..count {
             values::ints_mut(vector)[index] = match elements[index] {
-                _ if missing(index) => NA_LOGICAL,
+                _ if missing(index)? => NA_LOGICAL,
                 b"F" | b"FALSE" => 0,
                 b"T" | b"TRUE" => 1,
                 text => {
@@ -1906,7 +2004,7 @@ unsafe fn do_type_convert(call: &NativeCall<'_>) -> R<Sexp> {
     if result.is_none() && possible.integer {
         let vector = alloc(SexpType::Integer, count)?;
         for index in 0..count {
-            values::ints_mut(vector)[index] = if missing(index) {
+            values::ints_mut(vector)[index] = if missing(index)? {
                 NA_INTEGER
             } else {
                 match parse_integer(elements[index]) {
@@ -1927,12 +2025,12 @@ unsafe fn do_type_convert(call: &NativeCall<'_>) -> R<Sexp> {
         let vector = alloc(SexpType::Real, count)?;
         crate::heap().root(vector);
         for index in 0..count {
-            values::reals_mut(vector)[index] = if missing(index) {
+            values::reals_mut(vector)[index] = if missing(index)? {
                 NA_REAL
             } else {
                 let text = elements[index];
                 let (value, end) = parse_double_prefix(text, decimal, false, exactness)?;
-                if !is_blank(&text[end..]) {
+                if !is_blank(&text[end..])? {
                     possible.real = false;
                     possible.rule_out(text, decimal, refuse)?;
                     break;
@@ -1948,7 +2046,7 @@ unsafe fn do_type_convert(call: &NativeCall<'_>) -> R<Sexp> {
         let vector = alloc(SexpType::Complex, count)?;
         crate::heap().root(vector);
         for index in 0..count {
-            values::complexes_mut(vector)[index] = if missing(index) {
+            values::complexes_mut(vector)[index] = if missing(index)? {
                 Rcomplex {
                     r: NA_REAL,
                     i: NA_REAL,
@@ -1956,7 +2054,7 @@ unsafe fn do_type_convert(call: &NativeCall<'_>) -> R<Sexp> {
             } else {
                 let text = elements[index];
                 let (value, end) = parse_complex_prefix(text, decimal, false, exactness, true)?;
-                if !is_blank(&text[end..]) {
+                if !is_blank(&text[end..])? {
                     possible.complex = false;
                     break;
                 }
@@ -2018,13 +2116,13 @@ impl Possible {
         }
         if self.real {
             let (_, end) = parse_double_prefix(text, decimal, true, exactness)?;
-            if !is_blank(&text[end..]) {
+            if !is_blank(&text[end..])? {
                 self.real = false;
             }
         }
         if self.complex {
             let (_, end) = parse_complex_prefix(text, decimal, true, exactness, true)?;
-            if !is_blank(&text[end..]) {
+            if !is_blank(&text[end..])? {
                 self.complex = false;
             }
         }
