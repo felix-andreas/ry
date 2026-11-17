@@ -148,7 +148,8 @@ pub fn program(seed: u64) -> String {
         "# oracle metamorphic program, seed {seed}\n# features: {}\n{PREAMBLE}",
         features.names()
     );
-    for trial in 1..=2 + zoo.rng.below(3) {
+    // An engine takes longer to start than to run a trial, so a program holds many.
+    for trial in 1..=6 + zoo.rng.below(7) {
         text.push_str(&zoo.trial(trial));
     }
     text
@@ -504,23 +505,40 @@ impl Zoo {
         let mut text = self.bare_vector(kind, length);
         let mut names = Vec::new();
         if self.has(Feature::Names) && length > 0 && self.rng.chance(2, 5) {
-            if length <= 8 {
+            let given = if length <= 8 {
                 names = (0..length).map(|_| self.name()).collect();
-                text = format!("setNames({text}, c({}))", names.join(", "));
+                format!("c({})", names.join(", "))
             } else {
-                let pool: Vec<&'static str> = (0..3).map(|_| self.name()).collect();
-                text = match self.rng.below(3) {
-                    0 => format!("setNames({text}, paste0(\"n\", seq_len({length})))"),
-                    1 => format!("setNames({text}, as.character({length}:1))"),
+                match self.rng.below(3) {
+                    0 => format!("paste0(\"n\", seq_len({length}))"),
+                    1 => format!("as.character({length}:1)"),
                     _ => {
-                        names = pool.clone();
-                        format!(
-                            "setNames({text}, rep_len(c({}), {length}))",
-                            pool.join(", ")
-                        )
+                        names = (0..3).map(|_| self.name()).collect();
+                        format!("rep_len(c({}), {length})", names.join(", "))
                     }
-                };
-            }
+                }
+            };
+            // The same names reach a vector as strings, through `names<-`, and as argument
+            // tags, which are symbols.
+            let combine = if kind == Kind::List { "list" } else { "c" };
+            text = match self.rng.below(6) {
+                0 | 1 => format!("setNames({text}, {given})"),
+                2 => format!("structure({text}, names = {given})"),
+                3 => format!("local({{ named <- {text}; names(named) <- {given}; named }})"),
+                4 if length <= 8 && kind != Kind::List => {
+                    let elements: Vec<String> = names
+                        .iter()
+                        .enumerate()
+                        .map(|(index, name)| match *name {
+                            // R has no empty tag: an untagged argument has the empty name.
+                            "\"\"" => format!("bare[[{}]]", index + 1),
+                            name => format!("{name} = bare[[{}]]", index + 1),
+                        })
+                        .collect();
+                    format!("local({{ bare <- {text}; c({}) }})", elements.join(", "))
+                }
+                _ => format!("do.call({combine}, setNames(as.list({text}), {given}))"),
+            };
         }
         if self.has(Feature::Attributes) && self.rng.chance(1, 4) {
             let attributes = [
@@ -544,8 +562,29 @@ impl Zoo {
 
     fn matrix(&mut self) -> Value {
         const SIDES: [usize; 12] = [0, 1, 1, 2, 2, 3, 3, 4, 7, 8, 9, 16];
-        let rows = SIDES[self.rng.below(SIDES.len())];
-        let columns = SIDES[self.rng.below(SIDES.len())];
+        // Dimensions whose product straddles the lengths at which storage changes.
+        const THRESHOLDS: [(usize, usize); 12] = [
+            (3, 5),
+            (4, 4),
+            (1, 17),
+            (7, 9),
+            (8, 8),
+            (5, 13),
+            (64, 1),
+            (1, 65),
+            (9, 14),
+            (16, 8),
+            (3, 43),
+            (32, 16),
+        ];
+        let (rows, columns) = if self.rng.chance(1, 3) {
+            THRESHOLDS[self.rng.below(THRESHOLDS.len())]
+        } else {
+            (
+                SIDES[self.rng.below(SIDES.len())],
+                SIDES[self.rng.below(SIDES.len())],
+            )
+        };
         let kind = self.kind();
         let data = self.bare_vector(kind, rows * columns);
         let mut arguments = format!("{data}, {rows}, {columns}");
@@ -1027,7 +1066,12 @@ impl Zoo {
         let position = self.position(length);
         let positions = self.positions(length, &value.names);
         let stored = self.stored(kind);
-        let name = self.name();
+        // A lookup by name mostly asks for a name the value has.
+        let name = if !value.names.is_empty() && self.rng.chance(2, 3) {
+            value.names[self.rng.below(value.names.len())]
+        } else {
+            self.name()
+        };
         match self.rng.below(34) {
             0..=3 => format!("@[{position}] <- {stored}"),
             4..=6 => format!("@[[{position}]] <- {stored}"),
@@ -1069,7 +1113,11 @@ impl Zoo {
             }
             16 | 17 => {
                 body.reads += 1;
-                let read = match self.rng.below(9) {
+                let read = match self.rng.below(13) {
+                    9 => format!("names(@) == {name}"),
+                    10 => format!("match({name}, names(@))"),
+                    11 => format!("@[[{name}]]"),
+                    12 => format!("{name} %in% names(@)"),
                     0 => format!("@[{positions}]"),
                     1 => format!("@[[{position}]]"),
                     2 => "length(@)".to_owned(),
