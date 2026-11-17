@@ -2185,6 +2185,7 @@ dependencies = [
  "libmimalloc-sys",
  "loader",
  "mimalloc",
+ "numeric",
  "polars",
  "polars-arrow",
  "rcmd",

@@ -20,6 +20,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 heap = { path = "../heap" }
 interp = { path = "../interp" }
+numeric = { path = "../numeric" }
 stats = { path = "../stats" }
 graphics = { path = "../graphics" }
 frames = { path = "../frames" }

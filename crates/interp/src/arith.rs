@@ -4625,7 +4625,7 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
     }
     let length_out = match present(matched[2]) {
         Some(value) => {
-            let length_out = rep_count(value)?;
+            let length_out = values::as_real_scalar_warning(value)?;
             if length_out <= -1.0 {
                 return Err(call.error("invalid 'length.out' argument"));
             }
@@ -4645,7 +4645,7 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
             }
             // `each` is a double truncated toward zero: a non-finite count is 1, and one
             // below -1 or above the longest vector is an error.
-            let each = rep_count(value)?;
+            let each = values::as_real_scalar_warning(value)?;
             if !each.is_finite() {
                 1
             } else if each <= -1.0 || each > LONGEST_REPETITION as f64 {
@@ -4702,10 +4702,20 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
             total: out as usize,
         },
         (None, Some(times)) => {
+            // A count is a double truncated toward zero; anything else is read as integers,
+            // with the warnings of that coercion.
+            let times = if times.kind() == SexpType::Real {
+                times
+            } else {
+                let integers = coerce_vector(times, SexpType::Integer)?;
+                crate::heap().root(integers);
+                integers
+            };
+            let invalid = |repeat: f64| repeat.is_nan() || repeat <= -1.0;
             let times_count = length(times);
             if times_count == 1 {
                 let repeat = values::as_real_scalar(times);
-                if repeat.is_nan() || repeat < 0.0 {
+                if invalid(repeat) {
                     return Err(call.error("invalid 'times' argument"));
                 }
                 RepPlan::Cycle {
@@ -4719,7 +4729,7 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
                 let mut total = 0usize;
                 for position in 0..base_count {
                     let repeat = crate::subset::numeric_element(times, position);
-                    if repeat.is_nan() || repeat < 0.0 {
+                    if invalid(repeat) {
                         return Err(call.error("invalid 'times' argument"));
                     }
                     total = total
@@ -4759,20 +4769,6 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
         result.set_gp_bits(gp::S4_OBJECT, true);
     }
     Ok(result)
-}
-
-/// The first element of `rep`'s `length.out` or `each` as a number, NA when it has none. A
-/// string that is no number warns, as GNU R's `asReal` does.
-unsafe fn rep_count(value: Sexp) -> R<f64> {
-    let number = values::as_real_scalar(value);
-    if value.kind() == SexpType::String
-        && length(value) > 0
-        && number.is_nan()
-        && value.element(0) != values::na_string()
-    {
-        crate::conditions::warning("NAs introduced by coercion")?;
-    }
-    Ok(number)
 }
 
 /// Which element of `x` each element of `rep`'s result repeats, before `each` is applied:

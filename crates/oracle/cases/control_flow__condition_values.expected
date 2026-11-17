@@ -1,0 +1,172 @@
+[stdout]
+| 1 E: missing value where TRUE/FALSE needed | if (value) "yes" else "no" 
+| 2 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 3 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 4 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 5 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 6 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 7 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 8 yes 
+| 9 yes 
+| 10 yes 
+| 11 no 
+| 12 no 
+| 13 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 14 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 15 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 16 E: argument is of length zero | if (value) "yes" else "no" 
+| 17 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 18 E: the condition has length > 1 | if (value) "yes" else "no" 
+| 19 E: the condition has length > 1 | if (value) "yes" else "no" 
+| 20 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 21 E: argument is of length zero | if (value) "yes" else "no" 
+| 22 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 23 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 24 E: argument is of length zero | if (value) "yes" else "no" 
+| 25 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 26 E: the condition has length > 1 | if (value) "yes" else "no" 
+| 27 no 
+| 28 yes 
+| 29 no 
+| 30 yes 
+| 31 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 32 E: argument is of length zero | if (value) "yes" else "no" 
+| 33 E: argument is of length zero | if (value) "yes" else "no" 
+| 34 E: the condition has length > 1 | if (value) "yes" else "no" 
+| 35 E: the condition has length > 1 | if (value) "yes" else "no" 
+| 36 yes 
+| 37 yes 
+| 38 yes 
+| 39 yes 
+| 40 yes 
+| 41 yes 
+| 42 yes 
+| 43 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 44 E: the condition has length > 1 | if (value) "yes" else "no" 
+| 45 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 46 E: the condition has length > 1 | if (value) "yes" else "no" 
+| 1 E: missing value where TRUE/FALSE needed | while (value) { 
+| 2 E: argument is not interpretable as logical | while (value) { 
+| 3 E: argument is not interpretable as logical | while (value) { 
+| 4 E: argument is not interpretable as logical | while (value) { 
+| 5 E: argument is not interpretable as logical | while (value) { 
+| 6 E: argument is not interpretable as logical | while (value) { 
+| 7 E: argument is not interpretable as logical | while (value) { 
+| 8 2 
+| 9 2 
+| 10 2 
+| 11 0 
+| 12 0 
+| 13 E: argument is not interpretable as logical | while (value) { 
+| 14 E: argument is not interpretable as logical | while (value) { 
+| 15 E: argument is not interpretable as logical | while (value) { 
+| 16 E: argument is of length zero | while (value) { 
+| 17 E: argument is not interpretable as logical | while (value) { 
+| 18 E: the condition has length > 1 | while (value) { 
+| 19 E: the condition has length > 1 | while (value) { 
+| 20 E: argument is not interpretable as logical | while (value) { 
+| 21 E: argument is of length zero | while (value) { 
+| 22 E: argument is not interpretable as logical | while (value) { 
+| 23 E: argument is not interpretable as logical | while (value) { 
+| 24 E: argument is of length zero | while (value) { 
+| 25 E: argument is not interpretable as logical | while (value) { 
+| 26 E: the condition has length > 1 | while (value) { 
+| 27 0 
+| 28 2 
+| 29 0 
+| 30 2 
+| 31 E: argument is not interpretable as logical | while (value) { 
+| 32 E: argument is of length zero | while (value) { 
+| 33 E: argument is of length zero | while (value) { 
+| 34 E: the condition has length > 1 | while (value) { 
+| 35 E: the condition has length > 1 | while (value) { 
+| 36 2 
+| 37 2 
+| 38 2 
+| 39 2 
+| 40 2 
+| 41 2 
+| 42 2 
+| 43 E: argument is not interpretable as logical | while (value) { 
+| 44 E: the condition has length > 1 | while (value) { 
+| 45 E: argument is not interpretable as logical | while (value) { 
+| 46 E: the condition has length > 1 | while (value) { 
+| 1 E: missing value where TRUE/FALSE needed | if (value) "yes" else "no" 
+| 2 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 3 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 4 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 5 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 6 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 7 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 8 yes 
+| 9 yes 
+| 10 yes 
+| 11 no 
+| 12 no 
+| 13 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 14 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 15 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 16 E: argument is of length zero | if (value) "yes" else "no" 
+| 17 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 18 E: the condition has length > 1 | if (value) "yes" else "no" 
+| 19 E: the condition has length > 1 | if (value) "yes" else "no" 
+| 20 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 21 E: argument is of length zero | if (value) "yes" else "no" 
+| 22 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 23 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 24 E: argument is of length zero | if (value) "yes" else "no" 
+| 25 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 26 E: the condition has length > 1 | if (value) "yes" else "no" 
+| 27 no 
+| 28 yes 
+| 29 no 
+| 30 yes 
+| 31 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 32 E: argument is of length zero | if (value) "yes" else "no" 
+| 33 E: argument is of length zero | if (value) "yes" else "no" 
+| 34 E: the condition has length > 1 | if (value) "yes" else "no" 
+| 35 E: the condition has length > 1 | if (value) "yes" else "no" 
+| 36 yes 
+| 37 yes 
+| 38 yes 
+| 39 yes 
+| 40 yes 
+| 41 yes 
+| 42 yes 
+| 43 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 44 E: the condition has length > 1 | if (value) "yes" else "no" 
+| 45 E: argument is not interpretable as logical | if (value) "yes" else "no" 
+| 46 E: the condition has length > 1 | if (value) "yes" else "no" 
+| 2 E: argument is not interpretable as logical | if (value) break 
+| 7 E: argument is not interpretable as logical | if (value) break 
+| 14 E: argument is not interpretable as logical | if (value) break 
+| 17 E: argument is not interpretable as logical | if (value) break 
+| 2 E: argument is not interpretable as logical | if (value) break 
+| 7 E: argument is not interpretable as logical | if (value) break 
+| 14 E: argument is not interpretable as logical | if (value) break 
+| 17 E: argument is not interpretable as logical | if (value) break 
+| 2 E: argument is not interpretable as logical | if (value) break 
+| 7 E: argument is not interpretable as logical | if (value) break 
+| 14 E: argument is not interpretable as logical | if (value) break 
+| 17 E: argument is not interpretable as logical | if (value) break 
+| [1] NA
+| E: invalid 'y' type in 'x && y' | TRUE && "x" 
+| E: invalid 'x' type in 'x || y' | list(1) || TRUE 
+| E: invalid 'y' type in 'x || y' | FALSE || quote(x) 
+| [1] NA
+| E: invalid 'x' type in 'x && y' | "TRUE" && TRUE 
+| NULL
+| [1] TRUE
+| E: NA_integer_ is not TRUE | NULL 
+| E: "x" is not TRUE | NULL 
+| E: argument is not interpretable as logical | if (NA_real_) 1 else 2 
+| integer(0)
+| integer(0)
+| E: argument is of length zero | while (list()) 1 
+| E: argument is of length zero | if (character(0)) 1 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

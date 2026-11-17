@@ -5195,27 +5195,12 @@ unsafe fn general_condition(value: Sexp, call: Sexp) -> R<bool> {
         heap::object::NA_LOGICAL => {
             let message = if value.kind() == SexpType::Logical {
                 "missing value where TRUE/FALSE needed"
-            } else if value.kind() == SexpType::String {
-                "argument is not interpretable as logical"
             } else {
-                "missing value where TRUE/FALSE needed"
+                "argument is not interpretable as logical"
             };
             Err(error_in(call, message))
         }
-        condition => {
-            if !matches!(
-                value.kind(),
-                SexpType::Logical
-                    | SexpType::Integer
-                    | SexpType::Real
-                    | SexpType::String
-                    | SexpType::Complex
-                    | SexpType::Raw
-            ) {
-                return Err(error_in(call, "argument is of length zero".to_string()));
-            }
-            Ok(condition != 0)
-        }
+        condition => Ok(condition != 0),
     }
 }
 

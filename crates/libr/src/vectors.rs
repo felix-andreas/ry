@@ -14,7 +14,11 @@ use {
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, is_na_real},
         strings::Encoding,
     },
-    interp::sort::collate,
+    interp::{
+        coerce::{CoercionWarnings, complex_from_string, integer_from_string, real_from_string},
+        sort::collate,
+    },
+    numeric::long_double::{Exactness, strtod},
     std::ffi::{c_char, c_int, c_void},
 };
 
@@ -283,53 +287,6 @@ pub fn string_to_logical(text: &[u8]) -> i32 {
     }
 }
 
-/// `R_strtod`'s reading of a whole string: `None` when it is not a number.
-pub fn parse_real(text: &[u8]) -> Option<f64> {
-    let text = std::str::from_utf8(text).ok()?.trim();
-    if text == "NA" {
-        return Some(NA_REAL);
-    }
-    let (negative, digits) = match text.as_bytes().first() {
-        Some(b'-') => (true, &text[1..]),
-        Some(b'+') => (false, &text[1..]),
-        _ => (false, text),
-    };
-    let magnitude = if let Some(hex) = digits
-        .strip_prefix("0x")
-        .or_else(|| digits.strip_prefix("0X"))
-    {
-        parse_hex(hex)?
-    } else {
-        match digits {
-            "Inf" | "inf" | "Infinity" | "infinity" => f64::INFINITY,
-            "NaN" => f64::NAN,
-            _ if digits.bytes().all(|byte| {
-                byte.is_ascii_digit() || matches!(byte, b'.' | b'e' | b'E' | b'+' | b'-')
-            }) && digits.bytes().any(|byte| byte.is_ascii_digit()) =>
-            {
-                digits.parse::<f64>().ok()?
-            }
-            _ => return None,
-        }
-    };
-    Some(if negative { -magnitude } else { magnitude })
-}
-
-fn parse_hex(text: &str) -> Option<f64> {
-    let (mantissa, exponent) = match text.find(['p', 'P']) {
-        Some(position) => (&text[..position], text[position + 1..].parse::<i32>().ok()?),
-        None => (text, 0),
-    };
-    if mantissa.is_empty() {
-        return None;
-    }
-    let mut value = 0.0f64;
-    for digit in mantissa.chars() {
-        value = value * 16.0 + digit.to_digit(16)? as f64;
-    }
-    Some(value * 2f64.powi(exponent))
-}
-
 /// R's `as.character` for a double: the shortest of fixed and scientific notation at up to 15
 /// significant digits, fixed when the widths tie.
 pub fn format_real(value: f64) -> String {
@@ -521,7 +478,7 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
     }
     let result = runtime().heap.alloc_vector(target, length)?;
     runtime().heap.root(result);
-    let mut lost = false;
+    let mut warnings = CoercionWarnings::default();
     let mut out_of_range = false;
     let mut raw_out_of_range = false;
     for index in 0..count {
@@ -568,22 +525,7 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                         converted
                     }
                     SexpType::String => {
-                        let element = sexp_elt(object, index)?;
-                        if element == runtime().heap.known().na_string {
-                            NA_INTEGER
-                        } else {
-                            match parse_real(element.bytes()) {
-                                Some(value) => {
-                                    let (converted, range) = real_to_int(value);
-                                    out_of_range |= range;
-                                    converted
-                                }
-                                None => {
-                                    lost = true;
-                                    NA_INTEGER
-                                }
-                            }
-                        }
+                        integer_from_string(sexp_elt(object, index)?, &mut warnings)?
                     }
                     SexpType::Raw => altrep::elt::<u8>(object, index as R_xlen_t)? as i32,
                     _ => NA_INTEGER,
@@ -595,45 +537,33 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                     SexpType::Integer | SexpType::Logical => int_to_real(int_elt(object, index)?),
                     SexpType::Real => real_elt(object, index)?,
                     SexpType::Complex => altrep::elt::<Rcomplex>(object, index as R_xlen_t)?.r,
-                    SexpType::String => {
-                        let element = sexp_elt(object, index)?;
-                        if element == runtime().heap.known().na_string {
-                            NA_REAL
-                        } else {
-                            parse_real(element.bytes()).unwrap_or_else(|| {
-                                lost = true;
-                                NA_REAL
-                            })
-                        }
-                    }
+                    SexpType::String => real_from_string(sexp_elt(object, index)?, &mut warnings)?,
                     SexpType::Raw => altrep::elt::<u8>(object, index as R_xlen_t)? as f64,
                     _ => NA_REAL,
                 };
                 *(result.data() as *mut f64).add(index) = value;
             }
             SexpType::Complex => {
-                let real = match object.kind() {
-                    SexpType::Integer | SexpType::Logical => int_to_real(int_elt(object, index)?),
-                    SexpType::Real => real_elt(object, index)?,
+                let value = match object.kind() {
                     SexpType::String => {
-                        let element = sexp_elt(object, index)?;
-                        if element == runtime().heap.known().na_string {
-                            NA_REAL
-                        } else {
-                            parse_real(element.bytes()).unwrap_or_else(|| {
-                                lost = true;
-                                NA_REAL
-                            })
+                        complex_from_string(sexp_elt(object, index)?, &mut warnings)?
+                    }
+                    _ => {
+                        let real = match object.kind() {
+                            SexpType::Integer | SexpType::Logical => {
+                                int_to_real(int_elt(object, index)?)
+                            }
+                            SexpType::Real => real_elt(object, index)?,
+                            SexpType::Raw => altrep::elt::<u8>(object, index as R_xlen_t)? as f64,
+                            _ => NA_REAL,
+                        };
+                        Rcomplex {
+                            r: real,
+                            i: if is_na_real(real) { NA_REAL } else { 0.0 },
                         }
                     }
-                    SexpType::Raw => altrep::elt::<u8>(object, index as R_xlen_t)? as f64,
-                    _ => NA_REAL,
                 };
-                let imaginary = if is_na_real(real) { NA_REAL } else { 0.0 };
-                *(result.data() as *mut Rcomplex).add(index) = Rcomplex {
-                    r: real,
-                    i: imaginary,
-                };
+                *(result.data() as *mut Rcomplex).add(index) = value;
             }
             SexpType::String => {
                 let element = element_as_charsxp(object, index)?;
@@ -644,8 +574,7 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                     SexpType::Integer | SexpType::Logical => int_elt(object, index)?,
                     SexpType::Real => real_to_int(real_elt(object, index)?).0,
                     SexpType::String => {
-                        let element = sexp_elt(object, index)?;
-                        parse_real(element.bytes()).map_or(NA_INTEGER, |value| real_to_int(value).0)
+                        integer_from_string(sexp_elt(object, index)?, &mut warnings)?
                     }
                     _ => NA_INTEGER,
                 };
@@ -660,10 +589,10 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
             _ => {}
         }
     }
-    if lost {
+    if warnings.na {
         warn("NAs introduced by coercion");
     }
-    if out_of_range {
+    if out_of_range || warnings.integer_range {
         warn("NAs introduced by coercion to integer range");
     }
     if raw_out_of_range {
@@ -1869,29 +1798,17 @@ pub unsafe extern "C" fn R_compute_identical(left: Sexp, right: Sexp, flags: c_i
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_atof(text: *const c_char) -> f64 {
-    parse_real(c_bytes(text)).unwrap_or(0.0)
+    strtod(c_bytes(text), b'.', false, Exactness::Allow).value
 }
 
 /// `R_strtod`: the longest prefix of `text` that reads as a number.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_strtod(text: *const c_char, end: *mut *mut c_char) -> f64 {
-    let bytes = c_bytes(text);
-    let start = bytes
-        .iter()
-        .take_while(|byte| byte.is_ascii_whitespace())
-        .count();
-    for stop in (start + 1..=bytes.len()).rev() {
-        if let Some(value) = parse_real(&bytes[start..stop]) {
-            if !end.is_null() {
-                *end = text.add(stop) as *mut c_char;
-            }
-            return value;
-        }
-    }
+    let number = strtod(c_bytes(text), b'.', false, Exactness::Allow);
     if !end.is_null() {
-        *end = text as *mut c_char;
+        *end = text.add(number.length) as *mut c_char;
     }
-    0.0
+    number.value
 }
 
 /// `Rf_match(table, x, nomatch)`: for each element of `x`, the 1-based position of its first
@@ -2149,8 +2066,7 @@ pub unsafe extern "C" fn Rf_asComplex(object: Sexp) -> Rcomplex {
         };
         if !object.kind().is_atomic() || xlength(object)? < 1 {
             if object.kind() == SexpType::Char {
-                let value = parse_real(object.bytes()).unwrap_or(NA_REAL);
-                return Ok(Rcomplex { r: value, i: 0.0 });
+                return complex_from_string(object, &mut CoercionWarnings::default());
             }
             return Ok(na);
         }
