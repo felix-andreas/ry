@@ -2178,6 +2178,23 @@ pub unsafe fn materialize(object: Sexp) -> ApiResult<Sexp> {
 
 /// A regular vector with an ALTREP object's elements and no attributes.
 unsafe fn materialize_contents(object: Sexp) -> ApiResult<Sexp> {
+    contents(object, true)
+}
+
+/// A regular vector with an ALTREP object's elements, to read them from. A wrapper hands out
+/// the vector it wraps, whose attributes are that vector's and not the object's, and which the
+/// wrapper writes in place later: the caller reads elements and keeps nothing.
+pub unsafe fn element_storage(object: Sexp) -> ApiResult<Sexp> {
+    let mut object = object;
+    while is_wrapper(object) && object.car().is_altrep() {
+        object = object.car();
+    }
+    contents(object, false)
+}
+
+/// The elements of an ALTREP object as a regular vector: one without attributes that nothing
+/// writes when `bare`, and otherwise whichever vector the class keeps them in.
+unsafe fn contents(object: Sexp, bare: bool) -> ApiResult<Sexp> {
     runtime().heap.root(object);
     // A deferred string keeps its converted elements in an ordinary vector, so that vector is
     // the materialized form, and reading the strings again costs no further copy.
@@ -2202,11 +2219,15 @@ unsafe fn materialize_contents(object: Sexp) -> ApiResult<Sexp> {
             // the wrapper's, so only a slot without attributes can stand for the object.
             if slot.kind() == kind
                 && !slot.is_altrep()
-                && slot.attrib() == runtime().nil()
+                && (!bare || slot.attrib() == runtime().nil())
                 && slot.length() == count as isize
                 && slot.data().cast_const() == pointer
             {
-                slot.mark_not_mutable();
+                // Marking it shared makes its class copy it at the next write, which a caller
+                // that only reads must not cost the object.
+                if bare {
+                    slot.mark_not_mutable();
+                }
                 return Ok(slot);
             }
         }

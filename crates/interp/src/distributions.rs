@@ -113,7 +113,10 @@ macro_rules! distributions {
                 signalled(random_vector::<$sampler>(call.args, Interface::Stats, distributions!(@integer $shape), Conditions::Signal))
             }),)*
             ("rmultinom", |call| unsafe { rmultinom_routine(call.arg(0), call.arg(1), call.arg(2)) }),
-            ("signrank_free", |_| Ok(nil())),
+            ("signrank_free", |_| {
+                signrank_free();
+                Ok(nil())
+            }),
             ("wilcox_free", |_| {
                 wilcox_free();
                 Ok(nil())
@@ -1708,6 +1711,60 @@ impl Sampler for Binomial {
     fn draw<D: Deviates>(&mut self, deviates: &mut D) -> R<f64> {
         Binomial::draw(self, deviates)
     }
+
+    /// Recycled parameters (a probability per draw, typically) mostly have small means, whose
+    /// inversion setup is a few operations, so it runs inline without building the sampler.
+    fn fill_recycled<D: Deviates>(
+        deviates: &mut D,
+        values: &[&[f64]],
+        slots: &mut [f64],
+    ) -> R<bool> {
+        let [sizes, probabilities] = values else {
+            return Ok(false);
+        };
+        let pairs = sizes.iter().cycle().zip(probabilities.iter().cycle());
+        for (slot, (&size, &pp)) in slots.iter_mut().zip(pairs) {
+            *slot = match binomial_inversion(size, pp) {
+                Some(inversion) => {
+                    let draw = inversion.draw(deviates)?;
+                    let shape = &inversion.shape;
+                    (if shape.flip { shape.n - draw } else { draw }) as f64
+                }
+                None => Binomial::new(size, pp).draw(deviates)?,
+            };
+        }
+        Ok(true)
+    }
+}
+
+/// The inversion setup of [`binomial_kind`], for exactly the parameters it inverts for.
+#[inline]
+fn binomial_inversion(size: f64, pp: f64) -> Option<BinomialInversion> {
+    let rounded = forceint(size);
+    let valid = size.is_finite()
+        && rounded == size
+        && rounded > 0.0
+        && rounded < f64::from(i32::MAX)
+        && pp > 0.0
+        && pp < 1.0;
+    if !valid {
+        return None;
+    }
+    let p = pp.min(1.0 - pp);
+    let q = 1.0 - p;
+    if rounded * p >= 30.0 {
+        return None;
+    }
+    let r = p / q;
+    Some(BinomialInversion {
+        shape: BinomialShape {
+            n: rounded as i64,
+            flip: pp > 0.5,
+            g: r * (rounded + 1.0),
+            r,
+        },
+        qn: r_pow_di(q, rounded as i32),
+    })
 }
 
 fn binomial_kind(size: f64, pp: f64) -> BinomialKind {
@@ -1730,6 +1787,9 @@ fn binomial_kind(size: f64, pp: f64) -> BinomialKind {
             probability: pp,
         };
     }
+    if let Some(inversion) = binomial_inversion(size, pp) {
+        return BinomialKind::Inversion(inversion);
+    }
     let n = rounded as i64;
     let nf = rounded;
     let p = pp.min(1.0 - pp);
@@ -1742,12 +1802,6 @@ fn binomial_kind(size: f64, pp: f64) -> BinomialKind {
         g: r * (nf + 1.0),
         r,
     };
-    if np < 30.0 {
-        return BinomialKind::Inversion(BinomialInversion {
-            shape,
-            qn: q.powf(nf),
-        });
-    }
     let mode_real = np + p;
     let m = mode_real as i64;
     let mf = m as f64;

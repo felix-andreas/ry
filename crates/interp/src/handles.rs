@@ -173,6 +173,48 @@ fn expanded<'s, T: Vector>(context: &mut Cx<'s>, value: Local<'s>) -> R<Option<L
     Ok(unsafe { rooted(context, vector) }.downcast::<T>())
 }
 
+/// A standard vector of `T` to read the elements of `value` from: itself when it is one, and
+/// for an ALTREP object the vector its class keeps them in, or a copy when it keeps none. A
+/// class's vector carries attributes that are not the object's, and the class writes it in
+/// place later, so the caller reads its elements and neither writes nor keeps it. `None` for
+/// any other type.
+#[inline(always)]
+pub fn elements_of<'s, T: Vector>(
+    context: &mut Cx<'s>,
+    value: Local<'s>,
+) -> R<Option<Local<'s, T>>> {
+    if value.r_type() != T::TYPE {
+        return Ok(None);
+    }
+    match value.downcast::<T>() {
+        Some(vector) => Ok(Some(vector)),
+        None => stored(context, value),
+    }
+}
+
+/// [`elements_of`] for an ALTREP object of `T`'s type.
+#[cold]
+#[inline(never)]
+fn stored<'s, T: Vector>(context: &mut Cx<'s>, value: Local<'s>) -> R<Option<Local<'s, T>>> {
+    // SAFETY: the object is rooted, and its class's methods may allocate, which `&mut Cx`
+    // permits. The result is a live object, and nothing has allocated since.
+    let vector = unsafe {
+        rooted(
+            context,
+            (crate::interp().hooks.altrep_storage)(value.raw())?,
+        )
+    };
+    Ok(vector.downcast::<T>())
+}
+
+/// Whether the class of an ALTREP vector holds its elements in memory already, as a wrapper
+/// does, so reading them expands and copies nothing.
+pub fn holds_elements(_context: &mut Cx<'_>, vector: Local<'_, Alt>) -> R<bool> {
+    // SAFETY: the object is rooted and ALTREP, and its class's method may allocate, which
+    // `&mut Cx` permits.
+    Ok(unsafe { (crate::interp().hooks.altrep_dataptr_or_null)(vector.raw())? }.is_some())
+}
+
 /// `value` as a standard character vector, coerced as `as.character` coerces when it is of
 /// another type.
 #[inline(always)]

@@ -208,6 +208,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A lazily signalled error carries its condition class (settled)
 - `coerce_vector` applies GNU R's attribute rule in one place (settled)
 - A promise whose evaluation was left warns when it is forced again (settled)
+- A direct call of an attribute replacement wraps its target
 
 ## Builtins and base R
 
@@ -388,6 +389,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Whether a vector may be written in place is a value, `Owned`
 - A builtin's fast-path entry runs in its caller's handle scope and answers unrooted
 - A raw entry into handle code picks its scope by who releases
+- A list of inert elements skips its children when it dies
 
 ## C API, R home and packages
 

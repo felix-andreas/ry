@@ -433,6 +433,46 @@ pub(crate) unsafe fn copy_mapped(
     Ok(())
 }
 
+/// Fills `to[start..start + count]` with `from` recycled, a run of `from` at a time.
+unsafe fn copy_recycled(from: Sexp, to: Sexp, start: usize, count: usize) -> R<()> {
+    let length = length(from);
+    if length == 0 || count == 0 {
+        return Ok(());
+    }
+    match (from.kind(), to.kind()) {
+        (SexpType::Logical | SexpType::Integer, SexpType::Logical | SexpType::Integer)
+            if from.kind() == to.kind() =>
+        {
+            let from = values::ints(from);
+            for chunk in values::ints_mut(to)[start..start + count].chunks_mut(length) {
+                chunk.copy_from_slice(&from[..chunk.len()]);
+            }
+        }
+        (SexpType::Real, SexpType::Real) => {
+            let from = values::reals(from);
+            for chunk in values::reals_mut(to)[start..start + count].chunks_mut(length) {
+                chunk.copy_from_slice(&from[..chunk.len()]);
+            }
+        }
+        (SexpType::Logical | SexpType::Integer, SexpType::Real) => {
+            let from = values::ints(from);
+            for chunk in values::reals_mut(to)[start..start + count].chunks_mut(length) {
+                for (slot, &value) in chunk.iter_mut().zip(from) {
+                    *slot = int_to_real(value);
+                }
+            }
+        }
+        _ => copy_mapped(
+            from,
+            to,
+            count,
+            |position| position % length,
+            |position| start + position,
+        )?,
+    }
+    Ok(())
+}
+
 /// An integer or logical element as a double, NA staying NA.
 pub(crate) fn int_to_real(value: i32) -> f64 {
     if value == NA_INTEGER {
@@ -463,21 +503,23 @@ unsafe fn set_na(to: Sexp, to_index: usize) {
 /// Whether [`select`] reads `count` elements of `vector` one at a time instead of expanding it:
 /// always for a compact sequence, whose elements are arithmetic and which GNU R leaves compact
 /// when it is subset, and for another long ALTREP number vector of which the selection is a
-/// small part. A short one expands cheaply, and its class keeps the expansion.
-fn reads_sparsely(context: &mut Cx<'_>, vector: Local<'_>, count: usize) -> bool {
-    if vector.downcast::<Alt>().is_none()
-        || !matches!(
-            vector.r_type(),
-            SexpType::Logical | SexpType::Integer | SexpType::Real
-        )
-    {
-        return false;
+/// small part, unless its class holds the data already (a wrapper does). A short one expands
+/// cheaply, and its class keeps the expansion.
+fn reads_sparsely(context: &mut Cx<'_>, vector: Local<'_>, count: usize) -> R<bool> {
+    let Some(altrep) = vector.downcast::<Alt>() else {
+        return Ok(false);
+    };
+    if !matches!(
+        vector.r_type(),
+        SexpType::Logical | SexpType::Integer | SexpType::Real
+    ) {
+        return Ok(false);
     }
     if compact_sequence(vector).is_some() {
-        return true;
+        return Ok(true);
     }
     let extent = handles::length(context, vector);
-    extent >= 1 << 16 && count <= extent / 8
+    Ok(extent >= 1 << 16 && count <= extent / 8 && !handles::holds_elements(context, altrep)?)
 }
 
 /// The elements of `vector` at `positions` (`NA_POSITION` gives NA, or `NULL` in a list).
@@ -532,7 +574,7 @@ fn select_iter<'s>(
                 return read_items::<Str>(context, vector, positions, count, Some(na()));
             }
             SexpType::List => return read_items::<List>(context, vector, positions, count, None),
-            _ if reads_sparsely(context, vector, count) => {
+            _ if reads_sparsely(context, vector, count)? => {
                 return read_numbers(context, vector, positions, count);
             }
             _ => {}
@@ -728,25 +770,22 @@ fn read_integers<'s, T: Atomic<Element = i32>>(
     Ok(result.finish().value())
 }
 
-/// `object[index]` for a plain logical, integer, double, character or list vector and an
-/// attribute-free integer, double or logical subscript, gathered straight from the subscript
-/// without first resolving it to a position list. `None` defers to the general path, which
-/// handles every other shape (negative or zero subscripts, recycled logical subscripts, other
-/// element types).
+/// `object[index]` for a logical, integer, double, character or list vector whose selection
+/// keeps none of its attributes (the caller checks that) and an attribute-free integer, double
+/// or logical subscript, gathered straight from the subscript without first resolving it to a
+/// position list. `None` defers to the general path, which handles every other shape
+/// (negative or zero subscripts, recycled logical subscripts, other element types).
 fn gather_plain<'s>(
     context: &mut Cx<'s>,
     object: Local<'s>,
     index: Local<'s>,
 ) -> R<Option<Local<'s>>> {
-    if is_missing_argument(index)
-        || has_attributes(context, index)
-        || has_attributes(context, object)
-    {
+    if is_missing_argument(index) || has_attributes(context, index) {
         return Ok(None);
     }
     // A selection `select` reads sparsely takes the general path.
     let count = handles::length(context, index);
-    if reads_sparsely(context, object, count) {
+    if reads_sparsely(context, object, count)? {
         return Ok(None);
     }
     match object.r_type() {
@@ -765,7 +804,9 @@ fn gather_subscript<'s, T: Gather>(
     object: Local<'s>,
     index: Local<'s>,
 ) -> R<Option<Local<'s>>> {
-    let Some(object) = dense::<T>(context, object)? else {
+    // The elements read from the vector an ALTREP class keeps them in, which a wrapper shares
+    // without copying, where the object's standard form would copy them to carry its attributes.
+    let Some(object) = handles::elements_of::<T>(context, object)? else {
         return Ok(None);
     };
     if let Some((_, offsets)) = compact_sequence(index).and_then(compact_offsets) {
@@ -1447,7 +1488,9 @@ fn subset_value<'s>(
     let srcrefs = srcrefs
         .downcast::<List>()
         .map(|srcrefs| context.root(srcrefs));
-    if dims.is_none()
+    // Without names, a source reference or one dimension, the selection keeps no attribute, so
+    // the object's other attributes (a matrix's `dim`, a factor's levels) need no further rules.
+    if dims.as_ref().is_none_or(|dims| dims.len() != 1)
         && names.r_type() == SexpType::Nil
         && srcrefs.is_none()
         && let Some(result) = gather_plain(context, object, index)?
@@ -1574,22 +1617,6 @@ fn subset_value<'s>(
         handles::copy_attributes_to(context, object, &mut result)?;
         remove_attribute(context, &mut result, symbol(|symbols| symbols.class));
         remove_attribute(context, &mut result, symbol(|symbols| symbols.tsp));
-    } else if object.r_type() == SexpType::Expression
-        || handles::inherits(context, object, "factor")
-    {
-        let levels = context.root(get_attribute(
-            context,
-            object,
-            symbol(|symbols| symbols.levels),
-        ));
-        if levels.r_type() != SexpType::Nil {
-            set_attribute(
-                context,
-                &mut result,
-                symbol(|symbols| symbols.levels),
-                levels,
-            )?;
-        }
     }
     Ok(result.finish())
 }
@@ -6718,9 +6745,9 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
             let count = dims[across];
             let source = values::materialize(value)?;
             let source_rows = dims[0];
-            for line in 0..count {
-                let line_offset = offset + line;
-                if by_row {
+            if by_row {
+                for line in 0..count {
+                    let line_offset = offset + line;
                     copy_mapped(
                         source,
                         result,
@@ -6728,15 +6755,10 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                         |position| line + position * source_rows,
                         |position| line_offset + position * rows,
                     )?;
-                } else {
-                    copy_mapped(
-                        source,
-                        result,
-                        extent,
-                        |position| position + line * source_rows,
-                        |position| position + line_offset * rows,
-                    )?;
                 }
+            } else {
+                // Every matrix has `extent` rows, so its columns are one run of the result's.
+                copy_recycled(source, result, offset * rows, extent * count)?;
             }
             let dimnames = get_attr(value, symbols().dimnames);
             let names = if dimnames != nil() {
@@ -6775,13 +6797,7 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                     |position| offset + position * rows,
                 )?;
             } else {
-                copy_mapped(
-                    source,
-                    result,
-                    extent,
-                    |position| position % source_length,
-                    |position| position + offset * rows,
-                )?;
+                copy_recycled(source, result, offset * rows, extent)?;
             }
         }
         let names = values::names(value);

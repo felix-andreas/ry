@@ -713,6 +713,20 @@ pub unsafe fn coerce_atomic(
                 values::set_elt(result, index, charsxp);
             }
         }
+        SexpType::Raw if matches!(source, SexpType::Logical | SexpType::Integer) => {
+            for (slot, &value) in values::raws_mut(result)
+                .iter_mut()
+                .zip(values::ints(object))
+            {
+                *slot = match u8::try_from(value) {
+                    Ok(byte) => byte,
+                    Err(_) => {
+                        warnings.raw_range = true;
+                        0
+                    }
+                };
+            }
+        }
         SexpType::Raw => {
             let target = values::raws_mut(result);
             for (index, slot) in target.iter_mut().enumerate() {

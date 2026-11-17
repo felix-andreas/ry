@@ -771,9 +771,9 @@ unsafe fn do_qsort(call: &Call<'_>) -> R<Sexp> {
     values::named_list(&[("x", result), ("ix", index)])
 }
 
-/// `sorted_fpass(x, decreasing, na.last)`: no vector carries sortedness metadata, so the fast
-/// pass never applies and the caller sorts. The flags still go through GNU R's `asInteger`,
-/// whose coercion warnings `sort.int` reports.
+/// `sorted_fpass(x, decreasing, na.last)`: whether `x` is known to be in the wanted order, so
+/// `sort.int`, `order` and `sort.list` return it (or `seq_along(x)`) without sorting. The flags
+/// go through GNU R's `asInteger`, whose coercion warnings `sort.int` reports.
 unsafe fn do_sorted_fpass(call: &Call<'_>) -> R<Sexp> {
     for flag in [call.arg(1), call.arg(2)] {
         let mut warnings = CoercionWarnings::default();
@@ -800,7 +800,71 @@ unsafe fn do_sorted_fpass(call: &Call<'_>) -> R<Sexp> {
         }
         warnings.report()?;
     }
-    values::scalar_bool(false)
+    let decreasing = values::as_integer_scalar(call.arg(1));
+    let na_last = values::as_integer_scalar(call.arg(2));
+    let wanted = match (decreasing, na_last) {
+        (NA_INTEGER, _) => return values::scalar_bool(false),
+        (0, 0) => SORTED_INCR_NA_FIRST,
+        (0, _) => SORTED_INCR,
+        (_, 0) => SORTED_DECR_NA_FIRST,
+        _ => SORTED_DECR,
+    };
+    values::scalar_bool(known_sorted(call.arg(0), wanted)?)
+}
+
+/// Whether a plain integer or double vector without `NA` or NaN is non-decreasing, or
+/// non-increasing when `decreasing`, and strictly so when `strict`.
+unsafe fn in_order(x: Sexp, decreasing: bool, strict: bool) -> bool {
+    fn ordered<T: PartialOrd>(values: &[T], decreasing: bool, strict: bool) -> bool {
+        match (decreasing, strict) {
+            (false, false) => values.is_sorted_by(|left, right| left <= right),
+            (false, true) => values.is_sorted_by(|left, right| left < right),
+            (true, false) => values.is_sorted_by(|left, right| left >= right),
+            (true, true) => values.is_sorted_by(|left, right| left > right),
+        }
+    }
+    if x.is_altrep() {
+        return false;
+    }
+    match x.kind() {
+        SexpType::Integer => {
+            let values = x.slice::<i32>();
+            !values.contains(&NA_INTEGER) && ordered(values, decreasing, strict)
+        }
+        SexpType::Real => {
+            // A NaN fails every comparison, so only a lone one could pass as in order.
+            let values = x.slice::<f64>();
+            !values.first().is_some_and(|value| value.is_nan())
+                && ordered(values, decreasing, strict)
+        }
+        _ => false,
+    }
+}
+
+const SORTED_DECR_NA_FIRST: i32 = -2;
+const SORTED_DECR: i32 = -1;
+const SORTED_INCR: i32 = 1;
+const SORTED_INCR_NA_FIRST: i32 = 2;
+
+/// GNU R's `fastpass_sortcheck`: an ALTREP vector answers from its sortedness metadata, and a
+/// plain integer vector wanted increasing is scanned for non-decreasing order without `NA`.
+///
+/// GNU R's `sort` and `order` put that metadata on every numeric result, which ry's do not,
+/// because a wrapper makes every later read from R code slower. So ry scans the other plain
+/// vectors too, but only for strict order: with distinct values every sorting method gives the
+/// identity permutation, where a tie could come out of `method = "quick"` permuted.
+unsafe fn known_sorted(x: Sexp, wanted: i32) -> R<bool> {
+    if !matches!(x.kind(), SexpType::Integer | SexpType::Real) || length(x) == 0 {
+        return Ok(false);
+    }
+    if x.is_altrep() {
+        let (sorted, no_na) = (crate::interp().hooks.altrep_sortedness)(x)?;
+        let known = matches!(sorted, -2 | -1 | 1 | 2);
+        return Ok(known && (sorted == wanted || (no_na && sorted * wanted > 0)));
+    }
+    // GNU R scans only an integer vector wanted increasing, where ties pass.
+    let ties = x.kind() == SexpType::Integer && wanted > 0;
+    Ok(in_order(x, wanted < 0, !ties))
 }
 
 /// `order(na.last, decreasing, ...)`: the stable permutation that sorts the keys
@@ -918,6 +982,18 @@ pub(crate) unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
             value => Ok(value != 0),
         })
         .collect::<R<Vec<bool>>>()?;
+    // Input already in order, as `order(sort(x))` gives it, is the identity permutation, since
+    // the radix sort is stable and keeps signed zeros as ties.
+    if let [key] = materialized[..]
+        && !return_groups
+        && in_order(key, directions[0], false)
+    {
+        let permutation = alloc(SexpType::Integer, count)?;
+        for (slot, row) in values::ints_mut(permutation).iter_mut().zip(1..) {
+            *slot = row;
+        }
+        return Ok(permutation);
+    }
     let columns: Vec<Option<Column<'_>>> = materialized
         .iter()
         .map(|&key| radix_column(key, sort_strings))
@@ -1063,7 +1139,17 @@ unsafe fn do_rank(call: &Call<'_>) -> R<Sexp> {
     if x.kind() == SexpType::Raw && !x.is_object() {
         return Err(error("raw vectors cannot be sorted"));
     }
-    let column = column(x).ok_or_else(|| unimplemented_type(x, "greater"))?;
+    if !matches!(
+        x.kind(),
+        SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::Raw
+            | SexpType::String
+    ) {
+        return Err(unimplemented_type(x, "greater"));
+    }
     let requested = values::as_real_scalar(call.arg(1));
     if requested.is_nan() || requested < 0.0 {
         return Err(error("invalid 'length(xx)' value"));
@@ -1079,32 +1165,107 @@ unsafe fn do_rank(call: &Call<'_>) -> R<Sexp> {
             ));
         }
     };
-    let mut order: Vec<usize> = (0..count).collect();
-    order.sort_by(|&left, &right| column.compare(left, right, true));
     let mut ranks = vec![0.0; count];
-    let mut start = 0;
-    while start < count {
-        let mut end = start;
-        while end + 1 < count
-            && column.compare(order[start], order[end + 1], true) == Ordering::Equal
-        {
-            end += 1;
-        }
+    let mut assign = |start: usize, end: usize, members: &mut dyn Iterator<Item = usize>| {
         let rank = match ties {
             Ties::Average => (start + end + 2) as f64 / 2.0,
             Ties::Min => (start + 1) as f64,
             Ties::Max => (end + 1) as f64,
         };
-        for &index in &order[start..=end] {
+        for index in members {
             ranks[index] = rank;
         }
-        start = end + 1;
+    };
+    if let Some(keys) = rank_keys(x, count) {
+        let mut order: Vec<(u64, u32)> = keys
+            .into_iter()
+            .enumerate()
+            .map(|(index, key)| (key, index as u32))
+            .collect();
+        order.sort_unstable();
+        let mut start = 0;
+        while start < count {
+            let key = order[start].0;
+            let end = start
+                + order[start..]
+                    .iter()
+                    .take_while(|entry| entry.0 == key)
+                    .count()
+                - 1;
+            assign(
+                start,
+                end,
+                &mut order[start..=end].iter().map(|entry| entry.1 as usize),
+            );
+            start = end + 1;
+        }
+    } else {
+        let column = column(x).ok_or_else(|| unimplemented_type(x, "greater"))?;
+        let mut order: Vec<usize> = (0..count).collect();
+        order.sort_by(|&left, &right| column.compare(left, right, true));
+        let mut start = 0;
+        while start < count {
+            let mut end = start;
+            while end + 1 < count
+                && column.compare(order[start], order[end + 1], true) == Ordering::Equal
+            {
+                end += 1;
+            }
+            assign(start, end, &mut order[start..=end].iter().copied());
+            start = end + 1;
+        }
     }
     if ties == Ties::Average {
         values::real_vector(&ranks)
     } else {
         let ranks: Vec<i32> = ranks.iter().map(|&rank| rank as i32).collect();
         values::integer_vector(&ranks)
+    }
+}
+
+/// The first `count` elements of `x` as integers that sort, and tie, as `rank` compares the
+/// elements, or `None` when one is missing, which only the general comparison orders. A double
+/// maps to its bits with the sign folded so that unsigned order is numeric order, with `-0`
+/// read as `0`; a string maps to its collation rank.
+unsafe fn rank_keys(x: Sexp, count: usize) -> Option<Vec<u64>> {
+    match x.kind() {
+        SexpType::Logical | SexpType::Integer => {
+            let data = &values::ints(x)[..count];
+            if data.contains(&NA_INTEGER) {
+                return None;
+            }
+            Some(
+                data.iter()
+                    .map(|&value| u64::from((value as u32) ^ 0x8000_0000))
+                    .collect(),
+            )
+        }
+        SexpType::Real => {
+            let data = &values::reals(x)[..count];
+            if data.iter().any(|value| value.is_nan()) {
+                return None;
+            }
+            Some(
+                data.iter()
+                    .map(|&value| {
+                        let bits = (value + 0.0).to_bits();
+                        if bits >> 63 == 1 {
+                            !bits
+                        } else {
+                            bits | 1 << 63
+                        }
+                    })
+                    .collect(),
+            )
+        }
+        SexpType::String if count == length(x) => {
+            let ranks = string_ranks(x, TextOrder::Collation);
+            if ranks.contains(&0) {
+                return None;
+            }
+            Some(ranks.into_iter().map(u64::from).collect())
+        }
+        _ => None,
     }
 }
 
@@ -1316,18 +1477,30 @@ unsafe fn group_positions(call: &Call<'_>) -> R<Groups> {
     };
     let group = values::materialize(coerce_vector(group, kind)?)?;
     let unique = values::materialize(coerce_vector(unique, kind)?)?;
+    let missing = || call.error("'ugroup' does not contain every group");
+    if let (Some(table_keys), Some(group_keys)) = (plain_keys(unique), plain_keys(group))
+        && plain_kinds_match(table_keys, group_keys)
+    {
+        let mut matched = vec![0i32; length(group)];
+        if match_positions(table_keys, group_keys, &mut matched) {
+            let positions = matched
+                .into_iter()
+                .map(|position| position.checked_sub(1).filter(|&index| index >= 0))
+                .map(|index| index.map(|index| index as usize).ok_or_else(missing))
+                .collect::<R<Vec<usize>>>()?;
+            return Ok(Groups {
+                positions,
+                count: length(unique),
+            });
+        }
+    }
     let mut table: FxHashMap<Key<'_>, usize> = FxHashMap::default();
     for (index, key) in element_keys(unique).into_iter().enumerate() {
         table.entry(key).or_insert(index);
     }
     let positions = element_keys(group)
         .into_iter()
-        .map(|key| {
-            table
-                .get(&key)
-                .copied()
-                .ok_or_else(|| call.error("'ugroup' does not contain every group"))
-        })
+        .map(|key| table.get(&key).copied().ok_or_else(missing))
         .collect::<R<Vec<usize>>>()?;
     Ok(Groups {
         positions,
@@ -2178,8 +2351,14 @@ fn sort_by_key<K: RadixKey>(
     }
     let span = high - low;
     // Past about a million buckets the counting passes miss cache on every row, and the radix
-    // sort's sequential scatters win.
-    if count > SHORT_SORT && span < (count.max(1 << 16) as u64).min(1 << 20) {
+    // sort's sequential scatters win. A short slice counts only while its buckets are few
+    // beside its rows, since zeroing them would cost more than the comparison sort.
+    let counting_limit = if count > SHORT_SORT {
+        (count.max(1 << 16) as u64).min(1 << 20)
+    } else {
+        4 * count as u64
+    };
+    if span < counting_limit {
         // Positions fit `u32` like the rows do, and the narrower buckets halve the memory the
         // counting pass touches at random.
         let mut starts = vec![0u32; span as usize + 2];

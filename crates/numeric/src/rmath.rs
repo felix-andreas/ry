@@ -8974,9 +8974,24 @@ fn signrank_valid(n: f64) -> bool {
     false
 }
 
+thread_local! {
+    /// The signed rank counts for the last `n`, which GNU R keeps in a static table that
+    /// `signrank_free` releases when each R-level call returns, so an element-wise call builds
+    /// the `O(n^3)` table once instead of once per element.
+    static SIGNRANK_COUNTS: RefCell<Option<(usize, Rc<[f64]>)>> = const { RefCell::new(None) };
+}
+
 /// The number of subsets of `1..=n` with each sum from 0 to `n (n + 1) / 2`.
-fn signrank_counts(n: usize) -> Vec<f64> {
+fn signrank_counts(n: usize) -> Rc<[f64]> {
     debug_assert!(signrank_valid(n as f64));
+    if let Some(counts) = SIGNRANK_COUNTS.with_borrow(|table| {
+        table
+            .as_ref()
+            .filter(|(built, _)| *built == n)
+            .map(|(_, counts)| Rc::clone(counts))
+    }) {
+        return counts;
+    }
     let total = n * (n + 1) / 2;
     let mut counts = vec![0.0; total + 1];
     counts[0] = 1.0;
@@ -8987,7 +9002,14 @@ fn signrank_counts(n: usize) -> Vec<f64> {
             counts[i] += counts[i - j];
         }
     }
+    let counts: Rc<[f64]> = counts.into();
+    SIGNRANK_COUNTS.with_borrow_mut(|table| *table = Some((n, Rc::clone(&counts))));
     counts
+}
+
+/// Releases the signed rank counts, as the GNU R wrappers do on exit.
+pub fn signrank_free() {
+    SIGNRANK_COUNTS.with_borrow_mut(|table| *table = None);
 }
 
 pub fn dsignrank(x: f64, n: f64, log: bool) -> f64 {

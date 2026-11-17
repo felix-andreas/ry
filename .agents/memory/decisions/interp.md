@@ -1143,3 +1143,11 @@ without cells, promise forcing in the loop, and one observer word on the general
 - **A read that settles a promise without forcing it leaves a marked promise to forcing** (`eval::settled_without_code`, the JIT's `pure_value`), so `typeof(x)` on such an argument warns as a force does.
 - **An argument reference is pooled**, so `pooled_reference` clears the mark when it hands a reference to the next call. Without that, an argument that failed in one call made an unrelated argument of a later call warn.
 - Oracle case: `promises__restarting_interrupted_evaluation`.
+
+## A direct call of an attribute replacement wraps its target
+
+**Status:** built.
+
+- **Rule.** A direct call of a replacement primitive (`` `names<-`(x, v) ``) copies a bound target first, because ry's arguments hold no reference and the builtin would otherwise change the caller's binding. `Checks::replacement` says how: `Replacement::Attributes` (`attr<-`, `attributes<-`, `class<-`, `dimnames<-`, `names<-`, `oldClass<-`) copies through `values::replacement_copy`, which puts a long vector, list included, under a wrapper that shares its data, as GNU R's `R_shallow_duplicate_attr` does; `Replacement::Contents` makes a shallow copy.
+- **Why.** A plain shallow copy of a 1,000-element list costs 2 to 3 µs against GNU R's 0.45 µs wrapper.
+- The bytecode fast path `direct_set_names` copies through `handles::attributes_unshared` for the same reason.

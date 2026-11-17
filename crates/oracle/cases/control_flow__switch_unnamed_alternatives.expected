@@ -1,0 +1,28 @@
+[stdout]
+| [1] "a"
+| [1] "b"
+| [1] "c"
+| NULL
+| NULL
+| NULL
+| [1] "b"
+| [1] "duplicate 'switch' defaults: '2' and '3'"
+| [1] "duplicate 'switch' defaults: '2' and '3'"
+| [1] 1
+| [1] 2
+| [1] "empty alternative in numeric switch"
+| [1] 3
+| [1] "duplicate 'switch' defaults: '' and '\"y\"'"
+| [1] "empty alternative in numeric switch"
+| [1] "y"
+| [1] "duplicate 'switch' defaults: '\"x\"' and '\"y\"'"
+| [1] "duplicate 'switch' defaults: '' and '\"y\"'"
+| [1] "only"
+| [1] "only"
+| [1] TRUE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| TRUE

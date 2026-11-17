@@ -1422,18 +1422,55 @@ pub struct Extremes<T> {
 
 /// The extremes of integers or logicals, `NA` aside.
 pub fn integer_extremes(values: &[i32]) -> Extremes<i32> {
-    let (mut least, mut greatest) = (i32::MAX, i32::MIN);
-    let mut missing = 0usize;
-    for &value in values {
-        let is_na = value == NA_INTEGER;
-        missing += usize::from(is_na);
-        least = least.min(if is_na { i32::MAX } else { value });
-        // `NA` is the least `i32`, so it never raises the maximum.
-        greatest = greatest.max(value);
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the CPU supports AVX2, as just checked.
+        return unsafe { integer_extremes_avx2(values) };
     }
+    integer_extremes_lanes(values)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn integer_extremes_avx2(values: &[i32]) -> Extremes<i32> {
+    integer_extremes_lanes(values)
+}
+
+/// [`integer_extremes`] in independent lanes, with every operation a select or a compare, so
+/// the loop compiles to vector minimum and maximum instructions.
+#[inline(always)]
+fn integer_extremes_lanes(values: &[i32]) -> Extremes<i32> {
+    const LANES: usize = 16;
+    let mut least = [i32::MAX; LANES];
+    let mut greatest = [i32::MIN; LANES];
+    let mut missing = [0i32; LANES];
+    let mut present = [0i32; LANES];
+    let blocks = values.chunks_exact(LANES);
+    let rest = blocks.remainder();
+    for block in blocks {
+        for lane in 0..LANES {
+            let value = block[lane];
+            let is_na = value == NA_INTEGER;
+            missing[lane] |= i32::from(is_na);
+            present[lane] |= i32::from(!is_na);
+            least[lane] = least[lane].min(if is_na { i32::MAX } else { value });
+            // `NA` is the least `i32`, so it never raises the maximum.
+            greatest[lane] = greatest[lane].max(value);
+        }
+    }
+    for (lane, &value) in rest.iter().enumerate() {
+        let is_na = value == NA_INTEGER;
+        missing[lane] |= i32::from(is_na);
+        present[lane] |= i32::from(!is_na);
+        least[lane] = least[lane].min(if is_na { i32::MAX } else { value });
+        greatest[lane] = greatest[lane].max(value);
+    }
+    let any = |flags: [i32; LANES]| flags.iter().any(|&flag| flag != 0);
+    let least = least.iter().copied().min().unwrap_or(i32::MAX);
+    let greatest = greatest.iter().copied().max().unwrap_or(i32::MIN);
     Extremes {
-        bounds: (missing < values.len()).then_some((least, greatest)),
-        na: missing > 0,
+        bounds: any(present).then_some((least, greatest)),
+        na: any(missing),
         nan: false,
     }
 }

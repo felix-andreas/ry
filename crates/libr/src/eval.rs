@@ -80,6 +80,7 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
     let hooks = interp::Hooks {
         write_console: |text, is_error| crate::boundary::write_terminal(text, is_error),
         materialize_altrep: |object| unsafe { crate::altrep::materialize(object) },
+        altrep_storage: |object| unsafe { crate::altrep::element_storage(object) },
         altrep_length: |object| unsafe { Ok(crate::altrep::length(object)?.max(0) as usize) },
         compact_sequence: |kind, length, first, increment| unsafe {
             let length = length as crate::R_xlen_t;
@@ -90,6 +91,10 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
             }))
         },
         altrep_dataptr: |object| unsafe { crate::altrep::readable_dataptr(object) },
+        altrep_dataptr_or_null: |object| unsafe {
+            let pointer = crate::altrep::dataptr_or_null(object)?;
+            Ok((!pointer.is_null()).then_some(pointer.cast()))
+        },
         altrep_int_elt: |object, index| unsafe {
             crate::altrep::int_elt(object, index as crate::R_xlen_t)
         },
@@ -102,6 +107,12 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
         defer_strings: |object| unsafe { Ok(Some(crate::altrep::deferred_string(object)?)) },
         altrep_wrap: |object| unsafe { crate::altrep::try_wrap(object) },
         altrep_unwrap: |object| unsafe { crate::altrep::try_unwrap(object) },
+        altrep_sortedness: |object| unsafe {
+            Ok((
+                crate::altrep::is_sorted(object)?,
+                crate::altrep::no_na(object)? != 0,
+            ))
+        },
         altrep_summary: |object, method, remove_na| unsafe {
             Ok(match method {
                 AltrepSummary::Sum => crate::altrep::sum(object, remove_na)?,
