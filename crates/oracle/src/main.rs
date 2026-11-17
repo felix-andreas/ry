@@ -248,7 +248,7 @@ fn main() -> ExitCode {
             Some([FuzzKind::Corpus]) => print_corpus_program(*seed),
             _ => {
                 eprintln!(
-                    "--print takes one --kind: grammar, metamorphic, builtins, api or corpus"
+                    "--print takes one --kind: grammar, metamorphic, builtins, api, io or corpus"
                 );
                 ExitCode::from(2)
             }
@@ -1054,7 +1054,7 @@ fn check_fuzz_seed(
 fn run_fuzz(run: FuzzRun) -> ExitCode {
     let Some(kinds) = fuzz_kinds(run.kind) else {
         eprintln!(
-            "unknown --kind `{}`: grammar, metamorphic, builtins, api, corpus or all",
+            "unknown --kind `{}`: grammar, metamorphic, builtins, api, io, corpus or all",
             run.kind
         );
         return ExitCode::from(2);
@@ -1158,8 +1158,8 @@ fn run_fuzz(run: FuzzRun) -> ExitCode {
                             let label = &checked.label;
                             if let Some(error) = &checked.stopped {
                                 tally.ended_in_error += 1;
-                                // A metamorphic, builtins or api program catches its own
-                                // errors, so one that stops GNU R says the generator wrote
+                                // Every kind but the grammar's catches its own errors, so
+                                // a program that stops GNU R says the generator wrote
                                 // something it did not mean.
                                 if matches!(
                                     kind,
@@ -1167,6 +1167,7 @@ fn run_fuzz(run: FuzzRun) -> ExitCode {
                                         ProgramKind::Metamorphic
                                             | ProgramKind::Builtins
                                             | ProgramKind::Api
+                                            | ProgramKind::Io
                                     )
                                 ) {
                                     println!("STOPS   {label} under GNU R: {error}");

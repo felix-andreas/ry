@@ -1158,17 +1158,21 @@ pub enum ProgramKind {
     /// [`metamorphic::api_program`](crate::metamorphic::api_program): calls drawn from every
     /// function base, stats and utils export, on values from the zoo.
     Api,
+    /// [`metamorphic::io_program`](crate::metamorphic::io_program): zoo values written to files
+    /// and connections and read back.
+    Io,
 }
 
 /// The writable memory a fuzzed engine may map. GNU R and ry both run every generated program
 /// in a fraction of it, and a program that asks for more gets R's allocation error.
 pub const MEMORY_LIMIT: u64 = 2 << 30;
 
-pub const KINDS: [ProgramKind; 4] = [
+pub const KINDS: [ProgramKind; 5] = [
     ProgramKind::Grammar,
     ProgramKind::Metamorphic,
     ProgramKind::Builtins,
     ProgramKind::Api,
+    ProgramKind::Io,
 ];
 
 impl ProgramKind {
@@ -1178,6 +1182,7 @@ impl ProgramKind {
             ProgramKind::Metamorphic => "metamorphic",
             ProgramKind::Builtins => "builtins",
             ProgramKind::Api => "api",
+            ProgramKind::Io => "io",
         }
     }
 
@@ -1192,6 +1197,7 @@ impl ProgramKind {
             ProgramKind::Metamorphic => crate::metamorphic::program(seed),
             ProgramKind::Builtins => crate::metamorphic::builtins_program(seed),
             ProgramKind::Api => crate::metamorphic::api_program(seed),
+            ProgramKind::Io => crate::metamorphic::io_program(seed),
         }
     }
 }

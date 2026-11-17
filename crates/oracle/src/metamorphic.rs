@@ -20,6 +20,9 @@
 //! by hand, so each is a sensible use of its function. [`api_program`] draws its calls from
 //! the table of every function base, stats and utils export instead, with arguments nobody
 //! chose: it reaches the functions and the argument checks no one thought to test.
+//! [`io_program`] writes zoo values to files and connections and reads them back: a string's
+//! bytes and encoding mark, a number's digits and a table's cells must come back as GNU R
+//! brings them back, whatever the writer, the reader and the encoding between them.
 //!
 //! Swarm testing: a seed first draws the subset of [`Feature`]s its programs may use, so a rare
 //! pairing (raw vectors and `dim<-`, say) is not drowned out by the common ones.
@@ -536,6 +539,621 @@ fn syntactic(name: &str) -> String {
         true => name.to_owned(),
         false => format!("`{name}`"),
     }
+}
+
+/// A program of round trips through files and connections. Each episode binds a zoo value,
+/// writes it with one writer, and reads the file with a few readers, each read a top-level
+/// value. Every file is a relative name under the session's temporary directory, so no message
+/// holds a path that differs between engines, and every connection is closed by `with_`.
+pub fn io_program(seed: u64) -> String {
+    let mut rng = SplitMix64(seed ^ 0x696f_5f72_6f75_6e64);
+    let features = if rng.chance(1, 8) {
+        Features::all()
+    } else {
+        Features::swarm(&mut rng)
+    };
+    let mut zoo = Zoo {
+        rng,
+        features,
+        longest: IO_LONGEST,
+    };
+    let mut text = format!(
+        "# oracle io program, seed {seed}\n# features: {}\n{IO_PREAMBLE}",
+        features.names()
+    );
+    for episode in 1..=4 + zoo.rng.below(4) {
+        text.push_str(&io_episode(&mut zoo, episode));
+    }
+    text
+}
+
+/// The longest value an io program writes: a few hundred lines keep a printed read short.
+const IO_LONGEST: usize = 300;
+
+/// `with_` closes its connection however the body ends, because an engine reports a connection
+/// left open whenever it happens to collect it. `marks_` shows what printing hides, each
+/// string's encoding mark and bytes, and `sum_` stands in for a value too long to print.
+const IO_PREAMBLE: &str = r#"try_ <- function(expr) tryCatch(expr, error = function(e) paste("error:", conditionMessage(e)))
+with_ <- function(con, body) { force(con); on.exit(close(con)); body(con) }
+bytes_ <- function(file) readBin(file, "raw", 200000L)
+marks_ <- function(x) {
+  if (is.factor(x)) x <- levels(x)
+  if (is.character(x)) list(Encoding(x), lapply(unname(x), function(s) if (is.na(s)) NA else charToRaw(s)))
+  else if (is.list(x)) lapply(unname(x), marks_)
+  else x
+}
+sum_ <- function(x) {
+  if (!is.character(x)) return(list(class(x), length(x)))
+  list(length(x), Encoding(x), nchar(x, "bytes"), vapply(x, function(s) sum(as.integer(charToRaw(s))), 0, USE.NAMES = FALSE))
+}
+setwd(tempdir())
+"#;
+
+/// What an episode's file holds, which decides the readers that understand it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FileFormat {
+    /// Text, a line per element.
+    Lines,
+    /// A delimited table of a data frame or a matrix.
+    Table,
+    /// One serialized value whose bytes are the same under every engine.
+    Serialized,
+    /// One serialized value, compressed: the bytes depend on the compressor.
+    Compressed,
+    /// A saved workspace image.
+    Image,
+    /// R source that evaluates to the value.
+    Source,
+    /// The elements' binary representations.
+    Binary,
+}
+
+/// Strings that stress a text round trip beyond the zoo's: bytes that are not valid UTF-8 with
+/// no mark, a byte order mark, and every character a reader may take for a separator, a quote,
+/// a comment or a missing value.
+const IO_STRINGS: [&str; 26] = [
+    "\"a\\xffb\"",
+    "\"\\xe9t\\xe9\"",
+    "\"\\xc3\"",
+    "\"\\ufeffbom\"",
+    "\"\\u00a0\"",
+    "\"tab\\tsep\"",
+    "\"comma,sep\"",
+    "\"semi;colon\"",
+    "\"quo\\\"te\"",
+    "\"single'quote\"",
+    "\"#hash\"",
+    "\" lead\"",
+    "\"trail \"",
+    "\"  \"",
+    "\"\"",
+    "\"NA\"",
+    "NA_character_",
+    "\"back\\\\slash\"",
+    "\"cr\\rmid\"",
+    "\"line\\nbreak\"",
+    "\"1e-300\"",
+    "\"0x1A\"",
+    "\"T\"",
+    "\"-.5\"",
+    "\"1,5\"",
+    "\"2024-02-29\"",
+];
+
+/// Line lengths on both sides of the buffers a reader fills: 4 KiB, 8 KiB and 64 KiB.
+const IO_LINE_LENGTHS: [usize; 10] = [
+    1023, 4095, 4096, 4097, 8191, 8192, 8193, 10000, 65535, 65537,
+];
+
+/// Each writer leaves the value `v` in the file `f`.
+const IO_WRITERS: &[(FileFormat, &str)] = &[
+    (FileFormat::Lines, "writeLines(v, f)"),
+    (FileFormat::Lines, "writeLines(v, f, sep = \"\\r\\n\")"),
+    (FileFormat::Lines, "writeLines(v, f, useBytes = TRUE)"),
+    (FileFormat::Lines, "writeLines(enc2utf8(v), f)"),
+    (FileFormat::Lines, "writeLines(as.character(v), f)"),
+    (FileFormat::Lines, "writeLines(format(v), f)"),
+    (FileFormat::Lines, "writeLines(capture.output(print(v)), f)"),
+    (FileFormat::Lines, "cat(v, file = f, sep = \"\\n\")"),
+    (FileFormat::Lines, "cat(v, file = f)"),
+    (FileFormat::Lines, "cat(v, \"\\n\", file = f, fill = 20)"),
+    (
+        FileFormat::Lines,
+        "{ cat(v, file = f, sep = \"\\n\"); cat(v, file = f, sep = \",\", append = TRUE) }",
+    ),
+    (FileFormat::Lines, "write(v, f)"),
+    (
+        FileFormat::Lines,
+        "write(v, f, ncolumns = 2, sep = \"\\t\")",
+    ),
+    (
+        FileFormat::Lines,
+        "with_(file(f, \"w\"), function(con) { writeLines(v, con); cat(\"tail\", file = con) })",
+    ),
+    (
+        FileFormat::Lines,
+        "with_(file(f, \"wb\"), function(con) writeLines(v, con))",
+    ),
+    (
+        FileFormat::Lines,
+        "with_(file(f, \"w\", encoding = \"latin1\"), function(con) writeLines(v, con))",
+    ),
+    (
+        FileFormat::Lines,
+        "with_(file(f, \"w\", encoding = \"UTF-16LE\"), function(con) writeLines(v, con))",
+    ),
+    (
+        FileFormat::Lines,
+        "with_(gzfile(f, \"w\"), function(con) writeLines(v, con))",
+    ),
+    (
+        FileFormat::Lines,
+        "with_(bzfile(f, \"w\"), function(con) writeLines(v, con))",
+    ),
+    (
+        FileFormat::Lines,
+        "with_(xzfile(f, \"w\"), function(con) writeLines(v, con))",
+    ),
+    (FileFormat::Table, "write.table(v, f)"),
+    (
+        FileFormat::Table,
+        "write.table(v, f, quote = FALSE, sep = \"\\t\", row.names = FALSE)",
+    ),
+    (
+        FileFormat::Table,
+        "write.table(v, f, sep = \",\", col.names = NA, qmethod = \"double\")",
+    ),
+    (
+        FileFormat::Table,
+        "write.table(v, f, na = \"\", dec = \",\", sep = \";\")",
+    ),
+    (
+        FileFormat::Table,
+        "write.table(v, f, eol = \"\\r\\n\", col.names = FALSE)",
+    ),
+    (
+        FileFormat::Table,
+        "write.table(v, f, fileEncoding = \"latin1\")",
+    ),
+    (FileFormat::Table, "write.csv(v, f)"),
+    (
+        FileFormat::Table,
+        "write.csv(v, f, row.names = FALSE, na = \"\")",
+    ),
+    (
+        FileFormat::Table,
+        "write.csv(v, f, fileEncoding = \"UTF-8\")",
+    ),
+    (FileFormat::Table, "write.csv2(v, f)"),
+    (FileFormat::Serialized, "saveRDS(v, f, compress = FALSE)"),
+    (
+        FileFormat::Serialized,
+        "saveRDS(v, f, ascii = TRUE, compress = FALSE)",
+    ),
+    (
+        FileFormat::Serialized,
+        "saveRDS(v, f, version = 2, compress = FALSE)",
+    ),
+    (FileFormat::Serialized, "writeBin(serialize(v, NULL), f)"),
+    (
+        FileFormat::Serialized,
+        "writeBin(serialize(v, NULL, xdr = FALSE), f)",
+    ),
+    (
+        FileFormat::Serialized,
+        "writeBin(serialize(v, NULL, ascii = TRUE), f)",
+    ),
+    (
+        FileFormat::Serialized,
+        "with_(file(f, \"wb\"), function(con) serialize(v, con))",
+    ),
+    (FileFormat::Compressed, "saveRDS(v, f)"),
+    (
+        FileFormat::Compressed,
+        "saveRDS(v, f, compress = \"bzip2\")",
+    ),
+    (FileFormat::Compressed, "saveRDS(v, f, compress = \"xz\")"),
+    (
+        FileFormat::Compressed,
+        "with_(gzfile(f, \"wb\"), function(con) serialize(v, con))",
+    ),
+    (FileFormat::Image, "save(v, file = f)"),
+    (FileFormat::Image, "save(v, file = f, ascii = TRUE)"),
+    (
+        FileFormat::Image,
+        "save(list = \"v\", file = f, compress = FALSE)",
+    ),
+    (FileFormat::Image, "save(v, try_, file = f, version = 2)"),
+    (FileFormat::Source, "dput(v, f)"),
+    (FileFormat::Source, "dput(v, f, control = \"all\")"),
+    (FileFormat::Source, "dput(v, f, control = NULL)"),
+    (FileFormat::Source, "dump(\"v\", f)"),
+    (FileFormat::Source, "writeLines(deparse(v), f)"),
+    (
+        FileFormat::Source,
+        "cat(deparse(v, width.cutoff = 500L), file = f, sep = \"\\n\")",
+    ),
+    (FileFormat::Binary, "writeBin(v, f)"),
+    (FileFormat::Binary, "writeBin(v, f, size = 4)"),
+    (FileFormat::Binary, "writeBin(v, f, size = 2)"),
+    (FileFormat::Binary, "writeBin(v, f, size = 1)"),
+    (FileFormat::Binary, "writeBin(v, f, endian = \"big\")"),
+    (FileFormat::Binary, "writeBin(as.integer(v), f, size = 8)"),
+    (FileFormat::Binary, "writeBin(as.character(v), f)"),
+    (FileFormat::Binary, "writeChar(as.character(v), f)"),
+    (
+        FileFormat::Binary,
+        "writeChar(as.character(v), f, eos = NULL)",
+    ),
+    (
+        FileFormat::Binary,
+        "writeBin(charToRaw(paste(v, collapse = \"\")), f)",
+    ),
+    (
+        FileFormat::Binary,
+        "with_(file(f, \"wb\"), function(con) { writeBin(v, con); writeBin(1:2, con, size = 2) })",
+    ),
+];
+
+/// Each reader is a value read from the file `f`.
+const IO_READERS: &[(FileFormat, &str)] = &[
+    (FileFormat::Lines, "readLines(f)"),
+    (FileFormat::Lines, "readLines(f, n = 1)"),
+    (FileFormat::Lines, "readLines(f, n = 2, warn = FALSE)"),
+    (FileFormat::Lines, "readLines(f, encoding = \"UTF-8\")"),
+    (FileFormat::Lines, "readLines(f, encoding = \"latin1\")"),
+    (FileFormat::Lines, "readLines(f, skipNul = TRUE)"),
+    (FileFormat::Lines, "scan(f, what = \"\", quiet = TRUE)"),
+    (
+        FileFormat::Lines,
+        "scan(f, what = \"\", sep = \"\\n\", quiet = TRUE)",
+    ),
+    (
+        FileFormat::Lines,
+        "scan(f, what = \"\", sep = \",\", quiet = TRUE, strip.white = TRUE)",
+    ),
+    (FileFormat::Lines, "scan(f, quiet = TRUE)"),
+    (
+        FileFormat::Lines,
+        "scan(f, what = integer(), quiet = TRUE, na.strings = c(\"NA\", \"\"))",
+    ),
+    (
+        FileFormat::Lines,
+        "scan(f, what = list(\"\", \"\"), quiet = TRUE, fill = TRUE)",
+    ),
+    (
+        FileFormat::Lines,
+        "scan(f, what = \"\", quiet = TRUE, encoding = \"latin1\")",
+    ),
+    (
+        FileFormat::Lines,
+        "scan(f, what = \"\", quiet = TRUE, fileEncoding = \"latin1\")",
+    ),
+    (
+        FileFormat::Lines,
+        "scan(f, what = \"\", nmax = 2, skip = 1, quiet = TRUE)",
+    ),
+    (FileFormat::Lines, "scan(f, what = complex(), quiet = TRUE)"),
+    (FileFormat::Lines, "scan(f, what = logical(), quiet = TRUE)"),
+    (FileFormat::Lines, "count.fields(f)"),
+    (FileFormat::Lines, "readChar(f, 5)"),
+    (FileFormat::Lines, "readChar(f, c(1, 2, 3))"),
+    (FileFormat::Lines, "readChar(f, 100, useBytes = TRUE)"),
+    (FileFormat::Lines, "read.table(f)"),
+    (
+        FileFormat::Lines,
+        "read.table(f, sep = \"\\n\", quote = \"\")",
+    ),
+    (
+        FileFormat::Lines,
+        "read.table(f, fill = TRUE, header = FALSE, stringsAsFactors = TRUE)",
+    ),
+    (FileFormat::Lines, "bytes_(f)"),
+    (FileFormat::Lines, "file.size(f)"),
+    (
+        FileFormat::Lines,
+        "with_(file(f, \"r\"), function(con) { a <- readLines(con, 1); pushBack(c(\"p1\", a), con); list(a, pushBackLength(con), readLines(con)) })",
+    ),
+    (
+        FileFormat::Lines,
+        "with_(file(f, encoding = \"latin1\"), function(con) readLines(con))",
+    ),
+    (
+        FileFormat::Lines,
+        "with_(file(f, encoding = \"UTF-8-BOM\"), function(con) readLines(con))",
+    ),
+    (
+        FileFormat::Lines,
+        "with_(file(f, encoding = \"UTF-16LE\"), function(con) readLines(con))",
+    ),
+    (
+        FileFormat::Lines,
+        "with_(file(f, \"rb\"), function(con) { a <- readBin(con, \"raw\", 4); list(a, readLines(con)) })",
+    ),
+    (
+        FileFormat::Lines,
+        "with_(file(f, \"r\"), function(con) { a <- scan(con, \"\", n = 1, quiet = TRUE); list(a, readLines(con)) })",
+    ),
+    (
+        FileFormat::Lines,
+        "with_(file(f, \"r\"), function(con) { a <- readLines(con, 1); list(a, isIncomplete(con), readLines(con, 1), isOpen(con)) })",
+    ),
+    (
+        FileFormat::Lines,
+        "with_(file(f, \"rb\"), function(con) { a <- readChar(con, 2); p <- seek(con); seek(con, 1); list(a, p, readChar(con, 3)) })",
+    ),
+    (FileFormat::Table, "read.table(f)"),
+    (FileFormat::Table, "read.table(f, header = TRUE)"),
+    (
+        FileFormat::Table,
+        "read.table(f, header = TRUE, sep = \"\\t\", quote = \"\")",
+    ),
+    (
+        FileFormat::Table,
+        "read.table(f, header = TRUE, sep = \",\", row.names = 1)",
+    ),
+    (
+        FileFormat::Table,
+        "read.table(f, header = TRUE, colClasses = \"character\")",
+    ),
+    (FileFormat::Table, "read.table(f, header = TRUE, nrows = 2)"),
+    (FileFormat::Table, "read.table(f, skip = 1, fill = TRUE)"),
+    (
+        FileFormat::Table,
+        "read.table(f, header = TRUE, comment.char = \"\", as.is = TRUE, check.names = FALSE)",
+    ),
+    (
+        FileFormat::Table,
+        "read.table(f, header = TRUE, sep = \";\", dec = \",\", na.strings = \"\")",
+    ),
+    (FileFormat::Table, "read.csv(f)"),
+    (
+        FileFormat::Table,
+        "read.csv(f, row.names = 1, check.names = FALSE)",
+    ),
+    (
+        FileFormat::Table,
+        "read.csv(f, stringsAsFactors = TRUE, na.strings = \"\")",
+    ),
+    (FileFormat::Table, "read.csv(f, encoding = \"latin1\")"),
+    (FileFormat::Table, "read.csv(f, fileEncoding = \"latin1\")"),
+    (
+        FileFormat::Table,
+        "read.csv(f, header = FALSE, strip.white = TRUE)",
+    ),
+    (FileFormat::Table, "read.csv2(f)"),
+    (FileFormat::Table, "read.delim(f)"),
+    (FileFormat::Table, "read.csv(text = readLines(f))"),
+    (FileFormat::Table, "sapply(read.csv(f), class)"),
+    (
+        FileFormat::Table,
+        "utils::type.convert(read.table(f, header = TRUE, colClasses = \"character\"), as.is = TRUE)",
+    ),
+    (FileFormat::Table, "count.fields(f, sep = \",\")"),
+    (FileFormat::Table, "readLines(f)"),
+    (FileFormat::Table, "bytes_(f)"),
+    (
+        FileFormat::Table,
+        "scan(f, what = \"\", sep = \",\", quiet = TRUE)",
+    ),
+    (FileFormat::Serialized, "readRDS(f)"),
+    (FileFormat::Serialized, "identical(readRDS(f), v)"),
+    (FileFormat::Serialized, "unserialize(bytes_(f))"),
+    (FileFormat::Serialized, "bytes_(f)"),
+    (FileFormat::Serialized, "infoRDS(f)"),
+    (
+        FileFormat::Serialized,
+        "with_(file(f, \"rb\"), function(con) unserialize(con))",
+    ),
+    (FileFormat::Compressed, "readRDS(f)"),
+    (FileFormat::Compressed, "identical(readRDS(f), v)"),
+    (FileFormat::Compressed, "infoRDS(f)"),
+    (
+        FileFormat::Compressed,
+        "with_(gzfile(f, \"rb\"), function(con) unserialize(con))",
+    ),
+    (
+        FileFormat::Compressed,
+        "with_(gzfile(f, \"rb\"), function(con) length(readBin(con, \"raw\", 200000L)))",
+    ),
+    (
+        FileFormat::Image,
+        "local({ e <- new.env(); n <- load(f, e); list(n, identical(e$v, v)) })",
+    ),
+    (FileFormat::Image, "local({ load(f); v })"),
+    (
+        FileFormat::Image,
+        "with_(gzfile(f, \"rb\"), function(con) readBin(con, \"raw\", 5))",
+    ),
+    (FileFormat::Source, "dget(f)"),
+    (FileFormat::Source, "identical(dget(f), v)"),
+    (FileFormat::Source, "readLines(f)"),
+    (FileFormat::Source, "parse(f)"),
+    (FileFormat::Source, "eval(parse(f)[[1]])"),
+    (FileFormat::Source, "parse(text = readLines(f))"),
+    (FileFormat::Source, "parse(f, encoding = \"latin1\")"),
+    (FileFormat::Source, "source(f, local = TRUE)$value"),
+    (
+        FileFormat::Source,
+        "local({ e <- new.env(); sys.source(f, e); ls(e) })",
+    ),
+    (FileFormat::Source, "length(parse(f, keep.source = TRUE))"),
+    (FileFormat::Binary, "bytes_(f)"),
+    (FileFormat::Binary, "file.size(f)"),
+    (FileFormat::Binary, "readBin(f, \"integer\", 100)"),
+    (FileFormat::Binary, "readBin(f, \"double\", 100)"),
+    (FileFormat::Binary, "readBin(f, \"double\", 100, size = 4)"),
+    (
+        FileFormat::Binary,
+        "readBin(f, \"integer\", 100, size = 2, signed = FALSE)",
+    ),
+    (FileFormat::Binary, "readBin(f, \"integer\", 100, size = 1)"),
+    (
+        FileFormat::Binary,
+        "readBin(f, integer(), 100, endian = \"big\")",
+    ),
+    (FileFormat::Binary, "readBin(f, \"character\", 10)"),
+    (FileFormat::Binary, "readBin(f, \"logical\", 100)"),
+    (FileFormat::Binary, "readBin(f, \"complex\", 100)"),
+    (FileFormat::Binary, "readBin(f, \"numeric\", 3, size = 8)"),
+    (FileFormat::Binary, "readChar(f, 3)"),
+    (FileFormat::Binary, "readChar(f, c(2, 2), useBytes = TRUE)"),
+    (
+        FileFormat::Binary,
+        "with_(file(f, \"rb\"), function(con) { a <- readBin(con, \"raw\", 3); p <- seek(con); seek(con, 1); list(a, p, readBin(con, \"raw\", 2)) })",
+    ),
+];
+
+/// Round trips of the character vector `v` that touch no file.
+const IO_MEMORY: [&str; 22] = [
+    "with_(textConnection(v), function(con) list(readLines(con, 1), readLines(con)))",
+    "local({ out <- NULL; with_(textConnection(\"out\", \"w\", local = TRUE), function(con) { writeLines(v, con); cat(\"x\", \"y\", file = con) }); out })",
+    "with_(rawConnection(raw(0), \"wb\"), function(con) { writeLines(v, con); writeBin(1L, con); rawConnectionValue(con) })",
+    "with_(rawConnection(charToRaw(paste(v, collapse = \"\\n\"))), function(con) readLines(con))",
+    "with_(textConnection(v), function(con) { pushBack(c(\"x\", \"y\"), con); list(pushBackLength(con), readLines(con)) })",
+    "with_(textConnection(v), function(con) scan(con, what = \"\", quiet = TRUE))",
+    "with_(textConnection(v), function(con) read.table(con, fill = TRUE))",
+    "read.table(text = v)",
+    "read.csv(text = paste(v, collapse = \"\\n\"))",
+    "scan(text = v, what = \"\", quiet = TRUE)",
+    "scan(text = v, what = \"\", sep = \",\", quiet = TRUE)",
+    "capture.output(print(v))",
+    "capture.output(cat(v, sep = \"\\n\"))",
+    "capture.output(str(v))",
+    "capture.output(write.table(v))",
+    "capture.output(dput(v))",
+    "rawToChar(serialize(v, NULL, ascii = TRUE))",
+    "identical(unserialize(serialize(v, NULL)), v)",
+    "rawToChar(memDecompress(memCompress(charToRaw(paste(v, collapse = \"\")), \"gzip\"), \"gzip\"))",
+    "iconv(v, \"UTF-8\", \"latin1\")",
+    "iconv(v, \"latin1\", \"UTF-8\")",
+    "iconv(v, \"UTF-8\", \"UTF-16LE\", toRaw = TRUE)",
+];
+
+/// One episode: a value, a writer, and the reads of what it wrote.
+fn io_episode(zoo: &mut Zoo, number: usize) -> String {
+    const FORMATS: [FileFormat; 10] = [
+        FileFormat::Lines,
+        FileFormat::Lines,
+        FileFormat::Lines,
+        FileFormat::Table,
+        FileFormat::Table,
+        FileFormat::Serialized,
+        FileFormat::Compressed,
+        FileFormat::Image,
+        FileFormat::Source,
+        FileFormat::Binary,
+    ];
+    let format = FORMATS[zoo.rng.below(FORMATS.len())];
+    let mut long = false;
+    let value = match format {
+        FileFormat::Lines if zoo.has(Feature::LargeSizes) && zoo.rng.chance(1, 4) => {
+            long = true;
+            let ascii = IO_LINE_LENGTHS[zoo.rng.below(IO_LINE_LENGTHS.len())];
+            let wide = IO_LINE_LENGTHS[zoo.rng.below(IO_LINE_LENGTHS.len())];
+            format!(
+                "c(strrep(\"a\", {ascii}), strrep(\"\\u00e4\", {}), \"\\u65e5\", \"end\")",
+                wide / 2 + wide % 2
+            )
+        }
+        FileFormat::Lines if zoo.rng.chance(2, 3) => io_strings(zoo),
+        FileFormat::Lines => {
+            let kind = [
+                Kind::Character,
+                Kind::Integer,
+                Kind::Double,
+                Kind::Logical,
+                Kind::Complex,
+            ][zoo.rng.below(5)];
+            let length = zoo.length();
+            zoo.vector(kind, length).text
+        }
+        FileFormat::Table => match zoo.rng.below(4) {
+            0 => format!(
+                "data.frame(s = {}, n = seq_len(4) / 3, stringsAsFactors = FALSE)",
+                io_strings_of(zoo, 4)
+            ),
+            1 => zoo.matrix().text,
+            _ => zoo.data_frame().text,
+        },
+        FileFormat::Binary => {
+            let kind = [
+                Kind::Integer,
+                Kind::Double,
+                Kind::Logical,
+                Kind::Complex,
+                Kind::Character,
+                Kind::Raw,
+            ][zoo.rng.below(6)];
+            let length = zoo.length();
+            zoo.vector(kind, length).text
+        }
+        _ => zoo.value().text,
+    };
+    let mut text = format!("f <- \"f{number}\"\nv <- try_({value})\n");
+    if zoo.rng.chance(1, 5) {
+        text.push_str("v <- try_(as.character(v))\n");
+        for _ in 0..2 + zoo.rng.below(4) {
+            let call = IO_MEMORY[zoo.rng.below(IO_MEMORY.len())];
+            text.push_str(&io_observed(zoo, call, long));
+        }
+        return text;
+    }
+    let writers: Vec<&str> = IO_WRITERS
+        .iter()
+        .filter(|(written, _)| *written == format)
+        .map(|(_, writer)| *writer)
+        .collect();
+    text.push_str(&format!(
+        "try_({})\n",
+        writers[zoo.rng.below(writers.len())]
+    ));
+    for _ in 0..2 + zoo.rng.below(3) {
+        // One read in eight is of another format's reader: a reader handed a file it does not
+        // understand must refuse it the way GNU R does.
+        let mismatched = zoo.rng.chance(1, 8);
+        let readers: Vec<&str> = IO_READERS
+            .iter()
+            .filter(|(read, _)| mismatched || *read == format)
+            .map(|(_, reader)| *reader)
+            .collect();
+        let reader = readers[zoo.rng.below(readers.len())];
+        text.push_str(&io_observed(zoo, reader, long));
+    }
+    text
+}
+
+/// A top-level line that shows `call`'s value: printed, as its marks and bytes, compared with
+/// `v`, or, for a value too long to print, summed up.
+fn io_observed(zoo: &mut Zoo, call: &str, long: bool) -> String {
+    if long {
+        return format!("try_(sum_({call}))\n");
+    }
+    match zoo.rng.below(6) {
+        0 | 1 => format!("try_(marks_({call}))\n"),
+        2 => format!("try_(identical({call}, v))\n"),
+        _ => format!("try_({call})\n"),
+    }
+}
+
+/// A character vector of a few elements, half of them from [`IO_STRINGS`].
+fn io_strings(zoo: &mut Zoo) -> String {
+    const LENGTHS: [usize; 8] = [0, 1, 2, 3, 3, 5, 8, 33];
+    let length = LENGTHS[zoo.rng.below(LENGTHS.len())];
+    io_strings_of(zoo, length)
+}
+
+fn io_strings_of(zoo: &mut Zoo, length: usize) -> String {
+    if length == 0 {
+        return "character(0)".to_owned();
+    }
+    let items: Vec<&str> = (0..length)
+        .map(|_| match zoo.rng.chance(1, 2) {
+            true => IO_STRINGS[zoo.rng.below(IO_STRINGS.len())],
+            false => zoo.string(),
+        })
+        .collect();
+    format!("c({})", items.join(", "))
 }
 
 /// `check_` prints one line per form: whether it gave what the first run gave. `same_` treats
@@ -2088,7 +2706,12 @@ mod tests {
     #[test]
     fn programs_are_deterministic_and_parse() {
         for seed in 0..400 {
-            for program in [program(seed), builtins_program(seed), api_program(seed)] {
+            for program in [
+                program(seed),
+                builtins_program(seed),
+                api_program(seed),
+                io_program(seed),
+            ] {
                 assert!(parses(&program), "seed {seed} does not parse:\n{program}");
             }
             assert_eq!(program(seed), program(seed));
