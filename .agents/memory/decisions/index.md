@@ -345,6 +345,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Parked: cheaper global bindings in top-level loops (tier 0) (planned)
 - A compiled replacement probes the target before any subscript runs
 - A call native code evaluates repeatedly compiles at its third evaluation
+- A handler compiled code steps outside `scoped` leaves no handle behind
 
 ## Heap and collector
 
@@ -389,6 +390,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Interpreter code holds values through handles the borrow checker checks
 - Whether a vector may be written in place is a value, `Owned`
 - A builtin's fast-path entry runs in its caller's handle scope and answers unrooted
+- An allocation failure reports the size of the vector's data
 
 ## C API, R home and packages
 

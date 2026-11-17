@@ -5200,7 +5200,11 @@ unsafe fn complex_part(call: &Call<'_>, part: u8) -> R<Sexp> {
 }
 
 unsafe fn do_complex(call: &Call<'_>) -> R<Sexp> {
-    let count = values::as_integer_scalar(call.arg(0)).max(0) as usize;
+    let count = values::as_integer_scalar_warning(call.arg(0))?;
+    if count == NA_INTEGER || count < 0 {
+        return Err(error("invalid length"));
+    }
+    let count = count as usize;
     let real = coerce_vector(call.arg(1), SexpType::Real)?;
     let imaginary = coerce_vector(call.arg(2), SexpType::Real)?;
     let count = count.max(length(real)).max(length(imaginary));

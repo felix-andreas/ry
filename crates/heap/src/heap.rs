@@ -833,9 +833,9 @@ impl fmt::Display for HeapError {
         match self {
             HeapError::CannotAllocate { bytes } => {
                 let bytes = *bytes as f64;
-                let (amount, unit) = if bytes >= 1024.0 * 1024.0 * 1024.0 {
+                let (amount, unit) = if bytes > 1024.0 * 1024.0 * 1024.0 {
                     (bytes / (1024.0 * 1024.0 * 1024.0), "Gb")
-                } else if bytes >= 1024.0 * 1024.0 {
+                } else if bytes > 1024.0 * 1024.0 {
                     (bytes / (1024.0 * 1024.0), "Mb")
                 } else {
                     (bytes / 1024.0, "Kb")
@@ -1530,7 +1530,16 @@ impl Heap {
         } else {
             size
         };
-        let object = self.allocate_with(kind, size, &[], zeroed)?;
+        let object = self
+            .allocate_with(kind, size, &[], zeroed)
+            .map_err(|error| match error {
+                // GNU R reports the size of the vector's data in whole words, which leaves out
+                // the header and a handle vector's card bytes.
+                HeapError::CannotAllocate { .. } => HeapError::CannotAllocate {
+                    bytes: (length as usize * kind.element_size().unwrap_or(1)).next_multiple_of(8),
+                },
+                other => other,
+            })?;
         object.set_length_and_capacity(length, length);
         if object.is_carded() {
             object.clear_cards();

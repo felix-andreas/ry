@@ -475,3 +475,13 @@ GNU R finalizes an object at the first full `gc()` after its last reference goes
 - **Shapes the same measurement fixed.** A wrapper called from a very large function is `#[inline(always)]`, because LLVM declines `#[inline]` there. An attribute list is walked through the `attribute_cells` iterator, never collected first. A rooted allocation has one out-of-line body with the allocator inlined into it (`Heap::alloc_vector_rooted`, `values::alloc`). Text kept for the length of a call goes to a stack buffer, since `Cow::into_owned` is a `malloc` and a `free`.
 - **Rejected: a string's bytes for the whole scope** (`Local<Chars>` to `Gc<'s, Chars>`). Rooting keeps the string alive, but native code writes into a string in place (a package trims one by storing a NUL), so a slice that outlives the context borrow can change under its reader. `sub` and `gsub` copy the replacement text instead.
 - **Impact.** Performance: the table in `memory-safety.md`, "Cost"; the migrated rows are equal to or faster than the raw forms except a few that pay about ten instructions in their entry. Correctness: an entry cannot return a value read before a collection. Simplicity: an entry has no mark, root or release to balance by hand.
+
+## An allocation failure reports the size of the vector's data
+
+**Status:** built.
+
+- **What GNU R prints.** "cannot allocate vector of size 7.5 Gb" names the vector's data in whole 8-byte words: no header, and the unit changes above 1024 of the smaller one (`>`, so exactly 1024 Kb prints as Kb).
+- **What ry counts.** `Heap::alloc_vector_general` asks for the object's size, which has the header and, for a list or character vector above the small size, one card byte per 128 elements (`CARD_ELEMENTS`). Reported as is, a list of 1e12 elements printed 78.3 Gb where GNU R prints 78.2 Gb. The error is therefore rewritten at that one place to `length * element_size` rounded up to a word.
+- **Not matched.** The size at which an allocation fails is the machine's, so a request GNU R can satisfy and ry cannot (or the reverse) differs by design.
+- `complex(length.out = n)` reads `n` as GNU R's `asInteger` does (a warning and "invalid length" for a value outside the integer range) before it allocates.
+- Pinned by the oracle case `vectors__allocation_failure_size`. Found by the metamorphic fuzz kind.
