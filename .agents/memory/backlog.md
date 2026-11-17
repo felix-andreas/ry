@@ -669,9 +669,20 @@ checks" and "Whether a vector may be written in place is a value, `Owned`". Orde
 method: `development/design/memory-safety.md`, "Migration" and "Cost". `python3 tools/unsafe.py
 stats` counts what is left.
 
-- **Not built.** `assign_slot_element` and `replace_variable` in `bytecode.rs` copy through the raw
-  helpers and call the replacement builtins raw, the bytecode loop's register accessor, `Held<T>`
-  fields in traced structures, and a bulk fill for a new list or character vector.
+- **Migrated.** Tier 0's element and matrix stores; the attribute readers and setters with their
+  unary and direct fast paths (`attr`, `attributes`, `names`, `dim`, `dimnames`, `class`,
+  `oldClass`, `levels<-`, `comment`, `length<-`, `inherits`, `unclass` and their replacement
+  forms); every builtin of `strings.rs` but the four below; the bit conversions in `arith.rs`.
+- **Raw, in the order to take them.** `[<-`, `[[<-`, `$<-` and `@<-` (`subassign`, `subassign2`,
+  `dollar_assign` in `subset.rs`) with the slot paths that call them (`assign_slot_element`,
+  `replace_variable` in `bytecode.rs`); `[` and `[[`; `length`'s unary fast path, `.class2`,
+  `.cache_class` and the data-frame attribute copy (`do_copy_df_attr`); `paste`, `sprintf`,
+  `strsplit` and `make.unique`, which wait for the bulk fill; then `values.rs`, the evaluator and
+  the bytecode loop.
+- **Not built.** The bytecode loop's register accessor, `Held<T>` fields in traced structures,
+  and a bulk fill for a new list or character vector.
+- **Measure each batch** with `just bench-mechanisms` against the merge base, and fix a row
+  that moves by redesign (`memory-safety.md`, "Cost", lists the causes found so far).
 
 ## Open: failing tests on main
 
