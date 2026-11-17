@@ -1,0 +1,54 @@
+[stdout]
+| [1] 0
+| [1] 5
+| [1] 204
+| [1] 305
+| [1] 902
+| [[1]]
+| [1] "total"   "checked" "warning"
+| 
+| [[2]]
+| [1] "total"   "checked" "warning"
+| 
+| [[3]]
+| [1] "total"   "checked" "warning"
+| 
+| [[4]]
+| [1] "total"   "checked" "warning"
+| 
+| [1] "over the limit: 200 from checked(a, limit)"
+| [2] "over the limit: 300 from checked(b, limit)"
+| [3] "over the limit: 400 from checked(a, limit)"
+| [4] "over the limit: 500 from checked(b, limit)"
+| [1] 604
+| [1] "over the limit: 200 from checked(a, limit)"
+| [2] "over the limit: 300 from checked(b, limit)"
+| [3] "over the limit: 400 from checked(a, limit)"
+| [4] "over the limit: 500 from checked(b, limit)"
+| [5] "over the limit: 600 from checked(a, limit)"
+| [1] 6
+| handler sees TRUE .handleSimpleError(function (e)  
+| failing call strict(b) 
+| [1] "not a number: character"
+| handler sees TRUE .handleSimpleError(function (e)  
+| failing call strict(b) 
+| [1] "not a number: NULL"
+| [1] 8
+| [1] 41
+| [1] 960
+| [1] 51
+| [1] 40
+| [1] 41
+| [1] 42
+| [1] 43
+| [1] "handler with 40 forced" "handler with 42 forced"
+| [1] 465
+| [1] "seven divides 7"  "eleven 11"        "seven divides 14" "seven divides 21"
+| [5] "eleven 22"        "seven divides 28"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("seven divides 7", "eleven 11", "seven divides 14", "seven divides 21", 
+| "eleven 22", "seven divides 28")

@@ -31,9 +31,8 @@ use {
     bumpalo::Bump,
     heap::object::{Sexp, SexpType, gp},
     interp::{
-        annotations::{self, Declared, Entry},
+        annotations::{self, Declared},
         bytecode::{self, ARITHS, Arith, FEEDBACK, Op, PROFILE, feedback, operand_count, profile},
-        effects,
         eval::{DOTS_SOURCE, LITERAL_DEFAULT, MATCH_PER_CALL, direct_sources},
         values,
     },
@@ -647,7 +646,7 @@ pub enum Intrinsic {
     Colon,
 }
 
-/// Where a directly called closure's argument comes from.
+/// Where the argument of a native call or an inlined call comes from.
 #[derive(Clone, Copy, Debug)]
 pub enum Argument {
     Unboxed {
@@ -673,9 +672,10 @@ pub enum Passing {
     /// Nothing: the callee has never read the formal, and a read hands the call to tier 0,
     /// which binds the formal to a promise.
     Promise,
-    /// The formal's default, a literal, because the call leaves the formal out. Nothing
-    /// evaluates a literal, so the callee's load reads the object itself.
-    Default(Sexp),
+    /// A literal: the argument itself (a string, `NULL`, a constant vector, or a number the
+    /// callee reads boxed), or the formal's default where the call leaves the formal out.
+    /// Nothing evaluates a literal, so the callee's load reads the object itself.
+    Literal(Sexp),
     /// Nothing, because the call leaves the formal out and it has no default or one that is
     /// code. The callee has never read the formal, and a read hands the call to tier 0, which
     /// binds the default as a promise or reports the missing argument.
@@ -942,17 +942,6 @@ pub enum Action<'a> {
         dst: usize,
         src: usize,
         ty: Ty,
-    },
-    /// Calls a closure known at compile time with arguments evaluated by `steps`, binding each
-    /// to a promise that already holds its value, then refines the result to `dst`'s type.
-    Call {
-        steps: &'a [(Action<'a>, StateId)],
-        function: Sexp,
-        call: Sexp,
-        args: &'a [Argument],
-        /// The callee's annotation checks, decided from the arguments' compile-time types.
-        entry: Entry,
-        dst: (usize, Ty),
     },
     /// A call of a closure known at compile time whose body, planned as `callee`, runs inside
     /// this compiled code on registers of its own but without a call frame. `steps` evaluate
@@ -1343,9 +1332,14 @@ pub const SMALL: &str = "the body does too little natively to repay entering com
 pub struct Work {
     /// The instructions compiled code runs itself, other than [`Work::calls`].
     pub native: usize,
-    /// The calls compiled code makes itself: closure calls it inlines or enters directly, and
-    /// calls of a builtin it runs as a loop over their argument.
+    /// The calls compiled code makes itself other than [`Work::frames`]: closure calls it
+    /// inlines into the caller's frame or enters directly, and calls of a builtin it runs as
+    /// a loop over their argument.
     pub calls: usize,
+    /// The closure calls compiled code inlines with a frame of their own in its register
+    /// window, which save the call's setup and return but run the callee's instructions as
+    /// the callee's plan has them.
+    pub frames: usize,
     /// The instructions compiled code hands to tier 0 one at a time.
     pub steps: usize,
 }
@@ -1361,15 +1355,16 @@ pub struct Shape {
     /// reached through another name is missed, which costs only the compiled code, not
     /// correctness.
     pub native: usize,
-    /// The calls the plan may make itself: closure calls it may inline or enter directly, and
-    /// calls of a builtin it may run as a loop over its argument.
+    /// The calls of a builtin the plan may run as a loop over its argument.
     pub calls: usize,
+    /// The closure calls, each of which the plan may inline with a frame of its own.
+    pub frames: usize,
 }
 
 impl Shape {
     /// Whether some profile could make [`Plan::runs_natively`] true.
     pub fn may_run_natively(self) -> bool {
-        self.loops || self.native > 0 || self.calls > 0
+        self.loops || self.native > 0 || self.calls > 0 || self.frames > 0
     }
 
     /// The most a plan of the body could run itself, with nothing handed to tier 0.
@@ -1377,6 +1372,7 @@ impl Shape {
         Work {
             native: self.native,
             calls: self.calls,
+            frames: self.frames,
             steps: 0,
         }
     }
@@ -1389,12 +1385,14 @@ pub unsafe fn shape(code: Sexp) -> Shape {
         loops: true,
         native: 0,
         calls: 0,
+        frames: 0,
     };
     if values::length(constants.element(bytecode::LOOPS)) > 0 {
         return unbounded;
     }
     let mut native = 0;
     let mut calls = 0;
+    let mut frames = 0;
     let mut pc = 0;
     while pc < words.len() {
         let Some(op) = bytecode::op_of(words[pc] as u32) else {
@@ -1420,7 +1418,7 @@ pub unsafe fn shape(code: Sexp) -> Shape {
             | Op::ForEnd
             | Op::Internal => true,
             Op::CallGeneric | Op::CallRebinding => {
-                calls += 1;
+                frames += 1;
                 false
             }
             Op::Jump if operand(0) <= pc => return unbounded,
@@ -1483,6 +1481,7 @@ pub unsafe fn shape(code: Sexp) -> Shape {
         loops: false,
         native,
         calls,
+        frames,
     }
 }
 
@@ -1501,7 +1500,7 @@ impl Plan<'_> {
             || self
                 .actions
                 .iter()
-                .any(|action| matches!(action, Action::Call { .. } | Action::NativeCall { .. }))
+                .any(|action| matches!(action, Action::NativeCall { .. }))
     }
 
     /// The work of the whole body, split into the instructions outside its loops and those
@@ -1512,8 +1511,9 @@ impl Plan<'_> {
     /// natively. A backward jump counts as native work, because a compiled loop's own control
     /// costs no dispatch. A call handed to tier 0 that has never returned a value (`feedback`)
     /// counts as no work: it is a path the body has not taken, such as `stop()` under a check,
-    /// and costs nothing until it runs.
-    pub fn work(&self, feedback: &[i32]) -> BodyWork {
+    /// and costs nothing until it runs. A call inlined with a frame of its own counts as the
+    /// frame and the callee's work, which has no loop.
+    pub unsafe fn work(&self, feedback: &[i32]) -> BodyWork {
         let backward = |inst: &Inst| inst.op == Op::Jump && inst.operand(0) <= inst.pc;
         let loops: SmallVec<[(usize, usize); 4]> = self
             .insts
@@ -1521,22 +1521,57 @@ impl Plan<'_> {
             .filter(|inst| backward(inst))
             .map(|inst| (inst.operand(0), inst.pc))
             .collect();
+        let never_ran = |inst: &Inst| feedback.get(inst.pc).is_none_or(|&bits| bits == 0);
         let mut work = BodyWork::default();
-        for (inst, action) in self.insts.iter().zip(self.actions.iter()) {
-            let (native, calls, steps) = match action {
-                Action::Inline { .. }
-                | Action::Frame { .. }
-                | Action::Traverse { .. }
-                | Action::Call { .. }
-                | Action::NativeCall { .. } => (0, 1, 0),
+        for (position, (inst, action)) in self.insts.iter().zip(self.actions.iter()).enumerate() {
+            let (native, calls, frames, steps) = match action {
+                Action::Inline { .. } | Action::Traverse { .. } | Action::NativeCall { .. } => {
+                    (0, 1, 0, 0)
+                }
+                Action::Frame {
+                    callee, function, ..
+                } => {
+                    // Only a closure that holds its compiled body is inlined.
+                    let constants = function.cdr().cdr();
+                    let inner =
+                        unsafe { callee.work(values::ints(constants.element(FEEDBACK))).whole };
+                    (
+                        inner.native,
+                        inner.calls,
+                        inner.frames + 1,
+                        inner.steps,
+                    )
+                }
                 Action::Step { .. }
                     if matches!(inst.op, Op::CallGeneric | Op::CallBuiltin | Op::Internal)
-                        && feedback.get(inst.pc).is_none_or(|&bits| bits == 0) =>
+                        && never_ran(inst) =>
                 {
                     continue;
                 }
-                Action::Step { .. } => (0, 0, 1),
-                action if native(action) || backward(inst) => (1, 0, 0),
+                // The lookup of a function for a call that has never run is on the same
+                // untaken path.
+                Action::Step { .. }
+                    if inst.op == Op::GetFun
+                        && self.insts[position + 1..]
+                            .iter()
+                            .find(|later| {
+                                later.op == Op::CallGeneric && later.operand(1) == inst.operand(0)
+                            })
+                            .is_some_and(never_ran) =>
+                {
+                    continue;
+                }
+                // A step that runs tier 0's fast handler, or a builtin's direct entry, makes
+                // no round trip through the stepping helper, so it costs what tier 0 pays.
+                Action::Step { effect, fast, .. }
+                    if *fast != Fast::No
+                        || (*effect == Effect::PureUnlessObserved
+                            && inst.op == Op::CallBuiltin) =>
+                {
+                    continue;
+                }
+                Action::Step { .. } => (0, 0, 0, 1),
+                action if native(action) || backward(inst) => (1, 0, 0, 0),
                 _ => continue,
             };
             let depth = loops
@@ -1553,6 +1588,7 @@ impl Plan<'_> {
             for (part, weight) in [(part, weight), (&mut work.whole, 1)] {
                 part.native += weight * native;
                 part.calls += weight * calls;
+                part.frames += weight * frames;
                 part.steps += weight * steps;
             }
         }
@@ -1577,7 +1613,6 @@ fn native(action: &Action<'_>) -> bool {
         action,
         Action::Inline { .. }
             | Action::Traverse { .. }
-            | Action::Call { .. }
             | Action::Frame { .. }
             | Action::NativeCall { .. }
             | Action::Arithmetic { .. }
@@ -1669,7 +1704,6 @@ unsafe fn plan_at<'a>(
         hints: List::new_in(arena),
         modified: List::new_in(arena),
         declared: List::new_in(arena),
-        frame_safe: Map::with_hasher_in(FxBuildHasher, arena),
         callees: Map::with_hasher_in(FxBuildHasher, arena),
         formals: values::pairlist_items(formals)
             .iter()
@@ -1946,7 +1980,6 @@ struct Builder<'a> {
     /// By slot, the type the closure's signature declares for a formal, `Boxed` for anything else.
     declared: List<'a, Ty>,
     /// Whether each closure called directly is frame-safe, so each body is walked once.
-    frame_safe: Map<'a, Sexp, bool>,
     /// The plan of each closure asked to be inlined with a frame of its own and the type of
     /// its value, or `None` for one that cannot be, so each body is planned once however many
     /// calls of it the body makes.
@@ -2105,15 +2138,6 @@ impl<'a> Builder<'a> {
     /// Whether the instruction at `pc` has never recorded a value.
     fn never_ran(&self, pc: usize) -> bool {
         self.feedback.get(pc).copied().unwrap_or(0) == 0
-    }
-
-    /// The type a call of `function` at `pc` is expected to return: what the call site has
-    /// returned so far, or before it has ever returned, the type the callee declares.
-    unsafe fn call_result_at(&self, pc: usize, function: Sexp) -> Ty {
-        if !self.never_ran(pc) {
-            return self.feedback_at(pc);
-        }
-        annotations::declared_return_type(function).map_or(Ty::Boxed, declared_ty)
     }
 
     /// The type a load at `pc` of the variable in `slot` expects: what tier 0 has read there, or
@@ -2781,14 +2805,7 @@ impl<'a> Builder<'a> {
                                 None
                             }
                         })
-                        .or_else(|| {
-                            self.direct_call(
-                                state,
-                                call,
-                                function,
-                                (operand(0), self.call_result_at(inst.pc, function)),
-                            )
-                        }),
+                        .or_else(|| self.native_call(state, call, function, operand(0))),
                     _ => None,
                 };
                 match inlined {
@@ -3613,18 +3630,14 @@ impl<'a> Builder<'a> {
         Some(dst)
     }
 
-    /// Calls `function` directly when every argument is a scalar computed without effects or a
-    /// variable, which then need no promise to evaluate: each is bound to a promise that
-    /// already holds its value, so `substitute` still sees the argument's expression.
-    ///
-    /// Evaluating an argument before the call is only invisible when nothing can change what it
-    /// reads before the callee forces it, so the callee must be frame-safe.
-    unsafe fn direct_call(
+    /// Calls the native function of `function` ([`Action::NativeCall`]) when it has one for the
+    /// arguments' types and every argument is a scalar computed without effects or a variable.
+    unsafe fn native_call(
         &mut self,
         state: &mut State<'a>,
         call: Sexp,
         function: Sexp,
-        dst: (usize, Ty),
+        dst: usize,
     ) -> Option<Action<'a>> {
         let mut lowering = Lowering {
             state: state.clone(),
@@ -3672,48 +3685,20 @@ impl<'a> Builder<'a> {
                 (ty.is_unboxed() || ty.is_vector()).then_some(ty)
             })
             .collect();
-        if let Some(types) = types
-            && let Some(native) = native::native_for(function, &types)
-            && native.result.is_unboxed()
-        {
-            // The native function reads nothing of this frame, so the variables stay as they
-            // are.
-            after.visible = Some(true);
-            after.registers[dst.0] = native.result;
-            *state = after;
-            self.speculations
-                .extend(native.speculations.iter().cloned());
-            return Some(Action::NativeCall {
-                steps: lowering.steps.leak(),
-                native,
-                args: args.leak(),
-                dst: dst.0,
-            });
-        }
-        if !self.frame_safe(function) {
+        let native = native::native_for(function, &types?)?;
+        if !native.result.is_unboxed() {
             return None;
         }
-        // The callee may reach this frame through `parent.frame()`, so the call writes the
-        // variables back and forgets them like any opaque step.
-        after.flushed();
-        after.forget_slots();
-        after.visible = None;
-        after.registers[dst.0] = dst.1;
+        // The native function reads nothing of this frame, so the variables stay as they are.
+        after.visible = Some(true);
+        after.registers[dst] = native.result;
         *state = after;
-        let kinds: SmallVec<[Option<SexpType>; 4]> = args
-            .iter()
-            .map(|argument| match *argument {
-                Argument::Unboxed { ty, .. } => ty.storage(),
-                _ => None,
-            })
-            .collect();
-        let entry = annotations::entry_for(function, &kinds);
-        Some(Action::Call {
+        self.speculations
+            .extend(native.speculations.iter().cloned());
+        Some(Action::NativeCall {
             steps: lowering.steps.leak(),
-            function,
-            call,
+            native,
             args: args.leak(),
-            entry,
             dst,
         })
     }
@@ -3762,7 +3747,7 @@ impl<'a> Builder<'a> {
             let expression = match arguments.get(position as usize) {
                 Some(&(_, expression)) if position >= 0 => expression,
                 _ if position == LITERAL_DEFAULT => {
-                    args.push(Passing::Default(default));
+                    args.push(Passing::Literal(default));
                     forces.push(0);
                     continue;
                 }
@@ -3824,6 +3809,19 @@ impl<'a> Builder<'a> {
                 continue;
             }
             let slot = callee.slots.iter().position(|&symbol| symbol == formal);
+            // A constant is its own value. A number the callee computes with is passed
+            // unboxed below, and any other constant as the object the call holds.
+            let unboxed = callee.actions.iter().any(|action| {
+                matches!(*action, Action::GetVar { slot: read, load: Some(load), .. }
+                    if Some(read) == slot && (load.is_unboxed() || load == Ty::Num))
+            });
+            if (expression.kind().is_atomic() || expression == values::nil())
+                && !(unboxed && constant_type(expression).is_unboxed())
+            {
+                args.push(Passing::Literal(expression));
+                forces.push(0);
+                continue;
+            }
             let (state, steps, next) =
                 (lowering.state.clone(), lowering.steps.len(), lowering.next);
             lowering.forces = 0;
@@ -3919,13 +3917,7 @@ impl<'a> Builder<'a> {
         if !elidable(values::ints(constants.element(PROFILE))[profile::TIER_STATE]) {
             return Err("calls of the callee have needed their frame");
         }
-        // Tier 0 records only near a body's thresholds, and never in a small closure it runs
-        // without an activation, so a body without any feedback says nothing about which of
-        // its instructions have run.
         let feedback = values::ints(constants.element(FEEDBACK));
-        if feedback.iter().all(|&word| word == 0) {
-            return Err("the callee has no type feedback yet");
-        }
         // Giving the call its frame later binds each formal in the slot the code numbers it
         // by, so the body must run in a slot frame.
         let table = constants.element(bytecode::SLOTS);
@@ -3972,6 +3964,7 @@ impl<'a> Builder<'a> {
         if plan.loops != 0 || !plan.loop_headers.is_empty() {
             return Err("the callee loops");
         }
+        let certain = certain_prefix(&plan, feedback);
         let mut result = Ty::Bottom;
         for (position, action) in plan.actions.iter().enumerate() {
             let frameless = match *action {
@@ -3994,7 +3987,7 @@ impl<'a> Builder<'a> {
                 Action::Step { dst, fast, .. } => {
                     dst.is_some()
                         && fast == Fast::No
-                        && feedback.get(plan.insts[position].pc).copied().unwrap_or(0) == 0
+                        && !has_run(feedback, certain, plan.insts[position].pc)
                 }
                 Action::Return { src } => {
                     let returned = plan
@@ -4011,7 +4004,6 @@ impl<'a> Builder<'a> {
                 }
                 Action::Inline { .. }
                 | Action::Traverse { .. }
-                | Action::Call { .. }
                 | Action::NativeCall { .. }
                 | Action::GetFunSlot { .. }
                 | Action::Peek { .. }
@@ -4039,7 +4031,7 @@ impl<'a> Builder<'a> {
                         ..
                     } => "the callee runs an instruction only tier 0 has",
                     Action::Step { .. } => "the callee stores into an object",
-                    Action::Call { .. } | Action::GetFunSlot { .. } => {
+                    Action::NativeCall { .. } | Action::GetFunSlot { .. } => {
                         "the callee calls a closure that needs a frame"
                     }
                     Action::ForInit { .. } | Action::ForStep { .. } | Action::ForEnd { .. } => {
@@ -4816,25 +4808,6 @@ impl<'a> Builder<'a> {
         Ok(self.fast_step(state, Some((dst, feedback)), &[], Effect::Opaque, fast))
     }
 
-    /// Whether `function` is effect-free (see `interp::effects`), so a direct call may bind its
-    /// arguments to values. Each function lookup the fact rests on is recorded as a speculation,
-    /// so a redefinition invalidates the code. Calling handlers are the remaining way R code
-    /// could run inside such a call; the direct call checks for them when it runs.
-    unsafe fn frame_safe(&mut self, function: Sexp) -> bool {
-        if let Some(&safe) = self.frame_safe.get(&function) {
-            return safe;
-        }
-        let safe = match effects::effect_free_lookups(function) {
-            Ok(Some(lookups)) if lookups.iter().all(|lookup| self.portable(lookup)) => {
-                self.speculations.extend(lookups);
-                true
-            }
-            Ok(_) | Err(_) => false,
-        };
-        self.frame_safe.insert(function, safe);
-        safe
-    }
-
     /// Whether a shared plan may keep `speculation`: the lookup starts from the enclosure or a
     /// long-lived environment and ends in a long-lived one, so it resolves the same way from
     /// every enclosure that shares the code. A plan that is not shared keeps every speculation.
@@ -4866,12 +4839,37 @@ impl<'a> Builder<'a> {
     }
 }
 
+/// The pc before which every instruction of a callee planned as `plan` is taken to have run
+/// although it recorded nothing. Tier 0 records feedback only near a body's thresholds, and
+/// never in a small closure it runs without an activation, so a body without any feedback says
+/// nothing about its instructions. Every call of it runs the stretch before its first branch,
+/// and whatever comes after is planned as never run: an instruction there that needs the
+/// frame is an exit, and exits that turn out frequent stop the callee from being inlined
+/// ([`crate::runtime::MAX_FRAME_HANDOFFS`]). The branch on a builtin's binding is not a
+/// branch of the program.
+fn certain_prefix(plan: &Plan, feedback: &[i32]) -> usize {
+    if feedback.iter().any(|&word| word != 0) {
+        return 0;
+    }
+    plan.insts
+        .iter()
+        .find(|inst| ends_block(inst.op) && inst.op != Op::BranchUnlessBuiltin)
+        .map_or(usize::MAX, |inst| inst.pc)
+}
+
+/// Whether the callee's instruction at `pc` has run: it recorded a value, or it lies in the
+/// body's [`certain_prefix`].
+fn has_run(feedback: &[i32], certain: usize, pc: usize) -> bool {
+    pc < certain || feedback.get(pc).copied().unwrap_or(0) != 0
+}
+
 /// Whether calls of `function`, planned as the inlined frame `plan`, have read `formal`: a load
 /// of it has run, the body reads it for a call it inlines, or the body passes it on to an
 /// inlined call that has read it.
 unsafe fn has_read(plan: &Plan, function: Sexp, formal: Sexp) -> bool {
     unsafe {
         let feedback = values::ints(function.cdr().cdr().element(FEEDBACK));
+        let certain = certain_prefix(plan, feedback);
         let slot = plan.slots.iter().position(|&symbol| symbol == formal);
         let peeks = |steps: &[(Action, StateId)]| {
             steps.iter().any(
@@ -4883,7 +4881,7 @@ unsafe fn has_read(plan: &Plan, function: Sexp, formal: Sexp) -> bool {
             .zip(plan.insts.iter())
             .any(|(action, inst)| match *action {
                 Action::GetVar { slot: read, .. } if Some(read) == slot => {
-                    feedback.get(inst.pc).copied().unwrap_or(0) != 0
+                    has_run(feedback, certain, inst.pc)
                 }
                 Action::Frame {
                     steps,
@@ -4900,9 +4898,7 @@ unsafe fn has_read(plan: &Plan, function: Sexp, formal: Sexp) -> bool {
                             },
                         )
                 }
-                Action::Inline { steps }
-                | Action::Call { steps, .. }
-                | Action::NativeCall { steps, .. } => peeks(steps),
+                Action::Inline { steps } | Action::NativeCall { steps, .. } => peeks(steps),
                 Action::Traverse { prelude, steps, .. } => peeks(prelude) || peeks(steps),
                 _ => false,
             })

@@ -87,7 +87,8 @@ moment than GNU R's.
     are mostly `for (i in 1:n)`. Keeping the counter and sequence in registers and writing the
     variable each iteration through a binding write on the environment costs what tier 0's write
     costs.
-  - A direct call whose argument is a variable refuses, so `s <- f(s, x)` runs as a tier-0 call.
+  - A call whose argument is a variable the callee reads is not inlined, so `s <- f(s, x)` runs as
+    tier 0's call instruction.
     An argument kind that loads the binding cell, falling back like a failed load, would cover it.
   - Every `GetVar` is a tier-0 step, so arithmetic on globals stays boxed. The larger gain needs
     globals pinned to their binding cells (speculated, and invalidated on rebinding) or promoted

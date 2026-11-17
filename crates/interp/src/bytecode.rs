@@ -44,7 +44,7 @@
 
 use {
     crate::{
-        Frame, Interp,
+        Frame, Interp, Signalling,
         arith::{MATHS, math_index},
         builtins::{Arg, BuiltinDef, Call, Generic, Replacement, internal},
         conditions, deparse,
@@ -71,6 +71,7 @@ use {
     smallvec::{SmallVec, smallvec},
     std::{
         hash::{Hash, Hasher},
+        mem::MaybeUninit,
         ops::Range,
         rc::Rc,
     },
@@ -7087,13 +7088,7 @@ unsafe fn entry_event(machine: &mut Machine<'_>, entries: i32) -> Option<TierExi
     let profile = values::ints_mut(constants.element(PROFILE));
     let optimized = constants.element(TIER1) != nil();
     if optimized {
-        // A body with optimized code asks at every entry, and goes on asking for as long as
-        // it has the code, so only an entry that lost the code reschedules.
-        let entered = (tier.enter)(machine);
-        if constants.element(TIER1) != nil() {
-            return entered;
-        }
-        return reschedule(tier, constants, entered);
+        return enter_optimized(tier, machine, constants);
     }
     {
         if entries == recording_start(tier.entry_threshold) && profile[profile::TIER_STATE] >= 0 {
@@ -7111,6 +7106,21 @@ unsafe fn entry_event(machine: &mut Machine<'_>, entries: i32) -> Option<TierExi
         } else {
             None
         };
+    reschedule(tier, constants, entered)
+}
+
+/// [`entry_event`] for a body with optimized code, which asks at every entry and goes on
+/// asking for as long as it has the code, so only an entry that lost the code reschedules.
+#[inline(always)]
+unsafe fn enter_optimized(
+    tier: &Tier,
+    machine: &mut Machine<'_>,
+    constants: Sexp,
+) -> Option<TierExit> {
+    let entered = (tier.enter)(machine);
+    if pool_entry(constants, TIER1) != nil() {
+        return entered;
+    }
     reschedule(tier, constants, entered)
 }
 
@@ -7195,36 +7205,115 @@ unsafe fn loop_target(loops: Sexp, pc: usize, is_break: bool) -> Option<usize> {
 /// A closure call that [`call_fast`] takes enters its callee in place: the dispatch loop runs
 /// the body here and stops when it returns to the stepped call ([`Activation::stepping`]), so
 /// a call out of compiled code costs what a call between two interpreted bodies costs.
-pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<Option<Sexp>> {
-    let mut state = activation(machine, true);
-    if op_of(*state.code.add(pc) as u32) == Some(Op::CallGeneric) {
-        state.resume_base = (*state.interp).bytecode.resumes.len();
-        state.stepping = true;
-        let entered = if *state.header == (*state.heap).known().nil {
-            match call_fast::<false, false>(&mut state, pc) {
-                None => call_fast::<false, true>(&mut state, pc),
-                taken => taken,
-            }
-        } else {
-            call_fast::<true, false>(&mut state, pc)
-        };
-        match entered {
-            Some(STOP) => {}
-            Some(next) => {
-                (*RUN_HANDLERS.as_ptr().add(op_index(state.code, next)))(&mut state, next)
-            }
-            None => {
-                state.resume_base = NO_RESUMES;
-                state.stepping = false;
-                (*STEP_HANDLERS.as_ptr().add(op_index(state.code, pc)))(&mut state, pc);
-            }
+#[inline(always)]
+pub unsafe fn step_one(stepper: &mut Stepper, machine: &mut Machine<'_>, pc: usize) -> StepEnd {
+    let state = stepper.state(machine);
+    // Tier 0 specializes no closure call's word, so the opcode byte alone names one.
+    if *state.code.add(pc) as u32 & OP_MASK == Op::CallGeneric as u32 {
+        return step_call(stepper, pc);
+    }
+    (*STEP_HANDLERS.as_ptr().add(op_index(state.code, pc)))(state, pc);
+    step_end(state)
+}
+
+/// How an instruction the optimizing tier stepped ended ([`step_one`]). A failure's unwind
+/// waits in the stepper ([`Stepper::failure`]), so the common end is one byte in a register.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepEnd {
+    /// The activation goes on after the instruction.
+    Next,
+    /// The instruction returned from the activation.
+    Returned,
+    Failed,
+}
+
+#[inline(always)]
+unsafe fn step_end(state: &Activation<'_, '_>) -> StepEnd {
+    if state.exit.is_err() {
+        StepEnd::Failed
+    } else if state.stepped == STOP {
+        StepEnd::Returned
+    } else {
+        StepEnd::Next
+    }
+}
+
+/// [`step_one`] for a closure call. A callee entered in place points the state at its own
+/// code while it runs, so the next step builds the state again.
+#[inline(never)]
+unsafe fn step_call(stepper: &mut Stepper, pc: usize) -> StepEnd {
+    stepper.built = false;
+    let state = stepper.state.assume_init_mut();
+    state.resume_base = (*state.interp).bytecode.resumes.len();
+    state.stepping = true;
+    state.stepped = STOP;
+    let entered = if *state.header == (*state.heap).known().nil {
+        match call_fast::<false, false>(state, pc) {
+            None => call_fast::<false, true>(state, pc),
+            taken => taken,
         }
     } else {
-        (*STEP_HANDLERS.as_ptr().add(op_index(state.code, pc)))(&mut state, pc);
+        call_fast::<true, false>(state, pc)
+    };
+    match entered {
+        Some(STOP) => {}
+        Some(next) => (*RUN_HANDLERS.as_ptr().add(op_index(state.code, next)))(state, next),
+        None => {
+            state.resume_base = NO_RESUMES;
+            state.stepping = false;
+            (*STEP_HANDLERS.as_ptr().add(op_index(state.code, pc)))(state, pc);
+        }
     }
-    match (state.exit, state.stepped) {
-        (Ok(value), STOP) => Ok(Some(value)),
-        (result, _) => result.map(|_| None),
+    step_end(state)
+}
+
+/// The interpreter's view of one activation that the optimizing tier runs single instructions
+/// of ([`step_one`], [`quiet_step`], [`call_builtin_step`]). Building the view costs about as
+/// much as a simple instruction, so it is built at the activation's first step and kept: the
+/// addresses it holds stay put while the activation runs compiled, and the tier keeps one
+/// stepper per activation, the activation of each inlined call included.
+pub struct Stepper {
+    state: MaybeUninit<Activation<'static, 'static>>,
+    built: bool,
+}
+
+impl Stepper {
+    pub const fn new() -> Self {
+        Stepper {
+            state: MaybeUninit::uninit(),
+            built: false,
+        }
+    }
+
+    /// The unwind of the step that ended as [`StepEnd::Failed`]. Every failed step's unwind
+    /// is taken, here or by the step itself, so the stepper needs no drop.
+    #[cold]
+    pub unsafe fn failure(&mut self) -> Unwind {
+        let state = self.state.assume_init_mut();
+        match std::mem::replace(&mut state.exit, Ok(nil())) {
+            Err(unwind) => unwind,
+            Ok(_) => error("a stepped instruction failed without an error"),
+        }
+    }
+
+    /// The view of `machine`'s activation, which every use of one stepper names.
+    #[inline(always)]
+    unsafe fn state(&mut self, machine: &mut Machine<'_>) -> &mut Activation<'static, 'static> {
+        let machine = std::mem::transmute::<&mut Machine<'_>, &'static mut Machine<'static>>(machine);
+        if self.built {
+            let state = self.state.assume_init_mut();
+            state.machine = machine;
+            state
+        } else {
+            self.built = true;
+            self.state.write(activation(machine, true))
+        }
+    }
+}
+
+impl Default for Stepper {
+    fn default() -> Self {
+        Stepper::new()
     }
 }
 
@@ -7232,10 +7321,16 @@ pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<Option<Sexp>> 
 /// runs no R code: the builtin is one that calls none, no argument dispatches, and no calling
 /// handler is established. The handler's body runs here directly rather than through the step
 /// table, so only the parts of the activation the call reads are loaded, and the call costs
-/// what tier 0's handler costs. It records the result's type when `record` is set, and
-/// otherwise only while tier 0 profiles.
+/// what tier 0's handler costs. A builtin's direct entry records the result's type when
+/// `record` is set, and otherwise only while tier 0 profiles; any other call records it, as
+/// every stepped instruction does.
 #[inline(always)]
-pub unsafe fn call_builtin_step(machine: &mut Machine<'_>, pc: usize, record: bool) -> R<()> {
+pub unsafe fn call_builtin_step(
+    stepper: &mut Stepper,
+    machine: &mut Machine<'_>,
+    pc: usize,
+    record: bool,
+) -> R<()> {
     let code = machine.code.car().data().cast::<i32>().cast_const();
     // A positional call of a builtin with a direct entry reads only its registers, so it runs
     // without the activation, which costs as much to build as the call itself. Under a hook a
@@ -7266,13 +7361,13 @@ pub unsafe fn call_builtin_step(machine: &mut Machine<'_>, pc: usize, record: bo
             return Ok(());
         }
     }
-    let mut state = activation(machine, record);
+    let state = stepper.state(machine);
     let instruction = Instruction {
         code: state.code,
         at: pc,
         registers: state.registers,
     };
-    op_call_builtin(&mut state, instruction).map(|_| ())
+    op_call_builtin(state, instruction).map(|_| ())
 }
 
 /// Runs the element read or store at `pc` through tier 0's fast handler for it, for the
@@ -7297,28 +7392,38 @@ pub unsafe fn fast_step(machine: &mut Machine<'_>, pc: usize) -> bool {
 /// Runs the element read or store at `pc` through its generic handler when that runs no R code,
 /// for the optimizing tier where [`fast_step`] declined, so that no frame needs writing back. It
 /// may rebind `SubAssign`'s variable. `None` when the handler might run R code, and nothing
-/// ran: a calling handler is established, which a warning would run, or an operand is an
-/// object, an ALTREP vector, an environment or a promise, whose methods, active bindings or
-/// forcing could.
+/// ran: a handler is established that a warning or an error would run while the call signals
+/// ([`Signalling::Immediate`]), or an operand is an object, an ALTREP vector, an environment
+/// or a promise, whose methods, active bindings or forcing could.
 #[inline(always)]
-pub unsafe fn quiet_step(machine: &mut Machine<'_>, pc: usize) -> Option<R<()>> {
-    let mut state = activation(machine, true);
+pub unsafe fn quiet_step(
+    stepper: &mut Stepper,
+    machine: &mut Machine<'_>,
+    pc: usize,
+) -> Option<R<()>> {
+    let state = stepper.state(machine);
     // A specialized or fused opcode steps as the instruction it starts from, so the step
     // table is indexed by that base op, never by the specialized handler index.
     let op = op_of(*state.code.add(pc) as u32)?;
-    if !runs_no_r_code(&state, op, pc) {
+    if !runs_no_r_code(state, op, pc) {
         return None;
     }
     let heap = state.heap;
     let mark = (*heap).handle_mark();
-    (*STEP_HANDLERS.as_ptr().add(op as usize))(&mut state, pc);
+    (*STEP_HANDLERS.as_ptr().add(op as usize))(state, pc);
     (*heap).release_handles(mark);
-    Some(state.exit.map(|_| ()))
+    if state.exit.is_ok() {
+        return Some(Ok(()));
+    }
+    Some(std::mem::replace(&mut state.exit, Ok(nil())).map(|_| ()))
 }
 
 #[inline(always)]
 unsafe fn runs_no_r_code(state: &Activation<'_, '_>, op: Op, pc: usize) -> bool {
-    if (*state.interp).handlers.is_some() {
+    // A call that runs without a frame signals nothing, so no handler runs before the exit
+    // that builds its frame.
+    if (*state.interp).handlers.is_some() && (*state.interp).signalling == Signalling::Immediate
+    {
         return false;
     }
     let code = state.code;
@@ -7883,7 +7988,15 @@ unsafe fn scheduled_entry_in_place(state: &mut Activation<'_, '_>, entries: i32)
     // Compiled code runs on the native stack, and a call it hands to this loop may enter the
     // next compiled body in place, so a deep recursion nests here without passing through a
     // closure call's own stack check.
-    let event = eval::on_large_stack(|| entry_event(state.machine, entries));
+    let event = eval::on_large_stack(|| {
+        let constants = state.constants;
+        match &(*state.interp).bytecode.tier {
+            Some(tier) if pool_entry(constants, TIER1) != nil() => {
+                enter_optimized(tier, state.machine, constants)
+            }
+            _ => entry_event(state.machine, entries),
+        }
+    });
     // A finished activation's exit reads only what the tier leaves alone (the register file
     // never moves), and reloads for the caller, so only a body that goes on in tier 0 reloads:
     // the tier may have started or stopped its recording.

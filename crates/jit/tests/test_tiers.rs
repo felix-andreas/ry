@@ -1459,12 +1459,12 @@ fn inlined_frames_keep_passed_formals_lazy() {
     assert!(inlined >= 3, "only {inlined} callers inlined a frame");
 }
 
-/// A call that cannot start without its frame says nothing against the callee when the reason
-/// is the caller's surroundings, as under a calling handler. Rare ones change nothing. Frequent
-/// ones recompile the caller to call its callees, which stay inlinable everywhere else, and
-/// the caller keeps its compiled code however long that goes on.
+/// A calling handler does not stop an inlined call: the call runs without its frame however
+/// often a handler is established around it. What a handler sees of a condition signalled
+/// inside an inlined call needs base R, so the oracle case `jit__inlined_frames_under_handlers`
+/// pins it.
 #[test]
-fn inlined_frames_outlast_calling_handlers() {
+fn inlined_frames_run_under_calling_handlers() {
     with_interpreter(|| unsafe {
         jit::install_mode(Mode::Force);
         run("first <- function(x) { if (x < 0) stop('negative'); x + 1 }
@@ -1472,8 +1472,6 @@ fn inlined_frames_outlast_calling_handlers() {
              third <- function(x) { if (x < 0) stop('negative'); x - 3 }
              fourth <- function(x) { if (x < 0) stop('negative'); x / 4 }
              often <- function(x) first(x) + second(x) + third(x) + fourth(x)
-             rarely <- function(x) first(x) + second(x) + third(x) + fourth(x)
-             later <- function(x) first(x) * second(x)
              handled <- function(f) {
                .Internal(.addCondHands('warning', list(function(w) NULL), globalenv(), NULL, TRUE))
                f(1)
@@ -1481,67 +1479,38 @@ fn inlined_frames_outlast_calling_handlers() {
         for callee in ["first", "second", "third", "fourth"] {
             run(&format!("for (i in 1:5) {callee}(1)"));
         }
-        let function = |name: &str| {
-            let parsed = lower::parse_text(name, "<test>").ok()?;
-            eval::eval(parsed.element(0), values::global_env()).ok()
-        };
-        let frames =
-            |name: &str| function(name).map_or(0, |function| jit::inlined_frames(function));
-        let compiled = |name: &str| {
-            function(name).is_some_and(|function| {
-                function.cdr().cdr().element(interp::bytecode::TIER1) != values::nil()
-            })
+        let frames = || {
+            let parsed = lower::parse_text("often", "<test>").ok()?;
+            let function = eval::eval(parsed.element(0), values::global_env()).ok()?;
+            Some(jit::inlined_frames(function))
         };
         let expected = run("often(1)");
-        for name in ["often", "rarely"] {
-            for _ in 0..3 {
-                assert_eq!(run(&format!("{name}(1)")), expected);
-            }
-            assert_eq!(frames(name), 4, "{name} inlines its four calls");
+        for _ in 0..3 {
+            assert_eq!(run("often(1)"), expected);
         }
+        assert_eq!(frames(), Some(4), "the caller inlines its four calls");
 
-        // A callee's rare branch leaves compiled code from inside the inlined call.
         let before = jit::deoptimizations();
-        assert_eq!(run("often(-1)"), run("first(-1)"));
-        assert!(jit::deoptimizations() > before);
-
-        for index in 0..400 {
-            let call = if index % 20 == 0 {
-                "handled(rarely)"
-            } else {
-                "rarely(1)"
-            };
-            assert_eq!(run(call), expected);
-        }
-        assert_eq!(frames("rarely"), 4, "a rare handler costs no frame");
-
         for _ in 0..200 {
             assert_eq!(run("handled(often)"), expected);
         }
-        assert!(compiled("often"), "the caller keeps compiled code");
+        assert_eq!(frames(), Some(4), "a handler costs no frame");
         assert_eq!(
-            frames("often"),
-            0,
-            "under a handler the caller calls its callees"
+            jit::deoptimizations(),
+            before,
+            "a handler makes no inlined call leave"
         );
-        let before = jit::deoptimizations();
-        for _ in 0..100 {
-            assert_eq!(run("handled(often)"), expected);
-        }
-        assert_eq!(jit::deoptimizations(), before);
 
-        for _ in 0..3 {
-            run("later(1)");
-        }
-        assert_eq!(
-            frames("later"),
-            2,
-            "the callees are inlined in other callers"
-        );
-        assert_eq!(frames("rarely"), 4);
+        // A callee's rare branch leaves compiled code from inside the inlined call, with or
+        // without a handler around it.
+        assert_eq!(run("often(-1)"), run("first(-1)"));
+        assert_eq!(run("handled(function(x) often(-x))"), run("first(-1)"));
+        assert!(jit::deoptimizations() > before);
         jit::install_mode(Mode::Off);
     });
 }
+
+
 
 /// Random callers that loop over a call of a random three-formal closure. The callee computes
 /// with its arguments and two globals, may pass a formal on to a second closure that reads it

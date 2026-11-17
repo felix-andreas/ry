@@ -347,6 +347,10 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A compiled replacement probes the target before any subscript runs
 - A call native code evaluates repeatedly compiles at its third evaluation
 - A handler compiled code steps outside `scoped` leaves no handle behind
+- Tier 1 on generic code is frames for generic callees, not a third compiler
+- A stepped instruction runs on a kept view of the activation
+- Compiled code that keeps leaving is retired
+- The cost model counts frames, and free steps count nothing
 
 ## Heap and collector
 

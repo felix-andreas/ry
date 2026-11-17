@@ -9,7 +9,6 @@
 use {
     crate::analysis::{Speculation, bit, resolve_function, status},
     heap::{
-        activity,
         object::{
             Header, INTEGER_PREFIX, LOGICAL_PREFIX, NA_INTEGER, Sexp, SexpType, Slot,
             UNBOXED_SLOTS, gp, is_na_real,
@@ -18,11 +17,9 @@ use {
     },
     interp::{
         Signalling,
-        annotations::{self, Entry},
         arith,
         builtins::Arg,
-        bytecode::{self, LoopState, Machine, PROFILE, TIER1, TypedCall, profile},
-        effects::calling_handler_established,
+        bytecode::{self, LoopState, Machine, PROFILE, StepEnd, Stepper, TIER1, profile},
         eval, heap, moves,
         standard_library::{self, CompiledKey},
         unwind::{R, Unwind, error},
@@ -72,6 +69,8 @@ pub struct Activation {
     /// Where the compiled body's own register window ends in the register file, which the
     /// windows of its inlined calls are placed from ([`Inlined::header`]).
     pub root_top: usize,
+    /// Tier 0's view of the activation, for the instructions compiled code hands back.
+    pub stepper: Stepper,
 }
 
 /// What a helper holds until compiled code hands the activation back.
@@ -229,6 +228,12 @@ pub struct Compiled {
     /// [`jit_load_passed`]) found a promise it could not force without running code. Past
     /// [`MAX_FRAME_HANDOFFS`] the code is discarded and the body marked [`UNFORCED_FORMALS`].
     pub declined_loads: Cell<u32>,
+    /// The body's entry count when the code was compiled, and how often the code has left for
+    /// a reason no recompile removes: an instruction failed, or an inline fast path of the
+    /// body's own frame did not apply. When that is frequent among the entries since
+    /// ([`frequent`]) the code is discarded and the body runs in tier 0 from then on.
+    pub compiled_at: i32,
+    pub leaves: Cell<u32>,
     /// Whether the code discarded itself. Activations still running it keep counting, and by
     /// then the body may hold its recompiled code, which a second discard would throw away.
     pub retired: Cell<bool>,
@@ -312,8 +317,8 @@ pub enum ArgumentSource {
     Root(Sexp),
     /// Nowhere: compiled code never reads the formal, so it never forces it.
     Unread,
-    /// This literal, the default of a formal an inlined caller's call left out, which that
-    /// caller passed on.
+    /// This literal: a constant argument, or the default of a formal an inlined caller's call
+    /// left out, which that caller passed on.
     Literal(Sexp),
     /// Nowhere, because the call leaves the formal out: the frame binds the formal's default
     /// or the missing argument, as tier 0 binds it.
@@ -762,30 +767,35 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
         checked(activation, outcome::FAILED, |activation| {
             let machine = machine(activation);
             let heap = heap();
-            let epoch = if validate != 0 {
-                heap.binding_epoch()
-            } else {
-                0
-            };
+            let epoch = heap.binding_epoch();
             let mark = heap.handle_mark();
-            let stepped = step_unsignalled(activation, || bytecode::step_one(machine, pc as usize));
+            let stepper = &mut *(&raw mut activation.stepper);
+            let stepped = step_unsignalled(activation, || {
+                bytecode::step_one(stepper, machine, pc as usize)
+            });
             if heap.handle_mark() < mark {
                 handles_released_below(mark);
             }
             heap.release_handles(mark);
             match stepped {
-                None => outcome::FAILED,
-                Some(Err(unwind)) => {
-                    park(activation, unwind);
-                    outcome::FAILED
-                }
-                Some(Ok(Some(_))) => outcome::RETURNED,
-                Some(Ok(None))
+                Some(StepEnd::Next)
                     if validate != 0 && !still_valid(compiled(activation), machine, epoch) =>
                 {
                     outcome::INVALIDATED
                 }
-                Some(Ok(None)) => outcome::OK,
+                Some(StepEnd::Next) => outcome::OK,
+                Some(StepEnd::Returned) => outcome::RETURNED,
+                Some(StepEnd::Failed) => {
+                    let unwind = stepper.failure();
+                    park(activation, unwind);
+                    outcome::FAILED
+                }
+                // The instruction gave up before a signal, and tier 0 runs it again, so the
+                // unwind it gave up with is dropped.
+                None => {
+                    drop(stepper.failure());
+                    outcome::FAILED
+                }
             }
         })
     }
@@ -801,10 +811,10 @@ pub unsafe extern "C" fn jit_call_builtin(
 ) -> i32 {
     unsafe {
         checked(activation, outcome::FAILED, |activation| {
+            let machine = machine(activation);
+            let stepper = &mut *(&raw mut activation.stepper);
             let called = step_unsignalled(activation, || {
-                scoped(|| {
-                    bytecode::call_builtin_step(machine(activation), pc as usize, record != 0)
-                })
+                scoped(|| bytecode::call_builtin_step(stepper, machine, pc as usize, record != 0))
             });
             match called {
                 Some(Ok(())) => outcome::OK,
@@ -837,8 +847,10 @@ pub unsafe extern "C" fn jit_element_step(activation: *mut Activation, pc: i64, 
             return element::HANDLED;
         }
         checked(activation, element::FAILED, |activation| {
+            let machine = machine(activation);
+            let stepper = &mut *(&raw mut activation.stepper);
             let stepped = step_unsignalled(activation, || {
-                bytecode::quiet_step(machine(activation), pc as usize)
+                bytecode::quiet_step(stepper, machine, pc as usize)
             });
             match stepped {
                 Some(None) => element::DECLINED,
@@ -1196,109 +1208,6 @@ pub unsafe extern "C" fn jit_closure_matches(
     }
 }
 
-/// Calls the closure `function` for `call` with arguments compiled code evaluated, and puts the
-/// result in register `dst`. `arguments` holds a representation and its bits for each argument
-/// (see [`representation`]). Each argument is bound to its value rather than to a promise: the
-/// callee is frame-safe, so it never calls `substitute` or `missing`, and compiled code makes
-/// the call only while no handler is established, so no other R code can look at its frame.
-pub unsafe extern "C" fn jit_call(
-    activation: *mut Activation,
-    function: *mut Header,
-    call: *mut Header,
-    arguments: *const i64,
-    count: i64,
-    signature: *mut Header,
-    dst: i64,
-) -> i32 {
-    unsafe {
-        checked(activation, outcome::FAILED, |activation| {
-            let (Some(function), Some(call)) = (Sexp::from_raw(function), Sexp::from_raw(call))
-            else {
-                park(activation, error("compiled code passed a null call"));
-                return outcome::FAILED;
-            };
-            let machine = machine(activation);
-            let arguments = std::slice::from_raw_parts(arguments, 2 * count as usize);
-            let epoch = heap().binding_epoch();
-            let result = scoped(|| -> R<Sexp> {
-                let heap = heap();
-                let pairs = arguments.as_chunks::<2>().0;
-                let value = |index: usize| -> R<Sexp> {
-                    let Some(&[kind, bits]) = pairs.get(index) else {
-                        return Err(error("compiled code passed too few arguments"));
-                    };
-                    let value = match kind as i32 {
-                        representation::INTEGER => values::scalar_integer(bits as i32)?,
-                        representation::DOUBLE => values::scalar_real(f64::from_bits(bits as u64))?,
-                        representation::LOGICAL => values::scalar_logical(bits as i32)?,
-                        _ => Sexp::from_raw(bits as *mut Header)
-                            .ok_or_else(|| error("compiled code passed a null argument"))?,
-                    };
-                    heap.root(value);
-                    Ok(value)
-                };
-                eval::with_positional_args(count as usize, value, |args| {
-                    if annotations::is_typed(function) {
-                        let typed = TypedCall {
-                            call,
-                            function,
-                            args,
-                            sys_parent: machine.env(),
-                        };
-                        if let Some(value) = crate::native::call(&typed) {
-                            return value;
-                        }
-                        annotations::log_interpreted(call);
-                    }
-                    // `signature` is what the compiler decided about the callee's annotation
-                    // checks: null when they depend on the values, `NULL` for an untyped callee,
-                    // otherwise the signature of a typed callee whose arguments' types already
-                    // satisfy it.
-                    let entry = match Sexp::from_raw(signature) {
-                        None => {
-                            // The values are at hand, so the checks read them here instead of
-                            // looking each formal up again in the new frame.
-                            let values: SmallVec<[Sexp; 4]> =
-                                args.iter().map(|arg| arg.value).collect();
-                            annotations::enter_positional(call, function, &values)?
-                        }
-                        Some(signature) if signature == values::nil() => Entry::Checked(None),
-                        Some(signature) => Entry::Checked(Some(signature)),
-                    };
-                    // `NULL` from a slot frame names the frame below the callee's as its caller.
-                    if let Some(frame) = eval::bind_slots(call, function, args)? {
-                        return eval::run_frame(
-                            call,
-                            function,
-                            frame,
-                            machine.env(),
-                            args,
-                            entry,
-                            &[],
-                        );
-                    }
-                    let env = eval::bind_arguments(call, function, args, None)?;
-                    eval::run_closure(call, function, env, machine.env(), args, entry)
-                })
-            });
-            match result {
-                Err(unwind) => {
-                    park(activation, unwind);
-                    outcome::FAILED
-                }
-                Ok(value) => {
-                    *activation.registers.add(dst as usize) = value;
-                    if !still_valid(compiled(activation), machine, epoch) {
-                        outcome::INVALIDATED
-                    } else {
-                        outcome::OK
-                    }
-                }
-            }
-        })
-    }
-}
-
 /// Slot value representations for [`jit_flush`].
 pub mod representation {
     pub const BOXED: i32 = 0;
@@ -1330,6 +1239,9 @@ pub unsafe extern "C" fn jit_deopt_exit(
             });
         }
         write_back(activation, exit, scratch);
+        if exit.why == reason::PENDING || exit.why == reason::HANDOFF {
+            count_leave(compiled);
+        }
         jit_deopt(activation, exit.pc as i64, exit.why)
     }
 }
@@ -1580,6 +1492,7 @@ unsafe fn materialize(
             }
             Err(unwind) => {
                 park(&mut *root, unwind);
+                count_leave(compiled);
                 jit_deopt(root, i64::from(callee.call_pc), reason::PENDING)
             }
         }
@@ -1637,19 +1550,18 @@ unsafe fn enter_inlined(
                 let Some(&(_, expression)) = argument else {
                     return Ok(default);
                 };
+                // Tier 0 binds a constant argument as the object the call holds.
+                if !matches!(
+                    expression.kind(),
+                    SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode
+                ) {
+                    return Ok(expression);
+                }
                 if forced >> index & 1 == 0 {
-                    return match expression.kind() {
-                        SexpType::Symbol
-                        | SexpType::Language
-                        | SexpType::Promise
-                        | SexpType::Bytecode => {
-                            if caller == values::nil() {
-                                eval::slot_promise(state.slot_owner as usize, expression)
-                            } else {
-                                eval::make_promise(expression, caller)
-                            }
-                        }
-                        _ => Ok(expression),
+                    return if caller == values::nil() {
+                        eval::slot_promise(state.slot_owner as usize, expression)
+                    } else {
+                        eval::make_promise(expression, caller)
                     };
                 }
                 let value = match source {
@@ -1762,6 +1674,37 @@ unsafe fn count_handoff(compiled: &Compiled, inlined: &Inlined) {
     }
 }
 
+/// Counts a time `compiled` left for a reason a recompile would meet again. Leaving costs more
+/// than several entries save, so a body that leaves often is cheaper in tier 0: an error that
+/// unwinds through the body on most calls, as under a `tryCatch` that catches one each time,
+/// would otherwise pay for the exit every time.
+unsafe fn count_leave(compiled: &Compiled) {
+    let count = compiled.leaves.get().saturating_add(1);
+    compiled.leaves.set(count);
+    // A loop entered by on-stack replacement runs compiled without an entry being counted,
+    // so the entries of a body with loops do not say how much its code ran.
+    if count < MAX_FRAME_HANDOFFS || compiled.retired.get() || compiled.loops != 0 {
+        return;
+    }
+    unsafe {
+        let counters = values::ints_mut(compiled.code.cdr().element(PROFILE));
+        let entries = counters[profile::ENTRIES].saturating_sub(compiled.compiled_at);
+        if !frequent(count, u64::try_from(entries).unwrap_or(0)) {
+            return;
+        }
+        if crate::logging() {
+            eprintln!(
+                "jit: {} left compiled code {count} times in {entries} entries",
+                crate::describe(compiled.code)
+            );
+        }
+        retire(compiled, 0);
+        let counters = values::ints_mut(compiled.code.cdr().element(PROFILE));
+        counters[profile::TIER_STATE] = refused(counters[profile::TIER_STATE]);
+        counters[profile::RECORDING] = 0;
+    }
+}
+
 /// Counts a time an inlined call of `compiled` could not start without its frame for a
 /// reason that is not the callee's. Once that is frequent among the body's inlined calls, the
 /// body is recompiled to call its callees ([`NO_FRAMES`]).
@@ -1779,8 +1722,9 @@ unsafe fn count_declined_frame(compiled: &Compiled) {
 /// instruction that could run R code to tier 0, which gives the call its frame first.
 ///
 /// Returns null when the call needs its frame from the start, as tier 0's own frame entry
-/// decides, or when a calling handler could look at the stack. Compiled code then hands the
-/// call instruction to tier 0.
+/// decides. Compiled code then hands the call instruction to tier 0. An established calling
+/// handler does not need the frame: an instruction run for the call signals nothing
+/// ([`step_unsignalled`]), so a handler runs only after an exit has built every frame.
 ///
 /// A hot loop runs this once per iteration for each call it inlines, so the path that starts
 /// the call only tests what can change between two starts and writes nothing but the entry
@@ -1791,8 +1735,16 @@ pub unsafe extern "C" fn jit_enter_frame(parent: *mut Activation, frame: i64) ->
     unsafe {
         let child = (*parent).children.add(frame as usize - 1);
         if (*child).activation.compiled.is_null() {
-            return first_start(parent, frame);
+            return first_start(parent, child, frame);
         }
+        start(parent, child)
+    }
+}
+
+/// What every start of an inlined call tests ([`jit_enter_frame`]).
+#[inline(always)]
+unsafe fn start(parent: *mut Activation, child: *mut Child) -> *mut Activation {
+    unsafe {
         let inlined = &*(*child).inlined;
         let state = interp::interp();
         let function = inlined.function;
@@ -1810,11 +1762,9 @@ pub unsafe extern "C" fn jit_enter_frame(parent: *mut Activation, frame: i64) ->
             || enclosure.has_gp(gp::SLOT_FRAME);
         if needs_frame
             || (*(*parent).parked).pending.is_some()
-            || activity::enabled()
             || !state.object_systems
             || state.debugger.is_some()
             || moves::tracking()
-            || calling_handler_established()
             || depth > state.max_depth as usize
         {
             return declined(parent, child, needs_frame);
@@ -1825,15 +1775,22 @@ pub unsafe extern "C" fn jit_enter_frame(parent: *mut Activation, frame: i64) ->
 }
 
 /// [`jit_enter_frame`] for a call's first start in an entry of the compiled body, which
-/// writes the call's activation. Out of line, so that the other starts need no stack frame.
-#[cold]
+/// writes the call's activation. A body that calls its callee once per entry starts every
+/// call here, so this path cannot panic either and runs outside [`guarded`]. It is out of
+/// line, so that the other starts need no stack frame.
 #[inline(never)]
-unsafe fn first_start(parent: *mut Activation, frame: i64) -> *mut Activation {
+unsafe fn first_start(parent: *mut Activation, child: *mut Child, frame: i64) -> *mut Activation {
     unsafe {
-        if !guarded(parent, false, |parent| prepare(parent, frame)) {
-            return std::ptr::null_mut();
+        let function = prepare(&*parent, child, frame);
+        // Loading a namespace looks at the call stack, so the loader always has its frame.
+        if function == interp::interp().namespace_loader {
+            let inlined = &*(*child).inlined;
+            inlined.entries.set(inlined.entries.get().saturating_add(1));
+            let declined = declined(parent, child, true);
+            (*child).activation.compiled = std::ptr::null();
+            return declined;
         }
-        jit_enter_frame(parent, frame)
+        start(parent, child)
     }
 }
 
@@ -1863,31 +1820,27 @@ unsafe fn declined(
 /// when the call ends, instead of calling [`jit_clear_window`].
 pub const CLEARED_INLINE: usize = 16;
 
-/// Writes the activation of the inlined call of frame `frame` for this entry of the compiled
-/// body, before the call's first start in it. `false` when the call never runs without its
-/// frame.
-unsafe fn prepare(parent: &mut Activation, frame: i64) -> bool {
+/// Writes `child`, the activation of the inlined call of frame `frame`, for this entry of the
+/// compiled body, before the call's first start in it. Answers the call's closure.
+#[inline(always)]
+unsafe fn prepare(parent: &Activation, child: *mut Child, frame: i64) -> Sexp {
     unsafe {
         let compiled = compiled(parent);
-        let Some((layout, inlined)) = compiled
-            .frames
-            .get(frame as usize)
-            .and_then(|layout| Some((layout, layout.inlined.as_ref()?)))
-        else {
-            panic!("compiled code entered an inlined call it does not have");
-        };
+        debug_assert!(
+            compiled
+                .frames
+                .get(frame as usize)
+                .is_some_and(|layout| layout.inlined.is_some()),
+            "compiled code entered an inlined call it does not have"
+        );
+        let layout = compiled.frames.get_unchecked(frame as usize);
+        let inlined = layout.inlined.as_ref().unwrap_unchecked();
         let function = inlined.function;
-        if function == interp::interp().namespace_loader {
-            inlined.entries.set(inlined.entries.get().saturating_add(1));
-            count_handoff(compiled, inlined);
-            return false;
-        }
         let header = parent.root_top + inlined.header;
         let base = header + 1 + inlined.frame_slots;
         // The window holds `NULL` from the entry of the compiled body, which is what the
         // header and the slot root cells start as. Nothing reads the frame's slots while the
         // call has no frame, and `enter_inlined` fills them when it gets one.
-        let child = parent.children.add(frame as usize - 1);
         child.write(Child {
             activation: Activation {
                 registers: bytecode::register_address(base),
@@ -1897,13 +1850,14 @@ unsafe fn prepare(parent: &mut Activation, frame: i64) -> bool {
                 header: bytecode::register_address(header),
                 hints: bytecode::lookup_hints(inlined.code),
                 enclosure: function.tag(),
-                machine: std::ptr::null_mut(),
+                machine: (&raw mut (*child).machine).cast(),
                 compiled: parent.compiled,
                 layout,
                 parked: parent.parked,
                 children: parent.children,
                 resume_pc: 0,
                 root_top: parent.root_top,
+                stepper: Stepper::new(),
             },
             machine: Machine {
                 function,
@@ -1917,8 +1871,7 @@ unsafe fn prepare(parent: &mut Activation, frame: i64) -> bool {
             function_srcref: values::get_attr(function, values::symbols().srcref),
             srcref: values::nil(),
         });
-        (*child).activation.machine = (&raw mut (*child).machine).cast();
-        true
+        function
     }
 }
 

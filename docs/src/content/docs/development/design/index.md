@@ -64,6 +64,13 @@ Closure calls that keep formals and locals in the register window and create an 
 when a promise, a closure, reflection, dispatch or the C API needs one. It includes the measured share
 of calls that never need an environment, the reification triggers and the release path.
 
+### [Tier 1 on generic code](/development/design/generic-tier/)
+
+How the optimizing tier pays off on closure bodies that call builtins and small closures on lists,
+objects and strings: calls that run without a frame, native forms of builtins on boxed values, a
+remainder that costs what tier 0 costs, and a cost model that counts the work saved. It includes the
+measured profile that rules out a baseline compiler.
+
 ### [Prior art from new language implementations](/development/design/prior-art/)
 
 What Roc, Bend, goose and Vx do best in memory management, compilation, typing and C interop, and
