@@ -169,6 +169,7 @@ pub fn integer_vector<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s,
     coerced(context, value)
 }
 
+#[inline]
 fn coerced<'s, T: Vector>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s, T>> {
     let vector = if value.r_type() == T::TYPE {
         value
@@ -321,6 +322,7 @@ pub fn is_latin1(chars: Gc<'_, Chars>) -> bool {
 }
 
 /// Copies the names, dim and dimnames of `from` onto the new vector `to`.
+#[inline]
 pub fn copy_shape<T: Vector>(
     context: &mut Cx<'_>,
     from: Local<'_>,
@@ -336,6 +338,7 @@ pub fn copy_shape<T: Vector>(
 }
 
 /// Copies the names of `from` onto the new vector `to`.
+#[inline]
 pub fn copy_names<T: Vector>(
     context: &mut Cx<'_>,
     from: Local<'_>,
@@ -344,12 +347,18 @@ pub fn copy_names<T: Vector>(
     copy_named(context, from, to, &[values::symbols().names])
 }
 
+#[inline]
 fn copy_named<T: Vector>(
     _context: &mut Cx<'_>,
     from: Local<'_>,
     to: &mut Fresh<'_, T>,
     attributes: &[Sexp],
 ) -> R<()> {
+    let tagged = matches!(from.r_type(), SexpType::Pairlist | SexpType::Language);
+    // SAFETY: `from` is rooted, and reading its attribute list allocates nothing.
+    if !tagged && unsafe { from.raw().attrib() } == values::nil() {
+        return Ok(());
+    }
     let names = values::symbols().names;
     for &symbol in attributes {
         // SAFETY: both objects are rooted, `to` is visible to nothing else, and reading or
@@ -358,9 +367,7 @@ fn copy_named<T: Vector>(
         unsafe {
             // GNU R reads the names through `getAttrib`, which turns a pairlist's tags into
             // names.
-            let value = if symbol == names
-                && matches!(from.r_type(), SexpType::Pairlist | SexpType::Language)
-            {
+            let value = if symbol == names && tagged {
                 values::names(from.raw())
             } else {
                 values::get_attr(from.raw(), symbol)
