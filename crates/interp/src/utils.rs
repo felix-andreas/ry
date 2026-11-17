@@ -2067,12 +2067,12 @@ impl Possible {
 
 /// The factor `type.convert` makes of strings that are not numbers: its levels are the
 /// distinct strings that are not missing, each the first string that spells it, in collation
-/// order.
+/// order. GNU R's Shell sort places the levels the collation calls equal.
 unsafe fn character_factor(x: Sexp, is_na_string: &dyn Fn(&[u8]) -> bool) -> R<Sexp> {
     let strings = values::strings(x);
     let mut levels: Vec<&str> = Vec::new();
     let mut level_elements: Vec<Sexp> = Vec::new();
-    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut seen = rustc_hash::FxHashSet::default();
     for (index, text) in strings.iter().enumerate() {
         let Some(text) = text.as_deref() else {
             continue;
@@ -2084,15 +2084,23 @@ unsafe fn character_factor(x: Sexp, is_na_string: &dyn Fn(&[u8]) -> bool) -> R<S
         level_elements.push(x.element(index));
     }
     let mut order: Vec<usize> = (0..levels.len()).collect();
-    order.sort_by(|&left, &right| crate::sort::collate(levels[left], levels[right]));
-    let sorted: Vec<&str> = order.iter().map(|&index| levels[index]).collect();
+    let collator = crate::sort::collator();
+    crate::sort::shell_sort(&mut order, |left, right| {
+        collator.compare(levels[left], levels[right]).is_gt()
+    });
+    drop(collator);
+    let code_of: rustc_hash::FxHashMap<&str, i32> = order
+        .iter()
+        .zip(1..)
+        .map(|(&index, code)| (levels[index], code))
+        .collect();
     let result = alloc(SexpType::Integer, strings.len())?;
     crate::heap().root(result);
     for (index, text) in strings.iter().enumerate() {
         values::ints_mut(result)[index] = text
             .as_deref()
-            .and_then(|text| sorted.iter().position(|level| *level == text))
-            .map_or(NA_INTEGER, |position| position as i32 + 1);
+            .and_then(|text| code_of.get(text).copied())
+            .unwrap_or(NA_INTEGER);
     }
     let level_strings = alloc(SexpType::String, levels.len())?;
     crate::heap().root(level_strings);

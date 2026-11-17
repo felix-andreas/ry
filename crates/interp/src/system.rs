@@ -41,10 +41,6 @@ pub const BUILTINS: &[BuiltinDef] = &[
         values::set_attr(result, symbols().names, names)?;
         Ok(result)
     }),
-    internal("icuSetCollate", -1, |_| Ok(nil())).invisible(),
-    internal("icuGetCollate", 1, |_| unsafe {
-        scalar_string("ICU not in use")
-    }),
     internal("setNumMathThreads", 1, |_| unsafe { scalar_integer(1) }),
     internal("setMaxNumMathThreads", 1, |_| unsafe { scalar_integer(1) }),
     internal("isatty", 1, |call| unsafe {
@@ -3601,7 +3597,7 @@ unsafe fn do_capabilities(_call: &Call<'_>) -> R<Sexp> {
         "long.double",
         "libcurl",
     ];
-    let flags = [1, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 1];
+    let flags = [1, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 1];
     let result = values::logical_vector(&flags)?;
     let names = string_vector(&names)?;
     values::set_attr(result, symbols().names, names)?;
@@ -4951,7 +4947,9 @@ unsafe fn do_sys_setlocale(call: &Call<'_>) -> R<Sexp> {
         }
         !set_locale(category, text.as_ptr()).is_null()
     };
-    crate::sort::refresh_collation();
+    if category == libc::LC_ALL || category == libc::LC_COLLATE {
+        crate::sort::refresh_collation();
+    }
     if !honoured {
         crate::conditions::warning(format!(
             "OS reports request to set locale to \"{name}\" cannot be honored"

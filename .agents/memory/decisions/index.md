@@ -258,6 +258,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The radix string order ranks bytes with integer keys, and plain POSIX patterns capture on the automata
 - `x[] <- value` and `x[a:b] <- value` write whole copies of the value
 - `order`, `sort.int` and `sort.default` run natively on plain vectors
+- Strings collate with ICU4X's CLDR collator, as GNU R's ICU does
 
 ## R compatibility
 
