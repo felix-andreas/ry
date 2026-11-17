@@ -1773,7 +1773,7 @@ unsafe fn par_colour(value: Sexp, name: &str, background: Colour) -> R<Colour> {
     // Colour 0 is the device background.
     let zero = match value.kind() {
         SexpType::String => values::string_at(value, 0).as_deref() == Some("0"),
-        _ => interp::subset::numeric_element(value, 0) == 0.0,
+        _ => interp::arith::real_at(value, 0) == 0.0,
     };
     Ok(if zero { background } else { colour })
 }
@@ -4742,7 +4742,7 @@ unsafe fn real_at(value: Sexp, index: usize, default: f64) -> f64 {
     if value == nil() || count == 0 || !values::is_numeric_type(value.kind()) {
         return default;
     }
-    interp::subset::numeric_element(value, index % count)
+    interp::arith::real_at(value, index % count)
 }
 
 unsafe fn colour_at(value: Sexp, index: usize, default: Colour, background: Colour) -> R<Colour> {
@@ -4754,7 +4754,7 @@ unsafe fn colour_at(value: Sexp, index: usize, default: Colour, background: Colo
     let zero = match value.kind() {
         SexpType::String => values::string_at(value, index).as_deref() == Some("0"),
         SexpType::Integer | SexpType::Logical | SexpType::Real => {
-            interp::subset::numeric_element(value, index) == 0.0
+            interp::arith::real_at(value, index) == 0.0
         }
         _ => false,
     };
@@ -4802,7 +4802,7 @@ unsafe fn line_type_at(value: Sexp, index: usize, default: u32) -> R<u32> {
         }
         return parse_dash_pattern(&text).map_err(error);
     }
-    let number = interp::subset::numeric_element(value, index);
+    let number = interp::arith::real_at(value, index);
     if number.is_nan() {
         return Ok(default);
     }
@@ -4830,7 +4830,7 @@ unsafe fn pch_at(value: Sexp, index: usize, default: &Pch) -> Pch {
             None => Pch::Code(NA_INTEGER),
         };
     }
-    let number = interp::subset::numeric_element(value, index);
+    let number = interp::arith::real_at(value, index);
     Pch::Code(if number.is_nan() {
         NA_INTEGER
     } else {
@@ -7228,7 +7228,7 @@ unsafe fn colour_element(colours: Sexp, index: usize) -> R<Colour> {
             Some(text) => parse_colour(&text).map_err(error),
         },
         SexpType::Integer | SexpType::Logical | SexpType::Real => {
-            let value = interp::subset::numeric_element(colours, index);
+            let value = interp::arith::real_at(colours, index);
             if value.is_nan() {
                 return Ok(TRANSPARENT_WHITE);
             }

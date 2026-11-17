@@ -4,6 +4,7 @@ Read this before you change the R interpreter. Cross-cutting traps live in `.age
 
 ## Traps
 
+- **New interpreter code goes on the handle types** (`Cx`, `Local`, `Owned`; `development/design/memory-safety.md`), and a raw helper it must call gets its safe form in `handles.rs`, nowhere else. Never raise a count in `tools/unsafe-baseline.txt` to make `tools/unsafe.py check` pass: remove `unsafe` instead, or, for a wrapper in `handles.rs`, edit its line by hand and name the functions in the backlog ("the handle migration").
 - **A fast path that reads vector storage directly must refuse a vector with `flag_bits::ARRAY`**, or it skips the strict checks in `arrays.rs`. `duplicate` drops the flag (re-flag with `arrays::finish`), and `finish_result` copies a shared constant.
 - **gp bit 12 is `TYPED_DEFINITION` on a formals list or body and `CHECKED_PROMISE` on a promise.** `annotations::leave` runs at every closure exit, error or not, or a pending annotation check outlives its frame.
 - **Start-up state the environment can change is re-derived in `interp::session::start_from_image`**, since the image is written once in an emptied environment (`image::LOADING_VARIABLES`, `image::save_state`). Run `just start-image` after editing runtime R sources (`development/architecture.md`, "The start-up image").

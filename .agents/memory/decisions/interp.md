@@ -906,7 +906,7 @@ without cells, promise forcing in the loop, and one observer word on the general
   gives up (`false`, so `complex_assign` runs) whenever that or the setter lookup gave the frame its
   environment. The setter is a builtin (when the target has no method for it, asked through
   `dispatch::has_internal_method` with `Caller::SlotFrame`), a special with a direct entry (`@<-` on
-  an S4 object, `direct_at_assign`), or a closure whose other arguments are constants
+  an S4 object, `at_assign_values`), or a closure whose other arguments are constants
   (`replace_with_closure`). The closure gets the target and the value in forced promises that count
   them, unlike the uncounted `*tmp*` and value promises `complex_assign` hands a builtin: tier 0
   passes a builtin its arguments without the argument list whose cells count in GNU R, so a value

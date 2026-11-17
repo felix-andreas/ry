@@ -1928,7 +1928,7 @@ unsafe fn posixlt_instants(list: Sexp, tz: &str) -> R<Vec<f64>> {
         let flag = if length(isdst) == 0 || !honors_isdst {
             -1
         } else {
-            let flag = crate::subset::numeric_element(isdst, position % length(isdst));
+            let flag = crate::arith::real_at(isdst, position % length(isdst));
             if flag.is_nan() { -1 } else { flag as i32 }
         };
         *value = zone.local_to_utc(*value, flag);
@@ -2107,7 +2107,7 @@ unsafe fn balance_posixlt(list: Sexp, fill_only: bool, classed: bool) -> R<Sexp>
                     let value = if length(source) == 0 {
                         -1.0
                     } else {
-                        crate::subset::numeric_element(source, position % length(source))
+                        crate::arith::real_at(source, position % length(source))
                     };
                     *flag = if value.is_nan() { -1 } else { value as i32 };
                 }

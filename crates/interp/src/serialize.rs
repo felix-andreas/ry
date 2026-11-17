@@ -1552,8 +1552,8 @@ unsafe fn database_name(file: Sexp, what: &str) -> R<Sexp> {
 /// The offset and length a lazy-load key names.
 unsafe fn record_key(key: Sexp) -> (usize, usize) {
     (
-        crate::subset::numeric_element(key, 0) as usize,
-        crate::subset::numeric_element(key, 1) as usize,
+        crate::arith::real_at(key, 0) as usize,
+        crate::arith::real_at(key, 1) as usize,
     )
 }
 

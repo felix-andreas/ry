@@ -29,7 +29,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
+      # `just unsafe` measures each file's `unsafe` count against the first version of
+      # tools/unsafe-baseline.txt, which a shallow checkout does not have.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       # The Nix store, the test build and base R need more disk than the runner has free.
       - name: free disk space
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL

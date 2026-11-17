@@ -1,0 +1,56 @@
+[stdout]
+| NULL
+| [1] 1
+| [1] 3
+| NULL
+| [1] 3
+| NULL
+| NULL
+| List of 3
+|  $ NA: num 30
+|  $ b : num 2
+|  $ NA: num 3
+| List of 3
+|  $ NA: num 40
+|  $ b : num 2
+|  $ NA: num 3
+| [1] "a" NA 
+| List of 2
+|  $ a : num 1
+|  $ NA: num 3
+| List of 3
+|  $ NA: num 1
+|  $ b : num 2
+|  $ NA: num 50
+|    a <NA> 
+|    1    9 
+| warning in x[["a", exact = NA]] : partial match of 'a' to 'abc' 
+| [1] 1
+| warning in x[["a", exact = NA]] : partial match of 'a' to 'abc' 
+| warning in NULL : further partial match of 'a' to 'abd' 
+| NULL
+| warning in x[["a", exact = NA]] : partial match of 'a' to 'abc' 
+| warning in NULL : further partial match of 'a' to 'abd' 
+| NULL
+| [1] 1
+| [1] 1
+| NULL
+| warning in c(abc = 1)[["a", exact = NA]] : partial match of 'a' to 'abc' 
+| [1] 1
+| [1] "warned"
+| warning in list(x = list(abc = 1))[[c("x", "a"), exact = NA]] : partial match of 'a' to 'abc' 
+| [1] 1
+| [1] "attempt to use zero-length variable name"
+| List of 2
+|  $ a : num 1
+|  $ NA: num 2
+| List of 3
+|  $ a : num 1
+|  $ NA: num 2
+|  $ NA: num 3
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

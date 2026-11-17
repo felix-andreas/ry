@@ -516,6 +516,10 @@ pub struct Hooks {
     pub write_console: unsafe fn(&[u8], bool),
     /// Materializes an ALTREP vector into an ordinary one.
     pub materialize_altrep: unsafe fn(Sexp) -> R<Sexp>,
+    /// An ordinary vector to read an ALTREP vector's elements from: the one its class keeps
+    /// them in when there is one, which may carry other attributes and must not be written or
+    /// kept, and a copy otherwise.
+    pub altrep_storage: unsafe fn(Sexp) -> R<Sexp>,
     /// An ALTREP vector's length, from its class's `Length` method.
     pub altrep_length: unsafe fn(Sexp) -> R<usize>,
     /// A compact sequence (GNU R's `compact_intseq` or `compact_realseq`) of an integer or
@@ -1030,6 +1034,7 @@ pub fn default_hooks() -> Hooks {
     Hooks {
         write_console: default_write_console,
         materialize_altrep: |_| Err(unwind::error("ALTREP objects need the libR host")),
+        altrep_storage: |_| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_length: |_| Err(unwind::error("ALTREP objects need the libR host")),
         compact_sequence: |_, _, _, _| Ok(None),
         altrep_dataptr: |_| Ok(None),

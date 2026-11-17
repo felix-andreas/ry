@@ -198,6 +198,7 @@ the cheap copy.
 | --- | --- | --- |
 | Fill a new atomic vector | `fresh.as_mut_slice()` | `Fresh` is the only pointer and takes `&mut self`. No context is needed, because the object holds no pointers |
 | Fill a new list, string vector or pairlist | `fresh.set(cx, i, value)` with `&Cx` | the store runs the barrier and the count inside `heap`. A safepoint between two stores can promote the object, and the barrier covers that. There is no `&mut [Gc]` to fill without it |
+| Fill a new vector from one iterator | `cx.alloc_unfilled::<T>(n)?`, then `unfilled.fill(elements)` for numbers or `unfilled.fill_elements(cx, elements)` for a list or string vector | `Unfilled` is the only pointer and offers nothing but the fill, so no element is read before it is written. The elements borrow `&Cx`, so the iterator cannot reach a safepoint, the slots are written directly, and the references are counted once afterwards |
 | Change an existing object in place | `owned.write(cx)`, then `write.split()`, or `write.split_elements()` for a list | `Owned` says nothing else refers to the object, and `Write` holds `&mut Cx`, so no slice taken earlier is alive, no R code runs, and nothing can share the object meanwhile |
 | Store into an object with reference semantics | `cx.define(env, sym, value)` (`&mut Cx`), promise and external-pointer fields (`&Cx`) | the barrier and the count run inside `heap` |
 
@@ -422,6 +423,18 @@ shape, and changing the shape removed it:
   save registers, 14 instructions per allocation.
 - **Text kept for the length of a call is copied to a stack buffer.** `Cow::into_owned` is a
   `malloc` and a `free`, about 83 instructions per call of `sub`.
+- **A general step that a hot caller uses for one case is compiled into that caller, with the
+  parts the caller does not need switched off by a constant.** Growing a vector pads the new
+  elements, tests for room and copies attributes. An append stores into the one new element,
+  usually has room, and usually has no attributes but names, so `append` compiles the growth
+  step in (`grow_in_caller`) without the padding, asks the vector's header for room
+  (`Owned::has_room`) before the out-of-line resize, and stores the new name into the names the
+  growth copied. Through the general growth function an append ran about 77 instructions
+  longer than the raw form.
+- **A builtin answers its scalar case before it splits its arguments.** `x[[i]]` with two
+  untagged arguments reads them from the call and returns a list's element
+  without a root, because the builtin's caller receives a raw pointer either way. Splitting
+  first builds the subscript list and roots the element, about 160 instructions per call.
 
 With those rules, the forms on handles against the raw forms, in instructions per operation
 (`just bench-mechanisms`, tier 1 off): of 103 rows, 75 are within half a percent, 17 are lower and
@@ -463,6 +476,31 @@ The four higher rows, by cause:
   11 kB of machine code with every store kind inlined, and the allocation of its registers
   changes with unrelated code. Moving the fallback to the replacement builtin out of line made
   the row six instructions longer, because the split passes the operands again.
+
+`[`, `[[`, `$`, `@` and their replacement forms measure the same way: of 105 rows, 95 are within
+half a percent of the raw forms, 7 are lower and 3 are higher.
+
+| Operation | Raw | On handles | Change |
+| --- | ---: | ---: | ---: |
+| `x[name]` | 1,639 | 1,576 | -3.8% |
+| `names(x) <- value` | 3,275 | 3,198 | -2.4% |
+| `length(x) <- value` | 1,255 | 1,231 | -1.9% |
+| a new field of a list argument | 3,304 | 3,266 | -1.2% |
+| three appends to a new vector | 4,649 | 4,602 | -1.0% |
+| `nchar` | 1,521 | 1,506 | -1.0% |
+| string element of a local vector | 572 | 567 | -0.9% |
+| `x$name` dispatched to a method | 4,246 | 4,275 | +0.7% |
+| `unlist` of a short list | 6,346 | 6,391 | +0.7% |
+| `list` with a name | 1,279 | 1,294 | +1.2% |
+
+The three higher rows, by cause:
+
+- **`unlist`**: each element goes through the store that checks the target's type and takes
+  its write view, 97 instructions where the raw store ran 43.
+- **`x$name` to a method**: the dispatch with the allocation of its name argument runs 214
+  instructions where the raw pair ran 181.
+- **`list` with a name**: the names vector comes from the rooted allocation body, as `nchar`'s
+  result does.
 
 Each migration change measures its builtins the same way before the raw form is deleted, and a
 change that reaches the call path or the bytecode loop reports `just bench-mechanisms` and tier
@@ -519,14 +557,26 @@ the raw one and says why the handle types make the call sound. The wrappers are 
 function meets an unmigrated one, so that boundary is visible and counted, and a wrapper
 disappears when the helper under it is migrated.
 
-Written against the handle types: tier 0's element and matrix stores; the attribute readers and
-setters with their fast-path entries (`attr`, `attributes`, `names`, `dim`, `dimnames`, `class`,
-`oldClass`, `levels<-`, `comment`, `length<-`, `inherits`, `unclass` and the replacement forms);
-`strings.rs` except `paste`, `paste0`, `sprintf`, `strsplit` and `make.unique`; and the bit
-conversions in `arith.rs`. Three pieces of the API are not built: the bytecode loop's register
-accessor, `Held<T>` fields in traced structures, and a bulk fill for a new list or character
-vector, which the five string builtins above wait for because a store per element pays a count
-and a barrier each.
+Written against the handle types: tier 0's element and matrix stores; subscript resolution,
+element reads and stores, and `[`, `[[`, `$`, `@` with their replacement forms (`subset.rs`); the
+attribute readers and setters with their fast-path entries (`attr`, `attributes`, `names`, `dim`,
+`dimnames`, `class`, `oldClass`, `levels<-`, `comment`, `length<-`, `inherits`, `unclass` and the
+replacement forms); `strings.rs` except `paste`, `paste0`, `sprintf`, `strsplit` and
+`make.unique`; and the bit conversions in `arith.rs`. Two pieces of the API are not built: the
+bytecode loop's register accessor and `Held<T>` fields in traced structures.
+
+An unmigrated caller reaches a migrated function through a raw entry, an `unsafe fn` over `Sexp`
+that states what the caller must hold. Which helper the entry uses decides its cost:
+
+| Entry | Helper | Roots |
+| --- | --- | --- |
+| Returns no object | `handles::with` | a scope of its own, released on return |
+| Returns an object to a caller that treats it as rooted | `handles::with_result` | a scope of its own, and the result rooted again in the caller's |
+| Runs once per instruction or per loop iteration, and its caller releases the handle stack | `handles::in_caller_scope` with `handles::held` operands | none of its own: the caller's roots hold the operands, and what the entry roots stays until the caller's release |
+
+The third form is what `subset::vector_element` (the element read of `for` and the apply
+functions) and tier 0's `$` entries use, because a scope and a second root per call measured 15
+to 50 instructions on those paths.
 
 The order:
 
@@ -540,11 +590,22 @@ The order:
    and `interp::heap()` and `interp::interp()` are deleted.
 
 `tools/unsafe-baseline.txt` records the count of `unsafe` per source file outside the crates that
-own it. `just gate` fails when a file's count rises (`tools/unsafe.py check`), and a change that
-lowers one lowers the baseline with it, so the count only falls. `interp::handles` is the one
-file that may rise, and by less than the other files lose in the same change: a migrated builtin
-that needs a helper with no safe form adds the wrapper there and removes more `unsafe` than the
-wrapper holds.
+own it. `just gate` and CI's `just ci` fail when a file's count rises (`tools/unsafe.py check`),
+and a change that lowers one lowers the baseline with it (`tools/unsafe.py baseline`, which
+lowers counts and refuses to raise one), so the count only falls.
+
+A count rises only by a hand edit of its line. `check` compares each line with two references:
+the baseline's first version, and on a branch the baseline at the commit the branch left main
+at. It accepts a line above either only when `.agents/memory/backlog.md` names the functions
+that hold the new `unsafe` and allows at least that count:
+
+```
+- `crates/interp/src/handles.rs` 107 to 149: `evaluate`, `force`, `frame_value`
+```
+
+The expected case is `interp::handles`: a migrated builtin that calls a raw helper with no safe
+form adds the helper's wrapper there, and the backlog line stands until the helper itself takes
+handles and the wrapper goes.
 
 The guarantee covers a function that names neither `Sexp` nor `interp::heap()`. While the raw API
 is public (until step 4), safe code can leave the handle types and come back: `raw()` on any
@@ -568,9 +629,6 @@ no `Sexp`.
   pointer protection) share one definition with `libr`.
 - The spelling for linking a pairlist cell after it is visible to other code, which the evaluator
   does when it builds argument lists incrementally.
-- A bulk fill for a new list or character vector. `fresh.set` runs the barrier and the count per
-  element, and the raw code fills such a vector through its slice and counts once
-  (`Heap::count_written_elements`), which measured several times faster in `as.character` and
-  `strsplit`-style builders. The safe form is one call that takes an iterator of elements.
-  `strsplit` stays raw until then: it stores each new piece vector in its result before making
-  the vector's strings, so neither takes a handle, and a safe form would root one per element.
+- How `strsplit` fills its result. It stores each new piece vector in the result before making
+  the vector's strings, so neither takes a handle, and `Unfilled::fill_elements` cannot express
+  that: its iterator borrows `&Cx` and cannot allocate the strings.

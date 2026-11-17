@@ -370,11 +370,6 @@ Unverified until a Windows release smoke test runs:
 - **ry's own base R has never run on Windows.** Earlier Windows releases ran on GNU R's base, so the smoke test after a green base build is the first run of the bundled base there. Behind lattice wait 11 more recommended packages, the archive, and the smoke test.
 - **Landed:** the `fork` module is Unix-only again (a moved `#[cfg(unix)]` broke the Windows compile); the `Sys.which` fast path is Unix-only, because Windows base R defines its own `Sys.which`; the base tree carries GNU R's `Rblas.dll` and `Rlapack.dll`; it writes `etc/Rcmd_environ` and base's `Rprofile` with the lines GNU R's installer uncomments, so Rtools comes first on `PATH`; `shlib` runs `make` on the `PATH` that `Rcmd_environ` sets, which got grid and splines compiling (`shlib_runs_make_on_the_path_rcmd_environ_sets`).
 
-## Open: name matching gaps against GNU R
-
-- **`$` on an `NA` name.** GNU R's `$` matches an `NA` name as the text "NA" (`l <- list(1, 2); names(l) <- c(NA, "b"); l$N` is 1), and `w[["NA"]] <- 3` replaces an `NA`-named element; ry matches nothing and appends.
-- **`[[` with `exact = NA`.** `list(abc = 1)[["a", exact = NA]]` warns twice in ry (`subset2_level` and `single_position` both match) with the wrong call, and an ambiguous partial match warns twice in GNU R and not at all in ry.
-
 ## Open: one Renviron reader
 
 - ry has two Renviron readers, the interpreter's startup one in `crates/interp/src/session.rs` and `rcmd::command_environment`. The interpreter's lets an already-set variable win, which differs from GNU R's `process_Renviron` (a file line always overrides). Merge them into one reader with GNU R's semantics.
@@ -543,7 +538,6 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
   - **The target.** An intermediate collection should touch only the pages that hold untenured objects. It should also handle strings and symbols only for the young ones, the way a minor collection already treats the young string table (`decisions/heap-gc.md`, "Minor collections touch only what changed"). That makes the cost of one collection proportional to its young survivors, and young stress linear in allocations.
 - **Pin `TESTTHAT_PARALLEL=false` for collection counts and Ir comparisons.** A package whose DESCRIPTION sets `Config/testthat/parallel: true` (vctrs, rlang) runs its tests in testthat worker processes, which share the `RY_GC_LOG` file and which callgrind does not follow without `--trace-children=yes`. Collection counts then differ between runs, and a profile of the parent misses the tests. With the runner off, two vctrs runs give identical logs.
 - **After-marking work is 1.45% of testthat_full** (weak references, returned frames, sweep: two thirds of the collector's time in minor collections; `decisions/heap-gc.md`, "Escalation prediction and the dense precious set", item "Minor-collection cost by source"). Revisit if the collector's share of the run grows.
-- **GC torture over the package test suites** is owned by the robustness work (`oracle packages` under `RY_GC_STRESS` and `gctorture(TRUE)`, `development/robustness.md`).
 - **`strings__repeated_pieces` dominates the `ry-gctorture-young` oracle run.** Under `RY_GC_STRESS=young` the case runs for more than 240 s (it passes; the rest of the engine's cases take about 15 min together). It builds several character vectors of 200,000 elements. The likely cause is that young stress retraces every untenured object at each allocation, so the cost grows with the live young set times the allocations (unconfirmed). Options: shrink `n` in the case if it keeps covering the substr and formatC sharing thresholds, or make young stress cheaper on large live sets.
 - **String-heavy C code is bound by memory traffic** (`str_split`, see "Package kernels" below): suspects are the heap's allocation slow path and string-table probes that miss cache with about 2e7 live CHARSXPs. A character subset of 1e6 unique strings takes 0.012 s against GNU R's 0.003 s.
 - **Peak RSS is sensitive to when collections run**: report +3.8 MB from inlined base wrappers (gc() max-used unchanged, fixed offset), array_map from tier-1 loop state. One owner should look at the GC trigger policy for both.
@@ -665,20 +659,34 @@ About seven in ten of the hot suite's closure calls from compiled code take `cal
 
 ## Open: the handle migration
 
-Rule: `decisions/heap-gc.md`, "Interpreter code holds values through handles the borrow checker
-checks". Order, method and costs: `development/design/memory-safety.md`, "Migration" and "Cost".
+Rule and order: `development/design/memory-safety.md`, "Migration".
 
-- **Raw, in order.** `[<-`, `[[<-`, `$<-`, `@<-` (`subset.rs`) and their slot paths
-  (`assign_slot_element`, `replace_variable`); `[`, `[[`; `.class2`, `.cache_class`,
-  `do_copy_df_attr`; `paste`, `sprintf`, `strsplit`, `make.unique` (after the bulk fill);
-  `values.rs`, the evaluator, the bytecode loop.
-- **Not built** (`memory-safety.md`, "Migration"): the register accessor, `Held<T>`, a bulk fill.
-- **Raw functions the ratchet's baseline admits, to move with their files.** `op_subscript` and
-  `subscript_unbound` (`bytecode.rs`, with the register accessor), `patch_args_by_actuals`
-  (`dispatch.rs`), `lock_base_bindings` (`session.rs`). Also four from the builtin kernels: the
-  `altrep_dataptr_or_null` and `altrep_sortedness` hook fields (`interp.rs`, with the hook
-  table), `copy_recycled` (`subset.rs`, with `cbind`) and the POSIXlt `Column::of`
-  (`system.rs`, with `strftime`).
+- **Raw, in order.** The replacement forms' slot paths (`assign_slot_element`,
+  `replace_variable`); `subset.rs`'s builders (`matrix`, `array`, `aperm`, `cbind`) and the
+  entries raw callers reach; `.class2`, `.cache_class`; `paste`, `sprintf`, `make.unique`,
+  `strsplit`; the ALTREP hook table (`interp.rs`), `patch_args_by_actuals` (`dispatch.rs`), the
+  POSIXlt `Column::of` (`system.rs`); `values.rs`, the evaluator, the bytecode loop.
+- **Not built**: the register accessor, `Held<T>`.
+- **Unaudited.** `jit::runtime` helpers outside `scoped` must leave no handle.
+- **Unverified.** `assign_one` grows an owned list by moving its elements (`grow`, `final_step`)
+  and allocates names after, so an allocation failure there would leave the variable empty.
+- **Unexplained.** The hot set counts 1 to 2% more instructions per call on `base::matrix`,
+  `foreach::%do%`, `stats::coef` and lubridate's arithmetic with the subset forms on handles; the
+  per-operation table (`just bench-mechanisms`) shows no row for it.
+- **Raised `unsafe` counts** (`tools/unsafe.py check` reads them), until the helpers migrate:
+  - `crates/interp/src/handles.rs` 107 to 149: `alloc_with_room`, `array_subassign`, `array_subset`, `array_subset2`, `call_environment`, `call_value`, `classed_error`, `compact_sequence`, `copy_attributes_to`, `copy_elements`, `copy_most_attributes`, `define`, `dispatch_builtin`, `element_text`, `evaluate`, `force`, `frame_value`, `generated_call`, `holds_elements`, `install_bytes`, `int_element`, `is_altrep`, `item`, `list_to_pairlist`, `mark_shared`, `missing_argument`, `move_elements`, `owned_names`, `pairlist_to_list`, `permanent`, `reaching_environment`, `real_element`, `record_dollar`, `record_dollar_assign`, `record_subassign2`, `record_subset2`, `resize_in_place`, `scalar_subset`, `shallow_copy`, `store_item`, `stored`, `tag`, `type_name`, `warning_in`, `with_result`.
+  - `crates/interp/src/interp.rs` 47 to 48: `altrep_storage`, the hook's type.
+  - `crates/interp/src/bytecode.rs` 409 to 411: `assign_element`, `assign_matrix_element_in_place`, `assign_slot_matrix_element`, `load_declines`, `op_subscript`, `subscript_unbound`.
+  - `crates/interp/src/conditions.rs` 50 to 51: `c_error`.
+  - `crates/interp/src/connections.rs` 175 to 180: `drop_unconvertible`, `output_bytes`, `read_fixed_strings`, `text_encoding`, `translated_bytes`, `warn_unsigned`.
+  - `crates/interp/src/deparse.rs` 44 to 45: `argument_at`, `deparse_lines_checked`, `parenthesize_caller`, `unused_arguments`.
+  - `crates/interp/src/envir.rs` 125 to 127: `binding_environment`, `simple_as_environment`.
+  - `crates/interp/src/eval.rs` 266 to 267: `switch_empty_default`.
+  - `crates/interp/src/serialize.rs` 69 to 70: `do_load`.
+  - `crates/interp/src/session.rs` 26 to 27: `lock_base_bindings`.
+  - `crates/interp/src/sort.rs` 44 to 48: `collation_locale`, `do_icu_get_collate`, `do_icu_set_collate`, `in_order`, `incomparable_keys_given`, `rank_keys`, `strcoll`.
+  - `crates/interp/src/utils.rs` 68 to 81: `character_factor`, `comment_char`, `count_argument`, `extract_item`, `first_byte_separator`, `first_bytes`, `is_missing`, `pad_record`, `parse_complex_prefix`, `parse_double_prefix`, `quote_set`, `read_string`, `rule_out`, `scan_decimal`, `scan_frame`, `scan_separator`, `scan_vector`, `write_element`, `write_string`.
+  - `crates/interp/src/values.rs` 110 to 111: `as_integer_scalar_warning`, `as_real_scalar_warning`.
 
 ## Open: failing tests on main
 
@@ -698,9 +706,6 @@ checks". Order, method and costs: `development/design/memory-safety.md`, "Migrat
   closure that a function stores and a later call runs keeps its enclosure. Reproduce with the
   `SHAPES` package from `test_load.rs`: `ry load DIR -e "options(ry.load.lazy_s4 = TRUE);
   load_all('DIR', full = TRUE)" -e "isVirtualClass('Sq')"`.
-- **`oracle`: `recorded_outcomes_match_gnu_r` on `s4__deparse_class_definition`.** GNU R 4.6.2
-  deparses `methods::as` where the recording has `as`, so the recording has drifted. Re-record
-  the case.
 
 ## Open: the package loader
 
@@ -1584,24 +1589,16 @@ overhead, not allocation.
   base succeeds where GNU R fails (`lockEnvironment` leaves base's frame unlocked); base's
   bindings are locked as GNU R locks them.
 - Smaller differences in complex assignments, each the same in every tier: `exists("*tmp*")` in
-  a subscript is `FALSE` (GNU R binds `*tmp*` for the length of the assignment); `x[c(TRUE, NA)]
-  <- 1:2` warns and assigns where GNU R fails with "NAs are not allowed in subscripted
-  assignments"; `m[[1, TRUE]] <- 0L` on a 2 x 2 matrix writes the whole first row where GNU R
-  writes one element; `names(m)[2] <- "a"` on a matrix leaves it without names; a formal nobody
-  passed as the target (`f <- function(a) { a[1] <- 1 }; f()`) fails with "object of type
-  'symbol' is not subsettable" where GNU R says `argument "a" is missing, with no default`;
-  `..1[1] <- 1` fails with "object '..1' not found" where GNU R says "..1 used in an incorrect
-  context"; `p$v <- 1` on an S4 object without a method says "no '$<-' method for this S4
-  class" where GNU R says "no method for assigning subsets of this S4 class" against the
-  generated call; `body(x)[[1]] <- 1` on a number makes a closure where GNU R fails; and
-  `storage.mode(x)[2] <- "double"` fails with "invalid 'value' argument" where GNU R leaves
-  `x` unchanged.
+  a subscript is `FALSE` (GNU R binds `*tmp*` for the length of the assignment); `..1[1] <- 1`
+  fails with "object '..1' not found" where GNU R says "..1 used in an incorrect context";
+  `e$b <- 2` for a new name on an expression vector keeps an expression where GNU R makes a
+  list; and `p$v <- 1` on an S4 object without a method says "no '$<-' method for this S4 class" where
+  GNU R says "no method for assigning subsets of this S4 class" against the generated call.
 - Closures over equal but distinct body copies compile again. `Bodies` (`crates/interp/src/bytecode.rs`) shares code by body identity, but a lambda inside a testthat `expect_*()` argument is a fresh copy of its expression at each evaluation, so `testthat_full` compiles about 43 bodies per warm iteration (about 4M Ir of its 629M). GNU R's JIT cache hashes the structure and confirms with `identical`, so it shares them. A structural lookup at the compile decision, confirming with a deep compare of body, formals and srcref, would close it.
 - `readChar` reads one byte per device call: an 11 MB file takes 150 ms against GNU R's 29 ms (`readChar(f, file.size(f))`). Its ceiling on measured workloads is 0%, since `testthat_full`, the strings app and the report app never call it, so a bulk read (one device read per string) waits for a workload that does.
 - A missing argument forwarded through two calls is reported on the wrong call: with `leaf <- function(x) x; mid <- function(a) leaf(a * 2); wrap <- function(q) mid(q)`, `wrap()` fails with `argument "q" is missing, with no default` on both engines, but GNU R's condition call is `wrap()` and ry's is `leaf(a * 2)`. The same in every tier.
 - `nargs()` evaluated in another function's frame counts nothing: with `f <- function(p) eval(quote(nargs()), parent.frame()); g <- function(a, b, c) f(a)`, `g(1, 2, 3)` is 3 on GNU R and 0 on ry. The same in every tier.
 - An out-of-bounds `v[[k]]` in a closure is signalled one frame deeper than on GNU R: with `pick <- function(v, k) v[[k]]`, an `options(error = )` handler counts 2 frames on GNU R for `pick(c(1, 2, 3), 7L)` and 3 on ry (the extra one is `stop`). Every tier does it.
-- `integer(NA_real_)` fails with "invalid 'length' argument" where GNU R says "vector size cannot be NA/NaN", and `matrix(1, -1L)` returns a 0 x 0 matrix where GNU R fails with "invalid 'nrow' value (< 0)".
 - `integer`, `character` and the other vector constructors are builtins on ry and closures on GNU R, so an error inside one shows a frame less (`Calls: f` against `Calls: f -> integer`).
 - GNU R calls an active binding twice on the second call of `f <- function(x) x * sc` (the cause is unverified; the second call is the one GNU R byte-compiles `f` at); ry calls it once. GNU R also reads an active binding twice as the target of `x[2] <- v` in a function, with or without a `[<-` method, where ry reads it once in every tier. Low priority: nothing should depend on it.
 - `tracemem()` never reports a copy: it returns the address, and `untracemem` and `retracemem` do nothing (`crates/interp/src/system.rs`), so `x <- numeric(10); tracemem(x); y <- x; y[1] <- 1` prints nothing where GNU R prints a `tracemem[...]` line. Copy checks use `RY_GC_LOG` collection counts or `gc()`'s max used instead.
@@ -3612,8 +3609,6 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
 
 ## Open: stale code comments
 
-- The comment above `nightly-publish` in the `justfile` says a nightly is "a normal release ... never a pre-release" and that the Zed extension installs the newest pre-release. The recipe passes `--prerelease --latest=false`, the extension reads `pre_release: false` (`editors/zed/src/lib.rs`), and `development/releasing.md` ("Nightly builds") describes that. Correct the comment.
-- The doc comment in `crates/libr/tests/test_start_image.rs` names CI's `setup-r` as the writer of a `~/.Rprofile`. CI runs in the flake's dev shell and has no `setup-r` step, so the comment should name a user profile in general.
 - The fuzz batteries' cost is recorded in the knowledge base as re-parsing the stub corpus for each fresh database. That claim is unmeasured on the current tree: profile one battery and either confirm it or remove the bullet.
 
 ## Explicitly out of scope for now
