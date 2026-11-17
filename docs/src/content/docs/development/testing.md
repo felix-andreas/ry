@@ -649,7 +649,9 @@ engines and compares the images ([Corpus and oracle](/development/corpus-and-ora
 `just gc-torture` runs every oracle case on every core and takes about ten minutes on four cores
 in a debug build, and `just gc-torture young` runs them under `ry-gctorture-young`.
 `just gc-torture repeat` runs them twice in one process under seeded stress with the heap checked
-(`ry-repeat-gctorture-seeded`), and prints each case that takes over a minute. The generated
+(`ry-repeat-gctorture-seeded`), takes about forty minutes on four cores in a debug build, and
+prints each case that takes over a minute. A case is killed after fifteen minutes for each pass
+it makes. The generated
 programs run under both torture engines. `RY_GC_STRESS=1` stresses from the script's start and
 `RY_GC_STRESS=startup` from the first allocation, which takes about seven seconds on an empty script
 in a debug build ([Robustness](/development/robustness) lists the modes).

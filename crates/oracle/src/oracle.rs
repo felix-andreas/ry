@@ -321,7 +321,8 @@ impl ProcessEngine {
         }
     }
 
-    /// Kills a run that takes longer than `timeout` and reports it as failed.
+    /// Kills a run that takes longer than `timeout` for each pass it makes ([`Self::repeated`])
+    /// and reports it as failed.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
@@ -577,7 +578,8 @@ impl Engine for ProcessEngine {
             .envs(library_environment().iter().cloned())
             .envs(self.environment.iter().map(|(name, value)| (name, value)));
 
-        let output = run_command(command, self.timeout).map_err(|error| match error.kind() {
+        let timeout = self.timeout.map(|timeout| timeout * passes);
+        let output = run_command(command, timeout).map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound => {
                 EngineError::Unavailable(format!("`{}` was not found", self.program))
             }
@@ -587,7 +589,7 @@ impl Engine for ProcessEngine {
             return Err(EngineError::Failed(format!(
                 "{} was killed after {} seconds",
                 self.name,
-                self.timeout.map_or(0, |timeout| timeout.as_secs())
+                timeout.map_or(0, |timeout| timeout.as_secs())
             )));
         }
         // A report does not excuse a crash: the driver writes it before the process exits, and

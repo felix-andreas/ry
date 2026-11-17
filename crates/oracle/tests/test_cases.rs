@@ -579,7 +579,9 @@ fn cases_survive(
     for _ in 0..fuzz_iterations(sampled).min(all.len()) {
         chosen.push(all.swap_remove(rng.below(all.len())));
     }
-    let timeout = Duration::from_secs(600);
+    // The slowest cases take about seven minutes a pass under seeded stress with the heap
+    // checked, in a debug build on four busy cores.
+    let timeout = Duration::from_secs(900);
     let ry = ProcessEngine::ry().with_timeout(timeout);
     let torture = torture.with_timeout(timeout);
     let started = Instant::now();
