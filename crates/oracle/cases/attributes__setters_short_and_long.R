@@ -104,3 +104,35 @@ print(.row_names_info(d, 0L))
 d2 <- data.frame(a = 1:2, row.names = c("r", "s"))
 print(.row_names_info(d2))
 print(.row_names_info(d2, 0L))
+
+# A vector nothing else holds is changed where it is, at both sizes.
+for (n in c(6L, 100L)) {
+  own <- as.numeric(seq_len(n))
+  names(own) <- sprintf("e%d", seq_len(n))
+  attr(own, "tag") <- "t"
+  class(own) <- "thing"
+  own <- unclass(own)
+  dim(own) <- c(2L, n / 2)
+  dimnames(own) <- list(c("a", "b"), NULL)
+  print(names(attributes(own)))
+  print(own[2, n / 2])
+  length(own) <- n + 1L
+  print(tail(own, 2))
+}
+
+# Levels repeat when their text does, whatever the encoding mark, and for any vector type.
+latin <- "caf\xe9"
+Encoding(latin) <- "latin1"
+codes <- 1:2
+print(tryCatch({ levels(codes) <- c(latin, enc2utf8(latin)); "accepted" }, error = conditionMessage))
+print(tryCatch({ levels(codes) <- c(NA, NA); "accepted" }, error = conditionMessage))
+print(tryCatch({ levels(codes) <- c(2, 3, 2); "accepted" }, error = conditionMessage))
+print(tryCatch({ levels(codes) <- c("u", "v"); "accepted" }, error = conditionMessage))
+print(levels(codes))
+
+# Compact row names read back as a sequence, and long explicit ones as they are.
+frame <- data.frame(v = 1:200)
+print(sum(attr(frame, "row.names")))
+print(.row_names_info(frame))
+attr(frame, "row.names") <- 200:1
+print(head(attributes(frame)$row.names, 3))

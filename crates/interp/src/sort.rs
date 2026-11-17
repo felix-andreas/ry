@@ -2532,7 +2532,7 @@ unsafe fn incomparable_keys<'a>(incomparables: Sexp, kind: SexpType) -> R<Option
 /// Which elements of `x` repeat an earlier one (a later one with `from_last`). Lists compare
 /// their elements with `identical()`. With `first_only`, only the first duplicate in visiting
 /// order is sure to be flagged, and a hashed scan may stop there.
-unsafe fn duplicated_elements(
+pub(crate) unsafe fn duplicated_elements(
     x: Sexp,
     incomparables: Sexp,
     from_last: bool,
@@ -2850,7 +2850,7 @@ fn visit_in_order(count: usize, from_last: bool, mut flag: impl FnMut(usize) -> 
 }
 
 /// A set of indices below `len`, one bit each.
-struct Bits {
+pub(crate) struct Bits {
     words: Vec<u64>,
     len: usize,
 }
@@ -2881,7 +2881,7 @@ impl Bits {
             .sum()
     }
 
-    fn first(&self) -> Option<usize> {
+    pub(crate) fn first(&self) -> Option<usize> {
         let (index, word) = self
             .words
             .iter()

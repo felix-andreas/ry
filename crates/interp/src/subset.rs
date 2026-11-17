@@ -25,7 +25,6 @@ use {
         },
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp},
-    rustc_hash::FxHashSet,
     smallvec::{SmallVec, smallvec},
 };
 
@@ -4315,15 +4314,10 @@ fn assign_dimnames<'s>(
 fn do_set_levels<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
     let mut object = unshared(context, arguments.value(0))?;
     let levels = arguments.value(1);
-    if let Some(strings) = dense::<Str>(context, levels)? {
-        // Text with its encoding marks, which is what makes two strings one interned object.
-        let mut seen = FxHashSet::default();
-        for (index, level) in strings.iter(context).enumerate() {
-            let encoding = [gp::UTF8, gp::LATIN1, gp::BYTES].map(|mark| level.has_mark(mark));
-            if !seen.insert((level.bytes(), encoding)) {
-                return Err(arguments.error(format!("factor level [{}] is duplicated", index + 1)));
-            }
-        }
+    if levels.r_type().is_vector()
+        && let Some(index) = handles::first_duplicate(context, levels)?
+    {
+        return Err(arguments.error(format!("factor level [{}] is duplicated", index + 1)));
     }
     set_attribute(
         context,
@@ -5499,7 +5493,7 @@ pub(crate) fn do_is_list_factor<'s>(
         Some(list) if !list.is_empty() => list_factor(context, list, recursive)? == Some(true),
         _ => false,
     };
-    handles::logical(context, found)
+    handles::logical_constant(context, i32::from(found))
 }
 
 /// Whether every element of `list` is a factor, or with `recursive` a list of them: `None`
@@ -5668,7 +5662,7 @@ fn do_diag<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
     let data = handles::materialize(context, arguments.value(0))?;
     let rows = handles::integer_scalar(context, arguments.value(1)).max(0) as usize;
     let cols = handles::integer_scalar(context, arguments.value(2)).max(0) as usize;
-    if handles::length(context, data) == 0 {
+    if rows.min(cols) > 0 && handles::length(context, data) == 0 {
         return Err(error("'x' must have positive length"));
     }
     let mut result = match data.r_type() {

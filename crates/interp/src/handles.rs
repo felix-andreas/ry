@@ -216,14 +216,6 @@ pub fn logical_constant<'s>(_context: &Cx<'s>, value: i32) -> R<Local<'s>> {
     Ok(unsafe { Local::adopt(values::scalar_logical(value)?) })
 }
 
-/// A new logical vector of one element.
-#[inline]
-pub fn logical<'s>(context: &mut Cx<'s>, value: bool) -> R<Local<'s>> {
-    let mut result = context.alloc::<Logical>(1)?;
-    result.as_mut_slice().fill(i32::from(value));
-    Ok(result.finish().value())
-}
-
 /// A new integer vector of one element.
 #[inline]
 pub fn integer<'s>(context: &mut Cx<'s>, value: i32) -> R<Local<'s>> {
@@ -802,7 +794,22 @@ pub fn writable<'s, T: Vector>(
     {
         return Ok(owned);
     }
-    Ok(shallow_duplicate(context, vector)?.owned())
+    let copy = shallow_duplicate(context, vector)?;
+    // SAFETY: both are live objects. The copy drops the Array flag, which an element store
+    // keeps: it changes no type, length or attribute.
+    unsafe { copy.raw().set_array(vector.raw().is_array()) };
+    Ok(copy.owned())
+}
+
+/// The position of the first element of `vector` that repeats an earlier one, compared as
+/// `anyDuplicated` compares: strings by text, list elements with `identical`.
+pub fn first_duplicate(_context: &mut Cx<'_>, vector: Local<'_>) -> R<Option<usize>> {
+    // SAFETY: the vector is rooted, and reading an ALTREP vector may allocate, which `&mut Cx`
+    // permits.
+    let duplicated = unsafe {
+        crate::sort::duplicated_elements(vector.raw(), values::nil(), false, true, "anyDuplicated")?
+    };
+    Ok(duplicated.first())
 }
 
 /// Whether `value` has no attribute but names.
@@ -881,7 +888,7 @@ pub unsafe fn adopt<'s>(context: &Cx<'s>, raw: Sexp) -> Local<'s> {
 
 /// `raw` as a value of the context's scope, without a root of the scope's own: the frame
 /// holds an instruction's operands until the instruction ends, and a second root for each
-/// would cost every store.
+/// would cost every store and every builtin fast path.
 ///
 /// # Safety
 ///
@@ -900,11 +907,12 @@ macro_rules! safe_unary {
         unsafe fn entry(
             value: heap::object::Sexp,
         ) -> $crate::unwind::R<Option<heap::object::Sexp>> {
-            // SAFETY: the evaluator calls a unary entry on the interpreter's thread with a live
-            // argument, and stores or roots the result before it allocates again.
+            // SAFETY: the evaluator calls a unary entry on the interpreter's thread with an
+            // argument one of its registers holds until the entry returns, and stores or
+            // roots the result before it allocates again.
             unsafe {
                 $crate::handles::with(|context| {
-                    let value = $crate::handles::adopt(context, value);
+                    let value = $crate::handles::held(context, value);
                     Ok($function(context, value)?.map($crate::handles::Local::raw))
                 })
             }
@@ -922,12 +930,13 @@ macro_rules! safe_direct {
             _call: heap::object::Sexp,
             values: &[heap::object::Sexp],
         ) -> $crate::unwind::R<Option<heap::object::Sexp>> {
-            // SAFETY: as for `safe_unary`, with every argument value live.
+            // SAFETY: as for `safe_unary`: the caller's registers, or its root for a
+            // replacement's target, hold every argument value.
             unsafe {
                 $crate::handles::with(|context| {
                     let values: smallvec::SmallVec<[$crate::handles::Local<'_>; 4]> = values
                         .iter()
-                        .map(|&value| $crate::handles::adopt(context, value))
+                        .map(|&value| $crate::handles::held(context, value))
                         .collect();
                     Ok($function(context, &values)?.map($crate::handles::Local::raw))
                 })

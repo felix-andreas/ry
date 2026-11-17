@@ -41,8 +41,23 @@
 |       [,1]  [,2]
 | [1,]  TRUE FALSE
 | [2,] FALSE  TRUE
+| [1] "'x' must have positive length"
+| [1] 0 0
+| [1] 0 3
+|     
+| [1,]
+| [2,]
+| [1] 5050
+| [1] "thing"
+| $extra
+| [1] "kept"
+| 
+| [1] "integer"
+| <environment: R_GlobalEnv>
+| [1] TRUE
 [messages]
 [warnings]
 [errors]
-- 'x' must have positive length (in print(.Internal(diag(numeric(), 2L, 2L))))
 [value]
+logical
+| TRUE

@@ -2511,7 +2511,7 @@ fn do_is_methods_dispatch_on<'s>(
     context: &mut Cx<'s>,
     _arguments: &handles::Args<'_, 's>,
 ) -> R<Local<'s>> {
-    handles::logical(context, interp().globals.methods_dispatch)
+    handles::logical_constant(context, i32::from(interp().globals.methods_dispatch))
 }
 
 /// `standardGeneric("f")`: hands the call to the dispatcher the methods package installed.
@@ -2578,7 +2578,7 @@ unsafe fn do_set_s4_object(call: &Call<'_>) -> R<Sexp> {
 // The class builtins.
 
 fn do_is_s4<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
-    handles::logical(context, is_s4(arguments.value(0)))
+    handles::logical_constant(context, i32::from(is_s4(arguments.value(0))))
 }
 
 fn do_set_old_class<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {

@@ -13962,12 +13962,12 @@ unsafe fn assign_matrix_element_in_place(
     let stored = handles::with(|context| {
         let stored = store_matrix_element(
             context,
-            handles::adopt(context, target),
-            (
-                handles::adopt(context, row),
-                handles::adopt(context, column),
-            ),
-            handles::adopt(context, value),
+            // SAFETY: the binding cell, or the forced promise in it, holds the target, the
+            // frame's registers hold the subscripts and the value, and the store writes none
+            // of those.
+            handles::held(context, target),
+            (handles::held(context, row), handles::held(context, column)),
+            handles::held(context, value),
             Shared::Declined,
             // The conditions under which `complex_assign` updates the variable's value in
             // place.
@@ -14014,12 +14014,12 @@ unsafe fn assign_slot_matrix_element(
     let stored = handles::with(|context| {
         let stored = store_matrix_element(
             context,
-            handles::adopt(context, target),
-            (
-                handles::adopt(context, row),
-                handles::adopt(context, column),
-            ),
-            handles::adopt(context, value),
+            // SAFETY: the slot, or the forced promise in it, holds the target, the frame's
+            // registers hold the subscripts and the value, and the store writes none of
+            // those.
+            handles::held(context, target),
+            (handles::held(context, row), handles::held(context, column)),
+            handles::held(context, value),
             Shared::Copied,
             |target| {
                 // SAFETY: the slot holds the value itself, and `slot_owns` found no other

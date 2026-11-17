@@ -169,6 +169,11 @@ fn attribute_value<'s>(
 
 /// Compact row names (`c(NA, -n)`) read back as `1:n`.
 pub fn expand_row_names<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s>> {
+    // Any other length is the row names themselves, which a long data frame keeps as a compact
+    // sequence that `dense` would copy out.
+    if value.r_type() != SexpType::Integer || length(context, value) != 2 {
+        return Ok(value);
+    }
     let Some(rows) = dense::<Integer>(context, value)? else {
         return Ok(value);
     };
@@ -640,5 +645,5 @@ fn inherits<'s>(
     let found = what
         .iter(context)
         .any(|class| classes.position(context, class).is_some());
-    handles::logical(context, found)
+    handles::logical_constant(context, i32::from(found))
 }
