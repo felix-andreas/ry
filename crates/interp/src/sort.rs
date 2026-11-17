@@ -1261,8 +1261,9 @@ fn complete_prefix(x: Column<'_>, count: usize) -> Option<Column<'_>> {
             let data = data.get(..count)?;
             (!data.iter().any(|value| value.is_nan())).then_some(Column::Real(data))
         }
-        Column::Ranks(ranks) => (ranks.len() == count && !ranks.contains(&0))
-            .then_some(Column::Ranks(ranks)),
+        Column::Ranks(ranks) => {
+            (ranks.len() == count && !ranks.contains(&0)).then_some(Column::Ranks(ranks))
+        }
         _ => None,
     }
 }
