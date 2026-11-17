@@ -19,7 +19,7 @@
 139 crates/interp/src/base_fast_paths.rs
 17 crates/interp/src/builtin_libraries.rs
 20 crates/interp/src/builtins.rs
-409 crates/interp/src/bytecode.rs
+411 crates/interp/src/bytecode.rs
 2 crates/interp/src/callgrind.rs
 25 crates/interp/src/capture.rs
 22 crates/interp/src/code_image.rs
@@ -31,7 +31,7 @@
 14 crates/interp/src/crash.rs
 33 crates/interp/src/debugger.rs
 45 crates/interp/src/deparse.rs
-71 crates/interp/src/dispatch.rs
+72 crates/interp/src/dispatch.rs
 21 crates/interp/src/distributions.rs
 12 crates/interp/src/effects.rs
 9 crates/interp/src/element_access.rs
@@ -66,7 +66,7 @@
 71 crates/interp/src/records.rs
 8 crates/interp/src/replay.rs
 70 crates/interp/src/serialize.rs
-26 crates/interp/src/session.rs
+27 crates/interp/src/session.rs
 48 crates/interp/src/sort.rs
 385 crates/interp/src/standard_library.rs
 22 crates/interp/src/strings.rs
