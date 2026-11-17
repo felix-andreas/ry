@@ -374,7 +374,10 @@ pub unsafe fn find_called_fun(symbol: Sexp, mut env: Sexp, call: Sexp) -> R<Sexp
     }
     Err(error_in(
         call,
-        format!("could not find function \"{}\"", symbol_name(symbol)),
+        format!(
+            "could not find function \"{}\"",
+            crate::format::encode_string(&symbol_name(symbol), None)
+        ),
     ))
 }
 

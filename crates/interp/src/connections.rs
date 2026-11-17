@@ -1562,7 +1562,7 @@ unsafe fn do_read_lines(call: &Call<'_>) -> R<Sexp> {
         n => n as i64,
     };
     let ok = values::require_flag(call.arg(2), "ok")?;
-    let warn_incomplete = values::require_flag(call.arg(3), "warn")?;
+    let warn = values::require_flag(call.arg(3), "warn")?;
     let encoding = match values::first_string(call.arg(4)).as_deref() {
         Some("UTF-8" | "utf8") => Encoding::Utf8,
         Some("latin1") => Encoding::Latin1,
@@ -1593,7 +1593,7 @@ unsafe fn do_read_lines(call: &Call<'_>) -> R<Sexp> {
                 Some(text) => text_line(text, &mut offset, skip_nul, &mut line),
                 None => connection_line(con, skip_nul, &mut line)?,
             };
-            if nul {
+            if nul && warn {
                 crate::conditions::warning(format!(
                     "line {} appears to contain an embedded nul",
                     lines.len() + 1
@@ -1609,7 +1609,7 @@ unsafe fn do_read_lines(call: &Call<'_>) -> R<Sexp> {
                         (*con).incomplete = 1;
                     } else {
                         lines.push(std::mem::take(&mut line));
-                        if warn_incomplete {
+                        if warn {
                             crate::conditions::warning(format!(
                                 "incomplete final line found on '{}'",
                                 description_of(con)
@@ -3230,7 +3230,7 @@ fn raw_fixed_strings<'a>(bytes: &'a [u8], counts: &[i32], use_bytes: bool) -> R<
 
 /// The length a lead byte announces, as GNU R's `utf8clen` reads it: a continuation byte
 /// counts as a character of its own, and the lead bytes of the five and six byte forms count.
-fn utf8_sequence_length(lead: u8) -> usize {
+pub fn utf8_sequence_length(lead: u8) -> usize {
     match lead {
         0xc0..=0xdf => 2,
         0xe0..=0xef => 3,
@@ -3245,7 +3245,7 @@ fn utf8_sequence_length(lead: u8) -> usize {
 /// locale, or `None` for a sequence it rejects or that `bytes` cuts short. It rejects overlong
 /// forms and surrogates, but accepts code points above U+10FFFF, the five and six byte forms
 /// included.
-fn multibyte_length(bytes: &[u8]) -> Option<usize> {
+pub fn multibyte_length(bytes: &[u8]) -> Option<usize> {
     let lead = *bytes.first()?;
     let (length, least_second) = match lead {
         0..=0x7f => return Some(1),
@@ -4410,11 +4410,16 @@ unsafe fn device_open(con: Rconnection) -> R<bool> {
                     file.stream = Some(stream);
                 }
                 Err(failure) => {
-                    crate::conditions::warning(format!(
-                        "cannot open file '{}': {}",
-                        description_of(con),
-                        os_message(&failure)
-                    ))?;
+                    let (path, reason) = (description_of(con), os_message(&failure));
+                    crate::conditions::warning(match file.encoding {
+                        None => format!("cannot open file '{path}': {reason}"),
+                        Some(Compressed::Bzip2) => format!(
+                            "cannot open bzip2-ed file '{path}', probable reason '{reason}'"
+                        ),
+                        Some(_) => format!(
+                            "cannot open compressed file '{path}', probable reason '{reason}'"
+                        ),
+                    })?;
                     return Ok(false);
                 }
             }

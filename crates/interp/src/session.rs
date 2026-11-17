@@ -680,7 +680,16 @@ pub enum Outcome {
 /// before it runs, so `options(keep.source = TRUE)` keeps source references for the expressions
 /// after it.
 pub unsafe fn run_text(text: &str, source_name: &str) -> Outcome {
-    let text: Rc<str> = Rc::from(text);
+    // GNU R reads a script a line at a time into a C string, so a NUL ends its line, the
+    // newline included.
+    let text: Rc<str> = if text.contains('\0') {
+        text.split_inclusive('\n')
+            .map(|line| line.find('\0').map_or(line, |nul| &line[..nul]))
+            .collect::<String>()
+            .into()
+    } else {
+        Rc::from(text)
+    };
     let previous = SCRIPT_INPUT.with(|input| {
         input.replace(Some(ScriptInput {
             text: Rc::clone(&text),
@@ -738,7 +747,6 @@ pub fn read_script_input(buffer: &mut [u8]) -> Option<usize> {
 
 unsafe fn run_script(text: &str, source_name: &str) -> Outcome {
     let mut start = 0;
-    let mut line_offset = 0;
     'parse: loop {
         let rest = &text[start..];
         let (script, failure) = crate::lower::parse_script_prefix(rest);
@@ -800,7 +808,6 @@ unsafe fn run_script(text: &str, source_name: &str) -> Outcome {
                 while !text.is_char_boundary(resumed) {
                     resumed += 1;
                 }
-                line_offset += text[start..resumed].matches('\n').count();
                 start = resumed;
                 continue 'parse;
             }
@@ -812,7 +819,7 @@ unsafe fn run_script(text: &str, source_name: &str) -> Outcome {
                     &failure,
                     source_name,
                     "<input>",
-                    line_offset,
+                    Some(&script),
                 ));
                 write_console(b"Execution halted\n", true);
                 return Outcome::Failed;
@@ -875,7 +882,11 @@ pub unsafe fn run_console(
         if succeeded && let Some(failure) = failure {
             if failure.condition.is_some() {
                 report_toplevel(crate::lower::syntax_failure_unwind(
-                    &text, &failure, "<text>", "<input>", 0,
+                    &text,
+                    &failure,
+                    "<text>",
+                    "<input>",
+                    Some(&script),
                 ));
             } else {
                 let message = crate::lower::script_syntax_failure_message(&script, &failure);

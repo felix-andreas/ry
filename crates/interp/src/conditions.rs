@@ -202,7 +202,11 @@ unsafe fn class_names(class: Sexp, wanted: &[u8]) -> bool {
 pub unsafe fn signal_error(failure: RError) -> Unwind {
     activity::count(Counter::ConditionsSignalled);
     let call = resolve_call(failure.call);
-    let message = failure.message;
+    // GNU R formats a message into a C buffer, so it ends at the first NUL.
+    let mut message = failure.message;
+    if let Some(nul) = message.find('\0') {
+        message.truncate(nul);
+    }
     let saved = interp().handlers.clone();
     let _saved = set_aside(saved.clone(), None);
     let classes: [&[u8]; 3] = [b"simpleError", b"error", b"condition"];
@@ -548,7 +552,10 @@ pub fn warnings_raised() -> u64 {
 pub unsafe fn warning_call(call: Sexp, message: impl Into<String>) -> R<()> {
     WARNINGS.set(WARNINGS.get() + 1);
     let call = resolve_call(call);
-    let message = message.into();
+    let mut message = message.into();
+    if let Some(nul) = message.find('\0') {
+        message.truncate(nul);
+    }
     if crate::base_fast_paths::fast_paths_enabled() {
         match find_handler(&interp().handlers, &WARNING_CLASSES) {
             // Without a handler for the warning, `.signalSimpleWarning` only runs the default

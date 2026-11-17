@@ -1108,7 +1108,7 @@ pub fn stand_in(byte: u8) -> char {
 /// Whether `text` holds a character in the stand-in range. Each one encodes as `F4 8F BE xx` or
 /// `F4 8F BF xx` in UTF-8, and `F4` leads only the last plane of the code space, so most text is
 /// rejected by the byte scan alone.
-fn holds_stand_in(text: &str) -> bool {
+pub fn holds_stand_in(text: &str) -> bool {
     text.as_bytes().contains(&0xF4)
         && text
             .chars()

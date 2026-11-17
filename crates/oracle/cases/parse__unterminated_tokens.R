@@ -1,0 +1,80 @@
+# Tokens the input ends inside, raw strings without a bracket, escapes past their range, and
+# a `;` that ends no expression: the error GNU R's lexer or grammar gives, where it reports
+# it, and the lines it quotes.
+f <- tempfile()
+show <- function(expr) {
+  tryCatch(print(expr), error = function(e) {
+    cat(class(e)[1], "|", gsub(f, "FILE", conditionMessage(e), fixed = TRUE), "|", e$lineno, e$colno, "\n")
+  })
+}
+# A string, a backquoted name and a raw string run to the end of the input.
+show(parse(text = 'x <- "abc'))
+show(parse(text = c('cat("a\\n")', 'x <- "abc', 'print(3)')))
+show(parse(text = c('cat(1)', 'x <- "abc', '', '')))
+show(parse(text = c('cat(1)', 'x <- `abc', 'y')))
+show(parse(text = c('cat(1)', 'x <- r"(abc', 'y')))
+show(parse(text = "x <- r\"-(abc)\""))
+show(parse(text = c("x <- 'a", "b' 'c", "d")))
+show(parse(text = c("x <- 'a", "b' 'c", "d' `e", "f")))
+show(parse(text = c("x <- )", "'a", "b")))
+show(parse(text = c("x <- `a\\`", "b")))
+show(parse(text = c("f('a", "b', `c", "d`, r'(e", "f)', 'g')", "h <- R'[x", "", "y")))
+show(parse(text = "'"))
+show(parse(text = "`"))
+show(parse(text = "r'("))
+show(parse(text = "x <- 'a\n\nb"))
+# A `%` operator ends with its line.
+show(parse(text = c('cat(1)', 'x <- 5 %abc', 'y')))
+show(parse(text = c("x <- 1 %a", "b %c")))
+show(parse(text = "%"))
+show(parse(text = c("x <- %a%", "b")))
+# An escape the lexer rejects comes before the end of the input.
+show(parse(text = c("x <- 'a\\xZ", "b")))
+show(parse(text = "'\\777"))
+show(parse(text = "'\\777'"))
+show(parse(text = "x <- 'abc\\400\nfoo"))
+show(parse(text = "'\\377'"))
+show(parse(text = "'\\U{110000"))
+show(parse(text = "'\\U{41x}'"))
+show(parse(text = "'\\u{41}\\U{00000042}'"))
+# A raw string needs a bracket after its dashes.
+show(parse(text = "r'"))
+show(parse(text = "r\"x\""))
+show(parse(text = "x <- r\"--x\"; y"))
+show(parse(text = "R'-"))
+show(parse(text = "r'-a(b)-'"))
+show(parse(text = "1 + r'x' + 2\n3"))
+show(parse(text = "\tr'\n(a)'"))
+show(parse(text = "r'(a)' r'x"))
+show(parse(text = "r 'x'"))
+show(parse(text = "r'(a)-'\n"))
+# A `;` ends an expression, and nothing else, outside braces.
+show(parse(text = "1;;2"))
+show(parse(text = "{1;;2}"))
+show(parse(text = ";1"))
+show(parse(text = "1;"))
+show(parse(text = "1\n;\n2"))
+show(parse(text = "1; ;2"))
+show(parse(text = "function() {;}"))
+show(parse(text = "1;\n;2"))
+show(parse(text = "x <- 1;;"))
+# A file gives the same locations with and without its last newline.
+for (content in c("1 +\n", "1 +", "1 +\n\n\n", "x <- 'a\n", "x <- 'a", "x <- 'a\n\n", "y\nx <- 'a\nb\n", "1 2\n", "1 2")) {
+  writeBin(charToRaw(content), f)
+  show(parse(f))
+  show(parse(f, keep.source = TRUE))
+}
+show(source(f))
+# The error names the srcfile, and no file without one.
+show(parse(text = "1 +", srcfile = "abc"))
+show(parse(text = "1 +", srcfile = NULL))
+show(parse(text = "1 +", srcfile = 3))
+show(parse(text = "1 +", srcfile = character()))
+show(parse(text = "1 +", srcfile = srcfilecopy("zz", "1 +")))
+show(parse(text = "1 +", srcfile = NA_character_))
+writeLines("1 +", f)
+show(parse(file(f)))
+show(parse(f, srcfile = "q"))
+show(sys.source(f))
+show(str2lang("1 +"))
+show(str2expression(c("1", "2 +")))
