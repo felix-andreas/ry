@@ -8,8 +8,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub use heap::handle::{
-    Alt, Atomic, Chars, Complex, Cx, Elements, Expression, Fresh, Gc, Integer, Kind, List, Local,
-    Logical, Pointer, Raw, Real, Str, Value, Vector,
+    Alt, Atomic, Chars, Complex, Cx, Elements, Expression, Fresh, Gc, Identity, Integer, Kind,
+    List, Local, Logical, Pointer, Raw, Real, Str, Symbol, Value, Vector,
 };
 use {
     crate::{
@@ -165,23 +165,94 @@ pub fn character_vector<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'
         .ok_or_else(|| error("internal error: a character vector has no standard form"))
 }
 
+/// A copy of `vector` with its own element storage, which the caller may fill or change. List
+/// elements and attribute values are shared with the original.
+pub fn shallow_duplicate<'s, T: Vector>(
+    context: &mut Cx<'s>,
+    vector: Local<'_, T>,
+) -> R<Fresh<'s, T>> {
+    // SAFETY: the vector is rooted, and copying allocates, which `&mut Cx` permits.
+    let copy = unsafe { values::shallow_duplicate(vector.raw())? };
+    // SAFETY: the copy of a standard vector is a new standard vector of its type that only
+    // this pointer reaches, and nothing has allocated since it was made.
+    Ok(unsafe { fresh(context, copy) })
+}
+
+/// A copy of `vector` all the way down: its own element storage, and its own copies of the
+/// vectors and pairlists its elements and attributes hold.
+pub fn duplicate<'s, T: Vector>(context: &mut Cx<'s>, vector: Local<'_, T>) -> R<Fresh<'s, T>> {
+    // SAFETY: the vector is rooted, and copying allocates, which `&mut Cx` permits.
+    let copy = unsafe { values::duplicate(vector.raw())? };
+    // SAFETY: as for `shallow_duplicate`.
+    Ok(unsafe { fresh(context, copy) })
+}
+
+/// A copy of `value` for a caller that changes only its attributes. For a long vector it is
+/// an ALTREP wrapper that shares the elements, so the result is a plain value: reaching element
+/// storage takes `dense`, and writing elements takes `shallow_duplicate`.
+pub fn attribute_copy<'s>(context: &mut Cx<'s>, value: Local<'_>) -> R<Local<'s>> {
+    // SAFETY: the value is rooted, and copying allocates, which `&mut Cx` permits.
+    let copy = unsafe { values::shallow_duplicate_attr(value.raw())? };
+    // SAFETY: the copy is a live object and nothing has allocated since it was made.
+    Ok(unsafe { rooted(context, copy) })
+}
+
+/// Roots a new vector a raw call made and types it as one nothing else can see.
+///
+/// # Safety
+///
+/// `raw` is a live standard vector of type `T::TYPE` that no other pointer reaches, and nothing
+/// has allocated since the raw call returned it.
+unsafe fn fresh<'s, T: Vector>(context: &Cx<'s>, raw: Sexp) -> Fresh<'s, T> {
+    // SAFETY: the caller's contract; `rooted` keeps the vector alive for `'s`.
+    unsafe {
+        rooted(context, raw);
+        Fresh::adopt(raw)
+    }
+}
+
+/// The symbol a string names, as GNU R's `installTrChar` gives it: a string in another
+/// encoding names the symbol of its UTF-8 text. Two names are the same name exactly when their
+/// symbols are the same object.
+pub fn install<'s>(context: &mut Cx<'s>, name: Local<'_, Chars>) -> R<Local<'s, Symbol>> {
+    // SAFETY: the string is rooted, and interning a symbol may allocate, which `&mut Cx`
+    // permits.
+    let symbol = unsafe { values::install_charsxp_text(name.raw())? };
+    // SAFETY: `install` returned a live symbol and nothing has allocated since.
+    unsafe { rooted(context, symbol) }
+        .downcast::<Symbol>()
+        .ok_or_else(|| error("internal error: install returned no symbol"))
+}
+
+/// Whether two strings hold the same text, whatever their encoding marks. `NA` equals only
+/// `NA`.
+#[inline]
+pub fn same_text(left: Gc<'_, Chars>, right: Gc<'_, Chars>) -> bool {
+    // SAFETY: both strings are live, and the comparison only reads them.
+    unsafe { values::same_string(left.raw(), right.raw()) }
+}
+
 /// A string's text, decoded when it is marked latin1 or bytes.
+#[inline]
 pub fn text<'a>(chars: Gc<'a, Chars>) -> Cow<'a, str> {
     // SAFETY: the string is live for `'a`, which bounds the text borrowed from it.
     unsafe { values::char_str(chars.raw()) }
 }
 
 /// Whether `chars` is `NA_character_`.
+#[inline]
 pub fn is_na(chars: Gc<'_, Chars>) -> bool {
     chars.raw() == values::na_string()
 }
 
 /// Whether `chars` is marked as bytes, which have no character reading.
+#[inline]
 pub fn is_bytes(chars: Gc<'_, Chars>) -> bool {
     chars.has_mark(gp::BYTES)
 }
 
 /// Whether `chars` is marked latin1.
+#[inline]
 pub fn is_latin1(chars: Gc<'_, Chars>) -> bool {
     chars.has_mark(gp::LATIN1)
 }

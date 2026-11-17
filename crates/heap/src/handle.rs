@@ -110,6 +110,41 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! An object with no element storage has no element access. An ALTREP object is never a vector
+//! kind, so a write into one has to go through a copy the allocator made:
+//!
+//! ```compile_fail,E0277
+//! use heap::handle::{Cx, Local};
+//! fn written_without_storage<'s>(cx: &mut Cx<'s>, copy: Local<'s>) {
+//!     let mut write = unsafe { cx.assume_exclusive(copy) };
+//!     write.split().0[0] = 1.0;
+//! }
+//! ```
+//!
+//! A pointer has no `==`. Two objects are compared with `is`, and strings are not, because one
+//! text can be several objects:
+//!
+//! ```compile_fail,E0369
+//! use heap::handle::{Chars, Gc};
+//! fn compared_by_address(left: Gc<'_, Chars>, right: Gc<'_, Chars>) -> bool {
+//!     left == right
+//! }
+//! ```
+//!
+//! ```compile_fail,E0277
+//! use heap::handle::{Chars, Gc};
+//! fn compared_by_identity(left: Gc<'_, Chars>, right: Gc<'_, Chars>) -> bool {
+//!     left.is(right)
+//! }
+//! ```
+//!
+//! ```no_run
+//! use heap::handle::{Gc, Symbol};
+//! fn same_symbol(left: Gc<'_, Symbol>, right: Gc<'_, Symbol>) -> bool {
+//!     left.is(right)
+//! }
+//! ```
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
@@ -308,6 +343,16 @@ impl<'a, T: Kind> Gc<'a, T> {
         unsafe { self.raw.kind() }
     }
 
+    /// Whether this and `other` are one object. Strings have no such test, because one text
+    /// can be several objects: compare them with `interp::handles::same_text`.
+    #[inline]
+    pub fn is<U: Identity>(self, other: impl Pointer<U>) -> bool
+    where
+        T: Identity,
+    {
+        self.raw == other.raw()
+    }
+
     /// This pointer as a `U`, when the object is one.
     #[inline]
     pub fn downcast<U: Kind>(self) -> Option<Gc<'a, U>> {
@@ -390,6 +435,16 @@ impl<'s, T: Kind> Local<'s, T> {
         unsafe { self.raw.kind() }
     }
 
+    /// Whether this and `other` are one object. Strings have no such test, because one text
+    /// can be several objects: compare them with `interp::handles::same_text`.
+    #[inline]
+    pub fn is<U: Identity>(self, other: impl Pointer<U>) -> bool
+    where
+        T: Identity,
+    {
+        self.raw == other.raw()
+    }
+
     /// This pointer as a `U`, when the object is one.
     #[inline]
     pub fn downcast<U: Kind>(self) -> Option<Local<'s, U>> {
@@ -452,12 +507,22 @@ impl<'s, T: Elements> Local<'s, T> {
         unsafe { Gc::adopt(*(self.raw.data() as *const Sexp).add(index)) }
     }
 
+    /// The elements in order. The walk reads the length once, which is what lets a loop that
+    /// also fills a result compile to one counter: a length reloaded for each element cannot
+    /// be hoisted past the stores into the result.
     #[inline]
-    pub fn iter<'a>(self, cx: &'a Cx<'_>) -> impl ExactSizeIterator<Item = Gc<'a, T::Element>>
+    pub fn iter<'a>(self, _cx: &'a Cx<'_>) -> impl ExactSizeIterator<Item = Gc<'a, T::Element>>
     where
         's: 'a,
     {
-        (0..self.len()).map(move |index| self.get(cx, index))
+        // SAFETY: a standard vector of this kind stores `length` pointers to live objects of
+        // the element kind. Neither the length nor an element of a visible object changes
+        // without `&mut Cx`, which the borrow of the context rules out while the walk lives.
+        let elements: &'a [Sexp] = unsafe { self.raw.slice() };
+        // SAFETY: each element stays live until a safepoint, which also needs `&mut Cx`.
+        elements
+            .iter()
+            .map(|&element| unsafe { Gc::adopt(element) })
     }
 }
 
@@ -479,6 +544,22 @@ pub struct Fresh<'s, T: Vector> {
 }
 
 impl<'s, T: Vector> Fresh<'s, T> {
+    /// A new object some other code allocated, such as a copy.
+    ///
+    /// # Safety
+    ///
+    /// `raw` is a standard vector of type `T::TYPE`, it is rooted until `'s` ends, and no other
+    /// pointer to it exists.
+    #[inline]
+    pub unsafe fn adopt(raw: Sexp) -> Fresh<'s, T> {
+        debug_assert!(admits::<T>(raw), "a pointer of the wrong kind");
+        Fresh {
+            raw,
+            scope: PhantomData,
+            kind: PhantomData,
+        }
+    }
+
     #[inline]
     pub fn len(&self) -> usize {
         // SAFETY: a standard vector keeps its length in its header.
@@ -665,6 +746,10 @@ pub trait Kind: sealed::Sealed + 'static {
     fn admits(kind: SexpType, altrep: bool) -> bool;
 }
 
+/// A kind whose objects are compared by identity. Every kind but [`Chars`] is one: the heap
+/// interns a text once per encoding mark, so two strings with the same text can be two objects.
+pub trait Identity: Kind {}
+
 /// A standard vector.
 pub trait Vector: Kind {
     const TYPE: SexpType;
@@ -695,7 +780,11 @@ impl Kind for Value {
     }
 }
 
+impl Identity for Value {}
+
 impl sealed::Sealed for Alt {}
+
+impl Identity for Alt {}
 
 impl Kind for Alt {
     fn admits(_kind: SexpType, altrep: bool) -> bool {
@@ -715,6 +804,8 @@ macro_rules! kinds {
                 kind == SexpType::$type && !altrep
             }
         }
+
+        impl Identity for $name {}
     )*};
 }
 
@@ -728,14 +819,23 @@ kinds! {
     Str = String;
     List = List;
     Expression = Expression;
-    /// One string, as a character vector's element.
-    Chars = Char;
     Symbol = Symbol;
     Pairlist = Pairlist;
     Language = Language;
     Closure = Closure;
     Environment = Environment;
     Promise = Promise;
+}
+
+/// One string, as a character vector's element. It is not an [`Identity`] kind.
+pub struct Chars;
+
+impl sealed::Sealed for Chars {}
+
+impl Kind for Chars {
+    fn admits(kind: SexpType, altrep: bool) -> bool {
+        kind == SexpType::Char && !altrep
+    }
 }
 
 macro_rules! vectors {

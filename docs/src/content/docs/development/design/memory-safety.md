@@ -48,7 +48,7 @@ The runtime has seven such rules. Each has produced a crash or a wrong answer th
 | --- | --- | --- |
 | A value held across an allocation or a call is rooted | a freed object is read | `datetime__year_overflow`, `apply__lapply_closure_results_stay_rooted` |
 | A store into an old object runs the write barrier | a young object is freed while an old one points at it | `datatable__setcolorder_young_columns`, `datatable__setorder_young_strings` |
-| An element write goes to an object of the right kind that has element storage | the write lands on the next object | `assignment__long_argument_copy_element_stores` |
+| An element read or write goes to an object of the right kind that has element storage | the write lands on the next object, or the read takes another type's bytes for pointers | `assignment__long_argument_copy_element_stores`, `strings__encoding_rejects_non_character` |
 | An object is modified in place only when nothing else can see it | another variable changes | `assignment__dollar_in_place` |
 | A frame's slots and its environment agree about each variable | a stale or missing binding | `environments__unread_loop_variable` |
 | A new object is filled before anything can read or trace it | uninitialized elements are traced | the collector's seeded tests (`heap` `test_gc`) |
@@ -108,7 +108,7 @@ All four are one machine word, the same word a `SEXP` is, because the heap does 
 | --- | --- | --- | --- |
 | `Gc<'a, T>` | read from the heap, not rooted | a load through `&'a Cx` | the next safepoint: it borrows the context |
 | `Local<'s, T>` | rooted in scope `'s` | `cx.root(gc)`, every constructor, every argument, every register operand | the scope ends |
-| `Fresh<'s, T>` | a new object nothing else can see | `cx.alloc::<T>(n)`, `cx.duplicate` | `finish()` turns it into a `Local` |
+| `Fresh<'s, T>` | a new object nothing else can see | `cx.alloc::<T>(n)`, `handles::duplicate` | `finish()` turns it into a `Local` |
 | `Write<'a, 's, T>` | exclusive access to an existing object | the interpreter's ownership checks | it borrows the context mutably |
 
 `Gc` and `Local` are `Copy`. `Fresh` and `Write` are not: each is the only way to reach its object
@@ -171,7 +171,7 @@ only on standard kinds.
 
 | Copy | Raw function | Typed form | Returns |
 | --- | --- | --- | --- |
-| An owning copy, for a caller that writes elements | `values::duplicate`, `values::shallow_duplicate` | `cx.duplicate(vector)`, `cx.shallow_duplicate(vector)` | `Fresh<'s, T>`: a standard vector nothing else sees |
+| An owning copy, for a caller that writes elements | `values::duplicate`, `values::shallow_duplicate` | `handles::duplicate(cx, vector)`, `handles::shallow_duplicate(cx, vector)` | `Fresh<'s, T>`: a standard vector nothing else sees |
 | A copy for a caller that changes only attributes | `values::shallow_duplicate_attr` | `handles::attribute_copy(cx, value)` | `Local<'s, Value>`: for a vector of 64 or more elements, a wrapper that shares the original's data |
 
 The second has no storage of its own when it is a wrapper, so a `Sexp::slice_mut` on it is an
@@ -186,7 +186,7 @@ The two ways from it to a mutable slice both refuse a wrapper:
   to an ownership check, and `Cx::assume_exclusive` accepts only vector kinds.
 - `dense::<Real>` returns the standard vector the wrapper shares, as a `Local<Real>`, which reads
   but does not write. Writing needs a `Write`, and the ownership check fails because the wrapper
-  holds a reference to that vector, so the caller takes `cx.shallow_duplicate`, the owning copy.
+  holds a reference to that vector, so the caller takes `handles::shallow_duplicate`, the owning copy.
 
 The attribute setters accept any `Local<Value>`, so a caller that only changes attributes keeps
 the cheap copy.
@@ -219,7 +219,7 @@ interpreter: its count is one, and no register, handle or escaped list holds it 
 (`slot_owns`, a call's `reusable` test). The functions that establish that fact live in `interp`
 and are the only callers of `Cx::assume_exclusive`, an `unsafe` constructor that returns the
 `Write`. Because a `Write` borrows the context mutably, the fact cannot go stale: no R code runs
-between the check and the write. When the check fails, the caller duplicates (`cx.duplicate`
+between the check and the write. When the check fails, the caller duplicates (`handles::duplicate`
 returns a `Fresh`, never an ALTREP wrapper), stores the copy in the variable and checks again.
 
 `write.split()` gives an atomic vector's element storage and a `reader` for the sources. The
