@@ -13273,8 +13273,10 @@ unsafe fn assign_element(
         let stored = store_element(
             context,
             handles::adopt(context, target),
-            handles::adopt(context, index),
-            handles::adopt(context, value),
+            // SAFETY: the frame's registers, formals or constants hold the subscript and the
+            // value, and the store writes none of those.
+            handles::held(context, index),
+            handles::held(context, value),
             kind,
             // SAFETY: `owned` is the holder's test that its variable alone refers to the value
             // it is asked about.
@@ -13418,7 +13420,7 @@ impl Stored for Str {
             .then_some(text)
     }
 
-    #[inline]
+    #[inline(always)]
     fn put<'s>(context: &mut Cx<'s>, vector: &mut Owned<'s, Str>, at: usize, item: Local<'s, Str>) {
         let mut write = vector.write(context);
         let (mut stores, reader) = write.split_elements();
@@ -13439,7 +13441,7 @@ impl Stored for List {
         (kind != ElementKind::Single && value.r_type() != SexpType::Nil).then_some(value)
     }
 
-    #[inline]
+    #[inline(always)]
     fn put<'s>(context: &mut Cx<'s>, vector: &mut Owned<'s, List>, at: usize, item: Local<'s>) {
         vector.write(context).split_elements().0.set(at, item);
     }
@@ -13458,7 +13460,9 @@ fn store_element<'s>(
     if target.is(value) || handles::is_object(target) || handles::is_array(target) {
         return Ok(None);
     }
-    if let Some(vector) = target.downcast::<Real>() {
+    if let Some(environment) = target.downcast::<Environment>() {
+        Ok(bind_named(context, environment, index, value, kind)?.then_some(target))
+    } else if let Some(vector) = target.downcast::<Real>() {
         store_element_of(context, vector, index, value, kind, claim)
     } else if let Some(vector) = target.downcast::<List>() {
         store_element_of(context, vector, index, value, kind, claim)
@@ -13468,8 +13472,6 @@ fn store_element<'s>(
         store_element_of(context, vector, index, value, kind, claim)
     } else if let Some(vector) = target.downcast::<Logical>() {
         store_element_of(context, vector, index, value, kind, claim)
-    } else if let Some(environment) = target.downcast::<Environment>() {
-        Ok(bind_named(context, environment, index, value, kind)?.then_some(target))
     } else {
         Ok(None)
     }
@@ -13478,7 +13480,7 @@ fn store_element<'s>(
 /// `environment$name <- value` on a plain environment binds the name there, as the primitive
 /// would, without building the `*tmp*` call. A locked or active binding takes that call, which
 /// names it in the error or runs the binding's function.
-#[inline]
+#[inline(always)]
 fn bind_named<'s>(
     context: &mut Cx<'s>,
     environment: Local<'s, Environment>,
@@ -13495,12 +13497,11 @@ fn bind_named<'s>(
     if text.len() != 1 {
         return Ok(false);
     }
-    let name = context.root(text.get(context, 0));
-    let symbol = handles::install(context, name)?;
+    let symbol = handles::install_element(context, text, 0)?;
     handles::bind(context, environment, symbol, value)
 }
 
-#[inline]
+#[inline(always)]
 fn store_element_of<'s, T: Stored>(
     context: &mut Cx<'s>,
     vector: Local<'s, T>,

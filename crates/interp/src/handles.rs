@@ -267,16 +267,36 @@ unsafe fn fresh<'s, T: Vector>(context: &Cx<'s>, raw: Sexp) -> Fresh<'s, T> {
 /// encoding names the symbol of its UTF-8 text. Two names are the same name exactly when their
 /// symbols are the same object.
 #[inline]
-pub fn install<'s>(_context: &mut Cx<'s>, name: Local<'_, Chars>) -> R<Local<'s, Symbol>> {
-    let raw = name.raw();
-    // SAFETY: the string is rooted, and interning a symbol may allocate, which `&mut Cx`
-    // permits. A cached ASCII string names its symbol as it is, so the common name skips the
-    // translation.
+pub fn install<'s>(context: &mut Cx<'s>, name: Local<'_, Chars>) -> R<Local<'s, Symbol>> {
+    // SAFETY: the string is rooted.
+    unsafe { install_raw(context, name.raw()) }
+}
+
+/// [`install`] for element `at` of `names`, which the rooted vector keeps alive, so the name
+/// needs no root of its own.
+#[inline]
+pub fn install_element<'s>(
+    context: &mut Cx<'s>,
+    names: Local<'_, Str>,
+    at: usize,
+) -> R<Local<'s, Symbol>> {
+    let name = names.get(context, at).raw();
+    // SAFETY: the vector is rooted and holds the string.
+    unsafe { install_raw(context, name) }
+}
+
+/// # Safety
+///
+/// `name` is a `CHARSXP` that stays alive through an allocation.
+#[inline]
+unsafe fn install_raw<'s>(_context: &mut Cx<'s>, name: Sexp) -> R<Local<'s, Symbol>> {
+    // SAFETY: interning a symbol may allocate, which `&mut Cx` permits. A cached ASCII string
+    // names its symbol as it is, so the common name skips the translation.
     let symbol = unsafe {
-        if raw.has_gp(gp::ASCII) && raw.has_gp(gp::CACHED) && raw.length() > 0 {
-            crate::heap().install_char(raw)?
+        if name.has_gp(gp::ASCII) && name.has_gp(gp::CACHED) && name.length() > 0 {
+            crate::heap().install_char(name)?
         } else {
-            values::install_charsxp_text(raw)?
+            values::install_charsxp_text(name)?
         }
     };
     // SAFETY: both calls return a symbol, and the symbol table keeps every symbol alive.
@@ -667,4 +687,18 @@ pub unsafe fn with<T>(body: impl for<'s> FnOnce(&mut Cx<'s>) -> R<T>) -> R<T> {
 pub unsafe fn adopt<'s>(context: &Cx<'s>, raw: Sexp) -> Local<'s> {
     // SAFETY: the caller's contract, and nothing allocates before the root.
     unsafe { rooted(context, raw) }
+}
+
+/// `raw` as a value of the context's scope, without a root of the scope's own: the frame
+/// holds an instruction's operands until the instruction ends, and a second root for each
+/// would cost every store.
+///
+/// # Safety
+///
+/// `raw` is a live object, and a root of the caller's keeps it alive until [`with`] returns,
+/// whatever R code runs in between.
+#[inline]
+pub unsafe fn held<'s>(_context: &Cx<'s>, raw: Sexp) -> Local<'s> {
+    // SAFETY: the caller's contract.
+    unsafe { Local::adopt(raw) }
 }
