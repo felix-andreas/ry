@@ -2777,8 +2777,9 @@ fn binds_only_own_name(db: &dyn Db, item: Item<'_>, node: &SyntaxNode) -> bool {
 
 /// The tokens outside nested functions that can start a write in naming: an assignment
 /// operator, `for`, a destructuring `%<-%` or `%->%`, and the by-reference `:=` called by
-/// name, `setnames` and `setcolorder` (backticked or not). It may overcount, which only costs a naming pass, but a write naming records
-/// that this misses would drop a top-level binding.
+/// name, `setnames` and `setcolorder` (bare, backticked or as a string, since `':='(a, b)`
+/// calls the same function). It may overcount, which only costs a naming pass, but a write
+/// naming records that this misses would drop a top-level binding.
 fn write_tokens(node: &SyntaxNode) -> usize {
     node.node_ref()
         .tokens_outside(
@@ -2795,14 +2796,15 @@ fn write_tokens(node: &SyntaxNode) -> usize {
                         | SyntaxKind::EQ
                         | SyntaxKind::SPECIAL
                         | SyntaxKind::IDENT
+                        | SyntaxKind::STRING
                 )
             },
         )
         .filter(|token| match token.kind() {
             SyntaxKind::EQ => token.parent().map(NodeRef::kind) == Some(SyntaxKind::BINARY_EXPR),
             SyntaxKind::SPECIAL => matches!(token.text(), "%<-%" | "%->%"),
-            SyntaxKind::IDENT => matches!(
-                token.text().trim_matches('`'),
+            SyntaxKind::IDENT | SyntaxKind::STRING => matches!(
+                token.text().trim_matches(['`', '"', '\'']),
                 ":=" | "setnames" | "setcolorder"
             ),
             _ => true,

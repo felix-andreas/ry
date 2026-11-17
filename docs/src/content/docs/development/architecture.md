@@ -197,10 +197,18 @@ untouched top-level runs of the old tree around them. A query that reads a tree 
 the file's text and keeps only what it derives, so no memo holds a file's tree. The one syntax a
 memo keeps is the detached copy of an annotation's subtree, described below.
 
-The spliced tree is byte-identical and error-identical to a parse from scratch. The edit-stream
-fuzzer pins that equivalence, and the splice refuses and falls back to a full parse whenever the
-equivalence is not provable, so the store is invisible to every query downstream. Invalidation below
-the level of a whole file stays out of salsa on purpose.
+The spliced tree is byte-identical and error-identical to a parse from scratch, so the store is
+invisible to every query downstream. The parser makes that provable by recording what it read: a
+`Parse` carries a `Lookahead` for each top-level statement, and each `#:` annotation between two
+statements, that read a token past the one it stops on or read the end of the text. A function
+whose return type is followed by a body on the next line has one, and so has an inline union that
+looked for a `|` on the next line, error recovery that asked whether the next line starts a
+statement, and an f-string whose `{}` spans lines. A splice shares the statements up to a line break
+that no old statement read across, parses the lines the edit touched together with their closing
+line break, and shares the rest only when the reparsed statements read nothing past that break and
+no old statement read across it. Anything else is a full parse. The edit-stream and small-edit
+fuzzers pin the equivalence. Invalidation below the level of a whole file stays out of salsa on
+purpose.
 
 The real incrementality happens one level down, in the item tree. An item's identity interns its
 kind, its name, its parent, and a disambiguator, which makes it stable when other items are

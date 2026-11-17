@@ -1866,14 +1866,17 @@ variable) landed with the fix. Candidates for the next ones:
 
 ### Add more relational oracles
 
-The round trip from a definition to its references and back to the cursor is the only relational
-oracle in the tree, and it found a wrong jump in ordinary R. Each of these costs one extra call and
-needs no expected output:
+The IDE battery asks what must hold between answers (`testing.md`, "The editor features"). Two
+relations nobody asks yet, each one extra call with no expected output:
 
-- rename edits equal the references;
 - hover at the definition target names the same symbol as hover at the cursor;
 - completion at a name's first character offers that name;
-- goto-definition is idempotent.
+- the link a hover carries is one of the targets "go to definition" gives. `hover_definition`
+  resolves a name by its own copy of `expression_target`'s rules, and a default pass of the battery
+  with this check finds about ten disagreements: `x[[1]] <- 3` with the cursor on `x` links the hover
+  to the statement while the definition is empty; the others, in generated projects of several
+  files, are not reduced. The end shape is one resolution (`target_at`) that the hover's link
+  reads, with the check in the battery.
 
 ### Run the pinned CRAN corpus as a test, one project per package
 
@@ -1895,14 +1898,6 @@ pass over a non-deterministic reproducer wastes an hour and can conclude the opp
 The corpus arm should force a single thread, and a minimizer (file level first, then statement level)
 belongs in `scripts/` instead of being rewritten for each crash.
 
-### Mutate for the shape that found these, and keep the default budget cheap
-
-The IDE round trip needs about 1,200 iterations to surface this class, and the default 300 never
-does. Raising the default is the wrong lever, because that battery already costs 216 s. Every
-failing input had the same shape: two tokens abutting with no separator, as in `"s"broken <- ...`.
-The seed-mutation arm produces that shape by accident, and a grammar generator almost never does.
-Add "delete a separator" as an explicit mutation, and run the high budget nightly.
-
 ## Open: what the fuzzers actually feed the code
 
 An independent review measured the generators rather than reading them. Every number came from a
@@ -1910,94 +1905,17 @@ probe that reimplements each generator arm byte for byte, with the same RNG cons
 budgets, and from real `-C instrument-coverage` region counts. A default battery run generates
 11,735 inputs, and 98.7% of the wall clock goes to the two batteries with the worst input quality.
 
-### The format battery's 4,500 generated inputs add 8 regions of 2,951
+### What the shared generator leaves out
 
-Leave-one-out region coverage of `format.rs`, where the whole battery reaches 2,771 of 2,951:
-dropping `fuzz_random_bytes` loses none, dropping `fuzz_seed_mutations` loses none, and dropping
-token soup loses 4. Dropping all three as a block takes 2,771 to 2,763. `fixture_sources_hold_invariants`
-alone covers 2,762 and contributes 410 unique regions.
-
-The earlier figure of 14 in 1500 for the random-byte arm reaching the formatter body is confirmed,
-and it is worse than it reads. Eleven of the 14 are empty or whitespace, so the arm formats a
-program with at least one token three times in 1500, and never one with ten tokens.
-
-Delete the random-byte arm. Cut token soup to about 200, because it is the cheapest source of
-parser-error shapes at 33 of 35. Seed the mutations from the fixture corpus instead of from the 35
-hand-written seeds.
-
-### The generators cannot express most of the type system
-
-Normalizing diagnostics to message shapes, all three semantics fuzz arms reach 60 shapes, of which
-33 are parser errors, 9 are distinct `type-mismatch` shapes and none are lints. The program corpus
-reaches 110 and the typing fixtures reach 80.
-
-In 250 generated programs the annotation grammar produces `TYPE_REF`, `TYPE_FUNCTION` and
-`TYPE_RECORD`, and no unions, binders, applications, vectors, `list[T]`, tuples, parens, optional
-`[x]:` parameters or rest `...r:` parameters. The generator calls 6 of 872 declared stub names and
-reaches 1 of 37 overload sets. No harness emits `library(...)`, so every conditional namespace and
-the whole non-standard-evaluation ladder is unreachable, and nothing anywhere emits `setClass`,
-`setGeneric`, `R6Class` or `new()`. `metadata.rs` sits at 7.63% of regions, and `lints.rs` produces
-no findings in 250 programs.
-
-### Grammar-directed generation, prototyped and measured
-
-A 250-line recursive generator over the R grammar crossed with the `#:` grammar produced 1,500
-programs in 0.338 s.
-
-| metric | best current arm | grammar prototype |
-|---|---|---|
-| parses clean | 35.3% | 100% |
-| formats with 10 or more tokens | 8.0% | 41.3% mutated |
-| `parser.rs` regions | 87.27% | 93.46% |
-| semantic regions across 9 files | 11,073 | 12,888 |
-| diagnostic shapes | 60 | 95 |
-| distinct `type-mismatch` shapes | 9 | 17 |
-| lint shapes | 0 | 5 |
-| `ide::type_definition` hits | 0 of 7,884 | 80 of 23,826 |
-
-Add it alongside the existing arms rather than replacing them, because token soup still owns 24
-parser-error shapes. Semantic coverage then goes from 11,073 to 13,306 regions. The typing fixtures
-still lead at 14,580, so the corpus beats synthesis and both beat noise.
-
-### The best inputs are already in the tree, and only one crate uses them
-
-`fixture_sources_hold_invariants` exists only in `format`. The same 388 typing-fixture sources run
-through the semantic pipeline reach 86.92% of `check.rs` and 80 shapes, against the entire generated
-battery's 54.35% and 60. Wire it into `syntax`, `semantics` and `ide`, and use both corpora as
-mutation seeds rather than only as fixed inputs.
-
-The program-corpus arm as landed deserves one fair criticism. It runs one shared database over all
-1,967 files, calls `file_diagnostics` only, and asserts never-panic plus range geometry. That shared
-project changes what is tested: `unresolved` collapses from 284 to 148 while `duplicate` explodes
-from 20 to 2,182, because 1,967 unrelated files redeclare each other's names. Run per file with the
-full battery and it reaches 110 shapes. Fix it by batching into projects of a sane size and running
-the full `check_semantics_invariants`. The cost is fresh databases, at about 9 ms each in release
-and 113 ms in debug, so this wants the batteries in release or a lower count of databases per input.
-
-### The IDE battery costs 216 s and never reaches the type-driven features
-
-`type_definition` returns `Some` zero times in 7,884 offsets. That is structural, because it needs a
-`TyKind::Named` and no IDE seed declares a `@type`. `signature_help` fires at 0.5%, and 86.7% of
-inputs do not parse. Swapping the 10 hand-written seeds for grammar-generated programs that declare
-and use nominals took `ide.rs` from 52.58% to 68.38% on fewer inputs. Cap a generated program at
-about 10 statements, because a 150-input grammar sweep cost 81 s against 45 s for 300 tiny mutated
-ones.
-
-### The semantics incremental invariant never performs a small edit
-
-The fuzz harness's `run_single_file` derives its edit by generating an unrelated program, so the
-computed splice covers 97.3% of the old text on average and only one pair in 250 touches 10% or less.
-`syntax::reparse` therefore takes the full-parse fallback essentially always, and the engine sees
-whole-file invalidation every time. The splice-reuse path and per-item early cutoff, which are the
-architecture's core claim, are never exercised. Derive the edit from the source instead, by
-replacing or inserting one statement at a boundary.
+`syntax::testing::generate_program` grows typed programs from sorts and whole-statement snippets
+(aliases, records, tags, generics, the object systems, a data.table and a data.frame statement).
+It writes no `DataFrame` code, so frame queries, `Expr.col` and `GroupBy` reach the batteries only
+through fixture cases. A `DataFrame` sort with its verbs is the next addition. The generator's
+coverage is unmeasured: the figures on record (`parser.rs` 87%, 60 diagnostic shapes, `ide.rs`
+53%) are those of the generators it replaced.
 
 ### Smaller items, each with its measurement
 
-- **The syntax edit stream degenerates, and its coverage is fine anyway.** No buffer of 400 parses
-  clean, only 89 distinct shapes appear, and 60 steps lex to two tokens because an inserted `"`
-  swallows the buffer. Yet `reparse.rs` sits at 96.12% against a grammar-directed stream's 96.44%.
-  Reset the buffer every 20 steps or so and skip a near-empty one. Do not rewrite it.
 - **Coverage-guided fuzzing covers 15 of 17 targets, shallowly on the slow ones.**
   `just fuzz-all 60 runtime` runs them, locally or in the staged `test.yml` once it is accepted and
   someone starts it or tags a release. What it leaves open:
@@ -2036,9 +1954,8 @@ replacing or inserting one statement at a boundary.
   justfile fetches it, so `fuzz_corpus_seeded` in `syntax` and in `format` returns early. That is
   about 1,050 budgeted inputs that never run, behind a skip line `cargo test` hides. It is the same
   "green means nothing ran" species the `FIXTURE_FILTER` guard already fixed.
-- **Three surfaces have no fuzz coverage at all.** Generated `.Rtypes` text never reaches the stub
-  loader, which leaves `stubs.rs` at 60.67%. `PackageMetadata` appears in no harness. The IDE arm
-  only ever uses `DocumentKind::Package`.
+- **Two surfaces have no fuzz coverage at all.** Generated `.Rtypes` text never reaches the stub
+  loader, which leaves `stubs.rs` at 60.67%. `PackageMetadata` appears in no harness.
 - **The review's fourth item here was wrong, and the correction is the useful part.** It reported
   `syntax::literate::r_source_of_literate` as having no test of any kind. It has eight unit tests,
   and three of them already assert the byte-length invariant, including one for multibyte prose. The
@@ -2209,6 +2126,12 @@ Gaps in the simulation, fuzzing and scenario design that `development/robustness
 - **Run `just fuzz-deep` on a schedule.** It needs about 30 GB of build space (it builds every test binary, with line tables only) and GNU R with testthat at `R_LIBS_USER` for the scenario-backed suites; a scheduled run passes a fresh base (`just fuzz-deep 480 $(date +%s)`). One partial round from base 2000000 has run: the libr GC-stress suites, format, and heap passed, and the format and ide fuzzers found the two bugs now pinned in their regression lists. The language-server simulation, the C API sequences and the oracle torture have not had a deep window yet.
 - **GC torture over the package test suites.** `RY_GC_STRESS=1 oracle packages --runtime ry` against a corpus (`--corpus DIR` with `sources/`, `library/` and `closure.txt`) runs each package's own tests under collection stress. Over the 24 testthat-closure packages, R6, brio and callr passed under stress; the run stopped in cli, and the full 67-package closure has not run. Collector, barrier and rooting bugs it finds go to the heap work with the package, the stress mode and the first bad frame.
 - **rprojroot's tests fail on ry and pass on GNU R** (testthat closure, `oracle packages`); not yet triaged.
+- **Three splice guards read text where the parser could say what it looked at**
+  (`crates/syntax/src/reparse.rs`). `try_splice` recognizes an unterminated quote by its error
+  message (`starts_with("unterminated")`), and `anchor_ok` and `middle_touches_annotation` search
+  for `#:` next to the edit. The parser records how far each statement looked ahead; a lexer that
+  recorded the same for an open quote and for annotation stitching would replace all three and
+  let edits beside an annotation splice.
 - **The splice-reparse cross-check is the only `enable_invariants()` check.** Candidates: salsa
   query results recomputed in a fresh database at checkpoints, `LineIndex` round trips at the
   protocol edge, and the heap's `RY_GC_VERIFY` barrier check switched on by the same call.
@@ -2235,25 +2158,12 @@ not shown reachable from today's callers. But "an IDE feature never panics on a 
 stated soundness invariant with nothing enforcing it, and the CRLF break sits on the Windows default
 path.
 
-### The IDE arm asserts almost nothing
+### Hand-written seed lists remain beside the fixture arms
 
-Of 13 feature calls per offset, only `hover` is checked, and only for determinism. Eight are
-`let _ = ...`, which is never-panic only.
-
-Nothing asserts the invariant that actually matters and that memory already states: every range a
-feature returns lies inside the file. `definition`, `references`, `rename`, `type_definition`,
-`code_actions`, `inlay_hints` and `document_symbols` all hand ranges straight to the editor. Assert
-in-bounds ranges and determinism for every range-returning feature, and pay for it with the offset
-sampling the economics review costs out. That is the same wall clock for several times the oracle.
-
-### Seeds are hand-maintained while 1,183 fixture sources sit unused
-
-The batteries seed from 81 hand-written strings and never see the 1,183 fixture cases,
-which are the richest R corpus in the repo and the one that grows with every change. Seed the
-`syntax` and `format` batteries from it, delete the three `SEEDS` lists, which is about 110 lines,
-and keep a hand seed only where it encodes something the fixtures do not. For `semantics`, use
-fixture sources as mutation seeds rather than one per input, because 1,183 times 480 ms is 9.5
-minutes.
+Every analysis battery reads the fixture cases and the program corpus
+(`syntax::testing::fixture_case_sources`, `program_corpus_sources`), and the `SEEDS` lists of
+`format` and `ide` remain as mutation donors. Mutate fixture cases instead and delete the lists,
+keeping a hand seed only where it encodes something no fixture does.
 
 ### Two real invariants hold today, are unasserted, and cost about five lines each
 
@@ -2776,6 +2686,12 @@ the trailing comma introduces a missing argument, so it parses identically to th
 the space serves, and the `trailing-comma` lint reports the mistake.
 
 ## Open: semantics
+
+### A `#:` comment after a type definition annotates the next binding
+
+After `type P = Record{x: double} #: integer`, the line `p: P <- ...` reports
+`annotation-mismatch` against `integer`. The comment should annotate nothing, or be reported
+where it stands.
 
 ### A list operation over a record still loses the field types
 
@@ -3801,6 +3717,46 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
     package's R source for navigation, would close it.
   - A named argument that R completes by partial matching (`f(fac = 1)` for `factor`) is not
     linked to its parameter, so a parameter rename leaves it behind.
+- Rename gaps the IDE battery's rename check leaves out (`crates/ide/src/testing.rs`,
+  `check_rename_keeps_meaning`), each a rename that leaves code meaning something else:
+  - **Rename of a field follows one value.** Renaming `x` in
+    `points <- [(x = 1, y = 2), (x = 3, y = 4)]` edits one literal, and a `match` pattern
+    `(x = horizontal, y = vertical)` or an `Expr.col("x")` string that names the field is left
+    behind. A record field belongs to its type, so the target is the field of the type.
+  - **Rename of a field is refused for any same-named spelling in any subscript.** The screen
+    (`SpellingKind::Untraced` in `crates/ide/src/fields.rs`) is by name across the project, so a
+    global `n` read as `x[n]` on a plain vector refuses the rename of a record's field `n`, and
+    references from a field leave out the `"y"` of `x[["y"]]` that causes a refusal. Typing the
+    indexed value would tell a frame query and a list read from a vector subscript, and would
+    let the string and column reads be occurrences.
+  - **Rename leaves the uses of a `%op%` behind.** After `` `%plus%` <- function(x, y) x + y ``,
+    references and rename from the definition list only the definition, not `a %plus% b`.
+  - **Rename takes a script's reads of a library name it later shadows.** In
+    `letters <- toupper(letters)` the right-hand `letters` reads the library's value and is renamed
+    with the binding.
+  - Rename of a `DataFrame` column, or of a list field read through `[["name"]]`, `[, name]` or
+    `:=`, is refused, not carried through those reads.
+  - **Rename of an S3 generic leaves its methods behind.** Renaming `value` in
+    `value <- function(x, ...) UseMethod("value")` keeps `value.default` and the `"value"`
+    string, so dispatch finds nothing afterwards.
+- **Editor targets ignore which files see a global.** A script's top-level names are its own,
+  and the checker types a read of `helper` in `scripts/b.R` or `R/c.R` as `Unknown` when only
+  `scripts/a.R` defines it. Definition, references and rename still lead from those reads to
+  `scripts/a.R`, so renaming a script's `step` rewrites a package file's call to `stats::step`.
+  The target of a global should carry the scope that sees it (the package, the test helpers,
+  one script), and occurrences should stay inside it.
+- **A read that may be a local or a global.** In
+  `x <- 1; f <- function(flag) { if (flag) x <- 2; x }` the last `x` reads the local on one path
+  and the global on the other. It is an occurrence of the local only, so a rename of the global
+  leaves `f(FALSE)` reading a name that is gone. In
+  `f <- function() while (x < 3) x <- x + 1` the condition's `x` is listed by the global's
+  references and by the local's, and a rename from either side renames half of what it reads.
+  Rename should take both symbols together or refuse.
+- A field read through a project function that returns `invisible(list(...))` navigates to the
+  function, not to the field.
+- `x <- #: integer` followed by `1L` on the next line parses and checks without a finding, and the
+  formatter refuses the file. One of the two should change: the parser reports the annotation that
+  interrupts its statement, or the formatter lays it out.
 - Not done from rust-analyzer's list, with the reason:
   - Closing-brace hints (`} # fn_name`): cheap, worth adding once someone asks; long R functions
     are where they help.

@@ -341,3 +341,23 @@ token "team" Property
 token "tax" Property
 token "amount" Property
 lens run file at line 3
+
+#---- cursor_on_a_string_quote_stays_covered
+x <- $0"k"
+#++++
+symbol x (Value) at "x"
+select "\"k\""
+select "x <- \"k\""
+
+#---- cursor_in_block_indentation_stays_covered
+f <- function() {
+ $0 1
+}
+#++++
+symbol f (Function fn()) at "f"
+fold 0..=1 Block
+token "f" Function
+lens references "f"
+select "{\n  1\n}"
+select "function() {\n  1\n}"
+select "f <- function() {\n  1\n}"
