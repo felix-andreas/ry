@@ -128,13 +128,15 @@ pub unsafe fn is_native_value(value: Sexp) -> bool {
 }
 
 /// A builtin's result for one argument value when that takes no dispatch, no checks and no
-/// handle scope, or `None` for the full call (see [`BuiltinDef::unary`]).
+/// handle scope, or `None` for the full call (see [`BuiltinDef::unary`]). The caller holds the
+/// argument, in a register or under a root, until the entry returns.
 pub type UnaryFn = unsafe fn(Sexp) -> R<Option<Sexp>>;
 
 /// A builtin's result for the call and its argument values in formal order when that takes no
 /// dispatch, no checks and no handle scope of its own, or `None` for the full call (see
 /// [`BuiltinDef::direct`]). Most entries ignore the call, which only names the builtin's
-/// context, as `.Call` needs for its traceback.
+/// context, as `.Call` needs for its traceback. The caller holds every argument value, in a
+/// register or under a root, until the entry returns.
 pub type DirectFn = unsafe fn(Sexp, &[Sexp]) -> R<Option<Sexp>>;
 
 pub struct BuiltinDef {
