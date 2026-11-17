@@ -3501,6 +3501,7 @@ fn pattern_text<'a, 's: 'a>(
 }
 
 /// A string as the regular expression engine sees it, as [`subject_at`] reads it.
+#[inline]
 fn subject(chars: Gc<'_, Chars>, use_bytes: bool) -> Option<Cow<'_, str>> {
     if handles::is_na(chars) {
         None

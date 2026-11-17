@@ -149,6 +149,14 @@ fn do_set_comment<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local
 
 /// Element `index` of any vector as a length-one vector (or, for lists, the element).
 pub(crate) fn element<'s>(context: &mut Cx<'s>, vector: Local<'s>, index: usize) -> R<Local<'s>> {
+    element_inline(context, vector, index)
+}
+
+/// [`element`] compiled into its caller: the loops of `for` and the apply functions read one
+/// element per iteration through [`vector_element`], where a second call frame costs as much
+/// as the read.
+#[inline(always)]
+fn element_inline<'s>(context: &mut Cx<'s>, vector: Local<'s>, index: usize) -> R<Local<'s>> {
     // String and list elements read through the ALTREP class's `Elt` method on their own, and
     // logical, integer and double ones through `int_elt` and `real_elt`.
     match vector.r_type() {
@@ -181,12 +189,13 @@ pub(crate) fn element<'s>(context: &mut Cx<'s>, vector: Local<'s>, index: usize)
 ///
 /// # Safety
 ///
-/// The caller is on the interpreter's thread and holds no reference into the heap, `vector` is
-/// live. The result is rooted in the caller's handle scope, as a raw allocation is.
+/// The caller is on the interpreter's thread and holds no reference into the heap, and a root
+/// of its own keeps `vector` alive until this returns. The result is rooted in the caller's
+/// handle scope, as a raw allocation is.
 pub unsafe fn vector_element(vector: Sexp, index: usize) -> R<Sexp> {
-    handles::with_result(|context| {
-        let vector = handles::adopt(context, vector);
-        element(context, vector, index).map(Local::raw)
+    handles::in_caller_scope(|context| {
+        let vector = handles::held(context, vector);
+        element_inline(context, vector, index).map(Local::raw)
     })
 }
 
@@ -290,12 +299,12 @@ pub(crate) fn store_element<'s>(
 ///
 /// # Safety
 ///
-/// The caller is on the interpreter's thread and holds no reference into the heap, both are
-/// live, and the caller may change `to` where it is.
+/// The caller is on the interpreter's thread and holds no reference into the heap, roots of its
+/// own keep both vectors alive until this returns, and it may change `to` where it is.
 pub unsafe fn copy_element(from: Sexp, from_index: usize, to: Sexp, to_index: usize) -> R<()> {
     handles::with(|context| {
-        let from = handles::adopt(context, from);
-        let mut to = Owned::assume(handles::adopt(context, to));
+        let from = handles::held(context, from);
+        let mut to = Owned::assume(handles::held(context, to));
         store_element(context, from, from_index, &mut to, to_index)
     })
 }

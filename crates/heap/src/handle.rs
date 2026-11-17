@@ -287,10 +287,24 @@ impl<'s> Cx<'s> {
     pub fn alloc_unfilled<T: Vector>(&mut self, length: usize) -> HeapResult<Unfilled<'s, T>> {
         // SAFETY: the heap is live, and `&mut self` means no slice or unrooted value is alive.
         let heap = unsafe { &mut *self.heap.as_ptr() };
-        // SAFETY: `T::TYPE` is a vector type. Its elements are written before anything reads
-        // them, by `Unfilled::fill`, the only way to the vector; a list or string vector is
-        // filled with `NULL` or the empty string as `alloc_vector` fills it.
-        let raw = unsafe { heap.alloc_vector_uninit(T::TYPE, length)? };
+        let raw = match T::TYPE {
+            SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::I64
+            | SexpType::Complex
+            | SexpType::Raw => {
+                // SAFETY: the elements are written before anything reads them, by
+                // `Unfilled::fill`, the only way to the vector.
+                unsafe { heap.alloc_vector_uninit(T::TYPE, length)? }
+            }
+            // A list or string vector is filled with `NULL` or the empty string, because a
+            // collection may trace it before the fill. The heap's inline path keeps that one
+            // call deep, as for a number vector.
+            // SAFETY: `T::TYPE` is a vector type, and a length past `isize` wraps to a
+            // negative one, which the heap refuses.
+            _ => unsafe { heap.alloc_vector_inline(T::TYPE, length as isize)? },
+        };
         heap.root(raw);
         Ok(Unfilled {
             raw,

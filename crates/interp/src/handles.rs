@@ -643,6 +643,13 @@ pub fn is_object(value: impl Pointer<Value>) -> bool {
     unsafe { value.raw().is_object() }
 }
 
+/// Whether `value` is an ALTREP instance, whose contents its class computes.
+#[inline]
+pub fn is_altrep(value: impl Pointer<Value>) -> bool {
+    // SAFETY: as for `is_object`.
+    unsafe { value.raw().is_altrep() }
+}
+
 /// Whether `value` is one of ry's Arrays, whose stores go through the checks in `arrays`.
 #[inline]
 pub fn is_array(value: impl Pointer<Value>) -> bool {
@@ -1377,6 +1384,9 @@ pub fn factor_as_character<'s>(context: &mut Cx<'s>, factor: Local<'s>) -> R<Loc
 /// `object` as an ordinary object: an ALTREP instance's expanded form, anything else itself.
 #[inline]
 pub fn materialize<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Local<'s>> {
+    if !is_altrep(object) {
+        return Ok(object);
+    }
     // SAFETY: the object is rooted, and expanding it may run its class's methods, which
     // `&mut Cx` permits.
     Ok(unsafe { rooted(context, values::materialize(object.raw())?) })
@@ -1763,6 +1773,7 @@ pub fn record_subset2<'s>(
 
 /// The value `name` has in the frame of `environment` itself, its promise forced, or `None`
 /// when the frame does not bind it: `e[["name"]]` and `e$name`.
+#[inline]
 pub fn frame_value<'s>(
     context: &mut Cx<'s>,
     environment: Local<'s>,
@@ -1777,8 +1788,12 @@ pub fn frame_value<'s>(
         if value == values::unbound() {
             return Ok(None);
         }
-        let value = rooted(context, value);
-        Ok(Some(rooted(context, crate::eval::value_of(value.raw())?)))
+        // A promise roots itself while its code runs, and it holds its value afterwards.
+        let value = match value.kind() {
+            SexpType::Promise => crate::eval::force_promise(value)?,
+            _ => value,
+        };
+        Ok(Some(rooted(context, value)))
     }
 }
 
