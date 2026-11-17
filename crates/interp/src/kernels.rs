@@ -220,7 +220,9 @@ unsafe fn complex_binary(
     destination: Option<Sexp>,
 ) -> R<Option<Sexp>> {
     let operand = |value: Sexp| match value.kind() {
-        SexpType::Complex => bare(value),
+        SexpType::Complex => {
+            value.attrib() == values::nil() && !value.is_altrep() && !value.is_array()
+        }
         SexpType::Real => plain(value),
         _ => plain(value) && r_at_least(4, 4),
     };
@@ -350,11 +352,6 @@ pub unsafe fn plain(value: Sexp) -> bool {
 /// Whether a kernel may write its result into `value`: a [`plain`] vector that is not ALTREP.
 unsafe fn writable(value: Sexp) -> bool {
     !value.is_altrep() && plain(value)
-}
-
-/// Whether a vector has no attributes and is neither ALTREP nor an Array.
-fn bare(value: Sexp) -> bool {
-    value.attrib() == values::nil() && !value.is_altrep() && !value.is_array()
 }
 
 /// A logical, integer, double or complex vector's elements as a [`Complexes`] operand.
