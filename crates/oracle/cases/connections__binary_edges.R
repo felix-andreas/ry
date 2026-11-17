@@ -24,8 +24,9 @@ x <- "a\xe4"; Encoding(x) <- "bytes"; t_(writeChar(x, raw(), nchars = 1)); t_(wr
 t_(writeChar("abc", f, nchars = c(1L, 2L))); t_(writeChar("abc", f, eos = c("a", "b"))); t_(writeChar("abc", f, eos = NA)); t_(writeChar("abc", f, eos = NA_character_)); t_(readBin(f, "raw", 20))
 t_(writeChar(c("abc", "de"), f, nchars = c(1L, NA))); t_(readBin(f, "raw", 20)); t_(writeChar(c("abc", "de"), raw(), nchars = c(1L, NA))); t_(writeChar(c("abc", "d\xffe"), f, nchars = c(2L, 3L))); t_(readBin(f, "raw", 20))
 # GNU R never sets the byte after a string it breaks at 10000 bytes, so that string's length
-# differs between machines (10000 or more). The case prints its first 10000 bytes only.
-writeBin(as.raw(c(rep(0x61, 10005), 0, 0x62, 0)), f); con <- file(f, "rb"); x <- NULL; t_(x <- readBin(con, "character", 5)); print(nchar(x)[-1]); print(substring(x[1], 1, 10000) == strrep("a", 10000)); close(con)
+# differs between machines (10000 or more) and it may not be valid text. The case looks at its
+# first 10000 bytes only.
+writeBin(as.raw(c(rep(0x61, 10005), 0, 0x62, 0)), f); con <- file(f, "rb"); x <- NULL; t_(x <- readBin(con, "character", 5)); print(nchar(x[-1])); print(all(charToRaw(x[1])[1:10000] == as.raw(0x61))); close(con)
 writeBin(as.raw(c(0x61, 0, 0x62)), f); con <- file(f, "rb"); t_(readBin(con, "character", 5)); t_(readBin(con, "character", 5)); close(con)
 t_(readBin(as.raw(1:8), "integer", 2, signed = FALSE)); t_(readBin(as.raw(1:8), "double", 1, signed = FALSE)); t_(readBin(as.raw(1:8), "raw", 1, signed = FALSE)); t_(readBin(as.raw(1:8), "logical", 1, size = 1, signed = FALSE)); t_(readBin(as.raw(1:16), "complex", 1, signed = FALSE)); t_(readBin(as.raw(1:8), "character", 1, signed = FALSE))
 t_(readBin(as.raw(1:8), "integer", 2, size = 3)); t_(readBin(as.raw(1:8), "integer", 2, size = 0)); t_(readBin(as.raw(1:8), "integer", 2, size = -1)); t_(readBin(as.raw(1:8), "raw", 2, size = 2)); t_(readBin(as.raw(1:8), "double", 2, size = 2)); t_(readBin(as.raw(1:8), "character", 2, size = 2))

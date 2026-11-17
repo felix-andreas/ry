@@ -406,7 +406,10 @@ fn main() -> ExitCode {
             Duration::from_secs(timeout),
             &Effort {
                 budget,
-                deadline: minutes.map(|minutes| Instant::now() + Duration::from_secs(minutes * 60)),
+                // A number of minutes too large for the clock is no deadline.
+                deadline: minutes.and_then(|minutes| {
+                    Instant::now().checked_add(Duration::from_secs(minutes.saturating_mul(60)))
+                }),
                 jobs: jobs
                     .or_else(|| std::thread::available_parallelism().ok().map(usize::from))
                     .unwrap_or(1),

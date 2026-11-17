@@ -211,7 +211,9 @@ const NEUTRAL_STATEMENTS: &[&str] = &[
     "if (TRUE) NULL",
 ];
 
-/// Statements that leave a body's result alone and read the parameter `{}`.
+/// Statements that read the parameter `{}`. They leave a body's result alone unless the body
+/// depends on when the argument is forced: `force` and the self-assignment evaluate it at once,
+/// which raises the error of a missing argument early and moves a side effect of its promise.
 const NEUTRAL_PARAMETER_STATEMENTS: &[&str] = &[
     "missing({})",
     "exists(\"{}\", inherits = FALSE)",

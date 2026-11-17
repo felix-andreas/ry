@@ -60,9 +60,11 @@ too, so the fuzzer does not need to know which code is dead.
 The mutator (`oracle::mutate::perturb`) has two kinds for it. *Dead code* inserts a statement
 that never runs, such as `if (FALSE) {...}` around a statement taken from elsewhere in the
 program, an unused local closure, or a loop over `NULL`. *Neutral code* inserts a statement with
-no effect on the result, such as `sys.call()`, `gc(FALSE)`, a `tryCatch` around `NULL`, or, in a
-function with parameters, `x <- x` and `force(x)`. Both apply inside function bodies, where the
-compiler works. The `perturbed` kind makes four to twelve attempts on a grammar, metamorphic or
+no effect on the result, such as `sys.call()`, `gc(FALSE)` or a `tryCatch` around `NULL`. In a
+function with parameters it also inserts `x <- x` and `force(x)`, which evaluate the argument at
+once: that changes a program that leaves the argument missing or depends on when its promise
+runs, and GNU R runs the same mutant, so the comparison holds either way. Both apply inside
+function bodies, where the compiler works. The `perturbed` kind makes four to twelve attempts on a grammar, metamorphic or
 language program and keeps each mutant that parses, and the `corpus` kind draws them among its
 other mutations.
 

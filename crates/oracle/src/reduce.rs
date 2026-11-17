@@ -27,7 +27,11 @@ use {
         Engine, EngineError, Outcome, differing_expressions,
         fuzz::{Difference, classify},
     },
-    std::{fmt, path::Path, time::Instant},
+    std::{
+        fmt, io,
+        path::{Path, PathBuf},
+        time::Instant,
+    },
     syntax::{
         NodeOrToken,
         SyntaxKind::{self, *},
@@ -250,8 +254,9 @@ pub struct Effort<'a> {
 }
 
 /// Reduces `program`, on which `engine` diverges from GNU R (`reference`), to a smaller program on
-/// which it diverges with the same [`Signature`], within `effort`. Candidates are written to
-/// `directory`.
+/// which it diverges with the same [`Signature`], within `effort`. Each candidate runs in a directory of its
+/// own under `directory`, because a program may write files beside itself and candidates run
+/// side by side.
 ///
 /// GNU R must parse every candidate, and when GNU R ran the original to completion it must run
 /// the candidate to completion too, so a crash does not reduce to a program that is wrong R.
@@ -262,12 +267,20 @@ pub fn reduce_divergence(
     directory: &Path,
     effort: &Effort,
 ) -> Result<Reduction, ReduceError> {
-    let write = |path: &Path, text: &str| {
-        std::fs::write(path, text)
-            .map_err(|error| ReduceError::Write(format!("{}: {error}", path.display())))
+    let failed =
+        |path: &Path, error: io::Error| ReduceError::Write(format!("{}: {error}", path.display()));
+    // A candidate starts in an empty directory, so no file an earlier one wrote decides its run.
+    let place = |slot: usize, text: &str| -> Result<PathBuf, ReduceError> {
+        let home = directory.join(format!("slot-{slot}"));
+        if home.exists() {
+            std::fs::remove_dir_all(&home).map_err(|error| failed(&home, error))?;
+        }
+        std::fs::create_dir_all(&home).map_err(|error| failed(&home, error))?;
+        let path = home.join("reduce.R");
+        std::fs::write(&path, text).map_err(|error| failed(&path, error))?;
+        Ok(path)
     };
-    let path = directory.join("reduce.R");
-    write(&path, program)?;
+    let path = place(0, program)?;
     let reference_outcome = reference
         .run(&path)
         .map_err(|error| ReduceError::Reference(error.to_string()))?;
@@ -289,8 +302,7 @@ pub fn reduce_divergence(
         Signature::Crashed(_) | Signature::TimedOut | Signature::Failed
     );
     let shows = |slot: usize, candidate: &str| -> Result<bool, ReduceError> {
-        let path = directory.join(format!("reduce-{slot}.R"));
-        write(&path, candidate)?;
+        let path = place(slot, candidate)?;
         let reference_runs = || match reference.run(&path) {
             Ok(outcome) if parse_error(&outcome).is_some() => None,
             Ok(outcome) if completes && !outcome.errors.is_empty() => None,
@@ -347,10 +359,12 @@ pub fn reduce_divergence(
         }
         calls += found.map_or(candidates.len(), |index| index + 1);
         let smallest = found.map(|index| candidates[index].as_str());
+        // The reduction is worth more than its checkpoint, so a checkpoint that cannot be
+        // written is reported and the reduction goes on.
         if let (Some(checkpoint), Some(smallest)) = (effort.checkpoint, smallest)
-            && let Err(error) = write(checkpoint, smallest)
+            && let Err(error) = std::fs::write(checkpoint, smallest)
         {
-            failure.get_or_insert(error);
+            eprintln!("could not write {}: {error}", checkpoint.display());
         }
         if let Some(smallest) = smallest
             && reported.elapsed().as_secs() >= 15
@@ -365,15 +379,12 @@ pub fn reduce_divergence(
         found
     });
     for slot in 0..effort.jobs.max(1) {
-        let path = directory.join(format!("reduce-{slot}.R"));
-        if path.exists()
-            && let Err(error) = std::fs::remove_file(&path)
+        let home = directory.join(format!("slot-{slot}"));
+        if home.exists()
+            && let Err(error) = std::fs::remove_dir_all(&home)
         {
-            eprintln!("could not remove {}: {error}", path.display());
+            eprintln!("could not remove {}: {error}", home.display());
         }
-    }
-    if let Err(error) = std::fs::remove_file(&path) {
-        eprintln!("could not remove {}: {error}", path.display());
     }
     if let Some(error) = failure {
         return Err(error);
