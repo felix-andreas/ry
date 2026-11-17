@@ -394,22 +394,40 @@ SOURCE_FILE@0..8
     NAME@5..8
       IDENT@5..8 "sum"
 
-#==== accepted_divergences
 #---- eq_after_arrow
 a <- b = 1
+#++++
+SOURCE_FILE@0..10
+  BINARY_EXPR@0..10
+    BINARY_EXPR@0..7
+      NAME@0..1
+        IDENT@0..1 "a"
+      WHITESPACE@1..2 " "
+      LESS_MINUS@2..4 "<-"
+      WHITESPACE@4..5 " "
+      NAME@5..6
+        IDENT@5..6 "b"
+      WHITESPACE@6..7 " "
+    EQ@7..8 "="
+    WHITESPACE@8..9 " "
+    LITERAL@9..10
+      DOUBLE@9..10 "1"
+
+#---- arrow_after_eq
+a = b <- 1
 #++++
 SOURCE_FILE@0..10
   BINARY_EXPR@0..10
     NAME@0..1
       IDENT@0..1 "a"
     WHITESPACE@1..2 " "
-    LESS_MINUS@2..4 "<-"
-    WHITESPACE@4..5 " "
-    BINARY_EXPR@5..10
-      NAME@5..6
-        IDENT@5..6 "b"
-      WHITESPACE@6..7 " "
-      EQ@7..8 "="
+    EQ@2..3 "="
+    WHITESPACE@3..4 " "
+    BINARY_EXPR@4..10
+      NAME@4..5
+        IDENT@4..5 "b"
+      WHITESPACE@5..6 " "
+      LESS_MINUS@6..8 "<-"
       WHITESPACE@8..9 " "
       LITERAL@9..10
         DOUBLE@9..10 "1"

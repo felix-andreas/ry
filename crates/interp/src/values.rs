@@ -548,8 +548,13 @@ impl StringMemo<'_> {
     }
 }
 
+/// The symbol named `name`, whose stand-ins (see [`escape_invalid_bytes`]) name the bytes they
+/// stand for, as [`mkchar`] interns them.
 pub unsafe fn install(name: &str) -> R<Sexp> {
-    Ok(crate::heap().install(name.as_bytes())?)
+    Ok(match unescape_invalid_bytes(name) {
+        Some(bytes) => crate::heap().install(&bytes)?,
+        None => crate::heap().install(name.as_bytes())?,
+    })
 }
 
 pub unsafe fn install_bytes(name: &[u8]) -> R<Sexp> {
@@ -1056,7 +1061,19 @@ unsafe fn char_str_decoded<'a>(charsxp: Sexp) -> Cow<'a, str> {
         return Cow::Borrowed(text);
     }
     if charsxp.has_gp(gp::LATIN1) {
-        return Cow::Owned(bytes.iter().map(|&byte| byte as char).collect());
+        // GNU R translates a latin1 string as Windows-1252, and spells a byte that code page
+        // leaves undefined `<xx>`.
+        let mut text = String::with_capacity(bytes.len() * 2);
+        for &byte in bytes {
+            match byte {
+                0x80..=0x9f => match WINDOWS_1252_HIGH[usize::from(byte - 0x80)] {
+                    '\0' => text.push_str(&format!("<{byte:02x}>")),
+                    character => text.push(character),
+                },
+                _ => text.push(char::from(byte)),
+            }
+        }
+        return Cow::Owned(text);
     }
     // GNU R reads a string declared as bytes through its `\xNN` spelling wherever it needs
     // text, so printing, formatting and pasting show the escapes rather than decoded characters.
@@ -1073,6 +1090,14 @@ unsafe fn char_str_decoded<'a>(charsxp: Sexp) -> Cow<'a, str> {
     }
     escape_invalid_bytes(bytes)
 }
+
+/// The characters of bytes 0x80 to 0x9F in Windows-1252, with NUL for a byte it leaves undefined.
+const WINDOWS_1252_HIGH: [char; 32] = [
+    '\u{20ac}', '\0', '\u{201a}', '\u{192}', '\u{201e}', '\u{2026}', '\u{2020}', '\u{2021}',
+    '\u{2c6}', '\u{2030}', '\u{160}', '\u{2039}', '\u{152}', '\0', '\u{17d}', '\0', '\0',
+    '\u{2018}', '\u{2019}', '\u{201c}', '\u{201d}', '\u{2022}', '\u{2013}', '\u{2014}', '\u{2dc}',
+    '\u{2122}', '\u{161}', '\u{203a}', '\u{153}', '\0', '\u{17e}', '\u{178}',
+];
 
 /// Decodes bytes that need not be UTF-8 as text. GNU R keeps a string's bytes as they are, so a
 /// Latin-1 string in a UTF-8 session, or a piece `strsplit(useBytes = TRUE)` cut out of a
@@ -1103,7 +1128,7 @@ pub fn stand_in(byte: u8) -> char {
 /// Whether `text` holds a character in the stand-in range. Each one encodes as `F4 8F BE xx` or
 /// `F4 8F BF xx` in UTF-8, and `F4` leads only the last plane of the code space, so most text is
 /// rejected by the byte scan alone.
-fn holds_stand_in(text: &str) -> bool {
+pub fn holds_stand_in(text: &str) -> bool {
     text.as_bytes().contains(&0xF4)
         && text
             .chars()
@@ -1155,6 +1180,38 @@ pub fn unescape_invalid_bytes(text: &str) -> Option<Vec<u8>> {
         }
     }
     Some(bytes)
+}
+
+/// Text on its way out of the session (to the console or a connection) with every stand-in
+/// turned back into its byte, so a string that is not valid UTF-8 is written as the bytes it
+/// holds. Every stand-in encodes as `F4 8F BE xx` or `F4 8F BF xx`.
+pub fn unescape_output(bytes: &[u8]) -> Cow<'_, [u8]> {
+    let stand_in_at = |from: usize| {
+        memchr::memchr_iter(0xF4, &bytes[from..])
+            .map(|offset| from + offset)
+            .find(|&start| {
+                matches!(
+                    bytes.get(start + 1..start + 4),
+                    Some([0x8F, 0xBE | 0xBF, 0x80..=0xBF])
+                )
+            })
+    };
+    let Some(mut next) = stand_in_at(0) else {
+        return Cow::Borrowed(bytes);
+    };
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut position = 0;
+    loop {
+        output.extend_from_slice(&bytes[position..next]);
+        output.push(((bytes[next + 2] & 0x03) << 6) | (bytes[next + 3] & 0x3F));
+        position = next + 4;
+        match stand_in_at(position) {
+            Some(start) => next = start,
+            None => break,
+        }
+    }
+    output.extend_from_slice(&bytes[position..]);
+    Cow::Owned(output)
 }
 
 /// Whether two distinct interned strings hold the same text. Strings intern by bytes and
@@ -1781,6 +1838,71 @@ pub unsafe fn as_integer_scalar(object: Sexp) -> i32 {
         SexpType::Raw => raws(object)[0] as i32,
         _ => NA_INTEGER,
     }
+}
+
+/// The first element as an integer, or `NA`, with the coercion warnings of GNU R's `asInteger`:
+/// text that is no number and a double outside the integer range warn.
+pub unsafe fn as_integer_scalar_warning(object: Sexp) -> R<i32> {
+    if length(object) == 0 {
+        return Ok(NA_INTEGER);
+    }
+    let mut warnings = crate::coerce::CoercionWarnings::default();
+    let value = match object.kind() {
+        SexpType::Real => {
+            let (value, out_of_range) = crate::coerce::real_to_int(reals(object)[0]);
+            warnings.integer_range = out_of_range;
+            value
+        }
+        SexpType::Complex => {
+            let value = complexes(object)[0];
+            let (integer, out_of_range) = crate::coerce::real_to_int(value.r);
+            warnings.integer_range = out_of_range;
+            warnings.imaginary = !value.r.is_nan() && !value.i.is_nan() && value.i != 0.0;
+            integer
+        }
+        SexpType::String => match string_at(object, 0) {
+            Some(text) => match crate::coerce::parse_real(&text) {
+                Some(real) => {
+                    let (value, out_of_range) = crate::coerce::real_to_int(real);
+                    warnings.integer_range = out_of_range;
+                    value
+                }
+                None => {
+                    warnings.na = true;
+                    NA_INTEGER
+                }
+            },
+            None => NA_INTEGER,
+        },
+        _ => as_integer_scalar(object),
+    };
+    warnings.report()?;
+    Ok(value)
+}
+
+/// The first element as a double, or `NA`, with the coercion warnings of GNU R's `asReal`.
+pub unsafe fn as_real_scalar_warning(object: Sexp) -> R<f64> {
+    if length(object) == 0 {
+        return Ok(NA_REAL);
+    }
+    let mut warnings = crate::coerce::CoercionWarnings::default();
+    let value = match object.kind() {
+        SexpType::Complex => {
+            let value = complexes(object)[0];
+            warnings.imaginary = !value.r.is_nan() && !value.i.is_nan() && value.i != 0.0;
+            value.r
+        }
+        SexpType::String => match string_at(object, 0) {
+            Some(text) => crate::coerce::parse_real(&text).unwrap_or_else(|| {
+                warnings.na = true;
+                NA_REAL
+            }),
+            None => NA_REAL,
+        },
+        _ => as_real_scalar(object),
+    };
+    warnings.report()?;
+    Ok(value)
 }
 
 /// The first element as a double, or `NA`.

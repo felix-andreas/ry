@@ -3,16 +3,19 @@
 //! or an editor, which fail with a clear error in a non-interactive session.
 //!
 //! Base's `scan` lives here too, because `read.table` drives it together with
-//! `readtablehead` and `countfields`, and all three share one tokenizer.
+//! `readtablehead` and `countfields`, and all three share one character reader. The readers
+//! port GNU R's byte by byte, because `read.table` users depend on their quirks: a nul ends a
+//! field, a quote opens only at a field's start, and a quoted line end makes a line count `NA`.
 
 use {
     crate::{
         builtin_libraries::{NativeCall, NativeFn},
         builtins::{Arg, BuiltinDef, Call, internal},
-        coerce::{coerce_vector, parse_real},
+        coerce::coerce_vector,
         conditions::warning,
         format::{format_complex_alone, format_real_alone_scipen},
         platform,
+        sort::{collator, shell_sort},
         unwind::{R, Unwind, error},
         values::{
             self, alloc, length, na_string, nil, scalar_bool, scalar_integer, scalar_string,
@@ -22,8 +25,10 @@ use {
     },
     heap::{
         activity::set_profile_tick,
-        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType},
+        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp},
+        strings::Encoding,
     },
+    rustc_hash::{FxHashMap, FxHashSet},
     std::{
         cell::RefCell,
         collections::BTreeMap,
@@ -351,342 +356,220 @@ fn report_socket_error(reason: &std::io::Error) {
     write_console(message.as_bytes(), true);
 }
 
-// The tokenizer.
+// The character reader.
 
-/// How fields are delimited and quoted.
-struct Syntax {
-    /// `None` separates fields by white space.
-    separator: Option<u8>,
-    quotes: Vec<u8>,
-    comment: Option<u8>,
-    strip_white: bool,
-    allow_escapes: bool,
-}
+/// What [`Reader::next`] returns at the end of the input.
+const EOF: i32 = -1;
 
-impl Syntax {
-    unsafe fn from_arguments(separator: Sexp, quotes: Sexp, comment: Sexp) -> R<Syntax> {
-        let separator = match values::first_string(separator).as_deref() {
-            None | Some("") => None,
-            Some(text) if text.len() == 1 => Some(text.as_bytes()[0]),
-            Some(_) => return Err(error("invalid 'sep' value: must be one byte")),
-        };
-        let quotes = values::first_string(quotes)
-            .map(|text| text.as_bytes().to_vec())
-            .unwrap_or_default();
-        let comment = match values::first_string(comment).as_deref() {
-            None | Some("") => None,
-            Some(text) if text.len() == 1 => Some(text.as_bytes()[0]),
-            Some(_) => return Err(error("invalid 'comment.char' argument")),
-        };
-        Ok(Syntax {
-            separator,
-            quotes,
-            comment,
-            strip_white: false,
-            allow_escapes: false,
-        })
-    }
-}
-
-/// What ended a field.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum End {
-    Separator,
-    Line,
-    File,
-}
-
-struct Field {
-    text: String,
-}
-
-/// Reads fields from input bytes, keeping its position so the caller can store it back.
-struct Scanner<'a> {
+/// The character reader `scan`, `readtablehead` and `countfields` share, a port of GNU R's
+/// `scanchar`. Characters are bytes as `i32`, with [`EOF`] past the end.
+struct Reader<'a> {
     input: &'a [u8],
     position: usize,
-    syntax: &'a Syntax,
-    /// The line being read, from 1.
-    line: usize,
-    eof_in_quote: bool,
-    at_line_start: bool,
+    /// The character handed back by [`Reader::unread`], 0 for none. As in GNU R, a handed-back
+    /// nul is lost.
+    saved: i32,
+    /// The separator byte, 0 for fields separated by white space.
+    separator: i32,
+    quotes: Vec<u8>,
+    /// The comment byte, `NO_COMMENT` for none.
+    comment: i32,
+    escapes: bool,
+    skip_nul: bool,
+    /// Whether a nul was read (and dropped from the field it ended) while `skip_nul` was off.
+    embedded_nul: bool,
 }
 
-impl<'a> Scanner<'a> {
-    fn new(input: &'a [u8], position: usize, syntax: &'a Syntax) -> Scanner<'a> {
-        Scanner {
+const NO_COMMENT: i32 = 100_000;
+
+impl<'a> Reader<'a> {
+    fn new(input: &'a [u8], position: usize, syntax: Syntax) -> Reader<'a> {
+        Reader {
             input,
             position,
-            syntax,
-            line: 1,
-            eof_in_quote: false,
-            at_line_start: true,
+            saved: 0,
+            separator: syntax.separator,
+            quotes: syntax.quotes,
+            comment: syntax.comment,
+            escapes: false,
+            skip_nul: false,
+            embedded_nul: false,
         }
     }
 
-    fn peek(&self) -> Option<u8> {
-        self.input.get(self.position).copied()
+    fn raw(&mut self) -> i32 {
+        let mut character = self.byte();
+        if character == 0 {
+            if self.skip_nul {
+                while character == 0 {
+                    character = self.byte();
+                }
+            } else {
+                self.embedded_nul = true;
+            }
+        }
+        character
     }
 
-    /// Consumes a line end (`\n`, `\r\n` or a lone `\r`) if one is next.
-    fn take_line_end(&mut self) -> bool {
-        match self.peek() {
-            Some(b'\n') => {
+    fn byte(&mut self) -> i32 {
+        match self.input.get(self.position) {
+            Some(&byte) => {
                 self.position += 1;
-                self.line += 1;
-                true
+                byte as i32
             }
-            Some(b'\r') => {
-                self.position += 1;
-                if self.peek() == Some(b'\n') {
-                    self.position += 1;
-                }
-                self.line += 1;
-                true
-            }
-            _ => false,
+            None => EOF,
         }
     }
 
-    fn skip_rest_of_line(&mut self) -> End {
-        while let Some(byte) = self.peek() {
-            if byte == b'\n' || byte == b'\r' {
-                self.take_line_end();
-                return End::Line;
-            }
-            self.position += 1;
-        }
-        End::File
+    fn unread(&mut self, character: i32) {
+        self.saved = character;
     }
 
-    /// Skips `count` lines without looking at their content.
-    fn skip_lines(&mut self, count: usize) {
-        for _ in 0..count {
-            if self.peek().is_none() {
-                break;
-            }
-            self.skip_rest_of_line();
-        }
-        self.line = 1;
-    }
-
-    /// An escape sequence after a backslash, as `allowEscapes` reads it.
-    fn escape(&mut self) -> Vec<u8> {
-        let Some(byte) = self.peek() else {
-            return vec![b'\\'];
-        };
-        self.position += 1;
-        let simple = match byte {
-            b'n' => Some(b'\n'),
-            b't' => Some(b'\t'),
-            b'r' => Some(b'\r'),
-            b'a' => Some(7),
-            b'b' => Some(8),
-            b'f' => Some(12),
-            b'v' => Some(11),
-            b'\\' => Some(b'\\'),
-            b'"' => Some(b'"'),
-            b'\'' => Some(b'\''),
-            b' ' => Some(b' '),
-            b'\n' => Some(b'\n'),
-            _ => None,
-        };
-        if let Some(simple) = simple {
-            return vec![simple];
-        }
-        let (radix, limit) = match byte {
-            b'0'..=b'7' => {
-                self.position -= 1;
-                (8, 3)
-            }
-            b'x' => (16, 2),
-            b'u' => (16, 4),
-            b'U' => (16, 8),
-            other => return vec![b'\\', other],
-        };
-        let mut code = 0u32;
-        let mut digits = 0;
-        while digits < limit {
-            let Some(digit) = self.peek().and_then(|byte| (byte as char).to_digit(radix)) else {
-                break;
-            };
-            code = code * radix + digit;
-            self.position += 1;
-            digits += 1;
-        }
-        if matches!(byte, b'u' | b'U') {
-            let character = char::from_u32(code).unwrap_or('\u{FFFD}');
-            return character.to_string().into_bytes();
-        }
-        vec![code as u8]
-    }
-
-    /// The next field and what ended it. `None` means the terminator came before any field: a
-    /// blank line, the end of the input, or (between fields) only white space.
-    fn next_field(&mut self) -> (Option<Field>, End) {
-        let field = match self.syntax.separator {
-            None => self.next_white_field(),
-            Some(separator) => self.next_separated_field(separator),
-        };
-        self.at_line_start = field.1 != End::Separator;
-        field
-    }
-
-    fn next_white_field(&mut self) -> (Option<Field>, End) {
-        while matches!(self.peek(), Some(b' ' | b'\t')) {
-            self.position += 1;
-        }
-        let Some(first) = self.peek() else {
-            return (None, End::File);
-        };
-        if first == b'\n' || first == b'\r' {
-            self.take_line_end();
-            return (None, End::Line);
-        }
-        if Some(first) == self.syntax.comment {
-            return (None, self.skip_rest_of_line());
-        }
-        let mut text = Vec::new();
-        if self.syntax.quotes.contains(&first) {
-            self.position += 1;
-            loop {
-                let Some(byte) = self.peek() else {
-                    self.eof_in_quote = true;
-                    break;
-                };
-                self.position += 1;
-                if byte == first {
-                    break;
-                }
-                if byte == b'\\' {
-                    if self.syntax.allow_escapes {
-                        text.extend(self.escape());
-                        continue;
-                    }
-                    if self.peek() == Some(first) {
-                        text.push(first);
-                        self.position += 1;
-                        continue;
-                    }
-                }
-                if byte == b'\n' {
-                    self.line += 1;
-                }
-                text.push(byte);
-            }
+    /// The next character: a comment outside quotes reads as the line end that ends it, and
+    /// with `escapes` a backslash sequence reads as the character it names.
+    fn next(&mut self, in_quote: bool) -> i32 {
+        let mut next = if self.saved != 0 {
+            std::mem::replace(&mut self.saved, 0)
         } else {
-            while let Some(byte) = self.peek() {
-                if matches!(byte, b' ' | b'\t' | b'\n' | b'\r') || Some(byte) == self.syntax.comment
-                {
+            self.raw()
+        };
+        if next == self.comment && !in_quote {
+            loop {
+                next = self.raw();
+                if next == b'\n' as i32 || next == EOF {
                     break;
                 }
-                self.position += 1;
-                if byte == b'\\' && self.syntax.allow_escapes {
-                    let escaped = self.escape();
-                    // An escaped blank delimits the field, as the character itself would.
-                    if matches!(escaped.as_slice(), [b' ' | b'\t' | b'\n']) {
-                        break;
-                    }
-                    text.extend(escaped);
-                    continue;
+            }
+        }
+        if next != b'\\' as i32 || !self.escapes {
+            return next;
+        }
+        next = self.raw();
+        if (b'0' as i32..=b'8' as i32).contains(&next) {
+            let mut octal = next - b'0' as i32;
+            for _ in 0..2 {
+                next = self.raw();
+                if !(b'0' as i32..=b'8' as i32).contains(&next) {
+                    self.unread(next);
+                    break;
                 }
-                text.push(byte);
+                octal = 8 * octal + next - b'0' as i32;
             }
+            return octal;
         }
-        while matches!(self.peek(), Some(b' ' | b'\t')) {
-            self.position += 1;
-        }
-        let end = match self.peek() {
-            None => End::File,
-            Some(b'\n' | b'\r') => {
-                self.take_line_end();
-                End::Line
-            }
-            Some(byte) if Some(byte) == self.syntax.comment => self.skip_rest_of_line(),
-            Some(_) => End::Separator,
-        };
-        (
-            Some(Field {
-                text: String::from_utf8_lossy(&text).into_owned(),
-            }),
-            end,
-        )
-    }
-
-    fn next_separated_field(&mut self, separator: u8) -> (Option<Field>, End) {
-        let line_start = self.at_line_start;
-        if self.peek().is_none() {
-            return (None, End::File);
-        }
-        if self.syntax.strip_white {
-            while matches!(self.peek(), Some(b' ' | b'\t')) && Some(b' ') != Some(separator) {
-                self.position += 1;
-            }
-        }
-        let mut text = Vec::new();
-        let mut quoted = false;
-        let end = loop {
-            let Some(byte) = self.peek() else {
-                break End::File;
-            };
-            if byte == b'\n' || byte == b'\r' {
-                self.take_line_end();
-                break End::Line;
-            }
-            if byte == separator {
-                self.position += 1;
-                break End::Separator;
-            }
-            if Some(byte) == self.syntax.comment {
-                break self.skip_rest_of_line();
-            }
-            self.position += 1;
-            if self.syntax.quotes.contains(&byte) {
-                quoted = true;
-                loop {
-                    let Some(inner) = self.peek() else {
-                        self.eof_in_quote = true;
+        match u8::try_from(next).unwrap_or(0) {
+            b'a' => 7,
+            b'b' => 8,
+            b'f' => 12,
+            b'n' => b'\n' as i32,
+            b'r' => b'\r' as i32,
+            b't' => b'\t' as i32,
+            b'v' => 11,
+            b'x' => {
+                let mut value = 0;
+                for _ in 0..2 {
+                    next = self.raw();
+                    let Some(digit) = u8::try_from(next)
+                        .ok()
+                        .and_then(|byte| (byte as char).to_digit(16))
+                    else {
+                        self.unread(next);
                         break;
                     };
-                    self.position += 1;
-                    if inner == byte {
-                        if self.peek() == Some(byte) {
-                            text.push(byte);
-                            self.position += 1;
-                            continue;
-                        }
-                        break;
-                    }
-                    if inner == b'\\' && self.syntax.allow_escapes {
-                        text.extend(self.escape());
-                        continue;
-                    }
-                    if inner == b'\n' {
-                        self.line += 1;
-                    }
-                    text.push(inner);
+                    value = 16 * value + digit as i32;
                 }
-                continue;
+                value
             }
-            if byte == b'\\' && self.syntax.allow_escapes {
-                text.extend(self.escape());
-                continue;
+            _ if in_quote && self.is_quote(next) => {
+                self.unread(next);
+                b'\\' as i32
             }
-            text.push(byte);
-        };
-        if self.syntax.strip_white {
-            while matches!(text.last(), Some(b' ' | b'\t')) {
-                text.pop();
+            _ => next,
+        }
+    }
+
+    /// Whether `character` is in the quote set, as C's `strchr` finds it: a nul always is.
+    fn is_quote(&self, character: i32) -> bool {
+        character == 0 || self.quotes.contains(&(character as u8))
+    }
+
+    /// Skips to the end of the line; returns the line end or [`EOF`].
+    fn skip_line(&mut self) -> i32 {
+        loop {
+            let character = self.next(false);
+            if character == b'\n' as i32 || character == EOF {
+                return character;
             }
         }
-        if line_start && text.is_empty() && !quoted && end != End::Separator {
-            return (None, end);
+    }
+
+    /// The position to store back on the connection: a character handed back is unread.
+    fn rest_position(&self) -> usize {
+        if self.saved > 0 && self.position > 0 && self.input[self.position - 1] as i32 == self.saved
+        {
+            self.position - 1
+        } else {
+            self.position
         }
-        (
-            Some(Field {
-                text: String::from_utf8_lossy(&text).into_owned(),
-            }),
-            end,
-        )
+    }
+}
+
+/// White space as GNU R's `Rspace` sees it.
+fn is_space(character: i32) -> bool {
+    matches!(u8::try_from(character), Ok(b' ' | b'\t' | b'\n' | b'\r'))
+}
+
+/// How fields are delimited, quoted and commented, as the `sep`, `quote` and `comment.char`
+/// arguments give them.
+struct Syntax {
+    separator: i32,
+    quotes: Vec<u8>,
+    comment: i32,
+}
+
+/// `sep` as `scan` takes it: one byte, or none for white space.
+unsafe fn scan_separator(separator: Sexp) -> R<i32> {
+    match separator.kind() {
+        SexpType::String | SexpType::Nil => match first_bytes(separator) {
+            None => Ok(0),
+            Some(bytes) if bytes.len() > 1 => Err(error("invalid 'sep' value: must be one byte")),
+            Some(bytes) => Ok(bytes.first().map_or(0, |&byte| byte as i32)),
+        },
+        _ => Err(error("invalid 'sep' argument")),
+    }
+}
+
+/// The first string's bytes, `None` for an empty or non-character vector.
+unsafe fn first_bytes<'a>(vector: Sexp) -> Option<&'a [u8]> {
+    (vector.kind() == SexpType::String && length(vector) > 0).then(|| vector.element(0).bytes())
+}
+
+unsafe fn quote_set(quotes: Sexp) -> R<Vec<u8>> {
+    match quotes.kind() {
+        SexpType::String => Ok(first_bytes(quotes).unwrap_or_default().to_vec()),
+        SexpType::Nil => Ok(Vec::new()),
+        _ => Err(error("invalid quote symbol set")),
+    }
+}
+
+unsafe fn comment_char(comment: Sexp) -> R<i32> {
+    if comment.kind() != SexpType::String || length(comment) != 1 {
+        return Err(error("invalid 'comment.char' argument"));
+    }
+    match comment.element(0).bytes() {
+        [] => Ok(NO_COMMENT),
+        [byte] => Ok(*byte as i32),
+        _ => Err(error("invalid 'comment.char' argument")),
+    }
+}
+
+/// `sep` as `readtablehead` and `countfields` take it: its first byte, unchecked.
+unsafe fn first_byte_separator(separator: Sexp) -> R<i32> {
+    match separator.kind() {
+        SexpType::String | SexpType::Nil => Ok(first_bytes(separator)
+            .and_then(|bytes| bytes.first())
+            .map_or(0, |&byte| byte as i32)),
+        _ => Err(error("invalid 'sep' argument")),
     }
 }
 
@@ -726,17 +609,6 @@ impl Kind {
             Kind::Raw => SexpType::Raw,
         }
     }
-
-    fn expected(self) -> &'static str {
-        match self {
-            Kind::Logical => "a logical",
-            Kind::Integer => "an integer",
-            Kind::Double => "a real",
-            Kind::Complex => "a complex",
-            Kind::Character => "a string",
-            Kind::Raw => "a raw",
-        }
-    }
 }
 
 /// A converted field.
@@ -746,7 +618,7 @@ enum Value {
     Integer(i32),
     Double(f64),
     Complex(Rcomplex),
-    Text(String),
+    Text(Vec<u8>),
     Raw(u8),
 }
 
@@ -756,91 +628,169 @@ struct Column {
     values: Vec<Value>,
 }
 
+/// The settings of one `scan` call that its fields are read and converted with.
+struct ScanSettings<'a> {
+    decimal: u8,
+    na_strings: &'a [Vec<u8>],
+    max_items: usize,
+    max_lines: usize,
+    flush: bool,
+    fill: bool,
+    strip: &'a [bool],
+    blank_lines_skip: bool,
+    multi_line: bool,
+    console: bool,
+    /// Whether a byte-order mark at the start of the first field is dropped.
+    at_start: bool,
+}
+
 /// `scan(file, what, nmax, sep, dec, quote, skip, nlines, na.strings, flush, fill,
 /// strip.white, quiet, blank.lines.skip, multi.line, comment.char, allowEscapes, encoding,
-/// skipNul)`.
+/// skipNul)`, a port of GNU R's `do_scan`.
 unsafe fn do_scan(call: &Call<'_>) -> R<Sexp> {
     let file = call.arg(0);
     let what = call.arg(1);
-    let max_items = values::as_integer_scalar(call.arg(2));
-    let mut syntax = Syntax::from_arguments(call.arg(3), call.arg(5), call.arg(15))?;
-    let decimal = decimal_mark(call.arg(4))?;
-    let skip = values::as_integer_scalar(call.arg(6)).max(0) as usize;
-    let max_lines = values::as_integer_scalar(call.arg(7));
-    let na_strings = na_strings(call.arg(8));
-    let flush = values::as_logical_scalar(call.arg(9)) == 1;
-    let fill = values::as_logical_scalar(call.arg(10)) == 1;
+    let max_items = count_argument(call.arg(2));
+    let max_lines = count_argument(call.arg(7));
+    let skip = count_argument(call.arg(6));
+    let na_strings = call.arg(8);
+    let flush = values::as_logical_scalar(call.arg(9));
+    let fill = values::as_logical_scalar(call.arg(10));
     let strip = call.arg(11);
-    syntax.strip_white = strip.kind() == SexpType::Logical && values::ints(strip).contains(&1);
-    let quiet = values::as_logical_scalar(call.arg(12)) == 1;
-    let blank_lines_skip = values::as_logical_scalar(call.arg(13)) != 0;
-    let multi_line = values::as_logical_scalar(call.arg(14)) != 0;
-    syntax.allow_escapes = values::as_logical_scalar(call.arg(16)) == 1;
-    let is_list = what.kind() == SexpType::List;
-    let mut columns: Vec<Column> = if is_list {
-        let mut columns = Vec::with_capacity(length(what));
-        for index in 0..length(what) {
-            let element = what.element(index);
-            let kind = if element == nil() {
-                None
-            } else {
-                Some(Kind::of(element.kind()).ok_or_else(|| error("invalid 'what' specified"))?)
-            };
-            columns.push(Column {
-                kind,
-                values: Vec::new(),
-            });
-        }
-        if columns.is_empty() {
-            return Err(error("empty 'what' specified"));
-        }
-        columns
-    } else {
-        let kind = Kind::of(what.kind()).ok_or_else(|| error("invalid 'what' specified"))?;
-        vec![Column {
-            kind: Some(kind),
-            values: Vec::new(),
-        }]
+    let mut quiet = values::as_logical_scalar(call.arg(12));
+    let mut blank_lines_skip = values::as_logical_scalar(call.arg(13));
+    let mut multi_line = values::as_logical_scalar(call.arg(14));
+    let escapes = values::as_logical_scalar(call.arg(16));
+    let encoding = call.arg(17);
+    if encoding.kind() != SexpType::String || length(encoding) != 1 {
+        return Err(error("invalid 'encoding' argument"));
+    }
+    let mut mark = match encoding.element(0).bytes() {
+        b"latin1" => Some(Encoding::Latin1),
+        b"UTF-8" => Some(Encoding::Utf8),
+        _ => None,
     };
-    let settings = Conversion {
+    let skip_nul = values::as_logical_scalar(call.arg(18));
+    if quiet == NA_LOGICAL {
+        quiet = 0;
+    }
+    if blank_lines_skip == NA_LOGICAL {
+        blank_lines_skip = 1;
+    }
+    if multi_line == NA_LOGICAL {
+        multi_line = 1;
+    }
+    if strip.kind() != SexpType::Logical {
+        return Err(error("invalid 'strip.white' argument"));
+    }
+    if length(strip) != 1 && length(strip) != length(what) {
+        return Err(error("invalid 'strip.white' length"));
+    }
+    if na_strings.kind() != SexpType::String {
+        return Err(error("invalid 'na.strings' argument"));
+    }
+    let comment = call.arg(15);
+    if comment.kind() != SexpType::String || length(comment) != 1 {
+        return Err(error("invalid 'comment.char' argument"));
+    }
+    let separator = scan_separator(call.arg(3))?;
+    let decimal = scan_decimal(call.arg(4))?;
+    let syntax = Syntax {
+        separator,
+        quotes: quote_set(call.arg(5))?,
+        comment: comment_char(comment)?,
+    };
+    if escapes == NA_LOGICAL {
+        return Err(error("invalid 'allowEscapes' argument"));
+    }
+    if skip_nul == NA_LOGICAL {
+        return Err(error("invalid 'skipNul' argument"));
+    }
+    let na_strings: Vec<Vec<u8>> = (0..length(na_strings))
+        .map(|index| na_strings.element(index).bytes().to_vec())
+        .collect();
+    let strip: Vec<bool> = values::ints(strip)
+        .iter()
+        .map(|&value| value != 0)
+        .collect();
+    let mut columns: Vec<Column> = match what.kind() {
+        SexpType::List => {
+            if length(what) == 0 {
+                return Err(error("empty 'what' specified"));
+            }
+            let mut columns = Vec::with_capacity(length(what));
+            for index in 0..length(what) {
+                let element = what.element(index);
+                let kind = if element == nil() {
+                    None
+                } else {
+                    Some(Kind::of(element.kind()).ok_or_else(|| error("invalid 'what' argument"))?)
+                };
+                columns.push(Column {
+                    kind,
+                    values: Vec::new(),
+                });
+            }
+            columns
+        }
+        kind => vec![Column {
+            kind: Some(Kind::of(kind).ok_or_else(|| error("invalid 'what' argument"))?),
+            values: Vec::new(),
+        }],
+    };
+    let is_list = what.kind() == SexpType::List;
+    let console_text = crate::connections::console_scan_text(file, max_items as i32)?;
+    let settings = ScanSettings {
         decimal,
         na_strings: &na_strings,
+        max_items,
+        max_lines,
+        flush: flush != 0,
+        fill: fill != 0,
+        strip: &strip,
+        blank_lines_skip: blank_lines_skip != 0,
+        multi_line: multi_line != 0,
+        console: console_text.is_some(),
+        at_start: console_text.is_none() && skip == 0,
     };
-    let mut read = |input: &[u8], position: &mut usize| {
-        let mut scanner = Scanner::new(input, *position, &syntax);
-        scanner.skip_lines(skip);
-        let limits = Limits {
-            max_items,
-            max_lines,
-        };
+    let read = |input: &[u8], position: &mut usize| {
+        let mut reader = Reader::new(input, *position, syntax);
+        reader.escapes = escapes != 0;
+        reader.skip_nul = skip_nul != 0;
+        let mut warnings = Vec::new();
+        if !settings.console {
+            for _ in 0..skip {
+                reader.skip_line();
+            }
+        }
+        reader.saved = 0;
         let result = if is_list {
-            scan_records(
-                &mut scanner,
-                &mut columns,
-                &settings,
-                limits,
-                RecordRules {
-                    fill,
-                    flush,
-                    multi_line,
-                    blank_lines_skip,
-                },
-            )
+            scan_frame(&mut reader, &mut columns, &settings, &mut warnings)
         } else {
-            scan_items(&mut scanner, &mut columns[0], &settings, limits, flush)
+            scan_vector(&mut reader, &mut columns[0], &settings, &mut warnings)
         };
-        *position = scanner.position;
-        result.map(|count| (count, scanner.eof_in_quote))
+        *position = reader.rest_position();
+        (result, warnings, reader.embedded_nul)
     };
-    let outcome = match crate::connections::console_scan_text(file, max_items)? {
-        Some(text) => read(&text, &mut 0),
-        None => crate::connections::with_input(file, read)?,
+    let (outcome, warnings, embedded_nul) = match &console_text {
+        Some(text) => read(text, &mut 0),
+        None => {
+            let con = crate::connections::resolve(file, "invalid connection")?.1;
+            let was_open = (*con).isopen != 0;
+            let outcome = crate::connections::with_input(file, read)?;
+            // GNU R asks a connection scan opens for UTF-8 output, which a re-encoding
+            // connection gives.
+            if !was_open && (*con).UTF8out != 0 {
+                mark = Some(Encoding::Utf8);
+            }
+            outcome
+        }
     };
-    let (count, eof_in_quote) = outcome?;
-    if eof_in_quote {
-        warning("EOF within quoted string")?;
+    for message in warnings {
+        warning(message)?;
     }
-    if !quiet {
+    let count = outcome?;
+    if quiet == 0 {
         let noun = match (is_list, count) {
             (true, 1) => "record",
             (true, _) => "records",
@@ -849,257 +799,706 @@ unsafe fn do_scan(call: &Call<'_>) -> R<Sexp> {
         };
         write_console(format!("Read {count} {noun}\n").as_bytes(), true);
     }
-    if !is_list {
-        return column_vector(&columns[0]);
-    }
-    let mut vectors = Vec::with_capacity(columns.len());
-    for column in &columns {
-        vectors.push(column_vector(column)?);
-        crate::heap().root(*vectors.last().unwrap_or(&nil()));
-    }
-    let result = values::list_vector(&vectors)?;
-    let names = values::get_attr(what, symbols().names);
-    if names != nil() {
-        values::set_attr(result, symbols().names, names)?;
+    let result = if is_list {
+        let result = alloc(SexpType::List, columns.len())?;
+        crate::heap().root(result);
+        for (index, column) in columns.iter().enumerate() {
+            values::set_elt(result, index, column_vector(column, mark)?);
+        }
+        let names = values::get_attr(what, symbols().names);
+        if names != nil() {
+            values::set_attr(result, symbols().names, names)?;
+        }
+        result
+    } else {
+        column_vector(&columns[0], mark)?
+    };
+    if skip_nul == 0 && embedded_nul {
+        crate::heap().root(result);
+        warning("embedded nul(s) found in input")?;
     }
     Ok(result)
 }
 
-#[derive(Clone, Copy)]
-struct Limits {
-    /// Items, or records for a list `what`; zero or less for no limit.
-    max_items: i32,
-    /// Lines; zero or less for no limit.
-    max_lines: i32,
+/// A count argument as `asXLength` reads it: missing or negative is zero.
+unsafe fn count_argument(argument: Sexp) -> usize {
+    let value = values::as_real_scalar(argument);
+    if value.is_finite() && value > 0.0 {
+        value as usize
+    } else {
+        0
+    }
 }
 
-#[derive(Clone, Copy)]
-struct RecordRules {
-    fill: bool,
-    flush: bool,
-    multi_line: bool,
-    blank_lines_skip: bool,
+/// `dec` as `scan` takes it.
+unsafe fn scan_decimal(decimal: Sexp) -> R<u8> {
+    match decimal.kind() {
+        SexpType::String | SexpType::Nil => match first_bytes(decimal) {
+            None => Ok(b'.'),
+            Some([byte]) => Ok(*byte),
+            Some(_) => Err(error("invalid decimal separator: must be one byte")),
+        },
+        _ => Err(error("invalid decimal separator")),
+    }
 }
 
-struct Conversion<'a> {
-    decimal: u8,
-    na_strings: &'a [String],
-}
-
-/// Reads fields into one vector; returns the number of items.
-fn scan_items(
-    scanner: &mut Scanner<'_>,
+/// GNU R's `scanVector`: fields into one vector; returns the number of items.
+unsafe fn scan_vector(
+    reader: &mut Reader<'_>,
     column: &mut Column,
-    settings: &Conversion<'_>,
-    limits: Limits,
-    flush: bool,
-) -> Result<usize, crate::unwind::Unwind> {
-    let kind = column.kind.unwrap_or(Kind::Character);
-    let mut lines = 0;
+    settings: &ScanSettings<'_>,
+    warnings: &mut Vec<String>,
+) -> R<usize> {
+    let kind = column.kind;
+    let strip = settings.strip.first().copied().unwrap_or(false);
+    let mut buffer = Vec::new();
+    let mut at_start = settings.at_start;
+    let mut lines_read = 0;
+    let mut previous = 0;
+    let mut end = 1;
     loop {
-        if limits.max_items > 0 && column.values.len() >= limits.max_items as usize {
+        if end == EOF {
             break;
         }
-        let (field, mut end) = scanner.next_field();
-        if let Some(field) = field {
-            column
-                .values
-                .push(convert_field(&field.text, kind, settings)?);
-            if flush && end == End::Separator {
-                end = scanner.skip_rest_of_line();
-            }
-        }
-        if end != End::Separator {
-            lines += 1;
-            if end == End::File || (limits.max_lines > 0 && lines >= limits.max_lines) {
+        if end == b'\n' as i32 {
+            lines_read += 1;
+            if lines_read == settings.max_lines {
                 break;
             }
+            previous = column.values.len();
+        }
+        end = fill_buffer(reader, kind, strip, &mut buffer, &mut at_start, warnings);
+        if previous == column.values.len()
+            && buffer.is_empty()
+            && ((settings.blank_lines_skip && end == b'\n' as i32) || end == EOF)
+        {
+            if settings.console || end == EOF {
+                break;
+            }
+        } else {
+            column.values.push(extract_item(&buffer, kind, settings)?);
+            if column.values.len() == settings.max_items {
+                break;
+            }
+        }
+        if settings.flush && end != b'\n' as i32 && end != EOF {
+            end = reader.skip_line();
         }
     }
     Ok(column.values.len())
 }
 
-/// Reads fields into records of one field per column; returns the number of records.
-fn scan_records(
-    scanner: &mut Scanner<'_>,
+/// GNU R's `scanFrame`: records of one field per column; returns the number of records.
+unsafe fn scan_frame(
+    reader: &mut Reader<'_>,
     columns: &mut [Column],
-    settings: &Conversion<'_>,
-    limits: Limits,
-    rules: RecordRules,
-) -> Result<usize, crate::unwind::Unwind> {
+    settings: &ScanSettings<'_>,
+    warnings: &mut Vec<String>,
+) -> R<usize> {
     let width = columns.len();
+    let per_column_strip = settings.strip.len() == width;
+    let mut strip = settings.strip.first().copied().unwrap_or(false);
+    let mut buffer = Vec::new();
+    let mut at_start = settings.at_start;
     let mut records = 0;
+    let mut lines_read = 0;
     let mut filled = 0;
-    let mut lines = 0;
-    let mut fields_on_line = 0;
+    let mut end = 1;
     loop {
-        if limits.max_items > 0 && records >= limits.max_items as usize && filled == 0 {
+        if end == EOF {
             break;
         }
-        let line = scanner.line;
-        let (field, mut end) = scanner.next_field();
-        if let Some(field) = field {
-            fields_on_line += 1;
-            let column = &mut columns[filled];
-            if let Some(kind) = column.kind {
-                column
-                    .values
-                    .push(convert_field(&field.text, kind, settings)?);
+        if end == b'\n' as i32 {
+            lines_read += 1;
+            if filled != 0 {
+                if settings.fill {
+                    pad_record(columns, filled, settings)?;
+                    records += 1;
+                    filled = 0;
+                } else if !settings.multi_line {
+                    return Err(error(format!(
+                        "line {lines_read} did not have {width} elements"
+                    )));
+                }
             }
+            if settings.max_items > 0 && records >= settings.max_items {
+                break;
+            }
+            if lines_read == settings.max_lines {
+                break;
+            }
+        }
+        if per_column_strip {
+            strip = settings.strip[filled];
+        }
+        let kind = columns[filled].kind;
+        end = fill_buffer(reader, kind, strip, &mut buffer, &mut at_start, warnings);
+        if filled == 0
+            && buffer.is_empty()
+            && ((settings.blank_lines_skip && end == b'\n' as i32) || end == EOF)
+        {
+            if settings.console || end == EOF {
+                break;
+            }
+        } else {
+            let value = extract_item(&buffer, kind, settings)?;
+            columns[filled].values.push(value);
             filled += 1;
             if filled == width {
                 records += 1;
                 filled = 0;
-                if rules.flush && end == End::Separator {
-                    end = scanner.skip_rest_of_line();
+                if settings.flush && end != b'\n' as i32 && end != EOF {
+                    end = reader.skip_line();
                 }
             }
-        }
-        if end == End::Separator {
-            continue;
-        }
-        if fields_on_line == 0 {
-            if end == End::File {
-                break;
-            }
-            // A blank line that is kept reads as one empty field.
-            if !rules.blank_lines_skip {
-                let column = &mut columns[filled];
-                if let Some(kind) = column.kind {
-                    column.values.push(convert_field("", kind, settings)?);
-                }
-                filled += 1;
-                if filled == width {
-                    records += 1;
-                    filled = 0;
-                }
-                if filled > 0 && rules.fill {
-                    pad_record(columns, filled, settings)?;
-                    records += 1;
-                    filled = 0;
-                }
-            }
-        } else if filled > 0 {
-            if rules.fill {
-                pad_record(columns, filled, settings)?;
-                records += 1;
-                filled = 0;
-            } else if !rules.multi_line {
-                return Err(error(format!("line {line} did not have {width} elements")));
-            }
-        }
-        fields_on_line = 0;
-        lines += 1;
-        if end == End::File || (limits.max_lines > 0 && lines >= limits.max_lines) {
-            break;
         }
     }
-    if filled > 0 {
+    if filled != 0 {
+        if !settings.fill {
+            warnings
+                .push("number of items read is not a multiple of the number of columns".to_owned());
+        }
         pad_record(columns, filled, settings)?;
         records += 1;
     }
     Ok(records)
 }
 
-/// Fills the rest of a short record with empty fields, which a character
-/// column keeps as `""` and every other column reads as `NA`, as in GNU R.
-fn pad_record(columns: &mut [Column], from: usize, settings: &Conversion<'_>) -> R<()> {
+/// Fills the rest of a short record with empty fields, which a character column keeps as `""`
+/// and every other column reads as `NA`.
+unsafe fn pad_record(columns: &mut [Column], from: usize, settings: &ScanSettings<'_>) -> R<()> {
     for column in columns.iter_mut().skip(from) {
-        if let Some(kind) = column.kind {
-            column.values.push(convert_field("", kind, settings)?);
-        }
+        let value = extract_item(b"", column.kind, settings)?;
+        column.values.push(value);
     }
     Ok(())
 }
 
-/// A field converted to `kind`, or the error `scan` reports for it.
-fn convert_field(text: &str, kind: Kind, settings: &Conversion<'_>) -> R<Value> {
-    if kind == Kind::Character {
-        if settings.na_strings.iter().any(|na| na == text) {
-            return Ok(Value::Missing);
+/// GNU R's `fillBuffer`: reads the next field into `buffer` and returns what ended it, a
+/// separator, a line end, [`EOF`], or (between white-space separated fields) the field's
+/// first byte, which is handed back. Quotes apply only to character and skipped columns, and
+/// the field ends at its first nul, as a C string does.
+fn fill_buffer(
+    reader: &mut Reader<'_>,
+    kind: Option<Kind>,
+    strip: bool,
+    buffer: &mut Vec<u8>,
+    at_start: &mut bool,
+    warnings: &mut Vec<String>,
+) -> i32 {
+    let is_line_end =
+        |character: i32| character == b'\n' as i32 || character == b'\r' as i32 || character == EOF;
+    let quoting = matches!(kind, None | Some(Kind::Character));
+    buffer.clear();
+    let mut kept = 0;
+    let mut filled = 1;
+    let mut strip = strip;
+    'fill: {
+        if reader.separator == 0 {
+            strip = false;
+            let mut character = reader.next(false);
+            while character == b' ' as i32 || character == b'\t' as i32 {
+                character = reader.next(false);
+            }
+            if is_line_end(character) {
+                filled = character;
+                break 'fill;
+            }
+            if quoting && reader.is_quote(character) {
+                let quote = character;
+                loop {
+                    character = reader.next(true);
+                    if character == EOF || character == quote {
+                        break;
+                    }
+                    if character == b'\\' as i32 {
+                        character = reader.next(true);
+                        if character == EOF {
+                            break;
+                        }
+                        if character != quote {
+                            buffer.push(b'\\');
+                        }
+                    }
+                    buffer.push(character as u8);
+                }
+                if character == EOF {
+                    warnings.push("EOF within quoted string".to_owned());
+                }
+                character = reader.next(false);
+                kept = buffer.len();
+            } else {
+                loop {
+                    buffer.push(character as u8);
+                    character = reader.next(false);
+                    if is_space(character) || character == EOF {
+                        break;
+                    }
+                }
+            }
+            while character == b' ' as i32 || character == b'\t' as i32 {
+                character = reader.next(false);
+            }
+            if is_line_end(character) {
+                filled = character;
+            } else {
+                reader.unread(character);
+            }
+            break 'fill;
         }
-        return Ok(Value::Text(text.to_owned()));
+        let separator = reader.separator;
+        loop {
+            let mut character = reader.next(false);
+            if character == separator || is_line_end(character) {
+                filled = character;
+                break 'fill;
+            }
+            if kind != Some(Kind::Character) {
+                while character == b' ' as i32 || character == b'\t' as i32 {
+                    character = reader.next(false);
+                    if character == separator || is_line_end(character) {
+                        filled = character;
+                        break 'fill;
+                    }
+                }
+            }
+            if quoting && character != 0 && reader.is_quote(character) {
+                let quote = character;
+                loop {
+                    character = reader.next(true);
+                    while character != EOF && character != quote {
+                        buffer.push(character as u8);
+                        character = reader.next(true);
+                    }
+                    if character == EOF {
+                        warnings.push("EOF within quoted string".to_owned());
+                    }
+                    character = reader.next(true);
+                    if character != quote {
+                        break;
+                    }
+                    buffer.push(quote as u8);
+                }
+                kept = buffer.len();
+                if character == separator || is_line_end(character) {
+                    filled = character;
+                    break 'fill;
+                }
+                reader.unread(character);
+                continue;
+            }
+            if !strip || !buffer.is_empty() || !is_space(character) {
+                buffer.push(character as u8);
+            }
+        }
     }
-    let trimmed = text.trim_matches(|character| character == ' ' || character == '\t');
-    if trimmed.is_empty()
-        || settings
-            .na_strings
-            .iter()
-            .any(|na| na == trimmed || na == text)
-    {
+    if strip {
+        while buffer.len() > kept && buffer.last().is_some_and(|&byte| is_space(byte as i32)) {
+            buffer.pop();
+        }
+    }
+    if let Some(nul) = buffer.iter().position(|&byte| byte == 0) {
+        buffer.truncate(nul);
+    }
+    if *at_start && buffer.starts_with(b"\xef\xbb\xbf") {
+        buffer.drain(..3);
+    }
+    *at_start = false;
+    filled
+}
+
+/// GNU R's `extractItem`: a field converted to `kind`, or the error `scan` reports for it.
+unsafe fn extract_item(buffer: &[u8], kind: Option<Kind>, settings: &ScanSettings<'_>) -> R<Value> {
+    let Some(kind) = kind else {
+        return Ok(Value::Missing);
+    };
+    let is_na = |empty_is_na: bool| {
+        (empty_is_na && buffer.is_empty()) || settings.na_strings.iter().any(|na| na == buffer)
+    };
+    let expected = |what: &str| {
+        let mut message = format!("scan() expected '{what}', got '").into_bytes();
+        message.extend_from_slice(buffer);
+        message.push(b'\'');
+        crate::conditions::c_error(&message)
+    };
+    if kind == Kind::Character {
+        return Ok(if is_na(false) {
+            Value::Missing
+        } else {
+            Value::Text(buffer.to_vec())
+        });
+    }
+    if is_na(true) {
         return Ok(Value::Missing);
     }
-    let value = match kind {
-        Kind::Logical => match trimmed {
-            "T" | "TRUE" | "true" | "True" => Some(Value::Logical(1)),
-            "F" | "FALSE" | "false" | "False" => Some(Value::Logical(0)),
-            _ => None,
+    Ok(match kind {
+        Kind::Logical => match buffer {
+            b"T" | b"True" | b"TRUE" | b"true" => Value::Logical(1),
+            b"F" | b"False" | b"FALSE" | b"false" => Value::Logical(0),
+            _ => return Err(expected("a logical")),
         },
-        Kind::Integer => parse_integer(trimmed).map(Value::Integer),
-        Kind::Double => parse_double(trimmed, settings.decimal).map(Value::Double),
-        Kind::Complex => parse_complex(trimmed, settings.decimal).map(Value::Complex),
-        Kind::Raw => {
-            let valid = trimmed.len() <= 2 && trimmed.bytes().all(|byte| byte.is_ascii_hexdigit());
-            valid
-                .then(|| u8::from_str_radix(trimmed, 16).ok())
-                .flatten()
-                .map(Value::Raw)
+        Kind::Integer => match parse_integer(buffer) {
+            Some(value) => Value::Integer(value),
+            None => return Err(expected("an integer")),
+        },
+        Kind::Double => {
+            let (value, end) =
+                parse_double_prefix(buffer, settings.decimal, false, Exactness::Allow)?;
+            if !is_blank(&buffer[end..])? {
+                return Err(expected("a real"));
+            }
+            Value::Double(value)
         }
-        Kind::Character => None,
-    };
-    value.ok_or_else(|| {
-        error(format!(
-            "scan() expected '{}', got '{}'",
-            kind.expected(),
-            text
-        ))
+        Kind::Complex => {
+            let (value, end) =
+                parse_complex_prefix(buffer, settings.decimal, false, Exactness::Allow, false)?;
+            if !is_blank(&buffer[end..])? {
+                return Err(expected("a complex"));
+            }
+            Value::Complex(value)
+        }
+        Kind::Raw => {
+            let start = buffer
+                .iter()
+                .take_while(|&&byte| is_space(byte as i32))
+                .count();
+            let mut value = 0u32;
+            let mut end = start;
+            for _ in 0..2 {
+                match buffer
+                    .get(end)
+                    .and_then(|&byte| (byte as char).to_digit(16))
+                {
+                    Some(digit) => {
+                        value = 16 * value + digit;
+                        end += 1;
+                    }
+                    None => {
+                        value = 0;
+                        break;
+                    }
+                }
+            }
+            if !is_blank(&buffer[end..])? {
+                return Err(expected("a raw"));
+            }
+            Value::Raw(value as u8)
+        }
+        Kind::Character => Value::Missing,
     })
 }
 
-/// A decimal integer that fits an R integer.
-fn parse_integer(text: &str) -> Option<i32> {
-    let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
-    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    let value: i64 = text.trim_start_matches('+').parse().ok()?;
-    if value > i32::MAX as i64 || value <= i32::MIN as i64 {
-        return None;
-    }
-    Some(value as i32)
-}
-
-/// A double as R reads one, with `decimal` as the decimal mark.
-fn parse_double(text: &str, decimal: u8) -> Option<f64> {
-    if decimal == b'.' {
-        return parse_real(text);
-    }
-    if text.contains('.') {
-        return None;
-    }
-    parse_real(&text.replace(decimal as char, "."))
-}
-
-/// A complex number written `a`, `bi` or `a+bi`.
-fn parse_complex(text: &str, decimal: u8) -> Option<Rcomplex> {
-    let Some(body) = text.strip_suffix('i') else {
-        return parse_double(text, decimal).map(|r| Rcomplex { r, i: 0.0 });
-    };
-    let bytes = body.as_bytes();
-    let split = (1..bytes.len()).rev().find(|&index| {
-        matches!(bytes[index], b'+' | b'-') && !matches!(bytes[index - 1], b'e' | b'E')
-    });
-    match split {
-        Some(index) => {
-            let r = parse_double(&body[..index], decimal)?;
-            let i = parse_double(&body[index..], decimal)?;
-            Some(Rcomplex { r, i })
+/// GNU R's `Strtoi`: a whole decimal integer, after optional white space, that fits an R
+/// integer; `None` for anything else, `NA`'s bit pattern included.
+fn parse_integer(text: &[u8]) -> Option<i32> {
+    let mut position = text.iter().take_while(|&&byte| is_c_space(byte)).count();
+    let negative = match text.get(position) {
+        Some(b'-') => {
+            position += 1;
+            true
         }
-        None => parse_double(body, decimal).map(|i| Rcomplex { r: 0.0, i }),
+        Some(b'+') => {
+            position += 1;
+            false
+        }
+        _ => false,
+    };
+    let digits = text[position..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if digits == 0 {
+        return text.is_empty().then_some(0);
     }
+    if position + digits != text.len() {
+        return None;
+    }
+    let mut value: i64 = 0;
+    for &byte in &text[position..] {
+        value = value.checked_mul(10)?.checked_add((byte - b'0') as i64)?;
+        if value > i32::MAX as i64 + 1 {
+            return None;
+        }
+    }
+    let value = if negative { -value } else { value };
+    (value > i32::MIN as i64 && value <= i32::MAX as i64).then_some(value as i32)
 }
 
-unsafe fn column_vector(column: &Column) -> R<Sexp> {
+/// C's `isspace` in a UTF-8 locale, for one byte.
+fn is_c_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | 11 | 12 | b'\r')
+}
+
+/// GNU R's `isBlankString` in a UTF-8 locale: only white space characters as `iswspace` knows
+/// them. Like GNU R, it stops at the first character that is not white space, and an invalid
+/// multibyte sequence before any such character is an error.
+fn is_blank(text: &[u8]) -> R<bool> {
+    let text = text
+        .iter()
+        .position(|&byte| byte == 0)
+        .map_or(text, |end| &text[..end]);
+    let mut rest = text;
+    while !rest.is_empty() {
+        // One character is at most four bytes, so only those are validated per step.
+        let head = &rest[..rest.len().min(4)];
+        let valid = match std::str::from_utf8(head) {
+            Ok(valid) => valid,
+            Err(failure) => {
+                // SAFETY: `valid_up_to` is the length of a valid UTF-8 prefix.
+                unsafe { std::str::from_utf8_unchecked(&head[..failure.valid_up_to()]) }
+            }
+        };
+        if let Some(character) = valid.chars().next() {
+            if !is_wide_space(character) {
+                return Ok(false);
+            }
+            rest = &rest[character.len_utf8()..];
+        } else {
+            return Err(crate::connections::invalid_multibyte(rest));
+        }
+    }
+    Ok(true)
+}
+
+/// `iswspace` in glibc's UTF-8 locales.
+fn is_wide_space(character: char) -> bool {
+    matches!(
+        character,
+        '\t'..='\r'
+            | ' '
+            | '\u{1680}'
+            | '\u{2000}'..='\u{2006}'
+            | '\u{2008}'..='\u{200a}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{205f}'
+            | '\u{3000}'
+    )
+}
+
+/// How `type.convert`'s `numerals` treats a number with more digits than a double holds.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Exactness {
+    Allow,
+    Warn,
+    Refuse,
+}
+
+/// GNU R's `R_strtod5`: the double at the start of `text` and the bytes it spans, 0 when there
+/// is none. With `na`, `NA` reads as missing.
+unsafe fn parse_double_prefix(
+    text: &[u8],
+    decimal: u8,
+    na: bool,
+    exactness: Exactness,
+) -> R<(f64, usize)> {
+    let mut position = text.iter().take_while(|&&byte| is_c_space(byte)).count();
+    let rest = &text[position..];
+    if na && rest.starts_with(b"NA") {
+        return Ok((NA_REAL, position + 2));
+    }
+    let sign = match rest.first() {
+        Some(b'-') => {
+            position += 1;
+            -1.0
+        }
+        Some(b'+') => {
+            position += 1;
+            1.0
+        }
+        _ => 1.0,
+    };
+    let rest = &text[position..];
+    let starts_with = |prefix: &[u8]| {
+        rest.len() >= prefix.len() && rest[..prefix.len()].eq_ignore_ascii_case(prefix)
+    };
+    if starts_with(b"nan") {
+        return Ok((f64::NAN, position + 3));
+    }
+    if starts_with(b"infinity") {
+        return Ok((sign * f64::INFINITY, position + 8));
+    }
+    if starts_with(b"inf") {
+        return Ok((sign * f64::INFINITY, position + 3));
+    }
+    let too_exact = |mantissa: f64| -> R<bool> {
+        if mantissa <= 9_007_199_254_740_991.0 {
+            return Ok(false);
+        }
+        match exactness {
+            Exactness::Allow => Ok(false),
+            Exactness::Warn => {
+                warning(format!(
+                    "accuracy loss in conversion from \"{}\" to numeric",
+                    values::escape_invalid_bytes(text)
+                ))?;
+                Ok(false)
+            }
+            Exactness::Refuse => Ok(true),
+        }
+    };
+    if rest.len() > 2 && rest[0] == b'0' && matches!(rest[1], b'x' | b'X') {
+        position += 2;
+        let mut mantissa = 0.0f64;
+        let mut fraction_bits: i32 = -1;
+        while let Some(&byte) = text.get(position) {
+            if let Some(digit) = (byte as char).to_digit(16) {
+                mantissa = 16.0 * mantissa + digit as f64;
+            } else if byte == decimal {
+                fraction_bits = 0;
+                position += 1;
+                continue;
+            } else {
+                break;
+            }
+            if fraction_bits >= 0 {
+                fraction_bits += 4;
+            }
+            position += 1;
+        }
+        if too_exact(mantissa)? {
+            return Ok((NA_REAL, 0));
+        }
+        let mut exponent: i32 = 0;
+        if matches!(text.get(position), Some(b'p' | b'P')) {
+            position += 1;
+            let (value, digits, end) = exponent_digits(text, position);
+            if digits == 0 {
+                return Ok((NA_REAL, 0));
+            }
+            exponent = value;
+            position = end;
+        }
+        if mantissa != 0.0 {
+            if fraction_bits > 0 {
+                exponent -= fraction_bits;
+            }
+            mantissa = scale_by_two(mantissa, exponent);
+        }
+        return Ok((sign * mantissa, position));
+    }
+    let mut digits = String::new();
+    let mut exponent: i64 = 0;
+    while let Some(&byte) = text.get(position).filter(|byte| byte.is_ascii_digit()) {
+        digits.push(byte as char);
+        position += 1;
+    }
+    if text.get(position) == Some(&decimal) {
+        position += 1;
+        while let Some(&byte) = text.get(position).filter(|byte| byte.is_ascii_digit()) {
+            digits.push(byte as char);
+            exponent -= 1;
+            position += 1;
+        }
+    }
+    if digits.is_empty() {
+        return Ok((NA_REAL, 0));
+    }
+    let significant = digits.trim_start_matches('0');
+    let mantissa_exceeds =
+        significant.len() > 16 || (significant.len() == 16 && significant > "9007199254740991");
+    if too_exact(if mantissa_exceeds { f64::INFINITY } else { 0.0 })? {
+        return Ok((NA_REAL, 0));
+    }
+    if matches!(text.get(position), Some(b'e' | b'E')) {
+        position += 1;
+        let (value, count, end) = exponent_digits(text, position);
+        if count == 0 {
+            return Ok((NA_REAL, 0));
+        }
+        exponent += value as i64;
+        position = end;
+    }
+    let value: f64 = format!("{digits}e{exponent}").parse().unwrap_or(f64::NAN);
+    Ok((sign * value, position))
+}
+
+/// An exponent's optional sign and digits from `position`: its value (capped as GNU R caps
+/// it), the number of digits and where it ends.
+fn exponent_digits(text: &[u8], mut position: usize) -> (i32, usize, usize) {
+    let sign = match text.get(position) {
+        Some(b'-') => {
+            position += 1;
+            -1
+        }
+        Some(b'+') => {
+            position += 1;
+            1
+        }
+        _ => 1,
+    };
+    let mut value: i32 = 0;
+    let mut digits = 0;
+    while let Some(&byte) = text.get(position).filter(|byte| byte.is_ascii_digit()) {
+        if value < 9999 {
+            value = value * 10 + (byte - b'0') as i32;
+        }
+        digits += 1;
+        position += 1;
+    }
+    (sign * value, digits, position)
+}
+
+/// `value * 2^exponent` without overflowing an intermediate power of two.
+fn scale_by_two(mut value: f64, mut exponent: i32) -> f64 {
+    while exponent > 1000 {
+        value *= 2f64.powi(1000);
+        exponent -= 1000;
+    }
+    while exponent < -1000 {
+        value *= 2f64.powi(-1000);
+        exponent += 1000;
+    }
+    value * 2f64.powi(exponent)
+}
+
+/// GNU R's `strtoc`: the complex number at the start of `text` (`a`, `bi` or `a+bi`) and the
+/// bytes it spans. `scan` reads a failure as zero and `type.convert` (`missing_on_failure`)
+/// as `NA`, which also refuses a lone `i`.
+unsafe fn parse_complex_prefix(
+    text: &[u8],
+    decimal: u8,
+    na: bool,
+    exactness: Exactness,
+    missing_on_failure: bool,
+) -> R<(Rcomplex, usize)> {
+    let failed = if missing_on_failure { NA_REAL } else { 0.0 };
+    let (real, end) = parse_double_prefix(text, decimal, na, exactness)?;
+    if is_blank(&text[end..])? {
+        return Ok((Rcomplex { r: real, i: 0.0 }, end));
+    }
+    if text[end] == b'i' {
+        if missing_on_failure && end == 0 {
+            return Ok((
+                Rcomplex {
+                    r: NA_REAL,
+                    i: NA_REAL,
+                },
+                0,
+            ));
+        }
+        return Ok((Rcomplex { r: 0.0, i: real }, end + 1));
+    }
+    let (imaginary, length) = parse_double_prefix(&text[end..], decimal, na, exactness)?;
+    if text.get(end + length) == Some(&b'i') {
+        return Ok((
+            Rcomplex {
+                r: real,
+                i: imaginary,
+            },
+            end + length + 1,
+        ));
+    }
+    Ok((
+        Rcomplex {
+            r: failed,
+            i: failed,
+        },
+        0,
+    ))
+}
+
+unsafe fn column_vector(column: &Column, mark: Option<Encoding>) -> R<Sexp> {
     let Some(kind) = column.kind else {
         return Ok(nil());
     };
@@ -1139,7 +1538,7 @@ unsafe fn column_vector(column: &Column) -> R<Sexp> {
             }
             Kind::Character => {
                 let charsxp = match value {
-                    Value::Text(text) => values::mkchar(text)?,
+                    Value::Text(text) => read_string(text, mark)?,
                     _ => na_string(),
                 };
                 values::set_elt(vector, index, charsxp);
@@ -1149,505 +1548,829 @@ unsafe fn column_vector(column: &Column) -> R<Sexp> {
     Ok(vector)
 }
 
-unsafe fn decimal_mark(dec: Sexp) -> R<u8> {
-    match values::first_string(dec).as_deref() {
-        Some(text) if text.len() == 1 => Ok(text.as_bytes()[0]),
-        _ => Err(error("invalid decimal separator")),
-    }
-}
-
-unsafe fn na_strings(strings: Sexp) -> Vec<String> {
-    if strings.kind() != SexpType::String {
-        return Vec::new();
-    }
-    values::strings(strings)
-        .into_iter()
-        .map(|text| text.unwrap_or_else(|| "NA".to_owned()))
-        .collect()
+/// A string read from input, holding the input's bytes. Text read without a declared
+/// `encoding` is native (`"unknown"`) even when it is valid UTF-8, as GNU R's `mkChar` makes it,
+/// and ASCII text carries no mark.
+unsafe fn read_string(text: &[u8], mark: Option<Encoding>) -> R<Sexp> {
+    let encoding = match mark {
+        Some(mark) if !text.is_ascii() => mark,
+        _ => Encoding::Native,
+    };
+    values::mkchar_bytes(text, encoding)
 }
 
 // readtablehead and countfields.
 
-/// `readtablehead(file, nlines, comment.char, blank.lines.skip, quote, sep, skipNul)`: the
-/// first `nlines` lines that are not blank, a quoted field running over line ends joining its
-/// lines into one.
+/// `readtablehead(file, nlines, comment.char, blank.lines.skip, quote, sep, skipNul)`, a port
+/// of GNU R's: the first `nlines` lines that are not blank, a quoted field running over line
+/// ends joining its lines into one.
 unsafe fn do_read_table_head(call: &NativeCall<'_>) -> R<Sexp> {
     let file = call.arg(0);
     let count = values::as_integer_scalar(call.arg(1));
+    let mut blank_lines_skip = values::as_logical_scalar(call.arg(3));
     if count == NA_INTEGER || count <= 0 {
         return Err(error("invalid 'nlines' argument"));
     }
-    let blank_lines_skip = values::as_logical_scalar(call.arg(3)) != 0;
-    let syntax = Syntax::from_arguments(call.arg(5), call.arg(4), call.arg(2))?;
-    let (lines, incomplete, in_quote) = crate::connections::with_input(file, |input, position| {
-        let mut lines = Vec::new();
-        let mut incomplete = false;
-        let mut in_quote = false;
-        while lines.len() < count as usize && *position < input.len() {
-            let (line, ended, quoted) = head_line(input, position, &syntax);
-            incomplete = !ended;
-            in_quote = quoted;
-            if quoted {
-                break;
-            }
-            let content_empty = match syntax.comment {
-                Some(comment) => line.first().is_none_or(|byte| *byte == comment),
-                None => line.is_empty(),
-            };
-            if blank_lines_skip && content_empty {
-                continue;
-            }
-            lines.push(String::from_utf8_lossy(&line).into_owned());
-        }
-        (lines, incomplete, in_quote)
-    })?;
-    let description = crate::connections::description(file).unwrap_or_default();
-    if in_quote {
-        return Err(error(format!(
-            "incomplete final line found by readTableHeader on '{description}'"
-        )));
+    if blank_lines_skip == NA_LOGICAL {
+        blank_lines_skip = 1;
+    }
+    let quotes = quote_set(call.arg(4))?;
+    let comment = comment_char(call.arg(2))?;
+    let separator = first_byte_separator(call.arg(5))?;
+    let skip_nul = values::as_logical_scalar(call.arg(6));
+    if skip_nul == NA_LOGICAL {
+        return Err(error("invalid 'skipNul' argument"));
+    }
+    let con = crate::connections::resolve(file, "invalid connection")?.1;
+    let console = crate::connections::console_scan_text(file, 0)?;
+    let syntax = Syntax {
+        separator,
+        quotes,
+        comment,
+    };
+    let read = |input: &[u8], position: &mut usize| {
+        let mut reader = Reader::new(input, *position, syntax);
+        reader.skip_nul = skip_nul != 0;
+        let outcome = head_lines(
+            &mut reader,
+            count as usize,
+            blank_lines_skip != 0,
+            console.is_some(),
+        );
+        *position = reader.rest_position();
+        outcome
+    };
+    let outcome = match &console {
+        Some(text) => read(text, &mut 0),
+        None => crate::connections::with_input(file, read)?,
+    };
+    let HeadLines {
+        lines,
+        nul_lines,
+        incomplete,
+    } = outcome?;
+    for line in nul_lines {
+        warning(format!("line {line} appears to contain embedded nulls"))?;
     }
     if incomplete {
-        warning(format!(
-            "incomplete final line found by readTableHeader on '{description}'"
-        ))?;
+        let message = format!(
+            "incomplete final line found by readTableHeader on '{}'",
+            crate::connections::description(file).unwrap_or_default()
+        );
+        if (*con).text != 0 && (*con).blocking != 0 {
+            warning(message)?;
+        } else {
+            return Err(error(message));
+        }
     }
-    string_vector(&lines)
+    let vector = alloc(SexpType::String, lines.len())?;
+    for (index, line) in lines.iter().enumerate() {
+        values::set_elt(vector, index, read_string(line, None)?);
+    }
+    Ok(vector)
 }
 
-/// One logical line: the bytes up to a line end outside quotes, whether a line end ended it,
-/// and whether the input ran out inside a quote.
-fn head_line(input: &[u8], position: &mut usize, syntax: &Syntax) -> (Vec<u8>, bool, bool) {
+struct HeadLines {
+    lines: Vec<Vec<u8>>,
+    /// The (1-based) numbers of the lines a nul cut short.
+    nul_lines: Vec<usize>,
+    /// Whether the input ended inside a line.
+    incomplete: bool,
+}
+
+fn head_lines(
+    reader: &mut Reader<'_>,
+    count: usize,
+    blank_lines_skip: bool,
+    console: bool,
+) -> R<HeadLines> {
+    let mut head = HeadLines {
+        lines: Vec::new(),
+        nul_lines: Vec::new(),
+        incomplete: false,
+    };
+    let separator = reader.separator;
+    let comment = reader.comment;
+    let mut quote = 0;
     let mut line = Vec::new();
-    let mut quote: Option<u8> = None;
-    let mut field_start = true;
-    let mut in_comment = false;
-    while let Some(&byte) = input.get(*position) {
-        *position += 1;
-        if quote.is_none() && (byte == b'\n' || byte == b'\r') {
-            if byte == b'\r' && input.get(*position) == Some(&b'\n') {
-                *position += 1;
+    while head.lines.len() < count {
+        line.clear();
+        let mut empty = true;
+        let mut skip = false;
+        let mut first_nonwhite = true;
+        let mut character;
+        loop {
+            character = reader.next(true);
+            if character == EOF {
+                break;
             }
-            return (line, true, false);
-        }
-        line.push(byte);
-        if in_comment {
-            continue;
-        }
-        match quote {
-            Some(open) => {
-                if byte == b'\\' && syntax.separator.is_none() {
-                    if let Some(&next) = input.get(*position) {
-                        line.push(next);
-                        *position += 1;
+            if quote != 0 {
+                if separator == 0 && character == b'\\' as i32 {
+                    line.push(character as u8);
+                    character = reader.next(true);
+                    if character == EOF {
+                        return Err(error("\\ followed by EOF"));
                     }
-                } else if byte == open {
-                    quote = None;
-                    // Whitespace-separated input lets a quote open right after another closes,
-                    // as in `"A"" B "`, which is two fields.
-                    field_start = syntax.separator.is_none();
+                    line.push(character as u8);
+                    continue;
+                } else if character == quote {
+                    if separator == 0 {
+                        quote = 0;
+                    } else {
+                        let next = reader.next(true);
+                        if next == quote {
+                            line.push(character as u8);
+                        } else {
+                            reader.unread(next);
+                            quote = 0;
+                        }
+                    }
                 }
+            } else if !skip && (first_nonwhite || separator != 0) && reader.is_quote(character) {
+                quote = character;
+            } else if !skip && separator == 0 && is_space(character) {
+                first_nonwhite = true;
+            } else if character != b' ' as i32 && character != b'\t' as i32 {
+                first_nonwhite = false;
             }
-            None => {
-                if Some(byte) == syntax.comment {
-                    in_comment = true;
-                } else if syntax.quotes.contains(&byte)
-                    && (syntax.separator.is_some() || field_start)
-                {
-                    quote = Some(byte);
-                }
-                field_start = match syntax.separator {
-                    Some(separator) => byte == separator,
-                    None => byte == b' ' || byte == b'\t',
-                };
+            if empty && !skip && character != b'\n' as i32 && character != comment {
+                empty = false;
             }
+            if quote == 0 && !skip && character == comment {
+                skip = true;
+            }
+            if quote == 0 && character == b'\n' as i32 {
+                break;
+            }
+            line.push(character as u8);
+        }
+        if console && empty {
+            break;
+        }
+        if !empty || (character != EOF && !blank_lines_skip) {
+            let mut stored = line.clone();
+            if let Some(nul) = stored.iter().position(|&byte| byte == 0) {
+                stored.truncate(nul);
+                head.nul_lines.push(head.lines.len() + 1);
+            }
+            head.lines.push(stored);
+        }
+        if character == EOF {
+            head.incomplete = !line.is_empty();
+            break;
         }
     }
-    let quoted = quote.is_some();
-    (line, false, quoted)
+    Ok(head)
 }
 
-/// `countfields(file, sep, quote, skip, blank.lines.skip, comment.char)`: the number of fields
-/// on each line, `NA` for a line whose last field continues on the next one.
+/// `countfields(file, sep, quote, skip, blank.lines.skip, comment.char)`, a port of GNU R's:
+/// the number of fields on each line, `NA` for a line a quoted field runs over.
 unsafe fn do_count_fields(call: &NativeCall<'_>) -> R<Sexp> {
     let file = call.arg(0);
-    let syntax = Syntax::from_arguments(call.arg(1), call.arg(2), call.arg(5))?;
-    let skip = values::as_integer_scalar(call.arg(3)).max(0) as usize;
-    let blank_lines_skip = values::as_logical_scalar(call.arg(4)) != 0;
-    let (counts, eof_in_quote) = crate::connections::with_input(file, |input, position| {
-        let mut scanner = Scanner::new(input, *position, &syntax);
-        scanner.skip_lines(skip);
-        let mut counts = Vec::new();
-        let mut fields = 0;
-        let mut record_line = scanner.line;
-        loop {
-            let (field, end) = scanner.next_field();
-            if field.is_some() {
-                fields += 1;
-            }
-            if end == End::Separator {
-                continue;
-            }
-            if fields == 0 && end == End::File {
-                break;
-            }
-            // The lines a quoted field ran over count as unknown.
-            let spanned = scanner
-                .line
-                .saturating_sub(record_line + usize::from(end == End::Line));
-            counts.extend(std::iter::repeat_n(NA_INTEGER, spanned));
-            if fields > 0 || !blank_lines_skip {
-                counts.push(fields);
-            }
-            fields = 0;
-            record_line = scanner.line;
-            if end == End::File {
-                break;
+    let comment = comment_char(call.arg(5))?;
+    let skip = values::as_integer_scalar(call.arg(3));
+    let skip = if skip == NA_INTEGER || skip < 0 {
+        0
+    } else {
+        skip as usize
+    };
+    let mut blank_lines_skip = values::as_logical_scalar(call.arg(4));
+    if blank_lines_skip == NA_LOGICAL {
+        blank_lines_skip = 1;
+    }
+    let separator = first_byte_separator(call.arg(1))?;
+    let syntax = Syntax {
+        separator,
+        quotes: quote_set(call.arg(2))?,
+        comment,
+    };
+    let console = crate::connections::console_scan_text(file, 0)?;
+    let read = |input: &[u8], position: &mut usize| {
+        let mut reader = Reader::new(input, *position, syntax);
+        if console.is_none() {
+            for _ in 0..skip {
+                reader.skip_line();
             }
         }
-        *position = scanner.position;
-        (counts, scanner.eof_in_quote)
-    })?;
-    if eof_in_quote {
-        warning("EOF within quoted string")?;
+        reader.saved = 0;
+        let counts = count_fields(&mut reader, blank_lines_skip != 0);
+        *position = reader.rest_position();
+        counts
+    };
+    let counts = match &console {
+        Some(text) => read(text, &mut 0),
+        None => crate::connections::with_input(file, read)?,
+    }?;
+    match counts {
+        Some(counts) => values::integer_vector(&counts),
+        None => Ok(nil()),
     }
-    values::integer_vector(&counts)
+}
+
+/// The field counts of the lines `reader` has left, `None` when there are none.
+fn count_fields(reader: &mut Reader<'_>, blank_lines_skip: bool) -> R<Option<Vec<i32>>> {
+    let mut counts: Vec<i32> = Vec::new();
+    let set = |counts: &mut Vec<i32>, line: usize, value: i32| {
+        if counts.len() <= line {
+            counts.resize(line + 1, 0);
+        }
+        counts[line] = value;
+    };
+    let mut lines: usize = 0;
+    let mut fields = 0;
+    let mut quoted_on: usize = 0;
+    let mut quote = 0;
+    loop {
+        let mut character = reader.next(quoted_on > 0);
+        if character == EOF {
+            if fields != 0 {
+                set(&mut counts, lines, fields);
+            } else if lines == 0 {
+                return Ok(None);
+            } else {
+                lines -= 1;
+            }
+            break;
+        }
+        if character == b'\n' as i32 {
+            if quoted_on != 0 {
+                set(&mut counts, lines, NA_INTEGER);
+                lines += 1;
+            } else if fields != 0 || !blank_lines_skip {
+                set(&mut counts, lines, fields);
+                lines += 1;
+                fields = 0;
+                quoted_on = 0;
+            }
+            continue;
+        }
+        if reader.separator != 0 {
+            if fields == 0 {
+                fields += 1;
+            }
+            if quoted_on != 0 {
+                if character == quote {
+                    quoted_on = 0;
+                }
+            } else if reader.is_quote(character) {
+                quoted_on = lines + 1;
+                quote = character;
+            }
+            if character == reader.separator && quoted_on == 0 {
+                fields += 1;
+            }
+        } else if !is_space(character) {
+            if reader.is_quote(character) {
+                quote = character;
+                quoted_on = lines + 1;
+                loop {
+                    character = reader.next(true);
+                    if character == quote {
+                        break;
+                    }
+                    if character == EOF {
+                        return Err(error(format!(
+                            "quoted string on line {quoted_on} terminated by EOF"
+                        )));
+                    }
+                    if character == b'\n' as i32 {
+                        set(&mut counts, lines, NA_INTEGER);
+                        lines += 1;
+                    }
+                }
+                quoted_on = 0;
+            } else {
+                loop {
+                    character = reader.next(false);
+                    if is_space(character) || character == EOF {
+                        break;
+                    }
+                }
+                if character == EOF {
+                    character = b'\n' as i32;
+                }
+                reader.unread(character);
+            }
+            fields += 1;
+        }
+    }
+    counts.resize(lines + 1, 0);
+    Ok(Some(counts))
 }
 
 // type.convert.
 
-/// `typeconvert(x, na.strings, as.is, dec, numerals, tryLogical)`: the narrowest of logical,
-/// integer, double and complex that reads every element, or character (a factor unless
-/// `as.is`). Blank strings and `na.strings` are missing.
+/// `typeconvert(x, na.strings, as.is, dec, numerals, tryLogical)`, a port of GNU R's: the
+/// first of logical, integer, double and complex that reads every element, or character (a
+/// factor unless `as.is`). Empty and blank strings and `na.strings` are missing.
 unsafe fn do_type_convert(call: &NativeCall<'_>) -> R<Sexp> {
     let x = call.arg(0);
     if x.kind() != SexpType::String {
         return Err(error("the first argument must be of mode character"));
     }
-    let na = na_strings(call.arg(1));
-    let as_is = values::as_logical_scalar(call.arg(2)) == 1;
-    let decimal = decimal_mark(call.arg(3))?;
-    let numerals = values::first_string(call.arg(4))
-        .map(|text| text.into_owned())
-        .unwrap_or_else(|| "allow.loss".to_owned());
-    let try_logical = values::as_logical_scalar(call.arg(5)) != 0;
-    let strings = values::strings(x);
-    let missing = |text: &Option<String>| match text {
-        None => true,
-        Some(text) => na.iter().any(|candidate| candidate == text) || text.trim().is_empty(),
-    };
-    let present: Vec<&str> = strings
-        .iter()
-        .filter(|text| !missing(text))
-        .filter_map(|text| text.as_deref())
+    let na_strings = call.arg(1);
+    if na_strings.kind() != SexpType::String {
+        return Err(error("invalid 'na.strings' argument"));
+    }
+    let na_strings: Vec<Vec<u8>> = (0..length(na_strings))
+        .map(|index| na_strings.element(index).bytes().to_vec())
         .collect();
-    let result = if present
-        .iter()
-        .all(|text| try_logical && matches!(*text, "T" | "F" | "TRUE" | "FALSE"))
-    {
-        let result = alloc(SexpType::Logical, strings.len())?;
-        for (index, text) in strings.iter().enumerate() {
-            values::ints_mut(result)[index] = match text.as_deref() {
-                _ if missing(text) => NA_LOGICAL,
-                Some("T" | "TRUE") => 1,
-                _ => 0,
-            };
+    let as_is = values::as_logical_scalar(call.arg(2)) == 1;
+    let decimal_argument = call.arg(3);
+    let decimal = match decimal_argument.kind() {
+        SexpType::String | SexpType::Nil => {
+            first_bytes(decimal_argument).map_or(b'.', |bytes| bytes.first().copied().unwrap_or(0))
         }
-        result
-    } else if present
-        .iter()
-        .all(|text| parse_integer(text.trim_start()).is_some() && !text.ends_with([' ', '\t']))
-    {
-        let result = alloc(SexpType::Integer, strings.len())?;
-        for (index, text) in strings.iter().enumerate() {
-            values::ints_mut(result)[index] = if missing(text) {
-                NA_INTEGER
-            } else {
-                text.as_deref()
-                    .and_then(|text| parse_integer(text.trim_start()))
-                    .unwrap_or(NA_INTEGER)
-            };
-        }
-        result
-    } else if present.iter().all(|text| convertible_double(text, decimal))
-        && !loses_accuracy(&present, &numerals)?
-    {
-        let result = alloc(SexpType::Real, strings.len())?;
-        for (index, text) in strings.iter().enumerate() {
-            values::reals_mut(result)[index] = if missing(text) {
-                NA_REAL
-            } else {
-                text.as_deref()
-                    .and_then(|text| parse_double(text, decimal))
-                    .unwrap_or(NA_REAL)
-            };
-        }
-        result
-    } else if !present.iter().all(|text| convertible_double(text, decimal))
-        && present
-            .iter()
-            .all(|text| text.trim() != "NA" && parse_complex(text.trim(), decimal).is_some())
-    {
-        let result = alloc(SexpType::Complex, strings.len())?;
-        for (index, text) in strings.iter().enumerate() {
-            let na = Rcomplex {
-                r: NA_REAL,
-                i: NA_REAL,
-            };
-            values::complexes_mut(result)[index] = if missing(text) {
-                na
-            } else {
-                text.as_deref()
-                    .and_then(|text| parse_complex(text.trim(), decimal))
-                    .unwrap_or(na)
-            };
-        }
-        result
-    } else {
-        let is_na = |text: &Option<String>| match text {
-            None => true,
-            Some(text) => na.iter().any(|candidate| candidate == text),
-        };
-        if as_is {
-            let result = alloc(SexpType::String, strings.len())?;
-            for (index, text) in strings.iter().enumerate() {
-                let charsxp = match text {
-                    Some(text) if !is_na(&Some(text.clone())) => values::mkchar(text)?,
-                    _ => na_string(),
-                };
-                values::set_elt(result, index, charsxp);
-            }
-            result
-        } else {
-            let mut levels: Vec<&str> = strings
-                .iter()
-                .filter(|text| !is_na(text))
-                .filter_map(|text| text.as_deref())
-                .collect();
-            levels.sort_by(|left, right| crate::sort::collate(left, right));
-            levels.dedup();
-            let result = alloc(SexpType::Integer, strings.len())?;
-            for (index, text) in strings.iter().enumerate() {
-                values::ints_mut(result)[index] = match text.as_deref() {
-                    Some(text) if !is_na(&Some(text.to_owned())) => levels
-                        .binary_search_by(|level| crate::sort::collate(level, text))
-                        .map_or(NA_INTEGER, |position| position as i32 + 1),
-                    _ => NA_INTEGER,
-                };
-            }
-            let levels = string_vector(&levels)?;
-            values::set_attr(result, symbols().levels, levels)?;
-            let class = scalar_string("factor")?;
-            values::set_attr(result, symbols().class, class)?;
-            result
+        _ => b'.',
+    };
+    let (exactness, refuse) = match first_bytes(call.arg(4)) {
+        None | Some(b"allow.loss") => (Exactness::Allow, Exactness::Allow),
+        Some(b"warn.loss") => (Exactness::Warn, Exactness::Allow),
+        Some(b"no.loss") => (Exactness::Refuse, Exactness::Refuse),
+        Some(other) => {
+            return Err(error(format!(
+                "invalid 'numerals' string: \"{}\"",
+                values::escape_invalid_bytes(other)
+            )));
         }
     };
-    for attribute in [symbols().names, symbols().dim, symbols().dimnames] {
-        let value = values::get_attr(x, attribute);
-        if value != nil() {
-            values::set_attr(result, attribute, value)?;
+    let try_logical = values::as_logical_scalar(call.arg(5)) == 1;
+    let count = length(x);
+    let elements: Vec<&[u8]> = (0..count).map(|index| x.element(index).bytes()).collect();
+    let is_na_string = |text: &[u8]| na_strings.iter().any(|na| na == text);
+    let missing = |index: usize| {
+        let text = elements[index];
+        R::Ok(
+            x.element(index) == na_string()
+                || text.is_empty()
+                || is_na_string(text)
+                || is_blank(text)?,
+        )
+    };
+    let mut possible = Possible {
+        logical: try_logical,
+        integer: true,
+        real: true,
+        complex: true,
+    };
+    for index in 0..count {
+        if !missing(index)? {
+            possible.rule_out(elements[index], decimal, refuse)?;
+            break;
         }
     }
+    let mut result = None;
+    if possible.logical {
+        let vector = alloc(SexpType::Logical, count)?;
+        for index in 0..count {
+            values::ints_mut(vector)[index] = match elements[index] {
+                _ if missing(index)? => NA_LOGICAL,
+                b"F" | b"FALSE" => 0,
+                b"T" | b"TRUE" => 1,
+                text => {
+                    possible.logical = false;
+                    possible.rule_out(text, decimal, refuse)?;
+                    break;
+                }
+            };
+        }
+        if possible.logical {
+            result = Some(vector);
+        }
+    }
+    if result.is_none() && possible.integer {
+        let vector = alloc(SexpType::Integer, count)?;
+        for index in 0..count {
+            values::ints_mut(vector)[index] = if missing(index)? {
+                NA_INTEGER
+            } else {
+                match parse_integer(elements[index]) {
+                    Some(value) => value,
+                    None => {
+                        possible.integer = false;
+                        possible.rule_out(elements[index], decimal, refuse)?;
+                        break;
+                    }
+                }
+            };
+        }
+        if possible.integer {
+            result = Some(vector);
+        }
+    }
+    if result.is_none() && possible.real {
+        let vector = alloc(SexpType::Real, count)?;
+        crate::heap().root(vector);
+        for index in 0..count {
+            values::reals_mut(vector)[index] = if missing(index)? {
+                NA_REAL
+            } else {
+                let text = elements[index];
+                let (value, end) = parse_double_prefix(text, decimal, false, exactness)?;
+                if !is_blank(&text[end..])? {
+                    possible.real = false;
+                    possible.rule_out(text, decimal, refuse)?;
+                    break;
+                }
+                value
+            };
+        }
+        if possible.real {
+            result = Some(vector);
+        }
+    }
+    if result.is_none() && possible.complex {
+        let vector = alloc(SexpType::Complex, count)?;
+        crate::heap().root(vector);
+        for index in 0..count {
+            values::complexes_mut(vector)[index] = if missing(index)? {
+                Rcomplex {
+                    r: NA_REAL,
+                    i: NA_REAL,
+                }
+            } else {
+                let text = elements[index];
+                let (value, end) = parse_complex_prefix(text, decimal, false, exactness, true)?;
+                if !is_blank(&text[end..])? {
+                    possible.complex = false;
+                    break;
+                }
+                value
+            };
+        }
+        if possible.complex {
+            result = Some(vector);
+        }
+    }
+    let is_array = values::get_attr(x, symbols().dim) != nil();
+    let result = match result {
+        Some(result) => result,
+        None if as_is => {
+            let result = values::duplicate(x)?;
+            for index in 0..count {
+                if is_na_string(values::string_elt(result, index).bytes()) {
+                    values::set_elt(result, index, na_string());
+                }
+            }
+            result
+        }
+        None => character_factor(x, &is_na_string)?,
+    };
+    crate::heap().root(result);
+    values::set_attr(result, symbols().dim, values::get_attr(x, symbols().dim))?;
+    let names = if is_array {
+        symbols().dimnames
+    } else {
+        symbols().names
+    };
+    values::set_attr(result, names, values::get_attr(x, names))?;
     Ok(result)
 }
 
-/// Whether `text` reads as a double for `type.convert`, where `NA` is only missing when
-/// `na.strings` says so.
-fn convertible_double(text: &str, decimal: u8) -> bool {
-    text.trim() != "NA" && parse_double(text, decimal).is_some()
+/// The types `type.convert` has not ruled out.
+struct Possible {
+    logical: bool,
+    integer: bool,
+    real: bool,
+    complex: bool,
 }
 
-/// Whether reading `texts` as doubles loses digits under `numerals`, warning for
-/// `"warn.loss"`; only `"no.loss"` makes the loss refuse the conversion.
-unsafe fn loses_accuracy(texts: &[&str], numerals: &str) -> R<bool> {
-    if numerals == "allow.loss" {
-        return Ok(false);
+impl Possible {
+    /// GNU R's `ruleout_types`: rules out the types `text` cannot be read as, `NA` reading as
+    /// a missing number.
+    unsafe fn rule_out(&mut self, text: &[u8], decimal: u8, exactness: Exactness) -> R<()> {
+        if self.logical {
+            if matches!(text, b"F" | b"T" | b"FALSE" | b"TRUE") {
+                self.integer = false;
+                self.real = false;
+                self.complex = false;
+                return Ok(());
+            }
+            self.logical = false;
+        }
+        if self.integer && parse_integer(text).is_none() {
+            self.integer = false;
+        }
+        if self.real {
+            let (_, end) = parse_double_prefix(text, decimal, true, exactness)?;
+            if !is_blank(&text[end..])? {
+                self.real = false;
+            }
+        }
+        if self.complex {
+            let (_, end) = parse_complex_prefix(text, decimal, true, exactness, true)?;
+            if !is_blank(&text[end..])? {
+                self.complex = false;
+            }
+        }
+        Ok(())
     }
-    for text in texts {
-        let mantissa = text.trim().trim_start_matches(['+', '-']);
-        let mantissa = mantissa.split(['e', 'E']).next().unwrap_or("");
-        if mantissa.starts_with("0x") || mantissa.starts_with("0X") {
+}
+
+/// The factor `type.convert` makes of strings that are not numbers: its levels are the
+/// distinct strings that are not missing, each the first string that spells it, in collation
+/// order. GNU R's Shell sort places the levels the collation calls equal.
+unsafe fn character_factor(x: Sexp, is_na_string: &dyn Fn(&[u8]) -> bool) -> R<Sexp> {
+    let strings = values::strings(x);
+    let mut levels: Vec<&str> = Vec::new();
+    let mut level_elements: Vec<Sexp> = Vec::new();
+    let mut seen = FxHashSet::default();
+    for (index, text) in strings.iter().enumerate() {
+        let Some(text) = text.as_deref() else {
+            continue;
+        };
+        if is_na_string(x.element(index).bytes()) || !seen.insert(text) {
             continue;
         }
-        let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
-        let significant = digits.trim_start_matches('0').trim_end_matches('0');
-        if significant.len() > 15 {
-            if numerals == "no.loss" {
-                return Ok(true);
-            }
-            warning(format!(
-                "accuracy loss in conversion from \"{text}\" to numeric"
-            ))?;
-        }
+        levels.push(text);
+        level_elements.push(x.element(index));
     }
-    Ok(false)
+    let mut order: Vec<usize> = (0..levels.len()).collect();
+    let collator = collator();
+    shell_sort(&mut order, |left, right| {
+        collator.compare(levels[left], levels[right]).is_gt()
+    });
+    drop(collator);
+    let code_of: FxHashMap<&str, i32> = order
+        .iter()
+        .zip(1..)
+        .map(|(&index, code)| (levels[index], code))
+        .collect();
+    let result = alloc(SexpType::Integer, strings.len())?;
+    crate::heap().root(result);
+    for (index, text) in strings.iter().enumerate() {
+        values::ints_mut(result)[index] = text
+            .as_deref()
+            .and_then(|text| code_of.get(text).copied())
+            .unwrap_or(NA_INTEGER);
+    }
+    let level_strings = alloc(SexpType::String, levels.len())?;
+    crate::heap().root(level_strings);
+    for (position, &index) in order.iter().enumerate() {
+        values::set_elt(level_strings, position, level_elements[index]);
+    }
+    values::set_attr(result, symbols().levels, level_strings)?;
+    let class = scalar_string("factor")?;
+    values::set_attr(result, symbols().class, class)?;
+    Ok(result)
 }
 
 // write.table.
 
 /// `writetable(x, file, nrow, ncol, rnames, sep, eol, na, dec, quote, qmethod)`: the rows of a
-/// data frame or matrix as delimited text. Numbers are written to 15 significant digits,
-/// strings in the quoted columns between double quotes, with embedded quotes escaped by a
-/// backslash when `qmethod` is `TRUE` and doubled otherwise.
+/// data frame or matrix as delimited text, a port of GNU R's `writetable`. Numbers are written to
+/// 15 significant digits, strings in the quoted columns between double quotes, with embedded
+/// quotes escaped by a backslash when `qmethod` is `TRUE` and doubled otherwise. GNU R prints each
+/// piece as it goes, so an error leaves the rows before it in the file; the buffered output is
+/// written before the error is raised.
 unsafe fn do_write_table(call: &NativeCall<'_>) -> R<Sexp> {
     let x = call.arg(0);
     let file = call.arg(1);
-    let rows = values::as_integer_scalar(call.arg(2)).max(0) as usize;
-    let columns = values::as_integer_scalar(call.arg(3)).max(0) as usize;
+    let rows = values::as_integer_scalar(call.arg(2));
+    let columns = values::as_integer_scalar(call.arg(3));
     let row_names = call.arg(4);
-    let separator = values::first_string(call.arg(5))
-        .map(|text| text.into_owned())
-        .unwrap_or_default();
-    let eol = values::first_string(call.arg(6))
-        .map(|text| text.into_owned())
-        .unwrap_or_default();
-    let na = values::first_string(call.arg(7))
-        .map(|text| text.into_owned())
-        .unwrap_or_else(|| "NA".to_owned());
-    let decimal = values::first_string(call.arg(8))
-        .map(|text| text.into_owned())
-        .unwrap_or_else(|| ".".to_owned());
-    if decimal.chars().count() != 1 {
-        return Err(error("'dec' must be a single character"));
+    let [separator, eol, na, decimal] = [5, 6, 7, 8].map(|index| call.arg(index));
+    let escape = values::as_logical_scalar(call.arg(10));
+    if rows == NA_INTEGER {
+        return Err(error("invalid 'nr' argument"));
     }
+    if columns == NA_INTEGER {
+        return Err(error("invalid 'nc' argument"));
+    }
+    if row_names != nil() && row_names.kind() != SexpType::String {
+        return Err(error("invalid 'rnames' argument"));
+    }
+    for (value, name) in [
+        (separator, "sep"),
+        (eol, "eol"),
+        (na, "na"),
+        (decimal, "dec"),
+    ] {
+        if value.kind() != SexpType::String {
+            return Err(error(format!("invalid '{name}' argument")));
+        }
+    }
+    if escape == NA_LOGICAL {
+        return Err(error("invalid 'qmethod' argument"));
+    }
+    let first = |strings: Sexp| -> R<Vec<u8>> {
+        if length(strings) == 0 {
+            return Err(error("subscript out of bounds"));
+        }
+        let mut bytes = Vec::new();
+        write_string(strings.element(0), false, false, &mut bytes)?;
+        Ok(bytes)
+    };
+    let separator = first(separator)?;
+    let eol = first(eol)?;
+    let na = first(na)?;
+    let decimal = first(decimal)?;
+    let &[decimal] = decimal.as_slice() else {
+        return Err(error("'dec' must be a single character"));
+    };
+    let rows = rows.max(0) as usize;
+    let columns = columns.max(0) as usize;
     let quote = coerce_vector(call.arg(9), SexpType::Integer)?;
-    let quoted: Vec<i32> = values::ints(quote).to_vec();
-    let escape = values::as_logical_scalar(call.arg(10)) == 1;
-    let quote_text = |text: &str| -> String {
-        let inner = if escape {
-            text.replace('"', "\\\"")
-        } else {
-            text.replace('"', "\"\"")
-        };
-        format!("\"{inner}\"")
+    let mut quote_row_names = false;
+    let mut quote_columns = vec![false; columns];
+    for &entry in values::ints(quote) {
+        if entry == 0 {
+            quote_row_names = true;
+        }
+        if entry > 0
+            && let Some(slot) = quote_columns.get_mut(entry as usize - 1)
+        {
+            *slot = true;
+        }
+    }
+    let settings = Settings {
+        escape: escape == 1,
+        decimal,
+        scipen: crate::format::Settings::current_scipen(),
     };
     let is_frame = x.kind() == SexpType::List;
-    let mut cells: Vec<Cell> = Vec::with_capacity(columns);
-    for column in 0..columns {
-        let vector = if is_frame { x.element(column) } else { x };
-        cells.push(Cell::new(vector)?);
-    }
-    let mut output = String::new();
-    for row in 0..rows {
-        if row_names != nil() {
-            let name = values::string_at(row_names, row)
-                .map_or_else(|| na.clone(), |name| name.into_owned());
-            output.push_str(&if quoted.contains(&0) {
-                quote_text(&name)
-            } else {
-                name
-            });
-            output.push_str(&separator);
-        }
-        for (column, cell) in cells.iter().enumerate() {
-            if column > 0 {
-                output.push_str(&separator);
+    let mut levels = Vec::with_capacity(columns);
+    if is_frame {
+        for column in 0..columns {
+            let vector = x.element(column);
+            if length(vector) != rows {
+                return Err(error(format!(
+                    "corrupt data frame -- length of column {} does not match nrows",
+                    column + 1
+                )));
             }
-            let index = if is_frame { row } else { row + column * rows };
-            match cell.text(index, &decimal)? {
-                None => output.push_str(&na),
-                Some((text, true)) if quoted.contains(&(column as i32 + 1)) => {
-                    output.push_str(&quote_text(&text))
+            levels.push(
+                values::inherits(vector, "factor")
+                    .then(|| values::get_attr(vector, symbols().levels)),
+            );
+        }
+    } else if length(x) != rows * columns {
+        return Err(error("corrupt matrix -- dims do not match length"));
+    }
+    let mut output = Vec::new();
+    let written = (|| -> R<()> {
+        for row in 0..rows {
+            if row_names != nil() {
+                write_element(row_names, row, quote_row_names, &settings, &mut output)?;
+                output.extend_from_slice(&separator);
+            }
+            for (column, &quoted) in quote_columns.iter().enumerate() {
+                if column > 0 {
+                    output.extend_from_slice(&separator);
                 }
-                Some((text, _)) => output.push_str(&text),
+                let (vector, index) = if is_frame {
+                    (x.element(column), row)
+                } else {
+                    (x, row + column * rows)
+                };
+                if is_missing(vector, index) {
+                    output.extend_from_slice(&na);
+                    continue;
+                }
+                match levels.get(column).copied().flatten() {
+                    Some(level_strings) => {
+                        let code = match vector.kind() {
+                            SexpType::Integer => values::ints(vector)[index] as i64 - 1,
+                            SexpType::Real => (values::reals(vector)[index] - 1.0) as i64,
+                            _ => {
+                                return Err(error(format!(
+                                    "column {} claims to be a factor but does not have numeric codes",
+                                    column + 1
+                                )));
+                            }
+                        };
+                        let code = usize::try_from(code).unwrap_or(usize::MAX);
+                        write_element(level_strings, code, quoted, &settings, &mut output)?;
+                    }
+                    None => write_element(vector, index, quoted, &settings, &mut output)?,
+                }
+            }
+            output.extend_from_slice(&eol);
+            if output.len() > 1 << 16 {
+                crate::connections::print(file, &output)?;
+                output.clear();
             }
         }
-        output.push_str(&eol);
-        if output.len() > 1 << 16 {
-            crate::connections::print(file, output.as_bytes())?;
-            output.clear();
-        }
-    }
-    crate::connections::print(file, output.as_bytes())?;
+        Ok(())
+    })();
+    crate::connections::print(file, &output)?;
+    written?;
     Ok(nil())
 }
 
-/// A column being written: the vector and, for a factor, its levels.
-struct Cell {
-    vector: Sexp,
-    levels: Option<Sexp>,
+/// How `write.table` spells the elements it writes.
+struct Settings {
+    escape: bool,
+    decimal: u8,
     scipen: i32,
 }
 
-impl Cell {
-    unsafe fn new(vector: Sexp) -> R<Cell> {
-        let levels =
-            values::inherits(vector, "factor").then(|| values::get_attr(vector, symbols().levels));
-        let scipen = crate::format::Settings::current_scipen();
-        Ok(Cell {
-            vector,
-            levels,
-            scipen,
-        })
+/// GNU R's `isna` in io.c: which elements `write.table` writes as `na`. A double is missing when
+/// it is any NaN, a complex number when either part is.
+unsafe fn is_missing(vector: Sexp, index: usize) -> bool {
+    if index >= length(vector) {
+        return false;
     }
-
-    /// Element `index` as text, and whether it is a string (which quoting applies to); `None`
-    /// for a missing value.
-    unsafe fn text(&self, index: usize, decimal: &str) -> R<Option<(String, bool)>> {
-        let vector = self.vector;
-        let scipen = self.scipen;
-        if index >= length(vector) {
-            return Ok(None);
+    match vector.kind() {
+        SexpType::Logical | SexpType::Integer => values::ints(vector)[index] == NA_INTEGER,
+        SexpType::Real => values::reals(vector)[index].is_nan(),
+        SexpType::String => vector.element(index) == na_string(),
+        SexpType::Complex => {
+            let value = values::complexes(vector)[index];
+            value.r.is_nan() || value.i.is_nan()
         }
-        let with_decimal = |text: String| {
-            if decimal == "." {
-                text
-            } else {
-                text.replace('.', decimal)
-            }
-        };
-        Ok(match vector.kind() {
-            _ if self.levels.is_some() => {
-                let code = values::ints(vector)[index];
-                match self.levels {
-                    Some(levels)
-                        if code != NA_INTEGER && code >= 1 && (code as usize) <= length(levels) =>
-                    {
-                        values::string_at(levels, code as usize - 1)
-                            .map(|level| (level.into_owned(), true))
-                    }
-                    _ => None,
-                }
-            }
-            SexpType::String => {
-                values::string_at(vector, index).map(|text| (text.into_owned(), true))
-            }
-            SexpType::Logical => match values::ints(vector)[index] {
-                NA_LOGICAL => None,
-                0 => Some(("FALSE".to_owned(), false)),
-                _ => Some(("TRUE".to_owned(), false)),
-            },
-            SexpType::Integer => match values::ints(vector)[index] {
-                NA_INTEGER => None,
-                value => Some((value.to_string(), false)),
-            },
-            SexpType::Real => {
-                let value = values::reals(vector)[index];
-                if value.is_nan() {
-                    None
-                } else {
-                    Some((
-                        with_decimal(format_real_alone_scipen(value, 15, scipen)),
-                        false,
-                    ))
-                }
-            }
-            SexpType::Complex => {
-                let value = values::complexes(vector)[index];
-                if value.r.is_nan() || value.i.is_nan() {
-                    None
-                } else {
-                    Some((with_decimal(format_complex_alone(value, 15)), false))
-                }
-            }
-            SexpType::Raw => Some((format!("{:02x}", values::raws(vector)[index]), false)),
-            _ => {
-                let element = crate::subset::list_or_vector_element(vector, index)?;
-                let text = coerce_vector(element, SexpType::String)?;
-                values::first_string(text).map(|text| (text.into_owned(), false))
-            }
-        })
+        _ => false,
     }
+}
+
+/// GNU R's `EncodeElement2`: element `index` of `vector`, a string between double quotes when
+/// `quoted`.
+unsafe fn write_element(
+    vector: Sexp,
+    index: usize,
+    quoted: bool,
+    settings: &Settings,
+    output: &mut Vec<u8>,
+) -> R<()> {
+    if index >= length(vector) {
+        return Err(error("index out of range"));
+    }
+    let with_decimal = |text: String| -> Vec<u8> {
+        text.into_bytes()
+            .into_iter()
+            .map(|byte| if byte == b'.' { settings.decimal } else { byte })
+            .collect()
+    };
+    let text: Vec<u8> = match vector.kind() {
+        SexpType::String => {
+            return write_string(vector.element(index), quoted, settings.escape, output);
+        }
+        SexpType::Logical => match values::ints(vector)[index] {
+            NA_LOGICAL => b"NA".to_vec(),
+            0 => b"FALSE".to_vec(),
+            _ => b"TRUE".to_vec(),
+        },
+        SexpType::Integer => match values::ints(vector)[index] {
+            NA_INTEGER => b"NA".to_vec(),
+            value => value.to_string().into_bytes(),
+        },
+        SexpType::Real => with_decimal(format_real_alone_scipen(
+            values::reals(vector)[index],
+            15,
+            settings.scipen,
+        )),
+        SexpType::Complex => {
+            with_decimal(format_complex_alone(values::complexes(vector)[index], 15))
+        }
+        SexpType::Raw => format!("{:02x}", values::raws(vector)[index]).into_bytes(),
+        _ => {
+            let element = crate::subset::list_or_vector_element(vector, index)?;
+            let text = coerce_vector(element, SexpType::String)?;
+            values::first_string(text)
+                .map_or_else(|| b"NA".to_vec(), |text| text.into_owned().into_bytes())
+        }
+    };
+    output.extend_from_slice(&text);
+    Ok(())
+}
+
+/// A string as `translateChar` gives it to `write.table`: Latin-1 text in UTF-8, other text as
+/// its bytes up to the first NUL, and `NA` for the missing string. Non-ASCII text declared as
+/// bytes cannot be translated.
+unsafe fn write_string(charsxp: Sexp, quoted: bool, escape: bool, output: &mut Vec<u8>) -> R<()> {
+    let raw = charsxp.bytes();
+    let raw = raw
+        .iter()
+        .position(|&byte| byte == 0)
+        .map_or(raw, |end| &raw[..end]);
+    let latin1;
+    let bytes: &[u8] = if charsxp == na_string() {
+        b"NA"
+    } else if raw.is_ascii() {
+        raw
+    } else if charsxp.has_gp(gp::BYTES) {
+        return Err(error(
+            "translating strings with \"bytes\" encoding is not allowed",
+        ));
+    } else if charsxp.has_gp(gp::LATIN1) {
+        latin1 = values::char_str(charsxp);
+        latin1.as_bytes()
+    } else {
+        raw
+    };
+    if !quoted {
+        output.extend_from_slice(bytes);
+        return Ok(());
+    }
+    output.push(b'"');
+    for &byte in bytes {
+        if byte == b'"' {
+            output.push(if escape { b'\\' } else { b'"' });
+        }
+        output.push(byte);
+    }
+    output.push(b'"');
+    Ok(())
 }
 
 // Checksums and sizes.
@@ -1714,7 +2437,7 @@ unsafe fn object_size(object: Sexp) -> usize {
         SexpType::Char => VECTOR_HEADER + vector_data_size(object.bytes().len() + 1),
         SexpType::String => {
             let count = length(object);
-            let mut seen = rustc_hash::FxHashSet::default();
+            let mut seen = FxHashSet::default();
             let mut strings = 0;
             for index in 0..count {
                 let charsxp = object.element(index);

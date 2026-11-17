@@ -1,0 +1,45 @@
+[stdout]
+| warning: cannot open compressed file 'nofile', probable reason 'No such file or directory' 
+| error: cannot open the connection 
+| warning: cannot open compressed file 'nofile', probable reason 'No such file or directory' 
+| error: cannot open the connection 
+| warning: cannot open compressed file 'nofile', probable reason 'No such file or directory' 
+| error: cannot open the connection 
+| warning: cannot open bzip2-ed file 'nofile', probable reason 'No such file or directory' 
+| error: cannot open the connection 
+| warning: cannot open compressed file 'nofile', probable reason 'No such file or directory' 
+| error: cannot open the connection 
+| warning: cannot open file 'nofile': No such file or directory 
+| error: cannot open the connection 
+| warning: cannot open compressed file 'sub', probable reason 'No such file or directory' 
+| error: cannot open the connection 
+| warning: cannot open bzip2-ed file 'sub', probable reason 'No such file or directory' 
+| error: cannot open the connection 
+| warning: cannot open compressed file 'sub', probable reason 'No such file or directory' 
+| error: cannot open the connection 
+| warning: cannot open compressed file 'nofile', probable reason 'No such file or directory' 
+| error: cannot open the connection 
+| warning: cannot open compressed file 'nofile', probable reason 'No such file or directory' 
+| error: cannot open the connection 
+| warning: file ‘FILE’ has magic number 'list('
+|   Use of save versions prior to 2 is deprecated 
+| error: bad restore file magic number (file may be corrupted) -- no data loaded 
+| error: unknown input format 
+| error: unknown input format 
+| error: the input does not start with a magic number compatible with loading from a connection 
+| warning: file ‘FILE’ has magic number 'RD'
+|   Use of save versions prior to 2 is deprecated 
+| error: bad restore file magic number (file may be corrupted) -- no data loaded 
+| warning: file ‘FILE’ has magic number 'RDZ7'
+|   Use of save versions prior to 2 is deprecated 
+| error: restore file may be from a newer version of R -- no data loaded 
+| NULL
+| error: empty (zero-byte) input file 
+| error: bad 'file' argument 
+| error: invalid 'description' argument 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

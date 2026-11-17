@@ -786,7 +786,12 @@ fn complete_covariances(
 
 /// `data`, the whole column-major argument, when every row is used; otherwise the used rows of
 /// each of its `columns`, one column after another.
-fn used_rows<'a>(data: &'a [f64], columns: &[&[f64]], used: &[bool], used_count: usize) -> Cow<'a, [f64]> {
+fn used_rows<'a>(
+    data: &'a [f64],
+    columns: &[&[f64]],
+    used: &[bool],
+    used_count: usize,
+) -> Cow<'a, [f64]> {
     if used_count == used.len() {
         return Cow::Borrowed(data);
     }
@@ -806,7 +811,12 @@ fn used_rows<'a>(data: &'a [f64], columns: &[&[f64]], used: &[bool], used_count:
 
 /// Each column's mean rounded to double, as GNU R keeps it, taking a mean the caller already
 /// has; NA for a column holding a used NA.
-fn double_means(data: &[f64], rows: usize, means: &[Option<LongDouble>], missing: &[bool]) -> Vec<f64> {
+fn double_means(
+    data: &[f64],
+    rows: usize,
+    means: &[Option<LongDouble>],
+    missing: &[bool],
+) -> Vec<f64> {
     (0..means.len())
         .map(|index| {
             if missing[index] {

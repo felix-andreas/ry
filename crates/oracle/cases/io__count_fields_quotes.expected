@@ -1,0 +1,23 @@
+[stdout]
+| [1] NA NA NA  2
+| [1] 1 1 1
+| [1] "quoted string on line 1 terminated by EOF"
+| [1] NA NA NA  1
+| [1] 2 3 1
+| [1] 2 0 3 0 0 1
+| [1] 1 0 1 1 0 1
+| [1] 3 2 1
+| [1] 2
+| [1] 1
+| [1] NA  3  1
+| [1] NA  3  1
+| [1] 3 1
+| [1] NA NA  1
+| [1] 1
+| NULL
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 0L

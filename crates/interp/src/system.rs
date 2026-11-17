@@ -41,10 +41,6 @@ pub const BUILTINS: &[BuiltinDef] = &[
         values::set_attr(result, symbols().names, names)?;
         Ok(result)
     }),
-    internal("icuSetCollate", -1, |_| Ok(nil())).invisible(),
-    internal("icuGetCollate", 1, |_| unsafe {
-        scalar_string("ICU not in use")
-    }),
     internal("setNumMathThreads", 1, |_| unsafe { scalar_integer(1) }),
     internal("setMaxNumMathThreads", 1, |_| unsafe { scalar_integer(1) }),
     internal("isatty", 1, |call| unsafe {
@@ -3601,7 +3597,7 @@ unsafe fn do_capabilities(_call: &Call<'_>) -> R<Sexp> {
         "long.double",
         "libcurl",
     ];
-    let flags = [1, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 1];
+    let flags = [1, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 1];
     let result = values::logical_vector(&flags)?;
     let names = string_vector(&names)?;
     values::set_attr(result, symbols().names, names)?;
@@ -3958,7 +3954,7 @@ unsafe fn do_system(call: &Call<'_>) -> R<Sexp> {
         let output = process
             .output()
             .map_err(|failure| call.error(format!("error in running command: {failure}")))?;
-        let text = String::from_utf8_lossy(&output.stdout);
+        let text = values::escape_invalid_bytes(&output.stdout);
         let lines: Vec<&str> = text.lines().collect();
         let result = string_vector(&lines)?;
         let status = output.status.code().unwrap_or(127);
@@ -4090,7 +4086,7 @@ unsafe fn do_windows_system(call: &Call<'_>) -> R<Sexp> {
         interp().visible = false;
         return scalar_integer(status);
     }
-    let text = String::from_utf8_lossy(&captured);
+    let text = values::escape_invalid_bytes(&captured);
     let result = string_vector(&captured_lines(&text))?;
     if status != 0 {
         crate::heap().root(result);
@@ -4442,12 +4438,7 @@ unsafe fn do_enc2utf8(call: &Call<'_>) -> R<Sexp> {
             continue;
         }
         let converted = if charsxp.has_gp(heap::object::gp::LATIN1) {
-            charsxp
-                .bytes()
-                .iter()
-                .map(|&byte| byte as char)
-                .collect::<String>()
-                .into_bytes()
+            values::char_str(charsxp).into_owned().into_bytes()
         } else if std::str::from_utf8(charsxp.bytes()).is_ok() {
             charsxp.bytes().to_vec()
         } else {
@@ -4787,7 +4778,8 @@ unsafe fn do_esoft_version(_: &Call<'_>) -> R<Sexp> {
         ("bzlib", ""),
         ("xz", ""),
         ("PCRE", "10.42 2022-12-11"),
-        ("ICU", ""),
+        // The ICU release whose collation data ICU4X's compiled data was exported from.
+        ("ICU", "77.1"),
         ("TRE", ""),
         ("iconv", "glibc"),
         ("readline", ""),
@@ -4956,7 +4948,9 @@ unsafe fn do_sys_setlocale(call: &Call<'_>) -> R<Sexp> {
         }
         !set_locale(category, text.as_ptr()).is_null()
     };
-    crate::sort::refresh_collation();
+    if category == libc::LC_ALL || category == libc::LC_COLLATE {
+        crate::sort::refresh_collation();
+    }
     if !honoured {
         crate::conditions::warning(format!(
             "OS reports request to set locale to \"{name}\" cannot be honored"

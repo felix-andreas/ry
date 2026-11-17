@@ -1,0 +1,94 @@
+[stdout]
+| -- 1L 
+| [1] 1
+| attr(,"class")
+| [1] "1"
+| error: attempt to set invalid 'class' attribute | oldClass(x) <- value 
+| error: attempt to set invalid 'class' attribute | attr(x, "class") <- value 
+| -- 2.5 
+| [1] 1
+| attr(,"class")
+| [1] "2.5"
+| error: attempt to set invalid 'class' attribute | oldClass(x) <- value 
+| error: attempt to set invalid 'class' attribute | attr(x, "class") <- value 
+| -- TRUE 
+| [1] 1
+| attr(,"class")
+| [1] "TRUE"
+| error: attempt to set invalid 'class' attribute | oldClass(x) <- value 
+| error: attempt to set invalid 'class' attribute | attr(x, "class") <- value 
+| -- NA 
+| [1] 1
+| attr(,"class")
+| [1] NA
+| error: attempt to set invalid 'class' attribute | oldClass(x) <- value 
+| error: attempt to set invalid 'class' attribute | attr(x, "class") <- value 
+| -- c(1, 2) 
+| [1] 1
+| attr(,"class")
+| [1] "1" "2"
+| error: attempt to set invalid 'class' attribute | oldClass(x) <- value 
+| error: attempt to set invalid 'class' attribute | attr(x, "class") <- value 
+| -- list("a") 
+| [1] 1
+| attr(,"class")
+| [1] "a"
+| error: attempt to set invalid 'class' attribute | oldClass(x) <- value 
+| error: attempt to set invalid 'class' attribute | attr(x, "class") <- value 
+| -- list(1, "b") 
+| [1] 1
+| attr(,"class")
+| [1] "1" "b"
+| error: attempt to set invalid 'class' attribute | oldClass(x) <- value 
+| error: attempt to set invalid 'class' attribute | attr(x, "class") <- value 
+| -- a 
+| [1] 1
+| attr(,"class")
+| [1] "a"
+| error: attempt to set invalid 'class' attribute | oldClass(x) <- value 
+| error: attempt to set invalid 'class' attribute | attr(x, "class") <- value 
+| -- as.raw(0x01) 
+| [1] 1
+| attr(,"class")
+| [1] "01"
+| error: attempt to set invalid 'class' attribute | oldClass(x) <- value 
+| error: attempt to set invalid 'class' attribute | attr(x, "class") <- value 
+| -- 0+1i 
+| [1] 1
+| attr(,"class")
+| [1] "0+1i"
+| error: attempt to set invalid 'class' attribute | oldClass(x) <- value 
+| error: attempt to set invalid 'class' attribute | attr(x, "class") <- value 
+| -- integer(0) 
+| error: attempt to set invalid 'class' attribute | class(x) <- value 
+| [1] 1
+| error: attempt to set invalid 'class' attribute | attr(x, "class") <- value 
+| -- logical(0) 
+| error: attempt to set invalid 'class' attribute | class(x) <- value 
+| [1] 1
+| error: attempt to set invalid 'class' attribute | attr(x, "class") <- value 
+| -- list() 
+| error: attempt to set invalid 'class' attribute | class(x) <- value 
+| [1] 1
+| error: attempt to set invalid 'class' attribute | attr(x, "class") <- value 
+| -- character(0) 
+| [1] 1
+| [1] 1
+| [1] 1
+| -- NULL 
+| [1] 1
+| [1] 1
+| [1] 1
+| error: cannot coerce type 'builtin' to vector of type 'character' | class(x) <- sum 
+| $dim
+| [1] 2 2
+| 
+| $class
+| [1] "1" "2"
+| 
+[messages]
+[warnings]
+[errors]
+[value]
+list
+| list(dim = c(2L, 2L), class = c("1", "2"))

@@ -459,7 +459,7 @@ pub unsafe fn make_condition(unwind: &Unwind) -> ApiResult<Sexp> {
             interp::conditions::make_condition(
                 &failure.message,
                 call,
-                &["simpleError", "error", "condition"],
+                &interp::unwind::condition_classes(failure.class),
             )
         }
         Unwind::Interrupt => {

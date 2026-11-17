@@ -1,0 +1,17 @@
+[stdout]
+| error: invalid polynomial coefficient | polyroot(c(1, NA)) 
+| complex(0)
+| complex(0)
+| error: invalid polynomial coefficient | polyroot(c(1, 2, NA, 0)) 
+| [1] 2+1.615587e-27i 3-1.615587e-27i
+| complex(0)
+| error: unimplemented type 'character' in 'polyroot'
+|  | polyroot("a") 
+| error: unimplemented type 'list' in 'polyroot'
+|  | polyroot(list(1)) 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

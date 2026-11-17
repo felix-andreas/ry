@@ -1113,3 +1113,14 @@ without cells, promise forcing in the loop, and one observer word on the general
   instructions; no other `call:` row moved by more than 0.8%. `just bench hot` weighted
   instructions: finbench -2.1%, dsbench -2.6%, biobench -2.3%. The code-base suites' seconds
   did not move beyond their run-to-run noise (finbench 107.9 and 108.0).
+
+## A lazily signalled error carries its condition class
+
+**Status:** settled.
+
+- **Previous shape.** `RError` held a message and a call, so every error that left `eval` was signalled as a `simpleError`. GNU R classes a missing argument's error since 4.5 (`c(<reader>Error, "missingArgError", "error", "condition")`), and a classed handler (`tryCatch(f(), missingArgError = ...)`) never ran. `classed_error` signals eagerly, which fits a subscript error raised inside a builtin but not a variable read, whose error the optimizing tier defers past its frameless inlined calls.
+- **Target shape.** `RError` has a `class: ErrorClass` (`unwind.rs`): `Simple`, or `MissingArgument(ArgumentReader)` where the reader is GNU R's subclass (`evalError`, `getvarError`, `getMissingError`, `tailcallError`, `tailcallRecError`, `MathMissingError`, `log1Error`, `log2Error`). `conditions::signal_error` builds the classed condition where the error leaves the activation, natively, so no `stop()` frame shows in `sys.calls()`; `unwind::condition_classes` is the one place that maps a class to its condition classes, for R handlers and for the C API's `R_tryCatchError`. `Unwind` fits in 40 bytes (asserted in `unwind.rs`).
+- **The class is gated on the emulated release** (`r_at_least(4, 5)` in `unwind::missing_argument`): an older base R gets a `simpleError` whose call is the innermost closure call, as that release gives.
+- **The call is the lexical call**, the frame whose code named the argument (`eval::lexical_call`), as GNU R's `getLexicalCall(rho)`: `f <- function(a) g(a)` reports `f()`, not `g(a)`. A complex assignment `x[i] <- v` reads `x` in the frame when the frame binds it and in the enclosure otherwise (GNU R's `EnsureLocal`), so from a nested function the error names the enclosure's call.
+- **`evalError` against `getvarError` depends on GNU R's tier** (its AST evaluator against its compiled code), so a test prints one name for both (`conditions__missing_argument_classes`).
+- **Which builtins keep a missing argument** follows GNU R's `evalListKeepMissing` users, among them `log`, `round`, `signif`, `rep` (after its first argument, which `DispatchOrEval` evaluates: a name there bound to no argument is the caller's error, and any other missing `x` reaches the type check) and `Exec`. `.subset` and `.subset2` are plain builtins there, so an empty argument is an error.

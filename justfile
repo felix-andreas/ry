@@ -770,7 +770,8 @@ fuzz-differential seed="0" count="200" engines="ry-tier0,ry-jit":
 
 # The other program kinds of the differential fuzzer: `metamorphic` (one value, one body, and the
 # forms that must agree), `builtins` (builtins on a zoo of values), `api` (calls drawn from every
-# function of base, stats and utils), `corpus`, or `all`, e.g. `just fuzz-kind metamorphic 0 500`.
+# function of base, stats and utils), `io` (round trips through files and connections), `corpus`,
+# or `all`, e.g. `just fuzz-kind metamorphic 0 500`.
 # Diverging programs and their reports go to target/fuzz-findings.
 fuzz-kind kind="all" seed="0" count="200" engines="ry-tier0,ry-jit":
     cargo build -q -p ry-lang -p libr -p rcmd -p oracle

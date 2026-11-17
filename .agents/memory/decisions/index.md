@@ -205,6 +205,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - An empty named argument leaves its formal to a positional argument
 - `[[<-` reports a wrong subscript count in GNU R's order
 - A call site that passes `...` keeps a plan for what `...` held
+- A lazily signalled error carries its condition class (settled)
 
 ## Builtins and base R
 
@@ -258,6 +259,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The radix string order ranks bytes with integer keys, and plain POSIX patterns capture on the automata
 - `x[] <- value` and `x[a:b] <- value` write whole copies of the value
 - `order`, `sort.int` and `sort.default` run natively on plain vectors
+- Strings collate with ICU4X's CLDR collator, as GNU R's ICU does
 
 ## R compatibility
 

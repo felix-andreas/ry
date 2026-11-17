@@ -11,7 +11,7 @@ use {
         eval::{self, Args, apply_closure, call_builtin, forced_promise, value_of},
         interp,
         subset::modifiable_attributes,
-        unwind::{R, error},
+        unwind::{R, error, error_in},
         values::{
             self, char_str, get_attr, length, missing_arg, nil, scalar_string, string_vector,
             symbol_name, symbols, unbound,
@@ -902,7 +902,14 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
     } else {
         dispatch_argument(function, &promargs)?
     };
-    let found = generic_method(generic, object, env.enclosure(), sys_parent, sys_parent)?;
+    let found = generic_method(
+        call.call,
+        generic,
+        object,
+        env.enclosure(),
+        sys_parent,
+        sys_parent,
+    )?;
     let mut vars = found.vars;
     let dispatch_vars = vars.len();
     // Through R 4.3, local variables the generic defined before dispatching are visible to the
@@ -959,19 +966,21 @@ unsafe fn innermost_frame_of(env: Sexp) -> Option<usize> {
     frames[position].owns(env).then_some(position)
 }
 
-/// `UseMethod(generic)` from the slot frame at `position`, as the call its body returns,
-/// without giving the frame an environment: GNU R's dispatch reads only the frame's arguments
-/// and its call. `explicit` is the object `UseMethod(generic, object)` names. Through R 4.3 the
+/// The `UseMethod` call `site`, whose first argument is the generic's name, from the slot frame
+/// at `position`, as the call its body returns, without giving the frame an environment: GNU
+/// R's dispatch reads only the frame's arguments and its call. `explicit` is the object
+/// `UseMethod(generic, object)` names. Through R 4.3 the
 /// method sees the generic's locals, so the caller checks there are none. `None` when the frame
 /// is not the innermost call, which the generic path reports as an error.
 pub(crate) unsafe fn use_method_in_slots(
-    generic: Sexp,
+    site: Sexp,
     position: usize,
     explicit: Option<Sexp>,
 ) -> R<Option<Sexp>> {
     if position + 1 != interp().frames.len() {
         return Ok(None);
     }
+    let generic = site.cdr().car();
     activity::count(Counter::S3Dispatches);
     let dispatching = activity::enter(Activity::S3Dispatch, 0);
     let (frame_call, function) = {
@@ -992,7 +1001,14 @@ pub(crate) unsafe fn use_method_in_slots(
         None => dispatch_argument(function, &promargs)?,
     };
     let Some((owner, enclosure)) = caller else {
-        let found = generic_method(generic, object, function.tag(), sys_parent, sys_parent)?;
+        let found = generic_method(
+            site,
+            generic,
+            object,
+            function.tag(),
+            sys_parent,
+            sys_parent,
+        )?;
         let new_call = renamed_call(frame_call, found.method_name)?;
         drop(dispatching);
         return apply_method(
@@ -1010,7 +1026,7 @@ pub(crate) unsafe fn use_method_in_slots(
     // method finds it as its caller by position, and `.GenericCallEnv` is recorded as unbound:
     // whoever reads the variable asks the caller for its environment
     // (`eval::method_var_value`).
-    let found = generic_method(generic, object, function.tag(), enclosure, unbound())?;
+    let found = generic_method(site, generic, object, function.tag(), enclosure, unbound())?;
     let new_call = renamed_call(frame_call, found.method_name)?;
     drop(dispatching);
     if found.method.kind() != SexpType::Closure {
@@ -1087,11 +1103,13 @@ unsafe fn lazy_caller(position: usize, generic: Sexp) -> R<Option<(usize, Sexp)>
     Ok((!probed).then(|| (owner, function.tag())))
 }
 
-/// The method `UseMethod` calls for `object`, or the error GNU R gives when there is none.
+/// The method `UseMethod` calls for `object`, or the error GNU R gives when there is none,
+/// whose call is the `UseMethod` call `site`.
 /// `enclosure` is the generic's enclosure, where the generic's own definition is looked up first;
 /// methods are looked up from `lookup`, the caller's environment or, for a caller without one,
 /// its enclosure; `call_env` is what the method's `.GenericCallEnv` holds.
 unsafe fn generic_method(
+    site: Sexp,
     generic: Sexp,
     object: Sexp,
     enclosure: Sexp,
@@ -1123,9 +1141,10 @@ unsafe fn generic_method(
     } else {
         format!("\"c('{}')\"", classes.join("', '"))
     };
-    Err(error(format!(
-        "no applicable method for '{generic_name}' applied to an object of class {shown}"
-    )))
+    Err(error_in(
+        site,
+        format!("no applicable method for '{generic_name}' applied to an object of class {shown}"),
+    ))
 }
 
 /// The generic function named `name` as seen from the generic's frame, whose enclosure is
@@ -1611,7 +1630,7 @@ pub unsafe fn try_builtin_dispatch(
         let passed = args.len().min(2);
         if passed < required {
             let noun = if passed == 1 { "argument" } else { "arguments" };
-            return Err(crate::unwind::error_in(
+            return Err(error_in(
                 call,
                 format!(
                     "{passed} {noun} passed to '{}' which requires at least {required}",
@@ -2576,7 +2595,8 @@ unsafe fn do_set_s4_object(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_set_old_class(call: &Call<'_>) -> R<Sexp> {
     let object = modifiable_attributes(call.arg(0))?;
     let value = call.arg(1);
-    if value != nil() && value.kind() != SexpType::String {
+    // GNU R removes the attribute for any zero-length value before it checks the type.
+    if value != nil() && value.kind() != SexpType::String && length(value) != 0 {
         return Err(call.error("attempt to set invalid 'class' attribute"));
     }
     set_class_attribute(object, value)?;
@@ -2606,13 +2626,21 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("attempt to set an attribute on NULL"));
     }
     let object = modifiable_attributes(object)?;
-    if value == nil() || length(value) == 0 {
+    if value == nil() || (value.kind() == SexpType::String && length(value) == 0) {
         set_class_attribute(object, nil())?;
         return Ok(object);
     }
-    if value.kind() != SexpType::String {
-        return Err(call.error("attempt to set invalid 'class' attribute"));
-    }
+    // Any other vector, such as `class(x) <- 1L`, names the class by its text, as in GNU R.
+    let value = if value.kind() == SexpType::String {
+        value
+    } else {
+        let text = crate::coerce::coerce_vector(value, SexpType::String)?;
+        if length(text) == 0 {
+            return Err(call.error("attempt to set invalid 'class' attribute"));
+        }
+        text
+    };
+    crate::heap().root(value);
     // A matrix's implicit class, as `class(m)` reports it, is no attribute either.
     if length(value) == 2
         && values::dims(object).is_some_and(|dims| dims.len() == 2)

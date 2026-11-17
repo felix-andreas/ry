@@ -1060,7 +1060,7 @@ pub fn write_console(text: &[u8], is_error: bool) {
 /// Writes to the host's console, bypassing any `sink`.
 pub fn write_terminal(text: &[u8], is_error: bool) {
     // SAFETY: the hook is the host's, which accepts any bytes.
-    unsafe { (interp().hooks.write_console)(text, is_error) }
+    unsafe { (interp().hooks.write_console)(&values::unescape_output(text), is_error) }
 }
 
 /// Runs `body` in a handle scope: whatever it roots is released on exit, and its result (or the

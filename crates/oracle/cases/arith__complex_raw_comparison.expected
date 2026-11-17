@@ -1,0 +1,14 @@
+[stdout]
+| [1] TRUE   NA
+| [1] TRUE
+| [1] FALSE
+| [1] TRUE
+| [1]  TRUE FALSE
+| [1] TRUE
+| error: invalid comparison with complex values | as.raw(1) < 0+1i 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

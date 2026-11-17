@@ -52,7 +52,7 @@ use {
         values::{
             alloc_uninit, as_integer_scalar, as_logical_scalar, as_real_scalar, global_env,
             integer_vector, ints, ints_mut, is_nil, length, missing_arg, nil, reals, reals_mut,
-            string_at, symbols, unbound,
+            symbols, unbound,
         },
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp},
@@ -1101,8 +1101,9 @@ fn sort_descending(values: &mut [f64], labels: &mut [i32]) {
     }
 }
 
-/// `asVecSize`: a vector length from the first element of a number or string.
-unsafe fn vector_size(object: Sexp) -> R<i64> {
+/// `asVecSize`: a vector length from the first element of a number or string, or -1 for any
+/// other value, which the caller refuses.
+pub(crate) unsafe fn vector_size(object: Sexp) -> R<i64> {
     if length(object) == 0 {
         return Ok(-1);
     }
@@ -1115,9 +1116,7 @@ unsafe fn vector_size(object: Sexp) -> R<i64> {
             return Ok(i64::from(value));
         }
         SexpType::Real => reals(object)[0],
-        SexpType::String => string_at(object, 0)
-            .and_then(|text| crate::coerce::parse_real(&text))
-            .unwrap_or(f64::NAN),
+        SexpType::String => crate::values::as_real_scalar_warning(object)?,
         _ => return Ok(-1),
     };
     if value.is_nan() {

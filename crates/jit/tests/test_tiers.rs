@@ -1789,7 +1789,9 @@ fn a_loop_calling_an_argument_named_like_a_global_compiles_once() {
         use heap::activity::{self, Counter};
         jit::install_mode(Mode::Force);
         run("f <- function(x) x");
-        run("repeat_call <- function(n, f) { s <- 0L\ni <- 0L\nwhile (i < n) { s <- s + f(i)\ni <- i + 1L }\ns }");
+        run(
+            "repeat_call <- function(n, f) { s <- 0L\ni <- 0L\nwhile (i < n) { s <- s + f(i)\ni <- i + 1L }\ns }",
+        );
         activity::set_enabled(true);
         let before = activity::counter(Counter::JitCompiles);
         let value = run("repeat_call(30000L, function(x) 2L)");
@@ -1799,7 +1801,10 @@ fn a_loop_calling_an_argument_named_like_a_global_compiles_once() {
         (value, compiles)
     });
     assert_eq!(value, "60000L");
-    assert!(compiles <= 2, "{compiles} compiles: the loop's code was invalidated");
+    assert!(
+        compiles <= 2,
+        "{compiles} compiles: the loop's code was invalidated"
+    );
 }
 
 /// Compiled code calls an active binding at every read, as tier 0 does. The first compiled run

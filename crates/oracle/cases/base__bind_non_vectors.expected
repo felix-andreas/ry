@@ -1,0 +1,18 @@
+[stdout]
+|      [,1]
+| [1,] ?   
+|      [,1] [,2]
+| [1,] 1    1   
+| [2,] ?    ?   
+|      sum  
+| [1,] ?   1
+| [2,] ?   2
+| [1] "list"
+| [1] 2 3
+| error: cannot create a matrix from type 'expression' | cbind(expression(a), 1) 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

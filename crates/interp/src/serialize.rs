@@ -32,6 +32,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     })
     .invisible(),
     internal("loadFromConn2", 3, do_load_from_conn).invisible(),
+    internal("load", 2, do_load).invisible(),
     internal("getVarsFromFrame", 3, do_get_vars_from_frame),
     internal("memCompress", 2, do_mem_compress),
     internal("memDecompress", 2, do_mem_decompress),
@@ -1694,13 +1695,17 @@ unsafe fn do_serialize_info_from_conn(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_load_from_conn(call: &Call<'_>) -> R<Sexp> {
     let env = call.arg(1);
     if env.kind() != SexpType::Environment {
-        return Err(call.error("invalid 'envir' argument"));
+        return Err(error("invalid 'envir' argument"));
     }
     let bytes = crate::connections::read_binary(call.arg(0))?;
     let body = match bytes.get(..5) {
         // The stream carries its own format header, so XDR, ASCII and binary read alike.
         Some(b"RDX2\n" | b"RDX3\n" | b"RDA2\n" | b"RDA3\n" | b"RDB2\n" | b"RDB3\n") => &bytes[5..],
-        _ => return Err(call.error("the input does not start with a magic number compatible with loading from a connection")),
+        _ => {
+            return Err(error(
+                "the input does not start with a magic number compatible with loading from a connection",
+            ));
+        }
     };
     let mut bindings = unserialize(body, nil())?;
     crate::heap().root(bindings);
@@ -1712,6 +1717,37 @@ unsafe fn do_load_from_conn(call: &Call<'_>) -> R<Sexp> {
         bindings = bindings.cdr();
     }
     values::string_vector(&names)
+}
+
+/// `load(file, envir)`: the reader `load()` falls back to for a file that does not start with
+/// the magic number of save version 2 or 3. Save version 1 is the only format left for it, so
+/// every other file fails the way GNU R fails it.
+unsafe fn do_load(call: &Call<'_>) -> R<Sexp> {
+    let file = call.arg(0);
+    if file.kind() != SexpType::String || values::length(file) == 0 {
+        return Err(error("first argument must be a file name"));
+    }
+    let env = call.arg(1);
+    if env == nil() {
+        return Err(error("use of NULL environment is defunct"));
+    }
+    if env.kind() != SexpType::Environment {
+        return Err(error("invalid 'envir' argument"));
+    }
+    let path = crate::connections::expand_path(&values::char_str(file.element(0)));
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Err(error("unable to open file"));
+    };
+    Err(error(match bytes.get(..5) {
+        None if bytes.is_empty() => "restore file may be empty -- no data loaded",
+        Some(b"RDA1\n" | b"RDB1\n" | b"RDX1\n") => {
+            "restore file uses save version 1, which ry does not read -- no data loaded"
+        }
+        Some(magic) if magic.starts_with(b"RD") => {
+            "restore file may be from a newer version of R -- no data loaded"
+        }
+        _ => "bad restore file magic number (file may be corrupted) -- no data loaded",
+    }))
 }
 
 /// `getVarsFromFrame(vars, env, force)`: the named list of the bindings in `env`'s own frame.

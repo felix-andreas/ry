@@ -2938,8 +2938,10 @@ const AND_BP: u8 = 18;
 const OR_BP: u8 = 16;
 const TILDE_BP: u8 = 14;
 const RIGHT_ASSIGN_BP: u8 = 12;
-const EQ_ASSIGN_BP: u8 = 10;
-const LEFT_ASSIGN_BP: u8 = 8;
+const LEFT_ASSIGN_BP: u8 = 10;
+// GNU R's grammar takes `=` outside `expr`, so it binds looser than `<-` whatever the order of
+// its precedence declarations: `a = b <- c` is `a = (b <- c)`.
+const EQ_ASSIGN_BP: u8 = 8;
 const HELP_BP: u8 = 2;
 
 /// How tightly an infix operator binds its left and right operands: an operand stays with the

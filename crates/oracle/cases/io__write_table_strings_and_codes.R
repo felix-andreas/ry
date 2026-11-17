@@ -1,0 +1,30 @@
+# write.table() writes each string as translateChar gives it, stops at a bytes-declared string
+# it cannot translate after writing the rows before it, writes any NaN as `na`, and reads a
+# factor's codes from a double column too.
+f <- tempfile()
+written <- function(expr) {
+  message <- tryCatch({ expr; "ok" }, error = conditionMessage)
+  print(message)
+  print(rawToChar(readBin(f, "raw", 1000)))
+}
+v <- data.frame(s = c("ß", `Encoding<-`("a\xffb", "bytes"), "x"), n = (1:3) / 3)
+written(write.csv(v, f))
+v <- data.frame(s = c(`Encoding<-`("caf\xe9", "latin1"), "q\"t", NA), n = c(NaN, NA, Inf))
+written(write.csv(v, f))
+written(write.table(v, f, qmethod = "escape"))
+written(write.table(v, f, quote = FALSE, na = "-", dec = ","))
+d <- data.frame(x = factor(c("a", "b", NA, "c")))
+d$x <- structure(c(1, 2, NaN, 3.7), levels = c("a", "b", "c"), class = "factor")
+written(write.csv(d, f))
+d <- data.frame(y = 1:2)
+d$x <- structure(c(1L, 5L), levels = c("a", "b"), class = "factor")
+written(write.csv(d, f))
+d$x <- structure(1:2, levels = c("a", NA), class = "factor")
+written(write.csv(d, f))
+written(write.table(matrix(c(1.5, NA, NaN, 2, 3+0i, 4), 3), f))
+m <- matrix(c("a", NA, "b\"c", "d"), 2, dimnames = list(c("r1", NA), NULL))
+written(write.table(m, f))
+written(write.table(m, f, quote = 2))
+z <- data.frame(l = c(TRUE, NA), c = c(1+2i, complex(real = NA, imaginary = 1)), r = as.raw(1:2))
+written(write.table(z, f))
+unlink(f)

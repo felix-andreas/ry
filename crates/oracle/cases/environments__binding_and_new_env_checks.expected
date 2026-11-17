@@ -1,0 +1,23 @@
+[stdout]
+| error: not a symbol | bindingIsLocked(1, e) 
+| error: no binding for "zz" | bindingIsLocked("zz", e) 
+| error: not a symbol | bindingIsActive(1, e) 
+| [1] FALSE
+| error: not an environment | bindingIsLocked("a", c(2, 1)) 
+| [1] FALSE
+| error: not an environment | environmentIsLocked(1) 
+| error: use of NULL environment is defunct | environmentIsLocked(NULL) 
+| warning: NAs introduced by coercion to integer range | new.env(Inf) 
+| [1] "environment"
+| error: 'enclos' must be an environment | new.env(1, 2) 
+| error: 'enclos' must be an environment | new.env(TRUE, quote(v + 1), 1) 
+| error: 'envir' argument must be an environment | list2env(list(a = 1), 1, 0.5) 
+| error: 'enclos' must be an environment | new.env(hash = hash, parent = parent, size = size) 
+| error: argument must be an environment | as.list.environment(1, "sum") 
+| error: not a symbol | makeActiveBinding(1, function() 1, e) 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL
