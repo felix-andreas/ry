@@ -7,7 +7,7 @@ use {
     crate::{
         builtins::{BuiltinDef, Call, internal},
         format, records, standard_library, strings,
-        unwind::{R, Unwind},
+        unwind::{R, Unwind, error},
         values::{self, char_str, get_attr, length, nil, symbol_name, symbols},
     },
     heap::{
@@ -56,6 +56,15 @@ pub unsafe fn deparse_lines_with(
     deparse_checked(object, cutoff, opts, backtick, usize::MAX).0
 }
 
+/// [`deparse_lines`] for printing a call, which raises the error a deparse raises.
+pub unsafe fn deparse_lines_checked(object: Sexp, cutoff: usize, opts: u32) -> R<Vec<String>> {
+    let (lines, _, failure) = deparse_checked(object, cutoff, opts, true, usize::MAX);
+    match failure {
+        Some(failure) => Err(failure),
+        None => Ok(lines),
+    }
+}
+
 /// Deparses, and also reports whether the text cannot reparse to the object because it holds
 /// an environment, pointer, or other value with no source form, and the first error that
 /// `deparse` itself raises (an S4 object whose class is not defined). The deparse stops after
@@ -77,9 +86,10 @@ unsafe fn deparse_checked(
     (deparser.finish(), incomplete, failure)
 }
 
-/// Deparses for `deparse`, `dput` and `dump`, warning as `warnIncomplete` asks. Only these
-/// and coercion ([`deparse_for_coercion`]) raise a deparse error; the text an error message
-/// or `print` shows falls back to the plain value, because a message must never fail.
+/// Deparses for `deparse`, `dput` and `dump`, warning as `warnIncomplete` asks. Only these,
+/// coercion ([`deparse_for_coercion`]) and printing a call ([`deparse_lines_checked`]) raise a
+/// deparse error; the text an error message shows falls back to the plain value, because a
+/// message must never fail.
 unsafe fn deparse_warning(
     object: Sexp,
     cutoff: usize,
@@ -245,7 +255,17 @@ pub fn quote_name(name: &str) -> String {
     if is_syntactic(name) {
         name.to_owned()
     } else {
-        format!("`{}`", name.replace('\\', "\\\\").replace('`', "\\`"))
+        format::encode_string(name, Some('`'))
+    }
+}
+
+/// An argument's tag: a non-syntactic one is written in backticks under `backtick`, and in
+/// double quotes otherwise.
+fn tag_text(name: &str, backtick: bool) -> String {
+    if is_syntactic(name) {
+        name.to_owned()
+    } else {
+        format::encode_string(name, Some(if backtick { '`' } else { '"' }))
     }
 }
 
@@ -412,17 +432,21 @@ impl Deparser {
             SexpType::Nil => self.print("NULL"),
             SexpType::Symbol => {
                 let name = symbol_name(object);
-                if name.is_empty() {
-                    // The empty symbol, `R_MissingArg`, prints as nothing even when quoted.
-                } else if self.opts & options::QUOTE_EXPRESSIONS != 0 {
-                    self.print("quote(");
-                    self.print(&quote_name(&name));
-                    self.print(")");
-                } else if self.backtick {
-                    self.print(&quote_name(&name));
-                } else {
+                // The empty symbol, `R_MissingArg`, prints as nothing even when quoted.
+                if !name.is_empty() {
+                    let quoted = self.opts & options::QUOTE_EXPRESSIONS != 0;
+                    if quoted {
+                        self.print("quote(");
+                    }
                     // `backtick = FALSE`, the default for a symbol, prints a non-syntactic name bare.
-                    self.print(&name);
+                    if self.backtick {
+                        self.print(&quote_name(&name));
+                    } else {
+                        self.print(&name);
+                    }
+                    if quoted {
+                        self.print(")");
+                    }
                 }
             }
             SexpType::Closure => self.closure(object),
@@ -480,7 +504,23 @@ impl Deparser {
                     "pairlist("
                 });
                 self.in_list += 1;
-                self.arguments(object, false, false);
+                // A tag is written as a symbol is, so it is bare unless `backtick` is set, and
+                // the line never breaks between elements.
+                let saved = self.opts;
+                let mut cell = object;
+                while matches!(cell.kind(), SexpType::Pairlist | SexpType::Dots) {
+                    if cell.tag() != nil() {
+                        self.opts = 0;
+                        self.deparse(cell.tag());
+                        self.opts = saved;
+                        self.print(" = ");
+                    }
+                    self.deparse(cell.car());
+                    cell = cell.cdr();
+                    if matches!(cell.kind(), SexpType::Pairlist | SexpType::Dots) {
+                        self.print(", ");
+                    }
+                }
                 self.in_list -= 1;
                 self.print(if has_missing { "))" } else { ")" });
             }
@@ -578,50 +618,33 @@ impl Deparser {
         // in the formals and body show without their attributes.
         self.opts &= !(options::QUOTE_EXPRESSIONS | options::SHOW_ATTRIBUTES | options::USE_SOURCE);
         self.print("function (");
-        self.formals(function.car());
+        self.arguments(function.car(), true);
         self.print(") ");
         self.write_line();
         self.deparse(crate::bytecode::closure_body(function));
         self.opts = saved;
     }
 
-    unsafe fn formals(&mut self, formals: Sexp) {
+    /// The arguments of a call or the formals of a function: `tag = value`, with GNU R's line
+    /// breaks.
+    unsafe fn arguments(&mut self, mut list: Sexp, formals: bool) {
         let mut broken = false;
-        let mut cell = formals;
-        while cell.kind() == SexpType::Pairlist {
-            let name = symbol_name(cell.tag());
-            self.print(&quote_name(&name));
-            let default = cell.car();
-            if default != values::missing_arg() {
-                self.print(" = ");
-                self.deparse(default);
+        while list != nil() {
+            if !matches!(
+                list.kind(),
+                SexpType::Pairlist | SexpType::Language | SexpType::Dots
+            ) {
+                self.failure
+                    .get_or_insert(error("badly formed function expression"));
+                break;
             }
-            cell = cell.cdr();
-            if cell.kind() == SexpType::Pairlist {
-                self.print(", ");
-                self.line_break(&mut broken);
-            }
-        }
-        if broken {
-            self.indent -= 1;
-        }
-    }
-
-    /// The arguments of a call: `tag = value`, with GNU R's line breaks. A pairlist's elements
-    /// are written the same way but never break the line (`breaks` is false).
-    unsafe fn arguments(&mut self, mut list: Sexp, formals: bool, breaks: bool) {
-        let mut broken = false;
-        while matches!(
-            list.kind(),
-            SexpType::Pairlist | SexpType::Language | SexpType::Dots
-        ) {
             let tag = list.tag();
             if tag != nil() && tag.kind() == SexpType::Symbol {
                 let name = symbol_name(tag);
                 if name.is_empty() {
                     self.print("``");
                 } else {
-                    self.print(&quote_name(&name));
+                    self.print(&tag_text(&name, self.backtick));
                 }
                 if formals {
                     if list.car() != values::missing_arg() {
@@ -641,14 +664,9 @@ impl Deparser {
                 self.deparse(list.car());
             }
             list = list.cdr();
-            if matches!(
-                list.kind(),
-                SexpType::Pairlist | SexpType::Language | SexpType::Dots
-            ) {
+            if list != nil() {
                 self.print(", ");
-                if breaks {
-                    self.line_break(&mut broken);
-                }
+                self.line_break(&mut broken);
             }
         }
         if broken {
@@ -683,35 +701,40 @@ impl Deparser {
                 self.curly(arguments);
                 return;
             }
-            if head == symbols.paren && argument_count == 1 {
+            // A keyword's call is written in the keyword's form whatever arguments it holds,
+            // with `NULL` for each one it lacks.
+            let first = argument_at(arguments, 0);
+            let second = argument_at(arguments, 1);
+            let third = argument_at(arguments, 2);
+            if head == symbols.paren {
                 self.print("(");
-                self.deparse(arguments.car());
+                self.deparse(first);
                 self.print(")");
                 return;
             }
-            if head == symbols.if_ && (2..=3).contains(&argument_count) {
-                self.if_expression(arguments);
+            if head == symbols.if_ {
+                self.if_expression(first, second, (argument_count > 2).then_some(third));
                 return;
             }
-            if head == symbols.for_ && argument_count == 3 {
+            if head == symbols.for_ {
                 self.print("for (");
-                self.deparse(arguments.car());
+                self.deparse(first);
                 self.print(" in ");
-                self.deparse(arguments.cdr().car());
+                self.deparse(second);
                 self.print(") ");
-                self.deparse(arguments.cdr().cdr().car());
+                self.deparse(third);
                 return;
             }
-            if head == symbols.while_ && argument_count == 2 {
+            if head == symbols.while_ {
                 self.print("while (");
-                self.deparse(arguments.car());
+                self.deparse(first);
                 self.print(") ");
-                self.deparse(arguments.cdr().car());
+                self.deparse(second);
                 return;
             }
-            if head == symbols.repeat && argument_count == 1 {
+            if head == symbols.repeat {
                 self.print("repeat ");
-                self.deparse(arguments.car());
+                self.deparse(first);
                 return;
             }
             if let Some(form) = ry_form(name, arguments) {
@@ -727,33 +750,40 @@ impl Deparser {
                 self.print("next");
                 return;
             }
-            if head == symbols.function && argument_count >= 2 {
-                self.print("function(");
-                let formals = arguments.car();
-                self.formals(formals);
-                self.print(") ");
-                self.deparse(arguments.cdr().car());
+            if head == symbols.function {
+                if self.opts & options::USE_SOURCE != 0 && third.kind() == SexpType::String {
+                    for index in 0..length(third) {
+                        self.print(&char_str(third.element(index)));
+                        self.write_line();
+                    }
+                } else {
+                    self.print("function(");
+                    self.arguments(first, true);
+                    self.print(") ");
+                    self.deparse(second);
+                }
                 return;
             }
             if let Some(info) = operator_info(name) {
                 match (info.kind, argument_count) {
-                    (Kind::Subset, count) if count >= 1 => {
+                    (Kind::Subset, _) => {
                         let (open, close) = if name == b"[" {
                             ("[", "]")
                         } else {
                             ("[[", "]]")
                         };
-                        let target = arguments.car();
-                        let parens = needs_parens(info, target, true, left_of);
+                        let parens = needs_parens(info, first, true, left_of);
                         if parens {
                             self.print("(");
                         }
-                        self.deparse(target);
+                        self.deparse(first);
                         if parens {
                             self.print(")");
                         }
                         self.print(open);
-                        self.arguments(arguments.cdr(), false, true);
+                        if arguments != nil() {
+                            self.arguments(arguments.cdr(), false);
+                        }
                         self.print(close);
                         return;
                     }
@@ -791,9 +821,9 @@ impl Deparser {
                         }
                         return;
                     }
-                    (Kind::Binary | Kind::Binary2 | Kind::Assign, 2) => {
-                        let left = arguments.car();
-                        let right = arguments.cdr().car();
+                    (Kind::Binary | Kind::Binary2, 2) | (Kind::Assign, _) => {
+                        let left = first;
+                        let right = second;
                         let outer_parens = argument && name == b"=";
                         if outer_parens {
                             self.print("(");
@@ -839,11 +869,8 @@ impl Deparser {
                     }
                     // Every `PP_BINARY` operator called with one argument deparses as a
                     // prefix, so `` `%*%`(x) `` is `%*%x`, as GNU R prints it.
-                    (Kind::Binary | Kind::Binary2 | Kind::Unary, 1)
-                        if info.kind == Kind::Binary
-                            || matches!(name, b"+" | b"-" | b"!" | b"~") =>
-                    {
-                        let operand = arguments.car();
+                    (Kind::Binary, 1) | (Kind::Unary, _) => {
+                        let operand = first;
                         let info = if info.precedence == precedence::SUM {
                             OperatorInfo {
                                 precedence: precedence::SIGN,
@@ -868,7 +895,8 @@ impl Deparser {
                     _ => {}
                 }
             }
-            if is_user_binop(name) && argument_count == 2 {
+            let user_binop = is_user_binop(name);
+            if user_binop && argument_count == 2 && !has_tag(arguments) {
                 let info = OperatorInfo {
                     kind: Kind::Binary,
                     precedence: precedence::PERCENT,
@@ -906,7 +934,17 @@ impl Deparser {
                 }
                 return;
             }
-            self.plain_call(&quote_name(&name_text), arguments);
+            // A primitive's name and a `%op%` follow `backtick`, as an argument's tag does, and
+            // any other function's name is written in backticks.
+            let primitive = crate::builtins::primitive(&name_text).is_some();
+            let quoted = if matches!(name, b"[<-" | b"[[<-" | b"$<-" | b"@<-") {
+                format!("`{name_text}`")
+            } else if primitive || user_binop {
+                tag_text(&name_text, self.backtick)
+            } else {
+                quote_name(&name_text)
+            };
+            self.plain_call(&quoted, primitive, arguments);
             return;
         }
         // A call whose function is itself an expression.
@@ -918,7 +956,7 @@ impl Deparser {
             self.deparse(head);
         }
         self.print("(");
-        self.arguments(arguments, false, true);
+        self.arguments(arguments, false);
         self.print(")");
     }
 
@@ -1074,7 +1112,7 @@ impl Deparser {
             RyForm::Record | RyForm::Tuple => {
                 self.print("(");
                 self.in_list += 1;
-                self.arguments(arguments, false, true);
+                self.arguments(arguments, false);
                 self.in_list -= 1;
                 if values::pairlist_length(arguments) == 1 {
                     self.print(",");
@@ -1084,7 +1122,7 @@ impl Deparser {
             RyForm::Array => {
                 self.print("[");
                 self.in_list += 1;
-                self.arguments(arguments, false, true);
+                self.arguments(arguments, false);
                 self.in_list -= 1;
                 self.print("]");
             }
@@ -1095,7 +1133,7 @@ impl Deparser {
                 if payload != nil() {
                     self.print("(");
                     self.in_list += 1;
-                    self.arguments(payload, false, true);
+                    self.arguments(payload, false);
                     self.in_list -= 1;
                     self.print(")");
                 }
@@ -1238,16 +1276,15 @@ impl Deparser {
         }
     }
 
-    unsafe fn plain_call(&mut self, name: &str, arguments: Sexp) {
+    unsafe fn plain_call(&mut self, name: &str, primitive: bool, arguments: Sexp) {
         self.print(name);
         self.print("(");
         // GNU R keeps a braced `if` on one line inside the arguments of a call to a
         // primitive (`c`, `list`, `quote`), but breaks it inside any other call's.
-        let primitive = crate::builtins::primitive(name).is_some();
         if primitive {
             self.in_list += 1;
         }
-        self.arguments(arguments, false, true);
+        self.arguments(arguments, false);
         if primitive {
             self.in_list -= 1;
         }
@@ -1269,10 +1306,12 @@ impl Deparser {
         self.in_curly -= 1;
     }
 
-    unsafe fn if_expression(&mut self, arguments: Sexp) {
-        let condition = arguments.car();
-        let consequent = arguments.cdr().car();
-        let alternative = arguments.cdr().cdr();
+    unsafe fn if_expression(
+        &mut self,
+        condition: Sexp,
+        consequent: Sexp,
+        alternative: Option<Sexp>,
+    ) {
         self.print("if (");
         self.deparse(condition);
         self.print(") ");
@@ -1282,14 +1321,14 @@ impl Deparser {
                 self.write_line();
                 self.indent += 1;
             }
-            if alternative.kind() == SexpType::Pairlist {
+            if let Some(alternative) = alternative {
                 self.deparse(consequent);
                 self.write_line();
                 if !curly_ahead {
                     self.indent -= 1;
                 }
                 self.print("else ");
-                self.deparse(alternative.car());
+                self.deparse(alternative);
             } else {
                 self.deparse(consequent);
                 if !curly_ahead {
@@ -1298,9 +1337,9 @@ impl Deparser {
             }
         } else {
             self.deparse(consequent);
-            if alternative.kind() == SexpType::Pairlist {
+            if let Some(alternative) = alternative {
                 self.print(" else ");
-                self.deparse(alternative.car());
+                self.deparse(alternative);
             }
         }
     }
@@ -1335,15 +1374,17 @@ impl Deparser {
             self.print("\"NA\" = ");
             return;
         }
+        // GNU R writes the name as it is between the quotes, with no escapes.
         let text = char_str(name);
         if !text.is_empty() {
-            if is_syntactic(&text) {
-                self.print(&text);
-            } else if self.backtick {
-                self.print(&quote_name(&text));
-            } else {
-                self.print(&format::encode_string(&text, Some('"')));
-            }
+            let quote = match (is_syntactic(&text), self.backtick) {
+                (true, _) => "",
+                (false, true) => "`",
+                (false, false) => "\"",
+            };
+            self.print(quote);
+            self.print(&text);
+            self.print(quote);
             self.print(" = ");
         }
     }
@@ -1548,7 +1589,8 @@ impl Deparser {
                             // GNU R quotes the backticked name: `structure(1, "`a b`" = 2)`.
                             format!("\"{}\"", quote_name(other))
                         } else {
-                            format::encode_string(other, Some('"'))
+                            // The name as it is between the quotes, with no escapes.
+                            format!("\"{other}\"")
                         }
                     }
                 };
@@ -1680,7 +1722,7 @@ unsafe fn s4_parts(object: Sexp, class: Sexp) -> R<Option<S4Parts>> {
     let definition_call = values::call(get_class_def, &[class])?;
     let definition = crate::eval::eval(definition_call, values::base_env())?;
     if definition == nil() {
-        return Err(crate::unwind::error(
+        return Err(error(
             "cannot get a slot (\"slots\") from an object of type \"NULL\"",
         ));
     }
@@ -1802,6 +1844,31 @@ unsafe fn ry_call_form(expression: Sexp) -> Option<RyForm> {
         return None;
     }
     ry_form(expression.car().car().bytes(), expression.cdr())
+}
+
+/// The argument at `index`, or `NULL` past the end, as GNU R reads the `CAR` of an empty list.
+unsafe fn argument_at(mut arguments: Sexp, index: usize) -> Sexp {
+    for _ in 0..index {
+        if arguments == nil() {
+            return nil();
+        }
+        arguments = arguments.cdr();
+    }
+    if arguments == nil() {
+        nil()
+    } else {
+        arguments.car()
+    }
+}
+
+unsafe fn has_tag(mut arguments: Sexp) -> bool {
+    while arguments != nil() {
+        if arguments.tag() != nil() {
+            return true;
+        }
+        arguments = arguments.cdr();
+    }
+    false
 }
 
 unsafe fn is_curly(expression: Sexp) -> bool {

@@ -156,7 +156,7 @@ pub unsafe fn print_value(value: Sexp, options: &PrintOptions, tag: &mut String)
         SexpType::Promise => out("<promise>\n"),
         SexpType::Dots => out("<...>\n"),
         SexpType::Language => {
-            for line in deparse::deparse_lines(value, 60, deparse::options::SIMPLE) {
+            for line in deparse::deparse_lines_checked(value, 60, deparse::options::SIMPLE)? {
                 out(&format!("{line}\n"));
             }
         }
@@ -998,6 +998,8 @@ unsafe fn print_list(list: Sexp, options: &PrintOptions, tag: &mut String) -> R<
         if saved <= TAG_LIMIT {
             match name {
                 Some(name) if !name.is_empty() => {
+                    // The name is escaped as an unquoted string is, so a backtick in it stays.
+                    let name = encode_string(&name, None);
                     let piece = if deparse::is_syntactic(&name) {
                         format!("${name}")
                     } else {

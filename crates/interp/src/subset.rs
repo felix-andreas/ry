@@ -1021,7 +1021,7 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
             let result = subset(list, indices, drop, call)?;
             // Subsetting a pairlist gives a list, as in GNU R; a call stays a call.
             if object.kind() == SexpType::Language {
-                return values::list_to_pairlist(result, SexpType::Language);
+                return values::list_to_pairlist(result, SexpType::Language, false);
             }
             return Ok(result);
         }
@@ -2584,7 +2584,7 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         // A call stays a call with its attributes (a formula keeps its class and environment),
         // but a pairlist becomes a list, as in GNU R.
         return if object.kind() == SexpType::Language {
-            let rebuilt = values::list_to_pairlist(result, SexpType::Language)?;
+            let rebuilt = values::list_to_pairlist(result, SexpType::Language, true)?;
             values::copy_attributes(object, rebuilt)?;
             Ok(rebuilt)
         } else {
@@ -3282,7 +3282,7 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
     if matches!(object.kind(), SexpType::Pairlist | SexpType::Language) {
         let list = values::pairlist_to_list(object)?;
         let result = subassign2(list, indices, value, call)?;
-        let result = values::list_to_pairlist(result, object.kind())?;
+        let result = values::list_to_pairlist(result, object.kind(), true)?;
         // The call keeps its attributes, such as a formula's class and environment, and a
         // pairlist keeps its dimensions.
         values::copy_most_attributes(object, result, true)?;

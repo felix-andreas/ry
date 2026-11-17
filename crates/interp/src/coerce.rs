@@ -454,7 +454,7 @@ unsafe fn coerce_list(
             }
             Ok(result)
         }
-        SexpType::Pairlist | SexpType::Language => values::list_to_pairlist(list, kind),
+        SexpType::Pairlist | SexpType::Language => values::list_to_pairlist(list, kind, true),
         SexpType::String => {
             let result = alloc(SexpType::String, count)?;
             for index in 0..count {
@@ -1189,20 +1189,26 @@ unsafe fn do_as_vector(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_as_call(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
-    match object.kind() {
-        SexpType::Language => Ok(object),
+    let result = match object.kind() {
+        SexpType::Language => return Ok(object),
         SexpType::List | SexpType::Expression => {
             if length(object) == 0 {
-                return Err(call.error("invalid argument list"));
+                return Err(call.error("invalid length 0 argument"));
             }
-            values::list_to_pairlist(object, SexpType::Language)
+            values::list_to_pairlist(object, SexpType::Language, true)?
         }
         SexpType::Pairlist => {
             let items = values::pairlist_items(object);
-            values::pairlist(&items, SexpType::Language)
+            values::pairlist(&items, SexpType::Language)?
         }
-        _ => Err(call.error("invalid argument list")),
-    }
+        SexpType::String => {
+            return Err(call.error("as.call(<character>) not feasible; consider str2lang(<char.>)"));
+        }
+        _ => return Err(call.error("invalid argument list")),
+    };
+    // The function position carries no name.
+    crate::heap().set_tag(result, nil());
+    Ok(result)
 }
 
 unsafe fn do_as_function(call: &Call<'_>) -> R<Sexp> {

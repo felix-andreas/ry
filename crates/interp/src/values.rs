@@ -2022,14 +2022,17 @@ pub unsafe fn pairlist_to_list(list: Sexp) -> R<Sexp> {
     Ok(result)
 }
 
-/// The list vector as a pairlist with its names as tags.
-pub unsafe fn list_to_pairlist(list: Sexp, kind: SexpType) -> R<Sexp> {
+/// The list vector as a pairlist with its names as tags. An `NA` name is the tag `NA` under
+/// `tag_na`, as where GNU R converts a list, and no tag otherwise, as where it sets names.
+pub unsafe fn list_to_pairlist(list: Sexp, kind: SexpType, tag_na: bool) -> R<Sexp> {
     let names = names(list);
     let mut builder = PairlistBuilder::new(kind);
     for index in 0..length(list) {
         let tag = if names.kind() == SexpType::String {
             let name = names.element(index);
-            if name.bytes().is_empty() || name == na_string() {
+            if name == na_string() {
+                if tag_na { install("NA")? } else { nil() }
+            } else if name.bytes().is_empty() {
                 nil()
             } else {
                 crate::heap().install_char(name)?
