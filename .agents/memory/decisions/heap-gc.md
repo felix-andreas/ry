@@ -494,6 +494,16 @@ GNU R finalizes an object at the first full `gc()` after its last reference goes
 - **Contract of `held`.** The caller's root or register keeps the value alive for the whole call. It is `unsafe` to reach from raw code for that reason, and each use states which root holds the value.
 - **Impact.** Correctness: the subscript resolvers, the element reads and stores and the four operators with their replacement forms hold no raw pointer across an allocation. Performance: the per-operation table in the change that built it; the residue is one root per name lookup (`handles::names_of`, about 17 instructions against `values::names`). Simplicity: `subset.rs` holds 49 `unsafe fn` where it held 101: the specials' entries, the entries unmigrated callers reach, the attribute setters `set_dimnames`, `set_row_names` and `set_attribute_checked`, and the raw builtins `lengths`, `matrix`, `array`, `t`, `asplit`, `aperm`, `cbind`, `rbind` and `max.col`.
 
+## An allocation failure reports the size of the vector's data
+
+**Status:** built.
+
+- **What GNU R prints.** "cannot allocate vector of size 7.5 Gb" names the vector's data in whole 8-byte words: no header, and the unit changes above 1024 of the smaller one (`>`, so exactly 1024 Kb prints as Kb).
+- **What ry counts.** `Heap::alloc_vector_general` asks for the object's size, which has the header and, for a list or character vector above the small size, one card byte per 128 elements (`CARD_ELEMENTS`). Reported as is, a list of 1e12 elements printed 78.3 Gb where GNU R prints 78.2 Gb. The error is therefore rewritten at that one place to `length * element_size` rounded up to a word.
+- **Not matched.** The size at which an allocation fails is the machine's, so a request GNU R can satisfy and ry cannot (or the reverse) differs by design.
+- `complex(length.out = n)` reads `n` as GNU R's `asInteger` does (a warning and "invalid length" for a value outside the integer range) before it allocates.
+- Pinned by the oracle case `vectors__allocation_failure_size`. Found by the metamorphic fuzz kind.
+
 ## A list of inert elements skips its children when it dies
 
 **Status:** built.

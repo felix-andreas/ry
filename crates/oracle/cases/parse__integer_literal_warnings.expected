@@ -1,0 +1,38 @@
+[stdout]
+| .5e-3L W: non-integer value .5e-3L qualified with L; using numeric value 
+| .5e-3L -> double 5e-04 
+| 0x1.1p1L W: non-integer value 0x1.1p1L qualified with L; using numeric value 
+| 0x1.1p1L -> double 2.125 
+| 0x1.8p1L -> integer 3 
+| 1.0L W: integer literal 1.0L contains unnecessary decimal point 
+| 1.0L -> integer 1 
+| 1.5L W: integer literal 1.5L contains decimal; using numeric value 
+| 1.5L -> double 1.5 
+| 1e3L -> integer 1000 
+| 1.0e1L -> integer 10 
+| 1.5e1L -> integer 15 
+| 1.25e1L W: non-integer value 1.25e1L qualified with L; using numeric value 
+| 1.25e1L -> double 12.5 
+| 1e-1L W: non-integer value 1e-1L qualified with L; using numeric value 
+| 1e-1L -> double 0.1 
+| 0x10L -> integer 16 
+| 0x1p-1L W: non-integer value 0x1p-1L qualified with L; using numeric value 
+| 0x1p-1L -> double 0.5 
+| 0X1P2L -> integer 4 
+| 1.L W: integer literal 1.L contains unnecessary decimal point 
+| 1.L -> integer 1 
+| 100000000000L W: non-integer value 100000000000L qualified with L; using numeric value 
+| 100000000000L -> double 1e+11 
+| 1.0e10L W: non-integer value 1.0e10L qualified with L; using numeric value 
+| 1.0e10L -> double 1e+10 
+| 2147483647L -> integer 2147483647 
+| 2147483648L W: non-integer value 2147483648L qualified with L; using numeric value 
+| 2147483648L -> double 2147483648 
+| 1E0L -> integer 1 
+| 1.0E0L -> integer 1 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

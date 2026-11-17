@@ -524,7 +524,7 @@ released. A second battery drives random API sequences under collection stress a
 
 `oracle fuzz` runs whole R programs under GNU R and ry's engines and reports every program on
 which an engine differs. A seed and a kind name a program, so `oracle fuzz --kind K --seed N
---print` prints it and `--engines` replays it. The seven kinds find different bugs:
+--print` prints it and `--engines` replays it. The eight kinds find different bugs:
 
 | Kind | A program is | It finds |
 | --- | --- | --- |
@@ -534,6 +534,7 @@ which an engine differs. A seed and a kind name a program, so `oracle fuzz --kin
 | `api` (`oracle::metamorphic::api_program`) | calls of functions drawn from everything base, stats and utils export, on two zoo values and constants of other types, each call caught | a function nobody listed: one that crashes, or accepts, rejects or computes differently from GNU R |
 | `io` (`oracle::metamorphic::io_program`) | round trips through files and connections: a zoo value written by one writer (`writeLines`, `cat`, `writeBin`, `write.table`, `dput`, `saveRDS`, `save`, compressed and re-encoding connections) and read back by several readers | bytes on disk that differ from GNU R's, and readers that decode, mark, warn about or reject a file differently |
 | `language` (`oracle::language::program`) | a few closures, each built from statements of the construct families its seed enables (`on.exit`, frame inspection, `...`, promises, replacement functions, `<<-`, conditions and restarts, S3, S4 and Reference Class dispatch, `eval` and quoted code, environments, regular expressions over Unicode text, control flow) and called one, a few or sixty times; the first and the last call's visible value, log entries and warnings are recorded | a difference in evaluation order, in what a frame or a condition reports, or in dispatch, and one that appears only on a later call |
+| `perturbed` (`oracle::mutate::perturb`) | a grammar, metamorphic or language program with up to twelve statements inserted into its function bodies: dead code (such as `if (FALSE)` around a statement taken from elsewhere in the program, an unused local closure, a loop over `NULL`) and code without effect on the result (such as `sys.call()`, `gc(FALSE)`, a `tryCatch` around `NULL`, and `force(x)` or `x <- x` in a function with parameters) | compiled code that depends on a slot number, a constant index, a branch offset or an inlining decision |
 | `corpus` (`oracle::corpus`) | a snippet of real R code with one to four mutations | what no grammar author thought of |
 
 A metamorphic trial draws its value from a zoo: every atomic type and lists, with `NA`, `NaN`,
@@ -632,7 +633,7 @@ The count is a close upper bound, because a name inside a string literal counts 
 Every fuzzed engine runs with at most 2 GiB of writable memory (`oracle::fuzz::MEMORY_LIMIT`,
 `RLIMIT_DATA`), so a call that asks for a huge vector gets R's "cannot allocate" error in GNU R
 and in ry instead of taking the machine's memory. `just fuzz-differential` runs the grammar,
-`just fuzz-kind KIND` any kind, and `just fuzz-long HOURS BASE` all seven for a time budget, under
+`just fuzz-kind KIND` any kind, and `just fuzz-long HOURS BASE` all eight for a time budget, under
 tier 0, the forced JIT and seeded collection stress.
 
 `crates/oracle/tests/test_differential.rs` holds the bounded passes. Grammar programs run under
@@ -667,8 +668,12 @@ f(matrix(0, 8, 8))
 ```
 
 The command prints the reduced program, its signature and a replay command (with
-`ORACLE_OBSERVE=1` when only the observer's dump differs), and `--output` writes it. `--budget`
-caps the candidates (2000 by default), and the reduction is deterministic unless a candidate
+`ORACLE_OBSERVE=1` when only the observer's dump differs). `--output` names the file it writes,
+which holds the smallest program found so far at every improvement, so a reduction that is
+stopped early has a result. `--budget` caps the candidates (2000 by default) and `--minutes` the
+time. `--jobs` candidates run side by side (one per core by default): the chunk removals a
+one-at-a-time search would try next run together, and the first that still diverges is taken, so
+the result does not depend on `--jobs`, and the reduction is deterministic unless a candidate
 runs into the timeout. `oracle fuzz --reduce` starts no candidate after the time budget and
 leaves a timeout unreduced, because each candidate that still hangs costs the whole timeout.
 `oracle::reduce::reduce` takes any predicate, so its unit tests run without an engine.

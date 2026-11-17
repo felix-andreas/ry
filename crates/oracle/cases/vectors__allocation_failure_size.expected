@@ -1,0 +1,50 @@
+[stdout]
+| cannot allocate vector of size 7450.6 Gb 
+| cannot allocate vector of size 7450.6 Gb 
+| cannot allocate vector of size 7450.6 Gb 
+| cannot allocate vector of size 3725.3 Gb 
+| cannot allocate vector of size 3725.3 Gb 
+| invalid length 
+| cannot allocate vector of size 9313.2 Gb 
+| cannot allocate vector of size 7823.1 Gb 
+| cannot allocate vector of size 7823.1 Gb 
+| cannot allocate vector of size 7450.6 Gb 
+| cannot allocate vector of size 7823.1 Gb 
+| cannot allocate vector of size 7823.1 Gb 
+| cannot allocate vector of size 7450.6 Gb 
+| cannot allocate vector of size 7823.1 Gb 
+| cannot allocate vector of size 7823.1 Gb 
+| cannot allocate vector of size 7450.6 Gb 
+| cannot allocate vector of size 3911.6 Gb 
+| cannot allocate vector of size 3911.6 Gb 
+| cannot allocate vector of size 3725.3 Gb 
+| cannot allocate vector of size 3911.6 Gb 
+| cannot allocate vector of size 3911.6 Gb 
+| cannot allocate vector of size 3725.3 Gb 
+| cannot allocate vector of size 977.9 Gb 
+| cannot allocate vector of size 977.9 Gb 
+| cannot allocate vector of size 931.3 Gb 
+| cannot allocate vector of size 7823.1 Gb 
+| cannot allocate vector of size 7450.6 Gb 
+| cannot allocate vector of size 7450.6 Gb 
+| cannot allocate vector of size 7450.6 Gb 
+| warning: NAs introduced by coercion to integer range 
+| warning: NAs introduced by coercion to integer range 
+| error: invalid length 
+| error: invalid length 
+| error: invalid length 
+| complex 2 
+| complex 3 
+| complex 2 
+| complex 1 
+| complex 3 
+| warning: NAs introduced by coercion to integer range 
+| warning: NAs introduced by coercion to integer range 
+| [1] "invalid length"
+[messages]
+[warnings]
+- NAs introduced by coercion to integer range (in complex(1e+12))
+[errors]
+[value]
+character
+| "invalid length"

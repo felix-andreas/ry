@@ -580,3 +580,13 @@ Why one body compiled up to four times, each fixed at its source:
 - **Lifetime.** A compiled entry holds its code in an ephemeron (`Heap::alloc_weak_ref` with the call as key, `Heap::set_weak_value` on recompile), so the code lives exactly as long as the call and a dead call's entry is freed in `clear_dead`, which runs after `process_weak_refs` and before the sweep can reuse its address. Counting entries hold nothing, and their number is capped at `MAX_TRACKED_BODIES`.
 - **Cost.** On 200,000 rows in 40,000 groups, `DT[, spread(v), by = g]` takes about 35 ms compiled and 48 on the tree walker (GNU R 60), and `DT[, v[1L] + w[.N], by = g]` about 36 ms and 48 (GNU R 39).
 - Pinned by the oracle cases `native_eval__datatable_grouped_j`, `native_eval__datatable_frames` and `native_eval__purrr_rlang`, and by `fuzz_native_code_reevaluates_a_changing_call` in `crates/libr/tests/test_fuzz_native.rs`, which changes a call in place between evaluations and compares each result with the walker's on a fresh duplicate.
+
+## A handler compiled code steps outside `scoped` leaves no handle behind
+
+**Status:** built.
+
+- **The rule.** Compiled code runs most helpers inside `scoped` (`crates/jit/src/runtime.rs`), which marks the heap's handle stack, runs the helper and releases to the mark. `jit_element_step` tries `bytecode::fast_step` first, outside `scoped`, because a fast handler allocates nothing that needs a root. A fast handler must therefore return with the handle stack at the height it found.
+- **Why it matters.** A stepped call that enters its callee in place returns through `leave_fast` or `resume_caller`, which release to the compiled caller's `machine.mark`. A handle a fast handler left above that mark is released there, under the mark `jit_step` took for the call, and the check in `scoped` aborts ("a helper released handles compiled code holds").
+- **The case that showed it.** Reading one element of a deferred string (`as.character(<numbers>)`, an ALTREP vector) converts that element through libr's `deferred_storage`, which roots the vector. `read_altrep_element_call` in `bytecode.rs` takes a handle mark before the conversion and releases to it after, since the element stays reachable from the vector. Under the forced JIT, `x[2L, , drop = FALSE]` on a data frame with such a column aborted at the second call.
+- **Guard.** `jit_element_step` asserts in debug builds that `fast_step` left the handle stack where it was, so the oracle suite under `ry-jit` names a handler that breaks the rule.
+- Pinned by the oracle case `jit__deferred_string_read_before_call`. Found by the metamorphic fuzz kind.

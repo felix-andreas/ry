@@ -8,7 +8,9 @@
 use {
     crate::{
         builtins::{BuiltinDef, Call, internal},
-        coerce::{CoercionWarnings, coerce_vector, factor_as_character, parse_real, real_to_int},
+        coerce::{
+            CoercionWarnings, coerce_vector, factor_as_character, integer_from_string, real_to_int,
+        },
         conditions::warning,
         eval, records, standard_library,
         subset::select_elements,
@@ -780,14 +782,7 @@ unsafe fn do_sorted_fpass(call: &Call<'_>) -> R<Sexp> {
         if length(flag) > 0 {
             match flag.kind() {
                 SexpType::String => {
-                    if let Some(text) = string_at(flag, 0)
-                        && !text.trim_ascii().is_empty()
-                    {
-                        match parse_real(&text) {
-                            None => warnings.na = true,
-                            Some(value) => warnings.integer_range = real_to_int(value).1,
-                        }
-                    }
+                    integer_from_string(heap::handle::Gc::adopt(flag.element(0)), &mut warnings)?;
                 }
                 SexpType::Real => warnings.integer_range = real_to_int(values::reals(flag)[0]).1,
                 SexpType::Complex => {

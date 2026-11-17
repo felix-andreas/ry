@@ -1131,7 +1131,7 @@ without cells, promise forcing in the loop, and one observer word on the general
 
 - **Previous shape.** `coerce_vector_quiet` copied every attribute to every result, and callers cleared what GNU R drops case by case (`as_vector` stripped after the fact), so `as.list` of a matrix kept `dim`, `x[1, 2] <- list(v)` on an atomic matrix kept a `dim` GNU R drops, and `as.expression` of a named vector kept names.
 - **Target shape.** The tail of `coerce_vector_quiet` (`coerce.rs`) applies `coerceVector`'s rule: atomic to atomic keeps all attributes, list to and from expression keeps all, atomic to list keeps names only, atomic to expression keeps none, list or expression to atomic keeps names only. `coerce_atomic` sets no attribute itself. `storage.mode<-` and `mode<-` copy all attributes themselves, as GNU R's `do_storage_mode` (`SHALLOW_DUPLICATE_ATTRIB` after `coerceVector`) and the R code of `mode<-` (`attributes(x) <- atr`) do. libr's own `Rf_coerceVector` (`libr/src/vectors.rs`) follows the same rule.
-- **A subassignment reads its subscripts against the object as it was** (`subset.rs`): `dim` and `dimnames` are taken before the coercion that a list value forces, as GNU R's `MatrixAssign` reads them before `SubassignTypeFix`, so `m[1, 2] <- list(v)` assigns the cell and returns a plain list. `m[[1, 2]] <- list(v)` hands the atomic matrix to the same assignment with the value wrapped in a list.
+- **A subassignment reads its subscripts against the object as it was** (`subset.rs`): `dim` and `dimnames` are taken before the coercion that a list value forces, as GNU R's `MatrixAssign` reads them before `SubassignTypeFix`, so `m[1, 2] <- list(v)` assigns the cell and returns a plain list. `m[[1, 2]] <- list(v)` finds the cell's position first and assigns by that position, so the vector that results has no dimensions either.
 - Oracle case: `coerce__list_coercion_attributes`.
 
 ## A promise whose evaluation was left warns when it is forced again
@@ -1143,6 +1143,26 @@ without cells, promise forcing in the loop, and one observer word on the general
 - **A read that settles a promise without forcing it leaves a marked promise to forcing** (`eval::settled_without_code`, the JIT's `pure_value`), so `typeof(x)` on such an argument warns as a force does.
 - **An argument reference is pooled**, so `pooled_reference` clears the mark when it hands a reference to the next call. Without that, an argument that failed in one call made an unrelated argument of a later call warn.
 - Oracle case: `promises__restarting_interrupted_evaluation`.
+
+## An assignment with several subscripts checks them before the value
+
+**Status:** settled.
+
+- **Rule.** GNU R's `MatrixAssign` and `ArrayAssign` run after the subscripts are resolved, and `SubassignTypeFix` runs after both, so `x[i, j] <- value` reports the first of: a subscript count that does not fit ("incorrect number of subscripts on matrix" for two, "incorrect number of subscripts" for more), each dimension's subscript in turn (a logical longer than the extent, a name without `dimnames`, a position out of bounds), the value's length, and the type mismatch last.
+- **One resolver per dimension.** `subset::dimension_positions` resolves one dimension's subscript for the read and for the assignment, and `array_selections` runs the assignment's checks in order. A type mismatch is found first, because the type decides the copy, and is reported only after `array_selections` found nothing earlier.
+- **`m[[i, j]] <- value` reads each subscript as `[[` does** (`one_position`, GNU R's `get1index`): exactly one element, so a logical does not recycle and a vector of two is an error, reported against the generated call. For an atomic matrix the value's length is checked before any subscript. The cell is then assigned by its position in the vector, so a list matrix refuses `NULL` ("incompatible types (from list to NULL)") where a single subscript deletes the element.
+- **A value without a length.** For a function, an environment, a symbol or `NULL` GNU R's length check reads a length no selection can hold, so `m[1, 2] <- sum` and `m[1, 2] <- NULL` are "number of items to replace is not a multiple of replacement length" for an atomic and a list matrix alike, and only an empty selection reaches the type check. A call counts its elements. The check sits ahead of the coercion of a call or symbol value to a list, which would report the type first.
+- **`NULL` as the target comes before all of it.** GNU R coerces `NULL` to the value's type before it reads a subscript, so `x <- NULL; x[3] <- sum` is "invalid type/length (builtin/0) in vector allocation", a call is "unimplemented type 'NULL' in 'coercePairList'", a pairlist leaves `NULL` not subsettable, and an environment that binds nothing has length zero and leaves `NULL` unchanged.
+- **Previous shape.** The type fix ran first, and `[[<-` handed its subscripts to `[<-`, so `m[[TRUE, 1]] <- v` assigned a whole column and `m[[1:2, 1]] <- v` two cells.
+- Oracle case: `assignment__matrix_subscript_checks_order`.
+
+## A condition names a superassignment inside a function with the plain arrow
+
+**Status:** settled.
+
+- **GNU R's two evaluators differ.** For a warning or error from `x[5] <<- 1:3`, the AST evaluator names the call as written and compiled code names `x[5] <- 1:3`, because the compiler records the setter call with the plain arrow. A closure runs compiled from its second call on, and package code always, so the compiled form is the one programs see.
+- **Rule.** `unwind::reported_assignment` names a complex superassignment with the plain arrow whenever a function frame is on the stack, and as written at top level, where GNU R never compiles a statement. The first call of a closure in GNU R therefore differs from ry, as it differs from GNU R's own second call.
+- **Generators stay out of the gap.** The `language` kind compiles its closures up front, and the `metamorphic` kind muffles the warnings of its superassignment forms.
 
 ## A direct call of an attribute replacement wraps its target
 

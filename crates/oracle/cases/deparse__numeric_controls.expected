@@ -1,0 +1,266 @@
+[stdout]
+| 1+2i
+| 1+2i
+| 1+2i
+| 0x1p+0 + 0x1p+1i
+| 1+2i
+| 0x1p+0 + 0x1p+1i
+| 0x1p+0 + 0x1p+1i
+| 0x1p+0 + 0x1p+1i
+| 1+2i
+| c(1.5-2.25i, 0+0i, complex(real=NA, imaginary=0), 0-1i)
+| c(1.5-2.25i, 0+0i, complex(real=NA, imaginary=0), -0-1i)
+| c(1.5-2.25i, 0+0i, complex(real=NA, imaginary=0), 0-1i)
+| c(0x1.8p+0 + -0x1.2p+1i, 0x0p+0 + 0x0p+0i, complex(real=NA, imaginary=0), 
+| -0x0p+0 + -0x1p+0i)
+| c(1.5-2.25i, 0+0i, complex(real=NA, imaginary=0), -0-1i)
+| c(0x1.8p+0 + -0x1.2p+1i, 0x0p+0 + 0x0p+0i, complex(real=NA, imaginary=0), 
+| -0x0p+0 + -0x1p+0i)
+| c(0x1.8p+0 + -0x1.2p+1i, 0x0p+0 + 0x0p+0i, complex(real=NA, imaginary=0), 
+| -0x0p+0 + -0x1p+0i)
+| c(0x1.8p+0 + -0x1.2p+1i, 0x0p+0 + 0x0p+0i, complex(real=NA, imaginary=0), 
+| -0x0p+0 + -0x1p+0i)
+| c(1.5-2.25i, 0+0i, complex(real=NA, imaginary=0), -0-1i)
+| complex(real=NaN, imaginary=1)
+| complex(real=NaN, imaginary=1)
+| complex(real=NaN, imaginary=1)
+| complex(real=NaN, imaginary=1)
+| complex(real=NaN, imaginary=1)
+| complex(real=NaN, imaginary=1)
+| complex(real=NaN, imaginary=1)
+| complex(real=NaN, imaginary=1)
+| complex(real=NaN, imaginary=1)
+| complex(real=Inf, imaginary=-Inf)
+| complex(real=Inf, imaginary=-Inf)
+| complex(real=Inf, imaginary=-Inf)
+| complex(real=Inf, imaginary=-Inf)
+| complex(real=Inf, imaginary=-Inf)
+| complex(real=Inf, imaginary=-Inf)
+| complex(real=Inf, imaginary=-Inf)
+| complex(real=Inf, imaginary=-Inf)
+| complex(real=Inf, imaginary=-Inf)
+| complex(real=NA, imaginary=1)
+| complex(real=NA, imaginary=1)
+| complex(real=NA, imaginary=1)
+| complex(real=NA, imaginary=1)
+| complex(real=NA, imaginary=1)
+| complex(real=NA, imaginary=1)
+| complex(real=NA, imaginary=1)
+| complex(real=NA, imaginary=1)
+| complex(real=NA, imaginary=1)
+| complex(real=1, imaginary=NA)
+| complex(real=1, imaginary=NA)
+| complex(real=1, imaginary=NA)
+| complex(real=1, imaginary=NA)
+| complex(real=1, imaginary=NA)
+| complex(real=1, imaginary=NA)
+| complex(real=1, imaginary=NA)
+| complex(real=1, imaginary=NA)
+| complex(real=1, imaginary=NA)
+| 0.1+0.3i
+| 0.10000000000000001+0.29999999999999999i
+| 0.1+0.3i
+| 0x1.999999999999ap-4 + 0x1.3333333333333p-2i
+| 0.10000000000000001+0.29999999999999999i
+| 0x1.999999999999ap-4 + 0x1.3333333333333p-2i
+| 0x1.999999999999ap-4 + 0x1.3333333333333p-2i
+| 0x1.999999999999ap-4 + 0x1.3333333333333p-2i
+| 0.10000000000000001+0.29999999999999999i
+| -0.1-1e-20i
+| -0.10000000000000001-9.9999999999999995e-21i
+| -0.1-1e-20i
+| -0x1.999999999999ap-4 + -0x1.79ca10c924223p-67i
+| -0.10000000000000001-9.9999999999999995e-21i
+| -0x1.999999999999ap-4 + -0x1.79ca10c924223p-67i
+| -0x1.999999999999ap-4 + -0x1.79ca10c924223p-67i
+| -0x1.999999999999ap-4 + -0x1.79ca10c924223p-67i
+| -0.10000000000000001-9.9999999999999995e-21i
+| 1e+300+1e-300i
+| 1.0000000000000001e+300+1e-300i
+| 1e+300+1e-300i
+| 0x1.7e43c8800759cp+996 + 0x1.56e1fc2f8f359p-997i
+| 1.0000000000000001e+300+1e-300i
+| 0x1.7e43c8800759cp+996 + 0x1.56e1fc2f8f359p-997i
+| 0x1.7e43c8800759cp+996 + 0x1.56e1fc2f8f359p-997i
+| 0x1.7e43c8800759cp+996 + 0x1.56e1fc2f8f359p-997i
+| 1.0000000000000001e+300+1e-300i
+| 0+0i
+| -0-0i
+| 0+0i
+| -0x0p+0 + -0x0p+0i
+| -0-0i
+| -0x0p+0 + -0x0p+0i
+| -0x0p+0 + -0x0p+0i
+| -0x0p+0 + -0x0p+0i
+| -0-0i
+| c(0+1i, 2+0i)
+| c(a = 0+1i, b = 2+0i)
+| c(0+1i, 2+0i)
+| c(0x0p+0 + 0x1p+0i, 0x1p+1 + 0x0p+0i)
+| c(0+1i, 2+0i)
+| c(a = 0x0p+0 + 0x1p+0i, b = 0x1p+1 + 0x0p+0i)
+| c(0x0p+0 + 0x1p+0i, 0x1p+1 + 0x0p+0i)
+| c(a = 0x0p+0 + 0x1p+0i, b = 0x1p+1 + 0x0p+0i)
+| c(a = 0+1i, b = 2+0i)
+| 3+0i
+| 3+0i
+| 3+0i
+| 0x1.8p+1 + 0x0p+0i
+| 3+0i
+| 0x1.8p+1 + 0x0p+0i
+| 0x1.8p+1 + 0x0p+0i
+| 0x1.8p+1 + 0x0p+0i
+| 3+0i
+| 0.333333333333333+0.666666666666667i
+| 0.33333333333333331+0.66666666666666663i
+| 0.333333333333333+0.666666666666667i
+| 0x1.5555555555555p-2 + 0x1.5555555555555p-1i
+| 0.33333333333333331+0.66666666666666663i
+| 0x1.5555555555555p-2 + 0x1.5555555555555p-1i
+| 0x1.5555555555555p-2 + 0x1.5555555555555p-1i
+| 0x1.5555555555555p-2 + 0x1.5555555555555p-1i
+| 0.33333333333333331+0.66666666666666663i
+| complex(0)
+| complex(0)
+| complex(0)
+| complex(0)
+| complex(0)
+| complex(0)
+| complex(0)
+| complex(0)
+| complex(0)
+| NA_complex_
+| NA_complex_
+| NA
+| NA
+| NA
+| NA_complex_
+| NA
+| NA_complex_
+| NA_complex_
+| c(0+1i, complex(real=NaN, imaginary=0))
+| c(0+1i, complex(real=NaN, imaginary=0))
+| c(0+1i, complex(real=NaN, imaginary=0))
+| c(0x0p+0 + 0x1p+0i, complex(real=NaN, imaginary=0))
+| c(0+1i, complex(real=NaN, imaginary=0))
+| c(0x0p+0 + 0x1p+0i, complex(real=NaN, imaginary=0))
+| c(0x0p+0 + 0x1p+0i, complex(real=NaN, imaginary=0))
+| c(0x0p+0 + 0x1p+0i, complex(real=NaN, imaginary=0))
+| c(0+1i, complex(real=NaN, imaginary=0))
+| 123456789.123457+1i
+| 123456789.12345679+1i
+| 123456789.123457+1i
+| 0x1.d6f34547e6b75p+26 + 0x1p+0i
+| 123456789.12345679+1i
+| 0x1.d6f34547e6b75p+26 + 0x1p+0i
+| 0x1.d6f34547e6b75p+26 + 0x1p+0i
+| 0x1.d6f34547e6b75p+26 + 0x1p+0i
+| 123456789.12345679+1i
+| 1e+15+1e+15i
+| 1000000000000000+1000000000000000i
+| 1e+15+1e+15i
+| 0x1.c6bf52634p+49 + 0x1.c6bf52634p+49i
+| 1000000000000000+1000000000000000i
+| 0x1.c6bf52634p+49 + 0x1.c6bf52634p+49i
+| 0x1.c6bf52634p+49 + 0x1.c6bf52634p+49i
+| 0x1.c6bf52634p+49 + 0x1.c6bf52634p+49i
+| 1000000000000000+1000000000000000i
+| 1e+05+1e-05i
+| 100000+1.0000000000000001e-05i
+| 1e+05+1e-05i
+| 0x1.86ap+16 + 0x1.4f8b588e368f1p-17i
+| 100000+1.0000000000000001e-05i
+| 0x1.86ap+16 + 0x1.4f8b588e368f1p-17i
+| 0x1.86ap+16 + 0x1.4f8b588e368f1p-17i
+| 0x1.86ap+16 + 0x1.4f8b588e368f1p-17i
+| 100000+1.0000000000000001e-05i
+| 1e+05+1i
+| 100000+1i
+| 1e+05+1i
+| 0x1.86ap+16 + 0x1p+0i
+| 100000+1i
+| 0x1.86ap+16 + 0x1p+0i
+| 0x1.86ap+16 + 0x1p+0i
+| 0x1.86ap+16 + 0x1p+0i
+| 100000+1i
+| 0+1e-05i
+| 0+1.0000000000000001e-05i
+| 0+1e-05i
+| 0x0p+0 + 0x1.4f8b588e368f1p-17i
+| 0+1.0000000000000001e-05i
+| 0x0p+0 + 0x1.4f8b588e368f1p-17i
+| 0x0p+0 + 0x1.4f8b588e368f1p-17i
+| 0x0p+0 + 0x1.4f8b588e368f1p-17i
+| 0+1.0000000000000001e-05i
+| complex(real=NaN, imaginary=NaN)
+| complex(real=NaN, imaginary=NaN)
+| complex(real=NaN, imaginary=NaN)
+| complex(real=NaN, imaginary=NaN)
+| complex(real=NaN, imaginary=NaN)
+| complex(real=NaN, imaginary=NaN)
+| complex(real=NaN, imaginary=NaN)
+| complex(real=NaN, imaginary=NaN)
+| complex(real=NaN, imaginary=NaN)
+| 9007199254740992+4.94065645841247e-324i
+| 9007199254740992+4.9406564584124654e-324i
+| 9007199254740992+4.94065645841247e-324i
+| 0x1p+53 + 0x0.0000000000001p-1022i
+| 9007199254740992+4.9406564584124654e-324i
+| 0x1p+53 + 0x0.0000000000001p-1022i
+| 0x1p+53 + 0x0.0000000000001p-1022i
+| 0x1p+53 + 0x0.0000000000001p-1022i
+| 9007199254740992+4.9406564584124654e-324i
+| list(0x1p+0 + 0x1p+1i, c(0x1.8p+0 + -0x1.2p+1i, 0x0p+0 + 0x0p+0i, 
+| complex(real=NA, imaginary=0), -0x0p+0 + -0x1p+0i), complex(real=NaN, imaginary=1), 
+|     complex(real=Inf, imaginary=-Inf), complex(real=NA, imaginary=1), 
+|     complex(real=1, imaginary=NA), 0x1.999999999999ap-4 + 0x1.3333333333333p-2i, 
+|     -0x1.999999999999ap-4 + -0x1.79ca10c924223p-67i, 0x1.7e43c8800759cp+996 + 0x1.56e1fc2f8f359p-997i, 
+|     -0x0p+0 + -0x0p+0i, c(a = 0x0p+0 + 0x1p+0i, b = 0x1p+1 + 0x0p+0i
+|     ), 0x1.8p+1 + 0x0p+0i, 0x1.5555555555555p-2 + 0x1.5555555555555p-1i, 
+|     complex(0), NA_complex_, c(0x0p+0 + 0x1p+0i, complex(real=NaN, imaginary=0)
+|     ), 0x1.d6f34547e6b75p+26 + 0x1p+0i, 0x1.c6bf52634p+49 + 0x1.c6bf52634p+49i, 
+|     0x1.86ap+16 + 0x1.4f8b588e368f1p-17i, 0x1.86ap+16 + 0x1p+0i, 
+|     0x0p+0 + 0x1.4f8b588e368f1p-17i, complex(real=NaN, imaginary=NaN), 
+|     0x1p+53 + 0x0.0000000000001p-1022i)
+| list(1+2i, c(1.5-2.25i, 0+0i, complex(real=NA, imaginary=0), 
+| -0-1i), complex(real=NaN, imaginary=1), complex(real=Inf, imaginary=-Inf), 
+|     complex(real=NA, imaginary=1), complex(real=1, imaginary=NA), 
+|     0.10000000000000001+0.29999999999999999i, -0.10000000000000001-9.9999999999999995e-21i, 
+|     1.0000000000000001e+300+1e-300i, -0-0i, c(a = 0+1i, b = 2+0i
+|     ), 3+0i, 0.33333333333333331+0.66666666666666663i, complex(0), 
+|     NA_complex_, c(0+1i, complex(real=NaN, imaginary=0)), 123456789.12345679+1i, 
+|     1000000000000000+1000000000000000i, 100000+1.0000000000000001e-05i, 
+|     100000+1i, 0+1.0000000000000001e-05i, complex(real=NaN, imaginary=NaN), 
+|     9007199254740992+4.9406564584124654e-324i)
+| list(1+2i, c(1.5-2.25i, 0+0i, complex(real=NA, imaginary=0), 
+| 0-1i), complex(real=NaN, imaginary=1), complex(real=Inf, imaginary=-Inf), 
+|     complex(real=NA, imaginary=1), complex(real=1, imaginary=NA), 
+|     0.1+0.3i, -0.1-1e-20i, 1e+300+1e-300i, 0+0i, c(a = 0+1i, 
+|     b = 2+0i), 3+0i, 0.333333333333333+0.666666666666667i, complex(0), 
+|     NA_complex_, c(0+1i, complex(real=NaN, imaginary=0)), 123456789.123457+1i, 
+|     1e+15+1e+15i, 1e+05+1e-05i, 1e+05+1i, 0+1e-05i, complex(real=NaN, imaginary=NaN), 
+|     9007199254740992+4.94065645841247e-324i)
+| x + (0x0p+0 + 0x1p+0i)
+| f(0x1p+0 + 0x1p+1i, 0x1.999999999999ap-4)
+| c(0x1.999999999999ap-4, 0x1.5555555555555p-2, 0x1.56e1fc2f8f359p-997, 
+| NA, Inf, -0x0p+0, 0x1p+60, 0x0.0000000000001p-1022, 0x1.9p+6, 
+| 0x1.86ap+16, 0x1.e240b33333333p+16)
+| list(1, 0x1.4p+1, TRUE, "a", NULL, 0x0p+0 + 0x1.8p+1i)
+| x + (0+1i)
+| f(1+2i, 0.10000000000000001)
+| c(0.10000000000000001, 0.33333333333333331, 1e-300, NA, Inf, 
+| -0, 1.152921504606847e+18, 4.9406564584124654e-324, 100, 100000, 
+| 123456.7)
+| list(1, 2.5, TRUE, "a", NULL, 0+3i)
+| quote(x + (0x0p+0 + 0x1p+0i))
+| quote(f(0x1p+0 + 0x1p+1i, 0x1.999999999999ap-4))
+| c(0x1.999999999999ap-4, 0x1.5555555555555p-2, 0x1.56e1fc2f8f359p-997, 
+| NA, Inf, -0x0p+0, 0x1p+60, 0x0.0000000000001p-1022, 0x1.9p+6, 
+| 0x1.86ap+16, 0x1.e240b33333333p+16)
+| list(1L, 0x1.4p+1, TRUE, "a", NULL, 0x0p+0 + 0x1.8p+1i)
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

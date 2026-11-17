@@ -1558,16 +1558,17 @@ overhead, not allocation.
 
 ## Open: untyped R against GNU R
 
-- **Differences the fuzz kinds report** (`oracle fuzz --kind api|metamorphic|io`):
-  - *The call an error or warning of a primitive names.* A primitive called inside another call reports itself (`` tryCatch(`dimnames<-`(1:3, list()), error = conditionCall) ``); GNU R names the enclosing closure call unless the caller is byte-compiled. Also `"sum"(1, 2)` and `` `length<-`(NULL, 2) ``.
+- **Differences the fuzz kinds report**:
+  - *The call an error or warning of a primitive names.* A primitive called inside another call reports itself (`` tryCatch(`dimnames<-`(1:3, list()), error = conditionCall) ``); GNU R names the enclosing closure call unless the caller is byte-compiled.
   - Other messages: `matrix(sum)`, `x <- NULL; x[3] <- sum`, `qr.influence(1:3, 2)`, TRE's reasons (`regexpr("(", "a")`).
   - `sys.calls()` lacks `paste`'s frame while a promise is forced inside it.
-  - `print(1:10, max = 0)` prints one element, GNU R none (`print.rs` clamps `max` to 1).
+  - `print(1:10, max = 0)` prints one element, GNU R none.
   - `D(expression(), "x")` returns `NA` (GNU R: an error); `forceAndCall("a", sum, 1, 2)` does not warn.
   - `structure(1:.Machine$integer.max, names = letters[1:8])` is killed for memory (GNU R: "cannot allocate").
-  - *Parser.* `parse(text = "\xe4")` (GNU R: `expression()`); `function(a, a` (GNU R: `repeatedFormal` first); a backquoted name holding a NUL (GNU R truncates); byte columns of `parse(text =)` for unmarked non-ASCII; `ry run -` does not read standard input.
-  - *Files (`--kind io`).* `substr()` of a latin1 string is UTF-8; no "unable to translate" warning from regex and `strsplit` on an undefined Windows-1252 byte; C-level error messages are not cut at `warning.length` outside `scan`; `file(encoding = "UTF-8-BOM")`; `readChar` on invalid UTF-8; `writeBin(size = 2)` on raw, complex and double; ASCII `serialize` and `save` of ALTREP forms; `writeBin` to a path is visible; an "ASCII" output connection writes the text before an unconvertible character; `deparse()` output is marked UTF-8; embedded-NUL warnings of `read.table`, `scan`, `readLines`; UTF-8 read as UTF-16LE warns once more; `parse(encoding = "latin1")` of a gz file; a name over 8192 bytes (GNU R: `input buffer overflow`); `writeLines(intToUtf8(0x10FF80), f)` writes `80 0a` (GNU R `f4 8f be 80 0a`); invalid bytes in `scan(text = "\xff1")`, `` parse(text = "`\xff`") ``, the message of `parse(text = "a\tb\xc3")` and `writeChar` of a cut sequence with `eos = NULL`; `deparse(quote(break(1)))`.
-  - GNU R artifacts, not to learn: its compiler renames a `<<-` warning's call to `<-` and merges `-0` with `0`; `x[1, 2L, 1] <- sum` on a list array is undefined there.
+  - *Parser.* `parse(text = "\xe4")` (GNU R: `expression()`); `function(a, a` (GNU R: `repeatedFormal` first); a backquoted name holding a NUL (GNU R truncates); byte columns of `parse(text =)` for unmarked non-ASCII; `ry run -` does not read standard input; `1 < 2 < 3` parses (GNU R: a syntax error); `0x1.8` is a syntax error (GNU R: 1.5).
+  - *Files (`--kind io`).* `substr()` of a latin1 string is UTF-8; no "unable to translate" warning from regex and `strsplit` on an undefined Windows-1252 byte; C-level error messages are not cut at `warning.length` outside `scan`; `file(encoding = "UTF-8-BOM")`; `readChar` on invalid UTF-8; ASCII `serialize` and `save` of ALTREP forms; an "ASCII" output connection writes the text before an unconvertible character; `deparse()` output is marked UTF-8; embedded-NUL warnings of `read.table`, `scan`, `readLines`; UTF-8 read as UTF-16LE warns once more; `parse(encoding = "latin1")` of a gz file; a name over 8192 bytes (GNU R: `input buffer overflow`); `writeLines(intToUtf8(0x10FF80), f)` writes `80 0a` (GNU R `f4 8f be 80 0a`); invalid bytes in `scan(text = "\xff1")`, `` parse(text = "`\xff`") ``, the message of `parse(text = "a\tb\xc3")` and `writeChar` of a cut sequence with `eos = NULL`.
+  - *Console.* A piped line that is not UTF-8 ends `ry repl` silently (`read_piped_line`, `console.rs`); GNU R: "invalid multibyte character in parser".
+  - *Regex.* TRE's `ignore.case` folds by full case mapping: `grepl("ǆ", "ǅ")`, `grepl("ß", "ẞ")`, `grepl("k", "\u212a")` are TRUE (GNU R: FALSE). With `useBytes = TRUE` a POSIX class takes every high byte as punctuation: `gsub("[[:punct:]]", ".", "é", useBytes = TRUE)` (GNU R reads a byte as its Latin-1 character).
 - A builtin generic passes an S3 method promises of the call's code where GNU R passes values: with `length.cls <- function(x) deparse(substitute(x))`, `length(obj)` is `"obj"` on ry and the deparsed object on GNU R, and `` `names<-.cls` `` sees `substitute(value)` as `v` where GNU R sees `"a"`. The same in every tier (`dispatch.rs`, `internal_dispatch`).
 - `mapply` and `Map` pass the function values, where GNU R passes promises whose code is `dots[[2L]][[1L]]`: `Map(function(a, b) deparse(substitute(b)), 1:2, 3:4)` gives `"3L"` and `"4L"` on ry (`envir.rs`, `do_mapply`).
 - A compiled `x[i] <- v` decides between the builtin and a method by reading `x` before the subscripts run (`bytecode.rs`, `element_assignment`). A subscript that turns `x` into an object as a side effect (`x[{class(x) <<- "k"; 1}] <- v` from a nested function) dispatches on GNU R and runs the builtin compiled. Nothing real is known to do this.
@@ -2063,14 +2064,6 @@ The live workflow tests only `crates/ry` (`default-members`). Its staged replace
 `.github/pending/workflows/ci.yml` runs `just gate`'s recipes over the whole workspace and no
 ignored suite, so a human moving it into place closes this (`decisions/tooling-bench-ci.md`, "CI runs `just gate` against GNU R 4.6.2, and nothing ignored").
 
-### `ide::fuzz_deep` cannot be shortened
-
-`ide::fuzz_deep` runs `iterations().max(5000)` sweeps. That `.max` floor means `FUZZ_ITERS` cannot
-lower it, which is the bug. Measured in release on that exact input shape, which is 1 to 12
-concatenated seeds averaging 214 bytes over 111 offsets per sweep, one sweep costs 665 ms, so five
-thousand sweeps take 55.4 minutes on 4 cores. CI no longer runs ignored suites, so this blocks a
-future scheduled deep-fuzz job, not the CI move.
-
 ### This is not a fuzzer, it is a fixed 498-program corpus re-derived at 124 s a run
 
 Every generator seeds `SplitMix64` from compile-time constants with no entropy. Two runs of the
@@ -2192,7 +2185,7 @@ covers on the same generator. Drop it and give the budget to `fuzz_seed_mutation
 
 An agent can land all of these today: completion sampling, the release profile in `just gate`, the
 syntax budget raise, `catch_unwind` plus seed printing, `FUZZ_SEED`, the seeder fix, the `fuzz/`
-type-check guard, the `fuzz_deep` floor that unblocks the CI move, and the dead-arm cleanup.
+type-check guard, and the dead-arm cleanup.
 
 A human is required for three things: moving the staged workflows in `.github/pending/` into place,
 which needs workflow scope, any scheduled fuzz job and its corpus cache, and an OSS-Fuzz submission.

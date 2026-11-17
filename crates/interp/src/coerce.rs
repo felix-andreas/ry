@@ -4,6 +4,7 @@ use {
     crate::{
         builtins::{BuiltinDef, Call, Generic, builtin, internal, is_native_value},
         conditions, deparse,
+        handles::is_na,
         strings::with_text_buffer,
         system::r_at_least,
         unwind::{R, error},
@@ -12,9 +13,11 @@ use {
         },
     },
     heap::{
+        handle::{Chars, Gc},
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
         strings::Encoding,
     },
+    numeric::long_double::{Exactness, strtod},
 };
 
 /// Warnings a coercion raises, collected so each is reported once per call.
@@ -80,20 +83,7 @@ pub unsafe fn integer_scalar(object: Sexp) -> R<i32> {
             converted
         }
         SexpType::Complex => complex_to_int(values::complexes(object)[0], &mut warnings),
-        SexpType::String => match values::string_at(object, 0) {
-            Some(text) => match parse_real(&text) {
-                Some(real) => {
-                    let (converted, out_of_range) = real_to_int(real);
-                    warnings.integer_range = out_of_range;
-                    converted
-                }
-                None => {
-                    warnings.na = true;
-                    NA_INTEGER
-                }
-            },
-            None => NA_INTEGER,
-        },
+        SexpType::String => integer_from_string(Gc::adopt(object.element(0)), &mut warnings)?,
         _ => values::as_integer_scalar(object),
     };
     warnings.report()?;
@@ -109,53 +99,119 @@ fn raw_candidate(value: i32) -> i64 {
     }
 }
 
-/// R's string-to-double rule: surrounding whitespace is ignored, decimal and hexadecimal
-/// notation and `Inf`, `NaN` and `NA` are read; anything else is `None`.
-pub fn parse_real(text: &str) -> Option<f64> {
-    let trimmed = text.trim_matches(|character: char| character.is_ascii_whitespace());
-    if trimmed.is_empty() {
-        return None;
+/// GNU R's `RealFromString`: `NA` and a blank string are missing, a number with only white
+/// space after it is its value, and any other text is missing with the coercion warning.
+pub fn real_from_string(chars: Gc<'_, Chars>, warnings: &mut CoercionWarnings) -> R<f64> {
+    let text = chars.bytes();
+    if is_na(chars) || is_blank(text)? {
+        return Ok(NA_REAL);
     }
-    let (sign, body) = match trimmed.as_bytes()[0] {
-        b'-' => (-1.0, &trimmed[1..]),
-        b'+' => (1.0, &trimmed[1..]),
-        _ => (1.0, trimmed),
+    let number = strtod(text, b'.', false, Exactness::Allow);
+    if is_blank(&text[number.length..])? {
+        return Ok(number.value);
+    }
+    warnings.na = true;
+    Ok(NA_REAL)
+}
+
+/// GNU R's `IntegerFromString`: the string as `real_from_string` reads it, truncated, and
+/// missing with the range warning outside the integers.
+pub fn integer_from_string(chars: Gc<'_, Chars>, warnings: &mut CoercionWarnings) -> R<i32> {
+    let (converted, out_of_range) = real_to_int(real_from_string(chars, warnings)?);
+    warnings.integer_range |= out_of_range;
+    Ok(converted)
+}
+
+/// GNU R's `ComplexFromString`: a real `a`, an imaginary `bi` or `a+bi`.
+pub fn complex_from_string(chars: Gc<'_, Chars>, warnings: &mut CoercionWarnings) -> R<Rcomplex> {
+    let missing = Rcomplex {
+        r: NA_REAL,
+        i: NA_REAL,
     };
-    match body {
-        "NA" if sign > 0.0 && !trimmed.starts_with('+') => return Some(NA_REAL),
-        "Inf" | "inf" | "infinity" | "Infinity" | "INF" => return Some(sign * f64::INFINITY),
-        "NaN" | "nan" => return Some(f64::NAN),
-        _ => {}
+    let text = chars.bytes();
+    if is_na(chars) || is_blank(text)? {
+        return Ok(missing);
     }
-    let lower = body.to_ascii_lowercase();
-    if let Some(hex) = lower.strip_prefix("0x") {
-        if hex.is_empty()
-            || !hex.chars().all(|character| {
-                character.is_ascii_hexdigit() || matches!(character, '.' | 'p' | '-' | '+')
-            })
-        {
-            return None;
+    let first = strtod(text, b'.', false, Exactness::Allow);
+    let rest = &text[first.length..];
+    if is_blank(rest)? {
+        return Ok(Rcomplex {
+            r: first.value,
+            i: 0.0,
+        });
+    }
+    if rest[0] == b'i' && is_blank(&rest[1..])? {
+        return Ok(Rcomplex {
+            r: 0.0,
+            i: first.value,
+        });
+    }
+    if matches!(rest[0], b'+' | b'-') {
+        let second = strtod(rest, b'.', false, Exactness::Allow);
+        let rest = &rest[second.length..];
+        if rest.first() == Some(&b'i') && is_blank(&rest[1..])? {
+            return Ok(Rcomplex {
+                r: first.value,
+                i: second.value,
+            });
         }
-        return Some(sign * crate::lower::parse_number(&lower));
     }
-    let valid = body.bytes().enumerate().all(|(index, byte)| {
-        byte.is_ascii_digit()
-            || byte == b'.'
-            || byte == b'e'
-            || byte == b'E'
-            || ((byte == b'-' || byte == b'+')
-                && index > 0
-                && matches!(body.as_bytes()[index - 1], b'e' | b'E'))
-    });
-    if !valid || !body.bytes().any(|byte| byte.is_ascii_digit()) {
-        return None;
+    warnings.na = true;
+    Ok(missing)
+}
+
+/// The number a whole text spells, by the rule of `real_from_string`, for a caller that
+/// reports no coercion warning: `None` for blank text and for text that is no number.
+pub fn parse_real(text: &str) -> Option<f64> {
+    let number = strtod(text.as_bytes(), b'.', false, Exactness::Allow);
+    let blank = |text: &str| text.chars().all(is_wide_space);
+    (number.length > 0 && blank(&text[number.length..])).then_some(number.value)
+}
+
+/// C's `isspace` in a UTF-8 locale, for one byte.
+pub(crate) fn is_c_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | 11 | 12 | b'\r')
+}
+
+/// GNU R's `isBlankString` in a UTF-8 locale: only white space characters as `iswspace` knows
+/// them. Like GNU R, it stops at the first character that is not white space, and an invalid
+/// multibyte sequence before any such character is an error.
+pub(crate) fn is_blank(text: &[u8]) -> R<bool> {
+    let text = text
+        .iter()
+        .position(|&byte| byte == 0)
+        .map_or(text, |end| &text[..end]);
+    let mut rest = text;
+    while !rest.is_empty() {
+        // One character is at most four bytes, so only those are validated per step.
+        let head = &rest[..rest.len().min(4)];
+        let valid = head.utf8_chunks().next().map_or("", |chunk| chunk.valid());
+        if let Some(character) = valid.chars().next() {
+            if !is_wide_space(character) {
+                return Ok(false);
+            }
+            rest = &rest[character.len_utf8()..];
+        } else {
+            return Err(crate::connections::invalid_multibyte(rest));
+        }
     }
-    let body = if body.ends_with(['e', 'E']) {
-        return None;
-    } else {
-        body
-    };
-    body.parse::<f64>().ok().map(|value| sign * value)
+    Ok(true)
+}
+
+/// `iswspace` in glibc's UTF-8 locales.
+fn is_wide_space(character: char) -> bool {
+    matches!(
+        character,
+        '\t'..='\r'
+            | ' '
+            | '\u{1680}'
+            | '\u{2000}'..='\u{2006}'
+            | '\u{2008}'..='\u{200a}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{205f}'
+            | '\u{3000}'
+    )
 }
 
 pub fn string_to_logical(text: &str) -> i32 {
@@ -394,7 +450,7 @@ unsafe fn coerce_list(
             }
             Ok(result)
         }
-        SexpType::Pairlist | SexpType::Language => values::list_to_pairlist(list, kind),
+        SexpType::Pairlist | SexpType::Language => values::list_to_pairlist(list, kind, true),
         SexpType::String => {
             let result = alloc(SexpType::String, count)?;
             for index in 0..count {
@@ -575,23 +631,9 @@ pub unsafe fn coerce_atomic(
                         value
                     }
                     SexpType::Complex => complex_to_int(values::complexes(object)[index], warnings),
-                    SexpType::String => match values::string_at(object, index) {
-                        Some(text) => match parse_real(&text) {
-                            Some(value) if is_na_real(value) => NA_INTEGER,
-                            Some(value) => {
-                                let (converted, out_of_range) = real_to_int(value);
-                                warnings.integer_range |= out_of_range;
-                                converted
-                            }
-                            None => {
-                                if !text.trim().is_empty() {
-                                    warnings.na = true;
-                                }
-                                NA_INTEGER
-                            }
-                        },
-                        None => NA_INTEGER,
-                    },
+                    SexpType::String => {
+                        integer_from_string(Gc::adopt(object.element(index)), warnings)?
+                    }
                     SexpType::Raw => values::raws(object)[index] as i32,
                     _ => NA_INTEGER,
                 };
@@ -616,18 +658,9 @@ pub unsafe fn coerce_atomic(
                         }
                         value.r
                     }
-                    SexpType::String => match values::string_at(object, index) {
-                        Some(text) => match parse_real(&text) {
-                            Some(value) => value,
-                            None => {
-                                if !text.trim().is_empty() {
-                                    warnings.na = true;
-                                }
-                                NA_REAL
-                            }
-                        },
-                        None => NA_REAL,
-                    },
+                    SexpType::String => {
+                        real_from_string(Gc::adopt(object.element(index)), warnings)?
+                    }
                     SexpType::Raw => values::raws(object)[index] as f64,
                     _ => NA_REAL,
                 };
@@ -658,22 +691,9 @@ pub unsafe fn coerce_atomic(
                         r: values::reals(object)[index],
                         i: 0.0,
                     },
-                    SexpType::String => match values::string_at(object, index) {
-                        Some(text) => match parse_complex(&text) {
-                            Some(value) => value,
-                            None => {
-                                warnings.na = true;
-                                Rcomplex {
-                                    r: NA_REAL,
-                                    i: NA_REAL,
-                                }
-                            }
-                        },
-                        None => Rcomplex {
-                            r: NA_REAL,
-                            i: NA_REAL,
-                        },
-                    },
+                    SexpType::String => {
+                        complex_from_string(Gc::adopt(object.element(index)), warnings)?
+                    }
                     SexpType::Raw => Rcomplex {
                         r: values::raws(object)[index] as f64,
                         i: 0.0,
@@ -744,22 +764,10 @@ pub unsafe fn coerce_atomic(
                         warnings.integer_range |= out_of_range;
                         raw_candidate(converted)
                     }
-                    SexpType::String => match values::string_at(object, index) {
-                        Some(text) => match parse_real(&text) {
-                            Some(value) => {
-                                let (converted, out_of_range) = real_to_int(value);
-                                warnings.integer_range |= out_of_range;
-                                raw_candidate(converted)
-                            }
-                            None => {
-                                if !text.trim().is_empty() {
-                                    warnings.na = true;
-                                }
-                                -1
-                            }
-                        },
-                        None => -1,
-                    },
+                    SexpType::String => raw_candidate(integer_from_string(
+                        Gc::adopt(object.element(index)),
+                        warnings,
+                    )?),
                     SexpType::Complex => {
                         raw_candidate(complex_to_int(values::complexes(object)[index], warnings))
                     }
@@ -817,32 +825,6 @@ pub unsafe fn number_as_charsxp(numbers: Sexp, index: usize, scipen: i32) -> R<S
                     .mk_char(integer_digits(value, &mut [0_u8; 11]), Encoding::Native)?)
             }
         }
-    }
-}
-
-fn parse_complex(text: &str) -> Option<Rcomplex> {
-    let trimmed = text.trim();
-    if let Some(value) = parse_real(trimmed) {
-        return Some(Rcomplex { r: value, i: 0.0 });
-    }
-    let body = trimmed.strip_suffix('i')?;
-    let split = body
-        .char_indices()
-        .skip(1)
-        .filter(|(index, character)| {
-            matches!(character, '+' | '-') && !matches!(body.as_bytes()[index - 1], b'e' | b'E')
-        })
-        .map(|(index, _)| index)
-        .last();
-    match split {
-        Some(position) => Some(Rcomplex {
-            r: parse_real(&body[..position])?,
-            i: parse_real(&body[position..])?,
-        }),
-        None => Some(Rcomplex {
-            r: 0.0,
-            i: parse_real(body)?,
-        }),
     }
 }
 
@@ -1224,20 +1206,26 @@ unsafe fn do_as_vector(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_as_call(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
-    match object.kind() {
-        SexpType::Language => Ok(object),
+    let result = match object.kind() {
+        SexpType::Language => return Ok(object),
         SexpType::List | SexpType::Expression => {
             if length(object) == 0 {
-                return Err(call.error("invalid argument list"));
+                return Err(call.error("invalid length 0 argument"));
             }
-            values::list_to_pairlist(object, SexpType::Language)
+            values::list_to_pairlist(object, SexpType::Language, true)?
         }
         SexpType::Pairlist => {
             let items = values::pairlist_items(object);
-            values::pairlist(&items, SexpType::Language)
+            values::pairlist(&items, SexpType::Language)?
         }
-        _ => Err(call.error("invalid argument list")),
-    }
+        SexpType::String => {
+            return Err(call.error("as.call(<character>) not feasible; consider str2lang(<char.>)"));
+        }
+        _ => return Err(call.error("invalid argument list")),
+    };
+    // The function position carries no name.
+    crate::heap().set_tag(result, nil());
+    Ok(result)
 }
 
 unsafe fn do_as_function(call: &Call<'_>) -> R<Sexp> {

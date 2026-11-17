@@ -1580,12 +1580,14 @@ pub fn pairlist_to_list<'s>(context: &mut Cx<'s>, list: Local<'_>) -> R<Local<'s
     Ok(unsafe { rooted(context, values::pairlist_to_list(list.raw())?) })
 }
 
-/// A list as a pairlist or call of `kind`, its names as the cells' tags.
+/// A list as a pairlist or call of `kind`, its names as the cells' tags. `tag_na` makes an `NA`
+/// name the tag `NA`, where it otherwise leaves the cell untagged.
 #[inline]
 pub fn list_to_pairlist<'s>(
     context: &mut Cx<'s>,
     list: Local<'_, List>,
     kind: SexpType,
+    tag_na: bool,
 ) -> R<Owned<'s>> {
     assert!(
         matches!(kind, SexpType::Pairlist | SexpType::Language),
@@ -1594,7 +1596,7 @@ pub fn list_to_pairlist<'s>(
     // SAFETY: the list is rooted, and the cells allocate, which `&mut Cx` permits. The cells
     // are new, so only this handle reaches them.
     unsafe {
-        let cells = values::list_to_pairlist(list.raw(), kind)?;
+        let cells = values::list_to_pairlist(list.raw(), kind, tag_na)?;
         Ok(Owned::assume(rooted(context, cells)))
     }
 }

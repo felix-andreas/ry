@@ -1,0 +1,38 @@
+[stdout]
+| [1] ""   "NA" "b" 
+| f(`NA` = 1, b = 2)
+| [1] ""  NA  "b"
+| [1] "NA" "b" 
+| [1] ""  "b"
+| [1] "NA" "b" 
+| [1] ""   "NA" "b" 
+| f(1, b = 2)
+| [1] ""  ""  "b"
+| `NA`
+| [1] "NA"
+| [1] "a" "b"
+| [1] "a"
+| E: invalid length 0 argument 
+| E: invalid length 0 argument 
+| E: as.call(<character>) not feasible; consider str2lang(<char.>) 
+| E: invalid argument list 
+| E: invalid argument list 
+| E: invalid argument list 
+| [1] ""  "b"
+| [1] ""  "b"
+| [1] ""  "b"
+| E: invalid argument list 
+| [1] ""   "NA" ""  
+| f(`NA` = 1, 2)
+| f(NULL)
+| NULL
+| f(a = 1, NULL, 2)
+| [1] ""  "a" ""  "" 
+| 1()
+| f()
+[messages]
+[warnings]
+[errors]
+[value]
+language
+| f()

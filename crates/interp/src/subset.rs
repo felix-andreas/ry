@@ -23,8 +23,8 @@ use {
         },
         unwind::{R, Unwind, error},
         values::{
-            self, alloc, char_str, get_attr, length, na_string, nil, scalar_integer, symbol_name,
-            symbols, unbound,
+            self, Dims, alloc, char_str, get_attr, length, na_string, nil, scalar_integer,
+            symbol_name, symbols, unbound,
         },
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp},
@@ -1180,24 +1180,6 @@ impl<'a> Numbers<'a> {
     }
 }
 
-/// GNU R converts a double matrix or array subscript to integer before it resolves it, so a
-/// value outside the integer range selects `NA` with a warning, where a vector subscript of the
-/// same value is quietly out of bounds.
-pub(crate) fn dimension_index<'s>(context: &mut Cx<'s>, index: Local<'s>) -> R<Local<'s>> {
-    const LIMIT: f64 = 2_147_483_648.0;
-    let Some(numbers) = dense::<Real>(context, index)? else {
-        return Ok(index);
-    };
-    if numbers
-        .as_slice(context)
-        .iter()
-        .any(|number| number.abs() >= LIMIT)
-    {
-        return coerce(context, index, SexpType::Integer);
-    }
-    Ok(index)
-}
-
 /// The zero-based position of `x[i]` or `x[[i]]` with one untagged, attribute-free numeric
 /// scalar `i` inside the vector's bounds: the common case GNU R's byte code also answers before
 /// resolving subscripts in general.
@@ -1444,7 +1426,7 @@ fn subset_value<'s>(
             if object.r_type() == SexpType::Language {
                 let result = standard::<List>(result)?;
                 return Ok(
-                    handles::list_to_pairlist(context, result, SexpType::Language)?.finish(),
+                    handles::list_to_pairlist(context, result, SexpType::Language, false)?.finish(),
                 );
             }
             return Ok(result);
@@ -1668,12 +1650,12 @@ fn matrix_subset<'s>(
     drop: bool,
     call: Option<Local<'s>>,
 ) -> R<Local<'s>> {
-    let dimnames = context.root(get_attribute(
+    let all_dimnames = context.root(get_attribute(
         context,
         object,
         symbol(|symbols| symbols.dimnames),
     ));
-    let dimnames = dimnames.downcast::<List>();
+    let dimnames = all_dimnames.downcast::<List>();
     let component = |context: &Cx<'s>, dimension: usize| match dimnames {
         Some(dimnames) if dimension < dimnames.len() => {
             context.root(dimnames.get(context, dimension))
@@ -1708,28 +1690,13 @@ fn matrix_subset<'s>(
     }
     let mut selections: SmallVec<[Positions; 4]> = SmallVec::with_capacity(dims.len());
     for (dimension, (&index, &extent)) in indices.iter().zip(dims).enumerate() {
-        let names = component(context, dimension);
-        // Unlike a vector, a dimension never stretches to a longer logical subscript.
-        if index.r_type() == SexpType::Logical && handles::length(context, index) > extent {
-            return Err(call_error(call, "(subscript) logical subscript too long"));
-        }
-        let index = dimension_index(context, index)?;
-        let (positions, _) = resolve_subscript(context, index, extent, names, false, call)?;
-        if let Some((offset, &position)) = positions
-            .iter()
-            .enumerate()
-            .find(|&(_, &position)| position >= extent && position != NA_POSITION)
-        {
-            let failure = DimensionBounds {
-                object,
-                dimension,
-                index,
-                offset,
-                position,
-            };
-            return Err(dimension_out_of_bounds(context, call, failure));
-        }
-        selections.push(positions);
+        let of = Dimension {
+            object,
+            dimnames: all_dimnames,
+            dimension,
+            extent,
+        };
+        selections.push(dimension_positions(context, call, false, of, index)?);
     }
     let offsets = ArrayOffsets::new(&selections, dims);
     let count = offsets.remaining;
@@ -1964,40 +1931,147 @@ fn bounds_error<'s>(
     )
 }
 
-/// An out-of-bounds array subscript in `[` or `[<-`: element `offset` of the subscript `index`
-/// of dimension `dimension` selected `position`.
-struct DimensionBounds<'s> {
+/// One dimension of the matrix or array a subscript is read against.
+#[derive(Clone, Copy)]
+struct Dimension<'s> {
     object: Local<'s>,
+    /// The `dimnames` attribute of `object`.
+    dimnames: Local<'s>,
     dimension: usize,
-    index: Local<'s>,
-    offset: usize,
-    position: usize,
+    extent: usize,
 }
 
-/// The error for an out-of-bounds array subscript. GNU R reports the failing element: a name
-/// with its dimension, or a position without one.
-fn dimension_out_of_bounds<'s>(
+/// The positions the subscript `index` selects along one dimension, with the errors of GNU R's
+/// `int_arraySubscript`. Unlike a vector, a dimension never stretches: a longer logical
+/// subscript and a position past the extent are errors. An assignment (`assigning`) reports the
+/// position against the replacement call it generated.
+fn dimension_positions<'s>(
     context: &mut Cx<'s>,
     call: Option<Local<'s>>,
-    failure: DimensionBounds<'s>,
-) -> Unwind {
-    let index = failure.index;
-    let named =
-        index.r_type() == SexpType::String && failure.offset < handles::length(context, index);
-    let reported = match named {
-        true => element(context, index, failure.offset),
-        false => scalar::<Real>(context, failure.position as f64 + 1.0),
+    assigning: bool,
+    of: Dimension<'s>,
+    index: Local<'s>,
+) -> R<Positions> {
+    let extent = of.extent;
+    if index.r_type() == SexpType::Logical && handles::length(context, index) > extent {
+        return Err(call_error(call, "(subscript) logical subscript too long"));
+    }
+    if index.r_type() == SexpType::String && of.dimnames.r_type() == SexpType::Nil {
+        return Err(call_error(call, "no 'dimnames' attribute for array"));
+    }
+    let names = match of.dimnames.downcast::<List>() {
+        Some(dimnames) if of.dimension < dimnames.len() => {
+            context.root(dimnames.get(context, of.dimension))
+        }
+        _ => null(),
     };
-    let reported = match reported {
-        Ok(reported) => reported,
-        Err(failure) => return failure,
+    // GNU R converts a double subscript of a matrix or array to integer before it resolves it,
+    // so a value outside the integer range selects `NA` with a warning, where a vector
+    // subscript of the same value is quietly out of bounds.
+    const LIMIT: f64 = 2_147_483_648.0;
+    let index = match dense::<Real>(context, index)? {
+        Some(numbers)
+            if numbers
+                .as_slice(context)
+                .iter()
+                .any(|number| number.abs() >= LIMIT) =>
+        {
+            coerce(context, index, SexpType::Integer)?
+        }
+        _ => index,
+    };
+    let (positions, _) = resolve_subscript(context, index, extent, names, false, call)?;
+    let Some((offset, &position)) = positions
+        .iter()
+        .enumerate()
+        .find(|&(_, &position)| position >= extent && position != NA_POSITION)
+    else {
+        return Ok(positions);
+    };
+    let call = match call {
+        Some(call) if assigning => Some(handles::generated_call(context, call)?),
+        call => call,
+    };
+    // GNU R reports the failing element: a name with its dimension, or a position without one.
+    let named = index.r_type() == SexpType::String && offset < handles::length(context, index);
+    let reported = match named {
+        true => element(context, index, offset)?,
+        false => scalar::<Real>(context, position as f64 + 1.0)?,
     };
     let bounds = OutOfBounds {
-        object: failure.object,
-        dimension: named.then_some(failure.dimension),
+        object: of.object,
+        dimension: named.then_some(of.dimension),
         reported: None,
     };
-    bounds_error(context, call, "subscript out of bounds", bounds, reported)
+    Err(bounds_error(
+        context,
+        call,
+        "subscript out of bounds",
+        bounds,
+        reported,
+    ))
+}
+
+/// The dimensions of `object` and the positions `indices` select along each, for an assignment
+/// of `value_count` elements, after every check GNU R's `MatrixAssign` and `ArrayAssign` make
+/// before they look at the types: the number of subscripts, each subscript in turn, then the
+/// lengths.
+fn array_selections<'s>(
+    context: &mut Cx<'s>,
+    call: Local<'s>,
+    object: Local<'s>,
+    indices: &[Local<'s>],
+    value_count: usize,
+) -> R<(Dims, SmallVec<[Positions; 4]>)> {
+    let Some(dims) = handles::dims(context, object).filter(|dims| dims.len() == indices.len())
+    else {
+        return Err(handles::error_in(
+            call,
+            if indices.len() == 2 {
+                "incorrect number of subscripts on matrix"
+            } else {
+                "incorrect number of subscripts"
+            },
+        ));
+    };
+    let dimnames =
+        handles::get_attribute(context, object, handles::symbol(|symbols| symbols.dimnames));
+    let dimnames = context.root(dimnames);
+    let mut selections: SmallVec<[Positions; 4]> = SmallVec::new();
+    for (dimension, (&index, &extent)) in indices.iter().zip(dims.iter()).enumerate() {
+        let of = Dimension {
+            object,
+            dimnames,
+            dimension,
+            extent,
+        };
+        selections.push(dimension_positions(context, Some(call), true, of, index)?);
+    }
+    let total: usize = selections.iter().map(|selection| selection.len()).product();
+    // A single value skips the NA rows, and a longer one cannot say which of its elements an
+    // NA row would have taken. GNU R's matrix assignment checks this before comparing lengths,
+    // and its array assignment after.
+    let has_na = value_count > 1
+        && selections
+            .iter()
+            .any(|selection| selection.contains(&NA_POSITION));
+    let na_error = || handles::error_in(call, "NAs are not allowed in subscripted assignments");
+    if has_na && dims.len() == 2 {
+        return Err(na_error());
+    }
+    if total > 0 && value_count == 0 {
+        return Err(handles::error_in(call, "replacement has length zero"));
+    }
+    if total > 0 && !total.is_multiple_of(value_count) {
+        return Err(handles::error_in(
+            call,
+            "number of items to replace is not a multiple of replacement length",
+        ));
+    }
+    if has_na {
+        return Err(na_error());
+    }
+    Ok((dims, selections))
 }
 
 /// The elements a matrix subscript selects from an array with `dims`: one row per element and one
@@ -2739,96 +2813,121 @@ fn single_index<'s>(
     call: Option<Local<'s>>,
     bounds: OutOfBounds<'s>,
 ) -> R<usize> {
+    let index = symbol_text(context, index)?;
+    let matrix = bounds.dimension.is_some();
+    match one_position(context, index, extent, names, exact, matrix)? {
+        Single::At(position) => Ok(position),
+        Single::Outside => Err(bounds_error(
+            context,
+            call,
+            "subscript out of bounds",
+            bounds,
+            index,
+        )),
+        Single::Invalid(message) => Err(call_error(call, message)),
+    }
+}
+
+/// A symbol subscript as the string that names the same element, and any other subscript
+/// unchanged.
+fn symbol_text<'s>(context: &mut Cx<'s>, index: Local<'s>) -> R<Local<'s>> {
+    let Some(symbol) = index.downcast::<Symbol>() else {
+        return Ok(index);
+    };
+    let name = context.root(symbol.read(context).name());
+    let mut text = context.alloc::<Str>(1)?;
+    text.set(context, 0, name);
+    Ok(text.finish().value())
+}
+
+/// What one `[[` subscript selects among the elements of a vector or of one dimension.
+enum Single {
+    At(usize),
+    /// It names no element or lies past the end.
+    Outside,
+    /// It cannot name a single element; the text is GNU R's message, which the caller reports
+    /// against the call its operation names.
+    Invalid(String),
+}
+
+/// GNU R's `get1index` for a subscript that is not a symbol: what `index` selects among `extent`
+/// elements with `names`. `matrix` says the subscript indexes one dimension.
+fn one_position<'s>(
+    context: &mut Cx<'s>,
+    index: Local<'s>,
+    extent: usize,
+    names: Local<'s>,
+    exact: Option<bool>,
+    matrix: bool,
+) -> R<Single> {
     let index = materialize(context, index)?;
     let count = handles::length(context, index);
-    if count != 1 && index.r_type() != SexpType::Symbol {
-        return Err(call_error(
-            call,
-            if count == 0 {
-                "attempt to select less than one element in get1index"
-            } else {
-                "attempt to select more than one element in get1index"
-            },
-        ));
+    if count != 1 {
+        let amount = if count == 0 { "less" } else { "more" };
+        return Ok(Single::Invalid(format!(
+            "attempt to select {amount} than one element in get1index"
+        )));
     }
-    let out_of_bounds = |context: &mut Cx<'s>| {
-        bounds_error(context, call, "subscript out of bounds", bounds, index)
-    };
+    let inside = |position: Option<usize>| position.map_or(Single::Outside, Single::At);
     // Before 4.6.2 a matrix subscript never counts from the end, so a negative one selects
     // nothing; 4.6.2 applies the vector rule to each extent (PR#19116).
-    let matrix = bounds.dimension.is_some() && !crate::system::r_at_least_release(4, 6, 2);
+    let counts_from_end = !matrix || crate::system::r_at_least_release(4, 6, 2);
     match index.r_type() {
         SexpType::String => {
             let wanted = context.root(standard::<Str>(index)?.get(context, 0));
             // An empty name means "no name", so it never selects an element.
-            let found = match wanted.bytes(context).is_empty() {
-                true => None,
-                false => name_position(context, names, wanted, exact)?,
-            };
-            found.ok_or_else(|| out_of_bounds(context))
+            if wanted.bytes(context).is_empty() {
+                return Ok(Single::Outside);
+            }
+            Ok(inside(name_position(context, names, wanted, exact)?))
         }
         SexpType::Integer | SexpType::Logical => {
             let value = integers(context, index)[0];
             if value == NA_INTEGER {
-                return Err(out_of_bounds(context));
+                return Ok(Single::Outside);
             }
-            if value < 0 && extent == 2 && value >= -2 && !matrix {
-                return Ok(if value == -1 { 1 } else { 0 });
+            if value < 0 && extent == 2 && value >= -2 && counts_from_end {
+                return Ok(Single::At(if value == -1 { 1 } else { 0 }));
             }
             if value <= 0 {
-                let amount = if value < 0 && extent > 1 && !matrix {
+                let amount = if value < 0 && extent > 1 && counts_from_end {
                     "more"
                 } else {
                     "less"
                 };
-                return Err(call_error(
-                    call,
-                    format!("attempt to select {amount} than one element in integerOneIndex"),
-                ));
+                return Ok(Single::Invalid(format!(
+                    "attempt to select {amount} than one element in integerOneIndex"
+                )));
             }
-            if value as usize > extent {
-                return Err(out_of_bounds(context));
-            }
-            Ok(value as usize - 1)
+            Ok(inside(
+                (value as usize <= extent).then(|| value as usize - 1),
+            ))
         }
         SexpType::Real => {
             let value = standard::<Real>(index)?.as_slice(context)[0];
             if value.is_nan() {
-                return Err(out_of_bounds(context));
+                return Ok(Single::Outside);
             }
             let value = value.trunc();
             if value < 0.0 {
-                if extent == 2 && value >= -2.0 && !matrix {
-                    return Ok(if value == -1.0 { 1 } else { 0 });
+                if extent == 2 && value >= -2.0 && counts_from_end {
+                    return Ok(Single::At(if value == -1.0 { 1 } else { 0 }));
                 }
-                return Err(call_error(
-                    call,
-                    "invalid negative subscript in get1index <real>",
+                return Ok(Single::Invalid(
+                    "invalid negative subscript in get1index <real>".into(),
                 ));
             }
             if value == 0.0 {
-                return Err(call_error(
-                    call,
-                    "attempt to select less than one element in get1index <real>",
+                return Ok(Single::Invalid(
+                    "attempt to select less than one element in get1index <real>".into(),
                 ));
             }
-            if value > extent as f64 {
-                return Err(out_of_bounds(context));
-            }
-            Ok(value as usize - 1)
+            Ok(inside((value <= extent as f64).then(|| value as usize - 1)))
         }
-        SexpType::Symbol => {
-            let symbol = standard::<Symbol>(index)?;
-            let name = context.root(symbol.read(context).name());
-            let mut text = context.alloc::<Str>(1)?;
-            text.set(context, 0, name);
-            let text = text.finish().value();
-            single_index(context, text, extent, names, exact, call, bounds)
-        }
-        kind => Err(call_error(
-            call,
-            format!("invalid subscript type '{}'", kind.name()),
-        )),
+        kind => Ok(Single::Invalid(format!(
+            "invalid subscript type '{}'",
+            kind.name()
+        ))),
     }
 }
 
@@ -3479,6 +3578,32 @@ fn assign_subset<'s>(
             "implicit list embedding of S4 objects is deprecated",
         )?;
     }
+    // GNU R's matrix and array assignments check the subscripts and the value's length before
+    // its type. For a value that is not a vector (a function, an environment, a symbol, `NULL`)
+    // GNU R reads a length anyway, and what it finds exceeds any selection, so only an empty
+    // selection takes it.
+    let lengthless = !value.r_type().is_vector() && value.r_type() != SexpType::Record;
+    if lengthless && indices.len() >= 2 && object.r_type().is_vector() {
+        let count = match value.r_type() {
+            SexpType::Language | SexpType::Pairlist => handles::length(context, value),
+            _ => usize::MAX,
+        };
+        array_selections(context, call, object, indices, count)?;
+    }
+    // GNU R coerces `NULL` to the value's type before it looks at a subscript, which fails for
+    // every type that is not a vector's, except for an environment that binds nothing, whose
+    // length of zero makes the assignment a no-op.
+    if lengthless && value.r_type() != SexpType::Nil && object.r_type() == SexpType::Nil {
+        return match value.r_type() {
+            SexpType::Environment if handles::length(context, value) == 0 => Ok(object),
+            SexpType::Pairlist => Err(not_subsettable_error(context, Some(call), object)),
+            SexpType::Language => Err(error("unimplemented type 'NULL' in 'coercePairList'\n")),
+            kind => Err(error(format!(
+                "invalid type/length ({}/0) in vector allocation",
+                kind.name()
+            ))),
+        };
+    }
     // GNU R assigns a call's elements, as it does a pairlist's, so `f[2] <- quote(g(h))` stores
     // the symbol `g`.
     let value = if matches!(value.r_type(), SexpType::Pairlist | SexpType::Language) {
@@ -3524,7 +3649,7 @@ fn assign_subset<'s>(
             return Ok(result);
         }
         let result = standard::<List>(result)?;
-        let mut rebuilt = handles::list_to_pairlist(context, result, SexpType::Language)?;
+        let mut rebuilt = handles::list_to_pairlist(context, result, SexpType::Language, true)?;
         handles::copy_most_attributes(context, object, &mut rebuilt, true)?;
         return Ok(rebuilt.finish());
     }
@@ -3553,10 +3678,12 @@ fn assign_subset<'s>(
     {
         return delete_elements(context, object, indices, call);
     }
-    let value_kind = if value.r_type() == SexpType::Nil {
-        SexpType::Logical
-    } else {
-        value.r_type()
+    // `NULL` has no type to mismatch: a raw vector takes it as it takes a raw value, so the
+    // check of its length reports it.
+    let value_kind = match (value.r_type(), object.r_type()) {
+        (SexpType::Nil, SexpType::Raw) => SexpType::Raw,
+        (SexpType::Nil, _) => SexpType::Logical,
+        (kind, _) => kind,
     };
     // An empty vector takes an empty replacement of its own type, or an empty
     // list, unchanged whatever the index selects: an empty list must not turn
@@ -3569,7 +3696,24 @@ fn assign_subset<'s>(
     {
         return Ok(object);
     }
-    let target_kind = subassign_type_fix(object.r_type(), value_kind)?;
+    let value_count = if value.r_type() == SexpType::Nil {
+        0
+    } else if value.r_type().is_vector() {
+        handles::length(context, value)
+    } else {
+        1
+    };
+    // GNU R's matrix and array assignments check the subscripts and the lengths before the
+    // types, so a mismatch of types is reported only for an assignment that is otherwise sound.
+    let target_kind = match subassign_type_fix(object.r_type(), value_kind) {
+        Ok(kind) => kind,
+        Err(mismatch) => {
+            if indices.len() >= 2 {
+                array_selections(context, call, object, indices, value_count)?;
+            }
+            return Err(mismatch);
+        }
+    };
     let mut result = if target_kind != object.r_type() {
         let converted = handles::coerce(context, object, target_kind)?;
         match handles::unreferenced(converted) {
@@ -3587,17 +3731,27 @@ fn assign_subset<'s>(
     } else {
         value
     };
-    let value_count = if value.r_type() == SexpType::Nil {
-        0
-    } else if value.r_type().is_vector() {
-        handles::length(context, value)
-    } else {
-        1
-    };
     // The subscripts are read against the object as it was: a vector that became a list has
     // lost its dimensions, as in GNU R, where the result of `m[1, 2] <- list(v)` is a plain list.
     if indices.len() >= 2 {
-        return assign_array(context, object, result, indices, value, value_count, call);
+        if !value.is(result.get())
+            && let Some(dims) =
+                handles::dims(context, object).filter(|dims| dims.len() == indices.len())
+            && let Some(fixed) = slab(context, indices, &dims, result.get(), value)
+            && write_slab(context, &mut result, value, &dims, &fixed)
+        {
+            return Ok(result.finish());
+        }
+        let (dims, selections) = array_selections(context, call, object, indices, value_count)?;
+        if selections.iter().all(|selection| !selection.is_empty()) {
+            scatter(
+                context,
+                &mut result,
+                ArrayOffsets::new(&selections, &dims),
+                value,
+            )?;
+        }
+        return Ok(result.finish());
     }
     let index = indices
         .first()
@@ -3750,100 +3904,6 @@ fn delete_elements<'s>(
         )?;
     }
     handles::copy_most_attributes(context, object, &mut result, false)?;
-    Ok(result.finish())
-}
-
-/// `x[i, j, ...] <- value` into `result`, the copy of `object` to write, against `object`'s
-/// dims, one subscript per dimension.
-fn assign_array<'s>(
-    context: &mut Cx<'s>,
-    object: Local<'s>,
-    mut result: Owned<'s>,
-    indices: &[Local<'s>],
-    value: Local<'s>,
-    value_count: usize,
-    call: Local<'s>,
-) -> R<Local<'s>> {
-    let Some(dims) = handles::dims(context, object).filter(|dims| dims.len() == indices.len())
-    else {
-        return Err(handles::error_in(
-            call,
-            if indices.len() == 2 {
-                "incorrect number of subscripts on matrix"
-            } else {
-                "incorrect number of subscripts"
-            },
-        ));
-    };
-    if !value.is(result.get())
-        && let Some(fixed) = slab(context, indices, &dims, result.get(), value)
-        && write_slab(context, &mut result, value, &dims, &fixed)
-    {
-        return Ok(result.finish());
-    }
-    let dimnames =
-        handles::get_attribute(context, object, handles::symbol(|symbols| symbols.dimnames));
-    let dimnames = context.root(dimnames);
-    let mut selections: SmallVec<[Positions; 4]> = SmallVec::new();
-    for (dimension, (&index, &extent)) in indices.iter().zip(dims.iter()).enumerate() {
-        let names = match dimnames.downcast::<List>() {
-            Some(dimnames) if dimension < dimnames.len() => {
-                let names = dimnames.get(context, dimension);
-                context.root(names)
-            }
-            _ => null(),
-        };
-        let index = dimension_index(context, index)?;
-        let (positions, _) = resolve_subscript(context, index, extent, names, false, Some(call))?;
-        if let Some((offset, &position)) = positions
-            .iter()
-            .enumerate()
-            .find(|&(_, &position)| position >= extent && position != NA_POSITION)
-        {
-            let call = handles::generated_call(context, call)?;
-            let failure = DimensionBounds {
-                object,
-                dimension,
-                index,
-                offset,
-                position,
-            };
-            return Err(dimension_out_of_bounds(context, Some(call), failure));
-        }
-        selections.push(positions);
-    }
-    let total: usize = selections.iter().map(|selection| selection.len()).product();
-    // A single value skips the NA rows, and a longer one cannot say which of its elements
-    // an NA row would have taken. GNU R's matrix assignment checks this before comparing
-    // lengths, and its array assignment after.
-    let has_na = value_count > 1
-        && selections
-            .iter()
-            .any(|selection| selection.contains(&NA_POSITION));
-    let na_error = || handles::error_in(call, "NAs are not allowed in subscripted assignments");
-    if has_na && dims.len() == 2 {
-        return Err(na_error());
-    }
-    if total > 0 && value_count == 0 {
-        return Err(handles::error_in(call, "replacement has length zero"));
-    }
-    if total > 0 && !total.is_multiple_of(value_count) {
-        return Err(handles::error_in(
-            call,
-            "number of items to replace is not a multiple of replacement length",
-        ));
-    }
-    if has_na {
-        return Err(na_error());
-    }
-    if total > 0 {
-        scatter(
-            context,
-            &mut result,
-            ArrayOffsets::new(&selections, &dims),
-            value,
-        )?;
-    }
     Ok(result.finish())
 }
 
@@ -4574,7 +4634,7 @@ fn assign_subset2<'s>(
         let list = pairlist_to_list(context, object)?;
         let result = assign_subset2(context, list, indices, value, call)?;
         let result = standard::<List>(result)?;
-        let mut result = handles::list_to_pairlist(context, result, object.r_type())?;
+        let mut result = handles::list_to_pairlist(context, result, object.r_type(), true)?;
         // The call keeps its attributes, such as a formula's class and environment, and a
         // pairlist keeps its dimensions.
         handles::copy_most_attributes(context, object, &mut result, true)?;
@@ -4604,53 +4664,49 @@ fn assign_subset2<'s>(
             "[[ ]] improper number of subscripts",
         ));
     };
-    // `m[[i, j]] <- value` names one cell, which must exist.
+    // `m[[i, j]] <- value` names one cell, which must exist. GNU R checks the value's length
+    // before it reads a subscript.
+    let is_list = matches!(object.r_type(), SexpType::List | SexpType::Expression);
+    if !is_list {
+        atomic_replacement_check(context, value)?;
+    }
     let dimnames = get_attribute(context, object, symbol(|symbols| symbols.dimnames));
     let dimnames = context.root(dimnames);
+    let mut offset = 0usize;
+    let mut stride = 1usize;
     for (dimension, (&index, &extent)) in indices.iter().zip(dims.iter()).enumerate() {
-        let names = if dimnames.r_type() == SexpType::List {
-            element(context, dimnames.value(), dimension)?
-        } else {
-            null()
-        };
-        // A subscript GNU R rejects for another reason is left to the assignment below.
-        let inside = match one_index(context, extent, names, index) {
-            Ok(Slot::At(position)) => position < extent,
-            Ok(_) => false,
-            Err(_) => true,
-        };
-        if !inside {
-            return Err(subscript2_out_of_bounds(
-                context,
-                object,
-                Some(dimension),
-                index,
-            ));
-        }
-    }
-    let kind = object.r_type();
-    let is_list = matches!(kind, SexpType::List | SexpType::Expression);
-    if is_list
-        || kind == SexpType::Nil
-        || !value.r_type().is_atomic()
-        || handles::length(context, value) != 1
-    {
-        let list = if kind == SexpType::Nil {
-            context.alloc::<List>(0)?.finish().value()
-        } else {
-            if !is_list {
-                // The assignment below reads the dims and then makes the object a list, which a
-                // coercion here would leave without dims.
-                atomic_replacement_check(context, value)?;
+        let names = match dimnames.downcast::<List>() {
+            Some(dimnames) if dimension < dimnames.len() => {
+                context.root(dimnames.get(context, dimension))
             }
-            object
+            _ => null(),
         };
-        let mut wrapped = context.alloc::<List>(1)?;
-        wrapped.set(context, 0, value);
-        let wrapped = wrapped.finish().value();
-        return assign_subset(context, list, indices, wrapped, call);
+        let index = symbol_text(context, index)?;
+        let position = match one_position(context, index, extent, names, Some(true), true)? {
+            Single::At(position) => position,
+            Single::Outside => {
+                return Err(subscript2_out_of_bounds(
+                    context,
+                    object,
+                    Some(dimension),
+                    index,
+                ));
+            }
+            Single::Invalid(message) => return Err(replacement_error(context, call, message)),
+        };
+        offset += position * stride;
+        stride *= extent;
     }
-    assign_subset(context, object, indices, value, call)
+    if is_list && value.r_type() == SexpType::Nil {
+        return Err(incompatible_types(
+            handles::type_name(object),
+            "NULL",
+            "[[ assignment",
+        ));
+    }
+    // The cell is assigned by its position in the vector, which keeps the dimensions.
+    let position = scalar::<Real>(context, offset as f64 + 1.0)?;
+    assign_one(context, object, position, value, call, 1)
 }
 
 /// `x[[i]] <- value` with one subscript, which for a list may be a path of several (recursive
@@ -4667,16 +4723,7 @@ fn assign_one<'s>(
         return assign_subset2(context, object, &[index], value, call);
     }
     // A symbol subscript names the element, so the rest of the assignment sees it as a string.
-    let index = match index.downcast::<Symbol>() {
-        Some(symbol) => {
-            let name = symbol.read(context).name();
-            let name = context.root(name);
-            let mut text = context.alloc::<Str>(1)?;
-            text.set(context, 0, name);
-            text.finish().value()
-        }
-        None => index,
-    };
+    let index = symbol_text(context, index)?;
     let kind = object.r_type();
     let is_list = matches!(kind, SexpType::Nil | SexpType::List | SexpType::Expression);
     let count = handles::length(context, index);

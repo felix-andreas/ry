@@ -1,0 +1,112 @@
+[stdout]
+|  [1] "0x1.0681462b7e516p-1"    "0x1.48fcd9b1a50c2p-17"  
+|  [3] "0x1.52d02c7e14af6p+76"   "0x1.c7e83209e90b2p+72"  
+|  [5] "0x1.999999999999ap-4"    "0x1.4f8b588e368f1p-17"  
+|  [7] "0x1.8ee90ff6c373ep+96"   "0x1.4b66dc01ec6fbp-20"  
+|  [9] "0x1.0f0cf064dd592p+73"   "0x0.0000000000001p-1022"
+| [11] "0x1p-1022"               "0x0.fffffffffffffp-1022"
+| [13] "0x1.fffffffffffffp+1023" "0x1p+0"                 
+| [15] "0x1p+0"                  "0x0.00000000007e8p-1022"
+| [17] "0x0.0000000000019p-1022"
+| [1] "0x1.0681462b7e516p-1"    "0x1.48fcd9b1a50c2p-17"  
+| [3] "0x1.52d02c7e14af6p+76"   "0x1.4b66dc01ec6fbp-20"  
+| [5] "0x1.8ee90ff6c373ep+96"   "0x0.00000000007e8p-1022"
+| [7] "0x0.0000000000019p-1022" "0x0p+0"                 
+| [1] "0x1.0681462b7e516p-1"    "0x1.48fcd9b1a50c2p-17"  
+| [3] "0x1.1666666666666p+2"    "0x1.3333333333333p-2"   
+| [5] "0x0.012688b70e62bp-1022"
+| [1] Inf
+| [1] 0
+| [1] Inf
+| [1] 0
+| [1] 4.940656e-324
+| [1] 0
+| [1] 1.797693e+308
+| [1] Inf
+| [1] Inf
+| [1] Inf
+| [1] -Inf
+| [1] 0
+| [1] 2.225074e-308
+| [1] 0
+| [1] 1.5
+| [1] 1
+| [1] 24.5
+| [1] 8
+| [1] "W: NAs introduced by coercion"
+| [1] "W: NAs introduced by coercion"
+| [1] "W: NAs introduced by coercion"
+| [1] Inf
+| [1] 8.988466e+307
+| [1] 1
+| [1] 1
+| [1] NA
+| [1] NA
+| [1] NA
+| [1] 1
+| [1] 0.5
+| [1] "W: NAs introduced by coercion"
+| [1] 1e+05
+| [1] "W: NAs introduced by coercion"
+| [1] Inf
+| [1] "W: NAs introduced by coercion"
+| [1] NaN
+| [1] 1
+| [1] "W: NAs introduced by coercion"
+| [1] "W: NAs introduced by coercion"
+| [1] "W: NAs introduced by coercion"
+| [1] "W: NAs introduced by coercion"
+| [1] "W: NAs introduced by coercion"
+| [1] "W: NAs introduced by coercion"
+| [1] "W: NAs introduced by coercion"
+| [1] "W: NAs introduced by coercion"
+| [1] "W: NAs introduced by coercion"
+| [1] "E: invalid multibyte string at '<ff>'"
+| [1] "E: invalid multibyte string at '<ff>'"
+| [1] "E: invalid multibyte string at '<ff>'"
+| [1] "E: invalid multibyte string at '<ff>'"
+| [1] "E: invalid multibyte string at '<a0>'"
+| [1] 16
+| [1] 1000
+| [1] 12
+| [1] 1
+| [1] -1
+| [1] "W: NAs introduced by coercion"
+| [1] "W: NAs introduced by coercion to integer range"
+| [1] "W: NAs introduced by coercion to integer range"
+| [1] 1+0i
+| [1] 0+2i
+| [1] 1+2i
+| [1] 1-2i
+| [1] "W: NAs introduced by coercion"
+| [1] "W: NAs introduced by coercion"
+| [1] "W: NAs introduced by coercion"
+| [1] 16+10i
+| [1] 1+1i
+| [1] Inf-Infi
+| [1] "W: accuracy loss in conversion from \"9007199254740993\" to numeric"
+| [1] "9007199254740993" "1"               
+| [1] "0x20000000000001"
+| [1]  NA 1.5
+| [1] "E: scan() expected 'a real', got '1e'"
+| [1] "E: scan() expected 'a real', got 'x'"
+| [1] "W: NAs introduced by coercion"
+| [1]  1 NA NA
+| [1] "W: NAs introduced by coercion"
+| [1] "W: NAs introduced by coercion"
+| [1] 1
+| [1] "E: invalid 'type' (character) of argument"
+| [1] 1 2 3
+| [1] 0 0
+| [1] FALSE FALSE FALSE
+| [1] "W: NAs introduced by coercion"
+| [1] "E: non-numeric matrix extent"
+| [1] "W: NAs introduced by coercion"
+| [1] "W: NAs introduced by coercion"
+| [1] "W: NAs introduced by coercion"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "W: NAs introduced by coercion"

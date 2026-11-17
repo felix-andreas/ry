@@ -4351,82 +4351,127 @@ unsafe fn catch_return(env: Sexp, result: R<Sexp>) -> R<Sexp> {
 /// Runs the `on.exit` expressions of frame `depth` (one-based), keeping the visibility of the
 /// value. An unwind from an `on.exit` expression replaces the frame's own result, and a
 /// `return()` among them its visibility too.
+///
+/// While one expression runs the frame lists those after it, so `on.exit()` called from exit
+/// code adds to them or replaces them. GNU R runs that list only when the frame is entered
+/// again: when the expression left by a jump, or after the last expression of a frame that a
+/// jump is unwinding. A frame that returns drops it.
 unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
-    let frame = &mut interp().frames[depth - 1];
-    if frame.on_exit.is_empty() {
+    if interp().frames[depth - 1].on_exit.is_empty() {
         return result;
     }
-    let expressions = std::mem::take(&mut frame.on_exit);
-    // A slot frame keeps exit code compiled for its slots, which runs there without an
-    // environment; only an expression that did not compile needs one.
-    let (function, header) = (frame.function, frame.slots);
-    // Other exit code, such as the call `withr::defer` registers through `do.call`, runs in
-    // the frame's environment, which takes only the variables that code reads.
-    let env = if frame.env != nil()
-        || expressions
-            .iter()
-            .all(|expression| expression.kind() == SexpType::Bytecode)
-    {
-        frame.env
-    } else {
-        frame_env(depth - 1, Reify::Site("on.exit"))?
-    };
     let mut visible = interp().visible;
     let mark = crate::heap().handle_mark();
-    for &expression in &expressions {
-        crate::heap().root(expression);
-    }
-    // A `return(x)` unwinding to this frame is the value the function returns.
-    let returned = match &result {
-        Ok(value) => Some(*value),
-        Err(Unwind::Jump(jump)) => match *jump {
-            Jump::Return { env: target, value } if target == env => Some(value),
-            _ => None,
-        },
-        Err(_) => None,
-    };
-    interp().returned_values.push(returned);
-    // The value is on its way to the caller and nothing counts it yet, so exit code that
-    // modifies a variable holding it would write into the value the caller receives. GNU R
-    // counts it for as long as the exit code runs.
-    if let Some(value) = returned {
-        value.increment_refcount();
-    }
+    let mut returned = None;
     let mut outcome = result;
-    for expression in expressions {
-        // A handler stack that a condition left in place must not run the exit code.
-        let saved_handlers = interp().handlers.clone();
-        let _saved = crate::conditions::set_aside(saved_handlers.clone(), None);
-        interp().handlers = interp().frames[depth - 1].handlers.clone();
-        let exit = if expression.kind() == SexpType::Bytecode {
-            bytecode::run_promise_on_slots(expression, function, depth - 1, header as usize)
+    let mut first = true;
+    loop {
+        let frame = &mut interp().frames[depth - 1];
+        let expressions = std::mem::take(&mut frame.on_exit);
+        if expressions.is_empty() {
+            break;
+        }
+        // A slot frame keeps exit code compiled for its slots, which runs there without an
+        // environment; only an expression that did not compile needs one.
+        let (function, header) = (frame.function, frame.slots);
+        // Other exit code, such as the call `withr::defer` registers through `do.call`, runs in
+        // the frame's environment, which takes only the variables that code reads.
+        let env = if frame.env != nil()
+            || expressions
+                .iter()
+                .all(|expression| expression.kind() == SexpType::Bytecode)
+        {
+            frame.env
         } else {
-            eval(expression, env)
-        };
-        interp().handlers = saved_handlers;
-        match exit {
-            // `on.exit(return(x))` makes `x` the frame's value, even over an error unwinding
-            // through it, as in GNU R.
-            Err(Unwind::Jump(jump)) if matches!(jump, Jump::Return { env: target, .. } if target == env) => {
-                if let Jump::Return { value, .. } = jump {
-                    outcome = Ok(value);
-                    visible = interp().visible;
-                    if let Some(top) = interp().returned_values.last_mut() {
-                        *top = Some(value);
-                    }
+            match frame_env(depth - 1, Reify::Site("on.exit")) {
+                Ok(env) => env,
+                Err(unwind) => {
+                    outcome = Err(unwind);
+                    break;
                 }
             }
-            Err(unwind) => {
-                outcome = Err(unwind);
-                break;
+        };
+        for &expression in &expressions {
+            crate::heap().root(expression);
+        }
+        let returns_here =
+            |jump: &Jump| matches!(*jump, Jump::Return { env: target, .. } if target == env);
+        if first {
+            first = false;
+            // A `return(x)` unwinding to this frame is the value the function returns.
+            returned = match &outcome {
+                Ok(value) => Some(*value),
+                Err(Unwind::Jump(jump)) => match *jump {
+                    Jump::Return { value, .. } if returns_here(jump) => Some(value),
+                    _ => None,
+                },
+                Err(_) => None,
+            };
+            interp().returned_values.push(returned);
+            // The value is on its way to the caller and nothing counts it yet, so exit code that
+            // modifies a variable holding it would write into the value the caller receives.
+            // GNU R counts it for as long as the exit code runs.
+            if let Some(value) = returned {
+                value.increment_refcount();
             }
-            Ok(_) => {}
+        }
+        let mut jumped = false;
+        for (position, &expression) in expressions.iter().enumerate() {
+            interp().frames[depth - 1].on_exit =
+                expressions[position + 1..].iter().copied().collect();
+            // A handler stack that a condition left in place must not run the exit code.
+            let saved_handlers = interp().handlers.clone();
+            let _saved = crate::conditions::set_aside(saved_handlers.clone(), None);
+            interp().handlers = interp().frames[depth - 1].handlers.clone();
+            let exit = if expression.kind() == SexpType::Bytecode {
+                bytecode::run_promise_on_slots(expression, function, depth - 1, header as usize)
+            } else {
+                eval(expression, env)
+            };
+            interp().handlers = saved_handlers;
+            match exit {
+                // `on.exit(return(x))` makes `x` the frame's value, even over an error
+                // unwinding through it, as in GNU R.
+                Err(Unwind::Jump(jump)) if returns_here(&jump) => {
+                    if let Jump::Return { value, .. } = jump {
+                        outcome = Ok(value);
+                        visible = interp().visible;
+                        if let Some(top) = interp().returned_values.last_mut() {
+                            *top = Some(value);
+                        }
+                    }
+                    jumped = true;
+                    break;
+                }
+                Err(unwind) => {
+                    outcome = Err(unwind);
+                    jumped = true;
+                    break;
+                }
+                Ok(_) => {}
+            }
+        }
+        let unwinding = match &outcome {
+            Ok(_) => false,
+            Err(Unwind::Jump(jump)) => !returns_here(jump),
+            Err(_) => true,
+        };
+        if !jumped && !unwinding {
+            interp().frames[depth - 1].on_exit.clear();
+            break;
+        }
+        match &outcome {
+            Ok(value) => crate::heap().root(*value),
+            Err(unwind) => unwind.root(),
         }
     }
     if let Some(value) = returned {
         value.decrement_refcount();
     }
-    interp().returned_values.pop();
+    // The first pass pushes the entry, and a pass that fails before that leaves none to pop.
+    if !first {
+        interp().returned_values.pop();
+    }
     crate::heap().release_handles(mark);
     match &outcome {
         Ok(value) => crate::heap().root(*value),
@@ -5041,26 +5086,30 @@ unsafe fn do_expression(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-/// `all.names(expr, functions, max.names, unique)`.
+/// `all.names(expr, functions, max.names, unique)`. Without `functions` the whole function
+/// position of a call is skipped, even when it is a call itself.
 unsafe fn do_all_names(call: &Call<'_>) -> R<Sexp> {
     let functions = values::as_logical_scalar(call.arg(1)) == 1;
-    let maximum = values::as_integer_scalar(call.arg(2));
-    let unique = values::as_logical_scalar(call.arg(3)) == 1;
-    let mut names: Vec<String> = Vec::new();
-    unsafe fn walk(expression: Sexp, functions: bool, names: &mut Vec<String>) {
+    let maximum = match values::as_integer_scalar_warning(call.arg(2))? {
+        -1 => usize::MAX,
+        maximum => usize::try_from(maximum).unwrap_or(0),
+    };
+    let unique = values::as_logical_scalar(call.arg(3)) != 0;
+    unsafe fn walk(expression: Sexp, functions: bool, names: &mut Vec<Sexp>) {
         match expression.kind() {
             SexpType::Symbol => {
-                let name = symbol_name(expression).into_owned();
-                if !name.is_empty() {
+                let name = expression.car();
+                if name.length() != 0 {
                     names.push(name);
                 }
             }
             SexpType::Language => {
-                if functions || expression.car().kind() == SexpType::Language {
-                    walk(expression.car(), functions, names);
-                }
-                let mut cell = expression.cdr();
-                while cell.kind() == SexpType::Pairlist {
+                let mut cell = if functions {
+                    expression
+                } else {
+                    expression.cdr()
+                };
+                while cell != nil() {
                     walk(cell.car(), functions, names);
                     cell = cell.cdr();
                 }
@@ -5073,15 +5122,18 @@ unsafe fn do_all_names(call: &Call<'_>) -> R<Sexp> {
             _ => {}
         }
     }
+    // The names are symbols' print names, which their symbols keep alive.
+    let mut names: Vec<Sexp> = Vec::new();
     walk(call.arg(0), functions, &mut names);
     if unique {
         let mut seen = std::collections::HashSet::new();
-        names.retain(|name| seen.insert(name.clone()));
+        names.retain(|&name| seen.insert(name));
     }
-    if maximum >= 0 && names.len() > maximum as usize {
-        names.truncate(maximum as usize);
-    }
-    values::string_vector(&names)
+    names.truncate(maximum);
+    let result = crate::heap().alloc_vector(SexpType::String, names.len() as isize)?;
+    result.slice_mut::<Sexp>().copy_from_slice(&names);
+    crate::heap().count_written_elements(result);
+    Ok(result)
 }
 
 unsafe fn do_builtins(call: &Call<'_>) -> R<Sexp> {
@@ -5202,27 +5254,12 @@ unsafe fn general_condition(value: Sexp, call: Sexp) -> R<bool> {
         heap::object::NA_LOGICAL => {
             let message = if value.kind() == SexpType::Logical {
                 "missing value where TRUE/FALSE needed"
-            } else if value.kind() == SexpType::String {
-                "argument is not interpretable as logical"
             } else {
-                "missing value where TRUE/FALSE needed"
+                "argument is not interpretable as logical"
             };
             Err(error_in(call, message))
         }
-        condition => {
-            if !matches!(
-                value.kind(),
-                SexpType::Logical
-                    | SexpType::Integer
-                    | SexpType::Real
-                    | SexpType::String
-                    | SexpType::Complex
-                    | SexpType::Raw
-            ) {
-                return Err(error_in(call, "argument is of length zero".to_string()));
-            }
-            Ok(condition != 0)
-        }
+        condition => Ok(condition != 0),
     }
 }
 

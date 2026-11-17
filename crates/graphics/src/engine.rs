@@ -3158,7 +3158,7 @@ pub unsafe fn record_graphics(call: &Call<'_>) -> R<Sexp> {
     if parent.kind() != SexpType::Environment {
         return Err(error("'env' argument must be an environment"));
     }
-    let frame = values::list_to_pairlist(list, SexpType::Pairlist)?;
+    let frame = values::list_to_pairlist(list, SexpType::Pairlist, true)?;
     interp::heap().root(frame);
     let env = values::new_env(parent)?;
     interp::heap().root(env);
