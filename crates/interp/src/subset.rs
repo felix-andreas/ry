@@ -193,8 +193,7 @@ pub unsafe fn vector_element(vector: Sexp, index: usize) -> R<Sexp> {
 /// A length-one vector of `value`.
 #[inline(always)]
 fn scalar<'s, T: Atomic>(context: &mut Cx<'s>, value: T::Element) -> R<Local<'s>> {
-    let result = context.alloc_unfilled::<T>(1)?;
-    Ok(result.fill(std::iter::once(value)).finish().value())
+    Ok(context.scalar::<T>(value)?.finish().value())
 }
 
 /// Element `index` of a vector of `T`, expanded first when it is ALTREP, as a length-one
@@ -3027,17 +3026,20 @@ unsafe fn do_dollar(call: &Call<'_>) -> R<Sexp> {
     })
 }
 
-/// [`dollar_dispatch`] for raw callers. `name` is a `CHARSXP`.
+/// [`dollar_dispatch`] for tier 0's field instruction, in the instruction's handle scope. `name`
+/// is a `CHARSXP`.
 ///
 /// # Safety
 ///
-/// As for [`subset`], with `env` an environment.
+/// The caller is on the interpreter's thread and holds no reference into the heap. Its frame
+/// holds every argument until the instruction ends, and it releases what this roots. `env` is
+/// an environment.
 pub unsafe fn dollar_value(object: Sexp, name: Sexp, call: Sexp, env: Sexp) -> R<Sexp> {
-    handles::with_result(|context| {
-        let object = handles::adopt(context, object);
-        let name = standard::<Chars>(handles::adopt(context, name))?;
-        let call = handles::adopt(context, call);
-        let environment = standard::<Environment>(handles::adopt(context, env))?;
+    handles::in_caller_scope(|context| {
+        let object = handles::held(context, object);
+        let name = standard::<Chars>(handles::held(context, name))?;
+        let call = handles::held(context, call);
+        let environment = standard::<Environment>(handles::held(context, env))?;
         dollar_dispatch(context, object, name, call, environment).map(Local::raw)
     })
 }
@@ -3056,7 +3058,7 @@ fn dollar_dispatch<'s>(
         let arguments = [object, text.finish().value()];
         let generic = symbol(|symbols| symbols.dollar);
         if let Some(value) =
-            handles::dispatch_builtin(context, generic, call, &arguments, environment)?
+            handles::dispatch_builtin(context, generic, call, arguments, environment)?
         {
             return Ok(value);
         }
@@ -3064,17 +3066,17 @@ fn dollar_dispatch<'s>(
     dollar_field(context, object, name, Some(call))
 }
 
-/// `object$name` without dispatch, for raw callers, which pass the unbound marker for the
-/// running call. `name` is a `CHARSXP`.
+/// `object$name` without dispatch, for tier 0's field instruction, which passes the unbound
+/// marker for the running call. `name` is a `CHARSXP`.
 ///
 /// # Safety
 ///
-/// As for [`subset`].
+/// As for [`dollar_value`].
 pub unsafe fn dollar(object: Sexp, name: Sexp, call: Sexp) -> R<Sexp> {
-    handles::with_result(|context| {
-        let object = handles::adopt(context, object);
-        let name = standard::<Chars>(handles::adopt(context, name))?;
-        let call = (call != unbound()).then(|| handles::adopt(context, call));
+    handles::in_caller_scope(|context| {
+        let object = handles::held(context, object);
+        let name = standard::<Chars>(handles::held(context, name))?;
+        let call = (call != unbound()).then(|| handles::held(context, call));
         dollar_field(context, object, name, call).map(Local::raw)
     })
 }
@@ -3189,7 +3191,7 @@ unsafe fn do_at(call: &Call<'_>) -> R<Sexp> {
             let arguments = [object, text.finish().value()];
             let generic = symbol(|symbols| symbols.at);
             if let Some(value) =
-                handles::dispatch_builtin(context, generic, call_value, &arguments, environment)?
+                handles::dispatch_builtin(context, generic, call_value, arguments, environment)?
             {
                 return Ok(value.raw());
             }
@@ -4680,9 +4682,7 @@ fn do_length<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>>
     arguments.check_arity(1)?;
     let count = handles::length(context, arguments.value(0));
     if count > i32::MAX as usize {
-        let mut result = context.alloc::<Real>(1)?;
-        result.as_mut_slice().fill(count as f64);
-        return Ok(result.finish().value());
+        return Ok(context.scalar::<Real>(count as f64)?.finish().value());
     }
     handles::integer(context, count as i32)
 }

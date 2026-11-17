@@ -299,6 +299,36 @@ impl<'s> Cx<'s> {
         })
     }
 
+    /// A new vector of the one element `value`.
+    #[inline]
+    pub fn scalar<T: Atomic>(&mut self, value: T::Element) -> HeapResult<Fresh<'s, T>> {
+        // The heap's scalar slot covers the five R number types; an `I64` takes the general path.
+        if T::TYPE == SexpType::I64 {
+            return Ok(self.alloc_unfilled::<T>(1)?.fill(std::iter::once(value)));
+        }
+        const { assert!(size_of::<T::Element>() <= 16) };
+        let mut payload = [0u64; 2];
+        // SAFETY: an atomic element is plain data of at most the payload's 16 bytes, and the
+        // two do not overlap.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                (&raw const value).cast::<u8>(),
+                payload.as_mut_ptr().cast::<u8>(),
+                size_of::<T::Element>(),
+            );
+        }
+        // SAFETY: the heap is live, and `&mut self` means no slice or unrooted value is alive.
+        let heap = unsafe { &mut *self.heap.as_ptr() };
+        // SAFETY: `T::TYPE` is one of the number types the scalar slot holds.
+        let raw = unsafe { heap.alloc_scalar(T::TYPE, payload)? };
+        heap.root(raw);
+        Ok(Fresh {
+            raw,
+            scope: PhantomData,
+            kind: PhantomData,
+        })
+    }
+
     /// Runs `body` in a nested handle scope: whatever it roots is released on return, and its
     /// result is rooted again in this scope.
     #[inline]

@@ -228,9 +228,7 @@ pub fn logical_constant<'s>(_context: &Cx<'s>, value: i32) -> R<Local<'s>> {
 /// A new integer vector of one element.
 #[inline]
 pub fn integer<'s>(context: &mut Cx<'s>, value: i32) -> R<Local<'s>> {
-    let mut result = context.alloc::<Integer>(1)?;
-    result.as_mut_slice().fill(value);
-    Ok(result.finish().value())
+    Ok(context.scalar::<Integer>(value)?.finish().value())
 }
 
 /// Raises a warning against the running call.
@@ -789,16 +787,8 @@ pub fn append<'s, T: Vector>(
     };
     // `append_named` reads the element from a value of the vector's type.
     let scalar = match element {
-        Scalar::Real(value) => {
-            let mut scalar = context.alloc::<Real>(1)?;
-            scalar.as_mut_slice()[0] = value;
-            scalar.finish().value()
-        }
-        Scalar::Integer(value) => {
-            let mut scalar = context.alloc::<Integer>(1)?;
-            scalar.as_mut_slice()[0] = value;
-            scalar.finish().value()
-        }
+        Scalar::Real(value) => context.scalar::<Real>(value)?.finish().value(),
+        Scalar::Integer(value) => context.scalar::<Integer>(value)?.finish().value(),
         Scalar::Text(text) => text.value(),
         Scalar::Item(item) => item,
     };
@@ -1835,20 +1825,18 @@ pub fn force<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s>> {
 
 /// The S3 method of the internal generic `generic` for `arguments` applied, or `None` when
 /// the first argument's class has none.
-pub fn dispatch_builtin<'s>(
+#[inline]
+pub fn dispatch_builtin<'s, const COUNT: usize>(
     context: &mut Cx<'s>,
     generic: Gc<'_, Symbol>,
     call: Local<'s>,
-    arguments: &[Local<'s>],
+    arguments: [Local<'s>; COUNT],
     environment: Local<'s, Environment>,
 ) -> R<Option<Local<'s>>> {
-    let arguments: SmallVec<[crate::builtins::Arg; 4]> = arguments
-        .iter()
-        .map(|argument| crate::builtins::Arg {
-            tag: values::nil(),
-            value: argument.raw(),
-        })
-        .collect();
+    let arguments = arguments.map(|argument| crate::builtins::Arg {
+        tag: values::nil(),
+        value: argument.raw(),
+    });
     // SAFETY: the generic, the call, the arguments and the environment are rooted, and the
     // method runs R code, which `&mut Cx` permits.
     unsafe {
