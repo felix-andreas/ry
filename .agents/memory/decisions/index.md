@@ -381,6 +381,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The verifier checks every root and every traced reference
 - Interpreter code holds values through handles the borrow checker checks
 - Whether a vector may be written in place is a value, `Owned`
+- A builtin's fast-path entry runs in its caller's handle scope and answers unrooted
 
 ## C API, R home and packages
 
