@@ -1,0 +1,40 @@
+[stdout]
+| [1] "X"     "größe" "ä"     "key"   "n"    
+| $größe
+| [1] "unknown"
+| 
+| $ä
+| [1] "unknown"
+| 
+| $key
+| [1] "unknown"
+| 
+| [1] ""      "größe" "ä"     "key"   "n"    
+| [1] "unknown" "unknown" "unknown" "unknown" "unknown"
+| [1] "unknown" "UTF-8"   "UTF-8"   "unknown" "unknown"
+| $größe
+| [1] "unknown"
+| 
+| $ä
+| [1] "unknown"
+| 
+| $key
+| [1] "UTF-8"
+| 
+| [1] "unknown"
+| [1] "unknown"
+|  [1] "unknown" "unknown" "unknown" "unknown" "unknown" "unknown" "unknown"
+|  [8] "unknown" "unknown" "unknown"
+|  [1] "unknown" "latin1"  "latin1"  "unknown" "unknown" "unknown" "unknown"
+|  [8] "unknown" "latin1"  "unknown"
+|  [1] "unknown" "UTF-8"   "UTF-8"   "unknown" "unknown" "unknown" "unknown"
+|  [8] "unknown" "UTF-8"   "unknown"
+| [1] "unknown"
+| [1] "UTF-8"
+| [1] "unknown"
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 0L

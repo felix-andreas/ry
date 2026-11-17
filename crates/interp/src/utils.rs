@@ -1145,19 +1145,33 @@ unsafe fn column_vector(column: &Column, mark: Option<Encoding>) -> R<Sexp> {
             }
             Kind::Character => {
                 let charsxp = match value {
-                    // `encoding` declares what the file's bytes are; ASCII text carries no mark.
-                    Value::Text(text) => match mark {
-                        Some(mark) if !text.is_ascii() => {
-                            let bytes = values::unescape_invalid_bytes(text);
-                            values::mkchar_bytes(bytes.as_deref().unwrap_or(text.as_bytes()), mark)?
-                        }
-                        _ => values::mkchar(text)?,
-                    },
+                    Value::Text(text) => read_string(text, mark)?,
                     _ => na_string(),
                 };
                 values::set_elt(vector, index, charsxp);
             }
         }
+    }
+    Ok(vector)
+}
+
+/// A string read from input, holding the input's bytes. Text read without a declared
+/// `encoding` is native (`"unknown"`) even when it is valid UTF-8, as GNU R's `mkChar` makes it,
+/// and ASCII text carries no mark.
+unsafe fn read_string(text: &str, mark: Option<Encoding>) -> R<Sexp> {
+    let encoding = match mark {
+        Some(mark) if !text.is_ascii() => mark,
+        _ => Encoding::Native,
+    };
+    let bytes = values::unescape_invalid_bytes(text);
+    values::mkchar_bytes(bytes.as_deref().unwrap_or(text.as_bytes()), encoding)
+}
+
+/// [`read_string`] for each line, unmarked.
+unsafe fn read_strings(lines: &[String]) -> R<Sexp> {
+    let vector = alloc(SexpType::String, lines.len())?;
+    for (index, line) in lines.iter().enumerate() {
+        values::set_elt(vector, index, read_string(line, None)?);
     }
     Ok(vector)
 }
@@ -1225,7 +1239,7 @@ unsafe fn do_read_table_head(call: &NativeCall<'_>) -> R<Sexp> {
             "incomplete final line found by readTableHeader on '{description}'"
         ))?;
     }
-    string_vector(&lines)
+    read_strings(&lines)
 }
 
 /// One logical line: the bytes up to a line end outside quotes, whether a line end ended it,
