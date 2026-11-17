@@ -1,0 +1,47 @@
+[stdout]
+| [1] "symbol"
+| NULL
+| [1] FALSE
+| [1] "environment"
+| NULL
+| [1] FALSE
+| [1] "externalptr"
+| NULL
+| [1] FALSE
+| [1] "double"
+| $class
+| [1] "numeric"
+| attr(,"package")
+| [1] "methods"
+| 
+| [1] TRUE
+| [1] "symbol"
+| NULL
+| [1] FALSE
+| [1] "NULL"
+| NULL
+| [1] FALSE
+| [1] "character"
+| $package
+| [1] ".GlobalEnv"
+| 
+| [1] FALSE
+| [1] "S4"
+| $.xData
+| `<UNDEFINED>`
+| 
+| $class
+| [1] "N"
+| attr(,"package")
+| [1] ".GlobalEnv"
+| 
+| [1] TRUE
+| [1] "NULL"
+| NULL
+| [1] FALSE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| FALSE

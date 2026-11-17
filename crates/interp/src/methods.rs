@@ -599,8 +599,9 @@ pub unsafe fn exec_method(method: Sexp, generic_env: Sexp) -> R<Sexp> {
 }
 
 /// `R_do_new_object`: a new object of the class `class_def` defines, a deep copy of its
-/// prototype, marked as S4 when the prototype is a plain S4 object or the class comes from a
-/// package. Native code may write into a slot of the object it gets without checking whether
+/// prototype, given the class and marked as S4 when the prototype is a plain S4 object or the
+/// class comes from a package, unless the prototype is a symbol, an environment or an external
+/// pointer. Native code may write into a slot of the object it gets without checking whether
 /// the slot's value is shared, so it gets a deep copy, as GNU R makes.
 pub unsafe fn new_object(class_def: Sexp) -> R<Sexp> {
     new_object_copying(class_def, true)
@@ -632,8 +633,14 @@ pub unsafe fn new_object_copying(class_def: Sexp, deep: bool) -> R<Sexp> {
     } else {
         values::shallow_duplicate(prototype)?
     };
+    // A symbol, environment or external pointer is one shared object, which an attribute would
+    // change for every holder, so it takes no class.
+    let shared_data = matches!(
+        value.kind(),
+        SexpType::Symbol | SexpType::Environment | SexpType::ExternalPtr
+    );
     let package = values::get_attr(class_name, symbols().package);
-    if value.kind() == SexpType::Object || package != nil() {
+    if (value.kind() == SexpType::Object || package != nil()) && !shared_data {
         values::set_attr(value, symbols().class, class_name)?;
         value.set_gp_bits(gp::S4_OBJECT, true);
     }
