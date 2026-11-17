@@ -1468,7 +1468,11 @@ pub mod profile {
     /// opened, which the optimizing tier reads to estimate how often the body
     /// runs.
     pub const WINDOW: usize = 5;
-    pub const LENGTH: usize = 6;
+    /// The backward jumps the body took before [`BACK_EDGES`] last restarted, so the two add up
+    /// to every backward jump it has taken under the optimizing tier. The tier compares that
+    /// total with what compiling the body costs.
+    pub const EDGES_BEFORE: usize = 6;
+    pub const LENGTH: usize = 7;
     /// The counters a code image keeps. The next event is derived from them when it is read.
     pub const SERIALIZED: usize = 4;
 }
@@ -7299,7 +7303,8 @@ impl Stepper {
     /// The view of `machine`'s activation, which every use of one stepper names.
     #[inline(always)]
     unsafe fn state(&mut self, machine: &mut Machine<'_>) -> &mut Activation<'static, 'static> {
-        let machine = std::mem::transmute::<&mut Machine<'_>, &'static mut Machine<'static>>(machine);
+        let machine =
+            std::mem::transmute::<&mut Machine<'_>, &'static mut Machine<'static>>(machine);
         if self.built {
             let state = self.state.assume_init_mut();
             state.machine = machine;
@@ -7423,8 +7428,7 @@ pub unsafe fn quiet_step(
 unsafe fn runs_no_r_code(state: &Activation<'_, '_>, op: Op, pc: usize) -> bool {
     // A call that runs without a frame signals nothing, so no handler runs before the exit
     // that builds its frame.
-    if (*state.interp).handlers.is_some() && (*state.interp).signalling == Signalling::Immediate
-    {
+    if (*state.interp).handlers.is_some() && (*state.interp).signalling == Signalling::Immediate {
         return false;
     }
     let code = state.code;
@@ -9138,8 +9142,10 @@ unsafe fn jump_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
             return None;
         }
         if let Some(tier) = &(*state.interp).bytecode.tier {
-            let back_edges =
-                pool_constant(state, PROFILE).data().cast::<i32>().add(profile::BACK_EDGES);
+            let back_edges = pool_constant(state, PROFILE)
+                .data()
+                .cast::<i32>()
+                .add(profile::BACK_EDGES);
             let count = (*back_edges).saturating_add(1);
             if count >= tier.back_edge_threshold || count == tier.back_edge_threshold / 2 {
                 return None;
@@ -13393,6 +13399,8 @@ unsafe fn back_edge(state: &mut Activation<'_, '_>, tier: &Tier, pc: usize) -> B
     if profile[profile::BACK_EDGES] < tier.back_edge_threshold {
         return BackEdge::Continue(pc);
     }
+    profile[profile::EDGES_BEFORE] =
+        profile[profile::EDGES_BEFORE].saturating_add(profile[profile::BACK_EDGES]);
     profile[profile::BACK_EDGES] = 0;
     let exit = (tier.back_edge)(machine, pc);
     // The tier may have compiled the body or moved its entry count.

@@ -496,7 +496,7 @@ Why one body compiled up to four times, each fixed at its source:
 
 ## A body compiles only when its native work covers what compiled code costs
 
-**Status:** built; the constants, the calls made direct and the entry are superseded by "The cost model counts frames, and free steps count nothing".
+**Status:** built; the constants, the calls made direct and the entry are superseded by "The cost model counts frames, and free steps count nothing", and a loop is also asked "A loop compiles when its backward jumps repay the body".
 
 - **Why.** Entering compiled code from the dispatch loop (`count_entry`, `entry_event`, `jit::enter`, `compiled_for`, `jit::run`, register growth, result boxing) costs about 570 instructions more than starting the body in tier 0, and each `jit_step` about 300 more than tier 0 running the instruction. A one-line hot closure therefore ran slower compiled (`x^2`: -325 instructions per call; seven operations over two locals: +575), and several application programs were slower with the JIT on. After the model no application program runs more than 0.55% more instructions with the JIT on.
 - **Model.** `analysis.rs`, `Work` counts native instructions, calls removed or made direct, and steps. `jit.rs`, `saving` values them at `SAVING_PER_NATIVE` (130), `SAVING_PER_CALL` (1000) and minus `STEP_COST` (300); `saving_per_call` subtracts `ENTRY_COST` (570), so a step-free body breaks even at five native instructions or one call. `repays` multiplies by expected calls. `Plan::work` (`BodyWork`) counts the whole body, the part outside loops, and the loops, where depth `d` weighs `LOOP_WEIGHT` (8) to the `d - 1`, so one stepped instruction in an outer loop does not refuse a native inner loop.
@@ -638,6 +638,19 @@ Why one body compiled up to four times, each fixed at its source:
 - **`unpaid` gives both refusals.** A saving per call of zero or less over the whole horizon is `SMALL` and final; a positive saving that the expected calls do not cover is `RARE` and asked again. A `RARE` verdict for a body that could never pay made it record and ask all session.
 - **A body with an inlined frame is planned before the model is asked**, because only the plan knows what the callees save; the pre-plan filter (`Shape::work`) applies to bodies whose shape has no closure call. Refusing single-frame wrappers before planning lost the bodies whose frames nest.
 - **Forced mode is not at tier 0's cost per body**: a body of steps runs more instructions compiled than in tier 0, which stretches fix (stage 3 of the design note).
+
+## A loop compiles when its backward jumps repay the body
+
+**Status:** built.
+
+- **Previous shape and what was weak.** A body's loop compiled at the back-edge threshold whenever the weighted loop work saved anything (`saving(work.looped) > 0`), after a wait by size (`SIZE_WAIT_WORDS`). With free steps counting nothing and only taken paths counted, large base R bodies with a loop of steps passed that test for one native instruction per pass (`rbind.data.frame`, `apply`), and the compile of such a body is a visible pause in whichever call crosses the counter. Entries had a repay test (`unpaid`) and loops had none.
+- **Target shape** (`jit.rs`, `unpaid_loop`). At a loop's request on a body that never compiled, the saving of one pass through that loop, times the backward jumps expected, must cover `COMPILE_FIXED + COMPILE_PER_WORD * words`. Expected is the larger of `HORIZON_EDGES` and the backward jumps taken. A refusal (`UNPAID_LOOP`) is not final: the back-edge counter restarts so the loop asks again once the taken jumps would cover the compile, or have doubled when the pass saves nothing (another loop of the body may be the one that pays).
+- **One pass, without nested loops** (`BodyWork.hot`, `Plan::work`). The body has one back-edge counter for all its loops, so an inner loop's jumps are already in the count; weighting the hot loop's work by nesting (`LOOP_WEIGHT`) counted the inner loop twice and admitted `rbind.data.frame`.
+- **Taken jumps are `EDGES_BEFORE + BACK_EDGES`** (`bytecode.rs`, `profile`). `BACK_EDGES` is the counter tier 0's fast `Jump` handler compares with the threshold and the tier restarts it to set a wait, so it cannot also be the total. `runtime::restart_back_edges` is the one writer on the tier's side and keeps the sum; the interpreter's cold `back_edge` folds the count before it asks. The fast handler is unchanged.
+- **Why a fixed horizon and not the jumps taken alone.** Compiling only when the taken jumps already cover the compile (ski rental) bounds the loss at twice the optimum, but delays every small numeric loop from the threshold to about twice it, which the kernels pay. A multiple of the taken jumps admitted the large bodies at their first request. With the horizon, a body of a few hundred words compiles at the threshold for one native instruction per pass, and a body that fails it waits until tier 0 has run the passes the compile costs, so the compile costs at most what tier 0 has lost by then.
+- **A looping body entered at the top is asked `unpaid`** with the work outside its loops plus the loops' weighted work. `SMALL` on such a body stops its entries from asking and leaves its loops free to compile (`LOOPS_ONLY`), as `MOSTLY_TIER0` does; a final refusal would have closed the loops too.
+- **Expected impact.** Correctness: none, the rule only moves when a body compiles. Performance: no compile of a large stepping body inside a short run; numeric loops compile where they did. Incremental analysis: untouched.
+- Pinned by `a_loop_compiles_once_its_backward_jumps_repay_the_body` (`test_tiers.rs`).
 
 
 ## A back edge is counted in tier 0's fast jump handler

@@ -233,6 +233,27 @@ passes that test and is called too rarely waits and is asked again, and each ref
 wait. A body with an inlined frame is planned before the model is asked, because only the plan
 knows what its callees save.
 
+A body with loops is asked the same question in backward jumps instead of calls. When one of its
+loops asks, the model counts the work of one pass through that loop, leaving out the loops nested
+in it, because the body counts the backward jumps of all its loops together (`Plan::work`,
+`BodyWork.hot`). The body compiles when that saving, times the backward jumps it expects, covers
+the compile (`jit.rs`, `unpaid_loop`). It expects `HORIZON_EDGES` backward jumps, or as many as
+the body has taken once that is more:
+
+| The loop's pass saves | The body compiles |
+|---|---|
+| Enough that `HORIZON_EDGES` passes cover the compile | At the back-edge threshold |
+| Less | Once it has taken as many backward jumps as the compile costs in passes |
+| Nothing | Never from this loop, and it asks again when the taken backward jumps have doubled |
+
+The first row holds every numeric loop in a body of a few hundred instructions: one native
+instruction per pass is enough there. The second row is the large body with a loop that mostly
+steps, such as base R's `rbind.data.frame` or `apply`: compiling it costs as much as millions of
+its passes save, and most sessions never run that many. Waiting until tier 0 has run them bounds
+the loss, because the compile then costs at most what tier 0 has spent on the saving it would have
+made. A body with loops that is entered at the top is asked `unpaid` with the work of the whole
+body, so a call cannot compile what its loops would not.
+
 ### Native forms on boxed values (stage 2, planned)
 
 The planner's types describe numbers and numeric vectors, and every other value is `Boxed`. Generic

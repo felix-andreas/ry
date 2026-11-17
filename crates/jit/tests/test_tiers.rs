@@ -1520,11 +1520,13 @@ fn inlined_frames_run_under_calling_handlers() {
 fn a_body_that_leaves_on_every_call_is_retired() {
     with_interpreter(|| unsafe {
         jit::install_mode(Mode::Force);
-        run("kind <- function(x) { if (x < 0) return('negative'); 'other' }
+        run(
+            "kind <- function(x) { if (x < 0) return('negative'); 'other' }
              test <- function(x) { if (x < 0) return(TRUE); FALSE }
              classify <- function(x) { label <- kind(x); if (test(x)) label else 'none' }
              raise <- function(x) { if (x < 0) stop('negative'); x }
-             failing <- function(x) { value <- raise(x); value + 1 }");
+             failing <- function(x) { value <- raise(x); value + 1 }",
+        );
         for callee in ["kind", "test", "raise"] {
             run(&format!("for (i in 1:5) {callee}(1)"));
         }
@@ -1539,7 +1541,10 @@ fn a_body_that_leaves_on_every_call_is_retired() {
                 assert_eq!(run(&format!("{caller}(-1)")), expected);
             }
             let left = jit::deoptimizations() - before;
-            assert!(left <= most, "{caller} left compiled code {left} times in 500 calls");
+            assert!(
+                left <= most,
+                "{caller} left compiled code {left} times in 500 calls"
+            );
             assert_eq!(has_compiled_code(caller), !retired, "{caller}");
         }
         jit::install_mode(Mode::Off);
@@ -2003,6 +2008,61 @@ fn a_hot_body_that_runs_rarely_waits_to_compile() {
             has_compiled_code("rare"),
             "rare did not compile: {:?}",
             profile_of()
+        );
+        jit::install_mode(Mode::Off);
+    });
+}
+
+/// A loop compiles when the backward jumps its body is expected to take repay the compile.
+/// `short` and `long` run the same loop, which saves one native instruction per pass. `short`
+/// compiles at the back-edge threshold. `long` holds enough other code that compiling it costs
+/// more than the loop saves within the horizon, so it is refused, not for good, and compiles
+/// once it has taken the backward jumps that would have repaid the compile.
+#[test]
+fn a_loop_compiles_once_its_backward_jumps_repay_the_body() {
+    with_interpreter(|| unsafe {
+        use interp::bytecode::{PROFILE, profile};
+        jit::install_mode(Mode::On);
+        let threshold = interp::bytecode::tier().map_or(0, |tier| tier.back_edge_threshold);
+        let profile_of = |name: &str| {
+            let function = values::install(name)
+                .and_then(|symbol| eval::eval(symbol, values::global_env()))
+                .unwrap_or_else(|_| panic!("{name} is not defined"));
+            values::ints(function.cdr().cdr().element(PROFILE)).to_vec()
+        };
+        let padding: String = (0..60)
+            .map(|index| format!("p{index} <- c(n, {index}); "))
+            .collect();
+        run("short <- function(n) { last <- 0; for (j in 1:n) last <- c(j, j); last }");
+        run(&format!(
+            "long <- function(n) {{ if (n < 0) {{ {padding} }}; last <- 0; \
+             for (j in 1:n) last <- c(j, j); last }}"
+        ));
+        run("short(2); short(2); long(2); long(2)");
+        run(&format!("short({})", 2 * threshold));
+        assert!(
+            has_compiled_code("short"),
+            "short did not compile: {:?}",
+            profile_of("short")
+        );
+        // Past the wait a long body starts with, so the loop has asked once.
+        run(&format!("long({})", 20 * threshold));
+        let counters = profile_of("long");
+        assert!(!has_compiled_code("long"), "long compiled: {counters:?}");
+        assert!(
+            counters[profile::TIER_STATE] >= 0 && counters[profile::BACK_EDGES] < 0,
+            "long is not waiting: {counters:?}"
+        );
+        let wait = threshold - counters[profile::BACK_EDGES];
+        assert!(
+            wait < 400 * threshold,
+            "long waits for more backward jumps than the test runs: {counters:?}"
+        );
+        run(&format!("long({})", wait + threshold));
+        assert!(
+            has_compiled_code("long"),
+            "long did not compile: {:?}",
+            profile_of("long")
         );
         jit::install_mode(Mode::Off);
     });

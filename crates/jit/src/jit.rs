@@ -118,6 +118,12 @@ const STEP_COST: u64 = 180;
 /// slowest-rate callbacks, `x^2` and `Reduce`'s (one call in 9, need at most 390,000). Against
 /// `1 << 18`, which lost those two callbacks, it saved functional 10.8M instructions.
 const HORIZON_CALLS: u64 = 1 << 19;
+/// A body with a hot loop is expected to take this many more backward jumps, the horizon of
+/// [`HORIZON_CALLS`] for loops, or as many as it has taken if that is more ([`unpaid_loop`]).
+/// A body of a few hundred words then compiles at the back-edge threshold when a pass through
+/// its loop saves one native instruction, and a body of several thousand words whose loops
+/// save about that per pass, such as base R's `rbind.data.frame`, waits for a few million.
+const HORIZON_EDGES: u64 = 1 << 19;
 /// Backward jumps a body takes before a loop compiles, in the default mode, for the same reason.
 const BACK_EDGE_THRESHOLD: i32 = 10_000;
 /// Tier 1 compiles a body in time that grows with its length, about 10 us per instruction word,
@@ -224,11 +230,11 @@ unsafe fn compile_at_entry<'a>(machine: &mut Machine<'_>) -> Option<&'a Compiled
         let entries = counters[profile::ENTRIES];
         let threshold = bytecode::tier().map_or(i32::MAX, |tier| tier.entry_threshold);
         if entries >= threshold {
-            compiled_for(machine, true, false)
+            compiled_for(machine, true, None)
         } else if entries == 1 && counters[profile::TIER_STATE] == 0 && fully_typed(machine) {
             first_call(machine)
         } else {
-            compiled_for(machine, false, false)
+            compiled_for(machine, false, None)
         }
     }
 }
@@ -338,6 +344,47 @@ unsafe fn unpaid(machine: &Machine<'_>, work: Work) -> Option<&'static str> {
     }
 }
 
+/// Why a body does not compile for the hot loop whose one pass does `hot`, or `None` when the
+/// loop is expected to repay the compilation: the backward jumps the body is expected to take
+/// ([`HORIZON_EDGES`]) must save more than the compile costs. Past the horizon the test is
+/// whether the jumps already taken would have repaid it, so the compile never costs more than
+/// tier 0 has lost by then. A refusal is [`analysis::UNPAID_LOOP`] and sets the wait: the loop
+/// asks again when its body has taken the backward jumps the test needs, and at least as many
+/// again as it has taken, so the attempts on a body whose plan keeps changing stay few. A body
+/// that compiled before passed the test once already.
+unsafe fn unpaid_loop(machine: &Machine<'_>, hot: Work) -> Option<&'static str> {
+    unsafe {
+        let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
+        if runtime::compiles(profile[profile::TIER_STATE]) > 0 {
+            return None;
+        }
+        let words = values::ints(machine.code.car()).len() as u64;
+        let cost = COMPILE_FIXED + COMPILE_PER_WORD * words;
+        let seen = runtime::back_edges_seen(profile);
+        let per_pass = saving(hot);
+        let expected = seen.max(HORIZON_EDGES);
+        if logging() {
+            eprintln!(
+                "jit: {} expects {expected} backward jumps ({seen} taken) saving {per_pass} each against a compile of {cost}",
+                describe(machine.code)
+            );
+        }
+        if expected.saturating_mul(per_pass) >= cost {
+            return None;
+        }
+        // A loop that saves nothing itself waits for the body's other loops to double the count.
+        let needed = cost.checked_div(per_pass).map_or(0, |needed| needed + 1);
+        let more = needed.saturating_sub(seen).max(seen).max(1);
+        let threshold = bytecode::tier().map_or(0, |tier| tier.back_edge_threshold);
+        let start = i64::from(threshold) - i64::try_from(more).unwrap_or(i64::MAX);
+        runtime::restart_back_edges(
+            profile,
+            i32::try_from(start.max(i64::from(i32::MIN / 2))).unwrap_or(i32::MIN / 2),
+        );
+        Some(analysis::UNPAID_LOOP)
+    }
+}
+
 /// The session's call clock ([`interp::interp::Interp::calls_ever`]), as [`profile::WINDOW`]
 /// holds it.
 fn clock() -> i32 {
@@ -400,7 +447,7 @@ unsafe fn first_call<'a>(machine: &Machine<'_>) -> Option<&'a Compiled> {
 
 unsafe fn back_edge(machine: &mut Machine<'_>, target: usize) -> Option<TierExit> {
     unsafe {
-        let compiled = compiled_for(machine, true, true)?;
+        let compiled = compiled_for(machine, true, Some(target))?;
         if !compiled.osr.contains(&target) {
             return None;
         }
@@ -409,14 +456,16 @@ unsafe fn back_edge(machine: &mut Machine<'_>, target: usize) -> Option<TierExit
 }
 
 /// The compiled code for the activation, compiling it now when `hot` and it has none.
-/// `in_loop` says a backward jump asked: the loop is running in tier 0 right now, so waiting for
-/// the code after it to record its types would only keep the loop slow.
+/// `looping` is the target of the backward jump that asked, if one did: the loop is running in
+/// tier 0 right now, so waiting for the code after it to record its types would only keep the
+/// loop slow.
 unsafe fn compiled_for<'a>(
     machine: &Machine<'_>,
     hot: bool,
-    in_loop: bool,
+    looping: Option<usize>,
 ) -> Option<&'a Compiled> {
     unsafe {
+        let in_loop = looping.is_some();
         let constants = machine.code.cdr();
         // A body that compiled only for its loop would spend each call handing its instructions
         // back to tier 0, so calls keep running in tier 0 and only the loop enters compiled code.
@@ -508,17 +557,16 @@ unsafe fn compiled_for<'a>(
                     counters[profile::ENTRIES] = counters[profile::ENTRIES]
                         .min(tier.entry_threshold)
                         .saturating_sub(wait(tier.entry_threshold));
-                    counters[profile::BACK_EDGES] = -wait(tier.back_edge_threshold);
+                    runtime::restart_back_edges(counters, -wait(tier.back_edge_threshold));
                     counters[profile::RECORDING] = 0;
                 }
                 return None;
             }
         }
         let patient = !in_loop && runtime::cold_refusals(state) < MAX_COLD_REFUSALS;
-        let trigger = if in_loop {
-            Trigger::HotLoop
-        } else {
-            Trigger::HotEntry
+        let trigger = match looping {
+            Some(target) => Trigger::HotLoop { target },
+            None => Trigger::HotEntry,
         };
         let result = compile(machine, patient, trigger);
         // Compiling reads the profile too, so the counters are borrowed again afterwards.
@@ -536,13 +584,21 @@ unsafe fn compiled_for<'a>(
                 // recording at entry: nothing reads that feedback, and refused bodies are often
                 // the hot ones, so recording on every call of them was most of what the tier
                 // cost a test suite. A loop starts recording again halfway to its threshold.
-                if reason == analysis::MOSTLY_TIER0 {
+                // A body with loops that saves too little per call can still gain in a loop
+                // that runs long, so that verdict stops only its calls from asking.
+                let small_around_loops = reason == analysis::SMALL
+                    && values::length(constants.element(bytecode::LOOPS)) > 0;
+                if reason == analysis::MOSTLY_TIER0 || small_around_loops {
                     counters[profile::TIER_STATE] = state | runtime::LOOPS_ONLY;
                     counters[profile::ENTRIES] = runtime::NEVER_HOT;
                     counters[profile::RECORDING] = 0;
                     // The loop restarts recording when its counter reaches half the threshold
                     // again, which a counter already past that point would never do.
-                    counters[profile::BACK_EDGES] = 0;
+                    runtime::restart_back_edges(counters, 0);
+                } else if reason == analysis::UNPAID_LOOP {
+                    // The refusal set the wait, which reopens the recording window on the way
+                    // back to the threshold.
+                    counters[profile::RECORDING] = 0;
                 } else if reason == analysis::RARE {
                     // Each attempt records a window of feedback, so a body that keeps turning out
                     // rare waits twice as many entries each time, the way doubling bounds the
@@ -570,7 +626,7 @@ unsafe fn compiled_for<'a>(
                     // an empty window says nothing there.
                     counters[profile::TIER_STATE] = state + runtime::COLD_REFUSAL;
                     counters[profile::ENTRIES] = 0;
-                    counters[profile::BACK_EDGES] = 0;
+                    runtime::restart_back_edges(counters, 0);
                 } else {
                     counters[profile::TIER_STATE] = runtime::refused(counters[profile::TIER_STATE]);
                     counters[profile::RECORDING] = 0;
@@ -608,7 +664,8 @@ enum Trigger {
     /// The body was entered [`ENTRY_THRESHOLD`] times.
     HotEntry,
     /// A loop in the body took [`BACK_EDGE_THRESHOLD`] backward jumps and is running now.
-    HotLoop,
+    /// `target` is where its backward jump goes.
+    HotLoop { target: usize },
 }
 
 unsafe fn compile<'a>(
@@ -688,7 +745,11 @@ unsafe fn compile_in<'a>(
         // glues tier 0's steps together.
         // Entering a body with loops at the top or at a loop costs about the same, so what
         // decides between the two is the work around the loops alone.
-        let work = plan.work(values::ints(machine.code.cdr().element(FEEDBACK)));
+        let hot = match trigger {
+            Trigger::HotLoop { target } => Some(target),
+            Trigger::FirstCall | Trigger::HotEntry => None,
+        };
+        let work = plan.work(values::ints(machine.code.cdr().element(FEEDBACK)), hot);
         if !forced {
             let reason = if !plan.runs_natively() {
                 Some(analysis::NOTHING_NATIVE)
@@ -698,11 +759,22 @@ unsafe fn compile_in<'a>(
                     .flatten()
             } else if saving(work.looped) == 0 {
                 Some(analysis::STEPPING_LOOP)
-            } else if trigger != Trigger::HotLoop
-                && work.outside.steps > 0
-                && saving(work.outside) == 0
-            {
+            } else if hot.is_some() {
+                unpaid_loop(machine, work.hot)
+            } else if work.outside.steps > 0 && saving(work.outside) == 0 {
                 Some(analysis::MOSTLY_TIER0)
+            } else if trigger == Trigger::HotEntry {
+                // A call does the work around the loops and the loops' own, at the weight
+                // the plan gives them.
+                unpaid(
+                    machine,
+                    Work {
+                        native: work.outside.native + work.looped.native,
+                        calls: work.outside.calls + work.looped.calls,
+                        frames: work.outside.frames + work.looped.frames,
+                        steps: work.outside.steps + work.looped.steps,
+                    },
+                )
             } else {
                 None
             };

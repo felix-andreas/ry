@@ -1169,6 +1169,11 @@ pub const MOSTLY_TIER0: &str = "compiled code would hand most instructions to ti
 /// it leaves the recorded type feedback in place.
 pub const STEPPING_LOOP: &str = "the loops would hand too many instructions to tier 0";
 
+/// The refusal for a body whose hot loop has not taken enough backward jumps for what compiled
+/// code saves on each to repay compiling the body. It is not final: the loop asks again once
+/// it has.
+pub const UNPAID_LOOP: &str = "the loop has not run long enough to repay compiling the body";
+
 /// The refusal for compiling a fully typed closure at its first call when the call cannot run
 /// long: the body has no loop and calls no closure or native function directly, so the
 /// activation ends after a few instructions. Compiling costs about a millisecond, a thousand
@@ -1516,7 +1521,12 @@ impl Plan<'_> {
     /// taken ([`Plan::ran`]): native code there saves nothing, and counting it compiled bodies
     /// that return early (`match.fun` for a function) for work they never do. A call inlined
     /// with a frame of its own counts as the frame and the callee's work, which has no loop.
-    pub unsafe fn work(&self, feedback: &[i32]) -> BodyWork {
+    ///
+    /// `hot` is the target of the backward jump that asked for the compile, if one did. The
+    /// work of one pass through that loop is counted apart, without the loops nested inside
+    /// it: the body counts every loop's backward jumps together, so a nested loop's passes
+    /// are counted by its own jumps.
+    pub unsafe fn work(&self, feedback: &[i32], hot: Option<usize>) -> BodyWork {
         let ran = self.ran(feedback);
         let backward = |inst: &Inst| inst.op == Op::Jump && inst.operand(0) <= inst.pc;
         let loops: SmallVec<[(usize, usize); 4]> = self
@@ -1525,6 +1535,15 @@ impl Plan<'_> {
             .filter(|inst| backward(inst))
             .map(|inst| (inst.operand(0), inst.pc))
             .collect();
+        // A loop with a `next` jumps back to its target from more than one place.
+        let hot = hot.and_then(|target| {
+            let last = loops
+                .iter()
+                .filter(|&&(first, _)| first == target)
+                .map(|&(_, last)| last)
+                .max()?;
+            Some((target, last))
+        });
         let never_ran = |inst: &Inst| feedback.get(inst.pc).is_none_or(|&bits| bits == 0);
         let mut work = BodyWork::default();
         for (position, (inst, action)) in self.insts.iter().zip(self.actions.iter()).enumerate() {
@@ -1540,14 +1559,12 @@ impl Plan<'_> {
                 } => {
                     // Only a closure that holds its compiled body is inlined.
                     let constants = function.cdr().cdr();
-                    let inner =
-                        unsafe { callee.work(values::ints(constants.element(FEEDBACK))).whole };
-                    (
-                        inner.native,
-                        inner.calls,
-                        inner.frames + 1,
-                        inner.steps,
-                    )
+                    let inner = unsafe {
+                        callee
+                            .work(values::ints(constants.element(FEEDBACK)), None)
+                            .whole
+                    };
+                    (inner.native, inner.calls, inner.frames + 1, inner.steps)
                 }
                 Action::Step { .. }
                     if matches!(inst.op, Op::CallGeneric | Op::CallBuiltin | Op::Internal)
@@ -1592,7 +1609,18 @@ impl Plan<'_> {
                     LOOP_WEIGHT.pow(around.min(MAX_WEIGHTED_DEPTH) as u32),
                 ),
             };
-            for (part, weight) in [(part, weight), (&mut work.whole, 1)] {
+            let in_hot = hot.is_some_and(|(target, end)| {
+                target <= inst.pc
+                    && inst.pc <= end
+                    && !loops
+                        .iter()
+                        .any(|&(first, last)| target < first && first <= inst.pc && inst.pc <= last)
+            });
+            for (part, weight) in [
+                (part, weight),
+                (&mut work.whole, 1),
+                (&mut work.hot, usize::from(in_hot)),
+            ] {
                 part.native += weight * native;
                 part.calls += weight * calls;
                 part.frames += weight * frames;
@@ -1620,7 +1648,11 @@ impl Plan<'_> {
             for position in block.start..block.end {
                 set_bit(&mut ran, position, true);
             }
-            let Some(last) = block.end.checked_sub(1).and_then(|last| self.insts.get(last)) else {
+            let Some(last) = block
+                .end
+                .checked_sub(1)
+                .and_then(|last| self.insts.get(last))
+            else {
                 continue;
             };
             let (falls, jumps) = if last.op == Op::JumpUnless {
@@ -1632,7 +1664,11 @@ impl Plan<'_> {
             } else {
                 (falls_through(last.op), true)
             };
-            let next = self.insts.get(block.end).filter(|_| falls).map(|inst| inst.pc);
+            let next = self
+                .insts
+                .get(block.end)
+                .filter(|_| falls)
+                .map(|inst| inst.pc);
             let target = jump_target(last).filter(|_| jumps);
             for pc in [next, target].into_iter().flatten() {
                 let successor = self.block_at.get(pc).map_or(NO_BLOCK, |&block| block) as usize;
@@ -1646,13 +1682,15 @@ impl Plan<'_> {
     }
 }
 
-/// [`Plan::work`]: the plain counts of the whole body, the counts outside its loops, and the
-/// nesting-weighted counts inside them.
+/// [`Plan::work`]: the plain counts of the whole body, the counts outside its loops, the
+/// nesting-weighted counts inside them, and the counts of one pass through the loop that asked
+/// for the compile.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct BodyWork {
     pub whole: Work,
     pub outside: Work,
     pub looped: Work,
+    pub hot: Work,
 }
 
 const LOOP_WEIGHT: usize = 8;

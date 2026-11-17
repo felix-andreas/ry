@@ -16,8 +16,7 @@ use {
         records::NativeKind,
     },
     interp::{
-        Signalling,
-        arith,
+        Signalling, arith,
         builtins::Arg,
         bytecode::{self, LoopState, Machine, PROFILE, StepEnd, Stepper, TIER1, profile},
         eval::{self, Entering},
@@ -565,6 +564,20 @@ pub fn rare_refusals(state: i32) -> i32 {
     (state / RARE_REFUSAL) & 0xf
 }
 
+/// Every backward jump the body has taken under the tier.
+pub fn back_edges_seen(counters: &[i32]) -> u64 {
+    u64::try_from(counters[profile::EDGES_BEFORE].saturating_add(counters[profile::BACK_EDGES]))
+        .unwrap_or(0)
+}
+
+/// Makes the body's backward jumps count up from `start`, keeping [`back_edges_seen`].
+pub fn restart_back_edges(counters: &mut [i32], start: i32) {
+    counters[profile::EDGES_BEFORE] = counters[profile::EDGES_BEFORE]
+        .saturating_add(counters[profile::BACK_EDGES])
+        .saturating_sub(start);
+    counters[profile::BACK_EDGES] = start;
+}
+
 /// The entry count of a body that calls must not compile. Counting up from here never reaches
 /// the entry threshold, so tier 0 stops asking the tier about the body's calls, and stops
 /// recording type feedback for them unless the body has a loop that may still compile.
@@ -598,7 +611,7 @@ pub unsafe fn invalidate(code: Sexp) {
     } else {
         bytecode::tier().map_or(0, |tier| bytecode::recording_start(tier.entry_threshold))
     };
-    counters[profile::BACK_EDGES] = 0;
+    restart_back_edges(counters, 0);
     counters[profile::NEXT] = i32::MIN;
     if compiles(state) >= MAX_COMPILES {
         counters[profile::TIER_STATE] = refused(state);
@@ -1802,7 +1815,10 @@ unsafe fn start(parent: *mut Activation, child: *mut Child) -> *mut Activation {
 unsafe fn first_start(parent: *mut Activation, child: *mut Child, frame: i64) -> *mut Activation {
     unsafe {
         let Some(function) = prepare(&*parent, child, frame) else {
-            debug_assert!(false, "compiled code entered an inlined call it does not have");
+            debug_assert!(
+                false,
+                "compiled code entered an inlined call it does not have"
+            );
             return std::ptr::null_mut();
         };
         // Loading a namespace looks at the call stack, so the loader always has its frame.
