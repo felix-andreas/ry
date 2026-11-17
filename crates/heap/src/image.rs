@@ -421,6 +421,8 @@ impl Heap {
             .collect();
         let page_bytes = self.space.write_image(&mut out);
         let mut pages = vec![0u64; page_bytes.len() / 8];
+        // The pages are copied whole, freed slots included.
+        crate::space::sanitizer::allow(page_bytes.as_ptr(), page_bytes.len());
         std::ptr::copy_nonoverlapping(
             page_bytes.as_ptr(),
             pages.as_mut_ptr().cast::<u8>(),

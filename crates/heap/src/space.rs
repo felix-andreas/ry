@@ -337,6 +337,8 @@ impl Space {
                     // SAFETY: both offsets are inside a committed page.
                     let page_base = unsafe { self.base.as_ptr().add(page * PAGE_SIZE) };
                     let next = unsafe { page_base.add(start * slot_size) };
+                    // SAFETY: the run lies inside the committed page.
+                    unsafe { sanitizer::allow(next, (end - start) * slot_size) };
                     self.cursors[class] = Cursor {
                         // SAFETY: the run holds at least one slot.
                         next: unsafe { next.add(slot_size) },
@@ -706,10 +708,11 @@ impl Space {
     /// Sweeps one page and returns the change in the bytes its live objects take.
     unsafe fn sweep_page(&mut self, page: usize, swept: &mut Swept) -> isize {
         // Poisoning makes a use after free fail loudly, but costs a store per byte of every
-        // dead slot, so only debug builds and quarantine pay for it. The two instances keep
-        // the release sweep without quarantine free of the poisoning code, whose writes
-        // through `self` would make the word loop reload the page's bitmaps.
-        if cfg!(debug_assertions) || self.quarantine.is_some() {
+        // dead slot, so only debug builds, builds with AddressSanitizer and quarantine pay
+        // for it. The two instances keep the release sweep without quarantine free of the
+        // poisoning code, whose writes through `self` would make the word loop reload the
+        // page's bitmaps.
+        if cfg!(debug_assertions) || cfg!(sanitize = "address") || self.quarantine.is_some() {
             unsafe { self.sweep_page_words::<true>(page, swept) }
         } else {
             unsafe { self.sweep_page_words::<false>(page, swept) }
@@ -1210,6 +1213,7 @@ impl Space {
                 .base
                 .as_ptr()
                 .add(index * PAGE_SIZE + slot * SLOT_SIZES[class]);
+            sanitizer::allow(to, SLOT_SIZES[class]);
             std::ptr::copy_nonoverlapping(saved.as_ptr().add(moved.start), to, SLOT_SIZES[class]);
             self.allocated[index][word] |= bit;
             self.marks[index][word] |= bit;
@@ -1551,12 +1555,43 @@ pub(crate) unsafe fn poison(object: *mut u8, bytes: usize, collection: u64) {
         *object = POISONED_KIND;
         *object.add(1) = 0;
         object.add(FREED_BY_OFFSET).cast::<u64>().write(collection);
+        sanitizer::forbid(object.add(FREED_BY_OFFSET), bytes - FREED_BY_OFFSET);
     }
 }
 
 /// Where a poisoned object holds the number of the collection that freed it. Every slot and
 /// every large object is longer.
 pub(crate) const FREED_BY_OFFSET: usize = 8;
+
+/// What AddressSanitizer knows of freed objects. The heap maps its own memory, which the
+/// sanitizer takes for addressable throughout, so a build with the sanitizer tells it that a
+/// poisoned object is off limits until its memory is handed out again. A read or a write
+/// through a stale reference then stops at the faulting instruction, in Rust and in a native
+/// package built with the sanitizer. The first word stays readable, for the kind check.
+#[cfg(sanitize = "address")]
+pub(crate) mod sanitizer {
+    unsafe extern "C" {
+        fn __asan_poison_memory_region(address: *const u8, bytes: usize);
+        fn __asan_unpoison_memory_region(address: *const u8, bytes: usize);
+    }
+
+    pub unsafe fn forbid(address: *const u8, bytes: usize) {
+        unsafe { __asan_poison_memory_region(address, bytes) }
+    }
+
+    pub unsafe fn allow(address: *const u8, bytes: usize) {
+        unsafe { __asan_unpoison_memory_region(address, bytes) }
+    }
+}
+
+#[cfg(not(sanitize = "address"))]
+pub(crate) mod sanitizer {
+    #[inline(always)]
+    pub unsafe fn forbid(_address: *const u8, _bytes: usize) {}
+
+    #[inline(always)]
+    pub unsafe fn allow(_address: *const u8, _bytes: usize) {}
+}
 
 /// Finds the first run of free slots at or after `from` among a page's first `slots`, marks it
 /// allocated, and returns its slot range. A slot in `held` is not free. A run stops at the first

@@ -826,11 +826,12 @@ impl Sexp {
     /// The number of the collection that freed this poisoned object.
     pub unsafe fn freed_by(self) -> u64 {
         unsafe {
-            self.as_ptr()
+            let stamp = self
+                .as_ptr()
                 .cast::<u8>()
-                .add(crate::space::FREED_BY_OFFSET)
-                .cast::<u64>()
-                .read()
+                .add(crate::space::FREED_BY_OFFSET);
+            crate::space::sanitizer::allow(stamp, size_of::<u64>());
+            stamp.cast::<u64>().read()
         }
     }
 

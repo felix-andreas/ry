@@ -33,10 +33,13 @@ fn case_directory() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cases")
 }
 
-/// Cases that once read a freed argument reference after it left the pool, run on every stress
-/// pass whatever the seed picks. `apply__lapply_closure_results_stay_rooted` crashed only under
-/// collection stress; `datetime__year_overflow` crashed unstressed in S3 dispatch from a slot
-/// builtin call; the other two crashed now and then with the JIT forced.
+/// Cases that once read freed memory or lost a live object, run on every stress pass whatever
+/// the seed picks. `apply__lapply_closure_results_stay_rooted` crashed only under collection
+/// stress; `datetime__year_overflow` crashed unstressed in S3 dispatch from a slot builtin call;
+/// the next two crashed now and then with the JIT forced; the two data.table cases moved young
+/// elements through a pointer the write barrier did not see; and the last one wrote elements
+/// through a long argument's copy that had no storage, into the next object, on a function's
+/// second call.
 const REGRESSION_CASES: &[&str] = &[
     "apply__lapply_closure_results_stay_rooted",
     "datetime__year_overflow",
@@ -44,6 +47,7 @@ const REGRESSION_CASES: &[&str] = &[
     "environments__unread_loop_variable",
     "datatable__setcolorder_young_columns",
     "datatable__setorder_young_strings",
+    "assignment__long_argument_copy_element_stores",
 ];
 
 fn cases() -> Vec<PathBuf> {

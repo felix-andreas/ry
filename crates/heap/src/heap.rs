@@ -18,6 +18,8 @@
 // Every `unsafe fn` here has the same contract, stated once on `object::Sexp`: each handle it
 // takes must point at a live object of the kind the function expects.
 #![allow(clippy::missing_safety_doc)]
+// A build with AddressSanitizer tells it which objects are freed (`space::sanitizer`).
+#![feature(cfg_sanitize)]
 
 pub mod activity;
 pub mod arena;
@@ -41,7 +43,7 @@ use {
             slot_for,
         },
         records::{Layouts, slot_kind},
-        space::{SIZE_CLASS_BY_WORDS, SLOT_SIZES, Space, Swept, poison},
+        space::{SIZE_CLASS_BY_WORDS, SLOT_SIZES, Space, Swept, poison, sanitizer},
         strings::{Encoding, StringTable},
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -5320,6 +5322,7 @@ impl Heap {
                 break;
             };
             self.quarantined_large_bytes -= size;
+            sanitizer::allow(memory.as_ptr(), size);
             self.release_large_memory(memory.as_ptr(), size);
         }
     }
