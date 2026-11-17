@@ -2206,17 +2206,25 @@ struct Keys<K> {
     high: u64,
 }
 
-impl<K: RadixKey> FromIterator<K> for Keys<K> {
-    fn from_iter<I: IntoIterator<Item = K>>(keys: I) -> Keys<K> {
-        let (mut low, mut high) = (u64::MAX, 0);
-        let values = keys
-            .into_iter()
-            .inspect(|key| {
-                low = low.min(key.wide());
-                high = high.max(key.wide());
-            })
-            .collect();
-        Keys { values, low, high }
+/// The keys `key` makes of `items`. Each block of keys is scanned for its range while it is still
+/// in cache, as a loop of its own, since folding the range into the loop that makes the keys
+/// keeps either from compiling to vector instructions.
+fn keys<T: Copy, K: RadixKey>(items: &[T], key: impl Fn(T) -> K) -> Keys<K> {
+    const BLOCK: usize = 4096;
+    let mut values = Vec::with_capacity(items.len());
+    let (mut low, mut high) = (K::narrow(u64::MAX), K::narrow(0));
+    for block in items.chunks(BLOCK) {
+        let start = values.len();
+        values.extend(block.iter().map(|&item| key(item)));
+        for &value in &values[start..] {
+            low = low.min(value);
+            high = high.max(value);
+        }
+    }
+    Keys {
+        values,
+        low: low.wide(),
+        high: high.wide(),
     }
 }
 
@@ -2252,57 +2260,38 @@ fn sort_keys(column: &Column<'_>, decreasing: bool, na_last: bool) -> Option<Sor
             // make room for `NA` where it sorts last.
             let shifted = |value: i32| (value as u32) ^ (1 << 31);
             Some(SortKeys::Narrow(match (decreasing, na_last) {
-                (false, false) => items.iter().map(|&value| shifted(value)).collect(),
-                (false, true) => items
-                    .iter()
-                    .map(|&value| shifted(value).wrapping_sub(1))
-                    .collect(),
-                (true, false) => items
-                    .iter()
-                    .map(|&value| match shifted(value) {
-                        0 => 0,
-                        key => (u32::MAX - key) + 1,
-                    })
-                    .collect(),
-                (true, true) => items
-                    .iter()
-                    .map(|&value| match shifted(value) {
-                        0 => u32::MAX,
-                        key => u32::MAX - key,
-                    })
-                    .collect(),
+                (false, false) => keys(items, shifted),
+                (false, true) => keys(items, |value| shifted(value).wrapping_sub(1)),
+                (true, false) => keys(items, |value| match shifted(value) {
+                    0 => 0,
+                    key => (u32::MAX - key) + 1,
+                }),
+                (true, true) => keys(items, |value| match shifted(value) {
+                    0 => u32::MAX,
+                    key => u32::MAX - key,
+                }),
             }))
         }
-        Column::Real(items) => Some(SortKeys::Wide(
-            items
-                .iter()
-                .map(|&value| {
-                    // The IEEE bits ordered as unsigned integers, with -0 read as 0. NaN bit
-                    // patterns map past both infinities, so 0 and `u64::MAX` stay free.
-                    let key = (!value.is_nan()).then(|| {
-                        let bits = if value == 0.0 { 0 } else { value.to_bits() };
-                        if bits >> 63 == 1 {
-                            !bits
-                        } else {
-                            bits | 1 << 63
-                        }
-                    });
-                    place(key, u64::MAX)
-                })
-                .collect(),
-        )),
-        Column::Grouped(items) => Some(SortKeys::Narrow(
-            items.iter().map(|&code| code as u32).collect(),
-        )),
+        Column::Real(items) => Some(SortKeys::Wide(keys(items, |value: f64| {
+            // The IEEE bits ordered as unsigned integers, with -0 read as 0. NaN bit patterns
+            // map past both infinities, so 0 and `u64::MAX` stay free.
+            let key = (!value.is_nan()).then(|| {
+                let bits = if value == 0.0 { 0 } else { value.to_bits() };
+                if bits >> 63 == 1 {
+                    !bits
+                } else {
+                    bits | 1 << 63
+                }
+            });
+            place(key, u64::MAX)
+        }))),
+        Column::Grouped(items) => Some(SortKeys::Narrow(keys(items, |code| code as u32))),
         Column::Ranks(ranks) => {
             // The ranks count the rows at most, which are fewer than `u32::MAX`.
             let top = u64::from(ranks.iter().copied().max().unwrap_or(0)) + 1;
-            Some(SortKeys::Narrow(
-                ranks
-                    .iter()
-                    .map(|&rank| place((rank != 0).then_some(u64::from(rank)), top) as u32)
-                    .collect(),
-            ))
+            Some(SortKeys::Narrow(keys(ranks, |rank| {
+                place((rank != 0).then_some(u64::from(rank)), top) as u32
+            })))
         }
         Column::Complex(_) | Column::String(_) | Column::Raw(_) => None,
     }

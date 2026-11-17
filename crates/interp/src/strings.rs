@@ -2969,6 +2969,26 @@ fn regexpr<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>, global: bool) -> 
         }
     };
     let count = text.len();
+    // ASCII text needs no validation and no character positions, so a fixed pattern searches
+    // each string's bytes directly.
+    if !global
+        && report.ascii
+        && let Matcher::Literal(finder) = &matcher
+    {
+        let mut table = MatchTable::new(0, true);
+        let length = finder.needle().len() as i32;
+        for chars in text.iter(context) {
+            if handles::is_na(chars) {
+                table.push_na();
+                continue;
+            }
+            match find_literal_bytes(finder, chars.bytes()) {
+                Some(start) => table.push_match(start as i32 + 1, length),
+                None => table.push_none(),
+            }
+        }
+        return table.finish(context, &report, &names);
+    }
     if !global {
         let mut table = MatchTable::new(groups, report.ascii);
         for index in 0..count {
@@ -3302,6 +3322,13 @@ impl MatchTable {
             self.capture_starts.push(start);
             self.capture_lengths.push(length);
         }
+        self.rows += 1;
+    }
+
+    /// A match without capture groups, at the 1-based character `start`.
+    fn push_match(&mut self, start: i32, length: i32) {
+        self.starts.push(start);
+        self.lengths.push(length);
         self.rows += 1;
     }
 
