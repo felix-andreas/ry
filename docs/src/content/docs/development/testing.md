@@ -329,34 +329,66 @@ on, into its rendering, so the lint layer inherits the same invariants. The `for
 harnesses, and those of `syntax` and `ide`, also carry a `fuzz_regressions_hold_invariants` battery
 that pins every input the coverage-guided targets have ever broken.
 
+The analysis batteries draw their inputs from one place, `syntax::testing`, so a stronger input
+reaches the parser, the formatter, the checker and the editor features at once:
+
+| Source | What it gives |
+| --- | --- |
+| `generate_program`, `generate_project` | Programs grown from R's grammar and the type grammar together. Every value has a sort the generator tracks, so an annotation and its value mostly agree and the checker gets past name resolution into inference, generics, records, tags and `match`. About one binding in six is ill-typed on purpose. A project's later files read and call what earlier ones define. |
+| `fixture_case_sources` | Every case of every fixture suite in the repository, a multi-file case as its files. |
+| `program_corpus_sources` | The mined program corpus in `crates/syntax/tests/programs`. |
+| `small_edit` | One edit of the size a keystroke or a refactoring step makes: a statement deleted, duplicated, moved or replaced by another program's, a token deleted, duplicated, joined with its neighbor or renamed to another name of the file, a line commented out, an annotation comment turned into a plain one, or one character typed. |
+| `token_soup`, `mutate_seed`, `mutate_bytes` | Text that mostly does not parse, for the error paths. |
+
+A battery reports up to eight failing seeds per run (`FAILURES_PER_RUN`), each with its replay
+command, so one run of a deep campaign shows whether it found one defect or several.
+
 ### The semantic pipeline
 
-`crates/semantics/tests/test_fuzz.rs` runs generated programs, token soup, and two-file projects
-through the full semantic pipeline, with the generator biased toward reference cycles, closures,
-annotations, and typing-mode directives. On every input it checks four properties:
+`crates/semantics/tests/test_fuzz.rs` checks *sessions*. A session is a project of one to four
+files followed by up to three further states, and most steps between states are one `small_edit`
+of one file, as an editor makes them. The rest replace a file's text, add or drop a file, reorder
+the project, reclassify a file (package, script, test, test helper) or flip strict mode or the
+prelude. Files start as generated programs, fixture cases, corpus programs, programs of a few
+colliding names, or token soup.
+
+Two databases outlive the sessions (`semantics::testing::Workbench`). The incremental one is an
+editor's: it keeps one input per file and moves from state to state through the salsa setters,
+across sessions too, so every state is reached by an edit from an unrelated history. The reference
+one is a command's (`ry check`), with a bounded tree store and new inputs for every state. On every
+state the harness checks:
 
 - **Nothing panics**, which among other things means every salsa fixpoint converges.
-- **The output is deterministic** across fresh databases.
+- **Incremental equals fresh.** The incremental database renders every file as the reference does,
+  and returning to the session's first state restores its first rendering.
 - **Diagnostic ranges are well formed.**
-- **Incremental equals fresh.** Editing a file through the salsa setter gives the same output as a
-  fresh database on the edited text, and editing it back restores the original.
+- **The output is deterministic** across interning orders: every sixty-fourth session also compares
+  its first state with a database that has no history at all.
 
-`FUZZ_ITERS` scales the budgets. A bounded default runs inside `cargo test -p semantics`, the
-ignored `fuzz_deep` test carries the long runs, and on a panic the harness prints the inputs that
-produced it.
+The rendering folds every lint, under a configuration that turns them all on, so the lint layer
+inherits the same invariants. Two further arms run every fixture case as the project its suite
+checks it as, and the program corpus as package projects of eight files, each then with one small
+edit.
+
+A failing session is retried on fresh databases. When it fails there too, its seed replays it;
+when it passes alone, the failure needs the sessions before it, and the harness prints the window
+of seeds that replays it. `FUZZ_ITERS` scales the budgets, a bounded default runs inside
+`cargo test -p semantics`, and the ignored `fuzz_deep` test carries the long runs.
 
 ### The formatter
 
 `crates/format/tests/test_fuzz.rs` feeds the formatter valid-program seeds, byte-level mutations of
-those seeds, token soup, random bytes, every fixture case source in the repository, and real corpus
-files once they are fetched. It checks four properties: nothing panics (the formatter either
-succeeds or refuses with a structured error), the output is deterministic, the code is preserved,
-and formatting is idempotent, meaning that formatting a successful output again succeeds and
-reproduces it byte for byte.
+those seeds, token soup, generated programs and fixture cases with one small edit each, every
+fixture case source in the repository, the program corpus, and real corpus files once they are
+fetched. It checks that nothing panics (the formatter either succeeds or refuses with a structured
+error), that the output is deterministic, that the code is preserved, and that formatting is
+idempotent, meaning that formatting a successful output again succeeds and reproduces it byte for
+byte.
 
-The refusal path is part of the contract. A file with a syntax error in its R is refused, while an
-error in a `#:` annotation, which the parser marks `in_annotation`, only sends the affected block
-down the verbatim path.
+The refusal path is part of the contract, and the battery holds the formatter to it: a refusal is
+an error unless the input has a syntax error in its R, or a mid-line `#:` annotation whose
+statement continues on the next line, which has no stable layout. An error in a `#:` annotation,
+which the parser marks `in_annotation`, only sends the affected block down the verbatim path.
 
 **Preservation** is the one property that can catch the formatter changing your code. Determinism,
 idempotence, and "the output formats again" all hold for a formatter that silently drops a
@@ -374,6 +406,13 @@ formatter emit the wrong bytes for an identifier, which renames a variable while
 kind. An injected bug of exactly that shape passed a kind-only comparison and fails the spelling
 comparison.
 
+Two more comparisons close what the token sequence leaves open. The output must parse into the
+same tree as the input, node kind by node kind and depth by depth with the braces the formatter
+adds left out, because a moved line break can change how the same tokens group (`x` and `-1` on
+two lines are two statements, on one line a subtraction). And the output must hold the same
+comments in the same order, compared without their whitespace, because a comment is trivia that
+the token comparison never sees.
+
 Every generated input also runs the range battery, `check_range_format_invariants`, over a bounded
 spread of selections (the whole file, carets, whole lines, part-line spans, a range past the end).
 Range edits must be deterministic, refuse exactly when the whole file refuses, cover whole lines in
@@ -390,18 +429,43 @@ independent line oracle.
 
 ### The editor features
 
-`crates/ide/tests/test_fuzz.rs` sweeps every feature over a sample of byte offsets in each input:
-every token boundary plus a coarse stride, so positions off token boundaries and in the middle of
-multi-byte characters are covered too. At each offset nothing may panic, and every range handed to
-the editor must lie inside the text it indexes.
+`crates/ide/tests/test_fuzz.rs` checks projects on one warm database, as an editor holds them:
+generated projects of one to three files of mixed kinds (package, script, test, test helper), each
+then with one small edit, every fixture case as the project its suite checks it as, the program
+corpus as scripts, and mutated seeds. After the first project of a session only the files that
+changed are swept, and a failure is retried on a fresh database to tell whether it needs the
+sessions before it.
 
-Containment alone is a weak check, though: it says a range is somewhere in the file, not that it is
-on the right thing. Wherever the cursor sits on a name, two stronger properties hold as well:
+A sweep asks every feature at up to 64 byte offsets of a file, spread over token boundaries and a
+coarse stride, so positions off token boundaries and in the middle of multi-byte characters are
+covered too. At each offset nothing may panic, and every range handed to the editor must lie
+inside the text it indexes, on character boundaries. Containment alone is a weak check: it says a
+range is somewhere in the file, not that it is on the right thing. So the sweep also asks what
+must hold between answers:
 
 - **Name identity**: every rename edit, every reference, and the definition target cover text that
-  spells the same name (with backtick quoting normalized, since `` `x` `` and `x` are one binding).
+  spells the name under the cursor (with backtick quoting normalized, since `` `x` `` and `x` are
+  one binding).
 - **Round trip**: if the cursor navigates to a declaration, asking for references from that
-  declaration leads back to the cursor's own token.
+  declaration leads back to the cursor's own token, and a declaration is its own definition.
+- **One set of occurrences**: the references asked from the first and from the last occurrence of
+  a name are the set asked from the cursor, and references without the declaration are that set
+  minus its declarations.
+- **Rename edits never overlap**, and neither do the edits of a quick fix or of "fix all".
+- **Hover and selection ranges cover the cursor**, each selection range strictly inside the next.
+  An editor rejects the whole answer otherwise.
+- **Semantic tokens are sorted and do not overlap**, folds lie inside the file, and call hierarchy
+  items, symbols, code lenses and inlay hints have ranges in bounds.
+- **An inserted annotation parses.** On a file without syntax errors, the text with every inferred
+  annotation applied has none either, and the same holds for every quick fix.
+
+Once per project, and only when every file parses, the sweep also **renames** two names and checks
+the project it leaves: every file parses, no file gains a finding, and the references asked from
+the renamed cursor are as many as before. This is the check that catches a rename that misses a
+read or takes one that belongs to something else, which every per-answer check passes. Names the
+library binds, S3-style dotted names and operators are left out, and a renamed record or column
+name is held to the first and the last of the three checks only (the backlog's "Open: editor
+parity" says why).
 
 An off-by-one injected where item-relative ranges convert back to absolute offsets passes the
 containment check and fails name identity on the first seed.
@@ -986,13 +1050,14 @@ with a long `-max_total_time`.
 Without `just`, from `fuzz/`:
 
 ```sh
-cargo -Zscript ../scripts/seed-fuzz-corpus.rs   # seed from all fixture case sources
+cargo -Zscript ../scripts/seed-fuzz-corpus.rs   # seed from the fixture cases and the program corpus
 cargo fuzz run format -- -max_total_time=600 -print_final_stats=1
 cargo fuzz run parse  -- -max_total_time=600
 ```
 
-The seeder copies every fixture case's source in the repository into
-`fuzz/corpus/{parse,format,semantics}/`. Files are content-addressed, so running it again only adds.
+The seeder copies every fixture case's source, every program of the program corpus and every
+shipped stub into the corpus directory of each target that reads R source (`fuzz/corpus/parse/`,
+`format/`, `semantics/`, `ide/` and three more). Files are content-addressed, so running it again only adds.
 The corpus and the artifacts are gitignored, because a durable regression belongs in the
 `REGRESSIONS` battery or in a fixture case, not in the corpus.
 

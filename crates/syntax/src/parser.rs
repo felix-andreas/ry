@@ -1443,6 +1443,8 @@ impl Parser<'_> {
                 GREATER => angles = angles.checked_sub(1)?,
                 LESS_MINUS | EQ if depth == 0 && angles == 0 => return Some(pos),
                 IDENT | NULL_KW | PIPE | COMMA | COLON | MINUS_GREATER | DOTS => {}
+                // Inside braces a `;` parts a `GroupBy` type's keys from its other columns.
+                SEMICOLON if depth > 0 => {}
                 _ => return None,
             }
             if !matches!(kind, WHITESPACE | COMMENT | NEWLINE) {

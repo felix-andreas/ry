@@ -4,8 +4,8 @@
 edition = "2024"
 ---
 
-//! Seeds the fuzz corpora: every fixture case source and shipped stub for the targets that read
-//! R source, the repository's delimited files for `sniff` and `csv`, its config files and config fixtures
+//! Seeds the fuzz corpora: every fixture case source, every program of the program corpus and
+//! every shipped stub for the targets that read R source, the repository's delimited files for `sniff` and `csv`, its config files and config fixtures
 //! for `config`, and the recorded GNU R streams for the unserialize targets. The targets that
 //! read their input as a stream of generator choices (`bytecode`, `reload`, `lsp`) need no seed.
 //! Run `cargo +nightly -Zscript scripts/seed-fuzz-corpus.rs` before `cargo fuzz run`.
@@ -36,21 +36,21 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut sources: Vec<String> = Vec::new();
     let crates_root = repo_root.join("crates");
-    for path in files_with_suffix(&crates_root, ".test")? {
+    let mut case_files = files_with_suffix(&crates_root, ".test")?;
+    case_files.extend(files_with_suffix(&crates_root, ".corpus")?);
+    for path in case_files {
         let text = read_text_lossy(&path)?;
-        // A fixture case's source is the lines between its `#----` header and
-        // the `#++++` expectation marker.
+        // A case's source is the lines from its `#----` header to the `#++++` expectation
+        // marker, or to the next header in a program corpus, whose cases have no expectation.
         let mut case: Vec<&str> = Vec::new();
         let mut collecting = false;
-        for line in split_lines(&text) {
-            if line.starts_with("#----") {
-                collecting = true;
-                case.clear();
-            } else if line.starts_with("#++++") {
-                if !case.is_empty() {
+        for line in split_lines(&text).into_iter().chain(["#++++"]) {
+            if line.starts_with("#----") || line.starts_with("#++++") {
+                if collecting && !case.is_empty() {
                     sources.push(case.join("\n") + "\n");
                 }
-                collecting = false;
+                collecting = line.starts_with("#----");
+                case.clear();
             } else if collecting {
                 case.push(line);
             }

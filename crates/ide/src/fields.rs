@@ -11,7 +11,7 @@ use {
     crate::{NavigationTarget, Occurrence, declaring_item, position_in_item},
     semantics::{
         Db, Item, ItemKind, ProjectFiles, SourceFile,
-        hir::{Argument, AssignSpelling, ExprId, ExpressionKind, Module, Symbol},
+        hir::{Argument, AssignSpelling, ExprId, ExpressionKind, LiteralKind, Module, Symbol},
         item_hir, item_naming, item_node, item_tree,
         naming::BindingKind,
     },
@@ -345,7 +345,9 @@ pub(crate) fn field_occurrences(
         };
     }
     let mut resolver = Resolver::new(db, files);
-    let mut renamable = true;
+    let mut renamable = !spellings
+        .iter()
+        .any(|spelled| spelled.kind == SpellingKind::Untraced);
     let mut reads: Vec<(NavigationTarget, Vec<NavigationTarget>)> = Vec::new();
     for spelled in accesses {
         let here = NavigationTarget {
@@ -417,7 +419,7 @@ fn project_declarations(db: &dyn Db, files: ProjectFiles, name: Symbol) -> Vec<N
         .get(name.as_str())
         .into_iter()
         .flatten()
-        .filter(|spelled| spelled.kind != SpellingKind::Access)
+        .filter(|spelled| matches!(spelled.kind, SpellingKind::Element | SpellingKind::Write))
         .map(|spelled| NavigationTarget {
             file: spelled.file,
             range: spelled.range,
@@ -490,6 +492,10 @@ enum SpellingKind {
     /// The field of `receiver$name <- value`, which is also an access.
     Write,
     Access,
+    /// A spelling inside a subscript that may read the field and cannot be followed to it: the
+    /// string of `x[["name"]]`, or a bare name nothing binds, which a frame query reads as a
+    /// column (`x[, name]`).
+    Untraced,
 }
 
 /// A file's field spellings, and what the project index needs to find fields passed through
@@ -561,6 +567,41 @@ fn file_fields(db: &dyn Db, file: SourceFile) -> FileFields {
                     .map(|parameter| parameter.name.to_string())
                     .collect(),
             });
+        }
+        let subscripts: Vec<TextRange> = hir
+            .expressions()
+            .filter_map(|expression| match &expression.kind {
+                ExpressionKind::Index { arguments, .. } => Some(&hir[arguments]),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|argument| argument.value.map(|value| hir.range(value)))
+            .collect();
+        if !subscripts.is_empty() {
+            let naming = item_naming(db, item).as_ref();
+            for (index, expression) in hir.expressions().enumerate() {
+                let name = match &expression.kind {
+                    ExpressionKind::NameRef(name)
+                        if naming.is_none_or(|naming| {
+                            !naming.resolutions.contains_key(&ExprId::new(index))
+                        }) =>
+                    {
+                        name.as_str()
+                    }
+                    ExpressionKind::Literal(LiteralKind::String(text)) => &hir[text],
+                    _ => continue,
+                };
+                if subscripts
+                    .iter()
+                    .any(|subscript| subscript.contains_range(expression.range))
+                {
+                    spellings.push(FieldSpelling {
+                        name: name.to_owned(),
+                        kind: SpellingKind::Untraced,
+                        range: expression.range + item_offset,
+                    });
+                }
+            }
         }
         let mut push = |name: Symbol, kind, range: TextRange| {
             spellings.push(FieldSpelling {

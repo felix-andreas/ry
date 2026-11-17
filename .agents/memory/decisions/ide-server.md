@@ -256,3 +256,13 @@ The Zed extension bundles no binary: it locates `ry` at run time through the LSP
 - **One line per chunk.** R discards the rest of its input buffer when a command errors, so the console hands R one line per read (`take_chunk` in `crates/repl/src/console.rs`) and keeps the rest in `pending`. Code a script or hook queues goes as one unit. A read below top level (`readline()`, `menu()`, the browser) is answered from the console, never from `pending`; Ctrl-C clears `pending`.
 - **Preflight.** `InputFilter::discard` retracts a refused command, so the session's analysis never holds a command R did not run. A command counts as ry syntax when it holds an annotation, a `typing:` directive, a ry literal or a `Module.function` name that a native namespace declares, so `Sys.time` and `Ops.money` do not (`crates/ry/src/preflight.rs`).
 - **Tests.** `crates/ry/tests/test_repl_e2e.rs` pins multi-line paste, an error mid-paste, a nested read during a paste, Ctrl-C with input pending, and a refused command.
+
+## An editor target is what the code means, and rename refuses what it cannot trace
+
+**Status:** built.
+
+- **A top-level loop variable is the global of its name.** `for (x in xs) ...` at the top level leaves `x` bound for the statements after it, so definition, references and rename treat it like a top-level assignment (`binds_global` in `crates/ide/src/ide.rs`). As a separate symbol, the read after the loop was left behind by a rename.
+- **A global's references skip reads that mean something else.** A bare name in a frame query that names a column reads the column (`frame_column_reads`), and a call that passes a binding holding no function reaches the library's function (`CalleeTarget::Library`, or `CalleeTarget::Project` resolved through `non_local_target`, because the checker's global scope holds the library's functions too). Neither is an occurrence of the project's global.
+- **Rename refuses a field it cannot trace.** A field with a same-named string subscript (`x[["name"]]`) or an unbound bare name in a subscript (`frame[, name]`) is refused (`SpellingKind::Untraced` in `crates/ide/src/fields.rs`), in line with "Refactorings refuse rather than guess". Carrying the rename through those reads is in the backlog.
+- **Selection ranges always cover the cursor.** A cursor on a string's quote or in a block's indentation starts from the smallest node that covers it; an editor drops an answer whose first range does not hold the position.
+- **Why.** Each was a rename or a reference list that left the code meaning something else, found by the IDE battery's rename check (`testing.md`, "The editor features") and pinned in `crates/ide/tests/ide/rename_ported.R.test` and `tests/structure/selection.R.test`.

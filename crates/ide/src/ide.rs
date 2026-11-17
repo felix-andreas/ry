@@ -19,7 +19,7 @@ use {
         inline_annotations_enabled, item_annotation_syntax, item_annotations, item_check, item_hir,
         item_name_range, item_naming, item_node, item_tree,
         metadata::{PackageMetadata, is_own_package},
-        naming::{BindingId, BindingKind, CopySource, ItemNaming, dot_dot_variable},
+        naming::{BindingId, BindingInfo, BindingKind, CopySource, ItemNaming, dot_dot_variable},
         package_definitions, project_global_names, project_type_definitions,
         stubs::{
             NATIVE_NAMESPACES, StubSources, declaring_namespace, exporting_namespaces,
@@ -669,7 +669,11 @@ fn hover_definition<'db>(
         .and_then(|check| check.editor().callee_targets.get(&expression).copied());
     let binding = match callee_target {
         Some(CalleeTarget::Slot(binding)) => Some(binding),
-        Some(CalleeTarget::Project) => return global_hover_definition(db, files, name, None),
+        // The checker's global scope holds the library's functions too.
+        Some(CalleeTarget::Project) => {
+            return global_hover_definition(db, files, name, None)
+                .or_else(|| stub_hover_definition(db, name));
+        }
         Some(CalleeTarget::Library) => return stub_hover_definition(db, name),
         None => naming.resolutions.get(&expression).copied(),
     };
@@ -3435,11 +3439,12 @@ pub fn selection_ranges(db: &dyn Db, file: SourceFile, offset: TextSize) -> Vec<
     let text = file.text(db);
     let mut ranges: Vec<TextRange> = Vec::new();
     let mut push = |range: TextRange| {
-        if range.is_empty() {
+        // An editor rejects the whole answer when a range leaves the cursor out, which the
+        // contents of a block or a string do for a cursor on the delimiter or the indentation.
+        if range.is_empty() || offset < range.start() || range.end() < offset {
             return;
         }
-        // Each step must grow the previous one; a contents range that a cursor on a
-        // delimiter falls outside of is skipped.
+        // Each step must grow the previous one.
         if ranges
             .last()
             .is_none_or(|last| *last != range && range.contains_range(*last))
@@ -7131,7 +7136,7 @@ fn target_at<'db>(
             let naming = item_naming(db, item).as_ref()?;
             Some(match copy_origin(naming, binding) {
                 CopySource::Slot(origin) => match naming.bindings.get(&origin) {
-                    Some(info) if info.kind == BindingKind::TopLevel => {
+                    Some(info) if binds_global(naming, origin, info) => {
                         Target::Global(info.name.to_string())
                     }
                     _ => Target::Slot {
@@ -7228,7 +7233,7 @@ fn written_target_at<'db>(
         .iter()
         .filter(|(_, info)| info.range.contains_inclusive(position.relative))
         .min_by_key(|(binding, info)| (info.range.len(), binding.0))?;
-    if info.kind == BindingKind::TopLevel {
+    if binds_global(naming, *binding, info) {
         return Some(Target::Global(info.name.to_string()));
     }
     Some(Target::Slot {
@@ -7292,8 +7297,9 @@ fn expression_target<'db>(
             else {
                 return None;
             };
+            // The checker's global scope holds the library's functions too.
             return Some(match callee_target {
-                Some(CalleeTarget::Project) => Target::Global(name.to_string()),
+                Some(CalleeTarget::Project) => non_local_target(db, files, name.as_str()),
                 _ => Target::StubGlobal(name.to_string()),
             });
         }
@@ -7303,7 +7309,7 @@ fn expression_target<'db>(
         let info = naming.bindings.get(binding)?;
         // Cross-item reads resolve to the name, so the item's own top-level binding is the
         // global.
-        if info.kind == BindingKind::TopLevel {
+        if binds_global(naming, *binding, info) {
             return Some(Target::Global(info.name.to_string()));
         }
         return Some(Target::Slot {
@@ -7321,6 +7327,12 @@ fn expression_target<'db>(
         return Some(non_local_target(db, files, name));
     }
     None
+}
+
+/// Whether a binding of an item is the project's global of that name: a top-level assignment, or
+/// the variable of a top-level loop, which later statements read like one.
+fn binds_global(naming: &ItemNaming, binding: BindingId, info: &BindingInfo) -> bool {
+    info.kind == BindingKind::TopLevel || naming.extras().loop_bound_slots.contains(&binding)
 }
 
 /// Where a name the item does not bind navigates: the project's global, a stub's declaration,
@@ -7681,7 +7693,7 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                         continue;
                     };
                     for (binding, info) in &naming.bindings {
-                        if info.kind == BindingKind::TopLevel && info.name == *name {
+                        if binds_global(naming, *binding, info) && info.name == *name {
                             slot_occurrences(db, item, *binding, &mut result);
                         }
                     }
@@ -7690,7 +7702,7 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                             CopySource::NonLocal(source) => source == *name,
                             CopySource::Slot(origin) => {
                                 naming.bindings.get(&origin).is_some_and(|info| {
-                                    info.kind == BindingKind::TopLevel && info.name == *name
+                                    binds_global(naming, origin, info) && info.name == *name
                                 })
                             }
                         };
@@ -7700,15 +7712,38 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                     }
                     if let Some(hir) = item_hir(db, item) {
                         let item_offset = node.text_range().start();
+                        let reads: Vec<ExprId> = naming
+                            .non_locals
+                            .iter()
+                            .chain(&naming.quiet_reads)
+                            .filter(|(_, non_local)| *non_local == name)
+                            .map(|(expression, _)| *expression)
+                            .collect();
+                        // A bare name in a frame query that names a column reads the column.
+                        let columns = if reads.is_empty() {
+                            Vec::new()
+                        } else {
+                            frame_column_reads(db, item, hir, naming)
+                        };
+                        // A call goes past a binding that holds no function, to the library's
+                        // function of the name when there is one.
+                        let library_calls = (!reads.is_empty()
+                            && stub_declaration(db, name).is_some())
+                        .then(|| item_check(db, item))
+                        .flatten()
+                        .map(|check| &check.editor().callee_targets);
                         result.extend(
-                            naming
-                                .non_locals
-                                .iter()
-                                .chain(&naming.quiet_reads)
-                                .filter(|(_, non_local)| *non_local == name)
-                                .map(|(expression, _)| Occurrence {
+                            reads
+                                .into_iter()
+                                .filter(|expression| !columns.contains(&hir.range(*expression)))
+                                .filter(|expression| {
+                                    library_calls.is_none_or(|targets| {
+                                        targets.get(expression) != Some(&CalleeTarget::Library)
+                                    })
+                                })
+                                .map(|expression| Occurrence {
                                     file,
-                                    range: name_range(hir, *expression, name) + item_offset,
+                                    range: name_range(hir, expression, name) + item_offset,
                                     is_declaration: false,
                                 }),
                         );
