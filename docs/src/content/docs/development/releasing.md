@@ -16,12 +16,12 @@ extension.
 ## The release gate
 
 A release is cut only from a commit whose full gate is green. The full gate is `ci.yml`, and it has
-two jobs:
+two kinds of job:
 
 | Job | Recipe | What must pass |
 | --- | --- | --- |
 | `gate` | `just ci` | Formatting, clippy, and every test of the workspace, with the oracle compared against the pinned GNU R. |
-| `stress` | `just ci-stress` | Every oracle case run twice in one process under seeded collection stress with the collector's checks on, and the generated programs under the same stress ([Robustness](/development/robustness#running-the-long-harnesses)). |
+| `stress`, once for each of three seeds | `just ci-stress SEED` | Every oracle case run twice in one process under seeded collection stress with the collector's checks on, and the generated programs under the same stress ([Robustness](/development/robustness#running-the-long-harnesses)). |
 
 A red job blocks the release whatever its cause, a flaky test included: fix the cause or revert the
 change that brought it, then run the gate again on the new commit. A gate that ran on an earlier

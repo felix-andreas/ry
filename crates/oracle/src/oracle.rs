@@ -7,9 +7,13 @@
 //! GNU R is one such engine, and ry's runtime is another.
 
 pub mod bench;
+pub mod corpus;
 pub mod fuzz;
 pub mod gallery;
 pub mod install;
+pub mod metamorphic;
+pub mod mutate;
+pub mod reduce;
 
 use {
     serde::Deserialize,
@@ -30,6 +34,12 @@ use {
 pub mod packages;
 
 const DRIVER: &str = include_str!("driver.R");
+const OBSERVER: &str = include_str!("observe.R");
+
+/// `driver.R` with the deep observer spliced into its local scope.
+fn driver_text() -> String {
+    DRIVER.replacen("  # <observe.R>\n", OBSERVER, 1)
+}
 
 /// `Sync`, because a run hands every engine to one worker per core.
 pub trait Engine: Sync {
@@ -60,6 +70,9 @@ pub struct Outcome {
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
     pub value: Option<Value>,
+    /// The deep observer's dump of every top-level value, and the classes of every condition, in
+    /// the order they happened. Empty unless the engine observes ([`ProcessEngine::observing`]).
+    pub observed: Vec<String>,
     /// `R_LIBS` as the script saw it, when the engine reports it. It is not part of the
     /// behavior: [`diff`] refuses to compare runs that searched different libraries, because a
     /// package installed by one engine makes the other warn that it was built under another R.
@@ -75,6 +88,7 @@ impl PartialEq for Outcome {
             && self.warnings == other.warnings
             && self.errors == other.errors
             && self.value == other.value
+            && self.observed == other.observed
     }
 }
 
@@ -94,6 +108,8 @@ struct Report {
     value: Option<Value>,
     #[serde(default)]
     libraries: Option<String>,
+    #[serde(default)]
+    observed: Vec<String>,
 }
 
 /// The modes of ry's runtime that `--engine` names, which [`KnownFailure::engine`] must be one of.
@@ -239,6 +255,7 @@ pub fn known_failure<'a>(
         .find(|entry| entry.case == name && entry.engine == engine)
 }
 
+#[derive(Clone)]
 pub struct ProcessEngine {
     name: String,
     program: String,
@@ -257,6 +274,8 @@ pub struct ProcessEngine {
     /// How many times the driver evaluates the script in the one process
     /// ([`ProcessEngine::repeated`]).
     passes: u32,
+    /// The most private writable memory the engine's process may map, in bytes.
+    memory_limit: Option<u64>,
 }
 
 /// What the driver prints before each pass after the first, up to the pass number.
@@ -284,6 +303,7 @@ impl ProcessEngine {
             environment: Vec::new(),
             timeout: None,
             passes: 1,
+            memory_limit: None,
         }
     }
 
@@ -304,7 +324,8 @@ impl ProcessEngine {
         }
     }
 
-    /// Kills a run that takes longer than `timeout` and reports it as failed.
+    /// Kills a run that takes longer than `timeout` for each pass it makes ([`Self::repeated`])
+    /// and reports it as failed.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
@@ -318,6 +339,24 @@ impl ProcessEngine {
     /// A case marked `# oracle: runs once` ([`runs_once`]) runs once all the same.
     pub fn repeated(mut self, passes: u32) -> Self {
         self.passes = passes;
+        self
+    }
+
+    /// Caps the writable memory of the engine's process at `bytes`, so a generated program that
+    /// asks for a huge vector gets R's allocation error instead of the machine's memory. The
+    /// limit is on data (`RLIMIT_DATA`), not on address space, because ry reserves gigabytes
+    /// of address space it never writes and GNU R does not.
+    pub fn with_memory_limit(mut self, bytes: u64) -> Self {
+        self.memory_limit = Some(bytes);
+        self
+    }
+
+    /// Makes the driver report the deep observer's dump of every top-level value
+    /// ([`Outcome::observed`]), which shows what printing and deparsing hide: encoding marks,
+    /// attribute order, NA kinds, negative zero, and the object and S4 bits.
+    pub fn observing(mut self) -> Self {
+        self.environment
+            .push(("ORACLE_OBSERVE".to_string(), "1".to_string()));
         self
     }
 
@@ -436,6 +475,7 @@ impl ProcessEngine {
                 .unwrap_or_default(),
             timeout: None,
             passes: 1,
+            memory_limit: None,
         }
     }
 
@@ -452,6 +492,7 @@ impl ProcessEngine {
             environment: Vec::new(),
             timeout: None,
             passes: 1,
+            memory_limit: None,
         })
     }
 }
@@ -520,7 +561,7 @@ impl Engine for ProcessEngine {
         command.args(&self.arguments);
         if let Some(driver) = self.driver {
             let driver_path = scratch.path().join("driver.R");
-            std::fs::write(&driver_path, DRIVER)
+            std::fs::write(&driver_path, driver_text())
                 .map_err(|error| EngineError::Failed(error.to_string()))?;
             match driver {
                 Driver::GnuR => {
@@ -551,17 +592,20 @@ impl Engine for ProcessEngine {
             .envs(library_environment().iter().cloned())
             .envs(self.environment.iter().map(|(name, value)| (name, value)));
 
-        let output = run_command(command, self.timeout).map_err(|error| match error.kind() {
-            std::io::ErrorKind::NotFound => {
-                EngineError::Unavailable(format!("`{}` was not found", self.program))
+        let timeout = self.timeout.map(|timeout| timeout * passes);
+        let output = run_command(command, timeout, self.memory_limit).map_err(|error| {
+            match error.kind() {
+                std::io::ErrorKind::NotFound => {
+                    EngineError::Unavailable(format!("`{}` was not found", self.program))
+                }
+                _ => EngineError::Failed(format!("`{}`: {error}", self.program)),
             }
-            _ => EngineError::Failed(format!("`{}`: {error}", self.program)),
         })?;
         if output.timed_out {
             return Err(EngineError::Failed(format!(
                 "{} was killed after {} seconds",
                 self.name,
-                self.timeout.map_or(0, |timeout| timeout.as_secs())
+                timeout.map_or(0, |timeout| timeout.as_secs())
             )));
         }
         // A report does not excuse a crash: the driver writes it before the process exits, and
@@ -609,6 +653,7 @@ impl Engine for ProcessEngine {
             warnings: report.warnings,
             errors: report.errors,
             value: report.value,
+            observed: report.observed,
             libraries: report.libraries,
         })
     }
@@ -628,18 +673,32 @@ struct CommandOutput {
 /// (`&`) with both ignored, an ignored disposition survives `exec`, and GNU R keeps an ignored
 /// SIGINT instead of installing its handler, so a case that interrupts itself with
 /// `tools::pskill` would never see the interrupt under a detached run.
-fn run_command(mut command: Command, timeout: Option<Duration>) -> std::io::Result<CommandOutput> {
+#[cfg_attr(not(unix), allow(unused_variables))]
+fn run_command(
+    mut command: Command,
+    timeout: Option<Duration>,
+    memory_limit: Option<u64>,
+) -> std::io::Result<CommandOutput> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(unix)]
-    // SAFETY: the closure runs between fork and exec, and calls only `signal`, which is
-    // async-signal-safe.
+    // SAFETY: the closure runs between fork and exec, and calls only `signal` and `setrlimit`,
+    // which are async-signal-safe.
     unsafe {
-        std::os::unix::process::CommandExt::pre_exec(&mut command, || {
+        std::os::unix::process::CommandExt::pre_exec(&mut command, move || {
             for signal in [libc::SIGINT, libc::SIGQUIT] {
                 if libc::signal(signal, libc::SIG_DFL) == libc::SIG_ERR {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            if let Some(bytes) = memory_limit {
+                let limit = libc::rlimit {
+                    rlim_cur: bytes as libc::rlim_t,
+                    rlim_max: bytes as libc::rlim_t,
+                };
+                if libc::setrlimit(libc::RLIMIT_DATA, &limit) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
             }
@@ -878,7 +937,7 @@ fn ry_default_version() -> Option<String> {
     std::fs::write(&script, "cat(format(getRversion()))").ok()?;
     let mut command = Command::new(ry_program());
     command.args(["run", "--runtime", "ry"]).arg(&script);
-    let output = run_command(command, Some(Duration::from_secs(60))).ok()?;
+    let output = run_command(command, Some(Duration::from_secs(60)), None).ok()?;
     if output.timed_out {
         return None;
     }
@@ -1319,6 +1378,17 @@ pub fn render(outcome: &Outcome) -> String {
             text.push_str(&format!("| {line}\n"));
         }
     }
+    // Recorded outcomes come from engines that do not observe, so the section is written
+    // only when there is something in it.
+    if !outcome.observed.is_empty() {
+        text.push_str("[observed]\n");
+        for (index, entry) in outcome.observed.iter().enumerate() {
+            text.push_str(&format!("#{}\n", index + 1));
+            for line in entry.split('\n') {
+                text.push_str(&format!("| {line}\n"));
+            }
+        }
+    }
     text
 }
 
@@ -1338,8 +1408,21 @@ pub fn parse(text: &str) -> Option<Outcome> {
                 "warnings" => "warnings",
                 "errors" => "errors",
                 "value" => "value",
+                "observed" => "observed",
                 _ => return None,
             };
+        } else if section == "observed" {
+            // An editor that strips trailing spaces leaves an empty line as a bare `|`.
+            match line.strip_prefix("| ").or((line == "|").then_some("")) {
+                Some(content) => {
+                    let entry = outcome.observed.last_mut()?;
+                    if !entry.is_empty() {
+                        entry.push('\n');
+                    }
+                    entry.push_str(content);
+                }
+                None => outcome.observed.push(String::new()),
+            }
         } else if line == "\\ no newline at end of output" {
             if outcome.stdout.ends_with('\n') {
                 outcome.stdout.pop();
@@ -1393,6 +1476,67 @@ fn unescape(text: &str) -> String {
         }
     }
     result
+}
+
+/// A top-level expression whose observed entries differ between two outcomes.
+pub struct ExpressionDifference {
+    /// The expression's number, from one.
+    pub position: usize,
+    /// The reference's entries for it and the other outcome's, without the number.
+    pub reference: Vec<String>,
+    pub other: Vec<String>,
+}
+
+/// The top-level expressions whose observed entries differ between two outcomes, in order.
+/// Empty when either outcome was not observed.
+pub fn differing_expressions(reference: &Outcome, other: &Outcome) -> Vec<ExpressionDifference> {
+    fn by_expression(outcome: &Outcome) -> Vec<(usize, Vec<String>)> {
+        let mut groups: Vec<(usize, Vec<String>)> = Vec::new();
+        for entry in &outcome.observed {
+            let Some((position, text)) = entry
+                .strip_prefix('[')
+                .and_then(|rest| rest.split_once("] "))
+                .and_then(|(position, text)| Some((position.parse::<usize>().ok()?, text)))
+            else {
+                continue;
+            };
+            match groups.last_mut() {
+                Some((last, texts)) if *last == position => texts.push(text.to_string()),
+                _ => groups.push((position, vec![text.to_string()])),
+            }
+        }
+        groups
+    }
+    if reference.observed.is_empty() || other.observed.is_empty() {
+        return Vec::new();
+    }
+    let mut reference = by_expression(reference).into_iter().peekable();
+    let mut other = by_expression(other).into_iter().peekable();
+    let mut differing = Vec::new();
+    loop {
+        let (first, second) = match (reference.peek(), other.peek()) {
+            (None, None) => return differing,
+            (Some((first, _)), Some((second, _))) => (*first, *second),
+            (Some((first, _)), None) => (*first, usize::MAX),
+            (None, Some((second, _))) => (usize::MAX, *second),
+        };
+        let position = first.min(second);
+        let reference = reference
+            .next_if(|(candidate, _)| *candidate == position)
+            .map(|(_, texts)| texts)
+            .unwrap_or_default();
+        let other = other
+            .next_if(|(candidate, _)| *candidate == position)
+            .map(|(_, texts)| texts)
+            .unwrap_or_default();
+        if reference != other {
+            differing.push(ExpressionDifference {
+                position,
+                reference,
+                other,
+            });
+        }
+    }
 }
 
 /// A unified diff of two outcomes, or `None` when they are equal.

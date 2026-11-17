@@ -1,0 +1,69 @@
+[stdout]
+|   warning: NAs introduced by coercion 
+|   warning: NAs introduced by coercion 
+|   warning: NAs introduced by coercion 
+| [1] NA NA  2 NA
+|   warning: NAs introduced by coercion to integer range 
+|   warning: NAs introduced by coercion to integer range 
+| [1] NA  2 NA
+|   warning: imaginary parts discarded in coercion 
+|   warning: imaginary parts discarded in coercion 
+| [1] 1 2 3
+|   warning: NAs introduced by coercion 
+|   warning: NAs introduced by coercion to integer range 
+|   warning: imaginary parts discarded in coercion 
+| [1]  1 NA NA  0
+|   warning: NAs introduced by coercion 
+|   warning: NAs introduced by coercion 
+| [1] NA  1 NA
+|   warning: imaginary parts discarded in coercion 
+|   warning: imaginary parts discarded in coercion 
+| [1] 0 0
+|   warning: NAs introduced by coercion 
+|   warning: NAs introduced by coercion 
+| [1]   NA   NA 1+0i
+| [1]   NA   NA TRUE TRUE
+|   warning: NAs introduced by coercion 
+|   warning: NAs introduced by coercion 
+|   warning: out-of-range values treated as 0 in coercion to raw 
+| [1] 01 00 00 00 00
+| [1] 01 02
+| [1] NA  1
+| [1] NA  2
+| [1] NA NA
+| [1] "error: 'list' object cannot be coerced to type 'integer'"
+| [1] "error: 'list' object cannot be coerced to type 'integer'"
+| [1] "error: 'list' object cannot be coerced to type 'integer'"
+|   warning: NAs introduced by coercion 
+| [1] NA NA
+|   warning: NAs introduced by coercion 
+|   warning: NAs introduced by coercion 
+| [1] NA NA  3
+|   warning: NAs introduced by coercion 
+|   warning: NAs introduced by coercion to integer range 
+| [1] NA NA
+|   warning: NAs introduced by coercion 
+|   warning: NAs introduced by coercion 
+| [1] NA NA  7
+|   warning: NAs introduced by coercion 
+|   warning: NAs introduced by coercion 
+| [1] NA NA
+|   warning: NAs introduced by coercion 
+|   warning: NAs introduced by coercion 
+| [1] NA NA
+|   warning: NAs introduced by coercion 
+|   warning: NAs introduced by coercion 
+|   warning: NAs introduced by coercion 
+|   warning: imaginary parts discarded in coercion 
+|      [,1] [,2] [,3]
+| [1,]    1    2   NA
+| [2,]   NA   NA    0
+|  [1] NA NA NA NA NA NA NA NA NA NA NA NA NA NA NA NA NA NA NA NA NA NA NA NA NA
+| [26] NA
+| [1] 26
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 26

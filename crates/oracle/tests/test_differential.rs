@@ -10,11 +10,15 @@
 use {
     oracle::{
         Engine, ProcessEngine,
+        corpus::{check_corpus_seed, load_corpus, render_corpus_divergences},
         fuzz::{
-            SeedReport, check_seed, format_numbers_program, native_helpers_program,
-            parse_data_program, program, render_divergences, sprintf_program, trace_back_program,
+            MEMORY_LIMIT, ProgramKind, SeedReport, check_seed, format_numbers_program,
+            native_helpers_program, parse_data_program, program, render_divergences,
+            sprintf_program, trace_back_program,
         },
-        gnu_r_available, ry_runtime_available,
+        gnu_r_available,
+        reduce::{Signature, reduce_divergence},
+        ry_runtime_available,
     },
     std::{
         path::PathBuf,
@@ -55,10 +59,10 @@ fn fuzz_programs_agree_across_tiers() {
         eprintln!("skipped: ry's runtime is not built; run `cargo build -p ry-lang -p libr`");
         return;
     }
-    let gnu_r = ProcessEngine::gnu_r().with_timeout(TIMEOUT);
-    let tier0 = ProcessEngine::ry_tier0().with_timeout(TIMEOUT);
-    let jit = ProcessEngine::ry_jit().with_timeout(TIMEOUT);
-    let mut reports = run_seeds(&gnu_r, &[&tier0, &jit], fuzz_iterations(3));
+    let gnu_r = ProcessEngine::gnu_r().with_timeout(TIMEOUT).observing();
+    let tier0 = ProcessEngine::ry_tier0().with_timeout(TIMEOUT).observing();
+    let jit = ProcessEngine::ry_jit().with_timeout(TIMEOUT).observing();
+    let mut reports = run_seeds(&gnu_r, &[&tier0, &jit], fuzz_iterations(8));
     // A generator that drifts into erroring early would compare almost nothing, so most
     // programs must run to the end under GNU R.
     let completed = reports
@@ -73,12 +77,106 @@ fn fuzz_programs_agree_across_tiers() {
     let directory = scratch_directory();
     for &seed in REGRESSION_SEEDS {
         reports.push(
-            check_seed(seed, &gnu_r, &[&tier0, &jit], &directory)
-                .unwrap_or_else(|error| panic!("seed {seed}: {} failed: {error}", gnu_r.name())),
+            check_seed(
+                ProgramKind::Grammar,
+                seed,
+                &gnu_r,
+                &[&tier0, &jit],
+                &directory,
+            )
+            .unwrap_or_else(|error| panic!("seed {seed}: {} failed: {error}", gnu_r.name())),
         );
     }
     std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
     assert_agree(&reports);
+}
+
+/// A metamorphic program compares its own forms and prints `DIFFERENT` for one that disagrees,
+/// so it needs no GNU R: no form may disagree under the interpreter, and compiled code must
+/// give the interpreter's values, conditions and printed text.
+#[test]
+fn fuzz_metamorphic_forms_agree_across_tiers() {
+    if !ry_runtime_available() {
+        eprintln!("skipped: ry's runtime is not built; run `cargo build -p ry-lang -p libr`");
+        return;
+    }
+    let tier0 = ProcessEngine::ry_tier0().with_timeout(TIMEOUT).observing();
+    let jit = ProcessEngine::ry_jit().with_timeout(TIMEOUT).observing();
+    let reports = run_kind(
+        ProgramKind::Metamorphic,
+        &tier0,
+        &[&jit],
+        fuzz_iterations(8),
+    );
+    let disagreeing: Vec<String> = reports
+        .iter()
+        .filter(|report| report.reference.stdout.contains("DIFFERENT"))
+        .map(|report| {
+            format!(
+                "metamorphic seed {} under {}:\n{}\nprogram: cargo run -q -p oracle -- fuzz --kind metamorphic --seed {} --print",
+                report.seed,
+                tier0.name(),
+                report
+                    .reference
+                    .stdout
+                    .lines()
+                    .filter(|line| line.contains("DIFFERENT"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                report.seed
+            )
+        })
+        .collect();
+    assert!(
+        disagreeing.is_empty(),
+        "forms that must agree differ:\n{}",
+        disagreeing.join("\n")
+    );
+    assert_agree(&reports);
+}
+
+/// The builtins programs call a few hundred base functions on the value zoo. Without GNU R the
+/// values prove nothing, but every call must return or signal an R error under the interpreter,
+/// and compiled code must agree with it.
+#[test]
+fn fuzz_builtins_agree_across_tiers() {
+    if !ry_runtime_available() {
+        eprintln!("skipped: ry's runtime is not built; run `cargo build -p ry-lang -p libr`");
+        return;
+    }
+    let tier0 = ProcessEngine::ry_tier0().with_timeout(TIMEOUT).observing();
+    let jit = ProcessEngine::ry_jit().with_timeout(TIMEOUT).observing();
+    assert_agree(&run_kind(
+        ProgramKind::Builtins,
+        &tier0,
+        &[&jit],
+        fuzz_iterations(8),
+    ));
+}
+
+/// The api programs call functions from the table of everything base, stats and utils export
+/// with arguments of any type. No call may crash or hang the interpreter, and compiled code must
+/// agree with it; `just fuzz-kind api` compares the same programs with GNU R.
+#[test]
+fn fuzz_api_calls_agree_across_tiers() {
+    if !ry_runtime_available() {
+        eprintln!("skipped: ry's runtime is not built; run `cargo build -p ry-lang -p libr`");
+        return;
+    }
+    let prepare = |engine: ProcessEngine| {
+        engine
+            .with_timeout(TIMEOUT)
+            .with_memory_limit(MEMORY_LIMIT)
+            .observing()
+    };
+    let tier0 = prepare(ProcessEngine::ry_tier0());
+    let jit = prepare(ProcessEngine::ry_jit());
+    assert_agree(&run_kind(
+        ProgramKind::Api,
+        &tier0,
+        &[&jit],
+        fuzz_iterations(8),
+    ));
 }
 
 #[test]
@@ -96,8 +194,14 @@ fn fuzz_programs_survive_gc_torture() {
     let directory = scratch_directory();
     for &seed in REGRESSION_SEEDS {
         reports.push(
-            check_seed(seed, &ry, &[&torture, &young], &directory)
-                .unwrap_or_else(|error| panic!("seed {seed}: {} failed: {error}", ry.name())),
+            check_seed(
+                ProgramKind::Grammar,
+                seed,
+                &ry,
+                &[&torture, &young],
+                &directory,
+            )
+            .unwrap_or_else(|error| panic!("seed {seed}: {} failed: {error}", ry.name())),
         );
     }
     std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
@@ -105,6 +209,15 @@ fn fuzz_programs_survive_gc_torture() {
 }
 
 fn run_seeds(reference: &dyn Engine, engines: &[&dyn Engine], count: usize) -> Vec<SeedReport> {
+    run_kind(ProgramKind::Grammar, reference, engines, count)
+}
+
+fn run_kind(
+    kind: ProgramKind,
+    reference: &dyn Engine,
+    engines: &[&dyn Engine],
+    count: usize,
+) -> Vec<SeedReport> {
     let first: u64 = std::env::var("FUZZ_SEED")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -113,13 +226,20 @@ fn run_seeds(reference: &dyn Engine, engines: &[&dyn Engine], count: usize) -> V
     let started = Instant::now();
     let reports: Vec<SeedReport> = (first..first + count as u64)
         .map(|seed| {
-            check_seed(seed, reference, engines, &directory)
-                .unwrap_or_else(|error| panic!("seed {seed}: {} failed: {error}", reference.name()))
+            check_seed(kind, seed, reference, engines, &directory).unwrap_or_else(|error| {
+                panic!(
+                    "{} seed {seed}: {} failed: {error}\nprogram: cargo run -q -p oracle -- fuzz --kind {} --seed {seed} --print",
+                    kind.name(),
+                    reference.name(),
+                    kind.name()
+                )
+            })
         })
         .collect();
     std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
     eprintln!(
-        "{count} programs from seed {first} under {} and {} in {:.1} s",
+        "{count} {} programs from seed {first} under {} and {} in {:.1} s",
+        kind.name(),
         reference.name(),
         engines
             .iter()
@@ -190,6 +310,41 @@ fn fuzz_native_helpers_match_their_r_bodies() {
         }
     }
     std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
+}
+
+/// The reducer keeps a crash while GNU R still runs every candidate to completion. The crashing
+/// engine is a shell script that kills itself with SIGSEGV when the program mentions `boom`, so
+/// the test needs GNU R but not ry.
+#[cfg(unix)]
+#[test]
+fn reduction_keeps_a_crash_on_a_program_gnu_r_completes() {
+    use std::os::unix::fs::PermissionsExt;
+    if !gnu_r_available() {
+        eprintln!("skipped: GNU R is not installed");
+        return;
+    }
+    let directory = scratch_directory();
+    let script = directory.join("crashes-on-boom.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\ngrep -q boom \"$1\" && kill -SEGV $$\nexit 1\n",
+    )
+    .expect("write the crashing engine");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+        .expect("make the crashing engine executable");
+    let engine = ProcessEngine::from_command(&script.display().to_string())
+        .expect("a command line names an engine");
+    let gnu_r = ProcessEngine::gnu_r().with_timeout(TIMEOUT);
+    let program = "x <- 1:10\nprint(sum(x))\nboom <- function(n) n * 2\ny <- boom(3)\nprint(y)\nz <- paste(\"a\", \"b\")\n";
+    let reduction = reduce_divergence(program, &gnu_r, &engine, &directory, 200, None)
+        .unwrap_or_else(|error| panic!("the reduction failed: {error}"));
+    std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
+    assert_eq!(
+        reduction.signature,
+        Signature::Crashed("signal: 11 (SIGSEGV)".to_string())
+    );
+    assert_eq!(reduction.program, "boom <- NULL\n");
+    assert_eq!(reduction.bytes_after, reduction.program.len());
 }
 
 fn scratch_directory() -> PathBuf {
@@ -370,4 +525,41 @@ fn fuzz_sprintf_matches_gnu_r() {
         );
     }
     std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
+}
+
+/// No mutant of real R code (help examples, R's regression tests when downloaded, the oracle's
+/// cases) may crash ry at tier 0. Which snippet a seed picks changes whenever a case is added, so
+/// a mutant that merely differs from GNU R is printed for the long run to report
+/// (`just fuzz-kind corpus`) and does not fail the default suite.
+#[test]
+fn fuzz_corpus_mutants_never_crash() {
+    if !gnu_r_available() || !ry_runtime_available() {
+        eprintln!("skipped: GNU R or ry's runtime is not available");
+        return;
+    }
+    let corpus = load_corpus(false).expect("extract the fuzz corpus");
+    let gnu_r = ProcessEngine::gnu_r().with_timeout(TIMEOUT).observing();
+    let tier0 = ProcessEngine::ry_tier0().with_timeout(TIMEOUT).observing();
+    let directory = scratch_directory();
+    let mut failures = Vec::new();
+    for seed in fuzz_seeds(12) {
+        let report = check_corpus_seed(seed, &corpus.snippets, &gnu_r, &[&tier0], &directory)
+            .unwrap_or_else(|error| panic!("seed {seed}: GNU R failed: {error}"));
+        if report
+            .divergences
+            .iter()
+            .any(|divergence| divergence.crashed)
+        {
+            failures.push(render_corpus_divergences(&report));
+        } else if !report.divergences.is_empty() {
+            eprintln!("{}", render_corpus_divergences(&report));
+        }
+    }
+    std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
+    assert!(
+        failures.is_empty(),
+        "{} corpus mutants crashed ry:\n{}\nreplay with FUZZ_SEED=<seed> cargo test -p oracle --test test_differential fuzz_corpus",
+        failures.len(),
+        failures.join("\n")
+    );
 }

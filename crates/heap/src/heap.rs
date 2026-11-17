@@ -18,6 +18,8 @@
 // Every `unsafe fn` here has the same contract, stated once on `object::Sexp`: each handle it
 // takes must point at a live object of the kind the function expects.
 #![allow(clippy::missing_safety_doc)]
+// A build with AddressSanitizer tells it which objects are freed (`space::sanitizer`).
+#![feature(cfg_sanitize)]
 
 pub mod activity;
 pub mod arena;
@@ -42,7 +44,7 @@ use {
             slot_for,
         },
         records::{Layouts, slot_kind},
-        space::{SIZE_CLASS_BY_WORDS, SLOT_SIZES, Space, Swept, poison},
+        space::{SIZE_CLASS_BY_WORDS, SLOT_SIZES, Space, Swept, poison, sanitizer},
         strings::{Encoding, StringTable},
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -2099,13 +2101,28 @@ impl Heap {
         self.install_char(name)
     }
 
-    /// The interned symbol whose print name is the `CHARSXP` `name`. `NA_character_` is not the
-    /// interned "NA" string, and installs as the symbol `NA`, as GNU R's `installTrChar` does.
+    /// The interned symbol whose print name has the text of the `CHARSXP` `name`.
+    /// `NA_character_` is not the interned "NA" string, and installs as the symbol `NA`, as GNU
+    /// R's `installTrChar` does.
+    ///
+    /// GNU R finds a symbol by its text, so a UTF-8 name and the unmarked name with the same
+    /// bytes are one symbol, whose print name is the string that installed it first: names from
+    /// `c("a\u00e4" = 1)` are marked UTF-8, and those from `c(a\u00e4 = 1)` are not. The table
+    /// holds only that print name, so the other spelling finds the symbol through its twin. A
+    /// latin1 name is translated to UTF-8 first, as `installTrChar` translates it.
     pub unsafe fn install_char(&mut self, name: Sexp) -> HeapResult<Sexp> {
         if name == self.known.na_string {
             return self.install(b"NA");
         }
         if let Some(&symbol) = self.symbols.get(&name) {
+            return Ok(symbol);
+        }
+        if name.gp() & (gp::LATIN1 | gp::ASCII) == gp::LATIN1 {
+            let text: String = name.bytes().iter().map(|&byte| char::from(byte)).collect();
+            let translated = self.mk_char(text.as_bytes(), Encoding::Native)?;
+            return self.install_char(translated);
+        }
+        if let Some(symbol) = self.symbol_of_twin(name) {
             return Ok(symbol);
         }
         if name.length() as usize > MAX_SYMBOL_BYTES {
@@ -2124,8 +2141,31 @@ impl Heap {
 
     /// The interned symbol named `name`, if one exists, without installing it.
     pub unsafe fn find_symbol(&self, name: &[u8]) -> Option<Sexp> {
-        let name = self.find_interned(name, 0)?;
-        self.symbols.get(&name).copied()
+        match self.find_interned(name, 0) {
+            Some(name) => self
+                .symbols
+                .get(&name)
+                .copied()
+                .or_else(|| self.symbol_of_twin(name)),
+            None if name.is_ascii() => None,
+            None => {
+                let name = self.find_interned(name, gp::UTF8)?;
+                self.symbols.get(&name).copied()
+            }
+        }
+    }
+
+    /// The symbol whose print name has the bytes of the non-ASCII UTF-8 text `name` under the
+    /// other marking: unmarked for a UTF-8 string, UTF-8 for an unmarked one.
+    unsafe fn symbol_of_twin(&self, name: Sexp) -> Option<Sexp> {
+        let encoding = name.gp() & (gp::ENCODING | gp::ASCII);
+        let twin = match encoding {
+            gp::UTF8 => 0,
+            0 if name.is_valid_utf8() => gp::UTF8,
+            _ => return None,
+        };
+        let twin = self.find_interned(name.bytes(), twin)?;
+        self.symbols.get(&twin).copied()
     }
 
     pub fn symbol_count(&self) -> usize {
@@ -2191,6 +2231,7 @@ impl Heap {
 
     #[inline(always)]
     unsafe fn store(&mut self, parent: Sexp, old: Sexp, new: Sexp) {
+        self.verify_store(parent, new);
         self.count_store(parent, old, new);
         self.write_barrier(parent, new);
     }
@@ -2354,6 +2395,7 @@ impl Heap {
 
     #[inline(always)]
     pub unsafe fn set_element(&mut self, vector: Sexp, index: usize, value: Sexp) {
+        self.verify_store(vector, value);
         if vector.is_altrep()
             && let Some(elements) = crate::object::altrep_elements()
         {
@@ -3371,6 +3413,12 @@ impl Heap {
     /// Keeps `object` alive until the current handle scope ends.
     #[inline]
     pub fn root(&mut self, object: Sexp) {
+        #[cfg(debug_assertions)]
+        if self.policy.verify {
+            // SAFETY: the check reads only the heap's own tables and, for an address inside the
+            // heap, the header of its slot.
+            unsafe { self.verify_live(object, || "a value being rooted".into()) };
+        }
         self.roots.handles.push(object);
     }
 
@@ -4182,6 +4230,7 @@ impl Heap {
             .then(|| (Instant::now(), self.young_bytes, self.young_large_bytes));
         self.space.marked_vector_cells = 0;
         self.space.tenured_vector_cells = 0;
+        self.space.sweeping = self.stats.collections() + 1;
         self.deeper = kind != Collection::Minor;
         if kind != Collection::Major && self.policy.verify {
             self.verify_barrier();
@@ -4484,6 +4533,9 @@ impl Heap {
     }
 
     unsafe fn mark_roots(&mut self, kind: Collection) {
+        if self.policy.verify {
+            self.verify_roots(kind);
+        }
         let known = self.known;
         for object in known.all() {
             self.mark(object);
@@ -4554,8 +4606,225 @@ impl Heap {
 
     unsafe fn drain(&mut self) {
         while let Some(object) = self.mark_stack.pop() {
+            if self.policy.verify {
+                self.verify_children(object);
+            }
             self.trace(object);
         }
+    }
+
+    /// Under `RY_GC_VERIFY`, panics when a reachable object holds a reference that is not an
+    /// allocated object. Tracing would read the header behind such a reference and crash
+    /// somewhere unrelated, as it does after code writes past a small object's slot (an
+    /// element store into an ALTREP wrapper, which has no element storage).
+    #[cold]
+    unsafe fn verify_children(&self, parent: Sexp) {
+        for (position, child) in self.children_of(parent).into_iter().enumerate() {
+            if child == self.known.nil || self.is_allocated_object(child) {
+                continue;
+            }
+            let length = match parent.kind().shape() {
+                Shape::Vector if !parent.is_altrep() => format!(" of length {}", parent.length()),
+                _ => String::new(),
+            };
+            let field = match self.field_holding(parent, child) {
+                Some(field) => format!(" The reference is the word at {field:#x}."),
+                None => String::new(),
+            };
+            panic!(
+                "heap corrupted: a reachable {}{:?}{length} at {:p} holds {:p} as {}, which is \
+                 {}.{field} Found by collection {}.",
+                if parent.is_altrep() { "ALTREP " } else { "" },
+                parent.kind(),
+                parent.as_ptr(),
+                child.as_ptr(),
+                child_name(parent, position),
+                self.describe_stray(child),
+                self.space.sweeping,
+            );
+        }
+    }
+
+    /// Under `RY_GC_VERIFY`, panics when a root is not an allocated object, before marking
+    /// reads the header behind it. Such a root is a value that a handle, a frame or a table
+    /// kept past the collection that freed it, or memory that a stray store wrote over.
+    #[cold]
+    unsafe fn verify_roots(&self, kind: Collection) {
+        let minor = kind == Collection::Minor;
+        let roots = &self.roots;
+        for (name, stack) in [
+            ("global root", &roots.globals),
+            ("protect stack entry", &roots.protect.stack),
+            ("handle", &roots.handles),
+            ("handed-out value", &roots.handouts),
+        ] {
+            let start = if minor { stack.scanned } else { 0 };
+            for (index, &root) in stack.entries.iter().enumerate().skip(start) {
+                self.verify_root(root, || {
+                    format!("{name} {index} of {}", stack.entries.len())
+                });
+            }
+        }
+        if minor {
+            for &root in &self.new_roots {
+                self.verify_root(root, || {
+                    "a root registered since the last collection".into()
+                });
+            }
+        } else {
+            for &root in &roots.precious.objects {
+                self.verify_root(root, || "a preserved object".into());
+            }
+        }
+        for (id, source) in &self.sources {
+            let mut named = Vec::new();
+            source.trace(&mut Marker {
+                stack: &mut named,
+                space: None,
+                minor,
+            });
+            for (index, &root) in named.iter().enumerate() {
+                self.verify_root(root, || {
+                    format!(
+                        "value {index} of the {} that root source {id} names",
+                        named.len()
+                    )
+                });
+            }
+        }
+    }
+
+    unsafe fn verify_root(&self, root: Sexp, name: impl FnOnce() -> String) {
+        if root != self.known.nil && !self.is_allocated_object(root) {
+            panic!(
+                "heap corrupted: {} is {:p}, which is {}. Found by collection {}.",
+                name(),
+                root.as_ptr(),
+                self.describe_stray(root),
+                self.space.sweeping,
+            );
+        }
+    }
+
+    /// Under `RY_GC_VERIFY` in a build with debug assertions, panics when a store writes into
+    /// a freed object or stores one. A release build leaves the store to the next collection's
+    /// check, because the test would cost every store a branch.
+    #[inline(always)]
+    #[cfg_attr(not(debug_assertions), allow(unused_variables))]
+    unsafe fn verify_store(&self, parent: Sexp, child: Sexp) {
+        #[cfg(debug_assertions)]
+        if self.policy.verify {
+            self.verify_live(parent, || "the object a store writes into".into());
+            self.verify_live(child, || {
+                format!(
+                    "the value stored into the {:?} at {:p}",
+                    parent.kind(),
+                    parent.as_ptr()
+                )
+            });
+        }
+    }
+
+    /// Panics when `object`, which the mutator is using, is not an allocated object.
+    #[cfg(debug_assertions)]
+    unsafe fn verify_live(&self, object: Sexp, name: impl FnOnce() -> String) {
+        if object != self.known.nil && !self.is_allocated_object(object) {
+            panic!(
+                "heap corrupted: {} is {:p}, which is {}.",
+                name(),
+                object.as_ptr(),
+                self.describe_stray(object),
+            );
+        }
+    }
+
+    fn is_allocated_object(&self, object: Sexp) -> bool {
+        self.space
+            .is_allocated_object(object)
+            .unwrap_or_else(|| self.large.contains(&object))
+    }
+
+    /// What the address of `stray`, which is not an allocated object, is instead.
+    unsafe fn describe_stray(&self, stray: Sexp) -> String {
+        let address = stray.as_ptr() as usize;
+        match self.space.slot_at(stray) {
+            Some((start, size, true)) => format!(
+                "an address {} bytes into the {size}-byte slot of a live object",
+                address - start,
+            ),
+            Some((start, _, false)) if start == address && stray.is_poisoned() => {
+                format!("an object that collection {} freed", stray.freed_by())
+            }
+            Some((start, size, false)) if start == address => {
+                format!("a free {size}-byte slot")
+            }
+            Some((start, size, false)) => format!(
+                "an address {} bytes into a free {size}-byte slot",
+                address - start
+            ),
+            None if self
+                .quarantined_large
+                .iter()
+                .any(|&(memory, _)| memory.as_ptr() as usize == address) =>
+            {
+                format!("a large object that collection {} freed", stray.freed_by())
+            }
+            None => {
+                let double = f64::from_bits(address as u64);
+                if address < 1 << 16 {
+                    format!("no address of the heap (the integer {address})")
+                } else if double.is_finite() && (1e-200..1e200).contains(&double.abs()) {
+                    format!("no address of the heap (the bits of the double {double})")
+                } else {
+                    "no address of the heap".into()
+                }
+            }
+        }
+    }
+
+    /// The address of the word of small object `parent` that holds `child`, which is where a
+    /// debugger's watchpoint catches the store that put it there.
+    unsafe fn field_holding(&self, parent: Sexp, child: Sexp) -> Option<usize> {
+        let (start, size, _) = self.space.slot_at(parent)?;
+        (start..start + size)
+            .step_by(size_of::<usize>())
+            .find(|&word| (word as *const usize).read() == child.as_ptr() as usize)
+    }
+
+    /// The references `parent` holds that tracing follows: its attributes first, then its
+    /// fields or elements.
+    unsafe fn children_of(&self, parent: Sexp) -> Vec<Sexp> {
+        let mut children = vec![parent.attrib()];
+        if parent.is_altrep() {
+            children.extend([parent.car(), parent.cdr(), parent.tag()]);
+            return children;
+        }
+        match parent.kind().shape() {
+            Shape::Vector
+                if matches!(
+                    parent.kind(),
+                    SexpType::String | SexpType::List | SexpType::Expression
+                ) =>
+            {
+                children.extend((0..parent.length() as usize).map(|index| parent.element(index)));
+            }
+            Shape::Triple => children.extend([parent.car(), parent.cdr(), parent.tag()]),
+            Shape::Environment => {
+                children.push(parent.enclosure());
+                let frame = parent.frame_ptr();
+                if !frame.is_null() {
+                    children.extend((*frame).cells());
+                }
+            }
+            Shape::ExternalPtr => {
+                children.extend([parent.external_tag(), parent.external_protected()])
+            }
+            Shape::Record => children.extend(
+                (0..parent.record_slot_count()).filter_map(|slot| parent.record_child(slot)),
+            ),
+            Shape::Vector | Shape::WeakRef | Shape::Primitive => {}
+        }
+        children
     }
 
     #[inline(always)]
@@ -4907,40 +5176,7 @@ impl Heap {
             if remembered {
                 return;
             }
-            let mut children = vec![parent.attrib()];
-            if parent.is_altrep() {
-                children.extend([parent.car(), parent.cdr(), parent.tag()]);
-            } else {
-                match parent.kind().shape() {
-                    Shape::Vector
-                        if matches!(
-                            parent.kind(),
-                            SexpType::String | SexpType::List | SexpType::Expression
-                        ) =>
-                    {
-                        children.extend(
-                            (0..parent.length() as usize).map(|index| parent.element(index)),
-                        );
-                    }
-                    Shape::Triple => children.extend([parent.car(), parent.cdr(), parent.tag()]),
-                    Shape::Environment => {
-                        children.push(parent.enclosure());
-                        let frame = parent.frame_ptr();
-                        if !frame.is_null() {
-                            children.extend((*frame).cells());
-                        }
-                    }
-                    Shape::ExternalPtr => {
-                        children.extend([parent.external_tag(), parent.external_protected()])
-                    }
-                    Shape::Record => children.extend(
-                        (0..parent.record_slot_count())
-                            .filter_map(|slot| parent.record_child(slot)),
-                    ),
-                    _ => {}
-                }
-            }
-            for (position, child) in children.into_iter().enumerate() {
+            for (position, child) in self.children_of(parent).into_iter().enumerate() {
                 if !self.space.is_marked(child) || younger(parent, child) {
                     panic!(
                         "write barrier violated: {} {:?} (length {}) holds {} {:?} at child {position}",
@@ -5110,7 +5346,7 @@ impl Heap {
             return;
         }
         if self.space.quarantining() {
-            poison(memory, size);
+            poison(memory, size, self.space.sweeping);
             self.quarantined_large
                 .push_back((NonNull::new_unchecked(memory), size));
             self.quarantined_large_bytes += size;
@@ -5127,6 +5363,7 @@ impl Heap {
                 break;
             };
             self.quarantined_large_bytes -= size;
+            sanitizer::allow(memory.as_ptr(), size);
             self.release_large_memory(memory.as_ptr(), size);
         }
     }
@@ -5340,6 +5577,27 @@ unsafe fn has_younger_child(parent: Sexp) -> bool {
 #[inline(always)]
 unsafe fn younger(parent: Sexp, child: Sexp) -> bool {
     parent.gc_bits() & (gc_bits::OLD | gc_bits::TENURED) & !child.gc_bits() != 0
+}
+
+/// What the reference at `position` of [`Heap::children_of`] is to `parent`.
+unsafe fn child_name(parent: Sexp, position: usize) -> String {
+    let field = |names: &[&str]| match names.get(position - 1) {
+        Some(name) => (*name).to_string(),
+        None => format!("child {position}"),
+    };
+    if position == 0 {
+        return "its attributes".into();
+    }
+    if parent.is_altrep() {
+        return field(&["its first data field", "its second data field", "its class"]);
+    }
+    match parent.kind().shape() {
+        Shape::Vector => format!("element {}", position - 1),
+        Shape::Triple => field(&["its car", "its cdr", "its tag"]),
+        Shape::Environment if position == 1 => "its enclosure".into(),
+        Shape::Environment => format!("binding cell {}", position - 2),
+        _ => format!("child {position}"),
+    }
 }
 
 /// Whether tracing `object` would mark nothing: a CHARSXP or an atomic vector (logical, integer,

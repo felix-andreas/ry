@@ -4,7 +4,7 @@
 # flake.nix, not this file. It runs when started by hand (user decision: the orchestrating agent
 # starts it on main at its hourly check when main has new commits) and inside a release, which calls
 # it, so nothing is published from a commit that fails it. The `stress` job runs `just ci-stress`
-# in the same shell.
+# in the same shell, once per seed.
 name: CI
 
 on:
@@ -51,9 +51,13 @@ jobs:
         run: nix develop .#ci -c just ci
 
   stress:
-    name: collection stress
+    name: collection stress, seed ${{ matrix.seed }}
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [0, 1, 2]
     steps:
       - uses: actions/checkout@v4
       # The Nix store, the test build and base R need more disk than the runner has free.
@@ -74,4 +78,4 @@ jobs:
         run: nix develop .#ci -c bash -c 'dirname "$(command -v cargo)"' >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@v2
       - name: just ci-stress
-        run: nix develop .#ci -c just ci-stress
+        run: nix develop .#ci -c just ci-stress ${{ matrix.seed }}

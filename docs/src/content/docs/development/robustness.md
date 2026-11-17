@@ -225,7 +225,7 @@ harness of that kind yet; the gap is filed in the backlog.
 | Package builds (`R CMD` under `ry load`) | generated makefiles with recursive, simple, appended, conditional and self-referencing variables, continuations, escapes and `include` lines (`rcmd` `make_expansion_agrees_with_gnu_make`); GNU R's own `Makeconf` | GNU make's expansion of the same variables |
 | Help server | generated requests written back to back on one connection, and their byte mutations (`interp` `help_server` tests) | the parsed request round trips; percent-decoding and query splitting match tables recorded from GNU R |
 | Debugger | scripted sessions and a seeded client that sends random requests, including ry's own `ry*` requests, at every stop (`frames` `test_debugger`); valid and mutated message framing (`ry` `test_debug_framing`); simulated editors attaching to the console, reinitializing and racing each other (`frames` `test_console_server`); scenarios | transcripts; every request answered once, the session ends, the interpreter left clean; frames read back exactly, a malformed or oversized frame is refused without a panic or an unbounded allocation |
-| Interpreter | generated programs, including reads and writes of attributes, names and elements and `c()` calls that compiled code sends to the builtins' direct entries (`interp` `test_fuzz`); closures that write elements, rows and columns of an argument whose length sits at a storage threshold, called three times (`fuzz_replacements_agree_across_repeated_calls`); differential fuzzing; code images: generated code round-tripped, mutated image files and mutated-but-rehashed payloads loaded (`fuzz_code_image_round_trip`, `fuzz_code_image_file`, `fuzz_code_image_load`); `cargo fuzz` `interp_lower`, `bytecode`, `interp_code_image`, `interp_code_image_file` | GNU R, tier 0; the same statements run once at top level, and the caller's value unchanged; for code images the original code object, the evaluator's value, and an error or a warning, never a panic |
+| Interpreter | generated programs, including reads and writes of attributes, names and elements and `c()` calls that compiled code sends to the builtins' direct entries (`interp` `test_fuzz`); closures that write elements, rows and columns of an argument whose length sits at a storage threshold, called three times (`fuzz_replacements_agree_across_repeated_calls`); differential fuzzing (`oracle fuzz`) of five kinds of program: generated grammar programs, including element stores into argument copies of 64 elements and more, interpreted and compiled; metamorphic trials, where one body on one value from a zoo of types, sizes, names and encodings must give an identical result however often and wherever it runs (`fuzz_metamorphic_forms_agree_across_tiers`); builtins on the same zoo (`fuzz_builtins_agree_across_tiers`); calls of functions drawn from every export of base, stats and utils with arguments of any type (`fuzz_api_calls_agree_across_tiers`); and mutated snippets of real R code (base help examples, R's regression tests, the oracle cases), compared only where the unmutated snippet agrees (`fuzz_corpus_mutants_never_crash` is the bounded pass), each compared through a canonical dump of every top-level value and condition; code images: generated code round-tripped, mutated image files and mutated-but-rehashed payloads loaded (`fuzz_code_image_round_trip`, `fuzz_code_image_file`, `fuzz_code_image_load`); `cargo fuzz` `interp_lower`, `bytecode`, `interp_code_image`, `interp_code_image_file` | GNU R, tier 0; the same statements run once at top level, and the caller's value unchanged; for code images the original code object, the evaluator's value, and an error or a warning, never a panic |
 | Native package functions | seeded random frame stacks of closures, operators, `::`, `do.call`, `lapply`, `vapply`, `Reduce`, handlers, restarts, `eval`, `local`, `Recall`, S3 dispatch and trimming (`fuzz_native_trace_back_matches_its_r_body` in `oracle` `test_differential`, at tier 0 and under the JIT, `FUZZ_SEED` replays; the `conditions__rlang_trace_back_generated` oracle case) | the function's own R body on the same frame, by `identical()`; GNU R, through the oracle case |
 | Environment variables | seeded random `Sys.setenv`, `Sys.unsetenv` and Rust-side writes over prefix-sharing, empty, `NA`, `=`-holding and non-ASCII names and values (`interp` `test_fuzz` `fuzz_environment_variables_agree_with_the_c_library`); the `system__sys_env_round_trips` oracle case | the C library's environment, on every `Sys.getenv`, `Sys.setenv` and `Sys.unsetenv` result; GNU R, through the oracle case |
 | Native helpers (withr, base) | seeded random calls of withr's environment and option helpers, `Sys.getenv`, `Sys.setenv`, `Sys.unsetenv`, `intersect` and `structure(names =)` with `NA`, empty, unset and non-ASCII values (`fuzz_native_helpers_match_their_r_bodies` in `oracle` `test_differential`, at tier 0 and under the JIT, `FUZZ_SEED` replays) | each function's own R body, by `identical()` on the value, visibility, condition and environment and option state; GNU R, through the oracle cases |
@@ -277,6 +277,50 @@ points at a young one is remembered, has the element on a dirty card, or is esca
 barrier contract in [R runtime](/development/design/r-runtime/)). A missed barrier then panics
 at the next collection instead of freeing a live object only when the timing is unlucky.
 
+The same verification checks every root before the collector traces it, and every reference a
+reachable object holds as it is traced. A root or reference that is not nil and not the start of
+an allocated object panics with `heap corrupted`. A value kept without a root, and a write that
+runs past an object's storage into its neighbor, then fail at the next collection instead of when
+the damaged object is used. The report says what holds the reference, what the reference points
+at, and where it is stored:
+
+```
+heap corrupted: protect stack entry 0 of 1 is 0x2000000200c0, which is an object that collection 1 freed. Found by collection 2.
+
+heap corrupted: a reachable List of length 1 at 0x2000000200f0 holds 0x2000000200c0 as element 0,
+which is an object that collection 1 freed. The reference is the word at 0x200000020110. Found by
+collection 2.
+
+heap corrupted: a reachable List of length 2 at 0x2000000200c0 holds 0x3ff0000000000000 as
+element 1, which is no address of the heap (the bits of the double 1). The reference is the word
+at 0x2000000200e8. Found by collection 1.
+```
+
+| The report says | What happened |
+| --- | --- |
+| `an object that collection N freed` | Something kept the reference without a root across collection `N`. The holder names where: a protect stack entry, a handle, a handed-out value, a value the interpreter's root source names, or a field of another object. |
+| `no address of the heap (the integer N)` or `(the bits of the double X)` | A write ran past the end of a neighboring object and stored data over the reference. |
+| `an address N bytes into the S-byte slot of a live object` | The reference was computed, or a write overlapped it by part of a word. |
+| `a free S-byte slot` | The slot holds no object: none was allocated there yet, or one was freed before poisoning was on. |
+
+Small objects live at fixed addresses, so a run with the same seed reports the same address and
+the same collection number for them. A large object's address changes from run to run.
+
+A build with debug assertions also checks the mutator between collections: a store into an object,
+a stored value and a value being rooted as a handle must each be an allocated object. A builtin
+that allocates its result without rooting it, then fills it while allocating each element, fails
+at its first store after the collection that freed the result, and one that roots a value too late
+fails where it roots it:
+
+```
+heap corrupted: the object a store writes into is 0x200000b15000, which is an object that collection 2 freed.
+
+heap corrupted: a value being rooted is 0x2000000200c0, which is an object that collection 1 freed.
+```
+
+The panic's backtrace names the builtin. A release build leaves this case to the poison, because
+the check would cost every store and every root a branch.
+
 The default suite runs a seeded sample of the oracle cases (`cases_survive_gc_torture`,
 `cases_survive_young_gc_torture`) and of the generated programs (`fuzz_programs_survive_gc_torture`)
 under the first two modes, compared with ry unstressed. A third test
@@ -302,6 +346,24 @@ runtime, so there a freed object reads as `FREESXP` and its other fields as pois
 or verification, debug builds poison freed slots but reuse them at once, and release builds do
 neither.
 
+`just asan` runs the `heap` and `interp` tests in a build with AddressSanitizer. The heap maps its
+own memory, which the sanitizer knows nothing about, so in such a build the collector tells it:
+a freed object's memory past its first word, which holds the kind, is marked unaddressable, and a
+slot is marked addressable again when the allocator hands it out. A read or write of a freed object's fields or elements then
+stops at the access, in Rust or in C, instead of reading poison:
+
+```
+ERROR: AddressSanitizer: use-after-poison on address 0x2000000200d0 ...
+READ of size 8 ...
+    #1 heap::object::Sexp::length crates/heap/src/object.rs:995
+    #2 heap::object::Sexp::slice crates/heap/src/object.rs:1039
+```
+
+The sanitizer sees no boundary between two live objects, because slots sit side by side with no
+gap, so a write past one object into the next is left to the verifier's reference check above.
+Code the JIT generates and a package's compiled code are not instrumented, which is why the recipe
+covers the two crates' tests and not the oracle cases.
+
 Before the argument-reference rooting fix, `datetime__year_overflow` crashed unstressed under the
 oracle harness. In a debug build of that tree, `RY_GC_STRESS=young` with quarantine panicked
 with the message above in 3 of 3 runs, when a collection traced a root that still held a freed
@@ -313,9 +375,15 @@ object, while plain `RY_GC_STRESS=1` passed 3 of 3, since it tenures the object 
 | --- | --- |
 | `just simulate COUNT ACTIONS BASE` | The language-server simulator over `COUNT` seeds from `BASE`. |
 | `just scenarios [NAME]` | Every scenario, or one. |
-| `just fuzz-differential SEED COUNT ENGINES` | Generated programs under GNU R and ry's engines. |
+| `just fuzz-differential SEED COUNT ENGINES` | Generated grammar programs under GNU R and ry's engines. |
+| `just fuzz-kind KIND SEED COUNT ENGINES` | One kind of program (`grammar`, `metamorphic`, `builtins`, `api`, `corpus`) or `all`, with each diverging program and its report written to `target/fuzz-findings`. |
+| `just fuzz-coverage COUNT` | No engine: how many of the functions base, stats and utils export the programs of `COUNT` seeds of each kind name in a call. |
+| `just fuzz-long HOURS BASE ENGINES` | Every kind for `HOURS` of wall clock from seed `BASE`, under tier 0, the forced JIT and seeded collection stress unless `ENGINES` says otherwise. The staged Fuzz workflow runs it. |
+| `just fuzz-reduce FILE ENGINE` | One diverging program shrunk to a minimal one that diverges the same way (`oracle reduce`), the form a finding takes as an oracle case. |
+| `just fuzz-corpus SEED COUNT ENGINES` | Mutated snippets of real R code (base help examples, R's regression tests, the oracle cases) under GNU R and ry's engines, observing. |
 | `just gc-torture [young\|seeded\|repeat]` | Every oracle case under collection stress, under `RY_GC_STRESS=young`, under `RY_GC_STRESS=seed:N` with the heap checked, or under the last with each case evaluated twice in one process. |
-| `just ci-stress` | The release gate's stress job: `just gc-torture repeat` for three seeds, then generated programs under GNU R, tier 0, the JIT and the repeated seeded stress. |
+| `just asan [ARGS]` | The `heap` and `interp` tests under AddressSanitizer, which stops at a read or write of a freed object. |
+| `just ci-stress SEED` | One of the release gate's stress jobs: `just gc-torture repeat` with `FUZZ_SEED=SEED`, then 300 generated programs under GNU R, tier 0, the JIT and the repeated seeded stress. CI runs seeds 0, 1 and 2. |
 | `just fuzz-deep [MINUTES] [BASE] [DEPTH]` | Every seeded harness at a deep budget until the time limit, described below. |
 | `just fuzz-run TARGET` | One `cargo fuzz` target under libFuzzer. |
 | `just fuzz-all SECONDS [FEATURES]` | Every `cargo fuzz` target for `SECONDS` of wall clock each, after seeding the corpora and building the targets. `FEATURES` limits the targets: `runtime` leaves out the two that link Polars. |

@@ -1,0 +1,44 @@
+[stdout]
+| "error: invalid 'enclos' argument of type 'NULL'" 
+| 7 
+| 7 
+| 1 
+| 8 
+| 2 
+| "error: invalid 'enclos' argument of type 'NULL'" 
+| "error: invalid 'enclos' argument of type 'NULL'" 
+| "error: invalid 'enclos' argument of type 'NULL'" 
+| c(1L, 1L, 1L) 
+| integer(0) 
+| "error: invalid 'each' argument" 
+| 1:2 
+| integer(0) 
+| "error: invalid 'each' argument" 
+| c(1L, 1L, 1L, 1L, 1L) 
+| c(1L, 1L, 1L) 
+| c(1L, 1L, 1L) 
+| 1:2 
+| "error: invalid 'each' argument" 
+| .Primitive("sum") 
+| warning: setting environment(<primitive function>) is not possible and trying it is deprecated 
+| 1 
+| warning: coercing argument of type 'expression' to logical 
+| "error: 'list' object cannot be coerced to type 'logical'" 
+| warning: coercing argument of type 'expression' to logical 
+| "error: 'list' object cannot be coerced to type 'logical'" 
+| "error: 'list' object cannot be coerced to type 'double'" 
+| "error: 'list' object cannot be coerced to type 'double'" 
+| warning: coercing argument of type 'list' to logical 
+| TRUE 
+| c(1, 3) 
+| "error: 'list' object cannot be coerced to type 'double'" 
+| "error: invalid 'type' (expression) of argument" 
+| "error: invalid 'type' (expression) of argument" 
+| c(1, 2) 
+| "error: invalid 'type' (list) of argument" 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

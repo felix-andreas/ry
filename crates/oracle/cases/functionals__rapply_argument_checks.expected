@@ -1,0 +1,58 @@
+[stdout]
+| [1] "error: invalid 'classes' argument"
+| [1] "error: invalid 'classes' argument"
+| [1] "error: invalid 'classes' argument"
+| [1] "error: invalid 'classes' argument"
+| [1] "error: invalid 'classes' argument"
+| [1] "error: 'arg' must be NULL or a character vector"
+| [1] "error: 'object' must be a list or expression"
+| [1] "error: 'object' must be a list or expression"
+| [1] "error: invalid 'f' argument"
+| [1] "error: invalid 'f' argument"
+| List of 2
+|  $ : NULL
+|  $ : NULL
+| List of 2
+|  $ : NULL
+|  $ : num 2
+| expression(a, 2)
+|  Named chr [1:3] "name" "numeric" "character"
+|  - attr(*, "names")= chr [1:3] "" "" "b"
+| List of 1
+|  $ :List of 2
+|   ..$ : chr "name"
+|   ..$ : chr "numeric"
+| List of 2
+|  $ : num 2
+|  $ :List of 2
+|   ..$ : num 4
+|   ..$ : symbol d
+| List of 5
+|  $ : chr "miss"
+|  $ : chr "hit"
+|  $ : chr "miss"
+|  $ : chr "miss"
+|  $ : chr "miss"
+|  chr [1:5] "miss" "miss" "hit" "hit" "miss"
+|  Named chr [1:3] "integer" "character" "numeric"
+|  - attr(*, "names")= chr [1:3] "a" "b" ""
+| 'data.frame':	2 obs. of  2 variables:
+|  $ a: int  2 1
+|  $ b: chr  "y" "x"
+|  Named chr [1:2] "1" "x"
+|  - attr(*, "names")= chr [1:2] "a" "b"
+| List of 2
+|  $ a: num 1
+|  $ b:List of 1
+|   ..$ c: chr "S"
+|  - attr(*, "class")= chr "k"
+|  - attr(*, "extra")= logi TRUE
+| List of 2
+|  $ : chr "hit"
+|  $ : chr "miss"
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

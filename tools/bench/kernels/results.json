@@ -3,20 +3,20 @@
   "suite": "kernels",
   "name": "Numeric kernels (ours)",
   "meta": {
-    "date": "2026-11-15",
-    "ry_commit": null,
+    "date": "2026-11-17",
+    "ry_commit": "62985f41d849fb362e41614e9a58114f6a7178c5",
     "release": {
-      "tag": "0.4.5",
+      "tag": "0.5.0",
       "archive": "ry-x86_64-unknown-linux-gnu.tar.gz",
-      "sha256": "bb64321298f71a887abb468bac3dd285402d1e1088cce9917373b0cf588b66bb"
+      "sha256": "575ad8ad890b64c929eee4a9fab76262ffcea879c8e29070dfdcaad9d6b5c3dc"
     },
     "libr_text_bytes": {},
     "machine": {
       "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
       "cores": 4,
-      "kernel": "Linux 6.18.44-fc-v470"
+      "kernel": "Linux 6.18.44-fc-v509"
     },
-    "command": "tools/bench/bench.py kernels --release /tmp/claude-0/rel/ry-x86_64-unknown-linux-gnu.tar.gz --rscript /opt/R/4.6.2/bin/Rscript --write",
+    "command": "tools/bench/bench.py kernels --release /tmp/claude-0/-home-user-ry/154b171f-2090-585f-8f16-cbe3f4d1ab5f/scratchpad/rel050/ry-x86_64-unknown-linux-gnu.tar.gz --rscript /opt/R/4.6.2/bin/Rscript --write --samples /tmp/claude-0/-home-user-ry/154b171f-2090-585f-8f16-cbe3f4d1ab5f/scratchpad/bench050/samples-kernels",
     "gnu_r": {
       "version": "4.6.2",
       "blas": "/opt/R/4.6.2/lib/R/lib/libRblas.so"
@@ -30,7 +30,8 @@
     "gnu_r": "GNU R",
     "ry": "ry",
     "ry_typed": "ry typed",
-    "ry_typed_aot": "ry typed, AOT"
+    "ry_typed_aot": "ry typed, AOT",
+    "ry_typed_file": "ry typed, installed"
   },
   "baseline": "gnu_r",
   "ratio_kind": "speedup",
@@ -39,26 +40,32 @@
       "id": "array_dot",
       "display": "Dot product",
       "seconds": {
-        "gnu_r": 0.1665,
-        "ry": 0.024,
-        "ry_typed": 0.004549,
-        "ry_typed_aot": 0.004583
+        "gnu_r": 0.2005,
+        "ry": 0.027,
+        "ry_typed": 0.004792,
+        "ry_typed_aot": 0.0046935,
+        "ry_typed_file": 0.0046245
       },
       "ratio": {
         "ry": {
-          "median": 6.8478,
-          "low": 6.1759,
-          "high": 7.8004
+          "median": 7.4874,
+          "low": 7.1079,
+          "high": 8.0348
         },
         "ry_typed": {
-          "median": 35.3946,
-          "low": 33.0124,
-          "high": 37.934
+          "median": 42.5338,
+          "low": 37.2799,
+          "high": 46.5243
         },
         "ry_typed_aot": {
-          "median": 35.062,
-          "low": 31.0436,
-          "high": 39.3503
+          "median": 40.5114,
+          "low": 38.237,
+          "high": 46.53
+        },
+        "ry_typed_file": {
+          "median": 40.8912,
+          "low": 36.3322,
+          "high": 48.0919
         }
       },
       "flags": [
@@ -75,69 +82,91 @@
           "engine": "ry_typed_aot"
         },
         {
+          "kind": "too_short",
+          "engine": "ry_typed_file"
+        },
+        {
           "kind": "wide_interval",
-          "engine": "ry"
+          "engine": "ry_typed"
         },
         {
           "kind": "wide_interval",
           "engine": "ry_typed_aot"
+        },
+        {
+          "kind": "wide_interval",
+          "engine": "ry_typed_file"
         }
       ],
       "peak_mib": {
         "gnu_r": 100.1,
-        "ry": 81.1,
-        "ry_typed": 75.2,
-        "ry_typed_aot": 75.7
+        "ry": 81.4,
+        "ry_typed": 80.4,
+        "ry_typed_aot": 77.8,
+        "ry_typed_file": 85.2
       },
       "anonymous_mib": {
         "gnu_r": 87.6,
-        "ry": 44.4,
-        "ry_typed": 38.1,
-        "ry_typed_aot": 38.2
+        "ry": 44.2,
+        "ry_typed": 37.9,
+        "ry_typed_aot": 38.0,
+        "ry_typed_file": 40.8
       },
       "image_mib": {
         "gnu_r": 0.0,
-        "ry": 6.5,
-        "ry_typed": 6.5,
-        "ry_typed_aot": 6.5
+        "ry": 6.3,
+        "ry_typed": 7.0,
+        "ry_typed_aot": 6.2,
+        "ry_typed_file": 8.5
       },
       "libr_mib": {
         "gnu_r": 2.8,
-        "ry": 23.1,
-        "ry_typed": 23.4,
-        "ry_typed_aot": 23.8
+        "ry": 23.7,
+        "ry_typed": 26.3,
+        "ry_typed_aot": 26.4,
+        "ry_typed_file": 26.9
       },
       "first_seconds": {
-        "gnu_r": 0.1805,
-        "ry": 0.033,
-        "ry_typed": 0.006136,
-        "ry_typed_aot": 0.005468
+        "gnu_r": 0.202,
+        "ry": 0.036,
+        "ry_typed": 0.006568,
+        "ry_typed_aot": 0.005706,
+        "ry_typed_file": 0.00566
+      },
+      "compiled_in_session": {
+        "ry_typed_file": 0
       }
     },
     {
       "id": "array_filter",
       "display": "Counting filter",
       "seconds": {
-        "gnu_r": 0.135,
-        "ry": 0.023,
-        "ry_typed": 0.002721,
-        "ry_typed_aot": 0.0024
+        "gnu_r": 0.1455,
+        "ry": 0.02,
+        "ry_typed": 0.0024785,
+        "ry_typed_aot": 0.00252,
+        "ry_typed_file": 0.0024865
       },
       "ratio": {
         "ry": {
-          "median": 6.4068,
-          "low": 4.5172,
-          "high": 6.8423
+          "median": 7.244,
+          "low": 6.925,
+          "high": 7.4
         },
         "ry_typed": {
-          "median": 53.4867,
-          "low": 40.3859,
-          "high": 62.052
+          "median": 58.6813,
+          "low": 57.4126,
+          "high": 60.3894
         },
         "ry_typed_aot": {
-          "median": 55.2509,
-          "low": 48.926,
-          "high": 61.0066
+          "median": 57.3419,
+          "low": 56.8234,
+          "high": 59.6649
+        },
+        "ry_typed_file": {
+          "median": 58.0998,
+          "low": 56.2082,
+          "high": 61.0442
         }
       },
       "flags": [
@@ -154,73 +183,79 @@
           "engine": "ry_typed_aot"
         },
         {
-          "kind": "wide_interval",
-          "engine": "ry"
-        },
-        {
-          "kind": "wide_interval",
-          "engine": "ry_typed"
-        },
-        {
-          "kind": "wide_interval",
-          "engine": "ry_typed_aot"
+          "kind": "too_short",
+          "engine": "ry_typed_file"
         }
       ],
       "peak_mib": {
-        "gnu_r": 100.1,
-        "ry": 76.9,
-        "ry_typed": 79.6,
-        "ry_typed_aot": 79.8
+        "gnu_r": 100.0,
+        "ry": 77.2,
+        "ry_typed": 79.5,
+        "ry_typed_aot": 80.8,
+        "ry_typed_file": 83.2
       },
       "anonymous_mib": {
         "gnu_r": 87.6,
         "ry": 40.1,
-        "ry_typed": 38.2,
-        "ry_typed_aot": 38.1
+        "ry_typed": 37.9,
+        "ry_typed_aot": 37.9,
+        "ry_typed_file": 40.8
       },
       "image_mib": {
         "gnu_r": 0.0,
-        "ry": 6.5,
-        "ry_typed": 6.6,
-        "ry_typed_aot": 6.6
+        "ry": 6.3,
+        "ry_typed": 7.0,
+        "ry_typed_aot": 6.2,
+        "ry_typed_file": 8.4
       },
       "libr_mib": {
         "gnu_r": 2.8,
-        "ry": 23.1,
-        "ry_typed": 25.7,
-        "ry_typed_aot": 26.1
+        "ry": 23.7,
+        "ry_typed": 26.4,
+        "ry_typed_aot": 26.5,
+        "ry_typed_file": 26.8
       },
       "first_seconds": {
-        "gnu_r": 0.1425,
-        "ry": 0.039,
-        "ry_typed": 0.005314,
-        "ry_typed_aot": 0.003966
+        "gnu_r": 0.149,
+        "ry": 0.0265,
+        "ry_typed": 0.004833,
+        "ry_typed_aot": 0.004093,
+        "ry_typed_file": 0.004188
+      },
+      "compiled_in_session": {
+        "ry_typed_file": 0
       }
     },
     {
       "id": "array_map",
       "display": "Element map",
       "seconds": {
-        "gnu_r": 0.2315,
-        "ry": 0.03,
-        "ry_typed": 0.005718,
-        "ry_typed_aot": 0.005609
+        "gnu_r": 0.2595,
+        "ry": 0.035,
+        "ry_typed": 0.005923,
+        "ry_typed_aot": 0.0062385,
+        "ry_typed_file": 0.0062295
       },
       "ratio": {
         "ry": {
-          "median": 8.0556,
-          "low": 7.3333,
-          "high": 8.4537
+          "median": 7.4647,
+          "low": 7.1459,
+          "high": 7.7965
         },
         "ry_typed": {
-          "median": 39.4211,
-          "low": 36.8908,
-          "high": 42.131
+          "median": 43.7272,
+          "low": 40.9012,
+          "high": 44.9631
         },
         "ry_typed_aot": {
-          "median": 41.7538,
-          "low": 35.4038,
-          "high": 46.7055
+          "median": 41.5008,
+          "low": 41.3097,
+          "high": 42.9943
+        },
+        "ry_typed_file": {
+          "median": 41.9769,
+          "low": 39.6158,
+          "high": 43.4908
         }
       },
       "flags": [
@@ -237,65 +272,79 @@
           "engine": "ry_typed_aot"
         },
         {
-          "kind": "wide_interval",
-          "engine": "ry_typed_aot"
+          "kind": "too_short",
+          "engine": "ry_typed_file"
         }
       ],
       "peak_mib": {
         "gnu_r": 123.0,
-        "ry": 95.0,
-        "ry_typed": 75.2,
-        "ry_typed_aot": 78.0
+        "ry": 97.8,
+        "ry_typed": 77.3,
+        "ry_typed_aot": 80.7,
+        "ry_typed_file": 83.2
       },
       "anonymous_mib": {
         "gnu_r": 110.4,
-        "ry": 58.2,
-        "ry_typed": 38.1,
-        "ry_typed_aot": 38.1
+        "ry": 57.9,
+        "ry_typed": 37.9,
+        "ry_typed_aot": 37.9,
+        "ry_typed_file": 40.8
       },
       "image_mib": {
         "gnu_r": 0.0,
-        "ry": 6.6,
-        "ry_typed": 6.5,
-        "ry_typed_aot": 6.6
+        "ry": 7.1,
+        "ry_typed": 6.2,
+        "ry_typed_aot": 7.0,
+        "ry_typed_file": 8.4
       },
       "libr_mib": {
         "gnu_r": 2.8,
-        "ry": 23.1,
-        "ry_typed": 23.4,
-        "ry_typed_aot": 24.0
+        "ry": 23.7,
+        "ry_typed": 26.0,
+        "ry_typed_aot": 26.6,
+        "ry_typed_file": 26.8
       },
       "first_seconds": {
-        "gnu_r": 0.261,
-        "ry": 0.0465,
-        "ry_typed": 0.007503,
-        "ry_typed_aot": 0.006167
+        "gnu_r": 0.2735,
+        "ry": 0.048,
+        "ry_typed": 0.00732,
+        "ry_typed_aot": 0.00646,
+        "ry_typed_file": 0.006578
+      },
+      "compiled_in_session": {
+        "ry_typed_file": 0
       }
     },
     {
       "id": "array_sum",
       "display": "Element sum",
       "seconds": {
-        "gnu_r": 0.4065,
-        "ry": 0.0705,
-        "ry_typed": 0.0152,
-        "ry_typed_aot": 0.016799
+        "gnu_r": 0.4355,
+        "ry": 0.0765,
+        "ry_typed": 0.014925,
+        "ry_typed_aot": 0.014865,
+        "ry_typed_file": 0.014852
       },
       "ratio": {
         "ry": {
-          "median": 5.8318,
-          "low": 5.4415,
-          "high": 6.1716
+          "median": 5.7153,
+          "low": 5.5045,
+          "high": 5.8354
         },
         "ry_typed": {
-          "median": 27.6083,
-          "low": 26.5471,
-          "high": 29.5637
+          "median": 29.103,
+          "low": 28.2423,
+          "high": 29.9466
         },
         "ry_typed_aot": {
-          "median": 25.8079,
-          "low": 22.0633,
-          "high": 28.3883
+          "median": 29.2434,
+          "low": 28.0348,
+          "high": 29.6857
+        },
+        "ry_typed_file": {
+          "median": 29.2355,
+          "low": 28.7731,
+          "high": 30.1037
         }
       },
       "flags": [
@@ -312,65 +361,79 @@
           "engine": "ry_typed_aot"
         },
         {
-          "kind": "wide_interval",
-          "engine": "ry_typed_aot"
+          "kind": "too_short",
+          "engine": "ry_typed_file"
         }
       ],
       "peak_mib": {
-        "gnu_r": 100.1,
-        "ry": 76.8,
-        "ry_typed": 75.2,
-        "ry_typed_aot": 78.1
+        "gnu_r": 99.9,
+        "ry": 79.7,
+        "ry_typed": 77.4,
+        "ry_typed_aot": 77.8,
+        "ry_typed_file": 83.2
       },
       "anonymous_mib": {
         "gnu_r": 87.6,
-        "ry": 40.1,
-        "ry_typed": 38.1,
-        "ry_typed_aot": 38.2
+        "ry": 40.0,
+        "ry_typed": 37.9,
+        "ry_typed_aot": 37.9,
+        "ry_typed_file": 40.8
       },
       "image_mib": {
         "gnu_r": 0.0,
-        "ry": 6.5,
-        "ry_typed": 6.5,
-        "ry_typed_aot": 6.6
+        "ry": 7.1,
+        "ry_typed": 6.2,
+        "ry_typed_aot": 6.2,
+        "ry_typed_file": 8.4
       },
       "libr_mib": {
         "gnu_r": 2.8,
-        "ry": 23.1,
-        "ry_typed": 23.4,
-        "ry_typed_aot": 24.0
+        "ry": 23.8,
+        "ry_typed": 26.0,
+        "ry_typed_aot": 26.4,
+        "ry_typed_file": 26.8
       },
       "first_seconds": {
-        "gnu_r": 0.4645,
-        "ry": 0.1,
-        "ry_typed": 0.02247,
-        "ry_typed_aot": 0.016322
+        "gnu_r": 0.445,
+        "ry": 0.083,
+        "ry_typed": 0.0175,
+        "ry_typed_aot": 0.016361,
+        "ry_typed_file": 0.01662
+      },
+      "compiled_in_session": {
+        "ry_typed_file": 0
       }
     },
     {
       "id": "closures",
       "display": "Closures and lapply",
       "seconds": {
-        "gnu_r": 0.682,
+        "gnu_r": 0.76,
         "ry": 0.142,
-        "ry_typed": 0.003028,
-        "ry_typed_aot": 0.003077
+        "ry_typed": 0.002874,
+        "ry_typed_aot": 0.002906,
+        "ry_typed_file": 0.002849
       },
       "ratio": {
         "ry": {
-          "median": 4.835,
-          "low": 4.2863,
-          "high": 5.1917
+          "median": 5.2687,
+          "low": 5.0779,
+          "high": 5.4487
         },
         "ry_typed": {
-          "median": 226.9353,
-          "low": 189.0685,
-          "high": 289.5838
+          "median": 258.7371,
+          "low": 250.3007,
+          "high": 268.5994
         },
         "ry_typed_aot": {
-          "median": 237.5363,
-          "low": 200.3633,
-          "high": 247.1287
+          "median": 268.5211,
+          "low": 250.423,
+          "high": 274.8518
+        },
+        "ry_typed_file": {
+          "median": 264.0228,
+          "low": 257.5457,
+          "high": 271.7558
         }
       },
       "flags": [
@@ -383,73 +446,79 @@
           "engine": "ry_typed_aot"
         },
         {
-          "kind": "wide_interval",
-          "engine": "ry"
-        },
-        {
-          "kind": "wide_interval",
-          "engine": "ry_typed"
-        },
-        {
-          "kind": "wide_interval",
-          "engine": "ry_typed_aot"
+          "kind": "too_short",
+          "engine": "ry_typed_file"
         }
       ],
       "peak_mib": {
-        "gnu_r": 137.9,
-        "ry": 114.1,
-        "ry_typed": 58.1,
-        "ry_typed_aot": 56.3
+        "gnu_r": 138.0,
+        "ry": 110.7,
+        "ry_typed": 55.8,
+        "ry_typed_aot": 56.3,
+        "ry_typed_file": 59.3
       },
       "anonymous_mib": {
         "gnu_r": 125.4,
-        "ry": 69.5,
-        "ry_typed": 18.8,
-        "ry_typed_aot": 18.7
+        "ry": 67.3,
+        "ry_typed": 18.5,
+        "ry_typed_aot": 18.5,
+        "ry_typed_file": 19.1
       },
       "image_mib": {
         "gnu_r": 0.0,
-        "ry": 12.4,
-        "ry_typed": 6.6,
-        "ry_typed_aot": 6.5
+        "ry": 12.6,
+        "ry_typed": 6.2,
+        "ry_typed_aot": 6.2,
+        "ry_typed_file": 8.4
       },
       "libr_mib": {
         "gnu_r": 2.8,
-        "ry": 25.2,
-        "ry_typed": 23.5,
-        "ry_typed_aot": 23.8
+        "ry": 23.7,
+        "ry_typed": 23.9,
+        "ry_typed_aot": 24.3,
+        "ry_typed_file": 24.7
       },
       "first_seconds": {
-        "gnu_r": 0.748,
-        "ry": 0.1745,
-        "ry_typed": 0.009971,
-        "ry_typed_aot": 0.006814
+        "gnu_r": 0.7705,
+        "ry": 0.155,
+        "ry_typed": 0.008753,
+        "ry_typed_aot": 0.006344,
+        "ry_typed_file": 0.006487
+      },
+      "compiled_in_session": {
+        "ry_typed_file": 0
       }
     },
     {
       "id": "drawdown",
       "display": "Drawdown and volatility",
       "seconds": {
-        "gnu_r": 0.268,
-        "ry": 0.03,
-        "ry_typed": 0.005555,
-        "ry_typed_aot": 0.005697
+        "gnu_r": 0.2925,
+        "ry": 0.032,
+        "ry_typed": 0.005694,
+        "ry_typed_aot": 0.0058675,
+        "ry_typed_file": 0.005317
       },
       "ratio": {
         "ry": {
-          "median": 8.7241,
-          "low": 8.2864,
-          "high": 9.4368
+          "median": 9.1094,
+          "low": 8.9677,
+          "high": 9.3235
         },
         "ry_typed": {
-          "median": 47.9863,
-          "low": 41.0402,
-          "high": 51.2751
+          "median": 51.8051,
+          "low": 50.3482,
+          "high": 53.5203
         },
         "ry_typed_aot": {
-          "median": 49.8676,
-          "low": 41.4463,
-          "high": 52.3482
+          "median": 49.5559,
+          "low": 47.8591,
+          "high": 52.6505
+        },
+        "ry_typed_file": {
+          "median": 54.0056,
+          "low": 49.0149,
+          "high": 55.9875
         }
       },
       "flags": [
@@ -466,69 +535,79 @@
           "engine": "ry_typed_aot"
         },
         {
-          "kind": "wide_interval",
-          "engine": "ry_typed"
-        },
-        {
-          "kind": "wide_interval",
-          "engine": "ry_typed_aot"
+          "kind": "too_short",
+          "engine": "ry_typed_file"
         }
       ],
       "peak_mib": {
-        "gnu_r": 92.3,
-        "ry": 87.7,
-        "ry_typed": 96.8,
-        "ry_typed_aot": 96.4
+        "gnu_r": 92.2,
+        "ry": 89.8,
+        "ry_typed": 96.5,
+        "ry_typed_aot": 96.9,
+        "ry_typed_file": 102.2
       },
       "anonymous_mib": {
         "gnu_r": 79.8,
-        "ry": 50.8,
-        "ry_typed": 57.2,
-        "ry_typed_aot": 57.1
+        "ry": 50.5,
+        "ry_typed": 56.9,
+        "ry_typed_aot": 56.9,
+        "ry_typed_file": 59.7
       },
       "image_mib": {
         "gnu_r": 0.0,
         "ry": 6.5,
-        "ry_typed": 6.6,
-        "ry_typed_aot": 6.6
+        "ry_typed": 6.2,
+        "ry_typed_aot": 6.2,
+        "ry_typed_file": 8.4
       },
       "libr_mib": {
         "gnu_r": 2.8,
-        "ry": 23.1,
-        "ry_typed": 23.6,
-        "ry_typed_aot": 24.0
+        "ry": 23.7,
+        "ry_typed": 26.1,
+        "ry_typed_aot": 26.4,
+        "ry_typed_file": 26.8
       },
       "first_seconds": {
-        "gnu_r": 0.308,
-        "ry": 0.052,
-        "ry_typed": 0.007087,
-        "ry_typed_aot": 0.005831
+        "gnu_r": 0.306,
+        "ry": 0.05,
+        "ry_typed": 0.007252,
+        "ry_typed_aot": 0.006219,
+        "ry_typed_file": 0.006098
+      },
+      "compiled_in_session": {
+        "ry_typed_file": 0
       }
     },
     {
       "id": "fib",
       "display": "Recursive Fibonacci",
       "seconds": {
-        "gnu_r": 0.653,
-        "ry": 0.008,
-        "ry_typed": 0.005449,
-        "ry_typed_aot": 0.004939
+        "gnu_r": 0.6965,
+        "ry": 0.007,
+        "ry_typed": 0.004947,
+        "ry_typed_aot": 0.0049595,
+        "ry_typed_file": 0.004964
       },
       "ratio": {
         "ry": {
-          "median": 87.8571,
-          "low": 67.9697,
-          "high": 98.5
+          "median": 97.9286,
+          "low": 88.9286,
+          "high": 102.2857
         },
         "ry_typed": {
-          "median": 128.4857,
-          "low": 115.1323,
-          "high": 143.2596
+          "median": 140.126,
+          "low": 133.063,
+          "high": 143.1951
         },
         "ry_typed_aot": {
-          "median": 130.884,
-          "low": 122.3995,
-          "high": 144.0221
+          "median": 138.5585,
+          "low": 131.3802,
+          "high": 141.9851
+        },
+        "ry_typed_file": {
+          "median": 139.7097,
+          "low": 134.1691,
+          "high": 143.8613
         }
       },
       "flags": [
@@ -545,217 +624,228 @@
           "engine": "ry_typed_aot"
         },
         {
-          "kind": "wide_interval",
-          "engine": "ry"
-        },
-        {
-          "kind": "wide_interval",
-          "engine": "ry_typed"
-        },
-        {
-          "kind": "wide_interval",
-          "engine": "ry_typed_aot"
+          "kind": "too_short",
+          "engine": "ry_typed_file"
         }
       ],
       "peak_mib": {
         "gnu_r": 69.4,
-        "ry": 46.8,
-        "ry_typed": 50.6,
-        "ry_typed_aot": 51.0
+        "ry": 49.8,
+        "ry_typed": 51.4,
+        "ry_typed_aot": 49.0,
+        "ry_typed_file": 56.6
       },
       "anonymous_mib": {
-        "gnu_r": 56.9,
-        "ry": 10.1,
-        "ry_typed": 11.3,
-        "ry_typed_aot": 11.4
+        "gnu_r": 56.8,
+        "ry": 9.7,
+        "ry_typed": 11.0,
+        "ry_typed_aot": 11.0,
+        "ry_typed_file": 13.9
       },
       "image_mib": {
         "gnu_r": 0.0,
-        "ry": 6.5,
-        "ry_typed": 6.6,
-        "ry_typed_aot": 6.6
+        "ry": 7.1,
+        "ry_typed": 7.0,
+        "ry_typed_aot": 6.2,
+        "ry_typed_file": 8.5
       },
       "libr_mib": {
         "gnu_r": 2.8,
-        "ry": 23.2,
-        "ry_typed": 23.6,
-        "ry_typed_aot": 24.0
+        "ry": 23.9,
+        "ry_typed": 24.3,
+        "ry_typed_aot": 24.4,
+        "ry_typed_file": 24.9
       },
       "first_seconds": {
-        "gnu_r": 0.7055,
-        "ry": 0.0095,
-        "ry_typed": 0.006441,
-        "ry_typed_aot": 0.005057
+        "gnu_r": 0.7195,
+        "ry": 0.009,
+        "ry_typed": 0.005827,
+        "ry_typed_aot": 0.005029,
+        "ry_typed_file": 0.005173
+      },
+      "compiled_in_session": {
+        "ry_typed_file": 0
       }
     },
     {
       "id": "integer_loop",
       "display": "Collatz chains",
       "seconds": {
-        "gnu_r": 0.517,
-        "ry": 0.038
+        "gnu_r": 0.558,
+        "ry": 0.04
       },
       "ratio": {
         "ry": {
-          "median": 12.7541,
-          "low": 11.5,
-          "high": 14.2778
+          "median": 13.95,
+          "low": 13.7,
+          "high": 14.2857
         }
       },
       "flags": [
         {
           "kind": "too_short",
           "engine": "ry"
-        },
-        {
-          "kind": "wide_interval",
-          "engine": "ry"
         }
       ],
       "peak_mib": {
         "gnu_r": 69.5,
-        "ry": 51.8
+        "ry": 51.4
       },
       "anonymous_mib": {
         "gnu_r": 57.0,
-        "ry": 12.9
+        "ry": 12.4
       },
       "image_mib": {
         "gnu_r": 0.0,
-        "ry": 6.6
+        "ry": 6.5
       },
       "libr_mib": {
         "gnu_r": 2.8,
-        "ry": 23.3
+        "ry": 23.8
       },
       "first_seconds": {
-        "gnu_r": 0.581,
-        "ry": 0.0435
+        "gnu_r": 0.6205,
+        "ry": 0.0455
       }
     },
     {
       "id": "jackknife",
       "display": "Jackknife estimate",
       "seconds": {
-        "gnu_r": 0.379,
-        "ry": 0.2455
+        "gnu_r": 0.4145,
+        "ry": 0.247
       },
       "ratio": {
         "ry": {
-          "median": 1.4997,
-          "low": 1.4048,
-          "high": 1.6125
+          "median": 1.6497,
+          "low": 1.5509,
+          "high": 1.7356
         }
       },
       "flags": [],
       "peak_mib": {
         "gnu_r": 124.1,
-        "ry": 50.7
+        "ry": 51.8
       },
       "anonymous_mib": {
         "gnu_r": 111.6,
-        "ry": 14.1
+        "ry": 14.0
       },
       "image_mib": {
         "gnu_r": 0.0,
-        "ry": 6.7
+        "ry": 7.1
       },
       "libr_mib": {
         "gnu_r": 2.8,
-        "ry": 20.9
+        "ry": 23.5
       },
       "first_seconds": {
-        "gnu_r": 0.4555,
-        "ry": 0.275
+        "gnu_r": 0.471,
+        "ry": 0.25
       }
     },
     {
       "id": "log_rank",
       "display": "Log-rank statistic",
       "seconds": {
-        "gnu_r": 0.339,
-        "ry": 0.212,
-        "ry_typed": 0.134115,
-        "ry_typed_aot": 0.134582
+        "gnu_r": 0.347,
+        "ry": 0.2185,
+        "ry_typed": 0.138769,
+        "ry_typed_aot": 0.138422,
+        "ry_typed_file": 0.140918
       },
       "ratio": {
         "ry": {
-          "median": 1.6234,
-          "low": 1.5198,
-          "high": 1.7376
+          "median": 1.6023,
+          "low": 1.5787,
+          "high": 1.6162
         },
         "ry_typed": {
-          "median": 2.562,
-          "low": 2.2798,
-          "high": 2.6835
+          "median": 2.5055,
+          "low": 2.4233,
+          "high": 2.5523
         },
         "ry_typed_aot": {
-          "median": 2.5203,
-          "low": 2.3897,
-          "high": 2.6941
+          "median": 2.4746,
+          "low": 2.4217,
+          "high": 2.5186
+        },
+        "ry_typed_file": {
+          "median": 2.4837,
+          "low": 2.4592,
+          "high": 2.5083
         }
       },
-      "flags": [
-        {
-          "kind": "wide_interval",
-          "engine": "ry_typed"
-        }
-      ],
+      "flags": [],
       "peak_mib": {
         "gnu_r": 125.7,
-        "ry": 74.9,
-        "ry_typed": 59.6,
-        "ry_typed_aot": 62.6
+        "ry": 80.3,
+        "ry_typed": 60.2,
+        "ry_typed_aot": 63.6,
+        "ry_typed_file": 62.9
       },
       "anonymous_mib": {
         "gnu_r": 113.1,
-        "ry": 40.4,
-        "ry_typed": 20.3,
-        "ry_typed_aot": 20.7
+        "ry": 40.5,
+        "ry_typed": 20.5,
+        "ry_typed_aot": 20.5,
+        "ry_typed_file": 21.1
       },
       "image_mib": {
         "gnu_r": 0.0,
-        "ry": 6.7,
-        "ry_typed": 6.5,
-        "ry_typed_aot": 6.6
+        "ry": 7.3,
+        "ry_typed": 6.3,
+        "ry_typed_aot": 7.1,
+        "ry_typed_file": 8.5
       },
       "libr_mib": {
         "gnu_r": 2.8,
-        "ry": 20.8,
-        "ry_typed": 25.4,
-        "ry_typed_aot": 26.1
+        "ry": 23.5,
+        "ry_typed": 26.2,
+        "ry_typed_aot": 26.7,
+        "ry_typed_file": 24.9
       },
       "first_seconds": {
-        "gnu_r": 0.3955,
-        "ry": 0.229,
-        "ry_typed": 0.134101,
-        "ry_typed_aot": 0.136429
+        "gnu_r": 0.3945,
+        "ry": 0.2395,
+        "ry_typed": 0.140973,
+        "ry_typed_aot": 0.143175,
+        "ry_typed_file": 0.138928
+      },
+      "compiled_in_session": {
+        "ry_typed_file": 0
       }
     },
     {
       "id": "loop_sum",
       "display": "Counted loop sum",
       "seconds": {
-        "gnu_r": 0.1835,
-        "ry": 0.03,
-        "ry_typed": 0.009856,
-        "ry_typed_aot": 0.008598
+        "gnu_r": 0.198,
+        "ry": 0.029,
+        "ry_typed": 0.009447,
+        "ry_typed_aot": 0.0090725,
+        "ry_typed_file": 0.0071065
       },
       "ratio": {
         "ry": {
-          "median": 5.9839,
-          "low": 5.4046,
-          "high": 6.4643
+          "median": 6.9834,
+          "low": 6.8103,
+          "high": 7.1086
         },
         "ry_typed": {
-          "median": 19.1944,
-          "low": 15.9137,
-          "high": 21.4586
+          "median": 21.1617,
+          "low": 20.3402,
+          "high": 21.8199
         },
         "ry_typed_aot": {
-          "median": 21.2332,
-          "low": 19.8582,
-          "high": 22.5563
+          "median": 21.6841,
+          "low": 21.0965,
+          "high": 22.1501
+        },
+        "ry_typed_file": {
+          "median": 27.7938,
+          "low": 27.2075,
+          "high": 28.0893
         }
       },
       "flags": [
@@ -772,53 +862,61 @@
           "engine": "ry_typed_aot"
         },
         {
-          "kind": "wide_interval",
-          "engine": "ry_typed"
+          "kind": "too_short",
+          "engine": "ry_typed_file"
         }
       ],
       "peak_mib": {
         "gnu_r": 69.4,
         "ry": 49.1,
-        "ry_typed": 50.6,
-        "ry_typed_aot": 50.6
+        "ry_typed": 51.3,
+        "ry_typed_aot": 51.8,
+        "ry_typed_file": 54.9
       },
       "anonymous_mib": {
         "gnu_r": 56.9,
-        "ry": 12.4,
-        "ry_typed": 11.4,
-        "ry_typed_aot": 11.7
+        "ry": 12.0,
+        "ry_typed": 11.0,
+        "ry_typed_aot": 11.0,
+        "ry_typed_file": 12.2
       },
       "image_mib": {
         "gnu_r": 0.0,
-        "ry": 6.5,
-        "ry_typed": 6.6,
-        "ry_typed_aot": 6.6
+        "ry": 6.3,
+        "ry_typed": 7.0,
+        "ry_typed_aot": 7.0,
+        "ry_typed_file": 8.4
       },
       "libr_mib": {
         "gnu_r": 2.8,
-        "ry": 23.1,
-        "ry_typed": 23.5,
-        "ry_typed_aot": 24.0
+        "ry": 23.7,
+        "ry_typed": 24.2,
+        "ry_typed_aot": 24.6,
+        "ry_typed_file": 24.7
       },
       "first_seconds": {
-        "gnu_r": 0.2055,
-        "ry": 0.0455,
-        "ry_typed": 0.010486,
-        "ry_typed_aot": 0.009331
+        "gnu_r": 0.201,
+        "ry": 0.032,
+        "ry_typed": 0.009945,
+        "ry_typed_aot": 0.00896,
+        "ry_typed_file": 0.007275
+      },
+      "compiled_in_session": {
+        "ry_typed_file": 0
       }
     },
     {
       "id": "nested_loops",
       "display": "Pairwise distances",
       "seconds": {
-        "gnu_r": 0.1475,
-        "ry": 0.025
+        "gnu_r": 0.153,
+        "ry": 0.0275
       },
       "ratio": {
         "ry": {
-          "median": 5.7646,
-          "low": 5.6469,
-          "high": 6.1667
+          "median": 5.6667,
+          "low": 5.4224,
+          "high": 5.7407
         }
       },
       "flags": [
@@ -828,91 +926,92 @@
         }
       ],
       "peak_mib": {
-        "gnu_r": 69.9,
-        "ry": 58.7
+        "gnu_r": 69.6,
+        "ry": 56.6
       },
       "anonymous_mib": {
         "gnu_r": 57.1,
-        "ry": 19.7
+        "ry": 19.5
       },
       "image_mib": {
         "gnu_r": 0.0,
-        "ry": 6.6
+        "ry": 6.3
       },
       "libr_mib": {
         "gnu_r": 2.8,
-        "ry": 23.1
+        "ry": 23.7
       },
       "first_seconds": {
-        "gnu_r": 0.1645,
-        "ry": 0.0345
+        "gnu_r": 0.168,
+        "ry": 0.0375
       }
     },
     {
       "id": "simulation",
       "display": "Path simulation",
       "seconds": {
-        "gnu_r": 0.432,
-        "ry": 0.1255
+        "gnu_r": 0.449,
+        "ry": 0.1365
       },
       "ratio": {
         "ry": {
-          "median": 3.43,
-          "low": 3.1256,
-          "high": 3.7946
+          "median": 3.3248,
+          "low": 3.2533,
+          "high": 3.3534
         }
       },
-      "flags": [
-        {
-          "kind": "wide_interval",
-          "engine": "ry"
-        }
-      ],
+      "flags": [],
       "peak_mib": {
         "gnu_r": 172.0,
-        "ry": 148.0
+        "ry": 147.2
       },
       "anonymous_mib": {
         "gnu_r": 159.1,
-        "ry": 101.9
+        "ry": 100.4
       },
       "image_mib": {
         "gnu_r": 0.0,
-        "ry": 12.4
+        "ry": 12.6
       },
       "libr_mib": {
         "gnu_r": 3.0,
-        "ry": 23.1
+        "ry": 23.6
       },
       "first_seconds": {
-        "gnu_r": 0.5555,
-        "ry": 0.1755
+        "gnu_r": 0.497,
+        "ry": 0.171
       }
     },
     {
       "id": "vasicek",
       "display": "Vasicek rate paths",
       "seconds": {
-        "gnu_r": 0.2805,
-        "ry": 0.1065,
-        "ry_typed": 0.0715,
-        "ry_typed_aot": 0.070838
+        "gnu_r": 0.2875,
+        "ry": 0.1195,
+        "ry_typed": 0.08317,
+        "ry_typed_aot": 0.0859175,
+        "ry_typed_file": 0.0831675
       },
       "ratio": {
         "ry": {
-          "median": 2.561,
-          "low": 2.3739,
-          "high": 2.8852
+          "median": 2.4678,
+          "low": 2.3402,
+          "high": 2.547
         },
         "ry_typed": {
-          "median": 3.733,
-          "low": 3.1509,
-          "high": 4.1073
+          "median": 3.4675,
+          "low": 3.3321,
+          "high": 3.6225
         },
         "ry_typed_aot": {
-          "median": 3.7559,
-          "low": 3.062,
-          "high": 4.2507
+          "median": 3.3257,
+          "low": 3.1842,
+          "high": 3.5577
+        },
+        "ry_typed_file": {
+          "median": 3.4758,
+          "low": 3.3122,
+          "high": 3.6326
         }
       },
       "flags": [
@@ -925,73 +1024,79 @@
           "engine": "ry_typed_aot"
         },
         {
-          "kind": "wide_interval",
-          "engine": "ry"
-        },
-        {
-          "kind": "wide_interval",
-          "engine": "ry_typed"
-        },
-        {
-          "kind": "wide_interval",
-          "engine": "ry_typed_aot"
+          "kind": "too_short",
+          "engine": "ry_typed_file"
         }
       ],
       "peak_mib": {
         "gnu_r": 160.4,
-        "ry": 87.9,
-        "ry_typed": 64.5,
-        "ry_typed_aot": 64.9
+        "ry": 90.2,
+        "ry_typed": 89.5,
+        "ry_typed_aot": 89.7,
+        "ry_typed_file": 86.2
       },
       "anonymous_mib": {
         "gnu_r": 147.7,
-        "ry": 51.0,
-        "ry_typed": 22.3,
-        "ry_typed_aot": 22.3
+        "ry": 50.7,
+        "ry_typed": 40.4,
+        "ry_typed_aot": 40.5,
+        "ry_typed_file": 41.1
       },
       "image_mib": {
         "gnu_r": 0.0,
-        "ry": 6.6,
-        "ry_typed": 6.7,
-        "ry_typed_aot": 6.7
+        "ry": 6.5,
+        "ry_typed": 12.6,
+        "ry_typed_aot": 12.6,
+        "ry_typed_file": 8.6
       },
       "libr_mib": {
         "gnu_r": 2.9,
-        "ry": 20.9,
-        "ry_typed": 26.0,
-        "ry_typed_aot": 26.3
+        "ry": 23.5,
+        "ry_typed": 27.0,
+        "ry_typed_aot": 27.0,
+        "ry_typed_file": 27.1
       },
       "first_seconds": {
-        "gnu_r": 0.3005,
-        "ry": 0.134,
-        "ry_typed": 0.089593,
-        "ry_typed_aot": 0.085169
+        "gnu_r": 0.3175,
+        "ry": 0.1335,
+        "ry_typed": 0.085557,
+        "ry_typed_aot": 0.087116,
+        "ry_typed_file": 0.086414
+      },
+      "compiled_in_session": {
+        "ry_typed_file": 0
       }
     },
     {
       "id": "vector_arith",
       "display": "Vector arithmetic",
       "seconds": {
-        "gnu_r": 0.16,
-        "ry": 0.0605,
-        "ry_typed": 0.04211,
-        "ry_typed_aot": 0.049072
+        "gnu_r": 0.181,
+        "ry": 0.061,
+        "ry_typed": 0.044536,
+        "ry_typed_aot": 0.0450825,
+        "ry_typed_file": 0.0451705
       },
       "ratio": {
         "ry": {
-          "median": 2.6103,
-          "low": 2.4033,
-          "high": 2.8051
+          "median": 2.9672,
+          "low": 2.8226,
+          "high": 3.0492
         },
         "ry_typed": {
-          "median": 3.8201,
-          "low": 3.6534,
-          "high": 3.9068
+          "median": 4.0782,
+          "low": 3.8338,
+          "high": 4.1618
         },
         "ry_typed_aot": {
-          "median": 3.3434,
-          "low": 2.8859,
-          "high": 3.6554
+          "median": 4.0388,
+          "low": 3.8583,
+          "high": 4.128
+        },
+        "ry_typed_file": {
+          "median": 4.0013,
+          "low": 3.8937,
+          "high": 4.0677
         }
       },
       "flags": [
@@ -1008,119 +1113,133 @@
           "engine": "ry_typed_aot"
         },
         {
-          "kind": "wide_interval",
-          "engine": "ry_typed_aot"
+          "kind": "too_short",
+          "engine": "ry_typed_file"
         }
       ],
       "peak_mib": {
         "gnu_r": 137.9,
-        "ry": 70.8,
-        "ry_typed": 77.4,
-        "ry_typed_aot": 77.4
+        "ry": 72.9,
+        "ry_typed": 77.3,
+        "ry_typed_aot": 77.9,
+        "ry_typed_file": 85.5
       },
       "anonymous_mib": {
         "gnu_r": 125.4,
-        "ry": 36.4,
-        "ry_typed": 38.2,
-        "ry_typed_aot": 38.2
+        "ry": 36.1,
+        "ry_typed": 37.9,
+        "ry_typed_aot": 37.9,
+        "ry_typed_file": 40.9
       },
       "image_mib": {
         "gnu_r": 0.0,
-        "ry": 6.5,
-        "ry_typed": 6.6,
-        "ry_typed_aot": 6.6
+        "ry": 6.3,
+        "ry_typed": 6.2,
+        "ry_typed_aot": 6.2,
+        "ry_typed_file": 8.5
       },
       "libr_mib": {
         "gnu_r": 2.8,
-        "ry": 20.8,
-        "ry_typed": 23.6,
-        "ry_typed_aot": 24.0
+        "ry": 23.5,
+        "ry_typed": 26.0,
+        "ry_typed_aot": 26.5,
+        "ry_typed_file": 26.9
       },
       "first_seconds": {
-        "gnu_r": 0.215,
-        "ry": 0.0625,
-        "ry_typed": 0.042595,
-        "ry_typed_aot": 0.05092
+        "gnu_r": 0.229,
+        "ry": 0.07,
+        "ry_typed": 0.046515,
+        "ry_typed_aot": 0.045817,
+        "ry_typed_file": 0.045929
+      },
+      "compiled_in_session": {
+        "ry_typed_file": 0
       }
     },
     {
       "id": "vector_loop",
       "display": "Scale and shift",
       "seconds": {
-        "gnu_r": 0.28,
-        "ry": 0.033
+        "gnu_r": 0.309,
+        "ry": 0.037
       },
       "ratio": {
         "ry": {
-          "median": 8.25,
-          "low": 7.2531,
-          "high": 8.8562
+          "median": 8.527,
+          "low": 7.973,
+          "high": 9.0
         }
       },
       "flags": [
         {
           "kind": "too_short",
           "engine": "ry"
-        },
-        {
-          "kind": "wide_interval",
-          "engine": "ry"
         }
       ],
       "peak_mib": {
         "gnu_r": 170.6,
-        "ry": 150.9
+        "ry": 151.5
       },
       "anonymous_mib": {
         "gnu_r": 158.1,
-        "ry": 108.3
+        "ry": 108.2
       },
       "image_mib": {
         "gnu_r": 0.0,
-        "ry": 12.4
+        "ry": 12.6
       },
       "libr_mib": {
         "gnu_r": 2.8,
-        "ry": 23.1
+        "ry": 23.7
       },
       "first_seconds": {
-        "gnu_r": 0.3145,
-        "ry": 0.046
+        "gnu_r": 0.353,
+        "ry": 0.049
       }
     }
   ],
   "geomean": {
     "ry": {
-      "median": 5.779,
-      "low": 5.582,
-      "high": 5.9075,
+      "median": 6.0585,
+      "low": 5.9813,
+      "high": 6.106,
       "programs": 16
     },
     "ry_typed": {
-      "median": 24.628,
-      "low": 23.3709,
-      "high": 25.4112,
+      "median": 26.4717,
+      "low": 25.9286,
+      "high": 26.7564,
       "programs": 11
     },
     "ry_typed_aot": {
-      "median": 24.792,
-      "low": 23.7445,
-      "high": 25.534,
+      "median": 26.0485,
+      "low": 25.6864,
+      "high": 26.5212,
+      "programs": 11
+    },
+    "ry_typed_file": {
+      "median": 27.0076,
+      "low": 26.5992,
+      "high": 27.5358,
       "programs": 11
     }
   },
   "worst": {
     "ry": {
-      "id": "jackknife",
-      "ratio": 1.4997
+      "id": "log_rank",
+      "ratio": 1.6023
     },
     "ry_typed": {
       "id": "log_rank",
-      "ratio": 2.562
+      "ratio": 2.5055
     },
     "ry_typed_aot": {
       "id": "log_rank",
-      "ratio": 2.5203
+      "ratio": 2.4746
+    },
+    "ry_typed_file": {
+      "id": "log_rank",
+      "ratio": 2.4837
     }
   }
 }

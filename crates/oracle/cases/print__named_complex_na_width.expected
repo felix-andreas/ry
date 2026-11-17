@@ -1,0 +1,25 @@
+[stdout]
+|     a     b alpha 
+| 0+0i    NA    NA
+|      a bbbbbb 
+| 0+0i     NA
+| alpha     b     c 
+| 1+2i    NA 0+3i
+| alpha     b 
+|    NA    NA
+|           a           b           c 
+|  1.5e+00-2i          NA -1.0e+10+1i
+|   one   two three  four  five   six 
+| 0+1i    NA 0+2i    NA 0+3i    NA
+|   n1   n2   n3   n4   n5   n6   n7   n8   n9  n10  n11  n12  n13  n14  n15  n16 
+|   NA 1+1i   NA 1+1i   NA 1+1i   NA 1+1i   NA 1+1i   NA 1+1i   NA 1+1i   NA 1+1i
+|  n17  n18  n19  n20  n21  n22  n23  n24 
+|   NA 1+1i   NA 1+1i   NA 1+1i   NA 1+1i
+|    a    b 
+| 0+0i    -
+[messages]
+[warnings]
+[errors]
+[value]
+complex
+| c(a = 0+0i, b = complex(real=NA, imaginary=0))

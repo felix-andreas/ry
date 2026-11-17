@@ -1,0 +1,61 @@
+# The long differential fuzz run: every program kind of `oracle fuzz` (generated grammar programs,
+# metamorphic trials, builtins on a zoo of values, calls of every exported function of base, stats
+# and utils, mutated snippets of real R code) under GNU R and
+# ry's engines for the given number of hours, from a seed base no earlier run used. The job runs
+# `just fuzz-ci` in the flake's `ci` dev shell, whose GNU R is the one the oracle records; to change
+# what it runs, edit that recipe. Each diverging program and its report is uploaded as an artifact,
+# and the job fails when there is one. It runs when started by hand, like ci.yml.
+name: Fuzz
+
+on:
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: Hours of fuzzing (at most 5, because GitHub ends a job after six)
+        default: "4"
+      base:
+        description: First seed (default, the start time in seconds)
+        default: ""
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: differential fuzzing
+    runs-on: ubuntu-latest
+    # GitHub ends a job after six hours.
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - name: free disk space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: cachix/install-nix-action@v31
+      - uses: cachix/cachix-action@v17
+        with:
+          name: ry
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          pushFilter: "-ry-deps-|-rust-|-rustc-|-cargo-|-clippy-|-rustfmt-|-llvm-tools-"
+      - name: toolchain on PATH
+        run: nix develop .#ci -c bash -c 'dirname "$(command -v cargo)"' >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+      - name: just fuzz-ci
+        env:
+          HOURS: ${{ inputs.hours }}
+          BASE: ${{ inputs.base }}
+        run: nix develop .#ci -c just fuzz-ci "$HOURS" "$BASE"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fuzz-findings
+          path: |
+            target/fuzz-findings
+            target/fuzz-corpus/base-differs.txt
+          if-no-files-found: ignore

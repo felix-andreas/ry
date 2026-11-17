@@ -2505,3 +2505,63 @@ fn stress_quarantines_and_poisons_freed_objects() {
     // Turning stress off gives the quarantined memory back.
     heap.update_policy(|policy| policy.stress = GcStress::Off);
 }
+
+#[test]
+#[should_panic(expected = "protect stack entry 0 of 1 is")]
+fn the_verifier_names_a_protect_stack_entry_that_holds_a_freed_object() {
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| policy.verify = true);
+    unsafe {
+        let stale = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        heap.collect(Collection::Minor);
+        heap.roots.protect.protect(stale).expect("protect");
+        heap.collect(Collection::Minor);
+    }
+}
+
+// A build with debug assertions reports the freed object when it is rooted, and any other build
+// at the next collection.
+#[test]
+#[cfg_attr(debug_assertions, should_panic(expected = "a value being rooted is"))]
+#[cfg_attr(not(debug_assertions), should_panic(expected = "handle 0 of 1 is"))]
+fn the_verifier_names_a_handle_to_a_freed_object() {
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| policy.verify = true);
+    unsafe {
+        let stale = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        heap.collect(Collection::Minor);
+        heap.root(stale);
+        heap.collect(Collection::Minor);
+    }
+}
+
+#[test]
+#[should_panic(expected = "as element 0, which is an object that collection 1 freed")]
+fn the_verifier_says_a_stale_reference_points_at_a_freed_object() {
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| policy.verify = true);
+    unsafe {
+        let stale = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        heap.collect(Collection::Minor);
+        let holder = heap.alloc_vector(SexpType::List, 1).expect("alloc");
+        heap.root(holder);
+        *holder.slice_mut::<Sexp>().first_mut().expect("one element") = stale;
+        heap.collect(Collection::Minor);
+    }
+}
+
+#[test]
+#[should_panic(
+    expected = "as element 1, which is no address of the heap (the bits of the double 1)"
+)]
+fn the_verifier_reads_a_reference_that_is_no_object_as_the_number_stored_over_it() {
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| policy.verify = true);
+    unsafe {
+        let holder = heap.alloc_vector(SexpType::List, 2).expect("alloc");
+        heap.root(holder);
+        // What an element store of a double into a list's storage leaves behind.
+        holder.data().cast::<f64>().add(1).write(1.0);
+        heap.collect(Collection::Minor);
+    }
+}

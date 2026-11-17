@@ -3188,7 +3188,8 @@ unsafe fn parallel_extreme(call: &Call<'_>, internal: BuiltinFn) -> R<Sexp> {
         Err(Unwind::Error(_)) => return decline(),
         Err(other) => return Err(other),
     };
-    if !most_attributes_from(args[1], result)? {
+    // One argument comes back as itself, whose attributes are already its own.
+    if result != args[1] && !most_attributes_from(args[1], result)? {
         return decline();
     }
     finish(frame, result, true)

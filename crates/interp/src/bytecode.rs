@@ -13824,7 +13824,9 @@ unsafe fn assign_slot_matrix_element(
     let object = if current == target && slot_owns(state, target) {
         target
     } else {
-        let copy = values::shallow_duplicate_attr(target)?;
+        // `store_matrix_element` writes into the copy's storage, which a long vector's
+        // `shallow_duplicate_attr` wrapper does not have.
+        let copy = values::shallow_duplicate(target)?;
         copy.set_array(target.is_array());
         heap.store_slot(&mut *slot, copy);
         copy

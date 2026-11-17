@@ -5562,16 +5562,13 @@ pub unsafe fn logical_operand_of(value: Sexp, call: Sexp, operator: &str, side: 
 
 #[inline(never)]
 unsafe fn general_logical_operand(value: Sexp, call: Sexp, operator: &str, side: &str) -> R<i32> {
-    if !matches!(
-        value.kind(),
-        SexpType::Logical
-            | SexpType::Integer
-            | SexpType::Real
-            | SexpType::Complex
-            | SexpType::Nil
-            | SexpType::String
-            | SexpType::Raw
-    ) {
+    // GNU R's `isNumber`: a factor is an integer vector but not a number.
+    let number = match value.kind() {
+        SexpType::Logical | SexpType::Real | SexpType::Complex => true,
+        SexpType::Integer => !values::inherits(value, "factor"),
+        _ => false,
+    };
+    if !number {
         return Err(error_in(
             call,
             format!("invalid '{side}' type in 'x {operator} y'"),
@@ -5583,16 +5580,6 @@ unsafe fn general_logical_operand(value: Sexp, call: Sexp, operator: &str, side:
             call,
             format!("'length = {count}' in coercion to 'logical(1)'"),
         ));
-    }
-    if value.kind() == SexpType::String {
-        let result = values::as_logical_scalar(value);
-        if count == 1 && result == heap::object::NA_LOGICAL {
-            return Err(error_in(
-                call,
-                format!("invalid '{side}' type in 'x {operator} y'"),
-            ));
-        }
-        return Ok(result);
     }
     Ok(values::as_logical_scalar(value))
 }
@@ -5862,10 +5849,12 @@ unsafe fn do_force_and_call(call: &Call<'_>) -> R<Sexp> {
     // The callee's arguments are the call's own cells after `n` and `FUN` whenever the special
     // received them unchanged, which is every call written in source, so `Reduce` and the
     // apply family pay no pairlist per call. GNU R conses the same tail into one new call.
-    let rest = match call_tail(call.call, &call.args[2..]) {
+    // A call without `FUN` reaches the "attempt to apply non-function" error below, as in GNU R.
+    let arguments = call.args.get(2..).unwrap_or(&[]);
+    let rest = match call_tail(call.call, arguments) {
         Some(rest) => rest,
         None => values::pairlist(
-            &call.args[2..]
+            &arguments
                 .iter()
                 .map(|arg| (arg.tag, arg.value))
                 .collect::<SmallVec<[(Sexp, Sexp); 8]>>(),
@@ -6275,7 +6264,28 @@ unsafe fn call_seeded(
 unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
     let expression = call.arg(0);
     let mut env = call.arg(1);
-    let enclosure = call.arg(2);
+    // An S4 object that extends "environment" stands for the environment in its `.xData`
+    // slot. GNU R names the type of what that conversion made of a bad `enclos`, which is
+    // `NULL`.
+    let enclosure = match call.arg(2) {
+        enclosure if matches!(enclosure.kind(), SexpType::Nil | SexpType::Environment) => enclosure,
+        enclosure => match values::get_attr(enclosure, values::symbols().dot_xdata) {
+            data if enclosure.kind() == SexpType::Object
+                && data.kind() == SexpType::Environment =>
+            {
+                data
+            }
+            _ => return Err(error("invalid 'enclos' argument of type 'NULL'")),
+        },
+    };
+    if env.kind() == SexpType::Object {
+        let data = values::get_attr(env, values::symbols().dot_xdata);
+        env = if data.kind() == SexpType::Environment {
+            data
+        } else {
+            nil()
+        };
+    }
     match env.kind() {
         SexpType::Environment => {}
         SexpType::Nil => {
@@ -6293,14 +6303,16 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
             env = crate::envir::list_to_env(list, enclosure)?;
         }
         SexpType::Integer | SexpType::Real => {
+            if length(env) != 1 {
+                return Err(error("numeric 'envir' arg not of length one"));
+            }
             let which = values::as_integer_scalar(env);
+            if which == NA_INTEGER {
+                return Err(invalid_envir(env));
+            }
             env = crate::envir::sys_frame(which, call.env()?)?;
         }
-        _ => {
-            return Err(call.error(
-                "invalid 'envir' argument of type '".to_string() + env.kind().name() + "'",
-            ));
-        }
+        _ => return Err(invalid_envir(env)),
     }
     // `eval` runs its expression in a context of its own, as GNU R's does: it counts as a frame
     // for `sys.call` and friends, and a `return` in the expression returns from `eval`.
@@ -6351,6 +6363,13 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
     crate::truncate_frames(state, depth - 1);
     state.restarts = restarts;
     result
+}
+
+unsafe fn invalid_envir(env: Sexp) -> Unwind {
+    error(format!(
+        "invalid 'envir' argument of type '{}'",
+        env.kind().name()
+    ))
 }
 
 unsafe fn do_with_visible(call: &Call<'_>) -> R<Sexp> {
