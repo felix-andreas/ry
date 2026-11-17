@@ -113,6 +113,26 @@ impl Collator {
             }
         }
     }
+
+    /// One ICU sort key per text, when ICU collates: their byte order is [`Self::compare`]'s,
+    /// and equal keys mean equal texts at the collator's strength. A key holds no zero byte.
+    fn keys<Text: AsRef<str>>(&self, texts: &[Text]) -> Option<CollationKeys> {
+        let Collation::Icu(icu) = &*self.0 else {
+            return None;
+        };
+        let mut bytes = Vec::new();
+        let mut starts = Vec::with_capacity(texts.len() + 1);
+        for text in texts {
+            starts.push(u32::try_from(bytes.len()).ok()?);
+            let text = text.as_ref();
+            let Ok(()) = match values::unescape_invalid_bytes(text) {
+                None => icu.collator.write_sort_key_to(text, &mut bytes),
+                Some(raw) => icu.collator.write_sort_key_utf8_to(&raw, &mut bytes),
+            };
+        }
+        starts.push(u32::try_from(bytes.len()).ok()?);
+        Some(CollationKeys { bytes, starts })
+    }
 }
 
 pub fn sort_strings(names: &mut [String]) {
@@ -133,11 +153,12 @@ pub fn collation_order<Text: AsRef<str>>(texts: &[Text]) -> Vec<u32> {
     let text = |index: u32| texts[index as usize].as_ref();
     if c_collation() {
         order.sort_by(|&left, &right| text(left).cmp(text(right)));
-    } else if let Some(keys) = AsciiKeys::new(texts) {
-        order.sort_by(|&left, &right| keys.key(left).cmp(keys.key(right)));
-    } else {
-        let collator = collator();
-        order.sort_by(|&left, &right| collator.compare(text(left), text(right)));
+        return order;
+    }
+    let collator = collator();
+    match CollationKeys::ascii(texts).or_else(|| collator.keys(texts)) {
+        Some(keys) => order.sort_by(|&left, &right| keys.key(left).cmp(keys.key(right))),
+        None => order.sort_by(|&left, &right| collator.compare(text(left), text(right))),
     }
     order
 }
@@ -371,18 +392,20 @@ fn ascii_collate(left: &[u8], right: &[u8]) -> Ordering {
     left.len().cmp(&right.len()).then(case)
 }
 
-/// Byte keys whose order is [`ascii_collate`]'s, built once per text so a sort compares slices:
-/// the primary ranks, a zero, then 1 for each lowercase-or-caseless character and 2 for each
-/// uppercase one. Distinct texts have distinct keys.
-struct AsciiKeys {
+/// Byte keys, one per text, whose order is the session's collation, built once so a sort
+/// compares bytes rather than collating each pair. No key is a proper prefix of another
+/// followed only by zero bytes, so zero-padding a key keeps its order.
+struct CollationKeys {
     bytes: Vec<u8>,
     starts: Vec<u32>,
 }
 
-impl AsciiKeys {
-    /// The keys of `texts`, when the session collates printable ASCII as the root collation
-    /// does and every text is printable ASCII.
-    fn new<Text: AsRef<str>>(texts: &[Text]) -> Option<AsciiKeys> {
+impl CollationKeys {
+    /// The keys of `texts` in [`ascii_collate`]'s order, when the session collates printable
+    /// ASCII as the root collation does and every text is printable ASCII: the primary ranks,
+    /// which are never zero, a zero, then 1 for each lowercase-or-caseless character and 2 for
+    /// each uppercase one. Distinct texts have distinct keys.
+    fn ascii<Text: AsRef<str>>(texts: &[Text]) -> Option<CollationKeys> {
         let eligible = MODE.load(AtomicOrdering::Relaxed) == ROOT_ASCII
             && texts.iter().all(|text| is_printable_ascii(text.as_ref()));
         if !eligible {
@@ -402,12 +425,19 @@ impl AsciiKeys {
             bytes.extend(text.iter().map(|&byte| byte.is_ascii_uppercase() as u8 + 1));
         }
         starts.push(bytes.len() as u32);
-        Some(AsciiKeys { bytes, starts })
+        Some(CollationKeys { bytes, starts })
     }
 
     fn key(&self, index: u32) -> &[u8] {
         let index = index as usize;
         &self.bytes[self.starts[index] as usize..self.starts[index + 1] as usize]
+    }
+
+    fn all(&self) -> Vec<&[u8]> {
+        self.starts
+            .windows(2)
+            .map(|bounds| &self.bytes[bounds[0] as usize..bounds[1] as usize])
+            .collect()
     }
 }
 
@@ -1174,17 +1204,13 @@ unsafe fn do_rank(call: &Call<'_>) -> R<Sexp> {
             ));
         }
     };
-    let mut ranks = vec![0.0; count];
-    let mut assign = |start: usize, end: usize, members: &mut dyn Iterator<Item = usize>| {
-        let rank = match ties {
-            Ties::Average => (start + end + 2) as f64 / 2.0,
-            Ties::Min => (start + 1) as f64,
-            Ties::Max => (end + 1) as f64,
-        };
-        for index in members {
-            ranks[index] = rank;
-        }
+    // The rank shared by the rows in sorted positions `start..=end`.
+    let rank_of = |start: usize, end: usize| match ties {
+        Ties::Average => (start + end + 2) as f64 / 2.0,
+        Ties::Min => (start + 1) as f64,
+        Ties::Max => (end + 1) as f64,
     };
+    let mut ranks = vec![0.0; count];
     let rank_column = match x.kind() {
         SexpType::Logical | SexpType::Integer | SexpType::Real => column(x),
         SexpType::String if count == length(x) => {
@@ -1192,29 +1218,11 @@ unsafe fn do_rank(call: &Call<'_>) -> R<Sexp> {
         }
         _ => None,
     };
-    if let Some(keys) = rank_column.and_then(|column| rank_keys(column, count)) {
-        let mut order: Vec<(u64, u32)> = keys
-            .into_iter()
-            .enumerate()
-            .map(|(index, key)| (key, index as u32))
-            .collect();
-        order.sort_unstable();
-        let mut start = 0;
-        while start < count {
-            let key = order[start].0;
-            let end = start
-                + order[start..]
-                    .iter()
-                    .take_while(|entry| entry.0 == key)
-                    .count()
-                - 1;
-            assign(
-                start,
-                end,
-                &mut order[start..=end].iter().map(|entry| entry.1 as usize),
-            );
-            start = end + 1;
-        }
+    let keys = rank_column
+        .and_then(|column| complete_prefix(column, count))
+        .and_then(|column| sort_keys(&column, false, true));
+    if let Some(keys) = keys {
+        rank_by_keys(&keys, &rank_of, &mut ranks);
     } else {
         let column = column(x).ok_or_else(|| unimplemented_type(x, "greater"))?;
         let mut order: Vec<usize> = (0..count).collect();
@@ -1227,7 +1235,9 @@ unsafe fn do_rank(call: &Call<'_>) -> R<Sexp> {
             {
                 end += 1;
             }
-            assign(start, end, &mut order[start..=end].iter().copied());
+            for &row in &order[start..=end] {
+                ranks[row] = rank_of(start, end);
+            }
             start = end + 1;
         }
     }
@@ -1239,48 +1249,68 @@ unsafe fn do_rank(call: &Call<'_>) -> R<Sexp> {
     }
 }
 
-/// The first `count` elements of `x` as integers that sort, and tie, as `rank` compares the
-/// elements, or `None` when one is missing, which only the general comparison orders. A double
-/// maps to its bits with the sign folded so that unsigned order is numeric order, with `-0`
-/// read as `0`; strings come as their collation ranks.
-fn rank_keys(x: Column<'_>, count: usize) -> Option<Vec<u64>> {
+/// The first `count` elements of `x`, or `None` when one is missing, which only the general
+/// comparison orders.
+fn complete_prefix(x: Column<'_>, count: usize) -> Option<Column<'_>> {
     match x {
         Column::Integer(data) => {
             let data = data.get(..count)?;
-            if data.contains(&NA_INTEGER) {
-                return None;
-            }
-            Some(
-                data.iter()
-                    .map(|&value| u64::from((value as u32) ^ 0x8000_0000))
-                    .collect(),
-            )
+            (!data.contains(&NA_INTEGER)).then_some(Column::Integer(data))
         }
         Column::Real(data) => {
             let data = data.get(..count)?;
-            if data.iter().any(|value| value.is_nan()) {
-                return None;
-            }
-            Some(
-                data.iter()
-                    .map(|&value| {
-                        let bits = (value + 0.0).to_bits();
-                        if bits >> 63 == 1 {
-                            !bits
-                        } else {
-                            bits | 1 << 63
-                        }
-                    })
-                    .collect(),
-            )
+            (!data.iter().any(|value| value.is_nan())).then_some(Column::Real(data))
         }
-        Column::Ranks(ranks) => {
-            if ranks.contains(&0) {
-                return None;
-            }
-            Some(ranks.into_iter().map(u64::from).collect())
-        }
+        Column::Ranks(ranks) => (ranks.len() == count && !ranks.contains(&0))
+            .then_some(Column::Ranks(ranks)),
         _ => None,
+    }
+}
+
+/// Writes each row's rank by `keys` into `ranks`, where `rank_of` maps the sorted positions a
+/// run of tied rows takes to their shared rank. A key whose range is no wider than the rows
+/// (string ranks, small integers) needs no sort: counting each key gives the positions its
+/// rows take.
+fn rank_by_keys(keys: &SortKeys, rank_of: &dyn Fn(usize, usize) -> f64, ranks: &mut [f64]) {
+    if let SortKeys::Narrow(keys) = keys
+        && keys.high - keys.low < ranks.len() as u64
+    {
+        let low = keys.low as u32;
+        let mut ends = vec![0u32; (keys.high - keys.low) as usize + 1];
+        for &key in &keys.values {
+            ends[(key - low) as usize] += 1;
+        }
+        let mut total = 0;
+        for end in &mut ends {
+            total += *end;
+            *end = total;
+        }
+        let shared: Vec<f64> = ends
+            .iter()
+            .scan(0, |start, &end| {
+                let rank = rank_of(*start as usize, end.saturating_sub(1) as usize);
+                *start = end;
+                Some(rank)
+            })
+            .collect();
+        for (rank, &key) in ranks.iter_mut().zip(&keys.values) {
+            *rank = shared[(key - low) as usize];
+        }
+        return;
+    }
+    let mut order = vec![0u32; ranks.len()];
+    radix_order(std::slice::from_ref(keys), &mut order);
+    let mut start = 0;
+    while start < order.len() {
+        let mut end = start;
+        while end + 1 < order.len() && keys.equal(order[start] as usize, order[end + 1] as usize) {
+            end += 1;
+        }
+        let rank = rank_of(start, end);
+        for &row in &order[start..=end] {
+            ranks[row as usize] = rank;
+        }
+        start = end + 1;
     }
 }
 
@@ -1886,11 +1916,17 @@ unsafe fn string_ranks(vector: Sexp, order: TextOrder) -> Vec<u32> {
                 .iter()
                 .map(|&(charsxp, _)| char_str(charsxp))
                 .collect();
-            if bytewise {
-                let texts: Vec<&[u8]> = texts.iter().map(|text| text.as_bytes()).collect();
-                byte_ranks(&texts)
-            } else {
-                collation_ranks(&texts, &compare)
+            let keys = match &collator {
+                Some(collator) => CollationKeys::ascii(&texts).or_else(|| collator.keys(&texts)),
+                None => None,
+            };
+            match keys {
+                Some(keys) => byte_ranks(&keys.all()),
+                None if bytewise => {
+                    let texts: Vec<&[u8]> = texts.iter().map(|text| text.as_bytes()).collect();
+                    byte_ranks(&texts)
+                }
+                None => collation_ranks(&texts, &compare),
             }
         }
     };
@@ -1910,19 +1946,6 @@ enum TextOrder {
 
 /// The rank of each text (from 1) in collation order, through a comparison sort.
 fn collation_ranks(texts: &[Cow<'_, str>], compare: &dyn Fn(&str, &str) -> Ordering) -> Vec<u32> {
-    if let Some(keys) = AsciiKeys::new(texts) {
-        let mut by_text: Vec<u32> = (0..texts.len() as u32).collect();
-        by_text.sort_unstable_by(|&left, &right| keys.key(left).cmp(keys.key(right)));
-        let mut rank_of_code = vec![0u32; texts.len()];
-        let mut rank = 0;
-        for (position, &code) in by_text.iter().enumerate() {
-            if position == 0 || keys.key(by_text[position - 1]) != keys.key(code) {
-                rank += 1;
-            }
-            rank_of_code[code as usize] = rank;
-        }
-        return rank_of_code;
-    }
     let mut by_text: Vec<u32> = (0..texts.len() as u32).collect();
     by_text
         .sort_unstable_by(|&left, &right| compare(&texts[left as usize], &texts[right as usize]));
@@ -1944,7 +1967,8 @@ fn collation_ranks(texts: &[Cow<'_, str>], compare: &dyn Fn(&str, &str) -> Order
 }
 
 /// The rank of each text (from 1) in byte order. Eight bytes of each text, zero-padded, form a
-/// big-endian key that orders like the bytes themselves, because no R string holds a NUL. The
+/// big-endian key that orders like the bytes themselves, because no R string holds a NUL (and
+/// no [`CollationKeys`] key is another followed by zeros). The
 /// keys start past the prefix every text shares, are sorted as integers, and a run of equal
 /// keys is sorted again on the next eight bytes, so a text's bytes are read once per eight
 /// rather than once per comparison.
