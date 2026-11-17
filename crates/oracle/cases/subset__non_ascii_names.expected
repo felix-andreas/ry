@@ -50,9 +50,18 @@
 | [1] TRUE
 | [1] 5
 | [1] TRUE
+| [1] TRUE
+|  a 😀 
+|  1  5 
+|  a 😀 
+|  1  9 
+|  a 😀 
+|  1  9 
+|  a 😀 
+|  1  9 
 [messages]
 [warnings]
 [errors]
 [value]
-logical
-| TRUE
+NULL
+| NULL
