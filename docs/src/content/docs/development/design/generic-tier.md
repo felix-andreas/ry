@@ -267,49 +267,103 @@ above tier 0 there are bodies of steps, and stretches are designed to bring them
 ## Measured
 
 Each row is one pattern of `tools/bench/appsuite/patterns/r15_plain_function_bodies.R`: a closure
-called from a loop, in callgrind instructions per call, the loop included. "Before" is tier 1
-without the changes of step 1. A difference of 48 from "JIT off" is the loop's own, and means the
-body runs in tier 0. The handler columns run the same loop inside `withCallingHandlers`.
+called from a loop, in callgrind instructions per call, the loop included. The counts cover 32,000
+calls that start after a collection. "Before" is tier 1 without the changes of stage 1, and
+"Forced" is `RY_JIT=force`.
 
-| Body | JIT off | Before | Step 1 | Forced, before | Forced, step 1 |
+| Body | JIT off | Before | Stage 1 | Forced, before | Forced, stage 1 |
 |---|---|---|---|---|---|
-| `f()` | 1,674 | 2,611 | 1,603 | 3,321 | 1,952 |
-| `f(a)` | 1,813 | 3,085 | 1,782 | 2,519 | 2,276 |
-| `f(a, b, c)` | 1,934 | 3,545 | 1,805 | 2,541 | 2,299 |
-| passes 3 arguments on to `f` | 2,909 | 5,926 | 2,027 | 2,835 | 2,521 |
-| a chain of 5 calls | 5,128 | 10,756 | 3,860 | 6,918 | 5,749 |
-| two argument guards with `stop()` | 3,994 | 3,502 | 3,417 | 3,974 | 3,775 |
-| a function that returns early | 1,952 | 2,073 | 1,946 | 2,549 | 2,306 |
-| `x[[name]]` | 2,240 | 2,288 | 2,257 | 4,158 | 2,616 |
-| `switch()` on a string | 2,246 | 2,294 | 2,294 | 4,203 | 2,668 |
-| `if`/`else if` chain on a string | 5,847 | 5,895 | 5,895 | 8,431 | 7,735 |
-| reads of `x$a`, `x$a$b` | 5,080 | 5,128 | 5,128 | 7,413 | 7,111 |
-| `missing(b)` | 3,096 | 3,144 | 3,144 | 5,399 | 5,085 |
-| passes `...` on | 3,815 | 5,537 | 3,863 | 7,374 | 6,292 |
-| a helper of 20 lines | 23,627 | 23,786 | 23,772 | 25,443 | 25,754 |
-| 10 scalar assignments | 4,355 | 2,157 | 2,030 | 2,633 | 2,390 |
-| a loop that sums 10 elements | 10,449 | 6,066 | 4,970 | 5,591 | 5,934 |
+| f() with no argument | 1,661 | 2,598 | 1,554 | 3,310 | 1,936 |
+| a function that defines and calls a function | 5,458 | 5,508 | 5,475 | 10,102 | 9,674 |
+| lapply over 3 with a function that reads a local | 19,786 | 19,889 | 19,836 | 26,361 | 25,502 |
+| two argument guards with stop() | 3,995 | 3,507 | 3,382 | 3,979 | 3,770 |
+| a function that passes ... on | 3,816 | 5,542 | 3,833 | 7,397 | 6,281 |
+| field(x, name) as x[[name]] | 2,240 | 2,290 | 2,222 | 4,162 | 2,611 |
+| 10 scalar assignments | 4,377 | 2,160 | 1,995 | 2,636 | 2,385 |
+| if / else if chain on a string | 5,843 | 5,893 | 5,862 | 8,239 | 7,731 |
+| switch() on a string | 2,250 | 2,302 | 2,267 | 4,210 | 2,692 |
+| reads of x$a, x$a$b, x[['a']][['b']] | 5,080 | 5,135 | 5,097 | 7,423 | 7,111 |
+| writes of x$a, x[['a']], x$a$b | 13,824 | 13,986 | 13,841 | 16,253 | 15,704 |
+| f(a) with one argument | 1,811 | 3,088 | 1,746 | 2,521 | 2,272 |
+| for loop that sums 10 elements | 9,580 | 5,121 | 3,987 | 5,605 | 5,072 |
+| for loop that fills 10 elements | 9,100 | 5,166 | 5,013 | 6,247 | 5,932 |
+| for loop that copies 5 list fields | 17,490 | 17,774 | 17,593 | 18,908 | 18,555 |
+| list() of 4 named fields with paste0() | 9,137 | 9,213 | 9,152 | 11,300 | 10,854 |
+| helper of 20 lines | 22,850 | 23,089 | 22,898 | 25,644 | 25,010 |
+| f(a, b, c) by position | 1,932 | 3,547 | 1,768 | 2,541 | 2,295 |
+| f(a, b = , c = ) by name | 1,932 | 1,982 | 1,768 | 2,544 | 2,294 |
+| f(a) with two default arguments | 3,075 | 4,575 | 3,092 | 5,715 | 4,911 |
+| a function that passes 3 arguments on | 2,908 | 5,930 | 1,988 | 2,838 | 2,512 |
+| a chain of 5 calls | 5,129 | 10,759 | 3,816 | 6,921 | 5,735 |
+| a function that tests missing(b) | 3,095 | 3,147 | 3,112 | 5,402 | 5,083 |
+| a function that returns early | 1,951 | 2,075 | 1,911 | 2,550 | 2,302 |
 
-| Body, under a calling handler | JIT off | Before | Step 1 |
+The same loops inside `withCallingHandlers`, as a test suite runs them:
+
+| Body, under a calling handler | JIT off | Before | Stage 1 |
 |---|---|---|---|
-| `f()` | 1,884 | 2,580 | 1,806 |
-| `f(a, b, c)` | 2,904 | 3,782 | 2,227 |
-| passes 3 arguments on to `f` | 4,640 | 6,305 | 2,449 |
-| a chain of 5 calls | 7,846 | 11,893 | 5,042 |
-| `x[[name]]` | 3,109 | 3,157 | 2,452 |
-| a function that returns early | 2,978 | 3,861 | 2,368 |
-| 10 scalar assignments | 5,385 | 4,744 | 2,452 |
-| a loop that sums 10 elements | 11,291 | 7,216 | 6,282 |
+| f() with no argument | 1,860 | 2,560 | 1,747 |
+| a function that defines and calls a function | 5,518 | 5,566 | 5,535 |
+| lapply over 3 with a function that reads a local | 19,752 | 19,859 | 19,802 |
+| two argument guards with stop() | 3,993 | 4,046 | 3,380 |
+| a function that passes ... on | 4,698 | 5,570 | 4,712 |
+| field(x, name) as x[[name]] | 3,179 | 3,230 | 2,438 |
+| 10 scalar assignments | 5,404 | 4,745 | 2,414 |
+| if / else if chain on a string | 6,065 | 6,115 | 6,079 |
+| switch() on a string | 2,259 | 2,307 | 2,273 |
+| reads of x$a, x$a$b, x[['a']][['b']] | 5,085 | 5,130 | 5,097 |
+| writes of x$a, x[['a']], x$a$b | 13,842 | 14,000 | 13,855 |
+| f(a) with one argument | 2,781 | 3,666 | 2,164 |
+| for loop that sums 10 elements | 10,569 | 6,422 | 5,503 |
+| for loop that fills 10 elements | 9,103 | 5,526 | 5,269 |
+| for loop that copies 5 list fields | 17,487 | 17,774 | 17,588 |
+| list() of 4 named fields with paste0() | 9,134 | 9,213 | 9,151 |
+| helper of 20 lines | 24,073 | 24,318 | 24,120 |
+| f(a, b, c) by position | 2,901 | 3,783 | 2,187 |
+| f(a, b = , c = ) by name | 2,899 | 2,952 | 2,187 |
+| f(a) with two default arguments | 4,063 | 4,940 | 4,080 |
+| a function that passes 3 arguments on | 4,684 | 6,354 | 2,406 |
+| a chain of 5 calls | 7,842 | 11,894 | 4,995 |
+| a function that tests missing(b) | 3,096 | 3,148 | 3,112 |
+| a function that returns early | 2,974 | 3,858 | 2,330 |
 
-With step 1 no row runs more instructions with the JIT on than off beyond the loop's 48, where
-before the call rows ran up to twice tier 0's. The rows that gain are the ones with an inlined
-frame, and they gain most under a handler, where tier 0's call makes promises. The patterns of
-`r02_argument_checks.R` are unchanged: every body there is steps, and none compiles.
+The patterns of `tools/bench/appsuite/patterns/r02_argument_checks.R`:
 
-On the app-suite workload step 1 removes the loss and adds little gain. Four bodies compile, and
-the exits fall from 95,000 to 16. The compiled share of the time stays near zero, because most of
-its hot callees keep their frame: they pass `...`, run an instruction only tier 0 has, or call a
-closure that needs its own frame. Steps 2 and 4 are what move that share.
+| Body | JIT off | Before | Stage 1 | Forced, before | Forced, stage 1 |
+|---|---|---|---|---|---|
+| function with an argument check | 146,465 | 147,070 | 146,599 | 183,236 | 177,196 |
+| match.arg() | 9,167 | 9,240 | 9,203 | 10,936 | 10,557 |
+| stopifnot() with two conditions | 6,425 | 6,497 | 6,464 | 7,496 | 7,314 |
+| identical() of two short vectors | 4,032 | 4,083 | 4,048 | 5,135 | 4,920 |
+| check_args(...) alone | 106,154 | 106,648 | 106,222 | 138,114 | 133,130 |
+| list(...) of three values | 5,862 | 5,911 | 5,880 | 7,690 | 7,340 |
+| ifelse() on a scalar | 4,203 | 4,256 | 4,221 | 5,295 | 5,106 |
+| nested ifelse() with is.na() | 11,289 | 11,337 | 11,306 | 12,862 | 12,590 |
+| isTRUE() | 4,540 | 4,591 | 4,557 | 5,535 | 5,344 |
+| inherits(x, 'Date') | 1,903 | 1,954 | 1,920 | 3,297 | 3,072 |
+| is(x, 'character') | 4,421 | 4,474 | 4,439 | 6,897 | 6,396 |
+| missing() and default arguments | 4,924 | 4,975 | 4,940 | 7,370 | 6,985 |
+
+With the tier on, tier 0 counts back edges and entries for it: 17 instructions per back edge, the
+measuring loop's included. A "Stage 1" count that is 17 above "JIT off" is therefore a body that
+runs in tier 0 unchanged, and a body with loops of its own or with closures called from a builtin
+pays the same counts again. No row is above "JIT off" by more than those counts, which stay under
+1% of every row. Before, the rows that call a closure from compiled code ran up to twice tier 0's
+instructions.
+
+The rows that gain are the ones with an inlined frame, and they gain most under a handler, where
+tier 0's call makes promises: a chain of five calls runs in under two thirds of tier 0's
+instructions there. Every body of `r02_argument_checks.R` is steps around builtins and closures
+that keep their frame, so none compiles and the default mode matches tier 0.
+
+Forced mode runs fewer instructions than before on every row and more than tier 0 on most. The
+few rows below tier 0 have native arithmetic or a wrapper whose callee is inlined. The rows above
+it are bodies of steps, which is what stretches (stage 3) are for.
+
+On the app-suite workload stage 1 removes the loss and adds little gain. The compiled share of
+the time stays near zero, because most of its hot callees keep their frame: they pass `...`, run
+an instruction only tier 0 has, or call a closure that needs its own frame. Stages 2 and 4 are
+what move that share.
 
 ## How it compares
 
