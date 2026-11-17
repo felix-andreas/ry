@@ -111,7 +111,9 @@ fn filter_bit(symbol: Sexp) -> u64 {
     1 << ((symbol.as_ptr() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 58)
 }
 
-/// Every binding a frame gains passes here, which is what makes [`gp::BOUND_ELSEWHERE`] sound:
+/// Every binding a frame gains passes here, and so does every name the environment of a live slot
+/// frame keeps in a slot ([`Frame::set_slot_owner`]), which is what makes
+/// [`gp::BOUND_ELSEWHERE`] sound:
 /// the base frames keep their bindings on the symbols and never insert. A detached frame (see
 /// [`gp::DETACHED`]) marks nothing, because no lookup from an attached environment passes it, and
 /// it marks its whole frame once it is attached ([`Frame::mark_bound_elsewhere`]). That keeps
@@ -472,6 +474,9 @@ impl Frame {
     /// Records the slot frame this environment stands for and the list of names it keeps in
     /// slots ([`Frame::expected`]), or with `None` that it stands for none any more. The frame
     /// must hold no removed slot.
+    ///
+    /// A lookup through the environment finds a variable in its slot, so each name counts as
+    /// bound here ([`gp::BOUND_ELSEWHERE`]) although the frame gains no binding for it.
     pub fn set_slot_owner(&mut self, owner: Option<(usize, Sexp)>) {
         debug_assert_eq!(self.removed(), 0);
         match owner {
@@ -482,6 +487,7 @@ impl Frame {
                 // SAFETY: the caller hands over a list of symbols.
                 for &name in unsafe { names.slice::<Sexp>() } {
                     self.expect(name);
+                    mark_bound_elsewhere(name);
                 }
             }
             None => {

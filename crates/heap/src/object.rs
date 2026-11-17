@@ -388,8 +388,10 @@ pub mod gp {
     /// symbol's lookup stamp, so compiled code revalidates a lookup only when both moved.
     pub const WATCHED: u16 = 1 << 10;
     /// A symbol that the frame of some attached environment (one without [`DETACHED`]) binds or
-    /// once bound, other than a base frame. Only frame code sets it ([`crate::env`]'s inserts,
-    /// and a detached frame as it is attached), and nothing clears it, so a symbol without it
+    /// once bound, other than a base frame, or that the environment of a live slot frame keeps
+    /// or once kept in a slot. Only frame code sets it ([`crate::env`]'s inserts, a detached
+    /// frame as it is attached, and an environment as it starts to stand for a slot frame), and
+    /// nothing clears it, so a symbol without it
     /// resolves from any attached environment to its base binding, which is what lets a compiled
     /// guard for a base function check one bit and the base value instead of walking the chain.
     pub const BOUND_ELSEWHERE: u16 = 1 << 11;
