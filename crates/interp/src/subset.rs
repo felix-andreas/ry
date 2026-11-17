@@ -1627,6 +1627,9 @@ unsafe fn do_subset2(call: &Call<'_>) -> R<Sexp> {
         }
     }
     let (object, indices, _, exact) = subset_args(call);
+    if indices.is_empty() {
+        return Err(call.error("no index specified"));
+    }
     let exact = match exact {
         Some(exact) => match values::as_logical_scalar(exact) {
             NA_LOGICAL => None,
@@ -5350,7 +5353,10 @@ pub(crate) unsafe fn do_is_list_factor(call: &Call<'_>) -> R<Sexp> {
 unsafe fn row_col(call: &Call<'_>, rows: bool) -> R<Sexp> {
     let dims = coerce_vector(call.arg(0), SexpType::Integer)?;
     if length(dims) != 2 {
-        return Err(call.error("a matrix-like object is required as argument to 'row'/'col'"));
+        return Err(error(format!(
+            "a matrix-like object is required as argument to '{}'",
+            if rows { "row" } else { "col" }
+        )));
     }
     let row_count = values::ints(dims)[0].max(0) as usize;
     let col_count = values::ints(dims)[1].max(0) as usize;

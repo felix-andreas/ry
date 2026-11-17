@@ -2517,15 +2517,19 @@ fn real_key(value: f64) -> u64 {
 
 /// The `incomparables` argument as keys of `kind`, or `None` for `NULL` and `FALSE`.
 unsafe fn incomparable_keys<'a>(incomparables: Sexp, kind: SexpType) -> R<Option<Vec<Key<'a>>>> {
-    if incomparables == nil()
-        || (incomparables.kind() == SexpType::Logical
-            && length(incomparables) == 1
-            && values::ints(incomparables)[0] == 0)
-    {
+    if !incomparable_keys_given(incomparables) {
         return Ok(None);
     }
     let converted = values::materialize(coerce_vector(incomparables, kind)?)?;
     Ok(Some(element_keys(converted)))
+}
+
+/// Whether `incomparables` names values at all: `NULL` and `FALSE` do not.
+unsafe fn incomparable_keys_given(incomparables: Sexp) -> bool {
+    !(incomparables == nil()
+        || (incomparables.kind() == SexpType::Logical
+            && length(incomparables) == 1
+            && values::ints(incomparables)[0] == 0))
 }
 
 /// Which elements of `x` repeat an earlier one (a later one with `from_last`). Lists compare
@@ -2544,6 +2548,15 @@ unsafe fn duplicated_elements(
     let x = values::materialize(x)?;
     let count = length(x);
     let list = matches!(x.kind(), SexpType::List | SexpType::Expression);
+    // A list's incomparables are elements compared with `identical()`, as GNU R coerces them to
+    // the type of `x`.
+    let incomparable_elements = if list && incomparable_keys_given(incomparables) {
+        let converted = coerce_vector(incomparables, x.kind())?;
+        crate::heap().root(converted);
+        Some(converted)
+    } else {
+        None
+    };
     let incomparables = if list {
         None
     } else {
@@ -2571,7 +2584,13 @@ unsafe fn duplicated_elements(
                 .iter()
                 .any(|&seen| identical(x.element(seen), element, &flags))
             {
-                duplicated.insert(index);
+                let incomparable = incomparable_elements.is_some_and(|elements| {
+                    (0..length(elements))
+                        .any(|position| identical(elements.element(position), element, &flags))
+                });
+                if !incomparable {
+                    duplicated.insert(index);
+                }
             } else {
                 bucket.push(index);
             }

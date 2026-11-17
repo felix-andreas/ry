@@ -1,0 +1,20 @@
+[stdout]
+| [1] Inf
+| [1] Inf
+| [1] Inf
+| [1] Inf
+| [1] Inf
+| [1] Inf
+| [1] Inf
+| [1] Inf
+| [1] Inf
+| [1] Inf
+| [1] -Inf
+| [1]     Inf     Inf 1.27324
+| [1] Inf
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| Inf

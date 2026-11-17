@@ -709,11 +709,12 @@ impl Deparser {
                 self.ry_call(form, arguments);
                 return;
             }
-            if head == symbols.break_ && argument_count == 0 {
+            // GNU R prints the keyword alone whatever arguments the call holds.
+            if head == symbols.break_ {
                 self.print("break");
                 return;
             }
-            if head == symbols.next && argument_count == 0 {
+            if head == symbols.next {
                 self.print("next");
                 return;
             }

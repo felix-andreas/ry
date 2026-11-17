@@ -1,0 +1,26 @@
+[stdout]
+| warning: NAs introduced by coercion | integer("a") 
+| error: vector size cannot be NA/NaN | integer("a") 
+| [1] 0 0
+| warning: NAs introduced by coercion | vector("list", "a") 
+| error: vector size cannot be NA/NaN | vector("list", "a") 
+| warning: NAs introduced by coercion | vector(1:3, "a") 
+| error: vector size cannot be NA/NaN | vector(1:3, "a") 
+| error: invalid 'mode' argument | vector(1:3, 2) 
+| error: invalid 'length' argument | vector("numeric", 1:2) 
+| error: vector size cannot be infinite | vector("double", length) 
+| error: invalid 'length' argument | vector("double", length) 
+| error: invalid 'length' argument | logical(-1) 
+| error: vector: cannot make a vector of mode 'foo'. | vector("foo", 1) 
+| error: invalid 'mode' argument | vector(c("list", "integer"), 1) 
+| error: a matrix-like object is required as argument to 'row' | .row(1:3) 
+| error: a matrix-like object is required as argument to 'col' | .col(1:3) 
+|      [,1] [,2]
+| [1,]    1    1
+| [2,]    2    2
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| structure(c(1L, 2L, 1L, 2L), dim = c(2L, 2L))

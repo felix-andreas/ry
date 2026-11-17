@@ -1526,6 +1526,7 @@ pub unsafe fn real_at(vector: Sexp, index: usize) -> f64 {
                 value as f64
             }
         }
+        SexpType::Raw => f64::from(values::raws(vector)[index]),
         _ => NA_REAL,
     }
 }
@@ -2465,6 +2466,26 @@ math_functions! {
 
 pub fn math_value(function: Math, x: f64) -> f64 {
     use std::f64::consts::PI;
+    // GNU R 4.6's `math1_ari` answers these functions at a zero argument with a positive zero,
+    // so a negative zero loses its sign.
+    if x == 0.0
+        && matches!(
+            function,
+            Math::Expm1
+                | Math::Log1p
+                | Math::Sin
+                | Math::Asin
+                | Math::Tan
+                | Math::Atan
+                | Math::Sinh
+                | Math::Tanh
+                | Math::Asinh
+                | Math::Atanh
+        )
+        && r_at_least(4, 6)
+    {
+        return 0.0;
+    }
     match function {
         Math::Abs => x.abs(),
         Math::Sign => {

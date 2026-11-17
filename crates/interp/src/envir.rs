@@ -450,15 +450,16 @@ unsafe fn do_set_environment(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_new_env(call: &Call<'_>) -> R<Sexp> {
+    let hash = values::as_integer_scalar_warning(call.arg(0))?;
     let parent = call.arg(1);
-    let parent = if parent.kind() == SexpType::Environment {
-        parent
-    } else {
-        environment_arg(parent, "enclos")?
-    };
+    if parent == nil() {
+        return Err(error("use of NULL environment is defunct"));
+    }
+    let parent =
+        simple_as_environment(parent).ok_or_else(|| error("'enclos' must be an environment"))?;
     let env = new_env(parent)?;
-    if values::as_logical_scalar(call.arg(0)) == 1 {
-        let size = values::as_integer_scalar(call.arg(2));
+    if hash != 0 {
+        let size = values::as_integer_scalar_warning(call.arg(2))?;
         crate::heap().set_frame_hashed(env, if size == NA_INTEGER { 0 } else { size });
     }
     Ok(env)
@@ -596,22 +597,27 @@ unsafe fn do_environment_name(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// A symbol from a name argument.
-unsafe fn name_symbol(value: Sexp, what: &str) -> R<Sexp> {
+/// The symbol a variable-name argument names. `invalid` is the error for anything else, and for
+/// an empty name `get`, `get0` and `exists` give it where `assign` refuses the empty symbol.
+unsafe fn name_symbol(value: Sexp, invalid: &str, empty_is_invalid: bool) -> R<Sexp> {
     match value.kind() {
         SexpType::Symbol => Ok(value),
         SexpType::String if length(value) >= 1 => {
             let name = value.element(0);
             if name.bytes().is_empty() {
+                if empty_is_invalid {
+                    return Err(error(invalid));
+                }
                 return Err(error("attempt to use zero-length variable name"));
             }
             values::install_charsxp(name)
         }
-        _ => Err(error(format!("invalid '{what}' argument"))),
+        _ => Err(error(invalid)),
     }
 }
 
 unsafe fn do_assign(call: &Call<'_>) -> R<Sexp> {
-    let symbol = name_symbol(call.arg(0), "x")?;
+    let symbol = name_symbol(call.arg(0), "invalid first argument", false)?;
     let value = call.arg(1);
     let env = environment_arg(call.arg(2), "envir")?;
     let inherits = values::as_logical_scalar(call.arg(3)) == 1;
@@ -660,7 +666,7 @@ unsafe fn lookup(symbol: Sexp, env: Sexp, mode: &str, inherits: bool) -> R<Optio
 }
 
 unsafe fn do_get(call: &Call<'_>) -> R<Sexp> {
-    let symbol = name_symbol(call.arg(0), "x")?;
+    let symbol = name_symbol(call.arg(0), "invalid first argument", true)?;
     let env = environment_arg(call.arg(1), "envir")?;
     let mode = values::require_str(call.arg(2), "mode")?;
     let inherits = values::as_logical_scalar(call.arg(3)) == 1;
@@ -688,7 +694,7 @@ unsafe fn do_get(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_get0(call: &Call<'_>) -> R<Sexp> {
-    let symbol = name_symbol(call.arg(0), "x")?;
+    let symbol = name_symbol(call.arg(0), "invalid first argument", true)?;
     let env = environment_arg(call.arg(1), "envir")?;
     let mode = values::require_str(call.arg(2), "mode")?;
     let inherits = values::as_logical_scalar(call.arg(3)) == 1;
@@ -749,7 +755,7 @@ unsafe fn do_mget(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_exists(call: &Call<'_>) -> R<Sexp> {
-    let symbol = name_symbol(call.arg(0), "x")?;
+    let symbol = name_symbol(call.arg(0), "invalid first argument", true)?;
     let env = environment_arg(call.arg(1), "envir")?;
     let mode = values::require_str(call.arg(2), "mode")?;
     let inherits = values::as_logical_scalar(call.arg(3)) == 1;
@@ -844,7 +850,11 @@ unsafe fn do_ls(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_env2list(call: &Call<'_>) -> R<Sexp> {
-    let env = environment_arg(call.arg(0), "x")?;
+    let env = call.arg(0);
+    if env == nil() {
+        return Err(error("use of NULL environment is defunct"));
+    }
+    let env = simple_as_environment(env).ok_or_else(|| error("argument must be an environment"))?;
     let all = values::as_logical_scalar(call.arg(1)) == 1;
     let sorted = values::as_logical_scalar(call.arg(2)) == 1;
     let bound = env_symbols(env, all, sorted);
@@ -901,12 +911,17 @@ enum EmptyName {
 
 unsafe fn do_list2env(call: &Call<'_>) -> R<Sexp> {
     let list = call.arg(0);
-    let env = environment_arg(call.arg(1), "envir")?;
     if list.kind() != SexpType::List && list != nil() {
-        return Err(call.error("first argument must be a named list"));
+        return Err(error("first argument must be a named list"));
     }
     if length(list) > 0 && values::names(list) == nil() {
-        return Err(call.error("names(x) must be a character vector of the same length as x"));
+        return Err(error(
+            "names(x) must be a character vector of the same length as x",
+        ));
+    }
+    let env = call.arg(1);
+    if env.kind() != SexpType::Environment {
+        return Err(error("'envir' argument must be an environment"));
     }
     fill_env(env, list, EmptyName::Reject)?;
     Ok(env)
@@ -929,16 +944,39 @@ unsafe fn do_lock_environment(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_environment_is_locked(call: &Call<'_>) -> R<Sexp> {
-    let env = environment_arg(call.arg(0), "env")?;
+    let env = binding_environment(call.arg(0))?;
     scalar_bool(env.has_gp(gp::FRAME_LOCKED))
 }
 
 unsafe fn binding_cell(call: &Call<'_>) -> R<Sexp> {
-    let symbol = name_symbol(call.arg(0), "sym")?;
-    let env = environment_arg(call.arg(1), "env")?;
+    let symbol = call.arg(0);
+    if symbol.kind() != SexpType::Symbol {
+        return Err(error("not a symbol"));
+    }
+    let env = binding_environment(call.arg(1))?;
     crate::heap()
         .frame_cell(env, symbol)
         .ok_or_else(|| error(format!("no binding for \"{}\"", symbol_name(symbol))))
+}
+
+/// The environment argument of the binding and locking functions, which unlike most take no
+/// number for a frame: only an environment, or an S4 object that holds one, as GNU R's
+/// `simple_as_environment` allows.
+unsafe fn binding_environment(value: Sexp) -> R<Sexp> {
+    if value == nil() {
+        return Err(error("use of NULL environment is defunct"));
+    }
+    simple_as_environment(value).ok_or_else(|| error("not an environment"))
+}
+
+/// GNU R's `simple_as_environment`: an environment, or the one an S4 object extends.
+unsafe fn simple_as_environment(value: Sexp) -> Option<Sexp> {
+    let env = match value.kind() {
+        SexpType::Environment => value,
+        SexpType::Object if value.has_gp(gp::S4_OBJECT) => get_attr(value, symbols().dot_xdata),
+        _ => return None,
+    };
+    (env.kind() == SexpType::Environment).then_some(env)
 }
 
 unsafe fn do_lock_binding(call: &Call<'_>) -> R<Sexp> {
@@ -956,7 +994,7 @@ unsafe fn do_binding_is_locked(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_make_active_binding(call: &Call<'_>) -> R<Sexp> {
-    let symbol = name_symbol(call.arg(0), "sym")?;
+    let symbol = name_symbol(call.arg(0), "not a symbol", false)?;
     let function = call.arg(1);
     let env = environment_arg(call.arg(2), "env")?;
     if !values::is_function(function) {
@@ -1494,14 +1532,13 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
 
 unsafe fn do_get_option(call: &Call<'_>) -> R<Sexp> {
     let name = call.arg(0);
-    if name.kind() == SexpType::String
-        && length(name) == 1
-        && name.element(0) != values::na_string()
-    {
-        return Ok(option_value(name.element(0)));
+    if name.kind() != SexpType::String || length(name) != 1 {
+        return Err(error("'x' must be a character string"));
     }
-    let name = values::require_str(name, "x")?;
-    Ok(get_option(&name))
+    if name.element(0).bytes().is_empty() {
+        return Err(error("attempt to use zero-length variable name"));
+    }
+    Ok(option_value(name.element(0)))
 }
 
 /// Sets the options GNU R's C code sets at startup, before any R code runs.

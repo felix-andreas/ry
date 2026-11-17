@@ -1294,41 +1294,57 @@ unsafe fn do_as_function(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_vector(call: &Call<'_>) -> R<Sexp> {
-    let mode = values::require_str(call.arg(0), "mode")?;
     let length = call.arg(1);
-    let count = if values::length(length) == 1 {
-        values::as_real_scalar(length)
-    } else {
-        f64::NAN
-    };
-    if count.is_nan() || count < 0.0 {
+    if values::length(length) != 1 {
+        return Err(error("invalid 'length' argument"));
+    }
+    let count = crate::random::vector_size(length)?;
+    if count < 0 {
         return Err(error("invalid 'length' argument"));
     }
     let count = count as usize;
+    let modes = coerce_vector(call.arg(0), SexpType::String)?;
+    crate::heap().root(modes);
+    if values::length(modes) != 1 {
+        return Err(error("invalid 'mode' argument"));
+    }
+    let mode = char_str(modes.element(0));
     let kind = match mode.as_ref() {
         "any" => SexpType::Logical,
         mode => mode_type(mode)
-            .ok_or_else(|| call.error(format!("vector: cannot make a vector of mode '{mode}'.")))?,
+            .ok_or_else(|| error(format!("vector: cannot make a vector of mode '{mode}'.")))?,
     };
     if kind == SexpType::Pairlist {
         let items = vec![(nil(), nil()); count];
         return values::pairlist(&items, SexpType::Pairlist);
     }
     if !kind.is_vector() {
-        return Err(call.error(format!("vector: cannot make a vector of mode '{mode}'.")));
+        return Err(error(format!(
+            "vector: cannot make a vector of mode '{mode}'."
+        )));
     }
     alloc(kind, count)
 }
 
 unsafe fn do_set_storage_mode(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
-    let mode = values::require_str(call.arg(1), "value")?;
-    let kind = mode_type(&mode).ok_or_else(|| call.error("invalid value"))?;
+    let value = call.arg(1);
+    if value.kind() != SexpType::String || length(value) == 0 || value.element(0) == na_string() {
+        return Err(error("'value' must be non-null character string"));
+    }
+    let mode = char_str(value.element(0));
+    let kind = mode_type(&mode).ok_or_else(|| {
+        error(match mode.as_ref() {
+            "real" => "use of 'real' is defunct: use 'double' instead",
+            "single" => "use of 'single' is defunct: use mode<- instead",
+            _ => "invalid value",
+        })
+    })?;
     if object.kind() == kind {
         return Ok(object);
     }
     if values::inherits(object, "factor") {
-        return Err(call.error("invalid to change the storage mode of a factor"));
+        return Err(error("invalid to change the storage mode of a factor"));
     }
     coerce_vector(object, kind)
 }

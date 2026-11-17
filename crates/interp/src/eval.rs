@@ -5447,11 +5447,13 @@ unsafe fn skips_loop_context(expression: Sexp, jumps_allowed: bool) -> bool {
 }
 
 unsafe fn do_break(call: &Call<'_>) -> R<Sexp> {
+    call.check_arity(0)?;
     reachable_loop(call.env()?)?;
     Err(jump(Jump::Break { env: call.env()? }))
 }
 
 unsafe fn do_next(call: &Call<'_>) -> R<Sexp> {
+    call.check_arity(0)?;
     reachable_loop(call.env()?)?;
     Err(jump(Jump::Next { env: call.env()? }))
 }

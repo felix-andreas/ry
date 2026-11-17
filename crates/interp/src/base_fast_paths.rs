@@ -1329,6 +1329,7 @@ unsafe fn native_get_option(args: &[Arg]) -> R<Option<Sexp>> {
     if name.kind() != SexpType::String
         || length(name) != 1
         || name.element(0) == values::na_string()
+        || name.element(0).bytes().is_empty()
     {
         return Ok(None);
     }
