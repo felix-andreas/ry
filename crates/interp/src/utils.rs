@@ -24,7 +24,7 @@ use {
     },
     heap::{
         activity::set_profile_tick,
-        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType},
+        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp},
         strings::Encoding,
     },
     std::{
@@ -2075,168 +2075,259 @@ unsafe fn character_factor(x: Sexp, is_na_string: &dyn Fn(&[u8]) -> bool) -> R<S
 // write.table.
 
 /// `writetable(x, file, nrow, ncol, rnames, sep, eol, na, dec, quote, qmethod)`: the rows of a
-/// data frame or matrix as delimited text. Numbers are written to 15 significant digits,
-/// strings in the quoted columns between double quotes, with embedded quotes escaped by a
-/// backslash when `qmethod` is `TRUE` and doubled otherwise.
+/// data frame or matrix as delimited text, a port of GNU R's `writetable`. Numbers are written to
+/// 15 significant digits, strings in the quoted columns between double quotes, with embedded
+/// quotes escaped by a backslash when `qmethod` is `TRUE` and doubled otherwise. GNU R prints each
+/// piece as it goes, so an error leaves the rows before it in the file; the buffered output is
+/// written before the error is raised.
 unsafe fn do_write_table(call: &NativeCall<'_>) -> R<Sexp> {
     let x = call.arg(0);
     let file = call.arg(1);
-    let rows = values::as_integer_scalar(call.arg(2)).max(0) as usize;
-    let columns = values::as_integer_scalar(call.arg(3)).max(0) as usize;
+    let rows = values::as_integer_scalar(call.arg(2));
+    let columns = values::as_integer_scalar(call.arg(3));
     let row_names = call.arg(4);
-    let separator = values::first_string(call.arg(5))
-        .map(|text| text.into_owned())
-        .unwrap_or_default();
-    let eol = values::first_string(call.arg(6))
-        .map(|text| text.into_owned())
-        .unwrap_or_default();
-    let na = values::first_string(call.arg(7))
-        .map(|text| text.into_owned())
-        .unwrap_or_else(|| "NA".to_owned());
-    let decimal = values::first_string(call.arg(8))
-        .map(|text| text.into_owned())
-        .unwrap_or_else(|| ".".to_owned());
-    if decimal.chars().count() != 1 {
-        return Err(error("'dec' must be a single character"));
+    let [separator, eol, na, decimal] = [5, 6, 7, 8].map(|index| call.arg(index));
+    let escape = values::as_logical_scalar(call.arg(10));
+    if rows == NA_INTEGER {
+        return Err(error("invalid 'nr' argument"));
     }
+    if columns == NA_INTEGER {
+        return Err(error("invalid 'nc' argument"));
+    }
+    if row_names != nil() && row_names.kind() != SexpType::String {
+        return Err(error("invalid 'rnames' argument"));
+    }
+    for (value, name) in [
+        (separator, "sep"),
+        (eol, "eol"),
+        (na, "na"),
+        (decimal, "dec"),
+    ] {
+        if value.kind() != SexpType::String {
+            return Err(error(format!("invalid '{name}' argument")));
+        }
+    }
+    if escape == NA_LOGICAL {
+        return Err(error("invalid 'qmethod' argument"));
+    }
+    let first = |strings: Sexp| -> R<Vec<u8>> {
+        if length(strings) == 0 {
+            return Err(error("subscript out of bounds"));
+        }
+        let mut bytes = Vec::new();
+        write_string(strings.element(0), false, false, &mut bytes)?;
+        Ok(bytes)
+    };
+    let separator = first(separator)?;
+    let eol = first(eol)?;
+    let na = first(na)?;
+    let decimal = first(decimal)?;
+    let &[decimal] = decimal.as_slice() else {
+        return Err(error("'dec' must be a single character"));
+    };
+    let rows = rows.max(0) as usize;
+    let columns = columns.max(0) as usize;
     let quote = coerce_vector(call.arg(9), SexpType::Integer)?;
-    let quoted: Vec<i32> = values::ints(quote).to_vec();
-    let escape = values::as_logical_scalar(call.arg(10)) == 1;
-    let quote_text = |text: &str| -> String {
-        let inner = if escape {
-            text.replace('"', "\\\"")
-        } else {
-            text.replace('"', "\"\"")
-        };
-        format!("\"{inner}\"")
+    let mut quote_row_names = false;
+    let mut quote_columns = vec![false; columns];
+    for &entry in values::ints(quote) {
+        if entry == 0 {
+            quote_row_names = true;
+        }
+        if entry > 0
+            && let Some(slot) = quote_columns.get_mut(entry as usize - 1)
+        {
+            *slot = true;
+        }
+    }
+    let settings = Settings {
+        escape: escape == 1,
+        decimal,
+        scipen: crate::format::Settings::current_scipen(),
     };
     let is_frame = x.kind() == SexpType::List;
-    let mut cells: Vec<Cell> = Vec::with_capacity(columns);
-    for column in 0..columns {
-        let vector = if is_frame { x.element(column) } else { x };
-        cells.push(Cell::new(vector)?);
-    }
-    let mut output = String::new();
-    for row in 0..rows {
-        if row_names != nil() {
-            let name = values::string_at(row_names, row)
-                .map_or_else(|| na.clone(), |name| name.into_owned());
-            output.push_str(&if quoted.contains(&0) {
-                quote_text(&name)
-            } else {
-                name
-            });
-            output.push_str(&separator);
-        }
-        for (column, cell) in cells.iter().enumerate() {
-            if column > 0 {
-                output.push_str(&separator);
+    let mut levels = Vec::with_capacity(columns);
+    if is_frame {
+        for column in 0..columns {
+            let vector = x.element(column);
+            if length(vector) != rows {
+                return Err(error(format!(
+                    "corrupt data frame -- length of column {} does not match nrows",
+                    column + 1
+                )));
             }
-            let index = if is_frame { row } else { row + column * rows };
-            match cell.text(index, &decimal)? {
-                None => output.push_str(&na),
-                Some((text, true)) if quoted.contains(&(column as i32 + 1)) => {
-                    output.push_str(&quote_text(&text))
+            levels.push(
+                values::inherits(vector, "factor")
+                    .then(|| values::get_attr(vector, symbols().levels)),
+            );
+        }
+    } else if length(x) != rows * columns {
+        return Err(error("corrupt matrix -- dims do not match length"));
+    }
+    let mut output = Vec::new();
+    let written = (|| -> R<()> {
+        for row in 0..rows {
+            if row_names != nil() {
+                write_element(row_names, row, quote_row_names, &settings, &mut output)?;
+                output.extend_from_slice(&separator);
+            }
+            for (column, &quoted) in quote_columns.iter().enumerate() {
+                if column > 0 {
+                    output.extend_from_slice(&separator);
                 }
-                Some((text, _)) => output.push_str(&text),
+                let (vector, index) = if is_frame {
+                    (x.element(column), row)
+                } else {
+                    (x, row + column * rows)
+                };
+                if is_missing(vector, index) {
+                    output.extend_from_slice(&na);
+                    continue;
+                }
+                match levels.get(column).copied().flatten() {
+                    Some(level_strings) => {
+                        let code = match vector.kind() {
+                            SexpType::Integer => values::ints(vector)[index] as i64 - 1,
+                            SexpType::Real => (values::reals(vector)[index] - 1.0) as i64,
+                            _ => {
+                                return Err(error(format!(
+                                    "column {} claims to be a factor but does not have numeric codes",
+                                    column + 1
+                                )));
+                            }
+                        };
+                        let code = usize::try_from(code).unwrap_or(usize::MAX);
+                        write_element(level_strings, code, quoted, &settings, &mut output)?;
+                    }
+                    None => write_element(vector, index, quoted, &settings, &mut output)?,
+                }
+            }
+            output.extend_from_slice(&eol);
+            if output.len() > 1 << 16 {
+                crate::connections::print(file, &output)?;
+                output.clear();
             }
         }
-        output.push_str(&eol);
-        if output.len() > 1 << 16 {
-            crate::connections::print(file, output.as_bytes())?;
-            output.clear();
-        }
-    }
-    crate::connections::print(file, output.as_bytes())?;
+        Ok(())
+    })();
+    crate::connections::print(file, &output)?;
+    written?;
     Ok(nil())
 }
 
-/// A column being written: the vector and, for a factor, its levels.
-struct Cell {
-    vector: Sexp,
-    levels: Option<Sexp>,
+/// How `write.table` spells the elements it writes.
+struct Settings {
+    escape: bool,
+    decimal: u8,
     scipen: i32,
 }
 
-impl Cell {
-    unsafe fn new(vector: Sexp) -> R<Cell> {
-        let levels =
-            values::inherits(vector, "factor").then(|| values::get_attr(vector, symbols().levels));
-        let scipen = crate::format::Settings::current_scipen();
-        Ok(Cell {
-            vector,
-            levels,
-            scipen,
-        })
+/// GNU R's `isna` in io.c: which elements `write.table` writes as `na`. A double is missing when
+/// it is any NaN, a complex number when either part is.
+unsafe fn is_missing(vector: Sexp, index: usize) -> bool {
+    if index >= length(vector) {
+        return false;
     }
-
-    /// Element `index` as text, and whether it is a string (which quoting applies to); `None`
-    /// for a missing value.
-    unsafe fn text(&self, index: usize, decimal: &str) -> R<Option<(String, bool)>> {
-        let vector = self.vector;
-        let scipen = self.scipen;
-        if index >= length(vector) {
-            return Ok(None);
+    match vector.kind() {
+        SexpType::Logical | SexpType::Integer => values::ints(vector)[index] == NA_INTEGER,
+        SexpType::Real => values::reals(vector)[index].is_nan(),
+        SexpType::String => vector.element(index) == na_string(),
+        SexpType::Complex => {
+            let value = values::complexes(vector)[index];
+            value.r.is_nan() || value.i.is_nan()
         }
-        let with_decimal = |text: String| {
-            if decimal == "." {
-                text
-            } else {
-                text.replace('.', decimal)
-            }
-        };
-        Ok(match vector.kind() {
-            _ if self.levels.is_some() => {
-                let code = values::ints(vector)[index];
-                match self.levels {
-                    Some(levels)
-                        if code != NA_INTEGER && code >= 1 && (code as usize) <= length(levels) =>
-                    {
-                        values::string_at(levels, code as usize - 1)
-                            .map(|level| (level.into_owned(), true))
-                    }
-                    _ => None,
-                }
-            }
-            SexpType::String => {
-                values::string_at(vector, index).map(|text| (text.into_owned(), true))
-            }
-            SexpType::Logical => match values::ints(vector)[index] {
-                NA_LOGICAL => None,
-                0 => Some(("FALSE".to_owned(), false)),
-                _ => Some(("TRUE".to_owned(), false)),
-            },
-            SexpType::Integer => match values::ints(vector)[index] {
-                NA_INTEGER => None,
-                value => Some((value.to_string(), false)),
-            },
-            SexpType::Real => {
-                let value = values::reals(vector)[index];
-                if value.is_nan() {
-                    None
-                } else {
-                    Some((
-                        with_decimal(format_real_alone_scipen(value, 15, scipen)),
-                        false,
-                    ))
-                }
-            }
-            SexpType::Complex => {
-                let value = values::complexes(vector)[index];
-                if value.r.is_nan() || value.i.is_nan() {
-                    None
-                } else {
-                    Some((with_decimal(format_complex_alone(value, 15)), false))
-                }
-            }
-            SexpType::Raw => Some((format!("{:02x}", values::raws(vector)[index]), false)),
-            _ => {
-                let element = crate::subset::list_or_vector_element(vector, index)?;
-                let text = coerce_vector(element, SexpType::String)?;
-                values::first_string(text).map(|text| (text.into_owned(), false))
-            }
-        })
+        _ => false,
     }
+}
+
+/// GNU R's `EncodeElement2`: element `index` of `vector`, a string between double quotes when
+/// `quoted`.
+unsafe fn write_element(
+    vector: Sexp,
+    index: usize,
+    quoted: bool,
+    settings: &Settings,
+    output: &mut Vec<u8>,
+) -> R<()> {
+    if index >= length(vector) {
+        return Err(error("index out of range"));
+    }
+    let with_decimal = |text: String| -> Vec<u8> {
+        text.into_bytes()
+            .into_iter()
+            .map(|byte| if byte == b'.' { settings.decimal } else { byte })
+            .collect()
+    };
+    let text: Vec<u8> = match vector.kind() {
+        SexpType::String => {
+            return write_string(vector.element(index), quoted, settings.escape, output);
+        }
+        SexpType::Logical => match values::ints(vector)[index] {
+            NA_LOGICAL => b"NA".to_vec(),
+            0 => b"FALSE".to_vec(),
+            _ => b"TRUE".to_vec(),
+        },
+        SexpType::Integer => match values::ints(vector)[index] {
+            NA_INTEGER => b"NA".to_vec(),
+            value => value.to_string().into_bytes(),
+        },
+        SexpType::Real => with_decimal(format_real_alone_scipen(
+            values::reals(vector)[index],
+            15,
+            settings.scipen,
+        )),
+        SexpType::Complex => {
+            with_decimal(format_complex_alone(values::complexes(vector)[index], 15))
+        }
+        SexpType::Raw => format!("{:02x}", values::raws(vector)[index]).into_bytes(),
+        _ => {
+            let element = crate::subset::list_or_vector_element(vector, index)?;
+            let text = coerce_vector(element, SexpType::String)?;
+            values::first_string(text)
+                .map_or_else(|| b"NA".to_vec(), |text| text.into_owned().into_bytes())
+        }
+    };
+    output.extend_from_slice(&text);
+    Ok(())
+}
+
+/// A string as `translateChar` gives it to `write.table`: Latin-1 text in UTF-8, other text as
+/// its bytes up to the first NUL, and `NA` for the missing string. Non-ASCII text declared as
+/// bytes cannot be translated.
+unsafe fn write_string(charsxp: Sexp, quoted: bool, escape: bool, output: &mut Vec<u8>) -> R<()> {
+    let raw = charsxp.bytes();
+    let raw = raw
+        .iter()
+        .position(|&byte| byte == 0)
+        .map_or(raw, |end| &raw[..end]);
+    let latin1;
+    let bytes: &[u8] = if charsxp == na_string() {
+        b"NA"
+    } else if raw.is_ascii() {
+        raw
+    } else if charsxp.has_gp(gp::BYTES) {
+        return Err(error(
+            "translating strings with \"bytes\" encoding is not allowed",
+        ));
+    } else if charsxp.has_gp(gp::LATIN1) {
+        latin1 = raw.iter().map(|&byte| byte as char).collect::<String>();
+        latin1.as_bytes()
+    } else {
+        raw
+    };
+    if !quoted {
+        output.extend_from_slice(bytes);
+        return Ok(());
+    }
+    output.push(b'"');
+    for &byte in bytes {
+        if byte == b'"' {
+            output.push(if escape { b'\\' } else { b'"' });
+        }
+        output.push(byte);
+    }
+    output.push(b'"');
+    Ok(())
 }
 
 // Checksums and sizes.
