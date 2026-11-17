@@ -93,6 +93,27 @@ effects <- function() {
 }
 str(effects())
 
+# A store the subscript's argument makes into the target is replaced by this one, which works
+# on the value read before.
+nested <- function() {
+  kept <- c(1, 2, 3)
+  fields <- list(a = 1, b = 2)
+  set <- function(at, v) kept[at] <<- v
+  set_field <- function(at, v) fields[[at]] <<- v
+  store <- function(at) { kept[1L] <<- 100; at }
+  store_field <- function(at) { fields[["a"]] <<- 100; at }
+  out <- character(0)
+  for (i in 1:4) {
+    kept <- c(1, 2, 3)
+    fields <- list(a = 1, b = 2)
+    set(store(2L), i)
+    set_field(store_field("b"), i)
+    out <- c(out, paste(c(kept, unlist(fields)), collapse = " "))
+  }
+  out
+}
+print(nested())
+
 # The target is shared with another variable, an argument of the enclosing function, a global
 # and a global the function shadows.
 sharing <- function(argument, lazy) {

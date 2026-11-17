@@ -13625,7 +13625,12 @@ unsafe fn assign_enclosed_element(
         let read = if held.kind() == SexpType::Promise {
             let forces = held.car() == unbound();
             heap.root(target);
-            let read = eval::force_promise(held)?;
+            // GNU R keeps the value in `*tmp*` while the subscript runs, so a store the
+            // subscript's code makes into `x` goes to a copy, which this store then replaces.
+            target.increment_refcount();
+            let read = eval::force_promise(held);
+            target.decrement_refcount();
+            let read = read?;
             rebound = forces
                 && (enclosed_cell(variable, enclosure) != Some((home, cell))
                     || cell.cdr() != current);
