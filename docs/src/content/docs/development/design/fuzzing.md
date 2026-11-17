@@ -5,8 +5,8 @@ description: "Which ideas ry's differential fuzzer takes from Csmith, YARPGen, F
 
 ry's runtime fuzzer exists to find the bugs nobody thought to test for. This page measures it
 against the fuzzers that set the standard for compilers and language runtimes, says which of
-their ideas it takes and why, and lists what is left to build. The contract for what runs today
-is the [robustness page](/development/robustness/); this page is the reasoning and the plan.
+their ideas it takes and why, and lists what is left to build. The contract for what runs is the
+[robustness page](/development/robustness/); this page is the reasoning and the plan.
 
 ## What a finding needs
 
@@ -31,21 +31,22 @@ four things hold at once:
    the kind of an `NA` and the object bit, so the comparison has to look below it.
 3. **The finding is small.** A 200-line generated program is not a bug report. The same failure
    in five lines is.
-4. **There are enough executions, aimed well.** Three seeds in the default suite find nothing.
-   Thousands find the shallow bugs, and only feedback from the runtime finds the deep ones.
+4. **There are enough executions, aimed well.** The eight seeds per kind in the default suite
+   keep the harness working. Thousands find the shallow bugs, and only feedback from the runtime
+   finds the deep ones.
 
 ## The ideas, and what ry does with each
 
 | Source | The idea | In ry |
 | --- | --- | --- |
-| Csmith | Generate only programs with one defined meaning, so every difference between two implementations is a bug. | Taken. R has no undefined behavior, but it has addresses, hash order, clocks, the locale and GNU R's own defects. The generators emit none of them: every program is deterministic under GNU R (`programs_are_deterministic`), closures are byte-compiled up front because GNU R's two evaluators differ in a few messages, and a construct where GNU R itself is wrong is kept out at the generator, never scrubbed from the comparison. |
-| YARPGen | Generation policies: bias the generator toward what the optimizer acts on, since uniform sampling of a grammar rarely triggers an optimization. | Taken. The value zoo aims at the runtime's own thresholds (lengths 63, 64 and 65, compact sequences, the copy wrapper for long arguments), and closures run once, a few times and sixty times so the first and the compiled call are both observed. Planned: one template per JIT speculation that first satisfies the guard and then breaks it. |
+| Csmith | Generate only programs with one defined meaning, so every difference between two implementations is a bug. | Taken. R has no undefined behavior, but it has addresses, hash order, clocks, the locale and GNU R's own defects. The generators emit none of them: a program is a pure function of its seed (`programs_are_deterministic` pins the grammar kind), the `language` kind byte-compiles its closures up front because GNU R's two evaluators differ in a few messages, and a construct where GNU R itself is wrong is kept out at the generator. The comparison normalizes nothing; the two messages the `language` kind cannot keep apart are rewritten inside the program, where the reader sees it. |
+| YARPGen | Generation policies: bias the generator toward what the optimizer acts on, since uniform sampling of a grammar rarely triggers an optimization. | Taken. The value zoo aims at the runtime's own thresholds (lengths 63, 64 and 65, compact sequences, the copy wrapper for long arguments), and a body runs often enough that the first and the compiled call are both observed: a grammar function three times, a metamorphic body between 1 and 300 times, a language closure once, a few times or sixty times. Planned: one template per JIT speculation that first satisfies the guard and then breaks it. |
 | Fuzzilli | Mutate an intermediate form in which every mutant is a valid program; keep a corpus of programs that reached new coverage; splice code between corpus programs; templates that warm up the JIT. | Partly. R needs no intermediate form for validity, because every text that parses is a program and an error is behavior to compare, so mutation works on the lossless syntax tree (`oracle` `mutate.rs`). The coverage-guided corpus and splicing are planned (below). |
-| jsfunfuzz | Run one program with the JIT off and on and compare; feed the engine's own regression tests back in as seeds. | Taken. Every seed runs under tier 0 and the forced JIT, and the `corpus` kind mutates R's regression tests, the base help examples and the oracle cases. |
-| Hypothesis, QuickCheck | Integrated shrinking: shrink the choices the generator made, not its output, so every shrunk case is one the generator could produce. | Taken where the input has invariants, declined for programs. Component harnesses draw from `syntax::testing::Entropy`, so libFuzzer minimizes the choice stream. An R program has no invariant to keep, since any text is a legal input, and a mutated corpus snippet has no choice sequence at all, so programs shrink by delta debugging over the syntax tree (`oracle reduce`), which also removes what no generator choice maps to. |
+| jsfunfuzz | Run one program with the JIT off and on and compare; feed the engine's own regression tests back in as seeds. | Taken. Every seed runs under tier 0 and the forced JIT, and the `corpus` kind mutates R's regression tests, the base help examples, the corpus packages' own tests and the oracle cases. |
+| Hypothesis, QuickCheck | Integrated shrinking: shrink the choices the generator made, not its output, so every shrunk case is one the generator could produce. | Taken where the input has invariants, declined for programs. The structured component harnesses (the language server simulator, the loader's reloads, bytecode, code images, typed code files) draw from `syntax::testing::Entropy`, so libFuzzer minimizes the choice stream. An R program has no invariant to keep, since any text is a legal input, and a mutated corpus snippet has no choice sequence at all, so programs shrink by delta debugging over the syntax tree (`oracle reduce`), which also removes what no generator choice maps to. |
 | libFuzzer, AFL++, LibAFL | Coverage feedback: keep an input when it executes code no earlier input did, and mutate the kept inputs. | Taken for components (the `cargo fuzz` targets), planned for whole programs (below). |
-| Swarm testing | Each run enables a random subset of generator features, because a feature that is always on suppresses the bugs that need its absence. | Taken in the `metamorphic`, `builtins`, `api`, `io` and `language` kinds: a seed draws each feature with probability one half. Planned for the `grammar` kind, where every program draws from every block shape. |
-| EMI, metamorphic testing | Derive a second program whose result is known from the first: change code the run never reaches, or wrap, rename and repeat, and the result must not change. | Taken. The `metamorphic` kind runs one body in a dozen forms that must agree and checks it inside the program, so it needs no GNU R. The `perturbed` kind inserts dead and effect-free statements into a generated program's function bodies (below). |
+| Swarm testing | Each run enables a random subset of generator features, because a feature that is always on suppresses the bugs that need its absence. | Taken in the `metamorphic`, `builtins`, `api`, `io` and `language` kinds: a seed enables each feature with probability one half, and one seed in eight enables all of them. Planned for the `grammar` kind, where every program draws from every block shape. |
+| EMI, metamorphic testing | Derive a second program whose result is known from the first: change code the run never reaches, or wrap, rename and repeat, and the result must not change. | Taken. The `metamorphic` kind runs one body in up to ten of thirteen forms that must agree and checks it inside the program, so it needs no GNU R. The `perturbed` kind inserts dead and effect-free statements into a generated program's function bodies (below). |
 | Antithesis, FoundationDB | Deterministic simulation: one seed decides the whole run, faults included, so any failure replays. | Taken for the language server (the simulator) and for the collector (`RY_GC_STRESS=seed:N` decides where collections fall). Planned for the JIT's schedule and for interrupts (below). |
 
 ## Effect-free mutations
@@ -57,12 +58,13 @@ That is the useful half of EMI when a reference implementation exists: GNU R run
 too, so the fuzzer does not need to know which code is dead.
 
 The mutator (`oracle::mutate::perturb`) has two kinds for it. *Dead code* inserts a statement
-that never runs: `if (FALSE) {...}` around a statement taken from elsewhere in the program, an
-unused local closure, a loop over `NULL`. *Neutral code* inserts a statement with no effect on
-the result: `x <- x`, `force(x)`, `sys.call()`, `gc(FALSE)`, an empty `tryCatch`. Both apply
-inside function bodies, where the compiler works. The `perturbed` kind applies four to twelve
-of them to a grammar, metamorphic or language program, and the `corpus` kind draws them among
-its other mutations.
+that never runs, such as `if (FALSE) {...}` around a statement taken from elsewhere in the
+program, an unused local closure, or a loop over `NULL`. *Neutral code* inserts a statement with
+no effect on the result, such as `sys.call()`, `gc(FALSE)`, a `tryCatch` around `NULL`, or, in a
+function with parameters, `x <- x` and `force(x)`. Both apply inside function bodies, where the
+compiler works. The `perturbed` kind makes four to twelve attempts on a grammar, metamorphic or
+language program and keeps each mutant that parses, and the `corpus` kind draws them among its
+other mutations.
 
 ## What is left to build
 
@@ -70,17 +72,19 @@ In the order of expected yield.
 
 ### The JIT's schedule from the seed
 
-`RY_JIT=force` compiles every body on its second run. That is one schedule, and bugs hide in the
-others: a body compiled with ten calls of type feedback, a loop compiled at its fortieth
-iteration, a callee compiled before its caller. A seeded engine draws the entry and back-edge
-thresholds per program from the seed (`RY_JIT_THRESHOLDS`), the way the seeded collection stress
-draws where collections fall. The step after it is a seeded guard failure: a compiled guard that
-fails on purpose hands the activation back to tier 0 where no test ever made it do so.
+`RY_JIT=force` compiles a body at its second call and a loop at its first back edge. That is one
+schedule, and bugs hide in the others: a body compiled with ten calls of type feedback, a loop
+compiled at its fortieth iteration, a callee compiled before its caller. `RY_JIT_THRESHOLDS`
+sets the entry and back-edge thresholds, and no oracle engine uses it: a seeded engine draws
+both per program from the seed, the way the seeded collection stress draws where collections
+fall. The step after it is a seeded guard failure: a compiled guard that fails on purpose hands
+the activation back to tier 0 where no test ever made it do so.
 
 ### Coverage-guided whole programs
 
-The differential fuzzer starts three processes per program and runs about one program a second
-on a core. It cannot tell a program that reached new code from the thousandth one that did not.
+The differential fuzzer starts a process per engine for every program (GNU R, tier 0 and the
+forced JIT by default), so a core runs a few programs a second at best. It cannot tell a program
+that reached new code from the thousandth one that did not.
 An in-process target changes both: the runtime starts once, a `metamorphic` program is generated
 from libFuzzer's bytes through `Entropy`, and it runs under invariants. The program checks
 itself, so the target needs no GNU R: a line that ends in `DIFFERENT`, a panic or a sanitizer

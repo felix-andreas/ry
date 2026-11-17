@@ -40,11 +40,30 @@ use {
 /// Shrinks `program` while `interesting` holds, calling it at most `budget` times, and returns
 /// the smallest interesting program found. `program` itself is assumed to be interesting.
 pub fn reduce(program: &str, budget: usize, interesting: &mut dyn FnMut(&str) -> bool) -> String {
+    reduce_batched(program, budget, 1, &mut |candidates| {
+        candidates
+            .iter()
+            .position(|candidate| interesting(candidate))
+    })
+}
+
+/// [`reduce`] with a predicate over several candidates at once: `first_interesting` answers the
+/// index of the first interesting one among up to `width` candidates, which lets it run them
+/// side by side. The result is the one [`reduce`] finds, because a batch holds only candidates
+/// the sequential search would try in that order while the ones before them fail, and the
+/// budget counts a batch up to the candidate it adopts.
+pub fn reduce_batched(
+    program: &str,
+    budget: usize,
+    width: usize,
+    first_interesting: &mut dyn FnMut(&[String]) -> Option<usize>,
+) -> String {
     let mut reducer = Reducer {
         current: program.to_string(),
         calls: 0,
         budget,
-        interesting,
+        width: width.max(1),
+        first_interesting,
     };
     loop {
         let before = reducer.current.clone();
@@ -217,9 +236,22 @@ pub enum ReduceError {
     Write(String),
 }
 
+/// How far a reduction may go and what it leaves behind on the way.
+pub struct Effort<'a> {
+    /// The most candidates to run.
+    pub budget: usize,
+    /// No candidate starts after this.
+    pub deadline: Option<Instant>,
+    /// Candidates run side by side.
+    pub jobs: usize,
+    /// Where the smallest program found so far is written at every improvement, so a reduction
+    /// that is stopped early has a result.
+    pub checkpoint: Option<&'a Path>,
+}
+
 /// Reduces `program`, on which `engine` diverges from GNU R (`reference`), to a smaller program on
-/// which it diverges with the same [`Signature`], running at most `budget` candidates and none
-/// after `deadline`. Candidates are written to `directory`.
+/// which it diverges with the same [`Signature`], within `effort`. Candidates are written to
+/// `directory`.
 ///
 /// GNU R must parse every candidate, and when GNU R ran the original to completion it must run
 /// the candidate to completion too, so a crash does not reduce to a program that is wrong R.
@@ -228,15 +260,14 @@ pub fn reduce_divergence(
     reference: &dyn Engine,
     engine: &dyn Engine,
     directory: &Path,
-    budget: usize,
-    deadline: Option<Instant>,
+    effort: &Effort,
 ) -> Result<Reduction, ReduceError> {
-    let path = directory.join("reduce.R");
-    let write = |text: &str| {
-        std::fs::write(&path, text)
+    let write = |path: &Path, text: &str| {
+        std::fs::write(path, text)
             .map_err(|error| ReduceError::Write(format!("{}: {error}", path.display())))
     };
-    write(program)?;
+    let path = directory.join("reduce.R");
+    write(&path, program)?;
     let reference_outcome = reference
         .run(&path)
         .map_err(|error| ReduceError::Reference(error.to_string()))?;
@@ -257,38 +288,94 @@ pub fn reduce_divergence(
         wanted,
         Signature::Crashed(_) | Signature::TimedOut | Signature::Failed
     );
-    let mut calls = 0;
-    let mut write_failure = None;
-    let reduced = reduce(program, budget, &mut |candidate| {
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            return false;
-        }
-        calls += 1;
-        if let Err(error) = write(candidate) {
-            write_failure.get_or_insert(error);
-            return false;
-        }
+    let shows = |slot: usize, candidate: &str| -> Result<bool, ReduceError> {
+        let path = directory.join(format!("reduce-{slot}.R"));
+        write(&path, candidate)?;
         let reference_runs = || match reference.run(&path) {
             Ok(outcome) if parse_error(&outcome).is_some() => None,
             Ok(outcome) if completes && !outcome.errors.is_empty() => None,
             Ok(outcome) => Some(outcome),
             Err(_) => None,
         };
-        if engine_first {
+        Ok(if engine_first {
             let outcome = engine.run(&path);
             signature(&Outcome::default(), &outcome).as_ref() == Some(&wanted)
                 && reference_runs().is_some()
         } else {
-            let Some(reference_outcome) = reference_runs() else {
-                return false;
-            };
-            signature(&reference_outcome, &engine.run(&path)).as_ref() == Some(&wanted)
+            match reference_runs() {
+                Some(reference_outcome) => {
+                    signature(&reference_outcome, &engine.run(&path)).as_ref() == Some(&wanted)
+                }
+                None => false,
+            }
+        })
+    };
+    let started = Instant::now();
+    let mut reported = started;
+    let mut calls = 0;
+    let mut failure = None;
+    let reduced = reduce_batched(program, effort.budget, effort.jobs, &mut |candidates| {
+        if failure.is_some()
+            || effort
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return None;
         }
+        let verdicts: Vec<Result<bool, ReduceError>> = std::thread::scope(|scope| {
+            let runs: Vec<_> = candidates
+                .iter()
+                .enumerate()
+                .map(|(slot, candidate)| scope.spawn(move || shows(slot, candidate)))
+                .collect();
+            runs.into_iter()
+                .map(|run| match run.join() {
+                    Ok(verdict) => verdict,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                })
+                .collect()
+        });
+        let mut found = None;
+        for (index, verdict) in verdicts.into_iter().enumerate() {
+            match verdict {
+                Ok(true) if found.is_none() => found = Some(index),
+                Ok(_) => {}
+                Err(error) => {
+                    failure.get_or_insert(error);
+                }
+            }
+        }
+        calls += found.map_or(candidates.len(), |index| index + 1);
+        let smallest = found.map(|index| candidates[index].as_str());
+        if let (Some(checkpoint), Some(smallest)) = (effort.checkpoint, smallest)
+            && let Err(error) = write(checkpoint, smallest)
+        {
+            failure.get_or_insert(error);
+        }
+        if let Some(smallest) = smallest
+            && reported.elapsed().as_secs() >= 15
+        {
+            reported = Instant::now();
+            eprintln!(
+                "reduce: {} bytes after {calls} candidates and {} s",
+                smallest.len(),
+                started.elapsed().as_secs()
+            );
+        }
+        found
     });
+    for slot in 0..effort.jobs.max(1) {
+        let path = directory.join(format!("reduce-{slot}.R"));
+        if path.exists()
+            && let Err(error) = std::fs::remove_file(&path)
+        {
+            eprintln!("could not remove {}: {error}", path.display());
+        }
+    }
     if let Err(error) = std::fs::remove_file(&path) {
         eprintln!("could not remove {}: {error}", path.display());
     }
-    if let Some(error) = write_failure {
+    if let Some(error) = failure {
         return Err(error);
     }
     Ok(Reduction {
@@ -329,7 +416,8 @@ struct Reducer<'a> {
     current: String,
     calls: usize,
     budget: usize,
-    interesting: &'a mut dyn FnMut(&str) -> bool,
+    width: usize,
+    first_interesting: &'a mut dyn FnMut(&[String]) -> Option<usize>,
 }
 
 /// What a candidate must gain over the current program before the predicate sees it.
@@ -351,37 +439,56 @@ impl Reducer<'_> {
         parse(&self.current).syntax_node()
     }
 
-    /// Replaces `range` of the current program by `replacement` when the result qualifies.
-    fn attempt(&mut self, range: TextRange, replacement: &str, gain: Gain) -> bool {
+    /// The current program with `range` replaced by `replacement`.
+    fn replaced(&self, range: TextRange, replacement: &str) -> String {
         let start = usize::from(range.start());
         let end = usize::from(range.end());
-        let candidate = format!(
+        format!(
             "{}{replacement}{}",
             &self.current[..start],
             &self.current[end..]
-        );
+        )
+    }
+
+    /// Replaces `range` of the current program by `replacement` when the result qualifies.
+    fn attempt(&mut self, range: TextRange, replacement: &str, gain: Gain) -> bool {
+        let candidate = self.replaced(range, replacement);
         self.consider(candidate, gain)
     }
 
     fn consider(&mut self, candidate: String, gain: Gain) -> bool {
-        let qualifies = match gain {
-            Gain::Shorter => candidate.len() < self.current.len(),
-            Gain::NotLonger => candidate.len() <= self.current.len(),
-        };
-        if self.spent()
-            || !qualifies
-            || candidate == self.current
-            || !parse(&candidate).errors().is_empty()
-        {
-            return false;
+        self.consider_first(vec![candidate], gain).is_some()
+    }
+
+    /// Adopts the first of `candidates` that qualifies and is interesting, and answers its
+    /// index. Every candidate is a change to the current program, so the ones before the
+    /// adopted one have failed against the program the sequential search would have tried
+    /// them on.
+    fn consider_first(&mut self, candidates: Vec<String>, gain: Gain) -> Option<usize> {
+        let mut qualified: Vec<(usize, String)> = candidates
+            .into_iter()
+            .enumerate()
+            .filter(|(_, candidate)| {
+                let gains = match gain {
+                    Gain::Shorter => candidate.len() < self.current.len(),
+                    Gain::NotLonger => candidate.len() <= self.current.len(),
+                };
+                gains && *candidate != self.current && parse(candidate).errors().is_empty()
+            })
+            .collect();
+        qualified.truncate(self.budget.saturating_sub(self.calls));
+        if qualified.is_empty() {
+            return None;
         }
-        self.calls += 1;
-        if (self.interesting)(&candidate) {
-            self.current = candidate;
-            true
-        } else {
-            false
-        }
+        let texts: Vec<String> = qualified
+            .iter()
+            .map(|(_, candidate)| candidate.clone())
+            .collect();
+        let found = (self.first_interesting)(&texts);
+        self.calls += found.map_or(texts.len(), |position| position + 1);
+        let (index, candidate) = qualified.swap_remove(found?);
+        self.current = candidate;
+        Some(index)
     }
 }
 
@@ -420,10 +527,20 @@ fn remove_list_items(reducer: &mut Reducer) {
                 && start < items.len()
                 && !reducer.spent()
             {
-                let end = (start + chunk).min(items.len());
-                let range = removal_range(&items, start, end);
-                if !reducer.attempt(range, "", Gain::Shorter) {
-                    start += chunk;
+                // The next chunks are tried against the same program, so the first that can
+                // go is the one a chunk-by-chunk search would remove next.
+                let candidates: Vec<String> = (start..items.len())
+                    .step_by(chunk)
+                    .take(reducer.width)
+                    .map(|from| {
+                        let until = (from + chunk).min(items.len());
+                        reducer.replaced(removal_range(&items, from, until), "")
+                    })
+                    .collect();
+                let tried = candidates.len();
+                match reducer.consider_first(candidates, Gain::Shorter) {
+                    Some(removed) => start += removed * chunk,
+                    None => start += tried * chunk,
                 }
             }
             chunk /= 2;
@@ -745,6 +862,37 @@ mod tests {
         }
         let (text, _) = reduced(&program, 10_000, |candidate| candidate.contains("boom("));
         assert_eq!(text, "boom()\n");
+    }
+
+    #[test]
+    fn candidates_side_by_side_reduce_to_what_one_at_a_time_does() {
+        let mut program = String::new();
+        for line in 0..150 {
+            match line {
+                7 => program.push_str("alpha <- function(a, b, c) { b; boom(a) }\n"),
+                90 => program.push_str("beta <- list(1, alpha, 3)\n"),
+                140 => program.push_str("omega(beta, alpha)\n"),
+                _ => program.push_str(&format!("filler{line}(1, 2)\n")),
+            }
+        }
+        let interesting = |candidate: &str| {
+            candidate.contains("boom(")
+                && candidate.contains("omega(")
+                && candidate.contains("beta")
+        };
+        let (sequential, _) = reduced(&program, 10_000, interesting);
+        for width in [2, 3, 8] {
+            let mut calls = 0;
+            let batched = reduce_batched(&program, 10_000, width, &mut |candidates| {
+                assert!(candidates.len() <= width);
+                calls += 1;
+                candidates
+                    .iter()
+                    .position(|candidate| interesting(candidate))
+            });
+            assert_eq!(batched, sequential, "width {width}");
+            assert!(calls > 0);
+        }
     }
 
     #[test]

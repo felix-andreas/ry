@@ -12,7 +12,7 @@ use {
         known_failures,
         metamorphic::{api_functions, called_function, called_names},
         packages, parse, read_build,
-        reduce::{Signature, reduce_divergence},
+        reduce::{Effort, Signature, reduce_divergence},
         render, runnable_cases, verdict, write_build,
     },
     packages::{PackageOutcome, Runtime, Settings},
@@ -150,7 +150,14 @@ enum Command {
         /// The most candidates to run.
         #[arg(long, default_value_t = 2000)]
         budget: usize,
-        /// Where to write the reduced program.
+        /// Stop after this many minutes with the smallest program found by then.
+        #[arg(long)]
+        minutes: Option<u64>,
+        /// Candidates to run side by side (default: one per core).
+        #[arg(long)]
+        jobs: Option<usize>,
+        /// Where to write the reduced program. It holds the smallest program so far while the
+        /// reduction runs.
         #[arg(long)]
         output: Option<PathBuf>,
     },
@@ -390,13 +397,21 @@ fn main() -> ExitCode {
             engine,
             timeout,
             budget,
+            minutes,
+            jobs,
             output,
         } => run_reduce(
             &file,
             &engine,
             Duration::from_secs(timeout),
-            budget,
-            output.as_deref(),
+            &Effort {
+                budget,
+                deadline: minutes.map(|minutes| Instant::now() + Duration::from_secs(minutes * 60)),
+                jobs: jobs
+                    .or_else(|| std::thread::available_parallelism().ok().map(usize::from))
+                    .unwrap_or(1),
+                checkpoint: output.as_deref(),
+            },
         ),
         Command::Gallery {
             seed,
@@ -1476,8 +1491,13 @@ fn reduce_seed(
             &gnu_r,
             &observing,
             directory,
-            2000,
-            deadline,
+            // The fuzz run's own workers fill the cores.
+            &Effort {
+                budget: 2000,
+                deadline,
+                jobs: 1,
+                checkpoint: None,
+            },
         ) {
             Ok(reduction) => format!(
                 "--- reduced under {} ({}, {} candidates) ---\n{}",
@@ -1493,13 +1513,8 @@ fn reduce_seed(
 
 /// Reduces `file` against the engine `name`, prints the result and the command that replays it,
 /// and writes it to `output`.
-fn run_reduce(
-    file: &Path,
-    name: &str,
-    timeout: Duration,
-    budget: usize,
-    output: Option<&Path>,
-) -> ExitCode {
+fn run_reduce(file: &Path, name: &str, timeout: Duration, effort: &Effort) -> ExitCode {
+    let output = effort.checkpoint;
     let Some(engine) = ProcessEngine::named(name) else {
         eprintln!("unknown engine `{name}`");
         return ExitCode::from(2);
@@ -1519,7 +1534,7 @@ fn run_reduce(
         return ExitCode::FAILURE;
     }
     let started = Instant::now();
-    let reduction = reduce_divergence(&program, &gnu_r, &engine, &directory, budget, None);
+    let reduction = reduce_divergence(&program, &gnu_r, &engine, &directory, effort);
     if let Err(error) = std::fs::remove_dir_all(&directory) {
         eprintln!("could not remove {}: {error}", directory.display());
     }

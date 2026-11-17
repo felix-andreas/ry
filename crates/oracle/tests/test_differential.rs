@@ -17,7 +17,7 @@ use {
             sprintf_program, trace_back_program,
         },
         gnu_r_available,
-        reduce::{Signature, reduce_divergence},
+        reduce::{Effort, Signature, reduce_divergence},
         ry_runtime_available,
     },
     std::{
@@ -413,14 +413,23 @@ fn reduction_keeps_a_crash_on_a_program_gnu_r_completes() {
         .expect("a command line names an engine");
     let gnu_r = ProcessEngine::gnu_r().with_timeout(TIMEOUT);
     let program = "x <- 1:10\nprint(sum(x))\nboom <- function(n) n * 2\ny <- boom(3)\nprint(y)\nz <- paste(\"a\", \"b\")\n";
-    let reduction = reduce_divergence(program, &gnu_r, &engine, &directory, 200, None)
+    let checkpoint = directory.join("smallest.R");
+    let effort = Effort {
+        budget: 200,
+        deadline: None,
+        jobs: 3,
+        checkpoint: Some(&checkpoint),
+    };
+    let reduction = reduce_divergence(program, &gnu_r, &engine, &directory, &effort)
         .unwrap_or_else(|error| panic!("the reduction failed: {error}"));
+    let checkpointed = std::fs::read_to_string(&checkpoint).expect("read the checkpoint");
     std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
     assert_eq!(
         reduction.signature,
         Signature::Crashed("signal: 11 (SIGSEGV)".to_string())
     );
     assert_eq!(reduction.program, "boom <- NULL\n");
+    assert_eq!(checkpointed, reduction.program);
     assert_eq!(reduction.bytes_after, reduction.program.len());
 }
 
