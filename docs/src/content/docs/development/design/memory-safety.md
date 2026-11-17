@@ -348,12 +348,29 @@ comment.
 | Views | one test of the ALTREP bit per vector | one test per element | less work |
 | Element stores | barrier and count | the same | equal by construction |
 | `Write` | one address compare per source vector | hand-written alias checks | to measure |
-| `&mut Cx` parameter | one more live register through every call | a load from a static in `heap()`; the bytecode loop keeps the heap pointer in its activation | **to measure**: register pressure has cost this interpreter before (`lookup_outside` is forced inline for that reason) |
-| Slice access | bounds checks where an index is not an iterator | mostly slices already | to measure |
+| `&mut Cx` parameter | one more live register through every call | a load from a static in `heap()`; the bytecode loop keeps the heap pointer in its activation | no cost in a builtin (measured below); **to measure** on the call path and in the bytecode loop, where register pressure has cost this interpreter before (`lookup_outside` is forced inline for that reason) |
+| Slice access | bounds checks where an index is not an iterator | mostly slices already | no cost in an element walk (measured below) |
 
-Each migration change reports `just bench hot`, the kernel and code-base suites, and tier 1's
-instruction counts (`test_tiers`) before and after. A regression is fixed by changing the API (for
-the context parameter: keeping it in the activation, or making `Cx` a zero-sized token whose
+`nchar` is measured against its raw form, both compiled into one release build and counted with
+callgrind:
+
+| Program | Raw form | Safe form |
+| --- | --- | --- |
+| `nchar(s)` on one string, 200,000 calls: instructions in the builtin per call | 249 | 233 |
+| The same, with the `.Internal` call around it | 1,390 | 1,374 |
+| `sum(nchar(y))` on 100,000 strings, 20 times: instructions per element | 284.8 | 278.8 |
+
+The safe form is shorter because a dense view tests the ALTREP bit once per vector, where the raw
+accessors test it per element. One rule came out of the measurement: a wrapper in
+`interp::handles` whose common case is a test keeps the test `#[inline]` and its slow path
+`#[inline(never)]`. With the whole wrapper generic and out of line (the attribute copy for a
+value that has no attributes, the coercion of an argument that is already a character vector),
+the safe `nchar` ran 42 instructions per call longer than the raw one.
+
+Each migration change measures its builtins the same way before the raw form is deleted, and a
+change that reaches the call path or the bytecode loop reports `just bench-mechanisms` and tier
+1's instruction counts (`test_tiers`) before and after. A regression is fixed by changing the API
+(for the context parameter: keeping it in the activation, or making `Cx` a zero-sized token whose
 methods load the static as `heap()` does), not by keeping the raw version.
 
 ## Candidates
