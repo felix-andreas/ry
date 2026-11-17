@@ -133,6 +133,32 @@
 //! }
 //! ```
 //!
+//! Whether a vector may be written where it is, is one value. An [`Owned`] comes from a new
+//! vector or from the one `unsafe` claim that nothing else refers to an existing one, so a
+//! shared value has to be copied first, and the copy has to be one with storage:
+//!
+//! ```compile_fail,E0599
+//! use heap::handle::{Cx, Local, Real};
+//! fn written_while_shared<'s>(cx: &mut Cx<'s>, shared: Local<'s, Real>) {
+//!     shared.write(cx).split().0[0] = 1.0;
+//! }
+//! ```
+//!
+//! ```no_run
+//! use heap::handle::{Cx, Local, Owned, Real};
+//! use heap::HeapError;
+//! fn written_into_a_copy<'s>(
+//!     cx: &mut Cx<'s>,
+//!     shared: Local<'s, Real>,
+//! ) -> Result<Local<'s, Real>, HeapError> {
+//!     let mut copy = cx.alloc::<Real>(shared.len())?;
+//!     copy.as_mut_slice().copy_from_slice(shared.as_slice(cx));
+//!     let mut owned: Owned<'s, Real> = copy.owned();
+//!     owned.write(cx).split().0[0] = 1.0;
+//!     Ok(owned.finish())
+//! }
+//! ```
+//!
 //! A pointer has no `==`. Two objects are compared with `is`, and strings are not, because one
 //! text can be several objects:
 //!
@@ -375,6 +401,39 @@ impl<'a, T: Kind> Gc<'a, T> {
     }
 }
 
+impl<'a, T: Vector> Gc<'a, T> {
+    #[inline]
+    pub fn len(self) -> usize {
+        // SAFETY: a standard vector keeps its length in its header.
+        unsafe { self.raw.length() as usize }
+    }
+
+    #[inline]
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl<'a, T: Atomic> Gc<'a, T> {
+    /// The elements, which live as long as the borrow that keeps the object from collection.
+    #[inline]
+    pub fn as_slice(self) -> &'a [T::Element] {
+        // SAFETY: the vector stores `length` initialized elements, and no write is open while
+        // the context is borrowed shared.
+        unsafe { self.raw.slice() }
+    }
+}
+
+impl<'a, T: Elements> Gc<'a, T> {
+    #[inline]
+    pub fn get(self, index: usize) -> Gc<'a, T::Element> {
+        assert!(index < self.len(), "element index out of bounds");
+        // SAFETY: the index is in bounds of a standard vector of pointers, each a live object
+        // of the element kind.
+        unsafe { Gc::adopt(*(self.raw.data() as *const Sexp).add(index)) }
+    }
+}
+
 impl<'a> Gc<'a, Chars> {
     /// The string's bytes.
     #[inline]
@@ -602,6 +661,16 @@ impl<'s, T: Vector> Fresh<'s, T> {
             kind: PhantomData,
         }
     }
+
+    /// The object as one its holder may keep writing after other code has read it.
+    #[inline]
+    pub fn owned(self) -> Owned<'s, T> {
+        Owned {
+            raw: self.raw,
+            scope: PhantomData,
+            kind: PhantomData,
+        }
+    }
 }
 
 impl<T: Atomic> Fresh<'_, T> {
@@ -736,6 +805,84 @@ impl<'r> Reader<'r> {
         assert!(index < source.len(), "element index out of bounds");
         // SAFETY: as for `Local::get`. Stores made meanwhile free nothing.
         unsafe { Gc::adopt(*(source.raw.data() as *const Sexp).add(index)) }
+    }
+}
+
+/// An object the caller alone refers to, apart from the one place it is stored in, so changing
+/// it where it is changes no other R value. A [`Fresh`] vector is one; an existing object
+/// becomes one through [`Owned::assume`], after the test its holder defines (a reference count
+/// of one and no uncounted holder). Code that updates a variable asks for its `Owned` value
+/// once, copies when there is none, and writes only through the result.
+pub struct Owned<'s, T: Kind = Value> {
+    raw: Sexp,
+    scope: Brand<'s>,
+    kind: PhantomData<T>,
+}
+
+impl<'s, T: Kind> Owned<'s, T> {
+    /// # Safety
+    ///
+    /// Nothing else can observe `object`: no variable, register, handle or other object refers
+    /// to it except the one place the caller is updating.
+    #[inline]
+    pub unsafe fn assume(object: Local<'s, T>) -> Owned<'s, T> {
+        Owned {
+            raw: object.raw,
+            scope: PhantomData,
+            kind: PhantomData,
+        }
+    }
+
+    /// The object, to read.
+    #[inline]
+    pub fn get(&self) -> Local<'s, T> {
+        Local {
+            raw: self.raw,
+            scope: PhantomData,
+            kind: PhantomData,
+        }
+    }
+
+    /// The object as the value its holder stores.
+    #[inline]
+    pub fn finish(self) -> Local<'s, T> {
+        self.get()
+    }
+
+    /// The object as a value of any kind.
+    #[inline]
+    pub fn value(self) -> Owned<'s, Value> {
+        Owned {
+            raw: self.raw,
+            scope: PhantomData,
+            kind: PhantomData,
+        }
+    }
+
+    /// The object as kind `U`, or itself when it is not one.
+    #[inline]
+    pub fn downcast<U: Kind>(self) -> Result<Owned<'s, U>, Owned<'s, T>> {
+        if admits::<U>(self.raw) {
+            Ok(Owned {
+                raw: self.raw,
+                scope: PhantomData,
+                kind: PhantomData,
+            })
+        } else {
+            Err(self)
+        }
+    }
+}
+
+impl<'s, T: Vector> Owned<'s, T> {
+    /// Access to write the vector's elements where they are.
+    #[inline]
+    pub fn write<'a>(&'a mut self, cx: &'a mut Cx<'s>) -> Write<'a, 's, T> {
+        Write {
+            cx,
+            raw: self.raw,
+            kind: PhantomData,
+        }
     }
 }
 

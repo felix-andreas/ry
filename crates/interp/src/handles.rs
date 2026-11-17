@@ -8,8 +8,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub use heap::handle::{
-    Alt, Atomic, Chars, Complex, Cx, Elements, Expression, Fresh, Gc, Identity, Integer, Kind,
-    List, Local, Logical, Pointer, Raw, Real, Str, Symbol, Value, Vector,
+    Alt, Atomic, Chars, Complex, Cx, Elements, Environment, Expression, Fresh, Gc, Identity,
+    Integer, Kind, List, Local, Logical, Owned, Pointer, Raw, Real, Str, Symbol, Value, Vector,
 };
 use {
     crate::{
@@ -397,4 +397,266 @@ fn copy_named<T: Vector>(
         }
     }
     Ok(())
+}
+
+/// Whether R code dispatches on `value`, which its class attribute decides.
+#[inline]
+pub fn is_object(value: impl Pointer<Value>) -> bool {
+    // SAFETY: the handle is a live object, and the test reads its header.
+    unsafe { value.raw().is_object() }
+}
+
+/// Whether `value` is one of ry's Arrays, whose stores go through the checks in `arrays`.
+#[inline]
+pub fn is_array(value: impl Pointer<Value>) -> bool {
+    // SAFETY: as for `is_object`.
+    unsafe { value.raw().is_array() }
+}
+
+/// The rows and columns of a matrix: a vector whose `dim` attribute is two integers.
+#[inline]
+pub fn matrix_extent<T: Vector>(_context: &Cx<'_>, vector: impl Pointer<T>) -> Option<(i32, i32)> {
+    // SAFETY: the handle is a live vector, whose attributes are a pairlist this only reads,
+    // and the test admits a `dim` only as a standard integer vector of two elements.
+    unsafe {
+        let dim = values::get_attr(vector.raw(), values::symbols().dim);
+        (dim.kind() == SexpType::Integer && !dim.is_altrep() && values::length(dim) == 2)
+            .then(|| (dim.slice::<i32>()[0], dim.slice::<i32>()[1]))
+    }
+}
+
+/// The names of a vector.
+pub enum Names<'a> {
+    None,
+    Standard(Gc<'a, Str>),
+    /// Names in a form with no direct element access, such as an ALTREP character vector.
+    Other,
+}
+
+/// The `names` attribute of `vector`, read without a safepoint.
+#[inline]
+pub fn names<'a, T: Vector>(_context: &'a Cx<'_>, vector: impl Pointer<T>) -> Names<'a> {
+    // SAFETY: the handle is a live vector, whose attributes are a pairlist this only reads,
+    // and the borrow of the context keeps the attribute's value alive.
+    let names =
+        unsafe { Gc::<Value>::adopt(values::get_attr(vector.raw(), values::symbols().names)) };
+    if names.r_type() == SexpType::Nil {
+        return Names::None;
+    }
+    names
+        .downcast::<Str>()
+        .map_or(Names::Other, Names::Standard)
+}
+
+/// Ends every move of `value`, which base R code is about to change where it is.
+#[inline]
+pub fn modifying(_context: &mut Cx<'_>, value: Local<'_>) -> R<()> {
+    // SAFETY: the value is rooted, and ending a move may run R code, which `&mut Cx` permits.
+    unsafe { crate::moves::modifying(value.raw()) }
+}
+
+/// One element for a store, already of the element type of the vector it goes into.
+#[derive(Clone, Copy)]
+pub enum Scalar<'s> {
+    Real(f64),
+    /// An integer or a logical.
+    Integer(i32),
+    /// The first element of a character vector, which has one.
+    Text(Local<'s, Str>),
+    /// A list element.
+    Item(Local<'s>),
+}
+
+impl From<f64> for Scalar<'_> {
+    fn from(value: f64) -> Self {
+        Scalar::Real(value)
+    }
+}
+
+impl From<i32> for Scalar<'_> {
+    fn from(value: i32) -> Self {
+        Scalar::Integer(value)
+    }
+}
+
+impl<'s> From<Local<'s, Str>> for Scalar<'s> {
+    fn from(text: Local<'s, Str>) -> Self {
+        Scalar::Text(text)
+    }
+}
+
+impl<'s> From<Local<'s>> for Scalar<'s> {
+    fn from(item: Local<'s>) -> Self {
+        Scalar::Item(item)
+    }
+}
+
+/// `vector` one element longer, for the caller to bind: the last element is `element`, named
+/// `name` when there is one, and the vector's only attribute is its names. `owned` is the
+/// vector when the caller's variable alone holds it, and it then grows where it is if it has
+/// room.
+pub fn append<'s, T: Vector>(
+    context: &mut Cx<'s>,
+    vector: Local<'s, T>,
+    name: Option<Local<'s, Chars>>,
+    element: Scalar<'s>,
+    owned: Option<Owned<'s>>,
+) -> R<Local<'s>> {
+    assert!(
+        owned
+            .as_ref()
+            .is_none_or(|owned| owned.get().is(vector.value())),
+        "the claim is for another vector"
+    );
+    let fits = match (T::TYPE, element) {
+        (SexpType::Real, Scalar::Real(_))
+        | (SexpType::Integer | SexpType::Logical, Scalar::Integer(_))
+        | (SexpType::List | SexpType::Expression, Scalar::Item(_)) => true,
+        (SexpType::String, Scalar::Text(text)) => text.len() == 1,
+        _ => false,
+    };
+    assert!(
+        fits,
+        "an appended element of another type than the vector's"
+    );
+    let reuse = owned.is_some();
+    let Some(name) = name else {
+        // SAFETY: `vector` is a rooted standard vector, and `reuse` is true only under the
+        // caller's claim that nothing else holds it. The new element is set before anything
+        // else can allocate or fail, and `fits` matched its type to the storage.
+        let result = unsafe {
+            let heap = crate::heap();
+            let count = vector.len();
+            let result = if reuse
+                && heap.is_resizable(vector.raw())
+                && vector.raw().capacity() > count as isize
+            {
+                heap.resize_vector(vector.raw(), count as isize + 1)?;
+                vector.raw()
+            } else {
+                crate::subset::append_copy(vector.raw(), reuse)?
+            };
+            match element {
+                Scalar::Real(value) => values::reals_mut(result)[count] = value,
+                Scalar::Integer(value) => values::ints_mut(result)[count] = value,
+                Scalar::Text(text) => heap.set_element(result, count, text.raw().element(0)),
+                Scalar::Item(item) => heap.set_element(result, count, item.raw()),
+            }
+            result
+        };
+        // SAFETY: the copy was rooted when it was allocated, and otherwise the result is the
+        // rooted `vector`.
+        return Ok(unsafe { Local::adopt(result) });
+    };
+    // `append_named` reads the element from a value of the vector's type.
+    let scalar = match element {
+        Scalar::Real(value) => {
+            let mut scalar = context.alloc::<Real>(1)?;
+            scalar.as_mut_slice()[0] = value;
+            scalar.finish().value()
+        }
+        Scalar::Integer(value) => {
+            let mut scalar = context.alloc::<Integer>(1)?;
+            scalar.as_mut_slice()[0] = value;
+            scalar.finish().value()
+        }
+        Scalar::Text(text) => text.value(),
+        Scalar::Item(item) => item,
+    };
+    // SAFETY: every argument is rooted, `vector` is a standard vector whose type `fits`
+    // matched to the scalar, and `reuse` is the caller's claim.
+    let result =
+        unsafe { crate::subset::append_named(vector.raw(), name.raw(), scalar.raw(), reuse)? };
+    // SAFETY: as for the unnamed append.
+    Ok(unsafe { Local::adopt(result) })
+}
+
+/// The vector an element store into `vector` writes: `owned`, the vector itself under its
+/// holder's claim, or else a copy with its own storage for the holder to bind.
+#[inline]
+pub fn writable<'s, T: Vector>(
+    context: &mut Cx<'s>,
+    vector: Local<'s, T>,
+    owned: Option<Owned<'s>>,
+) -> R<Owned<'s, T>> {
+    if let Some(owned) = owned
+        && owned.get().is(vector.value())
+        && let Ok(owned) = owned.downcast::<T>()
+    {
+        return Ok(owned);
+    }
+    Ok(shallow_duplicate(context, vector)?.owned())
+}
+
+/// Whether `value` has no attribute but names.
+#[inline]
+pub fn has_only_names(_context: &Cx<'_>, value: impl Pointer<Value>) -> bool {
+    // SAFETY: the handle is a live object, whose attribute list this only reads.
+    unsafe {
+        let attributes = value.raw().attrib();
+        attributes == values::nil()
+            || (attributes.tag() == values::symbols().names && attributes.cdr() == values::nil())
+    }
+}
+
+/// `environment$name <- value` where it binds the name and nothing else happens: false, having
+/// changed nothing, for the empty environment, a locked frame that lacks the name, and a locked
+/// or active binding, whose assignment raises an error or runs a function.
+pub fn bind<'s>(
+    _context: &mut Cx<'s>,
+    environment: Local<'s, Environment>,
+    name: Local<'s, Symbol>,
+    value: Local<'s>,
+) -> R<bool> {
+    let heap = crate::heap();
+    let (environment, name) = (environment.raw(), name.raw());
+    // SAFETY: the three handles are rooted live objects of the kinds `define` expects, and
+    // `&mut Cx` permits the allocation of a new binding and the R code that ending a move runs.
+    unsafe {
+        let writable = environment != heap.known().empty_env
+            && match heap.frame_cell(environment, name) {
+                Some(cell) => !cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED),
+                None => !environment.has_gp(gp::FRAME_LOCKED),
+            };
+        if writable {
+            crate::moves::reaching_environment()?;
+            heap.define(environment, name, value.raw())?;
+        }
+        Ok(writable)
+    }
+}
+
+/// Runs `body`, which reaches the heap only through its context, for raw code that is not a
+/// builtin's entry. Whatever `body` roots is released on return, so a loop over such calls does
+/// not grow the handle stack.
+///
+/// # Safety
+///
+/// The caller is on the interpreter's thread and holds no reference into the heap. A raw
+/// pointer in the result is rooted by nothing this call did: the caller stores or roots it
+/// before anything allocates.
+#[inline]
+pub unsafe fn with<T>(body: impl for<'s> FnOnce(&mut Cx<'s>) -> R<T>) -> R<T> {
+    let heap = crate::heap();
+    let mark = heap.handle_mark();
+    // SAFETY: the interpreter's heap lives as long as the process, and `body` cannot keep the
+    // context or anything of its scope, because it must accept every `'s`.
+    let mut context = unsafe { Cx::enter(NonNull::from(&mut *heap)) };
+    let result = body(&mut context);
+    heap.release_handles(mark);
+    if let Err(unwind) = &result {
+        unwind.root();
+    }
+    result
+}
+
+/// Roots `raw` in the context's scope.
+///
+/// # Safety
+///
+/// `raw` is a live object.
+#[inline]
+pub unsafe fn adopt<'s>(context: &Cx<'s>, raw: Sexp) -> Local<'s> {
+    // SAFETY: the caller's contract, and nothing allocates before the root.
+    unsafe { rooted(context, raw) }
 }
