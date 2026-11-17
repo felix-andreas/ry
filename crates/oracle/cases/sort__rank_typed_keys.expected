@@ -17,6 +17,11 @@
 |  x  y  z 
 |  2  1 NA 
 | numeric(0)
+| numeric(0)
+| numeric(0)
+| numeric(0)
+| [1] NA NA
+| [1] NA NA
 | [1] 2.5 1.0 2.5
 [messages]
 [warnings]
