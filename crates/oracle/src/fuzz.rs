@@ -25,7 +25,7 @@
 //! environment or an unseeded random number, and no environment or closure is ever printed.
 
 use {
-    crate::{Engine, EngineError, Outcome, diff},
+    crate::{Engine, EngineError, ExpressionDifference, Outcome, diff, differing_expressions},
     std::path::Path,
     syntax::testing::SplitMix64,
 };
@@ -1144,8 +1144,51 @@ impl Generator {
     }
 }
 
+/// A family of generated programs. Each maps a seed to one program.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ProgramKind {
+    /// [`program`]: several blocks from a grammar of language features.
+    Grammar,
+    /// [`metamorphic::program`](crate::metamorphic::program): a value from the zoo, a body that
+    /// mutates it, and the forms the body must agree in.
+    Metamorphic,
+    /// [`metamorphic::builtins_program`](crate::metamorphic::builtins_program): builtins called
+    /// on values from the zoo.
+    Builtins,
+}
+
+pub const KINDS: [ProgramKind; 3] = [
+    ProgramKind::Grammar,
+    ProgramKind::Metamorphic,
+    ProgramKind::Builtins,
+];
+
+impl ProgramKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            ProgramKind::Grammar => "grammar",
+            ProgramKind::Metamorphic => "metamorphic",
+            ProgramKind::Builtins => "builtins",
+        }
+    }
+
+    pub fn named(name: &str) -> Option<ProgramKind> {
+        KINDS.into_iter().find(|kind| kind.name() == name)
+    }
+
+    /// The program of this kind for `seed`.
+    pub fn program(self, seed: u64) -> String {
+        match self {
+            ProgramKind::Grammar => program(seed),
+            ProgramKind::Metamorphic => crate::metamorphic::program(seed),
+            ProgramKind::Builtins => crate::metamorphic::builtins_program(seed),
+        }
+    }
+}
+
 /// What one seed's program did under the reference engine and every other engine.
 pub struct SeedReport {
+    pub kind: ProgramKind,
     pub seed: u64,
     pub program: String,
     /// GNU R's outcome, against which every other engine is compared.
@@ -1160,59 +1203,202 @@ pub struct Divergence {
     pub engine: String,
     /// A unified diff against the reference, or why the engine produced no outcome.
     pub detail: String,
+    /// The first top-level expressions whose observed values or conditions differ, when both
+    /// engines were observed.
+    pub expressions: Vec<DifferingExpression>,
+    /// The engine finished the program and reported an outcome.
+    pub ran: bool,
+    /// The warnings, messages or errors differ in text. With no differing expression (the
+    /// engines were not observed), it tells a condition difference from a printing one.
+    pub conditions: bool,
+    /// The engine died on a signal or a panic instead of finishing the program.
+    pub crashed: bool,
+}
+
+impl Divergence {
+    /// The names of the ways this engine differs, for a tally: `crash`, `failed`, or each
+    /// differing expression's [`Difference`]. With no differing expression it is `conditions`
+    /// when the condition text differs and `printed` when only the printed text does.
+    pub fn kinds(&self) -> Vec<&'static str> {
+        if self.crashed {
+            return vec!["crash"];
+        }
+        let mut kinds: Vec<&'static str> = self
+            .expressions
+            .iter()
+            .map(|expression| expression.difference.name())
+            .collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        if kinds.is_empty() {
+            kinds.push(match (self.ran, self.conditions) {
+                (false, _) => "failed",
+                (true, true) => "conditions",
+                (true, false) => "printed",
+            });
+        }
+        kinds
+    }
+}
+
+pub struct DifferingExpression {
+    pub source: String,
+    pub difference: Difference,
+}
+
+/// How an engine's result for one expression differs from the reference's. A generated
+/// program catches an error and makes its message the value, as a string that starts with
+/// `error:`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Difference {
+    /// Both gave a value, and the values differ.
+    Value,
+    /// The engine gave a value where the reference signals an error.
+    Accepts,
+    /// The engine signals an error where the reference gave a value.
+    Rejects,
+    /// Both signal an error, with different messages.
+    Message,
+    /// The values agree; warnings, messages or their classes differ.
+    Conditions,
+}
+
+impl Difference {
+    pub fn name(self) -> &'static str {
+        match self {
+            Difference::Value => "value",
+            Difference::Accepts => "accepts",
+            Difference::Rejects => "rejects",
+            Difference::Message => "message",
+            Difference::Conditions => "conditions",
+        }
+    }
+}
+
+/// How the engine's entries for one expression differ from the reference's.
+pub fn classify(difference: &ExpressionDifference) -> Difference {
+    fn value(entries: &[String]) -> Option<&String> {
+        entries
+            .iter()
+            .find(|entry| entry.starts_with("visible ") || entry.starts_with("invisible "))
+    }
+    // The value's own line, not a string nested in a list: `visible character[1] -"error: ...`,
+    // or the string's bytes when it holds a non-ASCII character, under any encoding mark.
+    fn caught(value: &str) -> bool {
+        let Some(token) = value
+            .split_once(' ')
+            .and_then(|(_, dump)| dump.strip_prefix("character[1] "))
+        else {
+            return false;
+        };
+        let mut characters = token.chars();
+        characters.next();
+        let rest = characters.as_str();
+        rest.starts_with("\"error: ") || rest.starts_with("<6572726f723a20")
+    }
+    match (value(&difference.reference), value(&difference.other)) {
+        (Some(reference), Some(other)) if reference == other => Difference::Conditions,
+        (Some(reference), Some(other)) => match (caught(reference), caught(other)) {
+            (true, true) => Difference::Message,
+            (true, false) => Difference::Accepts,
+            (false, true) => Difference::Rejects,
+            (false, false) => Difference::Value,
+        },
+        (Some(_), None) => Difference::Rejects,
+        (None, Some(_)) => Difference::Accepts,
+        (None, None) => Difference::Message,
+    }
 }
 
 /// Runs `seed`'s program under `reference` and under each of `engines`, in a file written to
 /// `directory`, and compares every engine with the reference.
 pub fn check_seed(
+    kind: ProgramKind,
     seed: u64,
     reference: &dyn Engine,
     engines: &[&dyn Engine],
     directory: &Path,
 ) -> Result<SeedReport, EngineError> {
-    let source = program(seed);
-    let path = directory.join(format!("fuzz_{seed}.R"));
+    let source = kind.program(seed);
+    let path = directory.join(format!("{}_{seed}.R", kind.name()));
     std::fs::write(&path, &source)
         .map_err(|error| EngineError::Failed(format!("{}: {error}", path.display())))?;
     let reference_outcome = reference.run(&path)?;
-    let mut divergences = Vec::new();
-    let mut unavailable = Vec::new();
-    for engine in engines {
-        match engine.run(&path) {
-            Ok(outcome) => {
-                if let Some(detail) = diff(
-                    &reference.name(),
-                    &reference_outcome,
-                    &engine.name(),
-                    &outcome,
-                ) {
-                    divergences.push(Divergence {
-                        engine: engine.name(),
-                        detail,
-                    });
-                }
-            }
-            Err(EngineError::Unavailable(reason)) => {
-                unavailable.push(format!("{}: {reason}", engine.name()))
-            }
-            Err(EngineError::Failed(reason) | EngineError::Crashed(reason)) => {
-                divergences.push(Divergence {
-                    engine: engine.name(),
-                    detail: reason,
-                })
-            }
-        }
-    }
+    let (divergences, unavailable) =
+        compare_engines(&source, reference, &reference_outcome, engines, &path);
     if let Err(error) = std::fs::remove_file(&path) {
         eprintln!("could not remove {}: {error}", path.display());
     }
     Ok(SeedReport {
+        kind,
         seed,
         program: source,
         reference: reference_outcome,
         divergences,
         unavailable,
     })
+}
+
+/// Runs the program `source`, stored at `path`, under each of `engines` and compares every
+/// outcome with the reference's. Returns the engines that differ and the reasons of the engines
+/// that cannot run here.
+pub fn compare_engines(
+    source: &str,
+    reference: &dyn Engine,
+    reference_outcome: &Outcome,
+    engines: &[&dyn Engine],
+    path: &Path,
+) -> (Vec<Divergence>, Vec<String>) {
+    let top_level = top_level_expressions(source);
+    let mut divergences = Vec::new();
+    let mut unavailable = Vec::new();
+    for engine in engines {
+        match engine.run(path) {
+            Ok(outcome) => {
+                if let Some(detail) = diff(
+                    &reference.name(),
+                    reference_outcome,
+                    &engine.name(),
+                    &outcome,
+                ) {
+                    let expressions = differing_expressions(reference_outcome, &outcome)
+                        .iter()
+                        .take(8)
+                        .filter_map(|difference| {
+                            Some(DifferingExpression {
+                                source: top_level.get(difference.position.checked_sub(1)?)?.clone(),
+                                difference: classify(difference),
+                            })
+                        })
+                        .collect();
+                    divergences.push(Divergence {
+                        engine: engine.name(),
+                        detail,
+                        expressions,
+                        ran: true,
+                        conditions: reference_outcome.errors != outcome.errors
+                            || reference_outcome.warnings != outcome.warnings
+                            || reference_outcome.messages != outcome.messages,
+                        crashed: false,
+                    });
+                }
+            }
+            Err(EngineError::Unavailable(reason)) => {
+                unavailable.push(format!("{}: {reason}", engine.name()))
+            }
+            Err(error @ (EngineError::Failed(_) | EngineError::Crashed(_))) => {
+                divergences.push(Divergence {
+                    engine: engine.name(),
+                    crashed: matches!(error, EngineError::Crashed(_)),
+                    detail: error.to_string(),
+                    expressions: Vec::new(),
+                    ran: false,
+                    conditions: false,
+                })
+            }
+        }
+    }
+    (divergences, unavailable)
 }
 
 /// The failure report for one seed: the program, every engine's difference, and the commands
@@ -1223,23 +1409,49 @@ pub fn render_divergences(report: &SeedReport) -> String {
         .iter()
         .map(|divergence| divergence.engine.as_str())
         .collect();
+    let (kind, seed) = (report.kind.name(), report.seed);
     let mut text = format!(
-        "seed {} diverges under {}\nreproduce: cargo run -q -p oracle -- fuzz --seed {} --engines {}\nprogram:   cargo run -q -p oracle -- fuzz --seed {} --print > fuzz_{}.R\n--- program ---\n{}",
-        report.seed,
+        "{kind} seed {seed} diverges under {}\nreproduce: cargo run -q -p oracle -- fuzz --kind {kind} --seed {seed} --engines {}\nprogram:   cargo run -q -p oracle -- fuzz --kind {kind} --seed {seed} --print > {kind}_{seed}.R\n--- program ---\n{}",
         engines.join(", "),
-        report.seed,
         engines.join(","),
-        report.seed,
-        report.seed,
         report.program
     );
     for divergence in &report.divergences {
-        text.push_str(&format!(
-            "--- {} ---\n{}\n",
-            divergence.engine, divergence.detail
-        ));
+        text.push_str(&render_divergence(divergence));
     }
     text
+}
+
+/// One engine's section of a failure report: the expressions that differ and how, then the
+/// diff or the reason the engine produced no outcome.
+pub fn render_divergence(divergence: &Divergence) -> String {
+    let mut text = format!("--- {} ---\n", divergence.engine);
+    if divergence.ran && divergence.expressions.is_empty() {
+        text.push_str(if divergence.conditions {
+            "differs (conditions): the text of a warning, message or error differs\n"
+        } else {
+            "differs (printed): the values and conditions agree, the printed text does not\n"
+        });
+    }
+    for expression in &divergence.expressions {
+        text.push_str(&format!(
+            "differs ({}): {}\n",
+            expression.difference.name(),
+            expression.source
+        ));
+    }
+    text.push_str(&format!("{}\n", divergence.detail));
+    text
+}
+
+/// The source of each top-level expression of `program`, in order, as R's `parse` counts them.
+fn top_level_expressions(program: &str) -> Vec<String> {
+    syntax::parse(program)
+        .syntax_node()
+        .children()
+        .filter(|child| syntax::ast::is_expression_kind(child.kind()))
+        .map(|child| child.text().to_string())
+        .collect()
 }
 
 /// The stack shapes [`trace_back_program`] nests, by the name its R preamble gives each wrapper.

@@ -747,6 +747,51 @@ fuzz-differential seed="0" count="200" engines="ry-tier0,ry-jit":
     cargo build -q -p ry-lang -p libr -p rcmd -p oracle
     ./target/debug/oracle fuzz --seed {{ seed }} --count {{ count }} --engines {{ engines }}
 
+# The other program kinds of the differential fuzzer: `metamorphic` (one value, one body, and the
+# forms that must agree), `builtins` (builtins on a zoo of values), `corpus`, or `all`, e.g.
+# `just fuzz-kind metamorphic 0 500`. Diverging programs and their reports go to
+# target/fuzz-findings.
+fuzz-kind kind="all" seed="0" count="200" engines="ry-tier0,ry-jit":
+    cargo build -q -p ry-lang -p libr -p rcmd -p oracle
+    ./target/debug/oracle fuzz --kind {{ kind }} --seed {{ seed }} --count {{ count }} --engines {{ engines }} --findings target/fuzz-findings
+
+# Every program kind of the differential fuzzer against GNU R for HOURS of wall clock, from seed
+# BASE on. A scheduled run passes a fresh base, e.g. `just fuzz-long 8 $(date +%s)`. Diverging
+# programs and their reports go to target/fuzz-findings, and the run exits 1 when there are any.
+fuzz-long hours="1" base="1000000" engines="ry-tier0,ry-jit,ry-gctorture-seeded":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build -q -p ry-lang -p libr -p rcmd -p oracle
+    minutes=$(python3 -I -c 'import sys; print(max(1, round(float(sys.argv[1]) * 60)))' "{{ hours }}")
+    ./target/debug/oracle fuzz --kind all --seed {{ base }} --minutes "$minutes" --engines {{ engines }} --findings target/fuzz-findings
+
+# The Fuzz workflow's job (.github/workflows/fuzz.yml), in the `ci` dev shell: `just fuzz-long`
+# after the set-up `just ci` does, from the start time as the seed base unless one is given.
+fuzz-ci hours="4" base="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export TZ=UTC NOT_CRAN=true
+    R_HOME=$(R RHOME)
+    export R_HOME
+    bash tools/oracle-locales.sh
+    just base-r dev
+    base="{{ base }}"
+    just fuzz-long "{{ hours }}" "${base:-$(date +%s)}"
+
+# Shrink a program on which an engine diverges from GNU R to a minimal one that diverges the same
+# way, e.g. `just fuzz-reduce fuzz_7.R ry-jit`; the result goes to target/fuzz-findings/reduced.R.
+fuzz-reduce file engine="ry-tier0":
+    cargo build -q -p ry-lang -p libr -p rcmd -p oracle
+    mkdir -p target/fuzz-findings
+    ./target/debug/oracle reduce --engine {{ engine }} --output target/fuzz-findings/reduced.R {{ file }}
+
+# Differential fuzzing on real R code: mutated snippets of base R's help examples, R's regression
+# tests and the oracle cases, under GNU R and ry's engines with the deep observer. Snippets that
+# differ before mutation go to target/fuzz-corpus/base-differs.txt instead of the findings.
+fuzz-corpus seed="0" count="200" engines="ry-tier0,ry-jit":
+    cargo build -q -p ry-lang -p libr -p rcmd -p oracle
+    ./target/debug/oracle fuzz --kind corpus --seed {{ seed }} --count {{ count }} --engines {{ engines }}
+
 # Every oracle case under collection stress (`RY_GC_STRESS`), compared with ry unstressed;
 # `just gc-torture young` keeps survivors collectable (`RY_GC_STRESS=young`), which finds an
 # object only a Rust local holds, and `just gc-torture seeded` collects at random gaps with the

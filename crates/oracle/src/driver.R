@@ -8,7 +8,28 @@
 # syntax error hides the output of the lines before it; the driver's own frames show up in
 # sys.nframe() and sys.calls(); commandArgs(TRUE) holds the two paths; and quit() ends the
 # run without a report.
+#
+# With `ORACLE_OBSERVE` set, the report also holds, in order, the deep observer's dump of every
+# top-level value with its visibility and every condition's classes, message and call (observe.R,
+# which the harness splices in below, so the script cannot see or replace it).
 local({
+  # <observe.R>
+  observing <- nzchar(Sys.getenv("ORACLE_OBSERVE"))
+  observed <- character()
+  observe_value <- function(result) {
+    dump <- tryCatch(.oracle_observe(result$value), error = function(condition) {
+      paste("the observer failed:", conditionMessage(condition))
+    })
+    observe_note(paste0(if (result$visible) "visible " else "invisible ", dump))
+  }
+  # Each entry starts with the number of the top-level expression it belongs to, so a
+  # difference names the expression.
+  position <- 0L
+  observe_note <- function(text) observed <<- c(observed, paste0("[", position, "] ", text))
+  observe_condition <- function(kind, condition) {
+    observe_note(paste0(.oracle_observe_condition(kind, condition), " ", describe(condition)))
+  }
+
   argv <- commandArgs(trailingOnly = TRUE)
   script <- argv[1L]
   report <- argv[2L]
@@ -52,9 +73,9 @@ local({
       value <- sprintf("{\"kind\":%s,\"deparsed\":%s}", json_string(typeof(last$value)), json_string(deparsed))
     }
     body <- sprintf(
-      "{\"messages\":%s,\"warnings\":%s,\"errors\":%s,\"value\":%s,\"libraries\":%s}\n",
+      "{\"messages\":%s,\"warnings\":%s,\"errors\":%s,\"value\":%s,\"libraries\":%s,\"observed\":%s}\n",
       json_array(messages), json_array(warnings), json_array(errors), value,
-      json_string(Sys.getenv("R_LIBS"))
+      json_string(Sys.getenv("R_LIBS")), json_array(observed)
     )
     writeLines(body, report, useBytes = TRUE)
   }
@@ -68,26 +89,31 @@ local({
   )
 
   for (expression in expressions) {
+    position <- position + 1L
     failed <- FALSE
     withCallingHandlers(
       tryCatch(
         {
           result <- withVisible(eval(expression, globalenv()))
           last <- list(value = result$value)
+          if (observing) observe_value(result)
           if (result$visible) print(result$value)
         },
         error = function(condition) {
+          if (observing) observe_condition("error", condition)
           errors <<- c(errors, describe(condition))
           last <<- NULL
           failed <<- TRUE
         }
       ),
       warning = function(condition) {
+        if (observing) observe_condition("warning", condition)
         warnings <<- c(warnings, describe(condition))
         if (isTRUE(getOption("warn") >= 2)) return(invisible())
         invokeRestart("muffleWarning")
       },
       message = function(condition) {
+        if (observing) observe_condition("message", condition)
         messages <<- c(messages, sub("\n$", "", conditionMessage(condition)))
         invokeRestart("muffleMessage")
       }

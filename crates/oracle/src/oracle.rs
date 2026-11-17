@@ -7,9 +7,13 @@
 //! GNU R is one such engine, and ry's runtime is another.
 
 pub mod bench;
+pub mod corpus;
 pub mod fuzz;
 pub mod gallery;
 pub mod install;
+pub mod metamorphic;
+pub mod mutate;
+pub mod reduce;
 
 use {
     serde::Deserialize,
@@ -30,6 +34,12 @@ use {
 pub mod packages;
 
 const DRIVER: &str = include_str!("driver.R");
+const OBSERVER: &str = include_str!("observe.R");
+
+/// `driver.R` with the deep observer spliced into its local scope.
+fn driver_text() -> String {
+    DRIVER.replacen("  # <observe.R>\n", OBSERVER, 1)
+}
 
 /// `Sync`, because a run hands every engine to one worker per core.
 pub trait Engine: Sync {
@@ -60,6 +70,9 @@ pub struct Outcome {
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
     pub value: Option<Value>,
+    /// The deep observer's dump of every top-level value, and the classes of every condition, in
+    /// the order they happened. Empty unless the engine observes ([`ProcessEngine::observing`]).
+    pub observed: Vec<String>,
     /// `R_LIBS` as the script saw it, when the engine reports it. It is not part of the
     /// behavior: [`diff`] refuses to compare runs that searched different libraries, because a
     /// package installed by one engine makes the other warn that it was built under another R.
@@ -75,6 +88,7 @@ impl PartialEq for Outcome {
             && self.warnings == other.warnings
             && self.errors == other.errors
             && self.value == other.value
+            && self.observed == other.observed
     }
 }
 
@@ -94,6 +108,8 @@ struct Report {
     value: Option<Value>,
     #[serde(default)]
     libraries: Option<String>,
+    #[serde(default)]
+    observed: Vec<String>,
 }
 
 /// The modes of ry's runtime that `--engine` names, which [`KnownFailure::engine`] must be one of.
@@ -237,6 +253,7 @@ pub fn known_failure<'a>(
         .find(|entry| entry.case == name && entry.engine == engine)
 }
 
+#[derive(Clone)]
 pub struct ProcessEngine {
     name: String,
     program: String,
@@ -296,6 +313,15 @@ impl ProcessEngine {
     /// Kills a run that takes longer than `timeout` and reports it as failed.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    /// Makes the driver report the deep observer's dump of every top-level value
+    /// ([`Outcome::observed`]), which shows what printing and deparsing hide: encoding marks,
+    /// attribute order, NA kinds, negative zero, and the object and S4 bits.
+    pub fn observing(mut self) -> Self {
+        self.environment
+            .push(("ORACLE_OBSERVE".to_string(), "1".to_string()));
         self
     }
 
@@ -480,7 +506,7 @@ impl Engine for ProcessEngine {
         command.args(&self.arguments);
         if let Some(driver) = self.driver {
             let driver_path = scratch.path().join("driver.R");
-            std::fs::write(&driver_path, DRIVER)
+            std::fs::write(&driver_path, driver_text())
                 .map_err(|error| EngineError::Failed(error.to_string()))?;
             match driver {
                 Driver::GnuR => {
@@ -539,6 +565,7 @@ impl Engine for ProcessEngine {
             warnings: report.warnings,
             errors: report.errors,
             value: report.value,
+            observed: report.observed,
             libraries: report.libraries,
         })
     }
@@ -1222,6 +1249,17 @@ pub fn render(outcome: &Outcome) -> String {
             text.push_str(&format!("| {line}\n"));
         }
     }
+    // Recorded outcomes come from engines that do not observe, so the section is written
+    // only when there is something in it.
+    if !outcome.observed.is_empty() {
+        text.push_str("[observed]\n");
+        for (index, entry) in outcome.observed.iter().enumerate() {
+            text.push_str(&format!("#{}\n", index + 1));
+            for line in entry.split('\n') {
+                text.push_str(&format!("| {line}\n"));
+            }
+        }
+    }
     text
 }
 
@@ -1241,8 +1279,21 @@ pub fn parse(text: &str) -> Option<Outcome> {
                 "warnings" => "warnings",
                 "errors" => "errors",
                 "value" => "value",
+                "observed" => "observed",
                 _ => return None,
             };
+        } else if section == "observed" {
+            // An editor that strips trailing spaces leaves an empty line as a bare `|`.
+            match line.strip_prefix("| ").or((line == "|").then_some("")) {
+                Some(content) => {
+                    let entry = outcome.observed.last_mut()?;
+                    if !entry.is_empty() {
+                        entry.push('\n');
+                    }
+                    entry.push_str(content);
+                }
+                None => outcome.observed.push(String::new()),
+            }
         } else if line == "\\ no newline at end of output" {
             if outcome.stdout.ends_with('\n') {
                 outcome.stdout.pop();
@@ -1296,6 +1347,67 @@ fn unescape(text: &str) -> String {
         }
     }
     result
+}
+
+/// A top-level expression whose observed entries differ between two outcomes.
+pub struct ExpressionDifference {
+    /// The expression's number, from one.
+    pub position: usize,
+    /// The reference's entries for it and the other outcome's, without the number.
+    pub reference: Vec<String>,
+    pub other: Vec<String>,
+}
+
+/// The top-level expressions whose observed entries differ between two outcomes, in order.
+/// Empty when either outcome was not observed.
+pub fn differing_expressions(reference: &Outcome, other: &Outcome) -> Vec<ExpressionDifference> {
+    fn by_expression(outcome: &Outcome) -> Vec<(usize, Vec<String>)> {
+        let mut groups: Vec<(usize, Vec<String>)> = Vec::new();
+        for entry in &outcome.observed {
+            let Some((position, text)) = entry
+                .strip_prefix('[')
+                .and_then(|rest| rest.split_once("] "))
+                .and_then(|(position, text)| Some((position.parse::<usize>().ok()?, text)))
+            else {
+                continue;
+            };
+            match groups.last_mut() {
+                Some((last, texts)) if *last == position => texts.push(text.to_string()),
+                _ => groups.push((position, vec![text.to_string()])),
+            }
+        }
+        groups
+    }
+    if reference.observed.is_empty() || other.observed.is_empty() {
+        return Vec::new();
+    }
+    let mut reference = by_expression(reference).into_iter().peekable();
+    let mut other = by_expression(other).into_iter().peekable();
+    let mut differing = Vec::new();
+    loop {
+        let (first, second) = match (reference.peek(), other.peek()) {
+            (None, None) => return differing,
+            (Some((first, _)), Some((second, _))) => (*first, *second),
+            (Some((first, _)), None) => (*first, usize::MAX),
+            (None, Some((second, _))) => (usize::MAX, *second),
+        };
+        let position = first.min(second);
+        let reference = reference
+            .next_if(|(candidate, _)| *candidate == position)
+            .map(|(_, texts)| texts)
+            .unwrap_or_default();
+        let other = other
+            .next_if(|(candidate, _)| *candidate == position)
+            .map(|(_, texts)| texts)
+            .unwrap_or_default();
+        if reference != other {
+            differing.push(ExpressionDifference {
+                position,
+                reference,
+                other,
+            });
+        }
+    }
 }
 
 /// A unified diff of two outcomes, or `None` when they are equal.

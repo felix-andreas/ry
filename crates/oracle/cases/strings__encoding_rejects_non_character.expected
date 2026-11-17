@@ -1,0 +1,18 @@
+[stdout]
+| double: a character vector argument expected
+| integer: a character vector argument expected
+| double: a character vector argument expected
+| logical: a character vector argument expected
+| complex: a character vector argument expected
+| raw: a character vector argument expected
+| list: a character vector argument expected
+| NULL: a character vector argument expected
+| symbol: a character vector argument expected
+| integer: a character vector argument expected
+| [1] "unknown" "UTF-8"   "unknown"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("unknown", "UTF-8", "unknown")
