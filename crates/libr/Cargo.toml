@@ -38,7 +38,6 @@ rcmd = { path = "../rcmd" }
 rustc-hash.workspace = true
 semantics = { path = "../semantics" }
 smallvec = { version = "1.15", features = ["union"] }
-unicode-width.workspace = true
 stacker.workspace = true
 syntax = { path = "../syntax" }
 table = { path = "../table" }

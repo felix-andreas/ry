@@ -2508,7 +2508,7 @@ pub unsafe extern "C" fn R_nchar(
         Ok(match kind {
             NCHAR_BYTES => string.bytes().len() as c_int,
             NCHAR_CHARS => utf8_text(string)?.chars().count() as c_int,
-            _ => crate::strings::display_width(&utf8_text(string)?) as c_int,
+            _ => interp::format::display_width(&utf8_text(string)?) as c_int,
         })
     })
 }

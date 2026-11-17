@@ -1927,7 +1927,6 @@ dependencies = [
  "stacker",
  "syntax",
  "thin-vec",
- "unicode-width 0.2.2",
  "windows-sys 0.61.2",
  "zstd",
 ]
@@ -2199,7 +2198,6 @@ dependencies = [
  "syntax",
  "table",
  "typed",
- "unicode-width 0.2.2",
 ]
 
 [[package]]
