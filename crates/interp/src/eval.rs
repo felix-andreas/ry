@@ -5562,16 +5562,13 @@ pub unsafe fn logical_operand_of(value: Sexp, call: Sexp, operator: &str, side: 
 
 #[inline(never)]
 unsafe fn general_logical_operand(value: Sexp, call: Sexp, operator: &str, side: &str) -> R<i32> {
-    if !matches!(
-        value.kind(),
-        SexpType::Logical
-            | SexpType::Integer
-            | SexpType::Real
-            | SexpType::Complex
-            | SexpType::Nil
-            | SexpType::String
-            | SexpType::Raw
-    ) {
+    // GNU R's `isNumber`: a factor is an integer vector but not a number.
+    let number = match value.kind() {
+        SexpType::Logical | SexpType::Real | SexpType::Complex => true,
+        SexpType::Integer => !values::inherits(value, "factor"),
+        _ => false,
+    };
+    if !number {
         return Err(error_in(
             call,
             format!("invalid '{side}' type in 'x {operator} y'"),
@@ -5583,16 +5580,6 @@ unsafe fn general_logical_operand(value: Sexp, call: Sexp, operator: &str, side:
             call,
             format!("'length = {count}' in coercion to 'logical(1)'"),
         ));
-    }
-    if value.kind() == SexpType::String {
-        let result = values::as_logical_scalar(value);
-        if count == 1 && result == heap::object::NA_LOGICAL {
-            return Err(error_in(
-                call,
-                format!("invalid '{side}' type in 'x {operator} y'"),
-            ));
-        }
-        return Ok(result);
     }
     Ok(values::as_logical_scalar(value))
 }
