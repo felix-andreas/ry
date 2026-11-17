@@ -331,7 +331,9 @@ export function mixedMachines(): boolean {
   const machines = new Set(
     gnuRSuites().map((suite) => {
       const meta = suite.results?.meta;
-      return JSON.stringify([meta?.machine.cpu, meta?.machine.kernel, meta?.gnuR?.blas]);
+      // A Firecracker guest kernel carries a host build tag (`-fc-v553`) that changes on a container restart.
+      const kernel = meta?.machine.kernel?.replace(/-fc-v\d+$/, '');
+      return JSON.stringify([meta?.machine.cpu, kernel, meta?.gnuR?.blas]);
     }),
   );
   return machines.size > 1;
