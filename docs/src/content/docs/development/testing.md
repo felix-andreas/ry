@@ -630,8 +630,10 @@ repeated calls, swapped, dropped or duplicated arguments, and neighboring operat
 runs under the deep observer. The unmutated snippet runs first: an engine that already differs on
 it is a plain compatibility gap, listed in `target/fuzz-corpus/base-differs.txt`, and only a
 mutant that diverges while its snippet agrees is a finding. A diverging mutant runs under GNU R a
-second time and is dropped when GNU R disagrees with itself. `just fuzz-corpus SEED COUNT ENGINES` runs a range of seeds, and
-`fuzz_corpus_mutants_agree_with_gnu_r` is the bounded pass.
+second time and is dropped when GNU R disagrees with itself. `just fuzz-corpus SEED COUNT ENGINES`
+runs a range of seeds. The bounded pass, `fuzz_corpus_mutants_never_crash`, fails only when a
+mutant crashes ry and prints the other divergences, because the snippet a seed picks changes
+whenever an oracle case is added.
 
 `crates/oracle/tests/test_gallery.rs` renders a seeded sample of the plot gallery under both
 engines and compares the images ([Corpus and oracle](/development/corpus-and-oracle)).
