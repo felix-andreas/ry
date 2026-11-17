@@ -1872,15 +1872,18 @@ unsafe fn do_register_s3_methods(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_do_call(call: &Call<'_>) -> R<Sexp> {
     let what = call.arg(0);
     let arguments = call.arg(1);
-    let env = environment_arg(call.arg(2), "envir")?;
-    if arguments.kind() != SexpType::List && arguments != nil() {
-        return Err(call.error("second argument must be a list"));
-    }
+    let env = call.arg(2);
     let function_expression = match what.kind() {
         SexpType::String if length(what) == 1 => values::install_charsxp(what.element(0))?,
         SexpType::Closure | SexpType::Builtin | SexpType::Special => what,
-        _ => return Err(call.error("'what' must be a function or character string")),
+        _ => return Err(error("'what' must be a function or character string")),
     };
+    if arguments.kind() != SexpType::List && arguments != nil() {
+        return Err(error("'args' must be a list"));
+    }
+    if env.kind() != SexpType::Environment {
+        return Err(error("'envir' must be an environment"));
+    }
     let names = values::names(arguments);
     let mut new_call = values::PairlistBuilder::new(SexpType::Language);
     new_call.push(nil(), function_expression)?;

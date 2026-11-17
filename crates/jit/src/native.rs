@@ -40,8 +40,8 @@ use {
         annotations,
         bytecode::{self, TypedCall},
         eval::{
-            PROMISE_SEEN, PendingName, is_reference, peek_variable, pending_name,
-            reference_variable, settle_unforced,
+            PROMISE_INTERRUPTED, PROMISE_SEEN, PendingName, is_reference, peek_variable,
+            pending_name, reference_variable, settle_unforced,
         },
         records, values,
     },
@@ -3164,9 +3164,9 @@ unsafe fn promise_value(
     if promise.car() != values::unbound() {
         return Some(promise.car());
     }
-    // Forcing a promise whose code is running raises the recursion error, which a read must not
-    // replace with a value.
-    if promise.has_gp(PROMISE_SEEN) || depth > MAX_PURE_DEPTH {
+    // Forcing a promise whose code is running raises the recursion error, and forcing one whose
+    // code was left warns, which a read must not replace with a value.
+    if promise.has_gp(PROMISE_SEEN | PROMISE_INTERRUPTED) || depth > MAX_PURE_DEPTH {
         return None;
     }
     let expression = promise.cdr();

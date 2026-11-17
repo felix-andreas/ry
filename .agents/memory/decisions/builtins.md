@@ -563,3 +563,14 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 - **Gaps.** ICU4X always normalizes, and GNU R's ICU runs with normalization off, so a string with combining marks out of canonical order can order differently. ICU4X carries CLDR 47 and GNU R 4.6.2's ICU 74 carries CLDR 44.
 - **Measured** (5 sorts, release, seconds; ry, GNU R): `sprintf("key%07d", sample(2e5))` 0.34, 4.27; a 2e5 mixed-case ASCII vector 0.26, 3.11, and `order` of it 0.32, 3.98; 2e4 strings with é, ß and ж 0.17, 0.18. Each comparison off the fast path runs the full collator; ICU4X 2.0 has no sort keys.
 - **Contract.** `sort__icu_collation.R` pins ignorables, ß, case, punctuation, scripts, ties, invalid bytes, comparisons and `icuSetCollate`.
+
+## `abbreviate` is GNU R's `stripchars`, pass for pass
+
+**Status:** settled.
+
+- **Previous shape.** One loop per class over the whole text, with ASCII vowels and Unicode lower case, and a warning for any non-ASCII element. Results differed from GNU R wherever a word-end pass decides (`"Überlänge Straße"` to 6), and the warning fired for strings GNU R leaves alone.
+- **Target shape.** `strings::abbreviate` runs GNU R's passes in order (vowels at a word's end, vowels, lower case at a word's end, lower case, any character), each from the end of the text and each stopping when the text fits. The vowel table is `wstripchars`' (ASCII and accented Latin vowels), lower case is glibc's class (Unicode lower case, or a single-letter upper-case form), and white space is glibc's `iswspace` (no no-break spaces, no U+0085).
+- **The warning** is raised once, after the loop, only with `use.classes` and only when a non-ASCII element longer than the minimum was shortened. An element that is not shortened is returned as it is, encoding mark included, and the result keeps the argument's attributes.
+- **A negative minimum** (reachable through `.Internal` only) follows GNU R's unsigned comparisons: an ASCII element is returned unchanged, and a non-ASCII one loses its inner spaces.
+- **Lower case can differ from GNU R by Unicode version** for letters added or reclassified between the Unicode of Rust's standard library and of the system's glibc (U+0295 and the letters Unicode 16 added are examples).
+- Oracle case: `strings__abbreviate_non_ascii`.
