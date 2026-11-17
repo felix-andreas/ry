@@ -673,6 +673,9 @@ checks". Order, method and costs: `development/design/memory-safety.md`, "Migrat
   `do_copy_df_attr`; `paste`, `sprintf`, `strsplit`, `make.unique` (after the bulk fill);
   `values.rs`, the evaluator, the bytecode loop.
 - **Not built** (`memory-safety.md`, "Migration"): the register accessor, `Held<T>`, a bulk fill.
+- **Raw functions the ratchet's baseline admits, to move with their files.** `op_subscript` and
+  `subscript_unbound` (`bytecode.rs`, with the register accessor), `patch_args_by_actuals`
+  (`dispatch.rs`), `lock_base_bindings` (`session.rs`).
 
 ## Open: failing tests on main
 
