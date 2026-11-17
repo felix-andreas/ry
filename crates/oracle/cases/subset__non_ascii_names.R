@@ -57,3 +57,15 @@ x["aä"] <- 9; print(x)
 e <- new.env(); invisible(do.call("$<-", list(e, n, 4))); print(exists("aä", envir = e, inherits = FALSE))
 e <- list2env(setNames(list(5), n)); print(get("aä", envir = e))
 print(identical(as.name(n), as.name("aä")))
+
+x <- c("ü" = 1)
+print(names(x) == "ü")
+y <- c(a = 1, "\U0001F600" = 2)
+y["\U0001F600"] <- 5
+print(y)
+tagged <- function(...) {
+  v <- c(...)
+  v["\U0001F600"] <- 9
+  v
+}
+for (call in 1:3) print(tagged(a = 1, "\U0001F600" = 2))

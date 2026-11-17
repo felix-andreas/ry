@@ -30,6 +30,8 @@
 | 16 list 3 TRUE 
 | 210 0 
 | kept 3 0 
+| 1 2080 
+| 112 112 112 0 
 [messages]
 - ok
 [warnings]
