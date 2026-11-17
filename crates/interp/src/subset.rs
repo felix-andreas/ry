@@ -21,10 +21,10 @@ use {
             names_of, null, pairlist_to_list, real_element, remove_attribute, safe, same_text,
             set_attribute, set_class, store_item, symbol, unshared,
         },
-        unwind::{R, Unwind, error, error_in, errorcall},
+        unwind::{R, Unwind, error},
         values::{
-            self, alloc, char_str, get_attr, length, missing_arg, na_string, nil, scalar_integer,
-            symbol_name, symbols, unbound,
+            self, alloc, char_str, get_attr, length, na_string, nil, scalar_integer, symbol_name,
+            symbols, unbound,
         },
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp},
@@ -877,11 +877,6 @@ fn compact_offsets(
     ))
 }
 
-/// [`compact_offsets`] of a raw subscript.
-unsafe fn sequence_offsets(index: Sexp) -> Option<(usize, impl ExactSizeIterator<Item = usize>)> {
-    values::compact_sequence(index).and_then(compact_offsets)
-}
-
 /// One bit per element, inline for vectors of up to 256 elements.
 type KeptMask = SmallVec<[u64; 4]>;
 
@@ -1113,37 +1108,6 @@ pub(crate) fn resolve_subscript<'s>(
     }
 }
 
-/// [`resolve_subscript`] for raw callers, which pass the unbound marker for the running call
-/// and `NULL` for none.
-///
-/// # Safety
-///
-/// The caller is on the interpreter's thread and holds no reference into the heap, the three
-/// objects are live, and the caller keeps `index` rooted while it reads the names.
-unsafe fn resolve(
-    index: Sexp,
-    extent: usize,
-    names: Sexp,
-    assigning: bool,
-    call: Sexp,
-) -> R<(Positions, Vec<Option<Sexp>>)> {
-    let (positions, new_names) = handles::with(|context| {
-        let index = handles::adopt(context, index);
-        let names = handles::adopt(context, names);
-        let call = (call != unbound()).then(|| handles::adopt(context, call));
-        let (positions, new_names) =
-            resolve_subscript(context, index, extent, names, assigning, call)?;
-        let new_names: Vec<Option<Sexp>> =
-            new_names.into_iter().map(|name| Some(name.raw())).collect();
-        Ok((positions, new_names))
-    })?;
-    // Raw callers keep the new names in their scope, as they would a raw allocation's result.
-    for name in new_names.iter().flatten() {
-        crate::heap().root(*name);
-    }
-    Ok((positions, new_names))
-}
-
 /// `vector` as a standard vector of `T`, which the caller has checked its type to be.
 #[inline(always)]
 fn standard<'s, T: Kind>(vector: Local<'s>) -> R<Local<'s, T>> {
@@ -1199,18 +1163,6 @@ pub(crate) fn dimension_index<'s>(context: &mut Cx<'s>, index: Local<'s>) -> R<L
         return coerce(context, index, SexpType::Integer);
     }
     Ok(index)
-}
-
-/// [`dimension_index`] for raw callers.
-///
-/// # Safety
-///
-/// As for [`vector_element`].
-unsafe fn dimension_subscript(index: Sexp) -> R<Sexp> {
-    handles::with_result(|context| {
-        let index = handles::adopt(context, index);
-        dimension_index(context, index).map(Local::raw)
-    })
 }
 
 /// The zero-based position of `x[i]` or `x[[i]]` with one untagged, attribute-free numeric
@@ -1458,7 +1410,9 @@ fn subset_value<'s>(
             // Subsetting a pairlist gives a list, as in GNU R; a call stays a call.
             if object.r_type() == SexpType::Language {
                 let result = standard::<List>(result)?;
-                return handles::list_to_pairlist(context, result, SexpType::Language);
+                return Ok(
+                    handles::list_to_pairlist(context, result, SexpType::Language)?.finish(),
+                );
             }
             return Ok(result);
         }
@@ -1951,19 +1905,6 @@ fn matrix_index(context: &Cx<'_>, index: Local<'_>, extent: usize) -> Option<usi
     (position >= 1.0 && position < extent as f64 + 1.0).then(|| position as usize - 1)
 }
 
-/// [`matrix_index`] for raw callers.
-///
-/// # Safety
-///
-/// As for [`vector_element`].
-unsafe fn matrix_position(index: Sexp, extent: usize) -> Option<usize> {
-    let position = handles::with(|context| {
-        let index = handles::held(context, index);
-        Ok(matrix_index(context, index, extent))
-    });
-    position.ok().flatten()
-}
-
 /// The context GNU R's `subscriptOutOfBoundsError` carries: the object being indexed, the
 /// dimension a matrix subscript belongs to, and the subscript to report when it is not the one
 /// that failed, such as the whole vector of a recursive `[[`.
@@ -2185,98 +2126,104 @@ enum MatrixFailure {
     Unnamed { dimension: usize, cell: usize },
 }
 
-/// [`matrix_positions`] for raw callers, which pass the unbound marker for the running call.
-///
-/// # Safety
-///
-/// As for [`vector_element`].
-unsafe fn matrix_index_positions(
-    object: Sexp,
-    dims: &[usize],
-    index: Sexp,
-    call: Sexp,
-) -> R<Option<Vec<Option<usize>>>> {
-    handles::with(|context| {
-        let object = handles::adopt(context, object);
-        let index = handles::adopt(context, index);
-        let call = (call != unbound()).then(|| handles::adopt(context, call));
-        matrix_positions(context, object, dims, index, call)
-    })
-}
-
 /// `[<-` for `m[i, ] <- value` or `a[i, j, ] <- value` (see [`slab`]), called without
 /// building the general call's arguments; any other shape answers `None` and takes the builtin.
-pub(crate) unsafe fn direct_subassign(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
-    let [object, indices @ .., value] = args else {
+pub(crate) unsafe fn direct_subassign(call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
+    // SAFETY: the caller's contract is that of a direct entry.
+    unsafe { crate::handles::safe_direct!(assign_slab)(call, args) }
+}
+
+fn assign_slab<'a, 's>(context: &'a mut Cx<'s>, values: &[Local<'s>]) -> R<Option<Gc<'a>>> {
+    let [object, indices @ .., value] = values else {
         return Ok(None);
     };
+    let (object, value) = (*object, *value);
+    let altrep = |value: Local<'s>| value.downcast::<handles::Alt>().is_some();
     if indices.len() < 2
-        || object.is_object()
-        || object.is_altrep()
-        || object.is_array()
-        || *value == *object
-        || value.is_object()
-        || value.is_altrep()
+        || handles::is_object(object)
+        || altrep(object)
+        || handles::is_array(object)
+        || value.is(object)
+        || handles::is_object(value)
+        || altrep(value)
     {
         return Ok(None);
     }
-    let Some(dims) = values::dims(*object) else {
+    let Some(dims) = handles::dims(context, object) else {
         return Ok(None);
     };
-    let Some(fixed) = slab(indices, &dims, *object, *value) else {
+    let Some(fixed) = slab(context, indices, &dims, object, value) else {
         return Ok(None);
     };
-    let result = modifiable(*object)?;
-    write_slab(result, *value, &dims, &fixed);
-    Ok(Some(result))
+    let mut result = unshared(context, object)?;
+    if !write_slab(context, &mut result, value, &dims, &fixed) {
+        return Ok(None);
+    }
+    Ok(Some(result.finish().read(context)))
 }
 
 /// For an assignment into a numeric array of extents `dims` whose every subscript is empty or
 /// one in-range position, given a value of the same type whose length divides the selection:
 /// the position each dimension fixes, or `None` for a dimension taken whole.
-unsafe fn slab(
-    indices: &[Sexp],
+fn slab<'s>(
+    context: &mut Cx<'s>,
+    indices: &[Local<'s>],
     dims: &[usize],
-    result: Sexp,
-    value: Sexp,
+    result: Local<'s>,
+    value: Local<'s>,
 ) -> Option<SmallVec<[Option<usize>; 4]>> {
     if indices.len() != dims.len()
-        || value.kind() != result.kind()
+        || value.r_type() != result.r_type()
         || !matches!(
-            result.kind(),
+            result.r_type(),
             SexpType::Real | SexpType::Integer | SexpType::Logical
         )
     {
         return None;
     }
-    let fixed = indices
-        .iter()
-        .zip(dims)
-        .map(|(&index, &extent)| {
-            if index == missing_arg() {
-                Some(None)
-            } else {
-                matrix_position(index, extent).map(Some)
-            }
-        })
-        .collect::<Option<SmallVec<[Option<usize>; 4]>>>()?;
+    let mut fixed: SmallVec<[Option<usize>; 4]> = SmallVec::new();
+    for (&index, &extent) in indices.iter().zip(dims) {
+        if handles::is_missing_argument(index) {
+            fixed.push(None);
+        } else {
+            fixed.push(Some(matrix_index(context, index, extent)?));
+        }
+    }
     let selected: usize = fixed
         .iter()
         .zip(dims)
         .map(|(position, &extent)| if position.is_some() { 1 } else { extent })
         .product();
-    let value_count = length(value);
+    let value_count = handles::length(context, value);
     (value_count > 0 && selected > 0 && selected.is_multiple_of(value_count)).then_some(fixed)
 }
 
-/// Writes the slab [`slab`] found.
-unsafe fn write_slab(result: Sexp, value: Sexp, dims: &[usize], fixed: &[Option<usize>]) {
-    match result.kind() {
-        SexpType::Real => {
-            scatter_slab(values::reals_mut(result), values::reals(value), dims, fixed)
-        }
-        _ => scatter_slab(values::ints_mut(result), values::ints(value), dims, fixed),
+/// Writes the slab [`slab`] found. False, having written nothing, unless both are standard
+/// vectors of one numeric type and `value` is not `result` itself.
+fn write_slab<'s>(
+    context: &mut Cx<'s>,
+    result: &mut Owned<'s>,
+    value: Local<'s>,
+    dims: &[usize],
+    fixed: &[Option<usize>],
+) -> bool {
+    fn typed<'s, T: Atomic>(
+        context: &mut Cx<'s>,
+        result: &mut Owned<'s>,
+        value: Local<'s>,
+        dims: &[usize],
+        fixed: &[Option<usize>],
+    ) -> Option<bool> {
+        let (result, value) = (result.narrow::<T>()?, value.downcast::<T>()?);
+        let mut write = result.write(context);
+        let (array, reader) = write.split();
+        scatter_slab(array, reader.slice(value)?, dims, fixed);
+        Some(true)
     }
+    typed::<Real>(context, result, value, dims, fixed)
+        .or_else(|| typed::<Integer>(context, result, value, dims, fixed))
+        .or_else(|| typed::<Logical>(context, result, value, dims, fixed))
+        .unwrap_or(false)
 }
 
 /// Writes `value`, recycled, over the elements of a column-major array with extents `dims`
@@ -2470,39 +2417,6 @@ impl Iterator for ArrayOffsets<'_> {
 
 // `[[`.
 
-/// [`dimension_out_of_bounds`] for raw callers.
-///
-/// # Safety
-///
-/// As for [`vector_element`].
-unsafe fn array_out_of_bounds(
-    call: Sexp,
-    object: Sexp,
-    dimension: usize,
-    index: Sexp,
-    offset: usize,
-    position: usize,
-) -> Unwind {
-    let failure = handles::with(|context| {
-        let call = (call != unbound()).then(|| handles::adopt(context, call));
-        let failure = DimensionBounds {
-            object: handles::adopt(context, object),
-            dimension,
-            index: handles::adopt(context, index),
-            offset,
-            position,
-        };
-        Ok(dimension_out_of_bounds(context, call, failure))
-    });
-    match failure {
-        Ok(failure) => {
-            failure.root();
-            failure
-        }
-        Err(failure) => failure,
-    }
-}
-
 unsafe fn do_subset2(call: &Call<'_>) -> R<Sexp> {
     handles::with(|context| {
         let arguments = subset_args(context, call);
@@ -2599,20 +2513,6 @@ fn name_position(
         handles::warning(context, format!("partial match of '{text}' to '{matched}'"))?;
     }
     Ok(found)
-}
-
-/// [`name_position`] for raw callers.
-///
-/// # Safety
-///
-/// As for [`vector_element`], with `name` a `CHARSXP`.
-unsafe fn match_name(names: Sexp, name: Sexp, exact: Option<bool>) -> R<Option<usize>> {
-    handles::with(|context| {
-        let names = handles::adopt(context, names);
-        let name = handles::adopt(context, name);
-        let name = standard::<Chars>(name)?;
-        name_position(context, names, name, exact)
-    })
 }
 
 /// `x[[...]]` without dispatch, for raw callers, which pass the unbound marker for the running
@@ -2915,51 +2815,6 @@ fn single_index<'s>(
             call,
             format!("invalid subscript type '{}'", kind.name()),
         )),
-    }
-}
-
-/// The context GNU R's `subscriptOutOfBoundsError` carries: the object being indexed, the
-/// dimension a matrix subscript belongs to, and the subscript to report when it is not the one
-/// that failed, such as the whole vector of a recursive `[[`.
-#[derive(Clone, Copy)]
-struct Bounds {
-    object: Sexp,
-    dimension: Option<usize>,
-    reported: Option<Sexp>,
-}
-
-impl Bounds {
-    fn of(object: Sexp) -> Bounds {
-        Bounds {
-            object,
-            dimension: None,
-            reported: None,
-        }
-    }
-}
-
-/// An out-of-bounds subscript, signalled as GNU R's `subscriptOutOfBoundsError` with the
-/// object, the 1-based dimension (`NA` for none) and the subscript, so handlers can tell it apart
-/// from other errors.
-unsafe fn out_of_bounds(call: Sexp, message: &str, bounds: Bounds, index: Sexp) -> Unwind {
-    let failure = handles::with(|context| {
-        let call = (call != unbound()).then(|| handles::adopt(context, call));
-        let bounds = OutOfBounds {
-            object: handles::adopt(context, bounds.object),
-            dimension: bounds.dimension,
-            reported: bounds
-                .reported
-                .map(|reported| handles::adopt(context, reported)),
-        };
-        let index = handles::adopt(context, index);
-        Ok(bounds_error(context, call, message, bounds, index))
-    });
-    match failure {
-        Ok(failure) => {
-            failure.root();
-            failure
-        }
-        Err(failure) => failure,
     }
 }
 
@@ -3284,6 +3139,35 @@ unsafe fn interp_methods_function(name: &str) -> R<Option<Sexp>> {
     Ok(Some(value_of(value)?))
 }
 
+/// [`interp_methods_function`] on handles.
+fn methods_function<'s>(context: &mut Cx<'s>, name: &str) -> R<Option<Local<'s>>> {
+    // SAFETY: the lookup may force a promise, which `&mut Cx` permits, and its result is rooted
+    // before anything else allocates.
+    unsafe { Ok(interp_methods_function(name)?.map(|function| handles::adopt(context, function))) }
+}
+
+/// GNU R's `[[ ]] subscript out of bounds` error for `index` into `object`, naming the
+/// dimension a matrix subscript belongs to.
+fn subscript2_out_of_bounds<'s>(
+    context: &mut Cx<'s>,
+    object: Local<'s>,
+    dimension: Option<usize>,
+    index: Local<'s>,
+) -> Unwind {
+    let bounds = OutOfBounds {
+        object,
+        dimension,
+        reported: None,
+    };
+    bounds_error(
+        context,
+        None,
+        "[[ ]] subscript out of bounds",
+        bounds,
+        index,
+    )
+}
+
 unsafe fn do_at_assign(call: &Call<'_>) -> R<Sexp> {
     let object = eval::eval(call.arg(0), call.env()?)?;
     let symbol = slot_symbol(call.arg(1))?;
@@ -3309,66 +3193,141 @@ unsafe fn do_at_assign(call: &Call<'_>) -> R<Sexp> {
             return Ok(result);
         }
     }
-
-    check_at_assignment(object, symbol, value)?;
-    set_slot(object, symbol, value)
+    // SAFETY: the evaluated arguments are rooted as each is adopted, before anything allocates,
+    // and the result is rooted before the scope ends.
+    unsafe {
+        let result = handles::with(|context| {
+            let object = handles::adopt(context, object);
+            let symbol = handles::permanent(standard::<Symbol>(handles::held(context, symbol))?);
+            let value = handles::adopt(context, value);
+            Ok(checked_slot_assign(context, object, symbol, value)?.raw())
+        })?;
+        crate::heap().root(result);
+        Ok(result)
+    }
 }
 
 /// `@<-` on evaluated arguments, for `object@name <- value` compiled to registers: the object,
 /// the slot's name as a symbol or a string, and the value. An S3 object answers `None`, because
 /// it may dispatch to a method, which the special looks up in its caller's environment.
-pub(crate) unsafe fn direct_at_assign(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
-    let &[object, name, value] = args else {
+pub(crate) unsafe fn direct_at_assign(call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
+    // SAFETY: the caller's contract is that of a direct entry.
+    unsafe { crate::handles::safe_direct!(at_assign_values)(call, args) }
+}
+
+fn at_assign_values<'a, 's>(context: &'a mut Cx<'s>, values: &[Local<'s>]) -> R<Option<Gc<'a>>> {
+    let &[object, name, value] = values else {
         return Ok(None);
     };
-    if object.is_object() && !object.has_gp(gp::S4_OBJECT) {
+    if handles::is_object(object) && !is_s4(object) {
         return Ok(None);
     }
-    let symbol = slot_symbol(name)?;
-    check_at_assignment(object, symbol, value)?;
-    set_slot(object, symbol, value).map(Some)
+    let slot = handles::permanent(slot_name(context, name)?);
+    Ok(Some(
+        checked_slot_assign(context, object, slot, value)?.read(context),
+    ))
+}
+
+/// `object@symbol <- value` once dispatch has declined: checked, then set on `object` or a copy.
+fn checked_slot_assign<'s>(
+    context: &mut Cx<'s>,
+    object: Local<'s>,
+    slot: Gc<'static, Symbol>,
+    value: Local<'s>,
+) -> R<Local<'s>> {
+    check_at_assignment(context, object, slot, value)?;
+    let mut object = unshared(context, object)?;
+    store_slot(context, &mut object, slot, value)
 }
 
 /// The methods package's check of `object@symbol <- value` against the class definition, which
 /// uses the implicit class of an object without a class attribute, so `x@a <- 1` on a list
 /// fails.
-unsafe fn check_at_assignment(object: Sexp, symbol: Sexp, value: Sexp) -> R<()> {
-    let Some(check) = interp_methods_function("checkAtAssignment")? else {
+fn check_at_assignment<'s>(
+    context: &mut Cx<'s>,
+    object: Local<'s>,
+    slot: Gc<'static, Symbol>,
+    value: Local<'s>,
+) -> R<()> {
+    let Some(check) = methods_function(context, "checkAtAssignment")? else {
         return Ok(());
     };
-    let class = crate::dispatch::class_of(object)?;
-    crate::heap().root(class);
-    let name = values::scalar_string_charsxp(symbol.car())?;
-    crate::heap().root(name);
-    let value_class = crate::dispatch::class_of(value)?;
-    crate::heap().root(value_class);
-    let check_call = values::call(check, &[class, name, value_class])?;
-    eval::eval(check_call, values::base_env())?;
+    let class = handles::class_of(context, object)?;
+    let mut name_string = context.alloc::<Str>(1)?;
+    name_string.set(context, 0, slot.name());
+    let name_string = name_string.finish().value();
+    let value_class = handles::class_of(context, value)?;
+    handles::call_value(context, check, &[class, name_string, value_class])?;
     Ok(())
 }
 
 /// `R_do_slot_assign`.
+///
+/// # Safety
+///
+/// On the interpreter's thread, with every argument a live object that the caller keeps rooted
+/// until it returns and `symbol` a symbol. The result is rooted in the caller's handle scope.
 pub unsafe fn set_slot(object: Sexp, symbol: Sexp, value: Sexp) -> R<Sexp> {
-    assign_slot(modifiable(object)?, symbol, value)
+    // SAFETY: the caller's roots hold the arguments, and the result is rooted before anything
+    // else allocates.
+    unsafe {
+        let result = handles::with(|context| {
+            let object = handles::held(context, object);
+            let slot = handles::permanent(standard::<Symbol>(handles::held(context, symbol))?);
+            let value = handles::held(context, value);
+            let mut object = unshared(context, object)?;
+            Ok(store_slot(context, &mut object, slot, value)?.raw())
+        })?;
+        crate::heap().root(result);
+        Ok(result)
+    }
 }
 
 /// Sets a slot of `object` itself, even when it is shared. The methods package's `slot<-`
 /// relies on that: its default `initialize` method calls it as a plain function on an object
 /// it has just copied, and discards the result.
+///
+/// # Safety
+///
+/// As for [`set_slot`]; the write lands in `object` whoever else refers to it, which the
+/// caller accepts.
 pub unsafe fn assign_slot(object: Sexp, symbol: Sexp, value: Sexp) -> R<Sexp> {
-    if symbol == symbols().dot_data
-        && let Some(function) = interp_methods_function("setDataPart")?
-    {
-        let call = values::call(function, &[object, value])?;
-        return eval::eval(call, values::base_env());
+    // SAFETY: the caller's roots hold the arguments, its contract accepts a write into a shared
+    // `object`, and the result is rooted before anything else allocates.
+    unsafe {
+        let result = handles::with(|context| {
+            let object = handles::held(context, object);
+            let slot = handles::permanent(standard::<Symbol>(handles::held(context, symbol))?);
+            let value = handles::held(context, value);
+            let mut object = Owned::assume(object);
+            Ok(store_slot(context, &mut object, slot, value)?.raw())
+        })?;
+        crate::heap().root(result);
+        Ok(result)
     }
-    let stored = if value == nil() {
-        values::install_bytes(b"\x01NULL\x01")?
+}
+
+/// Sets the slot `symbol` of the owned `object` to `value`: `.Data` through the methods
+/// package's `setDataPart`, and `NULL` as the methods package's placeholder symbol.
+fn store_slot<'s>(
+    context: &mut Cx<'s>,
+    object: &mut Owned<'s>,
+    slot: Gc<'static, Symbol>,
+    value: Local<'s>,
+) -> R<Local<'s>> {
+    if slot.is(symbol(|symbols| symbols.dot_data))
+        && let Some(function) = methods_function(context, "setDataPart")?
+    {
+        return handles::call_value(context, function, &[object.get(), value]);
+    }
+    let stored = if value.r_type() == SexpType::Nil {
+        let placeholder = handles::install_bytes(context, b"\x01NULL\x01")?;
+        context.root(placeholder).value()
     } else {
         value
     };
-    values::set_attr(object, symbol, stored)?;
-    Ok(object)
+    set_attribute(context, object, slot, stored)?;
+    Ok(object.get())
 }
 
 // Subassignment.
@@ -3386,20 +3345,60 @@ unsafe fn do_subassign(call: &Call<'_>) -> R<Sexp> {
     subassign(object.value, &indices, value_arg.value, call.call)
 }
 
+/// `x[i] <- value` and `x[i, j] <- value`.
+///
+/// # Safety
+///
+/// On the interpreter's thread, with every argument a live object that the caller keeps rooted
+/// until it returns. The result is rooted in the caller's handle scope.
+pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp) -> R<Sexp> {
+    // SAFETY: the caller's roots hold the arguments for the whole call, and the result is
+    // rooted before anything else allocates.
+    unsafe {
+        let result = handles::with(|context| {
+            let object = handles::held(context, object);
+            let indices: SmallVec<[Local<'_>; 4]> = indices
+                .iter()
+                .map(|&index| handles::held(context, index))
+                .collect();
+            let value = handles::held(context, value);
+            let call = handles::held(context, call);
+            Ok(assign_subset(context, object, &indices, value, call)?.raw())
+        })?;
+        crate::heap().root(result);
+        Ok(result)
+    }
+}
+
+/// Whether `value` is an ALTREP object.
+#[inline(always)]
+fn altrep(value: Local<'_>) -> bool {
+    value.downcast::<handles::Alt>().is_some()
+}
+
 /// Whether `x[i] <- value` leaves the atomic vector `object` exactly as it is: the subscript
 /// selects nothing and `value` needs no change of type. GNU R then returns `x` itself, so
 /// `x[FALSE] <- 1` keeps an ALTREP vector, such as a wrapper, unexpanded.
-unsafe fn selects_nothing(object: Sexp, indices: &[Sexp], value: Sexp) -> bool {
+fn selects_nothing<'s>(
+    context: &mut Cx<'s>,
+    object: Local<'s>,
+    indices: &[Local<'s>],
+    value: Local<'s>,
+) -> R<bool> {
     let &[index] = indices else {
-        return false;
+        return Ok(false);
     };
-    let empty = match index.kind() {
+    let empty = match index.r_type() {
         SexpType::Nil => true,
         // A longer logical index stretches the vector even when it selects nothing.
         SexpType::Logical => {
-            length(index) <= length(object) && values::ints(index).iter().all(|&flag| flag == 0)
+            handles::length(context, index) <= handles::length(context, object)
+                && handles::dense::<Logical>(context, index)?
+                    .is_some_and(|flags| flags.as_slice(context).iter().all(|&flag| flag == 0))
         }
-        SexpType::Integer | SexpType::Real | SexpType::String => length(index) == 0,
+        SexpType::Integer | SexpType::Real | SexpType::String => {
+            handles::length(context, index) == 0
+        }
         _ => false,
     };
     let atomic = |kind| {
@@ -3412,53 +3411,66 @@ unsafe fn selects_nothing(object: Sexp, indices: &[Sexp], value: Sexp) -> bool {
                 | SexpType::String
         )
     };
-    let fits = value.kind() == object.kind()
-        || (atomic(value.kind())
-            && atomic(object.kind())
-            && coerce::higher_type(object.kind(), value.kind()) == object.kind());
-    empty && fits && !value.is_object() && index.attrib() == nil()
+    let (object_kind, value_kind) = (object.r_type(), value.r_type());
+    let fits = value_kind == object_kind
+        || (atomic(value_kind)
+            && atomic(object_kind)
+            && coerce::higher_type(object_kind, value_kind) == object_kind);
+    Ok(empty
+        && fits
+        && !handles::is_object(value)
+        && index.attributes(context).r_type() == SexpType::Nil)
 }
 
-/// `x[i] <- value` and `x[i, j] <- value`.
-pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp) -> R<Sexp> {
+fn assign_subset<'s>(
+    context: &mut Cx<'s>,
+    object: Local<'s>,
+    indices: &[Local<'s>],
+    value: Local<'s>,
+    call: Local<'s>,
+) -> R<Local<'s>> {
     // `s[o] <- s` writes into the vector it reads from, so the value must be a copy, as in GNU
     // R's `SubassignN`; Matrix reorders its results this way.
-    let value = if value == object {
-        let copy = values::shallow_duplicate(value)?;
-        crate::heap().root(copy);
-        copy
+    let value = if value.is(object) {
+        handles::shallow_copy(context, value)?.finish()
     } else {
         value
     };
     // A value an Array cannot hold, such as an NA, makes the result a plain R vector.
-    let object = if object.is_array() {
-        match crate::arrays::subassign(object, indices, value, call)? {
+    let object = if handles::is_array(object) {
+        match handles::array_subassign(context, object, indices, value, call, false)? {
             Some(result) => return Ok(result),
-            None => values::plain(object)?,
+            None => handles::shallow_copy(context, object)?.finish(),
         }
     } else {
         object
     };
-    if object.is_altrep() && selects_nothing(object, indices, value) {
+    if altrep(object) && selects_nothing(context, object, indices, value)? {
         return Ok(object);
     }
-    let object = values::materialize(object)?;
-    let mut value = values::materialize(value)?;
+    let object = handles::materialize(context, object)?;
+    let mut value = handles::materialize(context, value)?;
     // A pairlist value assigns its elements into a list, as a list would, but has no atomic
     // counterpart to coerce to.
     // An S4 object that is not a vector goes in as its `as.vector()`, which dispatches, so a
     // class's own method decides what its elements are.
-    if value.kind() == SexpType::Object && object.kind() != SexpType::List {
-        let coerce = values::call(values::install("as.vector")?, &[eval::quote_value(value)?])?;
-        value = eval::eval(coerce, values::base_env())?;
-    } else if value.kind() == SexpType::Object {
-        conditions::warning_call(call, "implicit list embedding of S4 objects is deprecated")?;
+    if value.r_type() == SexpType::Object && object.r_type() != SexpType::List {
+        let function = handles::install_bytes(context, b"as.vector")?;
+        let function = context.root(function).value();
+        let quoted = handles::quoted(context, value)?;
+        value = handles::call_value(context, function, &[quoted])?;
+    } else if value.r_type() == SexpType::Object {
+        handles::warning_in(
+            context,
+            call,
+            "implicit list embedding of S4 objects is deprecated",
+        )?;
     }
     // GNU R assigns a call's elements, as it does a pairlist's, so `f[2] <- quote(g(h))` stores
     // the symbol `g`.
-    let value = if matches!(value.kind(), SexpType::Pairlist | SexpType::Language) {
+    let value = if matches!(value.r_type(), SexpType::Pairlist | SexpType::Language) {
         if !matches!(
-            object.kind(),
+            object.r_type(),
             SexpType::List
                 | SexpType::Expression
                 | SexpType::Pairlist
@@ -3466,278 +3478,175 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
                 | SexpType::Nil
         ) {
             return Err(incompatible_types(
-                crate::coerce::type_name(object),
-                crate::coerce::type_name(value),
+                handles::type_name(object),
+                handles::type_name(value),
                 "subassignment type fix",
             ));
         }
-        values::pairlist_to_list(value)?
-    } else if matches!(object.kind(), SexpType::List | SexpType::Expression) {
-        // GNU R coerces the value to a list first: a call becomes the list of its parts, and a
-        // symbol cannot be coerced. R 4.6.1 makes that an error; earlier releases warn, and the
-        // symbol becomes `NULL` and deletes the selected elements.
-        match value.kind() {
-            SexpType::Language => values::pairlist_to_list(value)?,
-            SexpType::Symbol if crate::system::r_at_least_release(4, 6, 1) => {
-                return Err(error("'symbol' object cannot be coerced to type 'list'"));
-            }
-            SexpType::Symbol => {
-                conditions::warning_call(call, "'symbol' object cannot be coerced to type 'list'")?;
-                nil()
-            }
-            _ => value,
+        pairlist_to_list(context, value)?
+    } else if matches!(object.r_type(), SexpType::List | SexpType::Expression)
+        && value.r_type() == SexpType::Symbol
+    {
+        // GNU R coerces the value to a list first, and a symbol cannot be coerced. R 4.6.1
+        // makes that an error; earlier releases warn, and the symbol becomes `NULL` and deletes
+        // the selected elements.
+        if crate::system::r_at_least_release(4, 6, 1) {
+            return Err(error("'symbol' object cannot be coerced to type 'list'"));
         }
+        handles::warning_in(
+            context,
+            call,
+            "'symbol' object cannot be coerced to type 'list'",
+        )?;
+        null()
     } else {
         value
     };
-    if object.kind() == SexpType::Pairlist || object.kind() == SexpType::Language {
-        let list = values::pairlist_to_list(object)?;
-        let result = subassign(list, indices, value, call)?;
+    if matches!(object.r_type(), SexpType::Pairlist | SexpType::Language) {
+        let list = pairlist_to_list(context, object)?;
+        let result = assign_subset(context, list, indices, value, call)?;
         // A call stays a call with its attributes (a formula keeps its class and environment),
         // but a pairlist becomes a list, as in GNU R.
-        return if object.kind() == SexpType::Language {
-            let rebuilt = values::list_to_pairlist(result, SexpType::Language)?;
-            values::copy_attributes(object, rebuilt)?;
-            Ok(rebuilt)
-        } else {
-            Ok(result)
-        };
+        if object.r_type() != SexpType::Language {
+            return Ok(result);
+        }
+        let result = standard::<List>(result)?;
+        let mut rebuilt = handles::list_to_pairlist(context, result, SexpType::Language)?;
+        handles::copy_most_attributes(context, object, &mut rebuilt, true)?;
+        return Ok(rebuilt.finish());
     }
     // GNU R leaves `NULL` given an empty value alone whatever the index, so
     // `x <- NULL; x[1] <- character(0)` is not the "replacement has length zero" error. An
     // empty vector given `NULL` still stretches to a longer subscript, so
     // `x <- list(); x[FALSE] <- NULL` leaves `list(NULL)`. An empty vector given an empty
     // vector is handled below, where it may still be coerced.
-    if object == nil() && (value == nil() || (value.kind().is_vector() && length(value) == 0)) {
+    if object.r_type() == SexpType::Nil
+        && (value.r_type() == SexpType::Nil
+            || (value.r_type().is_vector() && handles::length(context, value) == 0))
+    {
         return Ok(object);
     }
-    let object = if object == nil() {
-        alloc(
-            if value.kind().is_vector() {
-                value.kind()
-            } else {
-                SexpType::List
-            },
-            0,
-        )?
+    let object = if object.r_type() == SexpType::Nil {
+        empty_vector(context, value.r_type())?
     } else {
         object
     };
-    if !object.kind().is_vector() {
-        return Err(not_subsettable(call, object));
+    if !object.r_type().is_vector() {
+        return Err(not_subsettable_error(context, Some(call), object));
     }
-    // Deleting list elements.
-    if value == nil()
-        && matches!(object.kind(), SexpType::List | SexpType::Expression)
+    if value.r_type() == SexpType::Nil
+        && matches!(object.r_type(), SexpType::List | SexpType::Expression)
         && indices.len() <= 1
     {
-        let index = indices.first().copied().unwrap_or(missing_arg());
-        let object = if logical_stretch(index) > length(object) {
-            grow(object, logical_stretch(index), false)?
-        } else {
-            object
-        };
-        let count = length(object);
-        let names = values::names(object);
-        let (positions, _) = resolve(index, count, names, true, call)?;
-        let remove: std::collections::HashSet<usize> = positions
-            .into_iter()
-            .filter(|&position| position != NA_POSITION)
-            .collect();
-        // As with any assignment, the list first stretches to a longer logical subscript or past
-        // its end, padded with NULL, so `x[5] <- NULL` on two elements leaves four.
-        let stretch = if index.kind() == SexpType::Logical {
-            length(index)
-        } else {
-            0
-        };
-        let needed = remove
-            .iter()
-            .map(|&position| position + 1)
-            .max()
-            .unwrap_or(0)
-            .max(stretch);
-        let object = if needed > count {
-            grow(object, needed, false)?
-        } else {
-            object
-        };
-        let count = length(object);
-        let names = values::names(object);
-        let kept: Vec<usize> = (0..count)
-            .filter(|position| !remove.contains(position))
-            .collect();
-        let result = select_elements(object, &kept)?;
-        // Names first, as GNU R lists them after a deletion.
-        if names != nil() {
-            let new_names = select_elements(names, &kept)?;
-            values::set_attr(result, symbols().names, new_names)?;
-        }
-        values::copy_most_attributes(object, result, false)?;
-        return Ok(result);
+        return delete_elements(context, object, indices, call);
     }
-    let value_kind = if value == nil() {
+    let value_kind = if value.r_type() == SexpType::Nil {
         SexpType::Logical
     } else {
-        value.kind()
+        value.r_type()
     };
     // An empty vector takes an empty replacement of its own type, or an empty
     // list, unchanged whatever the index selects: an empty list must not turn
     // an atomic vector into a list.
-    if length(object) == 0
-        && value != nil()
-        && length(value) == 0
-        && (value_kind == object.kind()
+    if handles::length(context, object) == 0
+        && value.r_type() != SexpType::Nil
+        && handles::length(context, value) == 0
+        && (value_kind == object.r_type()
             || matches!(value_kind, SexpType::List | SexpType::Expression))
     {
         return Ok(object);
     }
-    let target_kind = subassign_type_fix(object.kind(), value_kind)?;
-    let mut result = if target_kind != object.kind() {
-        let converted = coerce_vector(object, target_kind)?;
-        if converted == object {
-            values::shallow_duplicate(object)?
-        } else {
-            converted
+    let target_kind = subassign_type_fix(object.r_type(), value_kind)?;
+    let mut result = if target_kind != object.r_type() {
+        let converted = handles::coerce(context, object, target_kind)?;
+        match handles::unreferenced(converted) {
+            Some(converted) if !converted.get().is(object) => converted,
+            _ => handles::shallow_copy(context, converted)?,
         }
     } else {
-        modifiable(object)?
+        unshared(context, object)?
     };
-    let value =
-        if value.kind() != target_kind && value.kind().is_vector() && target_kind != SexpType::List
-        {
-            coerce_vector(value, target_kind)?
-        } else {
-            value
-        };
-    let value_count = if value == nil() {
+    let value = if value.r_type() != target_kind
+        && value.r_type().is_vector()
+        && target_kind != SexpType::List
+    {
+        handles::coerce(context, value, target_kind)?
+    } else {
+        value
+    };
+    let value_count = if value.r_type() == SexpType::Nil {
         0
-    } else if value.kind().is_vector() {
-        length(value)
+    } else if value.r_type().is_vector() {
+        handles::length(context, value)
     } else {
         1
     };
     // The subscripts are read against the object as it was: a vector that became a list has
     // lost its dimensions, as in GNU R, where the result of `m[1, 2] <- list(v)` is a plain list.
     if indices.len() >= 2 {
-        let Some(dims) = values::dims(object).filter(|dims| dims.len() == indices.len()) else {
-            return Err(error_in(
-                call,
-                if indices.len() == 2 {
-                    "incorrect number of subscripts on matrix"
-                } else {
-                    "incorrect number of subscripts"
-                },
-            ));
-        };
-        if value != result
-            && let Some(fixed) = slab(indices, &dims, result, value)
-        {
-            write_slab(result, value, &dims, &fixed);
-            return Ok(result);
-        }
-        let dimnames = get_attr(object, symbols().dimnames);
-        let mut selections: SmallVec<[Positions; 4]> = SmallVec::new();
-        for (dimension, (&index, &extent)) in indices.iter().zip(dims.iter()).enumerate() {
-            let names = if dimnames.kind() == SexpType::List {
-                dimnames.element(dimension)
-            } else {
-                nil()
-            };
-            let index = dimension_subscript(index)?;
-            let (positions, _) = resolve(index, extent, names, false, call)?;
-            if let Some((offset, &position)) = positions
-                .iter()
-                .enumerate()
-                .find(|&(_, &position)| position >= extent && position != NA_POSITION)
-            {
-                let call = crate::unwind::generated_call(call)?;
-                return Err(array_out_of_bounds(
-                    call, object, dimension, index, offset, position,
-                ));
-            }
-            selections.push(positions);
-        }
-        let total: usize = selections.iter().map(|selection| selection.len()).product();
-        // A single value skips the NA rows, and a longer one cannot say which of its elements
-        // an NA row would have taken. GNU R's matrix assignment checks this before comparing
-        // lengths, and its array assignment after.
-        let has_na = value_count > 1
-            && selections
-                .iter()
-                .any(|selection| selection.contains(&NA_POSITION));
-        let na_error = || error_in(call, "NAs are not allowed in subscripted assignments");
-        if has_na && dims.len() == 2 {
-            return Err(na_error());
-        }
-        if total > 0 && value_count == 0 {
-            return Err(error_in(call, "replacement has length zero"));
-        }
-        if total > 0 && !total.is_multiple_of(value_count) {
-            return Err(error_in(
-                call,
-                "number of items to replace is not a multiple of replacement length",
-            ));
-        }
-        if has_na {
-            return Err(na_error());
-        }
-        if total == 0 {
-            return Ok(result);
-        }
-        scatter(result, ArrayOffsets::new(&selections, &dims), value)?;
-        return Ok(result);
+        return assign_array(context, object, result, indices, value, value_count, call);
     }
-    let index = indices.first().copied().unwrap_or(missing_arg());
-    let count = length(result);
-    let names = values::names(result);
+    let index = indices
+        .first()
+        .copied()
+        .unwrap_or_else(handles::missing_argument);
+    let count = handles::length(context, result.get());
     // A matrix with one column per dimension assigns single elements.
-    if let Some(dims) = values::dims(object)
-        && let Some(positions) = matrix_index_positions(object, &dims, index, call)?
+    if let Some(dims) = handles::dims(context, object)
+        && let Some(positions) = matrix_positions(context, object, &dims, index, Some(call))?
     {
         // As with a vector subscript, a single value skips the NA rows, and a longer one
         // cannot say which of its elements an NA row would have taken.
         if value_count > 1 && positions.iter().any(Option::is_none) {
-            return Err(error_in(
+            return Err(handles::error_in(
                 call,
                 "NAs are not allowed in subscripted assignments",
             ));
         }
         let rows = positions.len();
         if rows > 0 && value_count == 0 {
-            return Err(error_in(call, "replacement has length zero"));
+            return Err(handles::error_in(call, "replacement has length zero"));
         }
         if rows > 0 && !rows.is_multiple_of(value_count) {
-            conditions::warning(
+            handles::warning(
+                context,
                 "number of items to replace is not a multiple of replacement length",
             )?;
         }
         for (row, position) in positions.into_iter().enumerate() {
             if let Some(offset) = position {
-                assign_element(result, offset, value, row % value_count.max(1))?;
+                assign_element(
+                    context,
+                    &mut result,
+                    offset,
+                    value,
+                    row % value_count.max(1),
+                )?;
             }
         }
-        return Ok(result);
+        return Ok(result.finish());
     }
-    if scatter_plain(result, index, value, value_count)? {
-        return Ok(result);
+    if scatter_plain(context, &mut result, index, value, value_count)? {
+        return Ok(result.finish());
     }
-    let (positions, new_names) = resolve(index, count, names, true, call)?;
-    let positions: Vec<usize> = positions
-        .into_iter()
-        .filter(|&position| position != NA_POSITION)
-        .collect();
-    let stretch = logical_stretch(index);
+    let names = handles::names_of(context, result.get())?;
+    let (mut positions, new_names) =
+        resolve_subscript(context, index, count, names, true, Some(call))?;
+    positions.retain(|position| *position != NA_POSITION);
+    let stretch = logical_stretch(context, index);
     if positions.is_empty() && stretch <= count {
-        return Ok(result);
+        return Ok(result.finish());
     }
     if !positions.is_empty() && value_count == 0 {
-        return Err(error_in(call, "replacement has length zero"));
+        return Err(handles::error_in(call, "replacement has length zero"));
     }
     // GNU R attributes this warning to the current call, not the `[<-` call: the assignment at
     // its own level, else the closure call, which for `NextMethod` is `NextMethod(.Generic)`.
     if !positions.is_empty() && !positions.len().is_multiple_of(value_count) {
-        conditions::warning("number of items to replace is not a multiple of replacement length")?;
+        handles::warning(
+            context,
+            "number of items to replace is not a multiple of replacement length",
+        )?;
     }
     let needed = positions
         .iter()
@@ -3746,41 +3655,202 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         .map_or(0, |max| max + 1)
         .max(stretch);
     if needed > count {
-        result = grow(result, needed, false)?;
-        // `grow` keeps the names, padded with blanks, in a vector with room to grow, so only
-        // the appended names are written.
-        if !new_names.is_empty() {
-            let mut grown_names = values::names(result);
-            if grown_names == nil() {
-                grown_names = alloc_with_room(SexpType::String, needed)?;
-                values::set_attr(result, symbols().names, grown_names)?;
-            }
-            for (offset, name) in new_names.iter().enumerate() {
-                if let Some(name) = *name
-                    && count + offset < needed
-                {
-                    values::set_elt(grown_names, count + offset, name);
-                }
-            }
-        }
+        result = grow(context, result.get(), Some(result), needed, false)?;
+        write_names(context, &mut result, count, &new_names)?;
     }
     for (position, &target) in positions.iter().enumerate() {
-        assign_element(result, target, value, position % value_count)?;
+        assign_element(context, &mut result, target, value, position % value_count)?;
     }
-    Ok(result)
+    Ok(result.finish())
+}
+
+/// An empty vector of the type `x[i] <- value` gives `x <- NULL` for a value of type `kind`.
+fn empty_vector<'s>(context: &mut Cx<'s>, kind: SexpType) -> R<Local<'s>> {
+    Ok(match kind {
+        SexpType::Logical => context.alloc::<Logical>(0)?.finish().value(),
+        SexpType::Integer => context.alloc::<Integer>(0)?.finish().value(),
+        SexpType::Real => context.alloc::<Real>(0)?.finish().value(),
+        SexpType::Complex => context.alloc::<Complex>(0)?.finish().value(),
+        SexpType::Raw => context.alloc::<Raw>(0)?.finish().value(),
+        SexpType::String => context.alloc::<Str>(0)?.finish().value(),
+        SexpType::Expression => context.alloc::<Expression>(0)?.finish().value(),
+        _ => context.alloc::<List>(0)?.finish().value(),
+    })
+}
+
+/// `x[i] <- NULL` on a list: the list without the selected elements. As with any assignment,
+/// the list first stretches to a longer logical subscript or past its end, padded with NULL, so
+/// `x[5] <- NULL` on two elements leaves four.
+fn delete_elements<'s>(
+    context: &mut Cx<'s>,
+    object: Local<'s>,
+    indices: &[Local<'s>],
+    call: Local<'s>,
+) -> R<Local<'s>> {
+    let index = indices
+        .first()
+        .copied()
+        .unwrap_or_else(handles::missing_argument);
+    let stretch = logical_stretch(context, index);
+    let mut object = object;
+    if stretch > handles::length(context, object) {
+        object = grow(context, object, None, stretch, false)?.finish();
+    }
+    let count = handles::length(context, object);
+    let names = handles::names_of(context, object)?;
+    let (positions, _) = resolve_subscript(context, index, count, names, true, Some(call))?;
+    let needed = positions
+        .iter()
+        .filter(|&&position| position != NA_POSITION)
+        .map(|&position| position + 1)
+        .max()
+        .unwrap_or(0)
+        .max(stretch);
+    let mut removed: KeptMask = smallvec![0; needed.max(count).div_ceil(64)];
+    for &position in positions
+        .iter()
+        .filter(|&&position| position != NA_POSITION)
+    {
+        removed[position / 64] |= 1 << (position % 64);
+    }
+    if needed > count {
+        object = grow(context, object, None, needed, false)?.finish();
+    }
+    let count = handles::length(context, object);
+    let names = handles::names_of(context, object)?;
+    let kept: Vec<usize> = (0..count)
+        .filter(|&position| (removed[position / 64] & (1 << (position % 64))) == 0)
+        .collect();
+    let result = select(context, object, &kept)?;
+    let mut result = match handles::unreferenced(result) {
+        Some(result) => result,
+        None => handles::shallow_copy(context, result)?,
+    };
+    // Names first, as GNU R lists them after a deletion.
+    if names.r_type() != SexpType::Nil {
+        let new_names = select(context, names, &kept)?;
+        handles::set_attribute(
+            context,
+            &mut result,
+            handles::symbol(|symbols| symbols.names),
+            new_names,
+        )?;
+    }
+    handles::copy_most_attributes(context, object, &mut result, false)?;
+    Ok(result.finish())
+}
+
+/// `x[i, j, ...] <- value` into `result`, the copy of `object` to write, against `object`'s
+/// dims, one subscript per dimension.
+fn assign_array<'s>(
+    context: &mut Cx<'s>,
+    object: Local<'s>,
+    mut result: Owned<'s>,
+    indices: &[Local<'s>],
+    value: Local<'s>,
+    value_count: usize,
+    call: Local<'s>,
+) -> R<Local<'s>> {
+    let Some(dims) = handles::dims(context, object).filter(|dims| dims.len() == indices.len())
+    else {
+        return Err(handles::error_in(
+            call,
+            if indices.len() == 2 {
+                "incorrect number of subscripts on matrix"
+            } else {
+                "incorrect number of subscripts"
+            },
+        ));
+    };
+    if !value.is(result.get())
+        && let Some(fixed) = slab(context, indices, &dims, result.get(), value)
+        && write_slab(context, &mut result, value, &dims, &fixed)
+    {
+        return Ok(result.finish());
+    }
+    let dimnames =
+        handles::get_attribute(context, object, handles::symbol(|symbols| symbols.dimnames));
+    let dimnames = context.root(dimnames);
+    let mut selections: SmallVec<[Positions; 4]> = SmallVec::new();
+    for (dimension, (&index, &extent)) in indices.iter().zip(dims.iter()).enumerate() {
+        let names = match dimnames.downcast::<List>() {
+            Some(dimnames) if dimension < dimnames.len() => {
+                let names = dimnames.get(context, dimension);
+                context.root(names)
+            }
+            _ => null(),
+        };
+        let index = dimension_index(context, index)?;
+        let (positions, _) = resolve_subscript(context, index, extent, names, false, Some(call))?;
+        if let Some((offset, &position)) = positions
+            .iter()
+            .enumerate()
+            .find(|&(_, &position)| position >= extent && position != NA_POSITION)
+        {
+            let call = handles::generated_call(context, call)?;
+            let failure = DimensionBounds {
+                object,
+                dimension,
+                index,
+                offset,
+                position,
+            };
+            return Err(dimension_out_of_bounds(context, Some(call), failure));
+        }
+        selections.push(positions);
+    }
+    let total: usize = selections.iter().map(|selection| selection.len()).product();
+    // A single value skips the NA rows, and a longer one cannot say which of its elements
+    // an NA row would have taken. GNU R's matrix assignment checks this before comparing
+    // lengths, and its array assignment after.
+    let has_na = value_count > 1
+        && selections
+            .iter()
+            .any(|selection| selection.contains(&NA_POSITION));
+    let na_error = || handles::error_in(call, "NAs are not allowed in subscripted assignments");
+    if has_na && dims.len() == 2 {
+        return Err(na_error());
+    }
+    if total > 0 && value_count == 0 {
+        return Err(handles::error_in(call, "replacement has length zero"));
+    }
+    if total > 0 && !total.is_multiple_of(value_count) {
+        return Err(handles::error_in(
+            call,
+            "number of items to replace is not a multiple of replacement length",
+        ));
+    }
+    if has_na {
+        return Err(na_error());
+    }
+    if total > 0 {
+        scatter(
+            context,
+            &mut result,
+            ArrayOffsets::new(&selections, &dims),
+            value,
+        )?;
+    }
+    Ok(result.finish())
 }
 
 /// `target[index] <- value` written straight from an empty subscript or an attribute-free
 /// integer or double one whose positions all lie inside `target`, when `value` already has
 /// `target`'s type and its length divides the number of positions. Returns false, having written
 /// nothing, for every other shape, which the general path handles with GNU R's full rules.
-unsafe fn scatter_plain(target: Sexp, index: Sexp, value: Sexp, value_count: usize) -> R<bool> {
-    let kind = target.kind();
-    if values::has_attributes(index)
-        || value == target
-        || value.kind() != kind
-        || target.is_altrep()
-        || value.is_altrep()
+fn scatter_plain<'s>(
+    context: &mut Cx<'s>,
+    target: &mut Owned<'s>,
+    index: Local<'s>,
+    value: Local<'s>,
+    value_count: usize,
+) -> R<bool> {
+    let kind = target.get().r_type();
+    if index.attributes(context).r_type() != SexpType::Nil
+        || value.is(target.get())
+        || value.r_type() != kind
+        || altrep(target.get())
+        || altrep(value)
         || value_count == 0
         || !matches!(
             kind,
@@ -3793,17 +3863,18 @@ unsafe fn scatter_plain(target: Sexp, index: Sexp, value: Sexp, value_count: usi
     {
         return Ok(false);
     }
-    let count = length(target);
-    if index == missing_arg() {
-        return Ok(scatter_run(target, 0, count, value, value_count));
+    let count = handles::length(context, target.get());
+    if handles::is_missing_argument(index) {
+        return Ok(scatter_run(context, target, 0, count, value, value_count));
     }
-    if let Some((run, first, increment)) = values::compact_sequence(index)
+    if let Some((run, first, increment)) = compact_sequence(index)
         && increment == 1.0
         && first >= 1.0
         && first.fract() == 0.0
         && first as usize - 1 + run <= count
     {
         return Ok(scatter_run(
+            context,
             target,
             first as usize - 1,
             run,
@@ -3811,41 +3882,40 @@ unsafe fn scatter_plain(target: Sexp, index: Sexp, value: Sexp, value_count: usi
             value_count,
         ));
     }
-    if let Some((highest, offsets)) = sequence_offsets(index) {
-        return Ok(highest < count && scatter_offsets(target, offsets, value, value_count));
+    if let Some((highest, offsets)) = compact_sequence(index).and_then(compact_offsets) {
+        return Ok(highest < count && scatter_offsets(context, target, offsets, value, value_count));
     }
-    let index = values::materialize(index)?;
-    let offsets: Vec<usize> = match index.kind() {
-        SexpType::Integer => {
-            let positions = values::ints(index);
-            if positions
-                .iter()
-                .any(|&position| position <= 0 || position as usize > count)
-            {
-                return Ok(false);
-            }
-            positions
-                .iter()
-                .map(|&position| position as usize - 1)
-                .collect()
+    let index = handles::materialize(context, index)?;
+    let offsets: Positions = if let Some(positions) = index.downcast::<Integer>() {
+        let positions = positions.as_slice(context);
+        if positions
+            .iter()
+            .any(|&position| position <= 0 || position as usize > count)
+        {
+            return Ok(false);
         }
-        SexpType::Real => {
-            let positions = values::reals(index);
-            // NaN fails both comparisons, so an NA subscript also declines.
-            if !positions
-                .iter()
-                .all(|&position| position >= 1.0 && position < count as f64 + 1.0)
-            {
-                return Ok(false);
-            }
-            positions
-                .iter()
-                .map(|&position| position as usize - 1)
-                .collect()
+        positions
+            .iter()
+            .map(|&position| position as usize - 1)
+            .collect()
+    } else if let Some(positions) = index.downcast::<Real>() {
+        let positions = positions.as_slice(context);
+        // NaN fails both comparisons, so an NA subscript also declines.
+        if !positions
+            .iter()
+            .all(|&position| position >= 1.0 && position < count as f64 + 1.0)
+        {
+            return Ok(false);
         }
-        _ => return Ok(false),
+        positions
+            .iter()
+            .map(|&position| position as usize - 1)
+            .collect()
+    } else {
+        return Ok(false);
     };
     Ok(scatter_offsets(
+        context,
         target,
         offsets.iter().copied(),
         value,
@@ -3856,42 +3926,60 @@ unsafe fn scatter_plain(target: Sexp, index: Sexp, value: Sexp, value_count: usi
 /// Writes `value`, recycled, to the `run` elements of `target` from `start`, which lie inside it,
 /// a whole copy of `value` at a time. `value` has `target`'s type and is another vector. False,
 /// having written nothing, unless `run` is a multiple of `value_count`.
-unsafe fn scatter_run(
-    target: Sexp,
+fn scatter_run<'s>(
+    context: &mut Cx<'s>,
+    target: &mut Owned<'s>,
     start: usize,
     run: usize,
-    value: Sexp,
+    value: Local<'s>,
     value_count: usize,
 ) -> bool {
+    fn atomic<'s, T: Atomic>(
+        context: &mut Cx<'s>,
+        target: &mut Owned<'s>,
+        start: usize,
+        run: usize,
+        value: Local<'s>,
+    ) -> Option<()> {
+        let (target, source) = (target.narrow::<T>()?, value.downcast::<T>()?);
+        let mut write = target.write(context);
+        let (elements, reader) = write.split();
+        fill_run(elements.get_mut(start..start + run)?, reader.slice(source)?);
+        Some(())
+    }
+    /// The written part is copied onto the part after it, so a short value costs a barrier
+    /// decision per doubling, not per copy.
+    fn elements<'s, T: handles::Elements>(
+        context: &mut Cx<'s>,
+        target: &mut Owned<'s>,
+        start: usize,
+        run: usize,
+        value: Local<'s>,
+        value_count: usize,
+    ) -> Option<()> {
+        let (target, source) = (target.narrow::<T>()?, value.downcast::<T>()?);
+        handles::copy_elements(context, target, start, source, 0, value_count);
+        let mut filled = value_count;
+        while filled < run {
+            let step = filled.min(run - filled);
+            let written = target.get();
+            handles::copy_elements(context, target, start + filled, written, start, step);
+            filled += step;
+        }
+        Some(())
+    }
     if !run.is_multiple_of(value_count) {
         return false;
     }
     if run == 0 {
         return true;
     }
-    match target.kind() {
-        SexpType::Real => fill_run(
-            &mut values::reals_mut(target)[start..start + run],
-            values::reals(value),
-        ),
-        SexpType::Logical | SexpType::Integer => fill_run(
-            &mut values::ints_mut(target)[start..start + run],
-            values::ints(value),
-        ),
-        _ => {
-            // The written part is copied onto the part after it, so a short value costs a
-            // barrier decision per doubling, not per copy.
-            let heap = crate::heap();
-            heap.copy_elements(target, start, value, 0, value_count);
-            let mut filled = value_count;
-            while filled < run {
-                let step = filled.min(run - filled);
-                heap.copy_elements(target, start + filled, target, start, step);
-                filled += step;
-            }
-        }
-    }
-    true
+    atomic::<Real>(context, target, start, run, value)
+        .or_else(|| atomic::<Integer>(context, target, start, run, value))
+        .or_else(|| atomic::<Logical>(context, target, start, run, value))
+        .or_else(|| elements::<Str>(context, target, start, run, value, value_count))
+        .or_else(|| elements::<List>(context, target, start, run, value, value_count))
+        .is_some()
 }
 
 /// Fills `target`, whose length is a multiple of `source`'s, with copies of `source`.
@@ -3914,204 +4002,468 @@ fn fill_run<T: Copy>(target: &mut [T], source: &[T]) {
 
 /// Writes `value`, recycled, to `offsets` of `target`, which share its type and lie inside it.
 /// False, having written nothing, unless the number of offsets is a multiple of `value_count`.
-unsafe fn scatter_offsets(
-    target: Sexp,
-    offsets: impl ExactSizeIterator<Item = usize>,
-    value: Sexp,
+fn scatter_offsets<'s, I: ExactSizeIterator<Item = usize>>(
+    context: &mut Cx<'s>,
+    target: &mut Owned<'s>,
+    offsets: I,
+    value: Local<'s>,
     value_count: usize,
 ) -> bool {
+    fn elements<'s, T: handles::Elements, I: Iterator<Item = usize>>(
+        context: &mut Cx<'s>,
+        target: &mut Owned<'s>,
+        offsets: I,
+        value: Local<'s>,
+        value_count: usize,
+    ) -> Result<(), I> {
+        let (Some(target), Some(source)) = (target.narrow::<T>(), value.downcast::<T>()) else {
+            return Err(offsets);
+        };
+        let mut write = target.write(context);
+        let (mut stores, reader) = write.split_elements();
+        for (position, offset) in offsets.enumerate() {
+            stores.set(offset, reader.element(source, position % value_count));
+        }
+        Ok(())
+    }
     if !offsets.len().is_multiple_of(value_count) {
         return false;
     }
-    match target.kind() {
-        SexpType::Real => recycle_into(values::reals_mut(target), offsets, values::reals(value)),
-        SexpType::Logical | SexpType::Integer => {
-            recycle_into(values::ints_mut(target), offsets, values::ints(value))
-        }
-        _ => {
-            let source = value.slice::<Sexp>();
-            let heap = crate::heap();
-            for (position, offset) in offsets.enumerate() {
-                heap.set_element(target, offset, source[position % value_count]);
-            }
-        }
-    }
-    true
+    let Err(offsets) = recycle_typed::<Real, _>(context, target, offsets, value) else {
+        return true;
+    };
+    let Err(offsets) = recycle_typed::<Integer, _>(context, target, offsets, value) else {
+        return true;
+    };
+    let Err(offsets) = recycle_typed::<Logical, _>(context, target, offsets, value) else {
+        return true;
+    };
+    let Err(offsets) = elements::<Str, _>(context, target, offsets, value, value_count) else {
+        return true;
+    };
+    elements::<List, _>(context, target, offsets, value, value_count).is_ok()
 }
 
 /// A logical subscript longer than the vector stretches it on assignment to the subscript's
 /// length, whatever the subscript selects, as GNU R does.
-unsafe fn logical_stretch(index: Sexp) -> usize {
-    if index.kind() == SexpType::Logical {
-        length(index)
+fn logical_stretch(context: &mut Cx<'_>, index: Local<'_>) -> usize {
+    if index.r_type() == SexpType::Logical {
+        handles::length(context, index)
     } else {
         0
     }
 }
 
+/// A vector kind whose elements [`grow`] pads, moves and appends.
+trait Stored: Vector + Sized {
+    /// Sets the elements of `vector` from `from` on to NA (`NULL` in a list).
+    fn pad<'s>(context: &mut Cx<'s>, vector: &mut Owned<'s, Self>, from: usize);
+
+    /// Stores `value`, a scalar of the vector's type or a list element, at `at`.
+    fn put<'s>(
+        context: &mut Cx<'s>,
+        vector: &mut Owned<'s, Self>,
+        at: usize,
+        value: Local<'s>,
+    ) -> R<()>;
+
+    /// The first `count` elements of `from` into the new vector `to`.
+    fn take<'s>(
+        context: &mut Cx<'s>,
+        to: &mut Fresh<'s, Self>,
+        from: &mut Owned<'s, Self>,
+        count: usize,
+    ) -> R<()> {
+        handles::copy_prefix(context, from.get(), to, count)
+    }
+}
+
+macro_rules! stored_atomic {
+    ($kind:ident, $na:expr, $($source:ident),+) => {
+        impl Stored for $kind {
+            fn pad<'s>(context: &mut Cx<'s>, vector: &mut Owned<'s, Self>, from: usize) {
+                let mut write = vector.write(context);
+                let (elements, _) = write.split();
+                if let Some(tail) = elements.get_mut(from..) {
+                    tail.fill($na);
+                }
+            }
+
+            fn put<'s>(
+                context: &mut Cx<'s>,
+                vector: &mut Owned<'s, Self>,
+                at: usize,
+                value: Local<'s>,
+            ) -> R<()> {
+                let element = None
+                    $(.or_else(|| {
+                        value
+                            .downcast::<$source>()
+                            .and_then(|source| source.as_slice(context).first().copied())
+                    }))+
+                    .ok_or_else(|| error("internal error: an element of another type than the vector's"))?;
+                let mut write = vector.write(context);
+                let (elements, _) = write.split();
+                let slot = elements
+                    .get_mut(at)
+                    .ok_or_else(|| error("internal error: element index out of bounds"))?;
+                *slot = element;
+                Ok(())
+            }
+        }
+    };
+}
+
+stored_atomic!(Logical, NA_INTEGER, Logical, Integer);
+stored_atomic!(Integer, NA_INTEGER, Integer, Logical);
+stored_atomic!(Real, NA_REAL, Real);
+stored_atomic!(
+    Complex,
+    Rcomplex {
+        r: NA_REAL,
+        i: NA_REAL
+    },
+    Complex
+);
+stored_atomic!(Raw, 0, Raw);
+
+impl Stored for Str {
+    fn pad<'s>(context: &mut Cx<'s>, vector: &mut Owned<'s, Self>, from: usize) {
+        let length = vector.get().len();
+        let mut write = vector.write(context);
+        let (mut stores, _) = write.split_elements();
+        for index in from..length {
+            stores.set(index, handles::na());
+        }
+    }
+
+    fn put<'s>(
+        context: &mut Cx<'s>,
+        vector: &mut Owned<'s, Self>,
+        at: usize,
+        value: Local<'s>,
+    ) -> R<()> {
+        let text = value
+            .downcast::<Str>()
+            .filter(|text| !text.is_empty())
+            .ok_or_else(|| error("internal error: an element of another type than the vector's"))?;
+        let mut write = vector.write(context);
+        let (mut stores, reader) = write.split_elements();
+        stores.set(at, reader.element(text, 0));
+        Ok(())
+    }
+}
+
+macro_rules! stored_list {
+    ($kind:ident) => {
+        impl Stored for $kind {
+            /// A new list's elements and those a list grows by in place are already `NULL`.
+            fn pad<'s>(_context: &mut Cx<'s>, _vector: &mut Owned<'s, Self>, _from: usize) {}
+
+            fn put<'s>(
+                context: &mut Cx<'s>,
+                vector: &mut Owned<'s, Self>,
+                at: usize,
+                value: Local<'s>,
+            ) -> R<()> {
+                let mut write = vector.write(context);
+                let (mut stores, _) = write.split_elements();
+                stores.set(at, value);
+                Ok(())
+            }
+
+            /// An owned list's elements move into the copy instead of being counted into it
+            /// and back out of the original when the collector sweeps it.
+            fn take<'s>(
+                context: &mut Cx<'s>,
+                to: &mut Fresh<'s, Self>,
+                from: &mut Owned<'s, Self>,
+                _count: usize,
+            ) -> R<()> {
+                handles::move_elements(context, to, from);
+                Ok(())
+            }
+        }
+    };
+}
+
+stored_list!(List);
+stored_list!(Expression);
+
+/// Runs `$body` with `$typed` bound to `$value` downcast to the first of the stored vector kinds
+/// it is, as the type `$kind`, returning what the body returns.
+macro_rules! for_stored_kind {
+    ($value:expr, |$typed:ident: $kind:ident| $body:expr) => {
+        for_stored_kind!(@each $value, $typed, $kind, $body,
+            Logical, Integer, Real, Complex, Raw, Str, List, Expression)
+    };
+    (@each $value:expr, $typed:ident, $kind:ident, $body:expr, $($each:ident),+) => {
+        $(
+            if let Some($typed) = $value.downcast::<$each>() {
+                #[allow(dead_code)]
+                type $kind = $each;
+                return $body;
+            }
+        )+
+    };
+}
+
 /// `vector` extended to `new_length`, padded with NA, keeping its attributes but not its dims.
+/// `owned` is `vector` when the caller holds it alone.
 ///
-/// A copy reserves room past `new_length`, by GNU R's factor of 1.05, and an unshared vector with
+/// A copy reserves room past `new_length`, by GNU R's factor of 1.05, and an owned vector with
 /// room grows in place, so a loop that appends one element at a time runs in linear time.
 ///
-/// `final_step` says that nothing after the growth can fail, so an unshared list's elements may
-/// move into the copy instead of being counted into it and back out of the original when the
-/// collector sweeps it. An error after a move would leave the variable holding an empty list.
-unsafe fn grow(vector: Sexp, new_length: usize, final_step: bool) -> R<Sexp> {
-    let count = length(vector);
-    if grows_in_place(vector, new_length) {
-        let names = values::names(vector);
-        if names == nil() || grows_in_place(names, new_length) {
-            crate::heap().resize_vector(vector, new_length as isize)?;
-            for position in count..new_length {
-                set_na(vector, position);
+/// `final_step` says that nothing after the growth can fail, so an owned list's elements may
+/// move into the copy (see [`Stored::take`]). An error after a move would leave the variable
+/// holding an empty list.
+fn grow<'s>(
+    context: &mut Cx<'s>,
+    vector: Local<'s>,
+    owned: Option<Owned<'s>>,
+    new_length: usize,
+    final_step: bool,
+) -> R<Owned<'s>> {
+    assert!(
+        owned.as_ref().is_none_or(|owned| owned.get().is(vector)),
+        "the claim is for another vector"
+    );
+    for_stored_kind!(vector, |typed: Kind| {
+        let owned = owned.and_then(|owned| owned.downcast::<Kind>().ok());
+        Ok(grow_as(context, typed, owned, new_length, final_step)?.value())
+    });
+    Err(error(format!(
+        "internal error: growing a vector of type '{}'",
+        handles::type_name(vector)
+    )))
+}
+
+fn grow_as<'s, T: Stored>(
+    context: &mut Cx<'s>,
+    vector: Local<'s, T>,
+    owned: Option<Owned<'s, T>>,
+    new_length: usize,
+    final_step: bool,
+) -> R<Owned<'s, T>> {
+    let count = vector.len();
+    let mut owned = match owned {
+        Some(mut owned) => {
+            if handles::resize_in_place(context, &mut owned, new_length)? {
+                T::pad(context, &mut owned, count);
+                return Ok(owned);
             }
-            if names != nil() {
-                crate::heap().resize_vector(names, new_length as isize)?;
-            }
-            return Ok(vector);
+            Some(owned)
         }
+        None => None,
+    };
+    let mut result = handles::alloc_with_room::<T>(context, new_length)?;
+    match owned.as_mut() {
+        Some(original) if final_step => T::take(context, &mut result, original, count)?,
+        _ => handles::copy_prefix(context, vector, &mut result, count)?,
     }
-    let result = alloc_with_room(vector.kind(), new_length)?;
-    if final_step
-        && matches!(vector.kind(), SexpType::List | SexpType::Expression)
-        && !vector.is_altrep()
-        && !values::maybe_shared(vector)
-    {
-        crate::heap().move_elements(result, vector);
-    } else {
-        copy_prefix(values::materialize(vector)?, result, count)?;
-    }
-    for position in count..new_length {
-        set_na(result, position);
-    }
+    let mut result = result.owned();
+    T::pad(context, &mut result, count);
     // Names go first and the other attributes follow in order, as GNU R's `EnlargeVector`
     // lays them out; code such as the globals package checks the attribute order.
-    let names = values::names(vector);
-    if names != nil() {
-        let grown = alloc_with_room(SexpType::String, new_length)?;
-        let names = values::materialize(names)?;
-        crate::heap().copy_elements(grown, 0, names, 0, count);
-        values::set_attr(result, symbols().names, grown)?;
-    }
-    let mut cell = vector.attrib();
-    while cell.kind() == SexpType::Pairlist {
-        let tag = cell.tag();
-        if tag != symbols().dim && tag != symbols().dimnames && tag != symbols().names {
-            values::set_attr(result, tag, cell.car())?;
+    let names_symbol = handles::symbol(|symbols| symbols.names);
+    let names = handles::get_attribute(context, vector, names_symbol);
+    let names = context.root(names);
+    if names.r_type() != SexpType::Nil {
+        let mut grown = handles::alloc_with_room::<Str>(context, new_length)?;
+        if let Some(names) = handles::dense::<Str>(context, names)? {
+            let kept = names.len().min(count);
+            handles::copy_prefix(context, names, &mut grown, kept)?;
         }
-        cell = cell.cdr();
+        handles::set_attribute(context, &mut result, names_symbol, grown.finish().value())?;
     }
+    handles::copy_most_attributes(context, vector.value(), &mut result, false)?;
     Ok(result)
+}
+
+/// Writes `new_names` from position `count` into the names of the grown `vector`, which gets
+/// blank names first when it has none.
+fn write_names<'s>(
+    context: &mut Cx<'s>,
+    vector: &mut Owned<'s>,
+    count: usize,
+    new_names: &[Local<'s, handles::Chars>],
+) -> R<()> {
+    if new_names.is_empty() {
+        return Ok(());
+    }
+    let length = handles::length(context, vector.get());
+    let mut names = match handles::owned_names(context, vector) {
+        Some(names) if names.get().len() == length => names,
+        _ => {
+            let names_symbol = handles::symbol(|symbols| symbols.names);
+            let old = handles::get_attribute(context, vector.get(), names_symbol);
+            let old = context.root(old);
+            let mut names = handles::alloc_with_room::<Str>(context, length)?;
+            if let Some(old) = handles::dense::<Str>(context, old)? {
+                let kept = old.len().min(length);
+                handles::copy_prefix(context, old, &mut names, kept)?;
+            }
+            let names = names.owned();
+            handles::set_attribute(context, vector, names_symbol, names.get().value())?;
+            names
+        }
+    };
+    let mut write = names.write(context);
+    let (mut stores, _) = write.split_elements();
+    for (offset, &name) in new_names.iter().enumerate() {
+        if count + offset < length {
+            stores.set(count + offset, name);
+        }
+    }
+    Ok(())
 }
 
 /// `vector` with `value` appended as a new last element named `name`, a CHARSXP: `x$name <- value`
-/// or `x[["name"]] <- value` for a name `x` lacks. `vector` is an unshared list or atomic vector
-/// whose only attribute is `names`, and `value` a list element or a scalar of `vector`'s type. An
-/// unnamed `vector` gets blank names before the new one. The vector grows in place when it has
-/// room, as [`grow`] does, and otherwise the result is a copy with room to grow.
+/// or `x[["name"]] <- value` for a name `x` lacks. `vector` is a list or atomic vector whose only
+/// attribute is `names`, and `value` a list element or a scalar of `vector`'s type. An unnamed
+/// `vector` gets blank names before the new one. The vector grows in place when `reuse` says the
+/// caller's variable alone holds it and it has room, as [`grow`] does, and otherwise the result
+/// is a copy with room to grow.
+///
+/// # Safety
+///
+/// On the interpreter's thread, with every argument a live object that the caller keeps rooted
+/// until it returns, and `reuse` true only when nothing but the caller's variable refers to
+/// `vector`. The result is rooted in the caller's handle scope.
 pub(crate) unsafe fn append_named(vector: Sexp, name: Sexp, value: Sexp, reuse: bool) -> R<Sexp> {
-    let heap = crate::heap();
-    let count = length(vector);
-    let names = values::names(vector);
-    let result = if reuse
-        && grows_in_place(vector, count + 1)
-        && (names == nil() || grows_in_place(names, count + 1))
-    {
-        heap.resize_vector(vector, count as isize + 1)?;
-        vector
-    } else {
-        let result = alloc_with_room(vector.kind(), count + 1)?;
-        copy_prefix(vector, result, count)?;
-        result
-    };
-    let names = if names == nil() || result != vector {
-        let grown = alloc_with_room(SexpType::String, count + 1)?;
-        if names != nil() {
-            heap.copy_elements(grown, 0, names, 0, count);
-        }
-        values::set_attr(result, symbols().names, grown)?;
-        grown
-    } else {
-        heap.resize_vector(names, count as isize + 1)?;
-        names
-    };
-    heap.set_element(names, count, name);
-    match result.kind() {
-        SexpType::Real => values::reals_mut(result)[count] = value.slice::<f64>()[0],
-        SexpType::Integer | SexpType::Logical => {
-            values::ints_mut(result)[count] = value.slice::<i32>()[0]
-        }
-        SexpType::String => heap.set_element(result, count, value.element(0)),
-        _ => heap.set_element(result, count, value),
+    // SAFETY: the caller's roots hold the arguments, its claim makes `vector` owned under
+    // `reuse`, and the result is rooted before anything else allocates.
+    unsafe {
+        let result = handles::with(|context| {
+            let vector = handles::held(context, vector);
+            let name = handles::held(context, name)
+                .downcast::<handles::Chars>()
+                .ok_or_else(|| error("internal error: a name that is not a string"))?;
+            let value = handles::held(context, value);
+            let owned = reuse.then(|| Owned::assume(vector));
+            Ok(append_element(context, vector, owned, name, value)?
+                .finish()
+                .raw())
+        })?;
+        crate::heap().root(result);
+        Ok(result)
     }
+}
+
+/// [`append_named`] on handles.
+fn append_element<'s>(
+    context: &mut Cx<'s>,
+    vector: Local<'s>,
+    owned: Option<Owned<'s>>,
+    name: Local<'s, handles::Chars>,
+    value: Local<'s>,
+) -> R<Owned<'s>> {
+    let count = handles::length(context, vector);
+    let mut result = grow(context, vector, owned, count + 1, false)?;
+    write_names(context, &mut result, count, &[name])?;
+    store_scalar(context, &mut result, count, value)?;
     Ok(result)
 }
 
-/// Whether `vector` can take `new_length` elements without a copy: it is a resizable vector
-/// with that much room that nothing else references, and it has no dims for growth to drop.
-unsafe fn grows_in_place(vector: Sexp, new_length: usize) -> bool {
-    crate::heap().is_resizable(vector)
-        && !vector.is_altrep()
-        && new_length as isize <= vector.capacity()
-        && !values::maybe_shared(vector)
-        && values::get_attr(vector, symbols().dim) == nil()
-        && values::get_attr(vector, symbols().dimnames) == nil()
+/// Stores `value`, a scalar of the vector's type or a list element, at `at` of `vector`.
+fn store_scalar<'s>(
+    context: &mut Cx<'s>,
+    vector: &mut Owned<'s>,
+    at: usize,
+    value: Local<'s>,
+) -> R<()> {
+    macro_rules! each {
+        ($($kind:ident),+) => {
+            $(
+                if let Some(typed) = vector.narrow::<$kind>() {
+                    return <$kind as Stored>::put(context, typed, at, value);
+                }
+            )+
+        };
+    }
+    each!(Logical, Integer, Real, Complex, Raw, Str, List, Expression);
+    Err(error(format!(
+        "internal error: storing into a vector of type '{}'",
+        handles::type_name(vector.get())
+    )))
 }
 
-/// A copy of `vector`, which has no attributes, one element longer with the new element unset
-/// and room to grow, which the caller binds. The caller grows a vector in place where it has
-/// room. Nothing after this may fail, because an unshared list's elements move into the copy
-/// (see [`grow`]).
+/// A copy of `vector`, which has no attributes, one element longer with the new element NA and
+/// room to grow, which the caller binds. The caller grows a vector in place where it has room.
+/// Nothing after this may fail, because an owned list's elements move into the copy (see
+/// [`grow`]).
+///
+/// # Safety
+///
+/// On the interpreter's thread, with `vector` a live object that the caller keeps rooted until
+/// it returns, and `reuse` true only when nothing but the caller's variable refers to it. The
+/// result is rooted in the caller's handle scope.
 #[cold]
 pub(crate) unsafe fn append_copy(vector: Sexp, reuse: bool) -> R<Sexp> {
-    let count = length(vector);
-    let heap = crate::heap();
-    let result = alloc_with_room(vector.kind(), count + 1)?;
-    if reuse
-        && matches!(vector.kind(), SexpType::List | SexpType::Expression)
-        && !vector.is_altrep()
-        && !values::maybe_shared(vector)
-    {
-        heap.move_elements(result, vector);
-    } else {
-        copy_prefix(values::materialize(vector)?, result, count)?;
+    // SAFETY: the caller's root holds `vector`, its claim makes it owned under `reuse`, and the
+    // result is rooted before anything else allocates.
+    unsafe {
+        let result = handles::with(|context| {
+            let vector = handles::held(context, vector);
+            let (vector, owned) = if altrep(vector) {
+                (handles::materialize(context, vector)?, None)
+            } else {
+                (vector, reuse.then(|| Owned::assume(vector)))
+            };
+            let count = handles::length(context, vector);
+            Ok(grow(context, vector, owned, count + 1, true)?
+                .finish()
+                .raw())
+        })?;
+        crate::heap().root(result);
+        Ok(result)
     }
-    Ok(result)
-}
-
-/// A resizable vector of `length` elements with room to grow by GNU R's factor of 1.05.
-unsafe fn alloc_with_room(kind: SexpType, length: usize) -> R<Sexp> {
-    let capacity = length + length / 20;
-    let heap = crate::heap();
-    let vector = heap.alloc_resizable_vector(kind, capacity as isize)?;
-    heap.root(vector);
-    heap.resize_vector(vector, length as isize)?;
-    Ok(vector)
 }
 
 /// `target[offsets] <- value`, recycling `value`, which is not empty, and skipping NA offsets.
-unsafe fn scatter(target: Sexp, offsets: impl Iterator<Item = usize>, value: Sexp) -> R<()> {
-    let value = values::materialize(value)?;
-    let count = length(value);
-    if value != target && value.kind() == target.kind() {
-        match target.kind() {
-            SexpType::Real => {
-                recycle_into(values::reals_mut(target), offsets, values::reals(value));
-                return Ok(());
-            }
-            SexpType::Integer | SexpType::Logical => {
-                recycle_into(values::ints_mut(target), offsets, values::ints(value));
-                return Ok(());
-            }
-            _ => {}
-        }
-    }
+fn scatter<'s>(
+    context: &mut Cx<'s>,
+    target: &mut Owned<'s>,
+    offsets: impl Iterator<Item = usize>,
+    value: Local<'s>,
+) -> R<()> {
+    let value = handles::materialize(context, value)?;
+    let count = handles::length(context, value);
+    let Err(offsets) = recycle_typed::<Real, _>(context, target, offsets, value) else {
+        return Ok(());
+    };
+    let Err(offsets) = recycle_typed::<Integer, _>(context, target, offsets, value) else {
+        return Ok(());
+    };
+    let Err(offsets) = recycle_typed::<Logical, _>(context, target, offsets, value) else {
+        return Ok(());
+    };
     for (position, offset) in offsets.enumerate() {
         if offset != NA_POSITION {
-            assign_element(target, offset, value, position % count)?;
+            assign_element(context, target, offset, value, position % count)?;
         }
     }
+    Ok(())
+}
+
+/// [`recycle_into`] when `target` and `value` are distinct standard vectors of kind `T`, and
+/// otherwise the offsets back, untouched.
+#[inline(always)]
+fn recycle_typed<'s, T: Atomic, I: Iterator<Item = usize>>(
+    context: &mut Cx<'s>,
+    target: &mut Owned<'s>,
+    offsets: I,
+    value: Local<'s>,
+) -> Result<(), I> {
+    let (Some(target), Some(source)) = (target.narrow::<T>(), value.downcast::<T>()) else {
+        return Err(offsets);
+    };
+    let mut write = target.write(context);
+    let (elements, reader) = write.split();
+    let Some(source) = reader.slice(source) else {
+        return Err(offsets);
+    };
+    recycle_into(elements, offsets, source);
     Ok(())
 }
 
@@ -4124,12 +4476,24 @@ fn recycle_into<T: Copy>(target: &mut [T], offsets: impl Iterator<Item = usize>,
     }
 }
 
-unsafe fn assign_element(target: Sexp, position: usize, value: Sexp, value_index: usize) -> R<()> {
-    if matches!(target.kind(), SexpType::List | SexpType::Expression) && !value.kind().is_vector() {
-        values::set_elt(target, position, value);
-        return Ok(());
+fn assign_element<'s>(
+    context: &mut Cx<'s>,
+    target: &mut Owned<'s>,
+    position: usize,
+    value: Local<'s>,
+    value_index: usize,
+) -> R<()> {
+    if !value.r_type().is_vector() {
+        if let Some(list) = target.narrow::<List>() {
+            list.write(context).split_elements().0.set(position, value);
+            return Ok(());
+        }
+        if let Some(list) = target.narrow::<Expression>() {
+            list.write(context).split_elements().0.set(position, value);
+            return Ok(());
+        }
     }
-    copy_element(value, value_index, target, position)
+    store_element(context, value, value_index, target, position)
 }
 
 unsafe fn do_subassign2(call: &Call<'_>) -> R<Sexp> {
@@ -4144,130 +4508,310 @@ unsafe fn do_subassign2(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// `x[[i]] <- value`.
+///
+/// # Safety
+///
+/// On the interpreter's thread, with every argument a live object that the caller keeps rooted
+/// until it returns. The result is rooted in the caller's handle scope.
 pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp) -> R<Sexp> {
+    // SAFETY: the caller's roots hold the arguments for the whole call, and the result is
+    // rooted before anything else allocates.
+    unsafe {
+        let result = handles::with(|context| {
+            let object = handles::held(context, object);
+            let indices: SmallVec<[Local<'_>; 4]> = indices
+                .iter()
+                .map(|&index| handles::held(context, index))
+                .collect();
+            let value = handles::held(context, value);
+            let call = handles::held(context, call);
+            Ok(assign_subset2(context, object, &indices, value, call)?.raw())
+        })?;
+        crate::heap().root(result);
+        Ok(result)
+    }
+}
+
+/// [`subassign2`] on handles.
+fn assign_subset2<'s>(
+    context: &mut Cx<'s>,
+    object: Local<'s>,
+    indices: &[Local<'s>],
+    value: Local<'s>,
+    call: Local<'s>,
+) -> R<Local<'s>> {
     // `x[[i]] <- x` stores the old `x`, which is also the assignment's value, so the new `x`
     // is a copy: modified in place, the list would contain itself.
-    let object = if value == object && object.kind() != SexpType::Environment {
-        values::shallow_duplicate(object)?
+    let object = if value.is(object) && object.r_type() != SexpType::Environment {
+        handles::shallow_copy(context, object)?.finish()
     } else {
         object
     };
-    if object.kind() == SexpType::Record {
-        return crate::records::subassign2(object, indices, value, call);
+    if object.r_type() == SexpType::Record {
+        return handles::record_subassign2(context, object, indices, value, call);
     }
-    let object = if object.is_array() {
-        match crate::arrays::subassign2(object, indices, value, call)? {
+    let object = if handles::is_array(object) {
+        match handles::array_subassign(context, object, indices, value, call, true)? {
             Some(result) => return Ok(result),
-            None => values::plain(object)?,
+            None => handles::shallow_copy(context, object)?.finish(),
         }
     } else {
         object
     };
-    let object = values::materialize(object)?;
+    let object = handles::materialize(context, object)?;
     // A reference class object assigns into its environment and stays itself.
-    if object.kind() == SexpType::Object && object.has_gp(gp::S4_OBJECT) {
-        let data = s4_data_part(object);
-        if data.kind() != SexpType::Environment {
-            return Err(error_in(
+    if object.r_type() == SexpType::Object && is_s4(object) {
+        let data = s4_data(context, object);
+        if data.r_type() != SexpType::Environment {
+            return Err(handles::error_in(
                 call,
                 "[[<- defined for objects of type \"S4\" only for subclasses of environment",
             ));
         }
-        subassign2(data, indices, value, call)?;
+        assign_subset2(context, data, indices, value, call)?;
         return Ok(object);
     }
-    if object.kind() == SexpType::Environment {
-        crate::moves::reaching_environment()?;
-        let index = indices.first().copied().unwrap_or(nil());
-        if index.kind() != SexpType::String || length(index) != 1 {
-            return Err(error_in(call, "wrong args for environment subassignment"));
-        }
-        let symbol = values::install_charsxp(index.element(0))?;
-        eval::define(symbol, value, object)?;
+    if let Some(environment) = object.downcast::<handles::Environment>() {
+        handles::reaching_environment(context)?;
+        let name = match indices.first() {
+            Some(&index) if handles::length(context, index) == 1 => {
+                handles::dense::<Str>(context, index)?
+            }
+            _ => None,
+        };
+        let Some(name) = name else {
+            return Err(handles::error_in(
+                call,
+                "wrong args for environment subassignment",
+            ));
+        };
+        let symbol = handles::install_element(context, name, 0)?;
+        handles::define(context, symbol, value, environment)?;
         return Ok(object);
     }
-    if indices.is_empty() || indices.contains(&missing_arg()) {
+    if indices.is_empty()
+        || indices
+            .iter()
+            .any(|&index| handles::is_missing_argument(index))
+    {
         let object_field = [("object", object)];
-        let fields: &[(&str, Sexp)] = if object == nil() { &[] } else { &object_field };
-        return Err(missing_subscript(call, fields));
+        let fields: &[(&str, Local<'_>)] = if object.r_type() == SexpType::Nil {
+            &[]
+        } else {
+            &object_field
+        };
+        return Err(handles::classed_error(
+            context,
+            Some(call),
+            "missing subscript",
+            &["MissingSubscriptError", "error", "condition"],
+            fields,
+        ));
     }
-    if matches!(object.kind(), SexpType::Pairlist | SexpType::Language) {
-        let list = values::pairlist_to_list(object)?;
-        let result = subassign2(list, indices, value, call)?;
-        let result = values::list_to_pairlist(result, object.kind())?;
+    if matches!(object.r_type(), SexpType::Pairlist | SexpType::Language) {
+        let list = pairlist_to_list(context, object)?;
+        let result = assign_subset2(context, list, indices, value, call)?;
+        let result = standard::<List>(result)?;
+        let mut result = handles::list_to_pairlist(context, result, object.r_type())?;
         // The call keeps its attributes, such as a formula's class and environment, and a
         // pairlist keeps its dimensions.
-        values::copy_most_attributes(object, result, true)?;
-        return Ok(result);
+        handles::copy_most_attributes(context, object, &mut result, true)?;
+        return Ok(result.finish());
     }
-    if object == nil() && value == nil() {
-        return Ok(nil());
+    if object.r_type() == SexpType::Nil && value.r_type() == SexpType::Nil {
+        return Ok(object);
     }
-    if let [index] = indices {
-        return subassign2_one(object, *index, value, call, 1);
+    if let &[index] = indices {
+        return assign_one(context, object, index, value, call, 1);
     }
-    let Some(dims) = values::dims(object).filter(|dims| dims.len() == indices.len()) else {
+    let Some(dims) = handles::dims(context, object).filter(|dims| dims.len() == indices.len())
+    else {
         // GNU R counts the subscripts after it has checked what the object can hold.
-        let is_vector = object == nil()
-            || object.kind().is_atomic()
-            || matches!(object.kind(), SexpType::List | SexpType::Expression);
+        let kind = object.r_type();
+        let is_vector = kind == SexpType::Nil
+            || kind.is_atomic()
+            || matches!(kind, SexpType::List | SexpType::Expression);
         if !is_vector {
-            return Err(not_subsettable(call, object));
+            return Err(not_subsettable_error(context, Some(call), object));
         }
-        if object.kind().is_atomic() {
-            atomic_replacement_check(value)?;
+        if kind.is_atomic() {
+            atomic_replacement_check(context, value)?;
         }
-        return Err(error_in(call, "[[ ]] improper number of subscripts"));
+        return Err(handles::error_in(
+            call,
+            "[[ ]] improper number of subscripts",
+        ));
     };
     // `m[[i, j]] <- value` names one cell, which must exist.
-    let dimnames = get_attr(object, symbols().dimnames);
+    let dimnames = get_attribute(context, object, symbol(|symbols| symbols.dimnames));
+    let dimnames = context.root(dimnames);
     for (dimension, (&index, &extent)) in indices.iter().zip(dims.iter()).enumerate() {
-        let names = if dimnames.kind() == SexpType::List {
-            dimnames.element(dimension)
+        let names = if dimnames.r_type() == SexpType::List {
+            element(context, dimnames.value(), dimension)?
         } else {
-            nil()
+            null()
         };
         // A subscript GNU R rejects for another reason is left to the assignment below.
-        let inside = match one_index(extent, names, index) {
+        let inside = match one_index(context, extent, names, index) {
             Ok(Slot::At(position)) => position < extent,
             Ok(_) => false,
             Err(_) => true,
         };
         if !inside {
-            let bounds = Bounds {
-                dimension: Some(dimension),
-                ..Bounds::of(object)
-            };
-            return Err(out_of_bounds(
-                unbound(),
-                "[[ ]] subscript out of bounds",
-                bounds,
+            return Err(subscript2_out_of_bounds(
+                context,
+                object,
+                Some(dimension),
                 index,
             ));
         }
     }
-    let is_list = matches!(object.kind(), SexpType::List | SexpType::Expression);
-    if is_list || object == nil() || !value.kind().is_atomic() || length(value) != 1 {
-        let list = if object == nil() {
-            alloc(SexpType::List, 0)?
-        } else if is_list {
-            modifiable(object)?
+    let kind = object.r_type();
+    let is_list = matches!(kind, SexpType::List | SexpType::Expression);
+    if is_list
+        || kind == SexpType::Nil
+        || !value.r_type().is_atomic()
+        || handles::length(context, value) != 1
+    {
+        let list = if kind == SexpType::Nil {
+            context.alloc::<List>(0)?.finish().value()
         } else {
-            // The assignment below reads the dims and then makes the object a list, which a
-            // coercion here would leave without dims.
-            atomic_replacement_check(value)?;
+            if !is_list {
+                // The assignment below reads the dims and then makes the object a list, which a
+                // coercion here would leave without dims.
+                atomic_replacement_check(context, value)?;
+            }
             object
         };
-        let wrapped = values::list_vector(&[value])?;
-        return subassign(list, indices, wrapped, call);
+        let mut wrapped = context.alloc::<List>(1)?;
+        wrapped.set(context, 0, value);
+        let wrapped = wrapped.finish().value();
+        return assign_subset(context, list, indices, wrapped, call);
     }
-    subassign(object, indices, value, call)
+    assign_subset(context, object, indices, value, call)
 }
 
+/// `x[[i]] <- value` with one subscript, which for a list may be a path of several (recursive
+/// assignment); `level` is the depth of that path, which GNU R's error names.
+fn assign_one<'s>(
+    context: &mut Cx<'s>,
+    object: Local<'s>,
+    index: Local<'s>,
+    value: Local<'s>,
+    call: Local<'s>,
+    level: usize,
+) -> R<Local<'s>> {
+    if matches!(object.r_type(), SexpType::Pairlist | SexpType::Language) {
+        return assign_subset2(context, object, &[index], value, call);
+    }
+    // A symbol subscript names the element, so the rest of the assignment sees it as a string.
+    let index = match index.downcast::<Symbol>() {
+        Some(symbol) => {
+            let name = symbol.read(context).name();
+            let name = context.root(name);
+            let mut text = context.alloc::<Str>(1)?;
+            text.set(context, 0, name);
+            text.finish().value()
+        }
+        None => index,
+    };
+    let kind = object.r_type();
+    let is_list = matches!(kind, SexpType::Nil | SexpType::List | SexpType::Expression);
+    let count = handles::length(context, index);
+    let object_count = handles::length(context, object);
+    let names = handles::names_attribute(context, object);
+    if count > 1 {
+        if !is_list {
+            return Err(replacement_error(
+                context,
+                call,
+                "attempt to select more than one element in vectorIndex",
+            ));
+        }
+        let first = element(context, index, 0)?;
+        let rest_positions: Vec<Position> = (1..count).collect();
+        let rest = select(context, index, &rest_positions)?;
+        let inner = match one_index(context, object_count, names, first)? {
+            Slot::At(position) if position < object_count => element(context, object, position)?,
+            _ => {
+                return Err(replacement_error(
+                    context,
+                    call,
+                    format!("no such index at level {level}\n"),
+                ));
+            }
+        };
+        let updated = assign_one(context, inner, rest, value, call, level + 1)?;
+        return assign_one(context, object, first, updated, call, level);
+    }
+    if !is_list {
+        atomic_replacement_check(context, value)?;
+    }
+    let slot = one_index(context, object_count, names, index)?;
+    if !is_list {
+        let position = match slot {
+            Slot::At(position) => {
+                let mut position_value = context.alloc::<Real>(1)?;
+                position_value.as_mut_slice()[0] = position as f64 + 1.0;
+                position_value.finish().value()
+            }
+            Slot::Named => index,
+            Slot::Absent => return Err(subscript2_out_of_bounds(context, object, None, index)),
+        };
+        if !value.r_type().is_atomic() {
+            // A list or expression value turns the vector into one of its kind.
+            let list = handles::coerce(context, object, value.r_type())?;
+            return assign_one(context, list, position, value, call, level);
+        }
+        return assign_subset(context, object, &[position], value, call);
+    }
+    if kind == SexpType::Expression && value.r_type() != SexpType::Nil {
+        if value.r_type() == SexpType::List {
+            return Err(incompatible_types("expression", "list", "[[ assignment"));
+        }
+        subassign_type_fix(SexpType::Expression, value.r_type())?;
+    }
+    let position = match slot {
+        Slot::At(position) => position,
+        Slot::Named => object_count,
+        Slot::Absent if value.r_type() == SexpType::Nil => return Ok(object),
+        Slot::Absent => return Err(subscript2_out_of_bounds(context, object, None, index)),
+    };
+    if value.r_type() == SexpType::Nil {
+        if position >= object_count {
+            return Ok(object);
+        }
+        let mut position_value = context.alloc::<Real>(1)?;
+        position_value.as_mut_slice()[0] = position as f64 + 1.0;
+        let position_value = position_value.finish().value();
+        return assign_subset(context, object, &[position_value], null(), call);
+    }
+    let list = if kind == SexpType::Nil {
+        context.alloc::<List>(0)?.finish().value()
+    } else {
+        object
+    };
+    let owned = unshared(context, list)?;
+    let mut result = if position >= object_count {
+        let mut grown = grow(context, owned.get(), Some(owned), position + 1, true)?;
+        if matches!(slot, Slot::Named) {
+            let name = handles::dense::<Str>(context, index)?
+                .ok_or_else(|| error("internal error: a name subscript that is not a string"))?;
+            let name = name.get(context, 0);
+            let name = context.root(name);
+            write_names(context, &mut grown, position, &[name])?;
+        }
+        grown
+    } else {
+        owned
+    };
+    store_scalar(context, &mut result, position, value)?;
+    Ok(result.finish())
+}
 /// The type `x[i] <- value` leaves `x` as, with GNU R's errors for the pairs it refuses: raw
 /// mixes only with raw, an atomic vector takes no function, symbol, call or environment, and a
 /// list takes no function or environment.
-unsafe fn subassign_type_fix(object: SexpType, value: SexpType) -> R<SexpType> {
+fn subassign_type_fix(object: SexpType, value: SexpType) -> R<SexpType> {
     let atomic = |kind: SexpType| {
         matches!(
             kind,
@@ -4326,123 +4870,17 @@ fn incompatible_types(object: &str, value: &str, context: &str) -> Unwind {
     ))
 }
 
-/// `x[[i]] <- value` with one subscript, which for a list may be a path of several (recursive
-/// assignment); `level` is the depth of that path, which GNU R's error names.
-unsafe fn subassign2_one(
-    object: Sexp,
-    index: Sexp,
-    value: Sexp,
-    call: Sexp,
-    level: usize,
-) -> R<Sexp> {
-    if matches!(object.kind(), SexpType::Pairlist | SexpType::Language) {
-        return subassign2(object, &[index], value, call);
+/// An error that names `call` as GNU R names the call of a replacement function, the form
+/// `[[<-`(`*tmp*`, ...) for one an assignment generated.
+fn replacement_error<'s>(
+    context: &mut Cx<'s>,
+    call: Local<'s>,
+    message: impl Into<String>,
+) -> Unwind {
+    match handles::generated_call(context, call) {
+        Ok(reported) => handles::error_in(reported, message),
+        Err(failure) => failure,
     }
-    // A symbol subscript names the element, so the rest of the assignment sees it as a string.
-    let index = if index.kind() == SexpType::Symbol {
-        let name = values::scalar_string_charsxp(index.car())?;
-        crate::heap().root(name);
-        name
-    } else {
-        index
-    };
-    let is_list = object == nil() || matches!(object.kind(), SexpType::List | SexpType::Expression);
-    let count = length(index);
-    if count > 1 {
-        if !is_list {
-            return Err(errorcall(
-                call,
-                "attempt to select more than one element in vectorIndex",
-            ));
-        }
-        let first = vector_element(index, 0)?;
-        let rest_positions: Vec<usize> = (1..count).collect();
-        let rest = select_elements(index, &rest_positions)?;
-        let inner = match one_index(length(object), values::names(object), first)? {
-            Slot::At(position) if position < length(object) => object.element(position),
-            _ => {
-                return Err(errorcall(call, format!("no such index at level {level}\n")));
-            }
-        };
-        let updated = subassign2_one(inner, rest, value, call, level + 1)?;
-        return subassign2_one(object, first, updated, call, level);
-    }
-    if !is_list {
-        atomic_replacement_check(value)?;
-    }
-    let slot = one_index(length(object), values::names(object), index)?;
-    if !is_list {
-        let position = match slot {
-            Slot::At(position) => values::scalar_real(position as f64 + 1.0)?,
-            Slot::Named => index,
-            Slot::Absent => {
-                return Err(out_of_bounds(
-                    unbound(),
-                    "[[ ]] subscript out of bounds",
-                    Bounds::of(object),
-                    index,
-                ));
-            }
-        };
-        if !value.kind().is_atomic() {
-            // A list or expression value turns the vector into one of its kind.
-            let list = coerce_vector(object, value.kind())?;
-            return subassign2_one(list, position, value, call, level);
-        }
-        return subassign(object, &[position], value, call);
-    }
-    if object.kind() == SexpType::Expression && value != nil() {
-        if value.kind() == SexpType::List {
-            return Err(incompatible_types("expression", "list", "[[ assignment"));
-        }
-        subassign_type_fix(SexpType::Expression, value.kind())?;
-    }
-    let list = if object == nil() {
-        alloc(SexpType::List, 0)?
-    } else {
-        modifiable(object)?
-    };
-    let count = length(list);
-    let position = match slot {
-        Slot::At(position) => position,
-        Slot::Named => count,
-        Slot::Absent if value == nil() => return Ok(list),
-        Slot::Absent => {
-            return Err(out_of_bounds(
-                unbound(),
-                "[[ ]] subscript out of bounds",
-                Bounds::of(object),
-                index,
-            ));
-        }
-    };
-    if value == nil() {
-        if position >= count {
-            return Ok(list);
-        }
-        return subassign(
-            list,
-            &[values::scalar_real(position as f64 + 1.0)?],
-            nil(),
-            call,
-        );
-    }
-    let mut result = list;
-    if position >= count {
-        result = grow(list, position + 1, true)?;
-        if matches!(slot, Slot::Named) {
-            let names_now = values::names(result);
-            let new_names = if names_now == nil() {
-                alloc(SexpType::String, position + 1)?
-            } else {
-                names_now
-            };
-            values::set_elt(new_names, position, index.element(0));
-            values::set_attr(result, symbols().names, new_names)?;
-        }
-    }
-    values::set_elt(result, position, value);
-    Ok(result)
 }
 
 /// Where a single `[[<-` subscript points.
@@ -4456,52 +4894,71 @@ enum Slot {
     Absent,
 }
 
-/// The slot one `[[<-` subscript selects in `object`, with GNU R's errors: a length-2 vector
-/// takes a negative subscript as the element it leaves out.
-unsafe fn one_index(extent: usize, names: Sexp, index: Sexp) -> R<Slot> {
-    if length(index) == 0 {
+/// The slot one `[[<-` subscript selects in an object of `extent` elements with `names`, with
+/// GNU R's errors: a length-2 vector takes a negative subscript as the element it leaves out.
+fn one_index<'s>(
+    context: &mut Cx<'s>,
+    extent: usize,
+    names: Local<'s>,
+    index: Local<'s>,
+) -> R<Slot> {
+    if handles::length(context, index) == 0 {
         return Err(error("attempt to select less than one element in OneIndex"));
     }
-    match index.kind() {
-        SexpType::String => {
-            // NA selects the first NA name, as GNU R compares the string pointers.
-            if index.element(0) == values::na_string() {
-                let position = (names != nil())
-                    .then(|| {
-                        (0..length(names)).find(|&at| names.element(at) == values::na_string())
-                    })
-                    .flatten();
-                return Ok(position.map_or(Slot::Named, Slot::At));
-            }
-            let wanted = index.element(0);
-            if wanted.bytes().is_empty() {
-                return Ok(Slot::Named);
-            }
-            Ok(match match_name(names, wanted, Some(true))? {
-                Some(position) => Slot::At(position),
-                None => Slot::Named,
-            })
+    let wanted = match index.downcast::<Symbol>() {
+        Some(symbol) => {
+            let name = symbol.read(context).name();
+            Some(context.root(name))
         }
-        SexpType::Integer | SexpType::Logical => {
-            let value = values::ints(index)[0];
-            // NA is the most negative integer, so it selects "more than one" element.
-            one_index_position(i64::from(value), extent, "integerOneIndex")
-        }
-        SexpType::Real => {
-            let value = values::reals(index)[0];
-            // Past the longest vector R allows (2^52), a position selects nothing.
-            if value.is_nan() || value > 4_503_599_627_370_496.0 {
-                return Ok(Slot::Absent);
+        None => match dense::<Str>(context, index)? {
+            Some(index) => {
+                let name = index.get(context, 0);
+                Some(context.root(name))
             }
-            // Truncated toward zero, saturating at the integer range.
-            one_index_position(value.trunc() as i64, extent, "OneIndex <real>")
+            None => None,
+        },
+    };
+    if let Some(wanted) = wanted {
+        // NA selects the first NA name, as GNU R compares the string pointers.
+        if is_na(wanted.read(context)) {
+            let position = match dense::<Str>(context, names)? {
+                Some(names) => names.iter(context).position(is_na),
+                None => None,
+            };
+            return Ok(position.map_or(Slot::Named, Slot::At));
         }
-        SexpType::Symbol => one_index(extent, names, values::scalar_string_charsxp(index.car())?),
-        kind => Err(error(format!("invalid subscript type '{}'", kind.name()))),
+        if wanted.read(context).bytes().is_empty() {
+            return Ok(Slot::Named);
+        }
+        return Ok(match name_position(context, names, wanted, Some(true))? {
+            Some(position) => Slot::At(position),
+            None => Slot::Named,
+        });
     }
+    let integer = match dense::<Integer>(context, index)? {
+        Some(index) => Some(index.as_slice(context)[0]),
+        None => dense::<Logical>(context, index)?.map(|index| index.as_slice(context)[0]),
+    };
+    if let Some(value) = integer {
+        // NA is the most negative integer, so it selects "more than one" element.
+        return one_index_position(i64::from(value), extent, "integerOneIndex");
+    }
+    if let Some(index) = dense::<Real>(context, index)? {
+        let value = index.as_slice(context)[0];
+        // Past the longest vector R allows (2^52), a position selects nothing.
+        if value.is_nan() || value > 4_503_599_627_370_496.0 {
+            return Ok(Slot::Absent);
+        }
+        // Truncated toward zero, saturating at the integer range.
+        return one_index_position(value.trunc() as i64, extent, "OneIndex <real>");
+    }
+    Err(error(format!(
+        "invalid subscript type '{}'",
+        handles::type_name(index)
+    )))
 }
 
-unsafe fn one_index_position(value: i64, extent: usize, function: &str) -> R<Slot> {
+fn one_index_position(value: i64, extent: usize, function: &str) -> R<Slot> {
     if value > 0 {
         return Ok(Slot::At(value as usize - 1));
     }
@@ -4519,10 +4976,11 @@ unsafe fn one_index_position(value: i64, extent: usize, function: &str) -> R<Slo
 }
 
 /// GNU R's checks on a value assigned into one element of an atomic vector.
-unsafe fn atomic_replacement_check(value: Sexp) -> R<()> {
-    if !(value == nil()
-        || value.kind().is_atomic()
-        || matches!(value.kind(), SexpType::List | SexpType::Expression))
+fn atomic_replacement_check(context: &mut Cx<'_>, value: Local<'_>) -> R<()> {
+    let kind = value.r_type();
+    if !(kind == SexpType::Nil
+        || kind.is_atomic()
+        || matches!(kind, SexpType::List | SexpType::Expression))
     {
         // GNU R reads the length of a value that has none and reports this, naming the line of
         // `subassign.c` that reads it, which moves between releases.
@@ -4537,33 +4995,11 @@ unsafe fn atomic_replacement_check(value: Sexp) -> R<()> {
             "long vectors not supported yet: subassign.c:{line}"
         )));
     }
-    match length(value) {
+    match handles::length(context, value) {
         0 => Err(error("replacement has length zero")),
         1 => Ok(()),
         _ => Err(error("more elements supplied than there are to replace")),
     }
-}
-
-/// GNU R's `notSubsettableError`, which carries the object.
-unsafe fn not_subsettable(call: Sexp, object: Sexp) -> Unwind {
-    crate::conditions::classed_error(
-        call,
-        &format!(
-            "object of type '{}' is not subsettable",
-            object.kind().name()
-        ),
-        &["notSubsettableError", "error", "condition"],
-        &[("object", object)],
-    )
-}
-
-unsafe fn missing_subscript(call: Sexp, fields: &[(&str, Sexp)]) -> Unwind {
-    crate::conditions::classed_error(
-        call,
-        "missing subscript",
-        &["MissingSubscriptError", "error", "condition"],
-        fields,
-    )
 }
 
 unsafe fn do_dollar_assign(call: &Call<'_>) -> R<Sexp> {
@@ -4609,71 +5045,113 @@ unsafe fn do_dollar_assign(call: &Call<'_>) -> R<Sexp> {
     dollar_assign(object, name, value, call.call)
 }
 
+/// `x$name <- value`, with `name` a `CHARSXP`.
+///
+/// # Safety
+///
+/// On the interpreter's thread, with every argument a live object that the caller keeps rooted
+/// until it returns. The result is rooted in the caller's handle scope.
 pub unsafe fn dollar_assign(object: Sexp, name: Sexp, value: Sexp, call: Sexp) -> R<Sexp> {
+    // SAFETY: the caller's roots hold the arguments for the whole call, and the result is
+    // rooted before anything else allocates.
+    unsafe {
+        let result = handles::with(|context| {
+            let object = handles::held(context, object);
+            let name = handles::held(context, name)
+                .downcast::<handles::Chars>()
+                .ok_or_else(|| error("internal error: a name that is not a string"))?;
+            let value = handles::held(context, value);
+            let call = handles::held(context, call);
+            Ok(assign_dollar(context, object, name, value, call)?.raw())
+        })?;
+        crate::heap().root(result);
+        Ok(result)
+    }
+}
+
+/// [`dollar_assign`] on handles.
+fn assign_dollar<'s>(
+    context: &mut Cx<'s>,
+    object: Local<'s>,
+    name: Local<'s, handles::Chars>,
+    value: Local<'s>,
+    call: Local<'s>,
+) -> R<Local<'s>> {
     // `x$name <- x` stores the old `x`, as for `[[<-`.
-    let object = if value == object && object.kind() != SexpType::Environment {
-        values::shallow_duplicate(object)?
+    let object = if value.is(object) && object.r_type() != SexpType::Environment {
+        handles::shallow_copy(context, object)?.finish()
     } else {
         object
     };
-    if object.kind() == SexpType::Record {
-        return crate::records::dollar_assign(object, name.bytes(), value, call);
+    if object.r_type() == SexpType::Record {
+        let bytes: SmallVec<[u8; 32]> = SmallVec::from_slice(name.bytes(context));
+        return handles::record_dollar_assign(context, object, &bytes, value, call);
     }
-    let object = values::materialize(object)?;
-    match object.kind() {
-        SexpType::Environment => {
-            crate::moves::reaching_environment()?;
-            let symbol = crate::heap().install_char(name)?;
-            eval::define(symbol, value, object)?;
-            Ok(object)
-        }
-        SexpType::Object if object.has_gp(gp::S4_OBJECT) => {
-            let data = get_attr(object, symbols().dot_xdata);
-            if data.kind() == SexpType::Environment {
-                crate::moves::reaching_environment()?;
-                let symbol = crate::heap().install_char(name)?;
-                eval::define(symbol, value, data)?;
-                return Ok(object);
-            }
-            Err(error_in(call, "no '$<-' method for this S4 class"))
-        }
+    let object = handles::materialize(context, object)?;
+    if let Some(environment) = object.downcast::<handles::Environment>() {
+        handles::reaching_environment(context)?;
+        let symbol = handles::install(context, name)?;
+        handles::define(context, symbol, value, environment)?;
+        return Ok(object);
+    }
+    let kind = object.r_type();
+    if kind == SexpType::Object && is_s4(object) {
+        let data = get_attribute(context, object, symbol(|symbols| symbols.dot_xdata));
+        let data = context.root(data);
+        let Some(environment) = data.downcast::<handles::Environment>() else {
+            return Err(handles::error_in(call, "no '$<-' method for this S4 class"));
+        };
+        handles::reaching_environment(context)?;
+        let symbol = handles::install(context, name)?;
+        handles::define(context, symbol, value, environment)?;
+        return Ok(object);
+    }
+    let list = match kind {
         SexpType::List
         | SexpType::Expression
         | SexpType::Nil
         | SexpType::Pairlist
-        | SexpType::Language => {
-            let index = values::scalar_string_charsxp(name)?;
-            subassign2(object, &[index], value, call)
+        | SexpType::Language => object,
+        _ if kind.is_atomic() => {
+            handles::warning_in(context, call, "Coercing LHS to a list")?;
+            handles::coerce(context, object, SexpType::List)?
         }
-        _ if object.kind().is_atomic() => {
-            conditions::warning_call(call, "Coercing LHS to a list")?;
-            let list = coerce_vector(object, SexpType::List)?;
-            let index = values::scalar_string_charsxp(name)?;
-            subassign2(list, &[index], value, call)
-        }
-        _ => Err(not_subsettable(call, object)),
-    }
+        _ => return Err(not_subsettable_error(context, Some(call), object)),
+    };
+    let mut index = context.alloc::<Str>(1)?;
+    index.set(context, 0, name);
+    let index = index.finish().value();
+    assign_subset2(context, list, &[index], value, call)
 }
 
 unsafe fn do_list(call: &Call<'_>) -> R<Sexp> {
-    let result = alloc(SexpType::List, call.len())?;
+    // SAFETY: the call's arguments are the builtin's evaluated arguments, which it roots.
+    unsafe { handles::enter(call, list_of) }
+}
+
+/// `list(...)`: the arguments as a list, named by their tags when any has one.
+fn list_of<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let count = arguments.len();
+    let mut result = context.alloc::<List>(count)?;
     let mut any_names = false;
-    for (index, arg) in call.args.iter().enumerate() {
-        values::set_elt(result, index, arg.value);
-        if arg.tag != nil() {
-            any_names = true;
-        }
+    for index in 0..count {
+        result.set(context, index, arguments.value(index));
+        any_names |= arguments.tag(index).r_type() != SexpType::Nil;
     }
     if any_names {
-        let names = alloc(SexpType::String, call.len())?;
-        for (index, arg) in call.args.iter().enumerate() {
-            if arg.tag.kind() == SexpType::Symbol {
-                values::set_elt(names, index, arg.tag.car());
+        let mut names = context.alloc::<Str>(count)?;
+        for index in 0..count {
+            if let Some(tag) = arguments.tag(index).downcast::<Symbol>() {
+                let name = tag.read(context).name();
+                names.set(context, index, name);
             }
         }
-        values::set_attr(result, symbols().names, names)?;
+        let names = names.finish().value();
+        let mut result = result.owned();
+        set_attribute(context, &mut result, symbol(|symbols| symbols.names), names)?;
+        return Ok(result.finish().value());
     }
-    Ok(result)
+    Ok(result.finish().value())
 }
 
 // Lengths and names.
