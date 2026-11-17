@@ -1180,17 +1180,13 @@ impl<'a> Numbers<'a> {
     }
 }
 
-/// The zero-based position of `x[i]` or `x[[i]]` with one untagged, attribute-free numeric
-/// scalar `i` inside the vector's bounds: the common case GNU R's byte code also answers before
+/// The zero-based position of `x[i]` or `x[[i]]` with one attribute-free numeric scalar `i`
+/// inside the vector's bounds: the common case GNU R's byte code also answers before
 /// resolving subscripts in general.
-fn scalar_position(context: &mut Cx<'_>, arguments: &SubsetArgs<'_>) -> Option<usize> {
-    let ([index], true) = (arguments.indices.as_slice(), arguments.plain) else {
-        return None;
-    };
-    let object = arguments.object;
+fn scalar_position(context: &mut Cx<'_>, object: Local<'_>, index: Local<'_>) -> Option<usize> {
     let vector = object.r_type().is_atomic()
         || matches!(object.r_type(), SexpType::List | SexpType::Expression);
-    if !vector || object.downcast::<Alt>().is_some() || has_attributes(context, *index) {
+    if !vector || object.downcast::<Alt>().is_some() || has_attributes(context, index) {
         return None;
     }
     let position = match (index.downcast::<Integer>(), index.downcast::<Real>()) {
@@ -1215,8 +1211,6 @@ struct SubsetArgs<'s> {
     indices: SmallVec<[Local<'s>; 2]>,
     drop: Option<Local<'s>>,
     exact: Option<Local<'s>>,
-    /// Whether the call has exactly two arguments, neither tagged.
-    plain: bool,
 }
 
 /// Splits a builtin's arguments into the object, the subscripts, and `drop`/`exact`.
@@ -1246,7 +1240,6 @@ unsafe fn subset_args<'s>(context: &Cx<'s>, call: &Call<'_>) -> SubsetArgs<'s> {
         indices,
         drop,
         exact,
-        plain: matches!(call.args, [object, index] if object.tag == nil() && index.tag == nil()),
     }
 }
 
@@ -1254,31 +1247,38 @@ unsafe fn subset_args<'s>(context: &Cx<'s>, call: &Call<'_>) -> SubsetArgs<'s> {
 
 unsafe fn do_subset(call: &Call<'_>) -> R<Sexp> {
     handles::with(|context| {
+        // Two untagged arguments are tested for a scalar read before the arguments are split,
+        // because the split's loop and subscript list cost more than the read.
+        if let [object, index] = call.args
+            && object.tag == nil()
+            && index.tag == nil()
+        {
+            let object = handles::held(context, object.value);
+            let index = handles::held(context, index.value);
+            // `[` on an Array makes an Array, which `subset` builds.
+            if let Some(position) = scalar_position(context, object, index)
+                && !has_attributes(context, object)
+                && !handles::is_array(object)
+                && object.r_type().is_atomic()
+            {
+                return element(context, object, position).map(Local::raw);
+            }
+        }
         let arguments = subset_args(context, call);
+        let drop = match arguments.drop {
+            Some(drop) => handles::logical_scalar(context, drop) != 0,
+            None => true,
+        };
         let call = handles::held(context, call.call);
-        subset_call(context, &arguments, call).map(Local::raw)
+        subset_value(
+            context,
+            arguments.object,
+            &arguments.indices,
+            drop,
+            Some(call),
+        )
+        .map(Local::raw)
     })
-}
-
-fn subset_call<'s>(
-    context: &mut Cx<'s>,
-    arguments: &SubsetArgs<'s>,
-    call: Local<'s>,
-) -> R<Local<'s>> {
-    let object = arguments.object;
-    // `[` on an Array makes an Array, which `subset` builds.
-    if let Some(position) = scalar_position(context, arguments)
-        && !has_attributes(context, object)
-        && !handles::is_array(object)
-        && object.r_type().is_atomic()
-    {
-        return element(context, object, position);
-    }
-    let drop = match arguments.drop {
-        Some(drop) => handles::logical_scalar(context, drop) != 0,
-        None => true,
-    };
-    subset_value(context, object, &arguments.indices, drop, Some(call))
 }
 
 /// `x[i, ...]` with positional subscripts on a subject that is not an object: the same
@@ -2524,21 +2524,29 @@ impl Iterator for ArrayOffsets<'_> {
 
 unsafe fn do_subset2(call: &Call<'_>) -> R<Sexp> {
     handles::with(|context| {
-        let arguments = subset_args(context, call);
-        let object = arguments.object;
-        if let Some(position) = scalar_position(context, &arguments)
-            && !handles::is_object(object)
+        // The scalar read comes before the split, as in `do_subset`.
+        if let [object, index] = call.args
+            && object.tag == nil()
+            && index.tag == nil()
         {
-            match object.r_type() {
-                SexpType::List | SexpType::Expression => {
-                    return item(context, object, position).map(Local::raw);
+            let object = handles::held(context, object.value);
+            let index = handles::held(context, index.value);
+            if let Some(position) = scalar_position(context, object, index)
+                && !handles::is_object(object)
+            {
+                // The position is inside a vector with storage, so a list's element is read
+                // where it lies.
+                if let Some(list) = object.downcast::<List>() {
+                    return Ok(list.get(context, position).raw());
                 }
-                kind if kind.is_atomic() => {
-                    return element(context, object, position).map(Local::raw);
+                if let Some(expressions) = object.downcast::<Expression>() {
+                    return Ok(expressions.get(context, position).raw());
                 }
-                _ => {}
+                return element(context, object, position).map(Local::raw);
             }
         }
+        let arguments = subset_args(context, call);
+        let object = arguments.object;
         if arguments.indices.is_empty() {
             return Err(call.error("no index specified"));
         }
@@ -4365,12 +4373,21 @@ fn grow<'s>(
     );
     for_stored_kind!(vector, |typed: Kind| {
         let owned = owned.and_then(|owned| owned.downcast::<Kind>().ok());
-        Ok(grow_as(context, typed, owned, new_length, final_step)?.value())
+        Ok(grow_as(context, typed, owned, new_length, final_step)?
+            .vector
+            .value())
     });
     Err(error(format!(
         "internal error: growing a vector of type '{}'",
         handles::type_name(vector)
     )))
+}
+
+/// A grown vector and, when the growth copied its names, the copy: the vector's attribute is
+/// the only reference to it, so a name for a new element is stored without a second lookup.
+struct Grown<'s, T: Kind> {
+    vector: Owned<'s, T>,
+    names: Option<Owned<'s, Str>>,
 }
 
 fn grow_as<'s, T: Growable>(
@@ -4379,13 +4396,35 @@ fn grow_as<'s, T: Growable>(
     owned: Option<Owned<'s, T>>,
     new_length: usize,
     final_step: bool,
-) -> R<Owned<'s, T>> {
+) -> R<Grown<'s, T>> {
+    grow_in_caller(context, vector, owned, new_length, final_step, true)
+}
+
+/// [`grow_as`] compiled into its caller, which an append is hot enough to want. `pad` is false
+/// when the caller stores every new element itself.
+#[inline(always)]
+fn grow_in_caller<'s, T: Growable>(
+    context: &mut Cx<'s>,
+    vector: Local<'s, T>,
+    owned: Option<Owned<'s, T>>,
+    new_length: usize,
+    final_step: bool,
+    pad: bool,
+) -> R<Grown<'s, T>> {
     let count = vector.len();
     let mut owned = match owned {
         Some(mut owned) => {
-            if handles::resize_in_place(context, &mut owned, new_length)? {
-                T::pad(context, &mut owned, count);
-                return Ok(owned);
+            // A full vector fails the header test, which spares it the call.
+            if owned.has_room(new_length)
+                && handles::resize_in_place(context, &mut owned, new_length)?
+            {
+                if pad {
+                    T::pad(context, &mut owned, count);
+                }
+                return Ok(Grown {
+                    vector: owned,
+                    names: None,
+                });
             }
             Some(owned)
         }
@@ -4397,22 +4436,45 @@ fn grow_as<'s, T: Growable>(
         _ => handles::copy_prefix(context, vector, &mut result, count)?,
     }
     let mut result = result.owned();
-    T::pad(context, &mut result, count);
+    if pad {
+        T::pad(context, &mut result, count);
+    }
+    let names_symbol = handles::symbol(|symbols| symbols.names);
+    let (names, only_names) = {
+        let mut cells = handles::attribute_cells(context, vector);
+        let (names, only_names) = match cells.next() {
+            None => (None, true),
+            Some((tag, names)) if tag.is(names_symbol) => (Some(names), cells.next().is_none()),
+            Some(_) => {
+                let names = handles::get_attribute(context, vector, names_symbol);
+                ((names.r_type() != SexpType::Nil).then_some(names), false)
+            }
+        };
+        (names.map(|names| context.root(names)), only_names)
+    };
     // Names go first and the other attributes follow in order, as GNU R's `EnlargeVector`
     // lays them out; code such as the globals package checks the attribute order.
-    let names_symbol = handles::symbol(|symbols| symbols.names);
-    let names = handles::get_attribute(context, vector, names_symbol);
-    let names = context.root(names);
-    if names.r_type() != SexpType::Nil {
-        let mut grown = handles::alloc_with_room::<Str>(context, new_length)?;
-        if let Some(names) = handles::dense::<Str>(context, names)? {
-            let kept = names.len().min(count);
-            handles::copy_prefix(context, names, &mut grown, kept)?;
+    let names = match names {
+        Some(names) => {
+            let mut grown = handles::alloc_with_room::<Str>(context, new_length)?;
+            if let Some(names) = handles::dense::<Str>(context, names)? {
+                let kept = names.len().min(count);
+                handles::copy_prefix(context, names, &mut grown, kept)?;
+            }
+            let grown = grown.owned();
+            handles::set_attribute(context, &mut result, names_symbol, grown.get().value())?;
+            Some(grown)
         }
-        handles::set_attribute(context, &mut result, names_symbol, grown.finish().value())?;
+        None => None,
+    };
+    // The S4 bit travels with the attributes, and a vector may carry it without any.
+    if !only_names || handles::is_s4(vector.value()) {
+        handles::copy_most_attributes(context, vector.value(), &mut result, false)?;
     }
-    handles::copy_most_attributes(context, vector.value(), &mut result, false)?;
-    Ok(result)
+    Ok(Grown {
+        vector: result,
+        names,
+    })
 }
 
 /// Writes `new_names` from position `count` into the names of the grown `vector`, which gets
@@ -4474,11 +4536,21 @@ pub(crate) fn append<'s, T: Growable>(
     let count = vector.len();
     let owned = owned.and_then(|owned| owned.downcast::<T>().ok());
     // Writing a name can fail, so only an unnamed append may move an owned list's elements.
-    let mut result = grow_as(context, vector, owned, count + 1, name.is_none())?;
+    let Grown {
+        vector: mut result,
+        names,
+    } = grow_in_caller(context, vector, owned, count + 1, name.is_none(), false)?;
     put(context, &mut result, count);
     let mut result = result.value();
-    if let Some(name) = name {
-        write_names(context, &mut result, count, &[name])?;
+    match (name, names) {
+        (Some(name), Some(mut names)) => {
+            // The copied names are as long as the grown vector.
+            let mut write = names.write(context);
+            let (mut stores, _) = write.split_elements();
+            stores.set(count, name);
+        }
+        (Some(name), None) => write_names(context, &mut result, count, &[name])?,
+        (None, _) => {}
     }
     Ok(result.finish())
 }

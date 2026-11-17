@@ -186,7 +186,7 @@
 
 use {
     crate::{
-        Heap, HeapResult,
+        Heap, HeapResult, flag_bits,
         object::{Rcomplex, Sexp, SexpType},
     },
     std::{marker::PhantomData, mem::MaybeUninit, ptr::NonNull},
@@ -1102,6 +1102,18 @@ impl<'s, T: Kind> Owned<'s, T> {
 }
 
 impl<'s, T: Vector> Owned<'s, T> {
+    /// Whether the vector's storage holds `length` elements, so that it can grow to that
+    /// length where it is.
+    #[inline]
+    pub fn has_room(&self, length: usize) -> bool {
+        // SAFETY: the object is rooted, and the test reads its header.
+        unsafe {
+            self.raw.flags() & flag_bits::RESIZABLE != 0
+                && !self.raw.is_altrep()
+                && length as isize <= self.raw.capacity()
+        }
+    }
+
     /// Access to write the vector's elements where they are.
     #[inline]
     pub fn write<'a>(&'a mut self, cx: &'a mut Cx<'s>) -> Write<'a, 's, T> {

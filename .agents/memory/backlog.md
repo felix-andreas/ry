@@ -1588,8 +1588,9 @@ overhead, not allocation.
   bindings are locked as GNU R locks them.
 - Smaller differences in complex assignments, each the same in every tier: `exists("*tmp*")` in
   a subscript is `FALSE` (GNU R binds `*tmp*` for the length of the assignment); `..1[1] <- 1`
-  fails with "object '..1' not found" where GNU R says "..1 used in an incorrect context"; and
-  `p$v <- 1` on an S4 object without a method says "no '$<-' method for this S4 class" where
+  fails with "object '..1' not found" where GNU R says "..1 used in an incorrect context";
+  `e$b <- 2` for a new name on an expression vector keeps an expression where GNU R makes a
+  list; and `p$v <- 1` on an S4 object without a method says "no '$<-' method for this S4 class" where
   GNU R says "no method for assigning subsets of this S4 class" against the generated call.
 - Closures over equal but distinct body copies compile again. `Bodies` (`crates/interp/src/bytecode.rs`) shares code by body identity, but a lambda inside a testthat `expect_*()` argument is a fresh copy of its expression at each evaluation, so `testthat_full` compiles about 43 bodies per warm iteration (about 4M Ir of its 629M). GNU R's JIT cache hashes the structure and confirms with `identical`, so it shares them. A structural lookup at the compile decision, confirming with a deep compare of body, formals and srcref, would close it.
 - `readChar` reads one byte per device call: an 11 MB file takes 150 ms against GNU R's 29 ms (`readChar(f, file.size(f))`). Its ceiling on measured workloads is 0%, since `testthat_full`, the strings app and the report app never call it, so a bulk read (one device read per string) waits for a workload that does.

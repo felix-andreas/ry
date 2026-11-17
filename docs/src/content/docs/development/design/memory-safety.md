@@ -423,6 +423,18 @@ shape, and changing the shape removed it:
   save registers, 14 instructions per allocation.
 - **Text kept for the length of a call is copied to a stack buffer.** `Cow::into_owned` is a
   `malloc` and a `free`, about 83 instructions per call of `sub`.
+- **A general step that a hot caller uses for one case is compiled into that caller, with the
+  parts the caller does not need switched off by a constant.** Growing a vector pads the new
+  elements, tests for room and copies attributes. An append stores into the one new element,
+  usually has room, and usually has no attributes but names, so `append` compiles the growth
+  step in (`grow_in_caller`) without the padding, asks the vector's header for room
+  (`Owned::has_room`) before the out-of-line resize, and stores the new name into the names the
+  growth copied. Through the general growth function an append ran about 77 instructions
+  longer than the raw form.
+- **A builtin answers its scalar case before it splits its arguments.** `x[[i]]` with two
+  untagged arguments reads them from the call and returns a list's element
+  without a root, because the builtin's caller receives a raw pointer either way. Splitting
+  first builds the subscript list and roots the element, about 160 instructions per call.
 
 With those rules, the forms on handles against the raw forms, in instructions per operation
 (`just bench-mechanisms`, tier 1 off): of 103 rows, 75 are within half a percent, 17 are lower and
@@ -464,6 +476,29 @@ The four higher rows, by cause:
   11 kB of machine code with every store kind inlined, and the allocation of its registers
   changes with unrelated code. Moving the fallback to the replacement builtin out of line made
   the row six instructions longer, because the split passes the operands again.
+
+`[`, `[[`, `$`, `@` and their replacement forms measure the same way: of 105 rows, 93 are within
+half a percent of the raw forms, 9 are lower and 3 are higher.
+
+| Operation | Raw | On handles | Change |
+| --- | ---: | ---: | ---: |
+| `x[name]` | 1,642 | 1,576 | -4.0% |
+| `names(x) <- value` | 3,275 | 3,198 | -2.4% |
+| `length(x) <- value` | 1,269 | 1,247 | -1.7% |
+| a new field of a list argument | 3,304 | 3,266 | -1.1% |
+| three appends to a new vector | 4,676 | 4,629 | -1.0% |
+| `unlist` of a short list | 6,425 | 6,471 | +0.7% |
+| `x$name` dispatched to a method | 4,264 | 4,298 | +0.8% |
+| `list` with a name | 1,277 | 1,292 | +1.2% |
+
+The three higher rows, by cause:
+
+- **`unlist`**: each element goes through the store that checks the target's type and takes
+  its write view, 97 instructions where the raw store ran 43.
+- **`x$name` to a method**: the dispatch with the allocation of its name argument runs 214
+  instructions where the raw pair ran 181.
+- **`list` with a name**: the names vector comes from the rooted allocation body, as `nchar`'s
+  result does.
 
 Each migration change measures its builtins the same way before the raw form is deleted, and a
 change that reaches the call path or the bytecode loop reports `just bench-mechanisms` and tier
