@@ -1966,3 +1966,37 @@ Reading an item's range from `item_spans` made every edit re-lower every item of
   `signature_in_a_comment_reports_what_blocks_it`),
   `crates/ry/tests/native/blocked-aliased-signature.R`, `crates/syntax/tests/test_annotation.rs`,
   `a_console_reads_on_only_when_the_input_ended_too_early`, and the scenario `typed-comment-signatures`.
+
+## A splice reparse shares what the parser's recorded lookahead proves untouched
+
+**Status:** built.
+
+- **Previous source of truth.** `syntax::reparse::try_splice` guessed whether a line break was a safe
+  seam from the result of the parse: it matched error messages ("unclosed", "to close", "unterminated"),
+  counted open delimiters in the token stream, and refused a middle whose last error was incomplete.
+  Nothing said what a statement had read, so the guess was wrong wherever the grammar looks past a line
+  break without leaving an error: an inline union that continues on a line starting with `|`, a function
+  return type whose body is on the next line, a record type closed on a later line, recovery that asks
+  whether the next line starts a statement, and an f-string whose `{}` spans lines. On about 32,700
+  simulated edits (small edits and typed statements over the program corpus and the fixture sources) the
+  guess produced 95 trees or error lists that differ from a full parse.
+- **Target shape.** The parser records what it read. `Parse::lookahead` holds one `Lookahead { statement,
+  end }` for each top-level statement, and each `#:` annotation between two statements, that read a token
+  past the one it stops on or read the end of the text. Every token read at or past the cursor goes
+  through `Parser::kind_at`, `token_str` or `adjacent`, which keep the furthest index in `examined`; an
+  f-string's opening token counts as a read of its closing quote, because the lexer reads the f-string as
+  one unit. A splice shares the children before a line break no old statement read across, parses a
+  middle that includes its closing line break, requires that no middle statement read past that break
+  when a suffix follows, and shares the suffix only after a break no old statement read across. A spliced
+  parse composes its lookahead from the three parts, so the next splice starts from the same facts as
+  after a full parse.
+- **What stays lexical.** The lexer has two reads the parser cannot see, and each keeps its guard in
+  `try_splice`: an unterminated quote ends at its line break only because no closing quote follows
+  anywhere, and a lone `\r` joins a following `\n` into one line break.
+- **Impact.** Correctness: 0 differences on the same edits, and on 30,000 seeds each of the edit-stream
+  and small-edit arms. Splice rate while typing a statement: 34% before, 44% after, because the rule
+  refuses only what a statement read. Cost: one `Cell<usize>` maximum per token read, and one record per
+  statement that looked ahead (none for a statement that stops on the line break it read last).
+  Incremental analysis is unchanged: the tree store is invisible to queries.
+- **Check.** `reparse` compares every splice with a full parse under `enable_invariants()`, lookahead
+  included; `SPLICE_REGRESSIONS` in `crates/syntax/tests/test_fuzz.rs` pins each shape above.

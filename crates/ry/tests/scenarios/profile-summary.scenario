@@ -25,6 +25,55 @@ expect file summary.md lacks "confidential_input"
 expect file summary.md lacks "hidden failure text"
 expect file summary.md "Private package names are hashed with your key for code outside projects."
 
+# A summarized run takes the paths any other run takes, so the element reads of a hot loop stay
+# inline: the summary counts `[` calls only for the few the rest of the session makes.
+file inline.R
+| values <- as.double(1:20000)
+| total <- 0
+| walk <- function() for (i in 1:20000) total <<- total + values[i]
+| walk()
+| cat(total, "\n")
+run ry run --profile-summary inline.md inline.R
+expect exit 0
+expect stdout "200010000"
+expect file inline.md "closure calls"
+file inline-calls.R
+| text <- readLines("inline.md")
+| counted <- grep("^[|] `\\[` [|] [0-9]+ [|]$", text, value = TRUE)
+| calls <- if (length(counted)) as.integer(gsub("[^0-9]", "", counted)) else 0L
+| stopifnot(length(calls) == 1L, calls < 1000L)
+| cat("element reads stayed inline\n")
+run ry run inline-calls.R
+expect exit 0
+expect stdout "element reads stayed inline"
+
+# A summarized session can fork. The children run on without a sampling thread, their results
+# come back, and the parent writes the summary.
+file forked.R
+| add_one <- function(x) x + 1
+| count <- function(seed) { total <- 0; for (i in 1:20000) total <- add_one(total); total }
+| sums <- parallel::mclapply(1:4, count, mc.cores = 2)
+| cat(sum(unlist(sums)), "\n")
+run ry run --profile-summary forked.md forked.R
+expect exit 0
+expect stdout "80000"
+expect file forked.md "## Time split"
+
+# The sampled call stacks hold an S4 method's frame under its generic's, so the time of the code a
+# method calls is filed below both.
+file method.R
+| setClass("Shape", representation(size = "numeric"))
+| setGeneric("area", function(shape, ...) standardGeneric("area"))
+| spin <- function(n) { total <- 0; for (i in 1:n) total <- total + sqrt(i); total }
+| setMethod("area", "Shape", function(shape, ...) spin(shape@size))
+| cat(area(new("Shape", size = 3e7)) > 0, "\n")
+env RY_PROFILE_STACKS method-stacks.txt
+run ry run --profile-summary method.md method.R
+unset RY_PROFILE_STACKS
+expect exit 0
+expect stdout "TRUE"
+expect file method-stacks.txt "R_GlobalEnv::area;R_GlobalEnv::area;R_GlobalEnv::spin"
+
 # A run whose hot function is too small to compile says so: the events count compiled bodies and
 # refused compile attempts apart, and a table counts the refusals by the reason `RY_JIT_LOG=1`
 # prints for each.

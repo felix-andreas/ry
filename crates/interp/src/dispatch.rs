@@ -895,7 +895,8 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
     };
     // Methods are looked up from the generic's caller and see it as their `parent.frame()`,
     // so a generic called from a slot frame gives that frame its environment.
-    let sys_parent = eval::frame_sys_parent(position, eval::Reify::Site("method dispatch"))?;
+    let sys_parent =
+        eval::frame_sys_parent(position, eval::Reify::Site(eval::Site::MethodDispatch))?;
     eval::materialize_references(position)?;
     let promargs: eval::Args = crate::frame_args(interp(), position).into();
     let object = if call.len() >= 2 {
@@ -991,7 +992,7 @@ pub(crate) unsafe fn use_method_in_slots(
     let caller = lazy_caller(position, generic)?;
     let sys_parent = match caller {
         Some(_) => nil(),
-        None => eval::frame_sys_parent(position, eval::Reify::Site("method dispatch"))?,
+        None => eval::frame_sys_parent(position, eval::Reify::Site(eval::Site::MethodDispatch))?,
     };
     // The argument references the generic was called with go to the method as they are: the
     // calling instruction releases them only after the generic's call returns, and a method
@@ -1031,7 +1032,7 @@ pub(crate) unsafe fn use_method_in_slots(
     let new_call = renamed_call(frame_call, found.method_name)?;
     drop(dispatching);
     if found.method.kind() != SexpType::Closure {
-        let sys_parent = eval::frame_env(owner, eval::Reify::Site("method dispatch"))?;
+        let sys_parent = eval::frame_env(owner, eval::Reify::Site(eval::Site::MethodDispatch))?;
         return apply_method(
             new_call,
             found.method,
@@ -1379,7 +1380,7 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     let (call_env, lookup_env) = {
         let value = match read(symbols.dot_generic_call_env)? {
             value if value == unbound() => {
-                eval::frame_sys_parent(position, eval::Reify::Site("method dispatch"))?
+                eval::frame_sys_parent(position, eval::Reify::Site(eval::Site::MethodDispatch))?
             }
             value => value,
         };
@@ -2253,7 +2254,7 @@ unsafe fn apply_internal_method(call: Sexp, found: Found, promised: &[Arg], env:
         missing: 0,
         caller: crate::NO_SLOTS,
         pending: nil(),
-        inlined: false,
+        role: crate::FrameRole::Context,
         reified_by: crate::NOT_REIFIED,
         handle_mark: crate::heap().handle_mark() as u32,
         previous_owner: state.slot_owner,

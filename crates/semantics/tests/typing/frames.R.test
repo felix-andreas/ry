@@ -1164,6 +1164,13 @@ sales: DataFrame{region: character[], units: integer[], price: double[]}
 grouped: GroupBy{region: character[]; units: integer[], price: double[]}
 totals: DataFrame{region: character[], units: integer[], avg: double[], n: integer[]}
 
+#---- group_by_type_is_written_inline
+sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L), price = c(1.5, 2))
+grouped: GroupBy{region: character[]; units: integer[], price: double[]} <- DataFrame.group_by(sales, "region")
+#++++
+sales: DataFrame{region: character[], units: integer[], price: double[]}
+grouped: GroupBy{region: character[]; units: integer[], price: double[]}
+
 #---- join_appends_the_other_columns_with_a_suffix
 left <- DataFrame(id = 1:3, score = c(1, 2, 3))
 right <- DataFrame(id = 1:2, score = c(10, 20), label = c("a", "b"))

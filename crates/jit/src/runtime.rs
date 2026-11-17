@@ -9,6 +9,7 @@
 use {
     crate::analysis::{Speculation, bit, resolve_function, status},
     heap::{
+        activity,
         object::{
             Header, INTEGER_PREFIX, LOGICAL_PREFIX, NA_INTEGER, Sexp, SexpType, Slot,
             UNBOXED_SLOTS, gp, is_na_real,
@@ -1036,8 +1037,8 @@ pub unsafe extern "C" fn jit_load_slot(activation: *mut Activation, slot: i64) -
                             Ok((value, true))
                         }
                         Some(value) if value == values::missing_arg() => {
-                            let env =
-                                machine.reify(eval::Reify::Site("missing argument lookup"))?;
+                            let env = machine
+                                .reify(eval::Reify::Site(eval::Site::MissingArgumentLookup))?;
                             eval::eval_symbol(symbol, env).map(|value| (value, true))
                         }
                         _ => eval::eval_symbol(symbol, machine.enclosure())
@@ -1793,14 +1794,19 @@ unsafe fn start(parent: *mut Activation, child: *mut Child) -> *mut Activation {
             || function.cdr() != inlined.code
             || enclosure != (*child).activation.enclosure
             || enclosure.has_gp(gp::SLOT_FRAME);
+        let hooks = activity::hooks();
         if needs_frame
             || (*(*parent).parked).pending.is_some()
+            || hooks & activity::CAPTURE != 0
             || !state.object_systems
             || state.debugger.is_some()
             || moves::tracking()
             || depth > state.max_depth as usize
         {
             return declined(parent, child, needs_frame);
+        }
+        if hooks & activity::SUMMARY != 0 {
+            interp::profile_summary::count_inlined_call(function);
         }
         debug_assert!((*child).machine.mark == heap().handle_mark());
         &raw mut (*child).activation

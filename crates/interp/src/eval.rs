@@ -263,7 +263,7 @@ unsafe fn dots_binding(env: Sexp) -> R<Sexp> {
     let dots = symbols().dots;
     if env.has_gp(gp::SLOT_FRAME) && crate::heap().may_bind(env, dots) {
         let frame = &interp().frames[pending_owner(env)];
-        if !frame.inlined
+        if frame.role != crate::FrameRole::Inlined
             && let Some(value) = slot_content(frame.function, frame.slots as usize, dots)
         {
             return Ok(value);
@@ -288,7 +288,7 @@ pub unsafe fn slot_binding(env: Sexp, symbol: Sexp, forcing: bool) -> Option<Sex
     // A slot of a frame run without its body ([`run_inlined`]) holds the value where a cell
     // would hold the forced promise of the caller's variable ([`box_slots`]), which a reader
     // of the binding itself expects.
-    if frame.inlined && !forcing {
+    if frame.role == crate::FrameRole::Inlined && !forcing {
         return None;
     }
     let value = slot_content(frame.function, frame.slots as usize, symbol)?;
@@ -565,7 +565,7 @@ unsafe fn slot_promise_value(promise: Sexp, owner: usize) -> R<Sexp> {
     }
     eval(
         expression,
-        frame_env(owner, Reify::Site("promise over the frame"))?,
+        frame_env(owner, Reify::Site(Site::PromiseOverFrame))?,
     )
 }
 
@@ -734,7 +734,7 @@ pub unsafe fn slot_closure(header: usize, formals: Sexp, body: Sexp, srcref: Sex
         panic!("a slot frame's activation outlived its frame");
     };
     if crate::pending_closures_of(&state.pending_closures, owner).len() >= crate::FRAME_CLOSURES {
-        let env = frame_env(owner, Reify::Site("function definition"))?;
+        let env = frame_env(owner, Reify::Site(Site::FunctionDefinition))?;
         return make_closure(formals, body, srcref, env);
     }
     let env = pending_env(owner)?;
@@ -810,7 +810,7 @@ unsafe fn box_variable(owner: usize, symbol: Sexp) -> R<()> {
 /// caller makes only when something asks. It is read here, when the variable gets a cell.
 pub unsafe fn method_var_value(index: usize, symbol: Sexp, value: Sexp) -> R<Sexp> {
     if value == unbound() && symbol == symbols().dot_generic_call_env {
-        frame_sys_parent(index, Reify::Site("method dispatch"))
+        frame_sys_parent(index, Reify::Site(Site::MethodDispatch))
     } else {
         Ok(value)
     }
@@ -834,7 +834,7 @@ unsafe fn box_slots(owner: usize, slots: std::ops::Range<usize>) -> R<()> {
     // its slot as the value; the generic path would have bound a promise of the variable,
     // forced by the body, and `substitute` reads the variable from it. Constants bind as
     // themselves either way.
-    let sources = if frame.inlined {
+    let sources = if frame.role == crate::FrameRole::Inlined {
         direct_sources(function, frame.call)?
     } else {
         None
@@ -923,7 +923,7 @@ unsafe fn leave_slots(owner: usize) {
     if activity::enabled() {
         // Whatever asked for the environment last is the likeliest reader of it.
         if frame.reified_by == crate::NOT_REIFIED {
-            frame.reified_by = activity::label("environment read");
+            frame.reified_by = Site::EnvironmentRead as u32;
         }
         activity::count_reification(frame.reified_by);
     }
@@ -935,13 +935,13 @@ unsafe fn leave_slots(owner: usize) {
 /// environment from the start would list them, formals first. `cause` names what makes the
 /// environment outlive a frame that is returning, for the profile summary. The caller has
 /// suspended collection.
-unsafe fn lift_frame(index: usize, cause: Option<&'static str>) -> R<()> {
+unsafe fn lift_frame(index: usize, cause: Option<Site>) -> R<()> {
     let frame = &mut interp().frames[index];
     if activity::enabled()
         && frame.env == nil()
         && let Some(cause) = cause
     {
-        frame.reified_by = activity::label(cause);
+        frame.reified_by = cause as u32;
     }
     let (function, env) = (frame.function, frame.pending);
     let names = bytecode::frame_slot_names(function);
@@ -1221,7 +1221,7 @@ unsafe fn force_reference(reference: Sexp) -> R<Sexp> {
     if value == missing_arg() {
         return eval(
             symbol,
-            frame_env(owner, Reify::Site("promise over the frame"))?,
+            frame_env(owner, Reify::Site(Site::PromiseOverFrame))?,
         );
     }
     Ok(value)
@@ -1520,7 +1520,7 @@ pub unsafe fn promise_env(promise: Sexp) -> R<Sexp> {
     {
         return frame_env(
             reference_target(promise).0,
-            Reify::Site("promise environment"),
+            Reify::Site(Site::PromiseEnvironment),
         );
     }
     Ok(promise.tag())
@@ -1749,18 +1749,21 @@ unsafe fn call_direct_observed(
     call: Sexp,
     args: &[Sexp],
 ) -> R<Option<Sexp>> {
-    let index = builtin_index(definition);
-    let _activity = activity::enter(Activity::Builtin, index as u32);
     if activity::profile_ticked() {
         record_profile_sample(Some(definition.name))?;
     }
-    let value = run_direct(definition, direct, call, args)?;
-    // A declined entry leaves the count to the full call that follows.
-    if value.is_some() && activity::enabled() {
-        activity::count(Counter::BuiltinCalls);
-        activity::count_builtin(index);
+    if !activity::enabled() {
+        return run_direct(definition, direct, call, args);
     }
-    Ok(value)
+    let index = builtin_index(definition);
+    let running = activity::publish_builtin(index);
+    let value = run_direct(definition, direct, call, args);
+    activity::restore(running);
+    // A declined entry leaves the count to the full call that follows.
+    if matches!(value, Ok(Some(_))) {
+        activity::record_builtin(index);
+    }
+    value
 }
 
 #[inline(always)]
@@ -1799,8 +1802,9 @@ pub(crate) unsafe fn call_builtin_reusing(
 /// [`call_builtin_reusing`], blaming `blame` for an error that names no call.
 //
 // The common call (no hook to run, the arity right, no names to check, no replacement target to
-// copy) runs straight through; anything else takes the out-of-line path, so this frame stays
-// small enough that entry and exit cost a handful of instructions.
+// copy) runs straight through; anything else takes an out-of-line path, so this frame stays
+// small enough that entry and exit cost a handful of instructions. A call that only a hook
+// observes has its own path, which carries none of the checks' code.
 #[inline(always)]
 unsafe fn call_builtin_blaming(
     definition: &BuiltinDef,
@@ -1812,8 +1816,7 @@ unsafe fn call_builtin_blaming(
     blame: Sexp,
 ) -> R<Sexp> {
     let checks = definition.checks;
-    if activity::hooks() != 0
-        || (checks.arity && args.len() != definition.arity as usize)
+    if (checks.arity && args.len() != definition.arity as usize)
         || (checks.names && args.iter().any(|arg| arg.tag != nil()))
         || (checks.replacement != Replacement::None
             && args
@@ -1822,12 +1825,15 @@ unsafe fn call_builtin_blaming(
     {
         return call_builtin_checked(definition, call, op, args, env, reusable, blame);
     }
+    if activity::hooks() != 0 {
+        return call_builtin_observed(definition, call, op, args, env, reusable, blame);
+    }
     run_builtin(definition, call, op, args, env, reusable, blame)
 }
 
 /// [`call_builtin`] with arguments that are all untagged and none empty, as at a call site tier 0
-/// quickened: the names check cannot fail, so only a hook, a wrong arity or a shared replacement
-/// target takes the checked path.
+/// quickened: the names check cannot fail, so only a wrong arity or a shared replacement target
+/// takes the checked path, and a hook the observed one.
 #[inline(always)]
 pub(crate) unsafe fn call_builtin_positional(
     definition: &BuiltinDef,
@@ -1837,14 +1843,16 @@ pub(crate) unsafe fn call_builtin_positional(
     env: Sexp,
 ) -> R<Sexp> {
     let checks = definition.checks;
-    if activity::hooks() != 0
-        || (checks.arity && args.len() != definition.arity as usize)
+    if (checks.arity && args.len() != definition.arity as usize)
         || (checks.replacement != Replacement::None
             && args
                 .first()
                 .is_some_and(|target| target.value.refcount() >= 1))
     {
         return call_builtin_checked(definition, call, op, args, env, None, unbound());
+    }
+    if activity::hooks() != 0 {
+        return call_builtin_observed(definition, call, op, args, env, None, unbound());
     }
     run_builtin(definition, call, op, args, env, None, unbound())
 }
@@ -1871,8 +1879,40 @@ pub(crate) unsafe fn call_inlined_internal(
     result
 }
 
-/// The builtin call [`call_builtin_reusing`] hands off: it publishes the activity, raises the
-/// arity and name errors, takes a profile sample, and copies a shared replacement target.
+/// The builtin call under a hook flag whose arity, names and replacement target pass: it takes
+/// an `Rprof` sample that is due, and while a profile summary is collected it counts the call
+/// and publishes the builtin for as long as it runs.
+#[inline(never)]
+unsafe fn call_builtin_observed(
+    definition: &BuiltinDef,
+    call: Sexp,
+    op: Sexp,
+    args: &[Arg],
+    env: Sexp,
+    reusable: Option<Sexp>,
+    blame: Sexp,
+) -> R<Sexp> {
+    if activity::profile_ticked() {
+        record_profile_sample(Some(definition.name))?;
+    }
+    let summarized = activity::enabled();
+    let running = if summarized {
+        let index = builtin_index(definition);
+        activity::record_builtin(index);
+        activity::publish_builtin(index)
+    } else {
+        0
+    };
+    let result = run_builtin(definition, call, op, args, env, reusable, blame);
+    if summarized {
+        activity::restore(running);
+    }
+    result
+}
+
+/// The builtin call whose arity, names or replacement target needs a check: it raises the
+/// arity and name errors and copies a shared replacement target, and under a hook flag it
+/// records what [`call_builtin_observed`] does.
 #[inline(never)]
 unsafe fn call_builtin_checked(
     definition: &BuiltinDef,
@@ -1885,8 +1925,7 @@ unsafe fn call_builtin_checked(
 ) -> R<Sexp> {
     let _activity = if activity::enabled() {
         let index = builtin_index(definition);
-        activity::count(Counter::BuiltinCalls);
-        activity::count_builtin(index);
+        activity::record_builtin(index);
         activity::enter(Activity::Builtin, index as u32)
     } else {
         activity::enter(Activity::Builtin, 0)
@@ -2744,7 +2783,7 @@ pub unsafe fn bind_arguments(
                 // A deferred `.GenericCallEnv` (see `method_var_value`): this frame's caller is
                 // the slot frame the running byte code reads.
                 let value = if value == unbound() && symbol == symbols().dot_generic_call_env {
-                    slot_owner_env(Reify::Site("method dispatch"))?
+                    slot_owner_env(Reify::Site(Site::MethodDispatch))?
                 } else {
                     value
                 };
@@ -3175,7 +3214,6 @@ pub unsafe fn run_inlined(
     run: impl FnOnce(u32) -> R<Sexp>,
 ) -> R<Sexp> {
     let _window = SlotWindow(header, interp().references_used);
-    activity::count(Counter::ClosureCalls);
     let mut hooks = crate::profile_summary::enter_closure(call, function, sys_parent, &[], nil());
     let state = interp();
     if state.frames.len() as u32 >= state.max_depth {
@@ -3199,8 +3237,9 @@ pub unsafe fn run_inlined(
         header,
         missing,
         caller,
+        true,
     );
-    interp().frames[depth - 1].inlined = true;
+    interp().frames[depth - 1].role = crate::FrameRole::Inlined;
     let result = sampled.and_then(|()| scope(|| run((depth - 1) as u32)));
     let state = interp();
     let frame = &state.frames[depth - 1];
@@ -3224,11 +3263,10 @@ pub unsafe fn frame_env(index: usize, cause: Reify) -> R<Sexp> {
         return Ok(frame.env);
     }
     if activity::enabled() {
-        let asker = activity::label(match cause {
-            Reify::Builtin(op) => builtin_def(op)?.name,
-            Reify::Site(name) => name,
-        });
-        interp().frames[index].reified_by = asker;
+        interp().frames[index].reified_by = match cause {
+            Reify::Builtin(op) => SITES + builtin_index(builtin_def(op)?) as u32,
+            Reify::Site(site) => site as u32,
+        };
     }
     pending_env(index)
 }
@@ -3240,7 +3278,90 @@ pub unsafe fn frame_env(index: usize, cause: Reify) -> R<Sexp> {
 pub enum Reify {
     /// The builtin `op`, through [`crate::builtins::Call::env`].
     Builtin(Sexp),
-    Site(&'static str),
+    Site(Site),
+}
+
+macro_rules! sites {
+    ($($site:ident = $name:literal,)*) => {
+        /// A place in the runtime that asks for a slot frame's environment, or another reason
+        /// a package call takes the generic call protocol. A frame records the reason as a
+        /// number ([`Frame::reified_by`]): a site's own, or [`SITES`] plus the index of the
+        /// builtin that asked, so recording one compares and stores no text.
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        #[repr(u32)]
+        pub enum Site {
+            $($site,)*
+        }
+
+        const SITE_NAMES: &[&str] = &[$($name,)*];
+    };
+}
+
+sites! {
+    MethodDispatch = "method dispatch",
+    ParentFrame = "parent.frame",
+    Subassignment = "subassignment",
+    PromiseOverFrame = "promise over the frame",
+    Missing = "missing()",
+    MissingArgumentLookup = "missing argument lookup",
+    MatrixSubassignment = "matrix subassignment",
+    FunctionDefinition = "function definition",
+    DoCall = "do.call",
+    Assignment = "assignment",
+    S4Dispatch = "S4 dispatch",
+    VariableLookup = "variable lookup",
+    UncompiledExpression = "uncompiled expression",
+    TailUpdate = "tail update",
+    SysFrame = "sys.frame",
+    SwitchAlternative = "switch alternative",
+    ReplacementCall = "replacement call",
+    RebindingCall = "rebinding call",
+    PromiseEnvironment = "promise environment",
+    CallingPosition = "pos = -1",
+    OnExit = "on.exit",
+    ObjectSystemCheck = "object-system check",
+    NativeCode = "native code",
+    GenericCallNativeEntry = "generic call: native entry",
+    GenericCallArguments = "generic call: arguments",
+    GenericCall = "generic call",
+    FunctionLookup = "function lookup",
+    FunctionGuard = "function guard",
+    ForLoop = "for loop",
+    EnvironmentCall = "environment()",
+    DoCallArgument = "do.call argument",
+    DispatchingReplacement = "dispatching replacement",
+    DispatchSubjectMethod = "dispatch subject: method",
+    DispatchSubject = "dispatch subject",
+    Debugger = "debugger",
+    BuiltinDispatch = "builtin dispatch",
+    BuiltinCall = "builtin call",
+    BoundaryCapture = "boundary capture",
+    BoundEvaluation = "bound evaluation",
+    DollarField = "`$` field",
+    EnvironmentRead = "environment read",
+    PromiseOrEnvironmentOutlives = "promise or environment outliving the frame",
+    ClosureOutlives = "closure outliving the frame",
+    FrameWithEnvironment = "frame with an environment",
+    PromiseArgumentVariable = "promise argument: variable",
+    PromiseArgumentCall = "promise argument: call",
+    PromiseArgumentOther = "promise argument: other",
+    NotRecorded = "reason not recorded",
+}
+
+/// The first reason number that stands for a builtin.
+const SITES: u32 = 64;
+const _: () = assert!(SITE_NAMES.len() <= SITES as usize);
+
+/// The name the profile summary prints for the reason numbered `reason`.
+pub(crate) fn reason_name(reason: u32) -> &'static str {
+    match reason.checked_sub(SITES) {
+        None => SITE_NAMES.get(reason as usize).copied(),
+        Some(index) => interp()
+            .builtins
+            .get(index as usize)
+            .map(|definition| definition.name),
+    }
+    .unwrap_or("?")
 }
 
 /// The reasons that observe a frame's environment: they evaluate code in it, hand it out as a
@@ -3264,13 +3385,10 @@ pub const OBSERVING_REASONS: [&str; 18] = [
     "mget",
     "native code",
     "as.environment",
-    PROMISE_OR_ENVIRONMENT_OUTLIVES,
-    CLOSURE_OUTLIVES,
+    "promise or environment outliving the frame",
+    "closure outliving the frame",
     ".External2",
 ];
-
-const PROMISE_OR_ENVIRONMENT_OUTLIVES: &str = "promise or environment outliving the frame";
-const CLOSURE_OUTLIVES: &str = "closure outliving the frame";
 
 /// The `...` slot of the frame at `index`, when it is a slot frame that keeps every variable in
 /// its slot and has a `...` formal.
@@ -3297,7 +3415,10 @@ pub unsafe fn slot_dots(index: usize) -> Option<Sexp> {
 /// frame that keeps every variable in its slot and has a slot of that name.
 pub unsafe fn slot_register(index: usize, symbol: Sexp) -> Option<usize> {
     let frame = interp().frames.get(index)?;
-    if frame.env != nil() || frame.slots == crate::NO_SLOTS || frame.inlined {
+    if frame.env != nil()
+        || frame.slots == crate::NO_SLOTS
+        || frame.role == crate::FrameRole::Inlined
+    {
         return None;
     }
     let position = bytecode::frame_slot_names(frame.function)
@@ -3569,16 +3690,16 @@ pub enum Entering {
     /// The call starts, so one that needs the general path can run whole.
     Start,
     /// The call is half run: compiled code rebuilds the frame of an inlined call, whose start
-    /// already refused what the general path would have refused. The frame is pushed whatever
-    /// the session counts or debugs.
+    /// already refused what the general path would have refused and already counted the call
+    /// for a profile summary. The frame is pushed whatever the session records or debugs.
     Midway,
 }
 
 /// Pushes the frame of a call of `function` on the slot frame at `header`, whose arguments are
 /// already bound, without running its body, so an interpreter loop can run the body in place
-/// rather than recursing. A call that starts and needs what only the general path does
-/// (activity counters, the debugger, the object-system refusal, a namespace load) runs whole
-/// here.
+/// rather than recursing. A call that starts and needs what only the general path does (the
+/// boundary-call recorder, the debugger, the object-system refusal, a namespace load) runs
+/// whole here.
 ///
 /// From a successful return until [`leave`], the frame is the slot owner. The slot frame's
 /// registers belong to the call: [`leave`] releases them, and so does `enter` itself on an
@@ -3597,7 +3718,7 @@ pub unsafe fn enter(
 ) -> R<Entered> {
     let state = interp();
     if entering == Entering::Start
-        && (activity::enabled()
+        && (activity::hooks() & activity::CAPTURE != 0
             || !state.object_systems
             || function == state.namespace_loader
             || (state.debugger.is_some() && function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)))
@@ -3645,6 +3766,7 @@ pub unsafe fn enter(
         header,
         missing,
         caller,
+        entering == Entering::Start,
     );
     let defaults = sampled.and_then(|()| match promised {
         0 => Ok(()),
@@ -3691,6 +3813,7 @@ pub unsafe fn run_in_frame(
         crate::NO_SLOTS,
         0,
         caller,
+        false,
     );
     let result = sampled.and_then(|()| body(env)).map(|()| nil());
     leave(depth, result).map(|_| ())
@@ -3739,7 +3862,6 @@ unsafe fn run_frame_general(
     };
     let _window = SlotWindow(slots, interp().references_used);
     let _activity = activity::enter(Activity::CallSetup, 0);
-    activity::count(Counter::ClosureCalls);
     let mut hooks =
         crate::profile_summary::enter_closure(call, function, sys_parent, method_vars, env);
     if slots == crate::NO_SLOTS {
@@ -3760,7 +3882,7 @@ unsafe fn run_frame_general(
     };
     if !state.object_systems {
         let sys_parent = if caller != crate::NO_SLOTS {
-            frame_env(caller as usize, Reify::Site("object-system check"))?
+            frame_env(caller as usize, Reify::Site(Site::ObjectSystemCheck))?
         } else {
             sys_parent
         };
@@ -3776,6 +3898,7 @@ unsafe fn run_frame_general(
         slots,
         missing,
         caller,
+        true,
     );
     if let Err(unwind) = sampled {
         return pop_frame(function, depth, Err(unwind));
@@ -3931,16 +4054,16 @@ unsafe fn finish_frame(
 /// holder that outlives the frame. Three holders are not counted and are checked by hand: the
 /// value returned, `R_PreserveObject`, and a global calling handler. An error return keeps the
 /// environment, since the unwind may carry it or anything made over it.
-unsafe fn outliving_cause(index: usize, result: &R<Sexp>) -> Option<&'static str> {
+unsafe fn outliving_cause(index: usize, result: &R<Sexp>) -> Option<Site> {
     let Ok(value) = *result else {
-        return Some(PROMISE_OR_ENVIRONMENT_OUTLIVES);
+        return Some(Site::PromiseOrEnvironmentOutlives);
     };
     let state = interp();
     let frame = &state.frames[index];
     let env = frame.pending;
     let heap = crate::heap();
     if value == env || heap.is_preserved(env) {
-        return Some(PROMISE_OR_ENVIRONMENT_OUTLIVES);
+        return Some(Site::PromiseOrEnvironmentOutlives);
     }
     // Nothing counted names the environment, so no promise or closure over it is left to
     // look for.
@@ -3982,7 +4105,7 @@ unsafe fn outliving_cause(index: usize, result: &R<Sexp>) -> Option<&'static str
             || heap.is_preserved(closure)
             || crate::conditions::handlers_hold(&state.global_handlers, closure)
         {
-            return Some(CLOSURE_OUTLIVES);
+            return Some(Site::ClosureOutlives);
         }
         dying += 1;
     }
@@ -3997,7 +4120,7 @@ unsafe fn outliving_cause(index: usize, result: &R<Sexp>) -> Option<&'static str
     };
     dying += slots.iter().filter(|&&slot| dies(slot)).count();
     dying += cells().filter(|&bound| dies(bound)).count();
-    (env.refcount() as usize > dying).then_some(PROMISE_OR_ENVIRONMENT_OUTLIVES)
+    (env.refcount() as usize > dying).then_some(Site::PromiseOrEnvironmentOutlives)
 }
 
 /// A slot frame gives up the references of the variables still in its slots, the register file
@@ -4047,6 +4170,7 @@ unsafe fn push_frame(
     slots: u32,
     missing: u64,
     caller: u32,
+    counted: bool,
 ) -> (usize, R<()>) {
     let state = interp();
     let start = state.frame_args.len() as u32;
@@ -4074,14 +4198,14 @@ unsafe fn push_frame(
         missing,
         caller,
         pending: nil(),
-        inlined: false,
+        role: crate::FrameRole::Call,
         reified_by: crate::NOT_REIFIED,
         handle_mark,
         previous_owner,
         references,
     });
-    let sampled = if activity::profile_ticked() {
-        record_profile_sample(None)
+    let sampled = if activity::hooks() & (activity::SUMMARY | activity::PROFILE_TICK) != 0 {
+        profiled_entry(function, counted)
     } else {
         Ok(())
     };
@@ -4090,12 +4214,31 @@ unsafe fn push_frame(
     (state.frames.len(), sampled)
 }
 
+/// What the push of `function`'s frame owes a profile: the summary's counts, with the samples
+/// that waited filed under the frames beneath the new one, and the `Rprof` sample that is due.
+/// One test in [`push_frame`] covers both, so a run without a profile pays for neither.
+#[cold]
+#[inline(never)]
+unsafe fn profiled_entry(function: Sexp, counted: bool) -> R<()> {
+    if activity::enabled() {
+        crate::profile_summary::entering(function, interp().frames.len() - 1, counted);
+    }
+    if activity::profile_ticked() {
+        record_profile_sample(None)
+    } else {
+        Ok(())
+    }
+}
+
 /// Pops the frame at `depth` (one-based) once its call has finished with `result`, restoring
 /// the condition stacks and srcref of the caller.
 #[inline(always)]
 unsafe fn pop_frame(function: Sexp, depth: usize, result: R<Sexp>) -> R<Sexp> {
     let state = interp();
     if activity::enabled() {
+        if activity::sample_ticked() {
+            crate::profile_summary::resolve_samples(state.frames.len());
+        }
         let frame = &state.frames[depth - 1];
         let end = state
             .frames
@@ -4145,38 +4288,37 @@ unsafe fn pop_frame(function: Sexp, depth: usize, result: R<Sexp>) -> R<Sexp> {
 #[cold]
 pub(crate) unsafe fn count_package_call(function: Sexp, frame: Option<&Frame>, args: &[Arg]) {
     let enclosure = function.tag();
-    if enclosure == values::base_namespace() || !crate::envir::is_namespace(enclosure) {
+    // A closure made by a call is enclosed by that call's frame, which is no namespace; the
+    // flag is in the header at hand, where the namespace test is a lookup.
+    if enclosure == values::base_namespace()
+        || enclosure.has_gp(gp::FUNCTION_FRAME)
+        || enclosure == values::global_env()
+        || !crate::envir::is_namespace(enclosure)
+    {
         return;
     }
-    activity::count(Counter::PackageCalls);
+    activity::record(Counter::PackageCalls);
     let reason = match frame {
-        Some(frame) if frame.slots == crate::NO_SLOTS => Some("frame with an environment"),
+        Some(frame) if frame.slots == crate::NO_SLOTS => Some(Site::FrameWithEnvironment as u32),
         Some(frame) if frame.pending != nil() && !frame.pending.has_gp(gp::PENDING_FRAME) => {
-            let reason = activity::label_name(frame.reified_by);
-            if reason
-                .as_deref()
-                .is_some_and(|name| OBSERVING_REASONS.contains(&name))
-            {
-                activity::count(Counter::PackageCallsObserved);
-            }
-            activity::count_package_fallback(match reason {
-                Some(_) => frame.reified_by,
-                None => activity::label("reason not recorded"),
-            });
-            return;
+            Some(if frame.reified_by == crate::NOT_REIFIED {
+                Site::NotRecorded as u32
+            } else {
+                frame.reified_by
+            })
         }
         _ => args
             .iter()
             .find(|arg| arg.value.kind() == SexpType::Promise && !is_reference(arg.value))
             .map(|arg| match arg.value.cdr().kind() {
-                SexpType::Symbol => "promise argument: variable",
-                SexpType::Language => "promise argument: call",
-                _ => "promise argument: other",
+                SexpType::Symbol => Site::PromiseArgumentVariable as u32,
+                SexpType::Language => Site::PromiseArgumentCall as u32,
+                _ => Site::PromiseArgumentOther as u32,
             }),
     };
     match reason {
-        Some(reason) => activity::count_package_fallback(activity::label(reason)),
-        None => activity::count(Counter::PackageCallsDirect),
+        Some(reason) => activity::count_package_fallback(reason),
+        None => activity::record(Counter::PackageCallsDirect),
     }
 }
 
@@ -4400,7 +4542,7 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
         {
             frame.env
         } else {
-            match frame_env(depth - 1, Reify::Site("on.exit")) {
+            match frame_env(depth - 1, Reify::Site(Site::OnExit)) {
                 Ok(env) => env,
                 Err(unwind) => {
                     outcome = Err(unwind);
@@ -6453,7 +6595,7 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
         missing: 0,
         caller: crate::NO_SLOTS,
         pending: nil(),
-        inlined: false,
+        role: crate::FrameRole::Context,
         reified_by: crate::NOT_REIFIED,
         handle_mark: crate::heap().handle_mark() as u32,
         previous_owner: state.slot_owner,
@@ -6514,7 +6656,7 @@ unsafe fn do_recall(call: &Call<'_>) -> R<Sexp> {
         caller_call,
         function,
         &args,
-        frame_sys_parent(caller, Reify::Site("parent.frame"))?,
+        frame_sys_parent(caller, Reify::Site(Site::ParentFrame))?,
     )
 }
 
@@ -7451,8 +7593,7 @@ unsafe fn replace_through_primitive(
         let index = builtin_index(definition);
         let _activity = observed.then(|| activity::enter(Activity::Builtin, index as u32));
         if activity::enabled() {
-            activity::count(Counter::BuiltinCalls);
-            activity::count_builtin(index);
+            activity::record_builtin(index);
         }
         if observed && activity::profile_ticked() {
             record_profile_sample(Some(definition.name))?;

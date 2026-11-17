@@ -10,13 +10,19 @@ use {
         lints::{LintConfig, LintLevel, NameStyle, lint_file},
         naming::BindingKind,
         stubs::install_shipped_stubs,
+        test_document_kind,
     },
     salsa::{Setter as _, plumbing::AsId as _},
     std::{
         cell::RefCell,
         collections::BTreeMap,
         mem,
+        panic::{self, AssertUnwindSafe},
         sync::{Arc, Mutex},
+    },
+    syntax::testing::{
+        Entropy, FAILURES_PER_RUN, SplitMix64, fuzz_seeds, generate_program, generate_project,
+        replay_command, small_edit, split_files,
     },
 };
 
@@ -67,41 +73,338 @@ pub fn render_semantics(db: &RootDatabase, file: SourceFile) -> String {
     output
 }
 
-fn single_file_project(source: &str, kind: DocumentKind) -> (RootDatabase, SourceFile) {
-    let db = RootDatabase::default();
-    install_shipped_stubs(&db);
-    let file = SourceFile::new(&db, source.to_owned(), kind);
-    ProjectFiles::new(&db, vec![file]);
-    (db, file)
+/// One state of a project in a fuzz session.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectState {
+    /// `(key, text, kind)` in project order, which decides last-writer-wins. A key names one
+    /// file across the states of a session, so a state edits, adds, drops, reorders or
+    /// reclassifies files by what it lists.
+    pub files: Vec<(usize, String, DocumentKind)>,
+    pub strict: bool,
+    pub prelude: bool,
 }
 
-fn fresh_output(source: &str, kind: DocumentKind) -> String {
-    let (db, file) = single_file_project(source, kind);
-    render_semantics(&db, file)
+/// Two databases that outlive a fuzz case, so a case pays for its analysis and not for
+/// re-parsing the stub corpus, which costs thirty times as much.
+///
+/// The incremental database is an editor's: it keeps one input per file key and moves from
+/// state to state through the setters, across cases too, so every state is reached by an edit
+/// from an unrelated history. The reference database is a command's (`ry check`): bounded tree
+/// store, no editor facts, and new inputs for every state, so nothing it memoized about a file
+/// survives into the next. The two must render every file alike.
+pub struct Workbench {
+    incremental: RootDatabase,
+    inputs: Vec<(usize, SourceFile)>,
+    reference: RootDatabase,
+    sessions: usize,
 }
 
+impl Default for Workbench {
+    fn default() -> Workbench {
+        let incremental = RootDatabase::default();
+        let reference = RootDatabase::for_command(false);
+        for db in [&incremental, &reference] {
+            install_shipped_stubs(db);
+            AnalysisSettings::new(db, true, false, true);
+            ProjectFiles::new(db, Vec::new());
+        }
+        Workbench {
+            incremental,
+            inputs: Vec::new(),
+            reference,
+            sessions: 0,
+        }
+    }
+}
+
+/// Runs one session per seed of [`fuzz_seeds`] on a warm [`Workbench`]. A failure is retried on
+/// fresh databases to tell a failure of the session alone, which its seed replays, from one that
+/// needs the sessions before it, which the window from the workbench's first seed replays. The
+/// workbench is rebuilt every [`WORKBENCH_SESSIONS`] seeds so that window stays short, and after
+/// a failure, since the run goes on to report up to [`FAILURES_PER_RUN`] failing seeds.
+pub fn for_each_session(default: usize, mut session: impl FnMut(u64) -> Vec<ProjectState>) {
+    let mut bench: Option<(u64, Workbench)> = None;
+    let mut replays: Vec<String> = Vec::new();
+    for seed in fuzz_seeds(default) {
+        if seed % WORKBENCH_SESSIONS == 0 {
+            bench = None;
+        }
+        let (first_seed, workbench) = bench.get_or_insert_with(|| (seed, Workbench::default()));
+        let states = session(seed);
+        if panic::catch_unwind(AssertUnwindSafe(|| check_session(workbench, &states))).is_ok() {
+            continue;
+        }
+        let alone = panic::catch_unwind(AssertUnwindSafe(|| {
+            check_session(&mut Workbench::default(), &states)
+        }));
+        let history = match alone {
+            Err(_) => "",
+            Ok(()) => ", which fails only after the sessions before it",
+        };
+        eprintln!(
+            "---- the failing session (seed {seed}{history}) ----\n{}",
+            describe_session(&states)
+        );
+        replays.push(match alone {
+            Err(_) => format!("    {}", replay_command(seed)),
+            Ok(()) => format!(
+                "    FUZZ_ITERS={} {}",
+                seed - *first_seed + 1,
+                replay_command(*first_seed)
+            ),
+        });
+        bench = None;
+        if replays.len() == FAILURES_PER_RUN {
+            break;
+        }
+    }
+    assert!(
+        replays.is_empty(),
+        "{} session(s) failed; replay with\n{}",
+        replays.len(),
+        replays.join("\n")
+    );
+}
+
+const WORKBENCH_SESSIONS: u64 = 256;
+
+/// Walks the states and then returns to the first. At every step the incremental database must
+/// render each file as the reference does, and the return must restore the first rendering.
+/// Every sixty-fourth session also compares its first state with a database that has no history
+/// at all, which is the determinism check across interning orders.
+pub fn check_session(workbench: &mut Workbench, states: &[ProjectState]) {
+    let mut first: Option<Vec<String>> = None;
+    // A session of one state has nothing to edit back from.
+    let back = states.first().filter(|_| states.len() > 1);
+    for (step, state) in states.iter().chain(back).enumerate() {
+        let incremental = render_incrementally(workbench, state);
+        let reference = render_afresh(&mut workbench.reference, state);
+        assert!(
+            incremental == reference,
+            "step {step}: the incremental output diverges from a fresh build\n{}\n---- incremental:\n{}\n---- fresh:\n{}",
+            describe_session(states),
+            incremental.join("----\n"),
+            reference.join("----\n"),
+        );
+        match &first {
+            None => {
+                if workbench.sessions % 64 == 0 {
+                    let mut pristine = RootDatabase::default();
+                    install_shipped_stubs(&pristine);
+                    AnalysisSettings::new(&pristine, true, false, true);
+                    ProjectFiles::new(&pristine, Vec::new());
+                    assert!(
+                        render_afresh(&mut pristine, state) == reference,
+                        "the output depends on what the database analyzed before\n{}",
+                        describe_session(states)
+                    );
+                }
+                first = Some(incremental);
+            }
+            Some(first) if step == states.len() => assert!(
+                incremental == *first,
+                "the output is not restored after editing back\n{}",
+                describe_session(states)
+            ),
+            Some(_) => {}
+        }
+    }
+    workbench.sessions += 1;
+}
+
+/// Moves the incremental database to `state` as a host would, setting only what differs.
+fn render_incrementally(workbench: &mut Workbench, state: &ProjectState) -> Vec<String> {
+    let db = &mut workbench.incremental;
+    apply_settings(db, state);
+    let mut files = Vec::with_capacity(state.files.len());
+    for (key, text, kind) in &state.files {
+        let known = workbench
+            .inputs
+            .iter()
+            .find(|(existing, _)| existing == key)
+            .map(|(_, file)| *file);
+        let file = match known {
+            Some(file) => {
+                if file.text(db) != text {
+                    file.set_text(db).to(text.clone());
+                }
+                if *file.kind(db) != *kind {
+                    file.set_kind(db).to(*kind);
+                }
+                file
+            }
+            None => {
+                let file = SourceFile::new(db, text.clone(), *kind);
+                workbench.inputs.push((*key, file));
+                file
+            }
+        };
+        files.push(file);
+    }
+    let project = ProjectFiles::get(db);
+    if *project.files(db) != files {
+        project.set_files(db).to(files.clone());
+    }
+    files
+        .iter()
+        .map(|file| render_semantics(db, *file))
+        .collect()
+}
+
+/// Renders `state` from inputs `db` has never seen.
+fn render_afresh(db: &mut RootDatabase, state: &ProjectState) -> Vec<String> {
+    apply_settings(db, state);
+    let files: Vec<SourceFile> = state
+        .files
+        .iter()
+        .map(|(_, text, kind)| SourceFile::new(db, text.clone(), *kind))
+        .collect();
+    ProjectFiles::get(db).set_files(db).to(files.clone());
+    files
+        .iter()
+        .zip(&state.files)
+        .map(|(file, (_, text, _))| {
+            check_write_screen(db, *file, text);
+            render_semantics(db, *file)
+        })
+        .collect()
+}
+
+fn apply_settings(db: &mut RootDatabase, state: &ProjectState) {
+    let settings = AnalysisSettings::get(db);
+    if *settings.strict(db) != state.strict {
+        settings.set_strict(db).to(state.strict);
+    }
+    if *settings.prelude(db) != state.prelude {
+        settings.set_prelude(db).to(state.prelude);
+    }
+}
+
+fn describe_session(states: &[ProjectState]) -> String {
+    let mut text = String::new();
+    for (step, state) in states.iter().enumerate() {
+        text.push_str(&format!(
+            "==== state {step} (strict {}, prelude {})\n",
+            state.strict, state.prelude
+        ));
+        for (key, source, kind) in &state.files {
+            text.push_str(&format!("---- file {key} ({kind:?})\n{source}\n"));
+        }
+    }
+    text
+}
+
+/// A session a seed draws: a project of one to four files, each a generated program or one of
+/// `pool`, then up to three further states. Most steps are one [`small_edit`] of one file, as
+/// an editor makes them; the rest replace a file's text, add or drop a file, reorder the
+/// project, reclassify a file, or flip a setting.
+pub fn generate_session(rng: &mut dyn Entropy, pool: &[String]) -> Vec<ProjectState> {
+    const KINDS: [DocumentKind; 8] = [
+        DocumentKind::Package,
+        DocumentKind::Package,
+        DocumentKind::Package,
+        DocumentKind::Package,
+        DocumentKind::Package,
+        DocumentKind::Script,
+        DocumentKind::Test,
+        DocumentKind::TestHelper,
+    ];
+    let file_count = match rng.below(8) {
+        0..=4 => 1,
+        5 | 6 => 2,
+        _ => 3 + rng.below(2),
+    };
+    let mut texts = match rng.below(2) {
+        0 => generate_project(rng, file_count),
+        _ => Vec::new(),
+    };
+    while texts.len() < file_count && !pool.is_empty() {
+        texts.push(pool[rng.below(pool.len())].clone());
+    }
+    let mut next_key = texts.len();
+    let mut state = ProjectState {
+        files: texts
+            .into_iter()
+            .enumerate()
+            .map(|(key, text)| (key, text, KINDS[rng.below(KINDS.len())]))
+            .collect(),
+        strict: rng.below(8) == 7,
+        prelude: rng.below(12) != 11,
+    };
+    let mut states = vec![state.clone()];
+    for _ in 0..1 + rng.below(3) {
+        let target = rng.below(state.files.len());
+        match rng.below(16) {
+            0..=10 if !state.files.is_empty() => {
+                let donor = match pool.is_empty() {
+                    true => "probe <- 1L",
+                    false => pool[rng.below(pool.len())].as_str(),
+                };
+                state.files[target].1 = small_edit(rng, &state.files[target].1, donor);
+            }
+            11 if !state.files.is_empty() => state.files[target].1 = generate_program(rng),
+            12 if state.files.len() > 1 => {
+                state.files.remove(target);
+            }
+            13 if state.files.len() > 1 => {
+                let other = rng.below(state.files.len());
+                state.files.swap(target, other);
+            }
+            14 if !state.files.is_empty() => state.files[target].2 = KINDS[rng.below(KINDS.len())],
+            15 => match rng.below(2) {
+                0 => state.strict = !state.strict,
+                _ => state.prelude = !state.prelude,
+            },
+            _ => {
+                state.files.push((
+                    next_key,
+                    generate_program(rng),
+                    KINDS[rng.below(KINDS.len())],
+                ));
+                next_key += 1;
+            }
+        }
+        states.push(state.clone());
+    }
+    states
+}
+
+/// A fixture case as a project state: a `#~~~~ <path>` case as its files, with the kinds their
+/// paths give them.
+pub fn fixture_state(source: &str, default_kind: DocumentKind) -> ProjectState {
+    let files = match split_files(source) {
+        Some(files) => files
+            .into_iter()
+            .enumerate()
+            .map(|(key, (path, text))| {
+                let kind = match path.strip_prefix("tests/testthat/") {
+                    Some(name) => test_document_kind(name),
+                    None => default_kind,
+                };
+                (key, text, kind)
+            })
+            .collect(),
+        None => vec![(0, source.to_owned(), default_kind)],
+    };
+    ProjectState {
+        files,
+        strict: false,
+        prelude: !source.starts_with(PRELUDE_OFF_DIRECTIVE),
+    }
+}
+
+/// A single file edited to `edited_source` and back, on databases built for this call. The warm
+/// [`Workbench`] is the cheaper way to ask the same question; this one has no history, so a
+/// coverage-guided target's input is its whole reproducer.
 pub fn check_semantics_invariants(source: &str, edited_source: &str, kind: DocumentKind) {
-    let first = fresh_output(source, kind);
-    let (mut db, file) = single_file_project(source, kind);
-    let before = render_semantics(&db, file);
-    check_write_screen(&db, file, source);
-    // `first` comes from an independent database, so this comparison is the determinism check.
-    assert_eq!(
-        before, first,
-        "non-deterministic pipeline output across fresh databases for:\n{source}"
-    );
-    file.set_text(&mut db).to(edited_source.to_owned());
-    let incremental = render_semantics(&db, file);
-    let fresh = fresh_output(edited_source, kind);
-    assert_eq!(
-        incremental, fresh,
-        "incremental output diverges from a fresh build after editing\n---- from:\n{source}\n---- to:\n{edited_source}"
-    );
-    file.set_text(&mut db).to(source.to_owned());
-    let back = render_semantics(&db, file);
-    assert_eq!(
-        back, before,
-        "output not restored after editing back\n---- source:\n{source}\n---- via:\n{edited_source}"
+    let state = |text: &str| ProjectState {
+        files: vec![(0, text.to_owned(), kind)],
+        strict: false,
+        prelude: true,
+    };
+    check_session(
+        &mut Workbench::default(),
+        &[state(source), state(edited_source)],
     );
 }
 
@@ -141,8 +444,7 @@ pub fn check_semantics_input(input: &str) {
     } else {
         DocumentKind::Package
     };
-    let cut = input.floor_char_boundary((hash as usize >> 8) % (input.len() + 1));
-    let edited = format!("{}\nprobe <- 1L\n", &input[..cut]);
+    let edited = small_edit(&mut SplitMix64(hash), input, "probe <- 1L\n");
     check_semantics_invariants(input, &edited, kind);
 }
 
