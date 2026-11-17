@@ -39,12 +39,13 @@ pub type ApiResult<T> = Result<T, Unwind>;
 
 /// A non-local exit in flight. It is the interpreter's type, so an unwind crosses between R code
 /// and native code unchanged.
-pub use interp::unwind::{RError, Unwind};
+pub use interp::unwind::{ErrorClass, RError, Unwind};
 
 pub fn error(message: impl Into<String>) -> Unwind {
     Unwind::Error(RError {
         message: message.into(),
         call: runtime().nil(),
+        class: ErrorClass::Simple,
     })
 }
 
@@ -52,6 +53,7 @@ pub fn error_in(call: Sexp, message: impl Into<String>) -> Unwind {
     Unwind::Error(RError {
         message: message.into(),
         call,
+        class: ErrorClass::Simple,
     })
 }
 
@@ -593,6 +595,7 @@ pub fn report(unwind: &Unwind, prefix: &str) {
                 &RError {
                     message: error.message.clone(),
                     call,
+                    class: error.class,
                 },
             )
         }

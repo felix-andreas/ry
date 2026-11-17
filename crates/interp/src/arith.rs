@@ -30,7 +30,7 @@ use {
         long_double::{self, LongDouble},
         rmath,
         system::r_at_least,
-        unwind::{R, Unwind, error},
+        unwind::{MissingArgument, R, Unwind, error, missing_argument},
         values::{
             self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real, symbols,
         },
@@ -363,7 +363,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("trigamma", 1, |call| unsafe { math1(call, Math::Trigamma) })
         .generic(Generic::Math)
         .reusing_first_argument(),
-    builtin("log", -1, do_log).generic(Generic::Math),
+    builtin("log", -1, do_log)
+        .generic(Generic::Math)
+        .keep_missing(),
     builtin("round", -1, |call| unsafe { round_like(call, false) })
         .generic(Generic::Math)
         .keep_missing()
@@ -2759,8 +2761,13 @@ unsafe fn complex_atan(z: Rcomplex) -> Rcomplex {
 
 unsafe fn do_log(call: &Call<'_>) -> R<Sexp> {
     let (matched, _) = call.match_args(&["x", "base"])?;
-    let operand = present(matched[0])
-        .ok_or_else(|| call.error("argument \"x\" is missing, with no default"))?;
+    // GNU R's class for the error says how many arguments the call wrote.
+    let reader = if call.len() == 1 {
+        MissingArgument::Log1
+    } else {
+        MissingArgument::Log2
+    };
+    let operand = present(matched[0]).ok_or_else(|| missing_argument(call.call, "x", reader))?;
     let operand = values::materialize(operand)?;
     if let Some(base) = present(matched[1]) {
         let base = values::materialize(base)?;
@@ -2959,7 +2966,8 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
         return Err(error(missing_operand));
     }
     let (matched, _) = call.match_args(&["x", "digits"])?;
-    let operand = present(matched[0]).ok_or_else(|| call.error(missing_operand))?;
+    let operand = present(matched[0])
+        .ok_or_else(|| missing_argument(call.call, "x", MissingArgument::Math))?;
     if let Some(digits) = present(matched[1])
         && !matches!(
             digits.kind(),
@@ -4575,7 +4583,37 @@ fn finite_term(from: f64, index: f64, by: f64) -> f64 {
 /// `rep(x, times, each, length.out)`.
 unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
     let (matched, _) = call.match_args(&["x", "times", "length.out", "each", "..."])?;
-    let object = present(matched[0]).unwrap_or(nil());
+    // GNU R evaluates the call's first argument before it matches any, so that one being
+    // missing is the caller's error, while a missing `x` matched from a later position reaches
+    // the type check as the empty symbol.
+    if call
+        .args
+        .first()
+        .is_some_and(|first| first.value == values::missing_arg())
+    {
+        let arguments = call.call.cdr();
+        let name = match arguments.kind() {
+            SexpType::Pairlist if arguments.car().kind() == SexpType::Symbol => {
+                let first = arguments.car();
+                if first == symbols().dots {
+                    "".into()
+                } else {
+                    values::symbol_name(first)
+                }
+            }
+            _ => "".into(),
+        };
+        return Err(missing_argument(
+            crate::eval::lexical_call(call.env()?),
+            &name,
+            MissingArgument::Eval,
+        ));
+    }
+    let object = match present(matched[0]) {
+        Some(object) => object,
+        None if call.args.is_empty() => nil(),
+        None => return Err(call.error("attempt to replicate an object of type 'symbol'")),
+    };
     let times = match present(matched[1]) {
         // A list of counts works like the vector of them, as in GNU R.
         Some(times) if times.kind() == SexpType::List => {

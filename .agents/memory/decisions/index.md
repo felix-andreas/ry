@@ -205,6 +205,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - An empty named argument leaves its formal to a positional argument
 - `[[<-` reports a wrong subscript count in GNU R's order
 - A call site that passes `...` keeps a plan for what `...` held
+- A lazily signalled error carries its condition class (settled)
 
 ## Builtins and base R
 

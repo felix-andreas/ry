@@ -14,7 +14,9 @@ use {
         bytecode,
         coerce::{CoercionWarnings, real_to_int},
         conditions, deparse, dispatch, interp, moves, scope,
-        unwind::{Jump, R, Rooted, Unwind, error, error_in, jump},
+        unwind::{
+            Jump, MissingArgument, R, Rooted, Unwind, error, error_in, jump, missing_argument,
+        },
         utils::record_profile_sample,
         values::{
             self, alloc, cons_tagged, length, missing_arg, nil, symbol_name, symbols, triple,
@@ -74,24 +76,27 @@ unsafe fn eval_unsignalled(expression: Sexp, env: Sexp) -> R<Sexp> {
 
 /// The value of a symbol: its binding, with promises forced.
 pub unsafe fn eval_symbol(symbol: Sexp, env: Sexp) -> R<Sexp> {
-    eval_symbol_reporting(symbol, env, || lexical_call(env))
+    eval_symbol_reporting(symbol, env, || lexical_call(env), MissingArgument::Eval)
 }
 
 /// [`eval_symbol`] for a lookup that starts in `env` on behalf of a frame that is not `env`
 /// itself, such as a slot frame that has no environment or a frame whose own bindings were
 /// already searched: an unbound symbol is reported against `lexical()`, the call of the frame
-/// the code runs in, as GNU R's `getLexicalCall` does.
+/// the code runs in, as GNU R's `getLexicalCall` does. `reader` says whether the AST evaluator
+/// or compiled code reads the name, which GNU R tells apart in the class of the error for a
+/// missing argument.
 pub unsafe fn eval_symbol_reporting(
     symbol: Sexp,
     env: Sexp,
     lexical: impl FnOnce() -> Sexp,
+    reader: MissingArgument,
 ) -> R<Sexp> {
     let symbols = symbols();
     if symbol == symbols.dots {
         return Err(error("'...' used in an incorrect context"));
     }
     if let Some(index) = dot_dot_index(symbol) {
-        return dot_dot_value(index, env);
+        return dot_dot_value(index, env, lexical, reader);
     }
     // The empty symbol is `R_MissingArg`, whose value in GNU R is itself, so evaluating it is
     // a missing argument without a name rather than an unbound object.
@@ -107,12 +112,7 @@ pub unsafe fn eval_symbol_reporting(
         ));
     }
     if value == missing_arg() {
-        let name = symbol_name(symbol);
-        return Err(error(if name.is_empty() {
-            "argument is missing, with no default".to_string()
-        } else {
-            format!("argument \"{name}\" is missing, with no default")
-        }));
+        return Err(missing_argument(lexical(), &symbol_name(symbol), reader));
     }
     if value.kind() == SexpType::Promise {
         let forced = force_promise(value)?;
@@ -132,7 +132,12 @@ pub unsafe fn dot_dot_index(symbol: Sexp) -> Option<usize> {
     std::str::from_utf8(digits).ok()?.parse().ok()
 }
 
-unsafe fn dot_dot_value(index: usize, env: Sexp) -> R<Sexp> {
+unsafe fn dot_dot_value(
+    index: usize,
+    env: Sexp,
+    lexical: impl FnOnce() -> Sexp,
+    reader: MissingArgument,
+) -> R<Sexp> {
     if index == 0 {
         return Err(error("indexing '...' with non-positive index 0"));
     }
@@ -148,9 +153,7 @@ unsafe fn dot_dot_value(index: usize, env: Sexp) -> R<Sexp> {
         if position == index {
             let value = cell.car();
             if value == missing_arg() {
-                return Err(error(format!(
-                    "argument \"..{index}\" is missing, with no default"
-                )));
+                return Err(missing_argument(lexical(), &format!("..{index}"), reader));
             }
             return if value.kind() == SexpType::Promise {
                 force_promise(value)
@@ -364,10 +367,11 @@ pub unsafe fn find_called_fun(symbol: Sexp, mut env: Sexp, call: Sexp) -> R<Sexp
                 return Ok(value);
             }
             if value == missing_arg() {
-                return Err(error(format!(
-                    "argument \"{}\" is missing, with no default",
-                    symbol_name(symbol)
-                )));
+                return Err(missing_argument(
+                    call,
+                    &symbol_name(symbol),
+                    MissingArgument::Get,
+                ));
             }
         }
         env = env.enclosure();
@@ -679,7 +683,7 @@ pub(crate) unsafe fn enclosed_value(symbol: Sexp, enclosure: Sexp) -> R<Sexp> {
 unsafe fn eval_enclosed_name(symbol: Sexp, enclosure: Sexp, owner: usize) -> R<Sexp> {
     interp().visible = true;
     let lexical = || interp().frames.get(owner).map_or(nil(), |frame| frame.call);
-    match eval_symbol_reporting(symbol, enclosure, lexical) {
+    match eval_symbol_reporting(symbol, enclosure, lexical, MissingArgument::Getvar) {
         Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
         result => result,
     }
@@ -2177,7 +2181,11 @@ unsafe fn collect_evaluated_args(
                         if !keep_missing {
                             // GNU R evaluates the empty item as a symbol, in the frame that
                             // passes `...` on, so the error is that frame's, not the call's.
-                            return Err(error("argument is missing, with no default"));
+                            return Err(missing_argument(
+                                lexical_call(env),
+                                "",
+                                MissingArgument::Eval,
+                            ));
                         }
                         missing
                     } else {
@@ -5701,7 +5709,7 @@ pub(crate) unsafe fn switch_alternative(
         }
     }
     match defaults.first() {
-        Some(default) if default.value == missing => Err(error(SWITCH_EMPTY_DEFAULT)),
+        Some(default) if default.value == missing => Err(switch_empty_default()),
         Some(default) => Ok(Some(default.value)),
         None => Ok(None),
     }
@@ -5719,7 +5727,9 @@ pub(crate) enum SwitchSelector {
 /// The error GNU R's AST `switch` raises when no name matches and the default is empty, from
 /// evaluating the empty argument. Its byte compiler returns an invisible `NULL` instead; code
 /// that relies on that already fails on a closure's first, uncompiled call.
-pub(crate) const SWITCH_EMPTY_DEFAULT: &str = "argument is missing, with no default";
+pub(crate) unsafe fn switch_empty_default() -> Unwind {
+    missing_argument(unbound(), "", MissingArgument::Eval)
+}
 
 /// Checks a `switch` selector and reads it, with GNU R's warnings for a factor and for a
 /// number that does not fit an integer. Errors and the factor warning name `call`, the
@@ -5937,12 +5947,15 @@ unsafe fn call_tail(call: Sexp, args: &[Arg]) -> Option<Sexp> {
 /// and otherwise evaluates the call normally, which is what this does every time: the value is
 /// the same, but deep recursion still grows the stack.
 unsafe fn do_tailcall(call: &Call<'_>) -> R<Sexp> {
-    let Some((function, rest)) = call.args.split_first() else {
-        return Err(error("argument \"FUN\" is missing, with no default"));
+    let function = call.args.split_first();
+    let Some((function, rest)) = function.filter(|(function, _)| function.value != missing_arg())
+    else {
+        return Err(missing_argument(
+            lexical_call(call.env()?),
+            "FUN",
+            MissingArgument::TailcallRec,
+        ));
     };
-    if function.value == values::missing_arg() {
-        return Err(error("argument \"FUN\" is missing, with no default"));
-    }
     let function = if function.value.kind() == SexpType::String && length(function.value) == 1 {
         values::install(&values::string_at(function.value, 0).unwrap_or_default())?
     } else {
@@ -5977,8 +5990,16 @@ unsafe fn do_exec(call: &Call<'_>) -> R<Sexp> {
     if positional.next().is_some() {
         return Err(error("unused argument"));
     }
-    let Some(expr) = expr.filter(|expr| *expr != values::missing_arg()) else {
-        return Err(error("argument \"expr\" is missing, with no default"));
+    // GNU R keeps a missing argument passed on as `expr` missing instead of evaluating it.
+    let expr = match expr.filter(|expr| *expr != values::missing_arg()) {
+        Some(expr) if !argument_is_missing(expr, call.env()?)? => expr,
+        _ => {
+            return Err(missing_argument(
+                lexical_call(call.env()?),
+                "expr",
+                MissingArgument::Tailcall,
+            ));
+        }
     };
     let mut expr = eval(expr, call.env()?)?;
     if expr.kind() == SexpType::Expression && length(expr) == 1 {
@@ -7048,6 +7069,13 @@ pub unsafe fn complex_assign(
     }
     let lookup_env = if superassign { env.enclosure() } else { env };
     let mut base = find_var(inner, lookup_env)?;
+    if base == missing_arg() {
+        return Err(missing_argument(
+            lexical_call(lookup_env),
+            &symbol_name(inner),
+            MissingArgument::Eval,
+        ));
+    }
     if base == unbound() {
         // GNU R evaluates the name in the enclosure and names the call whose frame that is, or
         // no call when the enclosure is not a frame's.

@@ -204,6 +204,52 @@ pub struct RError {
     /// The call the error is reported against. `R_NilValue` means none, and `R_UnboundValue`
     /// means the innermost closure call, which is what GNU R's `error()` reports.
     pub call: Sexp,
+    pub class: ErrorClass,
+}
+
+/// The condition class an error is signalled with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorClass {
+    /// `simpleError`.
+    Simple,
+    /// GNU R's `missingArgError`, under the subclass that names what read the argument.
+    MissingArgument(MissingArgument),
+}
+
+/// What read a missing argument. GNU R names it in the first class of the condition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MissingArgument {
+    /// The AST evaluator, evaluating the argument's name.
+    Eval,
+    /// Compiled code, loading the variable.
+    Getvar,
+    /// A function lookup or `get`, which found the argument under the name.
+    Get,
+    /// `Exec`, without its expression.
+    Tailcall,
+    /// `Tailcall`, without its function.
+    TailcallRec,
+    /// A two-argument math function such as `round`.
+    Math,
+    /// `log` with one argument.
+    Log1,
+    /// `log` with two arguments.
+    Log2,
+}
+
+impl MissingArgument {
+    pub fn subclass(self) -> &'static str {
+        match self {
+            MissingArgument::Eval => "evalError",
+            MissingArgument::Getvar => "getvarError",
+            MissingArgument::Get => "getMissingError",
+            MissingArgument::Tailcall => "tailcallError",
+            MissingArgument::TailcallRec => "tailcallRecError",
+            MissingArgument::Math => "MathMissingError",
+            MissingArgument::Log1 => "log1Error",
+            MissingArgument::Log2 => "log2Error",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -229,6 +275,7 @@ pub fn error(message: impl Into<String>) -> Unwind {
     Unwind::Error(RError {
         message: message.into(),
         call: crate::heap().known().unbound,
+        class: ErrorClass::Simple,
     })
 }
 
@@ -237,6 +284,21 @@ pub fn error_in(call: Sexp, message: impl Into<String>) -> Unwind {
     Unwind::Error(RError {
         message: message.into(),
         call,
+        class: ErrorClass::Simple,
+    })
+}
+
+/// The error for reading the argument `name` (empty for an argument without one) that the call
+/// did not supply and that has no default, reported against `call` as [`error_in`] reports.
+pub fn missing_argument(call: Sexp, name: &str, reader: MissingArgument) -> Unwind {
+    Unwind::Error(RError {
+        message: if name.is_empty() {
+            "argument is missing, with no default".to_string()
+        } else {
+            format!("argument \"{name}\" is missing, with no default")
+        },
+        call,
+        class: ErrorClass::MissingArgument(reader),
     })
 }
 

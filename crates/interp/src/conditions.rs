@@ -9,7 +9,9 @@ use {
         Interp, Signalling,
         builtins::{BuiltinDef, Call, internal},
         bytecode, deparse, eval, interp,
-        unwind::{INTERRUPTS_SUSPENDED, Jump, R, RError, Unwind, error, jump, resolve_call},
+        unwind::{
+            ErrorClass, INTERRUPTS_SUSPENDED, Jump, R, RError, Unwind, error, jump, resolve_call,
+        },
         values::{
             self, char_str, global_env, length, list_vector, nil, scalar_string, string_at, symbols,
         },
@@ -197,16 +199,20 @@ unsafe fn class_names(class: Sexp, wanted: &[u8]) -> bool {
 }
 
 /// Signals an error raised by a builtin, native code or the evaluator: runs the calling
-/// handlers for `simpleError`, `error` and `condition`, jumps to an exiting one, and otherwise
-/// runs the default error handler. The result is the unwind to propagate.
+/// handlers for the error's classes, jumps to an exiting one, and otherwise runs the default
+/// error handler. The result is the unwind to propagate.
 pub unsafe fn signal_error(failure: RError) -> Unwind {
-    activity::count(Counter::ConditionsSignalled);
-    let call = resolve_call(failure.call);
     // GNU R formats a message into a C buffer, so it ends at the first NUL.
     let mut message = failure.message;
     if let Some(nul) = message.find('\0') {
         message.truncate(nul);
     }
+    if let ErrorClass::MissingArgument(reader) = failure.class {
+        let classes = [reader.subclass(), "missingArgError", "error", "condition"];
+        return classed_error(failure.call, &message, &classes, &[]);
+    }
+    activity::count(Counter::ConditionsSignalled);
+    let call = resolve_call(failure.call);
     let saved = interp().handlers.clone();
     let _saved = set_aside(saved.clone(), None);
     let classes: [&[u8]; 3] = [b"simpleError", b"error", b"condition"];
@@ -287,7 +293,8 @@ pub unsafe fn make_condition(message: &str, call: Sexp, classes: &[&str]) -> R<S
 }
 
 /// Signals an error condition of `classes` that carries `fields` after its message and call,
-/// as `stop(condition)` would. GNU R raises a few errors this way, such as
+/// as GNU R's `R_signalErrorCondition` does: each handler takes the condition object, and the
+/// default error handler runs when none unwinds. GNU R raises a few errors this way, such as
 /// `MissingSubscriptError`, so that handlers can tell them apart. The result is the unwind to
 /// propagate.
 pub unsafe fn classed_error(
@@ -296,20 +303,19 @@ pub unsafe fn classed_error(
     classes: &[&str],
     fields: &[(&str, Sexp)],
 ) -> Unwind {
-    let signal = || -> R<Unwind> {
-        let mut items = vec![
-            ("message", scalar_string(message)?),
-            ("call", resolve_call(call)),
-        ];
+    let call = resolve_call(call);
+    let signal = || -> R<()> {
+        let mut items = vec![("message", scalar_string(message)?), ("call", call)];
         items.extend_from_slice(fields);
         let condition = values::named_list(&items)?;
+        crate::heap().root(condition);
         values::set_attr(condition, symbols().class, values::string_vector(classes)?)?;
-        let stop = values::call(values::install("stop")?, &[condition])?;
-        eval::eval(stop, values::base_namespace())?;
-        Ok(crate::unwind::error_in(call, message))
+        signal_condition(condition, call)?;
+        Ok(())
     };
     match signal() {
-        Ok(unwind) | Err(unwind) => unwind,
+        Ok(()) => default_error(call, message),
+        Err(unwind) => unwind,
     }
 }
 
@@ -750,6 +756,7 @@ pub unsafe fn default_warning(call: Sexp, message: &str) -> R<()> {
         return Err(Unwind::Error(RError {
             message: format!("(converted from warning) {message}"),
             call,
+            class: ErrorClass::Simple,
         }));
     }
     if level == 1 || interp().immediate_warning {
@@ -1025,6 +1032,7 @@ unsafe fn do_stop(call: &Call<'_>) -> R<Sexp> {
     Err(signal_error(RError {
         message,
         call: condition_call,
+        class: ErrorClass::Simple,
     }))
 }
 

@@ -1,0 +1,59 @@
+[stdout]
+| evalError or getvarError | missingArgError error condition | argument "a" is missing, with no default | f() 
+| evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | (function(x) x + 1)() 
+| evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | (function(x) identity(x))() 
+| evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | (function(x) cat(x))() 
+| evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | (function(x) (function(y) y)(x))() 
+| evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | (function(x) tryCatch(x, finally = 1))() 
+| evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | FUN(X[[i]], ...) 
+| getMissingError | missingArgError error condition | argument "x" is missing, with no default | get(x, envir, mode, inherits) 
+| getMissingError | missingArgError error condition | argument "x" is missing, with no default | get0(x, envir, mode, inherits, ifnotfound) 
+| getMissingError | missingArgError error condition | argument "f" is missing, with no default | f(1) 
+| log1Error | missingArgError error condition | argument "x" is missing, with no default | log(x) 
+| log2Error | missingArgError error condition | argument "x" is missing, with no default | log(x, 2) 
+| log2Error | missingArgError error condition | argument "x" is missing, with no default | log(, 2) 
+| MathMissingError | missingArgError error condition | argument "x" is missing, with no default | round(x) 
+| MathMissingError | missingArgError error condition | argument "x" is missing, with no default | signif(x, 2) 
+| evalError or getvarError | missingArgError error condition | argument "..2" is missing, with no default | (function(...) ..2)(1, ) 
+| evalError or getvarError | missingArgError error condition | argument is missing, with no default | (function(...) ...elt(2))(1, ) 
+| evalError or getvarError | missingArgError error condition | argument is missing, with no default | (function(...) list(...))(1, ) 
+| evalError or getvarError | missingArgError error condition | argument is missing, with no default | (function(...) c(...))(, 1) 
+| evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | (function(x) rep(x, 2))() 
+| evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | (function(x) rep(x))() 
+| evalError or getvarError | missingArgError error condition | argument is missing, with no default | (function(...) rep(...))(, 2) 
+| simpleError | error condition | attempt to replicate an object of type 'symbol' | rep(times = 2, x) 
+| evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | (function(x) .subset(x, 1))() 
+| evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | (function(x) .subset2(x, 1))() 
+| evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | (function(x) .subset(1:3, x))() 
+| simpleError | error condition | argument 2 is empty | .subset(1:3, ) 
+| evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | (function(x) {     x[1] <- 2     x })() 
+| evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | (function(x) {     x[[1]] <- 2     x })() 
+| evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | (function(x) {     x$a <- 2     x })() 
+| evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | (function(x) {     names(x) <- "a"     x })() 
+| evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | (function(x) {     attr(x, "a") <- 1     x })() 
+| evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | (function(x) {     length(x) <- 2     x })() 
+| evalError or getvarError | missingArgError error condition | argument "x" is missing, with no default | (function(x) (function() x[1] <<- 2)())() 
+| tailcallError | missingArgError error condition | argument "expr" is missing, with no default | (function(x) Exec(x))() 
+| tailcallRecError | missingArgError error condition | argument "FUN" is missing, with no default | (function() Tailcall())() 
+| [1] 0.6931472
+| [1] 0.6931472
+| [1] 2.079442
+| [1] 1 2
+| NULL
+| [1] "missingArgError handler"
+| [1] "message" "call"   
+| exiting handler
+| [1] FALSE
+| [1] TRUE
+| Error in f() : argument "a" is missing, with no default
+| [1] "missingArgError" "error"           "condition"      
+| simpleError | error condition | ..1 used in an incorrect context, no ... to look in | (function() ...elt(1))() 
+| simpleError | error condition | the ... list contains fewer than 3 elements | (function(...) ...elt(3))(1, 2) 
+| simpleError | error condition | indexing '...' with non-positive index 0 | (function(...) ...elt(0))(1, 2) 
+| simpleError | error condition | the ... list contains fewer than 1 element | (function(...) ...elt(1))() 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

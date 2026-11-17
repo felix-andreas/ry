@@ -37,10 +37,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     special("[[<-", -1, do_subassign2).dispatch_or_eval(),
     special("$<-", 3, do_dollar_assign),
     special("@<-", 3, do_at_assign).direct(direct_at_assign),
-    builtin(".subset", -1, do_subset).keep_missing(),
-    builtin(".subset2", -1, do_subset2)
-        .keep_missing()
-        .direct(direct_subset2),
+    builtin(".subset", -1, do_subset),
+    builtin(".subset2", -1, do_subset2).direct(direct_subset2),
     builtin("list", -1, do_list),
     builtin("length", 1, do_length)
         .generic(Generic::Internal)

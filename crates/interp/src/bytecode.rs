@@ -55,7 +55,7 @@ use {
         interp,
         kernels::{self, Element, MAX_NODES, Node, Reduction},
         moves,
-        unwind::{Jump, R, Unwind, error, error_in},
+        unwind::{Jump, MissingArgument, R, Unwind, error, error_in, missing_argument},
         values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
     },
     heap::{
@@ -2967,7 +2967,7 @@ unsafe fn switch_arm(selector: Sexp, table: Sexp) -> R<usize> {
                 });
             match matched {
                 Some(index) => values::ints(table.element(SWITCH_NAME_ARMS))[index],
-                None if position_arms[0] < 0 => return Err(error(eval::SWITCH_EMPTY_DEFAULT)),
+                None if position_arms[0] < 0 => return Err(eval::switch_empty_default()),
                 None => position_arms[0],
             }
         }
@@ -11547,13 +11547,14 @@ unsafe fn slot_builtin_args(
     let dots = symbols().dots;
     let missing = missing_arg();
     let heap = crate::heap();
+    let lexical = LexicalFrame::of(state.machine);
     let mut push = |args: &mut eval::Args, tag: Sexp, item: Sexp, passed_on: bool| -> R<()> {
         let value = if item == missing {
             if !keep_missing {
                 // An empty item of `...` is the passing frame's error, as GNU R evaluates it
                 // as a symbol there; an empty argument written in the call is the call's.
                 return Err(if passed_on {
-                    error("argument is missing, with no default")
+                    missing_argument(lexical.call(), "", MissingArgument::Eval)
                 } else {
                     error_in(call, format!("argument {} is empty", args.len() + 1))
                 });
@@ -14058,7 +14059,10 @@ unsafe fn lookup_variable(
     } else if let Some(cell) = heap.frame_cell_hinted(env, symbol, hint) {
         let value = cell.cdr();
         if cell.has_gp(gp::ACTIVE_BINDING) || value == missing_arg() || value == unbound() {
-            return holding(held, || eval::eval_symbol(symbol, env));
+            return holding(held, || {
+                let lexical = || eval::lexical_call(env);
+                eval::eval_symbol_reporting(symbol, env, lexical, MissingArgument::Getvar)
+            });
         }
         Some(value)
     } else {
@@ -14141,7 +14145,7 @@ unsafe fn lookup_outside(
                 return Ok(value.car());
             }
             return holding(held, || {
-                eval::eval_symbol_reporting(symbol, env, || lexical.call())
+                eval::eval_symbol_reporting(symbol, env, || lexical.call(), MissingArgument::Getvar)
             });
         }
         Err(FrameBinding::Cell(cell)) => {
@@ -14155,7 +14159,12 @@ unsafe fn lookup_outside(
                 || value.kind() == SexpType::Promise
             {
                 return holding(held, || {
-                    eval::eval_symbol_reporting(symbol, env, || lexical.call())
+                    eval::eval_symbol_reporting(
+                        symbol,
+                        env,
+                        || lexical.call(),
+                        MissingArgument::Getvar,
+                    )
                 });
             }
             return Ok(value);
@@ -14170,7 +14179,7 @@ unsafe fn lookup_outside(
                 return Ok(value.car());
             }
             return holding(held, || {
-                eval::eval_symbol_reporting(symbol, env, || lexical.call())
+                eval::eval_symbol_reporting(symbol, env, || lexical.call(), MissingArgument::Getvar)
             });
         }
         if value != missing_arg() && value != unbound() {
@@ -14183,7 +14192,7 @@ unsafe fn lookup_outside(
         fill_cache(symbol, enclosure, cell, cache, slot);
     }
     holding(held, || {
-        eval::eval_symbol_reporting(symbol, env, || lexical.call())
+        eval::eval_symbol_reporting(symbol, env, || lexical.call(), MissingArgument::Getvar)
     })
 }
 
