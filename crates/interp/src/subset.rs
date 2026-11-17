@@ -10,6 +10,7 @@ use {
         },
         coerce::{self, coerce_vector},
         conditions,
+        distributions::SessionDeviates,
         element_access::direct_subset2,
         eval::{self, value_of},
         handles::{
@@ -18,6 +19,7 @@ use {
             clear_attributes, dense, get_attribute, is_na, is_s4, names_of, null, remove_attribute,
             safe, set_attribute, set_class, symbol, unshared,
         },
+        random::Deviates,
         unwind::{R, Unwind, error, error_in, errorcall},
         values::{
             self, Dims, alloc, char_str, get_attr, length, missing_arg, na_string, nil,
@@ -5721,62 +5723,146 @@ pub unsafe fn max_col(
     method: i32,
     maxes: &mut [i32],
 ) -> R<()> {
-    let random = method == 1;
-    if random {
+    let drawing = column_maxima(matrix, rows, columns, method, maxes);
+    // GNU R reads the generator's state at the first tie, so a call without one leaves
+    // `.Random.seed` as it was, even unset.
+    if !drawing.is_empty() {
         crate::random::get_rng_state()?;
+        draw_ties(matrix, rows, columns, &drawing, maxes, &mut SessionDeviates)?;
+        crate::random::put_rng_state()?;
     }
-    let entry = |row: usize, column: usize| matrix.get(row + column * rows).copied();
-    for (row, slot) in maxes.iter_mut().enumerate().take(rows) {
-        let mut missing = false;
-        let mut largest = 0.0f64;
-        for column in 0..columns {
-            let value = entry(row, column).unwrap_or(f64::NAN);
-            if value.is_nan() {
-                missing = true;
-                break;
-            }
-            if value.is_finite() {
-                largest = largest.max(value.abs());
-            }
-        }
-        let Some(mut maximum) = entry(row, 0).filter(|_| !missing && columns > 0) else {
-            *slot = NA_INTEGER;
-            continue;
-        };
-        let mut chosen = 0;
+    Ok(())
+}
+
+/// [`max_col`]'s scan, column by column over blocks of rows so that it reads the matrix in
+/// memory order. The maximum a row's scan follows never depends on a draw, so with `method` 1
+/// the scan only counts the ties that would draw and returns the rows with any, for
+/// [`draw_ties`].
+fn column_maxima(
+    matrix: &[f64],
+    rows: usize,
+    columns: usize,
+    method: i32,
+    maxes: &mut [i32],
+) -> Vec<usize> {
+    const BLOCK: usize = 256;
+    let mut drawing = Vec::new();
+    let Some(matrix) = matrix.get(..rows * columns).filter(|_| columns > 0) else {
+        maxes.fill(NA_INTEGER);
+        return drawing;
+    };
+    let random = method == 1;
+    let last = method == 3;
+    let count = rows.min(maxes.len());
+    for (block, out) in maxes[..count].chunks_mut(BLOCK).enumerate() {
+        let start = block * BLOCK;
+        let column = |column: usize| &matrix[column * rows + start..][..out.len()];
+        let mut maximum = [0.0f64; BLOCK];
+        let maximum = &mut maximum[..out.len()];
+        let mut chosen = [0u32; BLOCK];
+        let chosen = &mut chosen[..out.len()];
+        maximum.copy_from_slice(column(0));
         if random {
-            // Entries are treated as probabilities: values this close to the maximum tie.
-            let tolerance = 1e-5 * largest;
-            let mut ties = 1;
-            for column in 1..columns {
-                let value = entry(row, column).unwrap_or(f64::NAN);
-                if value > maximum + tolerance {
-                    maximum = value;
-                    chosen = column;
-                    ties = 1;
-                } else if value >= maximum - tolerance {
-                    // Reservoir sampling: each tied column ends up chosen with equal
-                    // probability.
-                    ties += 1;
-                    if f64::from(ties) * crate::random::unif_rand()? < 1.0 {
-                        chosen = column;
+            // The largest finite magnitude, or NaN once the row has met a missing value.
+            let mut tolerance = [0.0f64; BLOCK];
+            let tolerance = &mut tolerance[..out.len()];
+            for index in 0..columns {
+                for (largest, &value) in tolerance.iter_mut().zip(column(index)) {
+                    *largest = if value.is_nan() || largest.is_nan() {
+                        f64::NAN
+                    } else if value.is_finite() {
+                        largest.max(value.abs())
+                    } else {
+                        *largest
+                    };
+                }
+            }
+            for largest in tolerance.iter_mut() {
+                *largest *= 1e-5;
+            }
+            let mut draws = [0u32; BLOCK];
+            let draws = &mut draws[..out.len()];
+            for index in 1..columns {
+                for row in 0..out.len() {
+                    let value = column(index)[row];
+                    let (current, tolerance) = (maximum[row], tolerance[row]);
+                    if value > current + tolerance {
+                        maximum[row] = value;
+                        chosen[row] = index as u32;
+                    } else if value >= current - tolerance {
+                        draws[row] += 1;
                     }
                 }
             }
+            for row in 0..out.len() {
+                out[row] = if tolerance[row].is_nan() {
+                    NA_INTEGER
+                } else {
+                    if draws[row] > 0 {
+                        drawing.push(start + row);
+                    }
+                    chosen[row] as i32 + 1
+                };
+            }
         } else {
-            let last = method == 3;
-            for column in 1..columns {
-                let value = entry(row, column).unwrap_or(f64::NAN);
-                if value > maximum || (last && value == maximum) {
-                    maximum = value;
+            // A missing value makes the maximum NaN, which no later value replaces.
+            for index in 1..columns {
+                for (row, &value) in column(index).iter().enumerate() {
+                    let current = maximum[row];
+                    let better = value > current || (last && value == current);
+                    chosen[row] = if better { index as u32 } else { chosen[row] };
+                    maximum[row] = if better || value.is_nan() {
+                        value
+                    } else {
+                        current
+                    };
+                }
+            }
+            for ((out, &maximum), &chosen) in out.iter_mut().zip(&*maximum).zip(&*chosen) {
+                *out = if maximum.is_nan() {
+                    NA_INTEGER
+                } else {
+                    chosen as i32 + 1
+                };
+            }
+        }
+    }
+    drawing
+}
+
+/// The random-tie rows of [`column_maxima`] scanned again one at a time, in row order, which
+/// makes the same draws as GNU R's row-by-row loop.
+fn draw_ties(
+    matrix: &[f64],
+    rows: usize,
+    columns: usize,
+    drawing: &[usize],
+    maxes: &mut [i32],
+    deviates: &mut impl Deviates,
+) -> R<()> {
+    for &row in drawing {
+        let entry = |column: usize| matrix[row + column * rows];
+        let tolerance = 1e-5
+            * (0..columns)
+                .map(entry)
+                .filter(|value| value.is_finite())
+                .fold(0.0f64, |largest, value| largest.max(value.abs()));
+        let (mut maximum, mut chosen, mut ties) = (entry(0), 0, 1);
+        for column in 1..columns {
+            let value = entry(column);
+            if value > maximum + tolerance {
+                maximum = value;
+                chosen = column;
+                ties = 1;
+            } else if value >= maximum - tolerance {
+                // Reservoir sampling: each tied column ends up chosen with equal probability.
+                ties += 1;
+                if f64::from(ties) * deviates.uniform()? < 1.0 {
                     chosen = column;
                 }
             }
         }
-        *slot = chosen as i32 + 1;
-    }
-    if random {
-        crate::random::put_rng_state()?;
+        maxes[row] = chosen as i32 + 1;
     }
     Ok(())
 }
