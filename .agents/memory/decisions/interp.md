@@ -1163,3 +1163,11 @@ without cells, promise forcing in the loop, and one observer word on the general
 - **GNU R's two evaluators differ.** For a warning or error from `x[5] <<- 1:3`, the AST evaluator names the call as written and compiled code names `x[5] <- 1:3`, because the compiler records the setter call with the plain arrow. A closure runs compiled from its second call on, and package code always, so the compiled form is the one programs see.
 - **Rule.** `unwind::reported_assignment` names a complex superassignment with the plain arrow whenever a function frame is on the stack, and as written at top level, where GNU R never compiles a statement. The first call of a closure in GNU R therefore differs from ry, as it differs from GNU R's own second call.
 - **Generators stay out of the gap.** The `language` kind compiles its closures up front, and the `metamorphic` kind muffles the warnings of its superassignment forms.
+
+## A direct call of an attribute replacement wraps its target
+
+**Status:** built.
+
+- **Rule.** A direct call of a replacement primitive (`` `names<-`(x, v) ``) copies a bound target first, because ry's arguments hold no reference and the builtin would otherwise change the caller's binding. `Checks::replacement` says how: `Replacement::Attributes` (`attr<-`, `attributes<-`, `class<-`, `dimnames<-`, `names<-`, `oldClass<-`) copies through `values::replacement_copy`, which puts a long vector, list included, under a wrapper that shares its data, as GNU R's `R_shallow_duplicate_attr` does; `Replacement::Contents` makes a shallow copy.
+- **Why.** A plain shallow copy of a 1,000-element list costs 2 to 3 µs against GNU R's 0.45 µs wrapper.
+- The bytecode fast path `direct_set_names` copies through `handles::attributes_unshared` for the same reason.

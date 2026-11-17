@@ -1570,8 +1570,8 @@ pub unsafe fn shallow_duplicate(object: Sexp) -> R<Sexp> {
 }
 
 /// GNU R's `R_shallow_duplicate_attr`: a copy of `object` for a caller that changes only its
-/// attributes, which for a long atomic or character vector is a wrapper that shares the data
-/// until something writes to it through the ALTREP interface. Its storage must never be
+/// attributes, which for a long vector (atomic, character or list) is a wrapper that shares the
+/// data until something writes to it through the ALTREP interface. Its storage must never be
 /// written directly (`slice_mut`, `reals_mut`). Like [`shallow_duplicate`], it drops the Array
 /// bit.
 pub unsafe fn shallow_duplicate_attr(object: Sexp) -> R<Sexp> {
@@ -1583,6 +1583,7 @@ pub unsafe fn shallow_duplicate_attr(object: Sexp) -> R<Sexp> {
             | SexpType::Complex
             | SexpType::Raw
             | SexpType::String
+            | SexpType::List
     );
     // An Array's kernels read its storage directly, which a wrapper does not have.
     if !wrappable || object.is_array() || length(object) < WRAP_THRESHOLD {

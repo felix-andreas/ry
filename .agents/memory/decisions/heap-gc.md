@@ -485,3 +485,12 @@ GNU R finalizes an object at the first full `gc()` after its last reference goes
 - **Not matched.** The size at which an allocation fails is the machine's, so a request GNU R can satisfy and ry cannot (or the reverse) differs by design.
 - `complex(length.out = n)` reads `n` as GNU R's `asInteger` does (a warning and "invalid length" for a value outside the integer range) before it allocates.
 - Pinned by the oracle case `vectors__allocation_failure_size`. Found by the metamorphic fuzz kind.
+
+## A list of inert elements skips its children when it dies
+
+**Status:** built.
+
+- **Rule.** A list carries `INERT_ELEMENTS` (flag bit 6, shared with the string-only `VALID_UTF8`) while every element is inert: nil, a symbol, a `CHARSXP`, a character vector, or a small or ALTREP atomic vector (`object::is_inert`). Giving up such references can free nothing and release no frame, so `reconcile` and `release_swept_lists` skip a dead list with the bit, as GNU R's sweep skips every dead object's children.
+- **Maintenance.** Allocation sets the bit; `set_element`, `copy_elements`, `move_elements` and `count_written_elements` clear it when a non-inert element arrives; `escape` clears it, since native code may store anything through the pointer. `count_written_elements` derives it in the same pass that counts the elements (`increment_refcount_inert`, one header read per element, branch-free).
+- **Safety.** A set bit leaves the elements' counts overcounted, which is safe because counts only overcount; a clear bit only costs a walk. A large atomic element is not inert, because its release returns pages early.
+- Measured on a shallow copy of a shared 1,000-element list of doubles, freed each iteration: 3.2 µs per copy without the bit, 2.7 µs with it.

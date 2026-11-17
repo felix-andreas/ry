@@ -46,8 +46,8 @@ use {
     crate::{
         Frame, Interp,
         arith::{MATHS, math_index},
-        builtins::{Arg, BuiltinDef, Call, Generic, internal},
-        conditions,
+        builtins::{Arg, BuiltinDef, Call, Generic, Replacement, internal},
+        conditions, deparse,
         dispatch::{self, Caller},
         effects, element_access,
         envir::namespace_binding,
@@ -2880,10 +2880,6 @@ unsafe fn switch_compiles(args: &[(Sexp, Sexp)]) -> bool {
     let Some(((selector_tag, selector), alternatives)) = args.split_first() else {
         return false;
     };
-    let defaults = alternatives
-        .iter()
-        .filter(|(tag, _)| switch_default(*tag))
-        .count();
     *selector_tag == nil()
         && *selector != symbols().dots
         && *selector != missing_arg()
@@ -2891,7 +2887,6 @@ unsafe fn switch_compiles(args: &[(Sexp, Sexp)]) -> bool {
         && alternatives
             .iter()
             .all(|(_, value)| *value != symbols().dots)
-        && defaults <= 1
 }
 
 /// Whether an alternative with this tag is the default: it has no name, or an empty one.
@@ -2903,10 +2898,13 @@ unsafe fn switch_default(tag: Sexp) -> bool {
 const SWITCH_NAMES: usize = 0;
 /// Where it keeps, for each name, the arm that name runs (0 for none).
 const SWITCH_NAME_ARMS: usize = 1;
-/// Where it keeps the default's arm (first; 0 for none, -1 for an empty default, which is an
-/// error) and then, for each position, the arm a numeric selector runs (-1 for an empty
-/// alternative, which is an error).
+/// Where it keeps the default's arm (first; 0 for none, -1 for an empty default and
+/// [`SWITCH_DUPLICATE_DEFAULTS`] for more than one, which are errors) and then, for each
+/// position, the arm a numeric selector runs (-1 for an empty alternative, which is an error).
 const SWITCH_POSITION_ARMS: usize = 2;
+/// The default's arm when the call has two defaults, which a string selector rejects before it
+/// looks for a match and a numeric selector never consults.
+const SWITCH_DUPLICATE_DEFAULTS: i32 = -2;
 /// Where it keeps, for arms 0, 1, 2, ..., the constant pool index of the integer scalar
 /// [`Op::SwitchArm`] returns for that arm. The arm tests compare those scalars by identity, and a
 /// code image keeps each pool entry as one object but does not keep an object shared between two
@@ -2935,6 +2933,14 @@ unsafe fn switch_table(call: Sexp, alternatives: &[(Sexp, Sexp)]) -> R<(Sexp, Ve
                 position_arms[0] = arms.len() as i32;
             }
         }
+    }
+    if alternatives
+        .iter()
+        .filter(|(tag, _)| switch_default(*tag))
+        .count()
+        > 1
+    {
+        position_arms[0] = SWITCH_DUPLICATE_DEFAULTS;
     }
     let mut names = Vec::new();
     let mut name_arms = Vec::new();
@@ -2966,6 +2972,17 @@ unsafe fn switch_table(call: Sexp, alternatives: &[(Sexp, Sexp)]) -> R<(Sexp, Ve
 unsafe fn switch_arm(selector: Sexp, table: Sexp) -> R<usize> {
     let position_arms = values::ints(table.element(SWITCH_POSITION_ARMS));
     let arm = match eval::switch_selector(selector, table.element(SWITCH_CALL))? {
+        SwitchSelector::Name(_) if position_arms[0] == SWITCH_DUPLICATE_DEFAULTS => {
+            let alternatives = values::pairlist_items(table.element(SWITCH_CALL).cdr().cdr());
+            let mut defaults = alternatives
+                .into_iter()
+                .filter(|(tag, _)| *tag == nil() || symbol_name(*tag).is_empty())
+                .map(|(_, value)| deparse::deparse_one_line(value));
+            return Err(match (defaults.next(), defaults.next()) {
+                (Some(first), Some(second)) => eval::duplicate_defaults_error(&first, &second),
+                _ => error("duplicate 'switch' defaults"),
+            });
+        }
         SwitchSelector::Name(text) => {
             let names = table.element(SWITCH_NAMES);
             let count = length(names);
@@ -7235,7 +7252,8 @@ pub unsafe fn call_builtin_step(machine: &mut Machine<'_>, pc: usize, record: bo
         {
             interp().visible = true;
             Some(value)
-        } else if definition.direct.is_some() && !definition.checks.replacement {
+        } else if definition.direct.is_some() && definition.checks.replacement == Replacement::None
+        {
             eval::call_direct(definition, pool_entry(constants, operand(2)), values)?
         } else {
             None
@@ -9807,7 +9825,7 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
         return Ok(Flow::Next);
     }
     if definition.direct.is_some()
-        && !definition.checks.replacement
+        && definition.checks.replacement == Replacement::None
         && positional_arguments(call.cdr())
     {
         let values = std::slice::from_raw_parts(instruction.registers.add(first), count);
@@ -9862,7 +9880,7 @@ unsafe fn op_call_builtin_positional(
         return Ok(Flow::Next);
     }
     if definition.direct.is_some()
-        && !definition.checks.replacement
+        && definition.checks.replacement == Replacement::None
         && let Some(value) = eval::call_direct(definition, call, values)?
     {
         state.record(instruction.at, value);

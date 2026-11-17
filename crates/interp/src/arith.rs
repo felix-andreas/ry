@@ -648,17 +648,12 @@ unsafe fn margin_sums(call: &Call<'_>, rows: bool, mean: bool) -> R<Sexp> {
     if matrix.kind() == SexpType::Real && row_count.checked_mul(col_count) == Some(length(matrix)) {
         let data = values::reals(matrix);
         let output = values::reals_mut(result);
+        let divisor = if mean { inner } else { 1 };
         if rows {
-            let divisor = if mean { inner } else { 1 };
             done = long_double::finite_row_means(data, row_count, divisor, output);
             done.resize(outer, false);
-        } else if row_count > 0 {
-            for (position, column) in data.chunks_exact(row_count).enumerate() {
-                if let Some(total) = long_double::add_all(LongDouble::ZERO, column).finite() {
-                    output[position] = finish(total, inner);
-                    done[position] = true;
-                }
-            }
+        } else {
+            done = long_double::finite_column_means(data, row_count, divisor, output);
         }
     } else if matches!(matrix.kind(), SexpType::Logical | SexpType::Integer)
         && row_count.checked_mul(col_count) == Some(length(matrix))
@@ -3224,8 +3219,7 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
             } else {
                 long_double::running_products(values::reals(operand), out);
             }
-            // NA's payload outranks a plain NaN's on the x87 unit GNU R accumulates on, so from
-            // the first NA on every total is NA, whatever NaN came before it.
+            // GNU R marks every total from the first NA on as NA, whatever NaN came before it.
             if out.last().is_some_and(|total| total.is_nan())
                 && let Some(first) = values::reals(operand)
                     .iter()

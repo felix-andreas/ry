@@ -611,36 +611,48 @@ pub fn covariance(x: &[f64], x_offset: f64, y: &[f64], y_offset: f64, divisor: i
 }
 
 /// GNU R's `cumsum` of doubles: each running long double total, rounded to double into `out`,
-/// for the shorter of the two. NA and NaN propagate as the x87 unit propagates them, which is
-/// what decides between them in GNU R.
+/// for the shorter of the two. GNU R stops adding at the first NaN or NA element: every later
+/// total is the default NaN, and the caller marks the totals from the first NA on as NA. So a
+/// NaN's sign and payload never reach a total, and the x87 unit, which takes a microcode assist
+/// on each NaN operand, never sees one.
 pub fn running_sums(values: &[f64], out: &mut [f64]) {
     let count = values.len().min(out.len());
+    let first = values[..count]
+        .iter()
+        .position(|value| value.is_nan())
+        .unwrap_or(count);
     #[cfg(all(target_arch = "x86_64", not(windows)))]
-    x87::running_sums(&values[..count], &mut out[..count]);
+    x87::running_sums(&values[..first], &mut out[..first]);
     #[cfg(not(all(target_arch = "x86_64", not(windows))))]
     {
         let mut total = LongDouble::ZERO;
-        for (&value, out) in values[..count].iter().zip(&mut out[..count]) {
+        for (&value, out) in values[..first].iter().zip(&mut out[..first]) {
             total += value;
             *out = total.to_f64();
         }
     }
+    out[first..count].fill(f64::NAN);
 }
 
 /// GNU R's `cumprod` of doubles: each running long double product, rounded to double into
-/// `out`, for the shorter of the two. NA and NaN propagate as in `running_sums`.
+/// `out`, for the shorter of the two. NA and NaN end the products as in `running_sums`.
 pub fn running_products(values: &[f64], out: &mut [f64]) {
     let count = values.len().min(out.len());
+    let first = values[..count]
+        .iter()
+        .position(|value| value.is_nan())
+        .unwrap_or(count);
     #[cfg(all(target_arch = "x86_64", not(windows)))]
-    x87::running_products(&values[..count], &mut out[..count]);
+    x87::running_products(&values[..first], &mut out[..first]);
     #[cfg(not(all(target_arch = "x86_64", not(windows))))]
     {
         let mut product = LongDouble::from(1.0);
-        for (&value, out) in values[..count].iter().zip(&mut out[..count]) {
+        for (&value, out) in values[..first].iter().zip(&mut out[..first]) {
             product = product * LongDouble::from(value);
             *out = product.to_f64();
         }
     }
+    out[first..count].fill(f64::NAN);
 }
 
 /// GNU R's `rowSums` (`divisor` 1) or `rowMeans` (`divisor` the column count) of a column-major
@@ -695,6 +707,48 @@ pub fn finite_row_means(values: &[f64], rows: usize, divisor: usize, out: &mut [
                 total.finite().is_some()
             })
             .collect()
+    }
+}
+
+/// GNU R's `colSums` (`divisor` 1) or `colMeans` (`divisor` the row count) of a column-major
+/// matrix with `rows` rows: each column's long double total, divided by `divisor` in long double
+/// and rounded once to double into `out`. Returns which columns were written; a column holding
+/// an infinite or NaN value is left for the caller, whose `na.rm` decides it.
+pub fn finite_column_means(
+    values: &[f64],
+    rows: usize,
+    divisor: usize,
+    out: &mut [f64],
+) -> Vec<bool> {
+    if rows == 0 {
+        return vec![false; out.len()];
+    }
+    let columns = (values.len() / rows).min(out.len());
+    #[cfg(all(target_arch = "x86_64", not(windows)))]
+    {
+        let mut totals = vec![[0u8; 16]; columns];
+        x87::column_sums(&values[..rows * columns], rows, &mut totals);
+        x87::divide_each(&totals, divisor as u64, &mut out[..columns]);
+        let mut done: Vec<bool> = totals
+            .iter()
+            .map(|total| u16::from_le_bytes([total[8], total[9]]) & 0x7fff != 0x7fff)
+            .collect();
+        done.resize(out.len(), false);
+        done
+    }
+    #[cfg(not(all(target_arch = "x86_64", not(windows))))]
+    {
+        let mut done = vec![false; out.len()];
+        for ((column, out), done) in values.chunks_exact(rows).zip(out.iter_mut()).zip(&mut done) {
+            let total = add_all(LongDouble::ZERO, column);
+            *out = if divisor == 1 {
+                total.to_f64()
+            } else {
+                (total / divisor).to_f64()
+            };
+            *done = total.finite().is_some();
+        }
+        done
     }
 }
 
@@ -1509,6 +1563,46 @@ mod x87 {
         }
     }
 
+    /// The extended total of each `rows`-long column of `values` into `totals`, for as many
+    /// whole columns as both hold. Each total starts a new chain, so the processor overlaps a
+    /// column's additions with the end of the previous column's.
+    pub(super) fn column_sums(values: &[f64], rows: usize, totals: &mut [[u8; 16]]) {
+        let columns = values
+            .len()
+            .checked_div(rows)
+            .unwrap_or(0)
+            .min(totals.len());
+        // SAFETY: reads `rows * columns` doubles inside `values` and writes the first ten bytes
+        // of `columns` totals.
+        unsafe {
+            asm!(
+                "test {columns}, {columns}",
+                "jz 4f",
+                "2:",
+                "fldz",
+                "mov {count}, {rows}",
+                "3:",
+                "fadd qword ptr [{pointer}]",
+                "add {pointer}, 8",
+                "dec {count}",
+                "jnz 3b",
+                "fstp tbyte ptr [{totals}]",
+                "add {totals}, 16",
+                "dec {columns}",
+                "jnz 2b",
+                "4:",
+                pointer = inout(reg) values.as_ptr() => _,
+                totals = inout(reg) totals.as_mut_ptr() => _,
+                columns = inout(reg) columns => _,
+                rows = in(reg) rows,
+                count = out(reg) _,
+                out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
+                out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
+                options(nostack),
+            );
+        }
+    }
+
     /// `out[i] = totals[i] / divisor`, divided in extended precision and rounded once to
     /// double, for the shorter of the two. A divisor of 1 only rounds.
     pub(super) fn divide_each(totals: &[[u8; 16]], divisor: u64, out: &mut [f64]) {
@@ -1654,6 +1748,33 @@ fn scale(mut value: f64, mut power: i32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// From the first NaN or NA element on, every total is the default NaN, whatever its sign
+    /// and payload, and the totals before it are untouched.
+    #[test]
+    fn totals_after_a_nan_are_the_default_nan() {
+        let values = [
+            1.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            2.0,
+            f64::from_bits(0xfff8_0000_0000_0123),
+            3.0,
+            f64::from_bits(0x7ff0_0000_0000_07a2),
+        ];
+        for products in [false, true] {
+            let mut out = [0.0; 7];
+            if products {
+                running_products(&values, &mut out);
+            } else {
+                running_sums(&values, &mut out);
+            }
+            assert_eq!(out[0], 1.0);
+            for total in &out[4..] {
+                assert_eq!(total.to_bits(), f64::NAN.to_bits());
+            }
+        }
+    }
 
     /// Summation in the 64-bit significand matches x87: a huge term swallows small ones, extra
     /// bits survive until the final rounding, and an overflow shows only on conversion.

@@ -210,6 +210,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A promise whose evaluation was left warns when it is forced again (settled)
 - An assignment with several subscripts checks them before the value (settled)
 - A condition names a superassignment inside a function with the plain arrow (settled)
+- A direct call of an attribute replacement wraps its target
 
 ## Builtins and base R
 
@@ -391,6 +392,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Whether a vector may be written in place is a value, `Owned`
 - A builtin's fast-path entry runs in its caller's handle scope and answers unrooted
 - An allocation failure reports the size of the vector's data
+- A list of inert elements skips its children when it dies
 
 ## C API, R home and packages
 

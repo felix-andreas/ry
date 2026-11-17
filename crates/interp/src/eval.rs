@@ -8,8 +8,8 @@ use {
         Frame, Signalling,
         annotations::Entry,
         builtins::{
-            Arg, BuiltinDef, Call, DirectFn, Generic, Kind, NativeArgs, Visibility, builtin,
-            internal, internal_special, special,
+            Arg, BuiltinDef, Call, DirectFn, Generic, Kind, NativeArgs, Replacement, Visibility,
+            builtin, internal, internal_special, special,
         },
         bytecode,
         coerce::{CoercionWarnings, real_to_int},
@@ -1815,7 +1815,7 @@ unsafe fn call_builtin_blaming(
     if activity::hooks() != 0
         || (checks.arity && args.len() != definition.arity as usize)
         || (checks.names && args.iter().any(|arg| arg.tag != nil()))
-        || (checks.replacement
+        || (checks.replacement != Replacement::None
             && args
                 .first()
                 .is_some_and(|target| target.value.refcount() >= 1))
@@ -1839,7 +1839,7 @@ pub(crate) unsafe fn call_builtin_positional(
     let checks = definition.checks;
     if activity::hooks() != 0
         || (checks.arity && args.len() != definition.arity as usize)
-        || (checks.replacement
+        || (checks.replacement != Replacement::None
             && args
                 .first()
                 .is_some_and(|target| target.value.refcount() >= 1))
@@ -1921,10 +1921,16 @@ unsafe fn call_builtin_checked(
     let copied_target;
     let args = match args.first() {
         Some(target)
-            if checks.replacement && target.value.refcount() >= 1 && !is_assignment(call) =>
+            if checks.replacement != Replacement::None
+                && target.value.refcount() >= 1
+                && !is_assignment(call) =>
         {
             let mut copy = args.to_vec();
-            copy[0].value = values::shallow_duplicate(target.value)?;
+            copy[0].value = if checks.replacement == Replacement::Attributes {
+                values::replacement_copy(target.value)?
+            } else {
+                values::shallow_duplicate(target.value)?
+            };
             copied_target = copy;
             copied_target.as_slice()
         }
@@ -5734,17 +5740,14 @@ pub(crate) unsafe fn switch_alternative(
     };
     // GNU R rejects a second default before it looks for a match, naming the calling function
     // rather than the `switch`.
-    let defaults: Vec<&Arg> = alternatives
+    let mut defaults = alternatives
         .iter()
-        .filter(|arg| arg.tag == nil() || symbol_name(arg.tag).is_empty())
-        .collect();
-    if defaults.len() > 1 {
-        return Err(error(
-            "duplicate 'switch' defaults: '".to_string()
-                + &deparse::deparse_one_line(defaults[0].value)
-                + "' and '"
-                + &deparse::deparse_one_line(defaults[1].value)
-                + "'",
+        .filter(|arg| arg.tag == nil() || symbol_name(arg.tag).is_empty());
+    let default = defaults.next();
+    if let (Some(first), Some(second)) = (default, defaults.next()) {
+        return Err(duplicate_defaults_error(
+            &deparse::deparse_one_line(first.value),
+            &deparse::deparse_one_line(second.value),
         ));
     }
     for (position, arg) in alternatives.iter().enumerate() {
@@ -5757,7 +5760,7 @@ pub(crate) unsafe fn switch_alternative(
                 .map(|later| later.value));
         }
     }
-    match defaults.first() {
+    match default {
         Some(default) if default.value == missing => Err(switch_empty_default()),
         Some(default) => Ok(Some(default.value)),
         None => Ok(None),
@@ -5814,6 +5817,13 @@ pub(crate) unsafe fn switch_selector(selector: Sexp, call: Sexp) -> R<SwitchSele
     };
     warnings.report()?;
     Ok(SwitchSelector::Position(position))
+}
+
+/// The error for a `switch` with two defaults, given their deparsed texts.
+pub(crate) fn duplicate_defaults_error(first: &str, second: &str) -> Unwind {
+    error(format!(
+        "duplicate 'switch' defaults: '{first}' and '{second}'"
+    ))
 }
 
 /// Whether the alternative named `name` is the one the string selector `text` picks. GNU R

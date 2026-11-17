@@ -1,0 +1,32 @@
+[stdout]
+| [1] TRUE
+| [1] "k001" "k100"
+| [1] 12.5
+| [1] 0.5
+| [1] "changed"
+| [1] 99
+| [1] 100
+| [1] TRUE
+| NULL
+| [1] 2
+| [1] TRUE
+| [1] 0.25
+| k001 k002 
+| -1.0  0.5 
+| NULL
+| [1] "x"
+| [1] "list"
+| [1] TRUE
+| [1] TRUE
+| [1] "k001" "k002"
+| List of 3
+|  $ k001: num 0.25
+|  $ k002: chr "changed"
+|  $ k004: num 1
+| [1] 1262.5
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 1262.5

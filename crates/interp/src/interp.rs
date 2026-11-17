@@ -127,7 +127,7 @@ use {
     },
     heap::{
         Heap, Liveness, Marker, RootSource, activity,
-        object::{Sexp, SexpType},
+        object::{NA_INTEGER, Sexp, SexpType},
     },
     rustc_hash::FxHashMap,
     std::{cell::UnsafeCell, rc::Rc},
@@ -500,6 +500,9 @@ pub struct Hooks {
     /// when the class has none. A class may expand into storage it keeps, as compact sequences
     /// do, so repeated reads do not copy the vector each time.
     pub altrep_dataptr: unsafe fn(Sexp) -> R<Option<*const u8>>,
+    /// GNU R's `DATAPTR_OR_NULL`: an ALTREP vector's data when its class holds it already, as a
+    /// wrapper does, without expanding or copying anything, or `None`.
+    pub altrep_dataptr_or_null: unsafe fn(Sexp) -> R<Option<*const u8>>,
     /// Element `index` of an integer or logical ALTREP vector, from its class's `Elt` method,
     /// so that reading a few elements of a compact sequence never expands it.
     pub altrep_int_elt: unsafe fn(Sexp, usize) -> R<i32>,
@@ -511,6 +514,9 @@ pub struct Hooks {
     /// An integer or double ALTREP vector's `sum`, `min` or `max` with the given `na.rm`, from
     /// its class's `Sum`, `Min` or `Max` method, or `None` when the class has no answer.
     pub altrep_summary: unsafe fn(Sexp, AltrepSummary, bool) -> R<Option<Sexp>>,
+    /// An ALTREP vector's `*_IS_SORTED` and `*_NO_NA` metadata, GNU R's sortedness enum
+    /// (`NA_INTEGER` when unknown) and whether it knows the vector holds no missing value.
+    pub altrep_sortedness: unsafe fn(Sexp) -> R<(i32, bool)>,
     /// `as.character` of an integer or double vector without attributes as a vector that
     /// converts each element when it is read, or `None` when the host has no such class.
     pub defer_strings: unsafe fn(Sexp) -> R<Option<Sexp>>,
@@ -1001,10 +1007,12 @@ pub fn default_hooks() -> Hooks {
         altrep_length: |_| Err(unwind::error("ALTREP objects need the libR host")),
         compact_sequence: |_, _, _, _| Ok(None),
         altrep_dataptr: |_| Ok(None),
+        altrep_dataptr_or_null: |_| Ok(None),
         altrep_int_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_real_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_string_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_summary: |_, _, _| Ok(None),
+        altrep_sortedness: |_| Ok((NA_INTEGER, false)),
         defer_strings: |_| Ok(None),
         altrep_wrap: |object| unsafe { values::shallow_duplicate(object) },
         altrep_unwrap: |object| object,

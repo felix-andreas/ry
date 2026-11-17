@@ -34,7 +34,7 @@ use {
         object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp, is_na_real},
         strings::Encoding,
     },
-    memchr::memmem,
+    memchr::{memchr, memmem},
     regex_automata::{Anchored, Input, MatchKind, meta, util::syntax},
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::{SmallVec, smallvec},
@@ -2604,11 +2604,28 @@ fn grep<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>, logical: bool) -> R<
     }
     let compiled = {
         let pattern = pattern_text(context, pattern, use_bytes);
-        let errors = CompileErrors::for_text(context, &pattern, text, use_bytes);
-        Matcher::compile(&pattern, options, errors)
+        // The error style scans every text, so it is chosen only once the pattern has failed.
+        Matcher::compile(&pattern, options, CompileErrors::Quoted).or_else(|_| {
+            let errors = CompileErrors::for_text(context, &pattern, text, use_bytes);
+            Matcher::compile(&pattern, options, errors)
+        })
     };
     let matcher = compiled.map_err(|failure| compile_failure(context, failure))?;
+    let literal = match &matcher {
+        Matcher::Literal(finder) if !use_bytes => Some(finder.as_ref()),
+        _ => None,
+    };
     let hit = |context: &mut Cx<'_>, index: usize| -> R<bool> {
+        if let Some(finder) = literal {
+            let chars = text.get(context, index);
+            // The bytes of a string the heap validated as UTF-8 are its text, so a fixed pattern
+            // searches them in place.
+            if chars.is_valid_utf8() && !chars.has_mark(gp::LATIN1 | gp::BYTES) {
+                let found =
+                    !handles::is_na(chars) && find_literal_bytes(finder, chars.bytes()).is_some();
+                return Ok(found != invert);
+            }
+        }
         let found = if handles::is_na(text.get(context, index))
             || !valid_subject(
                 context,
@@ -2923,9 +2940,13 @@ fn regexpr<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>, global: bool) -> 
     let text = text_argument(context, arguments.value(1), text)?;
     let (compiled, report) = {
         let pattern = pattern_text(context, pattern, use_bytes);
-        let errors = CompileErrors::for_text(context, &pattern, text, use_bytes);
+        // As in `grep`, the error style is chosen only once the pattern has failed.
+        let compiled = Matcher::compile(&pattern, options, CompileErrors::Quoted).or_else(|_| {
+            let errors = CompileErrors::for_text(context, &pattern, text, use_bytes);
+            Matcher::compile(&pattern, options, errors)
+        });
         (
-            Matcher::compile(&pattern, options, errors),
+            compiled,
             MatchReport::new(context, &pattern, text, use_bytes),
         )
     };
@@ -3625,6 +3646,39 @@ impl CompileErrors {
     }
 }
 
+/// Where `finder`'s needle first starts in `haystack`.
+fn find_literal(finder: &memmem::Finder<'_>, haystack: &[u8]) -> Option<usize> {
+    let needle = finder.needle();
+    // R strings are mostly short, where the searcher's setup outweighs its scan, and finding
+    // each candidate first byte with `memchr` is several times faster.
+    if haystack.len() >= 64 {
+        return finder.find(haystack);
+    }
+    let Some((&first, rest)) = needle.split_first() else {
+        return Some(0);
+    };
+    let mut from = 0;
+    while let Some(offset) = memchr(first, &haystack[from..]) {
+        let start = from + offset;
+        if haystack
+            .get(start + 1..start + needle.len())
+            .is_some_and(|tail| tail == rest)
+        {
+            return Some(start);
+        }
+        from = start + 1;
+    }
+    None
+}
+
+/// [`find_literal`] on a string's bytes, which GNU R reads as a C string: a match that reaches
+/// past a NUL written into the string is no match.
+fn find_literal_bytes(finder: &memmem::Finder<'_>, bytes: &[u8]) -> Option<usize> {
+    let start = find_literal(finder, bytes)?;
+    let end = start + finder.needle().len();
+    memchr(0, &bytes[..end]).is_none().then_some(start)
+}
+
 #[derive(Clone)]
 enum Matcher {
     /// A fixed pattern, with its searcher built once rather than on every search.
@@ -3871,26 +3925,8 @@ impl Matcher {
         }
         match self {
             Matcher::Literal(finder) => {
-                let haystack = &text.as_bytes()[from..];
-                let needle = finder.needle();
-                // R strings are mostly short, where the searcher's setup outweighs its scan and
-                // comparing at each candidate first byte is several times faster.
-                let start = if haystack.len() < 64 {
-                    match needle.split_first() {
-                        Some((&first, rest)) => {
-                            haystack.iter().enumerate().position(|(start, &byte)| {
-                                byte == first
-                                    && haystack
-                                        .get(start + 1..start + needle.len())
-                                        .is_some_and(|tail| tail == rest)
-                            })
-                        }
-                        None => Some(0),
-                    }
-                } else {
-                    finder.find(haystack)
-                };
-                Ok(start.map(|start| (from + start, from + start + needle.len())))
+                let start = find_literal(finder, &text.as_bytes()[from..]);
+                Ok(start.map(|start| (from + start, from + start + finder.needle().len())))
             }
             Matcher::Pattern { regex, .. } => regex
                 .find_from_pos(text, from)

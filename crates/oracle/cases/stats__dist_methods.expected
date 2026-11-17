@@ -1,0 +1,99 @@
+[stdout]
+|  [1] "0x1.6552881a2168fp+1" "0x1.067772ccaa603p+1" "0x1.24031ee38bc39p+1"
+|  [4] "0x1.6f0c8f47510d8p+1" "0x1.88e7da1ddb811p+1" "0x1.40a3d404b4cc4p+1"
+|  [7] "0x1.d0e9d6c03c2cep+1" "0x1.216d82217680dp+1" "0x1.42c1b7fef2c9p+1" 
+| [10] "0x1.3922e25edeffbp+1" "0x1.0ec8eacd455e7p+1" "0x1.5f497138f5b64p+1"
+| [13] "0x1.afe0f0912e07p+1"  "0x1.d36f1fcb27fd7p+1" "0x1.93a2c5aa7edb3p+1"
+| [16] "0x1.2da7878831535p+1" "0x1.1985536d8bf45p+1" "0x1.3f3ca0a09dbc7p+1"
+| [19] "0x1.1a5863101f468p+1" "0x1.88cb2bb01eb36p+1" "0x1.a8e94d1fadc7dp+0"
+|  [1] "0x1.2af09a6e316f4p+1" "0x1.3881367fa6dd4p+0" "0x1.dc842c700e06p+0" 
+|  [4] "0x1.1fb8da842df44p+1" "0x1.0d2c5e482c479p+1" "0x1.f45173b43b6c6p+0"
+|  [7] "0x1.3e3ca877df38cp+1" "0x1.fd11caeef7fccp+0" "0x1.dd4fb4d2ce03ep+0"
+| [10] "0x1.df8f91be2cba5p+0" "0x1.78b4dd83482cep+0" "0x1.018e2441b4cc8p+1"
+| [13] "0x1.3304e88ddbbdbp+1" "0x1.69de1afc4cbbp+1"  "0x1.56da768e3e29ap+1"
+| [16] "0x1.df5fdbcb5ee0ep+0" "0x1.a5235da13f284p+0" "0x1.7f1c14c522058p+0"
+| [19] "0x1.e6d50db8d271ap+0" "0x1.cd84207afd41cp+0" "0x1.16b09239e6b27p+0"
+|  [1] "0x1.51248469e455ep+2" "0x1.0b19523fe0ec5p+2" "0x1.0ef2dd9ac3f57p+2"
+|  [4] "0x1.5ea53a25eccbep+2" "0x1.7231cae5a76cp+2"  "0x1.38149a00dc504p+2"
+|  [7] "0x1.cbb72aea6407p+2"  "0x1.f8c62ea0b472p+1"  "0x1.209fe5e5393f8p+2"
+| [10] "0x1.247ee50644171p+2" "0x1.07ba041abf14cp+2" "0x1.3d5ba6bce12b1p+2"
+| [13] "0x1.6f2edd45450e2p+2" "0x1.96cfcefae0b27p+2" "0x1.5f9c550794748p+2"
+| [16] "0x1.fe690d6f0ef5dp+1" "0x1.e8d75e82bb0d5p+1" "0x1.40549f7567836p+2"
+| [19] "0x1.c1fbc924bbe7ep+1" "0x1.885236d76ea28p+2" "0x1.851786207f2e5p+1"
+|  [1] "0x1.03c3f2afbe4cfp+2" "0x1.aba04f3cadc64p+1" "0x1.b49751a435a8cp+1"
+|  [4] "0x1.f3054fe9acafcp+1" "0x1.08b02fead4b7ep+2" "0x1.12a208ae34511p+2"
+|  [7] "0x1.12d1b71d297a8p+2" "0x1.4ce2eec1ea932p+1" "0x1.cd926674f0845p+1"
+| [10] "0x1.109e46a1a3b69p+2" "0x1.ea93657ad256dp+1" "0x1.6245afcce001bp+1"
+| [13] "0x1.50888c8d40934p+1" "0x1.f223c6954ee2bp+1" "0x1.b53908415a62p+1" 
+| [16] "0x1.3f38ee6e3330ep+1" "0x1.8bc78d25e8de5p+1" "0x1.03a3b17dcecb2p+2"
+| [19] "0x1.57746e86929ccp+1" "0x1.191e5cf8c4302p+2" "0x1.c601e223f8bb5p+1"
+|  [1] "0x0p+0" "0x0p+0" "0x0p+0" "0x0p+0" "0x0p+0" "0x0p+0" "0x0p+0" "0x0p+0"
+|  [9] "0x0p+0" "0x0p+0" "0x0p+0" "0x0p+0" "0x0p+0" "0x0p+0" "0x0p+0" "0x0p+0"
+| [17] "0x0p+0" "0x0p+0" "0x0p+0" "0x0p+0" "0x0p+0"
+|  [1] "0x1.ae3674ef8e22ap+1" "0x1.4a43527e1c6d5p+1" "0x1.5ec17d03587e1p+1"
+|  [4] "0x1.bf423ebd551d4p+1" "0x1.dfc6bfcbbda64p+1" "0x1.88fd4a9d58fc3p+1"
+|  [7] "0x1.1f959216b227ep+2" "0x1.5129ae9539146p+1" "0x1.805807df1d8d4p+1"
+| [10] "0x1.79308b9c3392ep+1" "0x1.4ce206759ac38p+1" "0x1.a66135878a6e2p+1"
+| [13] "0x1.fbf627072881bp+1" "0x1.141cd375638a6p+2" "0x1.d94339c9c765bp+1"
+| [16] "0x1.5f0463dc4df7cp+1" "0x1.4e4780023c14cp+1" "0x1.90e6f77ad803dp+1"
+| [19] "0x1.4243f204bf51ap+1" "0x1.ebaf20a91c413p+1" "0x1.01188124fdd72p+1"
+|  [1] "0x1.8a0b6b910ba24p+1" "0x1.067772ccaa603p+1" "Inf"                 
+|  [4] "0x1.8a16aebb99c65p+1" "0x1.88e7da1ddb811p+1" "0x1.40a3d404b4cc4p+1"
+|  [7] "0x1.ff84aa7c52e91p+1" "Inf"                  "0x1.e3692cc364aa4p-1"
+| [10] "0x1.567b5a33d5483p+1" "0x1.2c4169b6cba0dp+1" "Inf"                 
+| [13] "0x1.e238773df8b11p+1" "0x1.d36f1fcb27fd7p+1" "0x1.93a2c5aa7edb3p+1"
+| [16] "Inf"                  "Inf"                  "Inf"                 
+| [19] "0x1.3bab49c4d708fp+1" "0x1.9b119bb08e0dcp+1" "0x1.a8e94d1fadc7dp+0"
+|  [1] "0x1.2af09a6e316f4p+1" "0x1.3881367fa6dd4p+0" "Inf"                 
+|  [4] "0x1.1fb8da842df44p+1" "0x1.0d2c5e482c479p+1" "0x1.f45173b43b6c6p+0"
+|  [7] "0x1.3e3ca877df38cp+1" "Inf"                  "0x1.131ed0d9ac954p-1"
+| [10] "0x1.df8f91be2cba5p+0" "0x1.78b4dd83482cep+0" "Inf"                 
+| [13] "0x1.3304e88ddbbdbp+1" "0x1.69de1afc4cbbp+1"  "0x1.56da768e3e29ap+1"
+| [16] "Inf"                  "Inf"                  "Inf"                 
+| [19] "0x1.e6d50db8d271ap+0" "0x1.cd84207afd41cp+0" "0x1.16b09239e6b27p+0"
+|  [1] "0x1.80a6f26168f1ep+2" "0x1.0b19523fe0ec5p+2" "Inf"                 
+|  [4] "0x1.7652c2900c7dfp+2" "0x1.7231cae5a76cp+2"  "0x1.38149a00dc504p+2"
+|  [7] "0x1.0581fbf0fa921p+3" "Inf"                  "0x1.db01291879602p+0"
+| [10] "0x1.4505ac415b6f8p+2" "0x1.33fdfa2310218p+2" "Inf"                 
+| [13] "0x1.bd25648a9a144p+2" "0x1.96cfcefae0b27p+2" "0x1.5f9c550794748p+2"
+| [16] "Inf"                  "Inf"                  "Inf"                 
+| [19] "0x1.188968ad67d7ep+2" "0x1.94038be4bfcc6p+2" "0x1.851786207f2e5p+1"
+|  [1] "0x1.e969deb75bc06p+1" "0x1.aba04f3cadc64p+1" "0x1.14899f324da52p+2"
+|  [4] "0x1.cfc6a3e417dbbp+1" "0x1.08b02fead4b7ep+2" "0x1.12a208ae34511p+2"
+|  [7] "0x1.2e92131d1cc46p+2" "0x1.a7e5736d7c52dp+1" "0x1.569eaac2e631dp+1"
+| [10] "0x1.04c5d84a0ca43p+2" "0x1.1a28e808a57a9p+2" "0x1.6245afcce001bp+1"
+| [13] "0x1.93ad3db049905p+1" "0x1.f223c6954ee2bp+1" "0x1.b53908415a62p+1" 
+| [16] "0x1.82761a08ff6f4p+1" "0x1.8bc78d25e8de5p+1" "0x1.03a3b17dcecb2p+2"
+| [19] "0x1.ac5bbba79c8d8p+1" "0x1.0f65f436f53c2p+2" "0x1.c601e223f8bb5p+1"
+|  [1] "0x0p+0" "0x0p+0" "0x0p+0" "0x0p+0" "0x0p+0" "0x0p+0" "0x0p+0" "0x0p+0"
+|  [9] "0x0p+0" "0x0p+0" "0x0p+0" "0x0p+0" "0x0p+0" "0x0p+0" "0x0p+0" "0x0p+0"
+| [17] "0x0p+0" "0x0p+0" "0x0p+0" "0x0p+0" "0x0p+0"
+|  [1] "0x1.e23ce0813209bp+1" "0x1.4a43527e1c6d5p+1" "Inf"                 
+|  [4] "0x1.e0618354ee6a9p+1" "0x1.dfc6bfcbbda64p+1" "0x1.88fd4a9d58fc3p+1"
+|  [7] "0x1.417d8c6fa106dp+2" "Inf"                  "0x1.2bf9db9858321p+0"
+| [10] "0x1.a0949703dd63p+1"  "0x1.7992b44b48cc9p+1" "Inf"                 
+| [13] "0x1.24edcc49846dbp+2" "0x1.141cd375638a6p+2" "0x1.d94339c9c765bp+1"
+| [16] "Inf"                  "Inf"                  "Inf"                 
+| [19] "0x1.75e78c0088394p+1" "0x1.002c30458b827p+2" "0x1.01188124fdd72p+1"
+|    1  2
+| 2 NA   
+| 3 NA NA
+| dist(0)
+|          1        2        3        4        5
+| 1 0.000000 2.791581 2.050520 2.281345 2.867571
+| 2 2.791581 0.000000 3.632136 2.261154 2.521537
+| 3 2.050520 3.632136 0.000000 2.744429 3.374052
+| 4 2.281345 2.261154 2.744429 0.000000 2.356675
+| 5 2.867571 2.521537 3.374052 2.356675 0.000000
+[messages]
+[warnings]
+- treating non-finite values as NA (in dist(y, method, p = 1.5))
+- treating non-finite values as NA (in dist(y, method, p = 1.5))
+- treating non-finite values as NA (in dist(y, method, p = 1.5))
+- treating non-finite values as NA (in dist(y, method, p = 1.5))
+- treating non-finite values as NA (in dist(y, method, p = 1.5))
+- treating non-finite values as NA (in dist(y, method, p = 1.5))
+[errors]
+[value]
+NULL
+| NULL
