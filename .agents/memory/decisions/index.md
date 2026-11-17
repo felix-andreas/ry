@@ -580,6 +580,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The edit-to-signal loop is tuned for agents
 - The interpreter stays one crate, because the edit loop is bound by links
 - Agent-written notes are not mass-rewritten for brevity
+- The differential fuzzer compares canonical dumps, over four kinds of program
 
 ## Docs, process and positioning
 

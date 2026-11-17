@@ -14,7 +14,10 @@
 
 use {
     crate::{
-        Engine, EngineError, fuzz::{Divergence, compare_engines, render_divergence}, gnu_r_program, mutate::mutate,
+        Engine, EngineError,
+        fuzz::{Divergence, compare_engines, render_divergence},
+        gnu_r_program,
+        mutate::mutate,
         target_directory,
     },
     std::{
@@ -147,7 +150,13 @@ pub fn check_corpus_seed(
         .ok_or_else(|| EngineError::Failed("the fuzz corpus is empty".to_string()))?;
     let base_path = write_program(directory, &format!("corpus_{seed}_base.R"), &snippet.text)?;
     let reference_base = reference.run(&base_path)?;
-    let (base_differs, mut unavailable) = compare_engines(&snippet.text, reference, &reference_base, engines, &base_path);
+    let (base_differs, mut unavailable) = compare_engines(
+        &snippet.text,
+        reference,
+        &reference_base,
+        engines,
+        &base_path,
+    );
     remove_program(&base_path);
     let mut report = CorpusReport {
         seed,
@@ -178,8 +187,13 @@ pub fn check_corpus_seed(
     }
     let mutant_path = write_program(directory, &format!("corpus_{seed}.R"), &mutant)?;
     let reference_mutant = reference.run(&mutant_path)?;
-    let (divergences, more_unavailable) =
-        compare_engines(&mutant, reference, &reference_mutant, &agreeing, &mutant_path);
+    let (divergences, more_unavailable) = compare_engines(
+        &mutant,
+        reference,
+        &reference_mutant,
+        &agreeing,
+        &mutant_path,
+    );
     unavailable.extend(more_unavailable);
     if !divergences.is_empty() {
         let again = reference.run(&mutant_path)?;
@@ -202,7 +216,7 @@ pub fn render_corpus_divergences(report: &CorpusReport) -> String {
         .map(|divergence| divergence.engine.as_str())
         .collect();
     let mut text = format!(
-        "seed {seed} (from {source}) diverges under {names}\nreproduce: cargo run -q -p oracle -- fuzz --corpus --seed {seed} --engines {list}\nprogram:   cargo run -q -p oracle -- fuzz --corpus --seed {seed} --print > corpus_{seed}.R\n--- program ---\n{program}",
+        "corpus seed {seed} (from {source}) diverges under {names}\nreproduce: cargo run -q -p oracle -- fuzz --kind corpus --seed {seed} --engines {list}\nprogram:   cargo run -q -p oracle -- fuzz --kind corpus --seed {seed} --print > corpus_{seed}.R\n--- program ---\n{program}",
         seed = report.seed,
         source = report.source,
         names = engines.join(", "),
@@ -1009,7 +1023,7 @@ fn extract_regression_tests(
     }
     if !download {
         return Ok(Some(
-            "R's regression tests are not downloaded (`oracle fuzz --corpus` fetches them)"
+            "R's regression tests are not downloaded (`oracle fuzz --kind corpus` fetches them)"
                 .to_string(),
         ));
     }

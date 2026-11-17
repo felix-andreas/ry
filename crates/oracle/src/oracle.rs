@@ -9,11 +9,11 @@
 pub mod bench;
 pub mod corpus;
 pub mod fuzz;
-pub mod reduce;
 pub mod gallery;
 pub mod install;
 pub mod metamorphic;
 pub mod mutate;
+pub mod reduce;
 
 use {
     serde::Deserialize,

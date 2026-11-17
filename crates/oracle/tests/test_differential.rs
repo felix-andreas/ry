@@ -58,10 +58,10 @@ fn fuzz_programs_agree_across_tiers() {
         eprintln!("skipped: ry's runtime is not built; run `cargo build -p ry-lang -p libr`");
         return;
     }
-    let gnu_r = ProcessEngine::gnu_r().with_timeout(TIMEOUT);
-    let tier0 = ProcessEngine::ry_tier0().with_timeout(TIMEOUT);
-    let jit = ProcessEngine::ry_jit().with_timeout(TIMEOUT);
-    let mut reports = run_seeds(&gnu_r, &[&tier0, &jit], fuzz_iterations(3));
+    let gnu_r = ProcessEngine::gnu_r().with_timeout(TIMEOUT).observing();
+    let tier0 = ProcessEngine::ry_tier0().with_timeout(TIMEOUT).observing();
+    let jit = ProcessEngine::ry_jit().with_timeout(TIMEOUT).observing();
+    let mut reports = run_seeds(&gnu_r, &[&tier0, &jit], fuzz_iterations(8));
     // A generator that drifts into erroring early would compare almost nothing, so most
     // programs must run to the end under GNU R.
     let completed = reports
@@ -76,8 +76,14 @@ fn fuzz_programs_agree_across_tiers() {
     let directory = scratch_directory();
     for &seed in REGRESSION_SEEDS {
         reports.push(
-            check_seed(ProgramKind::Grammar, seed, &gnu_r, &[&tier0, &jit], &directory)
-                .unwrap_or_else(|error| panic!("seed {seed}: {} failed: {error}", gnu_r.name())),
+            check_seed(
+                ProgramKind::Grammar,
+                seed,
+                &gnu_r,
+                &[&tier0, &jit],
+                &directory,
+            )
+            .unwrap_or_else(|error| panic!("seed {seed}: {} failed: {error}", gnu_r.name())),
         );
     }
     std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
@@ -95,7 +101,12 @@ fn fuzz_metamorphic_forms_agree_across_tiers() {
     }
     let tier0 = ProcessEngine::ry_tier0().with_timeout(TIMEOUT).observing();
     let jit = ProcessEngine::ry_jit().with_timeout(TIMEOUT).observing();
-    let reports = run_kind(ProgramKind::Metamorphic, &tier0, &[&jit], fuzz_iterations(8));
+    let reports = run_kind(
+        ProgramKind::Metamorphic,
+        &tier0,
+        &[&jit],
+        fuzz_iterations(8),
+    );
     let disagreeing: Vec<String> = reports
         .iter()
         .filter(|report| report.reference.stdout.contains("DIFFERENT"))
@@ -134,7 +145,12 @@ fn fuzz_builtins_agree_across_tiers() {
     }
     let tier0 = ProcessEngine::ry_tier0().with_timeout(TIMEOUT).observing();
     let jit = ProcessEngine::ry_jit().with_timeout(TIMEOUT).observing();
-    assert_agree(&run_kind(ProgramKind::Builtins, &tier0, &[&jit], fuzz_iterations(8)));
+    assert_agree(&run_kind(
+        ProgramKind::Builtins,
+        &tier0,
+        &[&jit],
+        fuzz_iterations(8),
+    ));
 }
 
 #[test]
@@ -152,8 +168,14 @@ fn fuzz_programs_survive_gc_torture() {
     let directory = scratch_directory();
     for &seed in REGRESSION_SEEDS {
         reports.push(
-            check_seed(ProgramKind::Grammar, seed, &ry, &[&torture, &young], &directory)
-                .unwrap_or_else(|error| panic!("seed {seed}: {} failed: {error}", ry.name())),
+            check_seed(
+                ProgramKind::Grammar,
+                seed,
+                &ry,
+                &[&torture, &young],
+                &directory,
+            )
+            .unwrap_or_else(|error| panic!("seed {seed}: {} failed: {error}", ry.name())),
         );
     }
     std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");

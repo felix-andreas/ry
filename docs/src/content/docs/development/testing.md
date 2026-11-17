@@ -521,13 +521,76 @@ non-local exit native code can set up (`Rf_eval`, `R_tryEval`, `R_ToplevelExec`,
 checks the outcome, which cleanups ran, and that every C context, protection and `R_alloc` block was
 released. A second battery drives random API sequences under collection stress against a model.
 
-`crates/oracle/tests/test_differential.rs` runs whole generated R programs (`oracle::fuzz::program`)
-under GNU R, ry's tier 0 and ry's JIT, and under collection stress against ry unstressed, and every
-engine must print the same output, warnings and errors. The generator covers loops shaped for the
-JIT, closures, S3 dispatch, conditions and `on.exit`, environments, attributes, `NA` and overflow,
-and about one program in eight ends on a deliberate error. `cargo run -p oracle -- fuzz --seed N
---count K --engines ry-tier0,ry-jit,ry-gctorture` runs any range, prints each divergent program and
-its replay command, and `just fuzz-differential` and `just gc-torture` are the long runs.
+`oracle fuzz` runs whole R programs under GNU R and ry's engines and reports every program on
+which an engine differs. A seed and a kind name a program, so `oracle fuzz --kind K --seed N
+--print` prints it and `--engines` replays it. The four kinds find different bugs:
+
+| Kind | A program is | It finds |
+| --- | --- | --- |
+| `grammar` (`oracle::fuzz::program`) | several blocks from a grammar of language features: loops shaped for the JIT, closures, S3 dispatch, conditions and `on.exit`, environments, attributes, `NA` and overflow; about one in eight ends on a deliberate error | interpreter and JIT bugs in control flow and scoping |
+| `metamorphic` (`oracle::metamorphic::program`) | six to twelve trials; each builds one value, runs one body of updates and reads on it, and runs the same body in other forms that must give an identical result | a result that depends on how often or where code runs, or on how a value is stored |
+| `builtins` (`oracle::metamorphic::builtins_program`) | builtins called on a zoo of values, each call caught | a builtin that accepts, rejects or computes differently from GNU R |
+| `corpus` (`oracle::corpus`) | a snippet of real R code with one to four mutations | what no grammar author thought of |
+
+A metamorphic trial draws its value from a zoo: every atomic type and lists, with `NA`, `NaN`,
+`Inf` and `-0`; zero-length vectors and lengths on both sides of the sizes where storage changes
+(the inline capacities, the 512-byte small-vector limit, the 64 KiB arena chunk, a compact `1:n`); names that are empty, `NA`, duplicated or
+non-ASCII, attached through `names<-`, `setNames`, `structure`, argument tags and `do.call`;
+strings marked UTF-8, latin1 and bytes; matrices, arrays, data frames, factors and dates. The body
+is a few statements over `x`: element, slice, matrix and name assignments, attribute and
+replacement-function calls, `<<-`, loops, and reads by position and by name. The trial computes
+the reference result once, then compares it by `identical()` with the body's result in each
+other form and prints `same` or `DIFFERENT`:
+
+| Form | The body runs |
+| --- | --- |
+| `again xK` | K times in a row in the same closure, K from 1 to 300 |
+| `warmed`, `cold` | in the closure after it ran on values of other types and sizes, and in a copy of it that never ran |
+| `local`, `inline`, `evaluated`, `on.exit` | inside `local()`, in an anonymous closure, through `eval(quote())` in a new environment, or in a closure with an `on.exit` handler |
+| `top level` | as top-level statements on a global variable |
+| `renamed NAME` | with `x` under another name, among them a non-syntactic one, a non-ASCII one, `T` and `c` |
+| `caller` | called through `do.call`, `lapply`, `Map`, `Reduce`, `replicate` or `tryCatch` |
+| `shared` | on a value that a second variable, a list, an environment, a closure or an attribute also holds, whose copy must come out unchanged |
+| `collected` | with a `gc()` after every statement |
+| `serialized v2`, `serialized v3` | on the value after `unserialize(serialize())` |
+
+A `DIFFERENT` line is a bug in the engine that printed it, whatever GNU R says, so the kind is
+also a test without GNU R. Each seed turns on a random subset of 33 features (the value types,
+the name and encoding sources, the statement families, the forms), so a rare pair of features
+gets programs of its own instead of drowning in the common ones.
+
+Printed output hides much of a value, so every engine runs with the deep observer on
+(`crates/oracle/src/observe.R`, `ProcessEngine::observing`, off with `--no-observe`). After each
+top-level expression the driver records a canonical dump of its value and whether it was
+visible: the type, length and object bits, every element (a double by its bits, a string by its
+encoding mark and bytes), the attributes in stored order, and the structure of calls, closures
+and environments. It records each condition with its classes and call the same way. A non-ASCII
+string shows the same mark whether it is flagged UTF-8 or unflagged, because the two are the same
+text in a UTF-8 session; `ORACLE_OBSERVE=strict` tells them apart.
+
+The report of a diverging seed names each top-level expression that differs and how:
+
+| Difference | Meaning |
+| --- | --- |
+| `crash` | the engine died of a signal or a panic |
+| `value` | the expression's value or visibility differs |
+| `accepts`, `rejects` | one engine signals an error where the other returns |
+| `message` | both signal an error, with another message or call |
+| `conditions` | the warnings, messages or condition classes differ |
+| `printed` | the values and conditions agree and the printed text does not |
+
+`--jobs N` runs N programs at once, `--minutes M` keeps taking seeds until the time is up,
+`--findings DIR` writes each diverging program and its report to a directory, and the summary
+counts the differences by kind. `just fuzz-differential` runs the grammar, `just fuzz-kind KIND`
+any kind, and `just fuzz-long HOURS BASE` all four for a time budget, under tier 0, the forced JIT
+and seeded collection stress.
+
+`crates/oracle/tests/test_differential.rs` holds the bounded passes. Grammar programs run under
+GNU R, tier 0 and the JIT, and under collection stress against ry unstressed. Metamorphic and
+builtin programs run under tier 0 and the forced JIT, which must agree with each other and print
+no `DIFFERENT` (`fuzz_metamorphic_forms_agree_across_tiers`, `fuzz_builtins_agree_across_tiers`);
+their comparison with GNU R is the long run's, because ry differs from GNU R on many builtin
+programs and a default test must pass.
 
 A divergent program is 50 to 300 lines, so a finding is reduced before it becomes an oracle case.
 `oracle reduce FILE --engine NAME` (`just fuzz-reduce FILE ENGINE`, or `oracle fuzz --reduce` for
@@ -557,7 +620,7 @@ A grammar only covers what its author thought of, so a second source of programs
 mutated (`oracle::corpus`, `oracle::mutate`). The corpus is extracted at run time into
 `target/fuzz-corpus` and never committed: the examples of every base package's help pages
 (`tools::Rd2ex`), the `tests/*.R` of the R source for the installed release (downloaded from CRAN
-once by `oracle fuzz --corpus`), the oracle cases, and the tests of corpus packages that ship
+once by `oracle fuzz --kind corpus`), the oracle cases, and the tests of corpus packages that ship
 them. Each file splits into snippets, runs of top-level expressions cut at blank lines, without
 the paragraphs that touch graphics, files, the clock, the environment, addresses or unseeded
 random numbers. A seed picks a snippet and applies one to four mutations on the syntax tree:
@@ -567,8 +630,7 @@ repeated calls, swapped, dropped or duplicated arguments, and neighboring operat
 runs under the deep observer. The unmutated snippet runs first: an engine that already differs on
 it is a plain compatibility gap, listed in `target/fuzz-corpus/base-differs.txt`, and only a
 mutant that diverges while its snippet agrees is a finding. A diverging mutant runs under GNU R a
-second time and is dropped when GNU R disagrees with itself. `oracle fuzz --corpus --seed N
---print` prints a seed's program, `just fuzz-corpus SEED COUNT ENGINES` is the long run, and
+second time and is dropped when GNU R disagrees with itself. `just fuzz-corpus SEED COUNT ENGINES` runs a range of seeds, and
 `fuzz_corpus_mutants_agree_with_gnu_r` is the bounded pass.
 
 `crates/oracle/tests/test_gallery.rs` renders a seeded sample of the plot gallery under both

@@ -1101,7 +1101,11 @@ pub enum ProgramKind {
     Builtins,
 }
 
-pub const KINDS: [ProgramKind; 3] = [ProgramKind::Grammar, ProgramKind::Metamorphic, ProgramKind::Builtins];
+pub const KINDS: [ProgramKind; 3] = [
+    ProgramKind::Grammar,
+    ProgramKind::Metamorphic,
+    ProgramKind::Builtins,
+];
 
 impl ProgramKind {
     pub fn name(self) -> &'static str {
@@ -1343,7 +1347,9 @@ pub fn render_divergences(report: &SeedReport) -> String {
 pub fn render_divergence(divergence: &Divergence) -> String {
     let mut text = format!("--- {} ---\n", divergence.engine);
     if divergence.ran && divergence.expressions.is_empty() {
-        text.push_str("differs (printed): the values and conditions agree, the printed text does not\n");
+        text.push_str(
+            "differs (printed): the values and conditions agree, the printed text does not\n",
+        );
     }
     for expression in &divergence.expressions {
         text.push_str(&format!(
