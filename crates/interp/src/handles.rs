@@ -266,14 +266,21 @@ unsafe fn fresh<'s, T: Vector>(context: &Cx<'s>, raw: Sexp) -> Fresh<'s, T> {
 /// The symbol a string names, as GNU R's `installTrChar` gives it: a string in another
 /// encoding names the symbol of its UTF-8 text. Two names are the same name exactly when their
 /// symbols are the same object.
-pub fn install<'s>(context: &mut Cx<'s>, name: Local<'_, Chars>) -> R<Local<'s, Symbol>> {
+#[inline]
+pub fn install<'s>(_context: &mut Cx<'s>, name: Local<'_, Chars>) -> R<Local<'s, Symbol>> {
+    let raw = name.raw();
     // SAFETY: the string is rooted, and interning a symbol may allocate, which `&mut Cx`
-    // permits.
-    let symbol = unsafe { values::install_charsxp_text(name.raw())? };
-    // SAFETY: `install` returned a live symbol and nothing has allocated since.
-    unsafe { rooted(context, symbol) }
-        .downcast::<Symbol>()
-        .ok_or_else(|| error("internal error: install returned no symbol"))
+    // permits. A cached ASCII string names its symbol as it is, so the common name skips the
+    // translation.
+    let symbol = unsafe {
+        if raw.has_gp(gp::ASCII) && raw.has_gp(gp::CACHED) && raw.length() > 0 {
+            crate::heap().install_char(raw)?
+        } else {
+            values::install_charsxp_text(raw)?
+        }
+    };
+    // SAFETY: both calls return a symbol, and the symbol table keeps every symbol alive.
+    Ok(unsafe { Local::adopt(symbol) })
 }
 
 /// Whether two strings hold the same text, whatever their encoding marks. `NA` equals only
@@ -602,6 +609,7 @@ pub fn has_only_names(_context: &Cx<'_>, value: impl Pointer<Value>) -> bool {
 /// `environment$name <- value` where it binds the name and nothing else happens: false, having
 /// changed nothing, for the empty environment, a locked frame that lacks the name, and a locked
 /// or active binding, whose assignment raises an error or runs a function.
+#[inline]
 pub fn bind<'s>(
     _context: &mut Cx<'s>,
     environment: Local<'s, Environment>,

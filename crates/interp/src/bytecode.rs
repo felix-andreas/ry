@@ -13478,6 +13478,7 @@ fn store_element<'s>(
 /// `environment$name <- value` on a plain environment binds the name there, as the primitive
 /// would, without building the `*tmp*` call. A locked or active binding takes that call, which
 /// names it in the error or runs the binding's function.
+#[inline]
 fn bind_named<'s>(
     context: &mut Cx<'s>,
     environment: Local<'s, Environment>,
@@ -13499,6 +13500,7 @@ fn bind_named<'s>(
     handles::bind(context, environment, symbol, value)
 }
 
+#[inline]
 fn store_element_of<'s, T: Stored>(
     context: &mut Cx<'s>,
     vector: Local<'s, T>,
@@ -13557,6 +13559,7 @@ enum Position<'s> {
 
 /// The position `index` names in `vector`, or `None` for a subscript the replacement function
 /// has to interpret: anything but one plain number, or one name that is neither empty nor `NA`.
+#[inline]
 fn element_position<'s, T: Vector>(
     context: &Cx<'s>,
     vector: Local<'s, T>,
@@ -13577,13 +13580,21 @@ fn element_position<'s, T: Vector>(
         };
         return Some(Position::At(position));
     }
-    // `$<-` and a character subscript replace the first element whose name matches exactly; a
-    // name `x` lacks appends an element.
-    let text = index.downcast::<Str>()?;
-    if text.len() != 1 {
+    named_position(context, vector, index.downcast::<Str>()?)
+}
+
+/// The position of the element `name` names: `$<-` and a character subscript replace the first
+/// element whose name matches exactly, and a name `vector` lacks appends an element.
+#[inline(never)]
+fn named_position<'s, T: Vector>(
+    context: &Cx<'s>,
+    vector: Local<'s, T>,
+    name: Local<'s, Str>,
+) -> Option<Position<'s>> {
+    if name.len() != 1 {
         return None;
     }
-    let wanted = text.get(context, 0);
+    let wanted = name.get(context, 0);
     if handles::is_na(wanted) || wanted.bytes().is_empty() {
         return None;
     }
