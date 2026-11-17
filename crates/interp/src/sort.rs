@@ -983,16 +983,32 @@ pub(crate) unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
         })
         .collect::<R<Vec<bool>>>()?;
     // Input already in order, as `order(sort(x))` gives it, is the identity permutation, since
-    // the radix sort is stable and keeps signed zeros as ties.
+    // the radix sort is stable and keeps signed zeros as ties. Input strictly in the opposite
+    // order has no ties to keep stable, so it reverses, as GNU R's radix sort does.
     if let [key] = materialized[..]
         && !return_groups
-        && in_order(key, directions[0], false)
     {
-        let permutation = alloc(SexpType::Integer, count)?;
-        for (slot, row) in values::ints_mut(permutation).iter_mut().zip(1..) {
-            *slot = row;
+        let reversed = if in_order(key, directions[0], false) {
+            Some(false)
+        } else if count > 1 && in_order(key, !directions[0], true) {
+            Some(true)
+        } else {
+            None
+        };
+        if let Some(reversed) = reversed {
+            let permutation = alloc(SexpType::Integer, count)?;
+            let rows = values::ints_mut(permutation);
+            if reversed {
+                for (slot, row) in rows.iter_mut().zip((1..=count as i32).rev()) {
+                    *slot = row;
+                }
+            } else {
+                for (slot, row) in rows.iter_mut().zip(1..) {
+                    *slot = row;
+                }
+            }
+            return Ok(permutation);
         }
-        return Ok(permutation);
     }
     let columns: Vec<Option<Column<'_>>> = materialized
         .iter()
@@ -2326,29 +2342,28 @@ fn sort_by_key<K: RadixKey>(
     want_runs: bool,
 ) -> Vec<(usize, usize)> {
     let count = order.len();
+    // The keys gather once into row order, so every pass below streams one contiguous slice
+    // instead of chasing rows through the key column.
     let rows: Option<Vec<u32>> = (!identity).then(|| order.to_vec());
-    let row = |position: usize| rows.as_ref().map_or(position as u32, |rows| rows[position]);
-    let value = |position: usize| -> u64 { key[row(position) as usize].wide() };
+    let gathered: Option<Vec<K>> = rows
+        .as_ref()
+        .map(|rows| rows.iter().map(|&row| key[row as usize]).collect());
+    let values = gathered.as_deref().unwrap_or(key);
     let mut runs = Vec::new();
-    let (mut low, mut high, mut sorted, mut previous) = (u64::MAX, 0, true, 0);
-    for position in 0..count {
-        let value = value(position);
-        sorted &= value >= previous;
-        previous = value;
-        low = low.min(value);
-        high = high.max(value);
-    }
-    if sorted {
+    if values.is_sorted() {
         if identity {
             fill_identity(order);
         }
         if want_runs {
-            push_runs(&mut runs, 0, count, |position| {
-                key[order[position] as usize].wide()
-            });
+            push_runs(&mut runs, 0, count, |position| values[position].wide());
         }
         return runs;
     }
+    let (low, high) = values
+        .iter()
+        .fold((u64::MAX, 0), |(low, high), value| {
+            (low.min(value.wide()), high.max(value.wide()))
+        });
     let span = high - low;
     // Past about a million buckets the counting passes miss cache on every row, and the radix
     // sort's sequential scatters win. A short slice counts only while its buckets are few
@@ -2362,8 +2377,8 @@ fn sort_by_key<K: RadixKey>(
         // Positions fit `u32` like the rows do, and the narrower buckets halve the memory the
         // counting pass touches at random.
         let mut starts = vec![0u32; span as usize + 2];
-        for position in 0..count {
-            starts[(value(position) - low) as usize + 1] += 1;
+        for value in values {
+            starts[(value.wide() - low) as usize + 1] += 1;
         }
         for bucket in 1..starts.len() {
             starts[bucket] += starts[bucket - 1];
@@ -2376,22 +2391,32 @@ fn sort_by_key<K: RadixKey>(
                     .map(|pair| (pair[0] as usize, pair[1] as usize)),
             );
         }
-        for position in 0..count {
-            let row = row(position);
-            let value = key[row as usize].wide();
-            let start = &mut starts[(value - low) as usize];
-            order[*start as usize] = row;
-            *start += 1;
+        match &rows {
+            None => {
+                for (row, value) in (0..).zip(values) {
+                    let start = &mut starts[(value.wide() - low) as usize];
+                    order[*start as usize] = row;
+                    *start += 1;
+                }
+            }
+            Some(rows) => {
+                for (&row, value) in rows.iter().zip(values) {
+                    let start = &mut starts[(value.wide() - low) as usize];
+                    order[*start as usize] = row;
+                    *start += 1;
+                }
+            }
         }
         return runs;
     }
+    let row = |position: usize| rows.as_ref().map_or(position as u32, |rows| rows[position]);
     let mut sink = Sink {
         order,
         runs: want_runs.then_some(&mut runs),
     };
     if count <= SHORT_SORT {
         let mut pairs: Vec<(K, u32)> = (0..count)
-            .map(|position| (K::narrow(value(position)), row(position)))
+            .map(|position| (values[position], row(position)))
             .collect();
         pairs.sort_unstable();
         sink.emit(0, &pairs);
@@ -2405,20 +2430,20 @@ fn sort_by_key<K: RadixKey>(
     let sizes = loop {
         shift = shift.saturating_sub(DIGIT);
         let mut sizes = vec![0usize; BUCKETS];
-        for position in 0..count {
-            sizes[digit(value(position) - low, shift)] += 1;
+        for value in values {
+            sizes[digit(value.wide() - low, shift)] += 1;
         }
         if shift == 0 || sizes.iter().all(|&size| size < count) {
             break sizes;
         }
     };
     let mut cursors = bucket_starts(&sizes);
-    for position in 0..count {
-        let row = row(position);
-        let cursor = &mut cursors[digit(key[row as usize].wide() - low, shift)];
-        sink.order[*cursor] = row;
+    for (position, value) in values.iter().enumerate() {
+        let cursor = &mut cursors[digit(value.wide() - low, shift)];
+        sink.order[*cursor] = row(position);
         *cursor += 1;
     }
+    drop(gathered);
     drop(rows);
     let mut buffers = RowBuffers {
         pairs: Vec::new(),
