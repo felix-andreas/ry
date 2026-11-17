@@ -4345,76 +4345,112 @@ unsafe fn catch_return(env: Sexp, result: R<Sexp>) -> R<Sexp> {
 /// Runs the `on.exit` expressions of frame `depth` (one-based), keeping the visibility of the
 /// value. An unwind from an `on.exit` expression replaces the frame's own result, and a
 /// `return()` among them its visibility too.
+///
+/// While one expression runs the frame lists those after it, so `on.exit()` called from exit
+/// code adds to them or replaces them. GNU R runs that list only when the frame is entered
+/// again: when the expression left by a jump, or after the last expression of a frame that a
+/// jump is unwinding. A frame that returns drops it.
 unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
-    let frame = &mut interp().frames[depth - 1];
-    if frame.on_exit.is_empty() {
+    if interp().frames[depth - 1].on_exit.is_empty() {
         return result;
     }
-    let expressions = std::mem::take(&mut frame.on_exit);
-    // A slot frame keeps exit code compiled for its slots, which runs there without an
-    // environment; only an expression that did not compile needs one.
-    let (function, header) = (frame.function, frame.slots);
-    // Other exit code, such as the call `withr::defer` registers through `do.call`, runs in
-    // the frame's environment, which takes only the variables that code reads.
-    let env = if frame.env != nil()
-        || expressions
-            .iter()
-            .all(|expression| expression.kind() == SexpType::Bytecode)
-    {
-        frame.env
-    } else {
-        frame_env(depth - 1, Reify::Site("on.exit"))?
-    };
     let mut visible = interp().visible;
     let mark = crate::heap().handle_mark();
-    for &expression in &expressions {
-        crate::heap().root(expression);
-    }
-    // A `return(x)` unwinding to this frame is the value the function returns.
-    let returned = match &result {
-        Ok(value) => Some(*value),
-        Err(Unwind::Jump(jump)) => match *jump {
-            Jump::Return { env: target, value } if target == env => Some(value),
-            _ => None,
-        },
-        Err(_) => None,
-    };
-    interp().returned_values.push(returned);
-    // The value is on its way to the caller and nothing counts it yet, so exit code that
-    // modifies a variable holding it would write into the value the caller receives. GNU R
-    // counts it for as long as the exit code runs.
-    if let Some(value) = returned {
-        value.increment_refcount();
-    }
+    let mut returned = None;
     let mut outcome = result;
-    for expression in expressions {
-        // A handler stack that a condition left in place must not run the exit code.
-        let saved_handlers = interp().handlers.clone();
-        let _saved = crate::conditions::set_aside(saved_handlers.clone(), None);
-        interp().handlers = interp().frames[depth - 1].handlers.clone();
-        let exit = if expression.kind() == SexpType::Bytecode {
-            bytecode::run_promise_on_slots(expression, function, depth - 1, header as usize)
+    let mut first = true;
+    loop {
+        let frame = &mut interp().frames[depth - 1];
+        let expressions = std::mem::take(&mut frame.on_exit);
+        if expressions.is_empty() {
+            break;
+        }
+        // A slot frame keeps exit code compiled for its slots, which runs there without an
+        // environment; only an expression that did not compile needs one.
+        let (function, header) = (frame.function, frame.slots);
+        // Other exit code, such as the call `withr::defer` registers through `do.call`, runs in
+        // the frame's environment, which takes only the variables that code reads.
+        let env = if frame.env != nil()
+            || expressions
+                .iter()
+                .all(|expression| expression.kind() == SexpType::Bytecode)
+        {
+            frame.env
         } else {
-            eval(expression, env)
+            frame_env(depth - 1, Reify::Site("on.exit"))?
         };
-        interp().handlers = saved_handlers;
-        match exit {
-            // `on.exit(return(x))` makes `x` the frame's value, even over an error unwinding
-            // through it, as in GNU R.
-            Err(Unwind::Jump(jump)) if matches!(jump, Jump::Return { env: target, .. } if target == env) => {
-                if let Jump::Return { value, .. } = jump {
-                    outcome = Ok(value);
-                    visible = interp().visible;
-                    if let Some(top) = interp().returned_values.last_mut() {
-                        *top = Some(value);
+        for &expression in &expressions {
+            crate::heap().root(expression);
+        }
+        let returns_here =
+            |jump: &Jump| matches!(*jump, Jump::Return { env: target, .. } if target == env);
+        if first {
+            first = false;
+            // A `return(x)` unwinding to this frame is the value the function returns.
+            returned = match &outcome {
+                Ok(value) => Some(*value),
+                Err(Unwind::Jump(jump)) => match *jump {
+                    Jump::Return { value, .. } if returns_here(jump) => Some(value),
+                    _ => None,
+                },
+                Err(_) => None,
+            };
+            interp().returned_values.push(returned);
+            // The value is on its way to the caller and nothing counts it yet, so exit code that
+            // modifies a variable holding it would write into the value the caller receives.
+            // GNU R counts it for as long as the exit code runs.
+            if let Some(value) = returned {
+                value.increment_refcount();
+            }
+        }
+        let mut jumped = false;
+        for (position, &expression) in expressions.iter().enumerate() {
+            interp().frames[depth - 1].on_exit =
+                expressions[position + 1..].iter().copied().collect();
+            // A handler stack that a condition left in place must not run the exit code.
+            let saved_handlers = interp().handlers.clone();
+            let _saved = crate::conditions::set_aside(saved_handlers.clone(), None);
+            interp().handlers = interp().frames[depth - 1].handlers.clone();
+            let exit = if expression.kind() == SexpType::Bytecode {
+                bytecode::run_promise_on_slots(expression, function, depth - 1, header as usize)
+            } else {
+                eval(expression, env)
+            };
+            interp().handlers = saved_handlers;
+            match exit {
+                // `on.exit(return(x))` makes `x` the frame's value, even over an error
+                // unwinding through it, as in GNU R.
+                Err(Unwind::Jump(jump)) if returns_here(&jump) => {
+                    if let Jump::Return { value, .. } = jump {
+                        outcome = Ok(value);
+                        visible = interp().visible;
+                        if let Some(top) = interp().returned_values.last_mut() {
+                            *top = Some(value);
+                        }
                     }
+                    jumped = true;
+                    break;
                 }
+                Err(unwind) => {
+                    outcome = Err(unwind);
+                    jumped = true;
+                    break;
+                }
+                Ok(_) => {}
             }
-            Err(unwind) => {
-                outcome = Err(unwind);
-                break;
-            }
-            Ok(_) => {}
+        }
+        let unwinding = match &outcome {
+            Ok(_) => false,
+            Err(Unwind::Jump(jump)) => !returns_here(jump),
+            Err(_) => true,
+        };
+        if !jumped && !unwinding {
+            interp().frames[depth - 1].on_exit.clear();
+            break;
+        }
+        match &outcome {
+            Ok(value) => crate::heap().root(*value),
+            Err(unwind) => unwind.root(),
         }
     }
     if let Some(value) = returned {

@@ -1,0 +1,56 @@
+[stdout]
+| [1] 1
+| [1] "body" "a"    "b"   
+| [1] 1
+| [1] "a"      "b"      "second"
+| [1] 1
+| [1] "a"      "second"
+| [1] 1
+| [1] "a"       "cleared" "second" 
+| [1] 1
+| [1] "first"   "dropped"
+| [1] 1
+| [1] "h" "h" "h"
+| [1] 2
+| [1] "body"  "a"     "added"
+| [1] "in handler"
+| [1] "a"           "after error"
+| [1] "first fails"
+| [1] "a"      "second" "added" 
+| [1] "from the second round"
+| [1] "a" "b" "c"
+| [1] "body fails"
+| [1] "a"               "note(\"added\")" "added"          
+| [1] "body fails"
+| [1] "a" "b" "c"
+| [1] "body fails"
+| [1] "a"    "b"    "kept"
+| [1] "rescued"
+| [1] "a"
+| [1] "through a restart"
+| [1] "a"     "added"
+| [1] "at the bottom"
+| [1] "exit 0" "more 0" "exit 1" "more 1" "exit 2" "more 2"
+| [1] 2
+| [1] "body"  "a"     "added"
+| [1] "body fails"
+| [1] "a"               "note(\"added\")" "added"          
+| [1] 1
+| [1] "body" "a"    "b"   
+| [1] "body fails"
+| [1] "a" "b" "c"
+| [1] "body fails"
+| [1] "a" "b" "c"
+| [1] "body fails"
+| [1] "a"        "via eval" "b"       
+| NULL
+| [1] 1
+| [1] "inner frame" "b"          
+| [1] "body fails"
+| [1] "a"                     "note(\"via do.call\")" "via do.call"          
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| character(0)
