@@ -351,6 +351,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A stepped instruction runs on a kept view of the activation
 - Compiled code that keeps leaving is retired
 - The cost model counts frames, and free steps count nothing
+- A back edge is counted in tier 0's fast jump handler
 
 ## Heap and collector
 

@@ -632,7 +632,16 @@ Why one body compiled up to four times, each fixed at its source:
 
 - **Constants** (`jit.rs`; the measurements are the table "What compiled code costs against tier 0" in `development/design/generic-tier.md`): `ENTRY_COST` and `STEP_COST` fell with the leaner entry and the kept view, and `SAVING_PER_FRAME` is new. `Work` counts `frames` apart from `calls`, and an inlined frame adds its callee's own work (`Plan::work` reads the callee's feedback).
 - **Steps that cost nothing count nothing**: a call that never ran while tier 0 recorded and the `GetFun` that feeds it, an element instruction with a tier-0 fast handler, and a builtin call that runs no R code. Counting them refused bodies that gain (two guards with `stop()` around native work).
+- **Only paths the body has taken count** (`Plan::ran`). The model summed every planned instruction, so a body that returns early on every call (`match.fun` given a function) compiled for native work and a frame on a path it never runs, then paid the entry on each call. `Plan::ran` follows the directions each `JumpUnless` recorded (`feedback::BRANCH_TAKEN`, `BRANCH_NOT_TAKEN`) from the entry; a branch that recorded neither ends the path, which is the stretch every call of an unrecorded body runs. The feedback stays the one source of truth: the bitset is derived per query, nothing is stored.
 - **`unpaid` gives both refusals.** A saving per call of zero or less over the whole horizon is `SMALL` and final; a positive saving that the expected calls do not cover is `RARE` and asked again. A `RARE` verdict for a body that could never pay made it record and ask all session.
 - **A body with an inlined frame is planned before the model is asked**, because only the plan knows what the callees save; the pre-plan filter (`Shape::work`) applies to bodies whose shape has no closure call. Refusing single-frame wrappers before planning lost the bodies whose frames nest.
 - **Forced mode is not at tier 0's cost per body**: a body of steps runs more instructions compiled than in tier 0, which stretches fix (stage 3 of the design note).
 
+
+## A back edge is counted in tier 0's fast jump handler
+
+**Status:** built.
+
+- **Previous shape and what was weak.** With a tier installed, every backward jump left the fast `Jump` handler for the generic one, which sets up a frame, polls for an interrupt, counts the edge and releases handles. A loop the tier refuses (a `for` over `names(x)`) paid that on every iteration, so it ran more instructions with the JIT on than off: callgrind showed about 60 per back edge against about 6.
+- **Target shape.** `jump_fast` counts the edge itself (`profile::BACK_EDGES`) and falls to the generic handler only when an interrupt is requested or the count reaches one `back_edge` acts on, in which case it leaves the count unwritten for the generic handler to count again. The count costs about 20 instructions per back edge.
+- **Impact.** Loops in bodies the tier refuses or has not reached run at close to their cost without a tier. Handles are released at the next generic handler, as they are without a tier.

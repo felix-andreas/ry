@@ -1512,9 +1512,12 @@ impl Plan<'_> {
     /// natively. A backward jump counts as native work, because a compiled loop's own control
     /// costs no dispatch. A call handed to tier 0 that has never returned a value (`feedback`)
     /// counts as no work: it is a path the body has not taken, such as `stop()` under a check,
-    /// and costs nothing until it runs. A call inlined with a frame of its own counts as the
-    /// frame and the callee's work, which has no loop.
+    /// and costs nothing until it runs. So does every instruction on a path the body has not
+    /// taken ([`Plan::ran`]): native code there saves nothing, and counting it compiled bodies
+    /// that return early (`match.fun` for a function) for work they never do. A call inlined
+    /// with a frame of its own counts as the frame and the callee's work, which has no loop.
     pub unsafe fn work(&self, feedback: &[i32]) -> BodyWork {
+        let ran = self.ran(feedback);
         let backward = |inst: &Inst| inst.op == Op::Jump && inst.operand(0) <= inst.pc;
         let loops: SmallVec<[(usize, usize); 4]> = self
             .insts
@@ -1525,6 +1528,9 @@ impl Plan<'_> {
         let never_ran = |inst: &Inst| feedback.get(inst.pc).is_none_or(|&bits| bits == 0);
         let mut work = BodyWork::default();
         for (position, (inst, action)) in self.insts.iter().zip(self.actions.iter()).enumerate() {
+            if !bit(&ran, position) {
+                continue;
+            }
             let (native, calls, frames, steps) = match action {
                 Action::Inline { .. } | Action::Traverse { .. } | Action::NativeCall { .. } => {
                     (0, 1, 0, 0)
@@ -1594,6 +1600,49 @@ impl Plan<'_> {
             }
         }
         work
+    }
+
+    /// The instructions tier 0's feedback says the body has run, as a bitset by position:
+    /// those of the blocks reached from the entry along branches it has taken. A `JumpUnless`
+    /// records each direction it took, and one that recorded none ends the path, which covers
+    /// a body tier 0 runs without recording: every call of it runs the stretch before its
+    /// first such branch ([`certain_prefix`]). Any other branch counts as taken both ways.
+    fn ran(&self, feedback: &[i32]) -> SmallVec<[u64; 4]> {
+        let mut ran: SmallVec<[u64; 4]> = smallvec![0; self.insts.len().div_ceil(64).max(1)];
+        let mut reached: SmallVec<[u64; 4]> = smallvec![0; self.blocks.len().div_ceil(64).max(1)];
+        let mut pending: SmallVec<[usize; 8]> = SmallVec::new();
+        if !self.blocks.is_empty() {
+            set_bit(&mut reached, 0, true);
+            pending.push(0);
+        }
+        while let Some(index) = pending.pop() {
+            let block = &self.blocks[index];
+            for position in block.start..block.end {
+                set_bit(&mut ran, position, true);
+            }
+            let Some(last) = block.end.checked_sub(1).and_then(|last| self.insts.get(last)) else {
+                continue;
+            };
+            let (falls, jumps) = if last.op == Op::JumpUnless {
+                let bits = feedback.get(last.pc).map_or(0, |&bits| bits as u32);
+                (
+                    bits & feedback::BRANCH_NOT_TAKEN != 0,
+                    bits & feedback::BRANCH_TAKEN != 0,
+                )
+            } else {
+                (falls_through(last.op), true)
+            };
+            let next = self.insts.get(block.end).filter(|_| falls).map(|inst| inst.pc);
+            let target = jump_target(last).filter(|_| jumps);
+            for pc in [next, target].into_iter().flatten() {
+                let successor = self.block_at.get(pc).map_or(NO_BLOCK, |&block| block) as usize;
+                if successor < self.blocks.len() && !bit(&reached, successor) {
+                    set_bit(&mut reached, successor, true);
+                    pending.push(successor);
+                }
+            }
+        }
+        ran
     }
 }
 

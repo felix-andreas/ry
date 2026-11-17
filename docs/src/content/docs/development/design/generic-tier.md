@@ -59,26 +59,29 @@ their interpreters' dispatch and operand decoding and reuse the interpreters' in
 has quickened handlers and inline caches for variable reads, function lookups, fields and calls,
 so the dispatch share is all a baseline tier could remove here.
 
-**The call is the cost to remove.** A closure call in tier 0 takes about 900 instructions for a
-callee that does nothing, and about 1,900 while a calling handler is established, because the
-arguments then need promises. A test suite runs every expectation under a calling handler. The
+**The call is the cost to remove.** A closure call and its return take about 830 instructions in
+tier 0 for a callee without arguments. An established calling handler adds about 210 to that call
+and about 970 to a call with three arguments, because the arguments then need promises. A test
+suite runs every expectation under a calling handler. The
 helpers of generic code are short (`function(x, name) x[[name]]`, a guard, a default), so the call
 often costs more than the callee's body.
 
 ## What compiled code costs against tier 0
 
 Each number is a difference in callgrind instructions between the compiled path and tier 0's path
-for the same work, read from the functions involved. The cost model's constants
-(`crates/jit/src/jit.rs`) are these numbers.
+for the same work. The cost model's constants (`crates/jit/src/jit.rs`) follow these numbers:
+`ENTRY_COST`, `STEP_COST` and `SAVING_PER_FRAME` are measured, and `SAVING_PER_NATIVE` and
+`SAVING_PER_CALL` are the model's estimates for work that varies with the instruction.
 
 | Mechanism | Against tier 0 | Constant |
 |---|---|---|
 | Entering compiled code instead of starting the body in the dispatch loop | 380 more: the tier's entry (276), the scheduled entry's own return path, the jump to the code | `ENTRY_COST` |
 | An instruction handed to tier 0 (a step) | 60 to 70 more for the helper call alone; about 180 with the variables written back before it and reloaded after it | `STEP_COST` |
-| A call inlined with a frame, no arguments | 450 fewer: tier 0's call (368) and return (459), less the first start (152), the start (12), the register window (40) and the compiled code (38) | `SAVING_PER_FRAME` |
+| A call inlined with a frame, no arguments | 450 fewer, read from the `f()` row of "Measured" with the entry added back. The functions involved account for 585: tier 0's call (368) and return (459), less the first start (152), the start (12), the register window (40) and the compiled code (38). The constant is the smaller, end-to-end number | `SAVING_PER_FRAME` |
 | A call inlined with a frame, three arguments | 510 to 630 fewer | |
 | The first start of an inlined call in an entry | 152, once per entry of the compiled body for each call | |
 | A native arithmetic instruction with its loads and stores | about 130 fewer | `SAVING_PER_NATIVE` |
+| An inlined body, a native call or a traversal | The call and its boxing, estimated at 1,000 fewer | `SAVING_PER_CALL` |
 
 Two facts in the table shape the design. A step can never be free, so a body that is one step
 after another loses in compiled code whatever the entry costs, and such a body is not compiled.
@@ -207,6 +210,12 @@ the compile (`jit.rs`, `unpaid`). The saving is counted in tier-0 instructions t
 | A native instruction | `SAVING_PER_NATIVE` |
 | A step | Minus `STEP_COST` |
 | The entry | Minus `ENTRY_COST` |
+
+Only the instructions on paths the body has taken count (`Plan::ran`). Tier 0's `JumpUnless`
+records each direction it takes, and the model follows the recorded directions from the entry. A
+body that returns early on every call, such as `match.fun` given a function, has native work and
+calls on a path it never runs, and a model that counts them compiles it for savings it never
+makes.
 
 Three kinds of step count as zero in the model, because compiled code runs them at about tier 0's
 cost:

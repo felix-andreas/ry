@@ -9126,16 +9126,24 @@ unsafe fn set_srcref_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<u
     Some(at + 1 + operand_count(Op::SetSrcref))
 }
 
-/// `Jump` forward, and backward while no optimizing tier counts back edges and no interrupt is
-/// pending.
+/// `Jump` forward, and backward while no interrupt is pending and the back edge reaches no
+/// count the optimizing tier acts on. The count is left unwritten when it is due, because the
+/// generic handler counts the same edge again.
 #[inline(always)]
 unsafe fn jump_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
     let target = *state.code.add(at + 1) as usize;
-    if target < at
-        && ((*state.interp).bytecode.tier.is_some()
-            || crate::unwind::INTERRUPT_REQUESTED.load(std::sync::atomic::Ordering::Relaxed))
-    {
-        return None;
+    if target < at {
+        if crate::unwind::INTERRUPT_REQUESTED.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        if let Some(tier) = &(*state.interp).bytecode.tier {
+            let profile = values::ints_mut(state.constants.element(PROFILE));
+            let count = profile[profile::BACK_EDGES].saturating_add(1);
+            if count >= tier.back_edge_threshold || count == tier.back_edge_threshold / 2 {
+                return None;
+            }
+            profile[profile::BACK_EDGES] = count;
+        }
     }
     Some(target)
 }
