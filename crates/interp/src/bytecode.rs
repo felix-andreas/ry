@@ -2213,6 +2213,12 @@ pub enum Op {
     /// where a compiled replacement goes when an R function may receive those arguments: a
     /// method of an object, or a replacement closure.
     ComplexAssign,
+    /// `dst symbol cache`: a local the compiler counts as bound, read as the subscript of an
+    /// element assignment that skips the object probe ([`Op::SubAssign`]). A callee can have
+    /// removed it (`rm("k", envir = parent.frame())`), so `dst` gets `R_UnboundValue` when no
+    /// binding is found, and the assignment goes to `complex_assign`, where a method gets the
+    /// subscript as a promise it may never force. It reads as [`Op::GetVar`] otherwise.
+    Subscript,
 }
 
 /// Which replacement an [`Op::SubAssign`] does, stored as its sixth operand.
@@ -2227,7 +2233,7 @@ pub enum ElementKind {
     Dollar = 2,
 }
 
-pub const OPS: [Op; 54] = [
+pub const OPS: [Op; 55] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -2282,6 +2288,7 @@ pub const OPS: [Op; 54] = [
     Op::Internal,
     Op::Argument,
     Op::ComplexAssign,
+    Op::Subscript,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -3528,7 +3535,7 @@ impl Compiler {
             // replacement can leave a symbol without a slot, because it gives the frame its
             // environment when it finds none.
             let (named, required): (SmallVec<[(u32, Option<u32>); 2]>, bool) = match op {
-                Op::GetVar | Op::GetFun | Op::Argument => (
+                Op::GetVar | Op::GetFun | Op::Argument | Op::Subscript => (
                     smallvec![(self.code[pc + 2], Some(self.code[pc + 3]))],
                     true,
                 ),
@@ -4684,11 +4691,12 @@ impl Compiler {
         // promises it may never force, or force in another environment (`[<-.data.table`
         // evaluates `i` inside the table). So the target is read before any subscript runs, and
         // an object leaves the whole assignment to `complex_assign`; only the builtin replacement
-        // takes the subscripts evaluated. A constant subscript, or a local variable known to be
-        // bound here ([`Compiler::assigned`]), is the same either way: `SubAssign` hands a method
-        // the forced promise of its code, and reading it runs nothing and cannot fail. Such
+        // takes the subscripts evaluated. A constant subscript, or a local variable assigned
+        // earlier in the block ([`Compiler::assigned`]), is the same either way: `SubAssign`
+        // hands a method the forced promise of its code, and reading it runs nothing. Such
         // subscripts skip the probe, which keeps `x[[k]] <- v` and `x[i] <- v` in a loop as
-        // cheap as before.
+        // cheap as before. A callee may have removed the local since, so it is read by
+        // `Op::Subscript`, which leaves an unbound one to `complex_assign`.
         let registers: SmallVec<[u32; 2]> = subscripts.iter().map(|_| self.allocate()).collect();
         let eager = subscripts
             .iter()
@@ -4709,6 +4717,16 @@ impl Compiler {
                 // does, so the instruction looks the formal up itself (see `subscript_value`).
                 let symbol = self.constant(subscript);
                 self.emit(Op::Constant, &[register, symbol]);
+            } else if eager
+                && subscript.kind() == SexpType::Symbol
+                && self
+                    .bound
+                    .as_ref()
+                    .is_none_or(|bound| !bound.names.contains(&subscript))
+            {
+                let symbol = self.constant(subscript);
+                let cache = self.cache();
+                self.emit(Op::Subscript, &[register, symbol, cache]);
             } else {
                 self.expression(subscript, register)?;
             }
@@ -6134,7 +6152,7 @@ const MARKER_MASK: u32 = BREAK_MARKER | NEXT_MARKER;
 pub const fn operand_count(op: Op) -> usize {
     match op {
         Op::Constant => 2,
-        Op::GetVar | Op::Argument => 3,
+        Op::GetVar | Op::Argument | Op::Subscript => 3,
         Op::GetFun => 4,
         Op::SetVar => 3,
         Op::BranchUnlessBuiltin => 2,
@@ -6366,7 +6384,7 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
     use Operand::*;
     Some(match op {
         Op::Constant | Op::Ast => &[Register, Constant],
-        Op::GetVar | Op::Argument => &[Register, Symbol, Cache],
+        Op::GetVar | Op::Argument | Op::Subscript => &[Register, Symbol, Cache],
         Op::SetVar => &[Symbol, Register, Cache],
         Op::GetFun => &[Register, Symbol, Cache, Call],
         Op::BranchUnlessBuiltin | Op::BranchIfObject => &[Register, Target],
@@ -7359,12 +7377,15 @@ pub unsafe fn record_active_binding(code: Sexp, pc: usize) {
 }
 
 /// What `GetVar` at `pc` reads, and whether the binding is in the activation's own frame.
-/// Whether the instruction at `pc` is an [`Op::Argument`] whose formal is missing, which the
-/// optimizing tier leaves to tier 0: no compiled load yields the empty argument.
-pub unsafe fn passes_missing_argument(machine: &mut Machine<'_>, pc: usize) -> R<bool> {
+/// Whether the load at `pc` is one the optimizing tier leaves to tier 0: an [`Op::Argument`]
+/// whose formal is missing, since no compiled load yields the empty argument, or an
+/// [`Op::Subscript`] whose variable is unbound, which hands its assignment to `complex_assign`.
+pub unsafe fn load_declines(machine: &mut Machine<'_>, pc: usize) -> R<bool> {
     let word = values::ints(machine.code.car()).get(pc).copied();
-    if word.and_then(|word| op_of(word as u32)) != Some(Op::Argument) {
-        return Ok(false);
+    match word.and_then(|word| op_of(word as u32)) {
+        Some(Op::Argument) => {}
+        Some(Op::Subscript) => return Ok(subscript_unbound(&activation(machine, true), pc)),
+        _ => return Ok(false),
     }
     let state = activation(machine, true);
     let missing = argument_missing(&state, pc)?;
@@ -8130,6 +8151,7 @@ handlers! {
     run_internal: Internal, true, op_internal;
     run_argument: Argument, true, op_argument;
     run_complex_assign: ComplexAssign, true, op_complex_assign;
+    run_subscript: Subscript, true, op_subscript;
 }
 
 /// `Jump`, the one instruction whose failure resumes somewhere other than after itself: the
@@ -8208,6 +8230,7 @@ macro_rules! fast_paths {
 fast_paths! {
     fast_get_var: GetVar, get_var_fast;
     fast_argument: Argument, get_var_fast;
+    fast_subscript: Subscript, get_var_fast;
     fast_get_fun: GetFun, get_fun_fast;
     fast_set_var: SetVar, set_var_fast;
     fast_guard: Guard, guard_fast;
@@ -9578,6 +9601,34 @@ unsafe fn op_argument(state: &mut Activation<'_, '_>, instruction: Instruction) 
         return Ok(Flow::Next);
     }
     op_get_var(state, instruction)
+}
+
+/// [`Op::Subscript`]: `R_UnboundValue` when nothing binds the variable, and its value
+/// otherwise.
+unsafe fn op_subscript(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    if subscript_unbound(state, instruction.at) {
+        (*state.interp).visible = true;
+        instruction.output(0, unbound());
+        return Ok(Flow::Next);
+    }
+    op_get_var(state, instruction)
+}
+
+/// Whether nothing binds the variable the [`Op::Subscript`] at `pc` reads. It finds the
+/// binding without reading it, so an active binding runs once, in the load that follows.
+unsafe fn subscript_unbound(state: &Activation<'_, '_>, pc: usize) -> bool {
+    let symbol = pool_constant(state, *state.code.add(pc + 2) as usize);
+    let start = if state.in_slots() {
+        if let Some(slot) = state.slot(*state.code.add(pc + 3) as usize)
+            && *slot != unbound()
+        {
+            return false;
+        }
+        state.machine.function.tag()
+    } else {
+        *state.header
+    };
+    eval::find_cell(symbol, start).is_none_or(|cell| cell.cdr() == unbound())
 }
 
 /// Whether the formal the [`Op::Argument`] at `pc` reads is missing.
@@ -13002,6 +13053,13 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
     };
     let index = instruction.input(2);
     let target = call.cdr().car();
+    if index == unbound() {
+        let env = state.env(Reify::Site("subassignment"))?;
+        eval::complex_assign(call, target, value, env, false, &[])?;
+        instruction.output(0, value);
+        (*state.interp).visible = false;
+        return Ok(Flow::Next);
+    }
     // A symbol in the register is a formal left for lookup only when the subscript is that
     // formal; any other symbol is a computed subscript, which `[<-` rejects.
     if index.kind() == SexpType::Symbol && index != target.cdr().cdr().car() {
@@ -13060,6 +13118,13 @@ unsafe fn op_sub_assign_matrix(
     let variable = state.constant(instruction, 1);
     let target = call.cdr().car();
     let subscripts = [instruction.input(2), instruction.input(3)];
+    if subscripts.contains(&unbound()) {
+        let env = state.env(Reify::Site("matrix subassignment"))?;
+        eval::complex_assign(call, target, value, env, false, &[])?;
+        instruction.output(0, value);
+        (*state.interp).visible = false;
+        return Ok(Flow::Next);
+    }
     let codes = [target.cdr().cdr().car(), target.cdr().cdr().cdr().car()];
     // As in `op_sub_assign`, a symbol other than the subscript's own is a computed one.
     let lookups = subscripts

@@ -110,10 +110,33 @@ pub unsafe fn deparse_one_line(object: Sexp) -> String {
     join_one_line(deparse_lines(object, 60, options::SIMPLE))
 }
 
-/// An argument's code in an "unused argument" message, which GNU R deparses with no option, so
-/// an integer loses its `L` and a vector its names: `f(1L, 4L)` reports `unused argument (4)`.
-pub unsafe fn deparse_unused_argument(object: Sexp) -> String {
-    join_one_line(deparse_lines(object, 60, 0))
+/// The parenthesized arguments of an "unused argument" message, as GNU R deparses the
+/// pairlist of them on one line with no option: an integer loses its `L` and a vector its names
+/// (`f(1L, 4L)` reports `unused argument (4)`), a name that is not syntactic gets backticks,
+/// the lines of a block are joined by newlines, and a list with an empty argument reads as the
+/// `alist()` that makes it.
+pub unsafe fn unused_arguments(arguments: &[(Option<&str>, Sexp)]) -> String {
+    let missing = crate::values::missing_arg();
+    let items: Vec<String> = arguments
+        .iter()
+        .map(|&(name, value)| {
+            let text = if value == missing {
+                String::new()
+            } else {
+                deparse_lines(value, 60, 0).join("\n")
+            };
+            match name {
+                Some(name) => format!("{} = {text}", quote_name(name)),
+                None => text,
+            }
+        })
+        .collect();
+    let items = items.join(", ");
+    if arguments.iter().any(|&(_, value)| value == missing) {
+        format!("(alist({items}))")
+    } else {
+        format!("({items})")
+    }
 }
 
 /// The deparse `as.character` of a list stores for an element, GNU R's `deparse1line` with no

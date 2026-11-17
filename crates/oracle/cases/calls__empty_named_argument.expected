@@ -344,6 +344,87 @@
 | [1] "a b"
 | [1] 2 4
 | [1] 3
+| [1] 2.079442
+| [1] 2.079442
+| [1] 2.079442
+| [1] "error: argument \"x\" is missing, with no default | call: log(, 8)"
+| [1] 3
+| [1] 3
+| [1] 2.079442
+| [1] 2.079442
+| [1] 2.079442
+| [1] "error: argument \"x\" is missing, with no default | call: log(, 8)"
+| [1] 3
+| [1] 3
+| [1] 2.079442
+| [1] 2.079442
+| [1] 2.079442
+| [1] "error: argument \"x\" is missing, with no default | call: log(, 8)"
+| [1] 3
+| [1] 3
+| [1] "error: argument is missing, with no default | call: eval(expression, globalenv())"
+| [1] "error: argument is missing, with no default | call: eval(expression, globalenv())"
+| [1] "error: argument is missing, with no default | call: eval(expression, globalenv())"
+| [1] "error: argument is missing, with no default | call: in_frame()"
+| [1] "error: argument is missing, with no default | call: relay_rep(times = , 1:2)"
+| [1] 1 2
+| [1] 1 2 1 2
+| [1] "error: argument is missing, with no default | call: eval(expression, globalenv())"
+| [1] "error: argument is missing, with no default | call: eval(expression, globalenv())"
+| [1] "error: argument is missing, with no default | call: eval(expression, globalenv())"
+| [1] "error: argument is missing, with no default | call: in_frame()"
+| [1] "error: argument is missing, with no default | call: relay_rep(times = , 1:2)"
+| [1] 1 2
+| [1] 1 2 1 2
+| [1] "error: argument is missing, with no default | call: eval(expression, globalenv())"
+| [1] "error: argument is missing, with no default | call: eval(expression, globalenv())"
+| [1] "error: argument is missing, with no default | call: eval(expression, globalenv())"
+| [1] "error: argument is missing, with no default | call: in_frame()"
+| [1] "error: argument is missing, with no default | call: relay_rep(times = , 1:2)"
+| [1] 1 2
+| [1] 1 2 1 2
+| y n 
+| 2 1 
+| y n 
+| 2 2 
+| y n 
+| 2 1 
+| y n 
+| 2 0 
+| [1] "error: unused argument (z) | call: nm3.default(y = , obj, 2, 3)"
+| [1] FALSE  TRUE
+|  y  n 
+| 10  1 
+|  y  n 
+| 10  1 
+| y n 
+| 2 1 
+| y n 
+| 2 2 
+| y n 
+| 2 1 
+| y n 
+| 2 0 
+| [1] "error: unused argument (z) | call: nm3.default(y = , obj, 2, 3)"
+| [1] FALSE  TRUE
+|  y  n 
+| 10  1 
+|  y  n 
+| 10  1 
+| y n 
+| 2 1 
+| y n 
+| 2 2 
+| y n 
+| 2 1 
+| y n 
+| 2 0 
+| [1] "error: unused argument (z) | call: nm3.default(y = , obj, 2, 3)"
+| [1] FALSE  TRUE
+|  y  n 
+| 10  1 
+|  y  n 
+| 10  1 
 | [1] "error: unused argument (4) | call: two(1L, 2L, 4L)"
 | [1] "error: unused argument (w = 4) | call: two(1L, w = 4L)"
 | [1] "error: unused arguments (4, \"s\") | call: two(...)"
@@ -355,9 +436,39 @@
 | [1] TRUE
 | [1] "error: unused argument (list(1, 2)) | call: (function (a, b)  a)(1L, 2L, list(a = 1L, 2L))"
 | [1] "error: unused argument (1) | call: round(1L, 2L, c(a = 1L))"
+| [1] "error: unused argument (alist(w = )) | call: two(1, w = )"
+| [1] "error: unused argument (alist()) | call: two(1, 2, )"
+| [1] "error: unused arguments (alist(w = , v = 3)) | call: two(1, w = , v = 3)"
+| [1] "error: unused argument (`my arg` = 2) | call: two(1, `my arg` = 2)"
+| [1] "error: unused arguments (3, `if` = 4, `a b`) | call: two(1, 2, 3, `if` = 4, `a b`)"
+| [1] "error: unused argument ({\n    x\n    y\n}) | call: two(1, 2, {     x     y })"
+| [1] "error: unused argument (w = {\n    x\n}) | call: two(1, w = {     x })"
+| [1] "error: unused argument (alist(w = )) | call: round(1, 2, w = )"
+| [1] "error: unused argument (`my arg` = 3) | call: round(1, 2, `my arg` = 3)"
+| [1] "error: unused argument (alist(w = )) | call: (function (a, b)  a)(1, 2, w = )"
+| [1] "error: unused argument (alist(w = )) | call: two(1, w = )"
+| [1] "error: unused argument (alist()) | call: two(1, 2, )"
+| [1] "error: unused arguments (alist(w = , v = 3)) | call: two(1, w = , v = 3)"
+| [1] "error: unused argument (`my arg` = 2) | call: two(1, `my arg` = 2)"
+| [1] "error: unused arguments (3, `if` = 4, `a b`) | call: two(1, 2, 3, `if` = 4, `a b`)"
+| [1] "error: unused argument ({\n    x\n    y\n}) | call: two(1, 2, {     x     y })"
+| [1] "error: unused argument (w = {\n    x\n}) | call: two(1, w = {     x })"
+| [1] "error: unused argument (alist(w = )) | call: round(1, 2, w = )"
+| [1] "error: unused argument (`my arg` = 3) | call: round(1, 2, `my arg` = 3)"
+| [1] "error: unused argument (alist(w = )) | call: (function (a, b)  a)(1, 2, w = )"
+| [1] "error: unused argument (alist(w = )) | call: two(1, w = )"
+| [1] "error: unused argument (alist()) | call: two(1, 2, )"
+| [1] "error: unused arguments (alist(w = , v = 3)) | call: two(1, w = , v = 3)"
+| [1] "error: unused argument (`my arg` = 2) | call: two(1, `my arg` = 2)"
+| [1] "error: unused arguments (3, `if` = 4, `a b`) | call: two(1, 2, 3, `if` = 4, `a b`)"
+| [1] "error: unused argument ({\n    x\n    y\n}) | call: two(1, 2, {     x     y })"
+| [1] "error: unused argument (w = {\n    x\n}) | call: two(1, w = {     x })"
+| [1] "error: unused argument (alist(w = )) | call: round(1, 2, w = )"
+| [1] "error: unused argument (`my arg` = 3) | call: round(1, 2, `my arg` = 3)"
+| [1] "error: unused argument (alist(w = )) | call: (function (a, b)  a)(1, 2, w = )"
 [messages]
 [warnings]
 [errors]
 [value]
-character
-| "error: unused argument (1) | call: round(1L, 2L, c(a = 1L))"
+NULL
+| NULL
