@@ -657,6 +657,35 @@ About seven in ten of the hot suite's closure calls from compiled code take `cal
 - **`mkChar` on the C API boundary's direct path is measured and not taken.** Interning `mkChar`, `mkCharCE`, `mkCharLen` and `mkCharLenCE` without leaving the direct path, with the string-table probe inlined, cuts a 16-byte `Rf_mkCharLenCE` from 868 to 765 instructions (fresh) and 376 to 288 (re-interned), and the marginal cost of `str_split(s, "_")` on 1e6 strings by 4.1%. Whole package runs move by less than the bar (single process, `TESTTHAT_PARALLEL=false`): testthat -0.25%, purrr -0.17%, rlang -0.11%, and it adds about 40 lines. Revisit if a profile shows `mkChar*` call overhead above a few percent.
 - **Long strings through `mkCharLenCE` are measured and not taken.** processx hands it chunks of 45 to 95 KB, about 2.2G instructions in vctrs' test run (1.7%). Per byte of a 64 KB string under callgrind, ry re-interns an existing string in 1.7 instructions (1.57 in the one pass that does the NUL test, the ASCII test and the hash, 0.14 in the `memcmp` of the hit) and creates a new one in 4.0 (the same pass, a 1.0 copy and the allocation), against GNU R's 14.1 and 15.6. A 32-byte NUL and ASCII test with the copy folded in, plus hashing only a sample of a long string, might bring the pass to about 0.15 (an estimate), which would save under 1% of that run. Hashing a sample would also chain strings that share their ends in one bucket.
 
+## Open: the handle migration
+
+`decisions/heap-gc.md`, "Interpreter code holds values through handles the borrow checker
+checks", is the rule, and `development/design/memory-safety.md` the design. `heap::handle` and
+`interp::handles` exist, and six string builtins use them (`nchar`, `substr<-`, `strrep`,
+`strtoi`, `utf8ToInt`, `charToRaw`). Everything else in `interp`, `stats`, `graphics` and
+`frames` holds raw `Sexp` values: `python3 tools/unsafe.py stats` prints the counts per crate, and
+`tools/unsafe-baseline.txt` the count per file, which `just gate` lets only fall.
+
+- **Order.** `interp` leaf builtins first (the rest of `strings.rs`, then numbers, sorting and the
+  arithmetic kernels), then `values.rs`, then subsetting and assignment, then the evaluator and the
+  bytecode loop; then `stats`, `graphics` and `frames`; then the `libr`, `jit` and `typed` entry
+  points; last, `heap` stops exporting the raw accessors and `interp::heap()` and
+  `interp::interp()` go.
+- **How one file goes.** A builtin gets the signature `fn(&mut Cx<'s>, &Args<'_, 's>) ->
+  R<Local<'s>>` and its table entry `safe!(name)`. A raw helper it calls gets a safe form in
+  `interp::handles` that says why the handle types make the call sound, and the wrapper goes when
+  the helper under it migrates. Run the file's oracle cases on `ry`, `ry-tier0`, `ry-jit` and
+  `ry-repeat-gctorture-seeded`, then `python3 tools/unsafe.py baseline`.
+- **Measure each file.** Count instructions for one call of a migrated builtin against its raw
+  form before the raw form is deleted (callgrind on a release build with
+  `CARGO_PROFILE_RELEASE_STRIP=false`). A wrapper that tests a common case keeps the test
+  `#[inline]` and its slow path `#[inline(never)]`: LLVM leaves a generic wrapper with a loop out
+  of line, and each such call costs 20 to 60 instructions on a scalar builtin.
+- **Not built.** The replacement path's ownership checks as the callers of `assume_exclusive`
+  (`Write` exists and only its tests use it), the bytecode loop's register accessor,
+  `Held<T>` fields in structures the collector traces, and a bulk fill for a new list or character
+  vector (`memory-safety.md`, "Open questions").
+
 ## Open: failing tests on main
 
 `just ci` stops at the first failing test binary. With `--no-fail-fast` (and GNU R's
