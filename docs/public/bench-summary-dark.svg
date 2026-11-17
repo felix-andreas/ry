@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" width="760" height="300" role="img" aria-labelledby="t d" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
 <title id="t">ry speed-up over GNU R by benchmark suite</title>
-<desc id="d">Geometric mean speed-up over GNU R. Public R JIT benchmarks: GNU R 1.00x, ry 3.69x, ry typed 19x; Package test suites: GNU R 1.00x, ry 2.55x; Numeric kernels: GNU R 1.00x, ry 5.78x, ry typed 25x; Application workloads: GNU R 1.00x, ry 3.56x, ry typed 68x.</desc>
+<desc id="d">Geometric mean speed-up over GNU R. Public R JIT benchmarks: GNU R 1.00x, ry 3.76x, ry typed 20x; Package test suites: GNU R 1.00x, ry 2.75x; Numeric kernels: GNU R 1.00x, ry 6.06x, ry typed 26x; Application workloads: GNU R 1.00x, ry 3.77x, ry typed 72x.</desc>
 <rect x="16" y="12" width="12" height="12" rx="2" fill="#7d838c"/>
 <text x="34" y="22.5" font-size="13" fill="#e6edf3">GNU R</text>
 <rect x="92" y="12" width="12" height="12" rx="2" fill="#3987e5"/>
@@ -8,32 +8,32 @@
 <rect x="144" y="12" width="12" height="12" rx="2" fill="#d95926"/>
 <text x="162" y="22.5" font-size="13" fill="#e6edf3">ry typed</text>
 <text x="744" y="22.5" font-size="12" text-anchor="end" fill="#9198a1">Geometric mean speed-up over GNU R, higher is faster</text>
-<path d="M35.0 256V257.2a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#7d838c"/>
-<text x="57.0" y="247.2" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">1.00x</text>
-<path d="M85.0 256V249.7a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#3987e5"/>
-<text x="107.0" y="239.7" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">3.69x</text>
-<path d="M135.0 256V205.6a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#d95926"/>
-<text x="157.0" y="195.6" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">19x</text>
+<path d="M35.0 256V257.4a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#7d838c"/>
+<text x="57.0" y="247.4" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">1.00x</text>
+<path d="M85.0 256V250.1a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#3987e5"/>
+<text x="107.0" y="240.1" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">3.76x</text>
+<path d="M135.0 256V207.6a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#d95926"/>
+<text x="157.0" y="197.6" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">20x</text>
 <text x="107.0" y="278" font-size="13" text-anchor="middle" fill="#e6edf3">Public R JIT benchmarks</text>
-<path d="M242.0 256V257.2a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#7d838c"/>
-<text x="264.0" y="247.2" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">1.00x</text>
-<path d="M292.0 256V252.9a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#3987e5"/>
-<text x="314.0" y="242.9" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">2.55x</text>
+<path d="M242.0 256V257.4a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#7d838c"/>
+<text x="264.0" y="247.4" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">1.00x</text>
+<path d="M292.0 256V252.8a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#3987e5"/>
+<text x="314.0" y="242.8" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">2.75x</text>
 <text x="289.0" y="278" font-size="13" text-anchor="middle" fill="#e6edf3">Package test suites</text>
-<path d="M399.0 256V257.2a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#7d838c"/>
-<text x="421.0" y="247.2" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">1.00x</text>
-<path d="M449.0 256V243.9a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#3987e5"/>
-<text x="471.0" y="233.9" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">5.78x</text>
-<path d="M499.0 256V191.2a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#d95926"/>
-<text x="521.0" y="181.2" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">25x</text>
+<path d="M399.0 256V257.4a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#7d838c"/>
+<text x="421.0" y="247.4" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">1.00x</text>
+<path d="M449.0 256V244.0a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#3987e5"/>
+<text x="471.0" y="234.0" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">6.06x</text>
+<path d="M499.0 256V190.2a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#d95926"/>
+<text x="521.0" y="180.2" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">26x</text>
 <text x="471.0" y="278" font-size="13" text-anchor="middle" fill="#e6edf3">Numeric kernels</text>
-<path d="M581.0 256V257.2a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#7d838c"/>
-<text x="603.0" y="247.2" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">1.00x</text>
+<path d="M581.0 256V257.4a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#7d838c"/>
+<text x="603.0" y="247.4" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">1.00x</text>
 <path d="M631.0 256V250.1a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#3987e5"/>
-<text x="653.0" y="240.1" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">3.56x</text>
+<text x="653.0" y="240.1" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">3.77x</text>
 <path d="M681.0 256V70.7a4 4 0 0 1 4-4h36a4 4 0 0 1 4 4V256z" fill="#d95926"/>
-<text x="703.0" y="60.7" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">68x</text>
+<text x="703.0" y="60.7" font-size="14" font-weight="600" text-anchor="middle" fill="#e6edf3">72x</text>
 <text x="653.0" y="278" font-size="13" text-anchor="middle" fill="#e6edf3">Application workloads</text>
 <line x1="16" x2="744" y1="256" y2="256" stroke="#6e7681" stroke-width="1"/>
-<line x1="16" x2="744" y1="253.2" y2="253.2" stroke="#6e7681" stroke-width="1" stroke-dasharray="4 4"/>
+<line x1="16" x2="744" y1="253.4" y2="253.4" stroke="#6e7681" stroke-width="1" stroke-dasharray="4 4"/>
 </svg>
