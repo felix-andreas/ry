@@ -160,7 +160,8 @@ ending with the command that reruns it:
 ```
 
 While iterating, `cargo test -p semantics` is the default command, since it covers analysis
-behavior. `just gate` runs every test plus clippy and a formatting check.
+behavior. `just gate` fetches GNU R's pinned source release, then runs every test plus clippy and a
+formatting check.
 
 Tests run locally, with `just gate` for everything and the two recipes below for the part that
 needs no GNU R. CI runs tests only when a maintainer starts a workflow by hand or tags a release,
@@ -695,6 +696,14 @@ report carries the mutant's text for that reason.
 
 `crates/oracle/tests/test_gallery.rs` renders a seeded sample of the plot gallery under both
 engines and compares the images ([Corpus and oracle](/development/corpus-and-oracle)).
+
+`crates/oracle/tests/test_base_build.rs` builds the base packages of GNU R's pinned source release
+on this checkout's runtime (`tools/base-r/build.sh` with `R_BASE_PACKAGES_ONLY=1`) and runs a
+session with S4 classes on the result. No other suite covers this, because they run on a base R
+that is already built, often GNU R's own, and building runs code that no later session runs: the
+methods package defines its basic classes once, at installation. The test takes about three
+minutes in a debug build. It skips without the source tarball in `target/base-r-source`, which
+`just gate` and `just base-r` fetch (`tools/base-r/build.sh --fetch`).
 `just gc-torture` runs every oracle case on every core and takes about ten minutes on four cores
 in a debug build, and `just gc-torture young` runs them under `ry-gctorture-young`.
 `just gc-torture repeat` runs them twice in one process under seeded stress with the heap checked

@@ -5,12 +5,19 @@
 # builds GNU R's reference BLAS and LAPACK beside LIBR (lapack.sh).
 #
 # usage: tools/base-r/build.sh OUTPUT RY_RCMD LIBR
-#   R_SOURCE_TARBALL  use this tarball instead of downloading it (it is still checked)
-#   R_SOURCE_CACHE    where downloads are kept (default: target/base-r-source)
+#        tools/base-r/build.sh --fetch    download and check the tarball, and build nothing
+#   R_SOURCE_TARBALL      use this tarball instead of downloading it (it is still checked)
+#   R_SOURCE_CACHE        where downloads are kept (default: target/base-r-source)
+#   R_BASE_PACKAGES_ONLY  when set, stop after the base packages: no BLAS and LAPACK and no
+#                         recommended packages
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
-output=$1 rcmd=$2 libr=$3
+if [ "$1" = --fetch ]; then
+	output='' rcmd='' libr=''
+else
+	output=$1 rcmd=$2 libr=$3
+fi
 version=$(tr -d '[:space:]' < "$here/VERSION")
 name="R-$version.tar.gz"
 checksum=$(awk -v name="$name" '$2 == name { print $1 }' "$here/SHA256SUMS")
@@ -35,6 +42,7 @@ if [ "$actual" != "$checksum" ]; then
 	echo "$tarball has SHA-256 $actual, but SHA256SUMS pins $checksum" >&2
 	exit 1
 fi
+[ -n "$output" ] || exit 0
 source_root=$(mktemp -d "$cache/source.XXXXXX")
 trap 'rm -rf "$source_root"' EXIT
 # The release's only symlinks are the test suite's and the unversioned `Recommended/*.tgz` names
@@ -45,8 +53,9 @@ for patch in "$here"/patches/*.patch; do
 	[ -e "$patch" ] || continue
 	patch -d "$source" -p1 --quiet < "$patch"
 done
-"$here/lapack.sh" "$source" "$libr"
+[ -n "${R_BASE_PACKAGES_ONLY:-}" ] || "$here/lapack.sh" "$source" "$libr"
 "$rcmd" build-base "$source" "$output" --include "$root/crates/libr/include" --libr "$libr" --sha256 "$checksum"
+[ -z "${R_BASE_PACKAGES_ONLY:-}" ] || exit 0
 
 # The recommended packages, as GNU R installs them, in dependency order. Those with Fortran code
 # (nlme, KernSmooth, and mgcv, which imports nlme) would need a Fortran runtime in the archive on
