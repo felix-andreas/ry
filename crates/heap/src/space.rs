@@ -1090,7 +1090,6 @@ impl Space {
         Some(aligned && self.allocated[page][word] & bit != 0)
     }
 
-<<<<<<< HEAD
     /// The slot the address of `object` falls in: where the slot starts, its size in bytes and
     /// whether it is allocated, or `None` when the address is outside the space. Only the heap
     /// verifier asks, to say what a stray reference points at.
@@ -1103,8 +1102,6 @@ impl Space {
         Some((start, slot_size, self.allocated[page][word] & bit != 0))
     }
 
-=======
->>>>>>> origin/main
     /// Whether `object` lives in this space rather than among the large objects.
     pub fn holds(&self, object: Sexp) -> bool {
         self.locate(object).is_some()

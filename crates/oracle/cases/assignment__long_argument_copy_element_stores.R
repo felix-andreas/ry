@@ -66,8 +66,6 @@ k <- function(x) {
 }
 for (call in 1:3) out <- k(a)
 cat(attr(out, "extra"), sum(out), sum(a), "\n")
-<<<<<<< HEAD
-=======
 
 # A single store per call is enough: the copy is the compiled call's first and only write.
 single <- function(x) {
@@ -90,5 +88,4 @@ late <- function(x) {
 m <- matrix(FALSE, 8, 16)
 for (call in 1:3) cat(which(late(m)), "")
 cat(sum(m), "\n")
->>>>>>> origin/main
 message("ok")

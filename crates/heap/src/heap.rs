@@ -4611,7 +4611,6 @@ impl Heap {
     #[cold]
     unsafe fn verify_children(&self, parent: Sexp) {
         for (position, child) in self.children_of(parent).into_iter().enumerate() {
-<<<<<<< HEAD
             if child == self.known.nil || self.is_allocated_object(child) {
                 continue;
             }
@@ -4749,24 +4748,6 @@ impl Heap {
         (start..start + size)
             .step_by(size_of::<usize>())
             .find(|&word| (word as *const usize).read() == child.as_ptr() as usize)
-=======
-            let valid = child == self.known.nil
-                || self
-                    .space
-                    .is_allocated_object(child)
-                    .unwrap_or_else(|| self.large.contains(&child));
-            if !valid {
-                panic!(
-                    "heap corrupted: a reachable {}{:?} at {:p} holds {:p} at child {position}, \
-                     which is not an allocated object",
-                    if parent.is_altrep() { "ALTREP " } else { "" },
-                    parent.kind(),
-                    parent.as_ptr(),
-                    child.as_ptr(),
-                );
-            }
-        }
->>>>>>> origin/main
     }
 
     /// The references `parent` holds that tracing follows: its attributes first, then its
