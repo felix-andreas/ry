@@ -835,6 +835,19 @@ unsafe fn resolve(
     }
 }
 
+/// GNU R converts a double matrix or array subscript to integer before it resolves it, so a
+/// value outside the integer range selects `NA` with a warning, where a vector subscript of the
+/// same value is quietly out of bounds.
+unsafe fn dimension_subscript(index: Sexp) -> R<Sexp> {
+    const LIMIT: f64 = 2_147_483_648.0;
+    if index.kind() == SexpType::Real
+        && (0..length(index)).any(|position| numeric_element(index, position).abs() >= LIMIT)
+    {
+        return coerce_vector(index, SexpType::Integer);
+    }
+    Ok(index)
+}
+
 /// The object and zero-based position of `x[i]` or `x[[i]]` with one untagged, attribute-free
 /// numeric scalar `i` inside the vector's bounds: the common case GNU R's byte code also
 /// answers before resolving subscripts in general.
@@ -1198,6 +1211,7 @@ unsafe fn array_subset(
         if index.kind() == SexpType::Logical && length(index) > extent {
             return Err(error_in(call, "(subscript) logical subscript too long"));
         }
+        let index = dimension_subscript(index)?;
         let (positions, _) = resolve(index, extent, names, false, call)?;
         if let Some((offset, &position)) = positions
             .iter()
@@ -2714,6 +2728,7 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
             } else {
                 nil()
             };
+            let index = dimension_subscript(index)?;
             let (positions, _) = resolve(index, extent, names, false, call)?;
             if let Some((offset, &position)) = positions
                 .iter()
