@@ -1486,12 +1486,10 @@ impl Deparser {
                             "{sign}{}",
                             strings::hexadecimal_form(value.abs(), None, false)
                         )
+                    } else if self.opts & options::DIGITS17 != 0 && value.is_finite() {
+                        format::c_general(value, 17, false)
                     } else {
-                        if self.opts & options::DIGITS17 != 0 {
-                            format::c_general(value, 17, false)
-                        } else {
-                            format::format_real_alone(value, 15)
-                        }
+                        format::format_real_alone(value, 15)
                     }
                 }
                 SexpType::Complex => {
@@ -1522,6 +1520,17 @@ impl Deparser {
                             part(value.r),
                             part(value.i)
                         )
+                    } else if self.opts & options::HEX_NUMERIC != 0 && value.r.is_finite() {
+                        // GNU R writes `%a + %ai`, so a negative imaginary part keeps its own
+                        // sign after the plus.
+                        let hexadecimal = |part: f64| {
+                            let sign = if part.is_sign_negative() { "-" } else { "" };
+                            format!(
+                                "{sign}{}",
+                                strings::hexadecimal_form(part.abs(), None, false)
+                            )
+                        };
+                        format!("{} + {}i", hexadecimal(value.r), hexadecimal(value.i))
                     } else if self.opts & options::DIGITS17 != 0 && value.r.is_finite() {
                         // GNU R writes each part with `%.17g`, so the value parses back exactly.
                         let imaginary = format::c_general(value.i, 17, false);
