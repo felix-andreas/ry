@@ -11386,30 +11386,10 @@ unsafe fn assign_slot_element(
     (index, value, kind): (Sexp, Sexp, ElementKind),
     (whole, setter_call): (Sexp, Sexp),
 ) -> R<bool> {
+    let current = *slot;
     if assign_slot_element_in_place(state, slot, index, value, kind)? {
         return Ok(true);
     }
-    assign_slot_element_by_builtin(
-        state,
-        slot,
-        variable,
-        (index, value, kind),
-        (whole, setter_call),
-    )
-}
-
-/// [`assign_slot_element`] for a store the in-place forms refuse: the replacement builtin's own
-/// code runs on the slot's value or on a copy of it. Out of line, so the in-place store does not
-/// pay for this function's stack frame.
-#[inline(never)]
-unsafe fn assign_slot_element_by_builtin(
-    state: &Activation<'_, '_>,
-    slot: *mut Sexp,
-    variable: Sexp,
-    (index, value, kind): (Sexp, Sexp, ElementKind),
-    (whole, setter_call): (Sexp, Sexp),
-) -> R<bool> {
-    let current = *slot;
     // Forcing a formal's promise ran code that may have given the frame its environment.
     if *state.header != nil() {
         return Ok(false);
