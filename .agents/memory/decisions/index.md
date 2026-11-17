@@ -208,6 +208,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A lazily signalled error carries its condition class (settled)
 - `coerce_vector` applies GNU R's attribute rule in one place (settled)
 - A promise whose evaluation was left warns when it is forced again (settled)
+- An assignment with several subscripts checks them before the value (settled)
+- A condition names a superassignment inside a function with the plain arrow (settled)
 
 ## Builtins and base R
 

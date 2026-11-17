@@ -13,8 +13,8 @@ use {
         eval::{self, value_of},
         unwind::{R, Unwind, error, error_in, errorcall},
         values::{
-            self, alloc, char_str, get_attr, length, missing_arg, na_string, nil, scalar_integer,
-            symbol_name, symbols, unbound,
+            self, Dims, alloc, char_str, get_attr, length, missing_arg, na_string, nil,
+            scalar_integer, symbol_name, symbols, unbound,
         },
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp},
@@ -1202,27 +1202,9 @@ unsafe fn array_subset(
     }
     let mut selections: SmallVec<[Positions; 4]> = SmallVec::with_capacity(dims.len());
     for (dimension, (&index, &extent)) in indices.iter().zip(dims).enumerate() {
-        let names = if dimnames.kind() == SexpType::List {
-            dimnames.element(dimension)
-        } else {
-            nil()
-        };
-        // Unlike a vector, a dimension never stretches to a longer logical subscript.
-        if index.kind() == SexpType::Logical && length(index) > extent {
-            return Err(error_in(call, "(subscript) logical subscript too long"));
-        }
-        let index = dimension_subscript(index)?;
-        let (positions, _) = resolve(index, extent, names, false, call)?;
-        if let Some((offset, &position)) = positions
-            .iter()
-            .enumerate()
-            .find(|&(_, &position)| position >= extent && position != NA_POSITION)
-        {
-            return Err(array_out_of_bounds(
-                call, object, dimension, index, offset, position,
-            ));
-        }
-        selections.push(positions);
+        selections.push(dimension_positions(
+            call, false, object, dimnames, dimension, index, extent,
+        )?);
     }
     let offsets = ArrayOffsets::new(&selections, dims);
     let count = offsets.remaining;
@@ -1614,6 +1596,102 @@ unsafe fn array_out_of_bounds(
     out_of_bounds(call, "subscript out of bounds", bounds, reported)
 }
 
+/// The positions one subscript of a matrix or array selects along its dimension, with the
+/// errors of GNU R's `int_arraySubscript`. Unlike a vector, a dimension never stretches: a
+/// longer logical subscript and a position past the extent are errors.
+unsafe fn dimension_positions(
+    call: Sexp,
+    assigning: bool,
+    object: Sexp,
+    dimnames: Sexp,
+    dimension: usize,
+    index: Sexp,
+    extent: usize,
+) -> R<Positions> {
+    if index.kind() == SexpType::Logical && length(index) > extent {
+        return Err(error_in(call, "(subscript) logical subscript too long"));
+    }
+    if index.kind() == SexpType::String && dimnames == nil() {
+        return Err(error_in(call, "no 'dimnames' attribute for array"));
+    }
+    let names = if dimnames.kind() == SexpType::List {
+        dimnames.element(dimension)
+    } else {
+        nil()
+    };
+    let index = dimension_subscript(index)?;
+    let (positions, _) = resolve(index, extent, names, false, call)?;
+    if let Some((offset, &position)) = positions
+        .iter()
+        .enumerate()
+        .find(|&(_, &position)| position >= extent && position != NA_POSITION)
+    {
+        let call = if assigning {
+            crate::unwind::generated_call(call)?
+        } else {
+            call
+        };
+        return Err(array_out_of_bounds(
+            call, object, dimension, index, offset, position,
+        ));
+    }
+    Ok(positions)
+}
+
+/// The dimensions of `object` and the positions `indices` select along each, for an assignment
+/// of `value_count` elements, after every check GNU R's `MatrixAssign` and `ArrayAssign` make
+/// before they look at the types: the number of subscripts, each subscript in turn, then the
+/// lengths.
+unsafe fn array_selections(
+    call: Sexp,
+    object: Sexp,
+    indices: &[Sexp],
+    value_count: usize,
+) -> R<(Dims, SmallVec<[Positions; 4]>)> {
+    let Some(dims) = values::dims(object).filter(|dims| dims.len() == indices.len()) else {
+        return Err(error_in(
+            call,
+            if indices.len() == 2 {
+                "incorrect number of subscripts on matrix"
+            } else {
+                "incorrect number of subscripts"
+            },
+        ));
+    };
+    let dimnames = get_attr(object, symbols().dimnames);
+    let mut selections: SmallVec<[Positions; 4]> = SmallVec::new();
+    for (dimension, (&index, &extent)) in indices.iter().zip(dims.iter()).enumerate() {
+        selections.push(dimension_positions(
+            call, true, object, dimnames, dimension, index, extent,
+        )?);
+    }
+    let total: usize = selections.iter().map(|selection| selection.len()).product();
+    // A single value skips the NA rows, and a longer one cannot say which of its elements an
+    // NA row would have taken. GNU R's matrix assignment checks this before comparing lengths,
+    // and its array assignment after.
+    let has_na = value_count > 1
+        && selections
+            .iter()
+            .any(|selection| selection.contains(&NA_POSITION));
+    let na_error = || error_in(call, "NAs are not allowed in subscripted assignments");
+    if has_na && dims.len() == 2 {
+        return Err(na_error());
+    }
+    if total > 0 && value_count == 0 {
+        return Err(error_in(call, "replacement has length zero"));
+    }
+    if total > 0 && !total.is_multiple_of(value_count) {
+        return Err(error_in(
+            call,
+            "number of items to replace is not a multiple of replacement length",
+        ));
+    }
+    if has_na {
+        return Err(na_error());
+    }
+    Ok((dims, selections))
+}
+
 unsafe fn do_subset2(call: &Call<'_>) -> R<Sexp> {
     if let Some((object, position)) = scalar_position(call)
         && !object.is_object()
@@ -1877,6 +1955,34 @@ unsafe fn single_position(
     call: Sexp,
     bounds: Bounds,
 ) -> R<usize> {
+    let index = if index.kind() == SexpType::Symbol {
+        values::scalar_string_charsxp(index.car())?
+    } else {
+        index
+    };
+    let matrix = bounds.dimension.is_some();
+    match one_position(index, extent, names, exact, call, matrix)? {
+        Some(position) => Ok(position),
+        None => Err(out_of_bounds(
+            call,
+            "subscript out of bounds",
+            bounds,
+            index,
+        )),
+    }
+}
+
+/// GNU R's `get1index`: the position one `[[` subscript selects among `extent` elements, `None`
+/// for one that names no element or lies past the end, and an error for one that cannot name a
+/// single element. `matrix` says the subscript indexes one dimension.
+unsafe fn one_position(
+    index: Sexp,
+    extent: usize,
+    names: Sexp,
+    exact: Option<bool>,
+    call: Sexp,
+    matrix: bool,
+) -> R<Option<usize>> {
     if length(index) != 1 {
         return Err(error_in(
             call,
@@ -1887,43 +1993,28 @@ unsafe fn single_position(
             },
         ));
     }
+    // Before 4.6.2 a matrix subscript never counts from the end, so a negative one selects
+    // nothing; 4.6.2 applies the vector rule to each extent (PR#19116).
+    let counts_from_end = !matrix || crate::system::r_at_least_release(4, 6, 2);
     match index.kind() {
         SexpType::String => {
             let wanted = index.element(0);
             // An empty name means "no name", so it never selects an element.
-            let found = if wanted.bytes().is_empty() {
-                None
-            } else {
-                match_name(names, wanted, exact)?
-            };
-            match found {
-                Some(position) => Ok(position),
-                None => Err(out_of_bounds(
-                    call,
-                    "subscript out of bounds",
-                    bounds,
-                    index,
-                )),
+            if wanted.bytes().is_empty() {
+                return Ok(None);
             }
+            match_name(names, wanted, exact)
         }
         SexpType::Integer | SexpType::Logical => {
             let value = values::ints(index)[0];
             if value == NA_INTEGER {
-                return Err(out_of_bounds(
-                    call,
-                    "subscript out of bounds",
-                    bounds,
-                    index,
-                ));
+                return Ok(None);
             }
-            // Before 4.6.2 a matrix subscript never counts from the end, so a negative one
-            // selects nothing; 4.6.2 applies the vector rule to each extent (PR#19116).
-            let matrix = bounds.dimension.is_some() && !crate::system::r_at_least_release(4, 6, 2);
-            if value < 0 && extent == 2 && value >= -2 && !matrix {
-                return Ok(if value == -1 { 1 } else { 0 });
+            if value < 0 && extent == 2 && value >= -2 && counts_from_end {
+                return Ok(Some(if value == -1 { 1 } else { 0 }));
             }
             if value <= 0 {
-                let amount = if value < 0 && extent > 1 && !matrix {
+                let amount = if value < 0 && extent > 1 && counts_from_end {
                     "more"
                 } else {
                     "less"
@@ -1933,32 +2024,17 @@ unsafe fn single_position(
                     format!("attempt to select {amount} than one element in integerOneIndex"),
                 ));
             }
-            if value as usize > extent {
-                return Err(out_of_bounds(
-                    call,
-                    "subscript out of bounds",
-                    bounds,
-                    index,
-                ));
-            }
-            Ok(value as usize - 1)
+            Ok((value as usize <= extent).then(|| value as usize - 1))
         }
         SexpType::Real => {
             let value = values::reals(index)[0];
             if value.is_nan() {
-                return Err(out_of_bounds(
-                    call,
-                    "subscript out of bounds",
-                    bounds,
-                    index,
-                ));
+                return Ok(None);
             }
             let value = value.trunc();
             if value < 0.0 {
-                let matrix =
-                    bounds.dimension.is_some() && !crate::system::r_at_least_release(4, 6, 2);
-                if extent == 2 && value >= -2.0 && !matrix {
-                    return Ok(if value == -1.0 { 1 } else { 0 });
+                if extent == 2 && value >= -2.0 && counts_from_end {
+                    return Ok(Some(if value == -1.0 { 1 } else { 0 }));
                 }
                 return Err(error_in(
                     call,
@@ -1971,19 +2047,11 @@ unsafe fn single_position(
                     "attempt to select less than one element in get1index <real>",
                 ));
             }
-            if value > extent as f64 {
-                return Err(out_of_bounds(
-                    call,
-                    "subscript out of bounds",
-                    bounds,
-                    index,
-                ));
-            }
-            Ok(value as usize - 1)
+            Ok((value <= extent as f64).then(|| value as usize - 1))
         }
         SexpType::Symbol => {
             let name = values::scalar_string_charsxp(index.car())?;
-            single_position(name, extent, names, exact, call, bounds)
+            one_position(name, extent, names, exact, call, matrix)
         }
         kind => Err(error_in(
             call,
@@ -2542,6 +2610,32 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
     } else if value.kind() == SexpType::Object {
         conditions::warning_call(call, "implicit list embedding of S4 objects is deprecated")?;
     }
+    // GNU R's matrix and array assignments check the subscripts and the value's length before
+    // its type. For a value that is not a vector (a function, an environment, a symbol, `NULL`)
+    // GNU R reads a length anyway, and what it finds exceeds any selection, so only an empty
+    // selection takes it.
+    let lengthless = !value.kind().is_vector() && value.kind() != SexpType::Record;
+    if lengthless && indices.len() >= 2 && object.kind().is_vector() {
+        let count = match value.kind() {
+            SexpType::Language | SexpType::Pairlist => length(value),
+            _ => usize::MAX,
+        };
+        array_selections(call, object, indices, count)?;
+    }
+    // GNU R coerces `NULL` to the value's type before it looks at a subscript, which fails for
+    // every type that is not a vector's, except for an environment that binds nothing, whose
+    // length of zero makes the assignment a no-op.
+    if lengthless && value != nil() && object == nil() {
+        return match value.kind() {
+            SexpType::Environment if length(value) == 0 => Ok(object),
+            SexpType::Pairlist => Err(not_subsettable(call, object)),
+            SexpType::Language => Err(error("unimplemented type 'NULL' in 'coercePairList'\n")),
+            kind => Err(error(format!(
+                "invalid type/length ({}/0) in vector allocation",
+                kind.name()
+            ))),
+        };
+    }
     // GNU R assigns a call's elements, as it does a pairlist's, so `f[2] <- quote(g(h))` stores
     // the symbol `g`.
     let value = if matches!(value.kind(), SexpType::Pairlist | SexpType::Language) {
@@ -2664,10 +2758,14 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         values::copy_most_attributes(object, result, false)?;
         return Ok(result);
     }
-    let value_kind = if value == nil() {
-        SexpType::Logical
-    } else {
+    // `NULL` has no type to mismatch: a raw vector takes it as it takes a raw value, so the
+    // check of its length reports it.
+    let value_kind = if value != nil() {
         value.kind()
+    } else if object.kind() == SexpType::Raw {
+        SexpType::Raw
+    } else {
+        SexpType::Logical
     };
     // An empty vector takes an empty replacement of its own type, or an empty
     // list, unchanged whatever the index selects: an empty list must not turn
@@ -2680,7 +2778,24 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
     {
         return Ok(object);
     }
-    let target_kind = subassign_type_fix(object.kind(), value_kind)?;
+    let value_count = if value == nil() {
+        0
+    } else if value.kind().is_vector() {
+        length(value)
+    } else {
+        1
+    };
+    // GNU R's matrix and array assignments check the subscripts and the lengths before the
+    // types, so a mismatch of types is reported only for an assignment that is otherwise sound.
+    let target_kind = match subassign_type_fix(object.kind(), value_kind) {
+        Ok(kind) => kind,
+        Err(mismatch) => {
+            if indices.len() >= 2 {
+                array_selections(call, object, indices, value_count)?;
+            }
+            return Err(mismatch);
+        }
+    };
     let mut result = if target_kind != object.kind() {
         let converted = coerce_vector(object, target_kind)?;
         if converted == object {
@@ -2698,79 +2813,18 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         } else {
             value
         };
-    let value_count = if value == nil() {
-        0
-    } else if value.kind().is_vector() {
-        length(value)
-    } else {
-        1
-    };
     // The subscripts are read against the object as it was: a vector that became a list has
     // lost its dimensions, as in GNU R, where the result of `m[1, 2] <- list(v)` is a plain list.
     if indices.len() >= 2 {
-        let Some(dims) = values::dims(object).filter(|dims| dims.len() == indices.len()) else {
-            return Err(error_in(
-                call,
-                if indices.len() == 2 {
-                    "incorrect number of subscripts on matrix"
-                } else {
-                    "incorrect number of subscripts"
-                },
-            ));
-        };
         if value != result
+            && let Some(dims) = values::dims(object).filter(|dims| dims.len() == indices.len())
             && let Some(fixed) = slab(indices, &dims, result, value)
         {
             write_slab(result, value, &dims, &fixed);
             return Ok(result);
         }
-        let dimnames = get_attr(object, symbols().dimnames);
-        let mut selections: SmallVec<[Positions; 4]> = SmallVec::new();
-        for (dimension, (&index, &extent)) in indices.iter().zip(dims.iter()).enumerate() {
-            let names = if dimnames.kind() == SexpType::List {
-                dimnames.element(dimension)
-            } else {
-                nil()
-            };
-            let index = dimension_subscript(index)?;
-            let (positions, _) = resolve(index, extent, names, false, call)?;
-            if let Some((offset, &position)) = positions
-                .iter()
-                .enumerate()
-                .find(|&(_, &position)| position >= extent && position != NA_POSITION)
-            {
-                let call = crate::unwind::generated_call(call)?;
-                return Err(array_out_of_bounds(
-                    call, object, dimension, index, offset, position,
-                ));
-            }
-            selections.push(positions);
-        }
-        let total: usize = selections.iter().map(|selection| selection.len()).product();
-        // A single value skips the NA rows, and a longer one cannot say which of its elements
-        // an NA row would have taken. GNU R's matrix assignment checks this before comparing
-        // lengths, and its array assignment after.
-        let has_na = value_count > 1
-            && selections
-                .iter()
-                .any(|selection| selection.contains(&NA_POSITION));
-        let na_error = || error_in(call, "NAs are not allowed in subscripted assignments");
-        if has_na && dims.len() == 2 {
-            return Err(na_error());
-        }
-        if total > 0 && value_count == 0 {
-            return Err(error_in(call, "replacement has length zero"));
-        }
-        if total > 0 && !total.is_multiple_of(value_count) {
-            return Err(error_in(
-                call,
-                "number of items to replace is not a multiple of replacement length",
-            ));
-        }
-        if has_na {
-            return Err(na_error());
-        }
-        if total == 0 {
+        let (dims, selections) = array_selections(call, object, indices, value_count)?;
+        if selections.iter().any(|selection| selection.is_empty()) {
             return Ok(result);
         }
         scatter(result, ArrayOffsets::new(&selections, &dims), value)?;
@@ -3307,21 +3361,31 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
         }
         return Err(error_in(call, "[[ ]] improper number of subscripts"));
     };
-    // `m[[i, j]] <- value` names one cell, which must exist.
+    // `m[[i, j]] <- value` names one cell, which must exist. GNU R checks the value's length
+    // before it reads a subscript.
+    let is_list = matches!(object.kind(), SexpType::List | SexpType::Expression);
+    if !is_list {
+        atomic_replacement_check(value)?;
+    }
     let dimnames = get_attr(object, symbols().dimnames);
+    let mut offset = 0usize;
+    let mut stride = 1usize;
     for (dimension, (&index, &extent)) in indices.iter().zip(dims.iter()).enumerate() {
         let names = if dimnames.kind() == SexpType::List {
             dimnames.element(dimension)
         } else {
             nil()
         };
-        // A subscript GNU R rejects for another reason is left to the assignment below.
-        let inside = match one_index(extent, names, index) {
-            Ok(Slot::At(position)) => position < extent,
-            Ok(_) => false,
-            Err(_) => true,
+        // GNU R reports a subscript that names no single element against the generated call.
+        let position = match one_position(index, extent, names, Some(true), call, true) {
+            Ok(position) => position,
+            Err(Unwind::Error(mut failure)) if failure.call == call => {
+                failure.call = crate::unwind::generated_call(call)?;
+                return Err(Unwind::Error(failure));
+            }
+            Err(other) => return Err(other),
         };
-        if !inside {
+        let Some(position) = position else {
             let bounds = Bounds {
                 dimension: Some(dimension),
                 ..Bounds::of(object)
@@ -3332,24 +3396,21 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
                 bounds,
                 index,
             ));
-        }
-    }
-    let is_list = matches!(object.kind(), SexpType::List | SexpType::Expression);
-    if is_list || object == nil() || !value.kind().is_atomic() || length(value) != 1 {
-        let list = if object == nil() {
-            alloc(SexpType::List, 0)?
-        } else if is_list {
-            modifiable(object)?
-        } else {
-            // The assignment below reads the dims and then makes the object a list, which a
-            // coercion here would leave without dims.
-            atomic_replacement_check(value)?;
-            object
         };
-        let wrapped = values::list_vector(&[value])?;
-        return subassign(list, indices, wrapped, call);
+        offset += position * stride;
+        stride *= extent;
     }
-    subassign(object, indices, value, call)
+    if is_list && value == nil() {
+        return Err(incompatible_types(
+            object.kind().name(),
+            "NULL",
+            "[[ assignment",
+        ));
+    }
+    // The cell is assigned by its position in the vector, which keeps the dimensions.
+    let position = values::scalar_real(offset as f64 + 1.0)?;
+    crate::heap().root(position);
+    subassign2_one(object, position, value, call, 1)
 }
 
 /// The type `x[i] <- value` leaves `x` as, with GNU R's errors for the pairs it refuses: raw

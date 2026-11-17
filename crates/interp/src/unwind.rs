@@ -429,7 +429,7 @@ pub unsafe fn resolve_call(call: Sexp) -> Sexp {
         current_call()
     } else {
         match interp().assignment_call {
-            Some((replacement, whole, _)) if replacement == call => whole,
+            Some((replacement, whole, _)) if replacement == call => reported_assignment(whole),
             _ => call,
         }
     }
@@ -441,10 +441,33 @@ pub unsafe fn current_call() -> Sexp {
     if let Some((_, whole, depth)) = state.assignment_call
         && depth == state.frames.len()
     {
-        return whole;
+        return reported_assignment(whole);
     }
     state
         .frames
         .last()
         .map_or(crate::heap().nil(), |frame| frame.call)
+}
+
+/// The complex assignment `whole` as a condition names it. Inside a function GNU R's compiled
+/// code names `x[i] <<- value` with the plain arrow, and compiled code is what a closure runs
+/// from its second call on (`.agents/memory/decisions/interp.md`, "A condition names a
+/// superassignment inside a function with the plain arrow").
+unsafe fn reported_assignment(whole: Sexp) -> Sexp {
+    let superassignment = whole.kind() == SexpType::Language
+        && whole.car().kind() == SexpType::Symbol
+        && whole.car().car().bytes() == b"<<-";
+    if !superassignment || interp().frames.is_empty() {
+        return whole;
+    }
+    let plain =
+        crate::values::install("<-").and_then(|arrow| crate::values::lcons(arrow, whole.cdr()));
+    match plain {
+        Ok(call) => {
+            crate::heap().root(call);
+            call
+        }
+        // Out of memory while reporting: the condition names the assignment as written.
+        Err(_) => whole,
+    }
 }
