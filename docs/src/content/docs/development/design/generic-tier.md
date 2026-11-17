@@ -251,8 +251,12 @@ instruction per pass is enough there. The second row is the large body with a lo
 steps, such as base R's `rbind.data.frame` or `apply`: compiling it costs as much as millions of
 its passes save, and most sessions never run that many. Waiting until tier 0 has run them bounds
 the loss, because the compile then costs at most what tier 0 has spent on the saving it would have
-made. A body with loops that is entered at the top is asked `unpaid` with the work of the whole
-body, so a call cannot compile what its loops would not.
+made.
+
+A body with loops can also turn hot by its calls. It compiles then when the mean pass through its
+loops meets the first row, because any of its loops would compile it at the back-edge threshold.
+Otherwise it is asked `unpaid` with the work around its loops plus one pass through them, so a
+call cannot compile what its loops would not, and a refusal leaves its loops free to ask.
 
 ### Native forms on boxed values (stage 2, planned)
 

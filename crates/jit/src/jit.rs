@@ -310,6 +310,12 @@ fn saving_per_call(work: Work) -> u64 {
     saving(work).saturating_sub(ENTRY_COST)
 }
 
+/// What compiling the body costs, in the tier-0 instructions the savings are counted in.
+unsafe fn compile_cost(machine: &Machine<'_>) -> u64 {
+    let words = unsafe { values::ints(machine.code.car()).len() } as u64;
+    COMPILE_FIXED + COMPILE_PER_WORD * words
+}
+
 /// Why a loop-free body that just turned hot does not compile for the `work` its compiled code
 /// would do, by the model at [`COMPILE_FIXED`], or `None` when it is expected to repay its
 /// compilation. A body that saves too little per call to repay it even if every call of the
@@ -319,8 +325,7 @@ fn saving_per_call(work: Work) -> u64 {
 unsafe fn unpaid(machine: &Machine<'_>, work: Work) -> Option<&'static str> {
     unsafe {
         let per_call = saving_per_call(work);
-        let words = values::ints(machine.code.car()).len() as u64;
-        let cost = COMPILE_FIXED + COMPILE_PER_WORD * words;
+        let cost = compile_cost(machine);
         if HORIZON_CALLS * per_call < cost {
             return Some(analysis::SMALL);
         }
@@ -358,8 +363,7 @@ unsafe fn unpaid_loop(machine: &Machine<'_>, hot: Work) -> Option<&'static str> 
         if runtime::compiles(profile[profile::TIER_STATE]) > 0 {
             return None;
         }
-        let words = values::ints(machine.code.car()).len() as u64;
-        let cost = COMPILE_FIXED + COMPILE_PER_WORD * words;
+        let cost = compile_cost(machine);
         let seen = runtime::back_edges_seen(profile);
         let per_pass = saving(hot);
         let expected = seen.max(HORIZON_EDGES);
@@ -764,17 +768,31 @@ unsafe fn compile_in<'a>(
             } else if work.outside.steps > 0 && saving(work.outside) == 0 {
                 Some(analysis::MOSTLY_TIER0)
             } else if trigger == Trigger::HotEntry {
-                // A call does the work around the loops and the loops' own, at the weight
-                // the plan gives them.
-                unpaid(
-                    machine,
-                    Work {
-                        native: work.outside.native + work.looped.native,
-                        calls: work.outside.calls + work.looped.calls,
-                        frames: work.outside.frames + work.looped.frames,
-                        steps: work.outside.steps + work.looped.steps,
-                    },
-                )
+                // A backward jump of the body is a pass through one of its loops, so the mean
+                // pass is what one is expected to save. A body whose loops would compile it
+                // at the back-edge threshold compiles for its calls too.
+                let pass = Work {
+                    native: work.whole.native.saturating_sub(work.outside.native),
+                    calls: work.whole.calls.saturating_sub(work.outside.calls),
+                    frames: work.whole.frames.saturating_sub(work.outside.frames),
+                    steps: work.whole.steps.saturating_sub(work.outside.steps),
+                };
+                let per_pass = saving(pass) / plan.loop_headers.len() as u64;
+                if HORIZON_EDGES.saturating_mul(per_pass) >= compile_cost(machine) {
+                    None
+                } else {
+                    // A call does the work around the loops and the loops' own, at the
+                    // weight the plan gives them.
+                    unpaid(
+                        machine,
+                        Work {
+                            native: work.outside.native + work.looped.native,
+                            calls: work.outside.calls + work.looped.calls,
+                            frames: work.outside.frames + work.looped.frames,
+                            steps: work.outside.steps + work.looped.steps,
+                        },
+                    )
+                }
             } else {
                 None
             };
