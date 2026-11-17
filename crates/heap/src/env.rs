@@ -762,8 +762,7 @@ impl Frame {
         }
     }
 
-    /// Marks every symbol the frame binds, or keeps in a live slot frame's slots
-    /// ([`Frame::expected`]), when its environment becomes attached.
+    /// Marks every symbol the frame binds, when its environment becomes attached.
     pub(crate) fn mark_bound_elsewhere(&self) {
         for binding in self
             .bindings
@@ -771,12 +770,6 @@ impl Frame {
             .filter(|binding| binding.symbol != REMOVED)
         {
             mark_bound_elsewhere(binding.symbol);
-        }
-        if let Some(names) = self.expected {
-            // SAFETY: the list holds symbols and is alive while the frame runs.
-            for &name in unsafe { names.slice::<Sexp>() } {
-                mark_bound_elsewhere(name);
-            }
         }
     }
 
