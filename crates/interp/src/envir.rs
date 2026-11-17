@@ -2162,59 +2162,81 @@ unsafe fn do_mapply(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_rapply(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
+    if !matches!(object.kind(), SexpType::List | SexpType::Expression) {
+        return Err(call.error("'object' must be a list or expression"));
+    }
     let function = call.arg(1);
+    if !values::is_function(function) {
+        return Err(call.error("invalid 'f' argument"));
+    }
     let classes = call.arg(2);
+    if classes.kind() != SexpType::String {
+        return Err(call.error("invalid 'classes' argument"));
+    }
     let deflt = call.arg(3);
-    let how = values::require_str(call.arg(4), "how")?;
-    rapply_one(object, function, classes, deflt, &how, call.env()?)
+    if call.arg(4).kind() != SexpType::String {
+        return Err(call.error("invalid 'how' argument"));
+    }
+    let replace = values::require_str(call.arg(4), "how")? == "replace";
+    rapply_list(object, function, classes, deflt, replace, call.env()?)
 }
 
-unsafe fn rapply_one(
+/// Applies `rapply` to each element of a list or expression vector. As in GNU R, replace mode keeps the container's type and attributes, and the other modes
+/// give a list that keeps only the names.
+unsafe fn rapply_list(
     object: Sexp,
     function: Sexp,
     classes: Sexp,
     deflt: Sexp,
-    how: &str,
+    replace: bool,
     env: Sexp,
 ) -> R<Sexp> {
-    // GNU R walks `NULL` as an empty list, so `FUN` never sees it: replace mode keeps it and
-    // the other modes give an empty list.
-    if object == nil() {
-        return if how == "replace" {
-            Ok(nil())
-        } else {
-            alloc(SexpType::List, 0)
-        };
+    if object == nil() && replace {
+        return Ok(nil());
     }
-    if object.kind() == SexpType::List && !values::inherits(object, "data.frame")
-        || object.kind() == SexpType::List
-            && how != "unlist"
-            && values::inherits(object, "data.frame")
-    {
-        let count = length(object);
+    let count = length(object);
+    let result = if replace {
+        values::shallow_duplicate(object)?
+    } else {
         let result = alloc(SexpType::List, count)?;
-        for index in 0..count {
-            let value = rapply_one(object.element(index), function, classes, deflt, how, env)?;
-            values::set_elt(result, index, value);
+        let names = values::names(object);
+        if names != nil() {
+            values::set_attr(result, symbols().names, names)?;
         }
-        // As in GNU R, `how = "replace"` keeps every list's attributes, class included, and
-        // the other modes keep only the names.
-        if how == "replace" {
-            values::copy_attributes(object, result)?;
+        result
+    };
+    for index in 0..count {
+        let element = object.element(index);
+        let value = if element == nil()
+            || matches!(element.kind(), SexpType::List | SexpType::Expression)
+        {
+            rapply_list(element, function, classes, deflt, replace, env)?
         } else {
-            let names = values::names(object);
-            if names != nil() {
-                values::set_attr(result, symbols().names, names)?;
-            }
-        }
-        return Ok(result);
+            rapply_leaf(element, function, classes, deflt, replace, env)?
+        };
+        values::set_elt(result, index, value);
     }
-    let class = crate::dispatch::class_of(object)?;
-    let matches = (0..length(classes)).any(|index| {
-        let wanted = classes.element(index).bytes();
-        wanted == b"ANY"
-            || (0..length(class)).any(|class_index| class.element(class_index).bytes() == wanted)
-    });
+    Ok(result)
+}
+
+unsafe fn rapply_leaf(
+    object: Sexp,
+    function: Sexp,
+    classes: Sexp,
+    deflt: Sexp,
+    replace: bool,
+    env: Sexp,
+) -> R<Sexp> {
+    let count = length(classes);
+    let matches = if count > 0 && classes.element(0).bytes() == b"ANY" {
+        true
+    } else {
+        let class = crate::dispatch::class_of(object)?;
+        (0..count).any(|index| {
+            let wanted = classes.element(index).bytes();
+            (0..length(class)).any(|class_index| class.element(class_index).bytes() == wanted)
+        })
+    };
     if matches {
         // GNU R binds the element to `X` in the `rapply` closure's frame and evaluates
         // `FUN(X, ...)` there, so the extra arguments reach `FUN`.
@@ -2223,7 +2245,7 @@ unsafe fn rapply_one(
         let fun_call = values::call(function, &[x_symbol, symbols().dots])?;
         crate::heap().root(fun_call);
         eval::force_and_call(fun_call, 1, env)
-    } else if how == "replace" {
+    } else if replace {
         Ok(object)
     } else {
         Ok(deflt)
