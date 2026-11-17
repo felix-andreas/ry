@@ -2588,13 +2588,12 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
             Ok(result)
         };
     }
-    // GNU R leaves `NULL`, or an empty vector given `NULL`, alone whatever the index, so
+    // GNU R leaves `NULL` given an empty value alone whatever the index, so
     // `x <- NULL; x[1] <- character(0)` is not the "replacement has length zero" error. An
-    // empty vector given an empty vector is handled below, where it may still be coerced.
-    if (object == nil() || object.kind().is_vector())
-        && length(object) == 0
-        && (value == nil() || (object == nil() && value.kind().is_vector() && length(value) == 0))
-    {
+    // empty vector given `NULL` still stretches to a longer subscript, so
+    // `x <- list(); x[FALSE] <- NULL` leaves `list(NULL)`. An empty vector given an empty
+    // vector is handled below, where it may still be coerced.
+    if object == nil() && (value == nil() || (value.kind().is_vector() && length(value) == 0)) {
         return Ok(object);
     }
     let object = if object == nil() {
@@ -2787,6 +2786,15 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
                 "NAs are not allowed in subscripted assignments",
             ));
         }
+        let rows = positions.len();
+        if rows > 0 && value_count == 0 {
+            return Err(error_in(call, "replacement has length zero"));
+        }
+        if rows > 0 && !rows.is_multiple_of(value_count) {
+            conditions::warning(
+                "number of items to replace is not a multiple of replacement length",
+            )?;
+        }
         for (row, position) in positions.into_iter().enumerate() {
             if let Some(offset) = position {
                 assign_element(result, offset, value, row % value_count.max(1))?;
@@ -2809,11 +2817,10 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
     if !positions.is_empty() && value_count == 0 {
         return Err(error_in(call, "replacement has length zero"));
     }
+    // GNU R attributes this warning to the current call, not the `[<-` call: the assignment at
+    // its own level, else the closure call, which for `NextMethod` is `NextMethod(.Generic)`.
     if !positions.is_empty() && !positions.len().is_multiple_of(value_count) {
-        conditions::warning_call(
-            call,
-            "number of items to replace is not a multiple of replacement length",
-        )?;
+        conditions::warning("number of items to replace is not a multiple of replacement length")?;
     }
     let needed = positions
         .iter()
@@ -3979,14 +3986,34 @@ pub unsafe fn set_names(object: Sexp, names: Sexp) -> R<()> {
     values::set_attr(object, symbols().names, padded)
 }
 
+/// `dim<-` drops the names whatever the new dims are, where `attr(x, "dim") <-` keeps them.
 unsafe fn do_set_dim(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let dims = call.arg(1);
-    let object = modifiable(object)?;
+    // A pairlist's tags are its names but no attribute, so `dim(x) <- NULL` keeps them.
+    if call.arg(1) == nil() {
+        let mut cell = call.arg(0).attrib();
+        while cell.kind() == SexpType::Pairlist
+            && cell.tag() != symbols().dim
+            && cell.tag() != symbols().names
+        {
+            cell = cell.cdr();
+        }
+        if cell == nil() {
+            return Ok(call.arg(0));
+        }
+    }
+    let object = modifiable(call.arg(0))?;
+    set_dim(call, object, call.arg(1))?;
+    values::remove_attr(object, symbols().names);
+    Ok(object)
+}
+
+/// GNU R's `setAttrib(x, R_DimSymbol, dims)`: checks the dims against the length and drops the
+/// dimnames.
+unsafe fn set_dim(call: &Call<'_>, object: Sexp, dims: Sexp) -> R<()> {
     if dims == nil() {
         values::remove_attr(object, symbols().dim);
         values::remove_attr(object, symbols().dimnames);
-        return Ok(object);
+        return Ok(());
     }
     if !object.kind().is_vector() && object.kind() != SexpType::Pairlist {
         return Err(call.error("invalid first argument, must be vector (list or atomic)"));
@@ -4028,10 +4055,8 @@ unsafe fn do_set_dim(call: &Call<'_>) -> R<Sexp> {
             )));
         }
     }
-    values::remove_attr(object, symbols().names);
     values::remove_attr(object, symbols().dimnames);
-    values::set_attr(object, symbols().dim, dims)?;
-    Ok(object)
+    values::set_attr(object, symbols().dim, dims)
 }
 
 unsafe fn do_dimnames(call: &Call<'_>) -> R<Sexp> {
@@ -4160,11 +4185,7 @@ pub unsafe fn set_attribute_checked(object: Sexp, symbol: Sexp, value: Sexp, cal
             frame: crate::NO_SLOTS,
             reusable: None,
         };
-        let result = do_set_dim(&context)?;
-        if result != object {
-            crate::heap().set_attrib(object, result.attrib());
-        }
-        return Ok(());
+        return set_dim(&context, object, value);
     }
     if symbol == symbols.dimnames {
         return set_dimnames(object, value, call);
