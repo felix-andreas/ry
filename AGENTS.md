@@ -4,7 +4,7 @@ ry is a backwards-compatible reimplementation of R, extended with ry's static ty
 
 The same binary is the tooling: a language server and a command-line tool that aim to be world class at code analysis on the level of rust-analyzer, code formatting, and linting, with a static type checker at the core of the analysis.
 
-R has no static type system, so ry defines its own typing semantics, and the typing reference at `docs/src/content/docs/reference/type-system.mdx` is their contract. Annotations are written inline (`function(price: double) -> double`) or in `#:` comments in a JSDoc-like notation, which keep annotated code ordinary R that every other tool can read.
+R has no static type system, so ry defines its own typing semantics, and the typing reference at `reference/type-system.mdx` is their contract. Annotations are written inline (`function(price: double) -> double`) or in `#:` comments in a JSDoc-like notation, which keep annotated code ordinary R that every other tool can read.
 
 The crates in `crates/`:
 
@@ -75,7 +75,7 @@ ry must run these code bases, and its analysis must check them fast enough for i
 
 # How to write
 
-These rules cover everything an agent writes: docs, code comments, commit messages and pull request descriptions. Aim for prose that is clear first and pleasant second. Clarity is also a correctness tool, because a reviewer cannot check a claim they cannot parse. `docs/src/content/docs/development/index.md`, "Writing: one idea three ways", shows the target style.
+These rules cover everything an agent writes: docs, code comments, commit messages and pull request descriptions. Aim for prose that is clear first and pleasant second. Clarity is also a correctness tool, because a reviewer cannot check a claim they cannot parse. `development/index.md`, "Writing: one idea three ways", shows the target style.
 
 - **Start where the reader is.** Decide who is reading and open with what they need most: the answer, the rule, or what changed. Background comes after.
 - **Teach in order.** Introduce a concept before you use it, and finish one idea before starting the next. When a small example is easier to grasp than the general rule, show the example first.
@@ -118,6 +118,8 @@ Human engineers stage work, keep diffs small, and avoid rewrites that look scary
 
 An in-session worker commits directly to main. A separate cloud session delivers one large pull request (at least about 2,000 changed lines, always one whole logical step) that a reviewer agent checks, and agents may merge pull requests. Commit and push after each logical step. Commit messages and pull request titles follow Conventional Commits (`refactor: drop the legacy resolver`).
 
+A release is cut only from a commit whose CI is green, including the stress job (`development/releasing.md`).
+
 `.agents/orchestrator.md` is for the orchestrating session only; every other agent ignores it.
 
 ## Ownership
@@ -159,7 +161,7 @@ Memory lives in git so every agent reads the same source of truth; never keep pr
 - **`backlog.md`** lists open work, prioritized. Delete an item once it ships: rationale to `decisions/<area>.md`, contract to the docs, a closed user-testing finding to `test-user-reports.md`.
 - **`worklog.md`** is the one chronological file, one line of at most 400 bytes per cycle, appended by a scheduled routine; do not prune it as a rules violation.
 - **`crates/<crate>/AGENTS.md`** holds the traps of one crate.
-- Unsettled design work belongs in `docs/src/content/docs/development/design/`, not in memory.
+- Unsettled design work belongs in `development/design/`, not in memory.
 
 Add what is durable, prune what is resolved, stale or duplicated, and move items between horizons as their status changes. `python3 tools/memory.py check` (in `just gate`) enforces byte budgets and line limits; prune a file over budget (split a decisions area file) instead of raising it. `just` may be absent in a cloud container: every recipe is a plain command in the `justfile`.
 
@@ -207,7 +209,7 @@ Apply these when writing or optimizing code in the analysis core, the runtime, t
 # Design bar
 
 - Aim for world-class implementation quality, not merely passing behavior.
-- (user directive) For compiler, runtime and JIT design, the quality bar is the state-of-the-art implementations Bend, vx-lang, goose and Roc. Measure design choices against them and adopt their best ideas where they fit R's C API constraints; the comparison lives in `docs/src/content/docs/development/design/prior-art.md`.
+- (user directive) For compiler, runtime and JIT design, the quality bar is the state-of-the-art implementations Bend, vx-lang, goose and Roc. Measure design choices against them and adopt their best ideas where they fit R's C API constraints; the comparison lives in `development/design/prior-art.md`.
 - Use the simplest correct data model that expresses the semantics, and no complicated abstraction unless it removes real complexity.
 - Make illegal states unrepresentable whenever practical.
 - Keep a single source of truth for each semantic fact; store a fact that derives cheaply from it only for a clear performance reason, and never as state that can drift out of sync.
@@ -223,10 +225,10 @@ Apply these when writing or optimizing code in the analysis core, the runtime, t
 
 # Testing strategy
 
-- Robustness is the long-run priority, so everything must be fuzzable and simulatable (user directive). Every component (each analysis stage, the language server, the loader, the runtime, the GC, the C API, the JIT, the table engine, package install, the CLI) gets fuzz, simulation or scenario coverage the day it exists, never as a later add-on, with a bounded pass in the default test suite. `docs/src/content/docs/development/robustness.md` is the contract.
+- Robustness is the long-run priority, so everything must be fuzzable and simulatable (user directive). Every component (each analysis stage, the language server, the loader, the runtime, the GC, the C API, the JIT, the table engine, package install, the CLI) gets fuzz, simulation or scenario coverage the day it exists, never as a later add-on, with a bounded pass in the default test suite. `development/robustness.md` is the contract.
 - Never let nondeterminism escape a seam: no wall clock, OS randomness, unordered iteration that reaches output, or unsteppable threads in a component's logic. Harnesses draw all randomness from one seed and print a replay command on failure. A new incremental shortcut gets a from-scratch cross-check behind `syntax::testing::enable_invariants()`.
 - A bug a harness finds lands with a pinned regression input (a regression battery entry, fixture, or scenario). A user journey a feature enables gets a `crates/ry/tests/scenarios/*.scenario` file.
-- Prefer fixtures. A new phase or module gets a fixture suite, and a behavior gets the lightest fixture change that captures it, before any crate-local unit test unless it is awkward as a fixture. Favor renderers that expose semantic facts over implementation detail. Read `docs/src/content/docs/development/testing.md` before you change the harness or add a suite.
+- Prefer fixtures. A new phase or module gets a fixture suite, and a behavior gets the lightest fixture change that captures it, before any crate-local unit test unless it is awkward as a fixture. Favor renderers that expose semantic facts over implementation detail. Read `development/testing.md` before you change the harness or add a suite.
 - Fixtures are the desired semantics contract, not a record of known-wrong behavior. Change an expectation only when wording or behavior improves on purpose, never commit a wrong outcome to keep the suite green, and delete a case no longer worth keeping. A `group__case` name is the test identity: keep it stable and unique across the suite.
 - Start every shell command with `source tools/env.sh &&` (the nix dev shell; `testing.md`).
 - Run one fixture with `just fixture group__case [test-binary] [package]` (default `test_typing_fixtures`), and prefer focused crate tests (`cargo test -p semantics`) while iterating. `just gate` checks all.

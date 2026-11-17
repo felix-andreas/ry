@@ -30,10 +30,9 @@ commit does not count, because the commits since are untested.
 The gate applies to releases only. A commit may land on main while CI is red, so main can be red
 between releases, and the first step of a release is to bring it back to green.
 
-With the staged `release.yml` and `ci.yml` accepted (see [The workflows](#the-workflows)), the
-Release workflow enforces the gate: it runs `ci.yml` on the release commit as its own `gate` job,
-and `publish` needs it, so a release whose gate fails builds its archives and publishes nothing.
-Until then the gate is a step of the [checklist](#checklist), done by hand.
+The Release workflow enforces the gate: it runs `ci.yml` on the release commit as its own `gate`
+job, and `publish` needs it, so a release whose gate fails builds its archives and publishes
+nothing.
 
 ## Platform tiers
 
@@ -67,17 +66,15 @@ against GNU R. It runs only when started by hand (from the Actions tab, on any r
 or pull requests: the orchestrating agent starts it on main at its hourly check when main has new
 commits.
 
-`.github/pending/` holds staged files that run nothing until a maintainer accepts them with the
-command below. `test.yml` runs the fixture suites, the tests of the crates that need no R and a
-bounded fuzz pass ([Testing](/development/testing#running-one-case)). Like `ci.yml`, it starts only
-by hand, not on pushes or pull requests. The staged `ci.yml` adds the `stress` job and lets another
-workflow call it. The staged `release.yml` adds a `tests` job that calls `test.yml` and a `gate` job
-that calls `ci.yml`, and `publish` needs both, so a release is the one event that runs these checks
+`test.yml` runs the fixture suites, the tests of the crates that need no R and a bounded fuzz pass
+([Testing](/development/testing#running-one-case)). Like `ci.yml`, it starts only by hand, not on
+pushes or pull requests. `release.yml` has a `tests` job that calls `test.yml` and a `gate` job that
+calls `ci.yml`, and `publish` needs both, so a release is the one event that runs these checks
 without a hand start. A nightly build is not gated on them.
 
 Agents cannot write to `.github/workflows/`, so an agent that changes a workflow stages the new file
-under the same name in `.github/pending/`. A maintainer then moves it into place, commits and
-pushes with one command:
+under the same name in `.github/pending/`, where it runs nothing. A maintainer then moves it into
+place, commits and pushes with one command:
 
 ```bash
 git pull && just accept
@@ -248,19 +245,15 @@ version that differs from any of the three.
    empty ([Testing](/development/testing#known-oracle-failures)).
 3. Write the release's entry on the [news page](/news).
 4. Run `just bump-version X.Y.Z-beta` (it commits), and push.
-5. Pass [the release gate](#the-release-gate) on that commit: in the Actions tab, open **CI**,
-   select **Run workflow** on main, and wait until both jobs are green. With the staged workflows
-   accepted, the dry run of the next step runs the gate itself, so skip this step.
-6. Dry-run the workflow: in the Actions tab, open **Release**, select **Run workflow**, enter the
+5. Dry-run the workflow: in the Actions tab, open **Release**, select **Run workflow**, enter the
    version, untick **publish**, and run it. It builds and smoke-tests every archive without
-   publishing anything. With the staged `release.yml` accepted, the run also executes `test.yml`
-   and `ci.yml`.
-7. Push the tag (`git tag X.Y.Z-beta && git push origin X.Y.Z-beta`), or run the workflow again
-   with **publish** ticked. With the staged `release.yml` accepted, nothing is published unless
-   the `tests` and `gate` jobs pass.
-8. Check the release page: one archive per platform and the `.vsix` files. Install one archive by
+   publishing anything, and it runs `test.yml` and [the release gate](#the-release-gate) on that
+   commit. Go on only when every job is green.
+6. Push the tag (`git tag X.Y.Z-beta && git push origin X.Y.Z-beta`), or run the workflow again
+   with **publish** ticked. Nothing is published unless the `tests` and `gate` jobs pass.
+7. Check the release page: one archive per platform and the `.vsix` files. Install one archive by
    hand and run `ry --version`, and check the extension's version on the Marketplace.
-9. Update [Installation](/installation) to name the new release and its archives. For the first
+8. Update [Installation](/installation) to name the new release and its archives. For the first
    release from the workflow that means: each archive holds `ry` alone, with the runtime built in,
    and the Windows archive is `ry-x86_64-pc-windows-gnullvm.zip` (say that `ry run` and `ry load`
    work on Windows only if the Windows smoke test passed).

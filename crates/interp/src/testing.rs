@@ -1673,7 +1673,7 @@ fn element_program(entropy: &mut impl Entropy) -> String {
         "i <- c(3L, 1L)".to_owned(),
     ];
     for _ in 0..entropy.below(5) + 1 {
-        let statement = match entropy.below(13) {
+        let statement = match entropy.below(16) {
             0 => format!(
                 "attr(x, {}) <- {}",
                 pick(entropy, ATTRIBUTE_NAMES),
@@ -1756,10 +1756,27 @@ fn element_program(entropy: &mut impl Entropy) -> String {
                     ]
                 )
             ),
-            _ => format!(
+            12 => format!(
                 "x[[{}]] <- x[[{}]]",
                 pick(entropy, ELEMENT_INDICES),
                 pick(entropy, ELEMENT_INDICES)
+            ),
+            // A closure made in the frame stores into the frame's variable: the subscript is a
+            // constant, an argument, or a variable of the frame.
+            13 => format!(
+                "(function() x[[{}]] <<- {})()",
+                pick(entropy, ELEMENT_INDICES),
+                pick(entropy, ELEMENT_VALUES)
+            ),
+            14 => format!(
+                "(function(j) x[j] <<- {})({})",
+                pick(entropy, ELEMENT_VALUES),
+                pick(entropy, ELEMENT_INDICES)
+            ),
+            _ => format!(
+                "(function() {} <<- {})()",
+                pick(entropy, &["x$ab", "x$n", "x[i]", "x[[b]]", "x[b]"]),
+                pick(entropy, ELEMENT_VALUES)
             ),
         };
         statements.push(statement);
