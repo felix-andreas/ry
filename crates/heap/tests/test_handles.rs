@@ -4,7 +4,7 @@
 use {
     heap::{
         GcStress, Heap, HeapError,
-        handle::{Cx, Fresh, Integer, List, Local, Real, Str, Value},
+        handle::{Cx, Fresh, Integer, List, Local, Owned, Real, Str, Value},
     },
     std::ptr::NonNull,
     syntax::testing::{SplitMix64, for_each_seed},
@@ -92,7 +92,8 @@ fn a_write_reads_other_vectors_and_refuses_its_own_storage() {
         let target = integers(cx, &[1, 2, 3, 4])?;
         let source = integers(cx, &[10, 20, 30, 40])?;
         // SAFETY: `target` is visible to this test alone.
-        let mut write = unsafe { cx.assume_exclusive(target) };
+        let mut owned = unsafe { Owned::assume(target) };
+        let mut write = owned.write(cx);
         let (elements, reader) = write.split();
         elements[0] = reader.slice(source).expect("another vector")[3];
         assert!(reader.slice(target).is_none());
@@ -113,7 +114,8 @@ fn a_list_written_in_place_keeps_young_elements() {
         let young = integers(cx, &[7, 8])?;
         {
             // SAFETY: `list` is visible to this test alone.
-            let mut write = unsafe { cx.assume_exclusive(list) };
+            let mut owned = unsafe { Owned::assume(list) };
+            let mut write = owned.write(cx);
             let (mut stores, reader) = write.split_elements();
             stores.set(0, young.value());
             stores.set(2, reader.element(list, 0));

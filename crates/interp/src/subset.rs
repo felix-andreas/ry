@@ -3,6 +3,7 @@
 
 use {
     crate::{
+        attribute_access::names_factor,
         builtins::{
             Arg, BuiltinDef, Call, Generic, builtin, internal, internal_special, is_native_value,
             special,
@@ -11,6 +12,12 @@ use {
         conditions,
         element_access::direct_subset2,
         eval::{self, value_of},
+        handles::{
+            self, Args, Atomic, Complex, Cx, Expression, Fresh, Gc, Integer, List, Local, Logical,
+            Owned, Raw, Real, Str, Symbol, Vector, attribute_cells, attributes_unshared,
+            clear_attributes, dense, get_attribute, is_na, is_s4, names_of, null, remove_attribute,
+            safe, set_attribute, set_class, symbol, unshared,
+        },
         unwind::{R, Unwind, error, error_in, errorcall},
         values::{
             self, alloc, char_str, get_attr, length, missing_arg, na_string, nil, scalar_integer,
@@ -18,7 +25,6 @@ use {
         },
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp},
-    rustc_hash::FxHashSet,
     smallvec::{SmallVec, smallvec},
 };
 
@@ -40,7 +46,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".subset", -1, do_subset),
     builtin(".subset2", -1, do_subset2).direct(direct_subset2),
     builtin("list", -1, do_list),
-    builtin("length", 1, do_length)
+    builtin("length", 1, safe!(do_length))
         .generic(Generic::Internal)
         .unary(|value| unsafe {
             let plain = match value.kind() {
@@ -63,13 +69,13 @@ pub const BUILTINS: &[BuiltinDef] = &[
             };
             scalar_integer(count).map(Some)
         }),
-    builtin("length<-", 2, do_set_length).generic(Generic::Internal),
+    builtin("length<-", 2, safe!(do_set_length)).generic(Generic::Internal),
     internal("lengths", 2, do_lengths).generic(Generic::Internal),
-    builtin("dim<-", 2, do_set_dim).generic(Generic::Internal),
-    builtin("dimnames", 1, do_dimnames).generic(Generic::Internal),
-    builtin("dimnames<-", 2, do_set_dimnames).generic(Generic::Internal),
-    builtin("levels<-", 2, do_set_levels).generic(Generic::Internal),
-    builtin("attributes<-", 2, do_set_attributes),
+    builtin("dim<-", 2, safe!(do_set_dim)).generic(Generic::Internal),
+    builtin("dimnames", 1, safe!(do_dimnames)).generic(Generic::Internal),
+    builtin("dimnames<-", 2, safe!(do_set_dimnames)).generic(Generic::Internal),
+    builtin("levels<-", 2, safe!(do_set_levels)).generic(Generic::Internal),
+    builtin("attributes<-", 2, safe!(do_set_attributes)),
     internal("matrix", 7, do_matrix),
     internal("array", 3, do_array),
     internal("t.default", 1, do_transpose),
@@ -80,23 +86,13 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal_special("cbind", -1, |call| unsafe { bind(call, false) }),
     internal_special("rbind", -1, |call| unsafe { bind(call, true) }),
     internal("rev", 1, do_rev),
-    internal("islistfactor", 2, do_is_list_factor),
-    internal("comment", 1, |call| unsafe {
-        Ok(get_attr(call.arg(0), symbols().comment))
-    }),
-    internal("comment<-", 2, |call| unsafe {
-        let object = modifiable(call.arg(0))?;
-        let comment = match length(call.arg(1)) {
-            0 => nil(),
-            _ => call.arg(1),
-        };
-        set_attribute_checked(object, symbols().comment, comment, unbound())?;
-        Ok(object)
-    }),
-    internal("row", 1, |call| unsafe { row_col(call, true) }),
-    internal("col", 1, |call| unsafe { row_col(call, false) }),
-    internal("diag", 3, do_diag),
-    internal("shortRowNames", 2, do_short_row_names),
+    internal("islistfactor", 2, safe!(do_is_list_factor)),
+    internal("comment", 1, safe!(do_comment)),
+    internal("comment<-", 2, safe!(do_set_comment)),
+    internal("row", 1, safe!(do_row)),
+    internal("col", 1, safe!(do_col)),
+    internal("diag", 3, safe!(do_diag)),
+    internal("shortRowNames", 2, safe!(do_short_row_names)),
     internal("copyDFattr", 2, do_copy_df_attr),
 ];
 
@@ -121,6 +117,31 @@ pub unsafe fn modifiable_attributes(object: Sexp) -> R<Sexp> {
     } else {
         Ok(object)
     }
+}
+
+fn do_comment<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let object = arguments.value(0);
+    Ok(context.root(get_attribute(
+        context,
+        object,
+        symbol(|symbols| symbols.comment),
+    )))
+}
+
+fn do_set_comment<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let mut object = unshared(context, arguments.value(0))?;
+    let comment = match handles::length(context, arguments.value(1)) {
+        0 => null(),
+        _ => arguments.value(1),
+    };
+    assign_attribute(
+        context,
+        &mut object,
+        symbol(|symbols| symbols.comment),
+        comment,
+        None,
+    )?;
+    Ok(object.finish())
 }
 
 /// Element `index` of any vector as a length-one vector (or, for lists, the element).
@@ -215,7 +236,7 @@ pub unsafe fn copy_element(from: Sexp, from_index: usize, to: Sexp, to_index: us
 
 /// Copies the first `count` elements of `from` into a fresh `to` of the same type, which is not
 /// ALTREP, in bulk.
-unsafe fn copy_prefix(from: Sexp, to: Sexp, count: usize) -> R<()> {
+pub(crate) unsafe fn copy_prefix(from: Sexp, to: Sexp, count: usize) -> R<()> {
     match from.kind() {
         SexpType::String | SexpType::List | SexpType::Expression => {
             crate::heap().copy_elements(to, 0, from, 0, count);
@@ -3766,72 +3787,148 @@ unsafe fn do_list(call: &Call<'_>) -> R<Sexp> {
 
 // Lengths and names.
 
-unsafe fn do_length(call: &Call<'_>) -> R<Sexp> {
-    call.check_arity(1)?;
-    let count = length(call.arg(0));
+fn do_length<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    arguments.check_arity(1)?;
+    let count = handles::length(context, arguments.value(0));
     if count > i32::MAX as usize {
-        return values::scalar_real(count as f64);
+        let mut result = context.alloc::<Real>(1)?;
+        result.as_mut_slice().fill(count as f64);
+        return Ok(result.finish().value());
     }
-    scalar_integer(count as i32)
+    handles::integer(context, count as i32)
 }
 
-unsafe fn do_set_length(call: &Call<'_>) -> R<Sexp> {
-    let object = values::materialize(call.arg(0))?;
-    let value = call.arg(1);
-    if length(value) != 1 {
+fn do_set_length<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let object = handles::materialize(context, arguments.value(0))?;
+    let value = arguments.value(1);
+    if handles::length(context, value) != 1 {
         return Err(error("wrong length for 'value' argument"));
     }
-    let new_length = values::as_real_scalar(value);
+    let new_length = handles::real_scalar(context, value);
     if new_length.is_nan() || new_length < 0.0 {
         return Err(error("invalid value"));
     }
     let new_length = new_length as usize;
-    if object == nil() {
-        if new_length > 0 {
-            conditions::warning_call(call.call, "length of NULL cannot be changed")?;
-        }
-        return Ok(nil());
-    }
-    if object.kind() == SexpType::Pairlist {
-        // A pairlist keeps its leading cells with their tags and grows with untagged NULLs.
-        let mut items = Vec::with_capacity(new_length);
-        let mut cell = object;
-        while items.len() < new_length {
-            if cell.kind() == SexpType::Pairlist {
-                items.push((cell.tag(), cell.car()));
-                cell = cell.cdr();
-            } else {
-                items.push((nil(), nil()));
+    match object.r_type() {
+        SexpType::Nil => {
+            if new_length > 0 {
+                arguments.warning(context, "length of NULL cannot be changed")?;
             }
+            return Ok(null());
         }
-        return values::pairlist(&items, SexpType::Pairlist);
+        // A pairlist keeps its leading cells with their tags and grows with untagged NULLs.
+        SexpType::Pairlist => return handles::pairlist_prefix(context, object, new_length),
+        kind if !kind.is_vector() => return Err(arguments.error("invalid argument")),
+        _ => {}
     }
-    if !object.kind().is_vector() && object != nil() {
-        return Err(call.error("invalid argument"));
-    }
-    let count = length(object);
-    // GNU returns the object itself when the length is unchanged, so every
-    // attribute survives; the methods package relies on this to compare
-    // signatures with `identical`.
-    if count == new_length {
+    // GNU returns the object itself when the length is unchanged, so every attribute survives;
+    // the methods package relies on this to compare signatures with `identical`.
+    if handles::length(context, object) == new_length {
         return Ok(object);
     }
-    let result = alloc(object.kind(), new_length)?;
-    copy_prefix(object, result, new_length.min(count))?;
-    for position in count..new_length {
-        set_na(result, position);
+    let names = names_of(context, object)?;
+    let names = match names.r_type() {
+        SexpType::Nil => None,
+        _ => Some(handles::character_vector(context, names)?),
+    };
+    let complex_na = Rcomplex {
+        r: NA_REAL,
+        i: NA_REAL,
+    };
+    match object.r_type() {
+        SexpType::Logical => {
+            resized::<Logical>(context, object, names, new_length, |_, result, from| {
+                pad(result.as_mut_slice(), from, NA_LOGICAL)
+            })
+        }
+        SexpType::Integer => {
+            resized::<Integer>(context, object, names, new_length, |_, result, from| {
+                pad(result.as_mut_slice(), from, NA_INTEGER)
+            })
+        }
+        SexpType::Real => resized::<Real>(context, object, names, new_length, |_, result, from| {
+            pad(result.as_mut_slice(), from, NA_REAL)
+        }),
+        SexpType::Complex => {
+            resized::<Complex>(context, object, names, new_length, |_, result, from| {
+                pad(result.as_mut_slice(), from, complex_na)
+            })
+        }
+        SexpType::Raw => resized::<Raw>(context, object, names, new_length, |_, result, from| {
+            pad(result.as_mut_slice(), from, 0)
+        }),
+        SexpType::String => resized::<Str>(
+            context,
+            object,
+            names,
+            new_length,
+            |context, result, from| {
+                for index in from..result.len() {
+                    result.set(context, index, handles::na());
+                }
+            },
+        ),
+        SexpType::List => resized::<List>(
+            context,
+            object,
+            names,
+            new_length,
+            |context, result, from| {
+                for index in from..result.len() {
+                    result.set(context, index, null());
+                }
+            },
+        ),
+        SexpType::Expression => resized::<Expression>(
+            context,
+            object,
+            names,
+            new_length,
+            |context, result, from| {
+                for index in from..result.len() {
+                    result.set(context, index, null());
+                }
+            },
+        ),
+        _ => Err(arguments.error("invalid argument")),
     }
-    let names = values::names(object);
-    if names != nil() {
-        let new_names = alloc(SexpType::String, new_length)?;
-        copy_prefix(
-            values::materialize(names)?,
-            new_names,
-            new_length.min(count),
+}
+
+/// A new vector of `length` elements of `T`: the leading ones copied from `object`, the rest
+/// filled by `fill` from the position it is given, and `names` cut or padded with blanks to
+/// the same length.
+fn resized<'s, T: Vector>(
+    context: &mut Cx<'s>,
+    object: Local<'s>,
+    names: Option<Local<'s, Str>>,
+    length: usize,
+    fill: impl FnOnce(&Cx<'s>, &mut Fresh<'s, T>, usize),
+) -> R<Local<'s>> {
+    let object = object
+        .downcast::<T>()
+        .ok_or_else(|| error("internal error: an expanded vector has no standard form"))?;
+    let kept = length.min(object.len());
+    let mut result = context.alloc::<T>(length)?;
+    handles::copy_prefix(context, object, &mut result, kept)?;
+    fill(context, &mut result, object.len());
+    let mut result = result.owned();
+    if let Some(names) = names {
+        let mut new_names = context.alloc::<Str>(length)?;
+        handles::copy_prefix(context, names, &mut new_names, kept.min(names.len()))?;
+        set_attribute(
+            context,
+            &mut result,
+            symbol(|symbols| symbols.names),
+            new_names.finish().value(),
         )?;
-        values::set_attr(result, symbols().names, new_names)?;
     }
-    Ok(result)
+    Ok(result.finish().value())
+}
+
+fn pad<T: Copy>(elements: &mut [T], from: usize, value: T) {
+    for slot in elements.iter_mut().skip(from) {
+        *slot = value;
+    }
 }
 
 unsafe fn do_lengths(call: &Call<'_>) -> R<Sexp> {
@@ -3903,25 +4000,23 @@ unsafe fn do_lengths(call: &Call<'_>) -> R<Sexp> {
 /// GNU R's `namesgets`, behind `attr<-`, `attributes<-` and the C API: names are converted to
 /// character without dispatch, keeping the value's own attributes as `coerceVector` does, and
 /// padded with `NA` to the object's length.
-pub unsafe fn set_names(object: Sexp, names: Sexp) -> R<()> {
-    if names == nil() {
-        if matches!(object.kind(), SexpType::Pairlist | SexpType::Language) {
-            let mut cell = object;
-            while matches!(cell.kind(), SexpType::Pairlist | SexpType::Language) {
-                crate::heap().set_tag(cell, nil());
-                cell = cell.cdr();
-            }
+pub fn assign_names<'s>(context: &mut Cx<'s>, object: &mut Owned<'s>, names: Local<'s>) -> R<()> {
+    let target = object.get();
+    let tagged = matches!(target.r_type(), SexpType::Pairlist | SexpType::Language);
+    if names.r_type() == SexpType::Nil {
+        if tagged {
+            handles::set_tags(context, object, None)?;
         }
-        values::remove_attr(object, symbols().names);
+        remove_attribute(context, object, symbol(|symbols| symbols.names));
         return Ok(());
     }
-    let names = if values::inherits(names, "factor") {
-        coerce::factor_as_character(names)?
+    let names = if handles::inherits(context, names, "factor") {
+        handles::factor_as_character(context, names)?
     } else {
-        coerce_vector(names, SexpType::String)?
+        handles::coerce(context, names, SexpType::String)?
     };
     let is_vector_or_list = matches!(
-        object.kind(),
+        target.r_type(),
         SexpType::Logical
             | SexpType::Integer
             | SexpType::Real
@@ -3933,389 +4028,486 @@ pub unsafe fn set_names(object: Sexp, names: Sexp) -> R<()> {
             | SexpType::Pairlist
             | SexpType::Language
     );
-    if !is_vector_or_list && !object.has_gp(gp::S4_OBJECT) {
+    if !is_vector_or_list && !is_s4(target) {
         return Err(error("names() applied to a non-vector"));
     }
-    let count = length(object);
-    if length(names) > count {
+    let count = handles::length(context, target);
+    let names_length = handles::length(context, names);
+    if names_length > count {
         return Err(error(format!(
-            "'names' attribute [{}] must be the same length as the vector [{count}]",
-            length(names)
+            "'names' attribute [{names_length}] must be the same length as the vector [{count}]"
         )));
     }
-    if matches!(object.kind(), SexpType::Pairlist | SexpType::Language) {
-        let mut cell = object;
-        let mut index = 0;
-        while matches!(cell.kind(), SexpType::Pairlist | SexpType::Language) {
-            let tag = if index < length(names)
-                && names.element(index) != na_string()
-                && !names.element(index).bytes().is_empty()
-            {
-                crate::heap().install_char(names.element(index))?
-            } else {
-                nil()
-            };
-            crate::heap().set_tag(cell, tag);
-            cell = cell.cdr();
-            index += 1;
-        }
-        return Ok(());
+    if tagged {
+        let names = handles::character_vector(context, names)?;
+        return handles::set_tags(context, object, Some(names));
     }
-    let padded = if length(names) < count {
-        let padded = alloc(SexpType::String, count)?;
+    let names = if names_length < count {
+        let names = handles::character_vector(context, names)?;
+        let mut padded = context.alloc::<Str>(count)?;
         for index in 0..count {
-            values::set_elt(
-                padded,
-                index,
-                if index < length(names) {
-                    names.element(index)
-                } else {
-                    na_string()
-                },
-            );
+            let name = if index < names_length {
+                names.get(context, index)
+            } else {
+                handles::na()
+            };
+            padded.set(context, index, name);
         }
-        padded
-    } else if names == object {
+        padded.finish().value()
+    } else if names.is(target) {
         // `names(x) <- x` must not make the names attribute the vector itself, which would be a
         // cycle that `serialize` recurses into forever (GNU R's `R_FixupRHS`).
-        values::shallow_duplicate(names)?
+        let names = handles::character_vector(context, names)?;
+        handles::shallow_duplicate(context, names)?.finish().value()
     } else {
         names
     };
     // A one-dimensional array keeps its names as dimnames.
-    if let Some(dims) = values::dims(object)
+    if let Some(dims) = handles::dims(context, target)
         && dims.len() == 1
     {
-        let dimnames = values::list_vector(&[padded])?;
-        values::set_attr(object, symbols().dimnames, dimnames)?;
-        return Ok(());
+        let mut dimnames = context.alloc::<List>(1)?;
+        dimnames.set(context, 0, names);
+        return set_attribute(
+            context,
+            object,
+            symbol(|symbols| symbols.dimnames),
+            dimnames.finish().value(),
+        );
     }
-    values::set_attr(object, symbols().names, padded)
+    set_attribute(context, object, symbol(|symbols| symbols.names), names)
 }
 
 /// `dim<-` drops the names whatever the new dims are, where `attr(x, "dim") <-` keeps them.
-unsafe fn do_set_dim(call: &Call<'_>) -> R<Sexp> {
+fn do_set_dim<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let object = arguments.value(0);
+    let dims = arguments.value(1);
     // A pairlist's tags are its names but no attribute, so `dim(x) <- NULL` keeps them.
-    if call.arg(1) == nil() {
-        let mut cell = call.arg(0).attrib();
-        while cell.kind() == SexpType::Pairlist
-            && cell.tag() != symbols().dim
-            && cell.tag() != symbols().names
-        {
-            cell = cell.cdr();
-        }
-        if cell == nil() {
-            return Ok(call.arg(0));
-        }
+    if dims.r_type() == SexpType::Nil
+        && !attribute_cells(context, object).any(|(tag, _)| {
+            tag.is(symbol(|symbols| symbols.dim)) || tag.is(symbol(|symbols| symbols.names))
+        })
+    {
+        return Ok(object);
     }
-    let object = modifiable(call.arg(0))?;
-    set_dim(call, object, call.arg(1))?;
-    values::remove_attr(object, symbols().names);
-    Ok(object)
+    let mut object = unshared(context, object)?;
+    assign_dim(context, &mut object, dims, Some(arguments.expression()))?;
+    remove_attribute(context, &mut object, symbol(|symbols| symbols.names));
+    Ok(object.finish())
 }
 
 /// GNU R's `setAttrib(x, R_DimSymbol, dims)`: checks the dims against the length and drops the
 /// dimnames.
-unsafe fn set_dim(call: &Call<'_>, object: Sexp, dims: Sexp) -> R<()> {
-    if dims == nil() {
-        values::remove_attr(object, symbols().dim);
-        values::remove_attr(object, symbols().dimnames);
+fn assign_dim<'s>(
+    context: &mut Cx<'s>,
+    object: &mut Owned<'s>,
+    dims: Local<'s>,
+    call: Option<Local<'s>>,
+) -> R<()> {
+    if dims.r_type() == SexpType::Nil {
+        remove_attribute(context, object, symbol(|symbols| symbols.dim));
+        remove_attribute(context, object, symbol(|symbols| symbols.dimnames));
         return Ok(());
     }
-    if object == nil() {
-        values::check_attributable(object)?;
+    let target = object.get();
+    if target.r_type() == SexpType::Nil {
+        values::check_attributable(SexpType::Nil)?;
     }
-    if !object.kind().is_vector() && object.kind() != SexpType::Pairlist {
-        return Err(call.error("invalid first argument, must be vector (list or atomic)"));
+    if !target.r_type().is_vector() && target.r_type() != SexpType::Pairlist {
+        return Err(call_error(
+            call,
+            "invalid first argument, must be vector (list or atomic)",
+        ));
     }
-    let dims = coerce_vector(dims, SexpType::Integer)?;
-    let object_length = length(object) as i64;
+    let dims = handles::coerce(context, dims, SexpType::Integer)?;
+    let extents = handles::integer_vector(context, dims)?;
+    let object_length = handles::length(context, target) as i64;
+    let extents = extents.as_slice(context);
     if crate::system::r_at_least_release(4, 6, 2) {
-        let product = dims_total(call, dims)?;
+        let product = dims_total(extents).map_err(|message| call_error(call, message))?;
         if product != object_length {
-            return Err(call.error(format!(
-                "dims [product {product}] do not match the length of object [{object_length}]"
-            )));
+            return Err(call_error(
+                call,
+                format!(
+                    "dims [product {product}] do not match the length of object [{object_length}]"
+                ),
+            ));
         }
     } else {
-        if length(dims) == 0 {
-            return Err(call.error("length-0 dimension vector is invalid"));
+        if extents.is_empty() {
+            return Err(call_error(call, "length-0 dimension vector is invalid"));
         }
         // The first offending extent names the problem.
-        if let Some(&bad) = values::ints(dims)
+        if let Some(&bad) = extents
             .iter()
             .find(|&&value| value == NA_INTEGER || value < 0)
         {
-            return Err(call.error(if bad == NA_INTEGER {
-                "the dims contain missing values"
-            } else {
-                "the dims contain negative values"
-            }));
+            return Err(call_error(
+                call,
+                if bad == NA_INTEGER {
+                    "the dims contain missing values"
+                } else {
+                    "the dims contain negative values"
+                },
+            ));
         }
-        let product = values::ints(dims).iter().fold(1i64, |product, &extent| {
+        let product = extents.iter().fold(1i64, |product, &extent| {
             product.saturating_mul(extent as i64)
         });
         if product != object_length {
             // GNU R before 4.6.2 prints the extents only when both fit in an `int`.
             if product > i32::MAX as i64 || object_length > i32::MAX as i64 {
-                return Err(call.error("dims do not match the length of object"));
+                return Err(call_error(call, "dims do not match the length of object"));
             }
-            return Err(call.error(format!(
-                "dims [product {product}] do not match the length of object [{object_length}]"
-            )));
+            return Err(call_error(
+                call,
+                format!(
+                    "dims [product {product}] do not match the length of object [{object_length}]"
+                ),
+            ));
         }
     }
-    values::remove_attr(object, symbols().dimnames);
-    values::set_attr(object, symbols().dim, dims)
+    remove_attribute(context, object, symbol(|symbols| symbols.dimnames));
+    set_attribute(context, object, symbol(|symbols| symbols.dim), dims)
 }
 
-unsafe fn do_dimnames(call: &Call<'_>) -> R<Sexp> {
-    Ok(get_attr(call.arg(0), symbols().dimnames))
+/// An error that names `call`, or the running call for `None`.
+fn call_error(call: Option<Local<'_>>, message: impl Into<String>) -> Unwind {
+    match call {
+        Some(call) => handles::error_in(call, message),
+        None => error(message),
+    }
 }
 
-unsafe fn do_set_dimnames(call: &Call<'_>) -> R<Sexp> {
-    let object = modifiable_attributes(call.arg(0))?;
-    set_dimnames(object, call.arg(1), call.call)?;
-    Ok(object)
+fn do_dimnames<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let object = arguments.value(0);
+    Ok(context.root(get_attribute(
+        context,
+        object,
+        symbol(|symbols| symbols.dimnames),
+    )))
+}
+
+fn do_set_dimnames<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let mut object = attributes_unshared(context, arguments.value(0))?;
+    assign_dimnames(
+        context,
+        &mut object,
+        arguments.value(1),
+        Some(arguments.expression()),
+    )?;
+    Ok(object.finish())
+}
+
+/// `dimnames<-` for raw callers, which report an error against `call` (`NULL` for none, the
+/// unbound marker for the running call).
+///
+/// # Safety
+///
+/// The caller is on the interpreter's thread and holds no reference into the heap, all three
+/// are live, and the caller may change `object` where it is.
+pub unsafe fn set_dimnames(object: Sexp, dimnames: Sexp, call: Sexp) -> R<()> {
+    handles::with(|context| {
+        let mut object = Owned::assume(handles::adopt(context, object));
+        let dimnames = handles::adopt(context, dimnames);
+        let call = (call != unbound()).then(|| handles::adopt(context, call));
+        assign_dimnames(context, &mut object, dimnames, call)
+    })
 }
 
 /// `dimnames<-` with GNU R's checks: each component is `NULL` or as long as its extent. A
 /// list shorter than the dimensions is padded with `NULL`, an empty list removes the
 /// dimnames, and a list of only `NULL` components is kept as it is.
-pub unsafe fn set_dimnames(object: Sexp, dimnames: Sexp, call: Sexp) -> R<()> {
-    if dimnames == nil() {
-        values::remove_attr(object, symbols().dimnames);
+fn assign_dimnames<'s>(
+    context: &mut Cx<'s>,
+    object: &mut Owned<'s>,
+    dimnames: Local<'s>,
+    call: Option<Local<'s>>,
+) -> R<()> {
+    let name = symbol(|symbols| symbols.dimnames);
+    if dimnames.r_type() == SexpType::Nil {
+        remove_attribute(context, object, name);
         return Ok(());
     }
-    if object == nil() {
-        values::check_attributable(object)?;
+    let target = object.get();
+    if target.r_type() == SexpType::Nil {
+        values::check_attributable(SexpType::Nil)?;
     }
-    let Some(dims) = values::dims(object) else {
-        return Err(error_in(call, "'dimnames' applied to non-array"));
+    let Some(dims) = handles::dims(context, target) else {
+        return Err(call_error(call, "'dimnames' applied to non-array"));
     };
-    if dimnames.kind() != SexpType::List {
-        return Err(error_in(call, "'dimnames' must be a list"));
-    }
-    if length(dimnames) == 0 {
-        values::remove_attr(object, symbols().dimnames);
+    let Some(list) = dense::<List>(context, dimnames)? else {
+        return Err(call_error(call, "'dimnames' must be a list"));
+    };
+    if list.is_empty() {
+        remove_attribute(context, object, name);
         return Ok(());
     }
-    if length(dimnames) > dims.len() {
-        return Err(error_in(
+    if list.len() > dims.len() {
+        return Err(call_error(
             call,
             format!(
                 "length of 'dimnames' [{}] must match that of 'dims' [{}]",
-                length(dimnames),
+                list.len(),
                 dims.len()
             ),
         ));
     }
     // An unreferenced list of the right length is installed itself, as GNU R's `dimnamesgets`
     // does, so C code that sets the attribute and then fills the list sees its writes kept.
-    let reuse = length(dimnames) == dims.len() && dimnames.refcount() == 0;
-    let result = if reuse {
-        dimnames
-    } else {
-        alloc(SexpType::List, dims.len())?
+    let reused = (list.len() == dims.len())
+        .then(|| handles::unreferenced(list))
+        .flatten();
+    let reuse = reused.is_some();
+    let mut result = match reused {
+        Some(list) => list,
+        None => context.alloc::<List>(dims.len())?.owned(),
     };
-    for (dimension, &extent) in dims.iter().enumerate().take(length(dimnames)) {
-        let component = dimnames.element(dimension);
+    for (dimension, &extent) in dims.iter().enumerate().take(list.len()) {
+        let component = context.root(list.get(context, dimension));
         // A zero-length component means no names for that dimension, whatever its extent.
-        if component == nil() || length(component) == 0 {
-            values::set_elt(result, dimension, nil());
-            continue;
-        }
-        let component = if values::inherits(component, "factor") {
-            coerce::factor_as_character(component)?
-        } else if component.kind() != SexpType::String {
-            let converted = coerce_vector(component, SexpType::String)?;
-            values::clear_attributes(converted);
-            converted
-        } else {
-            component
-        };
-        if length(component) != extent {
-            return Err(error_in(
-                call,
-                format!(
-                    "length of 'dimnames' [{}] not equal to array extent",
-                    dimension + 1
-                ),
-            ));
-        }
-        values::set_elt(result, dimension, component);
-    }
-    let names = values::names(dimnames);
-    if names != nil() && !reuse {
-        let padded = alloc(SexpType::String, dims.len())?;
-        for index in 0..dims.len() {
-            let name = if index < length(names) {
-                names.element(index)
+        let component =
+            if component.r_type() == SexpType::Nil || handles::length(context, component) == 0 {
+                null()
             } else {
-                values::blank_string()
+                let component = if handles::inherits(context, component, "factor") {
+                    handles::factor_as_character(context, component)?
+                } else if component.r_type() != SexpType::String {
+                    handles::coerce_bare(context, component, SexpType::String)?
+                } else {
+                    component
+                };
+                if handles::length(context, component) != extent {
+                    return Err(call_error(
+                        call,
+                        format!(
+                            "length of 'dimnames' [{}] not equal to array extent",
+                            dimension + 1
+                        ),
+                    ));
+                }
+                component
             };
-            values::set_elt(padded, index, name);
-        }
-        values::set_attr(result, symbols().names, padded)?;
+        result
+            .write(context)
+            .split_elements()
+            .0
+            .set(dimension, component);
     }
-    values::set_attr(object, symbols().dimnames, result)
+    let names = names_of(context, list.value())?;
+    if names.r_type() != SexpType::Nil && !reuse {
+        let names = handles::character_vector(context, names)?;
+        let mut padded = context.alloc::<Str>(dims.len())?;
+        for index in 0..dims.len() {
+            let name = if index < names.len() {
+                names.get(context, index)
+            } else {
+                handles::blank()
+            };
+            padded.set(context, index, name);
+        }
+        set_attribute(
+            context,
+            &mut result,
+            symbol(|symbols| symbols.names),
+            padded.finish().value(),
+        )?;
+    }
+    set_attribute(context, object, name, result.finish().value())
 }
 
-unsafe fn do_set_levels(call: &Call<'_>) -> R<Sexp> {
-    let object = modifiable(call.arg(0))?;
-    let levels = call.arg(1);
-    if levels.kind() == SexpType::String {
-        let mut seen = FxHashSet::default();
-        for index in 0..length(levels) {
-            if !seen.insert(levels.element(index)) {
-                return Err(call.error(format!("factor level [{}] is duplicated", index + 1)));
-            }
-        }
+fn do_set_levels<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let mut object = unshared(context, arguments.value(0))?;
+    let levels = arguments.value(1);
+    if levels.r_type().is_vector()
+        && let Some(index) = handles::first_duplicate(context, levels)?
+    {
+        return Err(arguments.error(format!("factor level [{}] is duplicated", index + 1)));
     }
-    values::set_attr(object, symbols().levels, levels)?;
-    Ok(object)
+    set_attribute(
+        context,
+        &mut object,
+        symbol(|symbols| symbols.levels),
+        levels,
+    )?;
+    Ok(object.finish())
 }
 
 // Attributes.
 
 /// Sets an attribute with the checks GNU R's `setAttrib` makes for names, dims, dimnames and
-/// class.
-pub unsafe fn set_attribute_checked(object: Sexp, symbol: Sexp, value: Sexp, call: Sexp) -> R<()> {
-    let symbols = symbols();
-    if value != nil() {
-        values::check_attributable(object)?;
+/// class. `call` is the call an error names, or `None` for the running one.
+pub fn assign_attribute<'s>(
+    context: &mut Cx<'s>,
+    object: &mut Owned<'s>,
+    name: Gc<'_, Symbol>,
+    value: Local<'s>,
+    call: Option<Local<'s>>,
+) -> R<()> {
+    if value.r_type() != SexpType::Nil {
+        values::check_attributable(object.get().r_type())?;
     }
-    if symbol == symbols.comment && value != nil() && value.kind() != SexpType::String {
-        return Err(error_in(call, "attempt to set invalid 'comment' attribute"));
-    }
-    if symbol == symbols.names {
-        return set_names(object, value);
-    }
-    if symbol == symbols.dim {
-        let args = [
-            Arg {
-                tag: nil(),
-                value: object,
-            },
-            Arg { tag: nil(), value },
-        ];
-        let function = crate::builtins::primitive("dim<-").ok_or_else(|| error("no dim<-"))?;
-        let context = Call {
+    if name.is(symbol(|symbols| symbols.comment))
+        && !matches!(value.r_type(), SexpType::Nil | SexpType::String)
+    {
+        return Err(call_error(
             call,
-            op: function,
-            args: &args,
-            rho: values::global_env(),
-            frame: crate::NO_SLOTS,
-            reusable: None,
-        };
-        return set_dim(&context, object, value);
+            "attempt to set invalid 'comment' attribute",
+        ));
     }
-    if symbol == symbols.dimnames {
-        return set_dimnames(object, value, call);
+    if name.is(symbol(|symbols| symbols.names)) {
+        return assign_names(context, object, value);
     }
-    if symbol == symbols.class {
+    if name.is(symbol(|symbols| symbols.dim)) {
+        return assign_dim(context, object, value, call);
+    }
+    if name.is(symbol(|symbols| symbols.dimnames)) {
+        return assign_dimnames(context, object, value, call);
+    }
+    if name.is(symbol(|symbols| symbols.class)) {
         // GNU R's `classgets`: printing or dispatching on a class that is not character would
         // read its elements as strings.
-        if value != nil() && value.kind() != SexpType::String {
-            return Err(error_in(call, "attempt to set invalid 'class' attribute"));
+        if !matches!(value.r_type(), SexpType::Nil | SexpType::String) {
+            return Err(call_error(call, "attempt to set invalid 'class' attribute"));
         }
-        if value != nil() {
-            let factor = (0..length(value)).any(|index| value.element(index).bytes() == b"factor");
-            if factor && object.kind() != SexpType::Integer {
-                return Err(error_in(
-                    call,
-                    "adding class \"factor\" to an invalid object",
-                ));
-            }
+        if object.get().r_type() != SexpType::Integer && names_factor(context, value)? {
+            return Err(call_error(
+                call,
+                "adding class \"factor\" to an invalid object",
+            ));
         }
-        return crate::dispatch::set_class_attribute(object, value);
+        return set_class(context, object, value);
     }
-    if symbol == symbols.row_names {
-        return set_row_names(object, value);
+    if name.is(symbol(|symbols| symbols.row_names)) {
+        return assign_row_names(context, object, value);
     }
-    values::set_attr(object, symbol, value)
+    set_attribute(context, object, name, value)
+}
+
+/// [`assign_attribute`] for raw callers, with `call` as [`set_dimnames`] takes it.
+///
+/// # Safety
+///
+/// As for [`set_dimnames`], with `symbol` a symbol.
+pub unsafe fn set_attribute_checked(object: Sexp, symbol: Sexp, value: Sexp, call: Sexp) -> R<()> {
+    handles::with(|context| {
+        let mut object = Owned::assume(handles::adopt(context, object));
+        let value = handles::adopt(context, value);
+        let call = (call != unbound()).then(|| handles::adopt(context, call));
+        assign_attribute(context, &mut object, Gc::adopt(symbol), value, call)
+    })
 }
 
 /// GNU R's `row_names_gets`: the double `c(NA, n)` that `dput()` writes is stored as the
 /// integer `c(NA, n)`, and integer row names `1:n` of three rows or more as `c(NA, n)` with a
 /// positive `n`, which `.row_names_info()` then reports as not automatic. Other row names,
 /// `1:2` and `1L` among them, are stored as given; `.set_row_names(n)` passes `c(NA, -n)` itself.
-pub unsafe fn set_row_names(object: Sexp, value: Sexp) -> R<()> {
-    let symbol = symbols().row_names;
-    let value =
-        if value.kind() == SexpType::Real && length(value) == 2 && values::reals(value)[0].is_nan()
-        {
-            coerce_vector(value, SexpType::Integer)?
-        } else {
-            value
-        };
-    if value.kind() == SexpType::Integer {
-        let data = values::ints(value);
-        let compact = data.len() > 2
-            && data
-                .iter()
-                .enumerate()
-                .all(|(index, &row)| row == index as i32 + 1);
-        if compact {
-            let stored = values::integer_vector(&[NA_INTEGER, data.len() as i32])?;
-            return values::set_attr(object, symbol, stored);
-        }
-    } else if value != nil() && value.kind() != SexpType::String {
-        return Err(error(format!(
-            "row names must be 'character' or 'integer', not '{}'",
-            value.kind().name()
-        )));
-    }
-    values::set_attr(object, symbol, value)
-}
-
-pub(crate) unsafe fn do_set_attributes(call: &Call<'_>) -> R<Sexp> {
-    let attributes = call.arg(1);
-    // Unlike `attr<-`, giving NULL attributes turns it into an empty list, as in GNU R.
-    let object = match call.arg(0) {
-        object if object != nil() => modifiable_attributes(object)?,
-        _ if attributes == nil() => return Ok(nil()),
-        _ => alloc(SexpType::List, 0)?,
+pub fn assign_row_names<'s>(
+    context: &mut Cx<'s>,
+    object: &mut Owned<'s>,
+    value: Local<'s>,
+) -> R<()> {
+    let name = symbol(|symbols| symbols.row_names);
+    let compact_double = value.r_type() == SexpType::Real
+        && handles::length(context, value) == 2
+        && handles::real_scalar(context, value).is_nan();
+    let value = if compact_double {
+        handles::coerce(context, value, SexpType::Integer)?
+    } else {
+        value
     };
-    // The value is checked before anything is cleared, so a bad one leaves the object as it was.
-    let names = values::names(attributes);
-    if attributes != nil() {
-        if attributes.kind() != SexpType::List {
-            return Err(call.error("attributes must be a list or NULL"));
-        }
-        if length(attributes) > 0 && names == nil() {
-            return Err(call.error("attributes must be named"));
-        }
-        // GNU R checks the names from the second on; an empty first name fails later, when
-        // it is installed as a symbol.
-        if length(attributes) > 0 && names.element(0).bytes().is_empty() {
-            return Err(call.error("attempt to use zero-length variable name"));
-        }
-        for index in 1..length(attributes) {
-            if names.element(index).bytes().is_empty() {
-                return Err(call.error(format!(
-                    "all attributes must have names [{} does not]",
-                    index + 1
-                )));
+    match value.r_type() {
+        SexpType::Integer => {
+            let rows = handles::integer_vector(context, value)?;
+            let data = rows.as_slice(context);
+            let compact = data.len() > 2
+                && data
+                    .iter()
+                    .enumerate()
+                    .all(|(index, &row)| row == index as i32 + 1);
+            if compact {
+                let count = data.len() as i32;
+                let mut stored = context.alloc::<Integer>(2)?;
+                stored.as_mut_slice().copy_from_slice(&[NA_INTEGER, count]);
+                return set_attribute(context, object, name, stored.finish().value());
             }
         }
+        SexpType::Nil | SexpType::String => {}
+        kind => {
+            return Err(error(format!(
+                "row names must be 'character' or 'integer', not '{}'",
+                kind.name()
+            )));
+        }
     }
-    let was_s4 = object.has_gp(gp::S4_OBJECT);
-    values::clear_attributes(object);
-    if attributes == nil() {
-        return Ok(object);
+    set_attribute(context, object, name, value)
+}
+
+/// [`assign_row_names`] for raw callers.
+///
+/// # Safety
+///
+/// The caller is on the interpreter's thread and holds no reference into the heap, both are
+/// live, and the caller may change `object` where it is.
+pub unsafe fn set_row_names(object: Sexp, value: Sexp) -> R<()> {
+    handles::with(|context| {
+        let mut object = Owned::assume(handles::adopt(context, object));
+        let value = handles::adopt(context, value);
+        assign_row_names(context, &mut object, value)
+    })
+}
+
+pub(crate) fn do_set_attributes<'s>(
+    context: &mut Cx<'s>,
+    arguments: &Args<'_, 's>,
+) -> R<Local<'s>> {
+    let attributes = arguments.value(1);
+    // Unlike `attr<-`, giving NULL attributes turns it into an empty list, as in GNU R.
+    let mut object = match arguments.value(0) {
+        object if object.r_type() != SexpType::Nil => attributes_unshared(context, object)?,
+        _ if attributes.r_type() == SexpType::Nil => return Ok(null()),
+        _ => context.alloc::<List>(0)?.owned().value(),
+    };
+    let was_s4 = is_s4(object.get());
+    if attributes.r_type() == SexpType::Nil {
+        clear_attributes(context, &mut object, false);
+        return Ok(object.finish());
     }
-    // GNU R drops the S4 bit only when no attributes remain, so `structure()` on an S4
-    // object keeps it an S4 object.
-    if was_s4 && length(attributes) > 0 {
-        object.set_gp_bits(gp::S4_OBJECT, true);
+    // The value is checked before anything is cleared, so a bad one leaves the object as it was.
+    let Some(list) = dense::<List>(context, attributes)? else {
+        return Err(arguments.error("attributes must be a list or NULL"));
+    };
+    if list.is_empty() {
+        clear_attributes(context, &mut object, false);
+        return Ok(object.finish());
     }
+    let names = names_of(context, list.value())?;
+    if names.r_type() == SexpType::Nil {
+        return Err(arguments.error("attributes must be named"));
+    }
+    let names = handles::character_vector(context, names)?;
+    // GNU R checks the names from the second on; an empty first name fails later, when it is
+    // installed as a symbol.
+    if names.get(context, 0).bytes().is_empty() {
+        return Err(arguments.error("attempt to use zero-length variable name"));
+    }
+    for index in 1..list.len() {
+        if names.get(context, index).bytes().is_empty() {
+            return Err(arguments.error(format!(
+                "all attributes must have names [{} does not]",
+                index + 1
+            )));
+        }
+    }
+    // GNU R drops the S4 bit only when no attributes remain, so `structure()` on an S4 object
+    // keeps it an S4 object.
+    clear_attributes(context, &mut object, was_s4);
     // `dim` goes first, so `dimnames` can be checked against it.
     for pass in 0..2 {
-        for index in 0..length(attributes) {
-            let name = names.element(index);
-            if name != values::na_string() && name.bytes().is_empty() {
-                return Err(call.error(format!(
+        for index in 0..list.len() {
+            let name = names.get(context, index);
+            if !is_na(name) && name.bytes().is_empty() {
+                return Err(arguments.error(format!(
                     "all attributes must have names [{} does not]",
                     index + 1
                 )));
@@ -4324,11 +4516,19 @@ pub(crate) unsafe fn do_set_attributes(call: &Call<'_>) -> R<Sexp> {
             if (pass == 0) != is_dim {
                 continue;
             }
-            let symbol = crate::heap().install_char(name)?;
-            set_attribute_checked(object, symbol, attributes.element(index), call.call)?;
+            let name = context.root(name);
+            let name = handles::install_interned(context, name)?;
+            let value = context.root(list.get(context, index));
+            assign_attribute(
+                context,
+                &mut object,
+                name,
+                value,
+                Some(arguments.expression()),
+            )?;
         }
     }
-    Ok(object)
+    Ok(object.finish())
 }
 
 // Matrices and arrays.
@@ -4499,7 +4699,7 @@ unsafe fn do_array(call: &Call<'_>) -> R<Sexp> {
     let dims = coerce_vector(call.arg(1), SexpType::Integer)?;
     let dimnames = call.arg(2);
     let total: usize = if crate::system::r_at_least_release(4, 6, 2) {
-        dims_total(call, dims)? as usize
+        dims_total(values::ints(dims)).map_err(|message| call.error(message))? as usize
     } else {
         values::ints(dims)
             .iter()
@@ -4534,19 +4734,18 @@ unsafe fn do_array(call: &Call<'_>) -> R<Sexp> {
 /// `dim2total` (4.6.2 and later) checks it: an empty vector, then each extent for `NA` and
 /// sign, then a product beyond the longest vector. The product is a double, as there, so a
 /// zero extent still lets the later extents be checked.
-unsafe fn dims_total(call: &Call<'_>, dims: Sexp) -> R<i64> {
+fn dims_total(extents: &[i32]) -> Result<i64, &'static str> {
     const LONGEST_VECTOR: f64 = 4_503_599_627_370_496.0;
-    let extents = values::ints(dims);
     if extents.is_empty() {
-        return Err(call.error("'dim' cannot be of length 0"));
+        return Err("'dim' cannot be of length 0");
     }
     let mut product = 1.0f64;
     for &extent in extents {
         if extent == NA_INTEGER {
-            return Err(call.error("the dims contain missing values"));
+            return Err("the dims contain missing values");
         }
         if extent < 0 {
-            return Err(call.error("the dims contain negative values"));
+            return Err("the dims contain negative values");
         }
         product = if extent == 0 {
             0.0
@@ -4555,7 +4754,7 @@ unsafe fn dims_total(call: &Call<'_>, dims: Sexp) -> R<i64> {
         };
     }
     if product > LONGEST_VECTOR {
-        return Err(call.error("too many elements specified"));
+        return Err("too many elements specified");
     }
     Ok(product as i64)
 }
@@ -5313,65 +5512,91 @@ unsafe fn do_rev(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-pub(crate) unsafe fn do_is_list_factor(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let recursive = match values::as_logical_scalar(call.arg(1)) {
+pub(crate) fn do_is_list_factor<'s>(
+    context: &mut Cx<'s>,
+    arguments: &Args<'_, 's>,
+) -> R<Local<'s>> {
+    let object = arguments.value(0);
+    let recursive = match handles::logical_scalar(context, arguments.value(1)) {
         // R 4.5 refuses an NA, which earlier releases took as true.
         NA_LOGICAL if crate::system::r_at_least(4, 5) => {
-            return Err(call.error("NA in coercion to boolean"));
+            return Err(arguments.error("NA in coercion to boolean"));
         }
         recursive => recursive != 0,
     };
-    unsafe fn check(object: Sexp, recursive: bool) -> Option<bool> {
-        if object.kind() != SexpType::List {
-            return Some(values::inherits(object, "factor"));
-        }
-        let mut any = false;
-        for index in 0..length(object) {
-            let element = object.element(index);
-            if element.kind() == SexpType::List {
-                if !recursive {
-                    return Some(false);
-                }
-                match check(element, recursive) {
-                    Some(true) => any = true,
-                    Some(false) => return Some(false),
-                    None => {}
-                }
-            } else if values::inherits(element, "factor") {
-                any = true;
-            } else {
-                return Some(false);
-            }
-        }
-        if any { Some(true) } else { None }
-    }
-    if object.kind() != SexpType::List || length(object) == 0 {
-        return values::scalar_bool(false);
-    }
-    values::scalar_bool(check(object, recursive) == Some(true))
+    let found = match dense::<List>(context, object)? {
+        Some(list) if !list.is_empty() => list_factor(context, list, recursive)? == Some(true),
+        _ => false,
+    };
+    handles::logical_constant(context, i32::from(found))
 }
 
-unsafe fn row_col(call: &Call<'_>, rows: bool) -> R<Sexp> {
-    let dims = coerce_vector(call.arg(0), SexpType::Integer)?;
-    if length(dims) != 2 {
+/// Whether every element of `list` is a factor, or with `recursive` a list of them: `None`
+/// for a list with no factor at any depth.
+fn list_factor<'s>(
+    context: &mut Cx<'s>,
+    list: Local<'s, List>,
+    recursive: bool,
+) -> R<Option<bool>> {
+    let mut any = false;
+    for index in 0..list.len() {
+        let element = list.get(context, index);
+        if element.r_type() == SexpType::List {
+            if !recursive {
+                return Ok(Some(false));
+            }
+            let element = context.root(element);
+            let element = dense::<List>(context, element)?
+                .ok_or_else(|| error("internal error: a list has no standard form"))?;
+            match list_factor(context, element, recursive)? {
+                Some(true) => any = true,
+                Some(false) => return Ok(Some(false)),
+                None => {}
+            }
+        } else if handles::inherits(context, element, "factor") {
+            any = true;
+        } else {
+            return Ok(Some(false));
+        }
+    }
+    Ok(any.then_some(true))
+}
+
+fn do_row<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    row_col(context, arguments, true)
+}
+
+fn do_col<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    row_col(context, arguments, false)
+}
+
+fn row_col<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>, rows: bool) -> R<Local<'s>> {
+    let dims = handles::integer_vector(context, arguments.value(0))?;
+    let &[row_count, col_count] = dims.as_slice(context) else {
         return Err(error(format!(
             "a matrix-like object is required as argument to '{}'",
             if rows { "row" } else { "col" }
         )));
-    }
-    let row_count = values::ints(dims)[0].max(0) as usize;
-    let col_count = values::ints(dims)[1].max(0) as usize;
-    let result = alloc(SexpType::Integer, row_count * col_count)?;
+    };
+    let (row_count, col_count) = (row_count.max(0) as usize, col_count.max(0) as usize);
+    let mut result = context.alloc::<Integer>(row_count * col_count)?;
+    let elements = result.as_mut_slice();
     for row in 0..row_count {
         for col in 0..col_count {
-            values::ints_mut(result)[row + col * row_count] =
-                if rows { row as i32 + 1 } else { col as i32 + 1 };
+            elements[row + col * row_count] = if rows { row as i32 + 1 } else { col as i32 + 1 };
         }
     }
-    let dim = values::integer_vector(&[row_count as i32, col_count as i32])?;
-    values::set_attr(result, symbols().dim, dim)?;
-    Ok(result)
+    let mut dim = context.alloc::<Integer>(2)?;
+    dim.as_mut_slice()
+        .copy_from_slice(&[row_count as i32, col_count as i32]);
+    let mut result = result.owned();
+    set_attribute(
+        context,
+        &mut result,
+        symbol(|symbols| symbols.dim),
+        dim.finish().value(),
+    )?;
+    Ok(result.finish().value())
 }
 
 /// `.Internal(max.col(m, ties.method))`, with the method as GNU R's code: 1 random, 2 first,
@@ -5468,48 +5693,69 @@ pub unsafe fn max_col(
     Ok(())
 }
 
-unsafe fn do_diag(call: &Call<'_>) -> R<Sexp> {
-    let data = values::materialize(call.arg(0))?;
-    let rows = values::as_integer_scalar(call.arg(1)).max(0) as usize;
-    let cols = values::as_integer_scalar(call.arg(2)).max(0) as usize;
-    let kind = if matches!(data.kind(), SexpType::Complex) {
-        SexpType::Complex
-    } else if data.kind() == SexpType::Integer {
-        SexpType::Integer
-    } else {
-        SexpType::Real
-    };
-    let data = coerce_vector(data, kind)?;
-    let result = alloc(kind, rows * cols)?;
-    let count = length(data);
-    for index in 0..rows.min(cols) {
-        if count > 0 {
-            copy_element(data, index % count, result, index + index * rows)?;
-        }
+fn do_diag<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let data = handles::materialize(context, arguments.value(0))?;
+    let rows = handles::integer_scalar(context, arguments.value(1)).max(0) as usize;
+    let cols = handles::integer_scalar(context, arguments.value(2)).max(0) as usize;
+    if rows.min(cols) > 0 && handles::length(context, data) == 0 {
+        return Err(error("'x' must have positive length"));
     }
-    let dim = values::integer_vector(&[rows as i32, cols as i32])?;
-    values::set_attr(result, symbols().dim, dim)?;
-    Ok(result)
+    let mut result = match data.r_type() {
+        SexpType::Complex => diagonal::<Complex>(context, data, rows, cols)?,
+        SexpType::Integer => diagonal::<Integer>(context, data, rows, cols)?,
+        SexpType::Logical => diagonal::<Logical>(context, data, rows, cols)?,
+        SexpType::Raw => diagonal::<Raw>(context, data, rows, cols)?,
+        _ => diagonal::<Real>(context, data, rows, cols)?,
+    };
+    let mut dim = context.alloc::<Integer>(2)?;
+    dim.as_mut_slice()
+        .copy_from_slice(&[rows as i32, cols as i32]);
+    set_attribute(
+        context,
+        &mut result,
+        symbol(|symbols| symbols.dim),
+        dim.finish().value(),
+    )?;
+    Ok(result.finish())
 }
 
-unsafe fn do_short_row_names(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let kind = values::as_integer_scalar(call.arg(1));
-    let row_names = get_attr(object, symbols().row_names);
-    if kind == 0 {
-        return Ok(row_names);
+/// A `rows` by `cols` matrix of `T`, zero but for its diagonal, which repeats `data`.
+fn diagonal<'s, T: Atomic>(
+    context: &mut Cx<'s>,
+    data: Local<'s>,
+    rows: usize,
+    cols: usize,
+) -> R<Owned<'s>> {
+    let data = handles::coerce(context, data, T::TYPE)?;
+    let data = dense::<T>(context, data)?
+        .ok_or_else(|| error("internal error: a coerced vector has no standard form"))?;
+    let mut result = context.alloc::<T>(rows * cols)?;
+    let target = result.as_mut_slice();
+    let source = data.as_slice(context);
+    if !source.is_empty() {
+        for index in 0..rows.min(cols) {
+            target[index + index * rows] = source[index % source.len()];
+        }
     }
-    let count = if row_names.kind() == SexpType::Integer
-        && length(row_names) == 2
-        && values::ints(row_names)[0] == NA_INTEGER
-    {
-        values::ints(row_names)[1]
-    } else if row_names == nil() {
-        0
-    } else {
-        length(row_names) as i32
+    Ok(result.owned().value())
+}
+
+fn do_short_row_names<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let object = arguments.value(0);
+    let kind = handles::integer_scalar(context, arguments.value(1));
+    let row_names = get_attribute(context, object, symbol(|symbols| symbols.row_names));
+    if kind == 0 {
+        return Ok(context.root(row_names));
+    }
+    let count = match row_names.downcast::<Integer>() {
+        Some(rows) if rows.len() == 2 && rows.as_slice()[0] == NA_INTEGER => rows.as_slice()[1],
+        _ if row_names.r_type() == SexpType::Nil => 0,
+        _ => {
+            let row_names = context.root(row_names);
+            handles::length(context, row_names) as i32
+        }
     };
-    scalar_integer(if kind == 1 { count } else { count.abs() })
+    handles::integer(context, if kind == 1 { count } else { count.abs() })
 }
 
 unsafe fn do_copy_df_attr(call: &Call<'_>) -> R<Sexp> {

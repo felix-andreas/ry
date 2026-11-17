@@ -3078,7 +3078,11 @@ unsafe fn do_unlist(call: &Call<'_>) -> R<Sexp> {
     if x.is_object() {
         return decline();
     }
-    let factors = kernel(crate::subset::do_is_list_factor, &[x, recursive], frame)?;
+    let factors = kernel(
+        crate::handles::safe!(crate::subset::do_is_list_factor),
+        &[x, recursive],
+        frame,
+    )?;
     if values::as_logical_scalar(factors) != 0 {
         return decline();
     }
