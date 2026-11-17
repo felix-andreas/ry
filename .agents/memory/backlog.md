@@ -1572,9 +1572,13 @@ overhead, not allocation.
   - `print(1:10, max = 0)` prints one element, GNU R none.
   - `D(expression(), "x")` returns `NA` (GNU R: an error); `forceAndCall("a", sum, 1, 2)` does not warn.
   - `structure(1:.Machine$integer.max, names = letters[1:8])` is killed for memory (GNU R: "cannot allocate").
-  - *Parser.* `parse(text = "\xe4")` (GNU R: `expression()`); `function(a, a` (GNU R: `repeatedFormal` first); a backquoted name holding a NUL (GNU R truncates); byte columns of `parse(text =)` for unmarked non-ASCII; `ry run -` does not read standard input; `1 < 2 < 3` parses (GNU R: a syntax error); `0x1.8` is a syntax error (GNU R: 1.5).
+  - *Parser.* `oracle::parser::known_difference` leaves the grammar ones out of `--kind parser`; an entry leaves both with its fix.
+    - ry accepts what GNU R rejects: `1 < 2 < 3`; `=` assignment in an argument, a condition, an index or a default (`if (a = b) c`, `f(TRUE = 1)`); `::` after anything but a name or a string (`a::b::c`); a line break after an operand of an `if` branch inside parentheses or brackets (`(if (a) b`, line break, `+ c)`), which GNU R's lexer returns as a token there; `function(y, ) 1` (decide whether the trailing comma is ry syntax).
+    - ry rejects what GNU R accepts: `_` outside a named pipe argument (GNU R rejects most later, by rules of its own); a backquoted `` `_` `` in a pipe (``x |> `_`()`` is `` `_`(x) ``).
+    - Which error comes first: `function(a, a` (GNU R: `repeatedFormal`) and `''()"` (GNU R: "attempt to use zero-length variable name") report the later syntax error, and a damaged `for` head names a later token (`for (x y in z) 1`: GNU R `unexpected symbol`, ry `unexpected 'in'`). A lexer warning is lost when the text then fails to parse (`.2L '`).
+    - `'\ud800'` is U+FFFD without a warning (GNU R: bytes `ed a0 80` and "unpaired surrogate"); `parse(text = "\xe4")` (GNU R: `expression()`); a backquoted name holding a NUL (GNU R truncates); byte columns of `parse(text =)` for unmarked non-ASCII; `ry run -` does not read standard input.
   - *Files (`--kind io`).* `substr()` of a latin1 string is UTF-8; no "unable to translate" warning from regex and `strsplit` on an undefined Windows-1252 byte; C-level error messages are not cut at `warning.length` outside `scan`; `file(encoding = "UTF-8-BOM")`; `readChar` on invalid UTF-8; ASCII `serialize` and `save` of ALTREP forms; an "ASCII" output connection writes the text before an unconvertible character; `deparse()` output is marked UTF-8; embedded-NUL warnings of `read.table`, `scan`, `readLines`; UTF-8 read as UTF-16LE warns once more; `parse(encoding = "latin1")` of a gz file; a name over 8192 bytes (GNU R: `input buffer overflow`); `writeLines(intToUtf8(0x10FF80), f)` writes `80 0a` (GNU R `f4 8f be 80 0a`); invalid bytes in `scan(text = "\xff1")`, `` parse(text = "`\xff`") ``, the message of `parse(text = "a\tb\xc3")` and `writeChar` of a cut sequence with `eos = NULL`.
-  - *Console.* A piped line that is not UTF-8 ends `ry repl` silently (`read_piped_line`, `console.rs`); GNU R: "invalid multibyte character in parser".
+  - *Console.* A piped line that is not UTF-8 ends `ry repl` silently (`read_piped_line`, `console.rs`); GNU R: "invalid multibyte character in parser". A piped `ry repl` runs on after an error (GNU R: "Execution halted").
   - *Regex.* TRE's `ignore.case` folds by full case mapping: `grepl("ǆ", "ǅ")`, `grepl("ß", "ẞ")`, `grepl("k", "\u212a")` are TRUE (GNU R: FALSE). With `useBytes = TRUE` a POSIX class takes every high byte as punctuation: `gsub("[[:punct:]]", ".", "é", useBytes = TRUE)` (GNU R reads a byte as its Latin-1 character).
 - A builtin generic passes an S3 method promises of the call's code where GNU R passes values: with `length.cls <- function(x) deparse(substitute(x))`, `length(obj)` is `"obj"` on ry and the deparsed object on GNU R, and `` `names<-.cls` `` sees `substitute(value)` as `v` where GNU R sees `"a"`. The same in every tier (`dispatch.rs`, `internal_dispatch`).
 - `mapply` and `Map` pass the function values, where GNU R passes promises whose code is `dots[[2L]][[1L]]`: `Map(function(a, b) deparse(substitute(b)), 1:2, 3:4)` gives `"3L"` and `"4L"` on ry (`envir.rs`, `do_mapply`).
@@ -1875,6 +1879,11 @@ relations nobody asks yet, each one extra call with no expected output:
   to the statement while the definition is empty; the others, in generated projects of several
   files, are not reduced. The end shape is one resolution (`target_at`) that the hover's link
   reads, with the check in the battery.
+- a file the runtime refuses to parse has a syntax finding in `ry check`. The runtime refuses
+  more than `syntax::parse` as it lowers (`interp/src/lower.rs`), and `ry check` is silent on each:
+  `"\q"`, `"\x"`, `"\u00e4\x41"`, `function(x, x) 1`, `1 |> sum(_)`. The end shape is one
+  verdict: these rules move into the parser (`Parser::error_rule`) and the runtime reads them
+  there. The `parser` kind's fragments are the inputs for the check.
 
 ### Run the pinned CRAN corpus as a test, one project per package
 

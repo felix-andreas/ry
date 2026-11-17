@@ -603,6 +603,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The differential fuzzer compares canonical dumps, over five kinds of program
 - A test user's application workload is a suite scored by total time
 - The analysis batteries share one generator and check sessions on warm databases
+- The parser is fuzzed against GNU R's `parse()`, with the known differences in one list
 
 ## Docs, process and positioning
 

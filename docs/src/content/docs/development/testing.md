@@ -590,7 +590,7 @@ released. A second battery drives random API sequences under collection stress a
 
 `oracle fuzz` runs whole R programs under GNU R and ry's engines and reports every program on
 which an engine differs. A seed and a kind name a program, so `oracle fuzz --kind K --seed N
---print` prints it and `--engines` replays it. The eight kinds find different bugs:
+--print` prints it and `--engines` replays it. The nine kinds find different bugs:
 
 | Kind | A program is | It finds |
 | --- | --- | --- |
@@ -601,6 +601,7 @@ which an engine differs. A seed and a kind name a program, so `oracle fuzz --kin
 | `io` (`oracle::metamorphic::io_program`) | round trips through files and connections: a zoo value written by one writer (`writeLines`, `cat`, `writeBin`, `write.table`, `dput`, `saveRDS`, `save`, compressed and re-encoding connections) and read back by several readers | bytes on disk that differ from GNU R's, and readers that decode, mark, warn about or reject a file differently |
 | `language` (`oracle::language::program`) | a few closures, each built from statements of the construct families its seed enables (`on.exit`, frame inspection, `...`, promises, replacement functions, `<<-`, conditions and restarts, S3, S4 and Reference Class dispatch, `eval` and quoted code, environments, regular expressions over Unicode text, control flow) and called one, a few or sixty times; the first and the last call's visible value, log entries and warnings are recorded | a difference in evaluation order, in what a frame or a condition reports, or in dispatch, and one that appears only on a later call |
 | `perturbed` (`oracle::mutate::perturb`) | a grammar, metamorphic or language program with up to twelve statements inserted into its function bodies: dead code (such as `if (FALSE)` around a statement taken from elsewhere in the program, an unused local closure, a loop over `NULL`) and code without effect on the result (such as `sys.call()`, `gc(FALSE)`, a `tryCatch` around `NULL`, and `force(x)` or `x <- x` in a function with parameters) | compiled code that depends on a slot number, a constant index, a branch offset or an inlining decision |
+| `parser` (`oracle::parser::program`) | sixty source fragments handed to `parse(text =)`, from the families its seed enables: operator chains without parentheses, nested constructs, the same constructs across line breaks and comments, number and string literals, names, and such text with one token damaged or drawn as blind tokens; each fragment prints a dump of its tree (a number by type and bits, a string by bytes and encoding mark), its warnings, or the fact that it was rejected, and a literal fragment its whole error message (without the line number GNU R leaves uninitialized after "invalid \u{xxxx} sequence") | a precedence, a line-break rule, a literal's value or mark, and text one parser accepts and the other rejects |
 | `corpus` (`oracle::corpus`) | a snippet of real R code with one to four mutations | what no grammar author thought of |
 
 A metamorphic trial draws its value from a zoo: every atomic type and lists, with `NA`, `NaN`,
@@ -699,7 +700,7 @@ The count is a close upper bound, because a name inside a string literal counts 
 Every fuzzed engine runs with at most 2 GiB of writable memory (`oracle::fuzz::MEMORY_LIMIT`,
 `RLIMIT_DATA`), so a call that asks for a huge vector gets R's "cannot allocate" error in GNU R
 and in ry instead of taking the machine's memory. `just fuzz-differential` runs the grammar,
-`just fuzz-kind KIND` any kind, and `just fuzz-long HOURS BASE` all eight for a time budget, under
+`just fuzz-kind KIND` any kind, and `just fuzz-long HOURS BASE` all nine for a time budget, under
 tier 0, the forced JIT and seeded collection stress.
 
 `crates/oracle/tests/test_differential.rs` holds the bounded passes. Grammar programs run under
@@ -709,7 +710,10 @@ each other, print no `DIFFERENT` and never crash (`fuzz_metamorphic_forms_agree_
 `fuzz_builtins_agree_across_tiers`, `fuzz_api_calls_agree_across_tiers`,
 `fuzz_io_round_trips_agree_across_tiers`, `fuzz_language_constructs_agree_across_tiers`); their
 comparison with GNU R is the long run's, because ry differs from GNU R on many builtin and api
-programs and a default test must pass.
+programs and a default test must pass. Parser programs run under GNU R and tier 0, which must
+agree on every fragment (`fuzz_parser_matches_gnu_r`). A construct ry and GNU R are known to read
+differently is not generated: `oracle::parser::known_difference` names each one, the backlog
+lists it under "Differences the fuzz kinds report", and an entry leaves the function with its fix.
 
 A divergent program is 50 to 300 lines, so a finding is reduced before it becomes an oracle case.
 `oracle reduce FILE --engine NAME` (`just fuzz-reduce FILE ENGINE`, or `oracle fuzz --reduce` for

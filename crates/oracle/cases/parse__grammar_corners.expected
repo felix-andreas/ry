@@ -1,0 +1,159 @@
+[stdout]
+| function(x) x ? f -> ? 3 
+| \\(x) x ? f -> ? 3 
+| if (a) b ? c -> ? 3 
+| if (a) b else c ? d -> ? 3 
+| while (a) b ? c -> ? 3 
+| for (i in a) b ? c -> ? 3 
+| repeat b ? c -> ? 3 
+| while (a) b = c ? d -> ? 3 
+| ? a = b -> ? 2 
+| a ? b ? c -> ? 3 
+| f(a ? b) -> f 2 
+| if (a ? b) c -> if 3 
+| x <- function(x) x ? f -> ? 3 
+| -a ? b -> ? 3 
+| a = b ? c = d -> ? 3 
+| 0x1.8 -> 1.5 
+|    double 1.5 
+| 0x.8 -> 0.5 
+|    double 0.5 
+| 0x1. -> 1 
+|    double 1 
+| 0x. -> 0 
+|    double 0 
+| 0x.p1 -> 0 
+|    double 0 
+| 0x1.8p1 -> 3 
+|    double 3 
+| 0xA.8P-1 -> 5.25 
+|    double 5.25 
+| 0x1.1L -> 1.0625 
+|   warning: integer literal 0x1.1L contains decimal; using numeric value 
+|    double 1.0625 
+| 0x1.0L -> 1L 
+|   warning: integer literal 0x1.0L contains unnecessary decimal point 
+|    integer 1 
+| 0x1p1L -> 2L 
+|    integer 2 
+| 0x1.8p1L -> 3L 
+|    integer 3 
+| 0x1.8i -> 0+1.5i 
+|    complex 0+1.5i 
+| '\\x41' -> "A" 
+|    unknown 41 
+| '\\101' -> "A" 
+|    unknown 41 
+| 'ä' -> "ä" 
+|    UTF-8 c3 a4 
+| 'ä\\x41' -> "äA" 
+|    unknown c3 a4 41 
+| '\\u00e4' -> "ä" 
+|    UTF-8 c3 a4 
+| '\\u0041' -> "A" 
+|    unknown 41 
+| '\\xe4' -> "\xe4" 
+|    unknown e4 
+| '\\303\\244' -> "ä" 
+|    unknown c3 a4 
+| '\\u00e4\\x41' -> error: mixing Unicode and octal/hex escapes in a string is not allowed (<input>:1:12) 
+| '\\101\\U0001F600' -> error: mixing Unicode and octal/hex escapes in a string is not allowed (<input>:1:16) 
+| '\\u0041\\101' -> error: mixing Unicode and octal/hex escapes in a string is not allowed (<input>:1:12) 
+| "\\u00e4\\x41 -> error: <text>:1:1: unexpected INCOMPLETE_STRING 
+| '\\x41\\u00e4 -> error: <text>:1:1: unexpected INCOMPLETE_STRING 
+| \\\n(x) x -> error: <text>:2:0: unexpected end of line 
+| x\n\\\n(x) x -> error: <text>:3:0: unexpected end of line 
+| x; \\\n(x) x -> error: <text>:2:0: unexpected end of line 
+| {\\\n(x) x} -> {     function(x) x } 
+| {\n\\\n(x) x} -> {     function(x) x } 
+| {;\\\n(x) x} -> {     function(x) x } 
+| {x\n\\\n(x) x} -> error: <text>:3:0: unexpected end of line 
+| {}\n\\\n(x) x -> error: <text>:3:0: unexpected end of line 
+| x <- \\\n(x) x -> x <- function(x) x 
+| x = \\\n(x) x -> x = function(x) x 
+| -\n\\\n\n(x) x -> -function(x) x 
+| repeat \\\n(x) x -> repeat function(x) x 
+| if (a) \\\n(x) x -> if (a) function(x) x 
+| if (a) b else \\\n(x) x -> if (a) b else function(x) x 
+| function(y)\n\\\n(x) x -> function(y) function(x) x 
+| \\(y) \\\n(x) x -> function(y) function(x) x 
+| f(\\\n(x) x) -> f(function(x) x) 
+| (\\\n(x) x) -> (function(x) x) 
+| function\n(x) x -> function(x) x 
+| a::\nb -> error: <text>:2:0: unexpected end of line 
+| a:::\nb -> error: <text>:2:0: unexpected end of line 
+| a:: # c\nb -> error: <text>:2:0: unexpected end of line 
+| (a::\nb) -> (a::b) 
+| {a::\nb} -> error: <text>:2:0: unexpected end of line 
+| a$\nb -> a$b 
+| a@\nb -> a@b 
+| a :: b -> a::b 
+| a:: -> error: <text>:2:0: unexpected end of line 
+| a:::   -> error: <text>:2:0: unexpected end of line 
+| x\na:: # c -> error: <text>:3:0: unexpected end of line 
+| x |> a:: -> error: <text>:2:0: unexpected end of line 
+| function(x) a:: -> error: <text>:2:0: unexpected end of line 
+| {a:: -> error: <text>:2:0: unexpected end of line 
+| ({a:: -> error: <text>:2:0: unexpected end of line 
+| (a:: -> error: <text>:2:0: unexpected end of input 
+| x[a:: -> error: <text>:2:0: unexpected end of input 
+| {(a:: -> error: <text>:2:0: unexpected end of input 
+| if (a:: -> error: <text>:2:0: unexpected end of input 
+| f(a::\n) -> error: <text>:2:1: unexpected ')' 
+| \\ -> error: <text>:2:0: unexpected end of line 
+| x; \\ -> error: <text>:2:0: unexpected end of line 
+| {x; \\ -> error: <text>:2:0: unexpected end of line 
+| {\\ -> error: <text>:2:0: unexpected end of input 
+| f(\\ -> error: <text>:2:0: unexpected end of input 
+| a$ -> error: <text>:2:0: unexpected end of input 
+| a@ -> error: <text>:2:0: unexpected end of input 
+| x + -> error: <text>:2:0: unexpected end of input 
+| .5.5 -> error: <text>:1:3: unexpected numeric constant 
+| ..5 -> ..5 
+| 1.1.1.1 -> error: <text>:1:4: unexpected numeric constant 
+| .5. -> error: <text>:1:3: unexpected symbol 
+| x <- .5.5e1 -> error: <text>:1:8: unexpected numeric constant 
+| 0x -> error: <text>:1:1: unexpected input 
+| 0X -> error: <text>:1:1: unexpected input 
+| 0xg -> error: <text>:1:1: unexpected input 
+| 0xp1 -> error: <text>:1:1: unexpected input 
+| 0x1..2 -> error: <text>:1:1: unexpected input 
+| 0x1.2.3 -> error: <text>:1:1: unexpected input 
+| 0x1.8p -> error: <text>:1:1: unexpected input 
+| 0x1p+ -> error: <text>:1:1: unexpected input 
+| 0x1pL -> error: <text>:1:1: unexpected input 
+| x <- 0x -> error: <text>:1:6: unexpected input 
+| 1 + 0x + 2 -> error: <text>:1:5: unexpected input 
+| 1e -> error: <text>:1:1: unexpected input 
+| 1e+ -> error: <text>:1:1: unexpected input 
+| 1ex -> error: <text>:1:1: unexpected input 
+| x <- 3e -> error: <text>:1:6: unexpected input 
+| f(1e-) -> error: <text>:1:3: unexpected input 
+| c(1E, 2) -> error: <text>:1:3: unexpected input 
+| 1.e -> error: <text>:1:1: unexpected input 
+| .5e -> error: <text>:1:1: unexpected input 
+| if (TRUE) 1else 2 -> error: <text>:1:11: unexpected input 
+| 1e5else -> error: <text>:1:4: unexpected 'else' 
+| 1e5.5 -> error: <text>:1:4: unexpected numeric constant 
+| 1.2.3 -> error: <text>:1:4: unexpected numeric constant 
+| 1..2 -> error: <text>:1:3: unexpected numeric constant 
+| 1 %foo -> error: <text>:1:3: unexpected input 
+| a § b -> error: <text>:1:3: unexpected input 
+| 1 + 😀 -> error: <text>:1:5: unexpected input 
+| x <- 1 \001 2 -> error: <text>:1:8: unexpected invalid token 
+| x \033 -> error: <text>:1:3: unexpected invalid token 
+| for (... in x) a -> for (... in x) a 
+| for (..1 in x) a -> for (..1 in x) a 
+| for (`a b` in x) a -> for (`a b` in x) a 
+| for ('a' in x) a -> error: <text>:1:6: unexpected string constant 
+| 1 2 [1] 9
+| x \\ -> error: <text>:1:3: unexpected '\\' 
+| 1 \\(x) x -> error: <text>:1:3: unexpected '\\' 
+| a ** ** b -> error: <text>:1:6: unexpected '^' 
+| x ** -> error: <text>:2:0: unexpected end of input 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

@@ -56,6 +56,8 @@ fn a_console_reads_on_only_when_the_input_ended_too_early() {
         "c(1,\n",
         "x <-\n",
         "x +\n",
+        "x$\n",
+        "f(a::\n",
         "if (TRUE) {\n  1\n",
         // A `#:` block annotates the line after it, so the console waits for that line.
         "#: fn(x: I64) -> I64\n",
@@ -68,6 +70,11 @@ fn a_console_reads_on_only_when_the_input_ended_too_early() {
         "{ x y\n",
         "f(1))\n",
         "{ f(1))\n",
+        // R skips no line break after `::` or after a `\` that starts a statement.
+        "a::\n",
+        "a::",
+        "{a::\n",
+        "x; \\\n",
         "#: fn(x: \nx <- 1\n",
         "",
         // A blank line detaches the block, a broken block is only a comment, a block that

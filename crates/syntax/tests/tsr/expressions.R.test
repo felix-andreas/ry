@@ -753,6 +753,7 @@ SOURCE_FILE@0..438
       WHITESPACE@436..437 " "
       LITERAL@437..438
         DOUBLE@437..438 "1"
+err: 428..429: expected `(` on the same line as `\`: R does not continue a lambda that starts a statement across a line break
 
 #---- relational
 a == b
@@ -2848,64 +2849,76 @@ SOURCE_FILE@0..243
   NEWLINE@120..121 "\n"
   COMMENT@121..146 "# `...` as the `variable`"
   NEWLINE@146..147 "\n"
-  FOR_EXPR@147..156
+  FOR_EXPR@147..181
     FOR_KW@147..150 "for"
     WHITESPACE@150..151 " "
     L_PAREN@151..152 "("
     NAME@152..155
       DOTS@152..155 "..."
     WHITESPACE@155..156 " "
-  ERROR@156..181
     IN_KW@156..158 "in"
     WHITESPACE@158..159 " "
-    DOUBLE@159..160 "1"
-    COLON@160..161 ":"
-    DOUBLE@161..162 "2"
+    BINARY_EXPR@159..162
+      LITERAL@159..160
+        DOUBLE@159..160 "1"
+      COLON@160..161 ":"
+      LITERAL@161..162
+        DOUBLE@161..162 "2"
     R_PAREN@162..163 ")"
     WHITESPACE@163..164 " "
-    IDENT@164..169 "print"
-    L_PAREN@169..170 "("
-    IDENT@170..173 "get"
-    L_PAREN@173..174 "("
-    STRING@174..179 "\"...\""
-    R_PAREN@179..180 ")"
-    R_PAREN@180..181 ")"
+    CALL_EXPR@164..181
+      NAME@164..169
+        IDENT@164..169 "print"
+      ARGUMENT_LIST@169..181
+        L_PAREN@169..170 "("
+        ARGUMENT@170..180
+          CALL_EXPR@170..180
+            NAME@170..173
+              IDENT@170..173 "get"
+            ARGUMENT_LIST@173..180
+              L_PAREN@173..174 "("
+              ARGUMENT@174..179
+                LITERAL@174..179
+                  STRING@174..179 "\"...\""
+              R_PAREN@179..180 ")"
+        R_PAREN@180..181 ")"
   NEWLINE@181..182 "\n"
   NEWLINE@182..183 "\n"
   COMMENT@183..208 "# `..i` as the `variable`"
   NEWLINE@208..209 "\n"
-  FOR_EXPR@209..218
+  FOR_EXPR@209..243
     FOR_KW@209..212 "for"
     WHITESPACE@212..213 " "
     L_PAREN@213..214 "("
     NAME@214..217
       DOTDOTI@214..217 "..1"
     WHITESPACE@217..218 " "
-  ERROR@218..243
     IN_KW@218..220 "in"
     WHITESPACE@220..221 " "
-    DOUBLE@221..222 "1"
-    COLON@222..223 ":"
-    DOUBLE@223..224 "2"
+    BINARY_EXPR@221..224
+      LITERAL@221..222
+        DOUBLE@221..222 "1"
+      COLON@222..223 ":"
+      LITERAL@223..224
+        DOUBLE@223..224 "2"
     R_PAREN@224..225 ")"
     WHITESPACE@225..226 " "
-    IDENT@226..231 "print"
-    L_PAREN@231..232 "("
-    IDENT@232..235 "get"
-    L_PAREN@235..236 "("
-    STRING@236..241 "\"..1\""
-    R_PAREN@241..242 ")"
-    R_PAREN@242..243 ")"
-err: 151..152: unclosed `(` in the `for` head; expected a matching `)`
-err: 152..155: expected a loop variable after `for (`, found `...`
-err: 152..155: expected `in` in the `for` head, found `...`
-err: 156..158: expected a body for the `for` loop
-err: 156..158: unexpected `in` after this expression; expected a newline or `;`
-err: 213..214: unclosed `(` in the `for` head; expected a matching `)`
-err: 214..217: expected a loop variable after `for (`, found `..N`
-err: 214..217: expected `in` in the `for` head, found `..N`
-err: 218..220: expected a body for the `for` loop
-err: 218..220: unexpected `in` after this expression; expected a newline or `;`
+    CALL_EXPR@226..243
+      NAME@226..231
+        IDENT@226..231 "print"
+      ARGUMENT_LIST@231..243
+        L_PAREN@231..232 "("
+        ARGUMENT@232..242
+          CALL_EXPR@232..242
+            NAME@232..235
+              IDENT@232..235 "get"
+            ARGUMENT_LIST@235..242
+              L_PAREN@235..236 "("
+              ARGUMENT@236..241
+                LITERAL@236..241
+                  STRING@236..241 "\"..1\""
+              R_PAREN@241..242 ")"
+        R_PAREN@242..243 ")"
 
 #---- for_no_body_ts_error
 for (i in 1:5)
@@ -3292,14 +3305,14 @@ foo::..1
 ..1::..1
 #++++
 SOURCE_FILE@0..80
-  NAMESPACE_EXPR@0..14
-    NAMESPACE_EXPR@0..9
-      NAME@0..3
-        IDENT@0..3 "foo"
-      COLON2@3..5 "::"
-      NEWLINE@5..6 "\n"
-      NAME@6..9
-        IDENT@6..9 "foo"
+  NAMESPACE_EXPR@0..5
+    NAME@0..3
+      IDENT@0..3 "foo"
+    COLON2@3..5 "::"
+  NEWLINE@5..6 "\n"
+  NAMESPACE_EXPR@6..14
+    NAME@6..9
+      IDENT@6..9 "foo"
     COLON2@9..11 "::"
     NAME@11..14
       IDENT@11..14 "bar"
@@ -3359,6 +3372,7 @@ SOURCE_FILE@0..80
     COLON2@75..77 "::"
     NAME@77..80
       DOTDOTI@77..80 "..1"
+err: 4..5: expected a name after `::`, found end of line
 
 #---- namespace_get_internal
 foo:::
@@ -3372,14 +3386,14 @@ foo:::..1
 ..1:::..1
 #++++
 SOURCE_FILE@0..89
-  NAMESPACE_EXPR@0..16
-    NAMESPACE_EXPR@0..10
-      NAME@0..3
-        IDENT@0..3 "foo"
-      COLON3@3..6 ":::"
-      NEWLINE@6..7 "\n"
-      NAME@7..10
-        IDENT@7..10 "foo"
+  NAMESPACE_EXPR@0..6
+    NAME@0..3
+      IDENT@0..3 "foo"
+    COLON3@3..6 ":::"
+  NEWLINE@6..7 "\n"
+  NAMESPACE_EXPR@7..16
+    NAME@7..10
+      IDENT@7..10 "foo"
     COLON3@10..13 ":::"
     NAME@13..16
       IDENT@13..16 "bar"
@@ -3439,6 +3453,7 @@ SOURCE_FILE@0..89
     COLON3@83..86 ":::"
     NAME@86..89
       DOTDOTI@86..89 "..1"
+err: 5..6: expected a name after `:::`, found end of line
 
 #---- namespace_with_missing_rhs
 # It's nice that `::` allows an optional RHS and enforces that it can only be a

@@ -1,17 +1,20 @@
 # tryCatch() and suppressWarnings() as the stack, handlers and exit code see them: the frames
 # sys.calls() and sys.function() show, the call a caught condition carries, handler order, finally
 # and on.exit on every way out, and the muffleWarning restart.
+# The frames below a top-level expression belong to whatever runs the case, so they are not
+# printed, and frame numbers count from the first frame above them.
+below <- (function() sys.nframe())() - 1L
 calls_here <- function() {
-  n <- sys.nframe() - 1L
+  n <- sys.nframe() - 1L - below
   calls <- character(n)
   formals_seen <- character(n)
   for (i in seq_len(n)) {
-    calls[[i]] <- paste(deparse(sys.call(i)), collapse = " ")
-    formals_seen[[i]] <- paste(names(formals(sys.function(i))), collapse = ",")
+    calls[[i]] <- paste(deparse(sys.call(below + i)), collapse = " ")
+    formals_seen[[i]] <- paste(names(formals(sys.function(below + i))), collapse = ",")
   }
   print(calls)
   print(formals_seen)
-  print(sys.parents()[seq_len(n)])
+  print(pmax(sys.parents()[below + seq_len(n)] - below, 0L))
 }
 restart_names <- function() vapply(computeRestarts(), function(r) paste(r[[1L]], collapse = ""), "")
 
@@ -25,11 +28,11 @@ inner <- function() calls_here()
 outer()
 
 frame_contents <- function() {
-  for (i in seq_len(sys.nframe() - 1L)) print(ls(sys.frame(i), all.names = TRUE))
-  print(identical(environment(sys.function(2)), sys.frame(1)))
-  print(identical(sys.frame(1)$parentenv, globalenv()))
-  print(sys.frame(1)$handlers)
-  print(sys.frame(2)$nh)
+  for (i in seq_len(sys.nframe() - 1L - below)) print(ls(sys.frame(below + i), all.names = TRUE))
+  print(identical(environment(sys.function(below + 2L)), sys.frame(below + 1L)))
+  print(identical(sys.frame(below + 1L)$parentenv, globalenv()))
+  print(sys.frame(below + 1L)$handlers)
+  print(sys.frame(below + 2L)$nh)
 }
 tryCatch(frame_contents(), error = function(e) "handler", finally = NULL)
 tryCatch(frame_contents(), error = function(e) "e", warning = function(w) "w", message = function(m) "m")
@@ -312,8 +315,8 @@ print(environment(rs[[2]]$handler)$description)
 print(environment(rs[[1]]$handler)$name)
 withRestarts(calls_here(), here = function() NULL)
 frame_names <- function() {
-  n <- sys.nframe() - 1L
-  lapply(seq_len(n), function(i) ls(sys.frame(i), all.names = TRUE))
+  n <- sys.nframe() - 1L - below
+  lapply(seq_len(n), function(i) ls(sys.frame(below + i), all.names = TRUE))
 }
 print(withRestarts(frame_names(), here = function() NULL))
 print(withRestarts(frame_names(), here = function() NULL, there = "described"))
