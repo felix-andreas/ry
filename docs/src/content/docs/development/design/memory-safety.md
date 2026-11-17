@@ -404,6 +404,66 @@ accessors test it per element. One rule came out of the measurement: a wrapper i
 value that has no attributes, the coercion of an argument that is already a character vector),
 the safe `nchar` ran 42 instructions per call longer than the raw one.
 
+The attribute builtins and their fast-path entries run a few hundred instructions per scalar
+call, so ten instructions show in a row of `just bench-mechanisms`. Their first safe forms ran
+`attr` 52% longer than the raw one, `names` 30%, `dim` 24% and `attr<-` 21%. Each cause was a
+shape, and changing the shape removed it:
+
+- **A fast-path entry takes no scope and roots nothing.** Its caller releases the handle stack,
+  so a scope of the entry's own is a second mark and release per call, and an answer that
+  borrows the context needs no push (see "Scopes, registers and unwinds").
+- **A wrapper called from a very large function is `#[inline(always)]`.** LLVM declines
+  `#[inline]` once the caller is large, and the call saves registers on every use
+  (`install_name_at`, `attributes_unshared`, the text buffer helpers).
+- **An attribute list is walked through an iterator over its cells** (`attribute_cells`). A walk
+  that first collects the cells builds a list its caller reads once.
+- **A rooted allocation has one out-of-line body with the allocator inlined into it**
+  (`Heap::alloc_vector_rooted` under `Cx::alloc`, `values::alloc` for raw code). Two layers each
+  save registers, 14 instructions per allocation.
+- **Text kept for the length of a call is copied to a stack buffer.** `Cow::into_owned` is a
+  `malloc` and a `free`, about 83 instructions per call of `sub`.
+
+With those rules, the forms on handles against the raw forms, in instructions per operation
+(`just bench-mechanisms`, tier 1 off): of 103 rows, 75 are within half a percent, 17 are lower and
+11 are higher. The rows that differ by 1% or more:
+
+| Operation | Raw | On handles | Change |
+| --- | ---: | ---: | ---: |
+| `levels(x) <- value` | 1,822 | 1,480 | -18.7% |
+| `class(x) <- value` | 1,455 | 1,333 | -8.4% |
+| `m[i, j] <- value` | 769 | 709 | -7.8% |
+| `substr` | 5,223 | 4,850 | -7.1% |
+| `names` | 241 | 225 | -6.6% |
+| `inherits` | 753 | 710 | -5.7% |
+| two matrix elements of an argument, copied | 2,685 | 2,570 | -4.3% |
+| the same, on 100 elements | 2,888 | 2,774 | -4.0% |
+| `dim(x) <- value` | 2,286 | 2,205 | -3.5% |
+| `startsWith` | 1,124 | 1,086 | -3.4% |
+| string element of a local vector | 582 | 566 | -2.7% |
+| `grepl`, fixed | 5,638 | 5,500 | -2.4% |
+| `attributes` | 1,034 | 1,009 | -2.4% |
+| `names(x) <- value` | 3,221 | 3,153 | -2.1% |
+| `regexpr` | 10,614 | 10,426 | -1.8% |
+| `oldClass(x) <- value` | 1,295 | 1,281 | -1.1% |
+| `nchar` | 1,614 | 1,636 | +1.4% |
+| `holder$value <- i` on an environment | 795 | 807 | +1.5% |
+| `dim` | 209 | 213 | +1.9% |
+| `attr` | 390 | 400 | +2.6% |
+
+The four higher rows, by cause:
+
+- **`attr`**: the entry and the lookup run 121 instructions where the raw pair ran 111. The
+  lookup matches the name through the cell iterator.
+- **`dim`**: the entry runs 27 instructions where the raw one ran 23.
+- **`nchar`**: the builtin is on handles on both sides, and the difference is the allocation.
+  Its result comes from the rooted allocation body, 95 instructions, where `Cx::alloc` with the
+  root pushed inline called the allocator, 79. The rule that helps a builtin with several
+  allocations costs one with a single allocation about ten instructions.
+- **`holder$value <- i`**: the store function executes ten more register moves and spills. It is
+  11 kB of machine code with every store kind inlined, and the allocation of its registers
+  changes with unrelated code. Moving the fallback to the replacement builtin out of line made
+  the row six instructions longer, because the split passes the operands again.
+
 Each migration change measures its builtins the same way before the raw form is deleted, and a
 change that reaches the call path or the bytecode loop reports `just bench-mechanisms` and tier
 1's instruction counts (`test_tiers`) before and after. A regression is fixed by changing the API
@@ -458,6 +518,15 @@ builtin table holds, and each value helper a safe builtin calls has a safe form 
 the raw one and says why the handle types make the call sound. The wrappers are where a migrated
 function meets an unmigrated one, so that boundary is visible and counted, and a wrapper
 disappears when the helper under it is migrated.
+
+Written against the handle types: tier 0's element and matrix stores; the attribute readers and
+setters with their fast-path entries (`attr`, `attributes`, `names`, `dim`, `dimnames`, `class`,
+`oldClass`, `levels<-`, `comment`, `length<-`, `inherits`, `unclass` and the replacement forms);
+`strings.rs` except `paste`, `paste0`, `sprintf`, `strsplit` and `make.unique`; and the bit
+conversions in `arith.rs`. Three pieces of the API are not built: the bytecode loop's register
+accessor, `Held<T>` fields in traced structures, and a bulk fill for a new list or character
+vector, which the five string builtins above wait for because a store per element pays a count
+and a barrier each.
 
 The order:
 
