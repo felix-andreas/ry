@@ -1179,7 +1179,7 @@ check_ <- function(label, reference, value) cat(label, if (identical(reference, 
 "#;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Kind {
+pub(crate) enum Kind {
     Logical,
     Integer,
     Double,
@@ -1200,8 +1200,8 @@ enum Shape {
 }
 
 /// An R expression that builds a value, and what a body needs to know to index it.
-struct Value {
-    text: String,
+pub(crate) struct Value {
+    pub(crate) text: String,
     kind: Kind,
     shape: Shape,
     /// Elements of a vector, matrix or array; columns of a data frame.
@@ -1313,11 +1313,11 @@ const LIST_ITEMS: [&str; 10] = [
     "sum",
 ];
 
-struct Zoo {
-    rng: SplitMix64,
-    features: Features,
+pub(crate) struct Zoo {
+    pub(crate) rng: SplitMix64,
+    pub(crate) features: Features,
     /// No value is longer than this.
-    longest: usize,
+    pub(crate) longest: usize,
 }
 
 impl Zoo {
@@ -1351,7 +1351,7 @@ impl Zoo {
         length.min(self.longest)
     }
 
-    fn kind(&mut self) -> Kind {
+    pub(crate) fn kind(&mut self) -> Kind {
         const KINDS: [(Feature, Kind); 7] = [
             (Feature::Logical, Kind::Logical),
             (Feature::Integer, Kind::Integer),
@@ -1370,7 +1370,7 @@ impl Zoo {
     }
 
     /// One element of `kind`, as an R expression of length one.
-    fn element(&mut self, kind: Kind) -> &'static str {
+    pub(crate) fn element(&mut self, kind: Kind) -> &'static str {
         let special = self.has(Feature::SpecialNumbers) && self.rng.chance(1, 3);
         match kind {
             Kind::Logical => self.pick(&LOGICALS),
@@ -1385,7 +1385,7 @@ impl Zoo {
         }
     }
 
-    fn string(&mut self) -> &'static str {
+    pub(crate) fn string(&mut self) -> &'static str {
         match self.rng.below(8) {
             0 | 1 if self.has(Feature::NonAscii) => self.pick(&NON_ASCII_STRINGS),
             2 if self.has(Feature::OtherEncodings) => self.pick(&OTHER_ENCODING_STRINGS),
@@ -1394,7 +1394,7 @@ impl Zoo {
         }
     }
 
-    fn name(&mut self) -> &'static str {
+    pub(crate) fn name(&mut self) -> &'static str {
         if self.has(Feature::NonAscii) && self.rng.chance(1, 2) {
             self.pick(&NON_ASCII_NAMES)
         } else {
@@ -1696,7 +1696,7 @@ impl Zoo {
         }
     }
 
-    fn value(&mut self) -> Value {
+    pub(crate) fn value(&mut self) -> Value {
         let mut shapes = vec![Shape::Vector, Shape::Vector, Shape::Vector];
         for (feature, shape) in [
             (Feature::Matrix, Shape::Matrix),
