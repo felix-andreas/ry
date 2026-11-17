@@ -189,7 +189,7 @@ use {
         Heap, HeapResult,
         object::{Rcomplex, Sexp, SexpType},
     },
-    std::{marker::PhantomData, ptr::NonNull},
+    std::{marker::PhantomData, mem::MaybeUninit, ptr::NonNull},
 };
 
 /// The permission to use the heap, under the handle scope `'s`.
@@ -275,6 +275,24 @@ impl<'s> Cx<'s> {
         // negative one, which the heap refuses.
         let raw = unsafe { heap.alloc_vector_rooted(T::TYPE, length as isize)? };
         Ok(Fresh {
+            raw,
+            scope: PhantomData,
+            kind: PhantomData,
+        })
+    }
+
+    /// A new vector of `length` elements for one fill that writes every element: a number
+    /// vector skips the zeroing [`Cx::alloc`] does.
+    #[inline]
+    pub fn alloc_unfilled<T: Vector>(&mut self, length: usize) -> HeapResult<Unfilled<'s, T>> {
+        // SAFETY: the heap is live, and `&mut self` means no slice or unrooted value is alive.
+        let heap = unsafe { &mut *self.heap.as_ptr() };
+        // SAFETY: `T::TYPE` is a vector type. Its elements are written before anything reads
+        // them, by `Unfilled::fill`, the only way to the vector; a list or string vector is
+        // filled with `NULL` or the empty string as `alloc_vector` fills it.
+        let raw = unsafe { heap.alloc_vector_uninit(T::TYPE, length)? };
+        heap.root(raw);
+        Ok(Unfilled {
             raw,
             scope: PhantomData,
             kind: PhantomData,
@@ -485,6 +503,31 @@ impl<'a> Gc<'a, Pairlist> {
     #[inline]
     pub fn rest(self) -> Gc<'a> {
         // SAFETY: as for `head`.
+        unsafe { Gc::adopt(self.raw.cdr()) }
+    }
+}
+
+impl<'a> Gc<'a, Language> {
+    /// The function position of the call.
+    #[inline]
+    pub fn head(self) -> Gc<'a> {
+        // SAFETY: the cell is live for `'a` and keeps its fields alive.
+        unsafe { Gc::adopt(self.raw.car()) }
+    }
+
+    /// The call's arguments: a pairlist, or `NULL`.
+    #[inline]
+    pub fn rest(self) -> Gc<'a> {
+        // SAFETY: as for `head`.
+        unsafe { Gc::adopt(self.raw.cdr()) }
+    }
+}
+
+impl<'a> Gc<'a, Promise> {
+    /// The expression the promise evaluates.
+    #[inline]
+    pub fn code(self) -> Gc<'a> {
+        // SAFETY: the promise is live for `'a` and keeps its expression alive.
         unsafe { Gc::adopt(self.raw.cdr()) }
     }
 }
@@ -755,6 +798,69 @@ impl<T: Elements> Fresh<'_, T> {
         // SAFETY: the heap is live, the index is in bounds, the vector is a standard one, and
         // the value is a live object of the element kind. A store frees nothing.
         unsafe { (*cx.heap.as_ptr()).set_element(self.raw, index, value.raw()) }
+    }
+}
+
+/// A new vector whose elements are still to be written, from [`Cx::alloc_unfilled`]. It holds
+/// no borrow of the context, so the elements may come from slices the context lends after the
+/// allocation, and its one fill writes them in a single pass.
+pub struct Unfilled<'s, T: Vector> {
+    raw: Sexp,
+    scope: Brand<'s>,
+    kind: PhantomData<T>,
+}
+
+impl<'s, T: Atomic> Unfilled<'s, T> {
+    /// The vector with `elements` in order, and zeros after them when they run out.
+    #[inline(always)]
+    pub fn fill(self, elements: impl Iterator<Item = T::Element>) -> Fresh<'s, T> {
+        // SAFETY: the vector is a standard one of `T` that only `self` reaches, with room for
+        // `length` elements, and any bit pattern written as `MaybeUninit` is a valid slot.
+        let slots = unsafe {
+            std::slice::from_raw_parts_mut(
+                self.raw.data() as *mut MaybeUninit<T::Element>,
+                self.raw.length() as usize,
+            )
+        };
+        let mut slots = slots.iter_mut();
+        for (element, slot) in elements.zip(slots.by_ref()) {
+            slot.write(element);
+        }
+        let rest = slots.into_slice();
+        // SAFETY: zero bytes are a valid number of every atomic element type.
+        unsafe { std::ptr::write_bytes(rest.as_mut_ptr(), 0, rest.len()) };
+        Fresh {
+            raw: self.raw,
+            scope: PhantomData,
+            kind: PhantomData,
+        }
+    }
+}
+
+impl<'s, T: Elements> Unfilled<'s, T> {
+    /// The vector with `elements` in order, and the type's fill (`NULL` or the empty string)
+    /// after them. The slots are written directly and counted as references once afterwards,
+    /// which costs a list or string vector one pass instead of a barrier per element.
+    #[inline(always)]
+    pub fn fill_elements<'a>(
+        self,
+        cx: &'a Cx<'_>,
+        elements: impl Iterator<Item = Gc<'a, T::Element>>,
+    ) -> Fresh<'s, T> {
+        // SAFETY: the vector is a standard one of `T` that only `self` reaches, so no slice of
+        // it is alive, and each element is a live object of the element kind. Every slot held
+        // the uncounted fill `alloc_vector` writes, which `count_written_elements` requires.
+        unsafe {
+            for (slot, element) in self.raw.slice_mut::<Sexp>().iter_mut().zip(elements) {
+                *slot = element.raw();
+            }
+            (*cx.heap.as_ptr()).count_written_elements(self.raw);
+        }
+        Fresh {
+            raw: self.raw,
+            scope: PhantomData,
+            kind: PhantomData,
+        }
     }
 }
 
@@ -1058,6 +1164,8 @@ kinds! {
     Real = Real, |altrep| !altrep;
     Complex = Complex, |altrep| !altrep;
     Raw = Raw, |altrep| !altrep;
+    /// A vector of 64-bit integers.
+    I64 = I64, |altrep| !altrep;
     /// A character vector.
     Str = String, |altrep| !altrep;
     List = List, |altrep| !altrep;
@@ -1100,6 +1208,7 @@ vectors! {
     Real: Atomic<f64>;
     Complex: Atomic<Rcomplex>;
     Raw: Atomic<u8>;
+    I64: Atomic<i64>;
     List: Elements<Value>;
     Expression: Elements<Value>;
 }
