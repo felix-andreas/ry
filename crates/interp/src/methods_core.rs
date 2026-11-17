@@ -5824,7 +5824,10 @@ unsafe fn default_where(frame: Sexp, promise: Sexp) -> R<Option<Sexp>> {
     let Some(position) = frames.iter().rposition(|record| record.owns(frame)) else {
         return Ok(None);
     };
-    let caller = crate::eval::frame_sys_parent(position, crate::eval::Reify::Site("S4 dispatch"))?;
+    let caller = crate::eval::frame_sys_parent(
+        position,
+        crate::eval::Reify::Site(crate::eval::Site::S4Dispatch),
+    )?;
     let target = crate::envir::get_option("topLevelEnvironment");
     Ok(Some(crate::envir::top_env(caller, target)))
 }

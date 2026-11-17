@@ -12,7 +12,7 @@ use {
     syntax::{
         SyntaxElement,
         SyntaxKind::{self, *},
-        SyntaxNode, SyntaxToken, TextRange, TextSize, parse,
+        SyntaxNode, SyntaxToken, TextRange, TextSize, WalkEvent, parse,
     },
 };
 
@@ -581,6 +581,16 @@ pub fn check_format_invariants(input: &str) {
             significant_tokens(input),
             significant_tokens(&output),
             "formatting changed the code for input {input:?} (output {output:?})"
+        );
+        assert_eq!(
+            tree_shape(input),
+            tree_shape(&output),
+            "formatting changed how the code parses for input {input:?} (output {output:?})"
+        );
+        assert_eq!(
+            comments(input),
+            comments(&output),
+            "formatting changed the comments for input {input:?} (output {output:?})"
         );
         match format(&output, Config::default()) {
             Ok(second) => assert_eq!(second, output, "format not idempotent for input {input:?}"),
@@ -2595,6 +2605,37 @@ fn significant_tokens(text: &str) -> Vec<(SyntaxKind, String)> {
             let kind = token.kind();
             (kind, comparable_spelling(kind, token.text()).to_owned())
         })
+        .collect()
+}
+
+/// The nodes of the parsed tree with their depths, in source order. The same tokens parse to
+/// another tree when a line break moves, as `a\n+ b` is two statements and `a +\nb` one. A
+/// block counts as its contents, because braces may be added.
+fn tree_shape(text: &str) -> Vec<(usize, SyntaxKind)> {
+    let mut shape = Vec::new();
+    let mut depth = 0usize;
+    for event in parse(text).syntax_node().preorder() {
+        match event {
+            WalkEvent::Enter(node) if node.kind() != BRACE_EXPR => {
+                shape.push((depth, node.kind()));
+                depth += 1;
+            }
+            WalkEvent::Leave(node) if node.kind() != BRACE_EXPR => depth -= 1,
+            _ => {}
+        }
+    }
+    shape
+}
+
+/// Every comment in source order, without its blanks, since the formatter puts one after the
+/// `#` and drops those at the end.
+fn comments(text: &str) -> Vec<String> {
+    parse(text)
+        .syntax_node()
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .filter(|token| token.kind() == COMMENT)
+        .map(|token| token.text().split_whitespace().collect())
         .collect()
 }
 

@@ -165,12 +165,9 @@ pub struct Frame {
     /// something reads that variable through it ([`heap::object::gp::PARTIAL_FRAME`], from when
     /// it is [`Frame::env`] too), and takes them all if it outlives the frame.
     pub pending: Sexp,
-    /// A frame [`crate::eval::run_inlined`] runs without the closure's body, as for `do.call`:
-    /// its slots hold the values of arguments that the generic path would have bound as
-    /// promises, so a variable that moves into a binding cell is wrapped as one.
-    pub inlined: bool,
-    /// The [`heap::activity::label`] of what last asked for the slot frame's environment, while
-    /// a profile summary is collected; [`NOT_REIFIED`] otherwise.
+    pub role: FrameRole,
+    /// The number of what last asked for the slot frame's environment ([`eval::Site`]), while a
+    /// profile summary is collected; [`NOT_REIFIED`] otherwise.
     pub reified_by: u32,
     /// Where the call's arguments (values or promises, with the tags the call gave them) start
     /// in [`Interp::frame_args`]; they run up to the next frame's start. `sys.function`'s
@@ -394,6 +391,21 @@ impl<'a> IntoIterator for &'a mut FrameStack {
 /// [`Frame::slots`] of a frame that keeps its variables in an environment.
 pub const NO_SLOTS: u32 = u32::MAX;
 
+/// What a [`Frame`] stands for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FrameRole {
+    /// A closure call that runs the closure's body.
+    Call,
+    /// A closure call [`crate::eval::run_inlined`] runs without the closure's body, as for
+    /// `do.call`: its slots hold the values of arguments that the generic path would have bound
+    /// as promises, so a variable that moves into a binding cell is wrapped as one.
+    Inlined,
+    /// The context of a builtin's own call, which `sys.call()` shows and no closure runs in:
+    /// `eval`'s, which holds the builtin, and an internal dispatch's, which holds the method
+    /// whose own frame follows.
+    Context,
+}
+
 /// [`Frame::reified_by`] of a frame nothing asked the environment of.
 pub const NOT_REIFIED: u32 = u32::MAX;
 
@@ -459,7 +471,11 @@ pub fn forget_pending_closures(state: &mut Interp, depth: usize) {
 }
 
 /// Keeps the first `depth` frames and drops the rest with their arguments.
+#[inline]
 pub fn truncate_frames(state: &mut Interp, depth: usize) {
+    if activity::sample_ticked() {
+        resolve_samples_before_truncating(state);
+    }
     if let Some(frame) = state.frames.get(depth) {
         state.frame_args.truncate(frame.args as usize);
         state.method_vars.truncate(frame.method_vars as usize);
@@ -476,6 +492,16 @@ pub fn truncate_frames(state: &mut Interp, depth: usize) {
         // through `interp()`, and it is not used after this call.
         unsafe { eval::release_references(0) };
     }
+}
+
+/// Files the profile summary's waiting samples under the frames as they stand, before any is
+/// dropped.
+#[cold]
+#[inline(never)]
+fn resolve_samples_before_truncating(state: &Interp) {
+    // SAFETY: `state` is the interpreter's own state, which the reader reaches through
+    // `interp()`, and every frame it reads is live until the caller truncates.
+    unsafe { profile_summary::resolve_samples(state.frames.len()) };
 }
 
 /// A call that creates more closures than this, such as a loop of `lapply(x, function(i) ...)`,

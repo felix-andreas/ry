@@ -527,11 +527,17 @@ Rust frame, matches nothing, and allocates nothing unless the argument reference
   A closure whose body is one builtin call, such as rlang's
   `node_car <- function(x) { .Call(ffi_node_car, x) }`, is an ordinary callee: its arguments
   arrive as references, and the builtin forces the ones it reads.
-- **What leaves the path.** A debugger, a profile, a tracked move or a refused object system
-  (`activity::hooks`), a closure flagged for debugging, stepping or tracing, a closure with a
-  native entry, the namespace loader, `do.call`, a full frame stack or register file, and a
-  site's first calls, before its plan is stored and prepared. A site that met `PLAN_MISSES`
-  closures it could not plan for stays on the generic path for good.
+- **What leaves the path.** A debugger, an `Rprof` sample that is due, the boundary-call recorder, a
+  tracked move or a refused object system (`activity::hooks`), a closure flagged for debugging,
+  stepping or tracing, a closure with a native entry, the namespace loader, `do.call`, a full
+  frame stack or register file, and a site's first calls, before its plan is stored and
+  prepared. A site that met `PLAN_MISSES` closures it could not plan for stays on the generic
+  path for good.
+- **Under a profile summary.** The call handler tests the hook flags before anything else and
+  leaves for a second handler when one is set. Under a summary alone that handler runs the same
+  path compiled with the summary's counts (`call_summarized`, `leave_summarized`): the closure
+  call, the package call and the body's entry. A summarized run therefore binds, runs and
+  returns a call exactly as an unsummarized run does.
 - **Return.** `return_fast` takes the return of a frame whose code is still on its slots, with
   no `on.exit` code and nothing observing calls. When the frame handed out an environment while
   its code stayed on the slots (a callee asked for its parent frame, or a promise or a closure
@@ -567,8 +573,9 @@ are pinned by `crates/ry/tests/scenarios/slot-frames.scenario` and `slot-promise
 
 `--profile-summary` reports, under "Package calls", how many calls into package code skipped the
 generic call protocol and why each of the rest did not. `frame_env` records what asked
-(`eval::Reify`: the builtin, or a named site such as `"function definition"` or
-`"method dispatch"`) in `Frame.reified_by`, and the frame's pop classifies the call:
+(`eval::Reify`: the builtin, or a site such as `Site::FunctionDefinition` or
+`Site::MethodDispatch`) as a number in `Frame.reified_by`, the frame's pop classifies the call,
+and the report turns each number into the reason's name:
 
 | Class | Meaning |
 |---|---|

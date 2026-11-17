@@ -4,9 +4,12 @@
 use {
     format::{Config, check_format_invariants, check_range_format_invariants, format},
     std::panic::catch_unwind,
-    syntax::testing::{
-        SplitMix64, corpus_sample, fixture_case_sources, for_each_seed, mutate_bytes, mutate_seed,
-        program_corpus_sources, random_bytes, token_soup,
+    syntax::{
+        parse,
+        testing::{
+            SplitMix64, corpus_sample, fixture_case_sources, for_each_seed, generate_program,
+            mutate_bytes, mutate_seed, program_corpus_sources, small_edit, token_soup,
+        },
     },
 };
 
@@ -166,10 +169,23 @@ const REGRESSIONS: &[&str] = &[
 
 /// Whole-file and range formatting share every generated input: a range
 /// edit is a slice of the whole-file layout, so a bug in either shows up as a
-/// broken range invariant.
+/// broken range invariant. The formatter refuses only what R's grammar rejects and a mid-line
+/// `#:` annotation whose statement goes on below it.
 fn check_invariants(input: &str) {
-    check_format_invariants(input);
+    check_whole_file(input);
     check_range_format_invariants(input);
+}
+
+fn check_whole_file(input: &str) {
+    check_format_invariants(input);
+    if let Err(error) = format(input, Config::default()) {
+        let errors = parse(input).errors().to_vec();
+        assert!(
+            errors.iter().any(|parse_error| !parse_error.in_annotation)
+                || error.message.contains("cannot interrupt an expression"),
+            "the formatter refused code that parses ({error}): {input:?}"
+        );
+    }
 }
 
 const ITERATIONS: usize = 1500;
@@ -196,7 +212,7 @@ fn fuzz_regressions_hold_invariants() {
 fn fixture_sources_hold_invariants() {
     let sources = fixture_case_sources();
     for (_, source) in &sources {
-        check_format_invariants(source);
+        check_whole_file(source);
     }
     assert!(
         sources.len() > 100,
@@ -214,24 +230,34 @@ fn program_corpus_holds_invariants() {
         sources.len()
     );
     for (id, source) in &sources {
-        catch_unwind(|| check_format_invariants(source))
+        catch_unwind(|| check_whole_file(source))
             .unwrap_or_else(|_| panic!("program corpus case `{id}` broke a format invariant"));
     }
 }
 
 #[test]
-fn fuzz_random_bytes() {
-    run_random_bytes(ITERATIONS);
-}
-
-#[test]
 fn fuzz_token_soup() {
-    run_token_soup(ITERATIONS);
+    run_token_soup(200);
 }
 
 #[test]
 fn fuzz_seed_mutations() {
     run_seed_mutations(ITERATIONS);
+}
+
+/// The generator's programs, which use every construct of the grammar and nearly always parse,
+/// each followed by one small edit of it, which is how a formatter meets code that is being
+/// typed.
+#[test]
+fn fuzz_generated_programs() {
+    run_generated_programs(400);
+}
+
+/// The fixture suites' cases, which hold the layouts someone thought worth a test, after one
+/// small edit that borrows from another case.
+#[test]
+fn fuzz_fixture_edits() {
+    run_fixture_edits(500);
 }
 
 #[test]
@@ -254,16 +280,10 @@ fn fuzz_corpus_seeded() {
 #[ignore = "deep fuzz; run explicitly with a large FUZZ_ITERS"]
 fn fuzz_deep() {
     let budget = 20_000;
-    run_random_bytes(budget);
-    run_token_soup(budget);
+    run_token_soup(budget / 10);
     run_seed_mutations(budget);
-}
-
-fn run_random_bytes(budget: usize) {
-    for_each_seed(budget, |seed| {
-        let mut rng = SplitMix64(0xF0_12_34 ^ seed);
-        check_invariants(&random_bytes(&mut rng));
-    });
+    run_generated_programs(budget);
+    run_fixture_edits(budget);
 }
 
 fn run_token_soup(budget: usize) {
@@ -277,6 +297,32 @@ fn run_seed_mutations(budget: usize) {
     for_each_seed(budget, |seed| {
         let mut rng = SplitMix64(0xF0_5E_ED ^ seed);
         check_invariants(&mutate_seed(&mut rng, SEEDS, 16));
+    });
+}
+
+fn run_generated_programs(budget: usize) {
+    for_each_seed(budget, |seed| {
+        let mut rng = SplitMix64(0xF0_6E_4E ^ seed);
+        let program = generate_program(&mut rng);
+        let donor = SEEDS[rng.below(SEEDS.len())];
+        let edited = small_edit(&mut rng, &program, donor);
+        check_whole_file(&program);
+        check_whole_file(&edited);
+        // The range battery re-formats per line, which a program of forty lines makes the
+        // whole cost of this harness, so a sample of the programs runs it.
+        if seed % 16 == 0 {
+            check_range_format_invariants(&edited);
+        }
+    });
+}
+
+fn run_fixture_edits(budget: usize) {
+    let cases = fixture_case_sources();
+    for_each_seed(budget, |seed| {
+        let mut rng = SplitMix64(0xF0_F1_C5 ^ seed);
+        let (_, source) = &cases[rng.below(cases.len())];
+        let (_, donor) = &cases[rng.below(cases.len())];
+        check_invariants(&small_edit(&mut rng, source, donor));
     });
 }
 

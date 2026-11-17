@@ -236,7 +236,7 @@ impl Evaluator for Interpreter {
             0 => Ok(runtime().heap.known().global_env),
             count => Ok(interp::eval::frame_env(
                 count - 1,
-                interp::eval::Reify::Site("native code"),
+                interp::eval::Reify::Site(interp::eval::Site::NativeCode),
             )?),
         }
     }
