@@ -100,19 +100,20 @@ reached from native code (`Rf_eval` inside `.Call`) therefore makes its own `Cx`
 second `&mut` to the same memory, and the caller, which lent its `&mut Cx` to the native call,
 holds no unrooted value or slice across it.
 
-### Four pointers
+### Five pointers
 
-All four are one machine word, the same word a `SEXP` is, because the heap does not move objects.
+All five are one machine word, the same word a `SEXP` is, because the heap does not move objects.
 
 | Type | Meaning | Made by | Lives until |
 | --- | --- | --- | --- |
 | `Gc<'a, T>` | read from the heap, not rooted | a load through `&'a Cx` | the next safepoint: it borrows the context |
 | `Local<'s, T>` | rooted in scope `'s` | `cx.root(gc)`, every constructor, every argument, every register operand | the scope ends |
 | `Fresh<'s, T>` | a new object nothing else can see | `cx.alloc::<T>(n)`, `handles::duplicate` | `finish()` turns it into a `Local` |
-| `Write<'a, 's, T>` | exclusive access to an existing object | the interpreter's ownership checks | it borrows the context mutably |
+| `Owned<'s, T>` | an object nothing else refers to | `fresh.owned()`, or the interpreter's ownership checks | `finish()` turns it into a `Local` |
+| `Write<'a, 's, T>` | exclusive access to an owned vector's elements | `owned.write(cx)` | it borrows the context and the `Owned` mutably |
 
-`Gc` and `Local` are `Copy`. `Fresh` and `Write` are not: each is the only way to reach its object
-while it lives, which is what makes writing through it safe.
+`Gc` and `Local` are `Copy`. `Fresh`, `Owned` and `Write` are not: each is the only way to reach
+its object while it lives, which is what makes writing through it safe.
 
 Holding an unrooted value across a safepoint does not compile:
 
@@ -183,9 +184,9 @@ With the typed forms that store has no spelling. A `Local<Value>` has no element
 The two ways from it to a mutable slice both refuse a wrapper:
 
 - `downcast::<Real>()` returns `None` for an ALTREP object, so there is no `Local<Real>` to hand
-  to an ownership check, and `Cx::assume_exclusive` accepts only vector kinds.
+  to an ownership check, and `Owned::write` exists only for vector kinds.
 - `dense::<Real>` returns the standard vector the wrapper shares, as a `Local<Real>`, which reads
-  but does not write. Writing needs a `Write`, and the ownership check fails because the wrapper
+  but does not write. Writing needs an `Owned`, and the ownership check fails because the wrapper
   holds a reference to that vector, so the caller takes `handles::shallow_duplicate`, the owning copy.
 
 The attribute setters accept any `Local<Value>`, so a caller that only changes attributes keeps
@@ -197,7 +198,7 @@ the cheap copy.
 | --- | --- | --- |
 | Fill a new atomic vector | `fresh.as_mut_slice()` | `Fresh` is the only pointer and takes `&mut self`. No context is needed, because the object holds no pointers |
 | Fill a new list, string vector or pairlist | `fresh.set(cx, i, value)` with `&Cx` | the store runs the barrier and the count inside `heap`. A safepoint between two stores can promote the object, and the barrier covers that. There is no `&mut [Gc]` to fill without it |
-| Change an existing object in place | `write.split()`, or `write.split_elements()` for a list | `Write` holds `&mut Cx`, so no slice taken earlier is alive, no R code runs, and nothing can share the object meanwhile |
+| Change an existing object in place | `owned.write(cx)`, then `write.split()`, or `write.split_elements()` for a list | `Owned` says nothing else refers to the object, and `Write` holds `&mut Cx`, so no slice taken earlier is alive, no R code runs, and nothing can share the object meanwhile |
 | Store into an object with reference semantics | `cx.define(env, sym, value)` (`&mut Cx`), promise and external-pointer fields (`&Cx`) | the barrier and the count run inside `heap` |
 
 A store is not a safepoint: a count that drops to zero is only noted, and the object is freed at
@@ -216,11 +217,28 @@ through `&Cx` never invalidates a borrowed slice.
 
 **In-place modification.** Whether an object may be changed in place is a fact about the
 interpreter: its count is one, and no register, handle or escaped list holds it uncounted
-(`slot_owns`, a call's `reusable` test). The functions that establish that fact live in `interp`
-and are the only callers of `Cx::assume_exclusive`, an `unsafe` constructor that returns the
-`Write`. Because a `Write` borrows the context mutably, the fact cannot go stale: no R code runs
-between the check and the write. When the check fails, the caller duplicates (`handles::duplicate`
-returns a `Fresh`, never an ALTREP wrapper), stores the copy in the variable and checks again.
+(`slot_owns`, a call's `reusable` test). That fact is a value, `Owned<'s, T>`. It has two sources.
+A new vector is owned by construction (`fresh.owned()`). An existing one is owned when the code
+that holds its variable has tested the counts, and that test ends in `Owned::assume`, the one
+`unsafe` constructor. A store asks its caller for the claim and copies when there is none:
+
+```rust
+let owned = claim(vector.value());                       // Option<Owned>: the holder's test
+let mut vector = handles::writable(cx, vector, owned)?;  // the vector itself, or a Fresh copy
+vector.write(cx).split().0[position] = item;
+Ok(vector.finish())                                      // the value the variable holds afterwards
+```
+
+`handles::writable` returns the owned vector, or `handles::shallow_duplicate(..).owned()` when the
+claim is `None`. No path leads from a shared vector to a write, and none from the attribute copy
+either, because that copy is a `Local<Value>` and never an `Owned`. A `Write` borrows the context
+mutably, so the fact cannot go stale: no R code runs between the claim and the write.
+
+Tier 0's element stores (`x[i] <- v`, `x[[i]] <- v`, `x$name <- v`, `m[i, j] <- v` in
+`bytecode.rs`) are written this way. The raw entry the bytecode loop calls adopts its operands and
+passes the ownership test as a closure. The store itself (`store_element`, `store_matrix_element`)
+is safe code that is generic over the vector kind, so the same lines serve doubles, integers,
+logicals, strings and lists.
 
 `write.split()` gives an atomic vector's element storage and a `reader` for the sources. The
 reader compares storage addresses and returns `None` for a source that shares the target's
@@ -230,7 +248,7 @@ slice itself, so `x[i] <- x[j]` is `elements.copy_within(..)`. For a list,
 same object may be read and written.
 
 ```rust
-let mut write = own_slot(cx, state, slot)?;       // interp: the ownership check
+let mut write = owned.write(cx);
 let (elements, reader) = write.split();
 match reader.slice(value) {
     Some(source) => elements[position] = source[0],
@@ -327,7 +345,7 @@ its fields.
 | `heap` | the object layout, the allocator, the collector, and the handle types themselves | the crate |
 | `libr` C entry points | a `SEXP` from C carries no proof; each entry makes a `Cx` and adopts its arguments | one block per entry point |
 | Helpers called from JIT and typed code | generated code passes raw words | one block per helper |
-| Ownership checks | they assert the fact `Write` rests on | the few functions that call `assume_exclusive` |
+| Ownership checks | they assert the fact `Owned` rests on | the few functions that call `Owned::assume` |
 | The bytecode loop's registers | operand adoption, the raw register pointers an activation keeps, and unchecked indexing only if bounds checks measure above noise | one accessor module |
 | Calling a native routine, operating-system calls | foreign code | an allowlist of files in `interp` |
 | `unsafe impl Trace` | the collector trusts it | one per structure that holds values |
@@ -401,7 +419,7 @@ between it and the object, and native code needs the object's address.
 | Rule | Why not | Caught by |
 | --- | --- | --- |
 | Each `unsafe impl Trace` marks every field | a missed field is an unrooted value in the interpreter's state | seeded stress with verification over the oracle cases, each run twice in one process |
-| An ownership check is right before it calls `assume_exclusive` | the fact depends on counts, registers and frames | the replacement contract in `interp` `test_fuzz`, `assignment__dollar_in_place` and its siblings |
+| An ownership check is right before it calls `Owned::assume` | the fact depends on counts, registers and frames | the replacement contract in `interp` `test_fuzz`, `assignment__dollar_in_place` and its siblings |
 | An expression register is written only by its own activation | a property of the bytecode the compiler emits | the tier differential, seeded stress |
 | Native code keeps the C API's rules | foreign code can do anything | `libr` `test_fuzz_native` for ry's side of the boundary; nothing checks a package's C code |
 | A `libr` entry point adopts what C gave it correctly | C can pass anything | `libr` `test_fuzz_native`, the `PROTECT` balance check |
@@ -424,8 +442,10 @@ disappears when the helper under it is migrated.
 
 The order:
 
-1. `interp` leaf builtins (strings, numbers, sorting, arithmetic kernels), then `values.rs`, then
-   subsetting and assignment, then the evaluator and the bytecode loop.
+1. `interp`, by risk and not by ease: the paths that keep a value across an allocation or write
+   in place go first (tier 0's stores, the replacement and attribute builtins, name matching,
+   string encoding), then `values.rs`, the evaluator and the bytecode loop, and the leaf builtins
+   last, because a leaf rarely holds a value across a safepoint.
 2. `stats`, `graphics`, `frames`.
 3. `libr`, `jit`, `typed`: entry points make a `Cx`; raw access leaves their bodies.
 4. `heap` stops exporting the raw accessors outside a `raw` module that only the boundary imports,

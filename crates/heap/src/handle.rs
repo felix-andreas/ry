@@ -76,9 +76,9 @@
 //! and no slice taken earlier is alive:
 //!
 //! ```compile_fail,E0499
-//! use heap::handle::{Cx, Local, Real};
-//! fn allocates_during_a_write<'s>(cx: &mut Cx<'s>, vector: Local<'s, Real>) {
-//!     let mut write = unsafe { cx.assume_exclusive(vector) };
+//! use heap::handle::{Cx, Owned, Real};
+//! fn allocates_during_a_write<'s>(cx: &mut Cx<'s>, mut vector: Owned<'s, Real>) {
+//!     let mut write = vector.write(cx);
 //!     let (elements, _reader) = write.split();
 //!     let copy = cx.alloc::<Real>(1);
 //!     elements[0] = 1.0;
@@ -87,19 +87,19 @@
 //! ```
 //!
 //! ```compile_fail,E0502
-//! use heap::handle::{Cx, Local, Real};
-//! fn reads_an_earlier_slice_during_a_write<'s>(cx: &mut Cx<'s>, vector: Local<'s, Real>) {
-//!     let before = vector.as_slice(cx);
-//!     let mut write = unsafe { cx.assume_exclusive(vector) };
+//! use heap::handle::{Cx, Owned, Real};
+//! fn reads_an_earlier_slice_during_a_write<'s>(cx: &mut Cx<'s>, mut vector: Owned<'s, Real>) {
+//!     let before = vector.get().as_slice(cx);
+//!     let mut write = vector.write(cx);
 //!     let (elements, _reader) = write.split();
 //!     elements[0] = before[1];
 //! }
 //! ```
 //!
 //! ```no_run
-//! use heap::handle::{Cx, Local, Real};
-//! fn reads_through_the_reader<'s>(cx: &mut Cx<'s>, vector: Local<'s, Real>, source: Local<'s, Real>) {
-//!     let mut write = unsafe { cx.assume_exclusive(vector) };
+//! use heap::handle::{Cx, Local, Owned, Real};
+//! fn reads_through_the_reader<'s>(cx: &mut Cx<'s>, mut vector: Owned<'s, Real>, source: Local<'s, Real>) {
+//!     let mut write = vector.write(cx);
 //!     let (elements, reader) = write.split();
 //!     match reader.slice(source) {
 //!         Some(source) => elements[0] = source[1],
@@ -125,11 +125,10 @@
 //! An object with no element storage has no element access. An ALTREP object is never a vector
 //! kind, so a write into one has to go through a copy the allocator made:
 //!
-//! ```compile_fail,E0277
-//! use heap::handle::{Cx, Local};
-//! fn written_without_storage<'s>(cx: &mut Cx<'s>, copy: Local<'s>) {
-//!     let mut write = unsafe { cx.assume_exclusive(copy) };
-//!     write.split().0[0] = 1.0;
+//! ```compile_fail,E0599
+//! use heap::handle::{Cx, Owned};
+//! fn written_without_storage<'s>(cx: &mut Cx<'s>, mut copy: Owned<'s>) {
+//!     copy.write(cx).split().0[0] = 1.0;
 //! }
 //! ```
 //!
@@ -294,25 +293,6 @@ impl<'s> Cx<'s> {
                 error.reroot(heap);
                 Err(error)
             }
-        }
-    }
-
-    /// Exclusive access to `object` for writing it in place.
-    ///
-    /// # Safety
-    ///
-    /// Nothing else can observe `object`: no variable, register, handle or other object refers
-    /// to it except the one place the caller is updating, so changing it changes no other R
-    /// value.
-    #[inline]
-    pub unsafe fn assume_exclusive<'a, T: Vector>(
-        &'a mut self,
-        object: Local<'_, T>,
-    ) -> Write<'a, 's, T> {
-        Write {
-            cx: self,
-            raw: object.raw,
-            kind: PhantomData,
         }
     }
 }
@@ -727,7 +707,7 @@ impl<T: Atomic> Write<'_, '_, T> {
     #[inline]
     pub fn split(&mut self) -> (&mut [T::Element], Reader<'_>) {
         (
-            // SAFETY: the object is the caller's alone (`assume_exclusive`), and the reader
+            // SAFETY: the object is the caller's alone (the `Owned` it came from), and the reader
             // refuses to hand out its storage a second time.
             unsafe { self.raw.slice_mut() },
             Reader {

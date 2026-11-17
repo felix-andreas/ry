@@ -665,13 +665,13 @@ About seven in ten of the hot suite's closure calls from compiled code take `cal
 ## Open: the handle migration
 
 Rule: `decisions/heap-gc.md`, "Interpreter code holds values through handles the borrow checker
-checks". Order and method: `development/design/memory-safety.md`, "Migration" and "Cost". Six
-string builtins are migrated (`nchar`, `substr<-`, `strrep`, `strtoi`, `utf8ToInt`, `charToRaw`);
-`python3 tools/unsafe.py stats` counts the rest.
+checks" and "Whether a vector may be written in place is a value, `Owned`". Order (by risk) and
+method: `development/design/memory-safety.md`, "Migration" and "Cost". `python3 tools/unsafe.py
+stats` counts what is left.
 
-- **Not built.** The replacement path's ownership checks as the callers of `assume_exclusive`
-  (only tests use `Write`), the bytecode loop's register accessor, `Held<T>` fields in traced
-  structures, and a bulk fill for a new list or character vector.
+- **Not built.** `assign_slot_element` and `replace_variable` in `bytecode.rs` copy through the raw
+  helpers and call the replacement builtins raw, the bytecode loop's register accessor, `Held<T>`
+  fields in traced structures, and a bulk fill for a new list or character vector.
 
 ## Open: failing tests on main
 
