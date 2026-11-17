@@ -870,6 +870,7 @@ impl<'r> Reader<'r> {
 /// becomes one through [`Owned::assume`], after the test its holder defines (a reference count
 /// of one and no uncounted holder). Code that updates a variable asks for its `Owned` value
 /// once, copies when there is none, and writes only through the result.
+#[repr(transparent)]
 pub struct Owned<'s, T: Kind = Value> {
     raw: Sexp,
     scope: Brand<'s>,
@@ -928,6 +929,16 @@ impl<'s, T: Kind> Owned<'s, T> {
         } else {
             Err(self)
         }
+    }
+
+    /// The object as kind `U` while the borrow lasts, or `None` when it is not one. Code whose
+    /// vector kind is known only at run time keeps one `Owned` value and narrows it per write.
+    #[inline]
+    pub fn narrow<U: Kind>(&mut self) -> Option<&mut Owned<'s, U>> {
+        // SAFETY: `Owned` is `repr(transparent)` over the pointer and the kind is a marker, so
+        // the two types have one layout, and `admits` checked the object's kind.
+        admits::<U>(self.raw)
+            .then(|| unsafe { &mut *std::ptr::from_mut(self).cast::<Owned<'s, U>>() })
     }
 }
 
