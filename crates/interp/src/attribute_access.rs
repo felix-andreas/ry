@@ -14,7 +14,6 @@ use {
             dense, environment_names, get_attribute, install_name_at, integer_sequence, is_na,
             is_object, is_s4, length, logical_scalar, names_of, null, quoted, s4_classes, safe,
             safe_direct, safe_unary, set_attribute, set_class, stored_names, symbol, text,
-            unshared,
         },
         subset::{assign_attribute, assign_names, assign_row_names},
         unwind::{R, error},
@@ -554,7 +553,7 @@ fn direct_set_names<'a, 's>(context: &'a mut Cx<'s>, values: &[Local<'s>]) -> R<
     {
         return Ok(Some(object.read(context)));
     }
-    let mut object = unshared(context, object)?;
+    let mut object = attributes_unshared(context, object)?;
     assign_names(context, &mut object, names)?;
     Ok(Some(object.finish().read(context)))
 }

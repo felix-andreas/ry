@@ -291,6 +291,46 @@ unsafe fn copy_mapped(
     Ok(())
 }
 
+/// Fills `to[start..start + count]` with `from` recycled, a run of `from` at a time.
+unsafe fn copy_recycled(from: Sexp, to: Sexp, start: usize, count: usize) -> R<()> {
+    let length = length(from);
+    if length == 0 || count == 0 {
+        return Ok(());
+    }
+    match (from.kind(), to.kind()) {
+        (SexpType::Logical | SexpType::Integer, SexpType::Logical | SexpType::Integer)
+            if from.kind() == to.kind() =>
+        {
+            let from = values::ints(from);
+            for chunk in values::ints_mut(to)[start..start + count].chunks_mut(length) {
+                chunk.copy_from_slice(&from[..chunk.len()]);
+            }
+        }
+        (SexpType::Real, SexpType::Real) => {
+            let from = values::reals(from);
+            for chunk in values::reals_mut(to)[start..start + count].chunks_mut(length) {
+                chunk.copy_from_slice(&from[..chunk.len()]);
+            }
+        }
+        (SexpType::Logical | SexpType::Integer, SexpType::Real) => {
+            let from = values::ints(from);
+            for chunk in values::reals_mut(to)[start..start + count].chunks_mut(length) {
+                for (slot, &value) in chunk.iter_mut().zip(from) {
+                    *slot = int_to_real(value);
+                }
+            }
+        }
+        _ => copy_mapped(
+            from,
+            to,
+            count,
+            |position| position % length,
+            |position| start + position,
+        )?,
+    }
+    Ok(())
+}
+
 /// An integer or logical element as a double, NA staying NA.
 pub(crate) fn int_to_real(value: i32) -> f64 {
     if value == NA_INTEGER {
@@ -321,15 +361,23 @@ unsafe fn set_na(to: Sexp, to_index: usize) {
 /// Whether [`select_positions`] reads `count` elements of `vector` one at a time instead of
 /// expanding it: always for a compact sequence, whose elements are arithmetic and which GNU R
 /// leaves compact when it is subset, and for another long ALTREP number vector of which the
-/// selection is a small part. A short one expands cheaply, and its class keeps the expansion.
-unsafe fn reads_sparsely(vector: Sexp, count: usize) -> bool {
-    vector.is_altrep()
-        && matches!(
+/// selection is a small part, unless its class holds the data already (a wrapper does). A short
+/// one expands cheaply, and its class keeps the expansion.
+unsafe fn reads_sparsely(vector: Sexp, count: usize) -> R<bool> {
+    if !vector.is_altrep()
+        || !matches!(
             vector.kind(),
             SexpType::Logical | SexpType::Integer | SexpType::Real
         )
-        && (values::compact_sequence(vector).is_some()
-            || (length(vector) >= 1 << 16 && count <= length(vector) / 8))
+    {
+        return Ok(false);
+    }
+    if values::compact_sequence(vector).is_some() {
+        return Ok(true);
+    }
+    Ok(length(vector) >= 1 << 16
+        && count <= length(vector) / 8
+        && (crate::interp().hooks.altrep_dataptr_or_null)(vector)?.is_none())
 }
 
 /// A vector of the elements at `indices` (`usize::MAX` gives NA).
@@ -364,7 +412,7 @@ pub unsafe fn select_positions(
     }
     // A few elements of a long ALTREP number vector, such as `seq_len(2^31 - 1)[c(1, 10)]`, read
     // one at a time, because expanding a compact sequence can take gigabytes.
-    if reads_sparsely(vector, count) {
+    if reads_sparsely(vector, count)? {
         let extent = length(vector);
         let result = alloc(vector.kind(), count)?;
         if let Some((_, first, increment)) = values::compact_sequence(vector) {
@@ -456,16 +504,16 @@ pub unsafe fn select_positions(
     Ok(result)
 }
 
-/// `object[index]` for a plain logical, integer or double vector and an attribute-free integer,
-/// double or logical subscript, gathered straight from the subscript without first resolving
-/// it to a position list. `None` defers to the general path, which handles every other shape
+/// `object[index]` for a logical, integer, double, string or list vector whose selection keeps
+/// none of its attributes (the caller checks that) and an attribute-free integer, double or
+/// logical subscript, gathered straight from the subscript without first resolving it to a
+/// position list. `None` defers to the general path, which handles every other shape
 /// (negative or zero subscripts, recycled logical subscripts, other element types).
 unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
     // A selection `select_positions` reads sparsely takes the general path.
     if index == missing_arg()
         || values::has_attributes(index)
-        || values::has_attributes(object)
-        || reads_sparsely(object, length(index))
+        || reads_sparsely(object, length(index))?
     {
         return Ok(None);
     }
@@ -476,7 +524,13 @@ unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
     ) {
         return Ok(None);
     }
-    let object = values::materialize(object)?;
+    // A number vector's elements read through its class's data pointer, which a wrapper shares
+    // without copying, where materializing would copy the whole vector to drop its attributes.
+    let object = if matches!(kind, SexpType::String | SexpType::List) {
+        values::materialize(object)?
+    } else {
+        object
+    };
     if let Some((_, offsets)) = sequence_offsets(index) {
         let count = offsets.len();
         return Ok(Some(gather_kind(object, offsets, count)?));
@@ -627,8 +681,9 @@ fn kept_positions(keep: &[u64]) -> impl Iterator<Item = usize> + '_ {
     })
 }
 
-/// `object[positions]` for a logical, integer, double, character or list vector that is not
-/// ALTREP, NA (or `NULL`) past the end.
+/// `object[positions]` for a logical, integer, double, character or list vector, NA (or `NULL`)
+/// past the end. A character vector or list must not be ALTREP; a number vector that is reads
+/// through its class's data pointer.
 unsafe fn gather_kind(
     object: Sexp,
     positions: impl Iterator<Item = usize>,
@@ -650,6 +705,8 @@ unsafe fn gather_kind(
             *slot = source.get(position).copied().unwrap_or(NA_INTEGER);
         }
     }
+    // An ALTREP class whose data pointer failed left its error parked and an empty slice.
+    crate::unwind::raise_parked()?;
     Ok(result)
 }
 
@@ -1075,7 +1132,9 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
     // R, so `attr(exprs[i], "srcref")` still locates element `i`.
     let srcrefs = get_attr(object, symbols().srcref);
     let srcrefs = (srcrefs.kind() == SexpType::List).then_some(srcrefs);
-    if dims.is_none()
+    // Without names, a source reference or one dimension, the selection keeps no attribute, so
+    // the object's other attributes (a matrix's `dim`, a factor's levels) need no further rules.
+    if dims.as_ref().is_none_or(|dims| dims.len() != 1)
         && names == nil()
         && srcrefs.is_none()
         && let Some(result) = gather_plain(object, index)?
@@ -1149,11 +1208,6 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
         values::copy_attributes(object, result)?;
         values::remove_attr(result, symbols().class);
         values::remove_attr(result, symbols().tsp);
-    } else if object.kind() == SexpType::Expression || values::inherits(object, "factor") {
-        let levels = get_attr(object, symbols().levels);
-        if levels != nil() {
-            values::set_attr(result, symbols().levels, levels)?;
-        }
     }
     Ok(result)
 }
@@ -5401,9 +5455,9 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
             let count = dims[across];
             let source = values::materialize(value)?;
             let source_rows = dims[0];
-            for line in 0..count {
-                let line_offset = offset + line;
-                if by_row {
+            if by_row {
+                for line in 0..count {
+                    let line_offset = offset + line;
                     copy_mapped(
                         source,
                         result,
@@ -5411,15 +5465,10 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                         |position| line + position * source_rows,
                         |position| line_offset + position * rows,
                     )?;
-                } else {
-                    copy_mapped(
-                        source,
-                        result,
-                        extent,
-                        |position| position + line * source_rows,
-                        |position| position + line_offset * rows,
-                    )?;
                 }
+            } else {
+                // Every matrix has `extent` rows, so its columns are one run of the result's.
+                copy_recycled(source, result, offset * rows, extent * count)?;
             }
             let dimnames = get_attr(value, symbols().dimnames);
             let names = if dimnames != nil() {
@@ -5458,13 +5507,7 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                     |position| offset + position * rows,
                 )?;
             } else {
-                copy_mapped(
-                    source,
-                    result,
-                    extent,
-                    |position| position % source_length,
-                    |position| position + offset * rows,
-                )?;
+                copy_recycled(source, result, offset * rows, extent)?;
             }
         }
         let names = values::names(value);

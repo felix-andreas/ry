@@ -40,8 +40,8 @@ use {
         object::{
             CARD_CLEAN, CARD_ELEMENTS, CARD_UNTENURED, CARD_YOUNG, EnvironmentObject, LARGE_CLASS,
             NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, SymbolObject, TripleObject,
-            UNBOXED_SLOTS, VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, holds_handles, object_size,
-            slot_for,
+            UNBOXED_SLOTS, VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, holds_handles, is_inert,
+            object_size, slot_for,
         },
         records::{Layouts, slot_kind},
         space::{SIZE_CLASS_BY_WORDS, SLOT_SIZES, Space, Swept, poison, sanitizer},
@@ -1495,6 +1495,9 @@ impl Heap {
             for index in 0..length as usize {
                 data.cast::<Sexp>().add(index).write(fill);
             }
+            if kind == SexpType::List {
+                object.set_flag(flag_bits::INERT_ELEMENTS, true);
+            }
         } else if length > 0 {
             // Every nonempty vector's slot has at least 16 data bytes, so a scalar is zeroed by
             // two stores instead of a `memset` call.
@@ -1543,6 +1546,9 @@ impl Heap {
             SexpType::List | SexpType::Expression => {
                 let nil = self.known.nil;
                 object.slice_mut::<Sexp>().fill(nil);
+                if kind == SexpType::List {
+                    object.set_flag(flag_bits::INERT_ELEMENTS, true);
+                }
             }
             _ => {}
         }
@@ -2337,6 +2343,13 @@ impl Heap {
             "copy_elements ranges overlap"
         );
         let tracked = to.flags() & flag_bits::UNTRACKED == 0;
+        if to.has_inert_elements()
+            && !(from.has_inert_elements()
+                || (from_start..from_start + count)
+                    .all(|index| inert_element(from.stored_element(index))))
+        {
+            to.set_flag(flag_bits::INERT_ELEMENTS, false);
+        }
         for offset in 0..count {
             let value = from.stored_element(from_start + offset);
             if tracked
@@ -2363,9 +2376,15 @@ impl Heap {
     pub unsafe fn count_written_elements(&mut self, vector: Sexp) {
         let count = vector.length() as usize;
         if vector.flags() & flag_bits::UNTRACKED == 0 {
+            let mut inert = true;
             for &value in vector.slice::<Sexp>() {
-                value.increment_refcount();
+                inert &= value.increment_refcount_inert();
             }
+            if vector.kind() == SexpType::List {
+                vector.set_flag(flag_bits::INERT_ELEMENTS, inert);
+            }
+        } else if vector.has_inert_elements() {
+            vector.set_flag(flag_bits::INERT_ELEMENTS, false);
         }
         self.range_barrier(vector, 0, count);
     }
@@ -2387,6 +2406,9 @@ impl Heap {
             return;
         }
         std::ptr::copy_nonoverlapping(from.data() as *const Sexp, to.data() as *mut Sexp, count);
+        if !from.has_inert_elements() {
+            to.set_flag(flag_bits::INERT_ELEMENTS, false);
+        }
         from.set_length(0);
         self.range_barrier(to, 0, count);
     }
@@ -2424,6 +2446,9 @@ impl Heap {
             && let Some(elements) = crate::object::altrep_elements()
         {
             return (elements.write)(vector, index, value);
+        }
+        if vector.has_inert_elements() && !inert_element(value) {
+            vector.set_flag(flag_bits::INERT_ELEMENTS, false);
         }
         if !(vector.gc_bits() & gc_bits::ESCAPED != 0 && self.count_escaped_store(vector, value)) {
             self.count_store(vector, vector.stored_element(index), value);
@@ -2519,6 +2544,10 @@ impl Heap {
         if first {
             vector.set_gc_bit(gc_bits::ESCAPED, true);
             self.escaped.push(vector);
+        }
+        // Native code may store anything through the pointer.
+        if vector.has_inert_elements() {
+            vector.set_flag(flag_bits::INERT_ELEMENTS, false);
         }
         if !matches!(vector.kind(), SexpType::List | SexpType::Expression)
             || !vector.tracks_references()
@@ -4019,6 +4048,7 @@ impl Heap {
             give_up(object.attrib(), &mut work, &mut held);
             object.set_attrib_unbarriered(nil);
             match object.kind() {
+                SexpType::List if object.has_inert_elements() => {}
                 SexpType::List => {
                     for index in 0..object.length() as usize {
                         give_up(object.stored_element(index), &mut work, &mut held);
@@ -4101,6 +4131,9 @@ impl Heap {
                 });
             }
             self.release_swept_child(attributes, &mut dying);
+            if counted.is_none() && object.has_inert_elements() {
+                continue;
+            }
             // The slots are cleared as they are read, so a list met again (a child that reached
             // zero while its own entry was still pending) releases nothing twice.
             let slots = object.slice_mut::<Sexp>();
@@ -5827,6 +5860,15 @@ const RECONCILE_BYTES: usize = 4 << 20;
 
 /// Whether a reconcile can reclaim `object` once nothing holds it: a list, by giving up its
 /// elements, or a large atomic vector, by freeing it. ALTREP objects keep their own data.
+/// Whether giving up a reference to `value` can do no more than lower its count: `NULL`, a
+/// symbol, a string, or an atomic vector the collector frees with its page. Lists and large
+/// vectors are freed by a reconcile, a pairlist's fields are released with it, and the counts of
+/// environments, closures and promises decide whether a frame is released at return.
+#[inline(always)]
+pub(crate) unsafe fn inert_element(value: Sexp) -> bool {
+    is_inert(value.kind() as u8, value.flags(), value.size_class())
+}
+
 unsafe fn reclaimable(object: Sexp) -> bool {
     !object.is_altrep()
         && match object.kind() {

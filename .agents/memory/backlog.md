@@ -633,8 +633,8 @@ About seven in ten of the hot suite's closure calls from compiled code take `cal
 
 `tools/bench/builtins/slower.txt` lists every export of base, stats and utils that the builtins sweep finds slower than GNU R (or failing) in at least one case; `sweep.py ratchet --update` shrinks it as fixes land, and `sweep.py weights` orders the work by call frequency in the code bases and the oracle corpus.
 
-- **Failing on ry in the sweep:** `R_compiled_by`, `aregexec`, `rsmirnov`, `ppr`, `arima0`, `ar.mle`, `prmatrix` and `memDecompress` of an unknown type, among others; `sweep.py compare` prints the full list.
-- **`names<-` and list copies:** a list whose reference count is shared copies on each `names<-`, where GNU R's reference counting lets the copy be skipped; structural, in the heap's reference counts.
+- **Largest gaps left** (GNU R's time over ry's): `regexpr` with `fixed = TRUE` 0.42 and on characters 0.58, `order` and `sort` on 1e6 integers 0.69 and 0.89, `dsignrank` on a scalar 0.71, `cumsum` on 1e6 doubles 0.86 and `cumprod` 0.90; `slower.txt` has the rest.
+- **Failing on ry in the sweep:** `R_compiled_by`, `aregexec`, `rsmirnov`, `ppr`, `arima0` and others; `sweep.py compare` prints the full list.
 - **`e[["a"]] <- v` on an environment** takes the `*tmp*` replacement call (0.47 s against GNU R's 0.12 s for 1e6 assignments); only `e$a <- v` has the direct path in `assign_element` (`crates/interp/src/bytecode.rs`).
 - **POSIX repeated groups:** `(a)?(ab)?b*` on "abb" fills the first optional group where TRE fills the second (`strings__posix_repeated_group`, a known failure).
 
