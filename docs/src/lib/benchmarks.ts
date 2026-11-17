@@ -483,7 +483,8 @@ function chartRow(suite: Suite, program: Program & { measurement: Measurement },
     label: program.display,
     id: program.id === program.display ? undefined : program.id,
     href: source === undefined ? undefined : sourceUrl(source),
-    flags: [...measurement.failures.map(failureText), ...measurement.flags.map(flagText)],
+    // A flag on an engine the chart leaves out, such as profiled ry, belongs to the tables.
+    flags: [...measurement.failures.map(failureText), ...measurement.flags.filter((flag) => flag.engine === undefined || engines.includes(flag.engine)).map(flagText)],
     bars: engines.map((engine) => {
       const ratio = measurement.ratio[engine];
       const engineTime = measurement.seconds[engine];

@@ -1,0 +1,6460 @@
+{
+  "schema": 1,
+  "suite": "appsuite",
+  "name": "Application test suite",
+  "meta": {
+    "date": "2026-11-17",
+    "ry_commit": "62985f41d849fb362e41614e9a58114f6a7178c5",
+    "release": {
+      "tag": "0.5.0",
+      "archive": "ry-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "575ad8ad890b64c929eee4a9fab76262ffcea879c8e29070dfdcaad9d6b5c3dc"
+    },
+    "libr_text_bytes": {},
+    "machine": {
+      "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+      "cores": 4,
+      "kernel": "Linux 6.18.44-fc-v553"
+    },
+    "command": "tools/bench/bench.py appsuite --release /tmp/claude-0/-home-user-ry/154b171f-2090-585f-8f16-cbe3f4d1ab5f/scratchpad/rel050/ry-x86_64-unknown-linux-gnu.tar.gz --write --samples /tmp/claude-0/-home-user-ry/154b171f-2090-585f-8f16-cbe3f4d1ab5f/scratchpad/appsuite-samples.json",
+    "gnu_r": {
+      "version": "4.6.2",
+      "blas": "/opt/R/4.6.2/lib/R/lib/libRblas.so"
+    },
+    "too_short_seconds": 0.0,
+    "rounds": 10,
+    "extra_rounds": 0,
+    "seed": 1
+  },
+  "engines": {
+    "gnu_r": "GNU R",
+    "ry": "ry",
+    "ry_profiled": "ry, profile summary",
+    "gnu_r_contended": "GNU R, 4 processes",
+    "ry_contended": "ry, 4 processes"
+  },
+  "baseline": "gnu_r",
+  "ratio_kind": "speedup",
+  "programs": [
+    {
+      "id": "bodies",
+      "display": "Plain function bodies",
+      "seconds": {
+        "gnu_r": 3.454,
+        "ry": 1.0825,
+        "ry_profiled": 1.3415,
+        "gnu_r_contended": 3.504375,
+        "ry_contended": 1.061125
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.1601,
+          "low": 2.9323,
+          "high": 3.4639
+        },
+        "ry_profiled": {
+          "median": 2.4232,
+          "low": 2.3171,
+          "high": 2.7171
+        },
+        "ry_contended": {
+          "median": 3.2886,
+          "low": 3.1177,
+          "high": 3.5136
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry_profiled"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "objects",
+      "display": "S4 objects",
+      "seconds": {
+        "gnu_r": 3.2475,
+        "ry": 0.7435,
+        "ry_profiled": 0.9465,
+        "gnu_r_contended": 3.233,
+        "ry_contended": 0.710875
+      },
+      "ratio": {
+        "ry": {
+          "median": 4.1586,
+          "low": 3.5323,
+          "high": 5.3981
+        },
+        "ry_profiled": {
+          "median": 3.4014,
+          "low": 2.9981,
+          "high": 3.5639
+        },
+        "ry_contended": {
+          "median": 4.5115,
+          "low": 4.1537,
+          "high": 5.1285
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        },
+        {
+          "kind": "wide_interval",
+          "engine": "ry_profiled"
+        },
+        {
+          "kind": "wide_interval",
+          "engine": "ry_contended"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "keys",
+      "display": "String keys",
+      "seconds": {
+        "gnu_r": 2.2425,
+        "ry": 0.557,
+        "ry_profiled": 0.5935,
+        "gnu_r_contended": 2.4515,
+        "ry_contended": 0.5505
+      },
+      "ratio": {
+        "ry": {
+          "median": 4.0453,
+          "low": 3.286,
+          "high": 4.5313
+        },
+        "ry_profiled": {
+          "median": 3.8179,
+          "low": 3.6117,
+          "high": 4.0751
+        },
+        "ry_contended": {
+          "median": 4.2616,
+          "low": 4.0613,
+          "high": 4.6539
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "functionals",
+      "display": "Functionals",
+      "seconds": {
+        "gnu_r": 2.121,
+        "ry": 0.806,
+        "ry_profiled": 1.0995,
+        "gnu_r_contended": 2.067375,
+        "ry_contended": 0.773
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.7232,
+          "low": 2.3184,
+          "high": 2.8089
+        },
+        "ry_profiled": {
+          "median": 1.9282,
+          "low": 1.8591,
+          "high": 2.0672
+        },
+        "ry_contended": {
+          "median": 2.6925,
+          "low": 2.593,
+          "high": 2.9085
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "dates",
+      "display": "Dates",
+      "seconds": {
+        "gnu_r": 1.564,
+        "ry": 0.5265,
+        "ry_profiled": 0.5995,
+        "gnu_r_contended": 1.56175,
+        "ry_contended": 0.4905
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.032,
+          "low": 2.7699,
+          "high": 3.6171
+        },
+        "ry_profiled": {
+          "median": 2.6313,
+          "low": 2.1633,
+          "high": 3.4251
+        },
+        "ry_contended": {
+          "median": 3.2048,
+          "low": 3.0853,
+          "high": 3.4536
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        },
+        {
+          "kind": "wide_interval",
+          "engine": "ry_profiled"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "conditions",
+      "display": "Conditions",
+      "seconds": {
+        "gnu_r": 1.664,
+        "ry": 0.8145,
+        "ry_profiled": 0.997,
+        "gnu_r_contended": 1.63125,
+        "ry_contended": 0.7545
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.9677,
+          "low": 1.8955,
+          "high": 2.2468
+        },
+        "ry_profiled": {
+          "median": 1.7474,
+          "low": 1.439,
+          "high": 1.9398
+        },
+        "ry_contended": {
+          "median": 2.125,
+          "low": 2.0792,
+          "high": 2.2535
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        },
+        {
+          "kind": "wide_interval",
+          "engine": "ry_profiled"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "tables",
+      "display": "Small data.table objects",
+      "seconds": {
+        "gnu_r": 3.064,
+        "ry": 1.808,
+        "ry_profiled": 1.985,
+        "gnu_r_contended": 3.10875,
+        "ry_contended": 1.852375
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.6505,
+          "low": 1.5749,
+          "high": 1.8588
+        },
+        "ry_profiled": {
+          "median": 1.5169,
+          "low": 1.3451,
+          "high": 1.6597
+        },
+        "ry_contended": {
+          "median": 1.7696,
+          "low": 1.5852,
+          "high": 1.9123
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        },
+        {
+          "kind": "wide_interval",
+          "engine": "ry_profiled"
+        },
+        {
+          "kind": "wide_interval",
+          "engine": "ry_contended"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "series",
+      "display": "Small xts objects",
+      "seconds": {
+        "gnu_r": 2.4485,
+        "ry": 0.923,
+        "ry_profiled": 1.133,
+        "gnu_r_contended": 2.567375,
+        "ry_contended": 0.931125
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.6102,
+          "low": 2.3599,
+          "high": 2.8476
+        },
+        "ry_profiled": {
+          "median": 2.2278,
+          "low": 2.0311,
+          "high": 2.3621
+        },
+        "ry_contended": {
+          "median": 2.7457,
+          "low": 2.5855,
+          "high": 2.862
+        }
+      },
+      "flags": [],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "frames",
+      "display": "Data frames",
+      "seconds": {
+        "gnu_r": 0.796,
+        "ry": 0.403,
+        "ry_profiled": 0.466,
+        "gnu_r_contended": 0.854125,
+        "ry_contended": 0.369625
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.1118,
+          "low": 1.7787,
+          "high": 2.3409
+        },
+        "ry_profiled": {
+          "median": 1.6487,
+          "low": 1.2697,
+          "high": 2.0342
+        },
+        "ry_contended": {
+          "median": 2.3448,
+          "low": 2.0027,
+          "high": 2.5155
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        },
+        {
+          "kind": "wide_interval",
+          "engine": "ry_profiled"
+        },
+        {
+          "kind": "wide_interval",
+          "engine": "ry_contended"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "closures",
+      "display": "Closure objects",
+      "seconds": {
+        "gnu_r": 1.072,
+        "ry": 0.4405,
+        "ry_profiled": 0.574,
+        "gnu_r_contended": 1.15725,
+        "ry_contended": 0.43275
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.45,
+          "low": 2.044,
+          "high": 3.237
+        },
+        "ry_profiled": {
+          "median": 1.866,
+          "low": 1.6962,
+          "high": 2.023
+        },
+        "ry_contended": {
+          "median": 2.7308,
+          "low": 2.6233,
+          "high": 2.8364
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "native",
+      "display": "Large inputs",
+      "seconds": {
+        "gnu_r": 2.864,
+        "ry": 1.948,
+        "ry_profiled": 2.1635,
+        "gnu_r_contended": 2.779375,
+        "ry_contended": 2.0075
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.4611,
+          "low": 1.3537,
+          "high": 1.603
+        },
+        "ry_profiled": {
+          "median": 1.3197,
+          "low": 1.2211,
+          "high": 1.3809
+        },
+        "ry_contended": {
+          "median": 1.4267,
+          "low": 1.3646,
+          "high": 1.4926
+        }
+      },
+      "flags": [],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "expectations",
+      "display": "testthat expectations",
+      "seconds": {
+        "gnu_r": 3.5355,
+        "ry": 1.4385,
+        "ry_profiled": 1.805,
+        "gnu_r_contended": 3.445125,
+        "ry_contended": 1.45125
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.405,
+          "low": 2.148,
+          "high": 2.5744
+        },
+        "ry_profiled": {
+          "median": 1.9499,
+          "low": 1.6885,
+          "high": 2.1371
+        },
+        "ry_contended": {
+          "median": 2.4057,
+          "low": 2.2519,
+          "high": 2.5393
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        },
+        {
+          "kind": "wide_interval",
+          "engine": "ry_profiled"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "storage",
+      "display": "Storage",
+      "seconds": {
+        "gnu_r": 0.4775,
+        "ry": 0.1805,
+        "ry_profiled": 0.195,
+        "gnu_r_contended": 0.45225,
+        "ry_contended": 0.187375
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.6736,
+          "low": 2.067,
+          "high": 3.0166
+        },
+        "ry_profiled": {
+          "median": 2.4018,
+          "low": 2.2145,
+          "high": 2.5585
+        },
+        "ry_contended": {
+          "median": 2.4329,
+          "low": 2.2678,
+          "high": 2.6462
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s4: new() with initialize and validity",
+      "display": "s4: new() with initialize and validity",
+      "seconds": {
+        "gnu_r": 0.000287354,
+        "ry": 8.02e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.6186,
+          "low": 3.1132,
+          "high": 4.7816
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s4: generic with one argument",
+      "display": "s4: generic with one argument",
+      "seconds": {
+        "gnu_r": 1.5545e-06,
+        "ry": 9.365e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.5908,
+          "low": 1.4688,
+          "high": 2.1545
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s4: method with extra arguments (.local)",
+      "display": "s4: method with extra arguments (.local)",
+      "seconds": {
+        "gnu_r": 3.124e-06,
+        "ry": 1.482e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.9919,
+          "low": 1.6766,
+          "high": 2.55
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s4: callNextMethod()",
+      "display": "s4: callNextMethod()",
+      "seconds": {
+        "gnu_r": 7.8125e-05,
+        "ry": 2.3529e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.3196,
+          "low": 3.0051,
+          "high": 3.7544
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s4: slot read x@value",
+      "display": "s4: slot read x@value",
+      "seconds": {
+        "gnu_r": 2.12e-07,
+        "ry": 1.77e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.3094,
+          "low": 0.9875,
+          "high": 1.5697
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s4: replacement generic value(x) <- v",
+      "display": "s4: replacement generic value(x) <- v",
+      "seconds": {
+        "gnu_r": 1.1368e-05,
+        "ry": 6.1875e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.7429,
+          "low": 1.5492,
+          "high": 2.2108
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s4: slot write x@value <- v in a function",
+      "display": "s4: slot write x@value <- v in a function",
+      "seconds": {
+        "gnu_r": 9.4145e-06,
+        "ry": 4.8675e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.0357,
+          "low": 1.7939,
+          "high": 2.5473
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s4: is(x, 'Base')",
+      "display": "s4: is(x, 'Base')",
+      "seconds": {
+        "gnu_r": 7.3925e-06,
+        "ry": 7.365e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 10.6564,
+          "low": 9.2501,
+          "high": 12.301
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s4: slotNames(x)",
+      "display": "s4: slotNames(x)",
+      "seconds": {
+        "gnu_r": 1.1383e-05,
+        "ry": 1.8085e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 6.4263,
+          "low": 5.2599,
+          "high": 6.9571
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s4: slot(x, name)",
+      "display": "s4: slot(x, name)",
+      "seconds": {
+        "gnu_r": 7.03e-07,
+        "ry": 3.385e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.0732,
+          "low": 1.7066,
+          "high": 2.5
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s4: validObject(x)",
+      "display": "s4: validObject(x)",
+      "seconds": {
+        "gnu_r": 5.3711e-05,
+        "ry": 1.00095e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 5.1512,
+          "low": 4.9446,
+          "high": 5.8824
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s4: isVirtualClass('Base')",
+      "display": "s4: isVirtualClass('Base')",
+      "seconds": {
+        "gnu_r": 1.2848e-05,
+        "ry": 2.945e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 4.2751,
+          "low": 3.9419,
+          "high": 4.8752
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s4: sapply over 20 objects, one generic each",
+      "display": "s4: sapply over 20 objects, one generic each",
+      "seconds": {
+        "gnu_r": 4.2358e-05,
+        "ry": 2.1484e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.0731,
+          "low": 1.8063,
+          "high": 2.1582
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s4: lapply over the slots of one object",
+      "display": "s4: lapply over the slots of one object",
+      "seconds": {
+        "gnu_r": 1.74865e-05,
+        "ry": 5.142e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.5038,
+          "low": 2.9348,
+          "high": 3.7277
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "checks: function with an argument check",
+      "display": "checks: function with an argument check",
+      "seconds": {
+        "gnu_r": 9.10645e-05,
+        "ry": 1.9165e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 4.4609,
+          "low": 4.2495,
+          "high": 5.8627
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "checks: check_args(...) alone",
+      "display": "checks: check_args(...) alone",
+      "seconds": {
+        "gnu_r": 6.6467e-05,
+        "ry": 1.16885e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 5.3381,
+          "low": 4.3847,
+          "high": 6.3196
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "checks: list(...) of three values",
+      "display": "checks: list(...) of three values",
+      "seconds": {
+        "gnu_r": 7.91e-07,
+        "ry": 4.07e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.9634,
+          "low": 1.7802,
+          "high": 2.2004
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "checks: ifelse() on a scalar",
+      "display": "checks: ifelse() on a scalar",
+      "seconds": {
+        "gnu_r": 1.297e-06,
+        "ry": 2.47e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 5.3807,
+          "low": 4.5731,
+          "high": 5.6078
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "checks: nested ifelse() with is.na()",
+      "display": "checks: nested ifelse() with is.na()",
+      "seconds": {
+        "gnu_r": 2.949e-06,
+        "ry": 6.67e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 4.2374,
+          "low": 3.4122,
+          "high": 4.7682
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "checks: isTRUE()",
+      "display": "checks: isTRUE()",
+      "seconds": {
+        "gnu_r": 6.43e-07,
+        "ry": 2.855e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.2218,
+          "low": 1.9504,
+          "high": 2.8487
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "checks: inherits(x, 'Date')",
+      "display": "checks: inherits(x, 'Date')",
+      "seconds": {
+        "gnu_r": 3.77e-07,
+        "ry": 1.155e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.1171,
+          "low": 2.3276,
+          "high": 3.5026
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "checks: is(x, 'character')",
+      "display": "checks: is(x, 'character')",
+      "seconds": {
+        "gnu_r": 6.3095e-06,
+        "ry": 6.515e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 9.2386,
+          "low": 7.934,
+          "high": 11.364
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "checks: missing() and default arguments",
+      "display": "checks: missing() and default arguments",
+      "seconds": {
+        "gnu_r": 7.535e-07,
+        "ry": 3.22e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.3124,
+          "low": 2.0946,
+          "high": 2.5153
+        }
+      },
+      "flags": [],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "checks: match.arg()",
+      "display": "checks: match.arg()",
+      "seconds": {
+        "gnu_r": 6.5305e-06,
+        "ry": 6e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 10.8941,
+          "low": 10.001,
+          "high": 11.8598
+        }
+      },
+      "flags": [],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "checks: stopifnot() with two conditions",
+      "display": "checks: stopifnot() with two conditions",
+      "seconds": {
+        "gnu_r": 2.9185e-06,
+        "ry": 5.07e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 5.7414,
+          "low": 5.4685,
+          "high": 6.6883
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "checks: identical() of two short vectors",
+      "display": "checks: identical() of two short vectors",
+      "seconds": {
+        "gnu_r": 7.48e-07,
+        "ry": 2.99e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.5481,
+          "low": 2.2686,
+          "high": 2.931
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "keys: paste(a, b, sep = '|') of 20 strings",
+      "display": "keys: paste(a, b, sep = '|') of 20 strings",
+      "seconds": {
+        "gnu_r": 4.032e-06,
+        "ry": 8.04e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 5.0025,
+          "low": 4.4293,
+          "high": 6.1278
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "keys: paste0() of two scalars",
+      "display": "keys: paste0() of two scalars",
+      "seconds": {
+        "gnu_r": 3.1165e-06,
+        "ry": 5.825e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 5.1467,
+          "low": 4.8279,
+          "high": 7.0729
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "keys: paste(..., collapse = ', ') of 20 strings",
+      "display": "keys: paste(..., collapse = ', ') of 20 strings",
+      "seconds": {
+        "gnu_r": 3.975e-06,
+        "ry": 4.34e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 9.563,
+          "low": 7.8277,
+          "high": 11.0082
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "keys: scalar %in% 20 strings",
+      "display": "keys: scalar %in% 20 strings",
+      "seconds": {
+        "gnu_r": 1.2925e-06,
+        "ry": 1.235e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 8.7512,
+          "low": 7.7326,
+          "high": 11.6161
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "keys: 20 strings %in% 20 strings",
+      "display": "keys: 20 strings %in% 20 strings",
+      "seconds": {
+        "gnu_r": 2.3305e-06,
+        "ry": 3.08e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 7.3815,
+          "low": 5.487,
+          "high": 8.62
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "keys: match() of a scalar",
+      "display": "keys: match() of a scalar",
+      "seconds": {
+        "gnu_r": 6.105e-07,
+        "ry": 1.935e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.2573,
+          "low": 2.8955,
+          "high": 3.5187
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "keys: unique() of 20 strings",
+      "display": "keys: unique() of 20 strings",
+      "seconds": {
+        "gnu_r": 2.8265e-06,
+        "ry": 7.6e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.9014,
+          "low": 3.153,
+          "high": 4.7869
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "keys: which() of 20 logicals",
+      "display": "keys: which() of 20 logicals",
+      "seconds": {
+        "gnu_r": 1.5145e-06,
+        "ry": 3.455e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 4.5002,
+          "low": 3.7283,
+          "high": 5.2121
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "keys: names(which(named logicals))",
+      "display": "keys: names(which(named logicals))",
+      "seconds": {
+        "gnu_r": 2.0255e-06,
+        "ry": 6.45e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.2452,
+          "low": 2.6833,
+          "high": 3.6396
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "keys: list element by name x[[key]]",
+      "display": "keys: list element by name x[[key]]",
+      "seconds": {
+        "gnu_r": 4.1e-07,
+        "ry": 1.375e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.907,
+          "low": 2.5876,
+          "high": 3.2868
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "keys: subset a named list by 5 names",
+      "display": "keys: subset a named list by 5 names",
+      "seconds": {
+        "gnu_r": 9.43e-07,
+        "ry": 4.05e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.2506,
+          "low": 1.8773,
+          "high": 2.4444
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "keys: unlist(lapply(list, names))",
+      "display": "keys: unlist(lapply(list, names))",
+      "seconds": {
+        "gnu_r": 4.8525e-06,
+        "ry": 2.291e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.0134,
+          "low": 1.7436,
+          "high": 2.5002
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "keys: setdiff() of short vectors",
+      "display": "keys: setdiff() of short vectors",
+      "seconds": {
+        "gnu_r": 2.1362e-05,
+        "ry": 1.2045e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 17.9721,
+          "low": 15.2298,
+          "high": 21.429
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "keys: sprintf() with two values",
+      "display": "keys: sprintf() with two values",
+      "seconds": {
+        "gnu_r": 1.3635e-06,
+        "ry": 5.005e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.6913,
+          "low": 2.0131,
+          "high": 3.522
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "keys: gsub() on a scalar",
+      "display": "keys: gsub() on a scalar",
+      "seconds": {
+        "gnu_r": 2.0675e-06,
+        "ry": 4.8e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 4.1263,
+          "low": 3.008,
+          "high": 4.6535
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "keys: nchar() and substr()",
+      "display": "keys: nchar() and substr()",
+      "seconds": {
+        "gnu_r": 1.318e-06,
+        "ry": 6.02e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.2138,
+          "low": 1.9107,
+          "high": 2.5003
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "keys: toupper() and trimws()",
+      "display": "keys: toupper() and trimws()",
+      "seconds": {
+        "gnu_r": 2.01725e-05,
+        "ry": 4.2075e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 4.7683,
+          "low": 3.9797,
+          "high": 6.6967
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "destructure: c(a, b) %<-% f()",
+      "display": "destructure: c(a, b) %<-% f()",
+      "seconds": {
+        "gnu_r": 9.61915e-05,
+        "ry": 3.90015e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.4595,
+          "low": 2.1774,
+          "high": 2.8217
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "destructure: three names, nested value",
+      "display": "destructure: three names, nested value",
+      "seconds": {
+        "gnu_r": 0.000129516,
+        "ry": 5.4199e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.2155,
+          "low": 2.0058,
+          "high": 2.5707
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "destructure: the same with plain assignments",
+      "display": "destructure: the same with plain assignments",
+      "seconds": {
+        "gnu_r": 8.115e-07,
+        "ry": 3.865e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.1874,
+          "low": 1.9588,
+          "high": 2.5179
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.table: data.table() with 4 columns",
+      "display": "data.table: data.table() with 4 columns",
+      "seconds": {
+        "gnu_r": 0.000120972,
+        "ry": 4.7302e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.6736,
+          "low": 2.4486,
+          "high": 3.1097
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.table: rbindlist() of 3 tables",
+      "display": "data.table: rbindlist() of 3 tables",
+      "seconds": {
+        "gnu_r": 8.3801e-05,
+        "ry": 2.7405e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.8866,
+          "low": 2.5301,
+          "high": 3.4751
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.table: rbind() of 2 tables",
+      "display": "data.table: rbind() of 2 tables",
+      "seconds": {
+        "gnu_r": 9.2041e-05,
+        "ry": 3.5278e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.4873,
+          "low": 2.1452,
+          "high": 3.3606
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.table: Reduce(rbind) over 50 tables",
+      "display": "data.table: Reduce(rbind) over 50 tables",
+      "seconds": {
+        "gnu_r": 0.00475,
+        "ry": 0.00196484
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.3661,
+          "low": 2.1926,
+          "high": 2.6308
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.table: dt[col1 == 'k3']",
+      "display": "data.table: dt[col1 == 'k3']",
+      "seconds": {
+        "gnu_r": 0.000983399,
+        "ry": 0.000464355
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.1479,
+          "low": 1.9295,
+          "high": 2.5476
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.table: dt[col1 == 'k3', col3]",
+      "display": "data.table: dt[col1 == 'k3', col3]",
+      "seconds": {
+        "gnu_r": 0.00125586,
+        "ry": 0.00059668
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.0786,
+          "low": 1.8288,
+          "high": 2.4388
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.table: dt[, sum(col3), by = col4]",
+      "display": "data.table: dt[, sum(col3), by = col4]",
+      "seconds": {
+        "gnu_r": 0.000551758,
+        "ry": 0.000309082
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.7457,
+          "low": 1.5385,
+          "high": 2.0627
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.table: dt[, .(col1, col3)]",
+      "display": "data.table: dt[, .(col1, col3)]",
+      "seconds": {
+        "gnu_r": 0.00050293,
+        "ry": 0.000216797
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.3458,
+          "low": 2.0967,
+          "high": 2.5969
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.table: copy and := one column",
+      "display": "data.table: copy and := one column",
+      "seconds": {
+        "gnu_r": 0.000444824,
+        "ry": 0.00016748
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.5695,
+          "low": 2.3727,
+          "high": 3.2056
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.table: set() one column",
+      "display": "data.table: set() one column",
+      "seconds": {
+        "gnu_r": 9.796e-06,
+        "ry": 3.0745e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.1474,
+          "low": 2.4936,
+          "high": 3.5979
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.table: dt$col3 and dt[['col3']]",
+      "display": "data.table: dt$col3 and dt[['col3']]",
+      "seconds": {
+        "gnu_r": 8.354e-06,
+        "ry": 2.651e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.2649,
+          "low": 2.8467,
+          "high": 3.6143
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.table: dt[order(col3)]",
+      "display": "data.table: dt[order(col3)]",
+      "seconds": {
+        "gnu_r": 0.000157959,
+        "ry": 7.51955e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.9912,
+          "low": 1.546,
+          "high": 2.4676
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.table: as.data.table(data.frame)",
+      "display": "data.table: as.data.table(data.frame)",
+      "seconds": {
+        "gnu_r": 8.2642e-05,
+        "ry": 2.948e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.7229,
+          "low": 2.1033,
+          "high": 2.9044
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.table: merge() of two tables on one key",
+      "display": "data.table: merge() of two tables on one key",
+      "seconds": {
+        "gnu_r": 0.00136328,
+        "ry": 0.00068457
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.9863,
+          "low": 1.7406,
+          "high": 2.1226
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.table: nrow() and names()",
+      "display": "data.table: nrow() and names()",
+      "seconds": {
+        "gnu_r": 2.3175e-06,
+        "ry": 9.67e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.3469,
+          "low": 2.1193,
+          "high": 2.7808
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.table: col1 %chin% keys",
+      "display": "data.table: col1 %chin% keys",
+      "seconds": {
+        "gnu_r": 4.738e-06,
+        "ry": 1.4515e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.2169,
+          "low": 2.6059,
+          "high": 3.6514
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "xts: xts() from a matrix and dates",
+      "display": "xts: xts() from a matrix and dates",
+      "seconds": {
+        "gnu_r": 9.77785e-05,
+        "ry": 4.30905e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.1513,
+          "low": 2.0244,
+          "high": 2.3911
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "xts: x[day] with a Date",
+      "display": "xts: x[day] with a Date",
+      "seconds": {
+        "gnu_r": 0.000158203,
+        "ry": 6.7749e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.5319,
+          "low": 1.9121,
+          "high": 2.8059
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "xts: x[day, 'a']",
+      "display": "xts: x[day, 'a']",
+      "seconds": {
+        "gnu_r": 0.000157715,
+        "ry": 6.65285e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.3512,
+          "low": 2.1053,
+          "high": 2.7846
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "xts: x['2024-03'] with a text range",
+      "display": "xts: x['2024-03'] with a text range",
+      "seconds": {
+        "gnu_r": 0.000460937,
+        "ry": 0.000125244
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.4852,
+          "low": 3.1545,
+          "high": 3.9193
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "xts: x[10:20, ]",
+      "display": "xts: x[10:20, ]",
+      "seconds": {
+        "gnu_r": 1.38855e-05,
+        "ry": 6.5535e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.1586,
+          "low": 1.704,
+          "high": 2.4309
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "xts: coredata(x)",
+      "display": "xts: coredata(x)",
+      "seconds": {
+        "gnu_r": 5.5315e-06,
+        "ry": 1.69e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.1495,
+          "low": 2.6396,
+          "high": 3.8202
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "xts: index(x)",
+      "display": "xts: index(x)",
+      "seconds": {
+        "gnu_r": 3.5095e-05,
+        "ry": 4.078e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 8.6039,
+          "low": 8.0836,
+          "high": 9.1014
+        }
+      },
+      "flags": [],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "xts: as.numeric(x[day, 'a'])",
+      "display": "xts: as.numeric(x[day, 'a'])",
+      "seconds": {
+        "gnu_r": 0.000159546,
+        "ry": 7.8491e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.2586,
+          "low": 1.9049,
+          "high": 2.3801
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "xts: merge(x, y)",
+      "display": "xts: merge(x, y)",
+      "seconds": {
+        "gnu_r": 8.1665e-05,
+        "ry": 2.8442e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.9753,
+          "low": 2.2725,
+          "high": 3.2423
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "xts: rbind() of two halves",
+      "display": "xts: rbind() of two halves",
+      "seconds": {
+        "gnu_r": 4.11375e-05,
+        "ry": 2.0996e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.9768,
+          "low": 1.6082,
+          "high": 2.0838
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "xts: lag(y) and diff(y)",
+      "display": "xts: lag(y) and diff(y)",
+      "seconds": {
+        "gnu_r": 3.86355e-05,
+        "ry": 1.98665e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.0,
+          "low": 1.9082,
+          "high": 2.0693
+        }
+      },
+      "flags": [],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "xts: x * 2 + x",
+      "display": "xts: x * 2 + x",
+      "seconds": {
+        "gnu_r": 2.25525e-05,
+        "ry": 1.46635e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.5176,
+          "low": 1.3905,
+          "high": 1.9665
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "xts: first(x) and last(x)",
+      "display": "xts: first(x) and last(x)",
+      "seconds": {
+        "gnu_r": 3.89405e-05,
+        "ry": 2.0508e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.8966,
+          "low": 1.8065,
+          "high": 2.185
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "xts: window by dates index(x) <= day",
+      "display": "xts: window by dates index(x) <= day",
+      "seconds": {
+        "gnu_r": 5.47485e-05,
+        "ry": 1.50755e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.5467,
+          "low": 3.2544,
+          "high": 4.1116
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "xts: zoo::na.locf(y)",
+      "display": "xts: zoo::na.locf(y)",
+      "seconds": {
+        "gnu_r": 1.6647e-05,
+        "ry": 9.3995e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.8579,
+          "low": 1.6626,
+          "high": 2.0872
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "dates: as.Date() of a text",
+      "display": "dates: as.Date() of a text",
+      "seconds": {
+        "gnu_r": 3.32945e-05,
+        "ry": 7.08e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 49.0018,
+          "low": 38.524,
+          "high": 51.5043
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "dates: as.Date() of 20 texts",
+      "display": "dates: as.Date() of 20 texts",
+      "seconds": {
+        "gnu_r": 8.8379e-05,
+        "ry": 2.67e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 31.3745,
+          "low": 26.7768,
+          "high": 38.9003
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "dates: format(day, '%Y-%m-%d')",
+      "display": "dates: format(day, '%Y-%m-%d')",
+      "seconds": {
+        "gnu_r": 1.38095e-05,
+        "ry": 6.149e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.2079,
+          "low": 1.8041,
+          "high": 2.6913
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "dates: as.character() of 20 dates",
+      "display": "dates: as.character() of 20 dates",
+      "seconds": {
+        "gnu_r": 3.6041e-05,
+        "ry": 1.33665e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.7257,
+          "low": 2.5032,
+          "high": 2.921
+        }
+      },
+      "flags": [],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "dates: as.POSIXlt(day)$year",
+      "display": "dates: as.POSIXlt(day)$year",
+      "seconds": {
+        "gnu_r": 7.6215e-06,
+        "ry": 3.273e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.4065,
+          "low": 1.9332,
+          "high": 2.8323
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "dates: as.POSIXlt() of 20 dates, $mon",
+      "display": "dates: as.POSIXlt() of 20 dates, $mon",
+      "seconds": {
+        "gnu_r": 1.0391e-05,
+        "ry": 4.692e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.2702,
+          "low": 1.9701,
+          "high": 2.6964
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "dates: as.POSIXlt() of a POSIXct",
+      "display": "dates: as.POSIXlt() of a POSIXct",
+      "seconds": {
+        "gnu_r": 3.2425e-06,
+        "ry": 1.463e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.271,
+          "low": 1.8329,
+          "high": 2.6871
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "dates: weekdays() of 20 dates",
+      "display": "dates: weekdays() of 20 dates",
+      "seconds": {
+        "gnu_r": 2.5177e-05,
+        "ry": 1.18715e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.0207,
+          "low": 1.9138,
+          "high": 2.3765
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "dates: day + 1 and difference in days",
+      "display": "dates: day + 1 and difference in days",
+      "seconds": {
+        "gnu_r": 2.3407e-05,
+        "ry": 8.1405e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.8457,
+          "low": 2.478,
+          "high": 3.1018
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "dates: day %in% holidays",
+      "display": "dates: day %in% holidays",
+      "seconds": {
+        "gnu_r": 5.3105e-06,
+        "ry": 2.424e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.1988,
+          "low": 2.1463,
+          "high": 2.3428
+        }
+      },
+      "flags": [],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "dates: seq() of dates by day",
+      "display": "dates: seq() of dates by day",
+      "seconds": {
+        "gnu_r": 1.10855e-05,
+        "ry": 4.715e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.2836,
+          "low": 2.088,
+          "high": 2.7003
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "dates: seq() of dates by month",
+      "display": "dates: seq() of dates by month",
+      "seconds": {
+        "gnu_r": 8.56935e-05,
+        "ry": 3.19215e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.6591,
+          "low": 2.1731,
+          "high": 3.4812
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "dates: max() and range() of 20 dates",
+      "display": "dates: max() and range() of 20 dates",
+      "seconds": {
+        "gnu_r": 2.79845e-05,
+        "ry": 1.84175e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.5674,
+          "low": 1.3429,
+          "high": 1.7984
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "dates: is.na(day) and day > other",
+      "display": "dates: is.na(day) and day > other",
+      "seconds": {
+        "gnu_r": 7.0495e-06,
+        "ry": 3.933e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.8224,
+          "low": 1.5381,
+          "high": 2.2673
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "dates: as.numeric(format(day, '%Y'))",
+      "display": "dates: as.numeric(format(day, '%Y'))",
+      "seconds": {
+        "gnu_r": 1.3779e-05,
+        "ry": 6.584e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.0703,
+          "low": 1.9708,
+          "high": 2.1801
+        }
+      },
+      "flags": [],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "dates: Sys.time() and Sys.Date()",
+      "display": "dates: Sys.time() and Sys.Date()",
+      "seconds": {
+        "gnu_r": 4.59595e-05,
+        "ry": 6.859e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 6.2404,
+          "low": 5.8566,
+          "high": 7.4342
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "dates: lubridate::year() and month()",
+      "display": "dates: lubridate::year() and month()",
+      "seconds": {
+        "gnu_r": 2.69775e-05,
+        "ry": 1.1978e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.2904,
+          "low": 2.1105,
+          "high": 2.5313
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "dates: lubridate::ymd() of a text",
+      "display": "dates: lubridate::ymd() of a text",
+      "seconds": {
+        "gnu_r": 0.00124023,
+        "ry": 0.000258057
+      },
+      "ratio": {
+        "ry": {
+          "median": 4.6604,
+          "low": 3.9644,
+          "high": 5.2079
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "dates: c() of two dates",
+      "display": "dates: c() of two dates",
+      "seconds": {
+        "gnu_r": 2.0508e-05,
+        "ry": 9.4295e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.1624,
+          "low": 1.9826,
+          "high": 2.5034
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.frame: data.frame() with 3 columns",
+      "display": "data.frame: data.frame() with 3 columns",
+      "seconds": {
+        "gnu_r": 0.000165283,
+        "ry": 4.1321e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.737,
+          "low": 3.3005,
+          "high": 4.2204
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.frame: rbind() of 2 frames",
+      "display": "data.frame: rbind() of 2 frames",
+      "seconds": {
+        "gnu_r": 9.8389e-05,
+        "ry": 6.01805e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.6272,
+          "low": 1.4769,
+          "high": 1.9508
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.frame: do.call(rbind, 5 frames)",
+      "display": "data.frame: do.call(rbind, 5 frames)",
+      "seconds": {
+        "gnu_r": 0.00022583,
+        "ry": 0.000132813
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.7666,
+          "low": 1.4903,
+          "high": 2.0897
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.frame: df[['col3']]",
+      "display": "data.frame: df[['col3']]",
+      "seconds": {
+        "gnu_r": 4.1885e-06,
+        "ry": 2.287e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.629,
+          "low": 1.5365,
+          "high": 2.0895
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.frame: df$col3",
+      "display": "data.frame: df$col3",
+      "seconds": {
+        "gnu_r": 7.685e-07,
+        "ry": 1.815e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.8944,
+          "low": 3.3095,
+          "high": 4.6055
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.frame: df$col4 <- value",
+      "display": "data.frame: df$col4 <- value",
+      "seconds": {
+        "gnu_r": 5.4015e-06,
+        "ry": 2.9485e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.8423,
+          "low": 1.6407,
+          "high": 2.0497
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.frame: df[df$col1 == 'k3', ]",
+      "display": "data.frame: df[df$col1 == 'k3', ]",
+      "seconds": {
+        "gnu_r": 3.14945e-05,
+        "ry": 1.68305e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.9027,
+          "low": 1.6873,
+          "high": 2.4109
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.frame: df[, c('col1', 'col3')]",
+      "display": "data.frame: df[, c('col1', 'col3')]",
+      "seconds": {
+        "gnu_r": 9.9795e-06,
+        "ry": 3.948e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.4835,
+          "low": 2.0488,
+          "high": 2.8998
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.frame: df[3, 'col3']",
+      "display": "data.frame: df[3, 'col3']",
+      "seconds": {
+        "gnu_r": 8.232e-06,
+        "ry": 3.4865e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.5244,
+          "low": 2.1604,
+          "high": 3.2052
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.frame: nrow() and colnames()",
+      "display": "data.frame: nrow() and colnames()",
+      "seconds": {
+        "gnu_r": 4.3945e-06,
+        "ry": 1.406e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.1171,
+          "low": 2.7184,
+          "high": 3.8117
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.frame: as.data.frame() of a list",
+      "display": "data.frame: as.data.frame() of a list",
+      "seconds": {
+        "gnu_r": 0.000108521,
+        "ry": 3.8147e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.9648,
+          "low": 2.5959,
+          "high": 3.304
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.frame: merge() on one key",
+      "display": "data.frame: merge() on one key",
+      "seconds": {
+        "gnu_r": 0.000306641,
+        "ry": 0.000165039
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.8406,
+          "low": 1.6107,
+          "high": 2.5294
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.frame: df[order(df$col3), ]",
+      "display": "data.frame: df[order(df$col3), ]",
+      "seconds": {
+        "gnu_r": 5.16355e-05,
+        "ry": 1.6876e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.9597,
+          "low": 2.447,
+          "high": 3.3329
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.frame: cbind() of a frame and a vector",
+      "display": "data.frame: cbind() of a frame and a vector",
+      "seconds": {
+        "gnu_r": 5.4077e-05,
+        "ry": 2.61535e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.0856,
+          "low": 1.7294,
+          "high": 2.672
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "data.frame: apply() over the rows of a matrix",
+      "display": "data.frame: apply() over the rows of a matrix",
+      "seconds": {
+        "gnu_r": 2.53905e-05,
+        "ry": 1.2482e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.9541,
+          "low": 1.7274,
+          "high": 2.429
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "closures: build an object of 3 closures",
+      "display": "closures: build an object of 3 closures",
+      "seconds": {
+        "gnu_r": 1.4075e-06,
+        "ry": 6.705e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.9998,
+          "low": 1.7829,
+          "high": 2.2123
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "closures: method that assigns with <<-",
+      "display": "closures: method that assigns with <<-",
+      "seconds": {
+        "gnu_r": 4.555e-06,
+        "ry": 2.678e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.6023,
+          "low": 1.4706,
+          "high": 1.7533
+        }
+      },
+      "flags": [],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "closures: method that reads",
+      "display": "closures: method that reads",
+      "seconds": {
+        "gnu_r": 8.27e-07,
+        "ry": 2.875e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.1837,
+          "low": 2.485,
+          "high": 3.6761
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "closures: fastmap()",
+      "display": "closures: fastmap()",
+      "seconds": {
+        "gnu_r": 7.011e-06,
+        "ry": 6.645e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.0697,
+          "low": 0.9018,
+          "high": 1.2283
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "closures: fastmap set() of one key",
+      "display": "closures: fastmap set() of one key",
+      "seconds": {
+        "gnu_r": 3.357e-06,
+        "ry": 1.675e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.0703,
+          "low": 1.4011,
+          "high": 2.3198
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "closures: fastmap get() of one key",
+      "display": "closures: fastmap get() of one key",
+      "seconds": {
+        "gnu_r": 1.9535e-06,
+        "ry": 6.835e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.7931,
+          "low": 2.338,
+          "high": 3.1835
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "closures: fastmap new map, 3 sets, as_list()",
+      "display": "closures: fastmap new map, 3 sets, as_list()",
+      "seconds": {
+        "gnu_r": 3.2135e-05,
+        "ry": 1.74255e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.7511,
+          "low": 1.5661,
+          "high": 2.0893
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "closures: environment assign() and get()",
+      "display": "closures: environment assign() and get()",
+      "seconds": {
+        "gnu_r": 3.2955e-06,
+        "ry": 1.301e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.3647,
+          "low": 1.9773,
+          "high": 3.3003
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "closures: local() block",
+      "display": "closures: local() block",
+      "seconds": {
+        "gnu_r": 4.425e-07,
+        "ry": 2.51e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.7876,
+          "low": 1.4798,
+          "high": 2.2046
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "closures: fastmap set() of an old key, 10,000 keys",
+      "display": "closures: fastmap set() of an old key, 10,000 keys",
+      "seconds": {
+        "gnu_r": 2.6515e-06,
+        "ry": 1.7245e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.4921,
+          "low": 1.2912,
+          "high": 1.609
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "closures: fastmap set() of a new key, 10,000 keys",
+      "display": "closures: fastmap set() of a new key, 10,000 keys",
+      "seconds": {
+        "gnu_r": 9.7045e-06,
+        "ry": 4.013e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.4257,
+          "low": 1.8205,
+          "high": 2.7018
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "closures: fastmap get(), 10,000 keys",
+      "display": "closures: fastmap get(), 10,000 keys",
+      "seconds": {
+        "gnu_r": 1.505e-06,
+        "ry": 6.835e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.2505,
+          "low": 1.913,
+          "high": 3.0044
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "closures: fastmap has(), 10,000 keys",
+      "display": "closures: fastmap has(), 10,000 keys",
+      "seconds": {
+        "gnu_r": 1.4155e-06,
+        "ry": 7.4e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.9241,
+          "low": 1.7848,
+          "high": 2.254
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "closures: values[i] <<- v on 10,000 elements",
+      "display": "closures: values[i] <<- v on 10,000 elements",
+      "seconds": {
+        "gnu_r": 1.4075e-06,
+        "ry": 5.835e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.3463,
+          "low": 2.1472,
+          "high": 2.8209
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "closures: values[[n]] <<- v appends to 10,000",
+      "display": "closures: values[[n]] <<- v appends to 10,000",
+      "seconds": {
+        "gnu_r": 2.735e-06,
+        "ry": 1.3065e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.035,
+          "low": 1.7743,
+          "high": 2.4692
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "closures: new fastmap, 200 sets, as_list()",
+      "display": "closures: new fastmap, 200 sets, as_list()",
+      "seconds": {
+        "gnu_r": 0.00156641,
+        "ry": 0.000799805
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.9162,
+          "low": 1.706,
+          "high": 2.9954
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "conditions: tryCatch(f(i), error = h)",
+      "display": "conditions: tryCatch(f(i), error = h)",
+      "seconds": {
+        "gnu_r": 5.7145e-06,
+        "ry": 2.678e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.1422,
+          "low": 1.9202,
+          "high": 2.3941
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "conditions: tryCatch(f(i), finally = g)",
+      "display": "conditions: tryCatch(f(i), finally = g)",
+      "seconds": {
+        "gnu_r": 2.747e-06,
+        "ry": 1.5145e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.8171,
+          "low": 1.5485,
+          "high": 2.0766
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "conditions: tryCatch() with error and warning",
+      "display": "conditions: tryCatch() with error and warning",
+      "seconds": {
+        "gnu_r": 9.705e-06,
+        "ry": 5.806e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.7248,
+          "low": 1.555,
+          "high": 2.0491
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "conditions: withCallingHandlers(f(i), warning = h)",
+      "display": "conditions: withCallingHandlers(f(i), warning = h)",
+      "seconds": {
+        "gnu_r": 1.938e-06,
+        "ry": 9.745e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.9948,
+          "low": 1.681,
+          "high": 2.2005
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "conditions: tryCatch around withCallingHandlers",
+      "display": "conditions: tryCatch around withCallingHandlers",
+      "seconds": {
+        "gnu_r": 6.5765e-06,
+        "ry": 3.826e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.756,
+          "low": 1.4024,
+          "high": 1.8295
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "conditions: an error caught by tryCatch()",
+      "display": "conditions: an error caught by tryCatch()",
+      "seconds": {
+        "gnu_r": 1.79905e-05,
+        "ry": 9.521e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.9488,
+          "low": 1.7395,
+          "high": 2.069
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "conditions: a warning muffled by a handler",
+      "display": "conditions: a warning muffled by a handler",
+      "seconds": {
+        "gnu_r": 3.5248e-05,
+        "ry": 9.201e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.7627,
+          "low": 3.5619,
+          "high": 4.6774
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "conditions: suppressWarnings(f(i))",
+      "display": "conditions: suppressWarnings(f(i))",
+      "seconds": {
+        "gnu_r": 2.529e-06,
+        "ry": 1.1225e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.334,
+          "low": 1.8531,
+          "high": 2.4491
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "conditions: on.exit() in a function",
+      "display": "conditions: on.exit() in a function",
+      "seconds": {
+        "gnu_r": 4.3e-07,
+        "ry": 2.945e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.3815,
+          "low": 1.3272,
+          "high": 1.5925
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "conditions: try(f(i), silent = TRUE)",
+      "display": "conditions: try(f(i), silent = TRUE)",
+      "seconds": {
+        "gnu_r": 5.4475e-06,
+        "ry": 3.0745e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.6888,
+          "low": 1.5173,
+          "high": 2.2106
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "conditions: sys.call() and match.call()",
+      "display": "conditions: sys.call() and match.call()",
+      "seconds": {
+        "gnu_r": 3.5555e-06,
+        "ry": 1.6115e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.2481,
+          "low": 2.0433,
+          "high": 2.7675
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "conditions: sys.calls() 10 frames deep",
+      "display": "conditions: sys.calls() 10 frames deep",
+      "seconds": {
+        "gnu_r": 5.1575e-06,
+        "ry": 2.3745e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.2363,
+          "low": 2.0619,
+          "high": 2.3779
+        }
+      },
+      "flags": [],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "functionals: lapply() over 10 values",
+      "display": "functionals: lapply() over 10 values",
+      "seconds": {
+        "gnu_r": 7.2175e-06,
+        "ry": 2.5295e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.7118,
+          "low": 2.2808,
+          "high": 3.987
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "functionals: sapply() over 10 values",
+      "display": "functionals: sapply() over 10 values",
+      "seconds": {
+        "gnu_r": 1.66015e-05,
+        "ry": 6.798e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.5075,
+          "low": 2.0911,
+          "high": 2.7868
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "functionals: vapply() over 10 values",
+      "display": "functionals: vapply() over 10 values",
+      "seconds": {
+        "gnu_r": 9.018e-06,
+        "ry": 2.6435e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.6702,
+          "low": 3.2792,
+          "high": 4.0564
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "functionals: mapply() over two lists",
+      "display": "functionals: mapply() over two lists",
+      "seconds": {
+        "gnu_r": 2.0157e-05,
+        "ry": 7.4235e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.6888,
+          "low": 2.4019,
+          "high": 3.4381
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "functionals: Map() over two lists",
+      "display": "functionals: Map() over two lists",
+      "seconds": {
+        "gnu_r": 1.3748e-05,
+        "ry": 4.1505e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.3795,
+          "low": 2.8253,
+          "high": 3.9866
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "functionals: do.call() with a named list",
+      "display": "functionals: do.call() with a named list",
+      "seconds": {
+        "gnu_r": 2.617e-06,
+        "ry": 1.1845e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.2645,
+          "low": 1.8608,
+          "high": 2.5528
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "functionals: do.call('c', list)",
+      "display": "functionals: do.call('c', list)",
+      "seconds": {
+        "gnu_r": 2.2675e-06,
+        "ry": 1.1995e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.9636,
+          "low": 1.7708,
+          "high": 2.1266
+        }
+      },
+      "flags": [],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "functionals: Reduce(`+`, 10 values)",
+      "display": "functionals: Reduce(`+`, 10 values)",
+      "seconds": {
+        "gnu_r": 5.699e-06,
+        "ry": 1.558e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.3322,
+          "low": 2.9378,
+          "high": 3.8679
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "functionals: Filter() over 10 values",
+      "display": "functionals: Filter() over 10 values",
+      "seconds": {
+        "gnu_r": 1.2314e-05,
+        "ry": 3.9975e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.9203,
+          "low": 2.7847,
+          "high": 3.4211
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "functionals: unlist() of 10 values",
+      "display": "functionals: unlist() of 10 values",
+      "seconds": {
+        "gnu_r": 1.322e-06,
+        "ry": 6.21e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.2464,
+          "low": 2.0297,
+          "high": 2.5787
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "functionals: unlist() of a named list",
+      "display": "functionals: unlist() of a named list",
+      "seconds": {
+        "gnu_r": 1.808e-06,
+        "ry": 8.13e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.2292,
+          "low": 2.1302,
+          "high": 2.6735
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "functionals: setNames() and names()",
+      "display": "functionals: setNames() and names()",
+      "seconds": {
+        "gnu_r": 5.123e-06,
+        "ry": 1.362e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.8565,
+          "low": 3.1181,
+          "high": 4.5884
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "functionals: structure() with a class",
+      "display": "functionals: structure() with a class",
+      "seconds": {
+        "gnu_r": 3.7575e-06,
+        "ry": 4.84e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 7.8077,
+          "low": 7.1516,
+          "high": 8.4199
+        }
+      },
+      "flags": [],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "functionals: call forwarding ...",
+      "display": "functionals: call forwarding ...",
+      "seconds": {
+        "gnu_r": 9.63e-07,
+        "ry": 5.85e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.5845,
+          "low": 1.4432,
+          "high": 2.1044
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "functionals: call with 5 named arguments",
+      "display": "functionals: call with 5 named arguments",
+      "seconds": {
+        "gnu_r": 8.87e-07,
+        "ry": 3.42e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.6091,
+          "low": 2.0562,
+          "high": 2.9678
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "functionals: seq_along() loop that fills a list",
+      "display": "functionals: seq_along() loop that fills a list",
+      "seconds": {
+        "gnu_r": 1.8805e-06,
+        "ry": 6.145e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.1125,
+          "low": 2.7912,
+          "high": 3.4463
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "functionals: c() that grows a vector 10 times",
+      "display": "functionals: c() that grows a vector 10 times",
+      "seconds": {
+        "gnu_r": 2.2335e-06,
+        "ry": 9.58e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.5361,
+          "low": 2.1008,
+          "high": 3.1502
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "functionals: rev(), sort() and order() of 10 values",
+      "display": "functionals: rev(), sort() and order() of 10 values",
+      "seconds": {
+        "gnu_r": 4.0375e-05,
+        "ry": 2.8765e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 14.1338,
+          "low": 13.2659,
+          "high": 17.3275
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "functionals: sum(), mean(), max() of 10 values",
+      "display": "functionals: sum(), mean(), max() of 10 values",
+      "seconds": {
+        "gnu_r": 3.6395e-06,
+        "ry": 1.484e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.3549,
+          "low": 2.0674,
+          "high": 2.821
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "functionals: rep(), seq() and length()",
+      "display": "functionals: rep(), seq() and length()",
+      "seconds": {
+        "gnu_r": 1.3031e-05,
+        "ry": 4.2995e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.9855,
+          "low": 2.7083,
+          "high": 3.3749
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "math: qt() of 10,000 probabilities, df = 5",
+      "display": "math: qt() of 10,000 probabilities, df = 5",
+      "seconds": {
+        "gnu_r": 0.00537891,
+        "ry": 0.00480078
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.1393,
+          "low": 1.0244,
+          "high": 1.3542
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "math: qnorm() of 10,000 probabilities",
+      "display": "math: qnorm() of 10,000 probabilities",
+      "seconds": {
+        "gnu_r": 0.000141968,
+        "ry": 3.55835e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 4.5636,
+          "low": 3.6661,
+          "high": 5.1391
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "math: pnorm() of 10,000 values",
+      "display": "math: pnorm() of 10,000 values",
+      "seconds": {
+        "gnu_r": 0.000244385,
+        "ry": 9.668e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.4413,
+          "low": 2.2317,
+          "high": 3.4943
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "math: pt() of 10,000 values, df = 5",
+      "display": "math: pt() of 10,000 values, df = 5",
+      "seconds": {
+        "gnu_r": 0.00125293,
+        "ry": 0.00119043
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.045,
+          "low": 0.8822,
+          "high": 1.3546
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "math: exp(), log() and sqrt() of 10,000 values",
+      "display": "math: exp(), log() and sqrt() of 10,000 values",
+      "seconds": {
+        "gnu_r": 0.000201904,
+        "ry": 5.3711e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.7989,
+          "low": 3.1063,
+          "high": 4.1423
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "math: cumprod(1 + x) of 10,000 values",
+      "display": "math: cumprod(1 + x) of 10,000 values",
+      "seconds": {
+        "gnu_r": 8.551e-05,
+        "ry": 2.67945e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.1815,
+          "low": 3.1081,
+          "high": 3.3392
+        }
+      },
+      "flags": [],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "math: matrix %*% vector, 250 x 20",
+      "display": "math: matrix %*% vector, 250 x 20",
+      "seconds": {
+        "gnu_r": 4.326e-06,
+        "ry": 1.5375e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.584,
+          "low": 2.1631,
+          "high": 3.0356
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "math: cov() of a 250 x 20 matrix",
+      "display": "math: cov() of a 250 x 20 matrix",
+      "seconds": {
+        "gnu_r": 8.3618e-05,
+        "ry": 0.000169189
+      },
+      "ratio": {
+        "ry": {
+          "median": 0.4934,
+          "low": 0.4287,
+          "high": 0.5918
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "math: colMeans() and apply(m, 2, sd)",
+      "display": "math: colMeans() and apply(m, 2, sd)",
+      "seconds": {
+        "gnu_r": 0.000231445,
+        "ry": 0.000110718
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.1447,
+          "low": 1.9956,
+          "high": 2.2713
+        }
+      },
+      "flags": [],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "math: quantile() of 10,000 values",
+      "display": "math: quantile() of 10,000 values",
+      "seconds": {
+        "gnu_r": 0.000155395,
+        "ry": 4.5105e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.506,
+          "low": 3.1692,
+          "high": 3.9756
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "math: sort() of 10,000 values",
+      "display": "math: sort() of 10,000 values",
+      "seconds": {
+        "gnu_r": 9.3994e-05,
+        "ry": 0.000146729
+      },
+      "ratio": {
+        "ry": {
+          "median": 0.6884,
+          "low": 0.5538,
+          "high": 0.928
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "math: pmin() and pmax() of 10,000 values",
+      "display": "math: pmin() and pmax() of 10,000 values",
+      "seconds": {
+        "gnu_r": 7.11665e-05,
+        "ry": 0.000138306
+      },
+      "ratio": {
+        "ry": {
+          "median": 0.5071,
+          "low": 0.445,
+          "high": 0.5571
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "math: scalar loop with 1,000 steps",
+      "display": "math: scalar loop with 1,000 steps",
+      "seconds": {
+        "gnu_r": 1.93025e-05,
+        "ry": 2.7355e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 7.0114,
+          "low": 5.5399,
+          "high": 7.2655
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s3: UseMethod() to a class method",
+      "display": "s3: UseMethod() to a class method",
+      "seconds": {
+        "gnu_r": 3.9825e-06,
+        "ry": 1.197e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.4754,
+          "low": 2.8235,
+          "high": 4.2919
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s3: UseMethod() to the default method",
+      "display": "s3: UseMethod() to the default method",
+      "seconds": {
+        "gnu_r": 1.461e-06,
+        "ry": 4.445e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.1464,
+          "low": 2.8355,
+          "high": 3.5191
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s3: method that calls NextMethod()",
+      "display": "s3: method that calls NextMethod()",
+      "seconds": {
+        "gnu_r": 4.486e-06,
+        "ry": 1.1835e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.731,
+          "low": 3.2099,
+          "high": 4.3122
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s3: operator method a + b",
+      "display": "s3: operator method a + b",
+      "seconds": {
+        "gnu_r": 7.8205e-06,
+        "ry": 1.642e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 4.6383,
+          "low": 4.1199,
+          "high": 5.9797
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s3: `[` method with NextMethod()",
+      "display": "s3: `[` method with NextMethod()",
+      "seconds": {
+        "gnu_r": 5.7375e-06,
+        "ry": 1.5315e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.5324,
+          "low": 3.2371,
+          "high": 3.949
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s3: length() method",
+      "display": "s3: length() method",
+      "seconds": {
+        "gnu_r": 1.1905e-06,
+        "ry": 4.275e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.6544,
+          "low": 2.3706,
+          "high": 3.3338
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s3: format() method",
+      "display": "s3: format() method",
+      "seconds": {
+        "gnu_r": 5.348e-06,
+        "ry": 1.217e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 4.6654,
+          "low": 3.9964,
+          "high": 5.2916
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s3: x$v on a classed list",
+      "display": "s3: x$v on a classed list",
+      "seconds": {
+        "gnu_r": 8.04e-07,
+        "ry": 1.81e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 4.3834,
+          "low": 3.8607,
+          "high": 5.0882
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s3: structure() of a classed list",
+      "display": "s3: structure() of a classed list",
+      "seconds": {
+        "gnu_r": 4.5505e-06,
+        "ry": 6.54e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 6.9191,
+          "low": 5.6975,
+          "high": 7.5069
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s3: inherits(x, 'expr')",
+      "display": "s3: inherits(x, 'expr')",
+      "seconds": {
+        "gnu_r": 3.74e-07,
+        "ry": 1.685e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.1979,
+          "low": 1.9428,
+          "high": 2.3871
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s3: class(x)[1] and oldClass<-",
+      "display": "s3: class(x)[1] and oldClass<-",
+      "seconds": {
+        "gnu_r": 7.105e-07,
+        "ry": 3.19e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.1905,
+          "low": 2.0341,
+          "high": 2.2922
+        }
+      },
+      "flags": [],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "s3: print() of a classed object to a string",
+      "display": "s3: print() of a classed object to a string",
+      "seconds": {
+        "gnu_r": 6.19505e-05,
+        "ry": 1.8616e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.4596,
+          "low": 2.841,
+          "high": 3.9083
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: paste(a, b, sep = '|') of 5,000 strings",
+      "display": "large: paste(a, b, sep = '|') of 5,000 strings",
+      "seconds": {
+        "gnu_r": 0.00072461,
+        "ry": 0.000203125
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.5605,
+          "low": 3.281,
+          "high": 3.7879
+        }
+      },
+      "flags": [],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: paste0('id', 1:5000)",
+      "display": "large: paste0('id', 1:5000)",
+      "seconds": {
+        "gnu_r": 0.00118262,
+        "ry": 0.000454102
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.708,
+          "low": 2.3787,
+          "high": 3.0286
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: 5,000 strings %in% 5,000 strings",
+      "display": "large: 5,000 strings %in% 5,000 strings",
+      "seconds": {
+        "gnu_r": 0.000161866,
+        "ry": 2.8534e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 5.7534,
+          "low": 4.3517,
+          "high": 6.4071
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: match() of 5,000 strings",
+      "display": "large: match() of 5,000 strings",
+      "seconds": {
+        "gnu_r": 0.000149902,
+        "ry": 2.62755e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 5.7601,
+          "low": 4.4787,
+          "high": 6.2559
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: unique() of 5,000 strings",
+      "display": "large: unique() of 5,000 strings",
+      "seconds": {
+        "gnu_r": 7.75755e-05,
+        "ry": 1.1841e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 6.2413,
+          "low": 5.5125,
+          "high": 7.1013
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: order() of 5,000 strings",
+      "display": "large: order() of 5,000 strings",
+      "seconds": {
+        "gnu_r": 0.00980469,
+        "ry": 0.00216992
+      },
+      "ratio": {
+        "ry": {
+          "median": 4.6926,
+          "low": 3.6958,
+          "high": 5.3038
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: which() of 5,000 logicals",
+      "display": "large: which() of 5,000 logicals",
+      "seconds": {
+        "gnu_r": 1.65405e-05,
+        "ry": 4.4365e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 4.0259,
+          "low": 3.2429,
+          "high": 4.1668
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: x[logical index] of 5,000 numbers",
+      "display": "large: x[logical index] of 5,000 numbers",
+      "seconds": {
+        "gnu_r": 1.35955e-05,
+        "ry": 1.79445e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 0.7566,
+          "low": 0.6491,
+          "high": 0.8968
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: unlist() of a list of 5,000 numbers",
+      "display": "large: unlist() of a list of 5,000 numbers",
+      "seconds": {
+        "gnu_r": 7.8735e-05,
+        "ry": 0.000116699
+      },
+      "ratio": {
+        "ry": {
+          "median": 0.6825,
+          "low": 0.5385,
+          "high": 0.7679
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: lapply() over 5,000 numbers",
+      "display": "large: lapply() over 5,000 numbers",
+      "seconds": {
+        "gnu_r": 0.00246484,
+        "ry": 0.000763672
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.1446,
+          "low": 2.9274,
+          "high": 3.8416
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: as.POSIXlt() of 5,000 dates",
+      "display": "large: as.POSIXlt() of 5,000 dates",
+      "seconds": {
+        "gnu_r": 0.000671875,
+        "ry": 0.000326171
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.069,
+          "low": 1.6508,
+          "high": 2.4422
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: format() of 5,000 dates",
+      "display": "large: format() of 5,000 dates",
+      "seconds": {
+        "gnu_r": 0.00142773,
+        "ry": 0.00190625
+      },
+      "ratio": {
+        "ry": {
+          "median": 0.7491,
+          "low": 0.619,
+          "high": 0.8911
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: as.Date() of 5,000 texts",
+      "display": "large: as.Date() of 5,000 texts",
+      "seconds": {
+        "gnu_r": 0.0136719,
+        "ry": 0.00034961
+      },
+      "ratio": {
+        "ry": {
+          "median": 40.4182,
+          "low": 36.7054,
+          "high": 42.4481
+        }
+      },
+      "flags": [],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: ifelse() on 5,000 values",
+      "display": "large: ifelse() on 5,000 values",
+      "seconds": {
+        "gnu_r": 8.59375e-05,
+        "ry": 4.75465e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.8174,
+          "low": 1.689,
+          "high": 2.1446
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: qt() of 5,000 probabilities, df = 4.5",
+      "display": "large: qt() of 5,000 probabilities, df = 4.5",
+      "seconds": {
+        "gnu_r": 0.00258984,
+        "ry": 0.00248633
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.0419,
+          "low": 0.9929,
+          "high": 1.1897
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: Reduce(rbind) over 200 tables of 100 rows",
+      "display": "large: Reduce(rbind) over 200 tables of 100 rows",
+      "seconds": {
+        "gnu_r": 0.0406719,
+        "ry": 0.0229453
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.7388,
+          "low": 1.634,
+          "high": 1.9418
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: rbindlist() of 200 tables of 100 rows",
+      "display": "large: rbindlist() of 200 tables of 100 rows",
+      "seconds": {
+        "gnu_r": 0.000589356,
+        "ry": 0.000358399
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.6206,
+          "low": 1.4818,
+          "high": 1.7311
+        }
+      },
+      "flags": [],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: rbindlist() of two tables of 5,000 rows",
+      "display": "large: rbindlist() of two tables of 5,000 rows",
+      "seconds": {
+        "gnu_r": 0.000234619,
+        "ry": 0.000154663
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.6452,
+          "low": 1.3526,
+          "high": 2.1241
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: unique() of a table of 5,000 rows",
+      "display": "large: unique() of a table of 5,000 rows",
+      "seconds": {
+        "gnu_r": 0.000533692,
+        "ry": 0.000523438
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.019,
+          "low": 0.8739,
+          "high": 1.2394
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: table[kind == 'x'] of 5,000 rows",
+      "display": "large: table[kind == 'x'] of 5,000 rows",
+      "seconds": {
+        "gnu_r": 0.000881836,
+        "ry": 0.000501953
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.7029,
+          "low": 1.3691,
+          "high": 2.4112
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: table[, sum(value), by = kind]",
+      "display": "large: table[, sum(value), by = kind]",
+      "seconds": {
+        "gnu_r": 0.000711914,
+        "ry": 0.000410156
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.7636,
+          "low": 1.5272,
+          "high": 1.8555
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: merge() of two tables of 5,000 rows",
+      "display": "large: merge() of two tables of 5,000 rows",
+      "seconds": {
+        "gnu_r": 0.00341016,
+        "ry": 0.00283203
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.188,
+          "low": 1.0775,
+          "high": 1.3081
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: setkey() on a text column",
+      "display": "large: setkey() on a text column",
+      "seconds": {
+        "gnu_r": 0.000810547,
+        "ry": 0.000765625
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.053,
+          "low": 0.8479,
+          "high": 1.2473
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: serialize() of a table of 5,000 rows",
+      "display": "large: serialize() of a table of 5,000 rows",
+      "seconds": {
+        "gnu_r": 0.000477051,
+        "ry": 0.000308105
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.5011,
+          "low": 1.368,
+          "high": 1.9146
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: unserialize() of that table",
+      "display": "large: unserialize() of that table",
+      "seconds": {
+        "gnu_r": 0.00139062,
+        "ry": 0.000685547
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.1097,
+          "low": 1.8405,
+          "high": 2.1995
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: saveRDS() and readRDS() of that table",
+      "display": "large: saveRDS() and readRDS() of that table",
+      "seconds": {
+        "gnu_r": 0.0135312,
+        "ry": 0.00326563
+      },
+      "ratio": {
+        "ry": {
+          "median": 4.1759,
+          "low": 3.8483,
+          "high": 4.2577
+        }
+      },
+      "flags": [],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: copy of a numeric vector, one element set",
+      "display": "large: copy of a numeric vector, one element set",
+      "seconds": {
+        "gnu_r": 8.789e-06,
+        "ry": 4.3755e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.0135,
+          "low": 1.3585,
+          "high": 2.1202
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "large: sum(), cumsum() and diff() of 5,000 numbers",
+      "display": "large: sum(), cumsum() and diff() of 5,000 numbers",
+      "seconds": {
+        "gnu_r": 9.0576e-05,
+        "ry": 3.86965e-05
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.2145,
+          "low": 1.9184,
+          "high": 2.7802
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "body: f() with no argument",
+      "display": "body: f() with no argument",
+      "seconds": {
+        "gnu_r": 2.42e-07,
+        "ry": 1.75e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.4121,
+          "low": 1.1477,
+          "high": 2.0012
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "body: f(a) with one argument",
+      "display": "body: f(a) with one argument",
+      "seconds": {
+        "gnu_r": 3.865e-07,
+        "ry": 2.155e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.8795,
+          "low": 1.6852,
+          "high": 2.0626
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "body: f(a, b, c) by position",
+      "display": "body: f(a, b, c) by position",
+      "seconds": {
+        "gnu_r": 5.94e-07,
+        "ry": 2.49e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.3877,
+          "low": 2.0427,
+          "high": 2.6099
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "body: f(a, b = , c = ) by name",
+      "display": "body: f(a, b = , c = ) by name",
+      "seconds": {
+        "gnu_r": 5.915e-07,
+        "ry": 1.31e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 4.7715,
+          "low": 3.9562,
+          "high": 6.053
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "body: f(a) with two default arguments",
+      "display": "body: f(a) with two default arguments",
+      "seconds": {
+        "gnu_r": 7.365e-07,
+        "ry": 3.345e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.2456,
+          "low": 1.7366,
+          "high": 2.9695
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "body: a function that passes 3 arguments on",
+      "display": "body: a function that passes 3 arguments on",
+      "seconds": {
+        "gnu_r": 1.014e-06,
+        "ry": 4.295e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.5007,
+          "low": 2.3363,
+          "high": 2.8225
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "body: a chain of 5 calls",
+      "display": "body: a chain of 5 calls",
+      "seconds": {
+        "gnu_r": 1.2505e-06,
+        "ry": 8.1e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.538,
+          "low": 1.2993,
+          "high": 1.8526
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "body: a function that tests missing(b)",
+      "display": "body: a function that tests missing(b)",
+      "seconds": {
+        "gnu_r": 5.71e-07,
+        "ry": 1.81e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.0419,
+          "low": 2.4073,
+          "high": 3.4054
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "body: a function that returns early",
+      "display": "body: a function that returns early",
+      "seconds": {
+        "gnu_r": 3.615e-07,
+        "ry": 1.53e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.3849,
+          "low": 2.1668,
+          "high": 2.5338
+        }
+      },
+      "flags": [],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "body: a function that defines and calls a function",
+      "display": "body: a function that defines and calls a function",
+      "seconds": {
+        "gnu_r": 6.685e-07,
+        "ry": 4.1e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.5007,
+          "low": 1.3757,
+          "high": 2.2379
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "body: lapply over 3 with a function that reads a local",
+      "display": "body: lapply over 3 with a function that reads a local",
+      "seconds": {
+        "gnu_r": 3.8795e-06,
+        "ry": 1.8385e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.0187,
+          "low": 1.7697,
+          "high": 2.7792
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "body: two argument guards with stop()",
+      "display": "body: two argument guards with stop()",
+      "seconds": {
+        "gnu_r": 7.315e-07,
+        "ry": 3.135e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.1727,
+          "low": 2.013,
+          "high": 2.4724
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "body: a function that passes ... on",
+      "display": "body: a function that passes ... on",
+      "seconds": {
+        "gnu_r": 1.0385e-06,
+        "ry": 7.22e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.4755,
+          "low": 1.2064,
+          "high": 1.6561
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "body: field(x, name) as x[[name]]",
+      "display": "body: field(x, name) as x[[name]]",
+      "seconds": {
+        "gnu_r": 6.62e-07,
+        "ry": 1.815e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.6996,
+          "low": 3.1735,
+          "high": 4.3898
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "body: 10 scalar assignments",
+      "display": "body: 10 scalar assignments",
+      "seconds": {
+        "gnu_r": 9.49e-07,
+        "ry": 2.215e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 4.2623,
+          "low": 3.3297,
+          "high": 5.0617
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "body: if / else if chain on a string",
+      "display": "body: if / else if chain on a string",
+      "seconds": {
+        "gnu_r": 6.01e-07,
+        "ry": 3.53e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.6397,
+          "low": 1.4227,
+          "high": 1.7893
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "body: switch() on a string",
+      "display": "body: switch() on a string",
+      "seconds": {
+        "gnu_r": 4.08e-07,
+        "ry": 1.765e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.2409,
+          "low": 1.891,
+          "high": 2.8439
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "body: reads of x$a, x$a$b, x[['a']][['b']]",
+      "display": "body: reads of x$a, x$a$b, x[['a']][['b']]",
+      "seconds": {
+        "gnu_r": 1.1885e-06,
+        "ry": 4.33e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.8177,
+          "low": 1.9135,
+          "high": 3.688
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "body: writes of x$a, x[['a']], x$a$b",
+      "display": "body: writes of x$a, x[['a']], x$a$b",
+      "seconds": {
+        "gnu_r": 1.3905e-06,
+        "ry": 1.195e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.2426,
+          "low": 1.0503,
+          "high": 1.529
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "body: for loop that sums 10 elements",
+      "display": "body: for loop that sums 10 elements",
+      "seconds": {
+        "gnu_r": 1.0445e-06,
+        "ry": 4.19e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.4993,
+          "low": 1.9319,
+          "high": 2.8464
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "body: for loop that fills 10 elements",
+      "display": "body: for loop that fills 10 elements",
+      "seconds": {
+        "gnu_r": 1.463e-06,
+        "ry": 4.37e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.2949,
+          "low": 2.6396,
+          "high": 3.8241
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "body: for loop that copies 5 list fields",
+      "display": "body: for loop that copies 5 list fields",
+      "seconds": {
+        "gnu_r": 4.154e-06,
+        "ry": 1.3065e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.8181,
+          "low": 2.644,
+          "high": 3.826
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "body: list() of 4 named fields with paste0()",
+      "display": "body: list() of 4 named fields with paste0()",
+      "seconds": {
+        "gnu_r": 4.8145e-06,
+        "ry": 9.315e-07
+      },
+      "ratio": {
+        "ry": {
+          "median": 5.0005,
+          "low": 4.0096,
+          "high": 7.1025
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    },
+    {
+      "id": "body: helper of 20 lines",
+      "display": "body: helper of 20 lines",
+      "seconds": {
+        "gnu_r": 5.714e-06,
+        "ry": 2.033e-06
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.948,
+          "low": 2.6267,
+          "high": 3.6112
+        }
+      },
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ],
+      "peak_mib": {},
+      "anonymous_mib": {},
+      "image_mib": {},
+      "libr_mib": {}
+    }
+  ],
+  "geomean": {},
+  "worst": {
+    "ry": {
+      "id": "math: cov() of a 250 x 20 matrix",
+      "ratio": 0.4934
+    },
+    "ry_profiled": {
+      "id": "native",
+      "ratio": 1.3197
+    },
+    "ry_contended": {
+      "id": "native",
+      "ratio": 1.4267
+    }
+  },
+  "versus": {
+    "ry": "gnu_r",
+    "ry_profiled": "gnu_r",
+    "ry_contended": "gnu_r_contended"
+  },
+  "total": {
+    "seconds": {
+      "gnu_r": 28.657,
+      "ry": 11.726,
+      "ry_profiled": 14.101,
+      "gnu_r_contended": 29.089,
+      "ry_contended": 11.573
+    },
+    "ratio": {
+      "ry": {
+        "median": 2.4348,
+        "low": 2.3527,
+        "high": 2.5285
+      },
+      "ry_profiled": {
+        "median": 2.029,
+        "low": 1.9252,
+        "high": 2.1215
+      },
+      "ry_contended": {
+        "median": 2.496,
+        "low": 2.434,
+        "high": 2.6268
+      }
+    }
+  },
+  "tracked": {
+    "profile_cost": {
+      "median": 1.2067,
+      "low": 1.167,
+      "high": 1.2407
+    },
+    "tier1_share": 0.002,
+    "patterns": {
+      "count": 236,
+      "below_1_5": 19,
+      "below_1": 6
+    },
+    "contention": {
+      "gnu_r": {
+        "median": 1.0366,
+        "low": 0.9902,
+        "high": 1.0499
+      },
+      "ry": {
+        "median": 0.9823,
+        "low": 0.9487,
+        "high": 1.0277
+      },
+      "ry_over_gnu_r": {
+        "median": 0.9564,
+        "low": 0.9267,
+        "high": 1.0062
+      },
+      "processes": 4
+    },
+    "contention_wall": {
+      "gnu_r": {
+        "median": 1.0431,
+        "low": 0.9917,
+        "high": 1.0562
+      },
+      "ry": {
+        "median": 0.984,
+        "low": 0.944,
+        "high": 1.0326
+      },
+      "ry_over_gnu_r": {
+        "median": 0.9578,
+        "low": 0.9183,
+        "high": 1.0141
+      },
+      "processes": 4
+    }
+  }
+}
