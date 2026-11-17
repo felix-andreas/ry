@@ -391,6 +391,27 @@ pub fn set_raw_bytes(
     }
 }
 
+/// [`set_text`] with the bytes `range` of element `at` of `source`, whose text a borrow could
+/// not lend across the allocation.
+pub fn set_text_range(
+    _context: &mut Cx<'_>,
+    vector: &mut Fresh<'_, Str>,
+    index: usize,
+    source: Local<'_, Str>,
+    at: usize,
+    range: Range<usize>,
+) -> R<()> {
+    assert!(index < vector.len(), "element index out of bounds");
+    assert!(at < source.len(), "source index out of bounds");
+    // SAFETY: the source is rooted and holds its element, which making a string neither moves
+    // nor writes into, until the store, the last use of the text; the rest is as for
+    // `set_text`.
+    unsafe {
+        let text = values::char_str(source.raw().element(at));
+        values::set_mkchar(vector.raw(), index, &text[range])
+    }
+}
+
 /// A new character vector filled in order, each element once. Since no element is overwritten,
 /// a string stored earlier lives as long as the vector, which lets the fill hand out that string
 /// again for the same bytes instead of probing the heap's string table
@@ -891,6 +912,22 @@ pub unsafe fn with<T>(body: impl for<'s> FnOnce(&mut Cx<'s>) -> R<T>) -> R<T> {
     }
 }
 
+/// Runs `body` as a builtin's fast-path entry in the handle scope of its caller, which releases
+/// the handle stack once the entry returns: tier 0 after the instruction, compiled code and the
+/// evaluator's direct call around the entry. A scope of the entry's own would mark and release
+/// a second time on every call.
+///
+/// # Safety
+///
+/// As for [`with`], and the caller releases what `body` roots.
+#[inline(always)]
+pub unsafe fn in_caller_scope<T>(body: impl for<'s> FnOnce(&mut Cx<'s>) -> R<T>) -> R<T> {
+    // SAFETY: as in `with`. The scope `body` sees ends no later than the caller's, which it
+    // cannot outlive, because it must accept every `'s`.
+    let mut context = unsafe { Cx::enter(NonNull::from(&mut *crate::heap())) };
+    body(&mut context)
+}
+
 /// Roots `raw` in the context's scope.
 ///
 /// # Safety
@@ -908,8 +945,8 @@ pub unsafe fn adopt<'s>(context: &Cx<'s>, raw: Sexp) -> Local<'s> {
 ///
 /// # Safety
 ///
-/// `raw` is a live object, and a root of the caller's keeps it alive until [`with`] returns,
-/// whatever R code runs in between.
+/// `raw` is a live object, and a root of the caller's keeps it alive until the context's scope
+/// ends, whatever R code runs in between.
 #[inline]
 pub unsafe fn held<'s>(_context: &Cx<'s>, raw: Sexp) -> Local<'s> {
     // SAFETY: the caller's contract.
@@ -925,10 +962,11 @@ macro_rules! safe_unary {
             value: heap::object::Sexp,
         ) -> $crate::unwind::R<Option<heap::object::Sexp>> {
             // SAFETY: the evaluator calls a unary entry on the interpreter's thread with an
-            // argument one of its registers holds until the entry returns, and stores or
-            // roots the result before it allocates again.
+            // argument one of its registers holds until the entry returns, stores or roots
+            // the result before it allocates again, and releases the handle stack after the
+            // call.
             unsafe {
-                $crate::handles::with(|context| {
+                $crate::handles::in_caller_scope(|context| {
                     let value = $crate::handles::held(context, value);
                     Ok($function(context, value)?.map($crate::handles::Gc::raw))
                 })
@@ -950,7 +988,7 @@ macro_rules! safe_direct {
             // SAFETY: as for `safe_unary`: the caller's registers, or its root for a
             // replacement's target, hold every argument value.
             unsafe {
-                $crate::handles::with(|context| {
+                $crate::handles::in_caller_scope(|context| {
                     let values = $crate::handles::Local::adopt_slice(values);
                     Ok($function(context, values)?.map($crate::handles::Gc::raw))
                 })
@@ -1172,7 +1210,7 @@ pub fn unshared<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Owned<'s>> {
 
 /// [`unshared`] for a change of attributes only: the copy of a long vector is an ALTREP
 /// wrapper that shares the elements, so the result has no element access.
-#[inline]
+#[inline(always)]
 pub fn attributes_unshared<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Owned<'s>> {
     // SAFETY: as for `unshared`, with `modifiable_attributes`, whose copy is a new wrapper or
     // vector that nothing else refers to.
@@ -1290,7 +1328,7 @@ pub fn install_name(_context: &mut Cx<'_>, name: Local<'_, Chars>) -> R<Gc<'stat
 
 /// [`install_name`] for element `at` of `names`, which the rooted vector keeps alive, so the
 /// name needs no root of its own.
-#[inline]
+#[inline(always)]
 pub fn install_name_at(
     context: &mut Cx<'_>,
     names: Local<'_, Str>,

@@ -1675,7 +1675,6 @@ fn do_strtrim<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>
         return Err(error("invalid 'width' argument"));
     }
     let mut result = context.alloc::<Str>(text.len())?;
-    let mut buffer = String::new();
     for index in 0..text.len() {
         let chars = text.get(context, index);
         if handles::is_na(chars) {
@@ -1683,30 +1682,20 @@ fn do_strtrim<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>
             continue;
         }
         let limit = widths.as_slice(context)[index % widths.len()] as usize;
-        // The kept text is copied out because making its string allocates, which the text,
-        // borrowed from the heap, cannot outlive.
-        let whole = {
-            let current = handles::text(chars);
-            let mut used = 0;
-            let mut end = current.len();
-            for (offset, character) in current.char_indices() {
-                used += display_width(character.encode_utf8(&mut [0; 4]));
-                if used > limit {
-                    end = offset;
-                    break;
-                }
+        let current = handles::text(chars);
+        let mut used = 0;
+        let mut end = current.len();
+        for (offset, character) in current.char_indices() {
+            used += display_width(character.encode_utf8(&mut [0; 4]));
+            if used > limit {
+                end = offset;
+                break;
             }
-            let whole = end == current.len();
-            if !whole {
-                buffer.clear();
-                buffer.push_str(&current[..end]);
-            }
-            whole
-        };
-        if whole {
+        }
+        if end == current.len() {
             result.set(context, index, chars);
         } else {
-            handles::set_text(context, &mut result, index, &buffer)?;
+            handles::set_text_range(context, &mut result, index, text, index, 0..end)?;
         }
     }
     handles::copy_attributes(context, x, &mut result)?;

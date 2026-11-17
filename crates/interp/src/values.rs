@@ -410,9 +410,14 @@ pub unsafe fn is_nil(object: Sexp) -> bool {
 
 // Allocation. Every constructor roots its result.
 
-#[inline]
+// Out of line with the heap's inline path in its body, so a caller pays one call for a rooted
+// vector.
+#[inline(never)]
 pub unsafe fn alloc(kind: SexpType, length: usize) -> R<Sexp> {
-    Ok(crate::heap().alloc_vector_rooted(kind, length as isize)?)
+    let heap = crate::heap();
+    let object = heap.alloc_vector_inline(kind, length as isize)?;
+    heap.root(object);
+    Ok(object)
 }
 
 /// [`alloc`] without zeroing a numeric vector's elements; the caller writes all of them.

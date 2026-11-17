@@ -1445,9 +1445,8 @@ impl Heap {
         self.alloc_vector_inline(kind, length)
     }
 
-    /// [`Heap::alloc_vector`] with its result rooted in the current handle scope. Every caller
-    /// that roots a new vector shares this one body, which holds the inline path, so none of
-    /// them pays a second call for it.
+    /// [`Heap::alloc_vector`] with its result rooted in the current handle scope, as one body
+    /// that holds the inline path, so a caller pays one call for a rooted vector.
     #[inline(never)]
     pub unsafe fn alloc_vector_rooted(
         &mut self,
@@ -1459,8 +1458,14 @@ impl Heap {
         Ok(object)
     }
 
+    /// [`Heap::alloc_vector`] inlined into the caller whatever its size, for a caller that is
+    /// itself the one out-of-line body of an allocation.
     #[inline(always)]
-    unsafe fn alloc_vector_inline(&mut self, kind: SexpType, length: isize) -> HeapResult<Sexp> {
+    pub unsafe fn alloc_vector_inline(
+        &mut self,
+        kind: SexpType,
+        length: isize,
+    ) -> HeapResult<Sexp> {
         let shift = small_vector_shift(kind);
         // A negative length casts to a huge one and takes the general path, which refuses it.
         if shift == NOT_SMALL_VECTOR || length as usize > SMALL_VECTOR_DATA_BYTES >> shift {
