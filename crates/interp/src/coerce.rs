@@ -344,7 +344,9 @@ unsafe fn coerce_list(
         _ if kind.is_atomic() => {
             for index in 0..count {
                 let element = list.element(index);
-                if !(element.kind().is_atomic() && length(element) == 1) {
+                let vector = element.kind().is_atomic()
+                    || matches!(element.kind(), SexpType::List | SexpType::Expression);
+                if !(vector && length(element) <= 1) {
                     return Err(error(format!(
                         "'{}' object cannot be coerced to type '{}'",
                         source.name(),
@@ -354,8 +356,50 @@ unsafe fn coerce_list(
             }
             let result = alloc(kind, count)?;
             for index in 0..count {
-                let element = coerce_atomic(list.element(index), kind, warnings)?;
-                crate::subset::copy_element(element, 0, result, index)?;
+                let element = list.element(index);
+                // GNU R converts each element with `asInteger` and its kin, which warn once per
+                // element; an empty or list element is NA. Raw goes through `asInteger` and
+                // collects its range warning for the whole list.
+                let atomic = element.kind().is_atomic() && length(element) == 1;
+                if kind == SexpType::Raw {
+                    let value = if atomic {
+                        let mut element_warnings = CoercionWarnings::default();
+                        let integer =
+                            coerce_atomic(element, SexpType::Integer, &mut element_warnings)?;
+                        element_warnings.report()?;
+                        values::ints(integer)[0]
+                    } else {
+                        NA_INTEGER
+                    };
+                    values::raws_mut(result)[index] = match u8::try_from(value) {
+                        Ok(byte) => byte,
+                        Err(_) => {
+                            warnings.raw_range = true;
+                            0
+                        }
+                    };
+                } else if atomic {
+                    let mut element_warnings = CoercionWarnings::default();
+                    let converted = coerce_atomic(element, kind, &mut element_warnings)?;
+                    if kind != SexpType::Logical {
+                        element_warnings.report()?;
+                    }
+                    crate::subset::copy_element(converted, 0, result, index)?;
+                } else {
+                    match kind {
+                        SexpType::Logical | SexpType::Integer => {
+                            values::ints_mut(result)[index] = NA_INTEGER;
+                        }
+                        SexpType::Real => values::reals_mut(result)[index] = NA_REAL,
+                        SexpType::Complex => {
+                            values::complexes_mut(result)[index] = Rcomplex {
+                                r: NA_REAL,
+                                i: NA_REAL,
+                            };
+                        }
+                        _ => {}
+                    }
+                }
             }
             Ok(result)
         }
