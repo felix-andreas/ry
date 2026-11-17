@@ -1914,7 +1914,7 @@ unsafe fn do_write_char(call: &Call<'_>) -> R<Sexp> {
         }
         _ => return Err(error("invalid 'sep' argument")),
     };
-    if (values::length(object) as usize) < counts.len() {
+    if values::length(object) < counts.len() {
         return Err(error("'object' is too short"));
     }
     if counts.is_empty() {
