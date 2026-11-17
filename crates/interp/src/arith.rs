@@ -774,14 +774,14 @@ pub fn find_interval(
 /// GNU R's rule for round tick values covering `[lo, up]` in about `n` steps.
 unsafe fn do_pretty(call: &Call<'_>) -> R<Sexp> {
     let biases = call.arg(5);
-    let high_bias = crate::subset::numeric_element(biases, 0);
+    let high_bias = crate::arith::real_at(biases, 0);
     let five_bias = if length(biases) > 1 {
-        crate::subset::numeric_element(biases, 1)
+        crate::arith::real_at(biases, 1)
     } else {
         0.5 + 1.5 * high_bias
     };
     let smallest_factor = if length(biases) > 2 {
-        crate::subset::numeric_element(biases, 2)
+        crate::arith::real_at(biases, 2)
     } else {
         20.0
     };
@@ -1391,8 +1391,7 @@ unsafe fn check_conformable(left: Sexp, right: Sexp, call: Sexp, arithmetic: boo
     if left_dims != nil() && right_dims != nil() {
         let equal = length(left_dims) == length(right_dims)
             && (0..length(left_dims)).all(|index| {
-                crate::subset::numeric_element(left_dims, index)
-                    == crate::subset::numeric_element(right_dims, index)
+                crate::arith::real_at(left_dims, index) == crate::arith::real_at(right_dims, index)
             });
         if !equal {
             return Err(crate::unwind::error_in(call, "non-conformable arrays"));
@@ -4725,7 +4724,7 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
                 let mut counts = Vec::with_capacity(base_count);
                 let mut total = 0usize;
                 for position in 0..base_count {
-                    let repeat = crate::subset::numeric_element(times, position);
+                    let repeat = crate::arith::real_at(times, position);
                     if repeat.is_nan() || repeat < 0.0 {
                         return Err(call.error("invalid 'times' argument"));
                     }
@@ -4849,7 +4848,7 @@ unsafe fn do_rep_int(call: &Call<'_>) -> R<Sexp> {
         let mut counts = Vec::with_capacity(count);
         let mut total = 0usize;
         for index in 0..count {
-            let repeat = crate::subset::numeric_element(times, index);
+            let repeat = crate::arith::real_at(times, index);
             if repeat.is_nan() || repeat < 0.0 {
                 return Err(call.error("invalid 'times' value"));
             }

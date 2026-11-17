@@ -542,7 +542,6 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
   - **The target.** An intermediate collection should touch only the pages that hold untenured objects. It should also handle strings and symbols only for the young ones, the way a minor collection already treats the young string table (`decisions/heap-gc.md`, "Minor collections touch only what changed"). That makes the cost of one collection proportional to its young survivors, and young stress linear in allocations.
 - **Pin `TESTTHAT_PARALLEL=false` for collection counts and Ir comparisons.** A package whose DESCRIPTION sets `Config/testthat/parallel: true` (vctrs, rlang) runs its tests in testthat worker processes, which share the `RY_GC_LOG` file and which callgrind does not follow without `--trace-children=yes`. Collection counts then differ between runs, and a profile of the parent misses the tests. With the runner off, two vctrs runs give identical logs.
 - **After-marking work is 1.45% of testthat_full** (weak references, returned frames, sweep: two thirds of the collector's time in minor collections; `decisions/heap-gc.md`, "Escalation prediction and the dense precious set", item "Minor-collection cost by source"). Revisit if the collector's share of the run grows.
-- **GC torture over the package test suites** is owned by the robustness work (`oracle packages` under `RY_GC_STRESS` and `gctorture(TRUE)`, `development/robustness.md`).
 - **`strings__repeated_pieces` dominates the `ry-gctorture-young` oracle run.** Under `RY_GC_STRESS=young` the case runs for more than 240 s (it passes; the rest of the engine's cases take about 15 min together). It builds several character vectors of 200,000 elements. The likely cause is that young stress retraces every untenured object at each allocation, so the cost grows with the live young set times the allocations (unconfirmed). Options: shrink `n` in the case if it keeps covering the substr and formatC sharing thresholds, or make young stress cheaper on large live sets.
 - **String-heavy C code is bound by memory traffic** (`str_split`, see "Package kernels" below): suspects are the heap's allocation slow path and string-table probes that miss cache with about 2e7 live CHARSXPs. A character subset of 1e6 unique strings takes 0.012 s against GNU R's 0.003 s.
 - **Peak RSS is sensitive to when collections run**: report +3.8 MB from inlined base wrappers (gc() max-used unchanged, fixed offset), array_map from tier-1 loop state. One owner should look at the GC trigger policy for both.
@@ -665,18 +664,19 @@ About seven in ten of the hot suite's closure calls from compiled code take `cal
 
 ## Open: the handle migration
 
-Rule, order and costs: `development/design/memory-safety.md`, "Migration", "Cost".
+Rule and order: `development/design/memory-safety.md`, "Migration".
 
 - **Raw, in order.** The replacement forms' slot paths (`assign_slot_element`,
-  `replace_variable`); `subset.rs`'s builders (`matrix`, `array`, `aperm`, `cbind`, `rev`);
-  `.class2`, `.cache_class`, `do_copy_df_attr`; `paste`, `sprintf`, `make.unique`, `strsplit`;
-  `values.rs`, the evaluator, the bytecode loop.
-- **`subset.rs`'s raw entries** (`vector_element`, `subset`, `subassign`, the four replacement
-  specials) go when their callers move.
+  `replace_variable`); `subset.rs`'s builders (`matrix`, `array`, `aperm`, `cbind`) and the
+  entries raw callers reach; `.class2`, `.cache_class`; `paste`, `sprintf`, `make.unique`,
+  `strsplit`; `values.rs`, the evaluator, the bytecode loop.
 - **Not built**: the register accessor, `Held<T>`.
 - **Unaudited.** `jit::runtime` helpers outside `scoped` must leave no handle.
-- **Raw, admitted by the ratchet's baseline.** `op_subscript`, `subscript_unbound`
-  (`bytecode.rs`), `patch_args_by_actuals` (`dispatch.rs`), `lock_base_bindings` (`session.rs`).
+- **Raised `unsafe` counts** (`tools/unsafe.py check` reads them), until the helpers migrate:
+  - `crates/interp/src/handles.rs` 107 to 149: `alloc_with_room`, `array_subassign`, `array_subset`, `array_subset2`, `call_environment`, `call_value`, `classed_error`, `compact_sequence`, `copy_attributes_to`, `copy_elements`, `copy_most_attributes`, `define`, `dispatch_builtin`, `element_text`, `evaluate`, `force`, `frame_value`, `generated_call`, `holds_elements`, `install_bytes`, `int_element`, `is_altrep`, `item`, `list_to_pairlist`, `mark_shared`, `missing_argument`, `move_elements`, `owned_names`, `pairlist_to_list`, `permanent`, `reaching_environment`, `real_element`, `record_dollar`, `record_dollar_assign`, `record_subassign2`, `record_subset2`, `resize_in_place`, `scalar_subset`, `shallow_copy`, `store_item`, `stored`, `tag`, `type_name`, `warning_in`, `with_result`.
+  - `crates/interp/src/interp.rs` 47 to 48: `altrep_storage`, the hook's type.
+  - Earlier: `op_subscript`, `subscript_unbound` (`bytecode.rs`), `patch_args_by_actuals`
+    (`dispatch.rs`), `lock_base_bindings` (`session.rs`).
 
 ## Open: failing tests on main
 
@@ -3701,8 +3701,6 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
 
 ## Open: stale code comments
 
-- The comment above `nightly-publish` in the `justfile` says a nightly is "a normal release ... never a pre-release" and that the Zed extension installs the newest pre-release. The recipe passes `--prerelease --latest=false`, the extension reads `pre_release: false` (`editors/zed/src/lib.rs`), and `development/releasing.md` ("Nightly builds") describes that. Correct the comment.
-- The doc comment in `crates/libr/tests/test_start_image.rs` names CI's `setup-r` as the writer of a `~/.Rprofile`. CI runs in the flake's dev shell and has no `setup-r` step, so the comment should name a user profile in general.
 - The fuzz batteries' cost is recorded in the knowledge base as re-parsing the stub corpus for each fresh database. That claim is unmeasured on the current tree: profile one battery and either confirm it or remove the bullet.
 
 ## Explicitly out of scope for now

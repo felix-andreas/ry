@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Keeps `unsafe` from growing outside the crates that own it.
 
-    python3 tools/unsafe.py check      # fail when a file has more `unsafe` than its baseline
+    python3 tools/unsafe.py check      # fail when a file's `unsafe` count differs from its baseline
     python3 tools/unsafe.py baseline   # lower tools/unsafe-baseline.txt to the tree's counts
     python3 tools/unsafe.py stats      # `unsafe fn`, blocks and SAFETY comments per crate
 
@@ -9,11 +9,13 @@
 code, so their `unsafe` is not counted. Every other crate reaches the heap through
 `heap::handle`, and a file there may only lose `unsafe`: the baseline holds one count per file
 (the `unsafe` keywords outside comments), a file over its count fails, and a file under it asks
-for `baseline` so the lower count is locked in. `baseline` never raises a count, with one
-exception: `crates/interp/src/handles.rs` holds the safe forms of the interpreter's raw helpers,
-so it grows by a wrapper each time a migrated function needs one, and it may rise by less than
-the other files lose in the same change. Any other file that needs more says why in the same change, with its line
-in the baseline edited by hand.
+for `baseline` so the lower count is locked in.
+
+`baseline` only lowers counts. A count rises by a hand edit of its line, and `check` accepts a
+line that is higher than on main only when `.agents/memory/backlog.md` has a line for it that
+names the functions holding the new `unsafe`:
+
+    - `crates/interp/src/handles.rs` 107 to 149: `evaluate`, `force`, ...
 """
 
 import os
@@ -22,12 +24,12 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BASELINE = os.path.join(ROOT, "tools", "unsafe-baseline.txt")
+BASELINE = "tools/unsafe-baseline.txt"
+BACKLOG = ".agents/memory/backlog.md"
 OWNERS = ("heap", "libr", "jit", "typed", "ssa")
-WRAPPERS = "crates/interp/src/handles.rs"
 HEADER = (
     "# `unsafe` keywords per file outside heap, libr, jit, typed and ssa, which may only shrink.\n"
-    "# Lower: python3 tools/unsafe.py baseline\n"
+    "# Lower: python3 tools/unsafe.py baseline. A raise is a hand edit with a backlog line.\n"
 )
 KEYWORD = re.compile(r"\bunsafe\b")
 # The ABI string of `unsafe extern "C" fn` is blank by the time this runs.
@@ -41,7 +43,7 @@ def main():
     if command == "stats":
         stats()
     elif command == "baseline":
-        write_baseline(counted())
+        sys.exit(lower_baseline(counted()))
     elif command == "check":
         sys.exit(check(counted()))
     else:
@@ -50,59 +52,97 @@ def main():
 
 def check(counts):
     baseline = read_baseline()
-    falling = sum(counts.values()) < sum(baseline.values())
-    over = [
-        (path, count, baseline.get(path, 0))
-        for path, count in sorted(counts.items())
-        if count > baseline.get(path, 0) and not (path == WRAPPERS and falling)
-    ]
-    under = [path for path, limit in baseline.items() if counts.get(path, 0) != limit]
-    for path, count, limit in over:
-        print(f"{path}: {count} `unsafe`, baseline {limit}")
+    over = report_over(counts, baseline)
     if over:
+        return 1
+    unexplained = unexplained_raises(baseline)
+    for path, before, limit in unexplained:
+        print(f"{path}: baseline raised from {before} to {limit} without a backlog line")
+    if unexplained:
         print(
-            "\nReach the heap through `heap::handle` (development/design/memory-safety.md)"
-            " instead of adding `unsafe` here."
+            f"\nA raised count needs a line in {BACKLOG} that names the functions:\n"
+            "    - `PATH` BEFORE to AFTER: `function`, `function`, ..."
         )
         return 1
+    under = [path for path, limit in baseline.items() if counts.get(path, 0) < limit]
     if under:
         print(
-            f"{len(under)} file(s) differ from the baseline in a way it allows;"
+            f"{len(under)} file(s) have less `unsafe` than their baseline;"
             " run `python3 tools/unsafe.py baseline` to lock that in."
         )
         return 1
     return 0
 
 
-def write_baseline(counts):
-    baseline = read_baseline() if os.path.exists(BASELINE) else None
-    removed = 0
-    if baseline is not None:
-        removed = sum(
-            max(0, limit - counts.get(path, 0)) for path, limit in baseline.items() if path != WRAPPERS
-        )
+def lower_baseline(counts):
+    baseline = read_baseline()
     lines = []
-    for path, count in sorted(counts.items()):
-        if baseline is None:
-            limit = count
-        elif path == WRAPPERS:
-            limit = min(count, baseline.get(path, 0) + max(0, removed - 1))
-        else:
-            limit = min(count, baseline.get(path, 0))
-        if limit:
-            lines.append(f"{limit} {path}\n")
-    with open(BASELINE, "w", encoding="utf-8") as file:
+    for path, limit in sorted(baseline.items()):
+        lowered = min(limit, counts.get(path, 0))
+        if lowered:
+            lines.append(f"{lowered} {path}\n")
+    with open(os.path.join(ROOT, BASELINE), "w", encoding="utf-8") as file:
         file.write(HEADER + "".join(lines))
     print(f"{sum(int(line.split()[0]) for line in lines)} `unsafe` in {len(lines)} file(s)")
+    return 1 if report_over(counts, baseline) else 0
+
+
+def report_over(counts, baseline):
+    """Prints the files with more `unsafe` than their baseline, and says whether there are any."""
+    over = [
+        (path, count, baseline.get(path, 0))
+        for path, count in sorted(counts.items())
+        if count > baseline.get(path, 0)
+    ]
+    for path, count, limit in over:
+        print(f"{path}: {count} `unsafe`, baseline {limit}")
+    if over:
+        print(
+            "\nReach the heap through `heap::handle` (development/design/memory-safety.md)"
+            " instead of adding `unsafe` here. `baseline` never raises a count."
+        )
+    return bool(over)
+
+
+def unexplained_raises(baseline):
+    """The baseline lines that are higher than on main and that no backlog line accounts for."""
+    before = main_baseline()
+    if before is None:
+        print("note: main's baseline is not in this checkout, so raised counts go unchecked")
+        return []
+    with open(os.path.join(ROOT, BACKLOG), encoding="utf-8") as file:
+        backlog = file.read()
+    return [
+        (path, before.get(path, 0), limit)
+        for path, limit in sorted(baseline.items())
+        if limit > before.get(path, 0)
+        and not re.search(rf"^\s*- `{re.escape(path)}` \d+ to {limit}: `\w", backlog, re.MULTILINE)
+    ]
+
+
+def main_baseline():
+    """The baseline at the commit this checkout left main at, or `None` without that history."""
+    base = git("merge-base", "HEAD", "origin/main")
+    text = base and git("show", f"{base.strip()}:{BASELINE}")
+    return parse_baseline(text) if text else None
+
+
+def git(*arguments):
+    result = subprocess.run(["git", *arguments], cwd=ROOT, capture_output=True, text=True)
+    return result.stdout if result.returncode == 0 else None
 
 
 def read_baseline():
+    with open(os.path.join(ROOT, BASELINE), encoding="utf-8") as file:
+        return parse_baseline(file.read())
+
+
+def parse_baseline(text):
     baseline = {}
-    with open(BASELINE, encoding="utf-8") as file:
-        for line in file:
-            if line.strip() and not line.startswith("#"):
-                count, path = line.split(maxsplit=1)
-                baseline[path.strip()] = int(count)
+    for line in text.split("\n"):
+        if line.strip() and not line.startswith("#"):
+            count, path = line.split(maxsplit=1)
+            baseline[path.strip()] = int(count)
     return baseline
 
 

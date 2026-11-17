@@ -1324,7 +1324,7 @@ pub(crate) unsafe fn format_c_vector(
             if character {
                 text.push_str(&values::string_at(vector, index).unwrap_or_default());
             } else {
-                let value = crate::subset::numeric_element(vector, index);
+                let value = crate::arith::real_at(vector, index);
                 // GNU R writes an `fg` zero as a bare "0", whatever the width and flag.
                 if format == "fg" && value == 0.0 {
                     text.push('0');

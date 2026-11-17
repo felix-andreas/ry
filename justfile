@@ -270,6 +270,7 @@ comments *args="check":
 
 # Fails when a file outside heap, libr, jit, typed and ssa has more `unsafe` than its baseline, e.g.
 # `just unsafe stats` for the counts per crate or `just unsafe baseline` after removing some.
+# `baseline` never raises a count: a raise is a hand edit plus a backlog line naming the functions.
 unsafe *args="check":
     python3 -I tools/unsafe.py {{ args }}
 
@@ -523,8 +524,8 @@ nightly-name commit="HEAD":
     echo "nightly.$stamp.${hash:0:6}"
 
 # Publish release/NAME as a nightly GitHub release, then delete all but the newest five nightlies.
-# It is a normal release with `--latest=false`, never a pre-release: the Zed extension installs the
-# newest pre-release, and GitHub's "latest" must keep pointing at a real release.
+# It is a pre-release with `--latest=false`: the Zed extension installs only full releases, and
+# GitHub's "latest" must keep pointing at one.
 # Needs `gh` signed in (GH_TOKEN in CI).
 nightly-publish name:
     #!/usr/bin/env bash

@@ -42,13 +42,13 @@ pub const BUILTINS: &[BuiltinDef] = &[
     special("@", 2, do_at),
     special("[<-", -1, do_subassign)
         .dispatch_or_eval()
-        .direct(direct_subassign),
+        .direct(handles::safe_direct!(assign_slab)),
     special("[[<-", -1, do_subassign2).dispatch_or_eval(),
     special("$<-", 3, do_dollar_assign),
-    special("@<-", 3, do_at_assign).direct(direct_at_assign),
+    special("@<-", 3, do_at_assign).direct(handles::safe_direct!(at_assign_values)),
     builtin(".subset", -1, do_subset),
     builtin(".subset2", -1, do_subset2).direct(direct_subset2),
-    builtin("list", -1, do_list),
+    builtin("list", -1, safe!(list_of)),
     builtin("length", 1, safe!(do_length))
         .generic(Generic::Internal)
         .unary(|value| unsafe {
@@ -85,10 +85,10 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("max.col", 2, do_max_col),
     internal("aperm", 3, do_aperm),
     internal("asplit", 8, do_asplit),
-    internal("drop", 1, do_drop),
+    internal("drop", 1, safe!(do_drop)),
     internal_special("cbind", -1, |call| unsafe { bind(call, false) }),
     internal_special("rbind", -1, |call| unsafe { bind(call, true) }),
-    internal("rev", 1, do_rev),
+    internal("rev", 1, safe!(do_rev)),
     internal("islistfactor", 2, safe!(do_is_list_factor)),
     internal("comment", 1, safe!(do_comment)),
     internal("comment<-", 2, safe!(do_set_comment)),
@@ -96,7 +96,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("col", 1, safe!(do_col)),
     internal("diag", 3, safe!(do_diag)),
     internal("shortRowNames", 2, safe!(do_short_row_names)),
-    internal("copyDFattr", 2, do_copy_df_attr),
+    internal("copyDFattr", 2, safe!(do_copy_df_attr)),
 ];
 
 /// A copy of `object` that may be modified in place.
@@ -231,11 +231,6 @@ pub unsafe fn list_or_vector_element(vector: Sexp, index: usize) -> R<Sexp> {
         }
         _ => vector_element(vector, index),
     }
-}
-
-/// A numeric element as a double, for index and dimension vectors.
-pub unsafe fn numeric_element(vector: Sexp, index: usize) -> f64 {
-    crate::arith::real_at(vector, index)
 }
 
 /// `to[to_index] <- from[from_index]`, converted to `to`'s type.
@@ -2152,11 +2147,6 @@ enum MatrixFailure {
 
 /// `[<-` for `m[i, ] <- value` or `a[i, j, ] <- value` (see [`slab`]), called without
 /// building the general call's arguments; any other shape answers `None` and takes the builtin.
-pub(crate) unsafe fn direct_subassign(call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
-    // SAFETY: the caller's contract is that of a direct entry.
-    unsafe { crate::handles::safe_direct!(assign_slab)(call, args) }
-}
-
 fn assign_slab<'a, 's>(context: &'a mut Cx<'s>, values: &[Local<'s>]) -> R<Option<Gc<'a>>> {
     let [object, indices @ .., value] = values else {
         return Ok(None);
@@ -3108,14 +3098,13 @@ unsafe fn do_at(call: &Call<'_>) -> R<Sexp> {
 ///
 /// As for [`subset`], with `symbol` a symbol.
 pub unsafe fn get_slot(object: Sexp, symbol: Sexp, call: Sexp) -> R<Sexp> {
-    if symbol == symbols().dot_data
-        && let Some(function) = interp_methods_function("getDataPart")?
-    {
-        let call = values::call(function, &[object])?;
-        return eval::eval(call, values::base_env());
-    }
     handles::with_result(|context| {
         let object = handles::adopt(context, object);
+        if symbol == symbols().dot_data
+            && let Some(function) = methods_function(context, "getDataPart")?
+        {
+            return handles::call_value(context, function, &[object]).map(Local::raw);
+        }
         let slot = standard::<Symbol>(handles::adopt(context, symbol))?;
         let call = (call != unbound()).then(|| handles::adopt(context, call));
         slot_value(context, object, slot, call).map(Local::raw)
@@ -3165,23 +3154,22 @@ fn slot_value<'s>(
     Err(call_error(call, message))
 }
 
-unsafe fn interp_methods_function(name: &str) -> R<Option<Sexp>> {
-    let methods = crate::interp().globals.methods_namespace;
-    if methods == nil() {
-        return Ok(None);
-    }
-    let value = eval::find_var(values::install(name)?, methods)?;
-    if value == unbound() {
-        return Ok(None);
-    }
-    Ok(Some(value_of(value)?))
-}
-
-/// [`interp_methods_function`] on handles.
+/// The function the methods package binds to `name` in its namespace, or `None` while the
+/// package is not loaded or binds no such name.
 fn methods_function<'s>(context: &mut Cx<'s>, name: &str) -> R<Option<Local<'s>>> {
-    // SAFETY: the lookup may force a promise, which `&mut Cx` permits, and its result is rooted
-    // before anything else allocates.
-    unsafe { Ok(interp_methods_function(name)?.map(|function| handles::adopt(context, function))) }
+    // SAFETY: the namespace is rooted for the session, the lookup may force a promise, which
+    // `&mut Cx` permits, and its result is rooted before anything else allocates.
+    unsafe {
+        let methods = crate::interp().globals.methods_namespace;
+        if methods == nil() {
+            return Ok(None);
+        }
+        let value = eval::find_var(values::install(name)?, methods)?;
+        if value == unbound() {
+            return Ok(None);
+        }
+        Ok(Some(handles::adopt(context, value_of(value)?)))
+    }
 }
 
 /// GNU R's `[[ ]] subscript out of bounds` error for `index` into `object`, naming the
@@ -3246,11 +3234,6 @@ unsafe fn do_at_assign(call: &Call<'_>) -> R<Sexp> {
 /// `@<-` on evaluated arguments, for `object@name <- value` compiled to registers: the object,
 /// the slot's name as a symbol or a string, and the value. An S3 object answers `None`, because
 /// it may dispatch to a method, which the special looks up in its caller's environment.
-pub(crate) unsafe fn direct_at_assign(call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
-    // SAFETY: the caller's contract is that of a direct entry.
-    unsafe { crate::handles::safe_direct!(at_assign_values)(call, args) }
-}
-
 fn at_assign_values<'a, 's>(context: &'a mut Cx<'s>, values: &[Local<'s>]) -> R<Option<Gc<'a>>> {
     let &[object, name, value] = values else {
         return Ok(None);
@@ -5101,11 +5084,6 @@ fn assign_dollar<'s>(
     assign_subset2(context, list, &[index], value, call)
 }
 
-unsafe fn do_list(call: &Call<'_>) -> R<Sexp> {
-    // SAFETY: the call's arguments are the builtin's evaluated arguments, which it roots.
-    unsafe { handles::enter(call, list_of) }
-}
-
 /// `list(...)`: the arguments as a list, named by their tags when any has one.
 fn list_of<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
     let count = arguments.len();
@@ -6385,7 +6363,7 @@ unsafe fn do_aperm(call: &Call<'_>) -> R<Sexp> {
             }
         } else {
             for index in 0..rank {
-                let value = numeric_element(permutation, index);
+                let value = crate::arith::real_at(permutation, index);
                 if !(value >= 1.0 && value < rank as f64 + 1.0) {
                     return Err(call.error("value out of range in 'perm'"));
                 }
@@ -6436,77 +6414,102 @@ unsafe fn do_aperm(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-unsafe fn do_drop(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let Some(dims) = values::dims(object) else {
+fn do_drop<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let object = arguments.value(0);
+    let Some(dims) = handles::dims(context, object) else {
         return Ok(object);
     };
-    let kept: Vec<usize> = (0..dims.len())
+    let kept: SmallVec<[usize; 4]> = (0..dims.len())
         .filter(|&dimension| dims[dimension] != 1)
         .collect();
     if kept.len() == dims.len() {
         return Ok(object);
     }
-    let result = values::shallow_duplicate_attr(object)?;
-    let dimnames = get_attr(object, symbols().dimnames);
-    values::remove_attr(result, symbols().dim);
-    values::remove_attr(result, symbols().dimnames);
+    let mut result = handles::attribute_copy(context, object)?;
+    let dimnames = context.root(get_attribute(
+        context,
+        object,
+        symbol(|symbols| symbols.dimnames),
+    ));
+    let dimnames = dense::<List>(context, dimnames)?;
+    remove_attribute(context, &mut result, symbol(|symbols| symbols.dim));
+    remove_attribute(context, &mut result, symbol(|symbols| symbols.dimnames));
     if kept.len() > 1 {
-        let dim_values: SmallVec<[i32; 4]> = kept
-            .iter()
-            .map(|&dimension| dims[dimension] as i32)
-            .collect();
-        let dim = values::integer_vector(&dim_values)?;
-        values::set_attr(result, symbols().dim, dim)?;
+        let mut dim = context.alloc::<Integer>(kept.len())?;
+        for (slot, &dimension) in dim.as_mut_slice().iter_mut().zip(&kept) {
+            *slot = dims[dimension] as i32;
+        }
+        set_attribute(
+            context,
+            &mut result,
+            symbol(|symbols| symbols.dim),
+            dim.finish().value(),
+        )?;
         // As in GNU R's `DropDims`, the kept dimensions keep their dimnames and the names of
         // those dimnames, unless none of the kept dimensions has any.
-        let list: SmallVec<[Sexp; 4]> = if dimnames == nil() {
-            SmallVec::new()
-        } else {
-            kept.iter()
-                .map(|&dimension| dimnames.element(dimension))
-                .collect()
-        };
-        if list.iter().any(|names| *names != nil()) {
-            let list = values::list_vector(&list)?;
-            let dimension_names = get_attr(dimnames, symbols().names);
-            if dimension_names != nil() {
-                let kept_names = alloc(SexpType::String, kept.len())?;
-                for (index, &dimension) in kept.iter().enumerate() {
-                    crate::heap().set_element(
-                        kept_names,
-                        index,
-                        dimension_names.element(dimension),
-                    );
-                }
-                values::set_attr(list, symbols().names, kept_names)?;
+        if let Some(dimnames) = dimnames
+            && kept
+                .iter()
+                .any(|&dimension| named(context, dimnames, dimension).is_some())
+        {
+            let mut list = context.alloc::<List>(kept.len())?;
+            for (index, &dimension) in kept.iter().enumerate() {
+                list.set(context, index, dimnames.get(context, dimension));
             }
-            values::set_attr(result, symbols().dimnames, list)?;
+            let mut list = list.owned().value();
+            let dimension_names = names_of(context, dimnames.value())?;
+            if let Some(dimension_names) = dense::<Str>(context, dimension_names)? {
+                let kept_names = context.alloc_unfilled::<Str>(kept.len())?;
+                let dimension_names = dimension_names.read(context);
+                let kept_names = kept_names.fill_elements(
+                    context,
+                    kept.iter().map(|&dimension| dimension_names.get(dimension)),
+                );
+                set_attribute(
+                    context,
+                    &mut list,
+                    symbol(|symbols| symbols.names),
+                    kept_names.finish().value(),
+                )?;
+            }
+            set_attribute(
+                context,
+                &mut result,
+                symbol(|symbols| symbols.dimnames),
+                list.finish(),
+            )?;
         }
-    } else if dimnames != nil() {
-        let all_dimnames: SmallVec<[Sexp; 4]> = (0..dims.len())
-            .map(|dimension| dimnames.element(dimension))
-            .collect();
-        let names = dropped_names(&kept, &all_dimnames);
-        if names != nil() {
-            values::set_attr(result, symbols().names, names)?;
+    } else if let Some(dimnames) = dimnames {
+        // A plain vector takes the names of the one dimension kept, or for a single element
+        // those of the only dimension that has names: with names on several dimensions, none
+        // of them names a single element.
+        let names = match kept[..] {
+            [dimension] => named(context, dimnames, dimension),
+            _ => {
+                let mut named =
+                    (0..dims.len()).filter_map(|dimension| named(context, dimnames, dimension));
+                match (named.next(), named.next()) {
+                    (Some(names), None) => Some(names),
+                    _ => None,
+                }
+            }
+        };
+        if let Some(names) = names {
+            let names = context.root(names);
+            set_attribute(context, &mut result, symbol(|symbols| symbols.names), names)?;
         }
     }
-    Ok(result)
+    Ok(result.finish())
 }
 
-/// The names of an array dropped to a plain vector: those of the one dimension `kept`, or for a
-/// single element those of the only dimension that has names. With names on several
-/// dimensions, none of them names a single element.
-fn dropped_names(kept: &[usize], dimnames: &[Sexp]) -> Sexp {
-    if let [dimension] = kept {
-        return dimnames.get(*dimension).copied().unwrap_or(nil());
-    }
-    let mut named = dimnames.iter().copied().filter(|names| *names != nil());
-    match (named.next(), named.next()) {
-        (Some(names), None) => names,
-        _ => nil(),
-    }
+/// The names `dimnames` holds for `dimension`, if it has any.
+fn named<'a, 's>(
+    context: &'a Cx<'s>,
+    dimnames: Local<'s, List>,
+    dimension: usize,
+) -> Option<Gc<'a>> {
+    let names = dimnames.get(context, dimension);
+    (names.r_type() != SexpType::Nil).then_some(names)
 }
 
 /// `cbind` and `rbind` for vectors and matrices; data frames dispatch to their R methods.
@@ -6832,17 +6835,18 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
     Ok(result)
 }
 
-unsafe fn do_rev(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let count = length(object);
-    let indices: Vec<usize> = (0..count).rev().collect();
-    let result = select_elements(object, &indices)?;
-    let names = values::names(object);
-    if names != nil() {
-        let reversed = select_elements(names, &indices)?;
-        values::set_attr(result, symbols().names, reversed)?;
+fn do_rev<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let object = arguments.value(0);
+    let count = handles::length(context, object);
+    let reversed = select_iter(context, object, (0..count).rev(), count)?;
+    let names = names_of(context, object)?;
+    if names.r_type() == SexpType::Nil {
+        return Ok(reversed);
     }
-    Ok(result)
+    let names = select_iter(context, names, (0..count).rev(), count)?;
+    let mut result = owned(context, reversed)?;
+    set_attribute(context, &mut result, symbol(|symbols| symbols.names), names)?;
+    Ok(result.finish())
 }
 
 pub(crate) fn do_is_list_factor<'s>(
@@ -7091,10 +7095,9 @@ fn do_short_row_names<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<L
     handles::integer(context, if kind == 1 { count } else { count.abs() })
 }
 
-unsafe fn do_copy_df_attr(call: &Call<'_>) -> R<Sexp> {
-    let from = call.arg(0);
-    let to = modifiable(call.arg(1))?;
-    crate::heap().set_attrib(to, nil());
-    values::copy_attributes(from, to)?;
-    Ok(to)
+fn do_copy_df_attr<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let mut to = handles::unshared(context, arguments.value(1))?;
+    clear_attributes(context, &mut to, false);
+    handles::copy_attributes_to(context, arguments.value(0), &mut to)?;
+    Ok(to.finish())
 }

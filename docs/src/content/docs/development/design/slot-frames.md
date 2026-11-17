@@ -373,7 +373,7 @@ register holding it); otherwise the slot gets a copy, so `y <- x; x[1] <- 0` lea
 |---|---|
 | Not an object, builtin setter | In the slot. A special such as `[<-`, `attr<-` or `@<-` runs through its direct entry (`BuiltinDef::direct`), which takes evaluated arguments. |
 | An object whose class has no method for the setter | In the slot. The method lookup starts from the frame's enclosure (`dispatch::has_internal_method` with `Caller::SlotFrame`), because a slot frame defines no functions a lookup could find first. |
-| An S4 object, `x@name <- v` | In the slot, with the validity check `do_at_assign` makes (`direct_at_assign`). |
+| An S4 object, `x@name <- v` | In the slot, with the validity check `do_at_assign` makes (`at_assign_values`). |
 | A closure setter whose other arguments are constants, `f(x) <- v` or `f(x, "a") <- v` | The closure is called from the slot frame with forced promises for `*tmp*` and the value (`replace_with_closure`). Each promise counts a reference to what it holds while the closure's frame holds the promise, so the closure reads both as shared, and a frame that outlives the call keeps the caller from changing the target in place. The caller's frame gets an environment only if the closure asks for its caller's. |
 | An object with a method for the setter, a closure setter with computed arguments, a nested target such as `names(x)[2] <- v` | `eval::complex_assign` in the frame's environment, which moves the assigned variable into a cell. A level whose setter is a primitive, on an object without a method for it, is called with its evaluated values (`replace_through_primitive`); any other level builds its call, its argument list and a promise for `*tmp*` and for the value. |
 

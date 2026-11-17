@@ -554,10 +554,19 @@ The order:
 
 `tools/unsafe-baseline.txt` records the count of `unsafe` per source file outside the crates that
 own it. `just gate` fails when a file's count rises (`tools/unsafe.py check`), and a change that
-lowers one lowers the baseline with it, so the count only falls. `interp::handles` is the one
-file that may rise, and by less than the other files lose in the same change: a migrated builtin
-that needs a helper with no safe form adds the wrapper there and removes more `unsafe` than the
-wrapper holds.
+lowers one lowers the baseline with it (`tools/unsafe.py baseline`, which lowers counts and
+refuses to raise one), so the count only falls.
+
+A count rises only by a hand edit of its line, and `check` accepts a line higher than on main
+only when `.agents/memory/backlog.md` names the functions that hold the new `unsafe`:
+
+```
+- `crates/interp/src/handles.rs` 107 to 149: `evaluate`, `force`, `frame_value`
+```
+
+The expected case is `interp::handles`: a migrated builtin that calls a raw helper with no safe
+form adds the helper's wrapper there, and the backlog line stands until the helper itself takes
+handles and the wrapper goes.
 
 The guarantee covers a function that names neither `Sexp` nor `interp::heap()`. While the raw API
 is public (until step 4), safe code can leave the handle types and come back: `raw()` on any

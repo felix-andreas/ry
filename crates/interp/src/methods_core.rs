@@ -1337,7 +1337,7 @@ unsafe fn do_check_group_sig_length(call: &Call<'_>) -> R<Sexp> {
         if !matches!(value.kind(), SexpType::Integer | SexpType::Real) || length(value) != 1 {
             bail!(skip)
         }
-        lengths.push(crate::subset::numeric_element(value, 0));
+        lengths.push(crate::arith::real_at(value, 0));
     }
     // `max()` of a missing length is NA, and GNU R's `if (any(reset))` then fails.
     if lengths.iter().any(|length| length.is_nan()) {
