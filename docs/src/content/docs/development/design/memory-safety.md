@@ -484,3 +484,5 @@ no `Sexp`.
   element, and the raw code fills such a vector through its slice and counts once
   (`Heap::count_written_elements`), which measured several times faster in `as.character` and
   `strsplit`-style builders. The safe form is one call that takes an iterator of elements.
+  `strsplit` stays raw until then: it stores each new piece vector in its result before making
+  the vector's strings, so neither takes a handle, and a safe form would root one per element.
