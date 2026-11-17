@@ -245,8 +245,11 @@ def main():
     if args.rounds is not None and (args.rounds < 0 or (args.rounds == 0 and not (args.breakdown or args.instructions))):
         sys.exit("error: --rounds must be at least 1, or 0 for only a --breakdown or --instructions pass")
     release = None
+    args.ry_identity = args.ry
     if args.release:
         args.ry, release = unpack_release(args.release)
+        # The archive unpacks into a fresh temporary directory each run, so resuming keys on its hash.
+        args.ry_identity = f"release sha256 {release['sha256']}"
     if args.write:
         if release is None:
             sys.exit("error: --write records the official release archive; pass --release ARCHIVE, "
@@ -1738,7 +1741,7 @@ def samples_file(args, suite):
 
 
 def load_samples(path, args, table, programs):
-    key = {"rounds": args.rounds, "seed": args.seed, "filter": args.filter, "ry": args.ry,
+    key = {"rounds": args.rounds, "seed": args.seed, "filter": args.filter, "ry": args.ry_identity,
            "engines": [engine.key for engine in table], "programs": [program["id"] for program in programs]}
     if path is not None and path.exists():
         state = json.loads(path.read_text())
