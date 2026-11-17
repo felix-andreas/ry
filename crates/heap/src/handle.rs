@@ -76,9 +76,9 @@
 //! and no slice taken earlier is alive:
 //!
 //! ```compile_fail,E0499
-//! use heap::handle::{Cx, Local, Real};
-//! fn allocates_during_a_write<'s>(cx: &mut Cx<'s>, vector: Local<'s, Real>) {
-//!     let mut write = unsafe { cx.assume_exclusive(vector) };
+//! use heap::handle::{Cx, Owned, Real};
+//! fn allocates_during_a_write<'s>(cx: &mut Cx<'s>, mut vector: Owned<'s, Real>) {
+//!     let mut write = vector.write(cx);
 //!     let (elements, _reader) = write.split();
 //!     let copy = cx.alloc::<Real>(1);
 //!     elements[0] = 1.0;
@@ -87,19 +87,19 @@
 //! ```
 //!
 //! ```compile_fail,E0502
-//! use heap::handle::{Cx, Local, Real};
-//! fn reads_an_earlier_slice_during_a_write<'s>(cx: &mut Cx<'s>, vector: Local<'s, Real>) {
-//!     let before = vector.as_slice(cx);
-//!     let mut write = unsafe { cx.assume_exclusive(vector) };
+//! use heap::handle::{Cx, Owned, Real};
+//! fn reads_an_earlier_slice_during_a_write<'s>(cx: &mut Cx<'s>, mut vector: Owned<'s, Real>) {
+//!     let before = vector.get().as_slice(cx);
+//!     let mut write = vector.write(cx);
 //!     let (elements, _reader) = write.split();
 //!     elements[0] = before[1];
 //! }
 //! ```
 //!
 //! ```no_run
-//! use heap::handle::{Cx, Local, Real};
-//! fn reads_through_the_reader<'s>(cx: &mut Cx<'s>, vector: Local<'s, Real>, source: Local<'s, Real>) {
-//!     let mut write = unsafe { cx.assume_exclusive(vector) };
+//! use heap::handle::{Cx, Local, Owned, Real};
+//! fn reads_through_the_reader<'s>(cx: &mut Cx<'s>, mut vector: Owned<'s, Real>, source: Local<'s, Real>) {
+//!     let mut write = vector.write(cx);
 //!     let (elements, reader) = write.split();
 //!     match reader.slice(source) {
 //!         Some(source) => elements[0] = source[1],
@@ -125,11 +125,36 @@
 //! An object with no element storage has no element access. An ALTREP object is never a vector
 //! kind, so a write into one has to go through a copy the allocator made:
 //!
-//! ```compile_fail,E0277
-//! use heap::handle::{Cx, Local};
-//! fn written_without_storage<'s>(cx: &mut Cx<'s>, copy: Local<'s>) {
-//!     let mut write = unsafe { cx.assume_exclusive(copy) };
-//!     write.split().0[0] = 1.0;
+//! ```compile_fail,E0599
+//! use heap::handle::{Cx, Owned};
+//! fn written_without_storage<'s>(cx: &mut Cx<'s>, mut copy: Owned<'s>) {
+//!     copy.write(cx).split().0[0] = 1.0;
+//! }
+//! ```
+//!
+//! Whether a vector may be written where it is, is one value. An [`Owned`] comes from a new
+//! vector or from the one `unsafe` claim that nothing else refers to an existing one, so a
+//! shared value has to be copied first, and the copy has to be one with storage:
+//!
+//! ```compile_fail,E0599
+//! use heap::handle::{Cx, Local, Real};
+//! fn written_while_shared<'s>(cx: &mut Cx<'s>, shared: Local<'s, Real>) {
+//!     shared.write(cx).split().0[0] = 1.0;
+//! }
+//! ```
+//!
+//! ```no_run
+//! use heap::handle::{Cx, Local, Owned, Real};
+//! use heap::HeapError;
+//! fn written_into_a_copy<'s>(
+//!     cx: &mut Cx<'s>,
+//!     shared: Local<'s, Real>,
+//! ) -> Result<Local<'s, Real>, HeapError> {
+//!     let mut copy = cx.alloc::<Real>(shared.len())?;
+//!     copy.as_mut_slice().copy_from_slice(shared.as_slice(cx));
+//!     let mut owned: Owned<'s, Real> = copy.owned();
+//!     owned.write(cx).split().0[0] = 1.0;
+//!     Ok(owned.finish())
 //! }
 //! ```
 //!
@@ -220,6 +245,27 @@ impl<'s> Cx<'s> {
         }
     }
 
+    /// The answer `read` finds in the heap, or else the answer of `rest`, which may allocate.
+    /// Because the answer borrows the context, a caller returns it before the next safepoint
+    /// and it needs no root.
+    #[inline]
+    pub fn read_or<'a, T: Kind, E>(
+        &'a mut self,
+        read: impl for<'r> FnOnce(&'r Cx<'s>) -> Option<Gc<'r, T>>,
+        rest: impl FnOnce(&'a mut Cx<'s>) -> Result<Option<Gc<'a, T>>, E>,
+    ) -> Result<Option<Gc<'a, T>>, E> {
+        let this: *mut Cx<'s> = self;
+        // SAFETY: `this` is the exclusive borrow `self`, used as a shared borrow for `'a` when
+        // `read` answers and as itself when `read` declines, never both: `read` must accept
+        // every lifetime, so it keeps neither the context nor a pointer when it declines.
+        // The borrow checker cannot see that the two uses exclude each other (its "problem
+        // case 3"), which is the only reason this is not written as a plain `if let`.
+        if let Some(answer) = read(unsafe { &*this }) {
+            return Ok(Some(answer));
+        }
+        rest(unsafe { &mut *this })
+    }
+
     /// A new vector of `length` elements: zeros, `NULL`s or empty strings.
     #[inline]
     pub fn alloc<T: Vector>(&mut self, length: usize) -> HeapResult<Fresh<'s, T>> {
@@ -227,8 +273,7 @@ impl<'s> Cx<'s> {
         let heap = unsafe { &mut *self.heap.as_ptr() };
         // SAFETY: `T::TYPE` is a vector type, and a length over `isize::MAX` casts to a
         // negative one, which the heap refuses.
-        let raw = unsafe { heap.alloc_vector(T::TYPE, length as isize)? };
-        heap.root(raw);
+        let raw = unsafe { heap.alloc_vector_rooted(T::TYPE, length as isize)? };
         Ok(Fresh {
             raw,
             scope: PhantomData,
@@ -268,25 +313,6 @@ impl<'s> Cx<'s> {
                 error.reroot(heap);
                 Err(error)
             }
-        }
-    }
-
-    /// Exclusive access to `object` for writing it in place.
-    ///
-    /// # Safety
-    ///
-    /// Nothing else can observe `object`: no variable, register, handle or other object refers
-    /// to it except the one place the caller is updating, so changing it changes no other R
-    /// value.
-    #[inline]
-    pub unsafe fn assume_exclusive<'a, T: Vector>(
-        &'a mut self,
-        object: Local<'_, T>,
-    ) -> Write<'a, 's, T> {
-        Write {
-            cx: self,
-            raw: object.raw,
-            kind: PhantomData,
         }
     }
 }
@@ -375,6 +401,39 @@ impl<'a, T: Kind> Gc<'a, T> {
     }
 }
 
+impl<'a, T: Vector> Gc<'a, T> {
+    #[inline]
+    pub fn len(self) -> usize {
+        // SAFETY: a standard vector keeps its length in its header.
+        unsafe { self.raw.length() as usize }
+    }
+
+    #[inline]
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl<'a, T: Atomic> Gc<'a, T> {
+    /// The elements, which live as long as the borrow that keeps the object from collection.
+    #[inline]
+    pub fn as_slice(self) -> &'a [T::Element] {
+        // SAFETY: the vector stores `length` initialized elements, and no write is open while
+        // the context is borrowed shared.
+        unsafe { self.raw.slice() }
+    }
+}
+
+impl<'a, T: Elements> Gc<'a, T> {
+    #[inline]
+    pub fn get(self, index: usize) -> Gc<'a, T::Element> {
+        assert!(index < self.len(), "element index out of bounds");
+        // SAFETY: the index is in bounds of a standard vector of pointers, each a live object
+        // of the element kind.
+        unsafe { Gc::adopt(*(self.raw.data() as *const Sexp).add(index)) }
+    }
+}
+
 impl<'a> Gc<'a, Chars> {
     /// The string's bytes.
     #[inline]
@@ -398,7 +457,40 @@ impl<'a> Gc<'a, Chars> {
     }
 }
 
+impl<'a> Gc<'a, Symbol> {
+    /// The symbol's print name.
+    #[inline]
+    pub fn name(self) -> Gc<'a, Chars> {
+        // SAFETY: a symbol's `car` is its print name, a `CHARSXP` that the symbol keeps alive.
+        unsafe { Gc::adopt(self.raw.car()) }
+    }
+}
+
+impl<'a> Gc<'a, Pairlist> {
+    /// The cell's value.
+    #[inline]
+    pub fn head(self) -> Gc<'a> {
+        // SAFETY: the cell is live for `'a` and keeps its fields alive.
+        unsafe { Gc::adopt(self.raw.car()) }
+    }
+
+    /// The cell's tag: a symbol, or `NULL`.
+    #[inline]
+    pub fn tag(self) -> Gc<'a> {
+        // SAFETY: as for `head`.
+        unsafe { Gc::adopt(self.raw.tag()) }
+    }
+
+    /// The next cell, or what ends the list.
+    #[inline]
+    pub fn rest(self) -> Gc<'a> {
+        // SAFETY: as for `head`.
+        unsafe { Gc::adopt(self.raw.cdr()) }
+    }
+}
+
 /// A pointer rooted in the handle scope `'s`.
+#[repr(transparent)]
 pub struct Local<'s, T: Kind = Value> {
     raw: Sexp,
     scope: Brand<'s>,
@@ -424,6 +516,17 @@ impl<'s, T: Kind> Local<'s, T> {
             scope: PhantomData,
             kind: PhantomData,
         }
+    }
+
+    /// A caller's raw values as values of the scope, without copying them.
+    ///
+    /// # Safety
+    ///
+    /// Each of `raw` is a live object that `T` admits, and a root keeps it alive for `'s`.
+    #[inline]
+    pub unsafe fn adopt_slice<'a>(raw: &'a [Sexp]) -> &'a [Local<'s, T>] {
+        // SAFETY: the caller's contract, and `Local` is `repr(transparent)` over `Sexp`.
+        unsafe { &*(std::ptr::from_ref(raw) as *const [Local<'s, T>]) }
     }
 
     #[inline]
@@ -464,6 +567,19 @@ impl<'s, T: Kind> Local<'s, T> {
             scope: PhantomData,
             kind: PhantomData,
         })
+    }
+
+    /// The object as a pointer that borrows the context, for the readers [`Gc`] has.
+    #[inline]
+    pub fn read<'a>(self, _cx: &'a Cx<'_>) -> Gc<'a, T>
+    where
+        's: 'a,
+    {
+        Gc {
+            raw: self.raw,
+            borrow: PhantomData,
+            kind: PhantomData,
+        }
     }
 
     /// The attribute list, or `NULL`.
@@ -602,6 +718,16 @@ impl<'s, T: Vector> Fresh<'s, T> {
             kind: PhantomData,
         }
     }
+
+    /// The object as one its holder may keep writing after other code has read it.
+    #[inline]
+    pub fn owned(self) -> Owned<'s, T> {
+        Owned {
+            raw: self.raw,
+            scope: PhantomData,
+            kind: PhantomData,
+        }
+    }
 }
 
 impl<T: Atomic> Fresh<'_, T> {
@@ -658,7 +784,7 @@ impl<T: Atomic> Write<'_, '_, T> {
     #[inline]
     pub fn split(&mut self) -> (&mut [T::Element], Reader<'_>) {
         (
-            // SAFETY: the object is the caller's alone (`assume_exclusive`), and the reader
+            // SAFETY: the object is the caller's alone (the `Owned` it came from), and the reader
             // refuses to hand out its storage a second time.
             unsafe { self.raw.slice_mut() },
             Reader {
@@ -697,7 +823,7 @@ pub struct Stores<'r, T: Elements> {
 }
 
 impl<T: Elements> Stores<'_, T> {
-    #[inline]
+    #[inline(always)]
     pub fn set(&mut self, index: usize, value: impl Pointer<T::Element>) {
         // SAFETY: a standard vector keeps its length in its header.
         assert!(
@@ -736,6 +862,84 @@ impl<'r> Reader<'r> {
         assert!(index < source.len(), "element index out of bounds");
         // SAFETY: as for `Local::get`. Stores made meanwhile free nothing.
         unsafe { Gc::adopt(*(source.raw.data() as *const Sexp).add(index)) }
+    }
+}
+
+/// An object the caller alone refers to, apart from the one place it is stored in, so changing
+/// it where it is changes no other R value. A [`Fresh`] vector is one; an existing object
+/// becomes one through [`Owned::assume`], after the test its holder defines (a reference count
+/// of one and no uncounted holder). Code that updates a variable asks for its `Owned` value
+/// once, copies when there is none, and writes only through the result.
+pub struct Owned<'s, T: Kind = Value> {
+    raw: Sexp,
+    scope: Brand<'s>,
+    kind: PhantomData<T>,
+}
+
+impl<'s, T: Kind> Owned<'s, T> {
+    /// # Safety
+    ///
+    /// Nothing else can observe `object`: no variable, register, handle or other object refers
+    /// to it except the one place the caller is updating.
+    #[inline]
+    pub unsafe fn assume(object: Local<'s, T>) -> Owned<'s, T> {
+        Owned {
+            raw: object.raw,
+            scope: PhantomData,
+            kind: PhantomData,
+        }
+    }
+
+    /// The object, to read.
+    #[inline]
+    pub fn get(&self) -> Local<'s, T> {
+        Local {
+            raw: self.raw,
+            scope: PhantomData,
+            kind: PhantomData,
+        }
+    }
+
+    /// The object as the value its holder stores.
+    #[inline]
+    pub fn finish(self) -> Local<'s, T> {
+        self.get()
+    }
+
+    /// The object as a value of any kind.
+    #[inline]
+    pub fn value(self) -> Owned<'s, Value> {
+        Owned {
+            raw: self.raw,
+            scope: PhantomData,
+            kind: PhantomData,
+        }
+    }
+
+    /// The object as kind `U`, or itself when it is not one.
+    #[inline]
+    pub fn downcast<U: Kind>(self) -> Result<Owned<'s, U>, Owned<'s, T>> {
+        if admits::<U>(self.raw) {
+            Ok(Owned {
+                raw: self.raw,
+                scope: PhantomData,
+                kind: PhantomData,
+            })
+        } else {
+            Err(self)
+        }
+    }
+}
+
+impl<'s, T: Vector> Owned<'s, T> {
+    /// Access to write the vector's elements where they are.
+    #[inline]
+    pub fn write<'a>(&'a mut self, cx: &'a mut Cx<'s>) -> Write<'a, 's, T> {
+        Write {
+            cx,
+            raw: self.raw,
+            kind: PhantomData,
+        }
     }
 }
 
@@ -818,15 +1022,16 @@ impl Kind for Alt {
 }
 
 macro_rules! kinds {
-    ($($(#[$doc:meta])* $name:ident = $type:ident;)*) => {$(
+    ($($(#[$doc:meta])* $name:ident = $type:ident, |$altrep:ident| $standard:expr;)*) => {$(
         $(#[$doc])*
         pub struct $name;
 
         impl sealed::Sealed for $name {}
 
         impl Kind for $name {
-            fn admits(kind: SexpType, altrep: bool) -> bool {
-                kind == SexpType::$type && !altrep
+            #[inline]
+            fn admits(kind: SexpType, $altrep: bool) -> bool {
+                kind == SexpType::$type && $standard
             }
         }
 
@@ -834,22 +1039,24 @@ macro_rules! kinds {
     )*};
 }
 
+// Only a vector can be an ALTREP object (`Heap::alloc_altrep`), so the other kinds are told by
+// their type alone, which a walk over an attribute list tests for every cell and tag.
 kinds! {
-    Logical = Logical;
-    Integer = Integer;
-    Real = Real;
-    Complex = Complex;
-    Raw = Raw;
+    Logical = Logical, |altrep| !altrep;
+    Integer = Integer, |altrep| !altrep;
+    Real = Real, |altrep| !altrep;
+    Complex = Complex, |altrep| !altrep;
+    Raw = Raw, |altrep| !altrep;
     /// A character vector.
-    Str = String;
-    List = List;
-    Expression = Expression;
-    Symbol = Symbol;
-    Pairlist = Pairlist;
-    Language = Language;
-    Closure = Closure;
-    Environment = Environment;
-    Promise = Promise;
+    Str = String, |altrep| !altrep;
+    List = List, |altrep| !altrep;
+    Expression = Expression, |altrep| !altrep;
+    Symbol = Symbol, |_altrep| true;
+    Pairlist = Pairlist, |_altrep| true;
+    Language = Language, |_altrep| true;
+    Closure = Closure, |_altrep| true;
+    Environment = Environment, |_altrep| true;
+    Promise = Promise, |_altrep| true;
 }
 
 /// One string, as a character vector's element. It is not an [`Identity`] kind.
@@ -858,8 +1065,9 @@ pub struct Chars;
 impl sealed::Sealed for Chars {}
 
 impl Kind for Chars {
-    fn admits(kind: SexpType, altrep: bool) -> bool {
-        kind == SexpType::Char && !altrep
+    #[inline]
+    fn admits(kind: SexpType, _altrep: bool) -> bool {
+        kind == SexpType::Char
     }
 }
 

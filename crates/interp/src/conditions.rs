@@ -383,7 +383,7 @@ pub unsafe fn default_error(call: Sexp, message: &str) -> Unwind {
     // GNU R records the stack for `traceback()` only after the `error` option ran, so a
     // handler there still sees the previous error's.
     if let Err(unwind) = traceback_calls(0).and_then(|calls| {
-        Ok(crate::heap().define(values::base_env(), values::install(".Traceback")?, calls)?)
+        Ok(crate::heap().define_base_variable(values::install(".Traceback")?, calls)?)
     }) {
         outcome = unwind;
     }
@@ -872,7 +872,7 @@ pub unsafe fn print_warnings() -> R<()> {
         .map(|(call, message)| (message.as_str(), *call))
         .collect();
     let last = values::named_list(&items)?;
-    crate::heap().define(values::base_env(), values::install("last.warning")?, last)?;
+    crate::heap().define_base_variable(values::install("last.warning")?, last)?;
     Ok(())
 }
 

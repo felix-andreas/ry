@@ -67,6 +67,10 @@ length.widget <- function(x) if (is.null(x)) 0L else 7L
 "$.gadget" <- function(x, name) if (is.null(x)) 0L else name
 format.widget <- function(x, ...) if (is.null(x)) "" else "widget"
 quoted <- quote(i + 1L)
+grid <- matrix(0, 4L, 4L)
+wide <- matrix(0, 10L, 10L)
+kstore <- function(v) { v[2L] <- 9; v }
+kgrid <- function(m) { m[1L, 1L] <- 1; m[2L, 2L] <- 1; m }
 """
 
 # (name, expression). The loop assigns the expression's value, so an operation's count includes
@@ -137,10 +141,23 @@ OPERATIONS = [
     ("builtin: `is.numeric && length`", "is.numeric(i) && length(i) == 1L"),
     ("builtin: `%in%`", '"beta" %in% words'),
     ("builtin: `nchar`", "nchar(words)"),
+    ("builtin: `nzchar`", "nzchar(words)"),
+    ("builtin: `substr`", "substr(words, 1L, 2L)"),
+    ("builtin: `toupper`", "toupper(words)"),
+    ("builtin: `startsWith`", 'startsWith(words, "a")'),
+    ("builtin: `strtrim`", "strtrim(words, 2L)"),
+    ("builtin: `grepl`, fixed", 'grepl("a", words, fixed = TRUE)'),
+    ("builtin: `sub`", 'sub("a", "b", words)'),
+    ("builtin: `gsub`, fixed", 'gsub("a", "b", words, fixed = TRUE)'),
+    ("builtin: `regexpr`", 'regexpr("a", words)'),
+    ("builtin: `bitwAnd`", "bitwAnd(i, 3L)"),
     ("builtin: `sum` of 4 numbers", "sum(numbers)"),
     ("builtin: `seq_len`", "seq_len(4L)"),
     ("builtin: `attr`", 'attr(object, "class")'),
     ("builtin: `class`", "class(object)"),
+    ("builtin: `dim`", "dim(grid)"),
+    ("builtin: `unclass`", "unclass(object)"),
+    ("builtin: `attributes`", "attributes(object)"),
     ("builtin: `unlist` of a short list", "unlist(plain)"),
     ("builtin: `environment()`", "environment()"),
     ("assign: element of a local vector", "{ numbers[2L] <- 9; 0L }"),
@@ -150,7 +167,18 @@ OPERATIONS = [
     ("assign: `attr<-`", '{ attr(numbers, "unit") <- "m"; 0L }'),
     ("assign: `attr<-` with a computed name", '{ attr(numbers, if (i > 0L) "unit" else "u") <- "m"; 0L }'),
     ("assign: `class<-`", '{ class(plain) <- "widget"; 0L }'),
+    ("assign: `oldClass<-`", '{ oldClass(plain) <- "widget"; 0L }'),
+    ("assign: `dim<-`", "{ dim(numbers) <- c(2L, 2L); 0L }"),
+    ("assign: `length<-`", "{ length(numbers) <- 4L; 0L }"),
+    ("assign: `levels<-`", "{ levels(numbers) <- words; 0L }"),
     ("assign: variable in an environment", "{ holder$value <- i; 0L }"),
+    ("assign: string element of a local vector", '{ words[2L] <- "x"; 0L }'),
+    ("assign: list element by name", '{ plain[["a"]] <- i; 0L }'),
+    ("assign: element by name", '{ named[["b"]] <- 9; 0L }'),
+    ("assign: matrix element", "{ grid[2L, 2L] <- 9; 0L }"),
+    ("assign: element of an argument, copied", "kstore(numbers)"),
+    ("assign: two matrix elements of an argument, copied", "kgrid(grid)"),
+    ("assign: two matrix elements of a 100-element argument, copied", "kgrid(wide)"),
 ]
 
 EMPTY = "empty loop"
@@ -203,6 +231,11 @@ def main():
 
         for index in range(len(operations)):
             (work / f"{index}.R").write_text(program(operations[index][1]))
+        # A build's first start writes its start-up image, and a counted run that raced that
+        # write would start the slow way and shift every count, so one start comes first.
+        warm = subprocess.run([ry, "run", str(work / "0.R"), "1"], capture_output=True, text=True)
+        if warm.returncode != 0:
+            sys.exit(f"error: ry failed to run the empty loop:\n{warm.stderr[-2000:]}")
         with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count()) as pool:
             totals = dict(pool.map(count, runs))
         per_iteration = [(totals[index, LONG] - totals[index, SHORT]) / (LONG - SHORT) for index in range(len(operations))]

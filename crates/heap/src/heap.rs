@@ -1442,6 +1442,30 @@ impl Heap {
     /// because the header and length words are written whole.
     #[inline]
     pub unsafe fn alloc_vector(&mut self, kind: SexpType, length: isize) -> HeapResult<Sexp> {
+        self.alloc_vector_inline(kind, length)
+    }
+
+    /// [`Heap::alloc_vector`] with its result rooted in the current handle scope, as one body
+    /// that holds the inline path, so a caller pays one call for a rooted vector.
+    #[inline(never)]
+    pub unsafe fn alloc_vector_rooted(
+        &mut self,
+        kind: SexpType,
+        length: isize,
+    ) -> HeapResult<Sexp> {
+        let object = self.alloc_vector_inline(kind, length)?;
+        self.root(object);
+        Ok(object)
+    }
+
+    /// [`Heap::alloc_vector`] inlined into the caller whatever its size, for a caller that is
+    /// itself the one out-of-line body of an allocation.
+    #[inline(always)]
+    pub unsafe fn alloc_vector_inline(
+        &mut self,
+        kind: SexpType,
+        length: isize,
+    ) -> HeapResult<Sexp> {
         let shift = small_vector_shift(kind);
         // A negative length casts to a huge one and takes the general path, which refuses it.
         if shift == NOT_SMALL_VECTOR || length as usize > SMALL_VECTOR_DATA_BYTES >> shift {
@@ -2757,6 +2781,22 @@ impl Heap {
             return Ok(());
         }
         self.define_unbound(env, symbol, value)
+    }
+
+    /// [`Heap::define`] into the base environment past a locked binding, as GNU R's
+    /// `SET_SYMVALUE` writes the variables the runtime keeps there itself (`.Last.value`,
+    /// `.Traceback`, `.Options`), whose bindings start-up locks with the rest of base's.
+    pub unsafe fn define_base_variable(&mut self, symbol: Sexp, value: Sexp) -> HeapResult<()> {
+        let env = self.known.base_env;
+        if let Some(cell) = self.frame_cell(env, symbol)
+            && cell.has_gp(gp::BINDING_LOCKED)
+        {
+            cell.set_gp_bits(gp::BINDING_LOCKED, false);
+            let written = self.set_binding_value(cell, value);
+            cell.set_gp_bits(gp::BINDING_LOCKED, true);
+            return written;
+        }
+        self.define(env, symbol, value)
     }
 
     /// [`Heap::define`] for a `symbol` that `env`'s own frame does not bind, which the caller

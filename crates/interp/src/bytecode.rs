@@ -52,6 +52,10 @@ use {
         effects, element_access,
         envir::namespace_binding,
         eval::{self, Reify, SwitchSelector, as_condition},
+        handles::{
+            self, Atomic, Chars, Cx, Environment, Integer, List, Local, Logical, Names, Owned,
+            Real, Scalar, Str, Vector,
+        },
         interp,
         kernels::{self, Element, MAX_NODES, Node, Reduction},
         moves,
@@ -2209,6 +2213,12 @@ pub enum Op {
     /// where a compiled replacement goes when an R function may receive those arguments: a
     /// method of an object, or a replacement closure.
     ComplexAssign,
+    /// `dst symbol cache`: a local the compiler counts as bound, read as the subscript of an
+    /// element assignment that skips the object probe ([`Op::SubAssign`]). A callee can have
+    /// removed it (`rm("k", envir = parent.frame())`), so `dst` gets `R_UnboundValue` when no
+    /// binding is found, and the assignment goes to `complex_assign`, where a method gets the
+    /// subscript as a promise it may never force. It reads as [`Op::GetVar`] otherwise.
+    Subscript,
 }
 
 /// Which replacement an [`Op::SubAssign`] does, stored as its sixth operand.
@@ -2223,7 +2233,7 @@ pub enum ElementKind {
     Dollar = 2,
 }
 
-pub const OPS: [Op; 54] = [
+pub const OPS: [Op; 55] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -2278,6 +2288,7 @@ pub const OPS: [Op; 54] = [
     Op::Internal,
     Op::Argument,
     Op::ComplexAssign,
+    Op::Subscript,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -3524,7 +3535,7 @@ impl Compiler {
             // replacement can leave a symbol without a slot, because it gives the frame its
             // environment when it finds none.
             let (named, required): (SmallVec<[(u32, Option<u32>); 2]>, bool) = match op {
-                Op::GetVar | Op::GetFun | Op::Argument => (
+                Op::GetVar | Op::GetFun | Op::Argument | Op::Subscript => (
                     smallvec![(self.code[pc + 2], Some(self.code[pc + 3]))],
                     true,
                 ),
@@ -4680,11 +4691,12 @@ impl Compiler {
         // promises it may never force, or force in another environment (`[<-.data.table`
         // evaluates `i` inside the table). So the target is read before any subscript runs, and
         // an object leaves the whole assignment to `complex_assign`; only the builtin replacement
-        // takes the subscripts evaluated. A constant subscript, or a local variable known to be
-        // bound here ([`Compiler::assigned`]), is the same either way: `SubAssign` hands a method
-        // the forced promise of its code, and reading it runs nothing and cannot fail. Such
+        // takes the subscripts evaluated. A constant subscript, or a local variable assigned
+        // earlier in the block ([`Compiler::assigned`]), is the same either way: `SubAssign`
+        // hands a method the forced promise of its code, and reading it runs nothing. Such
         // subscripts skip the probe, which keeps `x[[k]] <- v` and `x[i] <- v` in a loop as
-        // cheap as before.
+        // cheap as before. A callee may have removed the local since, so it is read by
+        // `Op::Subscript`, which leaves an unbound one to `complex_assign`.
         let registers: SmallVec<[u32; 2]> = subscripts.iter().map(|_| self.allocate()).collect();
         let eager = subscripts
             .iter()
@@ -4705,6 +4717,16 @@ impl Compiler {
                 // does, so the instruction looks the formal up itself (see `subscript_value`).
                 let symbol = self.constant(subscript);
                 self.emit(Op::Constant, &[register, symbol]);
+            } else if eager
+                && subscript.kind() == SexpType::Symbol
+                && self
+                    .bound
+                    .as_ref()
+                    .is_none_or(|bound| !bound.names.contains(&subscript))
+            {
+                let symbol = self.constant(subscript);
+                let cache = self.cache();
+                self.emit(Op::Subscript, &[register, symbol, cache]);
             } else {
                 self.expression(subscript, register)?;
             }
@@ -6130,7 +6152,7 @@ const MARKER_MASK: u32 = BREAK_MARKER | NEXT_MARKER;
 pub const fn operand_count(op: Op) -> usize {
     match op {
         Op::Constant => 2,
-        Op::GetVar | Op::Argument => 3,
+        Op::GetVar | Op::Argument | Op::Subscript => 3,
         Op::GetFun => 4,
         Op::SetVar => 3,
         Op::BranchUnlessBuiltin => 2,
@@ -6362,7 +6384,7 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
     use Operand::*;
     Some(match op {
         Op::Constant | Op::Ast => &[Register, Constant],
-        Op::GetVar | Op::Argument => &[Register, Symbol, Cache],
+        Op::GetVar | Op::Argument | Op::Subscript => &[Register, Symbol, Cache],
         Op::SetVar => &[Symbol, Register, Cache],
         Op::GetFun => &[Register, Symbol, Cache, Call],
         Op::BranchUnlessBuiltin | Op::BranchIfObject => &[Register, Target],
@@ -7355,12 +7377,15 @@ pub unsafe fn record_active_binding(code: Sexp, pc: usize) {
 }
 
 /// What `GetVar` at `pc` reads, and whether the binding is in the activation's own frame.
-/// Whether the instruction at `pc` is an [`Op::Argument`] whose formal is missing, which the
-/// optimizing tier leaves to tier 0: no compiled load yields the empty argument.
-pub unsafe fn passes_missing_argument(machine: &mut Machine<'_>, pc: usize) -> R<bool> {
+/// Whether the load at `pc` is one the optimizing tier leaves to tier 0: an [`Op::Argument`]
+/// whose formal is missing, since no compiled load yields the empty argument, or an
+/// [`Op::Subscript`] whose variable is unbound, which hands its assignment to `complex_assign`.
+pub unsafe fn load_declines(machine: &mut Machine<'_>, pc: usize) -> R<bool> {
     let word = values::ints(machine.code.car()).get(pc).copied();
-    if word.and_then(|word| op_of(word as u32)) != Some(Op::Argument) {
-        return Ok(false);
+    match word.and_then(|word| op_of(word as u32)) {
+        Some(Op::Argument) => {}
+        Some(Op::Subscript) => return Ok(subscript_unbound(&activation(machine, true), pc)),
+        _ => return Ok(false),
     }
     let state = activation(machine, true);
     let missing = argument_missing(&state, pc)?;
@@ -8126,6 +8151,7 @@ handlers! {
     run_internal: Internal, true, op_internal;
     run_argument: Argument, true, op_argument;
     run_complex_assign: ComplexAssign, true, op_complex_assign;
+    run_subscript: Subscript, true, op_subscript;
 }
 
 /// `Jump`, the one instruction whose failure resumes somewhere other than after itself: the
@@ -8204,6 +8230,7 @@ macro_rules! fast_paths {
 fast_paths! {
     fast_get_var: GetVar, get_var_fast;
     fast_argument: Argument, get_var_fast;
+    fast_subscript: Subscript, get_var_fast;
     fast_get_fun: GetFun, get_fun_fast;
     fast_set_var: SetVar, set_var_fast;
     fast_guard: Guard, guard_fast;
@@ -9574,6 +9601,34 @@ unsafe fn op_argument(state: &mut Activation<'_, '_>, instruction: Instruction) 
         return Ok(Flow::Next);
     }
     op_get_var(state, instruction)
+}
+
+/// [`Op::Subscript`]: `R_UnboundValue` when nothing binds the variable, and its value
+/// otherwise.
+unsafe fn op_subscript(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    if subscript_unbound(state, instruction.at) {
+        (*state.interp).visible = true;
+        instruction.output(0, unbound());
+        return Ok(Flow::Next);
+    }
+    op_get_var(state, instruction)
+}
+
+/// Whether nothing binds the variable the [`Op::Subscript`] at `pc` reads. It finds the
+/// binding without reading it, so an active binding runs once, in the load that follows.
+unsafe fn subscript_unbound(state: &Activation<'_, '_>, pc: usize) -> bool {
+    let symbol = pool_constant(state, *state.code.add(pc + 2) as usize);
+    let start = if state.in_slots() {
+        if let Some(slot) = state.slot(*state.code.add(pc + 3) as usize)
+            && *slot != unbound()
+        {
+            return false;
+        }
+        state.machine.function.tag()
+    } else {
+        *state.header
+    };
+    eval::find_cell(symbol, start).is_none_or(|cell| cell.cdr() == unbound())
 }
 
 /// Whether the formal the [`Op::Argument`] at `pc` reads is missing.
@@ -12998,6 +13053,13 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
     };
     let index = instruction.input(2);
     let target = call.cdr().car();
+    if index == unbound() {
+        let env = state.env(Reify::Site("subassignment"))?;
+        eval::complex_assign(call, target, value, env, false, &[])?;
+        instruction.output(0, value);
+        (*state.interp).visible = false;
+        return Ok(Flow::Next);
+    }
     // A symbol in the register is a formal left for lookup only when the subscript is that
     // formal; any other symbol is a computed subscript, which `[<-` rejects.
     if index.kind() == SexpType::Symbol && index != target.cdr().cdr().car() {
@@ -13056,6 +13118,13 @@ unsafe fn op_sub_assign_matrix(
     let variable = state.constant(instruction, 1);
     let target = call.cdr().car();
     let subscripts = [instruction.input(2), instruction.input(3)];
+    if subscripts.contains(&unbound()) {
+        let env = state.env(Reify::Site("matrix subassignment"))?;
+        eval::complex_assign(call, target, value, env, false, &[])?;
+        instruction.output(0, value);
+        (*state.interp).visible = false;
+        return Ok(Flow::Next);
+    }
     let codes = [target.cdr().cdr().car(), target.cdr().cdr().cdr().car()];
     // As in `op_sub_assign`, a symbol other than the subscript's own is a computed one.
     let lookups = subscripts
@@ -13266,126 +13335,268 @@ unsafe fn assign_element(
     kind: ElementKind,
     owned: impl FnOnce(Sexp) -> bool,
 ) -> R<Option<Sexp>> {
-    let heap = crate::heap();
-    if target == value
-        || target.kind() == SexpType::Promise
-        || target.is_object()
-        || target.is_array()
-        || target.is_altrep()
-        || index.is_altrep()
-        || values::has_attributes(index)
-        || length(index) != 1
+    let stored = handles::with(|context| {
+        let stored = store_element(
+            context,
+            // SAFETY: the frame's variable holds the target, its registers, formals or
+            // constants hold the subscript and the value, and the store writes none of those.
+            handles::held(context, target),
+            handles::held(context, index),
+            handles::held(context, value),
+            kind,
+            // SAFETY: `owned` is the holder's test that its variable alone refers to the value
+            // it is asked about.
+            |target| owned(target.raw()).then(|| unsafe { Owned::assume(target) }),
+        )?;
+        Ok(stored.map(Local::raw))
+    })?;
+    // A copy or a longer vector is the caller's to bind.
+    if let Some(stored) = stored
+        && stored != target
     {
+        crate::heap().root(stored);
+    }
+    Ok(stored)
+}
+
+/// A vector kind whose elements tier 0 stores without the replacement function.
+trait Stored: Vector + Sized {
+    /// One element, as its storage holds it.
+    type Item<'s>: Copy + Into<Scalar<'s>>;
+
+    /// The element `x[[i]] <- value`, `x[i] <- value` or `x$name <- value` stores when the
+    /// assignment changes no type and no attribute: any non-`NULL` value for a list under `[[`
+    /// or `$`, and for an atomic vector a scalar without attributes of its type, or of a lower
+    /// type where `converts` allows the conversion `[<-` would do.
+    fn item<'s>(
+        context: &Cx<'_>,
+        value: Local<'s>,
+        kind: ElementKind,
+        converts: bool,
+    ) -> Option<Self::Item<'s>>;
+
+    fn put<'s>(context: &mut Cx<'s>, vector: &mut Owned<'s, Self>, at: usize, item: Self::Item<'s>);
+}
+
+/// The one element of an atomic vector that has no attributes.
+#[inline]
+fn bare_scalar<'a, 's: 'a, T: Atomic>(context: &'a Cx<'_>, value: Local<'s>) -> Option<T::Element> {
+    let vector = value.downcast::<T>()?;
+    (vector.len() == 1 && value.attributes(context).r_type() == SexpType::Nil)
+        .then(|| vector.as_slice(context)[0])
+}
+
+impl Stored for Real {
+    type Item<'s> = f64;
+
+    #[inline]
+    fn item<'s>(
+        context: &Cx<'_>,
+        value: Local<'s>,
+        kind: ElementKind,
+        converts: bool,
+    ) -> Option<f64> {
+        if kind == ElementKind::Dollar {
+            return None;
+        }
+        if let Some(real) = bare_scalar::<Real>(context, value) {
+            return Some(real);
+        }
+        if !converts {
+            return None;
+        }
+        let integer = bare_scalar::<Integer>(context, value)
+            .or_else(|| bare_scalar::<Logical>(context, value))?;
+        Some(if integer == NA_INTEGER {
+            NA_REAL
+        } else {
+            f64::from(integer)
+        })
+    }
+
+    #[inline]
+    fn put<'s>(context: &mut Cx<'s>, vector: &mut Owned<'s, Real>, at: usize, item: f64) {
+        vector.write(context).split().0[at] = item;
+    }
+}
+
+impl Stored for Integer {
+    type Item<'s> = i32;
+
+    #[inline]
+    fn item<'s>(
+        context: &Cx<'_>,
+        value: Local<'s>,
+        kind: ElementKind,
+        converts: bool,
+    ) -> Option<i32> {
+        if kind == ElementKind::Dollar {
+            return None;
+        }
+        // A logical's `NA` is the integer's.
+        bare_scalar::<Integer>(context, value).or_else(|| {
+            converts
+                .then(|| bare_scalar::<Logical>(context, value))
+                .flatten()
+        })
+    }
+
+    #[inline]
+    fn put<'s>(context: &mut Cx<'s>, vector: &mut Owned<'s, Integer>, at: usize, item: i32) {
+        vector.write(context).split().0[at] = item;
+    }
+}
+
+impl Stored for Logical {
+    type Item<'s> = i32;
+
+    #[inline]
+    fn item<'s>(
+        context: &Cx<'_>,
+        value: Local<'s>,
+        kind: ElementKind,
+        _converts: bool,
+    ) -> Option<i32> {
+        if kind == ElementKind::Dollar {
+            return None;
+        }
+        bare_scalar::<Logical>(context, value)
+    }
+
+    #[inline]
+    fn put<'s>(context: &mut Cx<'s>, vector: &mut Owned<'s, Logical>, at: usize, item: i32) {
+        vector.write(context).split().0[at] = item;
+    }
+}
+
+impl Stored for Str {
+    type Item<'s> = Local<'s, Str>;
+
+    #[inline]
+    fn item<'s>(
+        context: &Cx<'_>,
+        value: Local<'s>,
+        kind: ElementKind,
+        _converts: bool,
+    ) -> Option<Local<'s, Str>> {
+        let text = value.downcast::<Str>()?;
+        (kind != ElementKind::Dollar
+            && text.len() == 1
+            && value.attributes(context).r_type() == SexpType::Nil)
+            .then_some(text)
+    }
+
+    #[inline(always)]
+    fn put<'s>(context: &mut Cx<'s>, vector: &mut Owned<'s, Str>, at: usize, item: Local<'s, Str>) {
+        let mut write = vector.write(context);
+        let (mut stores, reader) = write.split_elements();
+        stores.set(at, reader.element(item, 0));
+    }
+}
+
+impl Stored for List {
+    type Item<'s> = Local<'s>;
+
+    #[inline]
+    fn item<'s>(
+        _context: &Cx<'_>,
+        value: Local<'s>,
+        kind: ElementKind,
+        _converts: bool,
+    ) -> Option<Local<'s>> {
+        (kind != ElementKind::Single && value.r_type() != SexpType::Nil).then_some(value)
+    }
+
+    #[inline(always)]
+    fn put<'s>(context: &mut Cx<'s>, vector: &mut Owned<'s, List>, at: usize, item: Local<'s>) {
+        vector.write(context).split_elements().0.set(at, item);
+    }
+}
+
+/// [`assign_element`] on rooted values. A target in a form without element storage, such as an
+/// ALTREP vector, is no kind this stores into, so it declines.
+fn store_element<'s>(
+    context: &mut Cx<'s>,
+    target: Local<'s>,
+    index: Local<'s>,
+    value: Local<'s>,
+    kind: ElementKind,
+    claim: impl FnOnce(Local<'s>) -> Option<Owned<'s>>,
+) -> R<Option<Local<'s>>> {
+    if target.is(value) || handles::is_object(target) || handles::is_array(target) {
         return Ok(None);
     }
-    // `$<-` on a plain environment binds the name there, as the primitive would, without
-    // building the `*tmp*` call. A locked or active binding takes that call, which names it in
-    // the error or runs the binding's function.
-    if target.kind() == SexpType::Environment
-        && kind == ElementKind::Dollar
-        && index.kind() == SexpType::String
-    {
-        let symbol = heap.install_char(index.element(0))?;
-        // The empty environment refuses every binding, and the `*tmp*` call names the error.
-        let writable = target != heap.known().empty_env
-            && match heap.frame_cell(target, symbol) {
-                Some(cell) => !cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED),
-                None => !target.has_gp(gp::FRAME_LOCKED),
-            };
-        if !writable {
-            return Ok(None);
-        }
-        crate::moves::reaching_environment()?;
-        heap.define(target, symbol, value)?;
-        return Ok(Some(target));
+    if let Some(environment) = target.downcast::<Environment>() {
+        Ok(bind_named(context, environment, index, value, kind)?.then_some(target))
+    } else if let Some(vector) = target.downcast::<Real>() {
+        store_element_of(context, vector, index, value, kind, claim)
+    } else if let Some(vector) = target.downcast::<List>() {
+        store_element_of(context, vector, index, value, kind, claim)
+    } else if let Some(vector) = target.downcast::<Integer>() {
+        store_element_of(context, vector, index, value, kind, claim)
+    } else if let Some(vector) = target.downcast::<Str>() {
+        store_element_of(context, vector, index, value, kind, claim)
+    } else if let Some(vector) = target.downcast::<Logical>() {
+        store_element_of(context, vector, index, value, kind, claim)
+    } else {
+        Ok(None)
     }
-    let fits = match target.kind() {
-        SexpType::List => kind != ElementKind::Single && value != nil(),
-        SexpType::Real | SexpType::Integer | SexpType::Logical | SexpType::String => {
-            // A value of a lower atomic type converts to the target's, as `[<-` would.
-            let converts = matches!(
-                (target.kind(), value.kind()),
-                (SexpType::Real, SexpType::Integer | SexpType::Logical)
-                    | (SexpType::Integer, SexpType::Logical)
-            );
-            kind != ElementKind::Dollar
-                && (value.kind() == target.kind() || converts)
-                && length(value) == 1
-                && !value.is_altrep()
-                && !values::has_attributes(value)
-        }
-        _ => false,
+}
+
+/// `environment$name <- value` on a plain environment binds the name there, as the primitive
+/// would, without building the `*tmp*` call. A locked or active binding takes that call, which
+/// names it in the error or runs the binding's function.
+#[inline(always)]
+fn bind_named<'s>(
+    context: &mut Cx<'s>,
+    environment: Local<'s, Environment>,
+    index: Local<'s>,
+    value: Local<'s>,
+    kind: ElementKind,
+) -> R<bool> {
+    if kind != ElementKind::Dollar {
+        return Ok(false);
+    }
+    let Some(text) = index.downcast::<Str>() else {
+        return Ok(false);
     };
-    if !fits {
+    if text.len() != 1 {
+        return Ok(false);
+    }
+    let symbol = handles::install_element(context, text, 0)?;
+    handles::bind(context, environment, symbol, value)
+}
+
+#[inline(always)]
+fn store_element_of<'s, T: Stored>(
+    context: &mut Cx<'s>,
+    vector: Local<'s, T>,
+    index: Local<'s>,
+    value: Local<'s>,
+    kind: ElementKind,
+    claim: impl FnOnce(Local<'s>) -> Option<Owned<'s>>,
+) -> R<Option<Local<'s>>> {
+    let Some(item) = T::item(context, value, kind, true) else {
         return Ok(None);
-    }
-    let position = match index.kind() {
-        // `$<-` on a list replaces the first element whose name matches exactly; a name `x`
-        // lacks appends an element, which `complex_assign` does.
-        SexpType::String => {
-            // An empty or `NA` name matches no element.
-            let wanted = index.element(0);
-            let names = values::get_attr(target, symbols().names);
-            if wanted == values::na_string()
-                || wanted.bytes().is_empty()
-                || !(names == nil() || names.kind() == SexpType::String && !names.is_altrep())
-            {
-                return Ok(None);
-            }
-            let wanted_bytes = wanted.bytes();
-            let found = (0..length(names)).find(|&at| {
-                let name = names.element(at);
-                name == wanted || (name != values::na_string() && name.bytes() == wanted_bytes)
-            });
-            match found {
-                Some(at) => at as f64 + 1.0,
-                // Appending a name: `x` grows in place where it has room when nothing else sees
-                // it, as the replacement call would extend `x` itself, and is otherwise copied
-                // with room to grow, so repeated appends are amortized.
-                None => {
-                    let attributes = target.attrib();
-                    if attributes != nil()
-                        && (attributes.tag() != symbols().names || attributes.cdr() != nil())
-                    {
-                        return Ok(None);
-                    }
-                    // `append_named` copies the value's payload, so a lower type converts
-                    // to the target's first.
-                    let value = match (target.kind(), value.kind()) {
-                        (SexpType::Real, SexpType::Integer | SexpType::Logical) => {
-                            let integer = value.slice::<i32>()[0];
-                            let converted = values::scalar_real(if integer == NA_INTEGER {
-                                NA_REAL
-                            } else {
-                                f64::from(integer)
-                            })?;
-                            heap.root(converted);
-                            converted
-                        }
-                        (SexpType::Integer, SexpType::Logical) => {
-                            let converted = values::scalar_integer(value.slice::<i32>()[0])?;
-                            heap.root(converted);
-                            converted
-                        }
-                        _ => value,
-                    };
-                    moves::modifying(target)?;
-                    let reuse = owned(target);
-                    return crate::subset::append_named(target, wanted, value, reuse).map(Some);
-                }
-            }
-        }
-        SexpType::Integer if index.slice::<i32>()[0] != NA_INTEGER => {
-            f64::from(index.slice::<i32>()[0])
-        }
-        SexpType::Real => index.slice::<f64>()[0],
-        _ => return Ok(None),
     };
-    let count = length(target);
+    let count = vector.len();
+    let bare = vector.value().attributes(context).r_type() == SexpType::Nil;
+    let position = match element_position(context, vector, index) {
+        Some(Position::At(position)) => position,
+        // Appending a name: `x` grows in place where it has room when nothing else sees it, as
+        // the replacement call would extend `x` itself, and is otherwise copied with room to
+        // grow, so repeated appends are amortized.
+        Some(Position::Named(name)) => {
+            handles::modifying(context, vector.value())?;
+            let owned = claim(vector.value());
+            return handles::append(context, vector, Some(name), item.into(), owned).map(Some);
+        }
+        None => return Ok(None),
+    };
     // Assigning one past the end of a vector without attributes appends, in place where a
     // previous growth left room, and otherwise into a vector with room to grow, so repeated
     // appends are amortized (see `subset::grow`).
-    let appends = position == count as f64 + 1.0 && target.attrib() == nil();
+    let appends = position == count as f64 + 1.0 && bare;
     // NaN fails both comparisons, and `x[[2.7]]` truncates to the second element.
     if !appends && !(position >= 1.0 && position < count as f64 + 1.0) {
         return Ok(None);
@@ -13394,43 +13605,78 @@ unsafe fn assign_element(
     // The conditions under which `complex_assign` updates the variable's value in place.
     // Otherwise the replacement function would change a shallow copy and bind it, which this
     // does without building the call.
-    moves::modifying(target)?;
-    let owned = owned(target);
-    let target = if appends {
-        // Of `subset::grows_in_place`'s tests, `owned` settles sharing and `appends` the
-        // attributes, and an ALTREP vector is never resizable, so only the room is left.
-        if owned && heap.is_resizable(target) && target.capacity() > count as isize {
-            heap.resize_vector(target, count as isize + 1)?;
-            target
-        } else {
-            crate::subset::append_copy(target, owned)?
-        }
-    } else if owned {
-        target
-    } else {
-        let copy = values::shallow_duplicate(target)?;
-        heap.root(copy);
-        copy
-    };
-    match (target.kind(), value.kind()) {
-        (SexpType::Real, SexpType::Real) => {
-            values::reals_mut(target)[position] = value.slice::<f64>()[0]
-        }
-        (SexpType::Real, _) => {
-            let integer = value.slice::<i32>()[0];
-            values::reals_mut(target)[position] = if integer == NA_INTEGER {
-                NA_REAL
-            } else {
-                f64::from(integer)
-            };
-        }
-        (SexpType::Integer | SexpType::Logical, _) => {
-            values::ints_mut(target)[position] = value.slice::<i32>()[0]
-        }
-        (SexpType::String, _) => heap.set_element(target, position, value.element(0)),
-        _ => heap.set_element(target, position, value),
+    handles::modifying(context, vector.value())?;
+    let owned = claim(vector.value());
+    if appends {
+        return handles::append(context, vector, None, item.into(), owned).map(Some);
     }
-    Ok(Some(target))
+    let mut vector = handles::writable(context, vector, owned)?;
+    T::put(context, &mut vector, position, item);
+    Ok(Some(vector.finish().value()))
+}
+
+/// Where a one-element subscript puts an element of `vector`.
+enum Position<'s> {
+    /// The one-based position a number names, or the position of the element a name matches.
+    /// It may lie outside the vector.
+    At(f64),
+    /// A name no element has, with nothing but names in the way of appending it.
+    Named(Local<'s, Chars>),
+}
+
+/// The position `index` names in `vector`, or `None` for a subscript the replacement function
+/// has to interpret: anything but one plain number, or one name that is neither empty nor `NA`.
+#[inline(always)]
+fn element_position<'s, T: Vector>(
+    context: &Cx<'s>,
+    vector: Local<'s, T>,
+    index: Local<'s>,
+) -> Option<Position<'s>> {
+    if index.attributes(context).r_type() != SexpType::Nil {
+        return None;
+    }
+    if let Some(integer) = index.downcast::<Integer>() {
+        let &[position] = integer.as_slice(context) else {
+            return None;
+        };
+        return (position != NA_INTEGER).then(|| Position::At(f64::from(position)));
+    }
+    if let Some(real) = index.downcast::<Real>() {
+        let &[position] = real.as_slice(context) else {
+            return None;
+        };
+        return Some(Position::At(position));
+    }
+    named_position(context, vector, index.downcast::<Str>()?)
+}
+
+/// The position of the element `name` names: `$<-` and a character subscript replace the first
+/// element whose name matches exactly, and a name `vector` lacks appends an element.
+#[inline(never)]
+fn named_position<'s, T: Vector>(
+    context: &Cx<'s>,
+    vector: Local<'s, T>,
+    name: Local<'s, Str>,
+) -> Option<Position<'s>> {
+    if name.len() != 1 {
+        return None;
+    }
+    let wanted = name.get(context, 0);
+    if handles::is_na(wanted) || wanted.bytes().is_empty() {
+        return None;
+    }
+    let found = match handles::names(context, vector) {
+        Names::None => None,
+        Names::Standard(names) => {
+            (0..names.len()).find(|&at| handles::same_text(names.get(at), wanted))
+        }
+        Names::Other => return None,
+    };
+    match found {
+        Some(at) => Some(Position::At(at as f64 + 1.0)),
+        None => handles::has_only_names(context, vector.value())
+            .then(|| Position::Named(context.root(wanted))),
+    }
 }
 
 /// The arguments after the variable of the one-level assignment target `target`, as compiled
@@ -13779,17 +14025,31 @@ unsafe fn assign_matrix_element_in_place(
     if cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED) {
         return Ok(false);
     }
-    let Some(position) = matrix_element_position(target, row, column, value) else {
-        return Ok(false);
-    };
-    // The conditions under which `complex_assign` updates the variable's value in place.
-    moves::modifying(target)?;
-    if values::maybe_shared(target) || !eval::reuse_permitted(env, target) {
-        return Ok(false);
+    let stored = handles::with(|context| {
+        let stored = store_matrix_element(
+            context,
+            // SAFETY: the binding cell, or the forced promise in it, holds the target, the
+            // frame's registers hold the subscripts and the value, and the store writes none
+            // of those.
+            handles::held(context, target),
+            (handles::held(context, row), handles::held(context, column)),
+            handles::held(context, value),
+            Shared::Declined,
+            // The conditions under which `complex_assign` updates the variable's value in
+            // place.
+            |target| {
+                // SAFETY: one counted reference, the variable's, and `reuse_permitted` rules
+                // out an uncounted holder.
+                (!values::maybe_shared(target.raw()) && eval::reuse_permitted(env, target.raw()))
+                    .then(|| unsafe { Owned::assume(target) })
+            },
+        )?;
+        Ok(stored.is_some())
+    })?;
+    if stored {
+        cell.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
     }
-    store_matrix_element(target, position, value);
-    cell.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
-    Ok(true)
+    Ok(stored)
 }
 
 /// [`assign_matrix_element_in_place`] on a slot's value. A matrix the slot does not own, such
@@ -13817,81 +14077,126 @@ unsafe fn assign_slot_matrix_element(
     if target == unbound() || target == missing_arg() || target.kind() == SexpType::Promise {
         return Ok(false);
     }
-    let Some(position) = matrix_element_position(target, row, column, value) else {
+    let stored = handles::with(|context| {
+        let stored = store_matrix_element(
+            context,
+            // SAFETY: the slot, or the forced promise in it, holds the target, the frame's
+            // registers hold the subscripts and the value, and the store writes none of
+            // those.
+            handles::held(context, target),
+            (handles::held(context, row), handles::held(context, column)),
+            handles::held(context, value),
+            Shared::Copied,
+            |target| {
+                // SAFETY: the slot holds the value itself, and `slot_owns` found no other
+                // holder.
+                (current == target.raw() && slot_owns(state, target.raw()))
+                    .then(|| unsafe { Owned::assume(target) })
+            },
+        )?;
+        Ok(stored.map(Local::raw))
+    })?;
+    let Some(object) = stored else {
         return Ok(false);
     };
-    moves::modifying(target)?;
-    let heap = &mut *state.heap;
-    let object = if current == target && slot_owns(state, target) {
-        target
-    } else {
-        // `store_matrix_element` writes into the copy's storage, which a long vector's
-        // `shallow_duplicate_attr` wrapper does not have.
-        let copy = values::shallow_duplicate(target)?;
-        copy.set_array(target.is_array());
-        heap.store_slot(&mut *slot, copy);
-        copy
-    };
-    store_matrix_element(object, position, value);
+    if object != current {
+        (*state.heap).store_slot(&mut *slot, object);
+    }
     Ok(true)
 }
 
-/// The position in the plain atomic matrix `target` that `target[row, column] <- value`
-/// writes when the store changes no type, length or attribute, or `None` when it is any
-/// other assignment.
-unsafe fn matrix_element_position(
-    target: Sexp,
-    row: Sexp,
-    column: Sexp,
-    value: Sexp,
-) -> Option<usize> {
-    if target == value
-        || target.is_object()
-        || target.is_altrep()
-        || !matches!(
-            target.kind(),
-            SexpType::Real | SexpType::Integer | SexpType::Logical | SexpType::String
-        )
-        || value.kind() != target.kind()
-        || length(value) != 1
-        || value.is_altrep()
-        || values::has_attributes(value)
-    {
-        return None;
-    }
-    let dim = values::get_attr(target, symbols().dim);
-    if dim.kind() != SexpType::Integer || length(dim) != 2 {
-        return None;
-    }
-    let rows = dim.slice::<i32>()[0];
-    let columns = dim.slice::<i32>()[1];
-    let row = matrix_subscript(row, rows)?;
-    let column = matrix_subscript(column, columns)?;
-    Some(row + column * rows as usize)
+/// What a matrix element store does with a matrix its variable does not own.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shared {
+    /// The store goes to a copy, which the caller binds.
+    Copied,
+    /// The store declines to `complex_assign`.
+    Declined,
 }
 
-unsafe fn store_matrix_element(target: Sexp, position: usize, value: Sexp) {
-    match target.kind() {
-        SexpType::Real => values::reals_mut(target)[position] = value.slice::<f64>()[0],
-        SexpType::Integer | SexpType::Logical => {
-            values::ints_mut(target)[position] = value.slice::<i32>()[0]
-        }
-        _ => crate::heap().set_element(target, position, value.element(0)),
+/// `target[row, column] <- value` on a plain atomic matrix when the store changes no type,
+/// length or attribute: the matrix the caller's variable holds afterwards, or `None` for any
+/// other assignment.
+fn store_matrix_element<'s>(
+    context: &mut Cx<'s>,
+    target: Local<'s>,
+    subscripts: (Local<'s>, Local<'s>),
+    value: Local<'s>,
+    shared: Shared,
+    claim: impl FnOnce(Local<'s>) -> Option<Owned<'s>>,
+) -> R<Option<Local<'s>>> {
+    if target.is(value) || handles::is_object(target) {
+        return Ok(None);
     }
+    if let Some(matrix) = target.downcast::<Real>() {
+        store_matrix_element_of(context, matrix, subscripts, value, shared, claim)
+    } else if let Some(matrix) = target.downcast::<Integer>() {
+        store_matrix_element_of(context, matrix, subscripts, value, shared, claim)
+    } else if let Some(matrix) = target.downcast::<Logical>() {
+        store_matrix_element_of(context, matrix, subscripts, value, shared, claim)
+    } else if let Some(matrix) = target.downcast::<Str>() {
+        store_matrix_element_of(context, matrix, subscripts, value, shared, claim)
+    } else {
+        Ok(None)
+    }
+}
+
+fn store_matrix_element_of<'s, T: Stored>(
+    context: &mut Cx<'s>,
+    matrix: Local<'s, T>,
+    (row, column): (Local<'s>, Local<'s>),
+    value: Local<'s>,
+    shared: Shared,
+    claim: impl FnOnce(Local<'s>) -> Option<Owned<'s>>,
+) -> R<Option<Local<'s>>> {
+    let Some(item) = T::item(context, value, ElementKind::Single, false) else {
+        return Ok(None);
+    };
+    let Some((rows, columns)) = handles::matrix_extent(context, matrix) else {
+        return Ok(None);
+    };
+    let (Some(row), Some(column)) = (
+        matrix_subscript(context, row, rows),
+        matrix_subscript(context, column, columns),
+    ) else {
+        return Ok(None);
+    };
+    let position = row + column * rows as usize;
+    // A `dim` attribute that does not describe the storage is some other code's error to report.
+    if position >= matrix.len() {
+        return Ok(None);
+    }
+    handles::modifying(context, matrix.value())?;
+    let owned = claim(matrix.value());
+    if owned.is_none() && shared == Shared::Declined {
+        return Ok(None);
+    }
+    // The copy has storage of its own: `writable` copies a vector known to have storage with
+    // the copy that keeps it, never with the wrapper an attribute change may use.
+    let mut matrix = handles::writable(context, matrix, owned)?;
+    T::put(context, &mut matrix, position, item);
+    Ok(Some(matrix.finish().value()))
 }
 
 /// The zero-based position a one-element numeric matrix subscript selects in a dimension of
 /// `extent`, or `None` when it is out of bounds, NA, or anything but a plain number.
-unsafe fn matrix_subscript(index: Sexp, extent: i32) -> Option<usize> {
-    if index.is_altrep() || values::has_attributes(index) || length(index) != 1 {
+fn matrix_subscript(context: &Cx<'_>, index: Local<'_>, extent: i32) -> Option<usize> {
+    if index.attributes(context).r_type() != SexpType::Nil {
         return None;
     }
-    let position = match index.kind() {
-        SexpType::Integer if index.slice::<i32>()[0] != NA_INTEGER => {
-            f64::from(index.slice::<i32>()[0])
+    let position = if let Some(integer) = index.downcast::<Integer>() {
+        let &[position] = integer.as_slice(context) else {
+            return None;
+        };
+        if position == NA_INTEGER {
+            return None;
         }
-        SexpType::Real => index.slice::<f64>()[0],
-        _ => return None,
+        f64::from(position)
+    } else {
+        let &[position] = index.downcast::<Real>()?.as_slice(context) else {
+            return None;
+        };
+        position
     };
     // NaN fails both comparisons, and `x[2.7, 1]` truncates to the second row.
     if !(position >= 1.0 && position < f64::from(extent) + 1.0) {

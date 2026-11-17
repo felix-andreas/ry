@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Tests of bench.py: its release-archive mode (what results.json records about the archive, and
 which images the run accepts), the typed suite, which scores typed ry against Rust, and the hot
-suite's runner and its generator, tooling/hot.py, and the builtins suite's runner and summary.
+suite's runner and its generator, tooling/hot.py, the builtins suite's runner and summary, and the
+appsuite suite's manifest and summary.
 
 A fake archive stands in for a release: its `ry` is a shell script that, like the real one,
 extracts a runtime library (a C library built here that exports `ry_runtime_id`) and a base R tree
@@ -14,6 +15,7 @@ usage: python3 -I tools/bench/test_bench.py
 """
 import argparse, hashlib, importlib.util, io, math, os, pathlib, shutil, subprocess, sys, tarfile, tempfile, unittest
 from contextlib import redirect_stdout
+from unittest import mock
 
 here = pathlib.Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("bench", here / "bench.py")
@@ -200,6 +202,62 @@ class TypedSuite(unittest.TestCase):
         self.assertGreaterEqual(result["seconds"], 0.0)
         refused = runner.run(program, bench.Engine("rust", "Rust", None, dict(os.environ, RY_BENCH_REPEAT="none")))
         self.assertEqual(refused, {"seconds": None, "reason": "RY_BENCH_REPEAT must be a positive whole number, not `none`"})
+
+
+class AppSuite(unittest.TestCase):
+    def setUp(self):
+        self.args = argparse.Namespace(ry="ry", baseline=None, jit_off=False, rscript="/no/such/Rscript",
+                                       seed=1, rounds=3, extra_rounds=0)
+        with mock.patch.object(bench, "library_environment", return_value={}):
+            self.table = bench.engines(self.args, bench.APP_SUITE)
+        self.programs = [{"id": "bodies", "display": "Plain function bodies", "group": "sections"},
+                         {"id": "dates", "display": "Dates", "group": "sections"},
+                         {"id": "body: f(x)", "display": "body: f(x)", "group": "patterns"},
+                         {"id": "body: g(x)", "display": "body: g(x)", "group": "patterns"}]
+
+    def summarize(self, seconds):
+        """The results of three identical rounds, given each engine's seconds per program."""
+        round_ = {name: {key: {"seconds": value, "checksum": "1", "wall": 10.0, "tier1_share": 0.25}
+                         for key, value in times.items()} for name, times in seconds.items()}
+        state = {"rounds": [round_] * 3}
+        with redirect_stdout(io.StringIO()):
+            return bench.summarize(bench.APP_SUITE, {"name": "Application test suite"}, self.programs,
+                                   self.table, state, self.args, {}, NoRefusals())
+
+    def test_lists_every_section_and_pattern(self):
+        manifest = bench.load_suite(bench.APP_SUITE)
+        groups = [program["group"] for program in manifest["programs"]]
+        self.assertEqual((groups.count("sections"), groups.count("patterns")), (13, 236))
+
+    def test_the_score_is_the_total_and_contended_ry_is_compared_with_contended_gnu_r(self):
+        results = self.summarize({
+            "bodies": {"gnu_r": 3.0, "ry": 1.0, "ry_profiled": 1.5, "gnu_r_contended": 3.0, "ry_contended": 1.5},
+            "dates": {"gnu_r": 1.0, "ry": 1.0, "ry_profiled": 1.0, "gnu_r_contended": 1.0, "ry_contended": 1.0},
+            "body: f(x)": {"gnu_r": 2e-6, "ry": 1e-6},
+            "body: g(x)": {"gnu_r": 1e-6, "ry": 1.25e-6},
+        })
+        self.assertEqual(results["geomean"], {})
+        self.assertEqual(results["total"]["seconds"]["ry"], 2.0)
+        self.assertEqual(results["total"]["ratio"]["ry"]["median"], 2.0)
+        self.assertEqual(results["total"]["ratio"]["ry_contended"]["median"], 1.6)
+        self.assertNotIn("gnu_r_contended", results["total"]["ratio"])
+        bodies = results["programs"][0]
+        self.assertEqual(bodies["ratio"]["ry_contended"]["median"], 2.0)
+        self.assertEqual(bench.ratio_label(results, "ry_contended"), "GNU R, 4 processes / ry, 4 processes"
+                         .replace("4", str(os.cpu_count() or 1)))
+        tracked = results["tracked"]
+        self.assertEqual(tracked["profile_cost"]["median"], 1.25)
+        self.assertEqual(tracked["tier1_share"], 0.25)
+        self.assertEqual(tracked["patterns"], {"count": 2, "below_1_5": 1, "below_1": 1})
+        self.assertEqual(tracked["contention"]["gnu_r"]["median"], 1.0)
+        self.assertEqual(tracked["contention"]["ry"]["median"], 1.25)
+        self.assertEqual(tracked["contention"]["ry_over_gnu_r"]["median"], 1.25)
+        self.assertEqual(tracked["contention_wall"]["ry_over_gnu_r"]["median"], 1.0)
+
+    def test_reads_the_workload_and_pattern_lines(self):
+        self.assertEqual(bench.APP_SECTION.match("bodies            3.234  1.23457e+07")["check"], "1.23457e+07")
+        self.assertEqual(bench.APP_PATTERN.match("s4: is(x, 'Base')\t7523")["nanoseconds"], "7523")
+        self.assertEqual(bench.TIER_ONE.search("| builtins | 3.3% | 0.008 |\n| JIT-compiled code | 16.7% | 0.004 |\n")["share"], "16.7")
 
 
 class PublicSuite(unittest.TestCase):

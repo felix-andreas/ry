@@ -1,0 +1,40 @@
+[stdout]
+| [<-.k
+| $a
+| [1] 1
+| 
+| $<-.k
+| [[<-.k
+| names<-.k
+| [<-.k
+| [<-.k
+| $a
+| [1] 1
+| 
+| $<-.k
+| [[<-.k
+| names<-.k
+| [<-.k
+| [<-.k
+| $a
+| [1] 1
+| 
+| $<-.k
+| [[<-.k
+| names<-.k
+| [<-.k
+| [<-.j
+| [<-.j
+| length<-.j
+| [<-.j
+| [<-.j
+| length<-.j
+| [<-.j
+| [<-.j
+| length<-.j
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

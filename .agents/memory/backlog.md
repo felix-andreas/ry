@@ -97,6 +97,7 @@ type store".
 - `parse()` accepts or refuses some text differently from GNU R, in the parser and lowering shared by every entry point. A left-nested chain about 20,000 operators deep (`1+1+...`, `x[[1]][[1]]...`, `f(1)(1)...`) overflows the stack in the lowering's recursion, where GNU R parses it; running `lower` under `eval::on_large_stack` would fix it. In `parse(text =)` a bare `\r` ends a line, so `"x <- 1\r2"` gives two expressions (GNU R: `unexpected invalid token`) and a comment holding one swallows less than GNU R's. `f(a <- b = c)` parses, where GNU R reports `unexpected '='`. `function(a = _) 1` is an error, where GNU R takes `_` as a default. `parse(text, n = 2, keep.source = TRUE)` builds parse data for every expression in the text, not the first two.
 - GNU R's srcref byte fields count one byte too many for each multibyte character of a string literal in a file parsed as UTF-8 (`s <- "café"` ends at byte 13, not 12); ry counts real bytes. Parse data agrees. `parse__parse_data_files.R` leaves the srcrefs of its non-ASCII file out until ry matches.
 - `list.files` differs from GNU R in two argument edge cases: `pattern = NA_character_` lists everything where GNU R reports `invalid 'pattern' argument`, and a directory written with a trailing slash joins with one slash under `full.names = TRUE` where GNU R keeps two (`"sub//inner"`). `pushBack` on a raw connection is accepted where GNU R refuses it.
+- Loading packages held about 7% of a 6 s test run in a second profile: the loader's plan (90 ms in one call), running and forcing its entries, `lazyLoadDBfetch` (104 ms over 3,889 calls), `dyn.load` (26 ms over 35 calls) and `unz` (19 ms over 438 calls). Each measured part is faster than GNU R already. A lazy-load fetch (`k14`) takes about 0.6 times GNU R's time: inflating the record is about 30% of it (see "Measured and not taken: libdeflate for lazy-load records") and the reader about 22%. The reader skips a byte-code record's code vector and its numeric constants (`Reader::discard_item` in `serialize.rs`); the calls among the constants are still built and dropped, because reading them fills the reference tables that later items index. Reading a zip entry through `unz` takes 40 to 50 µs against GNU R's 350. The loader's plan is linear in the package's files: on generated packages of 300 to 2,400 files of about 130 lines, about 0.4 ms per file without the index cache and 0.1 ms with it, on four loaded cores. A fresh CI container has no index cache, so its first plan is the uncached one. Where that time goes inside the analysis is not measured: a release build has no symbols, so it needs a build with them.
 - Loading packages held about 7% of a 6 s test run in a second profile: the loader's plan (90 ms in one call), running and forcing its entries, `lazyLoadDBfetch` (104 ms over 3,889 calls), `dyn.load` (26 ms over 35 calls) and `unz` (19 ms over 438 calls). Each measured part is faster than GNU R already. A lazy-load fetch (`k14`) takes about 0.6 times GNU R's time: inflating the record is about 30% of it (see "Measured and not taken: libdeflate for lazy-load records") and the reader about 22%. The reader skips a byte-code record's code vector and its numeric constants (`Reader::discard_item` in `serialize.rs`); the calls among the constants are still built and dropped, because reading them fills the reference tables that later items index. Reading a zip entry through `unz` takes 40 to 50 µs against GNU R's 350. The loader's plan is linear in the package's files: on generated packages of 300 to 2,400 files of about 130 lines, about 0.4 ms per file without the index cache and 0.1 ms with it, on four loaded cores. A fresh CI container has no index cache, so its first plan is the uncached one. Where that time goes inside the analysis is not measured; a release build keeps its symbol table, so `perf` on it can attribute the time.
 - A named empty argument differs from GNU R in three places. `log(x = , 8)` and `log(base = , 8)` fail with "argument 1 is empty" (argument evaluation refuses the empty argument before `log` matches) where GNU R gives `log(8)`. `rep(times = , 1:2)`, `rep(x = , 1:2, 2)` and `rep(each = , 1:2, 2)` return a value where GNU R fails with "argument is missing, with no default". And `NextMethod` does not do GNU R's `patchArgsByActuals`, which passes the empty named argument on as a promise of its formal and the positional argument that filled it as an empty one: with `gen.k <- function(x, y, ...) NextMethod()`, `gen(y = , obj, 2)` gives the default method a `...length()` of 1 in GNU R and 0 here, and with formals `(x, y, z)` `gen(y = , obj, 2, 3)` is "unused argument" in GNU R and binds all three here. A closure and `round(digits = , 2.567)` follow GNU R (`calls__empty_named_argument`).
 - An "unused argument" message differs from GNU R's for three shapes: an empty argument prints `(w = )` where GNU R prints `(alist(w = ))`, a non-syntactic name loses its backticks, and code of several lines is joined by spaces where GNU R keeps the newlines.
@@ -665,13 +666,13 @@ About seven in ten of the hot suite's closure calls from compiled code take `cal
 ## Open: the handle migration
 
 Rule: `decisions/heap-gc.md`, "Interpreter code holds values through handles the borrow checker
-checks". Order and method: `development/design/memory-safety.md`, "Migration" and "Cost". Six
-string builtins are migrated (`nchar`, `substr<-`, `strrep`, `strtoi`, `utf8ToInt`, `charToRaw`);
-`python3 tools/unsafe.py stats` counts the rest.
+checks". Order, method and costs: `development/design/memory-safety.md`, "Migration" and "Cost".
 
-- **Not built.** The replacement path's ownership checks as the callers of `assume_exclusive`
-  (only tests use `Write`), the bytecode loop's register accessor, `Held<T>` fields in traced
-  structures, and a bulk fill for a new list or character vector.
+- **Raw, in order.** `[<-`, `[[<-`, `$<-`, `@<-` (`subset.rs`) and their slot paths
+  (`assign_slot_element`, `replace_variable`); `[`, `[[`; `.class2`, `.cache_class`,
+  `do_copy_df_attr`; `paste`, `sprintf`, `strsplit`, `make.unique` (after the bulk fill);
+  `values.rs`, the evaluator, the bytecode loop.
+- **Not built** (`memory-safety.md`, "Migration"): the register accessor, `Held<T>`, a bulk fill.
 
 ## Open: failing tests on main
 
@@ -1565,29 +1566,16 @@ overhead, not allocation.
   - GNU R artifacts, not to learn: its compiler renames a `<<-` warning's call to `<-` and merges `-0` with `0`; `x[1, 2L, 1] <- sum` on a list array is undefined there.
 - A builtin generic passes an S3 method promises of the call's code where GNU R passes values: with `length.cls <- function(x) deparse(substitute(x))`, `length(obj)` is `"obj"` on ry and the deparsed object on GNU R, and `` `names<-.cls` `` sees `substitute(value)` as `v` where GNU R sees `"a"`. The same in every tier (`dispatch.rs`, `internal_dispatch`).
 - `mapply` and `Map` pass the function values, where GNU R passes promises whose code is `dots[[2L]][[1L]]`: `Map(function(a, b) deparse(substitute(b)), 1:2, 3:4)` gives `"3L"` and `"4L"` on ry (`envir.rs`, `do_mapply`).
-- A compiled `x[i] <- v` decides between the builtin and a method by reading `x` before the subscripts run (`bytecode.rs`, `element_assignment`). A subscript that turns `x` into an object as a side effect (`x[{class(x) <<- "k"; 1}] <- v` from a nested function) dispatches on GNU R and runs the builtin compiled. Nothing real is known to do this. A subscript that is a local the compiler counts as bound (`Compiler::assigned`) is read before the target, so with `drop_k <- function() rm("k", envir = parent.frame())`, `k <- 1; drop_k(); z[k] <- v` on an object `z` fails from the second call on with "object 'k' not found" where GNU R's method may never force `k`. A body that calls `rm()` itself records no bound locals.
-- The dispatch branch of a compiled replacement reads the target twice, once to probe it and once in `complex_assign`, so an active binding as the target runs its function twice where GNU R runs it once.
+- A compiled `x[i] <- v` decides between the builtin and a method by reading `x` before the subscripts run (`bytecode.rs`, `element_assignment`). A subscript that turns `x` into an object as a side effect (`x[{class(x) <<- "k"; 1}] <- v` from a nested function) dispatches on GNU R and runs the builtin compiled. Nothing real is known to do this.
 - When `base_primitive` cannot settle that `[<-` or `[[<-` is base's (an unforced promise or an active binding on the way, `bytecode.rs`, `replacement`), the compiled replacement takes the `BranchUnlessBuiltin` path, which runs the eager `Replace` for base's builtin even on an object target, so a method would see forced subscripts. Suspected from the code, not reproduced.
 - A subscript that is a formal is forced before a compiled `x[i] <- v`, `x[[i]] <- v` or `x[i, j] <- v` reads its target (`slot_subscript` and `subscript_value` in `bytecode.rs`), on a slot frame and on one with an environment. A default that assigns the target therefore runs first: `o <- function(x, i = { x[1] <- 100; 2 }) { x[i] <- 0; x }` gives `100 0 3` for `o(c(1, 2, 3))` from the second call on, where GNU R gives `1 0 3`. `slot-frames.md` names the gap.
 - A closure that keeps the value promise of a replacement call run by `eval::complex_assign` sees the caller's later change of the variable: with `` `cb<-` <- function(x, value) { x$cb <- function() value; x } ``, `f <- function() { obj <- list(); v <- c(5, 6); cb(obj, 1 + 1) <- v; v[1] <- 99; obj$cb() }` gives `99 6`. GNU R's byte code gives `5 6` and its AST evaluator `99 6`. Compiled, a setter with constant arguments (`cb(obj) <- v`) runs through `replace_with_closure`, whose promises count, and gives `5 6`.
 - `lapply`'s element calls read the `X` the internal was called with, so a `FUN` that rebinds `X` in `lapply`'s frame through `parent.frame()` changes nothing (`ElementCalls::plain`, `envir.rs`), where GNU R reads the new `X` for the next element. Removing `FUN` there, a non-function `FUN`, and a warning from a special `FUN` report the call `FUN(X[[i]], ...)` where GNU R reports the `lapply(...)` call.
 - `` lapply(list(1, 2), `repeat`) `` loops forever where GNU R raises an arity error, and `` `(`(x, ...) `` with an empty `...` raises "2 arguments passed to '('".
 - `m[3e10, 1] <- 5` on a matrix is "subscript out of bounds" where GNU R warns and assigns nothing.
-- A subscript of a nested assignment that takes a reference to the target lets a later level
-  change the alias: `x <- c(a = 1, b = 2); names(x)[{ keep <- x; 2 }] <- "z"` leaves `keep` with
-  the names `a z` on ry and `a b` on GNU R, and `levels(x)[{ keep <- x; 1 }] <- "z"` does the
-  same to a factor. `eval::complex_assign` decides whether to copy the variable before the
-  subscripts run; GNU R's replacement primitives test the reference count when they write.
-- `<<-` through a replacement into a locked binding changes the value before the assignment
-  fails: with `g <- c(1, 2); lockBinding("g", globalenv())`, `(function() g[1] <<- 5)()` fails
-  on both engines but leaves `g` as `5 2` on ry. `complex_assign` reads `locked` from the local
-  frame's cell, not from the binding `<<-` writes. Base's bindings are not locked either:
-  `(function() T[2] <<- FALSE)()` succeeds where GNU R fails with "cannot change value of locked
-  binding for 'T'".
-- S3 replacement methods defined as locals of the function that assigns are never called:
-  with `` `[<-.k` ``, `` `$<-.k` ``, `` `[[<-.k` `` and `` `names<-.k` `` assigned in `f`'s body,
-  `x[1] <- 2`, `x$a <- 3`, `x[[1]] <- 4` and `names(x) <- "q"` on a `k` object in `f` run the
-  builtins on ry and the four methods on GNU R.
+- `environmentIsLocked(baseenv())` is `FALSE` on ry and `TRUE` on GNU R, and a new binding in
+  base succeeds where GNU R fails (`lockEnvironment` leaves base's frame unlocked); base's
+  bindings are locked as GNU R locks them.
 - Smaller differences in complex assignments, each the same in every tier: `exists("*tmp*")` in
   a subscript is `FALSE` (GNU R binds `*tmp*` for the length of the assignment); `x[c(TRUE, NA)]
   <- 1:2` warns and assigns where GNU R fails with "NAs are not allowed in subscripted
@@ -1608,7 +1596,7 @@ overhead, not allocation.
 - An out-of-bounds `v[[k]]` in a closure is signalled one frame deeper than on GNU R: with `pick <- function(v, k) v[[k]]`, an `options(error = )` handler counts 2 frames on GNU R for `pick(c(1, 2, 3), 7L)` and 3 on ry (the extra one is `stop`). Every tier does it.
 - `integer(NA_real_)` fails with "invalid 'length' argument" where GNU R says "vector size cannot be NA/NaN", and `matrix(1, -1L)` returns a 0 x 0 matrix where GNU R fails with "invalid 'nrow' value (< 0)".
 - `integer`, `character` and the other vector constructors are builtins on ry and closures on GNU R, so an error inside one shows a frame less (`Calls: f` against `Calls: f -> integer`).
-- GNU R calls an active binding twice on the second call of `f <- function(x) x * sc` (the cause is unverified; the second call is the one GNU R byte-compiles `f` at); ry calls it once. Low priority: nothing should depend on it.
+- GNU R calls an active binding twice on the second call of `f <- function(x) x * sc` (the cause is unverified; the second call is the one GNU R byte-compiles `f` at); ry calls it once. GNU R also reads an active binding twice as the target of `x[2] <- v` in a function, with or without a `[<-` method, where ry reads it once in every tier. Low priority: nothing should depend on it.
 - `tracemem()` never reports a copy: it returns the address, and `untracemem` and `retracemem` do nothing (`crates/interp/src/system.rs`), so `x <- numeric(10); tracemem(x); y <- x; y[1] <- 1` prints nothing where GNU R prints a `tracemem[...]` line. Copy checks use `RY_GC_LOG` collection counts or `gc()`'s max used instead.
 - `.Call` into a package routine costs about 1.5x GNU R per call (`truelength()` x300k: 0.21 s
   against 0.14 s). What remains is the boundary itself: `call_native`'s native scope, rooting and

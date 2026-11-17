@@ -1440,6 +1440,7 @@ pub unsafe fn shape(code: Sexp) -> Shape {
             Op::Constant
             | Op::GetVar
             | Op::Argument
+            | Op::Subscript
             | Op::SetVar
             | Op::GetFun
             | Op::BranchUnlessBuiltin
@@ -1789,7 +1790,7 @@ unsafe fn formal_hints(arena: Arena<'_>, code: Sexp, formals: Sexp) -> Option<Sm
         .collect();
     let mut hints: SmallVec<[Ty; 4]> = smallvec![Ty::Bottom; symbols.len()];
     for inst in decode(arena, code).ok()? {
-        if !matches!(inst.op, Op::GetVar | Op::Argument) {
+        if !matches!(inst.op, Op::GetVar | Op::Argument | Op::Subscript) {
             continue;
         }
         let symbol = constants.element(inst.operand(1));
@@ -1987,7 +1988,7 @@ impl<'a> Builder<'a> {
         for position in 0..self.insts.len() {
             let inst = &self.insts[position];
             let symbol_operand = match inst.op {
-                Op::GetVar | Op::Argument => Some(inst.operand(1)),
+                Op::GetVar | Op::Argument | Op::Subscript => Some(inst.operand(1)),
                 Op::SetVar => Some(inst.operand(0)),
                 Op::ForStep => Some(inst.operand(2)),
                 // `ComplexAssign` names its target only inside its call, but the compiler emits
@@ -2009,7 +2010,9 @@ impl<'a> Builder<'a> {
                     self.modified[self.slot_of[&symbol]] = true;
                 }
                 let bits = self.feedback.get(inst.pc).map_or(0, |&bits| bits as u32);
-                if inst.op == Op::GetVar && bits & feedback::ACTIVE_BINDING != 0 {
+                if matches!(inst.op, Op::GetVar | Op::Subscript)
+                    && bits & feedback::ACTIVE_BINDING != 0
+                {
                     let slot = self.slot_of[&symbol];
                     let words = (slot + 1).div_ceil(64);
                     if self.volatile.len() < words {
@@ -2025,7 +2028,7 @@ impl<'a> Builder<'a> {
             let inst = &self.insts[position];
             let bits = self.feedback.get(inst.pc).map_or(0, |&bits| bits as u32)
                 & !(feedback::ACTIVE_BINDING | feedback::MISSING);
-            if matches!(inst.op, Op::GetVar | Op::Argument) && bits != 0 {
+            if matches!(inst.op, Op::GetVar | Op::Argument | Op::Subscript) && bits != 0 {
                 let slot = self.slot_of[&self.constant(inst.operand(1))];
                 self.hints[slot] = self.hints[slot].join(self.variable_ty(slot, bits));
             }
@@ -2365,7 +2368,7 @@ impl<'a> Builder<'a> {
         let action = match inst.op {
             // The global frame's variables are its environment's bindings, which an active
             // binding or code the loop calls may read or rebind.
-            Op::GetVar | Op::Argument if self.global => self.opaque_step(
+            Op::GetVar | Op::Argument | Op::Subscript if self.global => self.opaque_step(
                 state,
                 Some((operand(0), self.feedback_at(inst.pc))),
                 &[],
@@ -2396,7 +2399,7 @@ impl<'a> Builder<'a> {
             Op::Argument if self.feedback_bits(inst.pc) & feedback::MISSING != 0 => {
                 self.opaque_step(state, Some((operand(0), Ty::Boxed)), &[], Effect::Opaque)
             }
-            Op::GetVar | Op::Argument => {
+            Op::GetVar | Op::Argument | Op::Subscript => {
                 let slot = self.slot(self.constant(operand(1)));
                 let current = state.slots[slot];
                 let volatile = bit(&self.volatile, slot);
@@ -5288,6 +5291,7 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
         Op::Constant
         | Op::GetVar
         | Op::Argument
+        | Op::Subscript
         | Op::GetFun
         | Op::Ast
         | Op::Closure
