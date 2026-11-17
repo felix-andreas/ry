@@ -1,0 +1,141 @@
+[stdout]
+| rep
+| "error: invalid 'each' argument | rep(1:2, each = -1)" 
+| 1:2 
+| warning: first element used of 'each' argument | rep(1:2, each = c(2, 3)) 
+| c(1L, 1L, 2L, 2L) 
+| warning: NAs introduced by coercion | doTryCatch(return(expr), name, parentenv, handler) 
+| 1:2 
+| 1:2 
+| warning: first element used of 'each' argument | rep(1:2, each = integer(0)) 
+| 1:2 
+| warning: first element used of 'each' argument | rep(1:2, each = NULL) 
+| 1:2 
+| c(1L, 1L, 2L, 2L) 
+| 1:2 
+| 1:2 
+| "error: invalid 'each' argument | rep(integer(0), each = -1)" 
+| integer(0) 
+| "error: invalid 'each' argument | rep(NULL, each = -1)" 
+| "error: invalid 'times' argument | rep(1:2, times = -1)" 
+| "error: invalid 'times' argument | rep(1:2, times = NA)" 
+| "error: invalid 'length.out' argument | rep(1:2, length.out = -1)" 
+| 1:2 
+| warning: first element used of 'length.out' argument | rep(1:2, length.out = c(1, 2)) 
+| 1L 
+| warning: NAs introduced by coercion | doTryCatch(return(expr), name, parentenv, handler) 
+| 1:2 
+| eval
+| "error: numeric 'envir' arg not of length one | eval(1, c(1, 2))" 
+| "error: numeric 'envir' arg not of length one | eval(1, integer(0))" 
+| 1 
+| "error: invalid 'envir' argument of type 'integer' | eval(1, NA_integer_)" 
+| "error: invalid 'envir' argument of type 'character' | eval(1, \"a\")" 
+| "error: invalid 'envir' argument of type 'logical' | eval(1, TRUE)" 
+| "error: invalid 'enclos' argument of type 'NULL' | eval(quote(x), list(x = 1), 5)" 
+| "error: invalid 'enclos' argument of type 'NULL' | eval(quote(x), NULL, 5)" 
+| "error: invalid 'envir' argument of type 'builtin' | eval(1, sum)" 
+| 1 
+| "error: numeric 'envir' arg not of length one | evalq(1, c(1, 2))" 
+| 1 
+| "error: not that many frames on the stack | eval(1, 100)" 
+| fun
+| "error: invalid environment | as.function.default(alist(a = , a), 1)" 
+| "error: use of NULL environment is defunct | as.function.default(alist(a = , a), NULL)" 
+| "error: list argument expected | as.function.default(1)" 
+| "error: argument must have length at least 1 | as.function.default(alist())" 
+| function ()  
+| "error: invalid environment | as.function.default(alist(a = , a), sum)" 
+| "error: invalid formal argument list for \"as.function\" | as.function.default(alist(1, 2, a))" 
+| "error: invalid environment | as.function.default(c(formals(fun), if (is.null(value) || is.atomic(value) || " 
+| "error: invalid environment | as.function.default(c(value, if (is.null(bd) || is.atomic(bd) || " 
+| "error: replacement object is not an environment | environment(g) <- 1" 
+| "error: use of NULL environment is defunct | environment(g) <- NULL" 
+| structure(1, .Environment = <environment>) 
+| print
+| "error: invalid 'quote' argument | print.default(matrix(\"a\"), quote = NA)" 
+| "error: invalid 'quote' argument | print.default(\"a\", quote = NA)" 
+| "error: invalid 'quote' argument | print.default(\"a\", quote = \"x\")" 
+| warning: NAs introduced by coercion | print.default(1, "a") 
+| "error: invalid printing digits -2147483648 | print.default(1, \"a\")" 
+| "error: invalid printing digits 0 | print.default(1, digits = 0)" 
+| "error: invalid printing digits -2147483648 | print.default(1, digits = NA)" 
+| [1] 1
+| 1 
+| [1] 1
+| 1 
+| "error: invalid 'right' argument | print.default(\"a\", right = NA)" 
+| "error: invalid 'na.print' specification | print.default(1, na.print = 1)" 
+| "error: 'gap' must be non-negative integer | print.default(1, print.gap = -1)" 
+| "error: invalid 'max' argument | print.default(1, max = -1)" 
+| "error: invalid printing width | print.default(1, width = 5)" 
+| warning: NAs introduced by coercion | print.default(1, width = "a") 
+| "error: invalid printing width | print.default(1, width = \"a\")" 
+| "error: invalid 'useSource' argument | print.default(1, useSource = NA)" 
+| [1] 1
+| 1 
+| [1] 1
+| 1 
+| [1] 1
+| 1 
+| warning: NAs introduced by coercion | print.default(1, print.gap = "a") 
+| "error: 'gap' must be non-negative integer | print.default(1, print.gap = \"a\")" 
+| "error: invalid 'max' argument | print.default(1, max = NA)" 
+| warning: NAs introduced by coercion | print.default(1, max = "a") 
+| "error: invalid 'max' argument | print.default(1, max = \"a\")" 
+| raw
+| warning: NAs introduced by coercion to integer range | doTryCatch(return(expr), name, parentenv, handler) 
+| warning: out-of-range values treated as 0 in coercion to raw | doTryCatch(return(expr), name, parentenv, handler) 
+| as.raw(c(0x05, 0x00)) 
+| warning: out-of-range values treated as 0 in coercion to raw | doTryCatch(return(expr), name, parentenv, handler) 
+| as.raw(c(0x05, 0x00)) 
+| warning: NAs introduced by coercion | doTryCatch(return(expr), name, parentenv, handler) 
+| warning: out-of-range values treated as 0 in coercion to raw | doTryCatch(return(expr), name, parentenv, handler) 
+| as.raw(0x00) 
+| warning: out-of-range values treated as 0 in coercion to raw | doTryCatch(return(expr), name, parentenv, handler) 
+| as.raw(c(0x00, 0x00)) 
+| warning: NAs introduced by coercion to integer range | doTryCatch(return(expr), name, parentenv, handler) 
+| warning: out-of-range values treated as 0 in coercion to raw | doTryCatch(return(expr), name, parentenv, handler) 
+| as.raw(0x00) 
+| warning: NAs introduced by coercion | doTryCatch(return(expr), name, parentenv, handler) 
+| warning: NAs introduced by coercion to integer range | doTryCatch(return(expr), name, parentenv, handler) 
+| warning: out-of-range values treated as 0 in coercion to raw | doTryCatch(return(expr), name, parentenv, handler) 
+| as.raw(c(0x00, 0x00, 0x00)) 
+| warning: NAs introduced by coercion to integer range | doTryCatch(return(expr), name, parentenv, handler) 
+| warning: out-of-range values treated as 0 in coercion to raw | doTryCatch(return(expr), name, parentenv, handler) 
+| as.raw(c(0x00, 0x02)) 
+| warning: out-of-range values treated as 0 in coercion to raw | doTryCatch(return(expr), name, parentenv, handler) 
+| as.raw(0x00) 
+| warning: out-of-range values treated as 0 in coercion to raw | doTryCatch(return(expr), name, parentenv, handler) 
+| as.raw(0x00) 
+| warning: imaginary parts discarded in coercion | doTryCatch(return(expr), name, parentenv, handler) 
+| as.raw(0x03) 
+| D
+| "error: expression must not be type 'character' | D(\"x^2\", \"x\")" 
+| 0 
+| 1 
+| "error: expression must not be type 'list' | D(list(1), \"x\")" 
+| 2 * x 
+| NA_real_ 
+| 0 
+| 0 
+| "error: expression must not be type 'builtin' | D(sum, \"x\")" 
+| "error: variable must be a character string | D(quote(x^2), 1)" 
+| warning: only the first element is used as variable name | D(quote(x^2), c("x", "y")) 
+| 2 * x 
+| "error: variable must be a character string | D(quote(x^2), character(0))" 
+| 0 
+| "error: Function 'foo' is not in the derivatives table | D(quote(foo(x)), \"x\")" 
+| warning: NAs introduced by coercion to integer range | doTryCatch(return(expr), name, parentenv, handler) 
+| NA_integer_ 
+| NA_integer_ 
+| warning: imaginary parts discarded in coercion | doTryCatch(return(expr), name, parentenv, handler) 
+| 2L 
+| 16L 
+| 7L 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

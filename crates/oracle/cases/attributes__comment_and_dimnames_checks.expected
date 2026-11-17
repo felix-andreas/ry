@@ -1,0 +1,30 @@
+[stdout]
+| dimnames
+| "error: 'dimnames' applied to non-array" 
+| 1:3 
+| "error: 'dimnames' applied to non-array" 
+| "error: 'dimnames' must be a list" 
+| structure(1:4, dim = c(2L, 2L)) 
+| "error: length of 'dimnames' [3] must match that of 'dims' [2]" 
+| "error: 'dimnames' applied to non-array" 
+| "error: attempt to set an attribute on NULL" 
+| NULL 
+| .Primitive("sum") 
+| "error: 'dimnames' applied to non-array" 
+| comment
+| "error: attempt to set invalid 'comment' attribute" 
+| 1 
+| structure(1, comment = "a") 
+| structure(1, comment = c("a", "b")) 
+| "error: attempt to set an attribute on NULL" 
+| "error: attempt to set invalid 'comment' attribute" 
+| "error: attempt to set invalid 'comment' attribute" 
+| "error: cannot set an attribute on a 'builtin'" 
+| "error: attempt to set invalid 'comment' attribute" 
+| "error: attempt to set invalid 'comment' attribute" 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

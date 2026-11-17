@@ -1,0 +1,85 @@
+[stdout]
+| c(1L, 2L, 1L) 
+| c(1L, 2L, 1L, 0L) 
+| integer(0) 
+| integer(0) 
+| integer(0) 
+| "error: unimplemented type 'NULL' in 'bitwAnd'\n | bitwAnd(NULL, NULL)" 
+| "error: 'a' and 'b' must have the same type | bitwAnd(NULL, 1L)" 
+| "error: 'a' and 'b' must have the same type | bitwAnd(1L, NULL)" 
+| "error: unimplemented type 'complex' in 'bitwAnd'\n | bitwAnd(0+1i, 0+1i)" 
+| "error: unimplemented type 'list' in 'bitwAnd'\n | bitwAnd(list(1), list(1))" 
+| "error: unimplemented type 'raw' in 'bitwAnd'\n | bitwAnd(as.raw(1), as.raw(1))" 
+| "error: 'a' and 'b' must have the same type | bitwAnd(TRUE, 1L)" 
+| "error: 'a' and 'b' must have the same type | bitwAnd(1L, \"a\")" 
+| warning: NAs introduced by coercion to integer range | bitwAnd(2^40, 1) 
+| NA_integer_ 
+| NA_integer_ 
+| 1L 
+| 1L 
+| integer(0) 
+| "error: unimplemented type 'logical' in 'bitwNot'\n | bitwNot(NA)" 
+| -2:-4 
+| -2L 
+| warning: NAs introduced by coercion to integer range | bitwNot(2^31) 
+| NA_integer_ 
+| NA_integer_ 
+| "error: unimplemented type 'raw' in 'bitwNot'\n | bitwNot(as.raw(1))" 
+| "error: unimplemented type 'complex' in 'bitwNot'\n | bitwNot(0+1i)" 
+| NA_integer_ 
+| "error: 'a' and 'b' must have the same type | bitwShiftL(NA, 1L)" 
+| NA_integer_ 
+| -2L 
+| c(2L, 8L, 6L) 
+| 2L 
+| 2L 
+| 2L 
+| integer(0) 
+| 0L 
+| 2147483644L 
+| NA_integer_ 
+| integer(0) 
+| integer(0) 
+| warning: NAs introduced by coercion to integer range | bitwShiftL(2^31, 1) 
+| NA_integer_ 
+| "error: 'a' and 'b' must have the same type | bitwShiftL(0+1i, 1)" 
+| "error: 'a' and 'b' must have the same type | bitwShiftL(TRUE, 1L)" 
+| 2L 
+| 0L 
+| 1L 
+| 1L 
+| 1L 
+| "error: unimplemented type 'logical' in 'bitwAnd'\n | bitwAnd(TRUE, TRUE)" 
+| "error: unimplemented type 'character' in 'bitwAnd'\n | bitwAnd(\"a\", \"b\")" 
+| c(1L, 0L, 1L) 
+| integer(0) 
+| NA_integer_ 
+| -2L 
+| -2L 
+| "error: unimplemented type 'logical' in 'bitwNot'\n | bitwNot(TRUE)" 
+| "error: unimplemented type 'NULL' in 'bitwNot'\n | bitwNot(NULL)" 
+| "error: unimplemented type 'character' in 'bitwNot'\n | bitwNot(\"a\")" 
+| 3L 
+| 2L 
+| 2L 
+| warning: NAs introduced by coercion to integer range | bitwOr(2^31, 1) 
+| NA_integer_ 
+| 1L 
+| NA_integer_ 
+| 4L 
+| 4L 
+| 4L 
+| 4L 
+| 2147483647L 
+| NA_integer_ 
+| NA_integer_ 
+| "error: 'a' and 'b' must have the same type | bitwShiftL(\"a\", 1)" 
+| c(2L, 4L, 8L) 
+| "error: 'a' and 'b' must have the same type | bitwShiftL(NULL, 1L)" 
+| "error: 'a' and 'b' must have the same type | bitwShiftR(TRUE, 1L)" 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

@@ -1,5 +1,6 @@
 # The long differential fuzz run: every program kind of `oracle fuzz` (generated grammar programs,
-# metamorphic trials, builtins on a zoo of values, mutated snippets of real R code) under GNU R and
+# metamorphic trials, builtins on a zoo of values, calls of every exported function of base, stats
+# and utils, mutated snippets of real R code) under GNU R and
 # ry's engines for the given number of hours, from a seed base no earlier run used. The job runs
 # `just fuzz-ci` in the flake's `ci` dev shell, whose GNU R is the one the oracle records; to change
 # what it runs, edit that recipe. Each diverging program and its report is uploaded as an artifact,

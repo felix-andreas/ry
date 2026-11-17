@@ -274,6 +274,8 @@ pub struct ProcessEngine {
     /// How many times the driver evaluates the script in the one process
     /// ([`ProcessEngine::repeated`]).
     passes: u32,
+    /// The most private writable memory the engine's process may map, in bytes.
+    memory_limit: Option<u64>,
 }
 
 /// What the driver prints before each pass after the first, up to the pass number.
@@ -301,6 +303,7 @@ impl ProcessEngine {
             environment: Vec::new(),
             timeout: None,
             passes: 1,
+            memory_limit: None,
         }
     }
 
@@ -336,6 +339,15 @@ impl ProcessEngine {
     /// A case marked `# oracle: runs once` ([`runs_once`]) runs once all the same.
     pub fn repeated(mut self, passes: u32) -> Self {
         self.passes = passes;
+        self
+    }
+
+    /// Caps the writable memory of the engine's process at `bytes`, so a generated program that
+    /// asks for a huge vector gets R's allocation error instead of the machine's memory. The
+    /// limit is on data (`RLIMIT_DATA`), not on address space, because ry reserves gigabytes
+    /// of address space it never writes and GNU R does not.
+    pub fn with_memory_limit(mut self, bytes: u64) -> Self {
+        self.memory_limit = Some(bytes);
         self
     }
 
@@ -463,6 +475,7 @@ impl ProcessEngine {
                 .unwrap_or_default(),
             timeout: None,
             passes: 1,
+            memory_limit: None,
         }
     }
 
@@ -479,6 +492,7 @@ impl ProcessEngine {
             environment: Vec::new(),
             timeout: None,
             passes: 1,
+            memory_limit: None,
         })
     }
 }
@@ -579,11 +593,13 @@ impl Engine for ProcessEngine {
             .envs(self.environment.iter().map(|(name, value)| (name, value)));
 
         let timeout = self.timeout.map(|timeout| timeout * passes);
-        let output = run_command(command, timeout).map_err(|error| match error.kind() {
-            std::io::ErrorKind::NotFound => {
-                EngineError::Unavailable(format!("`{}` was not found", self.program))
+        let output = run_command(command, timeout, self.memory_limit).map_err(|error| {
+            match error.kind() {
+                std::io::ErrorKind::NotFound => {
+                    EngineError::Unavailable(format!("`{}` was not found", self.program))
+                }
+                _ => EngineError::Failed(format!("`{}`: {error}", self.program)),
             }
-            _ => EngineError::Failed(format!("`{}`: {error}", self.program)),
         })?;
         if output.timed_out {
             return Err(EngineError::Failed(format!(
@@ -657,18 +673,32 @@ struct CommandOutput {
 /// (`&`) with both ignored, an ignored disposition survives `exec`, and GNU R keeps an ignored
 /// SIGINT instead of installing its handler, so a case that interrupts itself with
 /// `tools::pskill` would never see the interrupt under a detached run.
-fn run_command(mut command: Command, timeout: Option<Duration>) -> std::io::Result<CommandOutput> {
+#[cfg_attr(not(unix), allow(unused_variables))]
+fn run_command(
+    mut command: Command,
+    timeout: Option<Duration>,
+    memory_limit: Option<u64>,
+) -> std::io::Result<CommandOutput> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(unix)]
-    // SAFETY: the closure runs between fork and exec, and calls only `signal`, which is
-    // async-signal-safe.
+    // SAFETY: the closure runs between fork and exec, and calls only `signal` and `setrlimit`,
+    // which are async-signal-safe.
     unsafe {
-        std::os::unix::process::CommandExt::pre_exec(&mut command, || {
+        std::os::unix::process::CommandExt::pre_exec(&mut command, move || {
             for signal in [libc::SIGINT, libc::SIGQUIT] {
                 if libc::signal(signal, libc::SIG_DFL) == libc::SIG_ERR {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            if let Some(bytes) = memory_limit {
+                let limit = libc::rlimit {
+                    rlim_cur: bytes as libc::rlim_t,
+                    rlim_max: bytes as libc::rlim_t,
+                };
+                if libc::setrlimit(libc::RLIMIT_DATA, &limit) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
             }
@@ -907,7 +937,7 @@ fn ry_default_version() -> Option<String> {
     std::fs::write(&script, "cat(format(getRversion()))").ok()?;
     let mut command = Command::new(ry_program());
     command.args(["run", "--runtime", "ry"]).arg(&script);
-    let output = run_command(command, Some(Duration::from_secs(60))).ok()?;
+    let output = run_command(command, Some(Duration::from_secs(60)), None).ok()?;
     if output.timed_out {
         return None;
     }

@@ -87,11 +87,13 @@ pub const BUILTINS: &[BuiltinDef] = &[
         Ok(get_attr(call.arg(0), symbols().comment))
     }),
     internal("comment<-", 2, |call| unsafe {
-        {
-            let object = modifiable(call.arg(0))?;
-            values::set_attr(object, symbols().comment, call.arg(1))?;
-            Ok(object)
-        }
+        let object = modifiable(call.arg(0))?;
+        let comment = match length(call.arg(1)) {
+            0 => nil(),
+            _ => call.arg(1),
+        };
+        set_attribute_checked(object, symbols().comment, comment, unbound())?;
+        Ok(object)
     }),
     internal("row", 1, |call| unsafe { row_col(call, true) }),
     internal("col", 1, |call| unsafe { row_col(call, false) }),
@@ -835,6 +837,19 @@ unsafe fn resolve(
     }
 }
 
+/// GNU R converts a double matrix or array subscript to integer before it resolves it, so a
+/// value outside the integer range selects `NA` with a warning, where a vector subscript of the
+/// same value is quietly out of bounds.
+unsafe fn dimension_subscript(index: Sexp) -> R<Sexp> {
+    const LIMIT: f64 = 2_147_483_648.0;
+    if index.kind() == SexpType::Real
+        && (0..length(index)).any(|position| numeric_element(index, position).abs() >= LIMIT)
+    {
+        return coerce_vector(index, SexpType::Integer);
+    }
+    Ok(index)
+}
+
 /// The object and zero-based position of `x[i]` or `x[[i]]` with one untagged, attribute-free
 /// numeric scalar `i` inside the vector's bounds: the common case GNU R's byte code also
 /// answers before resolving subscripts in general.
@@ -1198,6 +1213,7 @@ unsafe fn array_subset(
         if index.kind() == SexpType::Logical && length(index) > extent {
             return Err(error_in(call, "(subscript) logical subscript too long"));
         }
+        let index = dimension_subscript(index)?;
         let (positions, _) = resolve(index, extent, names, false, call)?;
         if let Some((offset, &position)) = positions
             .iter()
@@ -2574,13 +2590,12 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
             Ok(result)
         };
     }
-    // GNU R leaves `NULL`, or an empty vector given `NULL`, alone whatever the index, so
+    // GNU R leaves `NULL` given an empty value alone whatever the index, so
     // `x <- NULL; x[1] <- character(0)` is not the "replacement has length zero" error. An
-    // empty vector given an empty vector is handled below, where it may still be coerced.
-    if (object == nil() || object.kind().is_vector())
-        && length(object) == 0
-        && (value == nil() || (object == nil() && value.kind().is_vector() && length(value) == 0))
-    {
+    // empty vector given `NULL` still stretches to a longer subscript, so
+    // `x <- list(); x[FALSE] <- NULL` leaves `list(NULL)`. An empty vector given an empty
+    // vector is handled below, where it may still be coerced.
+    if object == nil() && (value == nil() || (value.kind().is_vector() && length(value) == 0)) {
         return Ok(object);
     }
     let object = if object == nil() {
@@ -2714,6 +2729,7 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
             } else {
                 nil()
             };
+            let index = dimension_subscript(index)?;
             let (positions, _) = resolve(index, extent, names, false, call)?;
             if let Some((offset, &position)) = positions
                 .iter()
@@ -2772,6 +2788,15 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
                 "NAs are not allowed in subscripted assignments",
             ));
         }
+        let rows = positions.len();
+        if rows > 0 && value_count == 0 {
+            return Err(error_in(call, "replacement has length zero"));
+        }
+        if rows > 0 && !rows.is_multiple_of(value_count) {
+            conditions::warning(
+                "number of items to replace is not a multiple of replacement length",
+            )?;
+        }
         for (row, position) in positions.into_iter().enumerate() {
             if let Some(offset) = position {
                 assign_element(result, offset, value, row % value_count.max(1))?;
@@ -2794,11 +2819,10 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
     if !positions.is_empty() && value_count == 0 {
         return Err(error_in(call, "replacement has length zero"));
     }
+    // GNU R attributes this warning to the current call, not the `[<-` call: the assignment at
+    // its own level, else the closure call, which for `NextMethod` is `NextMethod(.Generic)`.
     if !positions.is_empty() && !positions.len().is_multiple_of(value_count) {
-        conditions::warning_call(
-            call,
-            "number of items to replace is not a multiple of replacement length",
-        )?;
+        conditions::warning("number of items to replace is not a multiple of replacement length")?;
     }
     let needed = positions
         .iter()
@@ -3964,14 +3988,37 @@ pub unsafe fn set_names(object: Sexp, names: Sexp) -> R<()> {
     values::set_attr(object, symbols().names, padded)
 }
 
+/// `dim<-` drops the names whatever the new dims are, where `attr(x, "dim") <-` keeps them.
 unsafe fn do_set_dim(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let dims = call.arg(1);
-    let object = modifiable(object)?;
+    // A pairlist's tags are its names but no attribute, so `dim(x) <- NULL` keeps them.
+    if call.arg(1) == nil() {
+        let mut cell = call.arg(0).attrib();
+        while cell.kind() == SexpType::Pairlist
+            && cell.tag() != symbols().dim
+            && cell.tag() != symbols().names
+        {
+            cell = cell.cdr();
+        }
+        if cell == nil() {
+            return Ok(call.arg(0));
+        }
+    }
+    let object = modifiable(call.arg(0))?;
+    set_dim(call, object, call.arg(1))?;
+    values::remove_attr(object, symbols().names);
+    Ok(object)
+}
+
+/// GNU R's `setAttrib(x, R_DimSymbol, dims)`: checks the dims against the length and drops the
+/// dimnames.
+unsafe fn set_dim(call: &Call<'_>, object: Sexp, dims: Sexp) -> R<()> {
     if dims == nil() {
         values::remove_attr(object, symbols().dim);
         values::remove_attr(object, symbols().dimnames);
-        return Ok(object);
+        return Ok(());
+    }
+    if object == nil() {
+        values::check_attributable(object)?;
     }
     if !object.kind().is_vector() && object.kind() != SexpType::Pairlist {
         return Err(call.error("invalid first argument, must be vector (list or atomic)"));
@@ -4013,10 +4060,8 @@ unsafe fn do_set_dim(call: &Call<'_>) -> R<Sexp> {
             )));
         }
     }
-    values::remove_attr(object, symbols().names);
     values::remove_attr(object, symbols().dimnames);
-    values::set_attr(object, symbols().dim, dims)?;
-    Ok(object)
+    values::set_attr(object, symbols().dim, dims)
 }
 
 unsafe fn do_dimnames(call: &Call<'_>) -> R<Sexp> {
@@ -4033,15 +4078,22 @@ unsafe fn do_set_dimnames(call: &Call<'_>) -> R<Sexp> {
 /// list shorter than the dimensions is padded with `NULL`, an empty list removes the
 /// dimnames, and a list of only `NULL` components is kept as it is.
 pub unsafe fn set_dimnames(object: Sexp, dimnames: Sexp, call: Sexp) -> R<()> {
-    if dimnames == nil() || (dimnames.kind() == SexpType::List && length(dimnames) == 0) {
+    if dimnames == nil() {
         values::remove_attr(object, symbols().dimnames);
         return Ok(());
+    }
+    if object == nil() {
+        values::check_attributable(object)?;
     }
     let Some(dims) = values::dims(object) else {
         return Err(error_in(call, "'dimnames' applied to non-array"));
     };
     if dimnames.kind() != SexpType::List {
         return Err(error_in(call, "'dimnames' must be a list"));
+    }
+    if length(dimnames) == 0 {
+        values::remove_attr(object, symbols().dimnames);
+        return Ok(());
     }
     if length(dimnames) > dims.len() {
         return Err(error_in(
@@ -4125,6 +4177,12 @@ unsafe fn do_set_levels(call: &Call<'_>) -> R<Sexp> {
 /// class.
 pub unsafe fn set_attribute_checked(object: Sexp, symbol: Sexp, value: Sexp, call: Sexp) -> R<()> {
     let symbols = symbols();
+    if value != nil() {
+        values::check_attributable(object)?;
+    }
+    if symbol == symbols.comment && value != nil() && value.kind() != SexpType::String {
+        return Err(error_in(call, "attempt to set invalid 'comment' attribute"));
+    }
     if symbol == symbols.names {
         return set_names(object, value);
     }
@@ -4145,11 +4203,7 @@ pub unsafe fn set_attribute_checked(object: Sexp, symbol: Sexp, value: Sexp, cal
             frame: crate::NO_SLOTS,
             reusable: None,
         };
-        let result = do_set_dim(&context)?;
-        if result != object {
-            crate::heap().set_attrib(object, result.attrib());
-        }
-        return Ok(());
+        return set_dim(&context, object, value);
     }
     if symbol == symbols.dimnames {
         return set_dimnames(object, value, call);
@@ -4177,8 +4231,10 @@ pub unsafe fn set_attribute_checked(object: Sexp, symbol: Sexp, value: Sexp, cal
     values::set_attr(object, symbol, value)
 }
 
-/// GNU R's `row_names_gets`: row names `1:n`, and the double `c(NA, n)` that `dput()` writes
-/// and C code builds, are stored in the compact integer form `c(NA, -n)` (or `c(NA, n)`).
+/// GNU R's `row_names_gets`: the double `c(NA, n)` that `dput()` writes is stored as the
+/// integer `c(NA, n)`, and integer row names `1:n` of three rows or more as `c(NA, n)` with a
+/// positive `n`, which `.row_names_info()` then reports as not automatic. Other row names,
+/// `1:2` and `1L` among them, are stored as given; `.set_row_names(n)` passes `c(NA, -n)` itself.
 pub unsafe fn set_row_names(object: Sexp, value: Sexp) -> R<()> {
     let symbol = symbols().row_names;
     let value =
@@ -4190,15 +4246,20 @@ pub unsafe fn set_row_names(object: Sexp, value: Sexp) -> R<()> {
         };
     if value.kind() == SexpType::Integer {
         let data = values::ints(value);
-        let compact = !data.is_empty()
+        let compact = data.len() > 2
             && data
                 .iter()
                 .enumerate()
                 .all(|(index, &row)| row == index as i32 + 1);
         if compact {
-            let stored = values::integer_vector(&[NA_INTEGER, -(data.len() as i32)])?;
+            let stored = values::integer_vector(&[NA_INTEGER, data.len() as i32])?;
             return values::set_attr(object, symbol, stored);
         }
+    } else if value != nil() && value.kind() != SexpType::String {
+        return Err(error(format!(
+            "row names must be 'character' or 'integer', not '{}'",
+            value.kind().name()
+        )));
     }
     values::set_attr(object, symbol, value)
 }
@@ -4269,58 +4330,56 @@ pub(crate) unsafe fn do_set_attributes(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_matrix(call: &Call<'_>) -> R<Sexp> {
     let data = values::materialize(call.arg(0))?;
-    let nrow_arg = call.arg(1);
-    let ncol_arg = call.arg(2);
-    let by_row = values::as_logical_scalar(call.arg(3)) == 1;
+    if !(data.kind().is_atomic() || matches!(data.kind(), SexpType::List | SexpType::Expression)) {
+        return Err(error(format!(
+            "'data' must be of a vector type, was '{}'",
+            crate::coerce::type_name(data)
+        )));
+    }
+    let by_row = values::as_logical_scalar(call.arg(3));
+    if by_row == NA_LOGICAL {
+        return Err(error("invalid 'byrow' argument"));
+    }
+    let by_row = by_row == 1;
     let dimnames = call.arg(4);
-    let missing_nrow = values::as_logical_scalar(call.arg(5)) == 1;
-    let missing_ncol = values::as_logical_scalar(call.arg(6)) == 1;
     let count = length(data);
-    let (rows, cols) = match (missing_nrow, missing_ncol) {
-        (true, true) => (count, 1),
-        (false, true) => {
-            let rows = values::as_integer_scalar(nrow_arg).max(0) as usize;
-            (rows, if rows == 0 { 0 } else { count.div_ceil(rows) })
+    let nrow = matrix_extent(call, 1, 5, "nrow")?;
+    let ncol = matrix_extent(call, 2, 6, "ncol")?;
+    // GNU R compares the length with `extent * INT_MAX` before it looks for a zero extent, so
+    // non-empty data with one zero extent given is "too long".
+    let (rows, cols) = match (nrow, ncol) {
+        (None, None) => (count, 1),
+        (Some(0), None) | (None, Some(0)) if count > 0 => {
+            return Err(error("data is too long"));
         }
-        (true, false) => {
-            let cols = values::as_integer_scalar(ncol_arg).max(0) as usize;
-            (if cols == 0 { 0 } else { count.div_ceil(cols) }, cols)
-        }
-        (false, false) => (
-            values::as_integer_scalar(nrow_arg).max(0) as usize,
-            values::as_integer_scalar(ncol_arg).max(0) as usize,
-        ),
+        (Some(rows), None) => (rows, if rows == 0 { 0 } else { count.div_ceil(rows) }),
+        (None, Some(cols)) => (if cols == 0 { 0 } else { count.div_ceil(cols) }, cols),
+        (Some(rows), Some(cols)) => (rows, cols),
     };
     let total = rows * cols;
-    if count > 0
-        && total > 0
-        && (total % count != 0 && !count.is_multiple_of(rows.max(1))
-            || (count > total && !count.is_multiple_of(total)))
-    {
-        if count > total {
-            conditions::warning_call(
-                call.call,
-                format!("data length differs from size of matrix: [{count} != {rows} x {cols}]"),
-            )?;
-        } else if (rows > 0 && !count.is_multiple_of(rows))
-            || (cols > 0 && !count.is_multiple_of(cols))
-        {
-            conditions::warning_call(
-                call.call,
-                format!(
-                    "data length [{count}] is not a sub-multiple or multiple of the number of rows [{rows}]"
-                ),
-            )?;
+    // Whether `count` neither divides `extent` nor is divided by it.
+    let unrelated = |extent: usize| {
+        (count > extent && !count.is_multiple_of(extent))
+            || (count < extent && !extent.is_multiple_of(count))
+    };
+    if count > 1 && !total.is_multiple_of(count) {
+        if unrelated(rows) {
+            conditions::warning(format!(
+                "data length [{count}] is not a sub-multiple or multiple of the number of rows [{rows}]"
+            ))?;
+        } else if unrelated(cols) {
+            conditions::warning(format!(
+                "data length [{count}] is not a sub-multiple or multiple of the number of columns [{cols}]"
+            ))?;
+        } else if total != count {
+            conditions::warning(format!(
+                "data length differs from size of matrix: [{count} != {rows} x {cols}]"
+            ))?;
         }
     } else if count > 1 && total == 0 {
         conditions::warning("non-empty data for zero-extent matrix")?;
     }
-    let kind = if data == nil() {
-        SexpType::Logical
-    } else {
-        data.kind()
-    };
-    let result = alloc(kind, total)?;
+    let result = alloc(data.kind(), total)?;
     if count == 0 {
         for position in 0..total {
             set_na(result, position);
@@ -4341,6 +4400,34 @@ unsafe fn do_matrix(call: &Call<'_>) -> R<Sexp> {
         set_dimnames(result, dimnames, crate::heap().known().unbound)?;
     }
     Ok(result)
+}
+
+/// The `nrow` or `ncol` of a `matrix()` call, argument `index`, or `None` when the caller left
+/// it out, which the flag at `missing_index` says.
+unsafe fn matrix_extent(
+    call: &Call<'_>,
+    index: usize,
+    missing_index: usize,
+    name: &str,
+) -> R<Option<usize>> {
+    if values::as_logical_scalar(call.arg(missing_index)) == 1 {
+        return Ok(None);
+    }
+    let extent = call.arg(index);
+    if !values::is_numeric_type(extent.kind()) || values::inherits(extent, "factor") {
+        return Err(error("non-numeric matrix extent"));
+    }
+    if extent.kind() == SexpType::Real && length(extent) > 0 {
+        let (_, out_of_range) = crate::coerce::real_to_int(values::reals(extent)[0]);
+        if out_of_range {
+            conditions::warning("NAs introduced by coercion to integer range")?;
+        }
+    }
+    match values::as_integer_scalar(extent) {
+        NA_INTEGER => Err(error(format!("invalid '{name}' value (too large or NA)"))),
+        extent if extent < 0 => Err(error(format!("invalid '{name}' value (< 0)"))),
+        extent => Ok(Some(extent as usize)),
+    }
 }
 
 /// Fills `result`, a matrix of `rows` rows and of `data`'s type, with `data` recycled in column

@@ -1,0 +1,47 @@
+[stdout]
+| "error: attempt to set an attribute on NULL" 
+| "error: attempt to set an attribute on NULL" 
+| "error: attempt to set an attribute on NULL" 
+| "error: attempt to set an attribute on NULL" 
+| "error: attempt to set an attribute on NULL" 
+| "error: attempt to set an attribute on NULL" 
+| "error: attempt to set an attribute on NULL" 
+| "error: attempt to set an attribute on NULL" 
+| "error: attempt to set an attribute on NULL" 
+| NULL 
+| NULL 
+| NULL 
+| structure(list(), a = 1) 
+| structure(list(), a = 1) 
+| "error: attempt to set an attribute on NULL" 
+| "error: attempt to set an attribute on NULL" 
+| "error: attempt to set an attribute on NULL" 
+| NULL 
+| NULL 
+| "NULL" 
+| NULL 
+| NULL 
+| "error: cannot set an attribute on a 'builtin'" 
+| "error: cannot set an attribute on a 'builtin'" 
+| "error: cannot set an attribute on a 'builtin'" 
+| warning: setting environment(<primitive function>) is not possible and trying it is deprecated 
+| .Primitive("sum") 
+| "error: 'dimnames' applied to non-array" 
+| NULL 
+| NULL 
+| 3 
+| "error: cannot set an attribute on a 'symbol'" 
+| "error: cannot set an attribute on a 'symbol'" 
+| NULL 
+| a 
+| "attempt to set an attribute on NULL" 
+| "attempt to set an attribute on NULL" 
+| "attempt to set an attribute on NULL" 
+| "cannot set an attribute on a 'builtin'" 
+| NULL 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

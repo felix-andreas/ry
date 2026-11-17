@@ -12,8 +12,9 @@ use {
         Engine, ProcessEngine,
         corpus::{check_corpus_seed, load_corpus, render_corpus_divergences},
         fuzz::{
-            ProgramKind, SeedReport, check_seed, format_numbers_program, native_helpers_program,
-            parse_data_program, program, render_divergences, sprintf_program, trace_back_program,
+            MEMORY_LIMIT, ProgramKind, SeedReport, check_seed, format_numbers_program,
+            native_helpers_program, parse_data_program, program, render_divergences,
+            sprintf_program, trace_back_program,
         },
         gnu_r_available,
         reduce::{Signature, reduce_divergence},
@@ -147,6 +148,31 @@ fn fuzz_builtins_agree_across_tiers() {
     let jit = ProcessEngine::ry_jit().with_timeout(TIMEOUT).observing();
     assert_agree(&run_kind(
         ProgramKind::Builtins,
+        &tier0,
+        &[&jit],
+        fuzz_iterations(8),
+    ));
+}
+
+/// The api programs call functions from the table of everything base, stats and utils export
+/// with arguments of any type. No call may crash or hang the interpreter, and compiled code must
+/// agree with it; `just fuzz-kind api` compares the same programs with GNU R.
+#[test]
+fn fuzz_api_calls_agree_across_tiers() {
+    if !ry_runtime_available() {
+        eprintln!("skipped: ry's runtime is not built; run `cargo build -p ry-lang -p libr`");
+        return;
+    }
+    let prepare = |engine: ProcessEngine| {
+        engine
+            .with_timeout(TIMEOUT)
+            .with_memory_limit(MEMORY_LIMIT)
+            .observing()
+    };
+    let tier0 = prepare(ProcessEngine::ry_tier0());
+    let jit = prepare(ProcessEngine::ry_jit());
+    assert_agree(&run_kind(
+        ProgramKind::Api,
         &tier0,
         &[&jit],
         fuzz_iterations(8),

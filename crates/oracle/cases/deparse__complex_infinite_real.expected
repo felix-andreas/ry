@@ -1,0 +1,31 @@
+[stdout]
+| [1] "c(0+0i, Inf+0i)"
+| [1] "f(c(0+0i, Inf+0i))"
+| [1] "f(value = c(0+0i, Inf+0i))"
+| c(0+0i, Inf+0i)
+| c(Inf+1i, -Inf-2.5i, complex(real=Inf, imaginary=NaN), complex(real=NaN, imaginary=0), 
+| complex(real=NA, imaginary=3), complex(real=1.5, imaginary=-Inf)
+| )
+| c(Inf+1i, -Inf-2.5i, complex(real=Inf, imaginary=NaN), complex(real=NaN, imaginary=0), 
+| complex(real=NA, imaginary=3), complex(real=1.5, imaginary=-Inf)
+| )
+| c(Inf+1i, -Inf-2.5i, complex(real=Inf, imaginary=NaN), complex(real=NaN, imaginary=0), 
+| complex(real=NA, imaginary=3), complex(real=1.5, imaginary=-Inf)
+| )
+| c(Inf+1i, -Inf-2.5i)
+| [1] "Inf+0i"
+| [1] "f(c(complex(real=NA, imaginary=0), Inf+0i))"
+| [1] "-(-Inf+1i)"
+| [1] "(Inf+1i)^2"
+| [1] "c(complex(real=Inf, imaginary=NaN), complex(real=Inf, imaginary=NaN), "
+| [2] "complex(real=Inf, imaginary=NaN))"                                     
+| [1]  Inf+1.0i -Inf-2.5i
+| <simpleWarning in `[<-.factor`(`*tmp*`, 2, value = c(0+0i, Inf+0i)): invalid factor level, NA generated>
+[messages]
+[warnings]
+[errors]
+[value]
+list
+| structure(list(message = "invalid factor level, NA generated", 
+|     call = `[<-.factor`(*tmp*, 2, value = c(0+0i, Inf+0i))), class = c("simpleWarning", 
+| "warning", "condition"))

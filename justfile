@@ -764,12 +764,18 @@ fuzz-differential seed="0" count="200" engines="ry-tier0,ry-jit":
     ./target/debug/oracle fuzz --seed {{ seed }} --count {{ count }} --engines {{ engines }}
 
 # The other program kinds of the differential fuzzer: `metamorphic` (one value, one body, and the
-# forms that must agree), `builtins` (builtins on a zoo of values), `corpus`, or `all`, e.g.
-# `just fuzz-kind metamorphic 0 500`. Diverging programs and their reports go to
-# target/fuzz-findings.
+# forms that must agree), `builtins` (builtins on a zoo of values), `api` (calls drawn from every
+# function of base, stats and utils), `corpus`, or `all`, e.g. `just fuzz-kind metamorphic 0 500`.
+# Diverging programs and their reports go to target/fuzz-findings.
 fuzz-kind kind="all" seed="0" count="200" engines="ry-tier0,ry-jit":
     cargo build -q -p ry-lang -p libr -p rcmd -p oracle
     ./target/debug/oracle fuzz --kind {{ kind }} --seed {{ seed }} --count {{ count }} --engines {{ engines }} --findings target/fuzz-findings
+
+# How many of the functions base, stats and utils export the programs of COUNT seeds of each kind
+# name in a call. It runs no engine, so it measures the generators' reach in seconds.
+fuzz-coverage count="500":
+    cargo build -q -p oracle
+    ./target/debug/oracle fuzz --kind all --seed 0 --count {{ count }} --coverage
 
 # Every program kind of the differential fuzzer against GNU R for HOURS of wall clock, from seed
 # BASE on. A scheduled run passes a fresh base, e.g. `just fuzz-long 8 $(date +%s)`. Diverging
