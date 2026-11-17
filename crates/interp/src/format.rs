@@ -818,6 +818,10 @@ fn encode_into(result: &mut String, text: &str, quote: Option<char>) {
             character if ('\u{80}'..='\u{9f}').contains(&character) => {
                 result.push_str(&format!("\\u{:04x}", character as u32));
             }
+            // A byte that is not valid UTF-8, carried as its stand-in character.
+            character if let Some(byte) = values::escaped_byte(character) => {
+                result.push_str(&format!("\\x{byte:02x}"));
+            }
             character => result.push(character),
         }
     }

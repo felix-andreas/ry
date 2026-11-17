@@ -1,0 +1,19 @@
+[stdout]
+| simpleError | no applicable method for 'g' applied to an object of class "c('double', 'numeric')" | UseMethod("g") 
+| simpleError | no applicable method for 'g' applied to an object of class "c('double', 'numeric')" | UseMethod("g") 
+| simpleError | no applicable method for 'g' applied to an object of class "c('a', 'b')" | UseMethod("g") 
+| simpleError | no applicable method for 'h' applied to an object of class "character" | UseMethod("h") 
+| simpleError | no applicable method for 'on_second' applied to an object of class "logical" | UseMethod("on_second", y) 
+| simpleError | no applicable method for 'on_second' applied to an object of class "logical" | UseMethod("on_second", y) 
+| simpleError | no applicable method for 'computed' applied to an object of class "NULL" | UseMethod(paste0("comp", "uted")) 
+| simpleError | no applicable method for 'named' applied to an object of class "function" | UseMethod(generic = "named") 
+| simpleError | no applicable method for 'conditionMessage' applied to an object of class "c('double', 'numeric')" | UseMethod("conditionMessage") 
+| simpleError | in the method | g.default(1) 
+| Error in UseMethod("h") : 
+|   no applicable method for 'h' applied to an object of class "c('integer', 'numeric')"
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

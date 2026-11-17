@@ -1,0 +1,75 @@
+# readBin() and writeBin() over every type, size, signedness and byte order, from raw vectors and
+# connections, with the errors and warnings for sizes and connections they refuse.
+f <- tempfile()
+t_ <- function(expr) {
+  r <- withVisible(tryCatch(withCallingHandlers(expr, warning = function(w) { cat("warning:", conditionMessage(w), "\n"); invokeRestart("muffleWarning") }), error = function(e) { cat("error:", conditionMessage(e), "\n"); invisible(NULL) }))
+  if (r$visible) print(r$value) else cat("(invisible)\n")
+}
+show <- function() print(readBin(f, "raw", 300))
+# writeBin
+for (v in list(1:3, c(1.5, NA), c(TRUE, NA), c("aä", NA, ""), as.raw(1:3), 1i, numeric(0), character(0), NULL, list(1), "a\xffb", factor("a")))
+  for (size in list(NA_integer_, 1L, 2L, 3L, 4L, 8L, 16L)) {
+    cat("writeBin", deparse(v), size, "\n"); t_(writeBin(v, f, size = size)); if (file.exists(f)) { show(); unlink(f) }
+  }
+t_(writeBin(1:3, raw()))
+t_(writeBin(1:3, raw(), endian = "big"))
+t_(writeBin(1:3, raw(), endian = "swap"))
+t_(writeBin(1:3, raw(), endian = "x"))
+t_(writeBin(c(300L, -1L, NA), raw(), size = 1))
+t_(writeBin(c(70000L, -1L, NA), raw(), size = 2))
+t_(writeBin(c(1e10, -1, NA, Inf), raw(), size = 4))
+t_(writeBin(c(1e300, -1, NA, Inf, NaN), raw(), size = 4))
+t_(writeBin(c(1.5, -2.5), raw(), size = 12))
+t_(writeBin(c(1.5, -2.5), raw(), size = 16))
+t_(writeBin("a", raw(), useBytes = TRUE))
+t_(writeBin(c("aä", iconv("aä", "UTF-8", "latin1")), raw()))
+t_(writeBin(c("aä", iconv("aä", "UTF-8", "latin1")), raw(), useBytes = TRUE))
+t_(writeBin(1:3, 1))
+g <- tempfile(); t_(writeBin(1:3, g)); t_(readBin(g, "integer", 5)); unlink(g)
+t_(writeBin(quote(x), raw()))
+t_(writeBin(matrix(1:4, 2), raw(), size = 1))
+t_(writeBin(structure(1:2, class = "foo"), raw(), size = 1))
+# readBin
+r <- as.raw(c(1:20, 0xff, 0xfe, 0x80, 0x7f, 0, 0x61, 0x62, 0, 0xc3, 0xa4, 0, 0x63))
+for (what in list("integer", "int", "numeric", "double", "logical", "complex", "character", "raw", integer(), 1.5, "", "foo", TRUE, NULL, raw(), character(), complex()))
+  for (size in list(NA_integer_, 1L, 2L, 3L, 4L, 8L))
+    for (signed in c(TRUE, FALSE)) {
+      cat("readBin", deparse(what), size, signed, "\n"); t_(readBin(r, what, n = 40, size = size, signed = signed)) }
+t_(readBin(r, "integer", n = 3, endian = "big"))
+t_(readBin(r, "integer", n = 3, size = 2, endian = "big"))
+t_(readBin(r, "double", n = 3, size = 4, endian = "big"))
+t_(readBin(r, "double", n = 2, size = 16))
+t_(readBin(r, "integer", n = -1))
+t_(readBin(r, "integer", n = NA))
+t_(readBin(r, "integer", n = 2.9))
+t_(readBin(r, "integer", n = "3"))
+t_(readBin(r, "character", n = 3))
+t_(readBin(r[26:32], "character", n = 3))
+t_(readBin(as.raw(c(0x61, 0x62)), "character", n = 3))
+t_(readBin(as.raw(c(0xff, 0x62, 0, 0xe4, 0)), "character", n = 3))
+t_(Encoding(readBin(as.raw(c(0xc3, 0xa4, 0, 0xe4, 0)), "character", n = 3)))
+t_(readBin("nonexistent-file", "raw", 1))
+t_(readBin(1, "raw", 1))
+t_(readBin(r, "raw", n = 0))
+t_(readBin(raw(), "integer", n = 3))
+writeBin(r, f)
+con <- file(f, "rb"); t_(readBin(con, "integer", 2, size = 2)); t_(readBin(con, "character", 1)); t_(readBin(con, "raw", 100)); t_(readBin(con, "raw", 100)); close(con)
+con <- file(f, "r"); t_(readBin(con, "integer", 2, size = 2)); t_(readLines(con, 1)); close(con)
+con <- file(f, "rt"); t_(readBin(con, "integer", 2, size = 2)); close(con)
+con <- file(f, "wt"); t_(writeBin(1:2, con)); close(con)
+con <- file(f, "w"); t_(writeBin(1:2, con)); close(con)
+con <- textConnection("abc"); t_(readBin(con, "raw", 2)); close(con)
+con <- rawConnection(r); t_(readBin(con, "integer", 2)); t_(readChar(con, 3)); close(con)
+# readChar / writeChar
+writeBin(charToRaw("aäb€c\nxyz"), f)
+t_(readChar(f, 3)); t_(readChar(f, c(1, 2, 3))); t_(readChar(f, 100)); t_(readChar(f, 0)); t_(readChar(f, -1)); t_(readChar(f, NA)); t_(readChar(f, c(2, 0, 2)))
+t_(readChar(f, 3, useBytes = TRUE)); t_(readChar(f, c(2, 1, 1), useBytes = TRUE)); t_(Encoding(readChar(f, c(2, 1, 1), useBytes = TRUE))); t_(Encoding(readChar(f, c(1, 1, 1))))
+t_(readChar(charToRaw("aäb"), c(2, 2))); t_(readChar(as.raw(c(0x61, 0xff, 0x62)), 3)); t_(readChar(as.raw(c(0x61, 0, 0x62)), 3)); t_(readChar(as.raw(c(0x61, 0, 0x62)), 3, useBytes = TRUE))
+t_(readChar(as.raw(c(0x61, 0xc3)), 2)); t_(readChar(as.raw(c(0xc3, 0xa4, 0x62)), 1)); t_(readChar(raw(), 1)); t_(readChar(1, 1)); t_(readChar("nonexistent-file", 1L))
+con <- file(f, "r"); t_(readChar(con, 2)); close(con)
+for (v in list("abc", c("aä", "b"), NA_character_, "", character(0), 1, "a\xffb")) { 
+  cat("writeChar", deparse(v), "\n"); t_(writeChar(v, raw())); t_(writeChar(v, raw(), eos = NULL)); t_(writeChar(v, raw(), nchars = rep(5L, length(v)))); t_(writeChar(v, raw(), nchars = rep(1L, length(v)), useBytes = TRUE)); t_(writeChar(v, raw(), eos = "ä|")) }
+t_(writeChar("abc", raw(), nchars = 0)); t_(writeChar("abc", raw(), nchars = -1)); t_(writeChar("abc", raw(), nchars = NA)); t_(writeChar(c("a", "b"), raw(), nchars = 1)); t_(writeChar("abc", raw(), nchars = 2:3))
+t_(writeChar("abc", f)); show(); t_(writeChar("abc", f, eos = NULL)); show()
+con <- file(f, "w"); t_(writeChar("abc", con)); close(con); show()
+t_(writeChar("aä", raw(), nchars = 2, useBytes = TRUE)); t_(writeChar(iconv("aä", "UTF-8", "latin1"), raw())); t_(writeChar(iconv("aä", "UTF-8", "latin1"), raw(), useBytes = TRUE))

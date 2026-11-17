@@ -322,5 +322,5 @@ file name and sha256, and the commit the tag names, and `just readme` rewrites t
 from it. `--write` refuses a nightly archive, a local build, and a working tree with a change to a
 tracked file or an untracked file under `crates/` or `tools/bench/`, so the stored programs
 reproduce the measurement. The README summary warns when the suites were measured on different machines (CPU
-model or kernel) or against a GNU R on a different BLAS, because their ratios are then not
+model or kernel release, ignoring a Firecracker guest's `-fc-vNNN` build tag) or against a GNU R on a different BLAS, because their ratios are then not
 comparable.

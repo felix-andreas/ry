@@ -1,0 +1,34 @@
+[stdout]
+| [1] "a" "b" "x" "z" "1" ""  "p" "q"
+| [1] "a"  "b"  "xy" "z"  "12" ""   "p"  "q" 
+| [1] "a,b" "x"   "1"   "p,q"
+| [[1]]
+| [1] "a" "x" "1" "p"
+| 
+| [[2]]
+| [1] "b" "z" ""  "q"
+| 
+|   a b
+| 1 x  
+| 2 1  
+| 3 p q
+|    a b
+| 1 xy z
+| 2 12  
+| 3  p q
+| [1]  2 NA NA NA NA  2
+| [1] 1 3
+| [1] "a"
+[messages]
+[warnings]
+- embedded nul(s) found in input (in scan(f, what = "", sep = ",", quiet = TRUE))
+- embedded nul(s) found in input (in scan(f, what = "", quiet = TRUE))
+- embedded nul(s) found in input (in scan(f, what = list("", ""), sep = ",", quiet = TRUE))
+- line 2 appears to contain embedded nulls (in read.table(file = file, header = header, sep = sep, quote = quote, )
+- line 3 appears to contain embedded nulls (in read.table(file = file, header = header, sep = sep, quote = quote, )
+- embedded nul(s) found in input (in scan(f, quiet = TRUE))
+- embedded nul(s) found in input (in scan(f, "", quiet = TRUE))
+[errors]
+[value]
+integer
+| 0L

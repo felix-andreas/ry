@@ -1,0 +1,27 @@
+[stdout]
+| warning: NAs introduced by coercion 
+| [1] NA  1 NA
+| warning: NAs introduced by coercion to integer range 
+| [1] NA  1 NA
+| [1] 7 1 7
+| warning: imaginary parts discarded in coercion 
+| [1] 1 1 1
+| [1] 2 1 2
+| warning: NAs introduced by coercion 
+| error: argument must be coercible to non-negative integer | seq_len("a") 
+| [1] 1 2 3
+| warning: imaginary parts discarded in coercion 
+| [1] 1 2
+| warning: more than 2 arguments passed to default method of 'crossprod' 
+|      [,1]
+| [1,]    5
+| warning: more than 2 arguments passed to default method of 'tcrossprod' 
+|      [,1] [,2]
+| [1,]    1    2
+| [2,]    2    4
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| structure(c(1, 2, 2, 4), dim = c(2L, 2L))

@@ -354,6 +354,8 @@ fn do_nchar<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> 
         } else {
             match count_type {
                 CountType::Bytes => chars.bytes().len() as i32,
+                // GNU R counts a latin1 string's bytes, each one character and one column.
+                _ if handles::is_latin1(chars) => chars.bytes().len() as i32,
                 CountType::Chars => handles::text(chars).chars().count() as i32,
                 CountType::Width => display_width(&handles::text(chars)) as i32,
             }
@@ -593,6 +595,26 @@ unsafe fn do_strsplit(call: &Call<'_>) -> R<Sexp> {
             continue;
         };
         let position = index % splits.len().max(1);
+        // Splitting into characters reports an invalid string as the Perl matcher does.
+        let by_character =
+            !matches!(splits.get(position), Some(Some(separator)) if !separator.is_empty());
+        let reported = PatternOptions {
+            perl: options.perl || by_character,
+            ..options
+        };
+        let valid = use_bytes
+            || x.element(index).is_valid_utf8()
+            || handles::with(|context| {
+                let split = handles::dense::<Str>(context, handles::held(context, split))?;
+                match handles::dense::<Str>(context, handles::held(context, x))? {
+                    Some(x) => valid_subject(context, split, x, index, use_bytes, reported, false),
+                    None => Ok(true),
+                }
+            })?;
+        if !valid {
+            set_elt(result, index, values::scalar_string_charsxp(na_string())?);
+            continue;
+        }
         pieces.clear();
         match splits.get(position) {
             None => split_chars(&text, &mut pieces),
@@ -1909,6 +1931,25 @@ fn do_make_names<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<
     }
     let allow_underscore = allow_underscore == 1;
     refuse_bytes(context, names)?;
+    // GNU R decodes the first character, and the one after a leading dot, with `Mbrtowc`,
+    // whose error shows the text, and the whole name with `mbstowcs`, whose error counts it.
+    for (index, chars) in names.iter(context).enumerate() {
+        if handles::is_na(chars) {
+            continue;
+        }
+        let Some(bytes) = values::unescape_invalid_bytes(&handles::text(chars)) else {
+            continue;
+        };
+        let checked = usize::from(bytes.first() == Some(&b'.'));
+        return Err(match bytes.get(checked..) {
+            Some(rest)
+                if !rest.is_empty() && crate::connections::multibyte_length(rest).is_none() =>
+            {
+                crate::connections::invalid_multibyte(rest)
+            }
+            _ => error(format!("invalid multibyte string {}", index + 1)),
+        });
+    }
     let made: Vec<String> = names
         .iter(context)
         .map(|chars| {
@@ -2480,8 +2521,15 @@ fn grep<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>, logical: bool) -> R<
     let matcher = compiled.map_err(|failure| compile_failure(context, failure))?;
     let hit = |context: &mut Cx<'_>, index: usize| -> R<bool> {
         let found = if handles::is_na(text.get(context, index))
-            || !valid_subject(context, text, index, use_bytes, options, false)?
-        {
+            || !valid_subject(
+                context,
+                Some(pattern),
+                text,
+                index,
+                use_bytes,
+                options,
+                false,
+            )? {
             false
         } else {
             let element = subject(text.get(context, index), use_bytes).unwrap_or_default();
@@ -2589,7 +2637,15 @@ fn substitute<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>, global: bool) 
                 result.set(context, index, handles::na());
                 continue;
             }
-            valid_subject(context, text, index, use_bytes, options, true)?;
+            valid_subject(
+                context,
+                Some(pattern),
+                text,
+                index,
+                use_bytes,
+                options,
+                true,
+            )?;
             let Some(replacement) = &replacement else {
                 let found = {
                     let element = subject(text.get(context, index), use_bytes).unwrap_or_default();
@@ -2810,7 +2866,15 @@ fn regexpr<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>, global: bool) -> 
                 table.push_na();
                 continue;
             }
-            if !valid_subject(context, text, index, use_bytes, options, false)? {
+            if !valid_subject(
+                context,
+                Some(pattern),
+                text,
+                index,
+                use_bytes,
+                options,
+                false,
+            )? {
                 table.push_none();
                 continue;
             }
@@ -2830,7 +2894,15 @@ fn regexpr<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>, global: bool) -> 
             continue;
         }
         let mut table = MatchTable::new(groups);
-        if valid_subject(context, text, index, use_bytes, options, false)? {
+        if valid_subject(
+            context,
+            Some(pattern),
+            text,
+            index,
+            use_bytes,
+            options,
+            false,
+        )? {
             let element = subject(text.get(context, index), use_bytes).unwrap_or_default();
             let mut position = 0;
             // PCRE and fixed matching find the empty match in an empty string, and TRE does not.
@@ -3370,11 +3442,13 @@ pub(crate) unsafe fn subject_at<'a>(
     (charsxp != na_string()).then(|| values::escape_high_bytes(charsxp.bytes()))
 }
 
-/// Whether element `index` of `text` can be matched. GNU R refuses a string marked as UTF-8
-/// whose bytes are not UTF-8: the regex functions warn and treat it as unmatched, and `sub`
-/// and `gsub` (`fatal`) fail. TRE first fails to convert it to wide characters.
+/// Whether element `index` of `text` can be matched. GNU R refuses a string that is read as
+/// UTF-8 (marked so, or unmarked in the UTF-8 session) whose bytes are not UTF-8: the regex
+/// functions and `strsplit` warn and treat it as unmatched, and `sub` and `gsub` (`fatal`) fail.
+/// TRE first fails to convert it to wide characters.
 fn valid_subject(
     context: &mut Cx<'_>,
+    pattern: Option<Local<'_, Str>>,
     text: Local<'_, Str>,
     index: usize,
     use_bytes: bool,
@@ -3384,13 +3458,28 @@ fn valid_subject(
     let (translation, message) = {
         let chars = text.get(context, index);
         if use_bytes
-            || handles::encoding(chars) != Encoding::Utf8
+            || chars.is_valid_utf8()
+            || matches!(handles::encoding(chars), Encoding::Latin1 | Encoding::Bytes)
             || std::str::from_utf8(chars.bytes()).is_ok()
         {
             return Ok(true);
         }
-        if options.fixed || options.perl {
+        // Fixed matching compares UTF-8 only when the pattern or a text is marked as UTF-8,
+        // and otherwise reads the strings in the session's encoding.
+        let marked_utf8 = |vector: Local<'_, Str>| {
+            vector
+                .iter(context)
+                .any(|chars| handles::encoding(chars) == Encoding::Utf8)
+        };
+        if options.perl
+            || (options.fixed && (pattern.is_some_and(marked_utf8) || marked_utf8(text)))
+        {
             (None, format!("input string {} is invalid UTF-8", index + 1))
+        } else if options.fixed {
+            (
+                None,
+                format!("input string {} is invalid in this locale", index + 1),
+            )
         } else {
             let mut shown = String::new();
             for chunk in chars.bytes().utf8_chunks() {

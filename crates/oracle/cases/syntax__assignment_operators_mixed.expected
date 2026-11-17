@@ -1,0 +1,56 @@
+[stdout]
+| [1] 5 5
+| [1] 4
+| [1] 3
+| [1] "function (x) " "y <- x"       
+| [1] "a = b <- c"
+| [1] "a = b ~ c"
+| [1] "`?`((a = b), c)"
+| [1] "`?`(a <- b, c)"
+| [1] "a = c <- b"
+| [1] "a = b = c <- d = e"
+| [1] "`:=`(a, b <- c)"
+| [1] "a = `:=`(b, c)"
+| [1] "a ~ b = c"
+| [1] "a <- b = c"
+| [1] "`?`(a, (b = c))"
+| [1] "(b <- a) <- c"
+| [1] "a <- c <- b"
+| [1] "a = c <- b = d"
+| [1] "if (x) a = b <- c else d = e"
+| [1] "function(x) y = z <- 1"
+| [1] "for (i in 1:2) a = i <- 3"
+| [1] "a = if (x) b <- 1 else c = 2"
+| [1] "{"              "    a = b <- c" "    d <- e = f" "}"             
+| [1] "(a = b <- c)"
+| [1] "f(a = b <- c)"
+| [1] "a <<- b = c"
+| [1] "a = b <<- c"
+| [1] "a = f(b)"
+| [1] "x[a = b <- 1]"
+| [1] "a = -b <- 1"
+| [1] "a = !b <- 1"
+| [1] "a = ~b <- 1"
+| [1] "object 'y' not found"
+| `?`(a, b)
+| `?`(a)
+| `?`(`?`(a))
+| `?`(a, b, c)
+| `?`((a = b), c)
+| f((b = c), n = (b = c))
+| b = c
+| x[(a = b)]
+| x[(b = c)]
+| function (a = (b = c)) 
+| NULL
+| f(b <- c, (b = c) + 1, (b = c), {
+|     b = c
+| })
+[messages]
+[warnings]
+[errors]
+[value]
+language
+| f(b <- c, (b = c) + 1, (b = c), {
+|     b = c
+| })

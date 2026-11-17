@@ -209,6 +209,15 @@ pub fn integer_scalar(_context: &mut Cx<'_>, value: Local<'_>) -> i32 {
     unsafe { values::as_integer_scalar(value.raw()) }
 }
 
+/// [`integer_scalar`] with the coercion warnings of GNU R's `asInteger`: text that is no number
+/// and a double outside the integer range warn.
+#[inline]
+pub fn integer_scalar_warning(_context: &mut Cx<'_>, value: Local<'_>) -> R<i32> {
+    // SAFETY: the value is rooted, and a warning may run a calling handler, which `&mut Cx`
+    // permits.
+    unsafe { values::as_integer_scalar_warning(value.raw()) }
+}
+
 /// The shared `TRUE`, `FALSE` or `NA` the heap keeps for as long as it lives.
 #[inline]
 pub fn logical_constant<'s>(_context: &Cx<'s>, value: i32) -> R<Local<'s>> {

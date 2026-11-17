@@ -43,10 +43,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     special("[[<-", -1, do_subassign2).dispatch_or_eval(),
     special("$<-", 3, do_dollar_assign),
     special("@<-", 3, do_at_assign).direct(direct_at_assign),
-    builtin(".subset", -1, do_subset).keep_missing(),
-    builtin(".subset2", -1, do_subset2)
-        .keep_missing()
-        .direct(direct_subset2),
+    builtin(".subset", -1, do_subset),
+    builtin(".subset2", -1, do_subset2).direct(direct_subset2),
     builtin("list", -1, do_list),
     builtin("length", 1, safe!(do_length))
         .generic(Generic::Internal)
@@ -1648,6 +1646,9 @@ unsafe fn do_subset2(call: &Call<'_>) -> R<Sexp> {
         }
     }
     let (object, indices, _, exact) = subset_args(call);
+    if indices.is_empty() {
+        return Err(call.error("no index specified"));
+    }
     let exact = match exact {
         Some(exact) => match values::as_logical_scalar(exact) {
             NA_LOGICAL => None,
@@ -5265,6 +5266,31 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
     if items.iter().all(|arg| arg.value == nil()) {
         return Ok(nil());
     }
+    // An argument that is no vector makes the result a list, as in GNU R: a call or pairlist
+    // binds its elements, and anything else (a symbol, a function) is one element.
+    for arg in &mut items {
+        match arg.value.kind() {
+            SexpType::Nil
+            | SexpType::Raw
+            | SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::String
+            | SexpType::List
+            | SexpType::Expression => {}
+            SexpType::Language | SexpType::Pairlist => {
+                arg.value = coerce::coerce_vector(arg.value, SexpType::List)?;
+                crate::heap().root(arg.value);
+            }
+            _ => {
+                let wrapped = alloc(SexpType::List, 1)?;
+                values::set_elt(wrapped, 0, arg.value);
+                crate::heap().root(wrapped);
+                arg.value = wrapped;
+            }
+        }
+    }
     // Starting below raw, so that binding only raw vectors gives a raw matrix.
     let mut kind = SexpType::Nil;
     for arg in &items {
@@ -5272,6 +5298,11 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
     }
     if kind == SexpType::Nil {
         kind = SexpType::Logical;
+    }
+    if kind == SexpType::Expression {
+        return Err(crate::unwind::error(
+            "cannot create a matrix from type 'expression'",
+        ));
     }
     let (along, across) = if by_row { (1, 0) } else { (0, 1) };
     let matrix_dims = |value: Sexp| values::dims(value).filter(|dims| dims.len() == 2);
@@ -5538,7 +5569,7 @@ fn do_col<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
 fn row_col<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>, rows: bool) -> R<Local<'s>> {
     let dims = handles::integer_vector(context, arguments.value(0))?;
     let &[row_count, col_count] = dims.as_slice(context) else {
-        return Err(arguments.error(format!(
+        return Err(error(format!(
             "a matrix-like object is required as argument to '{}'",
             if rows { "row" } else { "col" }
         )));

@@ -1,0 +1,19 @@
+[stdout]
+| [1] "935"   "aaaa'"
+| [1] "936"   "aaaa'"
+| [1] "999"   "aaaa'"
+| [1] "999"   "aaaaa"
+| [1] "999"   "aaaaa"
+| [1] "999"   "aaaaa"
+| [1] "999"   "aaaaa"
+| [1] "999"   "aaaaa"
+| [1] "999"   "ééééé"
+| [1] "999"   "bbbbb"
+| [1] "199"   "bbbbb"
+| [1] "199"   "aaaaa"
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 0L

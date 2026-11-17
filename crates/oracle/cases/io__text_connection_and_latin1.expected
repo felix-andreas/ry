@@ -1,0 +1,47 @@
+[stdout]
+| [1] c3
+| [1] "unknown"
+| [1] "translating strings with \"bytes\" encoding is not allowed"
+| [1] c3
+| [1] e4
+| [1] c3 a4
+| [1] "a"  "NA"
+| [1] "unknown" "UTF-8"   "UTF-8"  
+| [1] c3
+| [1] "unknown" "UTF-8"  
+| [1] "invalid multibyte string 1"
+| [1] "invalid multibyte string at '<c3>a'"
+| [1] "invalid multibyte string 2"
+| [1] "invalid multibyte string at '<c3>'"
+| [1] "invalid multibyte string at '<e4><f6><fc>abc<64>efghijklmnop'"
+| [1] "invalid multibyte string 1"
+| [1] "X"
+| [1] "."
+| [1] "invalid multibyte string 1"
+|  [1]   65 8364   60   56   49   62 8218  402 8222 8230 8224 8225  710 8240  352
+| [16] 8249  338   60   56  100   62  381   60   56  102   62   60   57   48   62
+| [31] 8216 8217 8220 8221 8226 8211 8212  732 8482  353 8250  339   60   57  100
+| [46]   62  382  376  160  255
+| [1] "UTF-8"
+| [1] 35
+| [1] "A€<81>‚ƒ„…†‡ˆ‰Š‹Œ<8d>Ž<8f><90>‘’“”•–—˜™š›œ<9d>žŸ ÿ"
+| [1] TRUE
+| [1] "A€<81>‚ƒ„…†‡ˆ‰Š‹Œ<8d>Ž<8f><90>‘’“”•–—˜™š›œ<9d>žŸ ÿ!"
+| [1] 35
+| [1] 128 129 130 131 132
+| [1] "“quoted” € 5"
+| “quoted” € 5 
+| [1] "“QUOTED” € 5"
+| [1] 12
+| [1] "<81>b"
+| [1] 2
+| [1] 60 56 49 62 98
+| [1] FALSE
+|  [1] 1f 8b 08 00 00 00 00 00 00 03
+|  [1] 1f 8b 08 00 00 00 00 00 00 03
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 0L
