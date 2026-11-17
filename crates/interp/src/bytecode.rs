@@ -9126,9 +9126,10 @@ unsafe fn set_srcref_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<u
     Some(at + 1 + operand_count(Op::SetSrcref))
 }
 
-/// `Jump` forward, and backward while no interrupt is pending and the back edge reaches no
+/// `Jump` forward, and backward while no interrupt is requested and the back edge reaches no
 /// count the optimizing tier acts on. The count is left unwritten when it is due, because the
-/// generic handler counts the same edge again.
+/// generic handler counts the same edge again. The profile is read as the plain vector it is:
+/// an accessor that tests for ALTREP can call, which would cost every jump a frame.
 #[inline(always)]
 unsafe fn jump_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
     let target = *state.code.add(at + 1) as usize;
@@ -9137,12 +9138,13 @@ unsafe fn jump_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> 
             return None;
         }
         if let Some(tier) = &(*state.interp).bytecode.tier {
-            let profile = values::ints_mut(state.constants.element(PROFILE));
-            let count = profile[profile::BACK_EDGES].saturating_add(1);
+            let back_edges =
+                pool_constant(state, PROFILE).data().cast::<i32>().add(profile::BACK_EDGES);
+            let count = (*back_edges).saturating_add(1);
             if count >= tier.back_edge_threshold || count == tier.back_edge_threshold / 2 {
                 return None;
             }
-            profile[profile::BACK_EDGES] = count;
+            *back_edges = count;
         }
     }
     Some(target)
