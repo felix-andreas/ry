@@ -4178,7 +4178,8 @@ fn assign_one<'s>(
     let names = handles::names_attribute(context, object);
     if count > 1 {
         if !is_list {
-            return Err(handles::error_in(
+            return Err(replacement_error(
+                context,
                 call,
                 "attempt to select more than one element in vectorIndex",
             ));
@@ -4189,7 +4190,8 @@ fn assign_one<'s>(
         let inner = match one_index(context, object_count, names, first)? {
             Slot::At(position) if position < object_count => element(context, object, position)?,
             _ => {
-                return Err(handles::error_in(
+                return Err(replacement_error(
+                    context,
                     call,
                     format!("no such index at level {level}\n"),
                 ));
@@ -4322,6 +4324,19 @@ fn incompatible_types(object: &str, value: &str, context: &str) -> Unwind {
     error(format!(
         "incompatible types (from {from} to {to}) in {context}"
     ))
+}
+
+/// An error that names `call` as GNU R names the call of a replacement function, the form
+/// `[[<-`(`*tmp*`, ...) for one an assignment generated.
+fn replacement_error<'s>(
+    context: &mut Cx<'s>,
+    call: Local<'s>,
+    message: impl Into<String>,
+) -> Unwind {
+    match handles::generated_call(context, call) {
+        Ok(reported) => handles::error_in(reported, message),
+        Err(failure) => failure,
+    }
 }
 
 /// Where a single `[[<-` subscript points.
