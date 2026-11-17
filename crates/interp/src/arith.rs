@@ -30,7 +30,7 @@ use {
         long_double::{self, LongDouble},
         rmath,
         system::r_at_least,
-        unwind::{R, error},
+        unwind::{R, Unwind, error},
         values::{
             self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real, symbols,
         },
@@ -448,23 +448,23 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("beta", 2, |call| unsafe { math2(call, rmath::beta) }),
     internal("lbeta", 2, |call| unsafe { math2(call, rmath::lbeta) }),
     internal("bitwiseAnd", 2, |call| unsafe {
-        bitwise(call, |a, b| a & b)
+        bitwise(call, Some("bitwAnd"), |a, b| a & b)
     }),
     internal("bitwiseOr", 2, |call| unsafe {
-        bitwise(call, |a, b| a | b)
+        bitwise(call, Some("bitwOr"), |a, b| a | b)
     }),
     internal("bitwiseXor", 2, |call| unsafe {
-        bitwise(call, |a, b| a ^ b)
+        bitwise(call, Some("bitwXor"), |a, b| a ^ b)
     }),
     internal("bitwiseNot", 1, do_bitw_not),
     internal("bitwiseShiftL", 2, |call| unsafe {
-        bitwise(call, |a, b| match u32::try_from(b) {
+        bitwise(call, None, |a, b| match u32::try_from(b) {
             Ok(shift) if shift <= 31 => ((a as u32) << shift) as i32,
             _ => NA_INTEGER,
         })
     }),
     internal("bitwiseShiftR", 2, |call| unsafe {
-        bitwise(call, |a, b| match u32::try_from(b) {
+        bitwise(call, None, |a, b| match u32::try_from(b) {
             Ok(shift) if shift <= 31 => ((a as u32) >> shift) as i32,
             _ => NA_INTEGER,
         })
@@ -4443,17 +4443,41 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
         }
         other => other,
     };
-    let length_out = present(matched[2])
-        .map(|value| values::as_real_scalar(value))
-        .filter(|value| !value.is_nan());
-    let each = present(matched[3])
-        .map(|value| values::as_integer_scalar(value))
-        .filter(|&value| value != NA_INTEGER)
-        .unwrap_or(1)
-        .max(0) as usize;
     if object.kind() == SexpType::Pairlist {
         return Err(call.error("replication of pairlists is defunct"));
     }
+    let length_out = match present(matched[2]) {
+        Some(value) => {
+            let length_out = rep_count(value)?;
+            if length_out <= -1.0 {
+                return Err(call.error("invalid 'length.out' argument"));
+            }
+            if length(value) != 1 {
+                let message = "first element used of 'length.out' argument";
+                crate::conditions::warning_call(call.call, message)?;
+            }
+            Some(length_out).filter(|out| out.is_finite())
+        }
+        None => None,
+    };
+    let each = match present(matched[3]) {
+        Some(value) => {
+            if length(value) != 1 {
+                let message = "first element used of 'each' argument";
+                crate::conditions::warning_call(call.call, message)?;
+            }
+            let (each, out_of_range) = crate::coerce::real_to_int(rep_count(value)?);
+            if out_of_range {
+                crate::conditions::warning("NAs introduced by coercion to integer range")?;
+            }
+            match each {
+                NA_INTEGER => 1,
+                each if each < 0 => return Err(call.error("invalid 'each' argument")),
+                each => each as usize,
+            }
+        }
+        None => 1,
+    };
     // GNU R returns an empty `x` before it checks the type, so `rep(new.env(), 2)` is the
     // environment itself.
     if !is_replicable(object) && object != nil() && length(object) == 0 {
@@ -4557,6 +4581,20 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
         result.set_gp_bits(gp::S4_OBJECT, true);
     }
     Ok(result)
+}
+
+/// The first element of `rep`'s `length.out` or `each` as a number, NA when it has none. A
+/// string that is no number warns, as GNU R's `asReal` does.
+unsafe fn rep_count(value: Sexp) -> R<f64> {
+    let number = values::as_real_scalar(value);
+    if value.kind() == SexpType::String
+        && length(value) > 0
+        && number.is_nan()
+        && value.element(0) != values::na_string()
+    {
+        crate::conditions::warning("NAs introduced by coercion")?;
+    }
+    Ok(number)
 }
 
 /// Which element of `x` each element of `rep`'s result repeats, before `each` is applied:
@@ -4819,9 +4857,25 @@ unsafe fn math2(call: &Call<'_>, function: fn(f64, f64) -> f64) -> R<Sexp> {
     Ok(result)
 }
 
-unsafe fn bitwise(call: &Call<'_>, function: impl Fn(i32, i32) -> i32) -> R<Sexp> {
-    let left = coerce_vector(call.arg(0), SexpType::Integer)?;
-    let right = coerce_vector(call.arg(1), SexpType::Integer)?;
+/// A bitwise function of two operands. `name` is the R function an operand of an unsupported
+/// type is reported against; a shift has none, because GNU R coerces a shift count of any type
+/// to integer and then finds every unsupported first operand to differ from it in type.
+unsafe fn bitwise(
+    call: &Call<'_>,
+    name: Option<&str>,
+    function: impl Fn(i32, i32) -> i32,
+) -> R<Sexp> {
+    let left = bitwise_operand(call.arg(0))?;
+    let right = match name {
+        Some(_) => bitwise_operand(call.arg(1))?,
+        None => values::materialize(coerce_vector(call.arg(1), SexpType::Integer)?)?,
+    };
+    if left.kind() != right.kind() {
+        return Err(error("'a' and 'b' must have the same type"));
+    }
+    if left.kind() != SexpType::Integer {
+        return Err(unimplemented_bitwise_type(left, name.unwrap_or("bitwAnd")));
+    }
     let left_length = length(left);
     let right_length = length(right);
     let count = if left_length == 0 || right_length == 0 {
@@ -4845,7 +4899,10 @@ unsafe fn bitwise(call: &Call<'_>, function: impl Fn(i32, i32) -> i32) -> R<Sexp
 }
 
 unsafe fn do_bitw_not(call: &Call<'_>) -> R<Sexp> {
-    let operand = coerce_vector(call.arg(0), SexpType::Integer)?;
+    let operand = bitwise_operand(call.arg(0))?;
+    if operand.kind() != SexpType::Integer {
+        return Err(unimplemented_bitwise_type(operand, "bitwNot"));
+    }
     let count = length(operand);
     let result = values::alloc_uninit(SexpType::Integer, count)?;
     for (slot, &value) in values::ints_mut(result)
@@ -4859,6 +4916,24 @@ unsafe fn do_bitw_not(call: &Call<'_>) -> R<Sexp> {
         };
     }
     Ok(result)
+}
+
+/// An operand of a bitwise function as GNU R takes it: a double vector is coerced to integer,
+/// and a value of any other type is left for the caller's type check, so a logical or a string
+/// is an error rather than a number.
+unsafe fn bitwise_operand(operand: Sexp) -> R<Sexp> {
+    if operand.kind() == SexpType::Real {
+        coerce_vector(operand, SexpType::Integer)
+    } else {
+        values::materialize(operand)
+    }
+}
+
+unsafe fn unimplemented_bitwise_type(operand: Sexp, name: &str) -> Unwind {
+    error(format!(
+        "unimplemented type '{}' in '{name}'\n",
+        operand.kind().name()
+    ))
 }
 
 unsafe fn complex_part(call: &Call<'_>, part: u8) -> R<Sexp> {

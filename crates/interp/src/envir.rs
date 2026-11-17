@@ -430,6 +430,12 @@ unsafe fn do_set_environment(call: &Call<'_>) -> R<Sexp> {
     if env != nil() && env.kind() != SexpType::Environment {
         return Err(call.error("replacement object is not an environment"));
     }
+    if matches!(object.kind(), SexpType::Builtin | SexpType::Special) {
+        crate::conditions::warning(
+            "setting environment(<primitive function>) is not possible and trying it is deprecated",
+        )?;
+        return Ok(object);
+    }
     let copy = if values::maybe_shared(object) {
         values::shallow_duplicate(object)?
     } else {

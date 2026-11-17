@@ -3,15 +3,16 @@
 use {
     crate::{
         builtins::{BuiltinDef, Call, internal},
+        coerce::integer_scalar,
         deparse,
         eval::{self, value_of},
         format::{self, Settings, display_width, encode_element, encode_string, pad},
         interp,
-        unwind::R,
+        unwind::{R, error},
         values::{self, char_str, get_attr, length, nil, symbol_name, symbols},
         write_console,
     },
-    heap::object::{Sexp, SexpType, gp},
+    heap::object::{NA_LOGICAL, Sexp, SexpType, gp},
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -1100,20 +1101,18 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
         match name.as_str() {
             "digits" => {
                 if argument != nil() {
-                    let digits = values::as_integer_scalar(argument);
+                    let digits = integer_scalar(argument)?;
                     if !(1..=22).contains(&digits) {
-                        return Err(call.error("invalid digits parameter (1 <= digits <= 22)"));
+                        return Err(error(format!("invalid printing digits {digits}")));
                     }
                     options.settings.digits = digits as usize;
                 }
             }
-            "quote" => {
-                options.quote = values::as_logical_scalar(argument) != 0;
-            }
+            "quote" => options.quote = logical_argument(argument, "quote")?,
             "na.print" => {
                 if argument != nil() {
                     if argument.kind() != SexpType::String || values::length(argument) == 0 {
-                        return Err(call.error("invalid 'na.print' specification"));
+                        return Err(error("invalid 'na.print' specification"));
                     }
                     let text = values::first_string(argument)
                         .map(|text| text.into_owned())
@@ -1124,21 +1123,33 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
             }
             "print.gap" => {
                 if argument != nil() {
-                    options.gap = values::as_integer_scalar(argument).max(0) as usize;
+                    let gap = integer_scalar(argument)?;
+                    if gap < 0 {
+                        return Err(error("'gap' must be non-negative integer"));
+                    }
+                    options.gap = gap as usize;
                 }
             }
-            "right" => options.right = values::as_logical_scalar(argument) == 1,
+            "right" => options.right = logical_argument(argument, "right")?,
             "max" => {
                 if argument != nil() {
-                    options.max = values::as_integer_scalar(argument).max(1) as usize;
+                    let max = integer_scalar(argument)?;
+                    if max < 0 {
+                        return Err(error("invalid 'max' argument"));
+                    }
+                    options.max = max.max(1) as usize;
                 }
             }
             "width" => {
                 if argument != nil() {
-                    options.width = values::as_integer_scalar(argument).max(10) as usize;
+                    let width = integer_scalar(argument)?;
+                    if !(10..=10000).contains(&width) {
+                        return Err(error("invalid printing width"));
+                    }
+                    options.width = width as usize;
                 }
             }
-            "useSource" => options.use_source = values::as_logical_scalar(argument) != 0,
+            "useSource" => options.use_source = logical_argument(argument, "useSource")?,
             _ => {}
         }
     }
@@ -1152,6 +1163,13 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
         print_value(value, &options, &mut String::new())?;
     }
     Ok(value)
+}
+
+unsafe fn logical_argument(argument: Sexp, name: &str) -> R<bool> {
+    match values::as_logical_scalar(argument) {
+        NA_LOGICAL => Err(error(format!("invalid '{name}' argument"))),
+        value => Ok(value != 0),
+    }
 }
 
 /// `print.function(x, useSource, ...)`.

@@ -6265,6 +6265,14 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
     let expression = call.arg(0);
     let mut env = call.arg(1);
     let enclosure = call.arg(2);
+    // GNU R names the type of what `simple_as_environment` made of a bad `enclos`, which is
+    // `NULL` for everything that is not an S4 object.
+    if !matches!(
+        enclosure.kind(),
+        SexpType::Nil | SexpType::Environment | SexpType::Object
+    ) {
+        return Err(error("invalid 'enclos' argument of type 'NULL'"));
+    }
     match env.kind() {
         SexpType::Environment => {}
         SexpType::Nil => {
@@ -6282,14 +6290,16 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
             env = crate::envir::list_to_env(list, enclosure)?;
         }
         SexpType::Integer | SexpType::Real => {
+            if length(env) != 1 {
+                return Err(error("numeric 'envir' arg not of length one"));
+            }
             let which = values::as_integer_scalar(env);
+            if which == NA_INTEGER {
+                return Err(invalid_envir(env));
+            }
             env = crate::envir::sys_frame(which, call.env()?)?;
         }
-        _ => {
-            return Err(call.error(
-                "invalid 'envir' argument of type '".to_string() + env.kind().name() + "'",
-            ));
-        }
+        _ => return Err(invalid_envir(env)),
     }
     // `eval` runs its expression in a context of its own, as GNU R's does: it counts as a frame
     // for `sys.call` and friends, and a `return` in the expression returns from `eval`.
@@ -6340,6 +6350,13 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
     crate::truncate_frames(state, depth - 1);
     state.restarts = restarts;
     result
+}
+
+unsafe fn invalid_envir(env: Sexp) -> Unwind {
+    error(format!(
+        "invalid 'envir' argument of type '{}'",
+        env.kind().name()
+    ))
 }
 
 unsafe fn do_with_visible(call: &Call<'_>) -> R<Sexp> {
