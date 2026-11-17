@@ -900,16 +900,7 @@ impl Deparser {
             return;
         }
         // A call whose function is itself an expression.
-        let needs = matches!(head.kind(), SexpType::Language)
-            && (head.car() == symbols().function
-                || head.car().kind() == SexpType::Symbol
-                    && operator_info(head.car().car().bytes()).is_some_and(|info| {
-                        info.kind != Kind::Subset
-                            && info.kind != Kind::Dollar
-                            && !(info.kind == Kind::Binary2
-                                && info.precedence == precedence::NAMESPACE)
-                    }));
-        if needs || head.kind() == SexpType::Closure {
+        if parenthesize_caller(head) {
             self.print("(");
             self.deparse(head);
             self.print(")");
@@ -1828,6 +1819,52 @@ unsafe fn dangles(argument: Sexp, outer: u8) -> bool {
             };
             precedence < outer
         })
+}
+
+/// GNU R's `parenthesizeCaller`: whether a call's function, when it is not a name, is written
+/// in parentheses. A call of a name, a subset, a namespace access, `(` or `{` reads as the
+/// function without them (`f(1)(2)`, `x$f(1)`), and every other call does not (`(f(1)(2))(3)`,
+/// `(if (a) f else g)(1)`).
+unsafe fn parenthesize_caller(head: Sexp) -> bool {
+    if head.kind() != SexpType::Language {
+        return head.kind() == SexpType::Closure;
+    }
+    let function = head.car();
+    if function.kind() != SexpType::Symbol {
+        return true;
+    }
+    let name = function.car().bytes();
+    match operator_info(name) {
+        Some(info) => {
+            !matches!(info.kind, Kind::Subset | Kind::Dollar)
+                && info.precedence != precedence::NAMESPACE
+        }
+        None => {
+            is_user_binop(name)
+                || matches!(
+                    name,
+                    b"if"
+                        | b"while"
+                        | b"for"
+                        | b"repeat"
+                        | b"break"
+                        | b"next"
+                        | b"return"
+                        | b"function"
+                        | b"[<-"
+                        | b"[[<-"
+                        | b"$<-"
+                        | b"@<-"
+                        | b".C"
+                        | b".Fortran"
+                        | b".External"
+                        | b".External2"
+                        | b".Call"
+                        | b".External.graphics"
+                        | b".Call.graphics"
+                )
+        }
+    }
 }
 
 /// GNU R's `needsparens`: whether an operand of `main` must be parenthesized.
