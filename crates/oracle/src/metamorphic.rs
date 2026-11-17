@@ -16,14 +16,17 @@
 //! in the engine that printed it, with or without GNU R to compare with.
 //!
 //! [`builtins_program`] is the same zoo fed to builtins instead: one or two values and a few
-//! dozen calls on them, each a top-level value the deep observer dumps.
+//! dozen calls on them, each a top-level value the deep observer dumps. Its calls are written
+//! by hand, so each is a sensible use of its function. [`api_program`] draws its calls from
+//! the table of every function base, stats and utils export instead, with arguments nobody
+//! chose: it reaches the functions and the argument checks no one thought to test.
 //!
 //! Swarm testing: a seed first draws the subset of [`Feature`]s its programs may use, so a rare
 //! pairing (raw vectors and `dim<-`, say) is not drowned out by the common ones.
 //!
 //! Every program is deterministic under GNU R, and none prints an environment or a closure.
 
-use syntax::testing::SplitMix64;
+use {std::sync::LazyLock, syntax::testing::SplitMix64};
 
 /// One thing a program may contain. A seed enables each with probability one half.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -143,7 +146,11 @@ pub fn program(seed: u64) -> String {
     } else {
         Features::swarm(&mut rng)
     };
-    let mut zoo = Zoo { rng, features };
+    let mut zoo = Zoo {
+        rng,
+        features,
+        longest: usize::MAX,
+    };
     let mut text = format!(
         "# oracle metamorphic program, seed {seed}\n# features: {}\n{PREAMBLE}",
         features.names()
@@ -164,7 +171,11 @@ pub fn builtins_program(seed: u64) -> String {
     } else {
         Features::swarm(&mut rng)
     };
-    let mut zoo = Zoo { rng, features };
+    let mut zoo = Zoo {
+        rng,
+        features,
+        longest: usize::MAX,
+    };
     let mut text = format!(
         "# oracle builtins program, seed {seed}\n# features: {}\ntry_ <- function(expr) tryCatch(expr, error = function(e) paste(\"error:\", conditionMessage(e)))\n",
         features.names()
@@ -210,6 +221,254 @@ pub fn builtins_program(seed: u64) -> String {
         }
     }
     text
+}
+
+/// One function of base, stats or utils, from the table `api_functions.R` writes.
+pub struct ApiFunction {
+    pub package: &'static str,
+    pub name: &'static str,
+    /// An S3 method, which a program calls less often than a function users call by name.
+    pub method: bool,
+    /// How many leading arguments a call may pass by position, or `None` for a function no
+    /// program calls: one that reaches outside the process or need not agree between engines.
+    pub positional: Option<usize>,
+    /// The formals a call may pass by name, each with its position.
+    formals: Vec<(usize, &'static str)>,
+}
+
+/// Every function GNU R's base, stats and utils export, in the table's order.
+pub fn api_functions() -> &'static [ApiFunction] {
+    static TABLE: LazyLock<Vec<ApiFunction>> = LazyLock::new(|| {
+        include_str!("api_functions.txt")
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split('\t');
+                let package = fields.next()?;
+                let name = fields.next()?;
+                let method = fields.next()? == "method";
+                let positional = fields.next()?.parse().ok();
+                let formals = fields
+                    .next()
+                    .unwrap_or_default()
+                    .split(',')
+                    .enumerate()
+                    .filter(|(_, formal)| {
+                        !formal.is_empty() && *formal != "..." && !formal.ends_with('!')
+                    })
+                    .collect();
+                Some(ApiFunction {
+                    package,
+                    name,
+                    method,
+                    positional,
+                    formals,
+                })
+            })
+            .collect()
+    });
+    &TABLE
+}
+
+/// The R program that calls functions of the whole base, stats and utils interface on the zoo:
+/// two values and a few dozen calls, each with up to three arguments by position and sometimes
+/// one by name. The arguments are the two values, a small count, or a constant of another type,
+/// so most calls are ones nobody wrote a test for: a function given a type it must reject, an
+/// argument of length zero, or a name in another encoding. Every call's value is a top-level
+/// value the deep observer dumps, with its warnings, and some are printed as well.
+pub fn api_program(seed: u64) -> String {
+    let mut rng = SplitMix64(seed ^ 0x6170_695f_6361_6c6c);
+    let features = if rng.chance(1, 8) {
+        Features::all()
+    } else {
+        Features::swarm(&mut rng)
+    };
+    let mut zoo = Zoo {
+        rng,
+        features,
+        longest: API_LONGEST,
+    };
+    // Base functions get most of the calls: every other function is built from them.
+    let pools = [
+        "base", "base", "base", "base", "base", "stats", "stats", "utils",
+    ]
+    .map(|package| {
+        let methods = package == "base";
+        api_functions()
+            .iter()
+            .filter(|function| {
+                function.positional.is_some()
+                    && function.package == package
+                    && !(methods && function.method)
+            })
+            .collect::<Vec<_>>()
+    });
+    let methods: Vec<&ApiFunction> = api_functions()
+        .iter()
+        .filter(|function| function.positional.is_some() && function.method)
+        .collect();
+    let mut text = format!(
+        "# oracle api program, seed {seed}\n# features: {}\n{API_PREAMBLE}set.seed({})\n",
+        features.names(),
+        seed % 1000
+    );
+    for _ in 0..1 + zoo.rng.below(2) {
+        let first = zoo.value();
+        let second = zoo.value();
+        text.push_str(&format!(
+            "v <- try_({})\nw <- try_({})\n",
+            first.text, second.text
+        ));
+        for _ in 0..12 + zoo.rng.below(12) {
+            // A generic reaches its methods anyway, so a direct call of one is rare.
+            let pool = match zoo.rng.chance(1, 8) {
+                true => &methods,
+                false => &pools[zoo.rng.below(pools.len())],
+            };
+            let function = pool[zoo.rng.below(pool.len())];
+            let call = api_call(&mut zoo, function);
+            text.push_str(&match zoo.rng.chance(1, 3) {
+                true => format!("r <- show_(try_({call}))\n"),
+                false => format!("r <- try_({call})\n"),
+            });
+        }
+        text.push_str(&format!(
+            "try_(identical(v, {}))\ntry_(identical(w, {}))\n",
+            first.text, second.text
+        ));
+    }
+    text
+}
+
+/// The longest value an api program builds. A function may be quadratic in its argument, and
+/// 513 elements keep such a call to a quarter of a million cells.
+const API_LONGEST: usize = 513;
+
+/// `show_` prints a value unless it holds a function, an environment or a pointer, whose
+/// printed form would carry an address.
+const API_PREAMBLE: &str = r#"try_ <- function(expr) tryCatch(expr, error = function(e) paste("error:", conditionMessage(e)))
+plain_ <- function(x) {
+  if (is.function(x) || is.environment(x) || typeof(x) %in% c("externalptr", "weakref", "S4", "bytecode")) return(FALSE)
+  all(vapply(c(if (is.list(x)) unclass(x), attributes(x)), plain_, NA))
+}
+show_ <- function(x) {
+  try_(if (plain_(x)) print(x))
+  invisible(x)
+}
+"#;
+
+/// Arguments of other types than the zoo's two values: a call that takes a function, a
+/// language object, a count or a flag gets one now and then.
+const API_CONSTANTS: [&str; 22] = [
+    "NULL",
+    "TRUE",
+    "FALSE",
+    "NA",
+    "0L",
+    "1L",
+    "2",
+    "-1",
+    "0.5",
+    "Inf",
+    "NA_character_",
+    "\"a\"",
+    "\"\"",
+    "\"sum\"",
+    "character(0)",
+    "1:3",
+    "c(2, 1)",
+    "list(1, \"b\")",
+    "length",
+    "function(x, ...) x",
+    "quote(v + 1)",
+    "quote(x)",
+];
+
+/// One call of `function`. A replacement function is sometimes called as a replacement, which
+/// goes through the `*tmp*` protocol instead of an ordinary call.
+fn api_call(zoo: &mut Zoo, function: &ApiFunction) -> String {
+    let limit = function.positional.unwrap_or(0);
+    let count = [1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 0][zoo.rng.below(16)].min(limit);
+    let mut arguments: Vec<String> = (0..count)
+        .map(|position| match (position, zoo.rng.below(10)) {
+            (0, 0..=7) => "v".to_owned(),
+            (1, 0..=5) => "w".to_owned(),
+            (2, 0..=4) => zoo.small_count().to_string(),
+            (_, 8) => ["w", "v", "v"][position].to_owned(),
+            _ => zoo.pick(&API_CONSTANTS).to_owned(),
+        })
+        .collect();
+    let named: Vec<&str> = function
+        .formals
+        .iter()
+        .filter(|(position, _)| *position >= count)
+        .map(|(_, formal)| *formal)
+        .collect();
+    if !named.is_empty() && zoo.rng.chance(1, 3) {
+        let formal = named[zoo.rng.below(named.len())];
+        let value = match zoo.rng.below(8) {
+            0..=2 => "TRUE",
+            3 => "FALSE",
+            4 => "NA",
+            5 => "w",
+            _ => zoo.pick(&API_CONSTANTS),
+        };
+        arguments.push(format!("{} = {value}", syntactic(formal)));
+    }
+    let replaced = function
+        .name
+        .strip_suffix("<-")
+        .filter(|target| !target.is_empty() && !target.ends_with('<') && count >= 2);
+    match replaced {
+        Some(target) if !matches!(target, "[" | "[[" | "$" | "@") && zoo.rng.chance(1, 2) => {
+            let value = arguments.remove(count - 1);
+            let object = arguments.remove(0);
+            let rest: String = arguments.iter().map(|text| format!(", {text}")).collect();
+            format!(
+                "{{ x <- {object}; {}(x{rest}) <- {value}; x }}",
+                syntactic(target)
+            )
+        }
+        _ => format!("{}({})", syntactic(function.name), arguments.join(", ")),
+    }
+}
+
+/// The function a top-level expression of an api program calls, so a run can count its
+/// differences by function. `None` for any other expression.
+pub fn called_function(expression: &str) -> Option<String> {
+    let call = expression.strip_prefix("r <- ")?;
+    let call = call.strip_prefix("show_(").unwrap_or(call);
+    let call = call.strip_prefix("try_(")?;
+    if let Some(replacement) = call.strip_prefix("{ x <- ") {
+        let target = replacement.split_once("; ")?.1.split_once("(x")?.0;
+        return Some(format!("{}<-", target.trim_matches('`')));
+    }
+    match call.strip_prefix('`') {
+        Some(quoted) => Some(quoted.split_once('`')?.0.to_owned()),
+        None => Some(call.split_once('(')?.0.to_owned()),
+    }
+}
+
+/// `name` as R source: itself when it is a syntactic name, in backticks otherwise.
+fn syntactic(name: &str) -> String {
+    const RESERVED: [&str; 12] = [
+        "if", "else", "repeat", "while", "function", "for", "next", "break", "TRUE", "FALSE",
+        "NULL", "in",
+    ];
+    let mut characters = name.chars();
+    let starts = characters.next().is_some_and(|first| {
+        first.is_ascii_alphabetic()
+            || (first == '.' && !name[1..].starts_with(|c: char| c.is_ascii_digit()))
+    });
+    let plain = starts
+        && characters.all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+        && !RESERVED.contains(&name)
+        && !name.starts_with("NA")
+        && name != "Inf"
+        && name != "NaN";
+    match plain {
+        true => name.to_owned(),
+        false => format!("`{name}`"),
+    }
 }
 
 /// `check_` prints one line per form: whether it gave what the first run gave. `same_` treats
@@ -360,6 +619,8 @@ const LIST_ITEMS: [&str; 10] = [
 struct Zoo {
     rng: SplitMix64,
     features: Features,
+    /// No value is longer than this.
+    longest: usize,
 }
 
 impl Zoo {
@@ -376,7 +637,7 @@ impl Zoo {
     }
 
     fn length(&mut self) -> usize {
-        match self.rng.below(10) {
+        let length = match self.rng.below(10) {
             0..=4 => SMALL_LENGTHS[self.rng.below(SMALL_LENGTHS.len())],
             5..=7 => MIDDLE_LENGTHS[self.rng.below(MIDDLE_LENGTHS.len())],
             _ if self.has(Feature::LargeSizes) => {
@@ -389,7 +650,8 @@ impl Zoo {
                 LARGE_LENGTHS[self.rng.below(limit)]
             }
             _ => MIDDLE_LENGTHS[self.rng.below(MIDDLE_LENGTHS.len())],
-        }
+        };
+        length.min(self.longest)
     }
 
     fn kind(&mut self) -> Kind {
@@ -1759,7 +2021,7 @@ mod tests {
     #[test]
     fn programs_are_deterministic_and_parse() {
         for seed in 0..400 {
-            for program in [program(seed), builtins_program(seed)] {
+            for program in [program(seed), builtins_program(seed), api_program(seed)] {
                 assert!(parses(&program), "seed {seed} does not parse:\n{program}");
             }
             assert_eq!(program(seed), program(seed));
@@ -1781,6 +2043,51 @@ mod tests {
                 assert!(!escaped_in_backticks, "seed {seed}: {line}");
             }
         }
+    }
+
+    #[test]
+    fn the_function_table_parses_and_names_what_a_program_calls() {
+        let functions = api_functions();
+        assert!(functions.len() > 1500);
+        let callable = functions
+            .iter()
+            .filter(|function| function.positional.is_some())
+            .count();
+        assert!(callable > 1000, "{callable} callable functions");
+        for function in functions {
+            assert!(matches!(function.package, "base" | "stats" | "utils"));
+            assert!(function.positional.is_none_or(|count| count <= 3));
+        }
+        for seed in 0..100 {
+            for line in api_program(seed)
+                .lines()
+                .filter(|line| line.starts_with("r <- "))
+            {
+                let name = called_function(line)
+                    .unwrap_or_else(|| panic!("seed {seed}: no function in {line}"));
+                assert!(
+                    functions
+                        .iter()
+                        .any(|function| function.name == name && function.positional.is_some()),
+                    "seed {seed}: {name} is not a callable function of the table"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_call_names_its_function() {
+        let name = |line: &str| called_function(line);
+        assert_eq!(name("r <- try_(sum(v, w))").as_deref(), Some("sum"));
+        assert_eq!(name("r <- show_(try_(`[[`(v, 1L)))").as_deref(), Some("[["));
+        assert_eq!(
+            name("r <- try_({ x <- v; names(x) <- w; x })").as_deref(),
+            Some("names<-")
+        );
+        assert_eq!(name("v <- try_(c(1, 2))"), None);
+        assert_eq!(syntactic("is.na<-"), "`is.na<-`");
+        assert_eq!(syntactic("if"), "`if`");
+        assert_eq!(syntactic("rowSums"), "rowSums");
     }
 
     #[test]

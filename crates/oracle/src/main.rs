@@ -7,9 +7,11 @@ use {
         build_file, check_build,
         corpus::Snippet,
         diff, engine_packages, engines_named, expected_path, fails_run, find_cases,
-        fuzz::{Divergence, ProgramKind},
+        fuzz::{Divergence, MEMORY_LIMIT, ProgramKind},
         gallery, gnu_r_available, gnu_r_build, install, installed_packages, known_failure,
-        known_failures, packages, parse, read_build,
+        known_failures,
+        metamorphic::called_function,
+        packages, parse, read_build,
         reduce::{Signature, reduce_divergence},
         render, runnable_cases, verdict, write_build,
     },
@@ -107,8 +109,9 @@ enum Command {
         print: bool,
         /// The programs to run: `grammar` (generated blocks of language features), `metamorphic`
         /// (one value, one body, and the forms that must agree), `builtins` (builtins on a
-        /// zoo of values), `corpus` (mutated snippets of real R code, `oracle::corpus`), a
-        /// comma-separated list of them, or `all` for each of them on every seed.
+        /// zoo of values), `api` (calls drawn from every function of base, stats and utils),
+        /// `corpus` (mutated snippets of real R code, `oracle::corpus`), a comma-separated
+        /// list of them, or `all` for each of them on every seed.
         #[arg(long, default_value = "grammar")]
         kind: String,
         /// Compare only what a program prints, without the deep observer's dump of every
@@ -239,7 +242,9 @@ fn main() -> ExitCode {
             }
             Some([FuzzKind::Corpus]) => print_corpus_program(*seed),
             _ => {
-                eprintln!("--print takes one --kind: grammar, metamorphic, builtins or corpus");
+                eprintln!(
+                    "--print takes one --kind: grammar, metamorphic, builtins, api or corpus"
+                );
                 ExitCode::from(2)
             }
         };
@@ -1041,7 +1046,7 @@ fn check_fuzz_seed(
 fn run_fuzz(run: FuzzRun) -> ExitCode {
     let Some(kinds) = fuzz_kinds(run.kind) else {
         eprintln!(
-            "unknown --kind `{}`: grammar, metamorphic, builtins, corpus or all",
+            "unknown --kind `{}`: grammar, metamorphic, builtins, api, corpus or all",
             run.kind
         );
         return ExitCode::from(2);
@@ -1141,13 +1146,15 @@ fn run_fuzz(run: FuzzRun) -> ExitCode {
                             let label = &checked.label;
                             if let Some(error) = &checked.stopped {
                                 tally.ended_in_error += 1;
-                                // A metamorphic or builtins program catches its own errors,
-                                // so one that stops GNU R says the generator wrote something it
-                                // did not mean.
+                                // A metamorphic, builtins or api program catches its own
+                                // errors, so one that stops GNU R says the generator wrote
+                                // something it did not mean.
                                 if matches!(
                                     kind,
                                     FuzzKind::Generated(
-                                        ProgramKind::Metamorphic | ProgramKind::Builtins
+                                        ProgramKind::Metamorphic
+                                            | ProgramKind::Builtins
+                                            | ProgramKind::Api
                                     )
                                 ) {
                                     println!("STOPS   {label} under GNU R: {error}");
@@ -1188,6 +1195,17 @@ fn run_fuzz(run: FuzzRun) -> ExitCode {
                                     .flat_map(|divergence| divergence.kinds())
                                 {
                                     *tally.kinds.entry(name).or_default() += 1;
+                                }
+                                for divergence in &checked.divergences {
+                                    for expression in &divergence.expressions {
+                                        if let Some(function) = called_function(&expression.source)
+                                        {
+                                            *tally
+                                                .functions
+                                                .entry((function, expression.difference.name()))
+                                                .or_default() += 1;
+                                        }
+                                    }
                                 }
                                 if let Some(findings) = &run.findings {
                                     for (extension, text) in
@@ -1264,6 +1282,28 @@ fn run_fuzz(run: FuzzRun) -> ExitCode {
             .map(|(name, count)| format!("{name} {count}"))
             .collect();
         println!("by kind: {}", kinds.join(", "));
+        if !tally.functions.is_empty() {
+            let mut functions: Vec<_> = tally.functions.iter().collect();
+            functions.sort_by(|left, right| right.1.cmp(left.1).then(left.0.cmp(right.0)));
+            let listing: String = functions
+                .iter()
+                .map(|((function, kind), count)| format!("{count}\t{kind}\t{function}\n"))
+                .collect();
+            match &run.findings {
+                Some(findings) => {
+                    let file = findings.join("functions.txt");
+                    match std::fs::write(&file, listing) {
+                        Ok(()) => println!(
+                            "{} differing functions are listed in {}",
+                            functions.len(),
+                            file.display()
+                        ),
+                        Err(error) => eprintln!("{}: {error}", file.display()),
+                    }
+                }
+                None => print!("by function:\n{listing}"),
+            }
+        }
         ExitCode::FAILURE
     }
 }
@@ -1276,7 +1316,7 @@ fn fuzz_engines(
     observe: bool,
 ) -> Option<(ProcessEngine, Vec<ProcessEngine>)> {
     let prepare = |engine: ProcessEngine| {
-        let engine = engine.with_timeout(timeout);
+        let engine = engine.with_timeout(timeout).with_memory_limit(MEMORY_LIMIT);
         if observe { engine.observing() } else { engine }
     };
     let mut engines = Vec::new();
@@ -1329,6 +1369,8 @@ struct FuzzTally {
     base_differs: std::collections::BTreeSet<String>,
     /// How many engine runs differ in each way ([`oracle::fuzz::Divergence::kinds`]).
     kinds: std::collections::BTreeMap<&'static str, usize>,
+    /// How many expressions of api programs differ, by the function called and the way.
+    functions: std::collections::BTreeMap<(String, &'static str), usize>,
     unavailable: bool,
 }
 
