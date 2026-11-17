@@ -3341,8 +3341,10 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
         } else if is_list {
             modifiable(object)?
         } else {
+            // The assignment below reads the dims and then makes the object a list, which a
+            // coercion here would leave without dims.
             atomic_replacement_check(value)?;
-            coerce_vector(object, SexpType::List)?
+            object
         };
         let wrapped = values::list_vector(&[value])?;
         return subassign(list, indices, wrapped, call);

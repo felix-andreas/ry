@@ -1568,9 +1568,24 @@ unsafe fn change_ascii_case(x: Sexp, upper: bool) -> R<Sexp> {
     Ok(result)
 }
 
-/// `towupper` and `towlower` map one character to one character, so a character whose case
-/// mapping takes several (`ß` to `SS`) is left alone, as in GNU R.
+/// `towupper` and `towlower` are Unicode's simple case mappings, one character to one character.
+/// A character whose full mapping takes several (`ß` to `SS`) has a simple mapping only in the
+/// cases listed here, and is left alone otherwise, as in GNU R.
 fn change_char_case(character: char, upper: bool) -> char {
+    let code = u32::from(character);
+    let simple = if upper {
+        match code {
+            // Greek letters with iota subscript map to their titlecase forms.
+            0x1f80..=0x1f87 | 0x1f90..=0x1f97 | 0x1fa0..=0x1fa7 => Some(code + 8),
+            0x1fb3 | 0x1fc3 | 0x1ff3 => Some(code + 9),
+            _ => None,
+        }
+    } else {
+        (character == 'İ').then_some(u32::from('i'))
+    };
+    if let Some(simple) = simple.and_then(char::from_u32) {
+        return simple;
+    }
     if upper {
         single_char(character.to_uppercase(), character)
     } else {

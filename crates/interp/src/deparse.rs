@@ -481,7 +481,7 @@ impl Deparser {
                     "pairlist("
                 });
                 self.in_list += 1;
-                self.arguments(object, false);
+                self.arguments(object, false, false);
                 self.in_list -= 1;
                 self.print(if has_missing { "))" } else { ")" });
             }
@@ -608,8 +608,9 @@ impl Deparser {
         }
     }
 
-    /// The arguments of a call: `tag = value`, with GNU R's line breaks.
-    unsafe fn arguments(&mut self, mut list: Sexp, formals: bool) {
+    /// The arguments of a call: `tag = value`, with GNU R's line breaks. A pairlist's elements
+    /// are written the same way but never break the line (`breaks` is false).
+    unsafe fn arguments(&mut self, mut list: Sexp, formals: bool, breaks: bool) {
         let mut broken = false;
         while matches!(
             list.kind(),
@@ -646,7 +647,9 @@ impl Deparser {
                 SexpType::Pairlist | SexpType::Language | SexpType::Dots
             ) {
                 self.print(", ");
-                self.line_break(&mut broken);
+                if breaks {
+                    self.line_break(&mut broken);
+                }
             }
         }
         if broken {
@@ -751,7 +754,7 @@ impl Deparser {
                             self.print(")");
                         }
                         self.print(open);
-                        self.arguments(arguments.cdr(), false);
+                        self.arguments(arguments.cdr(), false, true);
                         self.print(close);
                         return;
                     }
@@ -908,7 +911,7 @@ impl Deparser {
             self.deparse(head);
         }
         self.print("(");
-        self.arguments(arguments, false);
+        self.arguments(arguments, false, true);
         self.print(")");
     }
 
@@ -1064,7 +1067,7 @@ impl Deparser {
             RyForm::Record | RyForm::Tuple => {
                 self.print("(");
                 self.in_list += 1;
-                self.arguments(arguments, false);
+                self.arguments(arguments, false, true);
                 self.in_list -= 1;
                 if values::pairlist_length(arguments) == 1 {
                     self.print(",");
@@ -1074,7 +1077,7 @@ impl Deparser {
             RyForm::Array => {
                 self.print("[");
                 self.in_list += 1;
-                self.arguments(arguments, false);
+                self.arguments(arguments, false, true);
                 self.in_list -= 1;
                 self.print("]");
             }
@@ -1085,7 +1088,7 @@ impl Deparser {
                 if payload != nil() {
                     self.print("(");
                     self.in_list += 1;
-                    self.arguments(payload, false);
+                    self.arguments(payload, false, true);
                     self.in_list -= 1;
                     self.print(")");
                 }
@@ -1237,7 +1240,7 @@ impl Deparser {
         if primitive {
             self.in_list += 1;
         }
-        self.arguments(arguments, false);
+        self.arguments(arguments, false, true);
         if primitive {
             self.in_list -= 1;
         }

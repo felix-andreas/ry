@@ -53,3 +53,10 @@ show("list [<- atomic", { x <- list(1, 2); x[1:3] <- classed(); x })
 show("[<- character", { x <- classed(); x[2] <- "B"; x })
 show("[[<- character", { x <- structure(1:2, extra = "e", names = c("p", "q")); x[["k"]] <- "x"; x })
 show("storage.mode<- double", { x <- grid(); storage.mode(x) <- "double"; x })
+
+# `[[<-` with subscripts for each extent reads the dims before a list value makes the object a
+# list.
+show("[[<- matrix cell", { x <- matrix(1:4, 2); x[[1, 2]] <- list(1); x })
+show("[[<- matrix cell by name", { x <- grid(); x[["r1", "c2"]] <- list("v"); x })
+show("[[<- array cell", { x <- array(1:8, c(2, 2, 2)); x[[1, 2, 2]] <- list("z"); x })
+show("[[<- matrix position", { x <- matrix(1:4, 2); x[[3]] <- list(1); x })

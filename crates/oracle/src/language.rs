@@ -103,12 +103,13 @@ const LONGEST: usize = 70;
 
 /// `log_` records a value as its deparsed text, so a log compares what the value is and not
 /// how it prints. It forces the value in its own frame first, so the frames a statement reports
-/// do not depend on the functions `log_` calls. `run_` calls `thunk` `times` times and returns the first and the last call's
-/// outcome: the value with its visibility, or the error's message and class, and the log, which
-/// also holds each warning. `t_` turns an error into a value so that one failing statement does
-/// not end the closure. `class_` is a condition's class with one name for `evalError` and
-/// `getvarError`: GNU R's AST evaluator raises the first for a missing argument and its
-/// compiled code the second, and which of the two runs a promise's code is not ry's to match.
+/// do not depend on the functions `log_` calls. `run_` calls `thunk` `times` times and returns
+/// the first and the last call's outcome: the value with its visibility, or the error's message
+/// and class, and the log, which also holds each warning. `t_` turns an error into a value so
+/// that one failing statement does not end the closure. `class_` is a condition's class with
+/// one name for `evalError` and `getvarError`: GNU R's AST evaluator raises the first for a
+/// missing argument and its compiled code the second, and which of the two runs a promise's
+/// code is not ry's to match.
 const PREAMBLE: &str = r#"trace_ <- new.env()
 log_ <- function(tag, value) {
   value
@@ -746,7 +747,7 @@ const S3: &[&str] = &[
     r#"log_("dispatch after UseMethod#L#", (function() { gen <- function(x) { marker <- "set"; UseMethod("gen"); "never" }; gen.default <- function(x) exists("marker", inherits = FALSE); gen(1) })())"#,
     r#"log_("group generic default#L#", t_(unclass(structure(1:3, class = "plain") + 1L)))"#,
     r#"log_("Ops mismatch#L#", (function() { Ops.left <- function(e1, e2) "left"; Ops.right <- function(e1, e2) "right"; withCallingHandlers(t_(structure(1, class = "left") + structure(2, class = "right")), warning = function(w) { log_("ops warning#L#", conditionMessage(w)); invokeRestart("muffleWarning") }) })())"#,
-    r#"log_("print dispatch#L#", capture.output(print(structure(list(1), class = "box_#E#")), box))"#,
+    r#"log_("print dispatch#L#", capture.output(print(structure(list(1), class = "box_#E#")), if (is.function(box)) "a function" else box))"#,
     r#"log_("format method in paste#L#", t_(paste0("[", format(box), "]")))"#,
     r#"log_("unclass in method#L#", t_(describe_#E#(unclass(box))))"#,
     r#"log_("class<- dispatch#L#", t_({ y <- x; class(y) <- "box_#E#"; length(y) }))"#,

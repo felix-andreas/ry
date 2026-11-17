@@ -57,9 +57,30 @@
 | [1] "error: first call"
 | [1] 2
 | [1] "error: third call"
+| warning: restarting interrupted promise evaluation 
+| typeof(x)
+| [1] "failed" "double"
+| warning: restarting interrupted promise evaluation 
+| rebound(late)
+| [1] "failed" "double"
+| warning: restarting interrupted promise evaluation 
+| rebound(late)
+| [1] "failed" "double"
+| warning: restarting interrupted promise evaluation 
+| measured(late)
+| [1] "failed" "1"      "FALSE"  "FALSE" 
+| warning: restarting interrupted promise evaluation 
+| measured(late)
+| [1] "failed" "1"      "FALSE"  "FALSE" 
+| warning: restarting interrupted promise evaluation 
+| measured(late)
+| [1] "failed" "1"      "FALSE"  "FALSE" 
+| warning: restarting interrupted promise evaluation 
+| typeof(y)
+| [1] "failed" "double"
 [messages]
 [warnings]
 [errors]
 [value]
 character
-| "error: third call"
+| c("failed", "double")

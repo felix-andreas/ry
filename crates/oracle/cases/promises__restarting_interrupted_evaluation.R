@@ -48,3 +48,30 @@ once <- function(p) show(p)
 once(stop("first call"))
 once(sqrt(4))
 once(stop("third call"))
+
+# A promise whose code is a variable bound since the failure warns too, whatever reads it.
+rebound <- function(x) {
+    first <- tryCatch(x, error = function(e) "failed")
+    late <<- 1
+    c(first, typeof(x))
+}
+for (i in 1:3) {
+    print(show(rebound(late)))
+    rm(late)
+}
+measured <- function(x) {
+    first <- tryCatch(x, error = function(e) "failed")
+    late <<- 1
+    c(first, length(x), is.null(x), missing(x))
+}
+for (i in 1:3) {
+    print(show(measured(late)))
+    rm(late)
+}
+passed_on <- function(x) (function(y) typeof(y))(x)
+forwarded <- function(x) {
+    first <- tryCatch(x, error = function(e) "failed")
+    late <<- 1
+    c(first, passed_on(x))
+}
+print(show(forwarded(late)))

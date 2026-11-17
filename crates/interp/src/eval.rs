@@ -44,8 +44,9 @@ pub type Matched = SmallVec<[Sexp; 8]>;
 pub const PROMISE_SEEN: u16 = 1 << 0;
 
 /// The promise bit set when its code left through an error or another jump, so the next force
-/// warns as GNU R does for a `PRSEEN` of 2.
-const PROMISE_INTERRUPTED: u16 = 1 << 1;
+/// warns as GNU R does for a `PRSEEN` of 2. A read that settles a promise without forcing it
+/// leaves such a promise to forcing, which gives the warning.
+pub const PROMISE_INTERRUPTED: u16 = 1 << 1;
 
 /// Evaluates `expression` in `env`. An error raised below is signalled here, so handlers run
 /// close to where it happened.
@@ -1235,7 +1236,7 @@ pub unsafe fn settled_without_code(promise: Sexp) -> R<Option<Sexp>> {
     // Longer chains are rare, and a chain that loops back (`function(x = y, y = x)`) must end
     // in the error forcing raises, so it is left to forcing.
     const CHAIN_LIMIT: usize = 16;
-    if promise.has_gp(PROMISE_SEEN) {
+    if promise.has_gp(PROMISE_SEEN | PROMISE_INTERRUPTED) {
         return Ok(None);
     }
     let mut chain: SmallVec<[Sexp; 4]> = smallvec![promise];
@@ -1255,7 +1256,7 @@ pub unsafe fn settled_without_code(promise: Sexp) -> R<Option<Sexp>> {
         if next.car() != unbound() {
             break next.car();
         }
-        if chain.len() == CHAIN_LIMIT || next.has_gp(PROMISE_SEEN) {
+        if chain.len() == CHAIN_LIMIT || next.has_gp(PROMISE_SEEN | PROMISE_INTERRUPTED) {
             return Ok(None);
         }
         chain.push(next);
