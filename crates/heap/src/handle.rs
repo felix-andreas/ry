@@ -245,6 +245,27 @@ impl<'s> Cx<'s> {
         }
     }
 
+    /// The answer `read` finds in the heap, or else the answer of `rest`, which may allocate.
+    /// Because the answer borrows the context, a caller returns it before the next safepoint
+    /// and it needs no root.
+    #[inline]
+    pub fn read_or<'a, T: Kind, E>(
+        &'a mut self,
+        read: impl for<'r> FnOnce(&'r Cx<'s>) -> Option<Gc<'r, T>>,
+        rest: impl FnOnce(&'a mut Cx<'s>) -> Result<Option<Gc<'a, T>>, E>,
+    ) -> Result<Option<Gc<'a, T>>, E> {
+        let this: *mut Cx<'s> = self;
+        // SAFETY: `this` is the exclusive borrow `self`, used as a shared borrow for `'a` when
+        // `read` answers and as itself when `read` declines, never both: `read` must accept
+        // every lifetime, so it keeps neither the context nor a pointer when it declines.
+        // The borrow checker cannot see that the two uses exclude each other (its "problem
+        // case 3"), which is the only reason this is not written as a plain `if let`.
+        if let Some(answer) = read(unsafe { &*this }) {
+            return Ok(Some(answer));
+        }
+        rest(unsafe { &mut *this })
+    }
+
     /// A new vector of `length` elements: zeros, `NULL`s or empty strings.
     #[inline]
     pub fn alloc<T: Vector>(&mut self, length: usize) -> HeapResult<Fresh<'s, T>> {
@@ -470,6 +491,7 @@ impl<'a> Gc<'a, Pairlist> {
 }
 
 /// A pointer rooted in the handle scope `'s`.
+#[repr(transparent)]
 pub struct Local<'s, T: Kind = Value> {
     raw: Sexp,
     scope: Brand<'s>,
@@ -495,6 +517,17 @@ impl<'s, T: Kind> Local<'s, T> {
             scope: PhantomData,
             kind: PhantomData,
         }
+    }
+
+    /// A caller's raw values as values of the scope, without copying them.
+    ///
+    /// # Safety
+    ///
+    /// Each of `raw` is a live object that `T` admits, and a root keeps it alive for `'s`.
+    #[inline]
+    pub unsafe fn adopt_slice<'a>(raw: &'a [Sexp]) -> &'a [Local<'s, T>] {
+        // SAFETY: the caller's contract, and `Local` is `repr(transparent)` over `Sexp`.
+        unsafe { &*(std::ptr::from_ref(raw) as *const [Local<'s, T>]) }
     }
 
     #[inline]
@@ -990,15 +1023,16 @@ impl Kind for Alt {
 }
 
 macro_rules! kinds {
-    ($($(#[$doc:meta])* $name:ident = $type:ident;)*) => {$(
+    ($($(#[$doc:meta])* $name:ident = $type:ident, |$altrep:ident| $standard:expr;)*) => {$(
         $(#[$doc])*
         pub struct $name;
 
         impl sealed::Sealed for $name {}
 
         impl Kind for $name {
-            fn admits(kind: SexpType, altrep: bool) -> bool {
-                kind == SexpType::$type && !altrep
+            #[inline]
+            fn admits(kind: SexpType, $altrep: bool) -> bool {
+                kind == SexpType::$type && $standard
             }
         }
 
@@ -1006,22 +1040,24 @@ macro_rules! kinds {
     )*};
 }
 
+// Only a vector can be an ALTREP object (`Heap::alloc_altrep`), so the other kinds are told by
+// their type alone, which a walk over an attribute list tests for every cell and tag.
 kinds! {
-    Logical = Logical;
-    Integer = Integer;
-    Real = Real;
-    Complex = Complex;
-    Raw = Raw;
+    Logical = Logical, |altrep| !altrep;
+    Integer = Integer, |altrep| !altrep;
+    Real = Real, |altrep| !altrep;
+    Complex = Complex, |altrep| !altrep;
+    Raw = Raw, |altrep| !altrep;
     /// A character vector.
-    Str = String;
-    List = List;
-    Expression = Expression;
-    Symbol = Symbol;
-    Pairlist = Pairlist;
-    Language = Language;
-    Closure = Closure;
-    Environment = Environment;
-    Promise = Promise;
+    Str = String, |altrep| !altrep;
+    List = List, |altrep| !altrep;
+    Expression = Expression, |altrep| !altrep;
+    Symbol = Symbol, |_altrep| true;
+    Pairlist = Pairlist, |_altrep| true;
+    Language = Language, |_altrep| true;
+    Closure = Closure, |_altrep| true;
+    Environment = Environment, |_altrep| true;
+    Promise = Promise, |_altrep| true;
 }
 
 /// One string, as a character vector's element. It is not an [`Identity`] kind.
@@ -1030,8 +1066,9 @@ pub struct Chars;
 impl sealed::Sealed for Chars {}
 
 impl Kind for Chars {
-    fn admits(kind: SexpType, altrep: bool) -> bool {
-        kind == SexpType::Char && !altrep
+    #[inline]
+    fn admits(kind: SexpType, _altrep: bool) -> bool {
+        kind == SexpType::Char
     }
 }
 

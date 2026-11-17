@@ -803,6 +803,7 @@ pub fn writable<'s, T: Vector>(
 
 /// The position of the first element of `vector` that repeats an earlier one, compared as
 /// `anyDuplicated` compares: strings by text, list elements with `identical`.
+#[inline]
 pub fn first_duplicate(_context: &mut Cx<'_>, vector: Local<'_>) -> R<Option<usize>> {
     // SAFETY: the vector is rooted, and reading an ALTREP vector may allocate, which `&mut Cx`
     // permits.
@@ -901,7 +902,8 @@ pub unsafe fn held<'s>(_context: &Cx<'s>, raw: Sexp) -> Local<'s> {
 }
 
 /// The raw unary entry (`builtins::UnaryFn`) of `$function`, a safe fast path that answers for
-/// one argument value or declines with `None`.
+/// one argument value or declines with `None`. The answer borrows the context, so the fast
+/// path returns a value it read from the heap without rooting it.
 macro_rules! safe_unary {
     ($function:path) => {{
         unsafe fn entry(
@@ -913,7 +915,7 @@ macro_rules! safe_unary {
             unsafe {
                 $crate::handles::with(|context| {
                     let value = $crate::handles::held(context, value);
-                    Ok($function(context, value)?.map($crate::handles::Local::raw))
+                    Ok($function(context, value)?.map($crate::handles::Gc::raw))
                 })
             }
         }
@@ -923,7 +925,7 @@ macro_rules! safe_unary {
 pub(crate) use safe_unary;
 
 /// The raw direct entry (`builtins::DirectFn`) of `$function`, a safe fast path over the
-/// argument values in formal order that answers or declines with `None`.
+/// argument values in formal order that answers or declines with `None`, as a unary one does.
 macro_rules! safe_direct {
     ($function:path) => {{
         unsafe fn entry(
@@ -934,11 +936,8 @@ macro_rules! safe_direct {
             // replacement's target, hold every argument value.
             unsafe {
                 $crate::handles::with(|context| {
-                    let values: smallvec::SmallVec<[$crate::handles::Local<'_>; 4]> = values
-                        .iter()
-                        .map(|&value| $crate::handles::held(context, value))
-                        .collect();
-                    Ok($function(context, &values)?.map($crate::handles::Local::raw))
+                    let values = $crate::handles::Local::adopt_slice(values);
+                    Ok($function(context, values)?.map($crate::handles::Gc::raw))
                 })
             }
         }
@@ -1059,6 +1058,7 @@ pub fn attribute_cells<'a, 's: 'a, T: Kind>(
 }
 
 /// The `dim` attribute as extents, when there is one.
+#[inline]
 pub fn dims(_context: &mut Cx<'_>, object: Local<'_>) -> Option<values::Dims> {
     // SAFETY: the object is rooted, and reading an ALTREP `dim` may run its class's method,
     // which `&mut Cx` permits.
@@ -1066,6 +1066,7 @@ pub fn dims(_context: &mut Cx<'_>, object: Local<'_>) -> Option<values::Dims> {
 }
 
 /// R's `length()` without dispatch, for any object.
+#[inline]
 pub fn length(_context: &mut Cx<'_>, object: Local<'_>) -> usize {
     // SAFETY: the object is rooted, and an ALTREP length may run its class's method, which
     // `&mut Cx` permits.
@@ -1090,11 +1091,7 @@ pub fn names_of<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Local<'s>> {
         // permits; the result is live until the next allocation.
         return Ok(unsafe { rooted(context, values::pairlist_names(object.raw())?) });
     }
-    if object.r_type() == SexpType::Environment {
-        return Ok(null());
-    }
-    let names = get_attribute(context, object, symbol(|symbols| symbols.names));
-    if names.r_type() != SexpType::Nil {
+    if let Some(names) = stored_names(context, object) {
         return Ok(context.root(names));
     }
     let dim = context.root(get_attribute(
@@ -1102,19 +1099,45 @@ pub fn names_of<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Local<'s>> {
         object,
         symbol(|symbols| symbols.dim),
     ));
-    if dim.r_type() == SexpType::Integer && length(context, dim) == 1 {
-        let dimnames = get_attribute(context, object, symbol(|symbols| symbols.dimnames));
-        if let Some(dimnames) = dimnames.downcast::<List>()
-            && dimnames.len() == 1
-        {
-            return Ok(context.root(dimnames.get(0)));
-        }
+    if length(context, dim) == 1 {
+        return Ok(context.root(array_names(context, object)));
     }
     Ok(null())
 }
 
+/// [`names_of`] for an object whose names are not a pairlist's tags, read where they are
+/// stored. It is `None` when only a safepoint can tell: the `dim` is an ALTREP vector, whose
+/// length its class's method reports.
+#[inline]
+pub fn stored_names<'a, 's: 'a>(context: &'a Cx<'_>, object: Local<'s>) -> Option<Gc<'a>> {
+    if object.r_type() == SexpType::Environment {
+        return Some(null().read(context));
+    }
+    let names = get_attribute(context, object, symbol(|symbols| symbols.names));
+    if names.r_type() != SexpType::Nil {
+        return Some(names);
+    }
+    let dim = get_attribute(context, object, symbol(|symbols| symbols.dim));
+    match dim.downcast::<Integer>() {
+        Some(dim) if dim.len() == 1 => Some(array_names(context, object)),
+        Some(_) => Some(null().read(context)),
+        None if dim.r_type() == SexpType::Integer => None,
+        None => Some(null().read(context)),
+    }
+}
+
+/// The names of a one-dimensional array, which are its dimnames.
+fn array_names<'a, 's: 'a>(context: &'a Cx<'_>, object: Local<'s>) -> Gc<'a> {
+    let dimnames = get_attribute(context, object, symbol(|symbols| symbols.dimnames));
+    match dimnames.downcast::<List>() {
+        Some(dimnames) if dimnames.len() == 1 => dimnames.get(0),
+        _ => null().read(context),
+    }
+}
+
 /// `object` to change where it is, as base R's replacement functions do: itself when nothing
 /// else refers to it, and otherwise a copy with its own storage.
+#[inline]
 pub fn unshared<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Owned<'s>> {
     // SAFETY: the object is rooted, and ending a move or copying may run R code or allocate,
     // which `&mut Cx` permits. `modifiable` returns the object itself only when its reference
@@ -1128,6 +1151,7 @@ pub fn unshared<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Owned<'s>> {
 
 /// [`unshared`] for a change of attributes only: the copy of a long vector is an ALTREP
 /// wrapper that shares the elements, so the result has no element access.
+#[inline]
 pub fn attributes_unshared<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Owned<'s>> {
     // SAFETY: as for `unshared`, with `modifiable_attributes`, whose copy is a new wrapper or
     // vector that nothing else refers to.
@@ -1231,6 +1255,7 @@ pub fn set_tags<'s>(
 }
 
 /// The symbol a string names, as GNU R's `installTrChar` gives it for an attribute name.
+#[inline]
 pub fn install_name(_context: &mut Cx<'_>, name: Local<'_, Chars>) -> R<Gc<'static, Symbol>> {
     // SAFETY: the string is rooted and interning may allocate, which `&mut Cx` permits; a
     // symbol lives as long as the heap.
@@ -1238,6 +1263,7 @@ pub fn install_name(_context: &mut Cx<'_>, name: Local<'_, Chars>) -> R<Gc<'stat
 }
 
 /// The symbol of a string as the heap's `install_char` gives it, which installs `NA` as `NA`.
+#[inline]
 pub fn install_interned(_context: &mut Cx<'_>, name: Local<'_, Chars>) -> R<Gc<'static, Symbol>> {
     // SAFETY: as for `install_name`.
     unsafe { Ok(Gc::adopt(crate::heap().install_char(name.raw())?)) }
@@ -1245,6 +1271,7 @@ pub fn install_interned(_context: &mut Cx<'_>, name: Local<'_, Chars>) -> R<Gc<'
 
 /// `value` coerced to `kind` as `coerceVector` does, keeping its attributes; itself when it
 /// already has that type, ALTREP or not.
+#[inline]
 pub fn coerce<'s>(context: &mut Cx<'s>, value: Local<'s>, kind: SexpType) -> R<Local<'s>> {
     if value.r_type() == kind {
         return Ok(value);
@@ -1255,6 +1282,7 @@ pub fn coerce<'s>(context: &mut Cx<'s>, value: Local<'s>, kind: SexpType) -> R<L
 
 /// `value` coerced to another type `kind` with no attributes, as a dimnames component is
 /// stored.
+#[inline]
 pub fn coerce_bare<'s>(context: &mut Cx<'s>, value: Local<'s>, kind: SexpType) -> R<Local<'s>> {
     assert!(value.r_type() != kind, "a coercion to the value's own type");
     let converted = coerce(context, value, kind)?;
@@ -1264,12 +1292,14 @@ pub fn coerce_bare<'s>(context: &mut Cx<'s>, value: Local<'s>, kind: SexpType) -
 }
 
 /// A factor's labels as a character vector.
+#[inline]
 pub fn factor_as_character<'s>(context: &mut Cx<'s>, factor: Local<'s>) -> R<Local<'s>> {
     // SAFETY: the factor is rooted, and the result allocates, which `&mut Cx` permits.
     Ok(unsafe { rooted(context, crate::coerce::factor_as_character(factor.raw())?) })
 }
 
 /// `object` as an ordinary object: an ALTREP instance's expanded form, anything else itself.
+#[inline]
 pub fn materialize<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Local<'s>> {
     // SAFETY: the object is rooted, and expanding it may run its class's methods, which
     // `&mut Cx` permits.
@@ -1298,6 +1328,7 @@ pub fn call_function<'s>(
 }
 
 /// The call `quote(value)`, which evaluates to `value` itself.
+#[inline]
 pub fn quoted<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s>> {
     // SAFETY: the value is rooted, and the call allocates, which `&mut Cx` permits.
     Ok(unsafe {
@@ -1309,12 +1340,24 @@ pub fn quoted<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s>> {
 }
 
 /// The class vector `class()` reports.
+#[inline]
 pub fn class_of<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Local<'s>> {
     // SAFETY: the object is rooted, and an implicit class allocates, which `&mut Cx` permits.
     Ok(unsafe { rooted(context, crate::dispatch::class_of(object.raw())?) })
 }
 
+/// [`class_of`] without a root, for a caller that hands the class on before the next
+/// safepoint.
+#[inline]
+pub fn class_read<'a>(_context: &'a mut Cx<'_>, object: Local<'_>) -> R<Gc<'a>> {
+    // SAFETY: the object is rooted, and an implicit class allocates, which `&mut Cx` permits.
+    // The class is the stored attribute or a new vector, live until the next allocation, which
+    // the borrow of the context rules out.
+    Ok(unsafe { Gc::adopt(crate::dispatch::class_of(object.raw())?) })
+}
+
 /// An S4 object's class and every class it extends, as `is()` lists them.
+#[inline]
 pub fn s4_classes<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Local<'s>> {
     // SAFETY: the object is rooted, and the methods package's R code may run, which `&mut Cx`
     // permits.
@@ -1327,12 +1370,14 @@ pub fn s4_classes<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Local<'s>> {
 }
 
 /// The class of an object with no class attribute and no dims, such as `"numeric"`.
+#[inline]
 pub fn basic_class(object: impl Pointer<Value>) -> &'static str {
     // SAFETY: the handle is a live object, whose type this reads.
     unsafe { crate::dispatch::basic_class(object.raw(), false) }
 }
 
 /// `ls(environment, all.names = TRUE, sorted = FALSE)`.
+#[inline]
 pub fn environment_names<'s>(
     context: &mut Cx<'s>,
     environment: Local<'s, Environment>,
@@ -1347,6 +1392,7 @@ pub fn environment_names<'s>(
 }
 
 /// `1:count` as a compact sequence, when the host provides one.
+#[inline]
 pub fn integer_sequence<'s>(context: &mut Cx<'s>, count: usize) -> R<Option<Local<'s>>> {
     // SAFETY: making the sequence allocates, which `&mut Cx` permits, and the result is live
     // until the next allocation.

@@ -9,11 +9,12 @@ use {
     crate::{
         builtins::{BuiltinDef, Generic, builtin, internal},
         handles::{
-            self, Args, Chars, Cx, Gc, Integer, Local, Str, Symbol, attribute_cells,
-            attributes_unshared, base_namespace, basic_class, call_function, class_of, dense,
-            environment_names, get_attribute, install_name, integer_sequence, is_na, is_object,
-            is_s4, length, logical_scalar, names_of, null, quoted, s4_classes, safe, safe_direct,
-            safe_unary, set_attribute, set_class, symbol, text, unshared,
+            self, Args, Chars, Cx, Gc, Integer, Local, Logical, Str, Symbol, attribute_cells,
+            attributes_unshared, base_namespace, basic_class, call_function, class_of, class_read,
+            dense, environment_names, get_attribute, install_name, integer_sequence, is_na,
+            is_object, is_s4, length, logical_scalar, names_of, null, quoted, s4_classes, safe,
+            safe_direct, safe_unary, set_attribute, set_class, stored_names, symbol, text,
+            unshared,
         },
         subset::{assign_attribute, assign_names, assign_row_names},
         unwind::{R, error},
@@ -70,65 +71,105 @@ pub fn attribute<'s>(
     which: Local<'s, Str>,
     exact: bool,
 ) -> R<Local<'s>> {
-    let (full, partial, ambiguous, wants_names, names_prefix) = {
-        let which = which.get(context, 0);
-        let wanted = which.bytes();
-        // One pass finds both kinds of match. Only a strictly longer tag can be a partial
-        // match, because an equal-length prefix is a full match, so tags of the wanted length
-        // (every tag, in a vector used as a map from fixed-width keys) cost one identity
-        // compare and no memcmp.
-        let mut full = None;
-        let mut partial = None;
-        let mut ambiguous = false;
-        for (tag, value) in attribute_cells(context, object) {
-            let Some(tag) = tag.downcast::<Symbol>() else {
-                continue;
-            };
-            let name = tag.name();
-            if same_chars(name, which) {
-                full = Some((Tag::of(tag), context.root(value)));
-                break;
-            }
-            if !exact {
-                let tag_text = name.bytes();
-                if tag_text.len() > wanted.len() && tag_text.starts_with(wanted) {
-                    ambiguous |= partial.is_some();
-                    partial = Some((Tag::of(tag), context.root(value)));
-                }
-            }
+    match lookup(context, object, which.get(context, 0), exact) {
+        Lookup::Value(value) => Ok(context.root(value)),
+        Lookup::Names => names_of(context, object),
+        Lookup::RowNames(value) => {
+            let value = context.root(value);
+            expand_row_names(context, value)
         }
-        (
-            full,
-            partial,
-            ambiguous,
-            wanted == b"names",
-            b"names".starts_with(wanted),
-        )
-    };
-    if let Some((tag, value)) = full {
-        return attribute_value(context, object, tag, value);
-    }
-    if wants_names {
-        return names_of(context, object);
-    }
-    if exact || ambiguous {
-        return Ok(null());
-    }
-    if names_prefix {
-        match partial {
-            None => return names_of(context, object),
-            // A prefix of both `names` and another tag is ambiguous when names exist.
-            Some((tag, _))
-                if tag != Tag::Names && names_of(context, object)?.r_type() != SexpType::Nil =>
-            {
+        Lookup::Unnamed { value, row_names } => {
+            let value = context.root(value);
+            if names_of(context, object)?.r_type() != SexpType::Nil {
                 return Ok(null());
             }
-            Some(_) => {}
+            if row_names {
+                expand_row_names(context, value)
+            } else {
+                Ok(value)
+            }
+        }
+        Lookup::Missing => Ok(null()),
+    }
+}
+
+/// Where [`lookup`] finds the answer of `attr`.
+enum Lookup<'a> {
+    /// The stored value.
+    Value(Gc<'a>),
+    /// The object's names, which `names_of` reads.
+    Names,
+    /// The row names as stored, which `expand_row_names` reads.
+    RowNames(Gc<'a>),
+    /// The value found for a prefix of `names`, which is the answer only when the object has
+    /// no names, because the prefix is ambiguous otherwise. It may be the stored row names.
+    Unnamed {
+        value: Gc<'a>,
+        row_names: bool,
+    },
+    Missing,
+}
+
+impl<'a> Lookup<'a> {
+    #[inline]
+    fn stored(tag: Gc<'_, Symbol>, value: Gc<'a>) -> Lookup<'a> {
+        if tag.is(symbol(|symbols| symbols.names)) {
+            Lookup::Names
+        } else if tag.is(symbol(|symbols| symbols.row_names)) {
+            Lookup::RowNames(value)
+        } else {
+            Lookup::Value(value)
         }
     }
+}
+
+/// The attribute of `object` that `attr` reads for the name `which`, without reading the
+/// names or expanding the row names, which may allocate.
+#[inline]
+fn lookup<'a, 's: 'a>(
+    context: &'a Cx<'_>,
+    object: Local<'s>,
+    which: Gc<'_, Chars>,
+    exact: bool,
+) -> Lookup<'a> {
+    let wanted = which.bytes();
+    // One pass finds both kinds of match. Only a strictly longer tag can be a partial match,
+    // because an equal-length prefix is a full match, so tags of the wanted length (every tag,
+    // in a vector used as a map from fixed-width keys) cost one identity compare and no memcmp.
+    let mut partial = None;
+    let mut ambiguous = false;
+    for (tag, value) in attribute_cells(context, object) {
+        let Some(tag) = tag.downcast::<Symbol>() else {
+            continue;
+        };
+        let name = tag.name();
+        if same_chars(name, which) {
+            return Lookup::stored(tag, value);
+        }
+        if !exact {
+            let tag_text = name.bytes();
+            if tag_text.len() > wanted.len() && tag_text.starts_with(wanted) {
+                ambiguous |= partial.is_some();
+                partial = Some((tag, value));
+            }
+        }
+    }
+    if wanted == b"names" {
+        return Lookup::Names;
+    }
+    if exact || ambiguous {
+        return Lookup::Missing;
+    }
+    let names = symbol(|symbols| symbols.names);
     match partial {
-        Some((tag, value)) => attribute_value(context, object, tag, value),
-        None => Ok(null()),
+        None if b"names".starts_with(wanted) => Lookup::Names,
+        None => Lookup::Missing,
+        // A prefix of both `names` and another tag is ambiguous when names exist.
+        Some((tag, value)) if b"names".starts_with(wanted) && !tag.is(names) => Lookup::Unnamed {
+            value,
+            row_names: tag.is(symbol(|symbols| symbols.row_names)),
+        },
+        Some((tag, value)) => Lookup::stored(tag, value),
     }
 }
 
@@ -149,21 +190,6 @@ impl Tag {
         } else {
             Tag::Other
         }
-    }
-}
-
-/// `getAttrib`'s value for an attribute stored as `value`.
-#[inline]
-fn attribute_value<'s>(
-    context: &mut Cx<'s>,
-    object: Local<'s>,
-    tag: Tag,
-    value: Local<'s>,
-) -> R<Local<'s>> {
-    match tag {
-        Tag::Names => names_of(context, object),
-        Tag::RowNames => expand_row_names(context, value),
-        Tag::Other => Ok(value),
     }
 }
 
@@ -227,26 +253,39 @@ fn do_attr<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
 }
 
 /// `attr(x, which)` and `attr(x, which, exact)` for one name and a logical `exact`.
-fn direct_attr<'s>(context: &mut Cx<'s>, values: &[Local<'s>]) -> R<Option<Local<'s>>> {
+fn direct_attr<'a, 's>(context: &'a mut Cx<'s>, values: &[Local<'s>]) -> R<Option<Gc<'a>>> {
     let (object, which) = match values {
         [object, which] | [object, which, _] => (*object, *which),
         _ => return Ok(None),
     };
-    if which.r_type() != SexpType::String || length(context, which) != 1 || is_native(object) {
+    let Some(which) = which.downcast::<Str>() else {
+        return Ok(None);
+    };
+    if which.len() != 1 || is_native(object) {
         return Ok(None);
     }
     let exact = match values.get(2) {
         None => false,
-        Some(&exact) if exact.r_type() == SexpType::Logical && length(context, exact) == 1 => {
-            let value = logical_scalar(context, exact);
-            value != NA_LOGICAL && value != 0
-        }
-        Some(_) => return Ok(None),
+        Some(exact) => match exact.downcast::<Logical>() {
+            Some(exact) if exact.len() == 1 => {
+                let value = exact.as_slice(context)[0];
+                value != NA_LOGICAL && value != 0
+            }
+            _ => return Ok(None),
+        },
     };
-    let Some(which) = dense::<Str>(context, which)? else {
-        return Ok(None);
-    };
-    attribute(context, object, which, exact).map(Some)
+    context.read_or(
+        |context| match lookup(context, object, which.get(context, 0), exact) {
+            Lookup::Value(value) => Some(value),
+            Lookup::Missing => Some(null().read(context)),
+            _ => None,
+        },
+        |context| {
+            Ok(Some(
+                attribute(context, object, which, exact)?.read(context),
+            ))
+        },
+    )
 }
 
 fn do_set_attr<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
@@ -284,7 +323,7 @@ fn do_set_attr<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s
 /// `attr(x, which) <- value` from a complex assignment, whose target is already unshared, for
 /// any attribute but the dims, which need `dim<-`'s checks, and a class the full call would
 /// refuse.
-fn direct_set_attr<'s>(context: &mut Cx<'s>, values: &[Local<'s>]) -> R<Option<Local<'s>>> {
+fn direct_set_attr<'a, 's>(context: &'a mut Cx<'s>, values: &[Local<'s>]) -> R<Option<Gc<'a>>> {
     let &[object, which, value] = values else {
         return Ok(None);
     };
@@ -327,7 +366,7 @@ fn direct_set_attr<'s>(context: &mut Cx<'s>, values: &[Local<'s>]) -> R<Option<L
     } else {
         set_attribute(context, &mut object, name, value)?;
     }
-    Ok(Some(object.finish()))
+    Ok(Some(object.finish().read(context)))
 }
 
 /// Whether the character vector `classes` names `"factor"`.
@@ -346,11 +385,11 @@ fn do_attributes<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<
     attributes(context, arguments.value(0))
 }
 
-fn unary_attributes<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Option<Local<'s>>> {
+fn unary_attributes<'a, 's>(context: &'a mut Cx<'s>, object: Local<'s>) -> R<Option<Gc<'a>>> {
     if is_native(object) {
         return Ok(None);
     }
-    attributes(context, object).map(Some)
+    Ok(Some(attributes(context, object)?.read(context)))
 }
 
 /// `attributes(x)`: a named list of the attributes, which shares the tags' print names as its
@@ -406,11 +445,24 @@ fn do_names<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> 
     names_of(context, object)
 }
 
-fn unary_names<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Option<Local<'s>>> {
+fn unary_names<'a, 's>(context: &'a mut Cx<'s>, object: Local<'s>) -> R<Option<Gc<'a>>> {
     if !plain(object) || object.r_type() == SexpType::Environment {
         return Ok(None);
     }
-    names_of(context, object).map(Some)
+    let tagged = matches!(
+        object.r_type(),
+        SexpType::Pairlist | SexpType::Language | SexpType::Dots
+    );
+    context.read_or(
+        |context| {
+            if tagged {
+                None
+            } else {
+                stored_names(context, object)
+            }
+        },
+        |context| Ok(Some(names_of(context, object)?.read(context))),
+    )
 }
 
 fn do_set_names<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
@@ -458,7 +510,7 @@ fn do_set_names<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'
 
 /// `names(x) <- value` from a complex assignment for a plain vector and a plain character
 /// `value` or `NULL`, which need no conversion.
-fn direct_set_names<'s>(context: &mut Cx<'s>, values: &[Local<'s>]) -> R<Option<Local<'s>>> {
+fn direct_set_names<'a, 's>(context: &'a mut Cx<'s>, values: &[Local<'s>]) -> R<Option<Gc<'a>>> {
     let &[object, names] = values else {
         return Ok(None);
     };
@@ -472,11 +524,11 @@ fn direct_set_names<'s>(context: &mut Cx<'s>, values: &[Local<'s>]) -> R<Option<
     if names.r_type() == SexpType::Nil
         && get_attribute(context, object, symbol(|symbols| symbols.names)).r_type() == SexpType::Nil
     {
-        return Ok(Some(object));
+        return Ok(Some(object.read(context)));
     }
     let mut object = unshared(context, object)?;
     assign_names(context, &mut object, names)?;
-    Ok(Some(object.finish()))
+    Ok(Some(object.finish().read(context)))
 }
 
 fn do_dim<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
@@ -488,15 +540,12 @@ fn do_dim<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
     )))
 }
 
-fn unary_dim<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Option<Local<'s>>> {
+fn unary_dim<'a, 's>(context: &'a mut Cx<'s>, object: Local<'s>) -> R<Option<Gc<'a>>> {
     if !plain(object) {
         return Ok(None);
     }
-    Ok(Some(context.root(get_attribute(
-        context,
-        object,
-        symbol(|symbols| symbols.dim),
-    ))))
+    let dim = symbol(|symbols| symbols.dim);
+    Ok(Some(get_attribute(context, object, dim)))
 }
 
 // `class`, `oldClass` and `inherits`.
@@ -505,11 +554,11 @@ fn do_class<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> 
     class_of(context, arguments.value(0))
 }
 
-fn unary_class<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Option<Local<'s>>> {
+fn unary_class<'a, 's>(context: &'a mut Cx<'s>, object: Local<'s>) -> R<Option<Gc<'a>>> {
     if is_native(object) {
         return Ok(None);
     }
-    class_of(context, object).map(Some)
+    class_read(context, object).map(Some)
 }
 
 fn do_old_class<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
@@ -521,64 +570,59 @@ fn do_old_class<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'
     )))
 }
 
-fn unary_old_class<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Option<Local<'s>>> {
+fn unary_old_class<'a, 's>(context: &'a mut Cx<'s>, object: Local<'s>) -> R<Option<Gc<'a>>> {
     if is_native(object) {
         return Ok(None);
     }
-    Ok(Some(context.root(get_attribute(
-        context,
-        object,
-        symbol(|symbols| symbols.class),
-    ))))
+    let class = symbol(|symbols| symbols.class);
+    Ok(Some(get_attribute(context, object, class)))
 }
 
 /// The classes `inherits` tests, which are `class(x)`'s, or for an S4 object its class and every
 /// class it extends, without allocating for an object that has no class attribute.
-enum Classes<'s> {
-    Vector(Local<'s, Str>),
+enum Classes<'a> {
+    Vector(Gc<'a, Str>),
     Fixed(&'static [&'static str]),
     Basic(&'static str),
 }
 
-impl<'s> Classes<'s> {
-    fn of(context: &mut Cx<'s>, object: Local<'s>) -> R<Classes<'s>> {
+impl<'a> Classes<'a> {
+    /// The classes of `object` read where they are stored, or `None` when only a safepoint
+    /// gives them: an S4 object's superclasses, and a class or `dim` that is not a standard
+    /// vector.
+    #[inline]
+    fn stored<'s: 'a>(context: &'a Cx<'_>, object: Local<'s>) -> Option<Classes<'a>> {
         if is_s4(object) {
-            let classes = s4_classes(context, object)?;
-            return Ok(dense::<Str>(context, classes)?.map_or(Classes::Fixed(&[]), Classes::Vector));
+            return None;
         }
         if is_object(object) {
-            let class = context.root(get_attribute(
-                context,
-                object,
-                symbol(|symbols| symbols.class),
-            ));
-            if length(context, class) > 0 {
-                return Ok(
-                    dense::<Str>(context, class)?.map_or(Classes::Fixed(&[]), Classes::Vector)
-                );
+            let class = get_attribute(context, object, symbol(|symbols| symbols.class));
+            match class.downcast::<Str>() {
+                Some(class) if class.len() > 0 => return Some(Classes::Vector(class)),
+                Some(_) => {}
+                None if class.r_type() == SexpType::Nil => {}
+                None => return None,
             }
         }
-        let dim = context.root(get_attribute(
-            context,
-            object,
-            symbol(|symbols| symbols.dim),
-        ));
-        if dim.r_type() != SexpType::Nil {
-            return Ok(Classes::Fixed(if length(context, dim) == 2 {
-                &["matrix", "array"]
-            } else {
-                &["array"]
-            }));
+        let dim = get_attribute(context, object, symbol(|symbols| symbols.dim));
+        if dim.r_type() == SexpType::Nil {
+            return Some(Classes::Basic(basic_class(object)));
         }
-        Ok(Classes::Basic(basic_class(object)))
+        let dim = dim.downcast::<Integer>()?;
+        Some(Classes::Fixed(if dim.len() == 2 {
+            &["matrix", "array"]
+        } else {
+            &["array"]
+        }))
     }
 
     /// The zero-based position of the class whose text is `wanted`.
-    fn position(&self, context: &Cx<'s>, wanted: Gc<'_, Chars>) -> Option<usize> {
+    #[inline]
+    fn position(&self, wanted: Gc<'_, Chars>) -> Option<usize> {
         match *self {
-            Classes::Vector(classes) => classes
-                .iter(context)
-                .position(|class| same_chars(class, wanted)),
+            Classes::Vector(classes) => {
+                (0..classes.len()).position(|index| same_chars(classes.get(index), wanted))
+            }
             Classes::Fixed(classes) => {
                 let bytes = wanted.bytes();
                 classes.iter().position(|class| class.as_bytes() == bytes)
@@ -588,11 +632,33 @@ impl<'s> Classes<'s> {
     }
 }
 
+/// The answer of `body` over the classes of `object`, which are read where they are stored
+/// when [`Classes::stored`] can, so the usual `inherits` roots and allocates nothing.
+#[inline]
+fn over_classes<'s, T>(
+    context: &mut Cx<'s>,
+    object: Local<'s>,
+    body: impl for<'a> FnOnce(&'a Cx<'s>, &Classes<'a>) -> T,
+) -> R<T> {
+    if let Some(classes) = Classes::stored(context, object) {
+        return Ok(body(context, &classes));
+    }
+    let classes = if is_s4(object) {
+        s4_classes(context, object)?
+    } else {
+        class_of(context, object)?
+    };
+    let classes = dense::<Str>(context, classes)?;
+    let classes = classes.map_or(Classes::Fixed(&[]), |classes| {
+        Classes::Vector(classes.read(context))
+    });
+    Ok(body(context, &classes))
+}
+
 fn do_inherits<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
     let object = arguments.value(0);
     let what = arguments.value(1);
     let which = logical_scalar(context, arguments.value(2)) == 1;
-    let classes = Classes::of(context, object)?;
     // A class generator (an R6 or S4 generator, say) names its class through `nameOfClass()`.
     let what = if what.r_type() == SexpType::String {
         what
@@ -606,7 +672,7 @@ fn do_inherits<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s
         }
         name
     };
-    inherits(context, &classes, what, which)
+    inherits(context, object, what, which)
 }
 
 /// `inherits(x, what, which)` for a character `what` and an `x` that is not an S4 object, which
@@ -614,36 +680,38 @@ fn do_inherits<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s
 ///
 /// # Safety
 ///
-/// The caller is on the interpreter's thread, holds no reference into the heap, both values
-/// are live, and the caller roots the result before it allocates.
+/// The caller is on the interpreter's thread, holds no reference into the heap, keeps both
+/// values alive until this returns, and roots the result before it allocates.
 pub(crate) unsafe fn plain_inherits(object: Sexp, what: Sexp, which: bool) -> R<Sexp> {
     handles::with(|context| {
-        let object = handles::adopt(context, object);
-        let what = handles::adopt(context, what);
-        let classes = Classes::of(context, object)?;
-        Ok(inherits(context, &classes, what, which)?.raw())
+        let object = handles::held(context, object);
+        let what = handles::held(context, what);
+        Ok(inherits(context, object, what, which)?.raw())
     })
 }
 
+#[inline]
 fn inherits<'s>(
     context: &mut Cx<'s>,
-    classes: &Classes<'s>,
+    object: Local<'s>,
     what: Local<'s>,
     which: bool,
 ) -> R<Local<'s>> {
     let what = dense::<Str>(context, what)?
         .ok_or_else(|| error("internal error: 'what' is not a character vector"))?;
     if which {
-        let mut result = context.alloc::<Integer>(what.len())?;
-        for (index, slot) in result.as_mut_slice().iter_mut().enumerate() {
-            *slot = classes
-                .position(context, what.get(context, index))
-                .map_or(0, |position| position as i32 + 1);
-        }
+        let positions: SmallVec<[i32; 8]> = over_classes(context, object, |context, classes| {
+            what.iter(context)
+                .map(|class| classes.position(class).map_or(0, |index| index as i32 + 1))
+                .collect()
+        })?;
+        let mut result = context.alloc::<Integer>(positions.len())?;
+        result.as_mut_slice().copy_from_slice(&positions);
         return Ok(result.finish().value());
     }
-    let found = what
-        .iter(context)
-        .any(|class| classes.position(context, class).is_some());
+    let found = over_classes(context, object, |context, classes| {
+        what.iter(context)
+            .any(|class| classes.position(class).is_some())
+    })?;
     handles::logical_constant(context, i32::from(found))
 }
