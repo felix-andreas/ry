@@ -919,7 +919,11 @@ impl Deparser {
                 }
             }
             let user_binop = is_user_binop(name);
-            if user_binop && argument_count == 2 && !has_tag(arguments) {
+            if user_binop
+                && argument_count == 2
+                && arguments.tag() == nil()
+                && arguments.cdr().tag() == nil()
+            {
                 let info = OperatorInfo {
                     kind: Kind::Binary,
                     precedence: precedence::PERCENT,
@@ -1891,16 +1895,6 @@ unsafe fn argument_at(mut arguments: Sexp, index: usize) -> Sexp {
     } else {
         arguments.car()
     }
-}
-
-unsafe fn has_tag(mut arguments: Sexp) -> bool {
-    while arguments != nil() {
-        if arguments.tag() != nil() {
-            return true;
-        }
-        arguments = arguments.cdr();
-    }
-    false
 }
 
 unsafe fn is_curly(expression: Sexp) -> bool {

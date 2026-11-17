@@ -1863,7 +1863,10 @@ pub unsafe fn as_integer_scalar_warning(object: Sexp) -> R<i32> {
             warnings.imaginary = !value.r.is_nan() && !value.i.is_nan() && value.i != 0.0;
             integer
         }
-        SexpType::String => crate::coerce::integer_from_string(object.element(0), &mut warnings)?,
+        SexpType::String => crate::coerce::integer_from_string(
+            heap::handle::Gc::adopt(object.element(0)),
+            &mut warnings,
+        )?,
         _ => as_integer_scalar(object),
     };
     warnings.report()?;
@@ -1882,7 +1885,10 @@ pub unsafe fn as_real_scalar_warning(object: Sexp) -> R<f64> {
             warnings.imaginary = !value.r.is_nan() && !value.i.is_nan() && value.i != 0.0;
             value.r
         }
-        SexpType::String => crate::coerce::real_from_string(object.element(0), &mut warnings)?,
+        SexpType::String => crate::coerce::real_from_string(
+            heap::handle::Gc::adopt(object.element(0)),
+            &mut warnings,
+        )?,
         _ => as_real_scalar(object),
     };
     warnings.report()?;

@@ -782,7 +782,7 @@ unsafe fn do_sorted_fpass(call: &Call<'_>) -> R<Sexp> {
         if length(flag) > 0 {
             match flag.kind() {
                 SexpType::String => {
-                    integer_from_string(flag.element(0), &mut warnings)?;
+                    integer_from_string(heap::handle::Gc::adopt(flag.element(0)), &mut warnings)?;
                 }
                 SexpType::Real => warnings.integer_range = real_to_int(values::reals(flag)[0]).1,
                 SexpType::Complex => {

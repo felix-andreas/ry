@@ -423,41 +423,30 @@ impl Unwind {
     }
 }
 
-/// The message of an error as R reports it, with its call resolved.
-pub unsafe fn resolve_call(call: Sexp) -> Sexp {
-    if call == crate::heap().known().unbound {
-        current_call()
-    } else {
-        match interp().assignment_call {
-            Some((replacement, whole, _)) if replacement == call => reported_assignment(whole),
-            _ => call,
-        }
-    }
-}
-
-/// The call of the innermost closure frame, or `NULL` at top level.
-pub unsafe fn current_call() -> Sexp {
-    let state = interp();
-    if let Some((_, whole, depth)) = state.assignment_call
-        && depth == state.frames.len()
-    {
-        return reported_assignment(whole);
-    }
-    state
-        .frames
-        .last()
-        .map_or(crate::heap().nil(), |frame| frame.call)
-}
-
-/// The complex assignment `whole` as a condition names it. Inside a function GNU R's compiled
+/// The call a condition raised against `call` names: `call` itself, the innermost closure
+/// call for an error raised without one, or the whole assignment when `call` is the generated
+/// replacement call of a complex assignment in progress. Inside a function GNU R's compiled
 /// code names `x[i] <<- value` with the plain arrow, and compiled code is what a closure runs
 /// from its second call on (`.agents/memory/decisions/interp.md`, "A condition names a
 /// superassignment inside a function with the plain arrow").
-unsafe fn reported_assignment(whole: Sexp) -> Sexp {
+pub unsafe fn resolve_call(call: Sexp) -> Sexp {
+    let state = interp();
+    let innermost = call == crate::heap().known().unbound;
+    let whole = match state.assignment_call {
+        Some((_, whole, depth)) if innermost && depth == state.frames.len() => whole,
+        Some((replacement, whole, _)) if !innermost && replacement == call => whole,
+        _ if innermost => {
+            return state
+                .frames
+                .last()
+                .map_or(crate::heap().nil(), |frame| frame.call);
+        }
+        _ => return call,
+    };
     let superassignment = whole.kind() == SexpType::Language
         && whole.car().kind() == SexpType::Symbol
         && whole.car().car().bytes() == b"<<-";
-    if !superassignment || interp().frames.is_empty() {
+    if !superassignment || state.frames.is_empty() {
         return whole;
     }
     let plain =
@@ -470,4 +459,9 @@ unsafe fn reported_assignment(whole: Sexp) -> Sexp {
         // Out of memory while reporting: the condition names the assignment as written.
         Err(_) => whole,
     }
+}
+
+/// The call of the innermost closure frame, or `NULL` at top level.
+pub unsafe fn current_call() -> Sexp {
+    resolve_call(crate::heap().known().unbound)
 }

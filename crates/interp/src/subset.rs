@@ -856,19 +856,6 @@ unsafe fn resolve(
     }
 }
 
-/// GNU R converts a double matrix or array subscript to integer before it resolves it, so a
-/// value outside the integer range selects `NA` with a warning, where a vector subscript of the
-/// same value is quietly out of bounds.
-unsafe fn dimension_subscript(index: Sexp) -> R<Sexp> {
-    const LIMIT: f64 = 2_147_483_648.0;
-    if index.kind() == SexpType::Real
-        && (0..length(index)).any(|position| numeric_element(index, position).abs() >= LIMIT)
-    {
-        return coerce_vector(index, SexpType::Integer);
-    }
-    Ok(index)
-}
-
 /// The object and zero-based position of `x[i]` or `x[[i]]` with one untagged, attribute-free
 /// numeric scalar `i` inside the vector's bounds: the common case GNU R's byte code also
 /// answers before resolving subscripts in general.
@@ -1589,34 +1576,6 @@ impl Iterator for ArrayOffsets<'_> {
 
 // `[[`.
 
-/// An out-of-bounds array subscript in `[` or `[<-`. GNU R reports the failing element: a name
-/// with its dimension, or a position without one.
-unsafe fn array_out_of_bounds(
-    call: Sexp,
-    object: Sexp,
-    dimension: usize,
-    index: Sexp,
-    offset: usize,
-    position: usize,
-) -> Unwind {
-    let named = index.kind() == SexpType::String && offset < length(index);
-    let reported = if named {
-        vector_element(index, offset)
-    } else {
-        values::scalar_real(position as f64 + 1.0)
-    };
-    let reported = match reported {
-        Ok(reported) => reported,
-        Err(failure) => return failure,
-    };
-    crate::heap().root(reported);
-    let bounds = Bounds {
-        dimension: named.then_some(dimension),
-        ..Bounds::of(object)
-    };
-    out_of_bounds(call, "subscript out of bounds", bounds, reported)
-}
-
 /// The positions one subscript of a matrix or array selects along its dimension, with the
 /// errors of GNU R's `int_arraySubscript`. Unlike a vector, a dimension never stretches: a
 /// longer logical subscript and a position past the extent are errors.
@@ -1640,23 +1599,48 @@ unsafe fn dimension_positions(
     } else {
         nil()
     };
-    let index = dimension_subscript(index)?;
+    // GNU R converts a double subscript of a matrix or array to integer before it resolves it,
+    // so a value outside the integer range selects `NA` with a warning, where a vector
+    // subscript of the same value is quietly out of bounds.
+    const LIMIT: f64 = 2_147_483_648.0;
+    let index = if index.kind() == SexpType::Real
+        && (0..length(index)).any(|position| numeric_element(index, position).abs() >= LIMIT)
+    {
+        coerce_vector(index, SexpType::Integer)?
+    } else {
+        index
+    };
     let (positions, _) = resolve(index, extent, names, false, call)?;
-    if let Some((offset, &position)) = positions
+    let Some((offset, &position)) = positions
         .iter()
         .enumerate()
         .find(|&(_, &position)| position >= extent && position != NA_POSITION)
-    {
-        let call = if assigning {
-            crate::unwind::generated_call(call)?
-        } else {
-            call
-        };
-        return Err(array_out_of_bounds(
-            call, object, dimension, index, offset, position,
-        ));
-    }
-    Ok(positions)
+    else {
+        return Ok(positions);
+    };
+    // GNU R reports the failing element: a name with its dimension, or a position without one.
+    let call = if assigning {
+        crate::unwind::generated_call(call)?
+    } else {
+        call
+    };
+    let named = index.kind() == SexpType::String && offset < length(index);
+    let reported = if named {
+        vector_element(index, offset)?
+    } else {
+        values::scalar_real(position as f64 + 1.0)?
+    };
+    crate::heap().root(reported);
+    let bounds = Bounds {
+        dimension: named.then_some(dimension),
+        ..Bounds::of(object)
+    };
+    Err(out_of_bounds(
+        call,
+        "subscript out of bounds",
+        bounds,
+        reported,
+    ))
 }
 
 /// The dimensions of `object` and the positions `indices` select along each, for an assignment
@@ -3671,7 +3655,7 @@ unsafe fn one_index(extent: usize, names: Sexp, index: Sexp) -> R<Slot> {
     }
 }
 
-unsafe fn one_index_position(value: i64, extent: usize, function: &str) -> R<Slot> {
+fn one_index_position(value: i64, extent: usize, function: &str) -> R<Slot> {
     if value > 0 {
         return Ok(Slot::At(value as usize - 1));
     }

@@ -524,9 +524,10 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                         out_of_range |= range;
                         converted
                     }
-                    SexpType::String => {
-                        integer_from_string(sexp_elt(object, index)?, &mut warnings)?
-                    }
+                    SexpType::String => integer_from_string(
+                        heap::handle::Gc::adopt(sexp_elt(object, index)?),
+                        &mut warnings,
+                    )?,
                     SexpType::Raw => altrep::elt::<u8>(object, index as R_xlen_t)? as i32,
                     _ => NA_INTEGER,
                 };
@@ -537,7 +538,10 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                     SexpType::Integer | SexpType::Logical => int_to_real(int_elt(object, index)?),
                     SexpType::Real => real_elt(object, index)?,
                     SexpType::Complex => altrep::elt::<Rcomplex>(object, index as R_xlen_t)?.r,
-                    SexpType::String => real_from_string(sexp_elt(object, index)?, &mut warnings)?,
+                    SexpType::String => real_from_string(
+                        heap::handle::Gc::adopt(sexp_elt(object, index)?),
+                        &mut warnings,
+                    )?,
                     SexpType::Raw => altrep::elt::<u8>(object, index as R_xlen_t)? as f64,
                     _ => NA_REAL,
                 };
@@ -545,9 +549,10 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
             }
             SexpType::Complex => {
                 let value = match object.kind() {
-                    SexpType::String => {
-                        complex_from_string(sexp_elt(object, index)?, &mut warnings)?
-                    }
+                    SexpType::String => complex_from_string(
+                        heap::handle::Gc::adopt(sexp_elt(object, index)?),
+                        &mut warnings,
+                    )?,
                     _ => {
                         let real = match object.kind() {
                             SexpType::Integer | SexpType::Logical => {
@@ -573,9 +578,10 @@ unsafe fn coerce_atomic(object: Sexp, target: SexpType) -> ApiResult<Sexp> {
                 let value = match object.kind() {
                     SexpType::Integer | SexpType::Logical => int_elt(object, index)?,
                     SexpType::Real => real_to_int(real_elt(object, index)?).0,
-                    SexpType::String => {
-                        integer_from_string(sexp_elt(object, index)?, &mut warnings)?
-                    }
+                    SexpType::String => integer_from_string(
+                        heap::handle::Gc::adopt(sexp_elt(object, index)?),
+                        &mut warnings,
+                    )?,
                     _ => NA_INTEGER,
                 };
                 let byte = if (0..=255).contains(&value) {
@@ -2066,7 +2072,10 @@ pub unsafe extern "C" fn Rf_asComplex(object: Sexp) -> Rcomplex {
         };
         if !object.kind().is_atomic() || xlength(object)? < 1 {
             if object.kind() == SexpType::Char {
-                return complex_from_string(object, &mut CoercionWarnings::default());
+                return complex_from_string(
+                    heap::handle::Gc::adopt(object),
+                    &mut CoercionWarnings::default(),
+                );
             }
             return Ok(na);
         }

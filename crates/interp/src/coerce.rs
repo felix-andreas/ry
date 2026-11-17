@@ -4,6 +4,7 @@ use {
     crate::{
         builtins::{BuiltinDef, Call, Generic, builtin, internal, is_native_value},
         conditions, deparse,
+        handles::is_na,
         strings::with_text_buffer,
         system::r_at_least,
         unwind::{R, error},
@@ -12,6 +13,7 @@ use {
         },
     },
     heap::{
+        handle::{Chars, Gc},
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
         strings::Encoding,
     },
@@ -81,7 +83,7 @@ pub unsafe fn integer_scalar(object: Sexp) -> R<i32> {
             converted
         }
         SexpType::Complex => complex_to_int(values::complexes(object)[0], &mut warnings),
-        SexpType::String => integer_from_string(object.element(0), &mut warnings)?,
+        SexpType::String => integer_from_string(Gc::adopt(object.element(0)), &mut warnings)?,
         _ => values::as_integer_scalar(object),
     };
     warnings.report()?;
@@ -99,9 +101,9 @@ fn raw_candidate(value: i32) -> i64 {
 
 /// GNU R's `RealFromString`: `NA` and a blank string are missing, a number with only white
 /// space after it is its value, and any other text is missing with the coercion warning.
-pub unsafe fn real_from_string(charsxp: Sexp, warnings: &mut CoercionWarnings) -> R<f64> {
-    let text = charsxp.bytes();
-    if charsxp == na_string() || is_blank(text)? {
+pub fn real_from_string(chars: Gc<'_, Chars>, warnings: &mut CoercionWarnings) -> R<f64> {
+    let text = chars.bytes();
+    if is_na(chars) || is_blank(text)? {
         return Ok(NA_REAL);
     }
     let number = strtod(text, b'.', false, Exactness::Allow);
@@ -114,20 +116,20 @@ pub unsafe fn real_from_string(charsxp: Sexp, warnings: &mut CoercionWarnings) -
 
 /// GNU R's `IntegerFromString`: the string as `real_from_string` reads it, truncated, and
 /// missing with the range warning outside the integers.
-pub unsafe fn integer_from_string(charsxp: Sexp, warnings: &mut CoercionWarnings) -> R<i32> {
-    let (converted, out_of_range) = real_to_int(real_from_string(charsxp, warnings)?);
+pub fn integer_from_string(chars: Gc<'_, Chars>, warnings: &mut CoercionWarnings) -> R<i32> {
+    let (converted, out_of_range) = real_to_int(real_from_string(chars, warnings)?);
     warnings.integer_range |= out_of_range;
     Ok(converted)
 }
 
 /// GNU R's `ComplexFromString`: a real `a`, an imaginary `bi` or `a+bi`.
-pub unsafe fn complex_from_string(charsxp: Sexp, warnings: &mut CoercionWarnings) -> R<Rcomplex> {
+pub fn complex_from_string(chars: Gc<'_, Chars>, warnings: &mut CoercionWarnings) -> R<Rcomplex> {
     let missing = Rcomplex {
         r: NA_REAL,
         i: NA_REAL,
     };
-    let text = charsxp.bytes();
-    if charsxp == na_string() || is_blank(text)? {
+    let text = chars.bytes();
+    if is_na(chars) || is_blank(text)? {
         return Ok(missing);
     }
     let first = strtod(text, b'.', false, Exactness::Allow);
@@ -183,13 +185,7 @@ pub(crate) fn is_blank(text: &[u8]) -> R<bool> {
     while !rest.is_empty() {
         // One character is at most four bytes, so only those are validated per step.
         let head = &rest[..rest.len().min(4)];
-        let valid = match std::str::from_utf8(head) {
-            Ok(valid) => valid,
-            Err(failure) => {
-                // SAFETY: `valid_up_to` is the length of a valid UTF-8 prefix.
-                unsafe { std::str::from_utf8_unchecked(&head[..failure.valid_up_to()]) }
-            }
-        };
+        let valid = head.utf8_chunks().next().map_or("", |chunk| chunk.valid());
         if let Some(character) = valid.chars().next() {
             if !is_wide_space(character) {
                 return Ok(false);
@@ -635,7 +631,9 @@ pub unsafe fn coerce_atomic(
                         value
                     }
                     SexpType::Complex => complex_to_int(values::complexes(object)[index], warnings),
-                    SexpType::String => integer_from_string(object.element(index), warnings)?,
+                    SexpType::String => {
+                        integer_from_string(Gc::adopt(object.element(index)), warnings)?
+                    }
                     SexpType::Raw => values::raws(object)[index] as i32,
                     _ => NA_INTEGER,
                 };
@@ -660,7 +658,9 @@ pub unsafe fn coerce_atomic(
                         }
                         value.r
                     }
-                    SexpType::String => real_from_string(object.element(index), warnings)?,
+                    SexpType::String => {
+                        real_from_string(Gc::adopt(object.element(index)), warnings)?
+                    }
                     SexpType::Raw => values::raws(object)[index] as f64,
                     _ => NA_REAL,
                 };
@@ -691,7 +691,9 @@ pub unsafe fn coerce_atomic(
                         r: values::reals(object)[index],
                         i: 0.0,
                     },
-                    SexpType::String => complex_from_string(object.element(index), warnings)?,
+                    SexpType::String => {
+                        complex_from_string(Gc::adopt(object.element(index)), warnings)?
+                    }
                     SexpType::Raw => Rcomplex {
                         r: values::raws(object)[index] as f64,
                         i: 0.0,
@@ -748,9 +750,10 @@ pub unsafe fn coerce_atomic(
                         warnings.integer_range |= out_of_range;
                         raw_candidate(converted)
                     }
-                    SexpType::String => {
-                        raw_candidate(integer_from_string(object.element(index), warnings)?)
-                    }
+                    SexpType::String => raw_candidate(integer_from_string(
+                        Gc::adopt(object.element(index)),
+                        warnings,
+                    )?),
                     SexpType::Complex => {
                         raw_candidate(complex_to_int(values::complexes(object)[index], warnings))
                     }
