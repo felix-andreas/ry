@@ -13,10 +13,13 @@
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
-if [ "$1" = --fetch ]; then
+if [ "${1:-}" = --fetch ]; then
 	output='' rcmd='' libr=''
-else
+elif [ $# -eq 3 ]; then
 	output=$1 rcmd=$2 libr=$3
+else
+	echo "usage: tools/base-r/build.sh OUTPUT RY_RCMD LIBR | --fetch" >&2
+	exit 2
 fi
 version=$(tr -d '[:space:]' < "$here/VERSION")
 name="R-$version.tar.gz"

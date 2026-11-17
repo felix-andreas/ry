@@ -5,19 +5,20 @@
 //! often GNU R's own, and building runs code no session runs afterwards: the methods package
 //! defines its basic classes and their relations once, at installation, and saves the result.
 //!
-//! The test skips without the source tarball in the download cache (`tools/base-r/build.sh
-//! --fetch`, which `just gate` and `just base-r` run) and without a built runtime
-//! (`cargo build -p ry-lang -p libr -p rcmd`).
+//! The test builds `ry`, `libR.so` and `ry-rcmd` first unless `ORACLE_RY` names another build. It
+//! skips without the source tarball in the download cache (`tools/base-r/build.sh --fetch`, which
+//! `just gate` and `just base-r` run).
 
 #![cfg(unix)]
 
 use {
-    oracle::{ry_program, ry_runtime_available},
+    oracle::{ry_program, target_directory},
     std::{
         fs,
         path::{Path, PathBuf},
         process::Command,
     },
+    syntax::testing::cargo_build,
 };
 
 /// S4 dispatch, a class over a basic class, and the default packages, on the base R just built.
@@ -41,10 +42,11 @@ const EXPECTED: &str = "[1] \"size\"\n3 TRUE TRUE \nTRUE \n2 150 \n";
 fn base_packages_build_on_this_runtime() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let version = include_str!("../../../tools/base-r/VERSION").trim();
-    // Where `build.sh` keeps its downloads.
-    let cache = std::env::var_os("R_SOURCE_CACHE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace.join("target/base-r-source"));
+    // Where `build.sh` keeps its downloads; `just` resolves a relative cache from the root.
+    let cache = match std::env::var_os("R_SOURCE_CACHE") {
+        Some(cache) => workspace.join(cache),
+        None => workspace.join("target/base-r-source"),
+    };
     let tarball = cache.join(format!("R-{version}.tar.gz"));
     if !tarball.is_file() {
         eprintln!(
@@ -53,15 +55,29 @@ fn base_packages_build_on_this_runtime() {
         );
         return;
     }
+    if std::env::var_os("ORACLE_RY").is_none() {
+        let built = cargo_build(&target_directory().join("debug"))
+            .args(["-p", "ry-lang", "-p", "libr", "-p", "rcmd"])
+            .current_dir(&workspace)
+            .status()
+            .expect("cargo runs");
+        assert!(
+            built.success(),
+            "cargo build -p ry-lang -p libr -p rcmd failed"
+        );
+    }
     let ry = PathBuf::from(ry_program());
     let directory = ry.parent().unwrap_or(Path::new("."));
-    let (rcmd, libr) = (directory.join("ry-rcmd"), directory.join("libR.so"));
-    if !ry_runtime_available() || !rcmd.is_file() || !libr.is_file() {
-        eprintln!(
-            "skipped: ry's runtime is not built; run `cargo build -p ry-lang -p libr -p rcmd`"
-        );
-        return;
-    }
+    let rcmd = directory.join("ry-rcmd");
+    let libr = match std::env::var_os("RY_LIBR") {
+        Some(library) => PathBuf::from(library),
+        None => directory.join("libR.so"),
+    };
+    assert!(
+        ry.is_file() && rcmd.is_file() && libr.is_file(),
+        "{} holds no built runtime (ry, ry-rcmd and libR.so)",
+        directory.display()
+    );
     let scratch = std::env::temp_dir().join(format!("ry-base-build-{}", std::process::id()));
     let output = scratch.join("base-r");
     fs::create_dir_all(&scratch).expect("the scratch directory is created");
@@ -72,6 +88,7 @@ fn base_packages_build_on_this_runtime() {
         .env_remove("R_HOME")
         .output()
         .expect("tools/base-r/build.sh runs");
+    // A failed build names the partial tree it keeps under `scratch`.
     assert!(
         build.status.success(),
         "the base packages do not build on this runtime ({}):\n{}{}",
@@ -89,11 +106,11 @@ fn base_packages_build_on_this_runtime() {
         .output()
         .expect("ry runs");
     let printed = String::from_utf8_lossy(&session.stdout);
+    fs::remove_dir_all(&scratch).expect("the scratch directory is removed");
     assert!(
         session.status.success() && printed == EXPECTED,
         "a session on the base R just built went wrong ({}):\n{printed}{}",
         session.status,
         String::from_utf8_lossy(&session.stderr)
     );
-    fs::remove_dir_all(&scratch).expect("the scratch directory is removed");
 }

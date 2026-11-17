@@ -61,8 +61,9 @@ test *args:
 # The pre-landing check: tests, clippy at -D warnings, fmt, the licence notices, the memory layout and comment length.
 gate: base-r-source battery clippy fmt-check (notices "--check") (readme "--check") (memory "check") comments unsafe
 
-# Fetch GNU R's pinned source release into the download cache. The battery's check that the base
-# packages build on this checkout's runtime (`test_base_build` in the oracle crate) skips without it.
+# Fetch GNU R's pinned source release into the download cache, over the network when it is not
+# there. The battery's check that the base packages build on this checkout's runtime
+# (`test_base_build` in the oracle crate) skips without it, so the gate fails instead.
 base-r-source:
     tools/base-r/build.sh --fetch
 
