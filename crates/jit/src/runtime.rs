@@ -825,7 +825,13 @@ pub unsafe extern "C" fn jit_call_builtin(
 /// cost every hit a stack frame.
 pub unsafe extern "C" fn jit_element_step(activation: *mut Activation, pc: i64, fast: i32) -> i32 {
     unsafe {
+        let mark = heap().handle_mark();
         if fast != 0 && bytecode::fast_step(machine(&*activation), pc as usize) {
+            debug_assert_eq!(
+                heap().handle_mark(),
+                mark,
+                "a fast handler left handles behind, which the next stepped call releases"
+            );
             return element::HANDLED;
         }
         checked(activation, element::FAILED, |activation| {

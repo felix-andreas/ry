@@ -9215,9 +9215,14 @@ unsafe fn read_altrep_element_call(state: &mut Activation<'_, '_>, at: usize) ->
             heap.try_alloc_scalar(kind, [bits, 0])?
         }
         None => {
+            // The conversion roots what it works on, and compiled code that steps this read
+            // releases nothing after it. The element stays reachable from the vector.
+            let mark = heap.handle_mark();
+            let element = values::altrep_string_elt(subject, offset);
+            heap.release_handles(mark);
             // An error converting the element (only running out of memory) declines, and the
             // builtin then converts it again and raises that error.
-            let element = values::altrep_string_elt(subject, offset).ok()?;
+            let element = element.ok()?;
             let scalar = heap.try_alloc_scalar(kind, [element.as_ptr() as u64, 0])?;
             // The store `Heap::set_element` would count into a fresh vector.
             element.increment_refcount();
