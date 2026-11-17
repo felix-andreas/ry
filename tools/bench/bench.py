@@ -8,6 +8,7 @@ The suites, each described by the suite.toml in its directory:
   packages      Package test suites: the pinned CRAN packages of packages/lock.tsv.
   kernels       Numeric kernels: our loops, recursion, arrays and numeric math.
   applications  Application workloads: our calls, dispatch, conditions, records and tables.
+  appsuite      Application test suite: a test user's workload of 13 sections and its 236 patterns.
   codebases     The three 300,000-line benchmark code bases, each running its test suite.
   hot           Hot package entries: the package calls that dominate the code bases, replayed in a loop.
   typed         Typed ry against Rust: every typed kernel and application beside its Rust twin.
@@ -116,6 +117,19 @@ base's instructions, which needs a build with symbols (`cargo build --profile pr
 `--save-dumps DIR` keeps each program's callgrind dumps as `DIR/<program>.<n>.callgrind`, for
 `callgrind_annotate` and for a function's inclusive cost and call count.
 
+The appsuite suite (appsuite/suite.toml) models a test user's application test suite. Its
+workload, appsuite/app_workload.R, has 13 sections whose rounds give each section the share of GNU
+R's time that its kind of code has in that suite, and it prints the CPU seconds of each section, so
+the suite is scored by the total, the sum of the sections, as GNU R's total over ry's in each round
+(`appsuite_summary`), never by a geometric mean. One process per engine and round runs the whole
+workload. Each file of appsuite/patterns/ times one kind of call per pattern and prints its
+nanoseconds per call; a pattern's time is that, in seconds. Beside GNU R and ry, three engines run
+the sections only: ry with `RY_PROFILE_SUMMARY`, which gives the summary's cost and the share of
+the time in JIT-compiled code, and GNU R and ry contended, where as many workload processes as the
+machine has cores run at once and a section's time is the mean over them. A contended ry's ratio
+is to a contended GNU R, and the summary gives each engine's slowdown under contention. The suite
+runs no extra rounds, because a wide interval there would rerun a whole pattern file.
+
 Usage: tools/bench/bench.py SUITE... | all [--release ARCHIVE | --ry PATH] [--rscript PATH] [--rounds N] [--seed N]
                             [--filter TEXT] [--extra-rounds N] [--samples FILE] [--write]
                             [--baseline PATH] [--jit-off] [--partial] [--any-build]
@@ -135,7 +149,7 @@ import sweep  # noqa: E402
 import typed_package  # noqa: E402
 from evict import evict  # noqa: E402
 
-SUITES = ["public", "packages", "kernels", "applications", "codebases", "hot", "typed", "builtins"]
+SUITES = ["public", "packages", "kernels", "applications", "appsuite", "codebases", "hot", "typed", "builtins"]
 # The suites whose programs may have a typed version, which the `ry typed` engine runs.
 TYPED_SUITES = ("public", "kernels", "applications")
 # The suite that times typed ry against Rust, where every other suite times ry against GNU R.
@@ -145,6 +159,8 @@ HOT_SUITE = "hot"
 # The per-function sweep of base, stats and utils, whose cases come from builtins/cases/*.R rather
 # than from suite.toml, and whose runner times every case of a round in one process per engine.
 BUILTINS_SUITE = "builtins"
+# A test user's application workload and its patterns, scored by the workload's total time.
+APP_SUITE = "appsuite"
 # `rustc -O` is opt-level 3, the level of cargo's release profile, and names no target CPU, so a
 # Rust twin is built the way a released Rust program is.
 RUSTC_FLAGS = ["-O", "--edition", "2024"]
@@ -155,7 +171,7 @@ PUBLISHED_ROUNDS = 10
 # The builtins suite times each case in five batches inside every process and keeps the median, and a
 # round of its thousands of cases takes most of an hour on each engine, so three rounds are enough to
 # judge a function against the ratchet's tolerance.
-SUITE_ROUNDS = {"builtins": (3, 2)}
+SUITE_ROUNDS = {"builtins": (3, 2), APP_SUITE: (10, 0)}
 # Below this many seconds a time mostly measures start-up and the timer.
 SHORT = 0.1
 # The codebases suite compares each test block's time, and only blocks GNU R runs in at least this
@@ -172,6 +188,15 @@ HOT_TIMEOUT = 3600
 # The builtins harness times batches of at least 10 ms of calls with a clock that resolves to the
 # microsecond, so no case of it is too short; a call's own time may be a few nanoseconds.
 BUILTINS_SHORT = 0.0
+# Every section of the application workload runs for at least 0.4 s of GNU R's CPU time, and every
+# pattern's batch for 0.3 s, so neither is too short; a pattern's time per call is far below 0.1 s.
+APP_SHORT = 0.0
+# The application workload's line for a section (`name seconds checksum`), and a pattern's line
+# (`label<TAB>nanoseconds`).
+APP_SECTION = re.compile(r"^(?P<name>[a-z]+) +(?P<seconds>[0-9.]+)  (?P<check>\S+)$")
+APP_PATTERN = re.compile(r"^(?P<label>[^\t]+)\t(?P<nanoseconds>[0-9]+)$")
+# The row of a profile summary's time split that is time in JIT-compiled code (tier 1).
+TIER_ONE = re.compile(r"^\| JIT-compiled code \| (?P<share>[0-9.]+)% \|", re.M)
 # The harness processes one instruction pass deals the suite's programs over (`instructions_of`).
 INSTRUCTION_SHARDS = 4
 # The same floor for the typed suite. Both of its harnesses time a warm run inside the process, so
@@ -319,12 +344,29 @@ def suite_args(args, suite):
 # Suites and engines.
 
 class Engine:
-    def __init__(self, key, label, command, env, typed=False, ahead=False, installed=False):
+    def __init__(self, key, label, command, env, typed=False, ahead=False, installed=False,
+                 groups=None, versus=None, processes=1, profiled=False):
         self.key, self.label, self.command, self.env, self.typed = key, label, command, env, typed
         # Whether the engine compiles a program's typed functions before the program starts.
         self.ahead = ahead
         # Whether the engine runs the typed program's definitions from an installed package.
         self.installed = installed
+        # The program groups the engine runs, or None for all of them.
+        self.groups = groups
+        # The engine its ratios compare with, when that is not the suite's baseline. An engine that
+        # names itself is the baseline of others and has no ratio of its own.
+        self.versus = versus
+        # How many processes run the program at once, each on a core of its own.
+        self.processes = processes
+        # Whether the engine writes a profile summary (`RY_PROFILE_SUMMARY`).
+        self.profiled = profiled
+
+
+def runs_on(engine, program):
+    """Whether the engine runs the program: a typed engine only a program with a typed version, and
+    an engine limited to some groups only their programs."""
+    return ((not engine.typed or "typed_source" in program)
+            and (engine.groups is None or program.get("group") in engine.groups))
 
 
 def baseline_key(suite):
@@ -340,7 +382,7 @@ def ratio_kind(suite):
 
 
 def short_floor(suite):
-    return {RUST_SUITE: RUST_SHORT, HOT_SUITE: HOT_SHORT, BUILTINS_SUITE: BUILTINS_SHORT}.get(suite, SHORT)
+    return {RUST_SUITE: RUST_SHORT, HOT_SUITE: HOT_SHORT, BUILTINS_SUITE: BUILTINS_SHORT, APP_SUITE: APP_SHORT}.get(suite, SHORT)
 
 
 def engines(args, suite):
@@ -368,6 +410,15 @@ def engines(args, suite):
         table.append(Engine("ry_typed_aot", "ry typed, AOT", ry + ["--aot"], ry_env, typed=True, ahead=True))
     if suite in ("kernels", "applications"):
         table.append(Engine("ry_typed_file", "ry typed, installed", ry, ry_env, typed=True, installed=True))
+    if suite == APP_SUITE:
+        # The contended engines model a CI machine that runs one test process per core.
+        cores = os.cpu_count() or 1
+        sections = {"sections"}
+        table.append(Engine("ry_profiled", "ry, profile summary", ry, ry_env, groups=sections, profiled=True))
+        table.append(Engine("gnu_r_contended", f"GNU R, {cores} processes", table[0].command, base,
+                            groups=sections, versus="gnu_r_contended", processes=cores))
+        table.append(Engine("ry_contended", f"ry, {cores} processes", ry, ry_env,
+                            groups=sections, versus="gnu_r_contended", processes=cores))
     if args.jit_off or suite in ("codebases", BUILTINS_SUITE):
         table.append(Engine("ry_nojit", "ry, JIT off", ry, dict(ry_env, RY_JIT="off")))
     if args.baseline:
@@ -504,6 +555,8 @@ def load_suite(suite, rscript="Rscript"):
             if named is not None and not (root / named).exists():
                 sys.exit(f"error: {suite}/suite.toml names {named}, which does not exist")
     listed = {program["id"] for program in manifest["programs"]}
+    if suite == APP_SUITE:
+        check_app_suite(manifest)
     if suite in ("kernels", "applications"):
         present = {path.name.removesuffix(".R") for path in (here / suite).glob("*.R")
                    if not path.name.endswith(".typed.R")}
@@ -576,6 +629,24 @@ def check_rust_suite(manifest):
                          f"which must be {value!r}")
 
 
+def check_app_suite(manifest):
+    """Exits unless the suite lists the workload's sections and every pattern of patterns/, each under
+    its label and with the file that times it."""
+    workload = (here / APP_SUITE / "app_workload.R").read_text()
+    sections = re.search(r"^rounds <- c\((.*?)^\)", workload, re.M | re.S)
+    named = re.findall(r"^\s*([a-z]+) = \d+", sections[1], re.M) if sections else []
+    patterns = {label: f"tools/bench/{APP_SUITE}/patterns/{path.name}"
+                for path in sorted((here / APP_SUITE / "patterns").glob("r[0-9]*.R"))
+                for label in re.findall(r'\bbench\(\s*"((?:[^"\\]|\\.)*)"', path.read_text())}
+    expected = {name: ("sections", f"tools/bench/{APP_SUITE}/app_workload.R") for name in named}
+    expected.update({label: ("patterns", source) for label, source in patterns.items()})
+    listed = {program["id"]: (program.get("group"), program.get("source")) for program in manifest["programs"]}
+    if listed != expected:
+        wrong = sorted(set(listed) ^ set(expected)) + sorted(name for name in set(listed) & set(expected)
+                                                            if listed[name] != expected[name])
+        sys.exit(f"error: {APP_SUITE}/suite.toml and the workload and pattern files disagree on {wrong[:10]}")
+
+
 def selected(manifest, args):
     return [program for program in manifest["programs"]
             if args.filter in program["id"] or args.filter == program.get("group")]
@@ -631,7 +702,7 @@ def run_suite(suite, manifest, missing, args, meta):
     table = engines(args, suite)
     programs = selected(manifest, args)
     runners = {"public": PublicRunner, "packages": PackageRunner, "codebases": CodebaseRunner, RUST_SUITE: RustRunner,
-               HOT_SUITE: HotRunner, BUILTINS_SUITE: SweepRunner}
+               HOT_SUITE: HotRunner, BUILTINS_SUITE: SweepRunner, APP_SUITE: AppSuiteRunner}
     runner = runners.get(suite, WorkloadRunner)(suite, args)
     samples_path = samples_file(args, suite)
     state = load_samples(samples_path, args, table, programs)
@@ -673,6 +744,8 @@ def run_suite(suite, manifest, missing, args, meta):
         print_builtins(results)
     else:
         print_table(results, table)
+    if suite == APP_SUITE:
+        print_appsuite(results)
     if suite == HOT_SUITE:
         print_hot(results)
     for key, found in results["worst"].items():
@@ -708,7 +781,7 @@ def shuffle_round(shuffle, programs, table):
     shuffle.shuffle(order)
     plan = []
     for program in order:
-        engines_here = [engine for engine in table if not engine.typed or "typed_source" in program]
+        engines_here = [engine for engine in table if runs_on(engine, program)]
         shuffle.shuffle(engines_here)
         plan.append((program, engines_here))
     return plan
@@ -718,8 +791,9 @@ def run_round(runner, plan, state):
     measured = {program["id"]: {} for program, _ in plan}
     if getattr(runner, "batched", False):
         # One process per engine runs the round's programs, in the round's order, and the engines
-        # take turns in the order the round drew for its first program.
-        for engine in plan[0][1] if plan else []:
+        # take turns in the order the round drew for its first program, then for the next program
+        # that adds an engine.
+        for engine in dict.fromkeys(engine for _, engines_here in plan for engine in engines_here):
             programs = [program for program, engines_here in plan if engine in engines_here]
             for name, result in runner.run_batch(programs, engine).items():
                 measured[name][engine.key] = result
@@ -1290,6 +1364,76 @@ class SweepRunner:
         pass
 
 
+class AppSuiteRunner:
+    """The appsuite suite: a round runs the workload's selected sections in one process per engine
+    (`SECTIONS`), or in one process per core at once on a contended engine, and each pattern file
+    that holds a selected pattern in a process of its own. A section's result is the CPU seconds the
+    workload prints for it and its checksum, with the process's wall seconds beside them; a
+    pattern's is its time per call. A profiled engine's sections also carry the share of the run in
+    JIT-compiled code, from the profile summary."""
+
+    batched = True
+
+    def __init__(self, suite, args):
+        self.network = []
+        self.work = pathlib.Path(tempfile.mkdtemp(prefix=f"ry-bench-{suite}-"))
+        self.workload = here / APP_SUITE / "app_workload.R"
+
+    def run(self, program, engine):
+        return self.run_batch([program], engine)[program["id"]]
+
+    def run_batch(self, programs, engine):
+        sections = [program["id"] for program in programs if program.get("group") == "sections"]
+        patterns = [program for program in programs if program.get("group") == "patterns"]
+        results = self.run_sections(sections, engine) if sections else {}
+        for source in dict.fromkeys(program["source"] for program in patterns):
+            wanted = [program["id"] for program in patterns if program["source"] == source]
+            results.update(self.run_patterns(root / source, wanted, engine))
+        return results
+
+    def run_sections(self, names, engine):
+        env = dict(engine.env, SECTIONS=",".join(names))
+        summary = self.work / f"profile-{engine.key}.md"
+        if engine.profiled:
+            env["RY_PROFILE_SUMMARY"] = str(summary)
+        command = engine.command + [str(self.workload)]
+        with concurrent.futures.ThreadPoolExecutor(engine.processes) as pool:
+            runs = list(pool.map(lambda _: spawn(command, env, cwd=self.work, sample=False), range(engine.processes)))
+        parsed = []
+        for status, out, err, wall, _ in runs:
+            lines = {found["name"]: found for found in map(APP_SECTION.match, out.splitlines()) if found}
+            if status != 0 or not all(name in lines for name in names):
+                return {name: {"seconds": None, "reason": failure_reason(out, err)} for name in names}
+            parsed.append((lines, wall))
+        extra = {}
+        if engine.profiled:
+            found = TIER_ONE.search(summary.read_text()) if summary.exists() else None
+            # The summary leaves out an activity that took no sample, such as JIT-compiled code
+            # when nothing tiered up.
+            extra["tier1_share"] = float(found["share"]) / 100 if found else 0.0
+            summary.unlink(missing_ok=True)
+        results = {}
+        for name in names:
+            checks = sorted({lines[name]["check"] for lines, _ in parsed})
+            if len(checks) > 1:
+                results[name] = {"seconds": None, "reason": f"the processes printed different checksums: {', '.join(checks)}"}
+                continue
+            results[name] = {"seconds": statistics.fmean(float(lines[name]["seconds"]) for lines, _ in parsed),
+                             "checksum": checks[0], "wall": round(statistics.fmean(wall for _, wall in parsed), 3), **extra}
+        return results
+
+    def run_patterns(self, source, wanted, engine):
+        status, out, err, _, _ = spawn(engine.command + [str(source)], engine.env, cwd=self.work, sample=False)
+        reported = {found["label"]: int(found["nanoseconds"]) for found in map(APP_PATTERN.match, out.splitlines()) if found}
+        missing = {"seconds": None, "reason": failure_reason(out, err) if status != 0 else "the file printed no line for it"}
+        # A pattern checks nothing, so every engine reports the same checksum.
+        return {label: {"seconds": reported[label] / 1e9, "checksum": "-"} if label in reported else missing
+                for label in wanted}
+
+    def close(self):
+        shutil.rmtree(self.work, ignore_errors=True)
+
+
 def hot_program_table(programs):
     """The program table hot/harness.R reads: a header, then per program its id and
     comma-separated lists of its sample files, iterations, rng, threw and fresh flags and namespaces."""
@@ -1786,9 +1930,12 @@ def interval(ratios, seed, resamples=2000):
 
 
 def round_ratios(state, program, table, engine, kind):
-    """An engine's ratio to the baseline, the first engine of the table, in each round where both
-    ran: the baseline's time on top for a speed-up, the engine's for a slowdown."""
-    baseline = table[0].key
+    """An engine's ratio to the baseline, the first engine of the table or the one the engine names
+    (`Engine.versus`), in each round where both ran: the baseline's time on top for a speed-up, the
+    engine's for a slowdown. An engine that is its own baseline has none."""
+    baseline = engine.versus or table[0].key
+    if baseline == engine.key:
+        return []
     if kind == "slowdown":
         return paired(state, program, engine.key, baseline)
     return paired(state, program, baseline, engine.key)
@@ -1837,7 +1984,7 @@ def summarize(suite, manifest, programs, table, state, args, meta, runner):
             row["runner"] = program["runner"]
             row["tests"] = {}
         failures = []
-        engines_here = [engine for engine in table if not engine.typed or "typed_source" in program]
+        engines_here = [engine for engine in table if runs_on(engine, program)]
         reference = None
         for engine in engines_here:
             runs = [round_[name][engine.key] for round_ in state["rounds"] if engine.key in round_.get(name, {})]
@@ -1945,7 +2092,104 @@ def summarize(suite, manifest, programs, table, state, args, meta, runner):
         hot_summary(results, programs, table, state, args)
     if suite == BUILTINS_SUITE:
         builtins_summary(results, manifest, table)
+    if suite == APP_SUITE:
+        appsuite_summary(results, programs, table, state, args)
     return results
+
+
+def appsuite_summary(results, programs, table, state, args):
+    """Adds what the appsuite suite records beside the common fields, and drops the geometric mean,
+    which is not its score: a section 10 times as fast would hide one that is no faster at all.
+
+    `total` holds each engine's total, the sum of its sections' CPU seconds, as the median over the
+    rounds, and the paired ratio of the totals to the engine's baseline. `tracked` holds what the
+    suite follows beside the score: the profile summary's cost (profiled ry's total over ry's), the
+    share of profiled ry's run in JIT-compiled code, how many patterns ry runs at under 1.5 and
+    under 1 times GNU R's speed, and each engine's slowdown under contention (its contended total
+    over its own), by CPU time and by the processes' wall time, with ry's over GNU R's."""
+    results["geomean"] = {}
+    results["versus"] = {engine.key: engine.versus or table[0].key for engine in table[1:]
+                         if (engine.versus or table[0].key) != engine.key}
+    sections = [program["id"] for program in programs if program.get("group") == "sections"]
+    keys = [engine.key for engine in table]
+
+    def per_round(key, field):
+        """The engine's total in each round, None where a section failed or did not run. The wall
+        time is the whole process's, so it is the same on every section."""
+        totals = []
+        for round_ in state["rounds"]:
+            runs = [round_.get(name, {}).get(key) for name in sections]
+            if not runs or not all(run and run.get("seconds") is not None for run in runs):
+                totals.append(None)
+            else:
+                totals.append(sum(run["seconds"] for run in runs) if field == "seconds" else runs[0][field])
+        return totals
+
+    def quoted(ratios):
+        if not ratios:
+            return None
+        median, low, high = interval(ratios, args.seed)
+        return {"median": round(median, 4), "low": round(low, 4), "high": round(high, 4)}
+
+    def ratios(top, bottom):
+        return [a / b for a, b in zip(top, bottom) if a and b]
+
+    cpu = {key: per_round(key, "seconds") for key in keys}
+    wall = {key: per_round(key, "wall") for key in keys}
+    results["total"] = {
+        "seconds": {key: round(statistics.median(found), 3) for key in keys if (found := [v for v in cpu[key] if v])},
+        "ratio": {key: found for key, against in results["versus"].items()
+                  if (found := quoted(ratios(cpu[against], cpu[key])))},
+    }
+    tracked = {}
+    if (cost := quoted(ratios(cpu.get("ry_profiled", []), cpu.get("ry", [])))):
+        tracked["profile_cost"] = cost
+    shares = [round_[sections[0]]["ry_profiled"]["tier1_share"] for round_ in state["rounds"]
+              if sections and "tier1_share" in round_.get(sections[0], {}).get("ry_profiled", {})]
+    if shares:
+        tracked["tier1_share"] = round(statistics.median(shares), 4)
+    speeds = [row["ratio"]["ry"]["median"] for row in results["programs"]
+              if row["id"] not in sections and "ry" in row["ratio"]]
+    if speeds:
+        tracked["patterns"] = {"count": len(speeds), "below_1_5": sum(speed < 1.5 for speed in speeds),
+                               "below_1": sum(speed < 1 for speed in speeds)}
+    contended = next((engine for engine in table if engine.processes > 1), None)
+    if contended is not None:
+        for field, totals in (("contention", cpu), ("contention_wall", wall)):
+            gnu_r = ratios(totals["gnu_r_contended"], totals["gnu_r"])
+            ry = ratios(totals["ry_contended"], totals["ry"])
+            both = [a / b for a, b in zip(
+                [c / s if c and s else None for c, s in zip(totals["ry_contended"], totals["ry"])],
+                [c / s if c and s else None for c, s in zip(totals["gnu_r_contended"], totals["gnu_r"])]) if a and b]
+            found = {"gnu_r": quoted(gnu_r), "ry": quoted(ry), "ry_over_gnu_r": quoted(both)}
+            if all(found.values()):
+                tracked[field] = dict(found, processes=contended.processes)
+    results["tracked"] = tracked
+
+
+def print_appsuite(results):
+    """The workload's totals and the numbers the suite tracks."""
+    label, total = results["engines"], results["total"]
+    if total["seconds"]:
+        print("\n| engine | total CPU seconds | speed-up of the total |\n| --- | ---: | ---: |")
+    for key, seconds in total["seconds"].items():
+        ratio = total["ratio"].get(key)
+        against = f" over {label[results['versus'][key]]}" if ratio else ""
+        print(f"| {label[key]} | {seconds:.3f} | " + (f"{ratio['median']:.2f}x ({ratio['low']:.2f} to {ratio['high']:.2f}){against}" if ratio else "") + " |")
+    tracked = results["tracked"]
+    quote = lambda found: f"{found['median']:.3f}x ({found['low']:.3f} to {found['high']:.3f})"
+    if "profile_cost" in tracked:
+        print(f"\nProfile summary cost: ry's total takes {quote(tracked['profile_cost'])} with RY_PROFILE_SUMMARY")
+    if "tier1_share" in tracked:
+        print(f"Share of the profiled workload in JIT-compiled code: {tracked['tier1_share']:.1%}")
+    if "patterns" in tracked:
+        found = tracked["patterns"]
+        print(f"Patterns: {found['below_1_5']} of {found['count']} below 1.5x, {found['below_1']} below 1x")
+    for field, what in (("contention", "CPU time"), ("contention_wall", "wall time")):
+        if field in tracked:
+            found = tracked[field]
+            print(f"Under contention ({found['processes']} processes, {what}): GNU R takes {quote(found['gnu_r'])} its "
+                  f"own time, ry {quote(found['ry'])}; ry's slowdown over GNU R's {quote(found['ry_over_gnu_r'])}")
 
 
 def stored_seconds(seconds):
@@ -2019,7 +2263,7 @@ def print_builtins(results):
 
 def ratio_label(results, key):
     """What a ratio divides, in the order it divides it: `GNU R / ry` or `ry typed / Rust`."""
-    labels = [results["engines"][results["baseline"]], results["engines"][key]]
+    labels = [results["engines"][results.get("versus", {}).get(key, results["baseline"])], results["engines"][key]]
     return " / ".join(reversed(labels) if results["ratio_kind"] == "slowdown" else labels)
 
 
@@ -2028,19 +2272,24 @@ def print_table(results, table):
     if not any(row["seconds"] or row.get("failures") for row in results["programs"]):
         return
     keys = [engine.key for engine in table if engine.key in results["engines"]]
+    # An engine that is only the baseline of others has no ratio column.
+    ratioed = [key for key in keys[1:] if any(key in row["ratio"] for row in results["programs"])]
     pairs = [key for key in keys if key in results.get("paired_geomean", {}) or
              any(key in row.get("paired", {}) for row in results["programs"])]
     label = results["engines"]
     print("| program | " + " | ".join(label[key] for key in keys) + " | "
-          + " | ".join(ratio_label(results, key) for key in keys[1:])
+          + " | ".join(ratio_label(results, key) for key in ratioed)
           + "".join(f" | {label['baseline' + key.removeprefix('ry')]} / {label[key]}" for key in pairs)
           + " | flags |")
-    print("| --- |" + " ---: |" * (2 * len(keys) - 1 + len(pairs)) + " --- |")
+    print("| --- |" + " ---: |" * (len(keys) + len(ratioed) + len(pairs)) + " --- |")
     # One unit per table: milliseconds where the suite times programs that finish in a few.
     unit = (lambda seconds: f"{seconds * 1000:.3f} ms") if results["meta"]["too_short_seconds"] < 0.001 else duration
+    if results["suite"] == APP_SUITE:
+        # Sections take seconds and patterns nanoseconds per call.
+        unit = lambda seconds: duration(seconds) if seconds >= 0.001 else f"{seconds * 1e9:.0f} ns"
     for row in results["programs"]:
         cells = [unit(row["seconds"][key]) if key in row["seconds"] else "" for key in keys]
-        for ratio in [row["ratio"].get(key) for key in keys[1:]] + [row.get("paired", {}).get(key) for key in pairs]:
+        for ratio in [row["ratio"].get(key) for key in ratioed] + [row.get("paired", {}).get(key) for key in pairs]:
             cells.append(f"{ratio['median']:.2f}x ({ratio['low']:.2f} to {ratio['high']:.2f})" if ratio else "")
         flags = ", ".join(f"{flag['kind']} ({flag['engine']})" for flag in row["flags"])
         if row.get("failures"):
