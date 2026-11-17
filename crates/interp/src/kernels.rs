@@ -1421,8 +1421,8 @@ pub struct Extremes<T> {
 }
 
 /// The extremes of integers or logicals, `NA` aside. The lanes are independent, with every
-/// operation a select or a compare, so the loop compiles to vector minimum and maximum
-/// instructions.
+/// operation a select or a compare, so the loop compiles to vector compares and selects (or
+/// vector minimum and maximum instructions where the target has them).
 pub fn integer_extremes(values: &[i32]) -> Extremes<i32> {
     const LANES: usize = 16;
     let mut least = [i32::MAX; LANES];

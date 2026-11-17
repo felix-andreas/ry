@@ -777,8 +777,9 @@ unsafe fn do_qsort(call: &Call<'_>) -> R<Sexp> {
 /// `sort.int`, `order` and `sort.list` return it (or `seq_along(x)`) without sorting. The flags
 /// go through GNU R's `asInteger`, whose coercion warnings `sort.int` reports.
 ///
-/// The check is GNU R's `fastpass_sortcheck`: an ALTREP vector answers from its sortedness metadata, and a
-/// plain integer vector wanted increasing is scanned for non-decreasing order without `NA`.
+/// The check is GNU R's `fastpass_sortcheck`: an ALTREP vector answers from its sortedness
+/// metadata, and a plain integer vector wanted increasing is scanned for non-decreasing order
+/// without `NA`.
 ///
 /// GNU R's `sort` and `order` put that metadata on every numeric result, which ry's do not,
 /// because a wrapper makes every later read from R code slower. So ry scans the other plain

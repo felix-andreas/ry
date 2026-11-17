@@ -12,3 +12,6 @@ big[c(3, 300, 599), 2] <- NA
 for (method in c("first", "last")) print(sum(max.col(big, method) * seq_len(600), na.rm = TRUE))
 set.seed(7); r <- max.col(big); print(sum(r * seq_len(600), na.rm = TRUE)); print(which(is.na(r)))
 print(runif(1))
+# The generator's state is read only at the first tie.
+rm(.Random.seed); invisible(max.col(matrix(1:4, 2))); print(exists(".Random.seed"))
+invisible(max.col(matrix(1, 2, 2))); print(exists(".Random.seed"))

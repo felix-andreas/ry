@@ -1199,8 +1199,9 @@ mod x87 {
     }
 
     pub fn add_all_numbers(mut total: [u8; 10], values: &[f64]) -> [u8; 10] {
-        // SAFETY: as in `add_all`; a NaN compares unordered with itself, so `jp` skips it before
-        // the x87 unit sees it.
+        // SAFETY: the loop reads `values.len()` doubles and writes `total` back; the x87 stack starts
+        // empty under the ABI and is left empty. A NaN compares unordered with itself, so `jp`
+        // skips it before the x87 unit sees it.
         unsafe {
             asm!(
                 "fld tbyte ptr [{total}]",
@@ -1236,7 +1237,8 @@ mod x87 {
         x_offset: [u8; 10],
         y_offset: [u8; 10],
     ) -> [u8; 10] {
-        // SAFETY: as in `add_all`; the caller checked that `y` is as long as `x`.
+        // SAFETY: reads `x.len()` doubles from `x` and from `y`, which the caller checked is as
+        // long; the x87 stack starts empty under the ABI and is left empty.
         unsafe {
             asm!(
                 "fld tbyte ptr [{y_offset}]",
@@ -1392,7 +1394,8 @@ mod x87 {
     }
 
     pub fn add_differences(mut total: [u8; 10], values: &[f64], offset: [u8; 10]) -> [u8; 10] {
-        // SAFETY: as in `add_all`; `offset` is only read.
+        // SAFETY: the loop reads `values.len()` doubles and writes `total` back; the x87 stack starts
+        // empty under the ABI and is left empty; `offset` is only read.
         unsafe {
             asm!(
                 "fld tbyte ptr [{offset}]",

@@ -5723,12 +5723,12 @@ pub unsafe fn max_col(
     method: i32,
     maxes: &mut [i32],
 ) -> R<()> {
-    let random = method == 1;
-    if random {
+    let drawing = column_maxima(matrix, rows, columns, method, maxes);
+    // GNU R reads the generator's state at the first tie, so a call without one leaves
+    // `.Random.seed` as it was, even unset.
+    if !drawing.is_empty() {
         crate::random::get_rng_state()?;
-    }
-    column_maxima(matrix, rows, columns, method, maxes, &mut SessionDeviates)?;
-    if random {
+        draw_ties(matrix, rows, columns, &drawing, maxes, &mut SessionDeviates)?;
         crate::random::put_rng_state()?;
     }
     Ok(())
@@ -5736,24 +5736,23 @@ pub unsafe fn max_col(
 
 /// [`max_col`]'s scan, column by column over blocks of rows so that it reads the matrix in
 /// memory order. The maximum a row's scan follows never depends on a draw, so with `method` 1
-/// the scan only counts the ties that would draw, and the rows with any are scanned again one
-/// at a time, in row order, which makes the same draws as GNU R's row-by-row loop.
+/// the scan only counts the ties that would draw and returns the rows with any, for
+/// [`draw_ties`].
 fn column_maxima(
     matrix: &[f64],
     rows: usize,
     columns: usize,
     method: i32,
     maxes: &mut [i32],
-    deviates: &mut impl Deviates,
-) -> R<()> {
+) -> Vec<usize> {
     const BLOCK: usize = 256;
+    let mut drawing = Vec::new();
     let Some(matrix) = matrix.get(..rows * columns).filter(|_| columns > 0) else {
         maxes.fill(NA_INTEGER);
-        return Ok(());
+        return drawing;
     };
     let random = method == 1;
     let last = method == 3;
-    let mut drawing = Vec::new();
     let count = rows.min(maxes.len());
     for (block, out) in maxes[..count].chunks_mut(BLOCK).enumerate() {
         let start = block * BLOCK;
@@ -5828,7 +5827,20 @@ fn column_maxima(
             }
         }
     }
-    for row in drawing {
+    drawing
+}
+
+/// The random-tie rows of [`column_maxima`] scanned again one at a time, in row order, which
+/// makes the same draws as GNU R's row-by-row loop.
+fn draw_ties(
+    matrix: &[f64],
+    rows: usize,
+    columns: usize,
+    drawing: &[usize],
+    maxes: &mut [i32],
+    deviates: &mut impl Deviates,
+) -> R<()> {
+    for &row in drawing {
         let entry = |column: usize| matrix[row + column * rows];
         let tolerance = 1e-5
             * (0..columns)
