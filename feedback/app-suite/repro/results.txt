@@ -1,0 +1,237 @@
+pattern                                                   GNU R ns      ry ns   GNU/ry
+s4: callNextMethod()                                         73975      21667     3.41
+s4: generic with one argument                                 1637       1041     1.57
+s4: isVirtualClass('Base')                                   11383       3189     3.57
+s4: is(x, 'Base')                                             7523        868     8.67
+s4: lapply over the slots of one object                      15656       5142     3.04
+s4: method with extra arguments (.local)                      2975       1743     1.71
+s4: new() with initialize and validity                      205078      67993     3.02
+s4: replacement generic value(x) <- v                        11475       6271     1.83
+s4: sapply over 20 objects, one generic each                 37842      20508     1.85
+s4: slotNames(x)                                              9216       2113     4.36
+s4: slot read x@value                                          208        215     0.97
+s4: slot write x@value <- v in a function                     9064       4822     1.88
+s4: slot(x, name)                                              603        378     1.60
+s4: validObject(x)                                           48706      10101     4.82
+checks: check_args(...) alone                                57007      11963     4.77
+checks: function with an argument check                      68359      15778     4.33
+checks: identical() of two short vectors                       601        289     2.08
+checks: ifelse() on a scalar                                  1152        278     4.14
+checks: inherits(x, 'Date')                                    341        132     2.58
+checks: isTRUE()                                               660        297     2.22
+checks: is(x, 'character')                                    5615        723     7.77
+checks: list(...) of three values                              771        401     1.92
+checks: match.arg()                                           5798        731     7.93
+checks: missing() and default arguments                        654        319     2.05
+checks: nested ifelse() with is.na()                          2686        746     3.60
+checks: stopifnot() with two conditions                       2594        601     4.32
+keys: 20 strings %in% 20 strings                              1965        290     6.78
+keys: gsub() on a scalar                                      1774        566     3.13
+keys: list element by name x[[key]]                            469        162     2.90
+keys: match() of a scalar                                      593        198     2.99
+keys: names(which(named logicals))                            2708        702     3.86
+keys: nchar() and substr()                                    1175        689     1.71
+keys: paste0() of two scalars                                 3281        542     6.05
+keys: paste(a, b, sep = '|') of 20 strings                    3342        790     4.23
+keys: paste(..., collapse = ', ') of 20 strings               3288        394     8.35
+keys: scalar %in% 20 strings                                  1190        127     9.37
+keys: setdiff() of short vectors                             20081       1141    17.60
+keys: sprintf() with two values                               1507        450     3.35
+keys: subset a named list by 5 names                           856        440     1.95
+keys: toupper() and trimws()                                 17700       3479     5.09
+keys: unique() of 20 strings                                  2769        834     3.32
+keys: unlist(lapply(list, names))                             4128       2079     1.99
+keys: which() of 20 logicals                                  1339        366     3.66
+destructure: c(a, b) %<-% f()                                82275      35034     2.35
+destructure: the same with plain assignments                   885        360     2.46
+destructure: three names, nested value                      116699      54687     2.13
+data.table: as.data.table(data.frame)                        49805      28320     1.76
+data.table: col1 %chin% keys                                  3937       1652     2.38
+data.table: copy and := one column                          338867     139893     2.42
+data.table: data.table() with 4 columns                      97900      46143     2.12
+data.table: dt$col3 and dt[['col3']]                          4974       2785     1.79
+data.table: dt[, .(col1, col3)]                             365234     179687     2.03
+data.table: dt[col1 == 'k3']                                542969     327148     1.66
+data.table: dt[col1 == 'k3', col3]                          714844     381836     1.87
+data.table: dt[order(col3)]                                  97656      68237     1.43
+data.table: dt[, sum(col3), by = col4]                      410156     255859     1.60
+data.table: merge() of two tables on one key                757812     498047     1.52
+data.table: nrow() and names()                                2449       1104     2.22
+data.table: rbindlist() of 3 tables                          61035      25879     2.36
+data.table: rbind() of 2 tables                              73853      27588     2.68
+data.table: Reduce(rbind) over 50 tables                   3757813    1539063     2.44
+data.table: set() one column                                  8438       3036     2.78
+xts: as.numeric(x[day, 'a'])                                138672      60059     2.31
+xts: coredata(x)                                              4776       2228     2.14
+xts: first(x) and last(x)                                    37109      19348     1.92
+xts: index(x)                                                36621       3860     9.49
+xts: lag(y) and diff(y)                                      35217      16357     2.15
+xts: merge(x, y)                                             65552      26001     2.52
+xts: rbind() of two halves                                   38452      18555     2.07
+xts: window by dates index(x) <= day                         54077      13855     3.90
+xts: x[10:20, ]                                              12909       5844     2.21
+xts: x['2024-03'] with a text range                         338867     126709     2.67
+xts: x * 2 + x                                               21484      12848     1.67
+xts: x[day, 'a']                                            142090      56396     2.52
+xts: x[day] with a Date                                     143066      60059     2.38
+xts: xts() from a matrix and dates                           89355      36438     2.45
+xts: zoo::na.locf(y)                                         16998       7980     2.13
+dates: as.character() of 20 dates                            33325      11841     2.81
+dates: as.Date() of 20 texts                                 91553       2670    34.29
+dates: as.Date() of a text                                   25818        809    31.91
+dates: as.numeric(format(day, '%Y'))                         12634       6180     2.04
+dates: as.POSIXlt(day)$year                                   7217       3479     2.07
+dates: as.POSIXlt() of 20 dates, $mon                         9399       4669     2.01
+dates: as.POSIXlt() of a POSIXct                              3319       1568     2.12
+dates: c() of two dates                                      19714       8560     2.30
+dates: day + 1 and difference in days                        22461       7706     2.91
+dates: day %in% holidays                                     48584       2411    20.15
+dates: format(day, '%Y-%m-%d')                               12970       6210     2.09
+dates: is.na(day) and day > other                             7248       3853     1.88
+dates: lubridate::year() and month()                         28503      10986     2.59
+dates: lubridate::ymd() of a text                           843750     230957     3.65
+dates: max() and range() of 20 dates                         25208      17578     1.43
+dates: seq() of dates by day                                  9430       4082     2.31
+dates: seq() of dates by month                               78613      28259     2.78
+dates: Sys.time() and Sys.Date()                             36743       9369     3.92
+dates: weekdays() of 20 dates                                19958      10803     1.85
+data.frame: apply() over the rows of a matrix                25452      11841     2.15
+data.frame: as.data.frame() of a list                        94727      33325     2.84
+data.frame: cbind() of a frame and a vector                  48462      22156     2.19
+data.frame: data.frame() with 3 columns                     126709      38330     3.31
+data.frame: df$col3                                            780        190     4.11
+data.frame: df$col4 <- value                                  5234       3052     1.71
+data.frame: df[3, 'col3']                                     7919       3212     2.47
+data.frame: df[, c('col1', 'col3')]                           9277       3662     2.53
+data.frame: df[['col3']]                                      3777       2373     1.59
+data.frame: df[df$col1 == 'k3', ]                            30273      14740     2.05
+data.frame: df[order(df$col3), ]                             43457      16022     2.71
+data.frame: do.call(rbind, 5 frames)                        208984     113281     1.84
+data.frame: merge() on one key                              280762     124023     2.26
+data.frame: nrow() and colnames()                             3983       1411     2.82
+data.frame: rbind() of 2 frames                              87158      48828     1.79
+closures: build an object of 3 closures                       1240        738     1.68
+closures: environment assign() and get()                      2861       1514     1.89
+closures: fastmap()                                           7950       6363     1.25
+closures: fastmap get(), 10,000 keys                          1575        725     2.17
+closures: fastmap get() of one key                            1743        706     2.47
+closures: fastmap has(), 10,000 keys                          1724        778     2.22
+closures: fastmap new map, 3 sets, as_list()                 26367      17853     1.48
+closures: fastmap set() of a new key, 10,000 keys             6775       3960     1.71
+closures: fastmap set() of an old key, 10,000 keys            2319       2087     1.11
+closures: fastmap set() of one key                            3426       1972     1.74
+closures: local() block                                        420        265     1.58
+closures: method that assigns with <<-                        4044       3250     1.24
+closures: method that reads                                    849        292     2.91
+closures: new fastmap, 200 sets, as_list()                 1179687     724609     1.63
+closures: values[i] <<- v on 10,000 elements                  1575        713     2.21
+closures: values[[n]] <<- v appends to 10,000                 3624       1431     2.53
+conditions: an error caught by tryCatch()                    15381       9369     1.64
+conditions: a warning muffled by a handler                   30701       9155     3.35
+conditions: on.exit() in a function                            419        310     1.35
+conditions: suppressWarnings(f(i))                            2304       1389     1.66
+conditions: sys.call() and match.call()                       3197       1656     1.93
+conditions: sys.calls() 10 frames deep                        4761       2411     1.97
+conditions: tryCatch around withCallingHandlers               6775       4692     1.44
+conditions: tryCatch(f(i), error = h)                         5280       3365     1.57
+conditions: tryCatch(f(i), finally = g)                       2525       1801     1.40
+conditions: tryCatch() with error and warning                 9018       6805     1.33
+conditions: try(f(i), silent = TRUE)                          5081       3990     1.27
+conditions: withCallingHandlers(f(i), warning = h)            2045       1194     1.71
+functionals: call forwarding ...                               898        696     1.29
+functionals: call with 5 named arguments                       820        351     2.34
+functionals: c() that grows a vector 10 times                 2060        866     2.38
+functionals: do.call('c', list)                               2087       1163     1.79
+functionals: do.call() with a named list                      2155       1282     1.68
+functionals: Filter() over 10 values                          9552       3738     2.56
+functionals: lapply() over 10 values                          6836       2380     2.87
+functionals: Map() over two lists                            12787       4250     3.01
+functionals: mapply() over two lists                         17517       6256     2.80
+functionals: Reduce(`+`, 10 values)                           5295       1740     3.04
+functionals: rep(), seq() and length()                       12970       4028     3.22
+functionals: rev(), sort() and order() of 10 values          44434       2953    15.05
+functionals: sapply() over 10 values                         15350       6241     2.46
+functionals: seq_along() loop that fills a list               2064        662     3.12
+functionals: setNames() and names()                           4150       1408     2.95
+functionals: structure() with a class                         3563        547     6.51
+functionals: sum(), mean(), max() of 10 values                3311       1587     2.09
+functionals: unlist() of 10 values                            1415        589     2.40
+functionals: unlist() of a named list                         1812        830     2.18
+functionals: vapply() over 10 values                          8041       2754     2.92
+math: colMeans() and apply(m, 2, sd)                        225586     115967     1.95
+math: cov() of a 250 x 20 matrix                            121826     270020     0.45
+math: cumprod(1 + x) of 10,000 values                        77881      33386     2.33
+math: exp(), log() and sqrt() of 10,000 values              124512      53223     2.34
+math: matrix %*% vector, 250 x 20                             2708       1209     2.24
+math: pmin() and pmax() of 10,000 values                     50781     118896     0.43
+math: pnorm() of 10,000 values                              227051      85937     2.64
+math: pt() of 10,000 values, df = 5                        1175781    1125000     1.05
+math: qnorm() of 10,000 probabilities                       143555      29968     4.79
+math: qt() of 10,000 probabilities, df = 5                 5109375    4781250     1.07
+math: quantile() of 10,000 values                           107178      33630     3.19
+math: scalar loop with 1,000 steps                           22583       3487     6.48
+math: sort() of 10,000 values                                87402     129639     0.67
+s3: class(x)[1] and oldClass<-                                 828        338     2.45
+s3: format() method                                           5142       1263     4.07
+s3: inherits(x, 'expr')                                        366        190     1.93
+s3: length() method                                           1339        493     2.72
+s3: method that calls NextMethod()                            4112       1434     2.87
+s3: `[` method with NextMethod()                              6714       1759     3.82
+s3: operator method a + b                                     7584       1984     3.82
+s3: print() of a classed object to a string                  54565      16998     3.21
+s3: structure() of a classed list                             4265        710     6.01
+s3: UseMethod() to a class method                             3922       1366     2.87
+s3: UseMethod() to the default method                         1503        493     3.05
+s3: x$v on a classed list                                      824        199     4.14
+large: 5,000 strings %in% 5,000 strings                     180664      24292     7.44
+large: as.Date() of 5,000 texts                           16453125     309570    53.15
+large: as.POSIXlt() of 5,000 dates                          477539     304688     1.57
+large: copy of a numeric vector, one element set              5402       1759     3.07
+large: format() of 5,000 dates                             1060547    1671875     0.63
+large: ifelse() on 5,000 values                              71533      40405     1.77
+large: lapply() over 5,000 numbers                         2300781     718750     3.20
+large: match() of 5,000 strings                              77393      23682     3.27
+large: merge() of two tables of 5,000 rows                 5406250    2617188     2.07
+large: order() of 5,000 strings                            9062500    2054687     4.41
+large: paste0('id', 1:5000)                                 998047     385742     2.59
+large: paste(a, b, sep = '|') of 5,000 strings              466797     175293     2.66
+large: qt() of 5,000 probabilities, df = 4.5               2726563    2554687     1.07
+large: rbindlist() of 200 tables of 100 rows                309570     218262     1.42
+large: rbindlist() of two tables of 5,000 rows              165527     140625     1.18
+large: Reduce(rbind) over 200 tables of 100 rows          24234375   18109375     1.34
+large: saveRDS() and readRDS() of that table              12812500    4140625     3.09
+large: serialize() of a table of 5,000 rows                 661133     360352     1.83
+large: setkey() on a text column                            810547     746094     1.09
+large: sum(), cumsum() and diff() of 5,000 numbers           76904      47363     1.62
+large: table[kind == 'x'] of 5,000 rows                     553711     326172     1.70
+large: table[, sum(value), by = kind]                       581055     452148     1.29
+large: unique() of 5,000 strings                             51758      10101     5.12
+large: unique() of a table of 5,000 rows                    425781     461914     0.92
+large: unlist() of a list of 5,000 numbers                   96680     113525     0.85
+large: unserialize() of that table                         1162109     698242     1.66
+large: which() of 5,000 logicals                              8286       4036     2.05
+large: x[logical index] of 5,000 numbers                     32166      14679     2.19
+body: 10 scalar assignments                                   1062        209     5.08
+body: a chain of 5 calls                                      1446        982     1.47
+body: a function that defines and calls a function             647        410     1.58
+body: a function that passes 3 arguments on                   1120        398     2.81
+body: a function that passes ... on                           1001        736     1.36
+body: a function that returns early                            420        148     2.84
+body: a function that tests missing(b)                         612        201     3.04
+body: f(a, b = , c = ) by name                                 578        162     3.57
+body: f(a, b, c) by position                                   586        368     1.59
+body: f(a) with one argument                                   382        318     1.20
+body: f(a) with two default arguments                          870        464     1.88
+body: field(x, name) as x[[name]]                              690        191     3.61
+body: for loop that copies 5 list fields                      3349       1259     2.66
+body: for loop that fills 10 elements                         1442        449     3.21
+body: for loop that sums 10 elements                           942        452     2.08
+body: f() with no argument                                     321        205     1.57
+body: helper of 20 lines                                      7034       1945     3.62
+body: if / else if chain on a string                           545        432     1.26
+body: lapply over 3 with a function that reads a local        3639       1698     2.14
+body: list() of 4 named fields with paste0()                  5280        921     5.73
+body: reads of x$a, x$a$b, x[['a']][['b']]                    1324        429     3.09
+body: switch() on a string                                     351        189     1.86
+body: two argument guards with stop()                          702        298     2.36
+body: writes of x$a, x[['a']], x$a$b                          1511       1266     1.19
