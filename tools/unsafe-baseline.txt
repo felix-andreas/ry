@@ -45,7 +45,7 @@
 13 crates/interp/src/help_server.rs
 17 crates/interp/src/image.rs
 48 crates/interp/src/interp.rs
-13 crates/interp/src/kernels.rs
+12 crates/interp/src/kernels.rs
 5 crates/interp/src/latex.rs
 113 crates/interp/src/linalg.rs
 46 crates/interp/src/lower.rs
@@ -67,7 +67,7 @@
 8 crates/interp/src/replay.rs
 70 crates/interp/src/serialize.rs
 27 crates/interp/src/session.rs
-51 crates/interp/src/sort.rs
+48 crates/interp/src/sort.rs
 385 crates/interp/src/standard_library.rs
 22 crates/interp/src/strings.rs
 59 crates/interp/src/subset.rs
@@ -79,7 +79,7 @@
 111 crates/interp/src/values.rs
 2 crates/numeric/src/c_format.rs
 58 crates/numeric/src/linpack.rs
-14 crates/numeric/src/long_double.rs
+13 crates/numeric/src/long_double.rs
 5 crates/numeric/src/rmath.rs
 9 crates/numeric/src/vector_math.rs
 2 crates/oracle/src/oracle.rs
