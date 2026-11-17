@@ -364,7 +364,7 @@ fn do_nchar<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> 
 }
 
 fn do_nzchar<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
-    let matched = arguments.matched(context, &["x", "keepNA"])?;
+    let matched = arguments.matched_as_passed(context, ["x", "keepNA"])?;
     // The empty symbol, as `lapply` hands over an empty argument taken from a call, evaluates to
     // `R_MissingArg`, which GNU R coerces to `""` rather than reporting a missing argument.
     if matched[0].is_some_and(handles::is_missing_argument) {
@@ -2526,7 +2526,7 @@ fn grep<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>, logical: bool) -> R<
         for (position, &index) in selected.iter().enumerate() {
             selected_names.set(context, position, names.get(context, index));
         }
-        handles::set_attribute(
+        handles::set_attribute_named(
             context,
             &mut result,
             "names",
@@ -3026,7 +3026,7 @@ fn do_regexec<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>
         let positions = context.scope(|inner: &mut Cx<'_>| {
             let mut positions = integers(inner, &starts)?;
             let lengths = integers(inner, &lengths)?.finish().value();
-            handles::set_attribute(inner, &mut positions, "match.length", lengths)?;
+            handles::set_attribute_named(inner, &mut positions, "match.length", lengths)?;
             report.annotate(inner, &mut positions)?;
             Ok::<_, Unwind>(positions.finish().value())
         })?;
@@ -3060,9 +3060,14 @@ impl MatchReport {
             let mut index_type = context.alloc::<Str>(1)?;
             let kind = if self.bytes { "bytes" } else { "chars" };
             handles::set_text(context, &mut index_type, 0, kind)?;
-            handles::set_attribute(context, vector, "index.type", index_type.finish().value())?;
+            handles::set_attribute_named(
+                context,
+                vector,
+                "index.type",
+                index_type.finish().value(),
+            )?;
             let use_bytes = handles::logical_constant(context, 1)?;
-            handles::set_attribute(context, vector, "useBytes", use_bytes)?;
+            handles::set_attribute_named(context, vector, "useBytes", use_bytes)?;
         }
         Ok(())
     }
@@ -3137,7 +3142,7 @@ impl MatchTable {
     ) -> R<Local<'s>> {
         let mut positions = integers(context, &self.starts)?;
         let lengths = integers(context, &self.lengths)?.finish().value();
-        handles::set_attribute(context, &mut positions, "match.length", lengths)?;
+        handles::set_attribute_named(context, &mut positions, "match.length", lengths)?;
         report.annotate(context, &mut positions)?;
         if self.groups > 0 {
             let mut column_names = context.alloc::<Str>(names.len())?;
@@ -3162,12 +3167,12 @@ impl MatchTable {
                         cells[group * self.rows + row] = row_major[row * self.groups + group];
                     }
                 }
-                handles::set_attribute(context, &mut matrix, "dim", dim)?;
-                handles::set_attribute(context, &mut matrix, "dimnames", dimnames)?;
+                handles::set_attribute_named(context, &mut matrix, "dim", dim)?;
+                handles::set_attribute_named(context, &mut matrix, "dimnames", dimnames)?;
                 let matrix = matrix.finish().value();
-                handles::set_attribute(context, &mut positions, attribute, matrix)?;
+                handles::set_attribute_named(context, &mut positions, attribute, matrix)?;
             }
-            handles::set_attribute(context, &mut positions, "capture.names", column_names)?;
+            handles::set_attribute_named(context, &mut positions, "capture.names", column_names)?;
         }
         Ok(positions.finish().value())
     }
@@ -3177,7 +3182,7 @@ impl MatchTable {
 fn na_match<'s>(context: &mut Cx<'s>) -> R<Local<'s>> {
     let mut positions = integers(context, &[NA_INTEGER])?;
     let lengths = integers(context, &[NA_INTEGER])?.finish().value();
-    handles::set_attribute(context, &mut positions, "match.length", lengths)?;
+    handles::set_attribute_named(context, &mut positions, "match.length", lengths)?;
     Ok(positions.finish().value())
 }
 

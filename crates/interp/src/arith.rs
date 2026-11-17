@@ -25,7 +25,9 @@ use {
         builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
         bytecode::Arith,
         coerce::{self, coerce_vector},
-        conditions, interp,
+        conditions,
+        handles::{self, Args, Cx, Integer, Local, Logical, Raw, Real, dense, safe},
+        interp,
         kernels::{self, Comparison, Extremes, Integers, Reals},
         long_double::{self, LongDouble},
         rmath,
@@ -60,81 +62,12 @@ unsafe extern "C" {
 }
 
 pub const BUILTINS: &[BuiltinDef] = &[
-    internal("intToBits", 1, |call| unsafe {
-        let integers = coerce_vector(call.arg(0), SexpType::Integer)?;
-        let source = values::ints(integers);
-        let result = alloc(SexpType::Raw, source.len() * 32)?;
-        for (index, value) in source.iter().enumerate() {
-            for bit in 0..32 {
-                values::raws_mut(result)[index * 32 + bit] = ((*value as u32 >> bit) & 1) as u8;
-            }
-        }
-        Ok(result)
-    }),
-    internal("rawToBits", 1, |call| unsafe {
-        let raw = call.arg(0);
-        if raw.kind() != SexpType::Raw {
-            return Err(call.error("argument 'x' must be a raw vector"));
-        }
-        let source = values::raws(raw);
-        let result = alloc(SexpType::Raw, source.len() * 8)?;
-        for (index, value) in source.iter().enumerate() {
-            for bit in 0..8 {
-                values::raws_mut(result)[index * 8 + bit] = (value >> bit) & 1;
-            }
-        }
-        Ok(result)
-    }),
-    internal("numToBits", 1, |call| unsafe {
-        let reals = call.arg(0);
-        if reals.kind() != SexpType::Real {
-            return Err(call.error("argument 'x' must be a numeric vector"));
-        }
-        let source = values::reals(reals);
-        let result = alloc(SexpType::Raw, source.len() * 64)?;
-        for (index, value) in source.iter().enumerate() {
-            let bits = value.to_bits();
-            for bit in 0..64 {
-                values::raws_mut(result)[index * 64 + bit] = ((bits >> bit) & 1) as u8;
-            }
-        }
-        Ok(result)
-    }),
-    internal("numToInts", 1, |call| unsafe {
-        let reals = call.arg(0);
-        if reals.kind() != SexpType::Real {
-            return Err(call.error("argument 'x' must be a numeric vector"));
-        }
-        let source = values::reals(reals);
-        let result = alloc(SexpType::Integer, source.len() * 2)?;
-        for (index, value) in source.iter().enumerate() {
-            let bits = value.to_bits();
-            values::ints_mut(result)[index * 2] = bits as u32 as i32;
-            values::ints_mut(result)[index * 2 + 1] = (bits >> 32) as u32 as i32;
-        }
-        Ok(result)
-    }),
-    internal("packBits", 2, do_pack_bits),
-    internal("rawShift", 2, |call| unsafe {
-        let raw = call.arg(0);
-        let shift = values::as_integer_scalar(call.arg(1));
-        if raw.kind() != SexpType::Raw {
-            return Err(call.error("argument 'x' must be a raw vector"));
-        }
-        if !(-8..=8).contains(&shift) {
-            return Err(call.error("argument 'n' must be a small integer"));
-        }
-        let source = values::raws(raw);
-        let result = alloc(SexpType::Raw, source.len())?;
-        for (index, value) in source.iter().enumerate() {
-            values::raws_mut(result)[index] = if shift >= 0 {
-                ((*value as u32) << shift) as u8
-            } else {
-                value >> -shift
-            };
-        }
-        Ok(result)
-    }),
+    internal("intToBits", 1, safe!(do_int_to_bits)),
+    internal("rawToBits", 1, safe!(do_raw_to_bits)),
+    internal("numToBits", 1, safe!(do_num_to_bits)),
+    internal("numToInts", 1, safe!(do_num_to_ints)),
+    internal("packBits", 2, safe!(do_pack_bits)),
+    internal("rawShift", 2, safe!(do_raw_shift)),
     builtin("+", -1, |call| unsafe {
         strict(call, OperatorClass::Arithmetic, |call| {
             arithmetic(call, Op::Add)
@@ -519,6 +452,83 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("sequence", -1, do_sequence),
     internal("bincode", 4, do_bincode),
 ];
+
+fn do_int_to_bits<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let integers = handles::integer_vector(context, arguments.value(0))?;
+    let mut result = context.alloc::<Raw>(integers.len() * 32)?;
+    let bits = result.as_mut_slice();
+    for (index, value) in integers.as_slice(context).iter().enumerate() {
+        for bit in 0..32 {
+            bits[index * 32 + bit] = ((*value as u32 >> bit) & 1) as u8;
+        }
+    }
+    Ok(result.finish().value())
+}
+
+fn do_raw_to_bits<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let Some(raw) = dense::<Raw>(context, arguments.value(0))? else {
+        return Err(arguments.error("argument 'x' must be a raw vector"));
+    };
+    let mut result = context.alloc::<Raw>(raw.len() * 8)?;
+    let bits = result.as_mut_slice();
+    for (index, value) in raw.as_slice(context).iter().enumerate() {
+        for bit in 0..8 {
+            bits[index * 8 + bit] = (value >> bit) & 1;
+        }
+    }
+    Ok(result.finish().value())
+}
+
+fn do_num_to_bits<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let reals = handles::coerce(context, arguments.value(0), SexpType::Real)?;
+    let Some(reals) = dense::<Real>(context, reals)? else {
+        return Err(arguments.error("argument 'x' must be a numeric vector"));
+    };
+    let mut result = context.alloc::<Raw>(reals.len() * 64)?;
+    let bits = result.as_mut_slice();
+    for (index, value) in reals.as_slice(context).iter().enumerate() {
+        let word = value.to_bits();
+        for bit in 0..64 {
+            bits[index * 64 + bit] = ((word >> bit) & 1) as u8;
+        }
+    }
+    Ok(result.finish().value())
+}
+
+fn do_num_to_ints<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let reals = handles::coerce(context, arguments.value(0), SexpType::Real)?;
+    let Some(reals) = dense::<Real>(context, reals)? else {
+        return Err(arguments.error("argument 'x' must be a numeric vector"));
+    };
+    let mut result = context.alloc::<Integer>(reals.len() * 2)?;
+    let halves = result.as_mut_slice();
+    for (index, value) in reals.as_slice(context).iter().enumerate() {
+        let word = value.to_bits();
+        halves[index * 2] = word as u32 as i32;
+        halves[index * 2 + 1] = (word >> 32) as u32 as i32;
+    }
+    Ok(result.finish().value())
+}
+
+fn do_raw_shift<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let shift = handles::integer_scalar(context, arguments.value(1));
+    let Some(raw) = dense::<Raw>(context, arguments.value(0))? else {
+        return Err(arguments.error("argument 'x' must be a raw vector"));
+    };
+    if !(-8..=8).contains(&shift) {
+        return Err(arguments.error("argument 'n' must be a small integer"));
+    }
+    let mut result = context.alloc::<Raw>(raw.len())?;
+    let shifted = result.as_mut_slice();
+    for (index, value) in raw.as_slice(context).iter().enumerate() {
+        shifted[index] = if shift >= 0 {
+            ((*value as u32) << shift) as u8
+        } else {
+            value >> -shift
+        };
+    }
+    Ok(result.finish().value())
+}
 
 /// `compareNumericVersion(x, y)`: -1, 0 or 1 per pair of versions, `NA` for an empty one.
 unsafe fn do_compare_numeric_version(call: &Call<'_>) -> R<Sexp> {
@@ -5263,66 +5273,83 @@ unsafe fn do_is_unsorted(call: &Call<'_>) -> R<Sexp> {
     scalar_bool(false)
 }
 
-unsafe fn do_pack_bits(call: &Call<'_>) -> R<Sexp> {
-    let bits = call.arg(0);
-    let kind = values::require_str(call.arg(1), "type")?;
-    let width = match kind.as_ref() {
-        "raw" => 8,
-        "integer" => 32,
-        "double" => 64,
-        _ => return Err(call.error("invalid 'type' argument")),
+fn do_pack_bits<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let bits = arguments.value(0);
+    let kind = arguments.value(1);
+    let width = match handles::first_string(context, kind).as_deref() {
+        Some("raw") => 8,
+        Some("integer") => 32,
+        Some("double") => 64,
+        _ => return Err(arguments.error("invalid 'type' argument")),
     };
-    let count = length(bits);
+    if handles::length(context, kind) != 1 {
+        return Err(error("invalid 'type' argument"));
+    }
+    let count = handles::length(context, bits);
     if !count.is_multiple_of(width) {
-        return Err(call.error(format!("argument 'x' must be a multiple of {width} long")));
+        return Err(arguments.error(format!("argument 'x' must be a multiple of {width} long")));
     }
-    let mut flags = Vec::with_capacity(count);
-    for index in 0..count {
-        let bit = match bits.kind() {
-            SexpType::Raw => values::raws(bits)[index] & 1,
-            SexpType::Logical | SexpType::Integer => {
-                let value = values::ints(bits)[index];
-                if value == NA_INTEGER {
-                    return Err(call.error("argument 'x' must not contain NAs"));
-                }
-                (value & 1) as u8
-            }
-            _ => return Err(call.error("argument 'x' must be raw, integer or logical")),
-        };
-        flags.push(bit as u64);
-    }
-    let packed: Vec<u64> = flags
-        .chunks(width)
-        .map(|chunk| {
-            chunk
+    let not_standard = || error("internal error: an expanded vector has no standard form");
+    let flags: Vec<u64> = match bits.r_type() {
+        _ if count == 0 => Vec::new(),
+        SexpType::Raw => {
+            let raw = dense::<Raw>(context, bits)?.ok_or_else(not_standard)?;
+            raw.as_slice(context)
                 .iter()
-                .enumerate()
-                .fold(0u64, |word, (bit, flag)| word | (flag << bit))
-        })
-        .collect();
+                .map(|byte| u64::from(byte & 1))
+                .collect()
+        }
+        SexpType::Logical => {
+            let logicals = dense::<Logical>(context, bits)?.ok_or_else(not_standard)?;
+            integer_flags(arguments, logicals.as_slice(context))?
+        }
+        SexpType::Integer => {
+            let integers = dense::<Integer>(context, bits)?.ok_or_else(not_standard)?;
+            integer_flags(arguments, integers.as_slice(context))?
+        }
+        _ => return Err(arguments.error("argument 'x' must be raw, integer or logical")),
+    };
+    let packed = flags.chunks(width).map(|chunk| {
+        chunk
+            .iter()
+            .enumerate()
+            .fold(0u64, |word, (bit, flag)| word | (flag << bit))
+    });
+    let words = count / width;
     match width {
         8 => {
-            let result = alloc(SexpType::Raw, packed.len())?;
-            for (index, word) in packed.iter().enumerate() {
-                values::raws_mut(result)[index] = *word as u8;
+            let mut result = context.alloc::<Raw>(words)?;
+            for (slot, word) in result.as_mut_slice().iter_mut().zip(packed) {
+                *slot = word as u8;
             }
-            Ok(result)
+            Ok(result.finish().value())
         }
         32 => {
-            let result = alloc(SexpType::Integer, packed.len())?;
-            for (index, word) in packed.iter().enumerate() {
-                values::ints_mut(result)[index] = *word as u32 as i32;
+            let mut result = context.alloc::<Integer>(words)?;
+            for (slot, word) in result.as_mut_slice().iter_mut().zip(packed) {
+                *slot = word as u32 as i32;
             }
-            Ok(result)
+            Ok(result.finish().value())
         }
         _ => {
-            let result = alloc(SexpType::Real, packed.len())?;
-            for (index, word) in packed.iter().enumerate() {
-                values::reals_mut(result)[index] = f64::from_bits(*word);
+            let mut result = context.alloc::<Real>(words)?;
+            for (slot, word) in result.as_mut_slice().iter_mut().zip(packed) {
+                *slot = f64::from_bits(word);
             }
-            Ok(result)
+            Ok(result.finish().value())
         }
     }
+}
+
+/// The low bit of each logical or integer, refusing an `NA`.
+fn integer_flags(arguments: &Args<'_, '_>, values: &[i32]) -> R<Vec<u64>> {
+    values
+        .iter()
+        .map(|&value| match value {
+            NA_INTEGER => Err(arguments.error("argument 'x' must not contain NAs")),
+            value => Ok((value & 1) as u64),
+        })
+        .collect()
 }
 
 /// `polyroot(z)`: the roots of the polynomial with coefficients `z` in increasing order, by
