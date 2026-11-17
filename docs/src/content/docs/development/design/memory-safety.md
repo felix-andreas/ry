@@ -198,6 +198,7 @@ the cheap copy.
 | --- | --- | --- |
 | Fill a new atomic vector | `fresh.as_mut_slice()` | `Fresh` is the only pointer and takes `&mut self`. No context is needed, because the object holds no pointers |
 | Fill a new list, string vector or pairlist | `fresh.set(cx, i, value)` with `&Cx` | the store runs the barrier and the count inside `heap`. A safepoint between two stores can promote the object, and the barrier covers that. There is no `&mut [Gc]` to fill without it |
+| Fill a new vector from one iterator | `cx.alloc_unfilled::<T>(n)?`, then `unfilled.fill(elements)` for numbers or `unfilled.fill_elements(cx, elements)` for a list or string vector | `Unfilled` is the only pointer and offers nothing but the fill, so no element is read before it is written. The elements borrow `&Cx`, so the iterator cannot reach a safepoint, the slots are written directly, and the references are counted once afterwards |
 | Change an existing object in place | `owned.write(cx)`, then `write.split()`, or `write.split_elements()` for a list | `Owned` says nothing else refers to the object, and `Write` holds `&mut Cx`, so no slice taken earlier is alive, no R code runs, and nothing can share the object meanwhile |
 | Store into an object with reference semantics | `cx.define(env, sym, value)` (`&mut Cx`), promise and external-pointer fields (`&Cx`) | the barrier and the count run inside `heap` |
 
@@ -519,14 +520,26 @@ the raw one and says why the handle types make the call sound. The wrappers are 
 function meets an unmigrated one, so that boundary is visible and counted, and a wrapper
 disappears when the helper under it is migrated.
 
-Written against the handle types: tier 0's element and matrix stores; the attribute readers and
-setters with their fast-path entries (`attr`, `attributes`, `names`, `dim`, `dimnames`, `class`,
-`oldClass`, `levels<-`, `comment`, `length<-`, `inherits`, `unclass` and the replacement forms);
-`strings.rs` except `paste`, `paste0`, `sprintf`, `strsplit` and `make.unique`; and the bit
-conversions in `arith.rs`. Three pieces of the API are not built: the bytecode loop's register
-accessor, `Held<T>` fields in traced structures, and a bulk fill for a new list or character
-vector, which the five string builtins above wait for because a store per element pays a count
-and a barrier each.
+Written against the handle types: tier 0's element and matrix stores; subscript resolution,
+element reads and stores, and `[`, `[[`, `$`, `@` with their replacement forms (`subset.rs`); the
+attribute readers and setters with their fast-path entries (`attr`, `attributes`, `names`, `dim`,
+`dimnames`, `class`, `oldClass`, `levels<-`, `comment`, `length<-`, `inherits`, `unclass` and the
+replacement forms); `strings.rs` except `paste`, `paste0`, `sprintf`, `strsplit` and
+`make.unique`; and the bit conversions in `arith.rs`. Two pieces of the API are not built: the
+bytecode loop's register accessor and `Held<T>` fields in traced structures.
+
+An unmigrated caller reaches a migrated function through a raw entry, an `unsafe fn` over `Sexp`
+that states what the caller must hold. Which helper the entry uses decides its cost:
+
+| Entry | Helper | Roots |
+| --- | --- | --- |
+| Returns no object | `handles::with` | a scope of its own, released on return |
+| Returns an object to a caller that treats it as rooted | `handles::with_result` | a scope of its own, and the result rooted again in the caller's |
+| Runs once per instruction or per loop iteration, and its caller releases the handle stack | `handles::in_caller_scope` with `handles::held` operands | none of its own: the caller's roots hold the operands, and what the entry roots stays until the caller's release |
+
+The third form is what `subset::vector_element` (the element read of `for` and the apply
+functions) and tier 0's `$` entries use, because a scope and a second root per call measured 15
+to 50 instructions on those paths.
 
 The order:
 
@@ -568,9 +581,6 @@ no `Sexp`.
   pointer protection) share one definition with `libr`.
 - The spelling for linking a pairlist cell after it is visible to other code, which the evaluator
   does when it builds argument lists incrementally.
-- A bulk fill for a new list or character vector. `fresh.set` runs the barrier and the count per
-  element, and the raw code fills such a vector through its slice and counts once
-  (`Heap::count_written_elements`), which measured several times faster in `as.character` and
-  `strsplit`-style builders. The safe form is one call that takes an iterator of elements.
-  `strsplit` stays raw until then: it stores each new piece vector in its result before making
-  the vector's strings, so neither takes a handle, and a safe form would root one per element.
+- How `strsplit` fills its result. It stores each new piece vector in the result before making
+  the vector's strings, so neither takes a handle, and `Unfilled::fill_elements` cannot express
+  that: its iterator borrows `&Cx` and cannot allocate the strings.

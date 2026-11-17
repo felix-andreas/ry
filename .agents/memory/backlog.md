@@ -665,17 +665,18 @@ About seven in ten of the hot suite's closure calls from compiled code take `cal
 
 ## Open: the handle migration
 
-Rule: `decisions/heap-gc.md`, "Interpreter code holds values through handles the borrow checker
-checks". Order, method and costs: `development/design/memory-safety.md`, "Migration" and "Cost".
+Rule, order and costs: `development/design/memory-safety.md`, "Migration", "Cost".
 
-- **Raw, in order.** `[<-`, `[[<-`, `$<-`, `@<-` (`subset.rs`) and their slot paths
-  (`assign_slot_element`, `replace_variable`); `[`, `[[`; `.class2`, `.cache_class`,
-  `do_copy_df_attr`; `paste`, `sprintf`, `strsplit`, `make.unique` (after the bulk fill);
+- **Raw, in order.** The replacement forms' slot paths (`assign_slot_element`,
+  `replace_variable`); `subset.rs`'s builders (`matrix`, `array`, `aperm`, `cbind`, `rev`);
+  `.class2`, `.cache_class`, `do_copy_df_attr`; `paste`, `sprintf`, `make.unique`, `strsplit`;
   `values.rs`, the evaluator, the bytecode loop.
-- **Not built** (`memory-safety.md`, "Migration"): the register accessor, `Held<T>`, a bulk fill.
-- **Raw functions the ratchet's baseline admits, to move with their files.** `op_subscript` and
-  `subscript_unbound` (`bytecode.rs`, with the register accessor), `patch_args_by_actuals`
-  (`dispatch.rs`), `lock_base_bindings` (`session.rs`).
+- **`subset.rs`'s raw entries** (`vector_element`, `subset`, `subassign`, the four replacement
+  specials) go when their callers move.
+- **Not built**: the register accessor, `Held<T>`.
+- **Unaudited.** `jit::runtime` helpers outside `scoped` must leave no handle.
+- **Raw, admitted by the ratchet's baseline.** `op_subscript`, `subscript_unbound`
+  (`bytecode.rs`), `patch_args_by_actuals` (`dispatch.rs`), `lock_base_bindings` (`session.rs`).
 
 ## Open: failing tests on main
 
