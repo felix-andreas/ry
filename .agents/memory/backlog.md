@@ -1517,6 +1517,10 @@ setup is about a tenth of the run, so take them for the objects they remove:
 - **In-place reads from a closure.** A closure made in a slot frame reads its maker's variables
   through `eval::slot_binding` on every read (1.76 million calls in the slice), because the
   inline cache holds binding cells and a slot is not one.
+- **Calls from Rust bind per call**: `bind_slots` walks the formals for a functional's element
+  call, S3 dispatch and `jit_call`. Prepare the callee once per loop, or use the site's plan.
+- **An element `<<-` behind a call subscript** (`x[[f(x)]] <<- v`) stays on
+  `Op::Ast` and makes the frame's environment.
 
 **Allocations per operation against GNU R.** Loops of 20,000 and 40,000 iterations of each operation,
 differenced. GNU R (4.6.2, its loop byte-compiled) counts `allocVector3`, `CONS_NR`, `cons`,

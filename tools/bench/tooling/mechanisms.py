@@ -73,6 +73,10 @@ kstore <- function(v) { v[2L] <- 9; v }
 kgrid <- function(m) { m[1L, 1L] <- 1; m[2L, 2L] <- 1; m }
 kappend <- function() { x <- numeric(0); x[[1L]] <- 1; x[[2L]] <- 2; x[[3L]] <- 3; x }
 kfield <- function(l) { l$z <- 1; l }
+kcount <- local({ count <- 0L; function() { count <<- count + 1L; count } })
+kkeep <- local({ kept <- numeric(4L); function(v) { kept[2L] <<- v; 0L } })
+kkeep_list <- local({ kept <- list(1, 2); function(v) { kept[[2L]] <<- v; 0L } })
+kkeep_field <- local({ kept <- list(a = 1, b = 2); function(v) { kept$b <<- v; 0L } })
 """
 
 # (name, expression). The loop assigns the expression's value, so an operation's count includes
@@ -107,6 +111,9 @@ OPERATIONS = [
     ("call: `do.call`", "do.call(k1, list(i))"),
     ("call: `eval` of a quoted call", "eval(quoted)"),
     ("call: anonymous function in place", "(function(x) x + 1L)(i)"),
+    ("call: its value replaces its argument", "kidentity(result)"),
+    ("call: base closure with a native entry", "isTRUE(result)"),
+    ("call: native entry declines a call argument", "isTRUE(kidentity(i))"),
     ("apply: `lapply` over 4 elements", "lapply(numbers, k1)"),
     ("apply: `vapply` over 4 elements", "vapply(numbers, k1, 0)"),
     ("apply: `sapply` over 4 elements", "sapply(numbers, k1)"),
@@ -183,6 +190,10 @@ OPERATIONS = [
     ("assign: two matrix elements of a 100-element argument, copied", "kgrid(wide)"),
     ("assign: three appends to a new vector", "kappend()"),
     ("assign: a new field of a list argument", "kfield(plain)"),
+    ("assign: `<<-` to an enclosing function's variable", "kcount()"),
+    ("assign: `<<-` to an element of an enclosing function's vector", "kkeep(i)"),
+    ("assign: `<<-` to an element of an enclosing function's list", "kkeep_list(i)"),
+    ("assign: `<<-` to a field of an enclosing function's list", "kkeep_field(i)"),
 ]
 
 EMPTY = "empty loop"

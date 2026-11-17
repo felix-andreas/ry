@@ -2310,6 +2310,12 @@ pub enum Op {
     /// binding is found, and the assignment goes to `complex_assign`, where a method gets the
     /// subscript as a promise it may never force. It reads as [`Op::GetVar`] otherwise.
     Subscript,
+    /// `dst symbol index value call kind setter`: `x[i] <<- value`, `x[[i]] <<- value` or
+    /// `x$name <<- value` with the base replacement function, as [`Op::SubAssign`] is for `<-`.
+    /// `index` is a constant: the subscript, or its symbol, which is read once the variable
+    /// found from the closure's enclosure is known to take the replacement function's own
+    /// code. Anything else runs the general assignment ([`eval::complex_assign`]).
+    SuperSubAssign,
 }
 
 /// Which replacement an [`Op::SubAssign`] does, stored as its sixth operand.
@@ -2324,7 +2330,16 @@ pub enum ElementKind {
     Dollar = 2,
 }
 
-pub const OPS: [Op; 55] = [
+/// The name of the replacement function an element assignment of `kind` calls.
+fn replacement_name(kind: ElementKind) -> &'static str {
+    match kind {
+        ElementKind::Single => "[<-",
+        ElementKind::Double => "[[<-",
+        ElementKind::Dollar => "$<-",
+    }
+}
+
+pub const OPS: [Op; 56] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -2380,6 +2395,7 @@ pub const OPS: [Op; 55] = [
     Op::Argument,
     Op::ComplexAssign,
     Op::Subscript,
+    Op::SuperSubAssign,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -4497,6 +4513,26 @@ impl Compiler {
                     &args,
                 );
             }
+            if name == "<<-"
+                && plain
+                && args.len() == 2
+                && self.bound.is_none()
+                && let Some((kind, replacement, subscripts)) =
+                    self.element_assignment_target(args[0].1)?
+                && let [subscript] = subscripts[..]
+                && (self_evaluating(subscript) || subscript.kind() == SexpType::Symbol)
+            {
+                return self.enclosed_element_assignment(
+                    call,
+                    head,
+                    primitive,
+                    replacement,
+                    kind,
+                    subscript,
+                    dst,
+                    &args,
+                );
+            }
             if matches!(name.as_str(), "<-" | "=")
                 && args.len() == 2
                 && args.iter().all(|(tag, _)| *tag == nil())
@@ -4783,11 +4819,7 @@ impl Compiler {
         args: &[(Sexp, Sexp)],
     ) -> R<()> {
         let target = args[0].1;
-        let replacement_symbol = values::install(match kind {
-            ElementKind::Single => "[<-",
-            ElementKind::Double => "[[<-",
-            ElementKind::Dollar => "$<-",
-        })?;
+        let replacement_symbol = values::install(replacement_name(kind))?;
         let mut guards = Vec::new();
         for (symbol, expected) in [(head, primitive), (replacement_symbol, replacement)] {
             guards.extend(self.guard(call, symbol, expected)?);
@@ -4847,18 +4879,7 @@ impl Compiler {
                 &[dst, variable, row, column, value, call_constant],
             ),
             [index, ..] => {
-                // The replacement call `complex_assign` would make, `` `[<-`(`*tmp*`, i,
-                // value = v) ``, which errors from the primitive name as GNU R's do.
-                let mut items: SmallVec<[(Sexp, Sexp); 4]> =
-                    smallvec![(nil(), replacement_symbol), (nil(), symbols().tmp)];
-                let mut rest = target.cdr().cdr();
-                while matches!(rest.kind(), SexpType::Pairlist | SexpType::Language) {
-                    items.push((rest.tag(), rest.car()));
-                    rest = rest.cdr();
-                }
-                items.push((symbols().value, args[1].1));
-                let setter_call = values::pairlist(&items, SexpType::Language)?;
-                let setter_call = self.constant(setter_call);
+                let setter_call = self.setter_call(replacement_symbol, target, args[1].1)?;
                 self.emit(
                     Op::SubAssign,
                     &[
@@ -4880,6 +4901,69 @@ impl Compiler {
         }
         self.cold_fallback(&guards, call, dst)?;
         Ok(())
+    }
+
+    /// `x[i] <<- value`, `x[[i]] <<- value` or `x$name <<- value` with one subscript that is a
+    /// constant or a variable, guarded by both `<<-` and the replacement function. The
+    /// instruction reads a variable subscript itself, after it has seen that the target takes
+    /// no replacement method, because a method gets the subscript as a promise it may never
+    /// force. A subscript that is a call has no such late reading and takes the general
+    /// assignment.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn enclosed_element_assignment(
+        &mut self,
+        call: Sexp,
+        head: Sexp,
+        primitive: Sexp,
+        replacement: Sexp,
+        kind: ElementKind,
+        subscript: Sexp,
+        dst: u32,
+        args: &[(Sexp, Sexp)],
+    ) -> R<()> {
+        let target = args[0].1;
+        let replacement_symbol = values::install(replacement_name(kind))?;
+        let mut guards = Vec::new();
+        for (symbol, expected) in [(head, primitive), (replacement_symbol, replacement)] {
+            guards.extend(self.guard(call, symbol, expected)?);
+        }
+        let mark = self.next_register;
+        let value = self.allocate();
+        self.expression(args[1].1, value)?;
+        let variable = self.constant(target.cdr().car());
+        let index = self.constant(subscript);
+        let call_constant = self.constant(call);
+        let setter_call = self.setter_call(replacement_symbol, target, args[1].1)?;
+        self.emit(
+            Op::SuperSubAssign,
+            &[
+                dst,
+                variable,
+                index,
+                value,
+                call_constant,
+                kind as u32,
+                setter_call,
+            ],
+        );
+        self.release_to(mark);
+        self.cold_fallback(&guards, call, dst)
+    }
+
+    /// The constant of the replacement call `complex_assign` would make for the one-level
+    /// `target`, `` `[<-`(`*tmp*`, i, value = v) ``, which errors from the primitive name as
+    /// GNU R's do.
+    unsafe fn setter_call(&mut self, replacement: Sexp, target: Sexp, value: Sexp) -> R<u32> {
+        let mut items: SmallVec<[(Sexp, Sexp); 4]> =
+            smallvec![(nil(), replacement), (nil(), symbols().tmp)];
+        let mut rest = target.cdr().cdr();
+        while matches!(rest.kind(), SexpType::Pairlist | SexpType::Language) {
+            items.push((rest.tag(), rest.car()));
+            rest = rest.cdr();
+        }
+        items.push((symbols().value, value));
+        let setter_call = values::pairlist(&items, SexpType::Language)?;
+        Ok(self.constant(setter_call))
     }
 
     /// Compiles what runs when the replacement `branch` tests may hand the target's other
@@ -6290,7 +6374,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::LogicLeft => 5,
         Op::LogicRight => 5,
         Op::Closure => 4,
-        Op::SubAssign => 7,
+        Op::SubAssign | Op::SuperSubAssign => 7,
         Op::SubAssignMatrix => 6,
         Op::Replace => 8,
         Op::SetSrcref => 2,
@@ -6525,6 +6609,7 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
         Op::LogicRight => &[Register, Register, Register, Constant, Immediate],
         Op::Closure => &[Register, Formals, Constant, Constant],
         Op::SubAssign => &[Register, Symbol, Register, Register, Call, Immediate],
+        Op::SuperSubAssign => &[Register, Symbol, Constant, Register, Call, Immediate],
         Op::SubAssignMatrix => &[Register, Symbol, Register, Register, Register, Call],
         Op::Replace => &[
             Register,
@@ -7292,15 +7377,15 @@ pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<Option<Sexp>> 
         state.resume_base = (*state.interp).bytecode.resumes.len();
         state.stepping = true;
         let entered = if *state.header == (*state.heap).known().nil {
-            match call_fast::<false, false, GUARDING>(&mut state, pc) {
-                None => call_fast::<false, true, GUARDING>(&mut state, pc),
+            match call_fast::<false, false, false, GUARDING>(&mut state, pc) {
+                None => call_fast::<false, true, false, GUARDING>(&mut state, pc),
                 taken => taken,
             }
         } else {
-            call_fast::<true, false, GUARDING>(&mut state, pc)
+            call_fast::<true, false, false, GUARDING>(&mut state, pc)
         };
         let entered = match entered {
-            None if activity::summary_only() => call_summarized(&mut state, pc),
+            None if activity::summary_only() => call_summarized::<false>(&mut state, pc),
             entered => entered,
         };
         match entered {
@@ -8275,6 +8360,7 @@ handlers! {
     run_argument: Argument, true, op_argument;
     run_complex_assign: ComplexAssign, true, op_complex_assign;
     run_subscript: Subscript, true, op_subscript;
+    run_super_sub_assign: SuperSubAssign, true, op_super_sub_assign;
 }
 
 /// `Jump`, the one instruction whose failure resumes somewhere other than after itself: the
@@ -8344,6 +8430,7 @@ macro_rules! fast_paths {
         const fn fast_path_table(mut table: [Handler; HANDLER_COUNT]) -> [Handler; HANDLER_COUNT] {
             $(table[Op::$op as usize] = $name;)*
             table[Op::CallGeneric as usize] = fast_call_generic;
+            table[Op::CallRebinding as usize] = fast_call_rebinding;
             table[Op::Return as usize] = fast_return;
             table
         }
@@ -8382,7 +8469,7 @@ unsafe fn fast_call_generic(state: &mut Activation<'_, '_>, at: usize) {
     if activity::hooks() != 0 {
         become call_generic_hooked(state, at)
     }
-    if let Some(next) = call_fast::<false, false, UNHOOKED>(state, at) {
+    if let Some(next) = call_fast::<false, false, false, UNHOOKED>(state, at) {
         if next == STOP {
             return;
         }
@@ -8397,9 +8484,9 @@ unsafe fn fast_call_generic(state: &mut Activation<'_, '_>, at: usize) {
 #[inline(never)]
 unsafe fn call_generic_by_name(state: &mut Activation<'_, '_>, at: usize) {
     let taken = if *state.header != (*state.heap).known().nil {
-        call_fast::<true, false, UNHOOKED>(state, at)
+        call_fast::<true, false, false, UNHOOKED>(state, at)
     } else {
-        call_fast::<false, true, UNHOOKED>(state, at)
+        call_fast::<false, true, false, UNHOOKED>(state, at)
     };
     if let Some(next) = taken {
         if next == STOP {
@@ -8407,7 +8494,56 @@ unsafe fn call_generic_by_name(state: &mut Activation<'_, '_>, at: usize) {
         }
         dispatch!(state, next);
     }
-    become GENERIC_HANDLERS[Op::CallGeneric as usize](state, at)
+    become generic_call_handler(state, at)(state, at)
+}
+
+/// The generic handler of the call at `at`: [`fast_call_rebinding`] sends a `CallRebinding`
+/// through the fast handlers of `CallGeneric`, whose operands its first three are.
+#[inline(always)]
+unsafe fn generic_call_handler(state: &Activation<'_, '_>, at: usize) -> Handler {
+    if op_index(state.code, at) == Op::CallRebinding as usize {
+        GENERIC_HANDLERS[Op::CallRebinding as usize]
+    } else {
+        GENERIC_HANDLERS[Op::CallGeneric as usize]
+    }
+}
+
+/// The fast handler of `CallRebinding`, `target <- function(target, ...)`. From a slot frame
+/// whose slot of `target` holds a value no move handles ([`moves::extent`]), a call of a
+/// closure the site has a fast plan for is the ordinary call, which goes on in
+/// [`fast_call_generic`]. Every other one takes the generic handler, where a builtin updates
+/// the slot's value in place, a closure takes it as a move, and a closure with a native entry
+/// runs that.
+unsafe fn fast_call_rebinding(state: &mut Activation<'_, '_>, at: usize) {
+    let code = state.code;
+    let function = *state.registers.add(*code.add(at + 2) as usize);
+    let feedback = pool_entry(state.constants, FEEDBACK);
+    let plans = &(*state.interp).bytecode.call_plans;
+    if *state.header == (*state.heap).known().nil
+        && function.kind() == SexpType::Closure
+        && !function.has_gp(gp::NATIVE_ENTRY)
+        && at + 1 < feedback.length() as usize
+        && let word = *feedback.data().cast::<i32>().add(at + 1)
+        && word > 0
+        && word as usize <= plans.rows.len()
+        && (*plans.rows.as_ptr().add(word as usize - 1)).flags & PLAN_FAST != 0
+    {
+        let target = pool_constant(state, *code.add(at + 4) as usize);
+        let names = pool_entry(pool_entry(state.constants, SLOTS), 1);
+        let slots = names.data().cast::<Sexp>();
+        let mut position = 0;
+        while position < names.length() as usize {
+            if *slots.add(position) == target {
+                let value = *state.header.add(1 + position);
+                if !matches!(value.kind(), SexpType::Record | SexpType::List) && !value.is_array() {
+                    become fast_call_generic(state, at)
+                }
+                break;
+            }
+            position += 1;
+        }
+    }
+    become GENERIC_HANDLERS[Op::CallRebinding as usize](state, at)
 }
 
 /// `CallGeneric` while a hook flag is set: through [`call_summarized`] when the flag is a
@@ -8415,35 +8551,59 @@ unsafe fn call_generic_by_name(state: &mut Activation<'_, '_>, at: usize) {
 #[inline(never)]
 unsafe fn call_generic_hooked(state: &mut Activation<'_, '_>, at: usize) {
     if activity::summary_only()
-        && let Some(next) = call_summarized(state, at)
+        && let Some(next) = call_summarized::<false>(state, at)
     {
         if next == STOP {
             return;
         }
         dispatch!(state, next);
     }
-    become GENERIC_HANDLERS[Op::CallGeneric as usize](state, at)
+    become generic_call_handler(state, at)(state, at)
 }
 
 /// [`call_fast`] for the call at `at` while a profile summary is collected: the same path with
 /// the summary's records, which are the call's count, its body's entry count, the time the
 /// call takes as call setup, and the samples that wait for the stack the call changes.
 #[inline(never)]
-unsafe fn call_summarized(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+unsafe fn call_summarized<const DECLINED: bool>(
+    state: &mut Activation<'_, '_>,
+    at: usize,
+) -> Option<usize> {
     if activity::sample_ticked() {
         crate::profile_summary::resolve_samples(interp().frames.len());
     }
     let running = activity::current();
     activity::publish(Activity::CallSetup);
-    let taken = match call_fast::<false, false, SUMMARIZED>(state, at) {
+    let taken = match call_fast::<false, false, DECLINED, SUMMARIZED>(state, at) {
         None if *state.header != (*state.heap).known().nil => {
-            call_fast::<true, false, SUMMARIZED>(state, at)
+            call_fast::<true, false, DECLINED, SUMMARIZED>(state, at)
         }
-        None => call_fast::<false, true, SUMMARIZED>(state, at),
+        None => call_fast::<false, true, DECLINED, SUMMARIZED>(state, at),
         taken => taken,
     };
     activity::restore(running);
     taken
+}
+
+/// [`call_fast`] for the call at `at` of a closure whose native entry has just declined it
+/// ([`crate::base_fast_paths::native_entry_by_value`]), so the body runs after all: the call
+/// enters as a call of any other closure does, under a profile summary too.
+#[inline(never)]
+unsafe fn call_declined(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    if activity::hooks() != 0 {
+        return if activity::summary_only() {
+            call_summarized::<true>(state, at)
+        } else {
+            None
+        };
+    }
+    match call_fast::<false, false, true, UNHOOKED>(state, at) {
+        None if *state.header != (*state.heap).known().nil => {
+            call_fast::<true, false, true, UNHOOKED>(state, at)
+        }
+        None => call_fast::<false, true, true, UNHOOKED>(state, at),
+        taken => taken,
+    }
 }
 
 /// The fast handler of `Return`: [`return_fast`] for a frame that handed out no environment,
@@ -8565,10 +8725,18 @@ unsafe fn leave_stepped(state: &mut Activation<'_, '_>, value: Sexp) -> bool {
 /// object system ([`activity::observers`]), a closure flagged for debugging or with a native
 /// entry, the namespace loader, `do.call`, a frame stack or register file that is full.
 ///
+/// `DECLINED` takes a closure with a native entry, for the caller that has tried the entry
+/// ([`call_declined`]); every other copy leaves such a closure to the handler that tries it.
+///
 /// `HOOKS` is how the copy treats the hook flags ([`GUARDING`]); under [`SUMMARIZED`] it counts
 /// the call and the callee's entry.
 #[inline(always)]
-unsafe fn call_fast<const BY_NAME: bool, const SPREAD: bool, const HOOKS: u8>(
+unsafe fn call_fast<
+    const BY_NAME: bool,
+    const SPREAD: bool,
+    const DECLINED: bool,
+    const HOOKS: u8,
+>(
     state: &mut Activation<'_, '_>,
     at: usize,
 ) -> Option<usize> {
@@ -8611,8 +8779,12 @@ unsafe fn call_fast<const BY_NAME: bool, const SPREAD: bool, const HOOKS: u8>(
         || (*row).formals != function.car()
         || (*row).body != body
         || (*row).flags & (fast | PLAN_SPREAD) != fast
-        || function
-            .has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE | gp::NATIVE_ENTRY)
+        || function.has_gp(
+            gp::CLOSURE_DEBUG
+                | gp::CLOSURE_STEP
+                | gp::CLOSURE_TRACE
+                | if DECLINED { 0 } else { gp::NATIVE_ENTRY },
+        )
         || function == interp.namespace_loader
         || function == interp.do_call
     {
@@ -10196,6 +10368,11 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             instruction.output(0, value);
             return Ok(Flow::Next);
         }
+        if function.has_gp(gp::NATIVE_ENTRY)
+            && let Some(next) = call_declined(state, instruction.at)
+        {
+            return Ok(Flow::Goto(next));
+        }
         let mut args = eval::Args::new();
         // Binding a variable's value instead of a promise for it is invisible when the callee
         // cannot assign anything before forcing it, nor look at the promise (`substitute`,
@@ -11715,18 +11892,8 @@ unsafe fn assign_slot_element(
     }
     // An object with a replacement method dispatches to it, which `complex_assign` does with
     // the frame's environment. Without a method the builtin's own code replaces.
-    if target.is_object() {
-        let Some(function) = crate::builtins::primitive(match kind {
-            ElementKind::Single => "[<-",
-            ElementKind::Double => "[[<-",
-            ElementKind::Dollar => "$<-",
-        }) else {
-            return Ok(false);
-        };
-        let definition = eval::builtin_def(function)?;
-        if dispatch::has_internal_method(definition, function, target, Caller::SlotFrame)? {
-            return Ok(false);
-        }
+    if target.is_object() && may_dispatch_replacement(target, kind, Caller::SlotFrame)? {
+        return Ok(false);
     }
     moves::modifying(target)?;
     let object = if environment || (current == target && slot_owns(state, target)) {
@@ -11764,6 +11931,15 @@ unsafe fn assign_slot_element(
         heap.store_slot(&mut *slot, result);
     }
     Ok(true)
+}
+
+/// Whether the element replacement of `kind` on the object `target` could run a method in
+/// place of the base primitive's own code ([`dispatch::has_internal_method`]).
+unsafe fn may_dispatch_replacement(target: Sexp, kind: ElementKind, caller: Caller) -> R<bool> {
+    let Some(function) = crate::builtins::primitive(replacement_name(kind)) else {
+        return Ok(true);
+    };
+    dispatch::has_internal_method(eval::builtin_def(function)?, function, target, caller)
 }
 
 /// [`assign_element`] on a slot's value: the slot's value changes in place when the slot owns
@@ -13345,6 +13521,191 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
     instruction.output(0, value);
     (*state.interp).visible = false;
     Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_super_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let call = state.constant(instruction, 4);
+    let value = instruction.input(3);
+    let kind = match instruction.operand(5) {
+        0 => ElementKind::Single,
+        1 => ElementKind::Double,
+        _ => ElementKind::Dollar,
+    };
+    let mut index = state.constant(instruction, 2);
+    if !assign_enclosed_element(
+        state,
+        state.constant(instruction, 1),
+        (&mut index, value, kind),
+        (call, state.constant(instruction, 6)),
+    )? {
+        let target = call.cdr().car();
+        let evaluated = evaluated_arguments(target, &[index])?;
+        let env = state.env(Reify::Site(Site::EnclosedSubassignment))?;
+        eval::complex_assign(call, target, value, env, true, &evaluated)?;
+    }
+    instruction.output(0, value);
+    (*state.interp).visible = false;
+    Ok(Flow::Next)
+}
+
+/// `x[i] <<- value`, `x[[i]] <<- value` or `x$name <<- value` on the variable `<<-` finds from
+/// the closure's enclosure, without making the running frame's environment, for any `x` that
+/// has no method for the replacement. The steps are GNU R's: `x` is read, then the subscript,
+/// then the base replacement's own code runs on `x`'s value, which changes in place when the
+/// binding alone holds it, and the result is bound as `x <<- result` binds it. `index` is a
+/// constant or the subscript's symbol, which is replaced by the variable's value once that is
+/// read. Returns `false`, having changed nothing, when the general assignment must run.
+unsafe fn assign_enclosed_element(
+    state: &Activation<'_, '_>,
+    variable: Sexp,
+    (index, value, kind): (&mut Sexp, Sexp, ElementKind),
+    (whole, setter_call): (Sexp, Sexp),
+) -> R<bool> {
+    let heap = &mut *state.heap;
+    let enclosure = state.machine.enclosure();
+    let Some((home, cell)) = enclosed_cell(variable, enclosure) else {
+        return Ok(false);
+    };
+    if cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED) {
+        return Ok(false);
+    }
+    let current = cell.cdr();
+    // A forced promise holds a value its caller may also hold, so the update goes to a copy.
+    let through_promise = current.kind() == SexpType::Promise;
+    let target = if through_promise {
+        current.car()
+    } else {
+        current
+    };
+    let environment = target.kind() == SexpType::Environment && kind != ElementKind::Single;
+    let replaceable = matches!(
+        target.kind(),
+        SexpType::Nil
+            | SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::String
+            | SexpType::Raw
+            | SexpType::List
+            | SexpType::Expression
+    );
+    if !(replaceable || environment) {
+        return Ok(false);
+    }
+    // A method takes the subscript unevaluated, so an object is asked before the subscript is
+    // read.
+    if target.is_object() {
+        let caller = if state.in_slots() {
+            Caller::SlotFrame
+        } else {
+            Caller::Env(*state.header)
+        };
+        if may_dispatch_replacement(target, kind, caller)? {
+            return Ok(false);
+        }
+    }
+    // Forcing the subscript's promise may rebind `x`. The replacement then works on a copy of
+    // the value read before, as GNU R's `*tmp*` holds it, and `<<-` finds the binding again.
+    let mut rebound = false;
+    if index.kind() == SexpType::Symbol {
+        let (slot, from) = if state.in_slots() {
+            (slot_named(state, *index), enclosure)
+        } else {
+            (None, *state.header)
+        };
+        let held = match slot {
+            Some(slot) if *slot != unbound() => *slot,
+            _ => match eval::find_cell(*index, from) {
+                Some(cell) if !cell.has_gp(gp::ACTIVE_BINDING) => cell.cdr(),
+                _ => return Ok(false),
+            },
+        };
+        let read = if held.kind() == SexpType::Promise {
+            let forces = held.car() == unbound();
+            heap.root(target);
+            let read = eval::force_promise(held)?;
+            rebound = forces
+                && (enclosed_cell(variable, enclosure) != Some((home, cell))
+                    || cell.cdr() != current);
+            read
+        } else {
+            held
+        };
+        if read == unbound() || read == missing_arg() || read.kind() == SexpType::Promise {
+            return Ok(false);
+        }
+        *index = read;
+    }
+    let index = *index;
+    let stored = assign_element(target, index, value, kind, |target| {
+        !through_promise
+            && !rebound
+            && !values::maybe_shared(target)
+            && eval::reuse_permitted(home, target)
+    })?;
+    if let Some(result) = stored {
+        if rebound {
+            eval::set_var(variable, result, enclosure)?;
+        } else if result != current {
+            eval::assign_local(variable, result, home, Some(cell))?;
+        }
+        return Ok(true);
+    }
+    if kind == ElementKind::Dollar && length(index) != 1 {
+        return Ok(false);
+    }
+    moves::modifying(target)?;
+    let owned = environment
+        || !(through_promise
+            || rebound
+            || value == target
+            || values::maybe_shared(target)
+            || !eval::reuse_permitted(home, target));
+    let object = if owned {
+        target
+    } else {
+        let was_array = target.is_array();
+        let copy = values::shallow_duplicate(target)?;
+        copy.set_array(was_array);
+        heap.root(copy);
+        copy
+    };
+    let interpreter = interp();
+    let outer = interpreter
+        .assignment_call
+        .replace((setter_call, whole, interpreter.frames.len()));
+    let result = match kind {
+        ElementKind::Single => crate::subset::subassign(object, &[index], value, setter_call),
+        ElementKind::Double => crate::subset::subassign2(object, &[index], value, setter_call),
+        ElementKind::Dollar => {
+            crate::subset::dollar_assign(object, index.element(0), value, setter_call)
+        }
+    };
+    // An error is signalled while the assignment is the call it reports.
+    let result = result.map_err(|unwind| eval::builtin_failure(unbound(), unwind));
+    interp().assignment_call = outer;
+    let result = result?;
+    heap.root(result);
+    // A warning's calling handler may have rebound the variable, so `<<-` finds it again.
+    eval::set_var(variable, result, enclosure)?;
+    Ok(true)
+}
+
+/// The binding cell `<<-` assigns `variable` through from `enclosure`, and the environment
+/// whose frame holds it.
+unsafe fn enclosed_cell(variable: Sexp, enclosure: Sexp) -> Option<(Sexp, Sexp)> {
+    let heap = crate::heap();
+    let empty = heap.known().empty_env;
+    let mut env = enclosure;
+    while env != empty {
+        if let Some(cell) = heap.frame_cell(env, variable) {
+            return Some((env, cell));
+        }
+        env = env.enclosure();
+    }
+    None
 }
 
 #[inline(always)]

@@ -1188,3 +1188,29 @@ without cells, promise forcing in the loop, and one observer word on the general
 - **Compiled code inlines calls under a summary** (`jit_enter_frame`). An inlined call has no frame, so `Counter::InlinedCalls` counts it apart, its body's entry is counted (`count_inlined_call`), and its samples belong to the body that inlined it. An inlined call that deoptimizes into a frame is not counted again (`enter`'s `counted`).
 - **Impact.** The summary's cost on the application test suite is tracked in `benchmarks.mdx`. A summary's shares describe the run a user gets without it, which is what makes them usable as a guide to what to optimize.
 - Tests: `a_summary_counts_calls_without_leaving_the_fast_paths` and `a_summary_counts_a_deoptimized_inlined_call_once` (`crates/jit/tests/test_tiers.rs`), scenario `profile-summary`.
+
+## Every closure call that can run on slots enters through the lean path
+
+**Status:** settled.
+
+- **Previous shape.** Three kinds of call paid for generality they did not use. A call from Rust (a functional's element call, S3 dispatch, `do.call`, machine code) collected its bound values in a list before writing them, tested the debugger, the recorder and the object-system switch one by one, and returned through the general exit, which handles an environment, `on.exit` code, a pending annotation check and frames left above. A rebinding site (`x <- f(x)`, `Op::CallRebinding`) with a closure `f` took the generic call handler on every call, because only the plain call instruction had a fast handler. A base closure with a native entry (`isTRUE`, `identical`, `unname`) whose entry declined, because an argument was a call or an object, bound a frame through the generic handler.
+- **Rule.** A call that needs only its arguments written and its frame pushed takes a path that does only that, whichever instruction or Rust function makes it.
+- **Calls from Rust.** `bind_slots` walks the formals once (slot agreement, by-position test) and writes each value into the register window. A default that does not fit a slot frame gives the written slots' counts back, without releasing the arguments, which are the caller's, and the call binds a heap frame. `enter` tests `activity::hooks()` once. `leave` pops a frame that returns a value and that nothing asked about (no environment, no pending one, no `on.exit`, no annotation check, no frame above) without the general exit; under a summary the cold `returning_summarized` records what `pop_frame` would.
+- **Rebinding sites.** `fast_call_rebinding` reads the site's plan and, for a closure with a fast plan, becomes the ordinary call handler. The store that follows is the instruction's own second half, so nothing else changes. The pre-test on `PLAN_FAST` matters: without it a site whose callee has no fast plan (`match.arg`) pays a failed attempt per call.
+- **Declined native entries.** `call_fast` takes a closure with `gp::NATIVE_ENTRY` only in the copies compiled with `DECLINED`, which `call_declined` runs after the generic handler tried the entry. Every other copy leaves such a closure to that handler, or the entry would never run.
+- **Rejected.** Hoisting the callee's shape out of a functional's loop (formals walk, register count) removes the walk too, but needs each functional to carry a prepared callee; it is in the backlog. A plan per Rust call site was rejected because those calls have no code position to key a plan on.
+- **Impact.** Fewer instructions per functional element call and S3 dispatch, and a rebinding call of a closure costs what a plain call costs; `just bench-mechanisms --filter call:` and `--filter apply:` price them.
+- Tests: oracle cases `calls__rebinding_calls_of_closures`, `calls__base_closures_with_call_arguments`.
+
+## An element `<<-` stores into the enclosing binding cell
+
+**Status:** settled.
+
+- **Previous shape.** `x[i] <<- v`, `x[[i]] <<- v` and `x$name <<- v` compiled to `Op::Ast`: the `<<-` special ran in the frame's environment, so every call of a closure that keeps state in its maker's variable made an environment, a getter and setter call, their argument cells and two promises.
+- **Target shape.** `Op::SuperSubAssign` (`dst variable index value call kind setter`) for one subscript that is a constant or a symbol. `assign_enclosed_element` finds the binding cell from the closure's environment (`enclosed_cell`), reads the subscript from its slot or by name, and stores in place when the cell alone holds the value (`eval::reuse_permitted`), otherwise into a copy bound with `eval::assign_local`. The primitive's own code runs for what the inline store does not cover, with the replacement call published for errors.
+- **What declines to `eval::complex_assign`**, with the subscript unevaluated: an active or locked binding, an object with a method for the setter (`may_dispatch_replacement`), an unbound target, and a subscript that is missing, unbound or an active binding. A method therefore receives the promise of the subscript's code, as in GNU R.
+- **A subscript promise is forced with the target rooted.** When forcing ran code and the cell or its value changed, the result is assigned by a second search (`eval::set_var`), which is what GNU R's `<<-` does after evaluating its arguments.
+- **Limit.** A subscript that is a call stays on `Op::Ast`: an object target must receive it unevaluated, so compiled code would have to read the target first and branch around the subscript's code, a branch tier 1 would have to compile too (backlog).
+- **The JIT** treats the instruction as an opaque step that uses the value register and makes the result invisible (`jit/src/analysis.rs`), as it does `Op::ComplexAssign`.
+- **Impact.** An element `<<-` makes no environment and builds no call (`just bench-mechanisms --filter "assign: "` prices it).
+- Tests: oracle case `assignment__enclosed_element_stores`.
