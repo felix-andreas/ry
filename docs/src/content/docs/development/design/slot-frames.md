@@ -210,7 +210,7 @@ compile-time probe (`Heap::probe`), the walk it emits (`codegen.rs`) and `jit_en
 | A promise the argument-reference path does not cover (see "Promises over a slot frame"), `delayedAssign` | empty | `slot_promise`, `slot_promises_into` |
 | A closure created in the frame | empty | `slot_closure`; `make_closure` for an uncompiled `function`; `~` (the formula's environment) |
 | `parent.frame()`, `sys.function`, `sys.frame(s)`, `environment()`, `as.environment(-1)`, `eval`'s numeric `envir` | empty, then whatever the code that receives it reads | `frame_env`, `frame_sys_parent` |
-| Code that the compiler did not translate and that runs in the frame | partial, for the variables it reads | `Op::Ast` (`<<-` targets, `...` forms), `BoundEval`, the debugger and `browser()` |
+| Code that the compiler did not translate and that runs in the frame | partial, for the variables it reads | `Op::Ast` (`<<-` targets other than one element of a variable, `...` forms), `BoundEval`, the debugger and `browser()` |
 | S3 dispatch from a builtin on an object argument | empty | `bytecode::call_builtin` |
 | S4 dispatch reading the generic's frame | partial | `standardGeneric`, which reads the signature arguments from the generic's frame (`do_standard_generic`), `exec_method` and `callNextMethod` (`methods.rs`) |
 | Condition handlers and restarts that record a frame | empty | `.addCondHands`, `.addRestart` (`conditions.rs`) |
@@ -380,6 +380,24 @@ register holding it); otherwise the slot gets a copy, so `y <- x; x[1] <- 0` lea
 A name the frame has not bound yet is read from the enclosure first (`eval::enclosed_value`), so
 `x[1] <- 0` on an outer `x` binds the changed copy in the slot.
 
+`x[i] <<- v`, `x[[i]] <<- v` and `x$name <<- v` whose one subscript is a constant or a variable
+store into the variable of an enclosing function without the frame's environment
+(`Op::SuperSubAssign`, `assign_enclosed_element` in `bytecode.rs`). The search for `x` starts at
+the closure's environment, as every `<<-` does. The element is stored in place when the binding
+cell alone holds the value (`eval::reuse_permitted`); otherwise the cell gets a changed copy. A
+subscript that is a variable is read after the target, from its slot or by name, and a promise is
+forced with the target held. When forcing it ran code that rebound the target, the result is
+assigned by a second search, as GNU R's `<<-` does after evaluating its arguments.
+
+| Target or subscript | Where the assignment runs |
+|---|---|
+| Not an object, or an object whose class has no method for the setter | In the binding cell, by the primitive's own code with the replacement call stored beside the instruction. |
+| An environment under `[[<-` or `$<-` | The variable is assigned in that environment, and the cell keeps the environment. |
+| An active or a locked binding, an object with a method for the setter, a variable no enclosing function binds, a subscript without a value | `eval::complex_assign` in the frame's environment, with the subscript unevaluated, so a method receives the promise of its code and an error is the general assignment's. |
+| A subscript that is a call, several subscripts, a nested target such as `names(x)[2] <<- v` | The general assignment (`Op::Ast`), which asks for the frame's environment. An object target must receive a subscript unevaluated, so the compiled code would have to read the target and branch around the subscript's code. |
+
+`crates/oracle/cases/assignment__enclosed_element_stores.R` pins these rows.
+
 A method or a replacement closure receives the subscripts as promises of their code, so when a
 subscript may run code or fail, the compiled code reads the target (and, for `f(x, i) <- v`, looks
 up `f<-`) before any subscript runs, and an object target or a closure setter branches to
@@ -527,12 +545,21 @@ Rust frame, matches nothing, and allocates nothing unless the argument reference
   A closure whose body is one builtin call, such as rlang's
   `node_car <- function(x) { .Call(ffi_node_car, x) }`, is an ordinary callee: its arguments
   arrive as references, and the builtin forces the ones it reads.
+- **Rebinding sites.** `x <- f(x)` on a slot frame's variable compiles to `Op::CallRebinding`,
+  which lets a builtin `f` change the value in place. When `f` is a closure the site has a fast
+  plan for, the instruction is the ordinary call followed by the store, so it takes this path
+  (`fast_call_rebinding`): the callee's reference to the slot counts as a second holder, which
+  is what a closure must see.
+- **Closures with a native entry.** A base closure such as `isTRUE`, `identical` or `unname`
+  has a native entry that answers a call whose arguments are plain values
+  (`base_fast_paths::native_entry_by_value`). The generic handler tries the entry first. When
+  the entry declines, because an argument is a call or an object, the body runs after all, and
+  the call enters through this path as a call of any other closure does (`call_declined`).
 - **What leaves the path.** A debugger, an `Rprof` sample that is due, the boundary-call recorder, a
   tracked move or a refused object system (`activity::hooks`), a closure flagged for debugging,
-  stepping or tracing, a closure with a native entry, the namespace loader, `do.call`, a full
-  frame stack or register file, and a site's first calls, before its plan is stored and
-  prepared. A site that met `PLAN_MISSES` closures it could not plan for stays on the generic
-  path for good.
+  stepping or tracing, the namespace loader, `do.call`, a full frame stack or register file, and
+  a site's first calls, before its plan is stored and prepared. A site that met `PLAN_MISSES`
+  closures it could not plan for stays on the generic path for good.
 - **Under a profile summary.** The call handler tests the hook flags before anything else and
   leaves for a second handler when one is set. Under a summary alone that handler runs the same
   path compiled with the summary's counts (`call_summarized`, `leave_summarized`): the closure
@@ -547,8 +574,25 @@ Rust frame, matches nothing, and allocates nothing unless the argument reference
 
 `crates/oracle/cases/calls__fast_calls_from_frames_read_by_name.R`,
 `calls__closures_without_formals.R`, `calls__trivial_bodies.R`,
+`calls__rebinding_calls_of_closures.R`, `calls__base_closures_with_call_arguments.R`,
 `environments__frame_environment_dies_at_return.R` and `functions__builtin_wrappers.R` pin these
 rules with the JIT off, on and forced. `just bench-mechanisms --filter call:` prices each shape.
+
+### Calls from Rust
+
+A functional (`lapply`, `vapply`, `Map`, `Reduce`), S3 dispatch, `do.call` and machine code call a
+closure from Rust, with evaluated arguments (`eval::bind_slots`, `run_frame`, `enter`, `leave`).
+Such a call has no site, so it has no plan, and it binds per call:
+
+- `bind_slots` walks the formals once. The walk checks that each formal has the slot the body's
+  code reads it from and settles whether the arguments bind by position (no `...`, no named
+  argument, no more arguments than formals). It writes each value straight into the frame's
+  register window, so nothing is collected in a list first.
+- `enter` tests the hook flags once for the recorder, the debugger and a refused object system.
+- `leave` returns a value from a frame that nothing asked about without the general exit: the
+  frame has no environment and no pending one, no `on.exit` code, no pending annotation check
+  and no frame above it, so the exit releases the frame's handles, slots and argument
+  references and pops it. Any other frame, and every error, takes the general exit.
 
 ## Checking it
 

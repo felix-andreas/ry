@@ -1470,6 +1470,7 @@ pub unsafe fn shape(code: Sexp) -> Shape {
             | Op::Missing
             | Op::Namespace
             | Op::SuperAssign
+            | Op::SuperSubAssign
             | Op::SetSrcref
             | Op::Resume
             | Op::Fused
@@ -2843,6 +2844,18 @@ impl<'a> Builder<'a> {
             // other arguments unevaluated.
             Op::ComplexAssign => {
                 let value = match state.registers[operand(1)] {
+                    Ty::Bottom => Ty::Boxed,
+                    ty => ty,
+                };
+                let action =
+                    self.opaque_step(state, Some((operand(0), value)), &[], Effect::Opaque);
+                state.visible = Some(false);
+                action
+            }
+            // An element assignment to an enclosing function's variable, which may run the
+            // general assignment too.
+            Op::SuperSubAssign => {
+                let value = match state.registers[operand(3)] {
                     Ty::Bottom => Ty::Boxed,
                     ty => ty,
                 };
@@ -5231,6 +5244,7 @@ pub fn reads(inst: &Inst) -> SmallVec<[usize; 4]> {
         Op::DispatchSubject => smallvec![operand(1), operand(3)],
         Op::Arithmetic => smallvec![operand(2), operand(3)],
         Op::SubAssign => smallvec![operand(2), operand(3)],
+        Op::SuperSubAssign => smallvec![operand(3)],
         Op::SubAssignMatrix => smallvec![operand(2), operand(3), operand(4)],
         Op::Replace => (operand(5) + 1..operand(5) + operand(6)).collect(),
         Op::JumpUnless | Op::Return | Op::ForEnd => smallvec![operand(0)],
@@ -5392,6 +5406,10 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
         Op::ComplexAssign => {
             kill(operand(0), live);
             gen_(operand(1), live);
+        }
+        Op::SuperSubAssign => {
+            kill(operand(0), live);
+            gen_(operand(3), live);
         }
         Op::Replace => {
             kill(operand(0), live);
