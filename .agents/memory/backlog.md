@@ -675,7 +675,10 @@ checks". Order, method and costs: `development/design/memory-safety.md`, "Migrat
 - **Not built** (`memory-safety.md`, "Migration"): the register accessor, `Held<T>`, a bulk fill.
 - **Raw functions the ratchet's baseline admits, to move with their files.** `op_subscript` and
   `subscript_unbound` (`bytecode.rs`, with the register accessor), `patch_args_by_actuals`
-  (`dispatch.rs`), `lock_base_bindings` (`session.rs`).
+  (`dispatch.rs`), `lock_base_bindings` (`session.rs`). Also four from the builtin kernels: the
+  `altrep_dataptr_or_null` and `altrep_sortedness` hook fields (`interp.rs`, with the hook
+  table), `copy_recycled` (`subset.rs`, with `cbind`) and the POSIXlt `Column::of`
+  (`system.rs`, with `strftime`).
 
 ## Open: failing tests on main
 
