@@ -1539,3 +1539,322 @@ pub fn real_scalar(_context: &mut Cx<'_>, value: Local<'_>) -> f64 {
     // `&mut Cx` permits.
     unsafe { values::as_real_scalar(value.raw()) }
 }
+
+/// The empty argument, as an empty subscript such as the `j` of `x[i, ]` evaluates.
+#[inline]
+pub fn missing_argument<'s>() -> Local<'s> {
+    // SAFETY: the empty argument is a symbol, which the heap keeps for as long as it lives.
+    unsafe { Local::adopt(values::missing_arg()) }
+}
+
+impl<'s> Args<'_, 's> {
+    /// The tag of the argument at `index`, `NULL` for an untagged one or past the last one.
+    #[inline]
+    pub fn tag(&self, index: usize) -> Local<'s> {
+        let tag = self
+            .call
+            .args
+            .get(index)
+            .map_or(values::nil(), |argument| argument.tag);
+        // SAFETY: a tag is a symbol or `NULL`, which the heap keeps for as long as it lives.
+        unsafe { Local::adopt(tag) }
+    }
+}
+
+/// A copy of `value` with its own storage, for a caller that changes it where it is: GNU R's
+/// `shallow_duplicate`, which also makes one of ry's Arrays a plain R vector.
+pub fn shallow_copy<'s>(context: &mut Cx<'s>, value: Local<'_>) -> R<Owned<'s>> {
+    // SAFETY: the value is rooted, and copying allocates, which `&mut Cx` permits. The copy is
+    // new, so only this handle reaches it.
+    unsafe {
+        let copy = values::shallow_duplicate(value.raw())?;
+        Ok(Owned::assume(rooted(context, copy)))
+    }
+}
+
+/// The elements of a pairlist or call as a list, its tags as names.
+pub fn pairlist_as_list<'s>(context: &mut Cx<'s>, value: Local<'_>) -> R<Local<'s>> {
+    // SAFETY: the value is rooted, and the list allocates, which `&mut Cx` permits.
+    unsafe { Ok(rooted(context, values::pairlist_to_list(value.raw())?)) }
+}
+
+/// The list `list` as a new pairlist or call (`kind`), its names as tags.
+pub fn list_as_pairlist<'s>(context: &mut Cx<'s>, list: Local<'_>, kind: SexpType) -> R<Owned<'s>> {
+    // SAFETY: the list is rooted, and the cells allocate, which `&mut Cx` permits. The cells
+    // are new, so only this handle reaches them.
+    unsafe {
+        let cells = values::list_to_pairlist(list.raw(), kind)?;
+        Ok(Owned::assume(rooted(context, cells)))
+    }
+}
+
+/// Copies the attributes of `from` onto `to` with its object and S4 bits, leaving out the
+/// names, dim and dimnames unless `keep_names_dims` asks for them.
+pub fn copy_most_attributes<T: Kind>(
+    _context: &mut Cx<'_>,
+    from: Local<'_>,
+    to: &mut Owned<'_, T>,
+    keep_names_dims: bool,
+) -> R<()> {
+    // SAFETY: both objects are rooted, the caller owns `to`, and setting an attribute
+    // allocates, which `&mut Cx` permits.
+    unsafe { values::copy_most_attributes(from.raw(), to.get().raw(), keep_names_dims) }
+}
+
+/// Resizes `vector` and its names where they are to `length` elements, as GNU R grows a
+/// vector that has room: true when both are resizable vectors with that much room that nothing
+/// else refers to and `vector` has no dim or dimnames, and otherwise false, having changed
+/// nothing. Elements past the old length are zeros, `NULL`s or empty strings.
+pub fn resize_in_place<T: Vector>(
+    _context: &mut Cx<'_>,
+    vector: &mut Owned<'_, T>,
+    length: usize,
+) -> R<bool> {
+    let heap = crate::heap();
+    let symbols = values::symbols();
+    let raw = vector.get().raw();
+    // SAFETY: the vector is rooted, and the tests read the headers of it, its names and its
+    // attribute list. The caller owns the vector, and its names have a reference count of at
+    // most one, the vector's attribute, so no other value sees either resize. Both have the room.
+    unsafe {
+        let room = |object: Sexp| {
+            heap.is_resizable(object)
+                && !object.is_altrep()
+                && length as isize <= object.capacity()
+                && !values::maybe_shared(object)
+        };
+        let names = values::get_attr(raw, symbols.names);
+        let fits = values::get_attr(raw, symbols.dim) == values::nil()
+            && values::get_attr(raw, symbols.dimnames) == values::nil()
+            && room(raw)
+            && (names == values::nil() || (names.kind() == SexpType::String && room(names)));
+        if !fits {
+            return Ok(false);
+        }
+        heap.resize_vector(raw, length as isize)?;
+        if names != values::nil() {
+            heap.resize_vector(names, length as isize)?;
+        }
+    }
+    Ok(true)
+}
+
+/// The names of the owned `vector`, to change where they are, when they are a standard
+/// character vector that only the vector's attribute refers to.
+pub fn owned_names<'s, T: Kind>(
+    context: &mut Cx<'s>,
+    vector: &mut Owned<'s, T>,
+) -> Option<Owned<'s, Str>> {
+    // SAFETY: the vector is rooted, and its attributes are a pairlist this only reads. A
+    // reference count of at most one is the attribute's, which belongs to the vector the caller
+    // owns, so nothing else observes the names; the root keeps them alive should the attribute
+    // be replaced.
+    unsafe {
+        let names = values::get_attr(vector.get().raw(), values::symbols().names);
+        if names.kind() != SexpType::String || names.is_altrep() || values::maybe_shared(names) {
+            return None;
+        }
+        let names = rooted(context, names).downcast::<Str>()?;
+        Some(Owned::assume(names))
+    }
+}
+
+/// A new vector of `length` elements with room to grow in place by GNU R's factor of 1.05.
+pub fn alloc_with_room<'s, T: Vector>(context: &mut Cx<'s>, length: usize) -> R<Fresh<'s, T>> {
+    let capacity = length + length / 20;
+    let heap = crate::heap();
+    // SAFETY: `T::TYPE` is a vector type, the new vector is rooted before anything else
+    // allocates, and shrinking it to `length` is within its capacity.
+    unsafe {
+        let vector = heap.alloc_resizable_vector(T::TYPE, capacity as isize)?;
+        let vector = fresh::<T>(context, vector);
+        heap.resize_vector(vector.raw(), length as isize)?;
+        Ok(vector)
+    }
+}
+
+/// Moves every element of the list `from` to the start of the new list `to`, leaving `from`
+/// empty: a list that grows by copying passes its references on instead of counting each one
+/// into the copy and back out of the original.
+pub fn move_elements<T: Elements>(
+    _context: &mut Cx<'_>,
+    to: &mut Fresh<'_, T>,
+    from: &mut Owned<'_, T>,
+) {
+    assert!(
+        matches!(T::TYPE, SexpType::List | SexpType::Expression),
+        "moving the elements of a vector that is not a list"
+    );
+    assert!(from.get().len() <= to.len(), "element index out of bounds");
+    // SAFETY: both are standard lists, distinct because `to` is new, whose slots still hold the
+    // `NULL` a new list starts with. The caller owns `from`, so what it leaves empty is seen by
+    // no other value.
+    unsafe { crate::heap().move_elements(to.raw(), from.get().raw()) }
+}
+
+/// Stores `count` elements of `from` from `from_start` into `to` from `to_start`, with one
+/// barrier decision for the whole run. When `from` is `to`, the two ranges must not overlap.
+pub fn copy_elements<T: Elements>(
+    _context: &mut Cx<'_>,
+    to: &mut Owned<'_, T>,
+    to_start: usize,
+    from: Local<'_, T>,
+    from_start: usize,
+    count: usize,
+) {
+    let target = to.get();
+    assert!(
+        to_start + count <= target.len() && from_start + count <= from.len(),
+        "element index out of bounds"
+    );
+    assert!(
+        target.raw() != from.raw()
+            || to_start + count <= from_start
+            || from_start + count <= to_start,
+        "overlapping element ranges"
+    );
+    // SAFETY: both are standard vectors of one handle kind, the ranges are in bounds and apart,
+    // and the caller owns `to`.
+    unsafe { crate::heap().copy_elements(target.raw(), to_start, from.raw(), from_start, count) }
+}
+
+/// `call` in the form an error raised for the replacement call of an assignment names.
+pub fn generated_call<'s>(context: &mut Cx<'s>, call: Local<'s>) -> R<Local<'s>> {
+    // SAFETY: the call is rooted, and rebuilding it allocates, which `&mut Cx` permits.
+    unsafe { Ok(rooted(context, crate::unwind::generated_call(call.raw())?)) }
+}
+
+/// Binds `symbol` to `value` in `environment`, as `assign` does.
+pub fn define(
+    _context: &mut Cx<'_>,
+    symbol: Local<'_, Symbol>,
+    value: Local<'_>,
+    environment: Local<'_, Environment>,
+) -> R<()> {
+    // SAFETY: the three handles are rooted, and a binding allocates and may run an active
+    // binding's function, which `&mut Cx` permits.
+    unsafe { crate::eval::define(symbol.raw(), value.raw(), environment.raw()) }
+}
+
+/// Ends the moves an assignment into an environment would make observable.
+pub fn reaching_environment(_context: &mut Cx<'_>) -> R<()> {
+    // SAFETY: ending a move may run R code, which `&mut Cx` permits.
+    unsafe { crate::moves::reaching_environment() }
+}
+
+/// `x[...] <- value` (`x[[...]] <- value` for `double`) on one of ry's Arrays, or `None` when
+/// the value makes the result a plain R vector.
+pub fn array_subassign<'s>(
+    context: &mut Cx<'s>,
+    array: Local<'s>,
+    indices: &[Local<'s>],
+    value: Local<'s>,
+    call: Local<'s>,
+    double: bool,
+) -> R<Option<Local<'s>>> {
+    let indices: SmallVec<[Sexp; 4]> = indices.iter().map(|index| index.raw()).collect();
+    // SAFETY: every handle is rooted, and the assignment allocates and copies a shared array,
+    // which `&mut Cx` permits.
+    unsafe {
+        let result = if double {
+            crate::arrays::subassign2(array.raw(), &indices, value.raw(), call.raw())?
+        } else {
+            crate::arrays::subassign(array.raw(), &indices, value.raw(), call.raw())?
+        };
+        Ok(result.map(|result| rooted(context, result)))
+    }
+}
+
+/// `x[[...]] <- value` on one of ry's records.
+pub fn record_subassign2<'s>(
+    context: &mut Cx<'s>,
+    record: Local<'s>,
+    indices: &[Local<'s>],
+    value: Local<'s>,
+    call: Local<'s>,
+) -> R<Local<'s>> {
+    let indices: SmallVec<[Sexp; 4]> = indices.iter().map(|index| index.raw()).collect();
+    // SAFETY: every handle is rooted, and the assignment allocates, which `&mut Cx` permits.
+    unsafe {
+        let result = crate::records::subassign2(record.raw(), &indices, value.raw(), call.raw())?;
+        Ok(rooted(context, result))
+    }
+}
+
+/// `x$name <- value` on one of ry's records.
+pub fn record_dollar_assign<'s>(
+    context: &mut Cx<'s>,
+    record: Local<'s>,
+    name: &[u8],
+    value: Local<'s>,
+    call: Local<'s>,
+) -> R<Local<'s>> {
+    // SAFETY: every handle is rooted, `name` is the caller's own buffer, and the assignment
+    // allocates, which `&mut Cx` permits.
+    unsafe {
+        let result = crate::records::dollar_assign(record.raw(), name, value.raw(), call.raw())?;
+        Ok(rooted(context, result))
+    }
+}
+
+/// The type name GNU R's errors give `value`, as `typeof` reports it.
+pub fn type_name(value: impl Pointer<Value>) -> &'static str {
+    // SAFETY: the handle is a live object, and the name is read from its header.
+    unsafe { crate::coerce::type_name(value.raw()) }
+}
+
+/// Raises a warning that names `call`.
+pub fn warning_in(_context: &mut Cx<'_>, call: Local<'_>, message: impl Into<String>) -> R<()> {
+    // SAFETY: a warning may run a calling handler, which is R code and so needs `&mut Cx`.
+    unsafe { conditions::warning_call(call.raw(), message) }
+}
+
+/// An error condition of `classes` that names `call` and carries `fields`.
+pub fn classed_error(
+    _context: &mut Cx<'_>,
+    call: Local<'_>,
+    message: &str,
+    classes: &[&str],
+    fields: &[(&str, Local<'_>)],
+) -> Unwind {
+    let fields: SmallVec<[(&str, Sexp); 2]> = fields
+        .iter()
+        .map(|&(name, value)| (name, value.raw()))
+        .collect();
+    // SAFETY: the call and every field are rooted, and the condition allocates, which
+    // `&mut Cx` permits.
+    unsafe { conditions::classed_error(call.raw(), message, classes, &fields) }
+}
+
+/// The length, first element and increment of a compact integer or double sequence.
+#[inline]
+pub fn compact_sequence(_context: &Cx<'_>, value: Local<'_>) -> Option<(usize, f64, f64)> {
+    // SAFETY: the value is rooted, and the test reads its ALTREP class and data.
+    unsafe { values::compact_sequence(value.raw()) }
+}
+
+/// The symbol spelled by `name`.
+pub fn install_bytes(_context: &mut Cx<'_>, name: &[u8]) -> R<Gc<'static, Symbol>> {
+    // SAFETY: interning allocates, which `&mut Cx` permits, and the heap keeps a symbol for as
+    // long as it lives.
+    unsafe { Ok(Gc::adopt(values::install_bytes(name)?)) }
+}
+
+/// Evaluates the call `function(arguments...)` in the base environment, with the function and
+/// the arguments in the call as they are.
+pub fn call_value<'s>(
+    context: &mut Cx<'s>,
+    function: Local<'s>,
+    arguments: &[Local<'s>],
+) -> R<Local<'s>> {
+    let arguments: SmallVec<[Sexp; 4]> = arguments.iter().map(|argument| argument.raw()).collect();
+    // SAFETY: the function and the arguments are rooted, and the call is rooted before the
+    // evaluation, which may run any R code, as `&mut Cx` permits.
+    unsafe {
+        let call = rooted(context, values::call(function.raw(), &arguments)?);
+        Ok(rooted(
+            context,
+            crate::eval::eval(call.raw(), values::base_env())?,
+        ))
+    }
+}
