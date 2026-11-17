@@ -4,12 +4,12 @@
 
 use {
     crate::{
-        Parse, SyntaxError, Unexpected,
+        Lookahead, Parse, SyntaxError, Unexpected,
         kind::SyntaxKind::{self, *},
         lexer::{Token, lex},
         tree::{Checkpoint, TreeBuilder},
     },
-    std::sync::Arc,
+    std::{cell::Cell, sync::Arc},
     text_size::{TextRange, TextSize},
 };
 
@@ -44,10 +44,14 @@ pub fn parse(text: &str) -> Parse {
         statement_had_lexer_error: false,
         statement_left_group_open: false,
         spread_allowed: false,
+        examined: Cell::new(0),
+        statement_start: None,
+        format_string_end: 0,
+        lookahead: Vec::new(),
     };
     parser.source_file();
     let tree = parser.builder.finish(text);
-    Parse::new(Arc::new(tree), parser.errors)
+    Parse::new(Arc::new(tree), parser.errors, parser.lookahead)
 }
 
 /// Deeper nesting reports an error instead of overflowing the stack.
@@ -93,11 +97,30 @@ struct Parser<'a> {
     /// leading `..base` is a record update's spread. The list clears it before parsing any item,
     /// so it never reaches a nested list.
     spread_allowed: bool,
+    /// The furthest token index the current top-level statement has read or stood on. Every
+    /// read of a token at or past `pos` goes through [`Parser::kind_at`], [`Parser::token_str`]
+    /// or [`Parser::adjacent`], which keep it.
+    examined: Cell<usize>,
+    /// Where the top-level statement being parsed starts.
+    statement_start: Option<usize>,
+    /// The token that closes the outermost f-string last opened, or the token count when
+    /// nothing closes it.
+    format_string_end: usize,
+    lookahead: Vec<Lookahead>,
 }
 
 impl Parser<'_> {
     fn current(&self) -> Option<SyntaxKind> {
-        self.tokens.get(self.pos).map(|token| token.kind)
+        self.kind_at(self.pos)
+    }
+
+    fn kind_at(&self, pos: usize) -> Option<SyntaxKind> {
+        self.examine(pos);
+        self.tokens.get(pos).map(|token| token.kind)
+    }
+
+    fn examine(&self, pos: usize) {
+        self.examined.set(self.examined.get().max(pos));
     }
 
     fn at(&self, kind: SyntaxKind) -> bool {
@@ -105,6 +128,7 @@ impl Parser<'_> {
     }
 
     fn token_str(&self, pos: usize) -> &str {
+        self.examine(pos);
         &self.text[self.offsets[pos]..self.offsets[pos + 1]]
     }
 
@@ -123,8 +147,7 @@ impl Parser<'_> {
         across_newlines: bool,
     ) -> Option<(SyntaxKind, usize)> {
         loop {
-            let token = self.tokens.get(pos)?;
-            match token.kind {
+            match self.kind_at(pos)? {
                 WHITESPACE | COMMENT => pos += 1,
                 NEWLINE if across_newlines => pos += 1,
                 ANNOTATION_MARKER => pos = self.annotation_region_end(pos),
@@ -134,7 +157,7 @@ impl Parser<'_> {
     }
 
     fn annotation_region_end(&self, mut pos: usize) -> usize {
-        let kind_at = |pos: usize| self.tokens.get(pos).map(|token| token.kind);
+        let kind_at = |pos: usize| self.kind_at(pos);
         loop {
             while kind_at(pos).is_some_and(|kind| kind != NEWLINE) {
                 pos += 1;
@@ -173,8 +196,27 @@ impl Parser<'_> {
                 _ => {}
             }
         }
+        // The lexer reads an f-string as one unit, lines inside its `{}` included, so whatever
+        // opens one has read up to the quote that closes it.
+        if kind == FSTRING_START && self.pos >= self.format_string_end {
+            let mut open = 0usize;
+            self.format_string_end = self.tokens.len();
+            for (index, token) in self.tokens.iter().enumerate().skip(self.pos) {
+                match token.kind {
+                    FSTRING_START => open += 1,
+                    FSTRING_END => open -= 1,
+                    _ => {}
+                }
+                if open == 0 {
+                    self.format_string_end = index;
+                    break;
+                }
+            }
+            self.examine(self.format_string_end);
+        }
         self.builder.token(kind, self.tokens[self.pos].len);
         self.pos += 1;
+        self.examine(self.pos);
     }
 
     fn start(&mut self, kind: SyntaxKind) {
@@ -335,6 +377,23 @@ impl Parser<'_> {
             .is_some_and(|token| token.kind == NEWLINE)
     }
 
+    /// Records the construct that began at token `start` when its parse read past the token
+    /// the parser stands on, or read the end of the text.
+    fn record_lookahead(&mut self, start: usize) {
+        let examined = self.examined.get();
+        if examined <= self.pos && examined < self.tokens.len() {
+            return;
+        }
+        let end = match self.offsets.get(examined + 1) {
+            Some(&end) => end,
+            None => self.text.len() + 1,
+        };
+        self.lookahead.push(Lookahead {
+            statement: TextSize::from(self.offsets[start] as u32),
+            end: TextSize::from(end as u32),
+        });
+    }
+
     fn eat_trivia(&mut self, across_newlines: bool) {
         loop {
             match self.current() {
@@ -347,6 +406,13 @@ impl Parser<'_> {
     }
 
     fn annotation(&mut self) {
+        // Between top-level statements no statement's lookahead covers the annotation, so it
+        // records its own.
+        let between_statements = self.statement_start.is_none();
+        let start = self.pos;
+        if between_statements {
+            self.examined.set(start);
+        }
         self.start(ANNOTATION);
         self.in_annotation = true;
         self.type_region = true;
@@ -371,6 +437,9 @@ impl Parser<'_> {
         self.in_annotation = false;
         self.type_region = false;
         self.finish();
+        if between_statements {
+            self.record_lookahead(start);
+        }
     }
 
     fn ann_trivia(&mut self, end: usize) {
@@ -420,6 +489,7 @@ impl Parser<'_> {
     }
 
     fn adjacent(&self, pos: usize) -> bool {
+        self.examine(pos);
         pos > 0
             && pos < self.tokens.len()
             && self.offsets[pos] == self.offsets[pos - 1] + usize::from(self.tokens[pos - 1].len)
@@ -688,15 +758,16 @@ impl Parser<'_> {
             return false;
         }
         let mut crossed_newline = false;
-        for token in &self.tokens[self.pos.min(self.tokens.len())..] {
-            match token.kind {
-                WHITESPACE | COMMENT => {}
-                NEWLINE => crossed_newline = true,
-                PIPE => return crossed_newline,
+        let mut pos = self.pos;
+        loop {
+            match self.kind_at(pos) {
+                Some(WHITESPACE | COMMENT) => {}
+                Some(NEWLINE) => crossed_newline = true,
+                Some(PIPE) => return crossed_newline,
                 _ => return false,
             }
+            pos += 1;
         }
-        false
     }
 
     fn ann_primary(&mut self, end: usize) {
@@ -844,7 +915,7 @@ impl Parser<'_> {
     }
 
     fn next_token_is(&self, kind: SyntaxKind) -> bool {
-        self.tokens.get(self.pos + 1).map(|token| token.kind) == Some(kind)
+        self.kind_at(self.pos + 1) == Some(kind)
     }
 
     fn ann_next_significant(&self, end: usize) -> Option<SyntaxKind> {
@@ -855,7 +926,7 @@ impl Parser<'_> {
         }
         // Inside a `#:` region a later line's marker is trivia, not a new region.
         (self.pos + 1..end)
-            .map(|pos| self.tokens[pos].kind)
+            .filter_map(|pos| self.kind_at(pos))
             .find(|kind| !matches!(kind, WHITESPACE | COMMENT | NEWLINE | ANNOTATION_MARKER))
     }
 
@@ -1167,6 +1238,14 @@ impl Parser<'_> {
 
     fn statements(&mut self, terminator: Option<SyntaxKind>) {
         loop {
+            // A statement that read past the token it stops on, or read the end of the text,
+            // depends on what follows: the splice reparse shares a statement only up to a line
+            // break none of them read across.
+            if terminator.is_none()
+                && let Some(start) = self.statement_start.take()
+            {
+                self.record_lookahead(start);
+            }
             self.eat_trivia(true);
             self.statement_had_lexer_error = false;
             self.statement_left_group_open = false;
@@ -1178,6 +1257,10 @@ impl Parser<'_> {
                 None => return,
                 Some(kind) if Some(kind) == terminator => return,
                 _ => {}
+            }
+            if terminator.is_none() {
+                self.statement_start = Some(self.pos);
+                self.examined.set(self.pos);
             }
 
             let statement_start = self.pos;
@@ -1322,7 +1405,7 @@ impl Parser<'_> {
         if !self.at(IDENT) {
             return None;
         }
-        let kind_at = |pos: usize| self.tokens.get(pos).map(|token| token.kind);
+        let kind_at = |pos: usize| self.kind_at(pos);
         let mut pos = self.pos + 1;
         while kind_at(pos) == Some(WHITESPACE) {
             pos += 1;
@@ -1376,7 +1459,7 @@ impl Parser<'_> {
         if !self.at(IDENT) || !matches!(self.token_str(self.pos), "type" | "alias") {
             return false;
         }
-        let kind_at = |pos: usize| self.tokens.get(pos).map(|token| token.kind);
+        let kind_at = |pos: usize| self.kind_at(pos);
         let mut pos = self.pos + 1;
         if kind_at(pos) != Some(WHITESPACE) {
             return false;
@@ -1444,8 +1527,9 @@ impl Parser<'_> {
         let mut pos = self.pos + 1;
         while pos < self.tokens.len()
             && self.adjacent(pos)
-            && (matches!(self.tokens[pos].kind, IDENT | MINUS)
-                || self.tokens[pos].kind.is_keyword())
+            && self
+                .kind_at(pos)
+                .is_some_and(|kind| matches!(kind, IDENT | MINUS) || kind.is_keyword())
         {
             name.push_str(self.token_str(pos));
             pos += 1;
@@ -1475,8 +1559,9 @@ impl Parser<'_> {
             let word_start = pos;
             while pos < self.tokens.len()
                 && (pos == word_start || self.adjacent(pos))
-                && (matches!(self.tokens[pos].kind, IDENT | MINUS)
-                    || self.tokens[pos].kind.is_keyword())
+                && self
+                    .kind_at(pos)
+                    .is_some_and(|kind| matches!(kind, IDENT | MINUS) || kind.is_keyword())
             {
                 pos += 1;
             }
@@ -1512,6 +1597,7 @@ impl Parser<'_> {
         parse(self, end);
         // Trivia after the type was never emitted: hand it back to R's grammar.
         if let Some(start) = self.deferred_trivia.take() {
+            self.examine(self.pos);
             self.pos = start;
         }
         (self.inline_type, self.type_region, self.type_brackets) = saved;
@@ -1626,10 +1712,8 @@ impl Parser<'_> {
             // `@Name(` or `@Name<` reads as a constructor, while after an operator a bare
             // `@Name` is one being typed.
             AT if self.next_token_is(IDENT)
-                && (matches!(
-                    self.tokens.get(self.pos + 2).map(|token| token.kind),
-                    Some(L_PAREN | LESS)
-                ) || !self.at_line_start()) =>
+                && (matches!(self.kind_at(self.pos + 2), Some(L_PAREN | LESS))
+                    || !self.at_line_start()) =>
             {
                 self.new_expr()
             }
@@ -1708,7 +1792,7 @@ impl Parser<'_> {
     /// a name as two operands in a row, a syntax error, while `try(x)`, `try (x)`, `try -x`,
     /// `try[x]` and a `try` that ends its line keep their R meanings.
     fn try_ahead(&self) -> bool {
-        let kind_at = |pos: usize| self.tokens.get(pos).map(|token| token.kind);
+        let kind_at = |pos: usize| self.kind_at(pos);
         kind_at(self.pos + 1) == Some(WHITESPACE) && kind_at(self.pos + 2) == Some(IDENT)
     }
 
@@ -1917,17 +2001,10 @@ impl Parser<'_> {
             return false;
         }
         let mut pos = self.pos + 2;
-        while self
-            .tokens
-            .get(pos)
-            .is_some_and(|token| token.kind == WHITESPACE)
-        {
+        while self.kind_at(pos) == Some(WHITESPACE) {
             pos += 1;
         }
-        matches!(
-            self.tokens.get(pos).map(|token| token.kind),
-            Some(FUNCTION_KW | BACKSLASH)
-        )
+        matches!(self.kind_at(pos), Some(FUNCTION_KW | BACKSLASH))
     }
 
     fn function_def(&mut self) {
@@ -2261,7 +2338,7 @@ impl Parser<'_> {
     /// `(` starts a tuple or record literal when it is empty or holds a comma at its own
     /// depth. R rejects both, so every parenthesized R expression keeps its meaning.
     fn literal_ahead(&self) -> bool {
-        let kind_at = |pos: usize| self.tokens.get(pos).map(|token| token.kind);
+        let kind_at = |pos: usize| self.kind_at(pos);
         if self
             .peek_significant(self.pos + 1, true)
             .is_some_and(|(kind, _)| kind == R_PAREN)
@@ -2297,7 +2374,7 @@ impl Parser<'_> {
         let Some((L_PAREN, open)) = self.peek_significant(self.pos + 1, false) else {
             return false;
         };
-        let kind_at = |pos: usize| self.tokens.get(pos).map(|token| token.kind);
+        let kind_at = |pos: usize| self.kind_at(pos);
         let mut depth = 0u32;
         let mut pos = open;
         loop {
@@ -2391,6 +2468,9 @@ impl Parser<'_> {
         );
         self.offsets
             .insert(self.pos + 1, self.offsets[self.pos] + 1);
+        if self.examined.get() > self.pos {
+            self.examined.set(self.examined.get() + 1);
+        }
     }
 
     /// `@Name(value)`: prefix `@` is a syntax error in R, so the form is free. The
@@ -2701,7 +2781,7 @@ impl Parser<'_> {
             }
             MINUS
                 if matches!(
-                    self.tokens.get(self.pos + 1).map(|token| token.kind),
+                    self.kind_at(self.pos + 1),
                     Some(INTEGER | DOUBLE | COMPLEX | SUFFIXED_NUMBER | INF_KW)
                 ) =>
             {

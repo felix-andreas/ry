@@ -1,21 +1,24 @@
-//! Fuzz harness for the semantic pipeline. Each generated case is one seed of
-//! [`for_each_seed`], so `FUZZ_SEED` replays a failure and `FUZZ_ITERS` sets the budget.
+//! Fuzz harness for the semantic pipeline. Each seed is one session, a project walked through
+//! a few edits on a database that stays warm across seeds, so `FUZZ_SEED` replays a failure and
+//! `FUZZ_ITERS` sets the budget.
 
 use {
     rustc_hash::FxHashMap,
-    salsa::Setter as _,
     semantics::{
-        DocumentKind, ProjectFiles, RootDatabase, SourceFile,
-        diagnostics::file_diagnostics,
+        DocumentKind,
         metadata::resolve_namespace_conditionals,
-        stubs::install_shipped_stubs,
-        testing::{check_semantics_input, check_semantics_invariants, render_semantics as render},
+        testing::{
+            ProjectState, check_semantics_input, fixture_state, for_each_session, generate_session,
+        },
     },
-    std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
+    std::sync::LazyLock,
     syntax::{
         SyntaxKind, SyntaxNode,
         ast::is_expression_kind,
-        testing::{SplitMix64, for_each_seed, mutate_seed, program_corpus_sources},
+        testing::{
+            SplitMix64, fixture_case_sources, for_each_seed, mutate_seed, program_corpus_sources,
+            small_edit, split_files,
+        },
     },
 };
 
@@ -159,10 +162,8 @@ const SOUP: &[&str] = &[
     "[1, 2]",
 ];
 
-/// The default budget of the main generator; each seed is one generated case.
-const ITERATIONS: usize = 250;
-
-fn generate_program(rng: &mut SplitMix64) -> String {
+/// A program of colliding definitions: few names, so files of one project bind the same ones.
+fn colliding_program(rng: &mut SplitMix64) -> String {
     let mut lines = Vec::new();
     if rng.chance(1, 6) {
         lines.push(DIRECTIVES[rng.below(DIRECTIVES.len())].to_owned());
@@ -178,91 +179,13 @@ fn generate_program(rng: &mut SplitMix64) -> String {
     lines.join("\n")
 }
 
-fn generate_soup(rng: &mut SplitMix64) -> String {
+fn soup(rng: &mut SplitMix64) -> String {
     let length = 1 + rng.below(60);
     let mut source = String::new();
     for _ in 0..length {
         source.push_str(SOUP[rng.below(SOUP.len())]);
     }
     source
-}
-
-/// Prints the failing inputs on panic: a bare salsa or checker panic names no source. `stream`
-/// keeps the generators apart, so the same seed draws a different case in each.
-fn run_single_file(budget: usize, stream: u64, generate: fn(&mut SplitMix64) -> String) {
-    for_each_seed(budget, |seed| {
-        let mut rng = SplitMix64(stream ^ seed);
-        let source = generate(&mut rng);
-        let kind = if rng.chance(1, 4) {
-            DocumentKind::Script
-        } else {
-            DocumentKind::Package
-        };
-        let edited_source = generate_program(&mut rng);
-        let result = catch_unwind(|| check_semantics_invariants(&source, &edited_source, kind));
-        if let Err(payload) = result {
-            eprintln!(
-                "---- pipeline panicked ({kind:?}) ----\n{source}\n---- edited to ----\n{edited_source}\n----"
-            );
-            resume_unwind(payload);
-        }
-    });
-}
-
-/// Prints the failing inputs on panic, as [`run_single_file`] does.
-fn run_multi_file(budget: usize, stream: u64) {
-    for_each_seed(budget, |seed| {
-        let mut rng = SplitMix64(stream ^ seed);
-        let first_source = generate_program(&mut rng);
-        let second_source = generate_program(&mut rng);
-        let edited_source = generate_program(&mut rng);
-        let result =
-            catch_unwind(|| check_multi_file_edit(&first_source, &second_source, &edited_source));
-        if let Err(payload) = result {
-            eprintln!(
-                "---- multi-file pipeline panicked ----\n{first_source}\n---- second file ----\n{second_source}\n---- second file edited to ----\n{edited_source}\n----"
-            );
-            resume_unwind(payload);
-        }
-    });
-}
-
-/// Edits the second of two package files and back, checking each state against a fresh
-/// database.
-fn check_multi_file_edit(first_source: &str, second_source: &str, edited_source: &str) {
-    let mut db = RootDatabase::default();
-    install_shipped_stubs(&db);
-    let first = SourceFile::new(&db, first_source.to_owned(), DocumentKind::Package);
-    let second = SourceFile::new(&db, second_source.to_owned(), DocumentKind::Package);
-    ProjectFiles::new(&db, vec![first, second]);
-    let before = (render(&db, first), render(&db, second));
-
-    second.set_text(&mut db).to(edited_source.to_owned());
-    let after_first = render(&db, first);
-    let after_second = render(&db, second);
-
-    let fresh_db = RootDatabase::default();
-    install_shipped_stubs(&fresh_db);
-    let fresh_first = SourceFile::new(&fresh_db, first_source.to_owned(), DocumentKind::Package);
-    let fresh_second = SourceFile::new(&fresh_db, edited_source.to_owned(), DocumentKind::Package);
-    ProjectFiles::new(&fresh_db, vec![fresh_first, fresh_second]);
-    assert_eq!(
-        after_first,
-        render(&fresh_db, fresh_first),
-        "cross-file incremental output diverges (untouched file)"
-    );
-    assert_eq!(
-        after_second,
-        render(&fresh_db, fresh_second),
-        "cross-file incremental output diverges (edited file)"
-    );
-
-    second.set_text(&mut db).to(second_source.to_owned());
-    assert_eq!(
-        (render(&db, first), render(&db, second)),
-        before,
-        "cross-file output not restored after editing back"
-    );
 }
 
 /// Inputs that once broke an invariant, pinned without the gitignored fuzz corpus.
@@ -275,13 +198,85 @@ const REGRESSIONS: &[&str] = &[
     "c(a, b) %<-% list(1L, 2L)\n",
     "frame <- data.frame(a = 1L)\nsetnames(frame, \"a\", \"b\")\n",
     "dt <- 1\ndt[, `:=`(b = 2L)]\n",
+    "dt <- 1\ndt[, ':='(b = 2L)][]\n",
     "frame <- data.frame(a = 1L)\n`setnames`(frame, \"a\", \"b\")\n",
     "setGeneric(\"area\", { y <- 1; function(obj) standardGeneric(\"area\") })\n",
     "x <- list(f = function() y <<- 1L)\n",
 ];
 
-/// One shared database (a fresh one re-parses the stubs per case), so this asserts only
-/// never-panic and range geometry; the generated arms cover determinism and equivalence.
+/// The files a session starts from or takes a statement from, besides the programs the grammar
+/// generates: every fixture case of every suite (a multi-file case as its files), the mined
+/// program corpus, colliding programs, token soup and the regressions.
+static POOL: LazyLock<Vec<String>> = LazyLock::new(|| {
+    let mut pool: Vec<String> = REGRESSIONS
+        .iter()
+        .map(|input| (*input).to_owned())
+        .collect();
+    for (_, source) in fixture_case_sources() {
+        match split_files(&source) {
+            Some(files) => pool.extend(files.into_iter().map(|(_, text)| text)),
+            None => pool.push(source),
+        }
+    }
+    pool.extend(
+        program_corpus_sources()
+            .into_iter()
+            .map(|(_, source)| source),
+    );
+    let mut rng = SplitMix64(0xC011_1DE5);
+    pool.extend((0..600).map(|_| colliding_program(&mut rng)));
+    pool.extend((0..150).map(|_| soup(&mut rng)));
+    pool
+});
+
+/// The default budget of [`fuzz_sessions`]; each seed is one session of two to four project
+/// states.
+const SESSIONS: usize = 600;
+
+#[test]
+fn fuzz_sessions() {
+    for_each_session(SESSIONS, |seed| {
+        generate_session(&mut SplitMix64(0x5E55_10A5 ^ seed), &POOL)
+    });
+}
+
+/// Every fixture case as the project its suite checks it as, then with one small edit. The
+/// cases are dealt out to two tests, so the default run checks them on two cores.
+#[test]
+fn fixture_sources_hold_invariants() {
+    check_fixture_sources(0);
+}
+
+#[test]
+fn fixture_sources_hold_invariants_odd() {
+    check_fixture_sources(1);
+}
+
+fn check_fixture_sources(parity: usize) {
+    let cases = fixture_case_sources();
+    assert!(
+        cases.len() > 2_000,
+        "expected every fixture suite, found {} cases",
+        cases.len()
+    );
+    for_each_session(cases.len() / 2, |seed| {
+        let (id, source) = &cases[(seed as usize * 2 + parity) % cases.len()];
+        let kind = if id.starts_with("semantics/tests/typing-scripts::") {
+            DocumentKind::Script
+        } else {
+            DocumentKind::Package
+        };
+        let mut state = fixture_state(source, kind);
+        state.strict = id.starts_with("semantics/tests/typing-strict::");
+        let mut rng = SplitMix64(0xF1C5_7A7E ^ seed);
+        let mut edited = state.clone();
+        let target = rng.below(edited.files.len());
+        edited.files[target].1 = small_edit(&mut rng, &edited.files[target].1, "probe <- 1L\n");
+        vec![state, edited]
+    });
+}
+
+/// The mined corpus as package projects of eight files, each then with one small edit.
 #[test]
 fn program_corpus_holds_invariants() {
     let sources = program_corpus_sources();
@@ -290,31 +285,24 @@ fn program_corpus_holds_invariants() {
         "expected the mined corpus, found {}",
         sources.len()
     );
-    let db = RootDatabase::default();
-    install_shipped_stubs(&db);
-    let files: Vec<(String, SourceFile)> = sources
-        .iter()
-        .map(|(id, source)| {
-            (
-                id.clone(),
-                SourceFile::new(&db, source.clone(), DocumentKind::Package),
-            )
-        })
-        .collect();
-    ProjectFiles::new(&db, files.iter().map(|(_, file)| *file).collect());
-    for (id, file) in &files {
-        let length = file.text(&db).len();
-        let diagnostics = catch_unwind(AssertUnwindSafe(|| file_diagnostics(&db, *file)))
-            .unwrap_or_else(|_| panic!("program corpus case `{id}` panicked the pipeline"));
-        for diagnostic in diagnostics {
-            let start = u32::from(diagnostic.range.start()) as usize;
-            let end = u32::from(diagnostic.range.end()) as usize;
-            assert!(
-                start <= end && end <= length,
-                "program corpus case `{id}`: range {start}..{end} escapes the file (length {length})"
-            );
-        }
-    }
+    let projects: Vec<&[(String, String)]> = sources.chunks(8).collect();
+    for_each_session(projects.len(), |seed| {
+        let state = ProjectState {
+            files: projects[seed as usize % projects.len()]
+                .iter()
+                .enumerate()
+                .map(|(key, (_, source))| (key, source.clone(), DocumentKind::Package))
+                .collect(),
+            strict: false,
+            prelude: true,
+        };
+        let mut rng = SplitMix64(0xC0A9_05E5 ^ seed);
+        let mut edited = state.clone();
+        let target = rng.below(edited.files.len());
+        let donor = &sources[rng.below(sources.len())].1;
+        edited.files[target].1 = small_edit(&mut rng, &edited.files[target].1, donor);
+        vec![state, edited]
+    });
 }
 
 #[test]
@@ -325,26 +313,11 @@ fn fuzz_regressions_hold_invariants() {
 }
 
 #[test]
-fn fuzz_generated_programs() {
-    run_single_file(ITERATIONS, 0xDECA_FBAD, generate_program);
-}
-
-#[test]
-fn fuzz_token_soup() {
-    run_single_file(ITERATIONS / 2, 0xBEEF_FACE, generate_soup);
-}
-
-#[test]
-fn fuzz_multi_file() {
-    run_multi_file(ITERATIONS / 5, 0xCAFE_D00D);
-}
-
-#[test]
 #[ignore = "long fuzz run for nightly/manual use"]
 fn fuzz_deep() {
-    run_single_file(ITERATIONS * 20, 0x5EED_0001, generate_program);
-    run_single_file(ITERATIONS * 10, 0x5EED_0002, generate_soup);
-    run_multi_file(ITERATIONS * 4, 0x5EED_0003);
+    for_each_session(SESSIONS * 20, |seed| {
+        generate_session(&mut SplitMix64(0x5EED_0001 ^ seed), &POOL)
+    });
 }
 
 /// A generated `NAMESPACE`: directives, `{` blocks and `if` directives nested at random, each

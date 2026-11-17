@@ -395,10 +395,33 @@ pub fn check_parse_invariants(input: &str) {
         );
     }
 
+    // Whatever the tree marks as broken, a finding names: otherwise a consumer that trusts an
+    // error-free parse reads a tree with holes in it.
+    if parse.errors().is_empty() {
+        let broken = parse
+            .syntax_node()
+            .descendants_with_tokens()
+            .find(|element| match element {
+                NodeOrToken::Node(node) => node.kind() == crate::SyntaxKind::ERROR,
+                NodeOrToken::Token(token) => token.kind() == crate::SyntaxKind::ERROR_TOKEN,
+            });
+        assert!(
+            broken.is_none(),
+            "the tree has an error node no finding reports for input {input:?}"
+        );
+    }
+
     // Erasure must turn a clean program into plain R: nothing inline survives, the
     // result is clean too, and erasing again changes nothing. A broken program has
-    // no meaning to erase.
-    if parse.errors().is_empty() {
+    // no meaning to erase, and neither has one with a type definition below the top level,
+    // which parses and is the checker's `annotation` error.
+    let nested_definition = parse.syntax_node().descendants().any(|node| {
+        node.kind() == crate::SyntaxKind::TYPE_DEFINITION
+            && node
+                .parent()
+                .is_some_and(|parent| parent.kind() != crate::SyntaxKind::SOURCE_FILE)
+    });
+    if parse.errors().is_empty() && !nested_definition {
         let erased = crate::erase_inline_annotations(&parse);
         let erased_parse = crate::parse(&erased);
         assert!(
@@ -514,21 +537,39 @@ impl Entropy for ByteStream<'_> {
     }
 }
 
-/// Runs `case` once per seed and, when one fails, panics with the command that replays exactly
-/// that seed. The seeds are [`fuzz_seeds`]: `0..default` normally, only `FUZZ_SEED` for a replay,
-/// and a window from it when `FUZZ_ITERS` or `FUZZ_DEPTH` is set as well. Each seed is the
-/// harness's whole input: the case builds its generator with `SplitMix64(seed)` and must draw
-/// nothing else, so the replay reproduces the failure byte for byte.
+/// Runs `case` once per seed and panics at the end with the command that replays each seed
+/// that failed. A run goes on past a failure, up to [`FAILURES_PER_RUN`] of them, so one long
+/// run reports every distinct bug in its window instead of the first. The seeds are
+/// [`fuzz_seeds`]: `0..default` normally, only `FUZZ_SEED` for a replay, and a window from it
+/// when `FUZZ_ITERS` or `FUZZ_DEPTH` is set as well. Each seed is the harness's whole input:
+/// the case builds its generator with `SplitMix64(seed)` and must draw nothing else, so the
+/// replay reproduces the failure byte for byte.
 pub fn for_each_seed(default: usize, mut case: impl FnMut(u64)) {
+    let mut failed: Vec<u64> = Vec::new();
     for seed in fuzz_seeds(default) {
         if panic::catch_unwind(AssertUnwindSafe(|| case(seed))).is_err() {
-            panic!(
-                "seed {seed} failed; replay with\n    {}",
-                replay_command(seed)
-            );
+            failed.push(seed);
+            if failed.len() == FAILURES_PER_RUN {
+                break;
+            }
         }
     }
+    if !failed.is_empty() {
+        let replays: Vec<String> = failed
+            .iter()
+            .map(|seed| format!("    {}", replay_command(*seed)))
+            .collect();
+        panic!(
+            "{} seed(s) failed; replay with\n{}",
+            failed.len(),
+            replays.join("\n")
+        );
+    }
 }
+
+/// Where a run stops collecting failing seeds: enough to tell distinct bugs apart, few enough
+/// that a harness broken on every seed ends quickly.
+pub const FAILURES_PER_RUN: usize = 8;
 
 /// The seeds [`for_each_seed`] runs, for a harness that has to write its own replay command.
 /// They start at `FUZZ_SEED` (0 when unset). Their count is `FUZZ_ITERS` when set, else
@@ -668,6 +709,215 @@ pub fn mutate_bytes(rng: &mut SplitMix64, source: &str) -> Vec<u8> {
         }
     }
     bytes
+}
+
+/// One program in R and typed ry, grown from the grammar and the type grammar together: every
+/// value has a sort the generator tracks, so an annotation and its value mostly agree and the
+/// checker gets past name resolution into inference, generics, records, tags and `match`. About
+/// one binding in six is ill-typed on purpose. The first alternative of every choice is the one
+/// that stops growing, so an exhausted [`ByteStream`] yields a one-statement program.
+pub fn generate_program(rng: &mut dyn Entropy) -> String {
+    generate_project(rng, 1).pop().unwrap_or_default()
+}
+
+/// `files` programs of one project: a later file reads and calls what an earlier one defined,
+/// and a name without a number may be defined in several files, which is what last-writer-wins
+/// resolution and cross-file invalidation need.
+pub fn generate_project(rng: &mut dyn Entropy, files: usize) -> Vec<String> {
+    let mut program = Program {
+        rng,
+        values: Vec::new(),
+        functions: Vec::new(),
+        counter: 0,
+    };
+    (0..files)
+        .map(|_| {
+            let mut text = String::new();
+            if rarely(&mut program, 12) {
+                text.push_str(pick(&mut program, FILE_DIRECTIVES));
+                text.push_str("\n\n");
+            }
+            for _ in 0..1 + program.rng.below(10) {
+                text.push_str(&statement(&mut program, 0));
+                text.push('\n');
+            }
+            text
+        })
+        .collect()
+}
+
+/// One edit of the size a keystroke or a refactoring step makes, so the result stays close to a
+/// program the pipeline analyzes in depth: a statement deleted, duplicated, moved, replaced by
+/// or joined with one of `donor`'s, a token deleted, duplicated or renamed to another name of
+/// the file, two tokens joined, a line commented out, an annotation comment turned into a plain
+/// one, or one character typed.
+pub fn small_edit(rng: &mut dyn Entropy, source: &str, donor: &str) -> String {
+    let statements = statement_ranges(source);
+    let (tokens, _) = crate::lex(source);
+    let mut spans: Vec<(crate::SyntaxKind, Range<usize>)> = Vec::with_capacity(tokens.len());
+    let mut offset = 0;
+    for token in &tokens {
+        let end = offset + u32::from(token.len) as usize;
+        spans.push((token.kind, offset..end));
+        offset = end;
+    }
+    let mut text = source.to_owned();
+    match rng.below(12) {
+        0 if !statements.is_empty() => {
+            text.replace_range(statements[rng.below(statements.len())].clone(), "");
+        }
+        1 if !statements.is_empty() => {
+            let range = statements[rng.below(statements.len())].clone();
+            let copy = format!("\n{}", &source[range.clone()]);
+            text.insert_str(range.end, &copy);
+        }
+        2 if statements.len() > 1 => {
+            let first = rng.below(statements.len() - 1);
+            let second = first + 1 + rng.below(statements.len() - first - 1);
+            let (first, second) = (statements[first].clone(), statements[second].clone());
+            text.replace_range(second.clone(), &source[first.clone()]);
+            text.replace_range(first, &source[second]);
+        }
+        3 | 4 => {
+            let donated = statement_ranges(donor);
+            let piece = match donated.is_empty() {
+                true => donor,
+                false => &donor[donated[rng.below(donated.len())].clone()],
+            };
+            match statements.is_empty() {
+                true => text.push_str(piece),
+                false if rng.below(2) == 0 => {
+                    text.replace_range(statements[rng.below(statements.len())].clone(), piece);
+                }
+                false => {
+                    let at = statements[rng.below(statements.len())].end;
+                    text.insert_str(at, &format!("\n{piece}"));
+                }
+            }
+        }
+        5 if !spans.is_empty() => {
+            text.replace_range(spans[rng.below(spans.len())].1.clone(), "");
+        }
+        6 if !spans.is_empty() => {
+            let range = spans[rng.below(spans.len())].1.clone();
+            text.insert_str(range.end, &source[range]);
+        }
+        7 => {
+            let names: Vec<&Range<usize>> = spans
+                .iter()
+                .filter(|(kind, _)| *kind == crate::SyntaxKind::IDENT)
+                .map(|(_, range)| range)
+                .collect();
+            if !names.is_empty() {
+                let target = names[rng.below(names.len())].clone();
+                let replacement = names[rng.below(names.len())].clone();
+                text.replace_range(target, &source[replacement]);
+            }
+        }
+        8 => {
+            let separators: Vec<&Range<usize>> = spans
+                .iter()
+                .filter(|(kind, _)| {
+                    matches!(
+                        kind,
+                        crate::SyntaxKind::WHITESPACE | crate::SyntaxKind::NEWLINE
+                    )
+                })
+                .map(|(_, range)| range)
+                .collect();
+            if !separators.is_empty() {
+                text.replace_range(separators[rng.below(separators.len())].clone(), "");
+            }
+        }
+        9 => {
+            let starts: Vec<usize> = std::iter::once(0)
+                .chain(source.match_indices('\n').map(|(at, _)| at + 1))
+                .collect();
+            text.insert_str(starts[rng.below(starts.len())], "# ");
+        }
+        10 => {
+            let annotations: Vec<usize> = source.match_indices("#:").map(|(at, _)| at).collect();
+            if !annotations.is_empty() {
+                let at = annotations[rng.below(annotations.len())];
+                text.replace_range(at + 1..at + 2, "");
+            }
+        }
+        _ => {
+            const TYPED: &[&str] = &[
+                "(", ")", "{", "}", "[", "]", ",", "\"", "'", "#", "\n", " ", "x", "1", ":", "=",
+                "<", "-", "$", "@", "|", "\\", "`", ".",
+            ];
+            let at = source.floor_char_boundary(rng.below(source.len() + 1));
+            text.insert_str(at, TYPED[rng.below(TYPED.len())]);
+        }
+    }
+    text
+}
+
+/// The edit that turns `old` into `new` as [`crate::reparse`] takes it: the range of `old` it
+/// deletes and the length it inserts there, with the longest common prefix and suffix cut off.
+pub fn splice_of(old: &str, new: &str) -> (crate::TextRange, crate::TextSize) {
+    let prefix = old
+        .bytes()
+        .zip(new.bytes())
+        .take_while(|(before, after)| before == after)
+        .count();
+    let prefix = old.floor_char_boundary(prefix);
+    let suffix = old.as_bytes()[prefix..]
+        .iter()
+        .rev()
+        .zip(new.as_bytes()[prefix..].iter().rev())
+        .take_while(|(before, after)| before == after)
+        .count();
+    let old_end = old.ceil_char_boundary(old.len() - suffix);
+    let new_end = new.len() - (old.len() - old_end);
+    (
+        crate::TextRange::new(
+            crate::TextSize::from(prefix as u32),
+            crate::TextSize::from(old_end as u32),
+        ),
+        crate::TextSize::from((new_end - prefix) as u32),
+    )
+}
+
+/// The ranges of a file's top-level statements, each with the `#:` and comment lines directly
+/// above it, which belong to it.
+pub fn statement_ranges(source: &str) -> Vec<Range<usize>> {
+    let root = crate::parse(source).syntax_node();
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    let mut leading: Option<usize> = None;
+    let mut line_breaks = 1;
+    for child in root.children_with_tokens() {
+        let (kind, range) = match &child {
+            NodeOrToken::Token(token) => (token.kind(), token.text_range()),
+            NodeOrToken::Node(node) => (node.kind(), node.text_range()),
+        };
+        let start = u32::from(range.start()) as usize;
+        match kind {
+            crate::SyntaxKind::WHITESPACE => {}
+            crate::SyntaxKind::NEWLINE => {
+                line_breaks += 1;
+                if line_breaks > 1 {
+                    leading = None;
+                }
+            }
+            // A comment after code on its line is that statement's, not the next one's.
+            crate::SyntaxKind::COMMENT
+            | crate::SyntaxKind::ANNOTATION
+            | crate::SyntaxKind::ANNOTATION_DIRECTIVE => {
+                if line_breaks > 0 {
+                    leading.get_or_insert(start);
+                }
+                line_breaks = 0;
+            }
+            _ if matches!(child, NodeOrToken::Node(_)) => {
+                ranges.push(leading.take().unwrap_or(start)..u32::from(range.end()) as usize);
+                line_breaks = -1;
+            }
+            _ => {}
+        }
+    }
+    ranges
 }
 
 /// An evenly spread sample of the corpus's `.R` files.
@@ -1064,4 +1314,790 @@ fn nested_token_at_offset(
         })
         .flat_map(|child| nested_token_at_offset(&child, offset))
         .collect()
+}
+
+/// What [`generate_project`] knows about the program so far.
+struct Program<'a> {
+    rng: &'a mut dyn Entropy,
+    values: Vec<(String, Sort)>,
+    functions: Vec<GeneratedFunction>,
+    counter: usize,
+}
+
+struct GeneratedFunction {
+    name: String,
+    parameters: Vec<Sort>,
+    result: Sort,
+}
+
+/// The types the generator can both spell and build a value of.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sort {
+    Integer,
+    Double,
+    Character,
+    Logical,
+    Integers,
+    Doubles,
+    Characters,
+    Named,
+    Record,
+    Tuple,
+    Maybe,
+    List,
+    Function,
+}
+
+const SORTS: [Sort; 13] = [
+    Sort::Integer,
+    Sort::Double,
+    Sort::Character,
+    Sort::Logical,
+    Sort::Integers,
+    Sort::Doubles,
+    Sort::Characters,
+    Sort::Named,
+    Sort::Record,
+    Sort::Tuple,
+    Sort::Maybe,
+    Sort::List,
+    Sort::Function,
+];
+
+const FILE_DIRECTIVES: &[&str] = &[
+    "# typing: on",
+    "# typing: strict",
+    "# typing: off",
+    "#: @strict",
+];
+
+const WORDS: &[&str] = &[
+    "total", "count", "label", "items", "helper", "point", "pair", "maybe", "scale", "step",
+    "result", "value",
+];
+
+/// `(hole, sort, type, literals)`: the hole names the sort in a template as `@{hole}`.
+const SORT_TABLE: &[(&str, Sort, &str, &[&str])] = &[
+    (
+        "I",
+        Sort::Integer,
+        "integer",
+        &[
+            "1L",
+            "0L",
+            "2L",
+            "10L",
+            "-1L",
+            "100000L",
+            "0x1FL",
+            "NA_integer_",
+        ],
+    ),
+    (
+        "D",
+        Sort::Double,
+        "double",
+        &[
+            "1.5", "0", "2", "1e3", "-0.5", ".5", "pi", "Inf", "NA_real_",
+        ],
+    ),
+    (
+        "C",
+        Sort::Character,
+        "character",
+        &[
+            "\"a\"",
+            "\"\"",
+            "\"hello world\"",
+            "'single'",
+            "\"é\"",
+            "r\"(raw)\"",
+            "NA_character_",
+        ],
+    ),
+    ("L", Sort::Logical, "logical", &["TRUE", "FALSE", "NA"]),
+    (
+        "IV",
+        Sort::Integers,
+        "integer[]",
+        &[
+            "c(1L, 2L, 3L)",
+            "1:3",
+            "integer(0)",
+            "seq_len(4L)",
+            "c(a = 1L, b = 2L)",
+        ],
+    ),
+    (
+        "DV",
+        Sort::Doubles,
+        "double[]",
+        &["c(1.5, 2)", "numeric(0)", "c(0.1, NA)", "c(x = 1, y = 2)"],
+    ),
+    (
+        "CV",
+        Sort::Characters,
+        "character[]",
+        &["c(\"a\", \"b\")", "character(0)", "letters"],
+    ),
+    (
+        "N",
+        Sort::Named,
+        "list{name: character, size: integer}",
+        &["list(name = \"a\", size = 1L)"],
+    ),
+    (
+        "R",
+        Sort::Record,
+        "Record{x: double, y: double}",
+        &["(x = 1, y = 2)", "(x = 0.5, y = -1)"],
+    ),
+    (
+        "U",
+        Sort::Tuple,
+        "Tuple{integer, character}",
+        &["(1L, \"a\")"],
+    ),
+    (
+        "M",
+        Sort::Maybe,
+        ":Some(integer) | :None",
+        &[":None", ":Some(1L)"],
+    ),
+    ("X", Sort::List, "List<I64>", &["[1L, 2L]", "[1L]"]),
+    (
+        "F",
+        Sort::Function,
+        "fn(value: integer) -> integer",
+        &["function(value) value", "\\(value) value + 1L"],
+    ),
+];
+
+/// Expressions by the sort they produce; a hole is filled with an expression of its sort.
+const EXPRESSIONS: &[(Sort, &str)] = &[
+    (Sort::Integer, "@{I} + @{I}"),
+    (Sort::Integer, "@{I} * @{I}"),
+    (Sort::Integer, "@{I} - @{I}"),
+    (Sort::Integer, "@{I} %/% @{I}"),
+    (Sort::Integer, "@{I} %% @{I}"),
+    (Sort::Integer, "-@{I}"),
+    (Sort::Integer, "(@{I})"),
+    (Sort::Integer, "length(@{CV})"),
+    (Sort::Integer, "length(@{DV})"),
+    (Sort::Integer, "nchar(@{C})"),
+    (Sort::Integer, "as.integer(@{D})"),
+    (Sort::Integer, "@{IV}[[1L]]"),
+    (Sort::Integer, "@{IV}[[@{I}]]"),
+    (Sort::Integer, "@{N}$size"),
+    (Sort::Integer, "@{N}[[\"size\"]]"),
+    (Sort::Integer, "sum(@{IV})"),
+    (Sort::Integer, "max(@{I}, @{I})"),
+    (Sort::Integer, "abs(@{I})"),
+    (Sort::Integer, "if (@{L}) @{I} else @{I}"),
+    (Sort::Integer, "switch(@{C}, a = @{I}, @{I})"),
+    (Sort::Integer, "@{F}(@{I})"),
+    (Sort::Integer, "@{IV} |> length()"),
+    (Sort::Integer, "(\\(inner) inner + 1L)(@{I})"),
+    (Sort::Integer, "local({\n  inner <- @{I}\n  inner * 2L\n})"),
+    (Sort::Integer, "tryCatch(@{I}, error = function(e) @{I})"),
+    (
+        Sort::Integer,
+        "match (@{M}) {\n  :Some(found) => found\n  :None => @{I}\n}",
+    ),
+    (Sort::Integer, "match (@{U}) {\n  (first, _) => first\n}"),
+    (Sort::Integer, "Result.with_default(List.first(@{X}), @{I})"),
+    (
+        Sort::Integer,
+        "List.walk(@{X}, @{I}, function(state, item) state + item)",
+    ),
+    (Sort::Integer, "List.len(@{X})"),
+    (Sort::Double, "@{D} + @{D}"),
+    (Sort::Double, "@{D} * @{D}"),
+    (Sort::Double, "@{D} / @{D}"),
+    (Sort::Double, "@{I} / @{I}"),
+    (Sort::Double, "@{D} + @{I}"),
+    (Sort::Double, "@{D}^2"),
+    (Sort::Double, "sqrt(@{D})"),
+    (Sort::Double, "exp(@{D})"),
+    (Sort::Double, "mean(@{DV})"),
+    (Sort::Double, "sum(@{DV})"),
+    (Sort::Double, "@{R}$x"),
+    (Sort::Double, "@{R}$y"),
+    (Sort::Double, "as.numeric(@{I})"),
+    (Sort::Double, "@{DV}[[1L]]"),
+    (Sort::Double, "if (@{L}) @{D} else @{D}"),
+    (Sort::Double, "@{D} |> sqrt()"),
+    (Sort::Double, "stats::sd(@{DV})"),
+    (
+        Sort::Double,
+        "match (@{R}) {\n  (x = horizontal, ..) => horizontal\n}",
+    ),
+    (Sort::Character, "paste(@{C}, @{C})"),
+    (Sort::Character, "paste0(@{C}, @{I})"),
+    (Sort::Character, "toupper(@{C})"),
+    (Sort::Character, "trimws(@{C})"),
+    (Sort::Character, "sprintf(\"%d items\", @{I})"),
+    (Sort::Character, "format(@{D})"),
+    (Sort::Character, "@{N}$name"),
+    (Sort::Character, "as.character(@{I})"),
+    (Sort::Character, "substr(@{C}, 1L, 2L)"),
+    (Sort::Character, "@{CV}[[1L]]"),
+    (Sort::Character, "paste(@{CV}, collapse = \", \")"),
+    (Sort::Character, "if (@{L}) @{C} else @{C}"),
+    (
+        Sort::Character,
+        "match (@{U}) {\n  (_, second) => second\n}",
+    ),
+    (Sort::Logical, "@{I} > @{I}"),
+    (Sort::Logical, "@{D} <= @{D}"),
+    (Sort::Logical, "@{C} == @{C}"),
+    (Sort::Logical, "!@{L}"),
+    (Sort::Logical, "@{L} && @{L}"),
+    (Sort::Logical, "@{L} || @{L}"),
+    (Sort::Logical, "isTRUE(@{L})"),
+    (Sort::Logical, "nchar(@{C}) > 0L"),
+    (Sort::Logical, "any(@{IV} > @{I})"),
+    (Sort::Logical, "all(@{DV} >= 0)"),
+    (Sort::Logical, "@{I} %in% @{IV}"),
+    (Sort::Logical, "is.na(@{D})"),
+    (Sort::Logical, "length(@{CV}) == 0L"),
+    (Sort::Logical, "startsWith(@{C}, @{C})"),
+    (Sort::Logical, "is.null(@{N}$name)"),
+    (Sort::Logical, "identical(@{IV}, @{IV})"),
+    (
+        Sort::Logical,
+        "match (@{M}) {\n  :Some(_) => TRUE\n  :None => FALSE\n}",
+    ),
+    (Sort::Integers, "c(@{I}, @{I})"),
+    (Sort::Integers, "c(@{IV}, @{I})"),
+    (Sort::Integers, "seq_len(@{I})"),
+    (Sort::Integers, "@{I}:@{I}"),
+    (Sort::Integers, "@{IV}[@{IV} > @{I}]"),
+    (Sort::Integers, "@{IV}[-1L]"),
+    (Sort::Integers, "rev(@{IV})"),
+    (Sort::Integers, "sort(@{IV})"),
+    (Sort::Integers, "unique(@{IV})"),
+    (Sort::Integers, "@{IV} + 1L"),
+    (Sort::Integers, "@{IV} * @{I}"),
+    (Sort::Integers, "seq_along(@{CV})"),
+    (Sort::Integers, "which(@{DV} > @{D})"),
+    (Sort::Integers, "nchar(@{CV})"),
+    (Sort::Integers, "as.integer(@{DV})"),
+    (Sort::Integers, "vapply(@{CV}, nchar, integer(1))"),
+    (Sort::Integers, "rep(@{I}, 3L)"),
+    (Sort::Integers, "if (@{L}) @{IV} else @{IV}"),
+    (Sort::Doubles, "c(@{D}, @{D})"),
+    (Sort::Doubles, "c(@{DV}, @{DV})"),
+    (Sort::Doubles, "@{DV} * 2"),
+    (Sort::Doubles, "@{DV} + @{D}"),
+    (Sort::Doubles, "@{IV} / 2"),
+    (Sort::Doubles, "as.numeric(@{IV})"),
+    (Sort::Doubles, "sqrt(@{DV})"),
+    (Sort::Doubles, "cumsum(@{DV})"),
+    (Sort::Doubles, "rev(@{DV})"),
+    (Sort::Doubles, "@{DV}[@{DV} > @{D}]"),
+    (Sort::Doubles, "@{DV} / sum(@{DV})"),
+    (
+        Sort::Doubles,
+        "vapply(@{IV}, function(item) item / 2, numeric(1))",
+    ),
+    (Sort::Doubles, "unname(@{DV})"),
+    (Sort::Characters, "c(@{C}, @{C})"),
+    (Sort::Characters, "c(@{CV}, @{C})"),
+    (Sort::Characters, "paste0(@{CV}, @{C})"),
+    (Sort::Characters, "toupper(@{CV})"),
+    (Sort::Characters, "as.character(@{IV})"),
+    (Sort::Characters, "sort(@{CV})"),
+    (Sort::Characters, "rev(@{CV})"),
+    (Sort::Characters, "unique(@{CV})"),
+    (Sort::Characters, "names(@{N})"),
+    (Sort::Characters, "strsplit(@{C}, \",\")[[1L]]"),
+    (Sort::Characters, "sprintf(\"%s!\", @{CV})"),
+    (Sort::Characters, "@{CV}[nchar(@{CV}) > @{I}]"),
+    (Sort::Named, "list(name = @{C}, size = @{I})"),
+    (Sort::Named, "if (@{L}) @{N} else @{N}"),
+    (Sort::Record, "(x = @{D}, y = @{D})"),
+    (Sort::Record, "if (@{L}) @{R} else @{R}"),
+    (
+        Sort::Record,
+        "match (@{R}) {\n  (x = horizontal, y = vertical) => (x = vertical, y = horizontal)\n}",
+    ),
+    (Sort::Tuple, "(@{I}, @{C})"),
+    (Sort::Tuple, "if (@{L}) @{U} else @{U}"),
+    (Sort::Maybe, ":Some(@{I})"),
+    (Sort::Maybe, "if (@{L}) :Some(@{I}) else :None"),
+    (
+        Sort::Maybe,
+        "match (@{M}) {\n  :Some(found) => :Some(found + 1L)\n  :None => :None\n}",
+    ),
+    (Sort::List, "[@{I}, @{I}]"),
+    (Sort::List, "[@{I}]"),
+    (Sort::List, "List.map(@{X}, function(item) item + 1L)"),
+    (Sort::List, "List.map(@{X}, \\(item) item * @{I})"),
+    (Sort::List, "List.from_r(@{IV})"),
+    (Sort::List, "List.append(@{X}, @{I})"),
+    (Sort::List, "List.concat(@{X}, @{X})"),
+    (Sort::List, "List.keep_if(@{X}, function(item) item > @{I})"),
+    (Sort::Function, "function(value) value + @{I}"),
+    (Sort::Function, "\\(value) value * 2L"),
+    (Sort::Function, "function(value: integer) -> integer value"),
+    (Sort::Function, "@pure function(value) value + 1L"),
+    (
+        Sort::Function,
+        "function(value) {\n  doubled <- value * 2L\n  doubled\n}",
+    ),
+    (
+        Sort::Function,
+        "local({\n  offset <- @{I}\n  function(value) value + offset\n})",
+    ),
+    (Sort::Function, "if (@{L}) @{F} else @{F}"),
+];
+
+/// Whole statements the sorts cannot express: type definitions, generics, the object systems,
+/// tables, the standard library, tests and code the lints report. `@{n}` and `@{m}` are fresh
+/// names and `@{T}` a fresh type or class name, each the same throughout one snippet.
+const SNIPPETS: &[&str] = &[
+    "#: @alias @{T} {integer | NULL}\n\n#: @{T}\n@{n} <- if (@{L}) @{I} else NULL\nif (!is.null(@{n})) print(@{n} + 1L)",
+    "alias @{T} = character[]\n@{n}: @{T} <- @{CV}",
+    "alias @{T}<V> = list[named: V]\n@{n}: @{T}<double> <- list(a = @{D})",
+    "type @{T} = Record{x: double, y: double}\n@{n}: @{T} <- @@{T}(@{R})\n@{m} <- function(at: @{T}) -> double at$x + at$y\nprint(@{m}(@{n}))",
+    "#: @type @{T} {list{w: double, h: double}}\n\n#: @new @{T}\n@{n} <- list(w = @{D}, h = @{D})\n\n#: fn(size: @{T}) -> double\n@{m} <- function(size) size$w * size$h",
+    "#: @alias @{T} {:Circle(radius: double) | :Rect(width: double, height: double)}\n\n#: fn(shape: @{T}) -> double\n@{n} <- function(shape) match (shape) {\n  :Circle(radius = r) => r * r\n  :Rect(width = w, height = h) => w * h\n}\n@{m} <- @{n}(:Circle(radius = @{D}))",
+    "type @{T} = :Node(Tuple{integer, @{T}}) | :End\n@{n} <- function(chain: @{T}) -> integer match (chain) {\n  :Node((head, rest)) => head + @{n}(rest)\n  :End => 0L\n}\n@{m} <- @{n}(@@{T}(:Node((@{I}, @@{T}(:End)))))",
+    "#: <T> fn(x: T[]) -> T\n@{n} <- function(x) x[[1L]]\n@{m} <- @{n}(@{CV})",
+    "@{n} <- function<T>(x: T) -> T x\n@{m} <- @{n}(@{R})",
+    "@{n} <- function<T: numeric>(x: T, y: T) -> T x + y\n@{m} <- @{n}(@{I}, @{I})",
+    "#: @forall T\n#: @param x {T}\n#: @param [times] {integer}\n#: @return {list[T]}\n@{n} <- function(x, times = 2L) rep(list(x), times)\n@{m} <- @{n}(@{C})",
+    "#: fn(...: character) -> character\n@{n} <- function(...) paste(..., sep = \"\")\n@{m} <- @{n}(@{C}, @{C})",
+    "#: @trust fn(x: integer) -> character\n@{n} <- function(x) x\n@{m} <- @{n}(@{I})",
+    "@{n} <- function(text: Str) Str.to_i64(text)\n@{m} <- Result.and_then(@{n}(\"4\"), function(parsed) if (parsed > 0) :Ok(parsed) else :Err(:NotPositive))",
+    "@{n} <- match (List.get(@{X}, @{I})) {\n  :Ok(item) => item\n  :Err(_) => @{I}\n}",
+    "@{n} <- Result.map(List.find_first(@{X}, function(item) item > @{I}), function(item) item * 2L)",
+    "@{n} <- structure(list(amount = @{D}), class = \"@{T}\")\nprint.@{T} <- function(x, ...) {\n  cat(format(x$amount), \"\\n\")\n  invisible(x)\n}\nformat.@{T} <- function(x, ...) paste(\"<\", x$amount, \">\")\n@{m} <- function(x, ...) UseMethod(\"@{m}\")\n@{m}.@{T} <- function(x, ...) x$amount * 2\n@{m}.default <- function(x, ...) NA_real_\nprint(@{m}(@{n}))",
+    "`+.@{T}` <- function(e1, e2) structure(list(amount = e1$amount + e2$amount), class = \"@{T}\")\n@{n} <- structure(list(amount = @{D}), class = \"@{T}\")\n@{m} <- @{n} + @{n}",
+    "setClass(\"@{T}\", representation(amount = \"numeric\", label = \"character\"))\nsetGeneric(\"@{m}\", function(object, ...) standardGeneric(\"@{m}\"))\nsetMethod(\"@{m}\", \"@{T}\", function(object, ...) object@amount * 2)\n@{n} <- new(\"@{T}\", amount = @{D}, label = @{C})\nprint(@{m}(@{n}))\nprint(@{n}@label)",
+    "@{T} <- R6::R6Class(\"@{T}\",\n  public = list(\n    amount = NULL,\n    initialize = function(amount) {\n      self$amount <- amount\n    },\n    double = function() self$amount * 2\n  ),\n  private = list(secret = 1L)\n)\n@{n} <- @{T}$new(@{D})\n@{m} <- @{n}$double()",
+    "@{T} <- setRefClass(\"@{T}\", fields = list(amount = \"numeric\"), methods = list(\n  bump = function() {\n    amount <<- amount + 1\n    invisible(.self)\n  }\n))\n@{n} <- @{T}$new(amount = @{D})\n@{n}$bump()",
+    "library(data.table)\n@{n} <- data.table(key = @{CV}, amount = @{DV})\n@{m} <- @{n}[amount > @{D}, .(total = sum(amount)), by = key]\n@{n}[, share := amount / sum(amount)]\nsetnames(@{n}, \"share\", \"part\")",
+    "@{n} <- data.frame(key = @{CV}, amount = @{DV}, stringsAsFactors = FALSE)\n@{n}$double <- @{n}$amount * 2\n@{m} <- @{n}[@{n}$amount > @{D}, c(\"key\", \"amount\")]\nprint(nrow(@{m}))",
+    "@{n} <- lapply(@{IV}, function(item) item * @{I})\n@{m} <- Reduce(`+`, @{n}, 0L)",
+    "@{n} <- Map(function(left, right) left + right, @{IV}, @{DV})\n@{m} <- do.call(rbind, @{n})",
+    "@{n} <- function(kind = c(\"mean\", \"median\"), ...) {\n  kind <- match.arg(kind)\n  on.exit(message(\"done\"), add = TRUE)\n  if (missing(...)) return(NULL)\n  switch(kind, mean = mean(c(...)), median = stats::median(c(...)))\n}\n@{m} <- @{n}(\"mean\", @{D}, @{D})",
+    "@{n} <- function() {\n  hits <- 0L\n  function() {\n    hits <<- hits + 1L\n    hits\n  }\n}\n@{m} <- @{n}()\nprint(@{m}())",
+    "@{n} <- function(n) if (n <= 1L) 1L else n * @{n}(n - 1L)\n@{m} <- function(n) if (n == 0L) TRUE else @{n}(n) > 0L",
+    "@{n} <- tryCatch({\n  warning(@{C})\n  @{I}\n}, warning = function(w) conditionMessage(w), error = function(e) NULL, finally = cat(\"\"))",
+    "@{n} <- y ~ a + b\n@{m} <- stats::lm(@{n}, data = data.frame(y = @{DV}, a = @{DV}, b = @{DV}))",
+    "test_that(\"@{n} holds\", {\n  @{n} <- @{I}\n  expect_equal(@{n}, @{I})\n  expect_true(@{L})\n  expect_error(stop(@{C}), \"a\")\n})",
+    "@{n} = @{I}\nT -> @{m}\nif (@{L} == TRUE) print(1:length(@{CV}))\nsapply(@{IV}, function(item) item)",
+    "@{n} <- @{IV}\nfor (index in seq_along(@{n})) @{n}[index] <- @{n}[index] + 1L\nnames(@{n}) <- @{CV}\nattr(@{n}, \"note\") <- @{C}\nlevels(@{n}) <- NULL",
+    "@{n} <- new.env()\nassign(\"@{m}\", @{I}, envir = @{n})\n@{m} <- get(\"@{m}\", envir = @{n})\nlocal({\n  @{m} <- @{C}\n  @{m}\n})",
+    "@{n} <- nosuchpkg::mystery(@{I})\n@{m} <- @{n}$field[[1L]](@{C})",
+    "@{n}: integer <- 1L\n@{n}: character <- \"a\"",
+    "#: double\n@{n}: integer <- @{I}",
+];
+
+fn statement(program: &mut Program, depth: usize) -> String {
+    let kinds = if depth >= 2 { 4 } else { 10 };
+    match program.rng.below(kinds) {
+        0 | 1 => binding(program, depth),
+        2 => {
+            let sort = any_sort(program);
+            format!("print({})", expression(program, sort, 1))
+        }
+        3 => replacement(program, depth),
+        4 | 5 => function_definition(program, depth),
+        6 | 7 => control_flow(program, depth),
+        _ => {
+            let template = pick(program, SNIPPETS);
+            let (name, other, class) = (fresh_name(program), fresh_name(program), {
+                program.counter += 1;
+                format!("Kind{}", program.counter)
+            });
+            let text = template
+                .replace("@{n}", &name)
+                .replace("@{m}", &other)
+                .replace("@{T}", &class);
+            expand(program, &text, 1)
+        }
+    }
+}
+
+fn binding(program: &mut Program, depth: usize) -> String {
+    let sort = any_sort(program);
+    let value_sort = if rarely(program, 6) {
+        any_sort(program)
+    } else {
+        sort
+    };
+    let value = expression(program, value_sort, 0);
+    let name = fresh_name(program);
+    let annotation = type_text(sort);
+    let text = match program.rng.below(8) {
+        0 | 1 => format!("{name} <- {value}"),
+        2 => format!("#: {annotation}\n{name} <- {value}"),
+        3 => format!("{name}: {annotation} <- {value}"),
+        4 => format!("{name}: {annotation} = {value}"),
+        5 => format!("#: @if-unknown {annotation}\n{name} <- {value}"),
+        6 if depth > 0 => format!("{name} <<- {value}"),
+        _ => format!("{name} = {value}"),
+    };
+    define_value(program, name, sort);
+    text
+}
+
+/// A write through a replacement form to a value in scope, or a binding when nothing is.
+fn replacement(program: &mut Program, depth: usize) -> String {
+    if program.values.is_empty() {
+        return binding(program, depth);
+    }
+    let (name, sort) = program.values[program.rng.below(program.values.len())].clone();
+    let template = match sort {
+        Sort::Integers => pick(
+            program,
+            &[
+                "@{v}[[1L]] <- @{I}",
+                "@{v}[@{v} > @{I}] <- 0L",
+                "names(@{v}) <- @{CV}",
+                "@{v}[[length(@{v}) + 1L]] <- @{I}",
+                "attr(@{v}, \"unit\") <- @{C}",
+            ],
+        ),
+        Sort::Doubles => pick(
+            program,
+            &[
+                "@{v}[2L] <- @{D}",
+                "@{v}[is.na(@{v})] <- 0",
+                "names(@{v})[1L] <- @{C}",
+            ],
+        ),
+        Sort::Characters => pick(
+            program,
+            &[
+                "@{v}[[1L]] <- @{C}",
+                "@{v} <- c(@{v}, @{C})",
+                "substr(@{v}, 1L, 1L) <- @{C}",
+            ],
+        ),
+        Sort::Named => pick(
+            program,
+            &[
+                "@{v}$size <- @{I}",
+                "@{v}[[\"name\"]] <- @{C}",
+                "@{v}$size <- @{v}$size + 1L",
+            ],
+        ),
+        Sort::Integer => "@{v} <- @{v} + @{I}",
+        Sort::Double => "@{v} <- @{v} * @{D}",
+        Sort::Character => "@{v} <- paste0(@{v}, @{C})",
+        Sort::Logical => "@{v} <- !@{v}",
+        Sort::Record => "@{v} <- (x = @{v}$y, y = @{D})",
+        Sort::Tuple => "@{v} <- (@{I}, @{C})",
+        Sort::Maybe => "@{v} <- :Some(@{I})",
+        Sort::List => "@{v} <- List.append(@{v}, @{I})",
+        Sort::Function => "@{v} <- @{F}",
+    };
+    expand(program, &template.replace("@{v}", &name), 1)
+}
+
+fn function_definition(program: &mut Program, depth: usize) -> String {
+    let name = fresh_name(program);
+    let parameters: Vec<(String, Sort)> = (0..program.rng.below(4))
+        .map(|index| {
+            (
+                format!("{}{index}", pick(program, &["arg", "input", "n"])),
+                any_sort(program),
+            )
+        })
+        .collect();
+    let optional = match parameters.last() {
+        Some((_, sort)) if rarely(program, 3) => Some(expression(program, *sort, 2)),
+        _ => None,
+    };
+    let dots = rarely(program, 6);
+    let result = any_sort(program);
+    let signature = GeneratedFunction {
+        name: name.clone(),
+        parameters: parameters.iter().map(|(_, sort)| *sort).collect(),
+        result,
+    };
+    // Registered before the body one time in four, so the body may recurse.
+    let recursive = rarely(program, 4);
+    if recursive {
+        define_function(program, signature);
+    }
+    let scope = program.values.len();
+    program.values.extend(parameters.iter().cloned());
+    let mut lines: Vec<String> = (0..program.rng.below(3))
+        .map(|_| statement(program, depth + 1))
+        .collect();
+    if dots {
+        lines.push("extra <- list(...)".to_owned());
+    }
+    if rarely(program, 5) {
+        lines.push(format!(
+            "if ({}) return({})",
+            expression(program, Sort::Logical, 2),
+            expression(program, result, 2)
+        ));
+    }
+    let last = expression(program, result, 1);
+    lines.push(match program.rng.below(4) {
+        0 | 1 => last,
+        2 => format!("return({last})"),
+        _ => format!("invisible({last})"),
+    });
+    program.values.truncate(scope);
+    if !recursive {
+        define_function(
+            program,
+            GeneratedFunction {
+                name: name.clone(),
+                parameters: parameters.iter().map(|(_, sort)| *sort).collect(),
+                result,
+            },
+        );
+    }
+
+    let style = program.rng.below(5);
+    let last_parameter = parameters.len().saturating_sub(1);
+    let mut plain = Vec::new();
+    let mut inline = Vec::new();
+    let mut compact = Vec::new();
+    let mut expanded = String::new();
+    for (index, (parameter, sort)) in parameters.iter().enumerate() {
+        let annotation = type_text(*sort);
+        match &optional {
+            Some(default) if index == last_parameter => {
+                plain.push(format!("{parameter} = {default}"));
+                inline.push(format!("{parameter}: {annotation} = {default}"));
+                compact.push(format!("[{parameter}]: {annotation}"));
+                expanded.push_str(&format!("#: @param [{parameter}] {{{annotation}}}\n"));
+            }
+            _ => {
+                plain.push(parameter.clone());
+                inline.push(format!("{parameter}: {annotation}"));
+                compact.push(format!("{parameter}: {annotation}"));
+                expanded.push_str(&format!("#: @param {parameter} {{{annotation}}}\n"));
+            }
+        }
+    }
+    if dots {
+        plain.push("...".to_owned());
+        inline.push("...".to_owned());
+        compact.push("...: Any".to_owned());
+    }
+    let returns = type_text(result);
+    let body = block(&lines);
+    match style {
+        0 | 1 => format!("{name} <- function({}) {body}", plain.join(", ")),
+        2 => format!(
+            "#: fn({}) -> {returns}\n{name} <- function({}) {body}",
+            compact.join(", "),
+            plain.join(", ")
+        ),
+        3 => format!(
+            "{expanded}#: @return {{{returns}}}\n{name} <- function({}) {body}",
+            plain.join(", ")
+        ),
+        _ => format!(
+            "{name} <- function({}) -> {returns} {body}",
+            inline.join(", ")
+        ),
+    }
+}
+
+fn control_flow(program: &mut Program, depth: usize) -> String {
+    let scope = program.values.len();
+    let condition = expression(program, Sort::Logical, 1);
+    let text = match program.rng.below(7) {
+        0 => format!("if ({condition}) {}", nested_block(program, depth)),
+        1 => format!(
+            "if ({condition}) {} else {}",
+            nested_block(program, depth),
+            nested_block(program, depth)
+        ),
+        2 => {
+            let sequence = expression(program, Sort::Integers, 1);
+            let variable = fresh_name(program);
+            program.values.push((variable.clone(), Sort::Integer));
+            format!(
+                "for ({variable} in {sequence}) {}",
+                nested_block(program, depth)
+            )
+        }
+        3 => {
+            let body = nested_block(program, depth);
+            format!(
+                "while ({condition}) {}",
+                body.replacen('{', "{\n  if (FALSE) next", 1)
+            )
+        }
+        4 => {
+            let body = nested_block(program, depth);
+            format!("repeat {}", body.replacen('{', "{\n  if (TRUE) break", 1))
+        }
+        5 => format!(
+            "tryCatch({}, error = function(e) {}, finally = {})",
+            nested_block(program, depth),
+            nested_block(program, depth),
+            nested_block(program, depth)
+        ),
+        _ => {
+            let subject = expression(program, Sort::Maybe, 1);
+            format!(
+                "match ({subject}) {{\n  :Some(found) if (found > 0L) => {}\n  _ => {}\n}}",
+                nested_block(program, depth).replace('\n', "\n  "),
+                nested_block(program, depth).replace('\n', "\n  ")
+            )
+        }
+    };
+    program.values.truncate(scope);
+    text
+}
+
+/// A braced block of statements whose bindings stay inside it, since it may not run.
+fn nested_block(program: &mut Program, depth: usize) -> String {
+    let scope = program.values.len();
+    let lines: Vec<String> = (0..1 + program.rng.below(3))
+        .map(|_| statement(program, depth + 1))
+        .collect();
+    program.values.truncate(scope);
+    block(&lines)
+}
+
+fn block(lines: &[String]) -> String {
+    let mut text = String::from("{\n");
+    for line in lines {
+        text.push_str("  ");
+        text.push_str(&line.replace('\n', "\n  "));
+        text.push('\n');
+    }
+    text.push('}');
+    text
+}
+
+/// An expression of `sort`: a literal, a value in scope, a call of a function in scope, or a
+/// template of [`EXPRESSIONS`]. Past `depth` 3 only the first two, which bounds its size.
+fn expression(program: &mut Program, sort: Sort, depth: usize) -> String {
+    let choice = if depth >= 3 {
+        program.rng.below(2)
+    } else {
+        program.rng.below(8)
+    };
+    match choice {
+        0 => literal(program, sort),
+        1 | 2 => {
+            let candidates: Vec<usize> = (0..program.values.len())
+                .filter(|index| program.values[*index].1 == sort)
+                .collect();
+            match candidates.is_empty() {
+                true => literal(program, sort),
+                false => program.values[candidates[program.rng.below(candidates.len())]]
+                    .0
+                    .clone(),
+            }
+        }
+        3 => {
+            let candidates: Vec<usize> = (0..program.functions.len())
+                .filter(|index| program.functions[*index].result == sort)
+                .collect();
+            if candidates.is_empty() {
+                return literal(program, sort);
+            }
+            let index = candidates[program.rng.below(candidates.len())];
+            let name = program.functions[index].name.clone();
+            let parameters = program.functions[index].parameters.clone();
+            let arguments: Vec<String> = parameters
+                .iter()
+                .map(|parameter| expression(program, *parameter, depth + 1))
+                .collect();
+            format!("{name}({})", arguments.join(", "))
+        }
+        _ => {
+            let candidates: Vec<&str> = EXPRESSIONS
+                .iter()
+                .filter(|(result, _)| *result == sort)
+                .map(|(_, template)| *template)
+                .collect();
+            let template = candidates[program.rng.below(candidates.len())];
+            expand(program, template, depth + 1)
+        }
+    }
+}
+
+/// Fills each `@{hole}` of `template` with an expression of the hole's sort.
+fn expand(program: &mut Program, template: &str, depth: usize) -> String {
+    let mut text = String::new();
+    let mut rest = template;
+    while let Some(at) = rest.find("@{") {
+        text.push_str(&rest[..at]);
+        let Some(end) = rest[at..].find('}') else {
+            break;
+        };
+        let hole = &rest[at + 2..at + end];
+        match SORT_TABLE.iter().find(|(name, ..)| *name == hole) {
+            Some((_, sort, ..)) => text.push_str(&expression(program, *sort, depth)),
+            None => text.push_str(&rest[at..at + end + 1]),
+        }
+        rest = &rest[at + end + 1..];
+    }
+    text.push_str(rest);
+    text
+}
+
+fn literal(program: &mut Program, sort: Sort) -> String {
+    let literals = SORT_TABLE
+        .iter()
+        .find(|(_, candidate, ..)| *candidate == sort)
+        .map_or(&[][..], |(.., literals)| literals);
+    pick(program, literals).to_owned()
+}
+
+fn type_text(sort: Sort) -> &'static str {
+    SORT_TABLE
+        .iter()
+        .find(|(_, candidate, ..)| *candidate == sort)
+        .map_or("Any", |(_, _, text, _)| text)
+}
+
+fn any_sort(program: &mut Program) -> Sort {
+    SORTS[program.rng.below(SORTS.len())]
+}
+
+/// A name with a number is unique in the project; one in three has none, so files collide.
+fn fresh_name(program: &mut Program) -> String {
+    let word = pick(program, WORDS);
+    if rarely(program, 3) {
+        return word.to_owned();
+    }
+    program.counter += 1;
+    format!("{word}{}", program.counter)
+}
+
+/// A redefinition replaces what the name was, so later reads use its latest sort.
+fn define_value(program: &mut Program, name: String, sort: Sort) {
+    program.values.retain(|(existing, _)| *existing != name);
+    program.functions.retain(|function| function.name != name);
+    program.values.push((name, sort));
+}
+
+fn define_function(program: &mut Program, function: GeneratedFunction) {
+    program
+        .values
+        .retain(|(existing, _)| *existing != function.name);
+    program
+        .functions
+        .retain(|existing| existing.name != function.name);
+    program.functions.push(function);
+}
+
+fn pick<'a>(program: &mut Program, pool: &[&'a str]) -> &'a str {
+    pool.get(program.rng.below(pool.len()))
+        .copied()
+        .unwrap_or("")
+}
+
+/// True once in `one_in` draws, and never on an exhausted stream, whose zeros must stop growth.
+fn rarely(program: &mut Program, one_in: usize) -> bool {
+    program.rng.below(one_in) == one_in - 1
 }

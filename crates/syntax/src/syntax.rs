@@ -134,16 +134,36 @@ fn ends_in_an_unattached_annotation(root: &SyntaxNode) -> bool {
 pub struct Parse {
     tree: Arc<Tree>,
     errors: Arc<Vec<SyntaxError>>,
+    lookahead: Arc<[Lookahead]>,
+}
+
+/// A top-level statement, or a `#:` annotation between two of them, whose parse read text past
+/// the token it stops on: a type that looked for a `|` on the next line, recovery that asked
+/// whether the next line starts a statement, an annotation that looked for a `#:` line to
+/// continue on, or any of them that read the end of the text. A statement that stops on the
+/// line break it read last has none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Lookahead {
+    /// Where the statement starts.
+    pub statement: TextSize,
+    /// The end of the last token it read, or one past the text when it read the end of file.
+    pub end: TextSize,
 }
 
 impl Parse {
-    pub fn new(tree: Arc<Tree>, mut errors: Vec<SyntaxError>) -> Parse {
+    pub fn new(tree: Arc<Tree>, mut errors: Vec<SyntaxError>, lookahead: Vec<Lookahead>) -> Parse {
         // Canonical order, so a splice reparse compares equal to a full parse.
         errors.sort_by_key(|error| (error.range.start(), error.range.end()));
         Parse {
             tree,
             errors: Arc::new(errors),
+            lookahead: lookahead.into(),
         }
+    }
+
+    /// In statement order.
+    pub fn lookahead(&self) -> &[Lookahead] {
+        &self.lookahead
     }
 
     pub fn tree(&self) -> &Arc<Tree> {
@@ -229,14 +249,27 @@ pub fn erased_lines_end(parse: &Parse, lines: usize) -> TextSize {
 fn erase_with(parse: &Parse, mut emit: impl FnMut(&str, TextRange, bool) -> bool) {
     let root = parse.syntax_node();
     let mut preorder = root.preorder_with_tokens();
+    let mut after_definition = false;
     while let Some(event) = preorder.next() {
         let WalkEvent::Enter(element) = event else {
             continue;
         };
         let more = match element {
-            NodeOrToken::Token(token) => emit(token.text(), token.text_range(), true),
+            // A `#:` behind a type definition annotates nothing. Behind the definition's
+            // comment it would be a second annotation on the line, and alone on the line it
+            // would annotate the next statement, so it is erased to a plain comment.
+            NodeOrToken::Token(token)
+                if after_definition && token.kind() == SyntaxKind::ANNOTATION_MARKER =>
+            {
+                emit("#", token.text_range(), false)
+            }
+            NodeOrToken::Token(token) => {
+                after_definition &= token.kind() != SyntaxKind::NEWLINE;
+                emit(token.text(), token.text_range(), true)
+            }
             NodeOrToken::Node(node) if node.kind() == SyntaxKind::TYPE_DEFINITION => {
                 preorder.skip_subtree();
+                after_definition = true;
                 // A paired definition already has its comment spelling right above it.
                 match paired_comment_definition(&node) {
                     Some(_) => emit("", node.text_range(), false),
