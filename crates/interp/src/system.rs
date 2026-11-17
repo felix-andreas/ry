@@ -3958,7 +3958,7 @@ unsafe fn do_system(call: &Call<'_>) -> R<Sexp> {
         let output = process
             .output()
             .map_err(|failure| call.error(format!("error in running command: {failure}")))?;
-        let text = String::from_utf8_lossy(&output.stdout);
+        let text = values::escape_invalid_bytes(&output.stdout);
         let lines: Vec<&str> = text.lines().collect();
         let result = string_vector(&lines)?;
         let status = output.status.code().unwrap_or(127);
@@ -4090,7 +4090,7 @@ unsafe fn do_windows_system(call: &Call<'_>) -> R<Sexp> {
         interp().visible = false;
         return scalar_integer(status);
     }
-    let text = String::from_utf8_lossy(&captured);
+    let text = values::escape_invalid_bytes(&captured);
     let result = string_vector(&captured_lines(&text))?;
     if status != 0 {
         crate::heap().root(result);

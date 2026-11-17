@@ -23,6 +23,7 @@ use {
     heap::{
         activity::set_profile_tick,
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType},
+        strings::Encoding,
     },
     std::{
         cell::RefCell,
@@ -606,7 +607,7 @@ impl<'a> Scanner<'a> {
         };
         (
             Some(Field {
-                text: String::from_utf8_lossy(&text).into_owned(),
+                text: values::escape_invalid_bytes(&text).into_owned(),
             }),
             end,
         )
@@ -683,7 +684,7 @@ impl<'a> Scanner<'a> {
         }
         (
             Some(Field {
-                text: String::from_utf8_lossy(&text).into_owned(),
+                text: values::escape_invalid_bytes(&text).into_owned(),
             }),
             end,
         )
@@ -776,6 +777,11 @@ unsafe fn do_scan(call: &Call<'_>) -> R<Sexp> {
     let blank_lines_skip = values::as_logical_scalar(call.arg(13)) != 0;
     let multi_line = values::as_logical_scalar(call.arg(14)) != 0;
     syntax.allow_escapes = values::as_logical_scalar(call.arg(16)) == 1;
+    let mark = match values::string_at(call.arg(17), 0).as_deref() {
+        Some("latin1") => Some(Encoding::Latin1),
+        Some("UTF-8") => Some(Encoding::Utf8),
+        _ => None,
+    };
     let is_list = what.kind() == SexpType::List;
     let mut columns: Vec<Column> = if is_list {
         let mut columns = Vec::with_capacity(length(what));
@@ -850,11 +856,11 @@ unsafe fn do_scan(call: &Call<'_>) -> R<Sexp> {
         write_console(format!("Read {count} {noun}\n").as_bytes(), true);
     }
     if !is_list {
-        return column_vector(&columns[0]);
+        return column_vector(&columns[0], mark);
     }
     let mut vectors = Vec::with_capacity(columns.len());
     for column in &columns {
-        vectors.push(column_vector(column)?);
+        vectors.push(column_vector(column, mark)?);
         crate::heap().root(*vectors.last().unwrap_or(&nil()));
     }
     let result = values::list_vector(&vectors)?;
@@ -1099,7 +1105,7 @@ fn parse_complex(text: &str, decimal: u8) -> Option<Rcomplex> {
     }
 }
 
-unsafe fn column_vector(column: &Column) -> R<Sexp> {
+unsafe fn column_vector(column: &Column, mark: Option<Encoding>) -> R<Sexp> {
     let Some(kind) = column.kind else {
         return Ok(nil());
     };
@@ -1139,7 +1145,14 @@ unsafe fn column_vector(column: &Column) -> R<Sexp> {
             }
             Kind::Character => {
                 let charsxp = match value {
-                    Value::Text(text) => values::mkchar(text)?,
+                    // `encoding` declares what the file's bytes are; ASCII text carries no mark.
+                    Value::Text(text) => match mark {
+                        Some(mark) if !text.is_ascii() => {
+                            let bytes = values::unescape_invalid_bytes(text);
+                            values::mkchar_bytes(bytes.as_deref().unwrap_or(text.as_bytes()), mark)?
+                        }
+                        _ => values::mkchar(text)?,
+                    },
                     _ => na_string(),
                 };
                 values::set_elt(vector, index, charsxp);
@@ -1197,7 +1210,7 @@ unsafe fn do_read_table_head(call: &NativeCall<'_>) -> R<Sexp> {
             if blank_lines_skip && content_empty {
                 continue;
             }
-            lines.push(String::from_utf8_lossy(&line).into_owned());
+            lines.push(values::escape_invalid_bytes(&line).into_owned());
         }
         (lines, incomplete, in_quote)
     })?;
@@ -1411,9 +1424,11 @@ unsafe fn do_type_convert(call: &NativeCall<'_>) -> R<Sexp> {
         if as_is {
             let result = alloc(SexpType::String, strings.len())?;
             for (index, text) in strings.iter().enumerate() {
-                let charsxp = match text {
-                    Some(text) if !is_na(&Some(text.clone())) => values::mkchar(text)?,
-                    _ => na_string(),
+                // The string itself is kept, so its bytes and its encoding mark survive.
+                let charsxp = if is_na(text) {
+                    na_string()
+                } else {
+                    x.element(index)
                 };
                 values::set_elt(result, index, charsxp);
             }
@@ -1427,16 +1442,26 @@ unsafe fn do_type_convert(call: &NativeCall<'_>) -> R<Sexp> {
             levels.sort_by(|left, right| crate::sort::collate(left, right));
             levels.dedup();
             let result = alloc(SexpType::Integer, strings.len())?;
+            // A level is the first string that spells it, bytes and encoding mark included.
+            let level_strings = alloc(SexpType::String, levels.len())?;
+            let mut seen = vec![false; levels.len()];
             for (index, text) in strings.iter().enumerate() {
-                values::ints_mut(result)[index] = match text.as_deref() {
+                let position = match text.as_deref() {
                     Some(text) if !is_na(&Some(text.to_owned())) => levels
                         .binary_search_by(|level| crate::sort::collate(level, text))
-                        .map_or(NA_INTEGER, |position| position as i32 + 1),
-                    _ => NA_INTEGER,
+                        .ok(),
+                    _ => None,
                 };
+                values::ints_mut(result)[index] =
+                    position.map_or(NA_INTEGER, |position| position as i32 + 1);
+                if let Some(position) = position
+                    && !seen[position]
+                {
+                    seen[position] = true;
+                    values::set_elt(level_strings, position, x.element(index));
+                }
             }
-            let levels = string_vector(&levels)?;
-            values::set_attr(result, symbols().levels, levels)?;
+            values::set_attr(result, symbols().levels, level_strings)?;
             let class = scalar_string("factor")?;
             values::set_attr(result, symbols().class, class)?;
             result

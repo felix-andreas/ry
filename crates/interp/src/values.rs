@@ -548,8 +548,13 @@ impl StringMemo<'_> {
     }
 }
 
+/// The symbol named `name`, whose stand-ins (see [`escape_invalid_bytes`]) name the bytes they
+/// stand for, as [`mkchar`] interns them.
 pub unsafe fn install(name: &str) -> R<Sexp> {
-    Ok(crate::heap().install(name.as_bytes())?)
+    Ok(match unescape_invalid_bytes(name) {
+        Some(bytes) => crate::heap().install(&bytes)?,
+        None => crate::heap().install(name.as_bytes())?,
+    })
 }
 
 pub unsafe fn install_bytes(name: &[u8]) -> R<Sexp> {
@@ -1155,6 +1160,38 @@ pub fn unescape_invalid_bytes(text: &str) -> Option<Vec<u8>> {
         }
     }
     Some(bytes)
+}
+
+/// Text on its way out of the session (to the console or a connection) with every stand-in
+/// turned back into its byte, so a string that is not valid UTF-8 is written as the bytes it
+/// holds. Every stand-in encodes as `F4 8F BE xx` or `F4 8F BF xx`.
+pub fn unescape_output(bytes: &[u8]) -> Cow<'_, [u8]> {
+    let stand_in_at = |from: usize| {
+        memchr::memchr_iter(0xF4, &bytes[from..])
+            .map(|offset| from + offset)
+            .find(|&start| {
+                matches!(
+                    bytes.get(start + 1..start + 4),
+                    Some([0x8F, 0xBE | 0xBF, 0x80..=0xBF])
+                )
+            })
+    };
+    let Some(mut next) = stand_in_at(0) else {
+        return Cow::Borrowed(bytes);
+    };
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut position = 0;
+    loop {
+        output.extend_from_slice(&bytes[position..next]);
+        output.push(((bytes[next + 2] & 0x03) << 6) | (bytes[next + 3] & 0x3F));
+        position = next + 4;
+        match stand_in_at(position) {
+            Some(start) => next = start,
+            None => break,
+        }
+    }
+    output.extend_from_slice(&bytes[position..]);
+    Cow::Owned(output)
 }
 
 /// Whether two distinct interned strings hold the same text. Strings intern by bytes and

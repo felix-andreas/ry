@@ -570,11 +570,11 @@ pub unsafe fn read_all_text(file: Sexp) -> R<String> {
         })?;
         let bytes = decompress(&bytes)
             .map_err(|failure| error(format!("cannot read compressed file '{path}': {failure}")))?;
-        return Ok(String::from_utf8_lossy(&bytes).into_owned());
+        return Ok(values::escape_invalid_bytes(&bytes).into_owned());
     }
     let mut text = String::new();
     with_input(file, |input, position| {
-        text = String::from_utf8_lossy(input).into_owned();
+        text = values::escape_invalid_bytes(input).into_owned();
         *position = input.len();
     })?;
     Ok(text)
@@ -657,7 +657,8 @@ pub unsafe fn write_text(file: Sexp, text: &str) -> R<()> {
             crate::write_console(text.as_bytes(), false);
             return Ok(());
         }
-        return std::fs::write(expand_path(&path), text).map_err(|failure| {
+        let bytes = values::unescape_output(text.as_bytes());
+        return std::fs::write(expand_path(&path), bytes).map_err(|failure| {
             error(format!(
                 "cannot open file '{path}': {}",
                 os_message(&failure)
@@ -2099,10 +2100,19 @@ unsafe fn do_push_back(call: &Call<'_>) -> R<Sexp> {
     }
     let con = resolve_con(call.arg(1))?.1;
     let newline = values::require_flag(call.arg(2), "newLine")?;
-    let lines: Vec<Vec<u8>> = values::strings(data)
-        .into_iter()
-        .map(|line| {
-            let mut line = line.unwrap_or_else(|| "NA".into()).into_bytes();
+    // `encoding = "bytes"` (type 2) pushes every string back as the bytes it holds. The other
+    // two re-encode Latin-1 text for the UTF-8 session and leave any other string's bytes alone.
+    let as_bytes = values::as_integer_scalar(call.arg(3)) == 2;
+    let lines: Vec<Vec<u8>> = (0..values::length(data))
+        .map(|index| {
+            let charsxp = data.element(index);
+            let mut line = if charsxp == values::na_string() {
+                b"NA".to_vec()
+            } else if !as_bytes && charsxp.has_gp(heap::object::gp::LATIN1) {
+                values::char_str(charsxp).into_owned().into_bytes()
+            } else {
+                charsxp.bytes().to_vec()
+            };
             if newline {
                 line.push(b'\n');
             }
@@ -3540,6 +3550,7 @@ unsafe fn method_write(con: Rconnection, bytes: &[u8]) -> R<usize> {
 /// calls `write`, so the default goes straight to `write`. ry's own connections print through
 /// the device, because a text output connection takes text but has no `write` method.
 unsafe fn method_print(con: Rconnection, text: &[u8]) -> R<()> {
+    let text = &*values::unescape_output(text);
     let default = default_vfprintf();
     match (*con).vfprintf {
         Some(method) if default.is_none_or(|default| !is_method(method, default)) => {

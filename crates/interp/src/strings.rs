@@ -578,6 +578,17 @@ unsafe fn do_strsplit(call: &Call<'_>) -> R<Sexp> {
             continue;
         };
         let position = index % splits.len().max(1);
+        // Splitting into characters reports an invalid string as the Perl matcher does.
+        let by_character =
+            !matches!(splits.get(position), Some(Some(separator)) if !separator.is_empty());
+        let reported = PatternOptions {
+            perl: options.perl || by_character,
+            ..options
+        };
+        if !valid_subject(split, x, index, use_bytes, reported, false)? {
+            set_elt(result, index, values::scalar_string_charsxp(na_string())?);
+            continue;
+        }
         pieces.clear();
         match splits.get(position) {
             None => split_chars(&text, &mut pieces),
@@ -2371,7 +2382,9 @@ unsafe fn grep(call: &Call<'_>, logical: bool) -> R<Sexp> {
     )?;
     let hit = |index: usize| -> R<bool> {
         let found = match subject_at(text, index, use_bytes) {
-            Some(_) if !valid_subject(text, index, use_bytes, options, false)? => false,
+            Some(_) if !valid_subject(call.arg(0), text, index, use_bytes, options, false)? => {
+                false
+            }
             Some(element) => matcher.find_at(&element, 0)?.is_some(),
             None => false,
         };
@@ -2444,7 +2457,7 @@ unsafe fn substitute(call: &Call<'_>, global: bool) -> R<Sexp> {
             set_elt(result, index, na_string());
             continue;
         }
-        valid_subject(text, index, use_bytes, options, true)?;
+        valid_subject(call.arg(0), text, index, use_bytes, options, true)?;
         let element = if use_bytes {
             values::escape_high_bytes(charsxp.bytes())
         } else {
@@ -2640,7 +2653,7 @@ unsafe fn regexpr(call: &Call<'_>, global: bool) -> R<Sexp> {
         for index in 0..count {
             match subject_at(text, index, use_bytes) {
                 None => table.push_na(),
-                Some(_) if !valid_subject(text, index, use_bytes, options, false)? => {
+                Some(_) if !valid_subject(call.arg(0), text, index, use_bytes, options, false)? => {
                     table.push_none()
                 }
                 Some(element) => match search(&element, 0)? {
@@ -2658,7 +2671,7 @@ unsafe fn regexpr(call: &Call<'_>, global: bool) -> R<Sexp> {
             set_elt(result, index, na_match()?);
             continue;
         };
-        if !valid_subject(text, index, use_bytes, options, false)? {
+        if !valid_subject(call.arg(0), text, index, use_bytes, options, false)? {
             table.push_none();
             set_elt(result, index, table.finish(&report, &names)?);
             continue;
@@ -3062,10 +3075,12 @@ pub(crate) unsafe fn subject_at<'a>(
     (charsxp != na_string()).then(|| values::escape_high_bytes(charsxp.bytes()))
 }
 
-/// Whether element `index` of `text` can be matched. GNU R refuses a string marked as UTF-8
-/// whose bytes are not UTF-8: the regex functions warn and treat it as unmatched, and `sub`
-/// and `gsub` (`fatal`) fail. TRE first fails to convert it to wide characters.
+/// Whether element `index` of `text` can be matched. GNU R refuses a string that is read as
+/// UTF-8 (marked so, or unmarked in the UTF-8 session) whose bytes are not UTF-8: the regex
+/// functions and `strsplit` warn and treat it as unmatched, and `sub` and `gsub` (`fatal`) fail.
+/// TRE first fails to convert it to wide characters.
 unsafe fn valid_subject(
+    pattern: Sexp,
     text: Sexp,
     index: usize,
     use_bytes: bool,
@@ -3074,13 +3089,23 @@ unsafe fn valid_subject(
 ) -> R<bool> {
     let charsxp = text.element(index);
     if use_bytes
-        || Encoding::of(charsxp) != Encoding::Utf8
+        || charsxp.is_valid_utf8()
+        || matches!(Encoding::of(charsxp), Encoding::Latin1 | Encoding::Bytes)
         || std::str::from_utf8(charsxp.bytes()).is_ok()
     {
         return Ok(true);
     }
-    let message = if options.fixed || options.perl {
+    // Fixed matching compares UTF-8 only when the pattern or a text is marked as UTF-8, and
+    // otherwise reads the strings in the session's encoding.
+    let marked_utf8 = |vector: Sexp| {
+        vector.kind() == SexpType::String
+            && (0..length(vector)).any(|index| vector.element(index).has_gp(gp::UTF8))
+    };
+    let message = if options.perl || (options.fixed && (marked_utf8(pattern) || marked_utf8(text)))
+    {
         format!("input string {} is invalid UTF-8", index + 1)
+    } else if options.fixed {
+        format!("input string {} is invalid in this locale", index + 1)
     } else {
         let mut shown = String::new();
         for chunk in charsxp.bytes().utf8_chunks() {
