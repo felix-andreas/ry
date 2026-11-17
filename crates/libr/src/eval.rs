@@ -80,6 +80,7 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
     let hooks = interp::Hooks {
         write_console: |text, is_error| crate::boundary::write_terminal(text, is_error),
         materialize_altrep: |object| unsafe { crate::altrep::materialize(object) },
+        altrep_storage: |object| unsafe { crate::altrep::element_storage(object) },
         altrep_length: |object| unsafe { Ok(crate::altrep::length(object)?.max(0) as usize) },
         compact_sequence: |kind, length, first, increment| unsafe {
             let length = length as crate::R_xlen_t;

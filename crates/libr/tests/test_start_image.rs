@@ -105,8 +105,8 @@ fn a_stale_start_image_is_written_again_and_never_loaded() {
 /// the image.
 ///
 /// A start that sources a profile never loads the image, so the session runs in the home's
-/// directory with `HOME` pointing there too, away from the user's `~/.Rprofile` (CI's
-/// `setup-r` writes one) and any `./.Rprofile`.
+/// directory with `HOME` pointing there too, away from the user's `~/.Rprofile` and any
+/// `./.Rprofile`.
 fn rscript(home: &Path, touches: Option<&Path>) -> (String, String) {
     let mut command = Command::new(home.join("bin/Rscript"));
     command
