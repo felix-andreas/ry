@@ -13272,9 +13272,9 @@ unsafe fn assign_element(
     let stored = handles::with(|context| {
         let stored = store_element(
             context,
-            handles::adopt(context, target),
-            // SAFETY: the frame's registers, formals or constants hold the subscript and the
-            // value, and the store writes none of those.
+            // SAFETY: the frame's variable holds the target, its registers, formals or
+            // constants hold the subscript and the value, and the store writes none of those.
+            handles::held(context, target),
             handles::held(context, index),
             handles::held(context, value),
             kind,
