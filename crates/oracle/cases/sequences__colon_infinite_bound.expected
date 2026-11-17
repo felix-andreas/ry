@@ -6,5 +6,7 @@
 [warnings]
 [errors]
 [value]
-double
-| c(5.5, 4.5, 3.5, 2.5)
+character
+| structure("Error in from:to : result would be too long a vector\n", class = "try-error", condition = structure(list(
+|     message = "result would be too long a vector", call = from:to), class = c("simpleError", 
+| "error", "condition")))

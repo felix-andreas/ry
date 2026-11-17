@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       hours:
-        description: Hours of fuzzing
+        description: Hours of fuzzing (at most 5, because GitHub ends a job after six)
         default: "4"
       base:
         description: First seed (default, the start time in seconds)
@@ -54,5 +54,7 @@ jobs:
         if: always()
         with:
           name: fuzz-findings
-          path: target/fuzz-findings
+          path: |
+            target/fuzz-findings
+            target/fuzz-corpus/base-differs.txt
           if-no-files-found: ignore

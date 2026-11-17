@@ -1040,7 +1040,7 @@ impl Zoo {
     fn statement(&mut self, value: &Value, body: &mut Body) -> String {
         let length = value.length;
         let kind = value.kind;
-        let shaped = match value.shape {
+        match value.shape {
             Shape::Matrix | Shape::Array if self.rng.chance(3, 5) => {
                 return self.matrix_statement(value);
             }
@@ -1060,9 +1060,8 @@ impl Zoo {
                 ][self.rng.below(8)]
                 .clone();
             }
-            _ => false,
-        };
-        debug_assert!(!shaped);
+            _ => {}
+        }
         let position = self.position(length);
         let positions = self.positions(length, &value.names);
         let stored = self.stored(kind);

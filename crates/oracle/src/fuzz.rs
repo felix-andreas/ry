@@ -1208,13 +1208,17 @@ pub struct Divergence {
     pub expressions: Vec<DifferingExpression>,
     /// The engine finished the program and reported an outcome.
     pub ran: bool,
+    /// The warnings, messages or errors differ in text. With no differing expression (the
+    /// engines were not observed), it tells a condition difference from a printing one.
+    pub conditions: bool,
     /// The engine died on a signal or a panic instead of finishing the program.
     pub crashed: bool,
 }
 
 impl Divergence {
     /// The names of the ways this engine differs, for a tally: `crash`, `failed`, or each
-    /// differing expression's [`Difference`], or `printed` when only the printed text differs.
+    /// differing expression's [`Difference`]. With no differing expression it is `conditions`
+    /// when the condition text differs and `printed` when only the printed text does.
     pub fn kinds(&self) -> Vec<&'static str> {
         if self.crashed {
             return vec!["crash"];
@@ -1227,7 +1231,11 @@ impl Divergence {
         kinds.sort_unstable();
         kinds.dedup();
         if kinds.is_empty() {
-            kinds.push(if self.ran { "printed" } else { "failed" });
+            kinds.push(match (self.ran, self.conditions) {
+                (false, _) => "failed",
+                (true, true) => "conditions",
+                (true, false) => "printed",
+            });
         }
         kinds
     }
@@ -1267,14 +1275,26 @@ impl Difference {
     }
 }
 
-fn classify(difference: &ExpressionDifference) -> Difference {
+/// How the engine's entries for one expression differ from the reference's.
+pub fn classify(difference: &ExpressionDifference) -> Difference {
     fn value(entries: &[String]) -> Option<&String> {
         entries
             .iter()
             .find(|entry| entry.starts_with("visible ") || entry.starts_with("invisible "))
     }
+    // The value's own line, not a string nested in a list: `visible character[1] -"error: ...`,
+    // or the string's bytes when it holds a non-ASCII character, under any encoding mark.
     fn caught(value: &str) -> bool {
-        value.contains("character[1] -\"error: ") || value.contains("character[1] u<6572726f723a20")
+        let Some(token) = value
+            .split_once(' ')
+            .and_then(|(_, dump)| dump.strip_prefix("character[1] "))
+        else {
+            return false;
+        };
+        let mut characters = token.chars();
+        characters.next();
+        let rest = characters.as_str();
+        rest.starts_with("\"error: ") || rest.starts_with("<6572726f723a20")
     }
     match (value(&difference.reference), value(&difference.other)) {
         (Some(reference), Some(other)) if reference == other => Difference::Conditions,
@@ -1356,6 +1376,9 @@ pub fn compare_engines(
                         detail,
                         expressions,
                         ran: true,
+                        conditions: reference_outcome.errors != outcome.errors
+                            || reference_outcome.warnings != outcome.warnings
+                            || reference_outcome.messages != outcome.messages,
                         crashed: false,
                     });
                 }
@@ -1370,6 +1393,7 @@ pub fn compare_engines(
                     detail: error.to_string(),
                     expressions: Vec::new(),
                     ran: false,
+                    conditions: false,
                 })
             }
         }
@@ -1403,9 +1427,11 @@ pub fn render_divergences(report: &SeedReport) -> String {
 pub fn render_divergence(divergence: &Divergence) -> String {
     let mut text = format!("--- {} ---\n", divergence.engine);
     if divergence.ran && divergence.expressions.is_empty() {
-        text.push_str(
-            "differs (printed): the values and conditions agree, the printed text does not\n",
-        );
+        text.push_str(if divergence.conditions {
+            "differs (conditions): the text of a warning, message or error differs\n"
+        } else {
+            "differs (printed): the values and conditions agree, the printed text does not\n"
+        });
     }
     for expression in &divergence.expressions {
         text.push_str(&format!(

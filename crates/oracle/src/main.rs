@@ -19,9 +19,9 @@ use {
         process::ExitCode,
         sync::{
             Mutex,
-            atomic::{AtomicU64, Ordering},
+            atomic::{AtomicBool, AtomicU64, Ordering},
         },
-        time::Duration,
+        time::{Duration, Instant},
     },
 };
 
@@ -1011,7 +1011,9 @@ fn check_fuzz_seed(
                 oracle::corpus::check_corpus_seed(seed, snippets, gnu_r, engines, directory)?;
             let skipped = if report.noisy {
                 Some("GNU R disagrees with itself")
-            } else if !engines.is_empty() && report.base_differs.len() == engines.len() {
+            } else if !report.base_differs.is_empty()
+                && report.base_differs.len() + report.unavailable.len() == engines.len()
+            {
                 Some("the snippet differs unmutated")
             } else if report.unchanged {
                 Some("no mutation applied")
@@ -1026,7 +1028,7 @@ fn check_fuzz_seed(
                     .iter()
                     .map(|divergence| format!("{}\t{}", divergence.engine, report.source))
                     .collect(),
-                stopped: None,
+                stopped: report.stopped,
                 skipped,
                 program: report.mutant,
                 divergences: report.divergences,
@@ -1077,7 +1079,7 @@ fn run_fuzz(run: FuzzRun) -> ExitCode {
         eprintln!("{}: {error}", findings.display());
         return ExitCode::FAILURE;
     }
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     let jobs = run
         .jobs
         .or_else(|| std::thread::available_parallelism().ok().map(usize::from))
@@ -1090,12 +1092,17 @@ fn run_fuzz(run: FuzzRun) -> ExitCode {
         Some(_) => u64::MAX,
         None => run.count.saturating_mul(kinds.len() as u64),
     };
+    // Set when no engine can run here, which no later seed changes.
+    let stop = AtomicBool::new(false);
+    let deadline = run.budget.map(|budget| started + budget);
     let state = Mutex::new(FuzzTally::default());
     std::thread::scope(|scope| {
         for _ in 0..jobs {
             scope.spawn(|| {
                 loop {
-                    if run.budget.is_some_and(|budget| started.elapsed() >= budget) {
+                    if stop.load(Ordering::Relaxed)
+                        || deadline.is_some_and(|deadline| Instant::now() >= deadline)
+                    {
                         return;
                     }
                     let position = next.fetch_add(1, Ordering::Relaxed);
@@ -1115,7 +1122,13 @@ fn run_fuzz(run: FuzzRun) -> ExitCode {
                     // worker takes the lock the others print under.
                     let reduced = match &result {
                         Ok(checked) if run.reduce && !checked.divergences.is_empty() => {
-                            reduce_seed(checked, &parsed, run.timeout, &directory.join(&stem))
+                            reduce_seed(
+                                checked,
+                                &parsed,
+                                run.timeout,
+                                &directory.join(&stem),
+                                deadline,
+                            )
                         }
                         _ => None,
                     };
@@ -1128,9 +1141,15 @@ fn run_fuzz(run: FuzzRun) -> ExitCode {
                             let label = &checked.label;
                             if let Some(error) = &checked.stopped {
                                 tally.ended_in_error += 1;
-                                // A generated program catches its own errors, so one that
-                                // stops GNU R says the generator wrote something it did not mean.
-                                if kind != FuzzKind::Generated(ProgramKind::Grammar) {
+                                // A metamorphic or builtins program catches its own errors,
+                                // so one that stops GNU R says the generator wrote something it
+                                // did not mean.
+                                if matches!(
+                                    kind,
+                                    FuzzKind::Generated(
+                                        ProgramKind::Metamorphic | ProgramKind::Builtins
+                                    )
+                                ) {
                                     println!("STOPS   {label} under GNU R: {error}");
                                 }
                             }
@@ -1142,7 +1161,7 @@ fn run_fuzz(run: FuzzRun) -> ExitCode {
                                 && checked.unavailable.len() == engines.len()
                             {
                                 tally.unavailable = true;
-                                next.store(u64::MAX / 2, Ordering::Relaxed);
+                                stop.store(true, Ordering::Relaxed);
                             } else if let Some(reason) =
                                 checked.skipped.filter(|_| checked.divergences.is_empty())
                             {
@@ -1320,12 +1339,19 @@ fn reduce_seed(
     engines: &[ProcessEngine],
     timeout: Duration,
     directory: &Path,
+    deadline: Option<Instant>,
 ) -> Option<String> {
-    let engine = report.divergences.first().and_then(|divergence| {
-        engines
-            .iter()
-            .find(|engine| engine.name() == divergence.engine)
-    })?;
+    let divergence = report.divergences.first()?;
+    let engine = engines
+        .iter()
+        .find(|engine| engine.name() == divergence.engine)?;
+    // Every candidate that still hangs costs the whole timeout.
+    if divergence.detail.contains("was killed after") {
+        return Some(
+            "--- not reduced: a timeout, which `oracle reduce` shrinks on request ---\n"
+                .to_string(),
+        );
+    }
     if let Err(error) = std::fs::create_dir_all(directory) {
         return Some(format!(
             "--- not reduced: {}: {error} ---\n",
@@ -1335,7 +1361,14 @@ fn reduce_seed(
     let gnu_r = ProcessEngine::gnu_r().with_timeout(timeout).observing();
     let observing = engine.clone().observing();
     Some(
-        match reduce_divergence(&report.program, &gnu_r, &observing, directory, 2000) {
+        match reduce_divergence(
+            &report.program,
+            &gnu_r,
+            &observing,
+            directory,
+            2000,
+            deadline,
+        ) {
             Ok(reduction) => format!(
                 "--- reduced under {} ({}, {} candidates) ---\n{}",
                 engine.name(),
@@ -1375,8 +1408,8 @@ fn run_reduce(
         eprintln!("{}: {error}", directory.display());
         return ExitCode::FAILURE;
     }
-    let started = std::time::Instant::now();
-    let reduction = reduce_divergence(&program, &gnu_r, &engine, &directory, budget);
+    let started = Instant::now();
+    let reduction = reduce_divergence(&program, &gnu_r, &engine, &directory, budget, None);
     if let Err(error) = std::fs::remove_dir_all(&directory) {
         eprintln!("could not remove {}: {error}", directory.display());
     }
@@ -1403,7 +1436,7 @@ fn run_reduce(
         return ExitCode::FAILURE;
     }
     let observe = match reduction.signature {
-        Signature::ObservedDiffers => "ORACLE_OBSERVE=1 ",
+        Signature::ObservedDiffers(_) => "ORACLE_OBSERVE=1 ",
         _ => "",
     };
     println!(

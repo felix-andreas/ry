@@ -779,10 +779,11 @@ fuzz-ci hours="4" base="":
     just fuzz-long "{{ hours }}" "${base:-$(date +%s)}"
 
 # Shrink a program on which an engine diverges from GNU R to a minimal one that diverges the same
-# way, e.g. `just fuzz-reduce fuzz_7.R ry-jit`; the result goes to `reduced.R`.
+# way, e.g. `just fuzz-reduce fuzz_7.R ry-jit`; the result goes to target/fuzz-findings/reduced.R.
 fuzz-reduce file engine="ry-tier0":
     cargo build -q -p ry-lang -p libr -p rcmd -p oracle
-    ./target/debug/oracle reduce --engine {{ engine }} --output reduced.R {{ file }}
+    mkdir -p target/fuzz-findings
+    ./target/debug/oracle reduce --engine {{ engine }} --output target/fuzz-findings/reduced.R {{ file }}
 
 # Differential fuzzing on real R code: mutated snippets of base R's help examples, R's regression
 # tests and the oracle cases, under GNU R and ry's engines with the deep observer. Snippets that

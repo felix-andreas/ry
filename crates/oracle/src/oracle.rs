@@ -1283,7 +1283,8 @@ pub fn parse(text: &str) -> Option<Outcome> {
                 _ => return None,
             };
         } else if section == "observed" {
-            match line.strip_prefix("| ") {
+            // An editor that strips trailing spaces leaves an empty line as a bare `|`.
+            match line.strip_prefix("| ").or((line == "|").then_some("")) {
                 Some(content) => {
                     let entry = outcome.observed.last_mut()?;
                     if !entry.is_empty() {

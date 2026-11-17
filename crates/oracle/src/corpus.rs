@@ -134,6 +134,8 @@ pub struct CorpusReport {
     pub noisy: bool,
     /// Every mutation drawn for the seed was skipped, so there was no mutant to compare.
     pub unchanged: bool,
+    /// The error that ended the mutant under the reference, when one did.
+    pub stopped: Option<String>,
     pub unavailable: Vec<String>,
 }
 
@@ -167,6 +169,7 @@ pub fn check_corpus_seed(
         divergences: Vec::new(),
         noisy: false,
         unchanged: mutant == snippet.text,
+        stopped: None,
         unavailable: Vec::new(),
     };
     let agreeing: Vec<&dyn Engine> = engines
@@ -174,11 +177,13 @@ pub fn check_corpus_seed(
         .copied()
         .filter(|engine| {
             let name = engine.name();
+            // One engine's name is a prefix of another's (`ry-jit`, `ry-jit-gctorture`).
+            let prefix = format!("{name}: ");
             !report
                 .base_differs
                 .iter()
                 .any(|divergence| divergence.engine == name)
-                && !unavailable.iter().any(|reason| reason.starts_with(&name))
+                && !unavailable.iter().any(|reason| reason.starts_with(&prefix))
         })
         .collect();
     if report.unchanged || agreeing.is_empty() {
@@ -187,6 +192,7 @@ pub fn check_corpus_seed(
     }
     let mutant_path = write_program(directory, &format!("corpus_{seed}.R"), &mutant)?;
     let reference_mutant = reference.run(&mutant_path)?;
+    report.stopped = reference_mutant.errors.first().cloned();
     let (divergences, more_unavailable) = compare_engines(
         &mutant,
         reference,

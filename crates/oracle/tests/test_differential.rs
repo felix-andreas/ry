@@ -310,7 +310,7 @@ fn reduction_keeps_a_crash_on_a_program_gnu_r_completes() {
         .expect("a command line names an engine");
     let gnu_r = ProcessEngine::gnu_r().with_timeout(TIMEOUT);
     let program = "x <- 1:10\nprint(sum(x))\nboom <- function(n) n * 2\ny <- boom(3)\nprint(y)\nz <- paste(\"a\", \"b\")\n";
-    let reduction = reduce_divergence(program, &gnu_r, &engine, &directory, 200)
+    let reduction = reduce_divergence(program, &gnu_r, &engine, &directory, 200, None)
         .unwrap_or_else(|error| panic!("the reduction failed: {error}"));
     std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
     assert_eq!(
@@ -519,7 +519,11 @@ fn fuzz_corpus_mutants_never_crash() {
     for seed in fuzz_seeds(12) {
         let report = check_corpus_seed(seed, &corpus.snippets, &gnu_r, &[&tier0], &directory)
             .unwrap_or_else(|error| panic!("seed {seed}: GNU R failed: {error}"));
-        if report.divergences.iter().any(|divergence| divergence.crashed) {
+        if report
+            .divergences
+            .iter()
+            .any(|divergence| divergence.crashed)
+        {
             failures.push(render_corpus_divergences(&report));
         } else if !report.divergences.is_empty() {
             eprintln!("{}", render_corpus_divergences(&report));

@@ -14,7 +14,8 @@
 #   - an environment's kind and its sorted names, without reading a binding, because reading
 #     forces promises and fires active bindings.
 #
-# Vectors longer than `.oracle_observe_limit` show their ends and a summary of the middle.
+# Vectors longer than `.oracle_observe_limit` show their ends and, for the middle, checksums that
+# depend on the position of every element.
 # The dump uses only base functions, so it reads the same under any engine that runs base R.
 .oracle_observe_limit <- 96L
 .oracle_observe_strict <- identical(Sys.getenv("ORACLE_OBSERVE"), "strict")
@@ -61,6 +62,23 @@
     )
   }
 
+  # A checksum that depends on the position of every value, as two sums of the values weighted
+  # by their index under two moduli. Both stay whole numbers below 2^53 up to 60 million
+  # doubles, so the order of the additions does not change them.
+  weigh <- function(values) {
+    values <- as.double(values)
+    index <- seq_along(values)
+    paste0(sprintf("%.0f", sum(values * (index %% 251 + 1))), "/", sprintf("%.0f", sum(values * (index %% 65521 + 1))))
+  }
+
+  # The middle of a long numeric vector: where its NA and NaN are, and the bits of the rest.
+  double_summary <- function(x) {
+    nan <- is.nan(x)
+    missing <- is.na(x) & !nan
+    x[nan | missing] <- 0
+    paste0("na=", weigh(missing), " nan=", weigh(nan), " bits=", weigh(as.integer(writeBin(x, raw(), endian = "big"))))
+  }
+
   atomic_line <- function(x) {
     x <- as.vector(unclass(x))
     count <- length(x)
@@ -68,11 +86,20 @@
     head_count <- .oracle_observe_limit %/% 2L
     middle <- x[(head_count + 1L):(count - head_count)]
     summary <- switch(typeof(x),
-      character = paste0("na=", sum(is.na(middle)), " bytes=", sum(nchar(middle[!is.na(middle)], "bytes")),
-        " marks=", paste(names(table(Encoding(middle))), table(Encoding(middle)), sep = ":", collapse = ",")),
-      raw = paste0("sum=", sum(as.integer(middle))),
-      complex = paste0("na=", sum(is.na(middle)), " sum=", paste(double_tokens(c(sum(Re(middle), na.rm = TRUE), sum(Im(middle), na.rm = TRUE))), collapse = " ")),
-      paste0("na=", sum(is.na(middle)), " sum=", double_tokens(sum(as.double(middle), na.rm = TRUE)))
+      character = {
+        present <- !is.na(middle)
+        bytes <- lapply(middle[present], charToRaw)
+        marks <- Encoding(middle[present])
+        if (!.oracle_observe_strict) {
+          wide <- vapply(bytes, function(text) any(text >= as.raw(0x80)), NA)
+          marks[wide & marks %in% c("UTF-8", "unknown") & validUTF8(middle[present])] <- "u"
+        }
+        paste0("na=", weigh(!present), " lengths=", weigh(lengths(bytes)), " bytes=", weigh(as.integer(unlist(bytes))),
+          " marks=", weigh(match(marks, c("unknown", "u", "UTF-8", "latin1", "bytes"))))
+      },
+      raw = paste0("bytes=", weigh(as.integer(middle))),
+      complex = paste0("re ", double_summary(Re(middle)), " im ", double_summary(Im(middle))),
+      double_summary(as.double(middle))
     )
     paste(c(tokens_of(x[seq_len(head_count)]), paste0("...[", summary, "]"), tokens_of(x[(count - head_count + 1L):count])), collapse = " ")
   }
@@ -102,7 +129,11 @@
         emit(depth, label, kind, "[", length(x), "]", flags)
         items <- unclass(x)
         attributes(items) <- NULL
-        for (index in seq_along(items)) walk(items[[index]], depth + 1L, paste0(index, ": "))
+        for (index in seq_along(items)) {
+          # A list can hold the empty symbol, which cannot be passed as an argument.
+          if (identical(items[[index]], quote(expr = ))) emit(depth + 1L, index, ": symbol <empty>")
+          else walk(items[[index]], depth + 1L, paste0(index, ": "))
+        }
       },
       symbol = emit(depth, label, "symbol ", if (identical(x, quote(expr = ))) "<empty>" else string_token(as.character(x))),
       language = , pairlist = {
@@ -144,7 +175,7 @@
   paste(lines, collapse = "\n")
 }
 
-# What a condition is beyond its message and call: its classes, in order.
+# A condition's kind and its classes, in order. The driver appends the message and the call.
 .oracle_observe_condition <- function(kind, condition) {
   paste0(kind, " <", paste(class(condition), collapse = "/"), ">")
 }

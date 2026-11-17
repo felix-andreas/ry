@@ -16,12 +16,18 @@
 //! - shrinking string and number literals toward the empty string and toward 0, 1 and 2.
 //!
 //! [`reduce_divergence`] runs it with engines: a candidate is interesting when the engine still
-//! differs from GNU R with the same [`Signature`], so the reduction keeps one bug instead of
-//! sliding to another one.
+//! differs from GNU R with the same [`Signature`]. The signature holds the channel that differs
+//! and, where a reduction leaves it alone, what differs in it (the error messages, the way the
+//! first observed expression differs), so the reduction seldom slides from one bug to another.
+//! Printed output and the last value change with every candidate, so a difference in those
+//! keeps only its channel.
 
 use {
-    crate::{Engine, EngineError, Outcome},
-    std::{fmt, path::Path},
+    crate::{
+        Engine, EngineError, Outcome, differing_expressions,
+        fuzz::{Difference, classify},
+    },
+    std::{fmt, path::Path, time::Instant},
     syntax::{
         NodeOrToken,
         SyntaxKind::{self, *},
@@ -63,27 +69,47 @@ pub enum Signature {
     TimedOut,
     /// Exited without a report, for another reason than a signal or the timeout.
     Failed,
-    ErrorsDiffer,
-    WarningsDiffer,
+    /// The error that ends the run differs: GNU R's message and the engine's, without their
+    /// calls, which a reduction rewrites.
+    ErrorsDiffer(Option<String>, Option<String>),
+    /// The first warning that differs: GNU R's message and the engine's, without their calls.
+    WarningsDiffer(Option<String>, Option<String>),
     MessagesDiffer,
     StdoutDiffers,
     ValueDiffers,
-    /// Only the deep observer's dump differs ([`Outcome::observed`]).
-    ObservedDiffers,
+    /// Only the deep observer's dump differs ([`Outcome::observed`]): how the first differing
+    /// expression differs, when the dump names one.
+    ObservedDiffers(Option<Difference>),
 }
 
 impl fmt::Display for Signature {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fn or_none(message: &Option<String>) -> &str {
+            message.as_deref().unwrap_or("none")
+        }
         match self {
             Signature::Crashed(signal) => write!(formatter, "crashed ({signal})"),
             Signature::TimedOut => formatter.write_str("timed out"),
             Signature::Failed => formatter.write_str("failed without a report"),
-            Signature::ErrorsDiffer => formatter.write_str("errors differ"),
-            Signature::WarningsDiffer => formatter.write_str("warnings differ"),
+            Signature::ErrorsDiffer(reference, engine) => write!(
+                formatter,
+                "errors differ (GNU R: {}; the engine: {})",
+                or_none(reference),
+                or_none(engine)
+            ),
+            Signature::WarningsDiffer(reference, engine) => write!(
+                formatter,
+                "warnings differ (GNU R: {}; the engine: {})",
+                or_none(reference),
+                or_none(engine)
+            ),
             Signature::MessagesDiffer => formatter.write_str("messages differ"),
             Signature::StdoutDiffers => formatter.write_str("stdout differs"),
             Signature::ValueDiffers => formatter.write_str("value differs"),
-            Signature::ObservedDiffers => formatter.write_str("observed differs"),
+            Signature::ObservedDiffers(Some(difference)) => {
+                write!(formatter, "observed differs ({})", difference.name())
+            }
+            Signature::ObservedDiffers(None) => formatter.write_str("observed differs"),
         }
     }
 }
@@ -103,10 +129,31 @@ pub fn signature(reference: &Outcome, outcome: &Result<Outcome, EngineError>) ->
         }
         Err(EngineError::Failed(_)) => return Some(Signature::Failed),
     };
+    // The driver appends the call to a message as ` (in call)`.
+    fn message(entry: Option<&String>) -> Option<String> {
+        let entry = entry?;
+        let text = match entry.rfind(" (in ") {
+            Some(index) if entry.ends_with(')') => &entry[..index],
+            _ => entry,
+        };
+        Some(text.to_string())
+    }
     if reference.errors != outcome.errors {
-        Some(Signature::ErrorsDiffer)
+        Some(Signature::ErrorsDiffer(
+            message(reference.errors.first()),
+            message(outcome.errors.first()),
+        ))
     } else if reference.warnings != outcome.warnings {
-        Some(Signature::WarningsDiffer)
+        let index = reference
+            .warnings
+            .iter()
+            .zip(&outcome.warnings)
+            .take_while(|(first, second)| first == second)
+            .count();
+        Some(Signature::WarningsDiffer(
+            message(reference.warnings.get(index)),
+            message(outcome.warnings.get(index)),
+        ))
     } else if reference.messages != outcome.messages {
         Some(Signature::MessagesDiffer)
     } else if reference.stdout != outcome.stdout {
@@ -114,7 +161,11 @@ pub fn signature(reference: &Outcome, outcome: &Result<Outcome, EngineError>) ->
     } else if reference.value != outcome.value {
         Some(Signature::ValueDiffers)
     } else if reference.observed != outcome.observed {
-        Some(Signature::ObservedDiffers)
+        Some(Signature::ObservedDiffers(
+            differing_expressions(reference, outcome)
+                .first()
+                .map(classify),
+        ))
     } else {
         None
     }
@@ -144,8 +195,8 @@ pub enum ReduceError {
 }
 
 /// Reduces `program`, on which `engine` diverges from GNU R (`reference`), to a smaller program on
-/// which it diverges with the same [`Signature`], running at most `budget` candidates. Candidates
-/// are written to `directory`.
+/// which it diverges with the same [`Signature`], running at most `budget` candidates and none
+/// after `deadline`. Candidates are written to `directory`.
 ///
 /// GNU R must parse every candidate, and when GNU R ran the original to completion it must run
 /// the candidate to completion too, so a crash does not reduce to a program that is wrong R.
@@ -155,6 +206,7 @@ pub fn reduce_divergence(
     engine: &dyn Engine,
     directory: &Path,
     budget: usize,
+    deadline: Option<Instant>,
 ) -> Result<Reduction, ReduceError> {
     let path = directory.join("reduce.R");
     let write = |text: &str| {
@@ -185,6 +237,9 @@ pub fn reduce_divergence(
     let mut calls = 0;
     let mut write_failure = None;
     let reduced = reduce(program, budget, &mut |candidate| {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return false;
+        }
         calls += 1;
         if let Err(error) = write(candidate) {
             write_failure.get_or_insert(error);
@@ -763,21 +818,40 @@ mod tests {
             signature(&reference, &printed),
             Some(Signature::StdoutDiffers)
         );
-        let errored = Ok(Outcome {
+        let boom = Outcome {
             errors: vec!["boom".to_string()],
+            ..Outcome::default()
+        };
+        let errored = Ok(boom.clone());
+        assert_eq!(
+            signature(&reference, &errored),
+            Some(Signature::ErrorsDiffer(None, Some("boom".to_string())))
+        );
+        let other_error = Ok(Outcome {
+            errors: vec!["bang (in f(1))".to_string()],
             ..Outcome::default()
         });
         assert_eq!(
-            signature(&reference, &errored),
-            Some(Signature::ErrorsDiffer)
+            signature(&boom, &other_error),
+            Some(Signature::ErrorsDiffer(
+                Some("boom".to_string()),
+                Some("bang".to_string())
+            ))
         );
-        let observed = Ok(Outcome {
-            observed: vec!["visible character 1".to_string()],
+        let observed = |entry: &str| Outcome {
+            observed: vec![entry.to_string()],
             ..reference.clone()
-        });
+        };
         assert_eq!(
-            signature(&reference, &observed),
-            Some(Signature::ObservedDiffers)
+            signature(
+                &observed("[1] visible double[1] 1:3ff0000000000000"),
+                &Ok(observed("[1] visible integer[1] 1"))
+            ),
+            Some(Signature::ObservedDiffers(Some(Difference::Value)))
+        );
+        assert_eq!(
+            signature(&reference, &Ok(observed("[1] visible integer[1] 1"))),
+            Some(Signature::ObservedDiffers(None))
         );
         let crashed = Err(EngineError::Crashed(
             "ry-jit wrote no report (signal: 11 (SIGSEGV) (core dumped)): Segmentation fault"

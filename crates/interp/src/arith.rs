@@ -4155,8 +4155,11 @@ unsafe fn do_seq_len(call: &Call<'_>) -> R<Sexp> {
         conditions::warning_call(call.call, "first element used of 'length.out' argument")?;
     }
     let count = values::as_real_scalar(value);
-    if count.is_nan() || count < 0.0 {
+    if !count.is_finite() || count < 0.0 {
         return Err(call.error("argument must be coercible to non-negative integer"));
+    }
+    if count >= heap::MAX_VECTOR_LENGTH as f64 {
+        return Err(call.error("result would be too long a vector"));
     }
     // Past the integer range the sequence is doubles, as GNU R's is.
     let kind = if count > i32::MAX as f64 {

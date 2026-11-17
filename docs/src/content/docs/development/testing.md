@@ -563,10 +563,12 @@ Printed output hides much of a value, so every engine runs with the deep observe
 (`crates/oracle/src/observe.R`, `ProcessEngine::observing`, off with `--no-observe`). After each
 top-level expression the driver records a canonical dump of its value and whether it was
 visible: the type, length and object bits, every element (a double by its bits, a string by its
-encoding mark and bytes), the attributes in stored order, and the structure of calls, closures
-and environments. It records each condition with its classes and call the same way. A non-ASCII
-string shows the same mark whether it is flagged UTF-8 or unflagged, because the two are the same
-text in a UTF-8 session; `ORACLE_OBSERVE=strict` tells them apart.
+encoding mark and bytes), the attributes in the order `attributes()` gives them, and the
+structure of calls, closures and environments. A vector of more than 96 elements shows its ends
+and, for the middle, checksums that depend on the position of every element. Each condition is
+recorded with its classes, message and call. A non-ASCII string shows the same mark whether it
+is flagged UTF-8 or unflagged, because the two are the same text in a UTF-8 session;
+`ORACLE_OBSERVE=strict` tells them apart.
 
 The report of a diverging seed names each top-level expression that differs and how:
 
@@ -575,8 +577,8 @@ The report of a diverging seed names each top-level expression that differs and 
 | `crash` | the engine died of a signal or a panic |
 | `value` | the expression's value or visibility differs |
 | `accepts`, `rejects` | one engine signals an error where the other returns |
-| `message` | both signal an error, with another message or call |
-| `conditions` | the warnings, messages or condition classes differ |
+| `message` | both signal an error, with another message, call or class |
+| `conditions` | the values agree; a warning's or message's text, call or classes differ |
 | `printed` | the values and conditions agree and the printed text does not |
 
 `--jobs N` runs N programs at once, `--minutes M` keeps taking seeds until the time is up,
@@ -600,8 +602,11 @@ block items, arguments and parameters in halving chunks, replaces a construct by
 `NULL`, `0`, `1L`, `""` or `TRUE`, and shrinks string and number literals. A candidate counts only
 when GNU R parses it, GNU R runs it to completion if it ran the original to completion, and the
 engine still diverges with the same signature: the same crash signal, a timeout, or the first of
-errors, warnings, messages, stdout, value and the deep observer's dump that differs. Both engines
-run with the observer on. For example, a segfault of `ry-tier0` in a replacement on a matrix,
+errors, warnings, messages, stdout, value and the deep observer's dump that differs. A difference
+in errors or warnings also keeps both engines' messages, and a difference in the dump keeps the
+way its first expression differs (the table above), so a reduction seldom slides to another bug;
+a difference in printed output or the last value keeps only its channel, so read the reduced
+program against the original report. Both engines run with the observer on. For example, a segfault of `ry-tier0` in a replacement on a matrix,
 buried in a 130-line fuzz program, reduces in about 300 candidates (a few minutes in a debug build)
 to:
 
@@ -613,7 +618,9 @@ f(matrix(0, 8, 8))
 
 The command prints the reduced program, its signature and a replay command (with
 `ORACLE_OBSERVE=1` when only the observer's dump differs), and `--output` writes it. `--budget`
-caps the candidates (2000 by default), and the reduction is deterministic.
+caps the candidates (2000 by default), and the reduction is deterministic unless a candidate
+runs into the timeout. `oracle fuzz --reduce` starts no candidate after the time budget and
+leaves a timeout unreduced, because each candidate that still hangs costs the whole timeout.
 `oracle::reduce::reduce` takes any predicate, so its unit tests run without an engine.
 
 A grammar only covers what its author thought of, so a second source of programs is real R code,
@@ -632,8 +639,10 @@ it is a plain compatibility gap, listed in `target/fuzz-corpus/base-differs.txt`
 mutant that diverges while its snippet agrees is a finding. A diverging mutant runs under GNU R a
 second time and is dropped when GNU R disagrees with itself. `just fuzz-corpus SEED COUNT ENGINES`
 runs a range of seeds. The bounded pass, `fuzz_corpus_mutants_never_crash`, fails only when a
-mutant crashes ry and prints the other divergences, because the snippet a seed picks changes
-whenever an oracle case is added.
+mutant crashes ry and prints the other divergences, because the snippet a seed picks depends on
+the corpus on disk: it changes whenever an oracle case is added, and with the R source and the
+packages a machine has. A corpus seed therefore replays only against the same corpus, and a
+report carries the mutant's text for that reason.
 
 `crates/oracle/tests/test_gallery.rs` renders a seeded sample of the plot gallery under both
 engines and compares the images ([Corpus and oracle](/development/corpus-and-oracle)).

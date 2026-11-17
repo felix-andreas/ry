@@ -10,8 +10,8 @@
 # run without a report.
 #
 # With `ORACLE_OBSERVE` set, the report also holds, in order, the deep observer's dump of every
-# top-level value with its visibility and the classes of every condition (observe.R, which the
-# harness splices in below, so the script cannot see or replace it).
+# top-level value with its visibility and every condition's classes, message and call (observe.R,
+# which the harness splices in below, so the script cannot see or replace it).
 local({
   # <observe.R>
   observing <- nzchar(Sys.getenv("ORACLE_OBSERVE"))
@@ -26,6 +26,9 @@ local({
   # difference names the expression.
   position <- 0L
   observe_note <- function(text) observed <<- c(observed, paste0("[", position, "] ", text))
+  observe_condition <- function(kind, condition) {
+    observe_note(paste0(.oracle_observe_condition(kind, condition), " ", describe(condition)))
+  }
 
   argv <- commandArgs(trailingOnly = TRUE)
   script <- argv[1L]
@@ -97,20 +100,20 @@ local({
           if (result$visible) print(result$value)
         },
         error = function(condition) {
-          if (observing) observe_note(.oracle_observe_condition("error", condition))
+          if (observing) observe_condition("error", condition)
           errors <<- c(errors, describe(condition))
           last <<- NULL
           failed <<- TRUE
         }
       ),
       warning = function(condition) {
-        if (observing) observe_note(.oracle_observe_condition("warning", condition))
+        if (observing) observe_condition("warning", condition)
         warnings <<- c(warnings, describe(condition))
         if (isTRUE(getOption("warn") >= 2)) return(invisible())
         invokeRestart("muffleWarning")
       },
       message = function(condition) {
-        if (observing) observe_note(.oracle_observe_condition("message", condition))
+        if (observing) observe_condition("message", condition)
         messages <<- c(messages, sub("\n$", "", conditionMessage(condition)))
         invokeRestart("muffleMessage")
       }
