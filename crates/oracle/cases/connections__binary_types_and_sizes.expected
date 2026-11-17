@@ -288,6 +288,7 @@
 | error: can only write to a binary connection 
 | (invisible)
 | (invisible)
+| [1] 1 2 3
 | error: can only write vector objects 
 | (invisible)
 | error: can only write vector objects 
@@ -2794,8 +2795,8 @@
 | character(0)
 | error: cannot read from this connection 
 | (invisible)
-| warning: NAs introduced by coercion 
-| error: invalid 'nchars' argument 
+| warning: cannot open file 'nonexistent-file': No such file or directory 
+| error: cannot open the connection 
 | (invisible)
 | warning: text connection used with readChar(), results may be incorrect 
 | [1] "aä"
