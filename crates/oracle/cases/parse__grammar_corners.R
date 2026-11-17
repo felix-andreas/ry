@@ -48,6 +48,14 @@ for (s in c("\\\n(x) x", "x\n\\\n(x) x", "x; \\\n(x) x", "{\\\n(x) x}", "{\n\\\n
 # `::` and `:::` end the statement at a line break; `$` and `@` do not.
 for (s in c("a::\nb", "a:::\nb", "a:: # c\nb", "(a::\nb)", "{a::\nb}", "a$\nb", "a@\nb", "a :: b")) show(s)
 
+# The input ends with a line break whether or not the text has one, so a `::` or a statement's
+# `\` at its end is cut by the line, where `$`, an operator and an open `(` wait for more input.
+for (s in c("a::", "a:::  ", "x\na:: # c", "x |> a::", "function(x) a::", "{a::", "({a::", "(a::", "x[a::",
+            "{(a::", "if (a::", "f(a::\n)", "\\", "x; \\", "{x; \\", "{\\", "f(\\", "a$", "a@", "x +")) show(s)
+
+# A number that starts with its `.` has read its fraction, so a second `.` starts another number.
+for (s in c(".5.5", "..5", "1.1.1.1", ".5.", "x <- .5.5e1")) show(s)
+
 # A number the lexer refuses and a character that starts no token are "unexpected input" where
 # they start, and a control character is an "invalid token".
 for (s in c("0x", "0X", "0xg", "0xp1", "0x1..2", "0x1.2.3", "0x1.8p", "0x1p+", "0x1pL", "x <- 0x", "1 + 0x + 2",

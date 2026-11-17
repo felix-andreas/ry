@@ -50,6 +50,9 @@ pub enum Unexpected {
     Token(TextRange),
     /// The end of the input.
     EndOfInput,
+    /// The line break that ends the last line, which R reads whether or not the text has one,
+    /// at a place where R's grammar does not skip line breaks.
+    EndOfLine,
     /// Nothing: the error breaks one of ry's own rules for a construct that parsed in full,
     /// such as a tuple item with a name, so R's grammar has no report for it and ry's message
     /// is the only one.

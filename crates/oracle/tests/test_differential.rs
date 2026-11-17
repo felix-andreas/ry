@@ -531,8 +531,8 @@ fn fuzz_parse_data_matches_gnu_r() {
 /// Parser programs: fragments of every construct, literal and name, well formed and damaged,
 /// each handed to `parse(text =)`. A fragment must give GNU R's tree (the type of every node, a
 /// number's bits, a string's bytes and encoding mark) and warnings, or be rejected as GNU R
-/// rejects it, and a string or number fragment must give GNU R's whole error message. Parsing
-/// happens before any tier runs code, so tier 0 alone covers it.
+/// rejects it, and a string or number fragment must give GNU R's error message with its position
+/// and quoted lines. Parsing happens before any tier runs code, so tier 0 alone covers it.
 #[test]
 fn fuzz_parser_matches_gnu_r() {
     if !gnu_r_available() || !ry_runtime_available() {

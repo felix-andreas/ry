@@ -332,7 +332,8 @@ impl Lexer<'_> {
             }
         } else {
             self.eat_while(|c| c.is_ascii_digit());
-            if self.eat(".") {
+            // A number that starts with its `.` has read its fraction: `.5.5` is two numbers.
+            if !self.text[start..].starts_with('.') && self.eat(".") {
                 self.eat_while(|c| c.is_ascii_digit());
             }
             if !self.exponent(['e', 'E']) {

@@ -169,52 +169,69 @@ pub unsafe fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailu
     let parse = syntax::parse(text);
     let root = parse.syntax_node();
     // A broken `#:` comment is a comment to R, so only R's own grammar can fail a parse.
-    let grammar_failure = parse
+    let mut grammar_errors = parse
         .errors()
         .iter()
-        .find(|failure| !failure.in_annotation)
-        .map(|failure| {
-            let offset = usize::from(failure.range.start()).min(text.len());
-            pipe_bind_failure(text, offset).unwrap_or_else(|| {
-                let found = match failure.unexpected {
-                    Unexpected::Token(found) => Some(found),
-                    Unexpected::EndOfInput => None,
-                    Unexpected::Nothing => {
-                        return SyntaxFailure {
-                            message: failure.message.clone(),
-                            unexpected: None,
-                            offset,
-                            condition: None,
-                        };
-                    }
-                };
-                let unexpected = found.map_or(text.len()..text.len(), |found| {
-                    let start = usize::from(found.start()).min(text.len());
-                    let mut end = usize::from(found.end()).min(text.len());
-                    // GNU R's lexer has read the character that shows a number to be malformed,
-                    // so the lines it quotes reach through that character.
-                    let refused_number = text[start..]
-                        .starts_with(|first: char| first == '.' || first.is_ascii_digit())
-                        && root
-                            .token_at_offset(found.start())
-                            .right_biased()
-                            .is_some_and(|token| token.kind() == SyntaxKind::ERROR_TOKEN);
-                    if refused_number
-                        && let Some(next) = text[end..].chars().next()
-                        && next != '\n'
-                    {
-                        end += next.len_utf8();
-                    }
-                    start..end
-                });
-                SyntaxFailure {
-                    message: unexpected_token(&root, text, &unexpected),
-                    unexpected: Some(unexpected),
-                    offset,
-                    condition: None,
+        .filter(|failure| !failure.in_annotation);
+    let first = grammar_errors.next();
+    // GNU R reads the final line break before the end of the input, so a construct that the
+    // line break cuts short fails before a group that the end of the input leaves open.
+    let reported = match first {
+        Some(failure) if matches!(failure.unexpected, Unexpected::EndOfInput) => grammar_errors
+            .find(|failure| matches!(failure.unexpected, Unexpected::EndOfLine))
+            .or(first),
+        first => first,
+    };
+    let grammar_failure = reported.map(|failure| {
+        let offset = usize::from(failure.range.start()).min(text.len());
+        pipe_bind_failure(text, offset).unwrap_or_else(|| {
+            let found = match failure.unexpected {
+                Unexpected::Token(found) => Some(found),
+                Unexpected::EndOfInput => None,
+                Unexpected::EndOfLine => {
+                    return SyntaxFailure {
+                        message: END_OF_LINE.to_owned(),
+                        unexpected: Some(text.len()..text.len()),
+                        offset,
+                        condition: None,
+                    };
                 }
-            })
-        });
+                Unexpected::Nothing => {
+                    return SyntaxFailure {
+                        message: failure.message.clone(),
+                        unexpected: None,
+                        offset,
+                        condition: None,
+                    };
+                }
+            };
+            let unexpected = found.map_or(text.len()..text.len(), |found| {
+                let start = usize::from(found.start()).min(text.len());
+                let mut end = usize::from(found.end()).min(text.len());
+                // GNU R's lexer has read the character that shows a number to be malformed,
+                // so the lines it quotes reach through that character.
+                let refused_number = text[start..]
+                    .starts_with(|first: char| first == '.' || first.is_ascii_digit())
+                    && root
+                        .token_at_offset(found.start())
+                        .right_biased()
+                        .is_some_and(|token| token.kind() == SyntaxKind::ERROR_TOKEN);
+                if refused_number
+                    && let Some(next) = text[end..].chars().next()
+                    && next != '\n'
+                {
+                    end += next.len_utf8();
+                }
+                start..end
+            });
+            SyntaxFailure {
+                message: unexpected_token(&root, text, &unexpected),
+                unexpected: Some(unexpected),
+                offset,
+                condition: None,
+            }
+        })
+    });
     // GNU R's lexer raises its own errors as it reads a token, so the first of them in a token
     // that starts before the grammar error, an unterminated string included, is the one
     // reported.
@@ -352,7 +369,8 @@ pub fn script_syntax_failure_message(script: &Script<'_>, failure: &SyntaxFailur
     let Some(unexpected) = &failure.unexpected else {
         return syntax_failure_message(text, failure, "<text>");
     };
-    if unexpected.is_empty() && unexpected.start >= text.len() {
+    // GNU R quotes no text for the end of the input, and the last line for its line break.
+    if unexpected.is_empty() && unexpected.start >= text.len() && failure.message != END_OF_LINE {
         return failure.message.clone();
     }
     // A string the script's end cuts short leaves GNU R's console waiting for more input.
@@ -926,6 +944,7 @@ fn unterminated_failure(root: &SyntaxNode, text: &str) -> Option<(usize, SyntaxF
 
 /// GNU R's message for a string, raw string or backquoted name the input ends inside.
 const INCOMPLETE_STRING: &str = "unexpected INCOMPLETE_STRING";
+const END_OF_LINE: &str = "unexpected end of line";
 
 /// Whether a raw string literal's text ends with the delimiter that mirrors its opening one.
 fn is_terminated_raw_string(text: &str) -> bool {

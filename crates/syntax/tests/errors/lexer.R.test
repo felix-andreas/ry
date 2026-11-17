@@ -52,6 +52,14 @@ error: missing digits after `0x`
   | mask <- 0x
   |         ^^
 
+#---- fraction_after_leading_dot_number
+ratio <- .5.5
+#++++
+error: unexpected number after this expression; expected a newline or `;`
+ --> 1:12
+  | ratio <- .5.5
+  |            ^^
+
 #---- hex_second_dot
 ratio <- 0x1.8.2
 #++++

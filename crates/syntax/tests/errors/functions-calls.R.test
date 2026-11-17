@@ -162,6 +162,46 @@ error: expected `(` on the same line as `\`: R does not continue a lambda that s
   | \
   | ^
 
+#---- lambda_cut_at_end_of_input
+x; \
+#++++
+error: expected `(` on the same line as `\`: R does not continue a lambda that starts a statement across a line break
+ --> 1:4
+  | x; \
+  |    ^
+
+#---- namespace_name_at_end_of_input
+{pkg::
+#++++
+error: unclosed `{`; expected a matching `}`
+ --> 1:1
+  | {pkg::
+  | ^
+error: expected a name after `::`, found end of line
+ --> 1:6
+  | {pkg::
+  |      ^
+
+#---- namespace_name_at_end_of_input_in_call
+f(pkg::
+#++++
+error: unclosed `(`; expected `)` to close it
+ --> 1:2
+  | f(pkg::
+  |  ^
+error: expected a name after `::`, found end of file
+ --> 1:8
+  | f(pkg::
+  |        ^
+
+#---- member_name_at_end_of_input
+x$
+#++++
+error: expected a name after `$`, found end of file
+ --> 1:3
+  | x$
+  |   ^
+
 #---- lambda_across_lines_after_operator
 x <- \
 (y) y + 1

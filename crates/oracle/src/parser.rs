@@ -8,11 +8,11 @@
 //! text would hide exactly what a parser gets wrong (an integer read as a double, the grouping of
 //! `-a^b`, an escape decoded to another byte), and it would add the deparser's own differences.
 //!
-//! A fragment comes from one [`Family`], and a seed enables a random subset of them. Half of the
+//! A fragment comes from one [`Family`], and a seed enables a random subset of them. Most
 //! families write text that should parse (operator chains without parentheses, nested constructs,
-//! literals, names, the same constructs across line breaks), and the others damage such text by
-//! one token or draw tokens blindly, because a parser's two answers, the tree and the refusal,
-//! are checked by different inputs.
+//! literals, names, the same constructs across line breaks), and two damage such text by one
+//! token or draw tokens blindly, because a parser's two answers, the tree and the refusal, are
+//! checked by different inputs.
 //!
 //! ry's own syntax is text GNU R rejects by design. A fragment with an inline annotation is not
 //! generated, and one where ry's parser finds a record, a tuple or another ry construct is passed
@@ -22,9 +22,11 @@
 //!
 //! A rejected fragment prints its whole error message (the line, the column, the token the
 //! parser stopped at and the lines it quotes) only in the mode `"message"`, which the string and
-//! number families use, because there the lexer is what refuses. Every other family prints the
-//! fact that the fragment was rejected, because the token a parser names for arbitrary damaged
-//! text is not what those families ask about. A rejected fragment prints no warnings.
+//! number families use, because there the lexer is what refuses. One message loses its location:
+//! GNU R prints an uninitialized line number after "invalid \u{xxxx} sequence". Every other
+//! family prints the fact that the fragment was rejected, because the token a parser names for
+//! arbitrary damaged text is not what those families ask about. A rejected fragment prints no
+//! warnings.
 
 use {
     std::iter::successors,
@@ -35,9 +37,9 @@ use {
             BREAK_EXPR, CALL_EXPR, COMMA, ELSE_KW, EQ, EQ2, FOR_EXPR, FSTRING, FUNCTION_DEF,
             GREATER, GREATER_EQ, IF_EXPR, L_BRACKET, L_BRACKET2, L_PAREN, LESS, LESS_EQ, LITERAL,
             MATCH_EXPR, NAME, NAMESPACE_EXPR, NEW_EXPR, NEWLINE, NEXT_EXPR, PARAMETER_LIST,
-            PAREN_EXPR, PURE_MARKER, QUESTION, R_BRACE, R_BRACKET, R_PAREN, RAW_STRING,
-            RECORD_EXPR, REPEAT_EXPR, SOURCE_FILE, STRING, SUFFIXED_NUMBER, TAG_EXPR, TRY_EXPR,
-            TUPLE_EXPR, TYPE_DEFINITION, UNARY_EXPR, UNDERSCORE, WHILE_EXPR,
+            PAREN_EXPR, PIPE_GREATER, PURE_MARKER, QUESTION, R_BRACE, R_BRACKET, R_PAREN,
+            RAW_STRING, RECORD_EXPR, REPEAT_EXPR, SOURCE_FILE, STRING, SUFFIXED_NUMBER, TAG_EXPR,
+            TRY_EXPR, TUPLE_EXPR, TYPE_DEFINITION, UNARY_EXPR, UNDERSCORE, WHILE_EXPR,
         },
         SyntaxNode, SyntaxToken, erase_inline_annotations, parse,
         testing::SplitMix64,
@@ -275,12 +277,15 @@ fn known_difference(text: &str) -> bool {
                     .first_child()
                     .filter(|callee| callee.kind() == LITERAL)
                     .and_then(|callee| callee.first_token())
-                    .is_some_and(|token| {
-                        matches!(token.kind(), STRING | RAW_STRING)
-                            && token
-                                .text()
-                                .chars()
-                                .all(|character| "rR\"'-()[]{}".contains(character))
+                    .is_some_and(|token| match token.kind() {
+                        STRING => token.text().len() == 2,
+                        RAW_STRING => matches!(
+                            token.text()[1..]
+                                .trim_matches(['"', '\''])
+                                .trim_matches('-'),
+                            "()" | "[]" | "{}"
+                        ),
+                        _ => false,
                     }),
                 // GNU R takes `::` and `:::` only between names and strings.
                 NAMESPACE_EXPR => node.first_child().is_none_or(|package| {
@@ -297,10 +302,14 @@ fn known_difference(text: &str) -> bool {
                     .last()
                     .is_some_and(|last| last.kind() == COMMA),
                 // GNU R parses `_` wherever a name can stand and rejects it later, with rules of its
-                // own; ry rejects every `_` that is not a named argument, and holds a backquoted `_`
-                // to the placeholder's rules, where GNU R reads a name.
+                // own; ry rejects every `_` that is not a named argument. In a pipe ry holds a
+                // backquoted `_` to the placeholder's rules, where GNU R reads a name.
                 NAME => node.first_token().is_some_and(|token| {
                     token.text() == "`_`"
+                        && node.ancestors().any(|ancestor| {
+                            ancestor.kind() == BINARY_EXPR
+                                && operator(&ancestor) == Some(PIPE_GREATER)
+                        })
                         || token.kind() == UNDERSCORE
                             && !node.parent().is_some_and(|parent| {
                                 parent.kind() == ARGUMENT && operator(&parent) == Some(EQ)
@@ -741,6 +750,10 @@ fn number(rng: &mut SplitMix64) -> String {
         "1TRUE",
         "1x",
         "0xg",
+        ".5.5",
+        "1.1.1.1",
+        "..5",
+        "0x1.2.3p1",
     ];
     if rng.chance(1, 3) {
         return FIXED[rng.below(FIXED.len())].to_owned();
@@ -764,6 +777,10 @@ fn number(rng: &mut SplitMix64) -> String {
     if rng.chance(1, 2) {
         text.push('.');
         run(rng, &mut text, 4);
+        if rng.chance(1, 8) {
+            text.push('.');
+            run(rng, &mut text, 2);
+        }
     }
     if rng.chance(1, 2) {
         let markers = if hex {

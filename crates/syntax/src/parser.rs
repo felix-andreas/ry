@@ -318,14 +318,24 @@ impl Parser<'_> {
     }
 
     /// Reports an error on the line break the parser stands on, where GNU R's parser stops
-    /// too: the break itself is the unexpected token, not what the next line starts with.
+    /// too: the break itself is the unexpected token, not what the next line starts with. The
+    /// end of the input ends its last line.
     fn error_at_line_break(&mut self, message: impl Into<String>) {
         let reported = self.errors.len();
-        let line_break = self.token_range(self.pos);
-        self.error_at(line_break, message);
+        let (range, unexpected) = match self.current() {
+            Some(_) => {
+                let line_break = self.token_range(self.pos);
+                (line_break, Unexpected::Token(line_break))
+            }
+            None => (
+                self.last_character_before(self.text.len()),
+                Unexpected::EndOfLine,
+            ),
+        };
+        self.error_at(range, message);
         if let Some(error) = self.errors.get_mut(reported) {
             error.incomplete = false;
-            error.unexpected = Unexpected::Token(line_break);
+            error.unexpected = unexpected;
         }
     }
 
@@ -339,7 +349,11 @@ impl Parser<'_> {
         else {
             return range;
         };
-        let end = self.text[..break_offset].trim_end().len();
+        self.last_character_before(break_offset)
+    }
+
+    fn last_character_before(&self, offset: usize) -> TextRange {
+        let end = self.text[..offset].trim_end().len();
         let start = self.text[..end]
             .char_indices()
             .next_back()
@@ -1719,7 +1733,11 @@ impl Parser<'_> {
         match self.current() {
             Some(IDENT | DOTS | DOTDOTI) => self.wrap(NAME),
             Some(STRING) => self.wrap(LITERAL),
-            Some(NEWLINE) => {
+            // R skips line breaks after `$` and `@` and inside `(` and `[`, so only a `::`
+            // outside them can stand before one.
+            Some(NEWLINE) | None
+                if !matches!(operator, DOLLAR | AT) && self.newlines_significant() =>
+            {
                 self.error_at_line_break(format!(
                     "expected a name after {}, found end of line",
                     operator.display()
@@ -1958,8 +1976,8 @@ impl Parser<'_> {
                 self.wrap(NAME);
             } else {
                 self.error_expected("a loop variable after `for (`");
-                // One mistake, one finding: what stands in the variable's place before `in`
-                // is skipped, so the rest of the head reads as written.
+                // One mistake, one finding: a single token that stands in the variable's place
+                // before `in` is skipped, so the rest of the head reads as written.
                 let next = self.peek_significant(self.pos + 1, true);
                 if !self.at(IN_KW) && matches!(next, Some((IN_KW, _))) {
                     self.start(ERROR);
@@ -2063,7 +2081,7 @@ impl Parser<'_> {
         let on_one_line = self.lambda_on_one_line == Some(self.pos);
         self.bump();
         self.eat_trivia(!on_one_line);
-        let cut = on_one_line && self.at(NEWLINE);
+        let cut = on_one_line && matches!(self.current(), Some(NEWLINE) | None);
         if cut {
             self.error_at_line_break(
                 "expected `(` on the same line as `\\`: R does not continue a lambda that starts a statement across a line break",
@@ -2087,7 +2105,9 @@ impl Parser<'_> {
             self.finish();
             self.eat_trivia(true);
         }
-        if !self.statement(BODY_BP) && !self.statement_left_group_open {
+        // One mistake, one finding: a lambda cut at the end of the input is already reported.
+        let reported = cut && self.current().is_none();
+        if !self.statement(BODY_BP) && !self.statement_left_group_open && !reported {
             // Blamed on the keyword: where the body search stopped can be a
             // zero-width spot past the last statement.
             self.error_at(keyword_range, "expected a function body");

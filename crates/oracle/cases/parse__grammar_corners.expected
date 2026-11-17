@@ -88,6 +88,31 @@
 | a$\nb -> a$b 
 | a@\nb -> a@b 
 | a :: b -> a::b 
+| a:: -> error: <text>:2:0: unexpected end of line 
+| a:::   -> error: <text>:2:0: unexpected end of line 
+| x\na:: # c -> error: <text>:3:0: unexpected end of line 
+| x |> a:: -> error: <text>:2:0: unexpected end of line 
+| function(x) a:: -> error: <text>:2:0: unexpected end of line 
+| {a:: -> error: <text>:2:0: unexpected end of line 
+| ({a:: -> error: <text>:2:0: unexpected end of line 
+| (a:: -> error: <text>:2:0: unexpected end of input 
+| x[a:: -> error: <text>:2:0: unexpected end of input 
+| {(a:: -> error: <text>:2:0: unexpected end of input 
+| if (a:: -> error: <text>:2:0: unexpected end of input 
+| f(a::\n) -> error: <text>:2:1: unexpected ')' 
+| \\ -> error: <text>:2:0: unexpected end of line 
+| x; \\ -> error: <text>:2:0: unexpected end of line 
+| {x; \\ -> error: <text>:2:0: unexpected end of line 
+| {\\ -> error: <text>:2:0: unexpected end of input 
+| f(\\ -> error: <text>:2:0: unexpected end of input 
+| a$ -> error: <text>:2:0: unexpected end of input 
+| a@ -> error: <text>:2:0: unexpected end of input 
+| x + -> error: <text>:2:0: unexpected end of input 
+| .5.5 -> error: <text>:1:3: unexpected numeric constant 
+| ..5 -> ..5 
+| 1.1.1.1 -> error: <text>:1:4: unexpected numeric constant 
+| .5. -> error: <text>:1:3: unexpected symbol 
+| x <- .5.5e1 -> error: <text>:1:8: unexpected numeric constant 
 | 0x -> error: <text>:1:1: unexpected input 
 | 0X -> error: <text>:1:1: unexpected input 
 | 0xg -> error: <text>:1:1: unexpected input 
