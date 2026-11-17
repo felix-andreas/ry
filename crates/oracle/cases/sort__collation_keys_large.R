@@ -7,7 +7,7 @@ word <- function(n, alphabet, lengths = 1:6) {
     vapply(seq_len(n), function(i) paste(sample(alphabet, sample(lengths, 1), TRUE), collapse = ""), "")
 }
 digest <- function(x) c(length(x), sum(as.numeric(x) * seq_along(x), na.rm = TRUE) %% 1e9)
-mixed <- c(letters[1:4], LETTERS[1:3], "é", "É", "ß", "ø", "-", " ", "1")
+mixed <- c(letters[1:4], LETTERS[1:3], "\u00e9", "\u00c9", "\u00df", "\u00f8", "-", " ", "1")
 pool <- word(40, mixed)
 dup <- sample(pool, 3000, TRUE)
 for (ties in c("average", "first", "last", "random", "max", "min")) {
@@ -21,7 +21,7 @@ wide <- word(3000, mixed, 1:12)
 print(digest(rank(wide)))
 print(digest(order(wide, decreasing = TRUE)))
 print(identical(sort(wide), wide[order(wide)]))
-prefix <- paste0("common-prefix-é-", sample(c("b", "a", "B", "á", "A"), 600, TRUE), sample(0:9, 600, TRUE))
+prefix <- paste0("common-prefix-\u00e9-", sample(c("b", "a", "B", "\u00e1", "A"), 600, TRUE), sample(0:9, 600, TRUE))
 print(digest(rank(prefix, ties.method = "min")))
 print(head(unique(sort(prefix)), 15))
 na <- dup[1:500]
@@ -29,7 +29,7 @@ na[c(3, 50, 499)] <- NA
 print(digest(rank(na, na.last = "keep")))
 print(sum(is.na(rank(na, na.last = "keep"))))
 print(digest(order(na, na.last = FALSE)))
-nfd <- rep(c("é", "é", "É", "É", "e", "f"), 100)
+nfd <- rep(c("e\u0301", "\u00e9", "E\u0301", "\u00c9", "e", "f"), 100)
 print(table(rank(nfd, ties.method = "min")))
 print(digest(order(nfd)))
 icuSetCollate(alternate_handling = "shifted")
