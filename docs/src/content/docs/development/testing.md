@@ -523,7 +523,7 @@ released. A second battery drives random API sequences under collection stress a
 
 `oracle fuzz` runs whole R programs under GNU R and ry's engines and reports every program on
 which an engine differs. A seed and a kind name a program, so `oracle fuzz --kind K --seed N
---print` prints it and `--engines` replays it. The seven kinds find different bugs:
+--print` prints it and `--engines` replays it. The eight kinds find different bugs:
 
 | Kind | A program is | It finds |
 | --- | --- | --- |
@@ -533,6 +533,7 @@ which an engine differs. A seed and a kind name a program, so `oracle fuzz --kin
 | `api` (`oracle::metamorphic::api_program`) | calls of functions drawn from everything base, stats and utils export, on two zoo values and constants of other types, each call caught | a function nobody listed: one that crashes, or accepts, rejects or computes differently from GNU R |
 | `io` (`oracle::metamorphic::io_program`) | round trips through files and connections: a zoo value written by one writer (`writeLines`, `cat`, `writeBin`, `write.table`, `dput`, `saveRDS`, `save`, compressed and re-encoding connections) and read back by several readers | bytes on disk that differ from GNU R's, and readers that decode, mark, warn about or reject a file differently |
 | `language` (`oracle::language::program`) | a few closures, each built from statements of the construct families its seed enables (`on.exit`, frame inspection, `...`, promises, replacement functions, `<<-`, conditions and restarts, S3, S4 and Reference Class dispatch, `eval` and quoted code, environments, regular expressions over Unicode text, control flow) and called one, a few or sixty times; the first and the last call's visible value, log entries and warnings are recorded | a difference in evaluation order, in what a frame or a condition reports, or in dispatch, and one that appears only on a later call |
+| `perturbed` (`oracle::mutate::perturb`) | a grammar, metamorphic or language program with four to twelve statements inserted into its function bodies: dead code (`if (FALSE)` around a statement taken from elsewhere in the program, an unused local closure, a loop over `NULL`) and code without effect on the result (`force(x)`, `x <- x`, `sys.call()`, `gc(FALSE)`, an empty `tryCatch`) | compiled code that depends on a slot number, a constant index, a branch offset or an inlining decision |
 | `corpus` (`oracle::corpus`) | a snippet of real R code with one to four mutations | what no grammar author thought of |
 
 A metamorphic trial draws its value from a zoo: every atomic type and lists, with `NA`, `NaN`,
@@ -631,7 +632,7 @@ The count is a close upper bound, because a name inside a string literal counts 
 Every fuzzed engine runs with at most 2 GiB of writable memory (`oracle::fuzz::MEMORY_LIMIT`,
 `RLIMIT_DATA`), so a call that asks for a huge vector gets R's "cannot allocate" error in GNU R
 and in ry instead of taking the machine's memory. `just fuzz-differential` runs the grammar,
-`just fuzz-kind KIND` any kind, and `just fuzz-long HOURS BASE` all seven for a time budget, under
+`just fuzz-kind KIND` any kind, and `just fuzz-long HOURS BASE` all eight for a time budget, under
 tier 0, the forced JIT and seeded collection stress.
 
 `crates/oracle/tests/test_differential.rs` holds the bounded passes. Grammar programs run under

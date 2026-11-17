@@ -9,10 +9,11 @@
 use syntax::{
     NodeOrToken, SyntaxKind, SyntaxNode, TextRange,
     kind::SyntaxKind::{
-        AMP, AMP2, ARGUMENT, ARGUMENT_LIST, BANG_EQ, BINARY_EXPR, CALL_EXPR, CARET, COLON, DOUBLE,
-        EQ, EQ2, FALSE_KW, FUNCTION_DEF, GREATER, GREATER_EQ, INTEGER, L_BRACKET, L_BRACKET2, LESS,
-        LESS_EQ, LESS_MINUS, LESS2_MINUS, LITERAL, MINUS, NA_KW, NAME, NULL_KW, PIPE, PIPE2, PLUS,
-        SLASH, SOURCE_FILE, SPECIAL, STAR, STRING, SUBSET_EXPR, SUBSET2_EXPR, TRUE_KW,
+        AMP, AMP2, ARGUMENT, ARGUMENT_LIST, BANG_EQ, BINARY_EXPR, BRACE_EXPR, CALL_EXPR, CARET,
+        COLON, DOUBLE, EQ, EQ2, FALSE_KW, FUNCTION_DEF, GREATER, GREATER_EQ, IDENT, INTEGER,
+        L_BRACKET, L_BRACKET2, LESS, LESS_EQ, LESS_MINUS, LESS2_MINUS, LITERAL, MINUS, NA_KW, NAME,
+        NULL_KW, PARAMETER, PARAMETER_LIST, PIPE, PIPE2, PLUS, SLASH, SOURCE_FILE, SPECIAL, STAR,
+        STRING, SUBSET_EXPR, SUBSET2_EXPR, TRUE_KW,
     },
     parse,
     testing::SplitMix64,
@@ -42,7 +43,16 @@ pub enum MutationKind {
     Subset,
     /// `TRUE`, `FALSE` and `NA` trade places, and `NULL` becomes an empty vector or list.
     Constant,
+    /// A function body gains a statement that never runs: a copy of another statement of the
+    /// program behind `if (FALSE)`, in a loop that makes no pass, or in a closure nobody calls.
+    DeadCode,
+    /// A function body gains a statement that does not change its result: a constant, a loop
+    /// over nothing much, a look at the frame (`environment()`, `sys.call()`), a new local.
+    Neutral,
 }
+
+/// The kinds that leave what a program computes alone and change only what the compiler sees.
+const EFFECT_FREE: [MutationKind; 2] = [MutationKind::DeadCode, MutationKind::Neutral];
 
 /// `program` with one to four mutations, the same text for the same seed. A mutation whose
 /// result would not parse is skipped, so the result always parses when `program` does; a
@@ -78,6 +88,40 @@ pub fn mutate(program: &str, seed: u64) -> String {
 /// Keeps the mutator's stream apart from the stream that picks the snippet for the same seed.
 const MUTATION_STREAM: u64 = 0x6d75_7461_6e74_0001;
 
+/// `program` with four to twelve effect-free mutations in its function bodies, the same text for
+/// the same seed. A mutation that changes a value usually ends the program in an early error.
+/// These keep the whole run and still move the slot numbers, constant indices, branch offsets
+/// and frame states the compiled body has, so a difference from GNU R on the result is a bug in
+/// how the body was compiled or run. A program without a function comes back unchanged.
+pub fn perturb(program: &str, seed: u64) -> String {
+    let mut rng = SplitMix64(PERTURBATION_STREAM ^ seed);
+    let count = 4 + rng.below(9);
+    let mut current = program.to_string();
+    if !parse(&current).errors().is_empty() {
+        return current;
+    }
+    for _ in 0..count {
+        let root = parse(&current).syntax_node();
+        let kind = EFFECT_FREE[rng.below(EFFECT_FREE.len())];
+        let candidates: Vec<Site> = sites(&root)
+            .into_iter()
+            .filter(|site| site.kind == kind)
+            .collect();
+        if candidates.is_empty() {
+            break;
+        }
+        let site = &candidates[rng.below(candidates.len())];
+        if let Some(candidate) = apply(&current, site, &mut rng)
+            && parse(&candidate).errors().is_empty()
+        {
+            current = candidate;
+        }
+    }
+    current
+}
+
+const PERTURBATION_STREAM: u64 = 0x7065_7274_7572_6201;
+
 const NUMBERS: &[&str] = &[
     "0",
     "1",
@@ -90,7 +134,8 @@ const NUMBERS: &[&str] = &[
     "NaN",
     "Inf",
     "-Inf",
-    "-0",
+    // Not `-0`, which GNU R's compiler merges with a `0` in the same function.
+    "-numeric(1)",
     "0.5",
     "1e-300",
     "1e300",
@@ -122,6 +167,58 @@ const STRINGS: &[&str] = &[
 /// Names given to the unnamed elements of a `c()` call, in order, so the result mixes plain,
 /// non-ASCII, non-syntactic and duplicated names.
 const ELEMENT_NAMES: &[&str] = &["a", "\"ä\"", "b", "`c d`", "a"];
+
+/// Statements that never run, with `{}` for the statement they hold.
+const DEAD_FORMS: &[&str] = &[
+    "if (FALSE) { {} }",
+    "while (FALSE) { {} }",
+    "if (TRUE) NULL else { {} }",
+    "dead__ <- function() { {} }",
+    "repeat { break; {} }",
+    "for (dead__ in NULL) { {} }",
+    "switch(\"none\", other = { {} })",
+];
+
+/// Statements for a dead form to hold when the program offers none of its own.
+const DEAD_STATEMENTS: &[&str] = &[
+    "stop(\"unreachable\")",
+    "dead__ <- numeric(64); dead__[2] <- 1; dead__[3] <- 2",
+    "return(NULL)",
+    "dead__ <<- NULL",
+];
+
+/// Statements that leave a body's result alone. Several ask for the frame, which a call that
+/// keeps its variables in registers must then build partway through the body, and the loops
+/// give a body without one a backward jump to compile at.
+const NEUTRAL_STATEMENTS: &[&str] = &[
+    "invisible(NULL)",
+    "NULL",
+    "environment()",
+    "sys.function()",
+    "sys.call()",
+    "parent.frame()",
+    "nargs()",
+    "gc(FALSE)",
+    "neutral__ <- 0L",
+    "(function() NULL)()",
+    "on.exit(NULL, add = TRUE)",
+    "tryCatch(NULL, error = function(e) NULL)",
+    "local(NULL)",
+    "eval(quote(NULL))",
+    "suppressWarnings(NULL)",
+    "for (neutral__ in 1:3) NULL",
+    "repeat break",
+    "if (TRUE) NULL",
+];
+
+/// Statements that leave a body's result alone and read the parameter `{}`.
+const NEUTRAL_PARAMETER_STATEMENTS: &[&str] = &[
+    "missing({})",
+    "exists(\"{}\", inherits = FALSE)",
+    "{} <- {}",
+    "force({})",
+    "substitute({})",
+];
 
 const ARITHMETIC: &[&str] = &["+", "-", "*", "/", "%%", "%/%", "^"];
 const COMPARISON: &[&str] = &["<", "<=", ">", ">=", "==", "!="];
@@ -178,6 +275,28 @@ fn sites(root: &SyntaxNode) -> Vec<Site> {
         };
         if let Some(kind) = kind {
             sites.push(Site { kind, node });
+        }
+    }
+    for node in root.descendants() {
+        // A statement of a braced block inside a function, or a function's whole unbraced
+        // body: the places a statement can go in front of without changing the body's value.
+        let places: Vec<SyntaxNode> = match node.kind() {
+            BRACE_EXPR if enclosing_function(&node).is_some() => node.children().collect(),
+            FUNCTION_DEF => node
+                .children()
+                .last()
+                .filter(|body| !matches!(body.kind(), BRACE_EXPR | PARAMETER_LIST))
+                .into_iter()
+                .collect(),
+            _ => Vec::new(),
+        };
+        for place in places {
+            for kind in EFFECT_FREE {
+                sites.push(Site {
+                    kind,
+                    node: place.clone(),
+                });
+            }
         }
     }
     sites
@@ -346,7 +465,80 @@ fn apply(text: &str, site: &Site, rng: &mut SplitMix64) -> Option<String> {
             };
             Some(replace(text, range, &replacement))
         }
+        MutationKind::DeadCode => {
+            let root = node.ancestors().last()?;
+            // A `break` or `next` copied out of its loop is an error where GNU R's compiler
+            // sees it, dead or not.
+            let donors: Vec<String> = root
+                .descendants()
+                .filter(|donor| {
+                    donor
+                        .parent()
+                        .is_some_and(|parent| matches!(parent.kind(), BRACE_EXPR | SOURCE_FILE))
+                })
+                .map(|donor| significant_text(text, &donor))
+                .filter(|donor| {
+                    !donor.is_empty()
+                        && donor.len() <= 400
+                        && !donor.contains("break")
+                        && !donor.contains("next")
+                })
+                .collect();
+            let statement = if donors.is_empty() || rng.below(4) == 0 {
+                DEAD_STATEMENTS[rng.below(DEAD_STATEMENTS.len())].to_string()
+            } else {
+                donors[rng.below(donors.len())].clone()
+            };
+            let form = DEAD_FORMS[rng.below(DEAD_FORMS.len())];
+            Some(insert_before(text, node, &form.replace("{}", &statement)))
+        }
+        MutationKind::Neutral => {
+            let parameters = enclosing_function(node)
+                .map(|function| parameter_names(&function))
+                .unwrap_or_default();
+            let statement = if parameters.is_empty() || rng.below(3) != 0 {
+                NEUTRAL_STATEMENTS[rng.below(NEUTRAL_STATEMENTS.len())].to_string()
+            } else {
+                NEUTRAL_PARAMETER_STATEMENTS[rng.below(NEUTRAL_PARAMETER_STATEMENTS.len())]
+                    .replace("{}", &parameters[rng.below(parameters.len())])
+            };
+            Some(insert_before(text, node, &statement))
+        }
     }
+}
+
+/// `text` with `statement` run just before `place`, which is a statement of a braced block or
+/// a function's unbraced body.
+fn insert_before(text: &str, place: &SyntaxNode, statement: &str) -> String {
+    let range = significant_range(place);
+    if place
+        .parent()
+        .is_some_and(|parent| parent.kind() == BRACE_EXPR)
+    {
+        let start = TextRange::empty(range.start());
+        return replace(text, start, &format!("{statement}\n"));
+    }
+    let body = &text[span(range)];
+    replace(text, range, &format!("{{ {statement}\n{body} }}"))
+}
+
+fn enclosing_function(node: &SyntaxNode) -> Option<SyntaxNode> {
+    node.ancestors()
+        .skip(1)
+        .find(|ancestor| ancestor.kind() == FUNCTION_DEF)
+}
+
+/// The plain names among a function's parameters, without `...`.
+fn parameter_names(function: &SyntaxNode) -> Vec<String> {
+    function
+        .children()
+        .filter(|child| child.kind() == PARAMETER_LIST)
+        .flat_map(|list| list.children())
+        .filter(|child| child.kind() == PARAMETER)
+        .filter_map(|parameter| parameter.first_token())
+        .filter(|token| token.kind() == IDENT)
+        .map(|token| token.text().to_string())
+        .collect()
 }
 
 fn replace(text: &str, range: TextRange, replacement: &str) -> String {
@@ -521,6 +713,8 @@ paste("a", "b", sep = "-")
             MutationKind::Operator,
             MutationKind::Subset,
             MutationKind::Constant,
+            MutationKind::DeadCode,
+            MutationKind::Neutral,
         ];
         for kind in kinds {
             let mut changed = 0;
@@ -535,6 +729,33 @@ paste("a", "b", sep = "-")
             }
             assert!(changed > 0, "{kind:?} never produced a parseable mutant");
         }
+    }
+
+    #[test]
+    fn perturbed_programs_parse_and_keep_every_statement() {
+        const FUNCTIONS: &str = "f <- function(v, ...) { total <- v^2; if (total > 3) { total <- 3 }; total }\ng <- function(a) a + 1\nf(2); g(1)\n";
+        let mut distinct = std::collections::BTreeSet::new();
+        for seed in 0..300 {
+            let perturbed = perturb(FUNCTIONS, seed);
+            assert!(
+                parse(&perturbed).errors().is_empty(),
+                "seed {seed} gave a program that does not parse:\n{perturbed}"
+            );
+            assert_eq!(perturbed, perturb(FUNCTIONS, seed), "seed {seed}");
+            for statement in ["total <- v^2", "total <- 3", "a + 1", "f(2); g(1)"] {
+                assert!(
+                    perturbed.contains(statement),
+                    "seed {seed} lost `{statement}`:\n{perturbed}"
+                );
+            }
+            assert!(
+                !perturbed.contains("...)") || !perturbed.contains("missing(...)"),
+                "seed {seed} reads `...` as a parameter:\n{perturbed}"
+            );
+            distinct.insert(perturbed);
+        }
+        assert!(distinct.len() > 200, "{} distinct programs", distinct.len());
+        assert_eq!(perturb("x <- 1\n", 0), "x <- 1\n");
     }
 
     #[test]

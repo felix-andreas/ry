@@ -230,6 +230,32 @@ fn fuzz_language_constructs_agree_across_tiers() {
     ));
 }
 
+/// Perturbed programs: a grammar, metamorphic or language program with statements inserted into
+/// its function bodies that never run or have no effect on the result. They change what the
+/// compiler sees (slots, constants, branch targets) and nothing else, so compiled code must
+/// agree with the interpreter; `just fuzz-kind perturbed` compares the same programs with GNU R.
+#[test]
+fn fuzz_perturbed_programs_agree_across_tiers() {
+    if !ry_runtime_available() {
+        eprintln!("skipped: ry's runtime is not built; run `cargo build -p ry-lang -p libr`");
+        return;
+    }
+    let prepare = |engine: ProcessEngine| {
+        engine
+            .with_timeout(TIMEOUT)
+            .with_memory_limit(MEMORY_LIMIT)
+            .observing()
+    };
+    let tier0 = prepare(ProcessEngine::ry_tier0());
+    let jit = prepare(ProcessEngine::ry_jit());
+    assert_agree(&run_kind(
+        ProgramKind::Perturbed,
+        &tier0,
+        &[&jit],
+        fuzz_iterations(8),
+    ));
+}
+
 #[test]
 fn fuzz_programs_survive_gc_torture() {
     if !gnu_r_available() || !ry_runtime_available() {

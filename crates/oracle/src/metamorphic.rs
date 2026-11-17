@@ -1246,8 +1246,11 @@ const LOGICALS: [&str; 3] = ["TRUE", "FALSE", "NA"];
 const INTEGERS: [&str; 7] = ["0L", "1L", "-1L", "2L", "7L", "100L", "-3L"];
 const SPECIAL_INTEGERS: [&str; 3] = ["NA_integer_", ".Machine$integer.max", "-2147483647L"];
 const DOUBLES: [&str; 8] = ["0", "1", "-1", "0.5", "2.5", "3", "0.1", "123456.789"];
+// Negative zero is computed, never written `-0`: GNU R's compiler folds that literal into a
+// constant and then shares one constant between it and a `0` in the same function, so
+// `function() c(-0, 0)` returns two negative zeros from its second call on.
 const SPECIAL_DOUBLES: [&str; 10] = [
-    "-0",
+    "-numeric(1)",
     "NA_real_",
     "NaN",
     "Inf",
@@ -1263,7 +1266,7 @@ const COMPLEXES: [&str; 5] = [
     "1+2i",
     "-1.5i",
     "NA_complex_",
-    "complex(real = Inf, imaginary = -0)",
+    "complex(real = Inf, imaginary = -numeric(1))",
 ];
 const STRINGS: [&str; 10] = [
     "\"a\"",
@@ -2110,10 +2113,12 @@ impl Zoo {
                 3 if length > 0 => format!("dim(@) <- c({length}, 1)"),
                 _ => "dim(@) <- c(1, length(@))".to_owned(),
             },
+            // The warnings are muffled because GNU R's two evaluators name such an assignment
+            // differently (`x[5] <<- v` on a closure's first call, `x[5] <- v` once compiled).
             22 if self.has(Feature::SuperAssignment) => match self.rng.below(3) {
-                0 => format!("(function() @[{position}] <<- {stored})()"),
-                1 => format!("(function() @[[{position}]] <<- {stored})()"),
-                _ => format!("local(@[{positions}] <<- {stored})"),
+                0 => format!("suppressWarnings((function() @[{position}] <<- {stored})())"),
+                1 => format!("suppressWarnings((function() @[[{position}]] <<- {stored})())"),
+                _ => format!("suppressWarnings(local(@[{positions}] <<- {stored}))"),
             },
             // A callee that changes its own copy of the argument.
             23 => format!("(function(z) {{ z[{position}] <- {stored}; z }})(@)"),
