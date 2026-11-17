@@ -37,6 +37,17 @@
 //! }
 //! ```
 //!
+//! So do a string's bytes:
+//!
+//! ```compile_fail,E0502
+//! use heap::handle::{Chars, Cx, Local, Real};
+//! fn bytes_across_an_allocation<'s>(cx: &mut Cx<'s>, text: Local<'s, Chars>) {
+//!     let bytes = text.bytes(cx);
+//!     let copy = cx.alloc::<Real>(1);
+//!     let _ = (bytes, copy);
+//! }
+//! ```
+//!
 //! A rooted value cannot leave the scope that roots it, except as the scope's result:
 //!
 //! ```compile_fail
