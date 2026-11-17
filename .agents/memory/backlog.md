@@ -670,6 +670,9 @@ Rule and order: `development/design/memory-safety.md`, "Migration".
 - **Unaudited.** `jit::runtime` helpers outside `scoped` must leave no handle.
 - **Unverified.** `assign_one` grows an owned list by moving its elements (`grow`, `final_step`)
   and allocates names after, so an allocation failure there would leave the variable empty.
+- **Unexplained.** The hot set counts 1 to 2% more instructions per call on `base::matrix`,
+  `foreach::%do%`, `stats::coef` and lubridate's arithmetic with the subset forms on handles; the
+  per-operation table (`just bench-mechanisms`) shows no row for it.
 - **Raised `unsafe` counts** (`tools/unsafe.py check` reads them), until the helpers migrate:
   - `crates/interp/src/handles.rs` 107 to 149: `alloc_with_room`, `array_subassign`, `array_subset`, `array_subset2`, `call_environment`, `call_value`, `classed_error`, `compact_sequence`, `copy_attributes_to`, `copy_elements`, `copy_most_attributes`, `define`, `dispatch_builtin`, `element_text`, `evaluate`, `force`, `frame_value`, `generated_call`, `holds_elements`, `install_bytes`, `int_element`, `is_altrep`, `item`, `list_to_pairlist`, `mark_shared`, `missing_argument`, `move_elements`, `owned_names`, `pairlist_to_list`, `permanent`, `reaching_environment`, `real_element`, `record_dollar`, `record_dollar_assign`, `record_subassign2`, `record_subset2`, `resize_in_place`, `scalar_subset`, `shallow_copy`, `store_item`, `stored`, `tag`, `type_name`, `warning_in`, `with_result`.
   - `crates/interp/src/interp.rs` 47 to 48: `altrep_storage`, the hook's type.
