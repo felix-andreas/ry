@@ -15,6 +15,7 @@ The specs live in the docs site under `docs/src/content/docs/`. `reference/type-
 
 ## Short-term
 
+- **`tools/unsafe.py check` fails** on `bytecode.rs`, `eval.rs`, `interp.rs` and `profile_summary.rs` in `crates/interp/src`. Move the profile summary's call and return code onto handles, never raise the baseline (`crates/interp/AGENTS.md`). Delete this line after.
 - **Reinstall `.corpus/ry-library`** (`just corpus-ry-install`) once: ry refuses its compiled packages, which carry `RyBuilt:` without `RyAbi:` (`decisions/libr-rcmd.md`, "A package ry compiled records its headers' binary interface"). Delete this line after.
 - **Vector kernels.** Toward 10x on element-wise code, the next steps are fusing `sum`/`mean` consumers into the fused pass and an AVX-512 `exp` (`crates/interp/src/kernels.rs`, `vector_math.rs`; `backlog.md`, "Open: untyped R against GNU R").
 - **Ahead-of-time compilation.** `ry run --aot` compiles a script's top-level typed functions, and those of files it sources into the global environment, before they run. `ry install` and `ry build --aot` install a typed package's elaborated sources and write its typed code file, whose code a session maps and attaches per function at its first call (`development/typed-code-file.md`); `--train` adds the versions the workload compiled. Native code that gives up after R calls replays the call in the interpreter (`interp::replay`). `ry build --aot --exe main.R` appends the elaborated script and its code file to a copy of `ry` (`crates/ry/src/executable.rs`), and the executable attaches from itself. Steps 1 to 4 of `backlog.md`, "Open: ahead-of-time compilation", are built; its loose ends (macOS runs, embedded sourced files) wait for a machine or a real program.
@@ -28,6 +29,7 @@ Most important first. Each line names the open item, and the detail is at its po
 **Runtime correctness and compatibility**
 
 - Failures main already has: "Open: broken on main".
+- Memory safety: interpreter code moves onto handle types that make holding an unrooted value across an allocation a compile error (`development/design/memory-safety.md`). Tier 0's stores, the attribute setters, name matching and the subset forms are on them, and the order of the rest is in "Open: the handle migration".
 - Open bug: with `RY_JIT=force`, compiled code misses a write that an argument promise makes to its caller's variable, so `crates/oracle/cases/environments__code_argument_references.R` fails in force mode ("Open: the JIT").
 - Runtime gaps, among them annotations at run time, graphics ("Graphics gaps"), the corpus packages' own tests ("Corpus package tests: what still fails"), the top CRAN packages' tests ("Top CRAN packages: what still fails") and GNU R's regression tests: "Open: the runtime".
 - The three benchmark code bases pass every generated test, and their per-test time trails GNU R's. Close that gap, then run `ry check` over the generated code for false reports ("Open: the benchmark packages under ry's runtime").
@@ -104,6 +106,7 @@ Cross-cutting traps and conventions. A trap that belongs to one crate lives in t
 ### Testing
 
 - **Typing is off unless `ry.toml` has `[check]` `typing = true` or the file starts with `# typing: on`**, so a throwaway project passes every type rule silently. To read an inferred type, annotate the binding with a type it cannot have and read the `found` half.
+- **Check a change to a path that keeps a value across a call with each case run twice in one process under seeded collection stress**: `oracle compare --engine ry-repeat-gctorture-seeded` on the affected case groups, or `just gc-torture repeat` for every case. A second call reaches the reused frames, plans and caches that one run never does.
 - **An oracle is trusted only once an injected bug turns it red.** Determinism, idempotence and round-trip checks pass on a uniformly wrong answer.
 - **Give a differential oracle inputs that always exist**: a test pointed only at a gitignored corpus never runs, and the runner hides its skip note.
 - **A foreign renderer's expectations are never bulk-blessed**; adjudicate each case against the typing reference.

@@ -401,6 +401,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Interpreter code holds values through handles the borrow checker checks
 - Whether a vector may be written in place is a value, `Owned`
 - A builtin's fast-path entry runs in its caller's handle scope and answers unrooted
+- A raw entry into handle code picks its scope by who releases
 - An allocation failure reports the size of the vector's data
 - A list of inert elements skips its children when it dies
 
@@ -609,6 +610,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The differential fuzzer compares canonical dumps, over five kinds of program
 - A test user's application workload is a suite scored by total time
 - The analysis batteries share one generator and check sessions on warm databases
+- The parser is fuzzed against GNU R's `parse()`, with the known differences in one list
 
 ## Docs, process and positioning
 

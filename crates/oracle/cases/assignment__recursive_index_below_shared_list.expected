@@ -1,0 +1,43 @@
+[stdout]
+| [1] 1 2
+| List of 1
+|  $ a:List of 1
+|   ..$ b:List of 1
+|   .. ..$ c: num 1
+| List of 1
+|  $ a:List of 1
+|   ..$ b:List of 2
+|   .. ..$ c: num 1
+|   .. ..$ d: num 2
+| [1] 1 2
+|     2 
+| 1 2 9 
+| List of 1
+|  $ a:List of 1
+|   ..$ b:List of 2
+|   .. ..$ c: num 1
+|   .. ..$ d: num 2
+| List of 1
+|  $ a:List of 1
+|   ..$ b:List of 1
+|   .. ..$ d: num 2
+| [1] 1
+| [1] "deep"
+| [1] 1 0
+| [1] 5
+| [1] "NAs are not allowed in subscripted assignments"
+| [1] "NAs are not allowed in subscripted assignments"
+| [1] "NAs are not allowed in subscripted assignments"
+| [1] "NAs are not allowed in subscripted assignments"
+| [1] "NAs are not allowed in subscripted assignments"
+| [1] 1 2 3
+| [1] 1 7 3
+| [1] "replacement has length zero"
+| v[c(NA, 1)] <- 4:5
+| [1] "no error"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "no error"

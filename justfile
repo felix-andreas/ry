@@ -79,6 +79,11 @@ ci:
     bash tools/oracle-locales.sh
     just base-r dev
     just fmt-check
+    # `just unsafe` reads the first version of its baseline, which a shallow checkout lacks.
+    if [ -n "${CI:-}" ] && [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+        git fetch --quiet --unshallow origin
+    fi
+    just unsafe
     just clippy
     just battery
 
@@ -270,6 +275,8 @@ comments *args="check":
 
 # Fails when a file outside heap, libr, jit, typed and ssa has more `unsafe` than its baseline, e.g.
 # `just unsafe stats` for the counts per crate or `just unsafe baseline` after removing some.
+# `baseline` never raises a count: a raise is a hand edit plus a backlog line naming the functions,
+# which `check` asks for wherever a count is above the baseline's first version.
 unsafe *args="check":
     python3 -I tools/unsafe.py {{ args }}
 
@@ -523,8 +530,8 @@ nightly-name commit="HEAD":
     echo "nightly.$stamp.${hash:0:6}"
 
 # Publish release/NAME as a nightly GitHub release, then delete all but the newest five nightlies.
-# It is a normal release with `--latest=false`, never a pre-release: the Zed extension installs the
-# newest pre-release, and GitHub's "latest" must keep pointing at a real release.
+# It is a pre-release with `--latest=false`: the Zed extension installs only full releases, and
+# GitHub's "latest" must keep pointing at one.
 # Needs `gh` signed in (GH_TOKEN in CI).
 nightly-publish name:
     #!/usr/bin/env bash
@@ -779,7 +786,7 @@ fuzz-differential seed="0" count="200" engines="ry-tier0,ry-jit":
 # function of base, stats and utils), `io` (round trips through files and connections), `language`
 # (closures over promises, frames, conditions, dispatch and quoted code, called repeatedly),
 # `perturbed` (a generated program with dead and effect-free statements inserted into its function
-# bodies), `corpus`, or `all`, e.g. `just fuzz-kind metamorphic 0 500`.
+# bodies), `parser` (source fragments handed to `parse(text =)`), `corpus`, or `all`, e.g. `just fuzz-kind metamorphic 0 500`.
 # Diverging programs and their reports go to target/fuzz-findings.
 fuzz-kind kind="all" seed="0" count="200" engines="ry-tier0,ry-jit":
     cargo build -q -p ry-lang -p libr -p rcmd -p oracle

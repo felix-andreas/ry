@@ -71,6 +71,8 @@ grid <- matrix(0, 4L, 4L)
 wide <- matrix(0, 10L, 10L)
 kstore <- function(v) { v[2L] <- 9; v }
 kgrid <- function(m) { m[1L, 1L] <- 1; m[2L, 2L] <- 1; m }
+kappend <- function() { x <- numeric(0); x[[1L]] <- 1; x[[2L]] <- 2; x[[3L]] <- 3; x }
+kfield <- function(l) { l$z <- 1; l }
 """
 
 # (name, expression). The loop assigns the expression's value, so an operation's count includes
@@ -179,6 +181,8 @@ OPERATIONS = [
     ("assign: element of an argument, copied", "kstore(numbers)"),
     ("assign: two matrix elements of an argument, copied", "kgrid(grid)"),
     ("assign: two matrix elements of a 100-element argument, copied", "kgrid(wide)"),
+    ("assign: three appends to a new vector", "kappend()"),
+    ("assign: a new field of a list argument", "kfield(plain)"),
 ]
 
 EMPTY = "empty loop"

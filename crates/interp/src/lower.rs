@@ -169,37 +169,69 @@ pub unsafe fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailu
     let parse = syntax::parse(text);
     let root = parse.syntax_node();
     // A broken `#:` comment is a comment to R, so only R's own grammar can fail a parse.
-    let grammar_failure = parse
+    let mut grammar_errors = parse
         .errors()
         .iter()
-        .find(|failure| !failure.in_annotation)
-        .map(|failure| {
-            let offset = usize::from(failure.range.start()).min(text.len());
-            pipe_bind_failure(text, offset).unwrap_or_else(|| {
-                let found = match failure.unexpected {
-                    Unexpected::Token(found) => Some(found),
-                    Unexpected::EndOfInput => None,
-                    Unexpected::Nothing => {
-                        return SyntaxFailure {
-                            message: failure.message.clone(),
-                            unexpected: None,
-                            offset,
-                            condition: None,
-                        };
-                    }
-                };
-                let unexpected = found.map_or(text.len()..text.len(), |found| {
-                    usize::from(found.start()).min(text.len())
-                        ..usize::from(found.end()).min(text.len())
-                });
-                SyntaxFailure {
-                    message: unexpected_token(&root, text, &unexpected),
-                    unexpected: Some(unexpected),
-                    offset,
-                    condition: None,
+        .filter(|failure| !failure.in_annotation);
+    let first = grammar_errors.next();
+    // GNU R reads the final line break before the end of the input, so a construct that the
+    // line break cuts short fails before a group that the end of the input leaves open.
+    let reported = match first {
+        Some(failure) if matches!(failure.unexpected, Unexpected::EndOfInput) => grammar_errors
+            .find(|failure| matches!(failure.unexpected, Unexpected::EndOfLine))
+            .or(first),
+        first => first,
+    };
+    let grammar_failure = reported.map(|failure| {
+        let offset = usize::from(failure.range.start()).min(text.len());
+        pipe_bind_failure(text, offset).unwrap_or_else(|| {
+            let found = match failure.unexpected {
+                Unexpected::Token(found) => Some(found),
+                Unexpected::EndOfInput => None,
+                Unexpected::EndOfLine => {
+                    return SyntaxFailure {
+                        message: END_OF_LINE.to_owned(),
+                        unexpected: Some(text.len()..text.len()),
+                        offset,
+                        condition: None,
+                    };
                 }
-            })
-        });
+                Unexpected::Nothing => {
+                    return SyntaxFailure {
+                        message: failure.message.clone(),
+                        unexpected: None,
+                        offset,
+                        condition: None,
+                    };
+                }
+            };
+            let unexpected = found.map_or(text.len()..text.len(), |found| {
+                let start = usize::from(found.start()).min(text.len());
+                let mut end = usize::from(found.end()).min(text.len());
+                // GNU R's lexer has read the character that shows a number to be malformed,
+                // so the lines it quotes reach through that character.
+                let refused_number = text[start..]
+                    .starts_with(|first: char| first == '.' || first.is_ascii_digit())
+                    && root
+                        .token_at_offset(found.start())
+                        .right_biased()
+                        .is_some_and(|token| token.kind() == SyntaxKind::ERROR_TOKEN);
+                if refused_number
+                    && let Some(next) = text[end..].chars().next()
+                    && next != '\n'
+                {
+                    end += next.len_utf8();
+                }
+                start..end
+            });
+            SyntaxFailure {
+                message: unexpected_token(&root, text, &unexpected),
+                unexpected: Some(unexpected),
+                offset,
+                condition: None,
+            }
+        })
+    });
     // GNU R's lexer raises its own errors as it reads a token, so the first of them in a token
     // that starts before the grammar error, an unterminated string included, is the one
     // reported.
@@ -300,7 +332,8 @@ pub fn syntax_failure_message(text: &str, failure: &SyntaxFailure, source_name: 
         let column = before
             .rsplit('\n')
             .next()
-            .map_or(0, |line| line.chars().count());
+            .map_or(0, |line| line.chars().count())
+            + 1;
         return format!("{prefix}{line}:{column}: {}", failure.message);
     };
     let report = grammar_error_report(text, unexpected, 0, failure.message == INCOMPLETE_STRING);
@@ -336,7 +369,8 @@ pub fn script_syntax_failure_message(script: &Script<'_>, failure: &SyntaxFailur
     let Some(unexpected) = &failure.unexpected else {
         return syntax_failure_message(text, failure, "<text>");
     };
-    if unexpected.is_empty() && unexpected.start >= text.len() {
+    // GNU R quotes no text for the end of the input, and the last line for its line break.
+    if unexpected.is_empty() && unexpected.start >= text.len() && failure.message != END_OF_LINE {
         return failure.message.clone();
     }
     // A string the script's end cuts short leaves GNU R's console waiting for more input.
@@ -364,7 +398,7 @@ pub fn script_syntax_failure_message(script: &Script<'_>, failure: &SyntaxFailur
 struct GrammarErrorReport {
     line: usize,
     /// GNU R's 1-based column of the token's first character, with tabs advancing to the next
-    /// multiple of 8, or 0 at the end of the input.
+    /// multiple of 8, or 0 at the end of the input and at a line break.
     column: usize,
     /// The line number of the last quoted line.
     context_line: usize,
@@ -389,12 +423,15 @@ fn grammar_error_report(
     } else {
         text[..unexpected.end.min(text.len())].to_owned()
     };
-    let line = if at_end {
+    // GNU R's lexer has read past a line break when its parser refuses it, so the error is at
+    // column 0 of the next line.
+    let at_line_break = text[unexpected.start.min(text.len())..].starts_with('\n');
+    let line = if at_end || at_line_break {
         read.matches('\n').count()
     } else {
         text[..unexpected.start].matches('\n').count()
     } + 1;
-    let column = if at_end {
+    let column = if at_end || at_line_break {
         0
     } else {
         let line_start = text[..unexpected.start]
@@ -493,7 +530,14 @@ fn token_description(token: &SyntaxToken, text: &str) -> String {
         SyntaxKind::MINUS_GREATER | SyntaxKind::MINUS_GREATER2 => "'->'",
         SyntaxKind::SPECIAL => "SPECIAL",
         SyntaxKind::NEWLINE => "end of line",
+        SyntaxKind::UNDERSCORE => "input",
+        // GNU R's lexer hands a control character to the grammar as a token of its own.
+        SyntaxKind::ERROR_TOKEN if text.starts_with(|first: char| first.is_ascii_control()) => {
+            "invalid token"
+        }
         SyntaxKind::ERROR_TOKEN => "input",
+        SyntaxKind::BACKSLASH => "'\\\\'",
+        SyntaxKind::CARET => "'^'",
         _ => return format!("'{text}'"),
     };
     name.to_owned()
@@ -836,9 +880,8 @@ fn escape_syntax_failure(start: usize, failure: EscapeFailure) -> SyntaxFailure 
 /// GNU R's error for the first token that lacks a delimiter, with the offset where the token
 /// starts. GNU R's lexer reads a string, a raw string or a backquoted name through to the end
 /// of the input, so the token it reports reaches there, where ry's lexer ends it with its
-/// line. An escape GNU R rejects anywhere in that stretch is the error instead. A `%` operator
-/// ends with its line in both, and a raw string without its opening bracket is an error of
-/// GNU R's lexer.
+/// line. An escape GNU R rejects anywhere in that stretch is the error instead. A raw string
+/// without its opening bracket is an error of GNU R's lexer.
 fn unterminated_failure(root: &SyntaxNode, text: &str) -> Option<(usize, SyntaxFailure)> {
     root.node_ref()
         .tokens_outside(is_skipped, |kind| {
@@ -880,18 +923,13 @@ fn unterminated_failure(root: &SyntaxNode, text: &str) -> Option<(usize, SyntaxF
                     };
                     return Some((start, failure));
                 }
-                SyntaxKind::ERROR_TOKEN if token_text.starts_with('%') => {
-                    let failure = SyntaxFailure {
-                        message: "unexpected input".to_owned(),
-                        unexpected: Some(start..start + token_text.len()),
-                        offset: start,
-                        condition: None,
-                    };
-                    return Some((start, failure));
-                }
                 _ => return None,
             };
-            if escapes && let Err(failure) = unescape_bytes(&text[start + 1..]) {
+            // GNU R reports mixed escapes at the closing quote, which this literal lacks.
+            if escapes
+                && let Err(failure) = unescape_bytes(&text[start + 1..])
+                && failure.class != "mixedEscapes"
+            {
                 return Some((start, escape_syntax_failure(start, failure)));
             }
             let failure = SyntaxFailure {
@@ -906,6 +944,7 @@ fn unterminated_failure(root: &SyntaxNode, text: &str) -> Option<(usize, SyntaxF
 
 /// GNU R's message for a string, raw string or backquoted name the input ends inside.
 const INCOMPLETE_STRING: &str = "unexpected INCOMPLETE_STRING";
+const END_OF_LINE: &str = "unexpected end of line";
 
 /// Whether a raw string literal's text ends with the delimiter that mirrors its opening one.
 fn is_terminated_raw_string(text: &str) -> bool {
@@ -1917,9 +1956,9 @@ unsafe fn format_string(node: NodeRef<'_>, context: Lowering<'_>) -> R<Sexp> {
         match child {
             NodeOrToken::Token(token) if token.kind() == SyntaxKind::FSTRING_TEXT => {
                 let text = token.text().replace("{{", "{").replace("}}", "}");
-                let (bytes, high_byte) =
+                let (bytes, native) =
                     unescape_bytes(&text).map_err(|failure| error(failure.message))?;
-                let encoding = if high_byte {
+                let encoding = if native {
                     Encoding::Native
                 } else {
                     Encoding::Utf8
@@ -2347,9 +2386,9 @@ unsafe fn literal(token: TokenRef<'_>) -> R<Sexp> {
         }
         SyntaxKind::STRING => {
             let inner = &text[1..text.len().saturating_sub(1).max(1)];
-            let (bytes, high_byte) =
+            let (bytes, native) =
                 unescape_bytes(inner).map_err(|failure| error(failure.message))?;
-            let encoding = if high_byte {
+            let encoding = if native {
                 Encoding::Native
             } else {
                 Encoding::Utf8
@@ -2438,12 +2477,13 @@ pub struct EscapeFailure {
 }
 
 /// Resolves R's string escapes. Octal and `\x` escapes give single bytes, so the result need
-/// not be UTF-8; the flag says whether such an escape gave a byte past ASCII, which leaves the
-/// string in the native encoding instead of marked as UTF-8, as in GNU R.
+/// not be UTF-8; the flag says whether the literal holds such an escape or a byte outside UTF-8,
+/// which leaves the string in the native encoding instead of marked as UTF-8, as in GNU R.
 pub fn unescape_bytes(text: &str) -> Result<(Vec<u8>, bool), EscapeFailure> {
     let mut bytes = Vec::with_capacity(text.len());
     let mut result = String::new();
-    let mut high_byte = false;
+    let mut native = false;
+    let mut byte_escape = false;
     let mut unicode = false;
     let mut characters = text.char_indices().peekable();
     let failure = |class, message: String, offset, value| EscapeFailure {
@@ -2456,7 +2496,7 @@ pub fn unescape_bytes(text: &str) -> Result<(Vec<u8>, bool), EscapeFailure> {
         if let Some(byte) = values::escaped_byte(character) {
             bytes.extend_from_slice(std::mem::take(&mut result).as_bytes());
             bytes.push(byte);
-            high_byte = true;
+            native = true;
             continue;
         }
         if character != '\\' {
@@ -2503,7 +2543,7 @@ pub fn unescape_bytes(text: &str) -> Result<(Vec<u8>, bool), EscapeFailure> {
                 }
                 bytes.extend_from_slice(std::mem::take(&mut result).as_bytes());
                 bytes.push(value as u8);
-                high_byte |= value >= 0x80;
+                byte_escape = true;
             }
             'x' => {
                 let (value, count) = escape_digits(&mut characters, 16, 2, &mut last);
@@ -2525,7 +2565,7 @@ pub fn unescape_bytes(text: &str) -> Result<(Vec<u8>, bool), EscapeFailure> {
                 }
                 bytes.extend_from_slice(std::mem::take(&mut result).as_bytes());
                 bytes.push(value as u8);
-                high_byte |= value >= 0x80;
+                byte_escape = true;
             }
             'u' | 'U' => {
                 let limit = if escape == 'u' { 4 } else { 8 };
@@ -2587,7 +2627,7 @@ pub fn unescape_bytes(text: &str) -> Result<(Vec<u8>, bool), EscapeFailure> {
                         ConditionValue::Null,
                     ));
                 }
-                unicode |= value >= 0x80;
+                unicode = true;
                 result.push(decoded);
             }
             other => {
@@ -2600,7 +2640,7 @@ pub fn unescape_bytes(text: &str) -> Result<(Vec<u8>, bool), EscapeFailure> {
             }
         }
     }
-    if unicode && high_byte {
+    if unicode && byte_escape {
         return Err(failure(
             "mixedEscapes",
             "mixing Unicode and octal/hex escapes in a string is not allowed".into(),
@@ -2609,7 +2649,7 @@ pub fn unescape_bytes(text: &str) -> Result<(Vec<u8>, bool), EscapeFailure> {
         ));
     }
     bytes.extend_from_slice(result.as_bytes());
-    Ok((bytes, high_byte))
+    Ok((bytes, native || byte_escape))
 }
 
 /// Reads up to `limit` digits in `radix`, moving `last` to the offset of the last one read.

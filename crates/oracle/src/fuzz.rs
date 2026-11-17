@@ -1167,13 +1167,16 @@ pub enum ProgramKind {
     /// A grammar, metamorphic or language program after [`mutate::perturb`](crate::mutate::perturb):
     /// the same computation in bodies the compiler sees differently.
     Perturbed,
+    /// [`parser::program`](crate::parser::program): source fragments through `parse(text =)`,
+    /// with the tree or the error of each.
+    Parser,
 }
 
 /// The writable memory a fuzzed engine may map. GNU R and ry both run every generated program
 /// in a fraction of it, and a program that asks for more gets R's allocation error.
 pub const MEMORY_LIMIT: u64 = 2 << 30;
 
-pub const KINDS: [ProgramKind; 7] = [
+pub const KINDS: [ProgramKind; 8] = [
     ProgramKind::Grammar,
     ProgramKind::Metamorphic,
     ProgramKind::Builtins,
@@ -1181,6 +1184,7 @@ pub const KINDS: [ProgramKind; 7] = [
     ProgramKind::Io,
     ProgramKind::Language,
     ProgramKind::Perturbed,
+    ProgramKind::Parser,
 ];
 
 impl ProgramKind {
@@ -1193,6 +1197,7 @@ impl ProgramKind {
             ProgramKind::Io => "io",
             ProgramKind::Language => "language",
             ProgramKind::Perturbed => "perturbed",
+            ProgramKind::Parser => "parser",
         }
     }
 
@@ -1217,6 +1222,7 @@ impl ProgramKind {
                 };
                 crate::mutate::perturb(&base, seed)
             }
+            ProgramKind::Parser => crate::parser::program(seed),
         }
     }
 }

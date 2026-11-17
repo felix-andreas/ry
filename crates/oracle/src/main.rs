@@ -111,8 +111,12 @@ enum Command {
         /// The programs to run: `grammar` (generated blocks of language features), `metamorphic`
         /// (one value, one body, and the forms that must agree), `builtins` (builtins on a
         /// zoo of values), `api` (calls drawn from every function of base, stats and utils),
-        /// `corpus` (mutated snippets of real R code, `oracle::corpus`), a comma-separated
-        /// list of them, or `all` for each of them on every seed.
+        /// `io` (values written to files and connections and read back), `language` (closures
+        /// over the call stack, evaluation order and dispatch), `perturbed` (such programs in
+        /// bodies the compiler sees differently), `parser` (source fragments through
+        /// `parse(text =)`), `corpus` (mutated snippets of real R code,
+        /// `oracle::corpus`), a comma-separated list of them, or `all` for each of them on
+        /// every seed.
         #[arg(long, default_value = "grammar")]
         kind: String,
         /// Compare only what a program prints, without the deep observer's dump of every
@@ -255,7 +259,7 @@ fn main() -> ExitCode {
             Some([FuzzKind::Corpus]) => print_corpus_program(*seed),
             _ => {
                 eprintln!(
-                    "--print takes one --kind: grammar, metamorphic, builtins, api, io or corpus"
+                    "--print takes one --kind: grammar, metamorphic, builtins, api, io, language, perturbed, parser or corpus"
                 );
                 ExitCode::from(2)
             }
@@ -1072,7 +1076,7 @@ fn check_fuzz_seed(
 fn run_fuzz(run: FuzzRun) -> ExitCode {
     let Some(kinds) = fuzz_kinds(run.kind) else {
         eprintln!(
-            "unknown --kind `{}`: grammar, metamorphic, builtins, api, io, corpus or all",
+            "unknown --kind `{}`: grammar, metamorphic, builtins, api, io, language, perturbed, parser, corpus or all",
             run.kind
         );
         return ExitCode::from(2);

@@ -186,10 +186,10 @@
 
 use {
     crate::{
-        Heap, HeapResult,
+        Heap, HeapResult, flag_bits,
         object::{Rcomplex, Sexp, SexpType},
     },
-    std::{marker::PhantomData, ptr::NonNull},
+    std::{marker::PhantomData, mem::MaybeUninit, ptr::NonNull},
 };
 
 /// The permission to use the heap, under the handle scope `'s`.
@@ -274,6 +274,68 @@ impl<'s> Cx<'s> {
         // SAFETY: `T::TYPE` is a vector type, and a length over `isize::MAX` casts to a
         // negative one, which the heap refuses.
         let raw = unsafe { heap.alloc_vector_rooted(T::TYPE, length as isize)? };
+        Ok(Fresh {
+            raw,
+            scope: PhantomData,
+            kind: PhantomData,
+        })
+    }
+
+    /// A new vector of `length` elements for one fill that writes every element: a number
+    /// vector skips the zeroing [`Cx::alloc`] does.
+    #[inline]
+    pub fn alloc_unfilled<T: Vector>(&mut self, length: usize) -> HeapResult<Unfilled<'s, T>> {
+        // SAFETY: the heap is live, and `&mut self` means no slice or unrooted value is alive.
+        let heap = unsafe { &mut *self.heap.as_ptr() };
+        let raw = match T::TYPE {
+            SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::I64
+            | SexpType::Complex
+            | SexpType::Raw => {
+                // SAFETY: the elements are written before anything reads them, by
+                // `Unfilled::fill`, the only way to the vector.
+                unsafe { heap.alloc_vector_uninit(T::TYPE, length)? }
+            }
+            // A list or string vector is filled with `NULL` or the empty string, because a
+            // collection may trace it before the fill. The heap's inline path keeps that one
+            // call deep, as for a number vector.
+            // SAFETY: `T::TYPE` is a vector type, and a length past `isize` wraps to a
+            // negative one, which the heap refuses.
+            _ => unsafe { heap.alloc_vector_inline(T::TYPE, length as isize)? },
+        };
+        heap.root(raw);
+        Ok(Unfilled {
+            raw,
+            scope: PhantomData,
+            kind: PhantomData,
+        })
+    }
+
+    /// A new vector of the one element `value`.
+    #[inline]
+    pub fn scalar<T: Atomic>(&mut self, value: T::Element) -> HeapResult<Fresh<'s, T>> {
+        // The heap's scalar slot covers the five R number types; an `I64` takes the general path.
+        if T::TYPE == SexpType::I64 {
+            return Ok(self.alloc_unfilled::<T>(1)?.fill(std::iter::once(value)));
+        }
+        const { assert!(size_of::<T::Element>() <= 16) };
+        let mut payload = [0u64; 2];
+        // SAFETY: an atomic element is plain data of at most the payload's 16 bytes, and the
+        // two do not overlap.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                (&raw const value).cast::<u8>(),
+                payload.as_mut_ptr().cast::<u8>(),
+                size_of::<T::Element>(),
+            );
+        }
+        // SAFETY: the heap is live, and `&mut self` means no slice or unrooted value is alive.
+        let heap = unsafe { &mut *self.heap.as_ptr() };
+        // SAFETY: `T::TYPE` is one of the number types the scalar slot holds.
+        let raw = unsafe { heap.alloc_scalar(T::TYPE, payload)? };
+        heap.root(raw);
         Ok(Fresh {
             raw,
             scope: PhantomData,
@@ -489,6 +551,31 @@ impl<'a> Gc<'a, Pairlist> {
     }
 }
 
+impl<'a> Gc<'a, Language> {
+    /// The function position of the call.
+    #[inline]
+    pub fn head(self) -> Gc<'a> {
+        // SAFETY: the cell is live for `'a` and keeps its fields alive.
+        unsafe { Gc::adopt(self.raw.car()) }
+    }
+
+    /// The call's arguments: a pairlist, or `NULL`.
+    #[inline]
+    pub fn rest(self) -> Gc<'a> {
+        // SAFETY: as for `head`.
+        unsafe { Gc::adopt(self.raw.cdr()) }
+    }
+}
+
+impl<'a> Gc<'a, Promise> {
+    /// The expression the promise evaluates.
+    #[inline]
+    pub fn code(self) -> Gc<'a> {
+        // SAFETY: the promise is live for `'a` and keeps its expression alive.
+        unsafe { Gc::adopt(self.raw.cdr()) }
+    }
+}
+
 /// A pointer rooted in the handle scope `'s`.
 #[repr(transparent)]
 pub struct Local<'s, T: Kind = Value> {
@@ -547,6 +634,15 @@ impl<'s, T: Kind> Local<'s, T> {
     pub fn r_type(self) -> SexpType {
         // SAFETY: the object is rooted.
         unsafe { self.raw.kind() }
+    }
+
+    /// Whether more than one object refers to this one, so that a change must go into a copy.
+    /// An element of a shared list is reachable through that list's other owners even when
+    /// this is false for the element.
+    #[inline]
+    pub fn is_shared(self) -> bool {
+        // SAFETY: the object is rooted.
+        unsafe { self.raw.refcount() > 1 }
     }
 
     /// Whether this and `other` are one object. Strings have no such test, because one text
@@ -758,6 +854,69 @@ impl<T: Elements> Fresh<'_, T> {
     }
 }
 
+/// A new vector whose elements are still to be written, from [`Cx::alloc_unfilled`]. It holds
+/// no borrow of the context, so the elements may come from slices the context lends after the
+/// allocation, and its one fill writes them in a single pass.
+pub struct Unfilled<'s, T: Vector> {
+    raw: Sexp,
+    scope: Brand<'s>,
+    kind: PhantomData<T>,
+}
+
+impl<'s, T: Atomic> Unfilled<'s, T> {
+    /// The vector with `elements` in order, and zeros after them when they run out.
+    #[inline(always)]
+    pub fn fill(self, elements: impl Iterator<Item = T::Element>) -> Fresh<'s, T> {
+        // SAFETY: the vector is a standard one of `T` that only `self` reaches, with room for
+        // `length` elements, and any bit pattern written as `MaybeUninit` is a valid slot.
+        let slots = unsafe {
+            std::slice::from_raw_parts_mut(
+                self.raw.data() as *mut MaybeUninit<T::Element>,
+                self.raw.length() as usize,
+            )
+        };
+        let mut slots = slots.iter_mut();
+        for (element, slot) in elements.zip(slots.by_ref()) {
+            slot.write(element);
+        }
+        let rest = slots.into_slice();
+        // SAFETY: zero bytes are a valid number of every atomic element type.
+        unsafe { std::ptr::write_bytes(rest.as_mut_ptr(), 0, rest.len()) };
+        Fresh {
+            raw: self.raw,
+            scope: PhantomData,
+            kind: PhantomData,
+        }
+    }
+}
+
+impl<'s, T: Elements> Unfilled<'s, T> {
+    /// The vector with `elements` in order, and the type's fill (`NULL` or the empty string)
+    /// after them. The slots are written directly and counted as references once afterwards,
+    /// which costs a list or string vector one pass instead of a barrier per element.
+    #[inline(always)]
+    pub fn fill_elements<'a>(
+        self,
+        cx: &'a Cx<'_>,
+        elements: impl Iterator<Item = Gc<'a, T::Element>>,
+    ) -> Fresh<'s, T> {
+        // SAFETY: the vector is a standard one of `T` that only `self` reaches, so no slice of
+        // it is alive, and each element is a live object of the element kind. Every slot held
+        // the uncounted fill `alloc_vector` writes, which `count_written_elements` requires.
+        unsafe {
+            for (slot, element) in self.raw.slice_mut::<Sexp>().iter_mut().zip(elements) {
+                *slot = element.raw();
+            }
+            (*cx.heap.as_ptr()).count_written_elements(self.raw);
+        }
+        Fresh {
+            raw: self.raw,
+            scope: PhantomData,
+            kind: PhantomData,
+        }
+    }
+}
+
 /// Exclusive access to an existing object. It holds the context, so no R code runs, nothing
 /// allocates and no slice taken earlier is alive while the object is written.
 pub struct Write<'a, 's, T: Vector> {
@@ -870,6 +1029,7 @@ impl<'r> Reader<'r> {
 /// becomes one through [`Owned::assume`], after the test its holder defines (a reference count
 /// of one and no uncounted holder). Code that updates a variable asks for its `Owned` value
 /// once, copies when there is none, and writes only through the result.
+#[repr(transparent)]
 pub struct Owned<'s, T: Kind = Value> {
     raw: Sexp,
     scope: Brand<'s>,
@@ -929,9 +1089,31 @@ impl<'s, T: Kind> Owned<'s, T> {
             Err(self)
         }
     }
+
+    /// The object as kind `U` while the borrow lasts, or `None` when it is not one. Code whose
+    /// vector kind is known only at run time keeps one `Owned` value and narrows it per write.
+    #[inline]
+    pub fn narrow<U: Kind>(&mut self) -> Option<&mut Owned<'s, U>> {
+        // SAFETY: `Owned` is `repr(transparent)` over the pointer and the kind is a marker, so
+        // the two types have one layout, and `admits` checked the object's kind.
+        admits::<U>(self.raw)
+            .then(|| unsafe { &mut *std::ptr::from_mut(self).cast::<Owned<'s, U>>() })
+    }
 }
 
 impl<'s, T: Vector> Owned<'s, T> {
+    /// Whether the vector's storage holds `length` elements, so that it can grow to that
+    /// length where it is.
+    #[inline]
+    pub fn has_room(&self, length: usize) -> bool {
+        // SAFETY: the object is rooted, and the test reads its header.
+        unsafe {
+            self.raw.flags() & flag_bits::RESIZABLE != 0
+                && !self.raw.is_altrep()
+                && length as isize <= self.raw.capacity()
+        }
+    }
+
     /// Access to write the vector's elements where they are.
     #[inline]
     pub fn write<'a>(&'a mut self, cx: &'a mut Cx<'s>) -> Write<'a, 's, T> {
@@ -1047,6 +1229,8 @@ kinds! {
     Real = Real, |altrep| !altrep;
     Complex = Complex, |altrep| !altrep;
     Raw = Raw, |altrep| !altrep;
+    /// A vector of 64-bit integers.
+    I64 = I64, |altrep| !altrep;
     /// A character vector.
     Str = String, |altrep| !altrep;
     List = List, |altrep| !altrep;
@@ -1089,6 +1273,7 @@ vectors! {
     Real: Atomic<f64>;
     Complex: Atomic<Rcomplex>;
     Raw: Atomic<u8>;
+    I64: Atomic<i64>;
     List: Elements<Value>;
     Expression: Elements<Value>;
 }
