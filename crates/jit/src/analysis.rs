@@ -3954,6 +3954,11 @@ impl<'a> Builder<'a> {
         if annotations::is_typed(function) {
             return Err("the callee is typed");
         }
+        // Tier 0's call runs such a closure in native code, without its body and without a
+        // frame, which costs less than any inlined frame of the body.
+        if function.has_gp(gp::NATIVE_ENTRY) {
+            return Err("the callee's calls run natively");
+        }
         if code == self.code {
             return Err("the call is recursive");
         }

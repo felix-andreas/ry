@@ -132,7 +132,8 @@ compiled code through frame states"). Generic callees qualify under these rules:
   only after an exit, where it finds every frame and every promise as tier 0 would have left them.
 - **A profile summary does not stop an inlined call.** A profile that changes which path runs
   measures another program. The summary attributes an inlined callee's time to compiled code and
-  to its caller's row.
+  to its caller's row. An exit under the summary pushes the frames it rebuilds, where a call
+  that starts under the summary runs whole on the general path (`eval::Entering`).
 
 These callees keep their frame, and their call is a step:
 
@@ -144,6 +145,7 @@ These callees keep their frame, and their call is a step:
 | An argument the callee reads may have an effect | The effect must happen where a promise would be forced |
 | The callee is longer than 512 instruction words, the nesting is deeper than 3, or the call is recursive | The compile is bounded |
 | The callee is typed, or has more than 64 formals | A typed callee has its native function |
+| The callee has a native entry (a base closure that tier 0 runs in native code) | Tier 0's call runs neither its body nor a frame |
 | The callee's environment may not outlive the compiled code | The code holds the callee by its address |
 | The callee runs an instruction only tier 0 has, or a call that needs its own frame, on every path | Every call would exit |
 

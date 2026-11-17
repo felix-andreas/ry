@@ -1452,6 +1452,28 @@ fn native_entries_hold_in_slot_frames() {
     );
 }
 
+/// Compiled code rebuilds the frame of an inlined call while the profile summary counts. A call
+/// that starts under the summary runs whole on the general path, which a half-run call cannot,
+/// so the rebuilt frame is pushed. The last ten calls of `inner` take a branch that never ran
+/// while tier 0 recorded, which leaves compiled code inside the inlined call and returns a value.
+#[test]
+fn inlined_frames_rebuild_under_the_profile_summary() {
+    let script = "inner <- function(x) if (x > 19990) nchar(\"late\") else x + 1\n\
+                  outer <- function(x) inner(x) + 1\n\
+                  total <- 0\n\
+                  for (i in seq_len(20000)) total <- total + outer(i)\n\
+                  cat(total, \"\\n\")\n";
+    let Some((summary, stdout)) = profile_summary(&[("frames.R", script)]) else {
+        return;
+    };
+    assert_eq!(stdout, "199850075 \n");
+    let exits = summary_count(&summary, "JIT deoptimizations");
+    assert!(
+        exits > 0,
+        "compiled code never left an inlined call, so no frame was rebuilt"
+    );
+}
+
 /// A typed call the typed core declines still reads its arguments first. When an argument is a
 /// call made in a slot frame, finding that call's function must not give the frame an
 /// environment, which a lookup in its pending environment would, on every call.

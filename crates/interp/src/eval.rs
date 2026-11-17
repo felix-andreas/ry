@@ -2696,6 +2696,7 @@ pub unsafe fn apply_closure_entering(
             header,
             missing,
             promised,
+            Entering::Start,
         );
     }
     let value = run_on_heap_frame(call, function, args, sys_parent, supplied, Entry::Unchecked)?;
@@ -3148,6 +3149,7 @@ pub unsafe fn bind_plan(
         header as u32,
         missing,
         promised,
+        Entering::Start,
     )
 }
 
@@ -3540,6 +3542,7 @@ pub unsafe fn run_frame(
         header,
         missing,
         promised,
+        Entering::Start,
     )?;
     if entered.header == crate::NO_SLOTS {
         return Ok(entered.value);
@@ -3560,10 +3563,22 @@ pub struct Entered {
     pub depth: u32,
 }
 
+/// Where a call stands when [`enter`] pushes its frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Entering {
+    /// The call starts, so one that needs the general path can run whole.
+    Start,
+    /// The call is half run: compiled code rebuilds the frame of an inlined call, whose start
+    /// already refused what the general path would have refused. The frame is pushed whatever
+    /// the session counts or debugs.
+    Midway,
+}
+
 /// Pushes the frame of a call of `function` on the slot frame at `header`, whose arguments are
 /// already bound, without running its body, so an interpreter loop can run the body in place
-/// rather than recursing. A call that needs what only the general path does (activity
-/// counters, the debugger, the object-system refusal, a namespace load) runs whole here.
+/// rather than recursing. A call that starts and needs what only the general path does
+/// (activity counters, the debugger, the object-system refusal, a namespace load) runs whole
+/// here.
 ///
 /// From a successful return until [`leave`], the frame is the slot owner. The slot frame's
 /// registers belong to the call: [`leave`] releases them, and so does `enter` itself on an
@@ -3578,12 +3593,14 @@ pub unsafe fn enter(
     header: u32,
     missing: u64,
     promised: u64,
+    entering: Entering,
 ) -> R<Entered> {
     let state = interp();
-    if activity::enabled()
-        || !state.object_systems
-        || function == state.namespace_loader
-        || (state.debugger.is_some() && function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP))
+    if entering == Entering::Start
+        && (activity::enabled()
+            || !state.object_systems
+            || function == state.namespace_loader
+            || (state.debugger.is_some() && function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)))
     {
         let frame = CallFrame::Slots {
             header,

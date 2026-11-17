@@ -20,7 +20,8 @@ use {
         arith,
         builtins::Arg,
         bytecode::{self, LoopState, Machine, PROFILE, StepEnd, Stepper, TIER1, profile},
-        eval, heap, moves,
+        eval::{self, Entering},
+        heap, moves,
         standard_library::{self, CompiledKey},
         unwind::{R, Unwind, error},
         values,
@@ -1631,6 +1632,7 @@ unsafe fn enter_inlined(
             header as u32,
             missing,
             promised,
+            Entering::Midway,
         )?;
         if entered.header == interp::NO_SLOTS {
             panic!("an inlined call ran whole where only its frame was to be pushed");
