@@ -97,7 +97,9 @@ what you meant or silences a finding without handling it, so it needs `--unsafe-
 ## On by default
 
 **`syntax-error`** (error): code R would refuse to parse, or an assignment target R would refuse to
-run, such as `1 + a <- 2`. A parse error names what is missing, stays on the line that caused it, and
+run, such as `1 + a <- 2`. It covers what R's parser checks beyond its grammar too: an escape a
+string cannot hold (`"\q"`), a parameter declared twice, a `|>` whose right side is not a call or
+misuses the placeholder `_`, and an empty name. A parse error names what is missing, stays on the line that caused it, and
 hides every other finding in the broken statement, because ry draws no conclusions from code it
 could not read. Strict mode can still report an undetermined type there.
 

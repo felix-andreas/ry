@@ -831,7 +831,7 @@ unsafe fn run_script(text: &str, source_name: &str) -> Outcome {
             }
         }
         if let Some(failure) = failure {
-            if failure.condition.is_some() {
+            if matches!(failure.report, crate::lower::FailureReport::Condition(_)) {
                 report_toplevel(crate::lower::syntax_failure_unwind(
                     rest,
                     &failure,
@@ -898,7 +898,7 @@ pub unsafe fn run_console(
             }
         }
         if succeeded && let Some(failure) = failure {
-            if failure.condition.is_some() {
+            if matches!(failure.report, crate::lower::FailureReport::Condition(_)) {
                 report_toplevel(crate::lower::syntax_failure_unwind(
                     &text,
                     &failure,

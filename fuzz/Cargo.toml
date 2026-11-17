@@ -72,6 +72,14 @@ doc = false
 bench = false
 
 [[bin]]
+name = "parse_verdict"
+path = "fuzz_targets/parse_verdict.rs"
+required-features = ["runtime"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "interp_unserialize"
 path = "fuzz_targets/interp_unserialize.rs"
 required-features = ["runtime"]

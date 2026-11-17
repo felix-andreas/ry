@@ -2000,3 +2000,40 @@ Reading an item's range from `item_spans` made every edit re-lower every item of
   Incremental analysis is unchanged: the tree store is invisible to queries.
 - **Check.** `reparse` compares every splice with a full parse under `enable_invariants()`, lookahead
   included; `SPLICE_REGRESSIONS` in `crates/syntax/tests/test_fuzz.rs` pins each shape above.
+
+## One syntax verdict, in the `syntax` crate, for `ry check` and the runtime
+
+**Status:** built.
+
+- **Decision.** A text is a syntax error for the runtime exactly when `syntax::parse` reports an error
+  outside a `#:` comment. `ry check` therefore reports every text `ry run` stops on before running a
+  line, and nothing the runtime runs. One exception: a byte outside UTF-8, which only the runtime
+  reads (as a stand-in character) and refuses where GNU R's lexer does.
+- **Previous source of truth.** The parser held GNU R's grammar, and `interp/src/lower.rs` held the checks
+  GNU R makes on text its grammar accepts, each on a lowered value: string escapes, a parameter declared
+  twice, the pipe's right side and its placeholder, an empty statement between semicolons, an empty name.
+  `ry check` was silent on all of them, and the escape decoder existed twice (lexer text, lowering bytes).
+- **Target shape.** `syntax::lexer` decodes a quoted token once (`unescape_quoted`; the runtime reads its
+  pieces) and reports a bad escape, an empty backquoted name and a NUL byte in a string (lowering cuts
+  a name at one, as GNU R does). An error the lexer raises inside a `#:` comment is an annotation
+  error, as the parser's are, and a string in such a comment ends at an escaped line break too. An
+  f-string is not R, so its bad escape is a ry rule (`error_rule`) with ry's message.
+  `syntax::validation` walks the finished tree for the rules that need structure (repeated parameters,
+  pipes and placeholders, empty statements, an empty string as a function or argument name). Each such
+  error carries a class (`Unexpected::Classed`), so the runtime words it as GNU R does and tools read
+  ry's message.
+- **Which error the runtime reports.** GNU R stops at the first error its parser meets, and a rule it
+  checks in a grammar action fires when the construct closes. `lower::error_order` gives every error the
+  offset of the last token GNU R has read by then and a rank (lexer, action, grammar, a construct the end
+  of input cuts short), and the smallest wins. An action runs only for a construct that is whole when the
+  grammar refuses a token, which `error_order` decides by parsing the construct's text up to that token
+  alone (`c("" = -)` is the grammar's error, `c("" = (1) 2)` the action's). `ry check` reports all of them.
+- **Impact.** Correctness: `ry check` finds `"\q"`, `function(x, x) 1`, `1 |> sum(_)`, `1;;2` and ``` `` ```
+  before the program runs. Simplicity: lowering no longer validates. Performance: one pass over
+  every file's tokens, which stops at functions, pipes, placeholders and strings. Incremental analysis:
+  the errors are part of the parse result, so the splice reparse re-validates the statements it parsed.
+- **Check.** `interp::testing::check_parse_verdict` (`fuzz_parse_verdict_is_shared`, `cargo fuzz`
+  `parse_verdict`), which also puts `#: ` before every line and requires both to accept the result,
+  since it is all comments to R; the golden cases in `crates/syntax/tests/errors`; the oracle's
+  `parser` kind for GNU R's side.
+- **Open.** `semantics/src/hir.rs` recognizes a pipe's shape with rules of its own (`pipe_shape`).

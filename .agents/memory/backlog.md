@@ -1574,9 +1574,9 @@ overhead, not allocation.
   - `structure(1:.Machine$integer.max, names = letters[1:8])` is killed for memory (GNU R: "cannot allocate").
   - *Parser.* `oracle::parser::known_difference` leaves the grammar ones out of `--kind parser`; an entry leaves both with its fix.
     - ry accepts what GNU R rejects: `1 < 2 < 3`; `=` assignment in an argument, a condition, an index or a default (`if (a = b) c`, `f(TRUE = 1)`); `::` after anything but a name or a string (`a::b::c`); a line break after an operand of an `if` branch inside parentheses or brackets (`(if (a) b`, line break, `+ c)`), which GNU R's lexer returns as a token there; `function(y, ) 1` (decide whether the trailing comma is ry syntax).
-    - ry rejects what GNU R accepts: `_` outside a named pipe argument (GNU R rejects most later, by rules of its own); a backquoted `` `_` `` in a pipe (``x |> `_`()`` is `` `_`(x) ``).
-    - Which error comes first: `function(a, a` (GNU R: `repeatedFormal`) and `''()"` (GNU R: "attempt to use zero-length variable name") report the later syntax error, and a damaged `for` head names a later token (`for (x y in z) 1`: GNU R `unexpected symbol`, ry `unexpected 'in'`). A lexer warning is lost when the text then fails to parse (`.2L '`).
-    - `'\ud800'` is U+FFFD without a warning (GNU R: bytes `ed a0 80` and "unpaired surrogate"); `parse(text = "\xe4")` (GNU R: `expression()`); a backquoted name holding a NUL (GNU R truncates); byte columns of `parse(text =)` for unmarked non-ASCII; `ry run -` does not read standard input.
+    - Raw strings: as an argument name (`c(r"(a)" = 1)` assigns `a` and returns an unnamed value; GNU R names the argument) and after `$` or `@` (`x$r"(a)"` is a syntax error; GNU R reads `x$a`). The parser takes only a plain string there.
+    - Both refuse, in different words: `f(_ = 1)` and `_::a` (GNU R: `unexpected '='`, `unexpected '::'`; ry: `invalidPlaceholder`). A lexer warning is lost when the text then fails to parse (`.2L '`).
+    - `'\ud800'` is U+FFFD without a warning (GNU R: bytes `ed a0 80` and "unpaired surrogate"); `parse(text = "\xe4")` (GNU R: `expression()`); byte columns of `parse(text =)` for unmarked non-ASCII; `ry run -` does not read standard input.
   - *Files (`--kind io`).* `substr()` of a latin1 string is UTF-8; no "unable to translate" warning from regex and `strsplit` on an undefined Windows-1252 byte; C-level error messages are not cut at `warning.length` outside `scan`; `file(encoding = "UTF-8-BOM")`; `readChar` on invalid UTF-8; ASCII `serialize` and `save` of ALTREP forms; an "ASCII" output connection writes the text before an unconvertible character; `deparse()` output is marked UTF-8; embedded-NUL warnings of `read.table`, `scan`, `readLines`; UTF-8 read as UTF-16LE warns once more; `parse(encoding = "latin1")` of a gz file; a name over 8192 bytes (GNU R: `input buffer overflow`); `writeLines(intToUtf8(0x10FF80), f)` writes `80 0a` (GNU R `f4 8f be 80 0a`); invalid bytes in `scan(text = "\xff1")`, `` parse(text = "`\xff`") ``, the message of `parse(text = "a\tb\xc3")` and `writeChar` of a cut sequence with `eos = NULL`.
   - *Console.* A piped line that is not UTF-8 ends `ry repl` silently (`read_piped_line`, `console.rs`); GNU R: "invalid multibyte character in parser". A piped `ry repl` runs on after an error (GNU R: "Execution halted").
   - *Regex.* TRE's `ignore.case` folds by full case mapping: `grepl("ǆ", "ǅ")`, `grepl("ß", "ẞ")`, `grepl("k", "\u212a")` are TRUE (GNU R: FALSE). With `useBytes = TRUE` a POSIX class takes every high byte as punctuation: `gsub("[[:punct:]]", ".", "é", useBytes = TRUE)` (GNU R reads a byte as its Latin-1 character).
@@ -1879,11 +1879,6 @@ relations nobody asks yet, each one extra call with no expected output:
   to the statement while the definition is empty; the others, in generated projects of several
   files, are not reduced. The end shape is one resolution (`target_at`) that the hover's link
   reads, with the check in the battery.
-- a file the runtime refuses to parse has a syntax finding in `ry check`. The runtime refuses
-  more than `syntax::parse` as it lowers (`interp/src/lower.rs`), and `ry check` is silent on each:
-  `"\q"`, `"\x"`, `"\u00e4\x41"`, `function(x, x) 1`, `1 |> sum(_)`. The end shape is one
-  verdict: these rules move into the parser (`Parser::error_rule`) and the runtime reads them
-  there. The `parser` kind's fragments are the inputs for the check.
 
 ### Run the pinned CRAN corpus as a test, one project per package
 
@@ -2752,7 +2747,8 @@ shape, so fixing one turns its case red and forces a deliberate re-bless.
   `_[i]` and `_@s` behave likewise. `lower_pipe` accepts only a `CALL_EXPR` right-hand side, so
   these stay an opaque `Binary Pipe` whose field access reads a name `_` that exists nowhere.
   `pipe_shape` needs a second shape for a placeholder at the head of an extraction chain,
-  substituting the piped value for the `_` in place.
+  substituting the piped value for the `_` in place. `syntax::validation` recognizes both shapes
+  for the runtime (`pipe_placeholder`, `called_function`), so the HIR should read them there.
 - **An empty control-flow head slots the body into the condition.** The cases are
   `broken__an_empty_if_condition_slots_the_body_into_the_condition` and its `while` and `for`
   siblings. `if () 1L` lowers to `If(condition: 1L, then: Missing)`, because the `IF_EXPR` arm reads

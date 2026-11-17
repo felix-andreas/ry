@@ -99,6 +99,28 @@ error: expected a parameter name, found number
   | f <- function(1) x
   |               ^
 
+#---- empty_statement_between_semicolons
+a <- 1;; b <- 2
+#++++
+error: this `;` ends no statement; remove it
+ --> 1:8
+  | a <- 1;; b <- 2
+  |        ^
+
+#---- semicolon_alone
+;
+#++++
+error: this `;` ends no statement; remove it
+ --> 1:1
+  | ;
+  | ^
+
+#---- semicolons_in_braces_are_fine
+{;}
+{ a;; b }
+#++++
+no errors
+
 #==== recovery_locality
 #---- broken_line_does_not_poison_file
 good1 <- 1

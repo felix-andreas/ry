@@ -133,6 +133,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The analysis core's per-item and per-file tables after the type store
 - A function has one signature, resolved in `syntax::annotation`
 - A splice reparse shares what the parser's recorded lookahead proves untouched
+- One syntax verdict, in the `syntax` crate, for `ry check` and the runtime
 
 ## Editor and language server
 

@@ -3,7 +3,11 @@
 //! without base R or libR, on an interpreter it installs on first use.
 
 use {
-    crate::{bytecode, code_image, deparse, eval, lower, serialize, unwind::Unwind, values},
+    crate::{
+        bytecode, code_image, deparse, eval, lower, serialize,
+        unwind::Unwind,
+        values::{self, holds_stand_in},
+    },
     heap::{
         Heap,
         object::{CARD_ELEMENTS, LARGEST_SMALL_BYTES, Sexp, SexpType, VECTOR_DATA_OFFSET},
@@ -33,22 +37,77 @@ pub fn with_interpreter<T>(body: impl FnOnce() -> T) -> T {
 /// Lowering any text must not panic: it either fails with a parse error or produces expressions,
 /// and every expression it produces must deparse without panicking.
 pub fn check_lowering_input(text: &str) {
+    refusal(text);
+}
+
+/// `ry check` and the runtime give one verdict on a text: the runtime refuses to parse it exactly
+/// when the `syntax` crate's parse holds an error outside a `#:` comment. A text only one of them
+/// refuses is a script that runs with a syntax diagnostic in the editor, or one the editor calls
+/// clean and the runtime stops on.
+///
+/// The same text with `#: ` before every line is all comments to R, so the runtime must parse it
+/// whatever the lines hold.
+///
+/// A text that holds a stand-in for a byte outside UTF-8 is exempt: only the runtime reads such
+/// bytes, and it refuses them where GNU R's lexer does.
+pub fn check_parse_verdict(text: &str) {
+    if holds_stand_in(text) {
+        return;
+    }
+    let mut commented = String::with_capacity(text.len() + 16);
+    commented.push_str("#: ");
+    for character in text.chars() {
+        commented.push(character);
+        if matches!(character, '\n' | '\r') {
+            commented.push_str("#: ");
+        }
+    }
+    for (text, is_comments) in [(text, false), (commented.as_str(), true)] {
+        let diagnosed = syntax::parse(text)
+            .errors()
+            .iter()
+            .find(|error| !error.in_annotation)
+            .map(|error| error.message.clone());
+        match (&diagnosed, &refusal(text)) {
+            (None, Some(refused)) => {
+                panic!("the syntax crate accepts {text:?} and the runtime refuses it: {refused}")
+            }
+            (Some(diagnosed), None) => {
+                panic!("the runtime parses {text:?} and the syntax crate reports: {diagnosed}")
+            }
+            (Some(diagnosed), Some(_)) if is_comments => {
+                panic!("{text:?} is all comments to R and is refused: {diagnosed}")
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The runtime's reason to refuse `text`, or `None` once it has parsed the text and deparsed
+/// every expression.
+fn refusal(text: &str) -> Option<String> {
     with_interpreter(|| {
         let mark = crate::heap().handle_mark();
         // SAFETY: the interpreter is installed.
-        unsafe {
-            if let Ok(expressions) = lower::parse_text(text, "<fuzz>") {
-                for index in 0..values::length(expressions) {
-                    deparse::deparse_lines(
-                        expressions.element(index),
-                        60,
-                        deparse::options::KEEP_INTEGER,
-                    );
+        let refused = unsafe {
+            match lower::parse_text(text, "<fuzz>") {
+                Ok(expressions) => {
+                    for index in 0..values::length(expressions) {
+                        deparse::deparse_lines(
+                            expressions.element(index),
+                            60,
+                            deparse::options::KEEP_INTEGER,
+                        );
+                    }
+                    None
                 }
+                Err(Unwind::Error(error)) => Some(error.message),
+                Err(other) => Some(format!("{other:?}")),
             }
-        }
+        };
         crate::heap().release_handles(mark);
-    });
+        refused
+    })
 }
 
 /// Reading any byte stream as a serialized object must fail with an R error or succeed, never

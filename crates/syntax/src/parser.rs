@@ -4,10 +4,11 @@
 
 use {
     crate::{
-        Lookahead, Parse, SyntaxError, Unexpected,
+        Classed, Lookahead, Parse, SyntaxError, Unexpected,
         kind::SyntaxKind::{self, *},
         lexer::{Token, lex},
         tree::{Checkpoint, TreeBuilder},
+        validation::validate,
     },
     std::{cell::Cell, sync::Arc},
     text_size::{TextRange, TextSize},
@@ -52,6 +53,7 @@ pub fn parse(text: &str) -> Parse {
     };
     parser.source_file();
     let tree = parser.builder.finish(text);
+    validate(&tree, &mut parser.errors);
     Parse::new(Arc::new(tree), parser.errors, parser.lookahead)
 }
 
@@ -1280,6 +1282,15 @@ impl Parser<'_> {
             self.statement_left_group_open = false;
             match self.current() {
                 Some(SEMICOLON) => {
+                    // R's grammar lets a `;` stand alone inside braces, but at the top level
+                    // one must end an expression.
+                    if terminator.is_none() {
+                        let reported = self.errors.len();
+                        self.error_here("this `;` ends no statement; remove it");
+                        if let Some(error) = self.errors.get_mut(reported) {
+                            error.unexpected = Unexpected::Classed(Classed::EmptyStatement);
+                        }
+                    }
                     self.bump();
                     continue;
                 }
@@ -1319,12 +1330,16 @@ impl Parser<'_> {
                 self.start(ERROR);
                 self.recover_to_statement_boundary(terminator);
                 self.finish();
+                if self.at(SEMICOLON) {
+                    self.bump();
+                }
                 continue;
             }
 
             self.eat_trivia(false);
             match self.current() {
-                None | Some(NEWLINE | SEMICOLON) => {}
+                None | Some(NEWLINE) => {}
+                Some(SEMICOLON) => self.bump(),
                 Some(kind) if Some(kind) == terminator => {}
                 Some(_) if self.statement_left_group_open => continue,
                 Some(kind) => {
@@ -1343,6 +1358,9 @@ impl Parser<'_> {
                     self.start(ERROR);
                     self.recover_to_statement_boundary(terminator);
                     self.finish();
+                    if self.at(SEMICOLON) {
+                        self.bump();
+                    }
                 }
             }
         }

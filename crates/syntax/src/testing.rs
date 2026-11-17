@@ -658,6 +658,125 @@ pub fn token_soup(rng: &mut SplitMix64, alphabet: &[&str]) -> String {
     text
 }
 
+/// One way of writing a fragment. A seed enables each with probability one half.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FragmentFamily {
+    /// Atoms joined by unary and binary operators with no parentheses, so the tree shows every
+    /// precedence and associativity decision.
+    Chain,
+    /// A nested expression over every construct of the grammar.
+    Construct,
+    /// A [`FragmentFamily::Construct`] fragment whose tokens are separated by line breaks, semicolons,
+    /// comments and nothing at all.
+    Layout,
+    /// One numeric literal, well formed or cut short.
+    Number,
+    /// One string literal: escapes of every form, raw strings, and both quotes.
+    Text,
+    /// A name of an unusual spelling in each position that takes a name.
+    Name,
+    /// A fragment of another family with one token deleted, repeated, swapped or replaced.
+    Mutant,
+    /// Tokens drawn blindly.
+    Soup,
+}
+
+pub const FRAGMENT_FAMILIES: [FragmentFamily; 8] = [
+    FragmentFamily::Chain,
+    FragmentFamily::Construct,
+    FragmentFamily::Layout,
+    FragmentFamily::Number,
+    FragmentFamily::Text,
+    FragmentFamily::Name,
+    FragmentFamily::Mutant,
+    FragmentFamily::Soup,
+];
+
+/// The text of one fragment of `family`.
+pub fn source_fragment(rng: &mut SplitMix64, family: FragmentFamily) -> String {
+    match family {
+        FragmentFamily::Chain => {
+            let mut tokens = Vec::new();
+            let links = 2 + rng.below(5);
+            fragment_chain(rng, &mut tokens, links);
+            tokens.join(" ")
+        }
+        FragmentFamily::Construct => {
+            let mut tokens = Vec::new();
+            fragment_expression(rng, &mut tokens, 3);
+            tokens.join(" ")
+        }
+        FragmentFamily::Layout => {
+            let mut tokens = Vec::new();
+            fragment_expression(rng, &mut tokens, 3);
+            let mut text = String::new();
+            for token in &tokens {
+                text.push_str(token);
+                text.push_str(FRAGMENT_SEPARATORS[rng.below(FRAGMENT_SEPARATORS.len())]);
+            }
+            text
+        }
+        FragmentFamily::Number => fragment_number(rng),
+        FragmentFamily::Text => fragment_string(rng),
+        FragmentFamily::Name => {
+            let template = FRAGMENT_NAME_TEMPLATES[rng.below(FRAGMENT_NAME_TEMPLATES.len())];
+            let mut text = String::new();
+            for character in template.chars() {
+                match character {
+                    '•' => text.push_str(FRAGMENT_NAMES[rng.below(FRAGMENT_NAMES.len())]),
+                    other => text.push(other),
+                }
+            }
+            text
+        }
+        FragmentFamily::Mutant => {
+            let mut tokens = Vec::new();
+            match rng.below(3) {
+                0 => {
+                    let links = 2 + rng.below(4);
+                    fragment_chain(rng, &mut tokens, links);
+                }
+                _ => fragment_expression(rng, &mut tokens, 2),
+            }
+            for _ in 0..1 + rng.below(2) {
+                let at = rng.below(tokens.len().max(1));
+                match rng.below(5) {
+                    0 if !tokens.is_empty() => {
+                        tokens.remove(at);
+                    }
+                    1 if !tokens.is_empty() => {
+                        let token = tokens[at].clone();
+                        tokens.insert(at, token);
+                    }
+                    2 if tokens.len() > 1 => {
+                        let other = rng.below(tokens.len());
+                        tokens.swap(at, other);
+                    }
+                    3 if !tokens.is_empty() => {
+                        tokens[at] =
+                            FRAGMENT_ALPHABET[rng.below(FRAGMENT_ALPHABET.len())].to_owned();
+                    }
+                    _ => tokens.insert(
+                        at,
+                        FRAGMENT_ALPHABET[rng.below(FRAGMENT_ALPHABET.len())].to_owned(),
+                    ),
+                }
+            }
+            tokens.join(" ")
+        }
+        FragmentFamily::Soup => {
+            let mut text = String::new();
+            for _ in 0..1 + rng.below(8) {
+                text.push_str(FRAGMENT_ALPHABET[rng.below(FRAGMENT_ALPHABET.len())]);
+                if !rng.chance(1, 4) {
+                    text.push(' ');
+                }
+            }
+            text
+        }
+    }
+}
+
 /// Byte edits on one seed, plus splices of up to `max_donor` bytes from another.
 pub fn mutate_seed(rng: &mut SplitMix64, seeds: &[&str], max_donor: usize) -> String {
     let mut text = seeds[rng.below(seeds.len())].as_bytes().to_vec();
@@ -1496,7 +1615,7 @@ const EXPRESSIONS: &[(Sort, &str)] = &[
     (Sort::Integer, "if (@{L}) @{I} else @{I}"),
     (Sort::Integer, "switch(@{C}, a = @{I}, @{I})"),
     (Sort::Integer, "@{F}(@{I})"),
-    (Sort::Integer, "@{IV} |> length()"),
+    (Sort::Integer, "(@{IV} |> length())"),
     (Sort::Integer, "(\\(inner) inner + 1L)(@{I})"),
     (Sort::Integer, "local({\n  inner <- @{I}\n  inner * 2L\n})"),
     (Sort::Integer, "tryCatch(@{I}, error = function(e) @{I})"),
@@ -1526,7 +1645,7 @@ const EXPRESSIONS: &[(Sort, &str)] = &[
     (Sort::Double, "as.numeric(@{I})"),
     (Sort::Double, "@{DV}[[1L]]"),
     (Sort::Double, "if (@{L}) @{D} else @{D}"),
-    (Sort::Double, "@{D} |> sqrt()"),
+    (Sort::Double, "(@{D} |> sqrt())"),
     (Sort::Double, "stats::sd(@{DV})"),
     (
         Sort::Double,
@@ -2100,4 +2219,487 @@ fn pick<'a>(program: &mut Program, pool: &[&'a str]) -> &'a str {
 /// True once in `one_in` draws, and never on an exhausted stream, whose zeros must stop growth.
 fn rarely(program: &mut Program, one_in: usize) -> bool {
     program.rng.below(one_in) == one_in - 1
+}
+
+const FRAGMENT_ATOMS: &[&str] = &[
+    "a",
+    "b",
+    "x",
+    "1",
+    "2L",
+    "\"s\"",
+    "TRUE",
+    "NULL",
+    "NA",
+    "Inf",
+    ".5",
+    "1i",
+    "..1",
+    "...",
+    "f",
+    "T",
+    "NA_integer_",
+    "0x10",
+    "1e3",
+    "'q'",
+    "`a b`",
+];
+
+/// Binary operators, each precedence level of R's grammar present, the common ones twice.
+const FRAGMENT_BINARY: &[&str] = &[
+    "^", "**", "-", "+", "-", "+", ":", "%%", "%in%", "%o%", "%||%", "|>", "*", "/", "*", "<", ">",
+    "<=", ">=", "==", "!=", "&", "&&", "|", "||", "~", "->", "->>", "<-", "<-", "<<-", "=", "?",
+    ":=", "$", "@", "::", ":::",
+];
+
+const FRAGMENT_UNARY: &[&str] = &["-", "+", "!", "~", "?", "-", "!"];
+
+const FRAGMENT_NAMES: &[&str] = &[
+    "a", ".a", "..a", "a.b", "a_b", "a1", ".1a", "_a", "a_", "..1", "...", "..", ".", "é", "naïve",
+    "日本", "α1", "`a b`", "`a\\`b`", "`a\\nb`", "`if`", "`1`", "``", "`é`", "\"s\"", "'s'", "if",
+    "NULL", "TRUE", "function", "in", "T", "NA", "Inf", "break", "a\u{a0}b", "ａ", "x1L", "e1",
+    "`\\x41`", "`a\\\\b`", "1a", ".2", "`...`", "`_`",
+];
+
+/// Where a name can stand; `•` is the hole.
+const FRAGMENT_NAME_TEMPLATES: &[&str] = &[
+    "•",
+    "• <- 1",
+    "1 -> •",
+    "• = 1",
+    "x$•",
+    "x@•",
+    "x$•$•",
+    "f(• = 1)",
+    "f(• = )",
+    "f(•)",
+    "function(•) 1",
+    "function(• = 2, •) •",
+    "\\(•) •",
+    "•::•",
+    "•:::•",
+    "•(1)",
+    "x$•(1)",
+    "x[• = 1]",
+    "x[[•]]",
+    "for (• in x) •",
+    "• |> f()",
+    "x |> •()",
+    "x |> f(• = _)",
+    "• + •",
+    "-•",
+    "• %in% •",
+    "~•",
+    "?•",
+    "• ? •",
+    "•$• <- •",
+    "c(• = 1, • = 2)",
+];
+
+const FRAGMENT_SEPARATORS: &[&str] = &[
+    " ", " ", " ", " ", "", "\n", "\n", " \n ", ";", " # c\n", "\n\n", "\t", "\n# c\n", "  ",
+];
+
+const FRAGMENT_ALPHABET: &[&str] = &[
+    "a", "b", "x", "f", "1", "2L", "\"s\"", "TRUE", "NULL", "(", ")", "{", "}", "[", "]", "[[",
+    "]]", ",", ";", "\n", "if", "else", "for", "in", "while", "repeat", "function", "\\", "break",
+    "next", "+", "-", "*", "/", "^", "**", ":", "::", ":::", "$", "@", "~", "?", "!", "!=", "==",
+    "<", ">", "<=", ">=", "&", "&&", "|", "||", "|>", "<-", "<<-", "->", "->>", "=", ":=", "%%",
+    "%in%", "%", "_", "...", "..1", ".", "#", "'", "\"", "`", "\\(", "0x", "1e", "1i", ".5",
+    "r\"(", ")\"", "=>", "<", "-", "=", ">", "|",
+];
+
+/// `links` operands joined by binary operators, each operand an atom with unary operators and
+/// postfix forms, or an open-ended construct (`if`, a function) that takes everything after it.
+fn fragment_chain(rng: &mut SplitMix64, tokens: &mut Vec<String>, links: usize) {
+    for index in 0..links {
+        if index > 0 {
+            tokens.push(FRAGMENT_BINARY[rng.below(FRAGMENT_BINARY.len())].to_owned());
+        }
+        while rng.chance(1, 4) {
+            tokens.push(FRAGMENT_UNARY[rng.below(FRAGMENT_UNARY.len())].to_owned());
+        }
+        match rng.below(14) {
+            0 => {
+                tokens.extend(["if", "(", "a", ")"].map(str::to_owned));
+                if rng.chance(1, 2) {
+                    let inner = 1 + rng.below((links - index).max(1));
+                    fragment_chain(rng, tokens, inner);
+                    tokens.push("else".to_owned());
+                }
+            }
+            1 => tokens.extend(["function", "(", "x", ")"].map(str::to_owned)),
+            2 => tokens.extend(["\\", "(", "x", ")"].map(str::to_owned)),
+            3 => {
+                tokens.extend(["for", "(", "i", "in", "x", ")"].map(str::to_owned));
+            }
+            4 => tokens.extend(["while", "(", "a", ")"].map(str::to_owned)),
+            5 => tokens.push("repeat".to_owned()),
+            _ => {
+                tokens.push(FRAGMENT_ATOMS[rng.below(FRAGMENT_ATOMS.len())].to_owned());
+                while rng.chance(1, 5) {
+                    let postfix: &[&str] = match rng.below(5) {
+                        0 => &["(", ")"],
+                        1 => &["(", "y", ")"],
+                        2 => &["[", "1", "]"],
+                        3 => &["[[", "1", "]]"],
+                        _ => &["$", "y"],
+                    };
+                    tokens.extend(postfix.iter().map(|token| (*token).to_owned()));
+                }
+                continue;
+            }
+        }
+        // The open-ended construct's body is the next operand.
+        tokens.push(FRAGMENT_ATOMS[rng.below(FRAGMENT_ATOMS.len())].to_owned());
+    }
+}
+
+/// A nested expression, as tokens. `depth` bounds the nesting.
+fn fragment_expression(rng: &mut SplitMix64, tokens: &mut Vec<String>, depth: usize) {
+    let push = |tokens: &mut Vec<String>, token: &str| tokens.push(token.to_owned());
+    if depth == 0 {
+        push(tokens, FRAGMENT_ATOMS[rng.below(FRAGMENT_ATOMS.len())]);
+        return;
+    }
+    match rng.below(20) {
+        0 | 1 => {
+            let links = 2 + rng.below(3);
+            fragment_chain(rng, tokens, links);
+        }
+        2 => {
+            push(tokens, FRAGMENT_UNARY[rng.below(FRAGMENT_UNARY.len())]);
+            fragment_expression(rng, tokens, depth - 1);
+        }
+        3 | 4 => {
+            fragment_expression(rng, tokens, depth - 1);
+            push(tokens, FRAGMENT_BINARY[rng.below(FRAGMENT_BINARY.len())]);
+            fragment_expression(rng, tokens, depth - 1);
+        }
+        5 => {
+            push(tokens, "(");
+            fragment_expression(rng, tokens, depth - 1);
+            push(tokens, ")");
+        }
+        6 => {
+            push(tokens, "{");
+            for index in 0..rng.below(4) {
+                if index > 0 {
+                    push(tokens, [";", "\n", ";", "\n", ";;", "\n\n"][rng.below(6)]);
+                }
+                fragment_expression(rng, tokens, depth - 1);
+            }
+            push(tokens, "}");
+        }
+        7 | 8 => {
+            push(tokens, "if");
+            push(tokens, "(");
+            fragment_expression(rng, tokens, depth - 1);
+            push(tokens, ")");
+            fragment_expression(rng, tokens, depth - 1);
+            if rng.chance(2, 3) {
+                push(tokens, "else");
+                fragment_expression(rng, tokens, depth - 1);
+            }
+        }
+        9 => {
+            push(tokens, "for");
+            push(tokens, "(");
+            push(tokens, FRAGMENT_NAMES[rng.below(8)]);
+            push(tokens, "in");
+            fragment_expression(rng, tokens, depth - 1);
+            push(tokens, ")");
+            fragment_expression(rng, tokens, depth - 1);
+        }
+        10 => {
+            if rng.chance(1, 2) {
+                push(tokens, "while");
+                push(tokens, "(");
+                fragment_expression(rng, tokens, depth - 1);
+                push(tokens, ")");
+            } else {
+                push(tokens, "repeat");
+            }
+            fragment_expression(rng, tokens, depth - 1);
+        }
+        11 | 12 => {
+            push(tokens, ["function", "function", "\\"][rng.below(3)]);
+            push(tokens, "(");
+            for index in 0..rng.below(4) {
+                if index > 0 {
+                    push(tokens, ",");
+                }
+                push(
+                    tokens,
+                    ["x", "y", "...", "a.b", "`a b`", ".z"][rng.below(6)],
+                );
+                if rng.chance(1, 3) {
+                    push(tokens, "=");
+                    fragment_expression(rng, tokens, depth - 1);
+                }
+            }
+            push(tokens, ")");
+            fragment_expression(rng, tokens, depth - 1);
+        }
+        13..=15 => {
+            fragment_expression(rng, tokens, depth - 1);
+            let (open, close) = [("(", ")"), ("(", ")"), ("[", "]"), ("[[", "]]")][rng.below(4)];
+            push(tokens, open);
+            for index in 0..rng.below(4) {
+                if index > 0 {
+                    push(tokens, ",");
+                }
+                match rng.below(8) {
+                    0 => {}
+                    1 => {
+                        push(
+                            tokens,
+                            ["n", "\"n\"", "`n m`", "NULL", "if", "'n'"][rng.below(6)],
+                        );
+                        push(tokens, "=");
+                        if rng.chance(3, 4) {
+                            fragment_expression(rng, tokens, depth - 1);
+                        }
+                    }
+                    _ => fragment_expression(rng, tokens, depth - 1),
+                }
+            }
+            push(tokens, close);
+        }
+        16 => {
+            fragment_expression(rng, tokens, depth - 1);
+            push(tokens, ["$", "@", "$", "::", ":::"][rng.below(5)]);
+            push(tokens, FRAGMENT_NAMES[rng.below(FRAGMENT_NAMES.len())]);
+        }
+        17 => {
+            fragment_expression(rng, tokens, depth - 1);
+            push(tokens, "|>");
+            push(tokens, "f");
+            push(tokens, "(");
+            if rng.chance(1, 2) {
+                push(tokens, "y");
+                push(tokens, "=");
+                push(tokens, "_");
+            }
+            push(tokens, ")");
+        }
+        18 => push(
+            tokens,
+            ["break", "next", "NULL", "function(x) x"][rng.below(4)],
+        ),
+        _ => push(tokens, FRAGMENT_ATOMS[rng.below(FRAGMENT_ATOMS.len())]),
+    }
+}
+
+/// A numeric literal built part by part, any part of which may be missing or doubled.
+fn fragment_number(rng: &mut SplitMix64) -> String {
+    const FIXED: &[&str] = &[
+        "0x",
+        "1e",
+        "1e+",
+        "1e-",
+        "0x1p",
+        "0x1p+",
+        "1.5L",
+        "1e3L",
+        "1e-3L",
+        "0x10L",
+        "1i",
+        "1e-2i",
+        "100000000000L",
+        "2147483647L",
+        "2147483648L",
+        "1e400",
+        "1e-400",
+        "0x1.8p1",
+        "0x.8p1",
+        "0x1.p1",
+        "0x1.8",
+        "1..2",
+        "1.2.3",
+        "1 .2",
+        "5.",
+        ".5",
+        ".",
+        "0x1g",
+        "1e5e5",
+        "1L2",
+        "1iL",
+        "1Li",
+        "0x1i",
+        "0x1L",
+        "1l",
+        "1E5",
+        "1e+05L",
+        "0X1F",
+        "0x1P3",
+        "1_000",
+        "00012",
+        "0.0L",
+        "1e0L",
+        "0xFFFFFFFFFFFFFFFFFFFF",
+        "123456789012345678901234567890",
+        "4.9e-324",
+        "1.0e+00i",
+        ".5e",
+        "0.5e1L",
+        "1.0L",
+        "0x1p-1074",
+        "1e1000L",
+        "0xfp2L",
+        "0b101",
+        "1e 5",
+        "1 e5",
+        "1e5.5",
+        "0x1.1",
+        "9007199254740993",
+        "0.1e-1i",
+        ".e5",
+        "0x.p1",
+        "1L.5",
+        "TRUE1",
+        "1TRUE",
+        "1x",
+        "0xg",
+        ".5.5",
+        "1.1.1.1",
+        "..5",
+        "0x1.2.3p1",
+    ];
+    if rng.chance(1, 3) {
+        return FIXED[rng.below(FIXED.len())].to_owned();
+    }
+    let mut text = String::new();
+    let hex = rng.chance(1, 4);
+    let digits = if hex {
+        "0123456789abcdefABCDEF"
+    } else {
+        "0123456789"
+    };
+    let run = |rng: &mut SplitMix64, text: &mut String, most: usize| {
+        for _ in 0..rng.below(most + 1) {
+            text.push(char::from(digits.as_bytes()[rng.below(digits.len())]));
+        }
+    };
+    if hex {
+        text.push_str(["0x", "0X"][rng.below(2)]);
+    }
+    run(rng, &mut text, 4);
+    if rng.chance(1, 2) {
+        text.push('.');
+        run(rng, &mut text, 4);
+        if rng.chance(1, 8) {
+            text.push('.');
+            run(rng, &mut text, 2);
+        }
+    }
+    if rng.chance(1, 2) {
+        let markers = if hex {
+            ["p", "P", "p", "e"]
+        } else {
+            ["e", "E", "e", "p"]
+        };
+        text.push_str(markers[rng.below(4)]);
+        text.push_str(["", "", "+", "-"][rng.below(4)]);
+        for _ in 0..rng.below(4) {
+            text.push(char::from(b'0' + rng.below(10) as u8));
+        }
+    }
+    text.push_str(["", "", "", "L", "i", "l", "I"][rng.below(7)]);
+    text
+}
+
+/// A string literal: a plain or a raw one, from pieces that each exercise one rule of the lexer.
+fn fragment_string(rng: &mut SplitMix64) -> String {
+    const PIECES: &[&str] = &[
+        "a",
+        " ",
+        "é",
+        "日",
+        "😀",
+        "\\n",
+        "\\t",
+        "\\\\",
+        "\\\"",
+        "\\'",
+        "\\`",
+        "\\a",
+        "\\b",
+        "\\f",
+        "\\v",
+        "\\r",
+        "\\0",
+        "\\x41",
+        "\\x4",
+        "\\xg",
+        "\\x",
+        "\\xe4",
+        "\\101",
+        "\\7",
+        "\\18",
+        "\\400",
+        "\\377",
+        "\\u00e4",
+        "\\u{e4}",
+        "\\u{1F600}",
+        "\\U0001F600",
+        "\\U{110000}",
+        "\\u{}",
+        "\\u",
+        "\\u{e4",
+        "\\ue4z",
+        "\\U{0}",
+        "\\u0000",
+        "\\x00",
+        "\\q",
+        "\\ ",
+        "\\\n",
+        "\n",
+        "\t",
+        "'",
+        "\"",
+        "#",
+        "\\U0010FFFF",
+        "\\u{00e4}x",
+        "\\xc3\\xa9",
+        "\\8",
+        "\\e",
+        "%",
+        "\\N",
+    ];
+    if rng.chance(1, 4) {
+        let dashes = "-".repeat(rng.below(3));
+        let (open, close) = [("(", ")"), ("[", "]"), ("{", "}")][rng.below(3)];
+        let quote = ["\"", "'"][rng.below(2)];
+        let mut text = format!("{}{quote}{dashes}{open}", ["r", "R"][rng.below(2)]);
+        for _ in 0..rng.below(5) {
+            text.push_str(
+                [
+                    "a", "\\", "\\n", "\"", "'", ")", "]", "}", "-", ")\"", "\n", "é", ")-", "(",
+                ][rng.below(14)],
+            );
+        }
+        // A closing delimiter that does not match leaves the string open.
+        match rng.below(8) {
+            0 => text.push_str(&format!("{close}{quote}")),
+            1 => text.push_str(&format!(")-{quote}")),
+            2 => text.push_str(&format!("{close}{dashes}")),
+            _ => text.push_str(&format!("{close}{dashes}{quote}")),
+        }
+        return text;
+    }
+    let quote = ["\"", "\"", "'"][rng.below(3)];
+    let mut text = quote.to_owned();
+    for _ in 0..rng.below(6) {
+        let piece = PIECES[rng.below(PIECES.len())];
+        // A bare quote of the string's own kind ends it, which is a case of its own.
+        if piece == quote && !rng.chance(1, 6) {
+            continue;
+        }
+        text.push_str(piece);
+    }
+    if !rng.chance(1, 12) {
+        text.push_str(quote);
+    }
+    text
 }

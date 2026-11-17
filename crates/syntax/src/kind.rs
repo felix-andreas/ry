@@ -233,6 +233,21 @@ impl SyntaxKind {
         matches!(self, WHITESPACE | NEWLINE | COMMENT)
     }
 
+    /// A node R's reading of the program does not hold: a `#:` comment, an inline annotation
+    /// or a type declaration. R sees the text with these erased.
+    pub fn is_erased(self) -> bool {
+        matches!(
+            self,
+            ANNOTATION
+                | TYPE_ASCRIPTION
+                | RETURN_TYPE
+                | TYPE_BINDER_LIST
+                | TYPE_DEFINITION
+                | NEW_TYPE
+                | PURE_MARKER
+        )
+    }
+
     pub fn is_keyword(self) -> bool {
         (FUNCTION_KW..=NA_CHARACTER_KW).contains(&self)
     }

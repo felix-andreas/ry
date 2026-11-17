@@ -14,11 +14,15 @@ mod lexer;
 mod parser;
 mod reparse;
 mod tree;
+mod validation;
 
 use std::{borrow::Cow, sync::Arc};
 pub use {
     kind::SyntaxKind,
-    lexer::{NumberType, Token, is_syntactic_name, lex, split_number_suffix},
+    lexer::{
+        EscapeError, EscapeErrorKind, EscapePiece, NumberType, Token, is_syntactic_name, lex,
+        raw_string_content, split_number_suffix, unescape_quoted,
+    },
     parser::{infix_binding_power, parse},
     text_size::{TextLen, TextRange, TextSize},
     tree::{
@@ -26,6 +30,7 @@ pub use {
         SyntaxElement, SyntaxElementChildren, SyntaxNode, SyntaxNodeChildren, SyntaxToken,
         TokenAtOffset, TokenRef, Tree, WalkEvent,
     },
+    validation::{called_function, pipe_placeholder},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +62,48 @@ pub enum Unexpected {
     /// such as a tuple item with a name, so R's grammar has no report for it and ry's message
     /// is the only one.
     Nothing,
+    /// One of the errors that leave the tree whole: a check R's lexer or its grammar actions
+    /// make on text the grammar accepts, or a `;` the grammar refuses.
+    Classed(Classed),
+}
+
+/// The errors of text whose tree is whole, which the formatter formats. R reports each at a
+/// position of its own, which the runtime derives from the tree and the error's range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Classed {
+    /// An escape R's lexer rejects in a string or a backquoted name. The range starts in the
+    /// token that holds it.
+    Escape,
+    /// A function that declares one parameter name twice. The range is the second name.
+    RepeatedFormal,
+    /// A `|>` whose right side, at `target`, R's pipe refuses.
+    Pipe { check: PipeCheck, target: TextRange },
+    /// A `_` that no pipe replaces. The range is the `_`.
+    StrayPlaceholder,
+    /// An empty name, which R cannot make a symbol of: a backquoted name, or an empty string
+    /// that names the function of a call or an argument. The range is the token.
+    EmptyName,
+    /// A `;` at the top level that ends no statement, which R's grammar refuses. The range is
+    /// the `;`.
+    EmptyStatement,
+    /// A NUL byte in a string, which R cannot hold. The range is the byte.
+    EmbeddedNul,
+}
+
+/// Why R's pipe refuses its right side. The first two blame the whole right side, the others
+/// one placeholder in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipeCheck {
+    /// The right side is a name or a constant, not a call.
+    NotCall,
+    /// The right side calls a function with a syntax of its own, such as `+` or `if`.
+    Special,
+    /// A placeholder inside the function the right side calls, as in `x |> _$f()`.
+    PlaceholderInFunction,
+    /// A placeholder passed as an argument without a name.
+    PlaceholderNotNamed,
+    /// A second placeholder.
+    PlaceholderRepeated,
 }
 
 impl SyntaxError {
@@ -68,6 +115,23 @@ impl SyntaxError {
             incomplete: false,
             unexpected: Unexpected::EndOfInput,
         }
+    }
+
+    /// This error with every range it holds moved by `by` bytes.
+    pub(crate) fn shifted(&self, by: i64) -> SyntaxError {
+        let shift = |range: TextRange| {
+            let start = (i64::from(u32::from(range.start())) + by) as u32;
+            let end = (i64::from(u32::from(range.end())) + by) as u32;
+            TextRange::new(TextSize::from(start), TextSize::from(end))
+        };
+        let mut shifted = self.clone();
+        shifted.range = shift(self.range);
+        match &mut shifted.unexpected {
+            Unexpected::Token(found) => *found = shift(*found),
+            Unexpected::Classed(Classed::Pipe { target, .. }) => *target = shift(*target),
+            _ => {}
+        }
+        shifted
     }
 }
 
