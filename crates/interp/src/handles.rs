@@ -699,114 +699,6 @@ pub fn modifying(_context: &mut Cx<'_>, value: Local<'_>) -> R<()> {
     unsafe { crate::moves::modifying(value.raw()) }
 }
 
-/// One element for a store, already of the element type of the vector it goes into.
-#[derive(Clone, Copy)]
-pub enum Scalar<'s> {
-    Real(f64),
-    /// An integer or a logical.
-    Integer(i32),
-    /// The first element of a character vector, which has one.
-    Text(Local<'s, Str>),
-    /// A list element.
-    Item(Local<'s>),
-}
-
-impl From<f64> for Scalar<'_> {
-    fn from(value: f64) -> Self {
-        Scalar::Real(value)
-    }
-}
-
-impl From<i32> for Scalar<'_> {
-    fn from(value: i32) -> Self {
-        Scalar::Integer(value)
-    }
-}
-
-impl<'s> From<Local<'s, Str>> for Scalar<'s> {
-    fn from(text: Local<'s, Str>) -> Self {
-        Scalar::Text(text)
-    }
-}
-
-impl<'s> From<Local<'s>> for Scalar<'s> {
-    fn from(item: Local<'s>) -> Self {
-        Scalar::Item(item)
-    }
-}
-
-/// `vector` one element longer, for the caller to bind: the last element is `element`, named
-/// `name` when there is one, and the vector's only attribute is its names. `owned` is the
-/// vector when the caller's variable alone holds it, and it then grows where it is if it has
-/// room.
-pub fn append<'s, T: Vector>(
-    context: &mut Cx<'s>,
-    vector: Local<'s, T>,
-    name: Option<Local<'s, Chars>>,
-    element: Scalar<'s>,
-    owned: Option<Owned<'s>>,
-) -> R<Local<'s>> {
-    assert!(
-        owned
-            .as_ref()
-            .is_none_or(|owned| owned.get().is(vector.value())),
-        "the claim is for another vector"
-    );
-    let fits = match (T::TYPE, element) {
-        (SexpType::Real, Scalar::Real(_))
-        | (SexpType::Integer | SexpType::Logical, Scalar::Integer(_))
-        | (SexpType::List | SexpType::Expression, Scalar::Item(_)) => true,
-        (SexpType::String, Scalar::Text(text)) => text.len() == 1,
-        _ => false,
-    };
-    assert!(
-        fits,
-        "an appended element of another type than the vector's"
-    );
-    let reuse = owned.is_some();
-    let Some(name) = name else {
-        // SAFETY: `vector` is a rooted standard vector, and `reuse` is true only under the
-        // caller's claim that nothing else holds it. The new element is set before anything
-        // else can allocate or fail, and `fits` matched its type to the storage.
-        let result = unsafe {
-            let heap = crate::heap();
-            let count = vector.len();
-            let result = if reuse
-                && heap.is_resizable(vector.raw())
-                && vector.raw().capacity() > count as isize
-            {
-                heap.resize_vector(vector.raw(), count as isize + 1)?;
-                vector.raw()
-            } else {
-                crate::subset::append_copy(vector.raw(), reuse)?
-            };
-            match element {
-                Scalar::Real(value) => values::reals_mut(result)[count] = value,
-                Scalar::Integer(value) => values::ints_mut(result)[count] = value,
-                Scalar::Text(text) => heap.set_element(result, count, text.raw().element(0)),
-                Scalar::Item(item) => heap.set_element(result, count, item.raw()),
-            }
-            result
-        };
-        // SAFETY: the copy was rooted when it was allocated, and otherwise the result is the
-        // rooted `vector`.
-        return Ok(unsafe { Local::adopt(result) });
-    };
-    // `append_named` reads the element from a value of the vector's type.
-    let scalar = match element {
-        Scalar::Real(value) => context.scalar::<Real>(value)?.finish().value(),
-        Scalar::Integer(value) => context.scalar::<Integer>(value)?.finish().value(),
-        Scalar::Text(text) => text.value(),
-        Scalar::Item(item) => item,
-    };
-    // SAFETY: every argument is rooted, `vector` is a standard vector whose type `fits`
-    // matched to the scalar, and `reuse` is the caller's claim.
-    let result =
-        unsafe { crate::subset::append_named(vector.raw(), name.raw(), scalar.raw(), reuse)? };
-    // SAFETY: as for the unnamed append.
-    Ok(unsafe { Local::adopt(result) })
-}
-
 /// The vector an element store into `vector` writes: `owned`, the vector itself under its
 /// holder's claim, or else a copy with its own storage for the holder to bind.
 #[inline(always)]
@@ -1522,7 +1414,21 @@ pub fn copy_prefix<T: Vector>(
     );
     // SAFETY: both are rooted standard vectors of one type, `to` is new and visible to nothing
     // else, and the count is in bounds of both.
-    unsafe { crate::subset::copy_prefix(from.raw(), to.raw(), count) }
+    unsafe {
+        match T::TYPE {
+            SexpType::String | SexpType::List | SexpType::Expression => {
+                crate::heap().copy_elements(to.raw(), 0, from.raw(), 0, count);
+                Ok(())
+            }
+            _ => crate::subset::copy_mapped(
+                from.raw(),
+                to.raw(),
+                count,
+                |index| index,
+                |index| index,
+            ),
+        }
+    }
 }
 
 /// The empty string, which the heap keeps for as long as it lives.

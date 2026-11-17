@@ -388,21 +388,9 @@ fn put_pointer<'s, T: Elements>(
     Ok(())
 }
 
-/// Copies the first `count` elements of `from` into a fresh `to` of the same type, which is not
-/// ALTREP, in bulk.
-pub(crate) unsafe fn copy_prefix(from: Sexp, to: Sexp, count: usize) -> R<()> {
-    match from.kind() {
-        SexpType::String | SexpType::List | SexpType::Expression => {
-            crate::heap().copy_elements(to, 0, from, 0, count);
-            Ok(())
-        }
-        _ => copy_mapped(from, to, count, |index| index, |index| index),
-    }
-}
-
 /// `to[target(i)] <- from[source(i)]` for `i` in `0..count`, converting to `to`'s type, with a
 /// typed loop for the same type and for the widening to double. `from` is not ALTREP.
-unsafe fn copy_mapped(
+pub(crate) unsafe fn copy_mapped(
     from: Sexp,
     to: Sexp,
     count: usize,
@@ -2946,7 +2934,24 @@ pub unsafe fn dollar(object: Sexp, name: Sexp, call: Sexp) -> R<Sexp> {
 }
 
 /// `object$name` without dispatch.
+///
+/// An environment's variable is read in the caller's frame: it is what tier 0's field
+/// instruction reads most, and the other kinds need registers that would be saved for it too.
+#[inline(always)]
 fn dollar_field<'s>(
+    context: &mut Cx<'s>,
+    object: Local<'s>,
+    name: Local<'s, Chars>,
+    call: Option<Local<'s>>,
+) -> R<Local<'s>> {
+    if object.r_type() == SexpType::Environment {
+        return Ok(handles::frame_value(context, object, name)?.unwrap_or_else(null));
+    }
+    field_of_value(context, object, name, call)
+}
+
+/// [`dollar_field`] for everything but an environment.
+fn field_of_value<'s>(
     context: &mut Cx<'s>,
     object: Local<'s>,
     name: Local<'s, Chars>,
@@ -2984,10 +2989,7 @@ fn dollar_field<'s>(
         }
         SexpType::Pairlist | SexpType::Language => {
             let list = pairlist_to_list(context, object)?;
-            dollar_field(context, list, name, call)
-        }
-        SexpType::Environment => {
-            Ok(handles::frame_value(context, object, name)?.unwrap_or_else(null))
+            field_of_value(context, list, name, call)
         }
         SexpType::Nil => Ok(null()),
         SexpType::Object if is_s4(object) => {
@@ -4056,7 +4058,7 @@ fn logical_stretch(context: &mut Cx<'_>, index: Local<'_>) -> usize {
 }
 
 /// A vector kind whose elements [`grow`] pads, moves and appends.
-trait Stored: Vector + Sized {
+pub(crate) trait Growable: Vector + Sized {
     /// Sets the elements of `vector` from `from` on to NA (`NULL` in a list).
     fn pad<'s>(context: &mut Cx<'s>, vector: &mut Owned<'s, Self>, from: usize);
 
@@ -4081,7 +4083,7 @@ trait Stored: Vector + Sized {
 
 macro_rules! stored_atomic {
     ($kind:ident, $na:expr, $($source:ident),+) => {
-        impl Stored for $kind {
+        impl Growable for $kind {
             fn pad<'s>(context: &mut Cx<'s>, vector: &mut Owned<'s, Self>, from: usize) {
                 let mut write = vector.write(context);
                 let (elements, _) = write.split();
@@ -4128,7 +4130,7 @@ stored_atomic!(
 );
 stored_atomic!(Raw, 0, Raw);
 
-impl Stored for Str {
+impl Growable for Str {
     fn pad<'s>(context: &mut Cx<'s>, vector: &mut Owned<'s, Self>, from: usize) {
         let length = vector.get().len();
         let mut write = vector.write(context);
@@ -4157,7 +4159,7 @@ impl Stored for Str {
 
 macro_rules! stored_list {
     ($kind:ident) => {
-        impl Stored for $kind {
+        impl Growable for $kind {
             /// A new list's elements and those a list grows by in place are already `NULL`.
             fn pad<'s>(_context: &mut Cx<'s>, _vector: &mut Owned<'s, Self>, _from: usize) {}
 
@@ -4216,7 +4218,7 @@ macro_rules! for_stored_kind {
 /// room grows in place, so a loop that appends one element at a time runs in linear time.
 ///
 /// `final_step` says that nothing after the growth can fail, so an owned list's elements may
-/// move into the copy (see [`Stored::take`]). An error after a move would leave the variable
+/// move into the copy (see [`Growable::take`]). An error after a move would leave the variable
 /// holding an empty list.
 fn grow<'s>(
     context: &mut Cx<'s>,
@@ -4239,7 +4241,7 @@ fn grow<'s>(
     )))
 }
 
-fn grow_as<'s, T: Stored>(
+fn grow_as<'s, T: Growable>(
     context: &mut Cx<'s>,
     vector: Local<'s, T>,
     owned: Option<Owned<'s, T>>,
@@ -4319,49 +4321,34 @@ fn write_names<'s>(
     Ok(())
 }
 
-/// `vector` with `value` appended as a new last element named `name`, a CHARSXP: `x$name <- value`
-/// or `x[["name"]] <- value` for a name `x` lacks. `vector` is a list or atomic vector whose only
-/// attribute is `names`, and `value` a list element or a scalar of `vector`'s type. An unnamed
-/// `vector` gets blank names before the new one. The vector grows in place when `reuse` says the
-/// caller's variable alone holds it and it has room, as [`grow`] does, and otherwise the result
-/// is a copy with room to grow.
-///
-/// # Safety
-///
-/// On the interpreter's thread, with every argument a live object that the caller keeps rooted
-/// until it returns, and `reuse` true only when nothing but the caller's variable refers to
-/// `vector`. The result is rooted in the caller's handle scope.
-pub(crate) unsafe fn append_named(vector: Sexp, name: Sexp, value: Sexp, reuse: bool) -> R<Sexp> {
-    // SAFETY: the caller's roots hold the arguments, its claim makes `vector` owned under
-    // `reuse`, and the result is rooted before anything else allocates.
-    unsafe {
-        handles::with_result(|context| {
-            let vector = handles::held(context, vector);
-            let name = handles::held(context, name)
-                .downcast::<handles::Chars>()
-                .ok_or_else(|| error("internal error: a name that is not a string"))?;
-            let value = handles::held(context, value);
-            let owned = reuse.then(|| Owned::assume(vector));
-            Ok(append_element(context, vector, owned, name, value)?
-                .finish()
-                .raw())
-        })
-    }
-}
-
-/// [`append_named`] on handles.
-fn append_element<'s>(
+/// `vector` one element longer, for the caller to bind: `x[[n + 1]] <- value`, or `x$name <- value`
+/// and `x[["name"]] <- value` for a name `x` lacks. `put` stores the new last element, and `name`
+/// names it, after blank names where `vector` has none. `vector`'s only attribute is its names.
+/// `owned` is the vector when the caller's variable alone holds it: it then grows where it is if
+/// it has room, as [`grow`] does, and the result is otherwise a copy with room to grow.
+pub(crate) fn append<'s, T: Growable>(
     context: &mut Cx<'s>,
-    vector: Local<'s>,
+    vector: Local<'s, T>,
     owned: Option<Owned<'s>>,
-    name: Local<'s, handles::Chars>,
-    value: Local<'s>,
-) -> R<Owned<'s>> {
-    let count = handles::length(context, vector);
-    let mut result = grow(context, vector, owned, count + 1, false)?;
-    write_names(context, &mut result, count, &[name])?;
-    store_scalar(context, &mut result, count, value)?;
-    Ok(result)
+    name: Option<Local<'s, handles::Chars>>,
+    put: impl FnOnce(&mut Cx<'s>, &mut Owned<'s, T>, usize),
+) -> R<Local<'s>> {
+    assert!(
+        owned
+            .as_ref()
+            .is_none_or(|owned| owned.get().is(vector.value())),
+        "the claim is for another vector"
+    );
+    let count = vector.len();
+    let owned = owned.and_then(|owned| owned.downcast::<T>().ok());
+    // Writing a name can fail, so only an unnamed append may move an owned list's elements.
+    let mut result = grow_as(context, vector, owned, count + 1, name.is_none())?;
+    put(context, &mut result, count);
+    let mut result = result.value();
+    if let Some(name) = name {
+        write_names(context, &mut result, count, &[name])?;
+    }
+    Ok(result.finish())
 }
 
 /// Stores `value`, a scalar of the vector's type or a list element, at `at` of `vector`.
@@ -4375,7 +4362,7 @@ fn store_scalar<'s>(
         ($($kind:ident),+) => {
             $(
                 if let Some(typed) = vector.narrow::<$kind>() {
-                    return <$kind as Stored>::put(context, typed, at, value);
+                    return <$kind as Growable>::put(context, typed, at, value);
                 }
             )+
         };
@@ -4385,36 +4372,6 @@ fn store_scalar<'s>(
         "internal error: storing into a vector of type '{}'",
         handles::type_name(vector.get())
     )))
-}
-
-/// A copy of `vector`, which has no attributes, one element longer with the new element NA and
-/// room to grow, which the caller binds. The caller grows a vector in place where it has room.
-/// Nothing after this may fail, because an owned list's elements move into the copy (see
-/// [`grow`]).
-///
-/// # Safety
-///
-/// On the interpreter's thread, with `vector` a live object that the caller keeps rooted until
-/// it returns, and `reuse` true only when nothing but the caller's variable refers to it. The
-/// result is rooted in the caller's handle scope.
-#[cold]
-pub(crate) unsafe fn append_copy(vector: Sexp, reuse: bool) -> R<Sexp> {
-    // SAFETY: the caller's root holds `vector`, its claim makes it owned under `reuse`, and the
-    // result is rooted before anything else allocates.
-    unsafe {
-        handles::with_result(|context| {
-            let vector = handles::held(context, vector);
-            let (vector, owned) = if altrep(vector) {
-                (handles::materialize(context, vector)?, None)
-            } else {
-                (vector, reuse.then(|| Owned::assume(vector)))
-            };
-            let count = handles::length(context, vector);
-            Ok(grow(context, vector, owned, count + 1, true)?
-                .finish()
-                .raw())
-        })
-    }
 }
 
 /// `target[offsets] <- value`, recycling `value`, which is not empty, and skipping NA offsets.

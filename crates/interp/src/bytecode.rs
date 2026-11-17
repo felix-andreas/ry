@@ -54,11 +54,12 @@ use {
         eval::{self, Reify, SwitchSelector, as_condition},
         handles::{
             self, Atomic, Chars, Cx, Environment, Integer, List, Local, Logical, Names, Owned,
-            Real, Scalar, Str, Vector,
+            Real, Str, Vector,
         },
         interp,
         kernels::{self, Element, MAX_NODES, Node, Reduction},
         moves,
+        subset::{self, Growable},
         unwind::{ArgumentReader, Jump, R, Unwind, error, error_in, missing_argument},
         values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
     },
@@ -13362,7 +13363,7 @@ unsafe fn assign_element(
 /// A vector kind whose elements tier 0 stores without the replacement function.
 trait Stored: Vector + Sized {
     /// One element, as its storage holds it.
-    type Item<'s>: Copy + Into<Scalar<'s>>;
+    type Item<'s>: Copy;
 
     /// The element `x[[i]] <- value`, `x[i] <- value` or `x$name <- value` stores when the
     /// assignment changes no type and no attribute: any non-`NULL` value for a list under `[[`
@@ -13568,7 +13569,7 @@ fn bind_named<'s>(
 }
 
 #[inline(always)]
-fn store_element_of<'s, T: Stored>(
+fn store_element_of<'s, T: Stored + Growable>(
     context: &mut Cx<'s>,
     vector: Local<'s, T>,
     index: Local<'s>,
@@ -13589,7 +13590,10 @@ fn store_element_of<'s, T: Stored>(
         Some(Position::Named(name)) => {
             handles::modifying(context, vector.value())?;
             let owned = claim(vector.value());
-            return handles::append(context, vector, Some(name), item.into(), owned).map(Some);
+            return subset::append(context, vector, owned, Some(name), |context, vector, at| {
+                <T as Stored>::put(context, vector, at, item)
+            })
+            .map(Some);
         }
         None => return Ok(None),
     };
@@ -13608,10 +13612,13 @@ fn store_element_of<'s, T: Stored>(
     handles::modifying(context, vector.value())?;
     let owned = claim(vector.value());
     if appends {
-        return handles::append(context, vector, None, item.into(), owned).map(Some);
+        return subset::append(context, vector, owned, None, |context, vector, at| {
+            <T as Stored>::put(context, vector, at, item)
+        })
+        .map(Some);
     }
     let mut vector = handles::writable(context, vector, owned)?;
-    T::put(context, &mut vector, position, item);
+    <T as Stored>::put(context, &mut vector, position, item);
     Ok(Some(vector.finish().value()))
 }
 
