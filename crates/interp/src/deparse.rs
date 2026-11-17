@@ -196,7 +196,6 @@ fn operator_info(name: &[u8]) -> Option<OperatorInfo> {
         b"$" | b"@" => (Kind::Dollar, DOLLAR, false),
         b"[" | b"[[" => (Kind::Subset, SUBSET, false),
         b"::" | b":::" => (Kind::Binary2, NAMESPACE, false),
-        b"?" => (Kind::Binary, 3, false),
         _ => return None,
     };
     Some(OperatorInfo {
@@ -270,6 +269,9 @@ struct Deparser {
     /// precedence. Whatever ends that operand without parentheses (an `if`, a loop, or a
     /// low-precedence unary operator) would swallow the rest of the expression on reparsing.
     left_of: Option<u8>,
+    /// Set just before deparsing a call's argument: an `=` assignment there takes parentheses,
+    /// since `f(a = b)` would read as a named argument.
+    argument: bool,
     incomplete: bool,
     /// The first error GNU R's deparser would raise. Deparsing goes on with the plain value, so
     /// callers that cannot fail still get text.
@@ -292,6 +294,7 @@ impl Deparser {
             max_lines: usize::MAX,
             depth: 0,
             left_of: None,
+            argument: false,
             incomplete: false,
             failure: None,
         }
@@ -348,6 +351,7 @@ impl Deparser {
 
     unsafe fn deparse(&mut self, object: Sexp) {
         let left_of = self.left_of.take();
+        let argument = std::mem::take(&mut self.argument);
         if self.stopped() {
             return;
         }
@@ -396,7 +400,7 @@ impl Deparser {
         if attributes {
             self.print("structure(");
         }
-        self.deparse_inner(object, if attributes { None } else { left_of });
+        self.deparse_inner(object, if attributes { None } else { left_of }, argument);
         if attributes {
             self.attributes(object);
             self.print(")");
@@ -404,7 +408,7 @@ impl Deparser {
         self.depth -= 1;
     }
 
-    unsafe fn deparse_inner(&mut self, object: Sexp, left_of: Option<u8>) {
+    unsafe fn deparse_inner(&mut self, object: Sexp, left_of: Option<u8>, argument: bool) {
         match object.kind() {
             SexpType::Nil => self.print("NULL"),
             SexpType::Symbol => {
@@ -461,7 +465,7 @@ impl Deparser {
                 if object.attrib() != nil() {
                     self.incomplete = true;
                 }
-                self.language(object, left_of)
+                self.language(object, left_of, argument)
             }
             SexpType::Pairlist | SexpType::Dots => {
                 // `pairlist()` evaluates its arguments, so an empty one only survives `alist()`.
@@ -622,15 +626,18 @@ impl Deparser {
                 if formals {
                     if list.car() != values::missing_arg() {
                         self.print(" = ");
+                        self.argument = true;
                         self.deparse(list.car());
                     }
                 } else {
                     self.print(" = ");
                     if list.car() != values::missing_arg() {
+                        self.argument = true;
                         self.deparse(list.car());
                     }
                 }
             } else {
+                self.argument = true;
                 self.deparse(list.car());
             }
             list = list.cdr();
@@ -647,7 +654,7 @@ impl Deparser {
         }
     }
 
-    unsafe fn language(&mut self, call: Sexp, left_of: Option<u8>) {
+    unsafe fn language(&mut self, call: Sexp, left_of: Option<u8>, argument: bool) {
         // `quote()` wraps the outermost call once, and a formula evaluates to itself, so it needs
         // no wrapping at all.
         if self.opts & options::QUOTE_EXPRESSIONS != 0 {
@@ -656,7 +663,7 @@ impl Deparser {
             if !formula {
                 self.print("quote(");
             }
-            self.language(call, None);
+            self.language(call, None, argument);
             if !formula {
                 self.print(")");
             }
@@ -777,6 +784,10 @@ impl Deparser {
                     (Kind::Binary | Kind::Binary2 | Kind::Assign, 2) => {
                         let left = arguments.car();
                         let right = arguments.cdr().car();
+                        let outer_parens = argument && name == b"=";
+                        if outer_parens {
+                            self.print("(");
+                        }
                         let left_parens = needs_parens(info, left, true);
                         if left_parens {
                             self.print("(");
@@ -809,6 +820,9 @@ impl Deparser {
                         if right_parens {
                             self.print(")");
                         }
+                        if outer_parens {
+                            self.print(")");
+                        }
                         if broken {
                             self.indent -= 1;
                         }
@@ -818,7 +832,7 @@ impl Deparser {
                     // prefix, so `` `%*%`(x) `` is `%*%x`, as GNU R prints it.
                     (Kind::Binary | Kind::Binary2 | Kind::Unary, 1)
                         if info.kind == Kind::Binary
-                            || matches!(name, b"+" | b"-" | b"!" | b"~" | b"?") =>
+                            || matches!(name, b"+" | b"-" | b"!" | b"~") =>
                     {
                         let operand = arguments.car();
                         let info = if info.precedence == precedence::SUM {
