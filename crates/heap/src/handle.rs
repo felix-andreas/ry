@@ -457,18 +457,6 @@ impl<'a> Gc<'a, Chars> {
     }
 }
 
-impl<'s> Local<'s, Chars> {
-    /// The string as a pointer that lasts as long as its scope, so its bytes can be read across
-    /// a collection: the scope's root keeps it alive, the heap does not move it, and a string
-    /// is never written after it is made. A vector has no such form, because its elements can
-    /// be written while a slice of them is held.
-    #[inline]
-    pub fn rooted(self) -> Gc<'s, Chars> {
-        // SAFETY: a root keeps the string alive for `'s`, which no value can outlive.
-        unsafe { Gc::adopt(self.raw) }
-    }
-}
-
 impl<'a> Gc<'a, Symbol> {
     /// The symbol's print name.
     #[inline]

@@ -2575,11 +2575,11 @@ fn substitute<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>, global: bool) 
     };
     let matcher = compiled.map_err(|failure| compile_failure(context, failure))?;
     // The replacement is read for every element, across the allocations that make the results,
-    // so its string is rooted.
-    let replacement_text = subject(
-        context.root(replacement.get(context, 0)).rooted(),
-        use_bytes,
-    );
+    // so its text is copied out of the heap once.
+    let replacement_bytes: Option<SmallVec<[u8; 64]>> =
+        subject(replacement.get(context, 0), use_bytes)
+            .map(|text| SmallVec::from_slice(text.as_bytes()));
+    let replacement_text = replacement_bytes.as_deref().map(String::from_utf8_lossy);
     let replacement = replacement_text
         .as_deref()
         .map(|text| parse_replacement(text, options));

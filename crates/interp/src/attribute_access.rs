@@ -403,7 +403,7 @@ fn attributes<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Local<'s>> {
     // An environment's `names` attribute is not listed, as `names(env)` is its variables.
     let environment = object.r_type() == SexpType::Environment;
     let listed = move |tag: Gc<'_, Symbol>| !environment || Tag::of(tag) != Tag::Names;
-    let mut count = usize::from(tags.is_some());
+    let mut count = 0;
     let mut row_names = None;
     for (tag, value) in attribute_cells(context, object) {
         let Some(tag) = tag.downcast::<Symbol>() else {
@@ -411,18 +411,28 @@ fn attributes<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Local<'s>> {
         };
         if listed(tag) {
             count += 1;
-            if Tag::of(tag) == Tag::RowNames {
+            // GNU R reads the row names by name for each such cell, so the first one answers.
+            if Tag::of(tag) == Tag::RowNames && row_names.is_none() {
                 row_names = Some(context.root(value));
             }
         }
     }
+    let row_names = match row_names {
+        Some(value) => {
+            let expanded = expand_row_names(context, value)?;
+            // Reading row names kept as an ALTREP vector runs its package's code, which may
+            // change the attributes, so the cells are counted again after it.
+            count = attribute_cells(context, object)
+                .filter(|(tag, _)| tag.downcast::<Symbol>().is_some_and(listed))
+                .count();
+            Some(expanded)
+        }
+        None => None,
+    };
+    let count = count + usize::from(tags.is_some());
     if count == 0 {
         return Ok(null());
     }
-    let row_names = match row_names {
-        Some(value) => Some(expand_row_names(context, value)?),
-        None => None,
-    };
     let mut result = context.alloc::<handles::List>(count)?;
     let mut names = context.alloc::<Str>(count)?;
     // The object holds its attribute cells, so they are read again after the allocations
