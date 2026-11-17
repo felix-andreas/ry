@@ -108,12 +108,14 @@ unsafe impl Reroot for Unwind {
 /// # Safety
 ///
 /// `raw` is a live object, and nothing has allocated since the raw call returned it.
+#[inline]
 unsafe fn rooted<'s>(context: &Cx<'s>, raw: Sexp) -> Local<'s> {
     // SAFETY: the caller's contract, and a `Value` handle admits every object.
     context.root(unsafe { Gc::<Value>::adopt(raw) })
 }
 
 /// Whether the class attribute of `value` names `class`.
+#[inline]
 pub fn inherits(_context: &Cx<'_>, value: impl Pointer<Value>, class: &str) -> bool {
     // SAFETY: the handle is a live object, and the test only reads its class attribute.
     unsafe { values::inherits(value.raw(), class) }
@@ -122,6 +124,7 @@ pub fn inherits(_context: &Cx<'_>, value: impl Pointer<Value>, class: &str) -> b
 /// The first element of a character vector as text, or `None` for `NA`, an empty vector and
 /// any other type. The text borrows the context mutably because an ALTREP class may compute
 /// the element, and then only the borrow keeps it alive.
+#[inline]
 pub fn first_string<'a>(_context: &'a mut Cx<'_>, value: Local<'_>) -> Option<Cow<'a, str>> {
     // SAFETY: the vector is rooted, an element read may run its class's method, which
     // `&mut Cx` permits, and nothing collects while the text borrows the context.
@@ -129,6 +132,7 @@ pub fn first_string<'a>(_context: &'a mut Cx<'_>, value: Local<'_>) -> Option<Co
 }
 
 /// The first element as a logical: `NA` for an empty vector or a type with no logical reading.
+#[inline]
 pub fn logical_scalar(_context: &mut Cx<'_>, value: Local<'_>) -> i32 {
     // SAFETY: the value is rooted, and reading an ALTREP's first element may allocate, which
     // `&mut Cx` permits.
@@ -153,12 +157,14 @@ pub fn dense<'s, T: Vector>(context: &mut Cx<'s>, value: Local<'s>) -> R<Option<
 
 /// `value` as a standard character vector, coerced as `as.character` coerces when it is of
 /// another type.
+#[inline]
 pub fn character_vector<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s, Str>> {
     coerced(context, value)
 }
 
 /// `value` as a standard integer vector, coerced as `as.integer` coerces when it is of another
 /// type.
+#[inline]
 pub fn integer_vector<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s, Integer>> {
     coerced(context, value)
 }
@@ -177,6 +183,7 @@ fn coerced<'s, T: Vector>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s,
 }
 
 /// The first element as an integer: `NA` for an empty vector or a type with no integer reading.
+#[inline]
 pub fn integer_scalar(_context: &mut Cx<'_>, value: Local<'_>) -> i32 {
     // SAFETY: the value is rooted, and reading an ALTREP's first element may allocate, which
     // `&mut Cx` permits.
@@ -184,6 +191,7 @@ pub fn integer_scalar(_context: &mut Cx<'_>, value: Local<'_>) -> i32 {
 }
 
 /// A new integer vector of one element.
+#[inline]
 pub fn integer<'s>(context: &mut Cx<'s>, value: i32) -> R<Local<'s>> {
     let mut result = context.alloc::<Integer>(1)?;
     result.as_mut_slice().fill(value);
@@ -191,6 +199,7 @@ pub fn integer<'s>(context: &mut Cx<'s>, value: i32) -> R<Local<'s>> {
 }
 
 /// Raises a warning against the running call.
+#[inline]
 pub fn warning(_context: &mut Cx<'_>, message: impl Into<String>) -> R<()> {
     // SAFETY: a warning may run a calling handler, which is R code and so needs the `&mut Cx`
     // this takes.
@@ -235,6 +244,7 @@ pub fn attribute_copy<'s>(context: &mut Cx<'s>, value: Local<'_>) -> R<Local<'s>
 ///
 /// `raw` is a live standard vector of type `T::TYPE` that no other pointer reaches, and nothing
 /// has allocated since the raw call returned it.
+#[inline]
 unsafe fn fresh<'s, T: Vector>(context: &Cx<'s>, raw: Sexp) -> Fresh<'s, T> {
     // SAFETY: the caller's contract; `rooted` keeps the vector alive for `'s`.
     unsafe {
@@ -279,6 +289,7 @@ pub fn na() -> Gc<'static, Chars> {
 }
 
 /// Stores `text` as element `index` of a new character vector.
+#[inline]
 pub fn set_text(
     _context: &mut Cx<'_>,
     vector: &mut Fresh<'_, Str>,
