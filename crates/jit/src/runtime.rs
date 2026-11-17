@@ -196,7 +196,11 @@ pub struct Compiled {
     /// enclosure. A closure made afresh by each call of its parent (`vapply(x, function(v) ...)`)
     /// or each R6 object's copy of a method then shares one compilation.
     pub portable: bool,
-    /// For portable code, a weak reference keyed on the enclosure whose lookups the epoch and
+    /// Whether portable code has a speculation that starts from the enclosure. Its epoch and
+    /// stamps then speak for one enclosure at a time, `checked`; those of portable code without
+    /// one speak for every enclosure.
+    pub tied: bool,
+    /// For tied code, a weak reference keyed on the enclosure whose lookups the epoch and
     /// stamps were last proven for; `NULL` otherwise. A weak reference rather than the
     /// enclosure's address, because a dead enclosure's address can come back as a new one whose
     /// lookups nobody checked.
@@ -368,14 +372,14 @@ pub struct Exit {
 /// binding epoch and the symbol's lookup stamp (see `gp::WATCHED`), so an unchanged epoch, or
 /// unchanged stamps of the speculated symbols, prove the lookups without walking them.
 /// `thorough` walks them anyway, for an activation whose frame may have bound a watched name
-/// before the name was watched. Portable code running for an enclosure other than the checked
+/// before the name was watched. Tied code running for an enclosure other than the checked
 /// one or its siblings walks, and leaves the epoch and stamps to the checked enclosure.
 #[inline]
 pub unsafe fn valid(compiled: &Compiled, machine: &Machine<'_>, thorough: bool) -> bool {
     // Every entry asks, and almost every time nothing moved the epoch since the last proof.
     if !thorough
         && heap().binding_epoch() == compiled.epoch.get()
-        && (!compiled.portable || compiled.checked.get().weak_key() == machine.enclosure())
+        && unsafe { proven_for(compiled, machine.enclosure()) }
     {
         return true;
     }
@@ -387,7 +391,7 @@ unsafe fn prove(compiled: &Compiled, machine: &Machine<'_>, thorough: bool) -> b
     let heap = heap();
     let epoch = heap.binding_epoch();
     let enclosure = machine.enclosure();
-    let checked = !compiled.portable || compiled.checked.get().weak_key() == enclosure;
+    let checked = unsafe { proven_for(compiled, enclosure) };
     let sibling = !checked && sibling_of_checked(compiled, enclosure);
     if !thorough && (checked || sibling) {
         // The epoch moves on any binding outside a function frame, which a test suite or a
@@ -446,14 +450,22 @@ unsafe fn still_valid(compiled: &Compiled, machine: &Machine<'_>, epoch: u64) ->
     unsafe { heap().binding_epoch() == epoch || valid(compiled, machine, false) }
 }
 
+/// Whether the epoch and stamps of `compiled` speak for an activation with `enclosure`. Code
+/// compiled for one enclosure only runs for that one.
+#[inline(always)]
+pub unsafe fn proven_for(compiled: &Compiled, enclosure: Sexp) -> bool {
+    unsafe { !compiled.tied || compiled.checked.get().weak_key() == enclosure }
+}
+
 /// Whether portable `compiled` runs for `enclosure`, which is not the checked enclosure but
 /// shares its parent. The closures one function expression makes on each call of its parent
 /// (`make_scaler <- function(k) function(x) x * k`) are siblings in this sense, so they share
 /// the checked enclosure's proof instead of each walking every speculation.
+#[inline]
 pub unsafe fn sibling_of_checked(compiled: &Compiled, enclosure: Sexp) -> bool {
     unsafe {
         let key = compiled.checked.get().weak_key();
-        key != values::nil() && key.enclosure() == enclosure.enclosure()
+        compiled.tied && key != values::nil() && key.enclosure() == enclosure.enclosure()
     }
 }
 

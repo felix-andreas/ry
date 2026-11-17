@@ -13621,7 +13621,12 @@ unsafe fn back_edge(state: &mut Activation<'_, '_>, tier: &Tier, pc: usize) -> B
     profile[profile::BACK_EDGES] = 0;
     let exit = (tier.back_edge)(machine, pc);
     // The tier may have compiled the body or moved its entry count.
-    values::ints_mut(machine.code.cdr().element(PROFILE))[profile::NEXT] = i32::MIN;
+    let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
+    profile[profile::NEXT] = i32::MIN;
+    // A refusal closes the recording window, and the loop that asked may run on for long.
+    if profile[profile::RECORDING] == 0 {
+        state.feedback = std::ptr::null_mut();
+    }
     match exit {
         Some(TierExit::Finished(result)) => BackEdge::Finished(result),
         Some(TierExit::Resume {

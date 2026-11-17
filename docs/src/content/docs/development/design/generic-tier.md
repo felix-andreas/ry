@@ -50,8 +50,8 @@ Two conclusions follow.
 **A baseline compiler has nothing to win.** A compiler that emits one call per instruction removes
 dispatch and operand decoding, which are a part of the 7.8%. Measured per instruction, tier 0
 spends about 10 instructions on dispatch and decoding for a plain instruction, and entering
-compiled code costs 380 more than entering the body in tier 0 (next section), so a generic body
-would need about 40 instructions per call before a baseline compile broke even, and a compiled
+compiled code costs 560 more than entering the body in tier 0 (next section), so a generic body
+would need about 55 instructions per call before a baseline compile broke even, and a compiled
 body's builtin and closure calls are handed back to tier 0 at a cost above that saving. ry built
 that tier once and it ran more instructions than tier 0 (`decisions/jit-ssa.md`, "No baseline
 tier, and code images hold bytecode only"). The baseline tiers of JavaScriptCore and V8 remove
@@ -70,14 +70,16 @@ often costs more than the callee's body.
 
 Each number is a difference in callgrind instructions between the compiled path and tier 0's path
 for the same work. The cost model's constants (`crates/jit/src/jit.rs`) follow these numbers:
-`ENTRY_COST`, `STEP_COST` and `SAVING_PER_FRAME` are measured, and `SAVING_PER_NATIVE` and
-`SAVING_PER_CALL` are the model's estimates for work that varies with the instruction.
+`ENTRY_COST`, `LOAD_COST`, `STEP_COST` and `SAVING_PER_FRAME` are measured, and
+`SAVING_PER_NATIVE` and `SAVING_PER_CALL` are the model's estimates for work that varies with the
+instruction.
 
 | Mechanism | Against tier 0 | Constant |
 |---|---|---|
-| Entering compiled code instead of starting the body in the dispatch loop | 380 more: the tier's entry (276), the scheduled entry's own return path, the jump to the code | `ENTRY_COST` |
+| Entering compiled code instead of starting the body in the dispatch loop | About 560 more: the tier's entry (246), the scheduled entry's dispatch and return path (107), the register window (36 to 53), the caller's feedback (55) and the code's prologue. End to end, two bodies that differ by four native instructions (`a + a + a + a + a` and the same with nine operands, each called through a closure made on every call) differ by 550, and the smaller one runs 132 more compiled than in tier 0 | `ENTRY_COST` |
+| A variable read from the frame, against one kept in a machine register | About 30 more when the inline probe answers, about 125 more when the runtime forces an argument's promise. A body that adds five arguments runs 130 more than one that adds one argument five times | `LOAD_COST` (60) |
 | An instruction handed to tier 0 (a step) | 60 to 70 more for the helper call alone; about 180 with the variables written back before it and reloaded after it | `STEP_COST` |
-| A call inlined with a frame, no arguments | 450 fewer, read from the `f()` row of "Measured" with the entry added back. The functions involved account for 585: tier 0's call (368) and return (459), less the first start (152), the start (12), the register window (40) and the compiled code (38). The constant is the smaller, end-to-end number | `SAVING_PER_FRAME` |
+| A call inlined with a frame, no arguments | About 600 fewer. The functions involved account for 585: tier 0's call (368) and return (459), less the first start (152), the start (12), the register window (40) and the compiled code (38). The `f()` row of "Measured" with the entry added back gives about 640 | `SAVING_PER_FRAME` |
 | A call inlined with a frame, three arguments | 510 to 630 fewer | |
 | The first start of an inlined call in an entry | 152, once per entry of the compiled body for each call | |
 | A native arithmetic instruction with its loads and stores | about 130 fewer | `SAVING_PER_NATIVE` |
@@ -212,6 +214,7 @@ the compile (`jit.rs`, `unpaid`). The saving is counted in tier-0 instructions t
 | A native instruction | `SAVING_PER_NATIVE` |
 | A step | Minus `STEP_COST` |
 | The entry | Minus `ENTRY_COST` |
+| A variable read from the frame outside the loops | Minus `LOAD_COST` |
 
 Only the instructions on paths the body has taken count (`Plan::ran`). Tier 0's `JumpUnless`
 records each direction it takes, and the model follows the recorded directions from the entry. A
@@ -243,7 +246,7 @@ the body has taken once that is more:
 | The loop's pass saves | The body compiles |
 |---|---|
 | Enough that `HORIZON_EDGES` passes cover the compile | At the back-edge threshold |
-| Less | Once it has taken as many backward jumps as the compile costs in passes |
+| Less | Once it has taken as many backward jumps as the compile costs in passes, and at least twice as many as at the refusal |
 | Nothing | Never from this loop, and it asks again when the taken backward jumps have doubled |
 
 The first row holds every numeric loop in a body of a few hundred instructions: one native
@@ -255,8 +258,9 @@ made.
 
 A body with loops can also turn hot by its calls. It compiles then when the mean pass through its
 loops meets the first row, because any of its loops would compile it at the back-edge threshold.
-Otherwise it is asked `unpaid` with the work around its loops plus one pass through them, so a
-call cannot compile what its loops would not, and a refusal leaves its loops free to ask.
+Otherwise it is asked `unpaid` with the work around its loops plus the work of its loops, each
+weighted by its nesting depth as for a loop's request, so a call cannot compile what its loops
+would not, and a refusal leaves its loops free to ask.
 
 ### Native forms on boxed values (stage 2, planned)
 

@@ -2091,6 +2091,27 @@ fn a_hot_body_that_runs_rarely_waits_to_compile() {
     });
 }
 
+/// A call reads each of its arguments from the frame once, so the four additions of `thin`
+/// save less than entering compiled code costs, and it runs in tier 0 however hot it is.
+/// `thick` adds as much to a value it has read and compiles. Both take `...` so that the
+/// loop's calls do not inline them.
+#[test]
+fn a_body_that_only_reads_its_arguments_does_not_compile() {
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::On);
+        let threshold = interp::bytecode::tier().map_or(0, |tier| tier.entry_threshold);
+        run("thin <- function(a, b, d, e, g, ...) a + b + d + e + g");
+        run("thick <- function(a, ...) a + a + a + a + a + a + a + a + a");
+        run(&format!(
+            "for (i in 1:{}) {{ thin(i, 1, 2, 3, 4); thick(i) }}",
+            2 * threshold
+        ));
+        assert!(!has_compiled_code("thin"), "thin compiled");
+        assert!(has_compiled_code("thick"), "thick did not compile");
+        jit::install_mode(Mode::Off);
+    });
+}
+
 /// A loop compiles when the backward jumps its body is expected to take repay the compile.
 /// `short` and `long` run the same loop, which saves one native instruction per pass. `short`
 /// compiles at the back-edge threshold. `long` holds enough other code that compiling it costs

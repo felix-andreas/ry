@@ -354,6 +354,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A stepped instruction runs on a kept view of the activation
 - Compiled code that keeps leaving is retired
 - The cost model counts frames, and free steps count nothing
+- Portable code with no lookup from the enclosure is proven for every enclosure
 - A loop compiles when its backward jumps repay the body
 - A back edge is counted in tier 0's fast jump handler
 

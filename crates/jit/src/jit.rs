@@ -87,9 +87,11 @@ const COMPILE_PER_WORD: u64 = 50_000;
 /// the root cells, and a boxed result. Against that, an instruction compiled code runs
 /// natively saves about [`SAVING_PER_NATIVE`], which includes the variable loads and stores
 /// around it that stay in machine registers, and a call it inlines into the caller's frame
-/// saves about [`SAVING_PER_CALL`]. A body whose saving does not exceed the entry cost never
-/// compiles on its own, however hot it is; its calls from compiled code can still be inlined
-/// there.
+/// saves about [`SAVING_PER_CALL`]. A variable the call reads from its frame is not in a
+/// machine register: against one that is, the read costs about [`LOAD_COST`], between a read
+/// the inline probe answers and one that forces an argument's promise in the runtime. A body
+/// whose saving does not exceed these costs never compiles on its own, however hot it is; its
+/// calls from compiled code can still be inlined there.
 ///
 /// A closure call inlined with a frame of its own saves about [`SAVING_PER_FRAME`]: tier 0's
 /// call setup, its return and the dispatch between them, less the window and the activation
@@ -101,10 +103,11 @@ const COMPILE_PER_WORD: u64 = 50_000;
 /// slots written back before it and the registers read again after it.
 ///
 /// `development/design/generic-tier.md` holds the measurements behind these numbers.
-const ENTRY_COST: u64 = 380;
+const ENTRY_COST: u64 = 560;
+const LOAD_COST: u64 = 60;
 const SAVING_PER_NATIVE: u64 = 130;
 const SAVING_PER_CALL: u64 = 1000;
-const SAVING_PER_FRAME: u64 = 450;
+const SAVING_PER_FRAME: u64 = 600;
 const STEP_COST: u64 = 180;
 /// A body's expected calls are its share of the closure calls the session made over its
 /// recording window, times this many calls. The session's call count measures how much
@@ -256,7 +259,8 @@ unsafe fn specialized<'a>(machine: &Machine<'_>) -> Option<&'a Compiled> {
         }
         let enclosure = machine.enclosure();
         let entered = if (*address).portable {
-            (*address).checked.get().weak_key() == enclosure
+            runtime::proven_for(&*address, enclosure)
+                || runtime::sibling_of_checked(&*address, enclosure)
         } else {
             // A dead enclosure's address may be reused by the live one, so the weak key decides.
             (*address).enclosure == enclosure
@@ -307,7 +311,7 @@ fn saving(work: Work) -> u64 {
 /// What one call of a body is expected to save when tier 0 enters its compiled code: zero when
 /// entering costs more than the body's work saves.
 fn saving_per_call(work: Work) -> u64 {
-    saving(work).saturating_sub(ENTRY_COST)
+    saving(work).saturating_sub(ENTRY_COST + LOAD_COST * work.loads as u64)
 }
 
 /// What compiling the body costs, in the tier-0 instructions the savings are counted in.
@@ -483,7 +487,7 @@ unsafe fn compiled_for<'a>(
             if !address.is_null() && (*address).portable {
                 let compiled = &*address;
                 let enclosure = machine.enclosure();
-                if compiled.checked.get().weak_key() != enclosure
+                if !runtime::proven_for(compiled, enclosure)
                     && !runtime::sibling_of_checked(compiled, enclosure)
                 {
                     // The epoch and stamps were proven for another enclosure's lookups, so the
@@ -776,6 +780,7 @@ unsafe fn compile_in<'a>(
                     calls: work.whole.calls.saturating_sub(work.outside.calls),
                     frames: work.whole.frames.saturating_sub(work.outside.frames),
                     steps: work.whole.steps.saturating_sub(work.outside.steps),
+                    loads: 0,
                 };
                 let per_pass = saving(pass) / plan.loop_headers.len() as u64;
                 if HORIZON_EDGES.saturating_mul(per_pass) >= compile_cost(machine) {
@@ -790,6 +795,7 @@ unsafe fn compile_in<'a>(
                             calls: work.outside.calls + work.looped.calls,
                             frames: work.outside.frames + work.looped.frames,
                             steps: work.outside.steps + work.looped.steps,
+                            loads: work.outside.loads,
                         },
                     )
                 }
@@ -881,6 +887,7 @@ unsafe fn compile_in<'a>(
             code: machine.code,
             enclosure,
             portable,
+            tied: portable && rooted.contains(&true),
             checked: Cell::new(values::nil()),
             rooted,
             extent: frames.iter().map(runtime::Layout::top).max().unwrap_or(0),
@@ -908,8 +915,9 @@ unsafe fn compile_in<'a>(
         // strong reference would keep the first object compiled for alive with its finalizer.
         // Portable code embeds nothing that dies with the enclosure, so it holds its objects
         // directly; element 0 is the weak reference `checked` names, set here to the compiling
-        // enclosure.
-        let mut kept = vec![enclosure];
+        // enclosure when the code is tied to one.
+        let free = compiled.portable && !compiled.tied;
+        let mut kept = vec![if free { values::nil() } else { enclosure }];
         kept.extend(plan.slots.iter().copied());
         for (function, callee) in &inlined {
             // The code is kept apart from the closure, whose body can be replaced.
@@ -929,19 +937,25 @@ unsafe fn compile_in<'a>(
             for (index, object) in kept.iter().enumerate() {
                 heap.set_element(protected, index, *object);
             }
-            let weak = if compiled.portable {
-                heap.alloc_weak_ref(enclosure, values::nil(), values::nil(), 0, false)
-            } else {
-                heap.alloc_weak_ref(enclosure, protected, values::nil(), 0, false)
-            }
-            .map_err(|_| error("the JIT could not allocate its code object"))?;
-            heap.root(weak);
-            let held = if compiled.portable {
-                heap.set_element(protected, 0, weak);
-                compiled.checked.set(weak);
+            let held = if free {
                 protected
             } else {
-                weak
+                let value = if compiled.portable {
+                    values::nil()
+                } else {
+                    protected
+                };
+                let weak = heap
+                    .alloc_weak_ref(enclosure, value, values::nil(), 0, false)
+                    .map_err(|_| error("the JIT could not allocate its code object"))?;
+                heap.root(weak);
+                if compiled.portable {
+                    heap.set_element(protected, 0, weak);
+                    compiled.checked.set(weak);
+                    protected
+                } else {
+                    weak
+                }
             };
             let address = Box::into_raw(compiled) as *mut c_void;
             heap.alloc_external_ptr(address, values::nil(), held)

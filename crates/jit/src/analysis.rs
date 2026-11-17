@@ -1348,6 +1348,10 @@ pub struct Work {
     pub frames: usize,
     /// The instructions compiled code hands to tier 0 one at a time.
     pub steps: usize,
+    /// The variables compiled code reads from the frame outside the body's loops, where each
+    /// call reads them once. A variable first read inside a loop is read from the frame on the
+    /// first pass only, so it is not counted.
+    pub loads: usize,
 }
 
 /// What the instructions of a body allow compiled code to do, whatever its profile records.
@@ -1380,6 +1384,7 @@ impl Shape {
             calls: self.calls,
             frames: self.frames,
             steps: 0,
+            loads: 0,
         }
     }
 }
@@ -1550,6 +1555,14 @@ impl Plan<'_> {
             if !bit(&ran, position) {
                 continue;
             }
+            let depth = loops
+                .iter()
+                .filter(|&&(first, last)| first <= inst.pc && inst.pc <= last)
+                .count();
+            if depth == 0 && matches!(action, Action::GetVar { load: Some(_), .. }) {
+                work.outside.loads += 1;
+                work.whole.loads += 1;
+            }
             let (native, calls, frames, steps) = match action {
                 Action::Inline { .. } | Action::Traverse { .. } | Action::NativeCall { .. } => {
                     (0, 1, 0, 0)
@@ -1598,10 +1611,6 @@ impl Plan<'_> {
                 action if native(action) || backward(inst) => (1, 0, 0, 0),
                 _ => continue,
             };
-            let depth = loops
-                .iter()
-                .filter(|&&(first, last)| first <= inst.pc && inst.pc <= last)
-                .count();
             let (part, weight) = match depth.checked_sub(1) {
                 None => (&mut work.outside, 1),
                 Some(around) => (
