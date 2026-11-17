@@ -1871,6 +1871,84 @@ fn active_bindings_are_called_at_every_compiled_read() {
     }
 }
 
+/// A profile summary counts a run without changing the paths it takes. Under the summary a loop
+/// that calls a small closure and reads a list element gives the same value, counts each
+/// closure call once whichever way it ran, and counts no builtin call for the element reads,
+/// which stay on the inline path. The elements come from a list because that read allocates
+/// nothing: the read of a numeric vector's element declines to the builtin whenever the heap
+/// has no free cell at hand, which depends on the tests that ran before.
+#[test]
+fn a_summary_counts_calls_without_leaving_the_fast_paths() {
+    const CALLS: u64 = 5000;
+    for mode in [Mode::Off, Mode::Force] {
+        let (plain, summarized, closures, builtins) = with_interpreter(|| unsafe {
+            use heap::activity::{self, Counter};
+            jit::install_mode(mode);
+            run("add <- function(a, b) a + b");
+            run(
+                "walk <- function(v, n) { s <- 0\ni <- 1L\nwhile (i <= n) { s <- add(s, v[[i]])\ni <- i + 1L }\ns }",
+            );
+            run(
+                "values <- list(1, 2)\nk <- 0L\nwhile (k < 12L) { values <- c(values, values)\nk <- k + 1L }",
+            );
+            // Twice first, so tier 0 has quickened the body and the forced tier has compiled it.
+            run("walk(values, 5000L)");
+            let plain = run("walk(values, 5000L)");
+            activity::set_enabled(true);
+            let calls = |counter| activity::counter(counter);
+            let closures = calls(Counter::ClosureCalls) + calls(Counter::InlinedCalls);
+            let builtins = calls(Counter::BuiltinCalls);
+            let summarized = run("walk(values, 5000L)");
+            let closures = calls(Counter::ClosureCalls) + calls(Counter::InlinedCalls) - closures;
+            let builtins = calls(Counter::BuiltinCalls) - builtins;
+            activity::set_enabled(false);
+            jit::install_mode(Mode::Off);
+            (plain, summarized, closures, builtins)
+        });
+        assert_eq!(plain, summarized, "{mode:?}");
+        assert_eq!(closures, CALLS + 1, "{mode:?}: closure calls counted");
+        assert!(
+            builtins < CALLS / 10,
+            "{mode:?}: {builtins} builtin calls, so the element reads left the inline path"
+        );
+    }
+}
+
+/// A call that leaves compiled code from inside an inlined callee is counted once. Its inlined
+/// entry counted it, so the frame the exit builds for tier 0 must not count it again.
+#[test]
+fn a_summary_counts_a_deoptimized_inlined_call_once() {
+    let (value, inlined, counted, deoptimized) = with_interpreter(|| unsafe {
+        use heap::activity::{self, Counter};
+        jit::install_mode(Mode::Force);
+        run("pick <- function(x) { if (x < 0) stop('negative'); x + 1 }
+             twice <- function(x) pick(x) + pick(x)");
+        run("for (i in 1:5) pick(1)");
+        for _ in 0..3 {
+            run("twice(1)");
+        }
+        let inlined = lower::parse_text("twice", "<test>")
+            .ok()
+            .and_then(|parsed| eval::eval(parsed.element(0), values::global_env()).ok())
+            .map_or(0, |function| jit::inlined_frames(function));
+        activity::set_enabled(true);
+        let calls =
+            || activity::counter(Counter::ClosureCalls) + activity::counter(Counter::InlinedCalls);
+        let (before, deoptimizations) = (calls(), jit::deoptimizations());
+        let value = run("twice(-1)");
+        let counted = calls() - before;
+        let deoptimized = jit::deoptimizations() - deoptimizations;
+        activity::set_enabled(false);
+        jit::install_mode(Mode::Off);
+        (value, inlined, counted, deoptimized)
+    });
+    assert_eq!(inlined, 2, "twice inlines its two calls");
+    assert!(deoptimized > 0, "the rare branch never left compiled code");
+    assert!(value.starts_with("error"), "{value}");
+    // `twice`, the `pick` whose rare branch left compiled code, and nothing after the error.
+    assert_eq!(counted, 2, "closure calls counted");
+}
+
 #[test]
 fn formal_shadows_enclosing_function() {
     // `sum` names a base function, but the call must reach the function passed in its place.

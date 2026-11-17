@@ -1007,8 +1007,8 @@ pub unsafe extern "C" fn jit_load_slot(activation: *mut Activation, slot: i64) -
                             Ok((value, true))
                         }
                         Some(value) if value == values::missing_arg() => {
-                            let env =
-                                machine.reify(eval::Reify::Site("missing argument lookup"))?;
+                            let env = machine
+                                .reify(eval::Reify::Site(eval::Site::MissingArgumentLookup))?;
                             eval::eval_symbol(symbol, env).map(|value| (value, true))
                         }
                         _ => eval::eval_symbol(symbol, machine.enclosure())
@@ -1716,6 +1716,7 @@ unsafe fn enter_inlined(
             header as u32,
             missing,
             promised,
+            false,
         )?;
         if entered.header == interp::NO_SLOTS {
             panic!("an inlined call ran whole where only its frame was to be pushed");
@@ -1808,9 +1809,10 @@ pub unsafe extern "C" fn jit_enter_frame(parent: *mut Activation, frame: i64) ->
             || function.cdr() != inlined.code
             || enclosure != (*child).activation.enclosure
             || enclosure.has_gp(gp::SLOT_FRAME);
+        let hooks = activity::hooks();
         if needs_frame
             || (*(*parent).parked).pending.is_some()
-            || activity::enabled()
+            || hooks & activity::CAPTURE != 0
             || !state.object_systems
             || state.debugger.is_some()
             || moves::tracking()
@@ -1818,6 +1820,9 @@ pub unsafe extern "C" fn jit_enter_frame(parent: *mut Activation, frame: i64) ->
             || depth > state.max_depth as usize
         {
             return declined(parent, child, needs_frame);
+        }
+        if hooks & activity::SUMMARY != 0 {
+            interp::profile_summary::count_inlined_call(function);
         }
         debug_assert!((*child).machine.mark == heap().handle_mark());
         &raw mut (*child).activation

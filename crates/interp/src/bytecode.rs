@@ -51,7 +51,7 @@ use {
         dispatch::{self, Caller},
         effects, element_access,
         envir::namespace_binding,
-        eval::{self, Reify, SwitchSelector, as_condition},
+        eval::{self, Reify, Site, SwitchSelector, as_condition},
         handles::{
             self, Atomic, Chars, Cx, Environment, Integer, List, Local, Logical, Names, Owned,
             Real, Scalar, Str, Vector,
@@ -128,6 +128,8 @@ pub struct State {
     bodies: Bodies,
     /// The tier of every call native code has evaluated ([`run_call`]).
     calls: Calls,
+    /// How often each closure body was entered, while a profile summary is collected.
+    entries: BodyEntries,
     tier: Option<Tier>,
     pub(crate) call_plans: CallPlans,
     /// What the dispatch loop resumes as each callee it entered in place returns, innermost
@@ -150,6 +152,7 @@ impl Default for State {
             registers: Vec::with_capacity(REGISTER_FILE_CAPACITY),
             bodies: Bodies::default(),
             calls: Calls::default(),
+            entries: BodyEntries::default(),
             tier: None,
             call_plans: CallPlans::default(),
             resumes: Vec::new(),
@@ -170,6 +173,7 @@ impl State {
         self.call_plans.clear_dead(liveness);
         self.bodies.clear_dead(liveness);
         self.calls.clear_dead(liveness);
+        self.entries.clear_dead(liveness);
     }
 }
 
@@ -558,6 +562,87 @@ impl Calls {
     }
 }
 
+/// How often each closure body was entered while a profile summary is collected, which the
+/// summary sets against where the samples fell ([`take_body_entries`]). A body is named by the
+/// address of its expression, as a sample names it.
+///
+/// A call of compiled code counts in the code itself ([`profile::CALLS`]), a load and a store
+/// per call, and `codes` lists every code object that holds such a count. A call of a body
+/// that is an expression counts in `counts`.
+#[derive(Default)]
+struct BodyEntries {
+    /// By body: the calls of a body that is an expression, and the calls of code that has died.
+    counts: FxHashMap<usize, u64>,
+    /// The code objects whose [`profile::CALLS`] is nonzero. Not traced: the list holds a code
+    /// object weakly and moves its count into `counts` when it dies.
+    codes: Vec<Sexp>,
+}
+
+impl BodyEntries {
+    /// Keeps the count of every code object the collection found dead, under its body. Dead
+    /// objects are intact until the collection frees them, so the code's constants are read
+    /// here for the last time.
+    unsafe fn clear_dead(&mut self, liveness: &Liveness<'_>) {
+        let counts = &mut self.counts;
+        self.codes.retain(|&code| {
+            let live = liveness.is_live(code);
+            if !live {
+                *counts.entry(source_of(code).as_ptr() as usize).or_insert(0) +=
+                    *pool_ints(code.cdr(), PROFILE).add(profile::CALLS) as u64;
+            }
+            live
+        });
+    }
+}
+
+/// Counts an entry of the closure body `code`, in the code itself, while a profile summary is
+/// collected.
+#[inline(always)]
+unsafe fn count_code_entry(code: Sexp) {
+    let calls = pool_ints(code.cdr(), PROFILE).add(profile::CALLS);
+    if *calls == 0 {
+        track_body_entries(code);
+    }
+    *calls = (*calls).saturating_add(1);
+}
+
+/// Lists `code` as holding a count of entries, at its first one.
+#[cold]
+#[inline(never)]
+unsafe fn track_body_entries(code: Sexp) {
+    interp().bytecode.entries.codes.push(code);
+}
+
+/// Counts an entry of `function`'s body by a call off tier 0's lean path, while a profile
+/// summary is collected: in the body's code, or by the body's address while it is an
+/// expression.
+pub(crate) unsafe fn count_body_entry(function: Sexp) {
+    let body = function.cdr();
+    if body.kind() == SexpType::Bytecode {
+        count_code_entry(body);
+    } else {
+        *interp()
+            .bytecode
+            .entries
+            .counts
+            .entry(body.as_ptr() as usize)
+            .or_insert(0) += 1;
+    }
+}
+
+/// The entries of every closure body counted while a profile summary was collected, by the
+/// address of the body's expression. Reading ends the count and clears it.
+pub(crate) unsafe fn take_body_entries() -> FxHashMap<usize, u64> {
+    let entries = std::mem::take(&mut interp().bytecode.entries);
+    let mut counts = entries.counts;
+    for code in entries.codes {
+        let calls = pool_ints(code.cdr(), PROFILE).add(profile::CALLS);
+        *counts.entry(source_of(code).as_ptr() as usize).or_insert(0) += *calls as u64;
+        *calls = 0;
+    }
+    counts
+}
+
 /// A hash of everything code compiled from `call` depends on: each cell's identity, kind and
 /// tag, and each leaf's identity, with a scalar's value and attributes, since native code writes
 /// a call's scalars in place (`INTEGER(index)[0] = i`). Identity rather than structure, because
@@ -757,7 +842,7 @@ impl Machine<'_> {
             self.clear_missing(slot);
             return Ok(());
         }
-        let env = self.reify(Reify::Site("assignment"))?;
+        let env = self.reify(Reify::Site(Site::Assignment))?;
         eval::assign_symbol(symbol, value, env, false)
     }
 
@@ -1467,7 +1552,12 @@ pub mod profile {
     /// opened, which the optimizing tier reads to estimate how often the body
     /// runs.
     pub const WINDOW: usize = 5;
-    pub const LENGTH: usize = 6;
+    /// How often the code was entered while a profile summary was collected
+    /// ([`super::count_code_entry`]), which the summary reads when it is written
+    /// ([`super::take_body_entries`]). [`ENTRIES`] cannot serve, because the optimizing tier
+    /// rewrites it.
+    pub const CALLS: usize = 6;
+    pub const LENGTH: usize = 7;
     /// The counters a code image keeps. The next event is derived from them when it is read.
     pub const SERIALIZED: usize = 4;
 }
@@ -7201,16 +7291,22 @@ pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<Option<Sexp>> 
         state.resume_base = (*state.interp).bytecode.resumes.len();
         state.stepping = true;
         let entered = if *state.header == (*state.heap).known().nil {
-            match call_fast::<false, false>(&mut state, pc) {
-                None => call_fast::<false, true>(&mut state, pc),
+            match call_fast::<false, false, GUARDING>(&mut state, pc) {
+                None => call_fast::<false, true, GUARDING>(&mut state, pc),
                 taken => taken,
             }
         } else {
-            call_fast::<true, false>(&mut state, pc)
+            call_fast::<true, false, GUARDING>(&mut state, pc)
+        };
+        let entered = match entered {
+            None if activity::summary_only() => call_summarized(&mut state, pc),
+            entered => entered,
         };
         match entered {
             Some(STOP) => {}
             Some(next) => {
+                // The callee runs on tier 0 from here, not in the compiled code that called.
+                let _activity = activity::enter(Activity::Interpreter, 0);
                 (*RUN_HANDLERS.as_ptr().add(op_index(state.code, next)))(&mut state, next)
             }
             None => {
@@ -7238,9 +7334,10 @@ pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<Option<Sexp>> 
 pub unsafe fn call_builtin_step(machine: &mut Machine<'_>, pc: usize, record: bool) -> R<()> {
     let code = machine.code.car().data().cast::<i32>().cast_const();
     // A positional call of a builtin with a direct entry reads only its registers, so it runs
-    // without the activation, which costs as much to build as the call itself. Under a hook a
-    // declined entry would be observed twice, so the full path takes it.
-    if *code.add(pc) as u32 == POSITIONAL_CALL_BUILTIN_WORD && activity::hooks() == 0 {
+    // without the activation, which costs as much to build as the call itself. Under an
+    // observer a declined entry would be observed twice, so the full path takes it; a profile
+    // summary counts a direct entry only when it answers (`eval::call_direct`).
+    if *code.add(pc) as u32 == POSITIONAL_CALL_BUILTIN_WORD && activity::observers() == 0 {
         let constants = machine.code.cdr();
         let registers = register_address(machine.base);
         let operand = |index: usize| *code.add(pc + 1 + index) as usize;
@@ -7460,7 +7557,7 @@ pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)>
                 };
                 (forced, false)
             } else if value == missing_arg() {
-                let env = machine.reify(Reify::Site("missing argument lookup"))?;
+                let env = machine.reify(Reify::Site(Site::MissingArgumentLookup))?;
                 (
                     lookup_variable(symbol, env, LookupCache::of(code), cache, 0..0)?,
                     true,
@@ -7888,9 +7985,16 @@ unsafe fn scheduled_entry_in_place(state: &mut Activation<'_, '_>, entries: i32)
     // never moves), and reloads for the caller, so only a body that goes on in tier 0 reloads:
     // the tier may have started or stopped its recording.
     match event {
-        Some(TierExit::Finished(Ok(value))) => leave_fast::<false, false>(state, value)
-            .or_else(|| leave_fast::<true, false>(state, value))
+        Some(TierExit::Finished(Ok(value))) => leave_fast::<false, false, GUARDING>(state, value)
+            .or_else(|| leave_fast::<true, false, GUARDING>(state, value))
             .or_else(|| (state.stepping && leave_stepped(state, value)).then_some(STOP))
+            .or_else(|| {
+                if activity::summary_only() {
+                    leave_summarized(state, value)
+                } else {
+                    None
+                }
+            })
             .unwrap_or_else(|| finished(state, Ok(value))),
         Some(TierExit::Finished(result)) => finished(state, result),
         Some(TierExit::Resume { pc, pending }) => {
@@ -8270,9 +8374,14 @@ fast_paths! {
 ///
 /// The handler holds the path for a caller on its slots only. What that path leaves goes on
 /// in [`call_generic_by_name`], a tail call, so the rarer path adds no saved register to this
-/// one.
+/// one. A call under a hook flag leaves at the first test for [`call_generic_hooked`], so the
+/// paths after it test no flag, and a summarized call passes through no handler that declines
+/// it.
 unsafe fn fast_call_generic(state: &mut Activation<'_, '_>, at: usize) {
-    if let Some(next) = call_fast::<false, false>(state, at) {
+    if activity::hooks() != 0 {
+        become call_generic_hooked(state, at)
+    }
+    if let Some(next) = call_fast::<false, false, UNHOOKED>(state, at) {
         if next == STOP {
             return;
         }
@@ -8287,9 +8396,9 @@ unsafe fn fast_call_generic(state: &mut Activation<'_, '_>, at: usize) {
 #[inline(never)]
 unsafe fn call_generic_by_name(state: &mut Activation<'_, '_>, at: usize) {
     let taken = if *state.header != (*state.heap).known().nil {
-        call_fast::<true, false>(state, at)
+        call_fast::<true, false, UNHOOKED>(state, at)
     } else {
-        call_fast::<false, true>(state, at)
+        call_fast::<false, true, UNHOOKED>(state, at)
     };
     if let Some(next) = taken {
         if next == STOP {
@@ -8300,9 +8409,49 @@ unsafe fn call_generic_by_name(state: &mut Activation<'_, '_>, at: usize) {
     become GENERIC_HANDLERS[Op::CallGeneric as usize](state, at)
 }
 
+/// `CallGeneric` while a hook flag is set: through [`call_summarized`] when the flag is a
+/// profile summary's and nothing else observes calls, and the generic handler otherwise.
+#[inline(never)]
+unsafe fn call_generic_hooked(state: &mut Activation<'_, '_>, at: usize) {
+    if activity::summary_only()
+        && let Some(next) = call_summarized(state, at)
+    {
+        if next == STOP {
+            return;
+        }
+        dispatch!(state, next);
+    }
+    become GENERIC_HANDLERS[Op::CallGeneric as usize](state, at)
+}
+
+/// [`call_fast`] for the call at `at` while a profile summary is collected: the same path with
+/// the summary's records, which are the call's count, its body's entry count, the time the
+/// call takes as call setup, and the samples that wait for the stack the call changes.
+#[inline(never)]
+unsafe fn call_summarized(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    if activity::sample_ticked() {
+        crate::profile_summary::resolve_samples(interp().frames.len());
+    }
+    let running = activity::current();
+    activity::publish(Activity::CallSetup);
+    let taken = match call_fast::<false, false, SUMMARIZED>(state, at) {
+        None if *state.header != (*state.heap).known().nil => {
+            call_fast::<true, false, SUMMARIZED>(state, at)
+        }
+        None => call_fast::<false, true, SUMMARIZED>(state, at),
+        taken => taken,
+    };
+    activity::restore(running);
+    taken
+}
+
 /// The fast handler of `Return`: [`return_fast`] for a frame that handed out no environment,
 /// and otherwise [`return_discarding`], a tail call for the reason [`fast_call_generic`] gives.
+/// A return under a hook flag leaves at the first test for [`return_hooked`].
 unsafe fn fast_return(state: &mut Activation<'_, '_>, at: usize) {
+    if activity::hooks() != 0 {
+        become return_hooked(state, at)
+    }
     if let Some(next) = return_fast::<false>(state, at) {
         dispatch!(state, next);
     }
@@ -8322,6 +8471,55 @@ unsafe fn return_discarding(state: &mut Activation<'_, '_>, at: usize) {
     become GENERIC_HANDLERS[Op::Return as usize](state, at)
 }
 
+/// `Return` while a hook flag is set: through [`leave_summarized`] when the flag is a profile
+/// summary's and nothing else observes calls, and the generic handler otherwise, as
+/// [`call_generic_hooked`] is for a call.
+#[inline(never)]
+unsafe fn return_hooked(state: &mut Activation<'_, '_>, at: usize) {
+    if activity::summary_only() {
+        let value = *state.registers.add(*state.code.add(at + 1) as usize);
+        if let Some(next) = leave_summarized(state, value) {
+            if next == STOP {
+                return;
+            }
+            dispatch!(state, next);
+        }
+    }
+    become GENERIC_HANDLERS[Op::Return as usize](state, at)
+}
+
+/// [`leave_fast`] for the running activation while a profile summary is collected: the same
+/// exits with the summary's records, which are the census of package calls and the samples
+/// that wait for the stack the return changes. A stepped call's callee answers [`STOP`].
+#[inline(never)]
+unsafe fn leave_summarized(state: &mut Activation<'_, '_>, value: Sexp) -> Option<usize> {
+    if activity::sample_ticked() {
+        crate::profile_summary::resolve_samples(interp().frames.len());
+    }
+    leave_fast::<false, false, SUMMARIZED>(state, value)
+        .or_else(|| leave_fast::<true, false, SUMMARIZED>(state, value))
+        .or_else(|| {
+            if state.stepping {
+                leave_fast::<false, true, SUMMARIZED>(state, value)
+                    .or_else(|| leave_fast::<true, true, SUMMARIZED>(state, value))
+            } else {
+                None
+            }
+        })
+}
+
+/// How a compiled copy of [`call_fast`] or [`leave_fast`] treats the hook flags
+/// ([`activity::hooks`]). [`GUARDING`] tests them and declines under any. [`UNHOOKED`] tests
+/// nothing, because its handler left for the hooked one at its first instruction; a sampler's
+/// tick that arrives after that test waits for the next call or return, as one that arrives
+/// after a test here would. [`SUMMARIZED`] is the path while a profile summary is collected
+/// and nothing else observes calls, which the caller has checked
+/// ([`activity::summary_only`]): the same path with the summary's records, compiled apart so
+/// that a call without a summary carries none of them.
+const GUARDING: u8 = 0;
+const UNHOOKED: u8 = 1;
+const SUMMARIZED: u8 = 2;
+
 /// `Return` from the callee of a call the optimizing tier stepped ([`step_one`]), which hands
 /// the result back to compiled code: the exit [`return_fast`] takes, without [`eval::leave`].
 #[inline(never)]
@@ -8333,8 +8531,8 @@ unsafe fn return_stepped(state: &mut Activation<'_, '_>, at: usize) -> bool {
 /// Ends a stepped call's callee with `value` when the lean exit applies, as [`leave_fast`] does.
 #[inline(always)]
 unsafe fn leave_stepped(state: &mut Activation<'_, '_>, value: Sexp) -> bool {
-    leave_fast::<false, true>(state, value)
-        .or_else(|| leave_fast::<true, true>(state, value))
+    leave_fast::<false, true, GUARDING>(state, value)
+        .or_else(|| leave_fast::<true, true, GUARDING>(state, value))
         .is_some()
 }
 
@@ -8362,11 +8560,14 @@ unsafe fn leave_stepped(state: &mut Activation<'_, '_>, value: Sexp) -> bool {
 /// It does what [`op_call_generic`] does for the same call through [`slot_promises_into`] or
 /// [`eval::referenced_args_into`], then
 /// [`eval::bind_plan`], [`eval::enter`] and [`enter_in_place`], and leaves every call that
-/// needs anything else to them: a debugger, a profile, a tracked move or a refused object
-/// system ([`activity::hooks`]), a closure flagged for debugging or with a native entry, the
+/// needs anything else to them: a debugger, an `Rprof` profile, a tracked move or a refused
+/// object system ([`activity::observers`]), a closure flagged for debugging or with a native entry, the
 /// namespace loader, `do.call`, a frame stack or register file that is full.
+///
+/// `HOOKS` is how the copy treats the hook flags ([`GUARDING`]); under [`SUMMARIZED`] it counts
+/// the call and the callee's entry.
 #[inline(always)]
-unsafe fn call_fast<const BY_NAME: bool, const SPREAD: bool>(
+unsafe fn call_fast<const BY_NAME: bool, const SPREAD: bool, const HOOKS: u8>(
     state: &mut Activation<'_, '_>,
     at: usize,
 ) -> Option<usize> {
@@ -8382,7 +8583,7 @@ unsafe fn call_fast<const BY_NAME: bool, const SPREAD: bool>(
     if at + 1 >= feedback.length() as usize
         || state.resume_base == NO_RESUMES
         || BY_NAME != (*state.header != nil)
-        || activity::hooks() != 0
+        || (HOOKS == GUARDING && activity::hooks() != 0)
     {
         return None;
     }
@@ -8646,7 +8847,7 @@ unsafe fn call_fast<const BY_NAME: bool, const SPREAD: bool>(
             previous_owner
         },
         pending: nil,
-        inlined: false,
+        role: crate::FrameRole::Call,
         reified_by: crate::NOT_REIFIED,
         handle_mark: (*heap).handle_mark() as u32,
         previous_owner,
@@ -8675,6 +8876,10 @@ unsafe fn call_fast<const BY_NAME: bool, const SPREAD: bool>(
         references,
         loops,
     );
+    if HOOKS == SUMMARIZED {
+        activity::record(Counter::ClosureCalls);
+        count_code_entry(state.machine.code);
+    }
     Some(count_entry(state))
 }
 
@@ -8736,7 +8941,7 @@ unsafe fn return_fast<const DISCARD: bool>(
     at: usize,
 ) -> Option<usize> {
     let value = *state.registers.add(*state.code.add(at + 1) as usize);
-    leave_fast::<DISCARD, false>(state, value)
+    leave_fast::<DISCARD, false, UNHOOKED>(state, value)
 }
 
 /// Ends the running activation, which a call instruction entered in place, with `value`, and
@@ -8746,8 +8951,11 @@ unsafe fn return_fast<const DISCARD: bool>(
 /// With `STEPPED` it takes only the callee of a call the optimizing tier stepped, and answers
 /// [`STOP`] with the step's outcome in [`Activation::exit`] and [`Activation::stepped`], as
 /// [`resume_caller`] leaves them; without it, never that callee.
+///
+/// `HOOKS` is how the copy treats the hook flags ([`GUARDING`]); under [`SUMMARIZED`] it also
+/// takes the summary's census of package calls.
 #[inline(always)]
-unsafe fn leave_fast<const DISCARD: bool, const STEPPED: bool>(
+unsafe fn leave_fast<const DISCARD: bool, const STEPPED: bool, const HOOKS: u8>(
     state: &mut Activation<'_, '_>,
     value: Sexp,
 ) -> Option<usize> {
@@ -8760,7 +8968,7 @@ unsafe fn leave_fast<const DISCARD: bool, const STEPPED: bool>(
     if count <= state.resume_base
         || returns_to_tier != STEPPED
         || *state.header != nil
-        || activity::hooks() != 0
+        || (HOOKS == GUARDING && activity::hooks() != 0)
     {
         return None;
     }
@@ -8774,10 +8982,14 @@ unsafe fn leave_fast<const DISCARD: bool, const STEPPED: bool>(
         return None;
     }
     debug_assert!(frame.env == nil && frame.slots as usize == state.machine.header);
+    if DISCARD && (pending.refcount() != 0 || value == pending || heap.is_preserved(pending)) {
+        return None;
+    }
+    if HOOKS == SUMMARIZED {
+        let args = interp.frame_args.get_unchecked(frame.args as usize..);
+        eval::count_package_call(frame.function, Some(frame), args);
+    }
     if DISCARD {
-        if pending.refcount() != 0 || value == pending || heap.is_preserved(pending) {
-            return None;
-        }
         crate::forget_pending_closures(interp, depth - 1);
         heap.discard_frame(pending, value);
         pending.set_gp_bits(gp::COMPILED_FRAME, false);
@@ -9075,8 +9287,9 @@ unsafe fn branch_if_object_fast(state: &mut Activation<'_, '_>, at: usize) -> Op
 }
 
 /// `CallBuiltin` of the base `[` or `[[` on two positional values, reading the element
-/// [`element_access::element_position`] takes without the call. A profile or activity trace
-/// being taken sees the full call, as [`eval::call_direct`] arranges for every direct entry.
+/// [`element_access::element_position`] takes without the call. A debugger, an `Rprof` profile
+/// or a recorder sees the full call ([`activity::observers`]); a profile summary counts only
+/// the reads that take the builtin.
 #[inline(always)]
 unsafe fn call_builtin_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
     if *state.code.add(at + 5) != 2 {
@@ -9158,7 +9371,7 @@ unsafe fn read_element_call<const STRING: bool>(
         || second.tag() != known.nil
         || arguments.car() == known.missing_arg
         || second.car() == known.missing_arg
-        || activity::hooks() != 0
+        || activity::observers() != 0
     {
         return None;
     }
@@ -9217,7 +9430,6 @@ unsafe fn read_altrep_element_call(state: &mut Activation<'_, '_>, at: usize) ->
         || second.tag() != known.nil
         || arguments.car() == known.missing_arg
         || second.car() == known.missing_arg
-        || activity::enabled()
     {
         return None;
     }
@@ -9678,7 +9890,7 @@ unsafe fn op_set_var(state: &mut Activation<'_, '_>, instruction: Instruction) -
         (*state.interp).visible = false;
         return Ok(Flow::Next);
     }
-    let env = state.env(Reify::Site("assignment"))?;
+    let env = state.env(Reify::Site(Site::Assignment))?;
     let hint = &mut *state.cache.hints.add(instruction.operand(2));
     let cell = (*state.heap).frame_cell_hinted(env, symbol, hint);
     eval::assign_local(symbol, value, env, cell)?;
@@ -9722,7 +9934,7 @@ unsafe fn slot_variable(
             return Ok(forced);
         }
         if value == missing_arg() {
-            let env = state.env(Reify::Site("variable lookup"))?;
+            let env = state.env(Reify::Site(Site::VariableLookup))?;
             return lookup_variable(symbol, env, state.cache, cache, held);
         }
         if value != unbound() {
@@ -9751,7 +9963,7 @@ unsafe fn slot_function(
     if let Some(slot) = state.slot(cache) {
         let mut value = *slot;
         if value == missing_arg() {
-            let env = state.env(Reify::Site("function lookup"))?;
+            let env = state.env(Reify::Site(Site::FunctionLookup))?;
             return lookup_function(symbol, env, state.cache, cache, call);
         }
         if value.kind() == SexpType::Promise {
@@ -9969,7 +10181,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
                     |symbol| slot_eager_argument(state, symbol),
                 )?
             } else {
-                let env = state.env(Reify::Site("generic call: native entry"))?;
+                let env = state.env(Reify::Site(Site::GenericCallNativeEntry))?;
                 crate::base_fast_paths::native_entry_by_value(
                     function,
                     arguments,
@@ -10032,7 +10244,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             nil()
         } else {
             args.clear();
-            let env = state.env(Reify::Site("generic call: arguments"))?;
+            let env = state.env(Reify::Site(Site::GenericCallArguments))?;
             if eager {
                 eval::eager_args_into(arguments, env, &mut args)?;
             } else if plan.is_some() {
@@ -10152,7 +10364,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             // environment: `<-` for an assignment form the compiler left to it, `switch`, `quote`.
             state.env(Reify::Builtin(function))?
         } else {
-            state.env(Reify::Site("generic call"))?
+            state.env(Reify::Site(Site::GenericCall))?
         };
         eval::apply_call(call, function, call.cdr(), env)?
     };
@@ -10807,7 +11019,7 @@ unsafe fn call_do_call(
                 }
                 state.machine.function.tag()
             } else {
-                state.env(Reify::Site("do.call"))?
+                state.env(Reify::Site(Site::DoCall))?
             };
             match effects::resolve_function(symbol, start) {
                 Some(found) => (found.function, symbol),
@@ -10876,7 +11088,7 @@ unsafe fn call_do_call(
     let sys_parent = if in_slots {
         nil()
     } else {
-        state.env(Reify::Site("do.call"))?
+        state.env(Reify::Site(Site::DoCall))?
     };
     activity::count(Counter::DoCallsInlined);
     eval::run_inlined(
@@ -10903,7 +11115,7 @@ unsafe fn settled_argument(state: &Activation<'_, '_>, expression: Sexp) -> R<Op
             let found = if state.in_slots() {
                 slot_eager_argument(state, expression)
             } else {
-                effects::eager_argument(expression, state.env(Reify::Site("do.call argument"))?)
+                effects::eager_argument(expression, state.env(Reify::Site(Site::DoCallArgument))?)
             };
             match found {
                 Some(value) => value,
@@ -11063,8 +11275,7 @@ unsafe fn slot_special_call(
     let _activity = activity::enter(Activity::Builtin, index as u32);
     let answer = slot_special_answer(state, instruction, definition.name, call)?;
     if answer.is_some() {
-        activity::count(Counter::BuiltinCalls);
-        activity::count_builtin(index);
+        activity::record_builtin(index);
     }
     Ok(answer)
 }
@@ -11256,7 +11467,7 @@ unsafe fn slot_switch(
         Some(chosen) if chosen.kind() == SexpType::Promise => eval::force_promise(chosen).map(Some),
         // The special evaluates the alternative it chose in the frame, as `do_switch` does.
         Some(chosen) if matches!(chosen.kind(), SexpType::Language | SexpType::Symbol) => {
-            eval::eval(chosen, state.env(Reify::Site("switch alternative"))?).map(Some)
+            eval::eval(chosen, state.env(Reify::Site(Site::SwitchAlternative))?).map(Some)
         }
         Some(chosen) => {
             interp().visible = true;
@@ -11388,7 +11599,7 @@ unsafe fn slot_builtin_call(
         let object = args.iter().any(|arg| arg.value.is_object());
         if !object || slot_call_dispatches(definition, function, &args)? {
             if object {
-                env = state.env(Reify::Site("builtin call"))?;
+                env = state.env(Reify::Site(Site::BuiltinCall))?;
             }
             if let Some(value) =
                 dispatch::try_builtin_dispatch(definition, call, function, &args, env)?
@@ -11942,7 +12153,7 @@ unsafe fn op_call_rebinding(state: &mut Activation<'_, '_>, instruction: Instruc
         call,
         function,
         target,
-        state.env(Reify::Site("rebinding call"))?,
+        state.env(Reify::Site(Site::RebindingCall))?,
     )?;
     state.record(instruction.at, value);
     instruction.output(0, value);
@@ -11998,7 +12209,7 @@ unsafe fn op_call_tail_update(state: &mut Activation<'_, '_>, instruction: Instr
         call,
         function,
         target,
-        state.env(Reify::Site("tail update"))?,
+        state.env(Reify::Site(Site::TailUpdate))?,
     )?;
     state.record(instruction.at, value);
     instruction.output(0, value);
@@ -12018,7 +12229,7 @@ unsafe fn op_field(state: &mut Activation<'_, '_>, instruction: Instruction) -> 
             object,
             name.car(),
             call,
-            state.env(Reify::Site("`$` field"))?,
+            state.env(Reify::Site(Site::DollarField))?,
         )?,
         None => crate::subset::dollar(object, name.car(), call)?,
     };
@@ -12122,7 +12333,7 @@ unsafe fn op_bound_eval(state: &mut Activation<'_, '_>, instruction: Instruction
         expression,
         names,
         bound,
-        state.env(Reify::Site("bound evaluation"))?,
+        state.env(Reify::Site(Site::BoundEvaluation))?,
     )?;
     state.record(instruction.at, value);
     instruction.output(0, value);
@@ -12176,7 +12387,7 @@ unsafe fn op_dispatch_subject(state: &mut Activation<'_, '_>, instruction: Instr
                 function,
                 call.cdr(),
                 subject,
-                state.env(Reify::Site("dispatch subject"))?,
+                state.env(Reify::Site(Site::DispatchSubject))?,
                 &mut args,
             )? {
                 Some(value) => value,
@@ -12255,7 +12466,7 @@ unsafe fn slot_subject_call(
         if let Some(method) =
             dispatch::subject_method(definition, subject, state.machine.enclosure())?
         {
-            let env = state.env(Reify::Site("dispatch subject: method"))?;
+            let env = state.env(Reify::Site(Site::DispatchSubjectMethod))?;
             return dispatch::apply_subject_method(call, method, subject, env).map(Some);
         }
     }
@@ -12312,7 +12523,10 @@ unsafe fn slot_subject_call(
 #[inline(always)]
 unsafe fn op_ast(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     let expression = state.constant(instruction, 1);
-    let value = eval::eval(expression, state.env(Reify::Site("uncompiled expression"))?)?;
+    let value = eval::eval(
+        expression,
+        state.env(Reify::Site(Site::UncompiledExpression))?,
+    )?;
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
@@ -12453,7 +12667,7 @@ unsafe fn slot_missing(state: &Activation<'_, '_>, symbol: Sexp) -> R<bool> {
             return eval::value_is_missing(*state.header.add(1 + position));
         }
     }
-    eval::is_missing(symbol, state.env(Reify::Site("missing()"))?)
+    eval::is_missing(symbol, state.env(Reify::Site(Site::Missing))?)
 }
 
 #[inline(always)]
@@ -12478,7 +12692,7 @@ unsafe fn op_guard(state: &mut Activation<'_, '_>, instruction: Instruction) -> 
     } else {
         lookup_function(
             symbol,
-            state.env(Reify::Site("function guard"))?,
+            state.env(Reify::Site(Site::FunctionGuard))?,
             state.cache,
             slot,
             unbound(),
@@ -12885,7 +13099,7 @@ unsafe fn op_for_step(state: &mut Activation<'_, '_>, instruction: Instruction) 
     };
     let env = match slot {
         Some(_) => nil(),
-        None => state.env(Reify::Site("for loop"))?,
+        None => state.env(Reify::Site(Site::ForLoop))?,
     };
     let loop_state = state
         .machine
@@ -13043,7 +13257,7 @@ unsafe fn op_closure(state: &mut Activation<'_, '_>, instruction: Instruction) -
             formals,
             body,
             srcref,
-            state.env(Reify::Site("function definition"))?,
+            state.env(Reify::Site(Site::FunctionDefinition))?,
         )?
     };
     // Every closure this site creates shares one compiled body, as GNU R compiles inner
@@ -13077,7 +13291,7 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
     let index = instruction.input(2);
     let target = call.cdr().car();
     if index == unbound() {
-        let env = state.env(Reify::Site("subassignment"))?;
+        let env = state.env(Reify::Site(Site::Subassignment))?;
         eval::complex_assign(call, target, value, env, false, &[])?;
         instruction.output(0, value);
         (*state.interp).visible = false;
@@ -13090,7 +13304,7 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
             call,
             target,
             value,
-            state.env(Reify::Site("subassignment"))?,
+            state.env(Reify::Site(Site::Subassignment))?,
             false,
             &evaluated_arguments(target, &[index])?,
         )?;
@@ -13113,7 +13327,7 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
         (*state.interp).visible = false;
         return Ok(Flow::Next);
     }
-    let env = state.env(Reify::Site("subassignment"))?;
+    let env = state.env(Reify::Site(Site::Subassignment))?;
     let done = match subscript_value(env, index)? {
         Some(index) => {
             assign_element_in_place(env, variable, index, value, kind)?
@@ -13142,7 +13356,7 @@ unsafe fn op_sub_assign_matrix(
     let target = call.cdr().car();
     let subscripts = [instruction.input(2), instruction.input(3)];
     if subscripts.contains(&unbound()) {
-        let env = state.env(Reify::Site("matrix subassignment"))?;
+        let env = state.env(Reify::Site(Site::MatrixSubassignment))?;
         eval::complex_assign(call, target, value, env, false, &[])?;
         instruction.output(0, value);
         (*state.interp).visible = false;
@@ -13165,7 +13379,7 @@ unsafe fn op_sub_assign_matrix(
         (*state.interp).visible = false;
         return Ok(Flow::Next);
     }
-    let env = state.env(Reify::Site("matrix subassignment"))?;
+    let env = state.env(Reify::Site(Site::MatrixSubassignment))?;
     let done = lookups
         && match (
             subscript_value(env, subscripts[0])?,
@@ -13202,7 +13416,7 @@ unsafe fn op_replace(state: &mut Activation<'_, '_>, instruction: Instruction) -
         )
     };
     if !(state.in_slots() && replace(state, nil())?) {
-        let env = state.env(Reify::Site("replacement call"))?;
+        let env = state.env(Reify::Site(Site::ReplacementCall))?;
         if !replace(state, env)? {
             let target = whole.cdr().car();
             let subscripts =
@@ -13220,7 +13434,7 @@ unsafe fn op_replace(state: &mut Activation<'_, '_>, instruction: Instruction) -
 unsafe fn op_complex_assign(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     let whole = state.constant(instruction, 2);
     let value = instruction.input(1);
-    let env = state.env(Reify::Site("dispatching replacement"))?;
+    let env = state.env(Reify::Site(Site::DispatchingReplacement))?;
     eval::complex_assign(whole, whole.cdr().car(), value, env, false, &[])?;
     // The optimizing tier speculates past a site that has never run.
     state.record(instruction.at, value);
@@ -14242,7 +14456,7 @@ pub(crate) unsafe fn call_builtin(
             if !slot_call_dispatches(definition, function, args)? {
                 return eval::call_builtin(definition, call, function, args, env);
             }
-            eval::slot_owner_env(Reify::Site("builtin dispatch"))?
+            eval::slot_owner_env(Reify::Site(Site::BuiltinDispatch))?
         } else {
             env
         };

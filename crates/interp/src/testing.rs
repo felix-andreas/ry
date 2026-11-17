@@ -1901,7 +1901,7 @@ pub fn check_frame_stack(entropy: &mut impl Entropy) {
             missing: 0,
             caller: 0,
             pending: nil,
-            inlined: false,
+            role: crate::FrameRole::Call,
             reified_by: crate::NOT_REIFIED,
             args: id,
             on_exit: (0..exits).map(|_| nil).collect::<ThinVec<_>>(),
