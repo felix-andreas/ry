@@ -13,7 +13,7 @@
 40 crates/interp/src/annotations.rs
 3 crates/interp/src/apply_results.rs
 7 crates/interp/src/approximate.rs
-182 crates/interp/src/arith.rs
+181 crates/interp/src/arith.rs
 37 crates/interp/src/arrays.rs
 2 crates/interp/src/attribute_access.rs
 139 crates/interp/src/base_fast_paths.rs
@@ -75,7 +75,7 @@
 28 crates/interp/src/testing.rs
 19 crates/interp/src/tools.rs
 9 crates/interp/src/unwind.rs
-82 crates/interp/src/utils.rs
+81 crates/interp/src/utils.rs
 111 crates/interp/src/values.rs
 2 crates/numeric/src/c_format.rs
 58 crates/numeric/src/linpack.rs
