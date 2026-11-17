@@ -1289,7 +1289,7 @@ written, and compiling ahead decides which of these facts are known before the f
 | Part | Status | Owner |
 | --- | --- | --- |
 | Slot frames, environments made on demand and filled one variable at a time | built (`slot-frames.md`) | frames |
-| A direct calling convention between closures | built from tier 0 to tier 0; machine to machine planned | frames (tier 0), JIT (machine code) |
+| A direct calling convention between closures | built from tier 0 to tier 0; compiled code inlines a callee or runs tier 0's call | frames (tier 0), JIT (machine code) |
 | Unboxed length-1 doubles, integers and logicals in compiled code | built inside tier 1 and native functions; across calls planned | JIT |
 | Whole-package compilation at install, with entry guards and deoptimization to tier 0 | measured and removed for untyped closures (`decisions/jit-ssa.md`, "No baseline tier, and code images hold bytecode only"); strict typed closures planned | JIT |
 
@@ -1320,9 +1320,10 @@ argument's compiled code and come from a pool, so they allocate nothing and need
 A reference becomes a promise object only when something keeps the argument past the call. A call
 that passes `...` on appends the arguments the caller's `...` slot collected.
 
-Between machine code (planned), a call of a sibling closure in a locked namespace is a direct
-machine call to the callee's entry for the argument types at hand, guarded once per call. Pure arguments (`native::pure_value`) are passed evaluated and unboxed; the rest are
-passed as promises over the caller's frame, exactly as tier 0 passes them.
+Machine code has no calling convention of its own for a general closure. A call from compiled
+code is inlined (as a native call, without a frame, or with a frame; "What it compiles" above)
+or runs as tier 0's call instruction, which the measurements in `generic-tier.md` show to cost
+less than a separate entry from machine code.
 
 **What makes the environment.** A slot frame has no environment object until something names the
 frame: a promise or a closure made in it, `parent.frame()`, `sys.function`, S3 and S4 dispatch, a
