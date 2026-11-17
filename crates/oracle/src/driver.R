@@ -14,7 +14,9 @@
 # which the harness splices in below, so the script cannot see or replace it).
 #
 # The driver's frame encloses in the base environment, not the global one, so a script that
-# rebinds `+` or `length` at top level leaves the driver's own calls alone. A case that prints
+# rebinds `+` or `length` at top level leaves the driver's own calls alone. A visible value is
+# printed the way R's top level prints it: base's `print` called on `x` in a frame that encloses
+# in the global environment, so a print method the script defines is found. A case that prints
 # the driver's frames (conditions__try_catch_fast_path) is recorded again after a change here.
 local({
   # <observe.R>
@@ -101,7 +103,11 @@ local({
           result <- withVisible(eval(expression, globalenv()))
           last <- list(value = result$value)
           if (observing) observe_value(result)
-          if (result$visible) print(result$value)
+          if (result$visible) {
+            frame <- new.env(parent = globalenv())
+            frame$x <- result$value
+            eval(as.call(list(print, quote(x))), frame)
+          }
         },
         error = function(condition) {
           if (observing) observe_condition("error", condition)

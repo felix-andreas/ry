@@ -1,6 +1,7 @@
 # An object a deeper call dropped must be finalized by a gc() that runs inside a later function
 # whose register window covers the registers the deeper call used, before that function has
-# written them.
+# written them. A collection before each batch keeps an allocation-triggered one from finalizing
+# the batch early.
 finalized <- 0L
 drop_tracked <- function(n) {
   for (i in seq_len(n)) {
@@ -19,8 +20,10 @@ wide <- function(k) {
   m <- list(d, g, h, i, j); o <- length(m) + f; p <- o * i; q <- p - o; r <- c(p, q)
   c(after - before, length(m), r)
 }
+invisible(gc())
 deeper(3)
 wide(1)
+invisible(gc())
 deeper(4)
 wide(2)
 finalized
