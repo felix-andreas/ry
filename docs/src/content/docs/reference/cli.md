@@ -325,9 +325,16 @@ file can be kept (no cache directory, or one ry cannot write to), the run uses a
 and the header says why.
 
 The time split comes from sampling what the runtime is doing once a millisecond, so a share below
-about 1% of a short run is noise. Collecting it slows a run by up to about 7% (1% on the fastest
-of three runs of the `timeseries` application workload, 7% on the median). Without the
-option, the hooks cost one predictable branch each.
+about 1% of a short run is noise. A summarized run takes the paths an unsummarized run takes:
+closure calls, inline builtins, element reads and compiled code run as they do without the option,
+and each event is counted where it happens. The summary's cost therefore grows with the number of
+events it counts, and [Benchmarks](/benchmarks) tracks it on the application test suite. Without
+the option, the hooks cost one predictable branch each.
+
+Two counts follow from this. A builtin that tier 0 or compiled code runs inline, such as `x + 1`
+or a scalar `x[i]`, is not a builtin call, so the builtin tables list only the calls outside those
+paths. A closure call that compiled code inlines has no frame: it is counted as "closure calls
+inlined into compiled code, without a frame", and its samples belong to the body that inlined it.
 
 Setting `RY_PROFILE_STACKS=FILE` as well writes every sampled call stack to FILE, one line per
 distinct stack and activity: the sample count, the activity (such as `builtin:c` or

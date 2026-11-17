@@ -7,12 +7,20 @@
 //! base R's builtins and the packages that own native code; a package outside the public list
 //! below is printed as a hash of its name, keyed with a secret ([`private_key`]).
 //!
+//! A sample also belongs to a call stack, which only the R thread can read. The sampling thread
+//! therefore queues each sample and sets [`activity::SAMPLE_TICK`], and the R thread files the
+//! queued samples under its frames the next time its stack is about to change
+//! ([`resolve_samples`]): the stack it reads then is the one every queued sample was taken in. A
+//! call pays for this with the test of the hook flags it makes anyway, so a summarized run takes
+//! the same call paths as any other.
+//!
 //! The same sampler measures benchmark regions: `.ry_bench_region(name)` marks where a region
 //! starts (and the one before it ends), and `RY_PROFILE_REGIONS` names a file that gets one JSON
 //! line per region with its wall time, its samples by activity and its event counts.
 
 use {
     crate::{
+        Frame, FrameRole,
         builtins::{BuiltinDef, Call, builtin},
         callgrind, interp,
         unwind::{R, error},
@@ -32,7 +40,7 @@ use {
         io::{self, Write as _},
         path::{Path, PathBuf},
         sync::{
-            Mutex,
+            Mutex, TryLockError,
             atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         },
         thread::JoinHandle,
@@ -127,29 +135,32 @@ struct PackageTime {
 }
 
 impl Samples {
+    /// Files `count` samples of the activity `word`, all taken in the stack whose frames, from
+    /// the outermost, have these owner labels, name symbols and bodies.
     fn record(
         &mut self,
         word: u32,
+        count: u64,
         owners: &[u32],
         names: &[usize],
         bodies: &[usize],
         global: u32,
     ) {
-        *self.words.entry(word).or_insert(0) += 1;
+        *self.words.entry(word).or_insert(0) += count;
         if let Some(stacks) = &mut self.stacks {
             let frames = owners.iter().copied().zip(names.iter().copied()).collect();
-            *stacks.entry((frames, word)).or_insert(0) += 1;
+            *stacks.entry((frames, word)).or_insert(0) += count;
         }
         self.bodies
             .entry(bodies.last().copied().unwrap_or(0))
-            .or_insert([0; Activity::ALL.len()])[category(word) as usize] += 1;
+            .or_insert([0; Activity::ALL.len()])[category(word) as usize] += count;
         let innermost_owner = owners.last().copied().unwrap_or(global);
         let innermost_name = names.last().copied().unwrap_or(0);
         if !owners.is_empty() {
             self.closures
                 .entry((innermost_owner, innermost_name))
                 .or_default()
-                .own += 1;
+                .own += count;
         }
         let activity = Activity::from_word(word);
         let (package, slot) = match activity {
@@ -165,9 +176,9 @@ impl Samples {
         };
         let time = self.packages.entry(package).or_default();
         match slot {
-            Slot::Code => time.code += 1,
-            Slot::Native => time.native += 1,
-            Slot::Overhead => time.overhead += 1,
+            Slot::Code => time.code += count,
+            Slot::Native => time.native += count,
+            Slot::Overhead => time.overhead += count,
         }
         // Stacks are short, so a linear scan for an earlier occurrence beats building a set.
         let mut seen_packages: SmallVec<[u32; 16]> = SmallVec::new();
@@ -178,7 +189,7 @@ impl Samples {
                 .zip(&names[..index])
                 .any(|(&other_owner, &other_name)| other_owner == owner && other_name == name);
             if !earlier {
-                self.closures.entry((owner, name)).or_default().inclusive += 1;
+                self.closures.entry((owner, name)).or_default().inclusive += count;
             }
             if !seen_packages.contains(&owner) {
                 seen_packages.push(owner);
@@ -188,7 +199,7 @@ impl Samples {
             seen_packages.push(global);
         }
         for package in seen_packages {
-            self.packages.entry(package).or_default().inclusive += 1;
+            self.packages.entry(package).or_default().inclusive += count;
         }
     }
 }
@@ -203,8 +214,38 @@ static SAMPLER: Mutex<Option<Sampler>> = Mutex::new(None);
 static STOP: AtomicBool = AtomicBool::new(false);
 static READY: AtomicBool = AtomicBool::new(false);
 static READY_AT: Mutex<Option<Instant>> = Mutex::new(None);
-/// Whether closure calls publish their frames, which only the summary reads.
-static PUBLISHING: AtomicBool = AtomicBool::new(false);
+
+/// The samples the sampling thread took since the R thread last filed them, counted by activity
+/// word. The R thread's stack is the same for every waiting sample, because it files them
+/// before the stack changes, so their order carries nothing and a long stretch without a call
+/// or a return fills one slot per distinct activity.
+///
+/// A slot holds an activity word above a count of samples, and zero while it is free. The
+/// sampling thread adds to a slot and the R thread takes it, with no lock between them: a
+/// forked child inherits a lock in the state the fork found it and no sampling thread to
+/// release it, so a lock the sampling thread could hold would stop the child at its first call.
+static WAITING: [AtomicU64; WAITING_SLOTS] = [const { AtomicU64::new(0) }; WAITING_SLOTS];
+const WAITING_SLOTS: usize = 1 << 8;
+
+/// The most frames a sample names, counted from the innermost: filing walks them at every
+/// tick, which a recursion thousands of frames deep would otherwise pay for.
+const SAMPLED_FRAMES: usize = 1024;
+
+/// The samples of a summary by call stack, while one is collected. Only the R thread reads or
+/// writes it.
+static STACKED: Mutex<Option<Stacked>> = Mutex::new(None);
+
+struct Stacked {
+    /// The samples filed under the stack they were taken in.
+    samples: Samples,
+    /// Owner labels by environment address. Namespaces and the global environment live for the
+    /// whole session, so an address names one owner; another top level (an environment
+    /// `sys.source` used) can be freed and its address reused, which at worst merges two such
+    /// owners under "other".
+    owners: FxHashMap<usize, u32>,
+    /// The label of the global environment, which owns a sample taken outside every closure.
+    global: u32,
+}
 /// The benchmark region running now, as its index in [`Regions::names`] plus one; zero outside
 /// any region. The sampler reads it to file each sample under its region.
 static REGION: AtomicU32 = AtomicU32::new(0);
@@ -282,9 +323,17 @@ pub fn start_from_environment() {
             std::path::absolute(&stacks).unwrap_or(stacks)
         })
         .filter(|_| path.is_some());
-    let keep_stacks = stacks.is_some();
-    let publishing = path.is_some();
-    PUBLISHING.store(publishing, Ordering::Relaxed);
+    let stacked = path.is_some();
+    if stacked {
+        *lock(&STACKED) = Some(Stacked {
+            samples: Samples {
+                stacks: stacks.is_some().then(FxHashMap::default),
+                ..Samples::default()
+            },
+            owners: FxHashMap::default(),
+            global: activity::label(GLOBAL_LABEL),
+        });
+    }
     if let Some(period) = std::env::var("RY_ALLOC_SITES")
         .ok()
         .and_then(|period| period.parse::<u64>().ok())
@@ -292,15 +341,8 @@ pub fn start_from_environment() {
         activity::set_allocation_period(period);
     }
     activity::set_enabled(true);
-    let global = activity::label(GLOBAL_LABEL);
     let thread = std::thread::spawn(move || {
-        let mut samples = Samples {
-            stacks: keep_stacks.then(FxHashMap::default),
-            ..Samples::default()
-        };
-        let mut owners = Vec::with_capacity(activity::FRAME_SLOTS);
-        let mut names = Vec::with_capacity(activity::FRAME_SLOTS);
-        let mut bodies = Vec::with_capacity(activity::FRAME_SLOTS);
+        let mut samples = Samples::default();
         while !STOP.load(Ordering::Relaxed) {
             std::thread::sleep(interval);
             if !READY.load(Ordering::Relaxed) {
@@ -308,9 +350,11 @@ pub fn start_from_environment() {
                 continue;
             }
             let word = activity::current();
-            if publishing {
-                activity::read_frames(&mut owners, &mut names, &mut bodies);
-                samples.record(word, &owners, &names, &bodies, global);
+            if stacked {
+                if !queue_sample(word) {
+                    *samples.words.entry(word).or_insert(0) += 1;
+                }
+                activity::set_hook(activity::SAMPLE_TICK, true);
             }
             if let Some(region) = (REGION.load(Ordering::Relaxed) as usize).checked_sub(1) {
                 if samples.regions.len() <= region {
@@ -332,7 +376,7 @@ pub fn start_from_environment() {
     });
 }
 
-/// Whether the sampler runs, which needs every closure call to pass the profiling hooks.
+/// Whether the sampler runs.
 pub fn sampling() -> bool {
     lock(&SAMPLER).is_some()
 }
@@ -392,30 +436,25 @@ fn counters() -> [u64; Counter::ALL.len()] {
 /// The label of code whose top level is the global environment: scripts and the console.
 const GLOBAL_LABEL: &str = "R_GlobalEnv";
 
-/// What a closure call holds while it runs: nothing while the profiling hooks are off, and
-/// otherwise its published frame and its boundary-call record.
-pub struct ClosureScope(Option<HookedScope>);
-
-struct HookedScope {
-    _frame: activity::FrameScope,
-    capture: crate::capture::Scope,
-}
+/// What a closure call holds while boundary calls are recorded: its record, until the scope
+/// drops.
+pub struct ClosureScope(Option<crate::capture::Scope>);
 
 impl ClosureScope {
     /// Hands the call's result to the boundary-call recorder before the scope drops.
     #[inline(always)]
     pub unsafe fn returned(&mut self, result: &R<Sexp>) {
-        if let Some(hooked) = &mut self.0 {
-            unsafe { hooked.capture.returned(result) };
+        if let Some(capture) = &mut self.0 {
+            unsafe { capture.returned(result) };
         }
     }
 }
 
-/// Runs the profiling hooks for a call of the closure `function` through `call` whose caller's
-/// frame is `sys_parent`, with the dispatch variables of a method in `method_vars` or bound in
-/// its frame environment `env` (`NULL` for a slot frame): publishes the frame for the sampler
-/// and records boundary calls, until the scope drops. Every closure call passes here, so with
-/// the hooks off it costs one test of the hook flags, and the rest is out of line.
+/// Records a call of the closure `function` through `call` as a boundary call while those are
+/// recorded: its caller's frame is `sys_parent`, and the dispatch variables of a method are in
+/// `method_vars` or bound in its frame environment `env` (`NULL` for a slot frame). Every
+/// closure call on the general path passes here, so with the recorder off it costs one test of
+/// the hook flags.
 #[inline(always)]
 pub unsafe fn enter_closure(
     call: Sexp,
@@ -424,63 +463,153 @@ pub unsafe fn enter_closure(
     method_vars: &[(Sexp, Sexp)],
     env: Sexp,
 ) -> ClosureScope {
-    if !activity::enabled() {
+    if activity::hooks() & activity::CAPTURE == 0 {
         return ClosureScope(None);
     }
-    unsafe { enter_closure_hooked(call, function, sys_parent, method_vars, env) }
-}
-
-#[inline(never)]
-unsafe fn enter_closure_hooked(
-    call: Sexp,
-    function: Sexp,
-    sys_parent: Sexp,
-    method_vars: &[(Sexp, Sexp)],
-    env: Sexp,
-) -> ClosureScope {
-    let capture = if activity::hooks() & activity::CAPTURE != 0 {
-        unsafe { crate::capture::enter(call, function, sys_parent, method_vars, env) }
-    } else {
-        crate::capture::Scope::none()
-    };
-    let frame = if PUBLISHING.load(Ordering::Relaxed) {
-        unsafe { publish_frame(call, function) }
-    } else {
-        activity::no_frame()
-    };
-    ClosureScope(Some(HookedScope {
-        _frame: frame,
-        capture,
+    ClosureScope(Some(unsafe {
+        crate::capture::enter(call, function, sys_parent, method_vars, env)
     }))
 }
 
-unsafe fn publish_frame(call: Sexp, function: Sexp) -> activity::FrameScope {
-    let owner = crate::dispatch::top_env(function.tag());
-    let body = crate::bytecode::closure_body(function).as_ptr() as usize;
-    let owner = {
-        let mut labels = lock(&OWNER_LABELS);
-        *labels.entries.entry(body).or_insert(0) += 1;
-        match labels.owners.get(&(owner.as_ptr() as usize)) {
-            Some(&label) => label,
-            None => {
-                let name = if owner == values::global_env() {
-                    GLOBAL_LABEL.to_owned()
-                } else {
-                    crate::envir::namespace_name(owner).unwrap_or_else(|| "other".to_owned())
-                };
-                let label = activity::label(&name);
-                labels.owners.insert(owner.as_ptr() as usize, label);
-                label
+/// What a summary records of the frame the general path has just pushed for a call of the
+/// closure `function`: the samples that waited, filed under the `beneath` frames the stack held
+/// before the push, and, for a call that is `counted`, the call and an entry of its body. A
+/// frame that is not counted stands for a call something else counted (an inlined call that
+/// compiled code handed over) or for none (compiled typed code's frame for a call it makes).
+/// The caller has checked [`activity::enabled`]. A call on tier 0's lean path counts in its code
+/// instead ([`crate::bytecode::profile::CALLS`]).
+#[cold]
+#[inline(never)]
+pub(crate) unsafe fn entering(function: Sexp, beneath: usize, counted: bool) {
+    if activity::sample_ticked() {
+        unsafe { resolve_samples(beneath) };
+    }
+    if counted {
+        activity::record(Counter::ClosureCalls);
+        unsafe { crate::bytecode::count_body_entry(function) };
+    }
+}
+
+/// Counts a call of the closure `function` that compiled code runs inline, without a frame,
+/// while a profile summary is collected.
+pub unsafe fn count_inlined_call(function: Sexp) {
+    activity::record(Counter::InlinedCalls);
+    unsafe { crate::bytecode::count_body_entry(function) };
+}
+
+/// Files the samples the sampling thread queued under the first `depth` frames of the R
+/// thread's call stack. Whatever pushes or pops a frame calls this when
+/// [`activity::sample_ticked`], with the depth the stack has without that change, so every
+/// queued sample was taken in the stack read here.
+#[cold]
+#[inline(never)]
+pub(crate) unsafe fn resolve_samples(depth: usize) {
+    // Naming a frame's package can run R code (a namespace's `spec` behind an active binding),
+    // whose calls come back here: they leave the samples to the filing that is under way.
+    let mut guard = match STACKED.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return,
+    };
+    let Some(stacked) = guard.as_mut() else {
+        return;
+    };
+    let running = activity::current();
+    activity::publish(Activity::Profiler);
+    // Cleared before the slots are read: a sample queued after its slot was read sets the flag
+    // again.
+    activity::set_hook(activity::SAMPLE_TICK, false);
+    let mut waiting: SmallVec<[u64; 8]> = SmallVec::new();
+    for slot in &WAITING {
+        if slot.load(Ordering::SeqCst) != 0 {
+            waiting.push(slot.swap(0, Ordering::SeqCst));
+        }
+    }
+    if !waiting.is_empty() {
+        let mut owners: SmallVec<[u32; 64]> = SmallVec::new();
+        let mut names: SmallVec<[usize; 64]> = SmallVec::new();
+        let mut bodies: SmallVec<[usize; 64]> = SmallVec::new();
+        let frames = &interp().frames;
+        for index in depth.saturating_sub(SAMPLED_FRAMES)..depth.min(frames.len()) {
+            let frame = &frames[index];
+            if frame.role == FrameRole::Context || frame.function.kind() != SexpType::Closure {
+                continue;
+            }
+            let (owner, name, body) = unsafe { frame_identity(stacked, frame) };
+            owners.push(owner);
+            names.push(name);
+            bodies.push(body);
+        }
+        let global = stacked.global;
+        for held in waiting {
+            stacked.samples.record(
+                (held >> 32) as u32,
+                held & u64::from(u32::MAX),
+                &owners,
+                &names,
+                &bodies,
+                global,
+            );
+        }
+    }
+    drop(guard);
+    activity::restore(running);
+}
+
+/// Counts one sample of the activity `word` for the R thread, on the sampling thread: in the
+/// slot that holds the word, or in a free one. Answers false when every slot holds another
+/// word, which takes hundreds of distinct activities without one call or return.
+fn queue_sample(word: u32) -> bool {
+    let start = (word.wrapping_mul(0x9E37_79B9) >> 24) as usize;
+    for probe in 0..WAITING_SLOTS {
+        let slot = &WAITING[(start + probe) % WAITING_SLOTS];
+        let mut held = slot.load(Ordering::SeqCst);
+        loop {
+            // The exchange fails against a slot the R thread takes meanwhile, so no sample is
+            // added to a count that was already filed.
+            let counted = if held == 0 {
+                u64::from(word) << 32 | 1
+            } else if (held >> 32) as u32 == word && held as u32 != u32::MAX {
+                held + 1
+            } else {
+                break;
+            };
+            match slot.compare_exchange_weak(held, counted, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return true,
+                Err(current) => held = current,
             }
         }
-    };
+    }
+    false
+}
+
+/// What a sample records of `frame`: the label of the package that owns its closure, the symbol
+/// the call names it by (zero for a call of anything else), and its body.
+unsafe fn frame_identity(stacked: &mut Stacked, frame: &Frame) -> (u32, usize, usize) {
+    let function = frame.function;
+    let owner = unsafe { crate::dispatch::top_env(function.tag()) };
+    let body = unsafe { crate::bytecode::closure_body(function) }.as_ptr() as usize;
+    let owner = *stacked
+        .owners
+        .entry(owner.as_ptr() as usize)
+        .or_insert_with(|| {
+            let name = if owner == values::global_env() {
+                GLOBAL_LABEL.to_owned()
+            } else {
+                unsafe { crate::envir::namespace_name(owner) }.unwrap_or_else(|| "other".to_owned())
+            };
+            activity::label(&name)
+        });
     // `pkg::f()`, `obj$f()` and `obj@f()` take the name `f`; GNU R's `Rprof()` writes these as
     // `pkg::f`, `obj$f` and `obj@f`, and `tools/bench/compare_profiles.py` reduces those to `f` so
     // the two engines' rows match.
-    let mut head = call.car();
+    let mut head = frame.call.car();
     if head.kind() == SexpType::Language
         && head.car().kind() == SexpType::Symbol
-        && matches!(&*values::symbol_name(head.car()), "::" | ":::" | "$" | "@")
+        && matches!(
+            &*unsafe { values::symbol_name(head.car()) },
+            "::" | ":::" | "$" | "@"
+        )
     {
         head = head.cdr().cdr().car();
     }
@@ -489,25 +618,8 @@ unsafe fn publish_frame(call: Sexp, function: Sexp) -> activity::FrameScope {
     } else {
         0
     };
-    activity::push_frame(owner, name, body)
+    (owner, name, body)
 }
-
-/// What closure calls record while a summary is collected.
-struct Calls {
-    /// Owner labels by environment address. Namespaces and the global environment live for the
-    /// whole session, so an address names one owner; another top level (an environment
-    /// `sys.source` used) can be freed and its address reused, which at worst merges two such
-    /// owners under "other".
-    owners: FxHashMap<usize, u32>,
-    /// Entries by closure body address. A body freed and reallocated elsewhere merges with the
-    /// new one, which only matters for closures built and dropped at run time.
-    entries: FxHashMap<usize, u64>,
-}
-
-static OWNER_LABELS: Mutex<Calls> = Mutex::new(Calls {
-    owners: FxHashMap::with_hasher(rustc_hash::FxBuildHasher),
-    entries: FxHashMap::with_hasher(rustc_hash::FxBuildHasher),
-});
 
 /// Marks the end of start-up: samples after this count toward the time split.
 pub fn mark_ready() {
@@ -529,13 +641,30 @@ pub fn finish() -> R<()> {
         return Ok(());
     }
     STOP.store(true, Ordering::Relaxed);
-    activity::set_enabled(false);
-    PUBLISHING.store(false, Ordering::Relaxed);
     let elapsed = sampler.started.elapsed();
-    let samples = sampler
+    let sampled = sampler
         .thread
         .join()
         .map_err(|_| error("the profile summary's sampling thread panicked"))?;
+    // The samples still waiting are filed under the stack the session ends in.
+    unsafe { resolve_samples(interp().frames.len()) };
+    activity::set_enabled(false);
+    let samples = match lock(&STACKED).take() {
+        Some(mut stacked) => {
+            // What the sampling thread could not queue belongs to no stack it can name.
+            for (&word, &count) in &sampled.words {
+                stacked
+                    .samples
+                    .record(word, count, &[], &[], &[], stacked.global);
+            }
+            Samples {
+                startup: sampled.startup,
+                regions: sampled.regions,
+                ..stacked.samples
+            }
+        }
+        None => sampled,
+    };
     if let Some(path) = &sampler.regions {
         write_file(path, &regions_report(&samples), "the benchmark regions")?;
     }
@@ -544,7 +673,8 @@ pub fn finish() -> R<()> {
     };
     let ready = lock(&READY_AT).map(|ready| ready.duration_since(sampler.started));
     let key = private_key(sampler.started_in.as_deref()).map_err(error)?;
-    let text = report(&samples, elapsed, ready, &key)
+    let entries = unsafe { crate::bytecode::take_body_entries() };
+    let text = report(&samples, &entries, elapsed, ready, &key)
         .map_err(|_| error("cannot format the profile summary"))?;
     write_file(path, &text, "the profile summary")?;
     if let (Some(path), Some(stacks)) = (&sampler.stacks, &samples.stacks) {
@@ -1096,6 +1226,7 @@ fn format_key(key: &[u8; 16]) -> String {
 
 fn report(
     samples: &Samples,
+    entries: &FxHashMap<usize, u64>,
     elapsed: Duration,
     ready: Option<Duration>,
     key: &PrivateKey,
@@ -1179,7 +1310,6 @@ fn report(
     ];
     let mut bucketed = [[0u64; Activity::ALL.len()]; BUCKETS.len() + 1];
     let mut bodies_in = [0u64; BUCKETS.len()];
-    let entries = std::mem::take(&mut lock(&OWNER_LABELS).entries);
     for &entered in entries.values() {
         if let Some(index) = BUCKETS.iter().position(|&(_, below)| entered < below) {
             bodies_in[index] += 1;
@@ -1349,7 +1479,13 @@ fn report(
     let calls = activity::counter(Counter::PackageCalls);
     if calls > 0 {
         let direct = activity::counter(Counter::PackageCallsDirect);
-        let observed = activity::counter(Counter::PackageCallsObserved);
+        let fallbacks = by_reason_name(activity::package_fallbacks());
+        let observing = |reason: &str| crate::eval::OBSERVING_REASONS.contains(&reason);
+        let observed: u64 = fallbacks
+            .iter()
+            .filter(|(reason, _)| observing(reason))
+            .map(|(_, count)| count)
+            .sum();
         let share = |part: u64, whole: u64| {
             if whole == 0 {
                 0.0
@@ -1370,18 +1506,17 @@ fn report(
             out,
             "| reason for the generic protocol | calls | share | observed |\n| --- | ---: | ---: | :---: |"
         )?;
-        for (reason, count) in activity::package_fallbacks() {
-            let observing = crate::eval::OBSERVING_REASONS.contains(&reason.as_str());
+        for (reason, count) in fallbacks {
             writeln!(
                 out,
                 "| {reason} | {count} | {:.1}% | {} |",
                 share(count, calls),
-                if observing { "yes" } else { "" },
+                if observing(reason) { "yes" } else { "" },
             )?;
         }
     }
 
-    let reifications = activity::reifications();
+    let reifications = by_reason_name(activity::reifications());
     if !reifications.is_empty() {
         let total: u64 = reifications.iter().map(|(_, count)| count).sum();
         writeln!(out, "\n## Slot frames turned into environments\n")?;
@@ -1494,6 +1629,21 @@ fn report(
         }
     }
     Ok(out)
+}
+
+/// The counts of `reasons` under the names the summary prints, largest first. A site and a
+/// builtin of one name (`parent.frame`) are one row.
+fn by_reason_name(reasons: Vec<(u32, u64)>) -> Vec<(&'static str, u64)> {
+    let mut named: Vec<(&'static str, u64)> = Vec::new();
+    for (reason, count) in reasons {
+        let name = crate::eval::reason_name(reason);
+        match named.iter_mut().find(|(held, _)| *held == name) {
+            Some((_, total)) => *total += count,
+            None => named.push((name, count)),
+        }
+    }
+    named.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(right.0)));
+    named
 }
 
 #[cfg(test)]
