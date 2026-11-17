@@ -746,7 +746,7 @@ pub struct Stores<'r, T: Elements> {
 }
 
 impl<T: Elements> Stores<'_, T> {
-    #[inline]
+    #[inline(always)]
     pub fn set(&mut self, index: usize, value: impl Pointer<T::Element>) {
         // SAFETY: a standard vector keeps its length in its header.
         assert!(

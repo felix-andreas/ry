@@ -13560,7 +13560,7 @@ enum Position<'s> {
 
 /// The position `index` names in `vector`, or `None` for a subscript the replacement function
 /// has to interpret: anything but one plain number, or one name that is neither empty nor `NA`.
-#[inline]
+#[inline(always)]
 fn element_position<'s, T: Vector>(
     context: &Cx<'s>,
     vector: Local<'s, T>,

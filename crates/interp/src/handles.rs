@@ -274,7 +274,7 @@ pub fn install<'s>(context: &mut Cx<'s>, name: Local<'_, Chars>) -> R<Local<'s, 
 
 /// [`install`] for element `at` of `names`, which the rooted vector keeps alive, so the name
 /// needs no root of its own.
-#[inline]
+#[inline(always)]
 pub fn install_element<'s>(
     context: &mut Cx<'s>,
     names: Local<'_, Str>,
@@ -288,7 +288,7 @@ pub fn install_element<'s>(
 /// # Safety
 ///
 /// `name` is a `CHARSXP` that stays alive through an allocation.
-#[inline]
+#[inline(always)]
 unsafe fn install_raw<'s>(_context: &mut Cx<'s>, name: Sexp) -> R<Local<'s, Symbol>> {
     // SAFETY: interning a symbol may allocate, which `&mut Cx` permits. A cached ASCII string
     // names its symbol as it is, so the common name skips the translation.
@@ -600,7 +600,7 @@ pub fn append<'s, T: Vector>(
 
 /// The vector an element store into `vector` writes: `owned`, the vector itself under its
 /// holder's claim, or else a copy with its own storage for the holder to bind.
-#[inline]
+#[inline(always)]
 pub fn writable<'s, T: Vector>(
     context: &mut Cx<'s>,
     vector: Local<'s, T>,
@@ -629,7 +629,7 @@ pub fn has_only_names(_context: &Cx<'_>, value: impl Pointer<Value>) -> bool {
 /// `environment$name <- value` where it binds the name and nothing else happens: false, having
 /// changed nothing, for the empty environment, a locked frame that lacks the name, and a locked
 /// or active binding, whose assignment raises an error or runs a function.
-#[inline]
+#[inline(always)]
 pub fn bind<'s>(
     _context: &mut Cx<'s>,
     environment: Local<'s, Environment>,
