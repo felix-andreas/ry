@@ -147,6 +147,9 @@ pub(crate) struct Space {
     /// The vector data, in 8-byte cells, of the objects marked since the heap last reset it,
     /// counted as marking reaches each object because its header is in cache then.
     pub marked_vector_cells: u64,
+    /// The number of the collection whose sweep runs or ran last, which poisoning writes into
+    /// each object it frees, so a report about a stale reference can name it.
+    pub sweeping: u64,
     /// The part of `marked_vector_cells` whose objects are tenured, counted the same way.
     pub tenured_vector_cells: u64,
     /// The header bits a newly marked object that was already old gets: `OLD` in a minor
@@ -254,6 +257,7 @@ impl Space {
             quarantine: None,
             touched: Vec::new(),
             marked_vector_cells: 0,
+            sweeping: 0,
             tenured_vector_cells: 0,
             promote_bits: gc_bits::OLD,
             pinned: Vec::new(),
@@ -739,7 +743,8 @@ impl Space {
                 self.finalizable[page][word] &= !dead;
                 if POISON {
                     for bit in set_bits(dead) {
-                        unsafe { poison(page_base.add((word * 64 + bit) * slot_size), slot_size) };
+                        let slot = unsafe { page_base.add((word * 64 + bit) * slot_size) };
+                        unsafe { poison(slot, slot_size, self.sweeping) };
                     }
                     if let Some(quarantine) = &mut self.quarantine {
                         quarantine.slots[page][word] |= dead;
@@ -1080,6 +1085,18 @@ impl Space {
         let slot_size = SLOT_SIZES[self.page_class[page] as usize];
         let aligned = (offset & (PAGE_SIZE - 1)) % slot_size == 0;
         Some(aligned && self.allocated[page][word] & bit != 0)
+    }
+
+    /// The slot the address of `object` falls in: where the slot starts, its size in bytes and
+    /// whether it is allocated, or `None` when the address is outside the space. Only the heap
+    /// verifier asks, to say what a stray reference points at.
+    pub fn slot_at(&self, object: Sexp) -> Option<(usize, usize, bool)> {
+        let (page, word, bit) = self.locate(object)?;
+        let address = object.as_ptr() as usize;
+        let offset = address.wrapping_sub(self.base.as_ptr() as usize);
+        let slot_size = SLOT_SIZES[self.page_class[page] as usize];
+        let start = address - (offset & (PAGE_SIZE - 1)) % slot_size;
+        Some((start, slot_size, self.allocated[page][word] & bit != 0))
     }
 
     /// Whether `object` lives in this space rather than among the large objects.
@@ -1525,15 +1542,21 @@ unsafe fn drop_frame(object: Sexp) {
 }
 
 /// Overwrites a freed object of `bytes` bytes with [`POISON`] under a [`POISONED_KIND`] kind
-/// byte. Its GC bits stay clear, so the
-/// collector never takes a stale reference to it for a marked object.
-pub(crate) unsafe fn poison(object: *mut u8, bytes: usize) {
+/// byte, and records after its first word that collection `collection` freed it
+/// ([`Sexp::freed_by`]). Its GC bits stay clear, so the collector never takes a stale reference
+/// to it for a marked object.
+pub(crate) unsafe fn poison(object: *mut u8, bytes: usize, collection: u64) {
     unsafe {
         std::ptr::write_bytes(object, POISON, bytes);
         *object = POISONED_KIND;
         *object.add(1) = 0;
+        object.add(FREED_BY_OFFSET).cast::<u64>().write(collection);
     }
 }
+
+/// Where a poisoned object holds the number of the collection that freed it. Every slot and
+/// every large object is longer.
+pub(crate) const FREED_BY_OFFSET: usize = 8;
 
 /// Finds the first run of free slots at or after `from` among a page's first `slots`, marks it
 /// allocated, and returns its slot range. A slot in `held` is not free. A run stops at the first

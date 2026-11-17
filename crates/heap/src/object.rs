@@ -823,6 +823,17 @@ impl Sexp {
         unsafe { self.header().kind.get() == crate::space::POISONED_KIND }
     }
 
+    /// The number of the collection that freed this poisoned object.
+    pub unsafe fn freed_by(self) -> u64 {
+        unsafe {
+            self.as_ptr()
+                .cast::<u8>()
+                .add(crate::space::FREED_BY_OFFSET)
+                .cast::<u64>()
+                .read()
+        }
+    }
+
     pub unsafe fn attrib(self) -> Sexp {
         unsafe { self.header().attrib.get() }
     }
@@ -1415,9 +1426,21 @@ impl Sexp {
 #[cold]
 #[inline(never)]
 fn freed_object(object: Sexp) -> ! {
+    // SAFETY: `Sexp::kind` read the header already.
+    if unsafe { !object.is_poisoned() } {
+        panic!(
+            "read the kind of {:p}, which is no object: its kind byte is {:#x}",
+            object.as_ptr(),
+            // SAFETY: as above.
+            unsafe { object.header().kind.get() },
+        )
+    }
     panic!(
-        "read the kind of a freed object at {:p}: something used a reference after the collector \
-         freed it",
-        object.as_ptr()
+        "read the kind of a freed object at {:p}: something used a reference after collection \
+         {} freed it",
+        object.as_ptr(),
+        // SAFETY: the collector poisoned the object, and a poisoned object is longer than
+        // the two words read here.
+        unsafe { object.freed_by() },
     )
 }
