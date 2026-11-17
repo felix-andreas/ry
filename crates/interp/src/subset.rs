@@ -1943,8 +1943,8 @@ struct Dimension<'s> {
 
 /// The positions the subscript `index` selects along one dimension, with the errors of GNU R's
 /// `int_arraySubscript`. Unlike a vector, a dimension never stretches: a longer logical
-/// subscript and a position past the extent are errors. An assignment (`assigning`) reports the
-/// position against the replacement call it generated.
+/// subscript and a position past the extent are errors. An assignment (`assigning`) reports
+/// every error against the replacement call it generated, which is built only for an error.
 fn dimension_positions<'s>(
     context: &mut Cx<'s>,
     call: Option<Local<'s>>,
@@ -1953,11 +1953,20 @@ fn dimension_positions<'s>(
     index: Local<'s>,
 ) -> R<Positions> {
     let extent = of.extent;
-    if index.r_type() == SexpType::Logical && handles::length(context, index) > extent {
-        return Err(call_error(call, "(subscript) logical subscript too long"));
-    }
-    if index.r_type() == SexpType::String && of.dimnames.r_type() == SexpType::Nil {
-        return Err(call_error(call, "no 'dimnames' attribute for array"));
+    let reported_call = |context: &mut Cx<'s>| match call {
+        Some(call) if assigning => handles::generated_call(context, call).map(Some),
+        call => Ok(call),
+    };
+    let refused = if index.r_type() == SexpType::Logical && handles::length(context, index) > extent
+    {
+        Some("(subscript) logical subscript too long")
+    } else if index.r_type() == SexpType::String && of.dimnames.r_type() == SexpType::Nil {
+        Some("no 'dimnames' attribute for array")
+    } else {
+        None
+    };
+    if let Some(message) = refused {
+        return Err(call_error(reported_call(context)?, message));
     }
     let names = match of.dimnames.downcast::<List>() {
         Some(dimnames) if of.dimension < dimnames.len() => {
@@ -1980,7 +1989,18 @@ fn dimension_positions<'s>(
         }
         _ => index,
     };
-    let (positions, _) = resolve_subscript(context, index, extent, names, false, call)?;
+    let positions = match resolve_subscript(context, index, extent, names, false, call) {
+        Ok((positions, _)) => positions,
+        Err(Unwind::Error(mut failure))
+            if assigning && call.is_some_and(|call| failure.call == call.raw()) =>
+        {
+            if let Some(reported) = reported_call(context)? {
+                failure.call = reported.raw();
+            }
+            return Err(Unwind::Error(failure));
+        }
+        Err(other) => return Err(other),
+    };
     let Some((offset, &position)) = positions
         .iter()
         .enumerate()
@@ -1988,10 +2008,7 @@ fn dimension_positions<'s>(
     else {
         return Ok(positions);
     };
-    let call = match call {
-        Some(call) if assigning => Some(handles::generated_call(context, call)?),
-        call => call,
-    };
+    let call = reported_call(context)?;
     // GNU R reports the failing element: a name with its dimension, or a position without one.
     let named = index.r_type() == SexpType::String && offset < handles::length(context, index);
     let reported = match named {
@@ -2727,13 +2744,15 @@ fn subset2_value<'s>(
                 dimension: Some(dimension),
                 reported: None,
             };
+            let index = symbol_text(context, index)?;
             let position = single_index(context, index, extent, names, exact, call, bounds)?;
             offset += position * stride;
             stride *= extent;
         }
         return element(context, object, offset);
     }
-    let index = materialize(context, indices[0])?;
+    let index = symbol_text(context, indices[0])?;
+    let index = materialize(context, index)?;
     let count = handles::length(context, index);
     let list = matches!(object.r_type(), SexpType::List | SexpType::Expression);
     if count > 1 && list {
@@ -2803,7 +2822,7 @@ fn subset2_value<'s>(
     element(context, object, position)
 }
 
-/// The position a `[[` subscript selects, with GNU R's errors.
+/// The position a `[[` subscript that is not a symbol selects, with GNU R's errors.
 fn single_index<'s>(
     context: &mut Cx<'s>,
     index: Local<'s>,
@@ -2813,7 +2832,6 @@ fn single_index<'s>(
     call: Option<Local<'s>>,
     bounds: OutOfBounds<'s>,
 ) -> R<usize> {
-    let index = symbol_text(context, index)?;
     let matrix = bounds.dimension.is_some();
     match one_position(context, index, extent, names, exact, matrix)? {
         Single::At(position) => Ok(position),
@@ -2850,8 +2868,8 @@ enum Single {
     Invalid(String),
 }
 
-/// GNU R's `get1index` for a subscript that is not a symbol: what `index` selects among `extent`
-/// elements with `names`. `matrix` says the subscript indexes one dimension.
+/// GNU R's `get1index`: what `index`, which is not a symbol, selects among `extent` elements
+/// with `names`. `matrix` says the subscript indexes one dimension.
 fn one_position<'s>(
     context: &mut Cx<'s>,
     index: Local<'s>,
@@ -3579,16 +3597,12 @@ fn assign_subset<'s>(
         )?;
     }
     // GNU R's matrix and array assignments check the subscripts and the value's length before
-    // its type. For a value that is not a vector (a function, an environment, a symbol, `NULL`)
-    // GNU R reads a length anyway, and what it finds exceeds any selection, so only an empty
-    // selection takes it.
+    // its type. For a value that is not a vector (a function, an environment, a symbol, a call,
+    // `NULL`) GNU R reads a length anyway, and what it finds exceeds any selection, so only an
+    // empty selection takes it.
     let lengthless = !value.r_type().is_vector() && value.r_type() != SexpType::Record;
     if lengthless && indices.len() >= 2 && object.r_type().is_vector() {
-        let count = match value.r_type() {
-            SexpType::Language | SexpType::Pairlist => handles::length(context, value),
-            _ => usize::MAX,
-        };
-        array_selections(context, call, object, indices, count)?;
+        array_selections(context, call, object, indices, usize::MAX)?;
     }
     // GNU R coerces `NULL` to the value's type before it looks at a subscript, which fails for
     // every type that is not a vector's, except for an environment that binds nothing, whose
