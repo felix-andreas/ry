@@ -342,6 +342,10 @@ Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomat
 - **macOS has not run it.** `sign` calls `codesign --force --sign -` on the output; run the `build-exe` scenario on a macOS machine or CI job when one is available.
 - **Sourced files compile at run time.** A file the script sources is read from disk and compiles as under `ry run --aot`. Embed sourced strict files when a real program ships as an executable with them.
 
+### Study
+
+- **Porffor** compiles JavaScript ahead of time through C or Wasm into small standalone binaries. Study its dynamic typing strategy, garbage collector and `eval` handling for `--aot` and `ry build --aot --exe` (`docs/src/content/docs/development/design/prior-art.md`, "Porffor").
+
 ### Not planned
 
 - **Machine code for untyped hot bodies.** Trained code images already carry the profile, so tier 1 compiles a hot body at its first calls. Storing its machine code too has a start condition, which the untyped decision names: the applications suite showing tier 1 winning, and its compile showing in a cold run.
