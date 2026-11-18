@@ -76,10 +76,10 @@ fn scenarios_hold() {
         .collect();
     // Building the single binary replaces `ry`, so it happens before any scenario runs one. A
     // failed build is cached, and the scenario that needs the binary reports it.
-    let needs_single_ry = texts.iter().flatten().any(|text| {
-        text.lines()
-            .any(|line| line.starts_with("run single-ry"))
-    });
+    let needs_single_ry = texts
+        .iter()
+        .flatten()
+        .any(|text| text.lines().any(|line| line.starts_with("run single-ry")));
     if needs_single_ry && let Err(error) = single_ry() {
         eprintln!("building the single binary failed: {error}");
     }
