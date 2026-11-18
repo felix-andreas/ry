@@ -100,7 +100,7 @@ const PARSE_VERDICT_REGRESSIONS: &[&str] = &[
     "x$\"\"",
     "\"\" <- 1",
     "(\"\")()",
-    // A NUL byte inside a name, a string and a comment.
+    // A NUL byte inside a name, an operator, a string and a comment.
     "`my\0 name` <- 1",
     "f(`a\0` = 1)$`b\0c`",
     "function(`a\0`) 1",
@@ -137,6 +137,7 @@ const PARSE_VERDICT_REGRESSIONS: &[&str] = &[
     "#: \"a\\\nprint(1) # \"",
     "x <- 1 #: 'a\\\r\ny <- 2 # '",
     "#: `a\\\ny",
+    "#: 'a\\",
     // An escape R does not know, in an f-string.
     "f\"\\d\"",
 ];

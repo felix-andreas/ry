@@ -37,6 +37,11 @@
 | > c(a = 1)$a
 | error: simpleError $ operator is invalid for atomic vectors 
 | error: simpleError embedded nul in string: '\t"\0b' 
+| error: unrecognizedEscape '\q' is an unrecognized escape in character string (<input>:1:5) 
+| error: mixedEscapes mixing Unicode and octal/hex escapes in a string is not allowed (<input>:1:13) 
+| error: unrecognizedEscape '\q' is an unrecognized escape in character string (<input>:1:3) 
+| error: repeatedFormal repeated formal argument 'a' (<input>:1:13) 
+| error: simpleError embedded nul in string: 'a\0' 
 | error: simpleError FILE:2:1: unexpected end of file 
 | error: simpleError FILE:2:1: unexpected end of file 
 | error: simpleError FILE:2:6: unexpected end of file 

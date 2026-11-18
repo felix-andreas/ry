@@ -1074,6 +1074,8 @@ mod tests {
             "1,",
             ")((",
             "x <- \"abc\ndef\" , (",
+            // R skips no line break after `::`.
+            "dplyr::",
         ] {
             assert!(input_is_complete(text), "expected complete: {text:?}");
         }
@@ -1090,7 +1092,6 @@ mod tests {
             "a |>",
             "list(a = 1,",
             "x$",
-            "dplyr::",
             "\"unterminated",
             // R reads an open quote to the end of the input, across line breaks.
             "s <- \"line one\nline two",

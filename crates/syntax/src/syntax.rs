@@ -137,8 +137,11 @@ impl SyntaxError {
 
 /// The console's rule for reading another line instead of running what it has.
 ///
-/// R's own rule is that input is unfinished when every syntax error in it says that it ended too
-/// early. A broken `#:` comment is only a comment to R, so it never holds input back.
+/// R's own rule is that input is unfinished when every error its grammar meets says that the
+/// input ended too early. A check R makes when a construct closes (a repeated parameter, a pipe's
+/// right side, a stray placeholder, an empty string as a name) refuses nothing until the command
+/// is whole, so R reads on past one and reports it with the finished command. A broken `#:`
+/// comment is only a comment to R, so it never holds input back.
 ///
 /// ry adds one case: input that ends in a `#:` block on its own lines is unfinished, because the
 /// block annotates the expression on the line after it and means nothing alone. A blank line
@@ -148,15 +151,29 @@ impl SyntaxError {
 pub fn input_is_unfinished(text: &str) -> bool {
     let parse = parse(text);
     let end = TextSize::of(text.trim_end());
-    let mut errors = parse
+    let mut refused_when_whole = false;
+    let mut grammar = parse
         .errors()
         .iter()
-        .filter(|error| !error.in_annotation)
+        .filter(|error| {
+            let deferred = match error.unexpected {
+                Unexpected::Classed(
+                    Classed::RepeatedFormal | Classed::Pipe { .. } | Classed::StrayPlaceholder,
+                ) => true,
+                // The lexer refuses an empty backquoted name at once.
+                Unexpected::Classed(Classed::EmptyName) => !text[error.range].starts_with('`'),
+                _ => false,
+            };
+            refused_when_whole |= deferred && !error.in_annotation;
+            !error.in_annotation && !deferred
+        })
         .peekable();
-    if errors.peek().is_some() {
-        return errors.all(|error| error.incomplete || error.range.start() >= end);
+    if grammar.peek().is_some() {
+        return grammar.all(|error| error.incomplete || error.range.start() >= end);
     }
-    parse.errors().is_empty() && ends_in_an_unattached_annotation(&parse.syntax_node())
+    !refused_when_whole
+        && parse.errors().is_empty()
+        && ends_in_an_unattached_annotation(&parse.syntax_node())
 }
 
 fn ends_in_an_unattached_annotation(root: &SyntaxNode) -> bool {

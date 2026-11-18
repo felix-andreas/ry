@@ -59,6 +59,13 @@ fn a_console_reads_on_only_when_the_input_ended_too_early() {
         "x$\n",
         "f(a::\n",
         "if (TRUE) {\n  1\n",
+        // A check R makes when a construct closes does not end the wait for the rest.
+        "f(x |> y,\n",
+        "function(a, a\n",
+        "c(\"\" = 1,\n",
+        "1 |> 2 +\n",
+        "f(g(_),\n",
+        "{\n  1 |> 2\n",
         // A `#:` block annotates the line after it, so the console waits for that line.
         "#: fn(x: I64) -> I64\n",
         "#: fn(x: I64) -> I64",
@@ -89,6 +96,12 @@ fn a_console_reads_on_only_when_the_input_ended_too_early() {
         "(a = 1, a = 2)\n",
         "[x = 1]\n",
         ":Some()\n",
+        // So is a check R makes on a construct that closed, and one its lexer makes.
+        "x |> y\n",
+        "function(a, a) 1\n",
+        "f(g(_))\n",
+        "f(``,\n",
+        "f(\"\\q\",\n",
     ];
     for text in unfinished {
         assert!(syntax::input_is_unfinished(text), "unfinished: {text:?}");

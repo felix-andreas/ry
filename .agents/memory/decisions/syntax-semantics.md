@@ -2028,6 +2028,13 @@ Reading an item's range from `item_spans` made every edit re-lower every item of
   of input cuts short), and the smallest wins. An action runs only for a construct that is whole when the
   grammar refuses a token, which `error_order` decides by parsing the construct's text up to that token
   alone (`c("" = -)` is the grammar's error, `c("" = (1) 2)` the action's). `ry check` reports all of them.
+  GNU R refuses a NUL in a string once it has read the closing quote, so an escape error anywhere in
+  that string comes first (oracle case `parse__nul_bytes`).
+- **When a console reads on.** GNU R's console waits for the rest of a command although an action has
+  refused part of it (`f(x |> y,`, `function(a, a`, `c("" = 1,`), and reports the action's error with the
+  whole command. A lexer error (`"\q`, ``` `` ```) and a grammar error end the wait at once. So
+  `syntax::input_is_unfinished` sets the action classes aside before it asks whether every error says
+  the input ended too early (`a_console_reads_on_only_when_the_input_ended_too_early`).
 - **Impact.** Correctness: `ry check` finds `"\q"`, `function(x, x) 1`, `1 |> sum(_)`, `1;;2` and ``` `` ```
   before the program runs. Simplicity: lowering no longer validates. Performance: one pass over
   every file's tokens, which stops at functions, pipes, placeholders and strings. Incremental analysis:

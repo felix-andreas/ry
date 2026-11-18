@@ -324,10 +324,13 @@ fn error_order(
                 refused.min(range.end().into())
             });
         let alone = format!("{before}{}\n{after}", &text[from..to]);
-        let whole = syntax::parse(&alone)
-            .errors()
-            .iter()
-            .all(|error| error.in_annotation || matches!(error.unexpected, Unexpected::Classed(_)));
+        let whole = syntax::parse(&alone).errors().iter().all(|error| {
+            error.in_annotation
+                || matches!(
+                    error.unexpected,
+                    Unexpected::Classed(class) if !matches!(class, Classed::EmptyStatement)
+                )
+        });
         if is_open(range) || !whole { 5 } else { 1 }
     };
     match error.unexpected {
@@ -356,9 +359,12 @@ fn error_order(
             (token, 0, read)
         }
         Unexpected::Classed(Classed::EmbeddedNul) => {
-            let token =
-                token_at(root, start).map_or(start, |token| token.text_range().start().into());
-            (token, 0, start)
+            // GNU R refuses the NUL once it has read the closing quote, so after every escape
+            // of the string.
+            let token = token_at(root, start).map_or(start..start, |token| {
+                token.text_range().start().into()..token.text_range().end().into()
+            });
+            (token.start, 0, token.end + 1)
         }
         Unexpected::Classed(Classed::RepeatedFormal) => {
             let parameter = token_at(root, start)
@@ -553,10 +559,12 @@ unsafe fn error_failure(root: &SyntaxNode, text: &str, error: &SyntaxError) -> S
             // GNU R refuses the string as it builds it, and shows the decoded text.
             let shown = token_at(root, offset).map_or_else(String::new, |token| {
                 let token_text = token.text();
-                let inner = token_text.get(1..token_text.len().saturating_sub(1));
-                match (token.kind(), inner.map(unescape_bytes)) {
-                    (SyntaxKind::STRING, Some(Ok((bytes, _)))) => encode_bytes(&bytes, None),
-                    _ => encode_string(raw_string_content(token_text), None),
+                match token.kind() {
+                    SyntaxKind::RAW_STRING => encode_string(raw_string_content(token_text), None),
+                    _ => token_text
+                        .get(1..token_text.len().saturating_sub(1))
+                        .and_then(|inner| unescape_bytes(inner).ok())
+                        .map_or_else(String::new, |(bytes, _)| encode_bytes(&bytes, None)),
                 }
             });
             return SyntaxFailure {
