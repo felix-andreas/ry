@@ -26,7 +26,7 @@ use {
         path::{Path, PathBuf},
         process::{Child, ChildStdin, Command, Stdio},
         sync::{
-            Arc, Mutex, OnceLock,
+            Arc, Mutex, OnceLock, PoisonError, RwLock, RwLockReadGuard,
             mpsc::{self, Receiver},
         },
         time::{Duration, Instant},
@@ -68,12 +68,28 @@ fn scenarios_hold() {
     let scenarios = select_scenarios(scenarios, selected.as_deref())
         .unwrap_or_else(|message| panic!("{message}"));
     corpus_library();
+    let texts: Vec<Result<String, String>> = scenarios
+        .iter()
+        .map(|(_, path)| {
+            fs::read_to_string(path).map_err(|error| format!("reading {}: {error}", path.display()))
+        })
+        .collect();
+    // Building the single binary replaces `ry`, so it happens before any scenario runs one. A
+    // failed build is cached, and the scenario that needs the binary reports it.
+    let needs_single_ry = texts
+        .iter()
+        .flatten()
+        .any(|text| text.lines().any(|line| line.starts_with("run single-ry")));
+    if needs_single_ry && let Err(error) = single_ry() {
+        eprintln!("building the single binary failed: {error}");
+    }
+    let _binary = ry_binary_in_use();
     // Each scenario works in its own directory under CARGO_TARGET_TMPDIR and its own processes,
     // so they run in parallel; the report follows the sorted order all the same.
-    let outcomes = in_parallel(&scenarios, |(name, path)| {
-        fs::read_to_string(path)
-            .map_err(|error| format!("reading {}: {error}", path.display()))
-            .and_then(|text| run_scenario(name, &text))
+    let work: Vec<(&String, &Result<String, String>)> =
+        scenarios.iter().map(|(name, _)| name).zip(&texts).collect();
+    let outcomes = in_parallel(&work, |(name, text)| {
+        Result::clone(text).and_then(|text| run_scenario(name, &text))
     });
     let mut failures = Vec::new();
     let mut skips = Vec::new();
@@ -181,6 +197,7 @@ const TYPED_HARNESS_INTERPRETED: [&str; 2] = ["measure", "clock"];
 /// function before the program starts, so that none compiles during the run.
 #[test]
 fn typed_benchmarks_run_natively() {
+    let _binary = ry_binary_in_use();
     if let Some(reason) =
         missing_requirement(&["ry-runtime".to_owned()], None).expect("a known requirement")
     {
@@ -367,6 +384,7 @@ const PACKAGE_TIERINGS: [Tiering; 2] = [
 /// script that stops with an error partway.
 #[test]
 fn typed_scripts_agree_however_they_compile() {
+    let _binary = ry_binary_in_use();
     if let Some(reason) =
         missing_requirement(&["ry-runtime".to_owned()], None).expect("a known requirement")
     {
@@ -602,6 +620,7 @@ fn typed_scripts_agree_however_they_compile() {
 /// compile in the session and the script prints what it prints with an intact file.
 #[test]
 fn fuzz_typed_code_file() {
+    let _binary = ry_binary_in_use();
     if let Some(reason) =
         missing_requirement(&["ry-runtime".to_owned()], None).expect("a known requirement")
     {
@@ -798,6 +817,7 @@ fn package_parts(statements: &[String]) -> Option<(Vec<String>, Vec<String>)> {
 /// script starts, and the function the script then calls is among them.
 #[test]
 fn a_script_with_more_definitions_than_the_closure_limit_compiles_them_all_ahead() {
+    let _binary = ry_binary_in_use();
     if let Some(reason) =
         missing_requirement(&["ry-runtime".to_owned()], None).expect("a known requirement")
     {
@@ -1154,6 +1174,7 @@ struct NativeProgram {
 /// the same either way.
 #[test]
 fn native_diagnostics_agree_with_the_typed_core() {
+    let _binary = ry_binary_in_use();
     if let Some(reason) =
         missing_requirement(&["ry-runtime".to_owned()], None).expect("a known requirement")
     {
@@ -1608,6 +1629,7 @@ fn native_reads_leave_missing_arguments_to_the_interpreter() {
 /// major collection.
 #[test]
 fn identical_runs_make_identical_collections() {
+    let _binary = ry_binary_in_use();
     if let Some(reason) =
         missing_requirement(&["ry-runtime".to_owned()], None).expect("a known requirement")
     {
@@ -1683,6 +1705,7 @@ fn profile_summary(files: &[(&str, &str)]) -> Option<(String, String)> {
         eprintln!("profile summary: skipped, {reason}");
         return None;
     }
+    let _binary = ry_binary_in_use();
     let directory = tempfile::tempdir().expect("temporary directory");
     for (name, text) in files {
         fs::write(directory.path().join(name), text).expect("write a file");
@@ -2387,16 +2410,26 @@ fn r_home() -> Result<&'static PathBuf, String> {
     .map_err(Clone::clone)
 }
 
+/// Every test that runs the `ry` under test holds this for reading, and [`single_ry`] holds it
+/// for writing while it rebuilds that binary in place. A process that starts during the swap
+/// runs the embedding build, and one that copies itself (`ry build --exe`) finds its
+/// executable deleted.
+static RY_BINARY: RwLock<()> = RwLock::new(());
+
+fn ry_binary_in_use() -> RwLockReadGuard<'static, ()> {
+    RY_BINARY.read().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// A `ry` with the runtime and base R embedded, as a release ships it, alone in a directory of
 /// its own. It is built with `RY_EMBED_RUNTIME` and `RY_EMBED_BASE` (`crates/repl/build.rs`) and
-/// copied away, and then `ry`
-/// is built again without it, so the binary the other scenarios run is the usual one and the
-/// next `cargo test` has nothing to rebuild. Scenarios run one after another, so none of them
-/// sees the swap.
+/// copied away, and then `ry` is built again without it, so the binary the other tests run is
+/// the usual one and the next `cargo test` has nothing to rebuild. The swap holds [`RY_BINARY`]
+/// for writing, so a caller must not hold it for reading.
 fn single_ry() -> Result<&'static PathBuf, String> {
     static SINGLE: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     SINGLE
         .get_or_init(|| {
+            let _swap = RY_BINARY.write().unwrap_or_else(PoisonError::into_inner);
             let libr = libr_path()?;
             let base = ry_base().ok_or("ry's base R is not built; build it with `just base-r`")?;
             let build = |embed: Option<(&Path, &Path)>| -> Result<(), String> {

@@ -497,8 +497,8 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     {
         panic!("a promise was forced after its last counted reference was released");
     }
-    // A reference only reads a variable of another frame; forcing the promise it reaches records
-    // the code that runs.
+    // A reference records the code it runs itself (`force_reference`): reading another frame's
+    // variable runs none, and forcing the promise it reaches records the code that runs.
     let result = if promise.has_gp(gp::ARGUMENT_REFERENCE) {
         force_reference(promise)
     } else {
@@ -1193,7 +1193,10 @@ pub(crate) unsafe fn reference_target(reference: Sexp) -> (usize, u32) {
 /// as a promise of the variable's name in that frame would read it.
 unsafe fn force_reference(reference: Sexp) -> R<Sexp> {
     let symbol = reference.cdr();
+    // An environment or code reference runs its caller's code as the promise it stands for
+    // would, so the boundary-call recorder sees that code as it sees a promise's.
     if let Some(env) = reference_env(reference) {
+        let _recorded = crate::capture::evaluating(|| env);
         let code = reference.attrib();
         if code.kind() == SexpType::Bytecode {
             return bytecode::run_promise(code, env);
@@ -1203,7 +1206,9 @@ unsafe fn force_reference(reference: Sexp) -> R<Sexp> {
     let (owner, slot) = reference_target(reference);
     let frame = &interp().frames[owner];
     if let Some(code) = reference_code(reference) {
-        return bytecode::run_promise_on_slots(code, frame.function, owner, frame.slots as usize);
+        let (function, slots) = (frame.function, frame.slots as usize);
+        let _recorded = crate::capture::evaluating(|| function.tag());
+        return bytecode::run_promise_on_slots(code, function, owner, slots);
     }
     if frame.env != nil() {
         return eval(symbol, frame.env);
