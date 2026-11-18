@@ -5268,7 +5268,10 @@ unsafe fn parallel_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
     if count == 0 {
         return alloc(kind, 0);
     }
-    if items.iter().any(|&item| count % length(item) != 0) {
+    if items
+        .iter()
+        .any(|&item| !count.is_multiple_of(length(item)))
+    {
         crate::conditions::warning("an argument will be fractionally recycled")?;
     }
     if kind == SexpType::String {

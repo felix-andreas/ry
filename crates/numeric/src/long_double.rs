@@ -1883,7 +1883,7 @@ mod tests {
             let fast = add_products(third, values, &reversed, third, seven);
             assert_eq!(format!("{fast:?}"), format!("{model:?}"), "{values:?}");
             let shifted: Vec<f64> = values.iter().map(|value| value * 0.3 - 1.0).collect();
-            let columns = [&values[..], &reversed, &shifted, &values[..]];
+            let columns = [values, &reversed, &shifted, values];
             let offsets = [0.7, -2.5, 1e-3, 0.0];
             let fast = covariances_by_four(values, 1.0 / 3.0, columns, offsets, 7);
             for (j, column) in columns.iter().enumerate() {
