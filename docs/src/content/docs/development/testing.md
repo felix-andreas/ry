@@ -451,6 +451,12 @@ must hold between answers:
 - **One set of occurrences**: the references asked from the first and from the last occurrence of
   a name are the set asked from the cursor, and references without the declaration are that set
   minus its declarations.
+- **The hover agrees with "go to definition"**: the link a hover carries is one of the definition
+  targets, and where the cursor navigates to a declaration, the hover there names the same symbol
+  as the hover at the cursor.
+- **Completion offers what resolves**: at the end of a name whose hover links to a declaration,
+  completion offers that name. The position that declares the name is left out, and so is a
+  member after `$` or `@` whose receiver has no known type.
 - **Rename edits never overlap**, and neither do the edits of a quick fix or of "fix all".
 - **Hover and selection ranges cover the cursor**, each selection range strictly inside the next.
   An editor rejects the whole answer otherwise.
@@ -471,6 +477,16 @@ checker narrows by a predicate's name on purpose).
 
 An off-by-one injected where item-relative ranges convert back to absolute offsets passes the
 containment check and fails name identity on the first seed.
+
+Four of these invariants are also `debug_assert`s at the seam that produces the value, so every
+fixture and every battery of every crate tests them, at no cost in a release build:
+
+| Seam | Invariant |
+| --- | --- |
+| `semantics::item_spans` | an item's name range lies inside the item and spells its name |
+| `semantics::item_hir` | every expression range lies inside the item |
+| `semantics::item_naming` | every binding range lies inside the item |
+| `ide`'s `occurrences` | the occurrences of one name are spelled alike, quoting and a `..` prefix aside |
 
 The data.table rewrites are checked once per input: they never overlap, every range lies inside
 the text, and when the input parses cleanly, so does the text with every rewrite applied.

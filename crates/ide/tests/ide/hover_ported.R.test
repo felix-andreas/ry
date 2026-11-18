@@ -598,7 +598,7 @@ hint @5: integer | character
 for (item in list(a = 1L, b = "two")) it$0em
 #++++
 hover 38..42: item: integer | character
-hover-definition: local 5..9
+hover-definition: global 5..9
 definition 5..9
 references: 5..9*, 38..42
 rename: 2 edit(s)

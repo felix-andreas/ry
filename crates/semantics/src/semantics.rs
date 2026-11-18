@@ -580,11 +580,27 @@ pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> 
             continue;
         }
         let (kind, name, name_range) = match top_level_definition(&node) {
-            Some(definition) => (
-                definition.kind,
-                Some(Symbol::new(&definition.name)),
-                Some(definition.name_range),
-            ),
+            Some(definition) => {
+                // A jump to a definition lands on this range, so it is the name's own token.
+                debug_assert!(
+                    node.text_range().contains_range(definition.name_range)
+                        && file
+                            .text(db)
+                            .get(std::ops::Range::<usize>::from(definition.name_range))
+                            .is_some_and(|spelled| {
+                                spelled.contains('\\')
+                                    || spelled.trim_matches(['`', '"', '\'']) == definition.name
+                            }),
+                    "the name range {:?} of `{}` does not spell it",
+                    definition.name_range,
+                    definition.name
+                );
+                (
+                    definition.kind,
+                    Some(Symbol::new(&definition.name)),
+                    Some(definition.name_range),
+                )
+            }
             None => (ItemKind::Statement, None, None),
         };
         let disambiguator = {
@@ -848,8 +864,16 @@ impl ItemSyntax {
 /// the module comes out equal, and everything downstream of it cuts off.
 #[salsa::tracked(returns(ref))]
 pub fn item_hir<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<hir::Module> {
-    let syntax = item_syntax(db, item)?;
-    Some(hir::lower_item(&syntax.syntax_node()))
+    let node = item_syntax(db, item)?.syntax_node();
+    let module = hir::lower_item(&node);
+    debug_assert!(
+        module
+            .ranges()
+            .all(|range| node.text_range().contains_range(range)),
+        "an expression lies outside its item {:?}",
+        node.text_range()
+    );
+    Some(module)
 }
 
 #[salsa::tracked(returns(ref))]
@@ -864,7 +888,20 @@ pub fn item_naming<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<naming::Item
         Some(files) => *project_ref_class_binds(db, files, class, member),
         None => ref_class_binds(file_ref_classes(db, file), class, member),
     };
-    Some(naming::resolve_item(module, masked_verbs, &is_member))
+    let naming = naming::resolve_item(module, masked_verbs, &is_member);
+    // The item's own range is its widest expression: reading the syntax here would tie the
+    // names to the item's stamp.
+    debug_assert!(
+        {
+            let extent = module.ranges().reduce(TextRange::cover);
+            naming
+                .bindings
+                .values()
+                .all(|info| extent.is_some_and(|extent| extent.contains_range(info.range)))
+        },
+        "a binding lies outside its item"
+    );
+    Some(naming)
 }
 
 /// The Reference Classes a file defines, keyed by class name, with the members that
@@ -1054,9 +1091,8 @@ pub fn package_scheme_exists_in(
         return true;
     }
     library.is_some_and(|library| {
-        library.nominals.contains(name)
-            || ((library.schemes.contains_key(name) || library.known_exports.contains(name))
-                && !stubs::outside_prelude(db, library, name))
+        (library.schemes.contains_key(name) || library.known_exports.contains(name))
+            && !stubs::outside_prelude(db, library, name)
     })
 }
 
