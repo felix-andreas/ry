@@ -110,6 +110,63 @@ fn refusal(text: &str) -> Option<String> {
     })
 }
 
+/// A base tree saved by another build has that build's prologues in its functions, among them
+/// ones in front of closures a function defines. Installing a fast path must hash such a body
+/// as the code GNU R has, and leave this build's prologue alone in it: an inner closure gets
+/// its prologue from this build's own table afterwards.
+pub fn check_saved_prologues_replaced() {
+    const PLAIN: &str = "function(x) { inner <- function(y) y + 1; inner(x) }";
+    const SAVED: &str = "function(x) { .Internal(ryOuter()); \
+        { inner <- function(y) { .Internal(ryGone()); y + 1 }; inner(x) } }";
+    const INSTALLED: &str =
+        "function(x) { .Internal(ryOuter()); { inner <- function(y) y + 1; inner(x) } }";
+    with_interpreter(|| {
+        let mark = crate::heap().handle_mark();
+        // SAFETY: the interpreter is installed, and the handle scope roots what is parsed.
+        let checked = unsafe {
+            (|| -> Result<(), Unwind> {
+                let parts = |text: &str| -> Result<(Sexp, Sexp), Unwind> {
+                    let definition = lower::parse_text(text, "<test>")?.element(0);
+                    Ok((definition.cdr().car(), definition.cdr().cdr().car()))
+                };
+                let hash_of = |formals: Sexp, body: Sexp| {
+                    let mut hash = crate::session::FNV_OFFSET;
+                    crate::session::stable_hash(formals, &mut hash);
+                    crate::session::stable_hash(body, &mut hash);
+                    hash
+                };
+                let (formals, plain) = parts(PLAIN)?;
+                let expected = hash_of(formals, plain);
+                let (_, installed) = parts(INSTALLED)?;
+                let wanted = hash_of(formals, installed);
+                for (label, text) in [("plain", PLAIN), ("saved", SAVED), ("installed", INSTALLED)]
+                {
+                    let (_, body) = parts(text)?;
+                    let block = crate::base_fast_paths::with_prologue(
+                        formals, body, "f", "ryOuter", expected, false,
+                    )?;
+                    let Some(block) = block else {
+                        panic!("the {label} body did not hash as GNU R's code");
+                    };
+                    assert_eq!(
+                        hash_of(formals, block),
+                        wanted,
+                        "the {label} body did not come out with this build's prologue alone"
+                    );
+                    if label == "installed" {
+                        assert!(block == body, "a body that needs no change was rebuilt");
+                    }
+                }
+                Ok(())
+            })()
+        };
+        crate::heap().release_handles(mark);
+        if checked.is_err() {
+            panic!("the prologue check raised an R error");
+        }
+    });
+}
+
 /// Reading any byte stream as a serialized object must fail with an R error or succeed, never
 /// panic. Returns whether the stream read as an object.
 ///
