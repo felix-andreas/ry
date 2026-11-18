@@ -937,8 +937,13 @@ pub unsafe extern "C" fn jit_load(activation: *mut Activation, pc: i64, slot: i6
             }
             let epoch = heap().binding_epoch();
             let reads = interp::interp().active_binding_reads;
+            let in_slots = machine.env() == values::nil();
             let loaded = scoped(|| bytecode::load_variable(machine, pc as usize));
             let result = finish_load(activation, slot, loaded, epoch);
+            // A promise the load forced can reach this frame (`sys.frame()`) and bind its
+            // variables, which moves them out of their slots, so the values compiled code holds
+            // may be stale. The load is recorded as an active binding's is.
+            let moved = in_slots && machine.env() != values::nil();
             // Code that would reuse the value of a load that called an active binding hands the
             // activation to tier 0 after the load, and the recompile reads the variable again at
             // every use. Comparing a count also catches a binding that a forced promise read,
@@ -946,7 +951,7 @@ pub unsafe extern "C" fn jit_load(activation: *mut Activation, pc: i64, slot: i6
             // every read says so in its metadata rather than in an argument, because an extra
             // argument at every load site costs the register allocator an instruction in loops.
             if result != outcome::LOAD_FAILED
-                && interp::interp().active_binding_reads != reads
+                && (interp::interp().active_binding_reads != reads || moved)
                 && !bit(&layout(activation).volatile, slot as usize)
             {
                 bytecode::record_active_binding(machine.code, pc as usize);
@@ -1030,6 +1035,7 @@ pub unsafe extern "C" fn jit_load_slot(activation: *mut Activation, slot: i64) -
             let machine = machine(activation);
             let symbol = layout(activation).slots[slot as usize];
             let epoch = heap().binding_epoch();
+            let in_slots = machine.env() == values::nil();
             let loaded = scoped(|| {
                 if machine.env() == values::nil() {
                     return match frame_slot(activation, machine, slot).map(|slot| *slot) {
@@ -1062,7 +1068,13 @@ pub unsafe extern "C" fn jit_load_slot(activation: *mut Activation, slot: i64) -
                     .is_some_and(|cell| cell.cdr().kind() != SexpType::Promise);
                 eval::eval_symbol(symbol, machine.env()).map(|value| (value, local))
             });
-            finish_load(activation, slot, loaded, epoch)
+            let result = finish_load(activation, slot, loaded, epoch);
+            // As in `jit_load`: a forced promise that moved the frame's variables out of their
+            // slots may have rebound them.
+            if result != outcome::LOAD_FAILED && in_slots && machine.env() != values::nil() {
+                return outcome::LOAD_INVALIDATED;
+            }
+            result
         })
     }
 }

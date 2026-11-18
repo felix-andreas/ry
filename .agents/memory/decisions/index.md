@@ -357,6 +357,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Portable code with no lookup from the enclosure is proven for every enclosure
 - A loop compiles when its backward jumps repay the body
 - A back edge is counted in tier 0's fast jump handler
+- A load that reaches the runtime writes dirty variables back first
 
 ## Heap and collector
 

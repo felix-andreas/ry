@@ -376,6 +376,19 @@ impl<'a> State<'a> {
         }
     }
 
+    /// Marks every dirty object as one a load may have written back. A load that reaches the
+    /// runtime can force a promise, and the promise's code can look at the frame
+    /// (`sys.frame()`), so the variables are written back before it. A scalar held in variables
+    /// stays dirty: its write-back hands no reference over, so writing it again is harmless, and
+    /// a scalar that may be clean is one a join forgets ([`Slot::join`]).
+    fn exposed(&mut self) {
+        for slot in &mut self.slots {
+            if slot.may_be(status::DIRTY) && !slot.ty.in_variables() {
+                slot.status |= status::LOCAL;
+            }
+        }
+    }
+
     fn join(&mut self, other: &State) {
         for (mine, theirs) in self.registers.iter_mut().zip(&other.registers) {
             *mine = mine.join(*theirs);
@@ -2567,16 +2580,18 @@ impl<'a> Builder<'a> {
                             ty,
                         }
                     };
-                    // Code generation writes the variables back before the load and forgets them
-                    // after it, but only when the load reaches the runtime: a load the inline
-                    // frame probe answers leaves the variables as they were.
-                    let mut forced = state.clone();
-                    forced.flushed();
-                    forced.forget_slots();
-                    forced.slots[slot] = loaded;
+                    // Code generation writes the variables back before the load, and forgets them
+                    // after a `forcing` one, but only when the load reaches the runtime: a load
+                    // the inline frame probe answers leaves the variables as they were.
                     state.slots[slot] = loaded;
                     if forcing {
+                        let mut forced = state.clone();
+                        forced.flushed();
+                        forced.forget_slots();
+                        forced.slots[slot] = loaded;
                         state.join(&forced);
+                    } else {
+                        state.exposed();
                     }
                 }
                 state.registers[operand(0)] = state.slots[slot].ty;
@@ -2623,6 +2638,7 @@ impl<'a> Builder<'a> {
                     let current = state.slots[slot];
                     let load = current.may_be(status::NOT_LOADED).then_some(current.ty);
                     if load.is_some() {
+                        state.exposed();
                         state.slots[slot] = Slot {
                             status: (current.status & status::LOADED)
                                 | status::LOCAL
@@ -2981,6 +2997,9 @@ impl<'a> Builder<'a> {
                     && !(self.defaulted.contains_key(&self.slots[slot])
                         && state.slots[slot].may_be(status::NOT_LOADED))
                 {
+                    if state.slots[slot].may_be(status::NOT_LOADED) {
+                        state.exposed();
+                    }
                     let mut forgotten = state.slots[slot];
                     forgotten.status = status::NOT_LOADED;
                     let mut fast = state.slots[slot];
@@ -3225,6 +3244,9 @@ impl<'a> Builder<'a> {
                     && !(self.defaulted.contains_key(&self.slots[slot])
                         && state.slots[slot].may_be(status::NOT_LOADED))
                 {
+                    if state.slots[slot].may_be(status::NOT_LOADED) {
+                        state.exposed();
+                    }
                     // The generic path writes the variable back, runs the assignment in tier 0
                     // and forgets the variable; the fast path may make it dirty by copying it.
                     let mut forgotten = state.slots[slot];
