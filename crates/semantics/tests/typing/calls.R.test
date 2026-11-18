@@ -902,11 +902,13 @@ f: <T> fn(x: T) -> double
 f <- function(x, g) x |> g
 #++++
 f: <T, U> fn(x: T, g: U) -> Unknown
+25..26 error[syntax-error] the right side of `|>` must be a function call, such as `f()`
 
 #---- positional_placeholder_stays_opaque
 f <- function(x) x |> paste(_, "a")
 #++++
 f: <T> fn(x: T) -> Unknown
+28..29 error[syntax-error] the pipe placeholder `_` must be passed as a named argument, as in `f(data = _)`
 
 #---- a_declared_callback_called_only_by_name_misses_its_positional_slot
 # A declared shape names no parameters, so `arglist = 1` goes to `...` and fills no slot.

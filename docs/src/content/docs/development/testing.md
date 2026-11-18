@@ -547,8 +547,15 @@ the erased text parses cleanly, holds no inline annotation, and erases to itself
 The runtime is tested against models and against GNU R rather than with fixtures. The oracle's
 cases (`crates/oracle/cases/`, [Corpus and oracle](/development/corpus-and-oracle)) hold the
 R-level behavior, and `crates/interp/tests/test_fuzz.rs` fuzzes lowering and checks that the
-tier-0 bytecode agrees with the evaluator. `crates/jit/tests/test_tiers.rs` does the same one tier
-up: it runs random loop, branch and vector programs as closure bodies under tier 0 and under the JIT
+tier-0 bytecode agrees with the evaluator. One of its arms holds the parse verdict: the runtime
+refuses to parse a text exactly when `syntax::parse` reports an error outside a `#:` comment
+(`fuzz_parse_verdict_is_shared`, `interp::testing::check_parse_verdict`), so `ry check` reports
+every text `ry run` would stop on, and nothing else. A text with a byte outside UTF-8 is exempt,
+because only the runtime reads such bytes. Its inputs are the source fragments of the oracle's
+`parser` kind (`syntax::testing::source_fragment`), byte mutations of real snippets and small
+edits of generated programs. Each input is checked a second time with `#: ` before every line:
+that text is all comments to R, so both must accept it. `crates/jit/tests/test_tiers.rs` does the
+same one tier up: it runs random loop, branch and vector programs as closure bodies under tier 0 and under the JIT
 forced on (`jit::Mode::Force`, which compiles a body on its second call and a loop on its first
 backward jump), and every call must give the same value or error. Most generated programs must run
 to a value, so a generator that drifts into erroring early fails the test instead of passing
@@ -601,7 +608,7 @@ which an engine differs. A seed and a kind name a program, so `oracle fuzz --kin
 | `io` (`oracle::metamorphic::io_program`) | round trips through files and connections: a zoo value written by one writer (`writeLines`, `cat`, `writeBin`, `write.table`, `dput`, `saveRDS`, `save`, compressed and re-encoding connections) and read back by several readers | bytes on disk that differ from GNU R's, and readers that decode, mark, warn about or reject a file differently |
 | `language` (`oracle::language::program`) | a few closures, each built from statements of the construct families its seed enables (`on.exit`, frame inspection, `...`, promises, replacement functions, `<<-`, conditions and restarts, S3, S4 and Reference Class dispatch, `eval` and quoted code, environments, regular expressions over Unicode text, control flow) and called one, a few or sixty times; the first and the last call's visible value, log entries and warnings are recorded | a difference in evaluation order, in what a frame or a condition reports, or in dispatch, and one that appears only on a later call |
 | `perturbed` (`oracle::mutate::perturb`) | a grammar, metamorphic or language program with up to twelve statements inserted into its function bodies: dead code (such as `if (FALSE)` around a statement taken from elsewhere in the program, an unused local closure, a loop over `NULL`) and code without effect on the result (such as `sys.call()`, `gc(FALSE)`, a `tryCatch` around `NULL`, and `force(x)` or `x <- x` in a function with parameters) | compiled code that depends on a slot number, a constant index, a branch offset or an inlining decision |
-| `parser` (`oracle::parser::program`) | sixty source fragments handed to `parse(text =)`, from the families its seed enables: operator chains without parentheses, nested constructs, the same constructs across line breaks and comments, number and string literals, names, and such text with one token damaged or drawn as blind tokens; each fragment prints a dump of its tree (a number by type and bits, a string by bytes and encoding mark), its warnings, or the fact that it was rejected, and a literal fragment its whole error message (without the line number GNU R leaves uninitialized after "invalid \u{xxxx} sequence") | a precedence, a line-break rule, a literal's value or mark, and text one parser accepts and the other rejects |
+| `parser` (`oracle::parser::program`) | sixty source fragments (`syntax::testing::source_fragment`) handed to `parse(text =)`, from the families its seed enables: operator chains without parentheses, nested constructs, the same constructs across line breaks and comments, number and string literals, names, and such text with one token damaged or drawn as blind tokens; each fragment prints a dump of its tree (a number by type and bits, a string by bytes and encoding mark), its warnings, or the fact that it was rejected, and a literal fragment its whole error message (without the line number GNU R leaves uninitialized after "invalid \u{xxxx} sequence") | a precedence, a line-break rule, a literal's value or mark, and text one parser accepts and the other rejects |
 | `corpus` (`oracle::corpus`) | a snippet of real R code with one to four mutations | what no grammar author thought of |
 
 A metamorphic trial draws its value from a zoo: every atomic type and lists, with `NA`, `NaN`,
@@ -1000,6 +1007,7 @@ thin wrapper around a battery its crate exports, which the crate's in-tree harne
 | `sniff` | `sniff::check_sniff_invariants` |
 | `csv` | `table::io::check_csv_bytes` |
 | `interp_lower`, `interp_unserialize`, `bytecode` | `interp::testing::check_lowering_input`, `check_unserialize_input`, `check_bytecode_agreement` |
+| `parse_verdict` | `interp::testing::check_parse_verdict` |
 | `interp_code_image`, `interp_code_image_file` | `interp::testing::check_code_image_round_trip`, `check_code_image_file` |
 | `unserialize` | `R::serialize::check_unserialize_input` |
 

@@ -43,6 +43,86 @@ error: unterminated backtick name; expected a closing `` ` ``
   | `weird name <- 1
   | ^^^^^^^^^^^^^^^^
 
+#---- unrecognized_escape
+x <- 'a\qb'
+#++++
+error: `\q` is not an escape R knows. Write `\\` for a backslash
+ --> 1:8
+  | x <- 'a\qb'
+  |        ^^
+
+#---- hex_escape_without_digits
+x <- "\x"
+#++++
+error: `\x` needs a hex digit after it
+ --> 1:7
+  | x <- "\x"
+  |       ^^
+
+#---- octal_escape_too_large
+x <- '\400'
+#++++
+error: `\400` is above `\377`, the largest octal escape
+ --> 1:7
+  | x <- '\400'
+  |       ^^^^
+
+#---- nul_escape
+x <- "a\0b"
+#++++
+error: this escape names the NUL character, which an R string cannot hold
+ --> 1:8
+  | x <- "a\0b"
+  |        ^^
+
+#---- unicode_escape_without_digits
+x <- '\u'
+#++++
+error: `\u` needs a hex digit after it
+ --> 1:7
+  | x <- '\u'
+  |       ^^
+
+#---- unicode_escape_unclosed
+x <- '\u{e4'
+#++++
+error: `\u{` needs a closing `}` after its digits
+ --> 1:7
+  | x <- '\u{e4'
+  |       ^^^^^
+
+#---- unicode_escape_out_of_range
+x <- '\U{110000}'
+#++++
+error: `110000` is not a Unicode code point; the largest is `10ffff`
+ --> 1:7
+  | x <- '\U{110000}'
+  |       ^^^^^^^^^^
+
+#---- unicode_and_byte_escapes_mixed
+x <- '\x41\u00e4'
+#++++
+error: a string cannot mix `\u` or `\U` escapes with octal or `\x` escapes
+ --> 1:6
+  | x <- '\x41\u00e4'
+  |      ^^^^^^^^^^^^
+
+#---- escape_in_a_backtick_name
+`a\qb` <- 1
+#++++
+error: `\q` is not an escape R knows. Write `\\` for a backslash
+ --> 1:3
+  | `a\qb` <- 1
+  |   ^^
+
+#---- empty_backtick_name
+`` <- 1
+#++++
+error: a name cannot be empty: write at least one character between the backquotes
+ --> 1:1
+  | `` <- 1
+  | ^^
+
 #==== numbers
 #---- missing_hex_digits
 mask <- 0x

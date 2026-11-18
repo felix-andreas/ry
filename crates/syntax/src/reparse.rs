@@ -6,7 +6,7 @@
 
 use {
     crate::{
-        Lookahead, NodeOrToken, Parse, SyntaxElement, Unexpected,
+        Lookahead, NodeOrToken, Parse, SyntaxElement,
         kind::SyntaxKind::*,
         lexer::lex,
         parse,
@@ -153,22 +153,10 @@ pub fn try_splice(
         if error.range.end() <= prefix_len {
             errors.push(error.clone());
         } else if suffix_len > 0 && error.range.start() >= old_suffix_start {
-            let mut rebased = error.clone();
-            rebased.range = shift(error.range, delta);
-            if let Unexpected::Token(found) = &mut rebased.unexpected {
-                *found = shift(*found, delta);
-            }
-            errors.push(rebased);
+            errors.push(error.shifted(delta));
         }
     }
-    for error in middle.errors() {
-        let mut rebased = error.clone();
-        rebased.range = shift(error.range, prefix);
-        if let Unexpected::Token(found) = &mut rebased.unexpected {
-            *found = shift(*found, prefix);
-        }
-        errors.push(rebased);
-    }
+    errors.extend(middle.errors().iter().map(|error| error.shifted(prefix)));
     let rebase = |lookahead: &Lookahead, by: i64| {
         let range = shift(TextRange::new(lookahead.statement, lookahead.end), by);
         Lookahead {

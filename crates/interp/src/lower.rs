@@ -13,6 +13,7 @@ use {
     crate::{
         builtins::{BuiltinDef, Call, internal},
         connections::{multibyte_length, utf8_sequence_length},
+        format::{encode_bytes, encode_string},
         unwind::{R, Unwind, error},
         values::{self, alloc, escaped_byte, holds_stand_in, install, missing_arg, nil, symbols},
     },
@@ -24,8 +25,9 @@ use {
     smallvec::SmallVec,
     std::borrow::Cow,
     syntax::{
-        ElementRef, NodeOrToken, NodeRef, NumberType, SyntaxElement, SyntaxKind, SyntaxNode,
-        SyntaxToken, TextRange, TextSize, TokenRef, Unexpected, split_number_suffix,
+        Classed, ElementRef, EscapeErrorKind, EscapePiece, NodeOrToken, NodeRef, NumberType,
+        PipeCheck, SyntaxElement, SyntaxError, SyntaxKind, SyntaxNode, SyntaxToken, TextRange,
+        TextSize, TokenRef, Unexpected, raw_string_content, split_number_suffix, unescape_quoted,
     },
 };
 
@@ -73,6 +75,7 @@ pub unsafe fn parse_with_srcfile(text: &str, source_name: &str, srcfile: Sexp) -
             source: source.as_ref(),
             owner: node,
             typed,
+            placeholder: None,
         };
         let cursor = node.node_ref();
         values::set_elt(result, index, lower(cursor, context)?);
@@ -112,27 +115,44 @@ pub struct Script<'text> {
 /// A script's first syntax error: where it is in the text, and GNU R's message for it without
 /// the location. Most of GNU R's parse errors are plain errors, but the ones its grammar actions
 /// and lexer raise (a repeated formal argument, a misused pipe, a bad string escape) are
-/// conditions of class `parseError`, which `condition` describes.
+/// conditions of class `parseError`, which `report` describes.
 pub struct SyntaxFailure {
     pub offset: usize,
     pub message: String,
-    pub condition: Option<ParseCondition>,
-    /// For an error of R's grammar, the token GNU R's parser stops on (an empty range at the end
-    /// of the input), whose location and preceding lines GNU R's message quotes. `offset` stays
-    /// where ry's parser anchors the error, which decides how much of a script runs first.
-    pub unexpected: Option<std::ops::Range<usize>>,
+    pub report: FailureReport,
+}
+
+/// The form GNU R reports a syntax error in.
+pub enum FailureReport {
+    /// A message of ry's own, for text GNU R has no report for, with the location of `offset`.
+    Located,
+    /// An error of R's grammar, with the token GNU R's parser stops on (an empty range at the
+    /// end of the input), whose location and preceding lines GNU R's message quotes. `offset`
+    /// is where ry's parser anchors the error, which decides how much of a script runs first.
+    Grammar(std::ops::Range<usize>),
+    /// A condition of class `parseError`.
+    Condition(ParseCondition),
+    /// A plain error without a location, as GNU R raises when it makes a symbol of an empty name.
+    Plain,
 }
 
 /// The class and fields of a `parseError` condition.
 pub struct ParseCondition {
     pub class: &'static str,
     pub value: ConditionValue,
+    pub position: ConditionPosition,
+    /// The expression the condition names as its call.
+    pub call: Option<SyntaxNode>,
+}
+
+/// Where a `parseError` condition says it is, as a place in the text.
+pub enum ConditionPosition {
     /// The offset of the last character GNU R's lexer read before it raised the condition,
     /// whose line and column the message reports.
-    pub position: usize,
-    /// The expression the condition names as its call, lowered with each pipe placeholder as
-    /// the string `"_"`, as GNU R reports it.
-    pub call: Option<SyntaxNode>,
+    Read(usize),
+    /// The offset of the line break, or the end of the text, that ends the top-level
+    /// expression the condition is about. GNU R reports column 0 of the line it ends.
+    LineBreak(usize),
 }
 
 /// The `value` field of a `parseError` condition.
@@ -165,114 +185,75 @@ pub unsafe fn parse_script<'text>(
 /// Parses `text` as far as it goes: the expressions a newline or `;` ends before the first
 /// syntax error, and that error. GNU R runs each expression of a script once it is complete,
 /// so those run before the error stops the script.
+///
+/// The verdict is the `syntax` crate's: the text fails exactly when its parse holds an error
+/// outside a `#:` comment. GNU R stops at the first error it meets where ry's parser reports
+/// every one, so the error reported is the one GNU R meets first ([`error_order`]), in GNU R's
+/// words.
 pub unsafe fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailure>) {
     let parse = syntax::parse(text);
     let root = parse.syntax_node();
     // A broken `#:` comment is a comment to R, so only R's own grammar can fail a parse.
-    let mut grammar_errors = parse
-        .errors()
-        .iter()
-        .filter(|failure| !failure.in_annotation);
-    let first = grammar_errors.next();
-    // GNU R reads the final line break before the end of the input, so a construct that the
-    // line break cuts short fails before a group that the end of the input leaves open.
-    let reported = match first {
-        Some(failure) if matches!(failure.unexpected, Unexpected::EndOfInput) => grammar_errors
-            .find(|failure| matches!(failure.unexpected, Unexpected::EndOfLine))
-            .or(first),
-        first => first,
-    };
-    let grammar_failure = reported.map(|failure| {
-        let offset = usize::from(failure.range.start()).min(text.len());
-        pipe_bind_failure(text, offset).unwrap_or_else(|| {
-            let found = match failure.unexpected {
-                Unexpected::Token(found) => Some(found),
-                Unexpected::EndOfInput => None,
-                Unexpected::EndOfLine => {
-                    return SyntaxFailure {
-                        message: END_OF_LINE.to_owned(),
-                        unexpected: Some(text.len()..text.len()),
-                        offset,
-                        condition: None,
-                    };
-                }
-                Unexpected::Nothing => {
-                    return SyntaxFailure {
-                        message: failure.message.clone(),
-                        unexpected: None,
-                        offset,
-                        condition: None,
-                    };
-                }
-            };
-            let unexpected = found.map_or(text.len()..text.len(), |found| {
-                let start = usize::from(found.start()).min(text.len());
-                let mut end = usize::from(found.end()).min(text.len());
-                // GNU R's lexer has read the character that shows a number to be malformed,
-                // so the lines it quotes reach through that character.
-                let refused_number = text[start..]
-                    .starts_with(|first: char| first == '.' || first.is_ascii_digit())
-                    && root
-                        .token_at_offset(found.start())
-                        .right_biased()
-                        .is_some_and(|token| token.kind() == SyntaxKind::ERROR_TOKEN);
-                if refused_number
-                    && let Some(next) = text[end..].chars().next()
-                    && next != '\n'
-                {
-                    end += next.len_utf8();
-                }
-                start..end
-            });
-            SyntaxFailure {
-                message: unexpected_token(&root, text, &unexpected),
-                unexpected: Some(unexpected),
-                offset,
-                condition: None,
-            }
+    let errors = || parse.errors().iter().filter(|error| !error.in_annotation);
+    let open_from = errors()
+        .filter(|error| {
+            matches!(
+                error.unexpected,
+                Unexpected::EndOfInput | Unexpected::EndOfLine
+            )
         })
-    });
-    // GNU R's lexer raises its own errors as it reads a token, so the first of them in a token
-    // that starts before the grammar error, an unterminated string included, is the one
-    // reported.
+        .map(|error| usize::from(error.range.start()))
+        .max();
+    let refused: SmallVec<[usize; 4]> = errors()
+        .filter_map(|error| match error.unexpected {
+            Unexpected::Token(found) => Some(found.start().into()),
+            Unexpected::Nothing | Unexpected::Classed(Classed::EmptyStatement) => {
+                Some(error.range.start().into())
+            }
+            _ => None,
+        })
+        .collect();
+    let reported = errors()
+        .map(|error| (error_order(&root, text, error, open_from, &refused), error))
+        .min_by_key(|(order, _)| *order);
+    // What GNU R's lexer rejects and ry's accepts: a NUL, a byte that starts no character,
+    // and a string the input ends inside, which GNU R reads through the end of the input
+    // where ry's lexer ends it with its line. Each is placed by the token it is in. GNU R's
+    // lexer hands the unended string to the grammar as a token, so an action that runs on
+    // reading it comes first.
     let unterminated = if parse.errors().is_empty() {
         None
     } else {
         unterminated_failure(&root, text)
     };
     let lexical = [
-        nul_failure(&root, text),
-        multibyte_failure(&root, text),
-        escape_failure(&root),
-        empty_statement_failure(&root),
+        unterminated.map(|(start, failure)| {
+            let rank = if matches!(failure.report, FailureReport::Grammar(_)) {
+                3
+            } else {
+                0
+            };
+            ((start, rank, 0), failure)
+        }),
+        nul_failure(&root, text).map(|(start, failure)| ((start, 0, failure.offset), failure)),
+        multibyte_failure(&root, text)
+            .map(|(start, failure)| ((start, 0, failure.offset), failure)),
     ]
     .into_iter()
     .flatten()
-    .min_by_key(|(_, failure)| failure.offset);
-    // Every later byte belongs to the unterminated token in GNU R's reading, so a lexical
-    // failure counts only when it comes before that token.
-    let lexical = match (unterminated, lexical) {
-        (Some((start, _)), Some(lexical)) if lexical.1.offset < start => Some(lexical),
-        (Some(unterminated), _) => Some(unterminated),
-        (None, lexical) => lexical,
+    .min_by_key(|(order, _)| *order);
+    let failure = match (lexical, reported) {
+        (Some((lexical_order, lexical)), Some((order, _))) if lexical_order <= order => {
+            Some(lexical)
+        }
+        (_, Some((_, error))) => Some(error_failure(&root, text, error)),
+        (lexical, None) => lexical.map(|(_, lexical)| lexical),
     };
-    let mut failure = match (grammar_failure, lexical) {
-        (Some(grammar), Some((start, lexical))) if start <= grammar.offset => Some(lexical),
-        (None, lexical) => lexical.map(|(_, lexical)| lexical),
-        (grammar, _) => grammar,
-    };
-    // Most files hold no pipe and no placeholder, and `_` and `function` are common in names
-    // and comments, so the kind column answers both questions in one scan each.
-    let tree = root.node_ref();
-    let may_hold_placeholder = tree.any_kind(|kind| kind == SyntaxKind::UNDERSCORE);
-    let may_fail_action =
-        tree.any_kind(|kind| matches!(kind, SyntaxKind::PARAMETER_LIST | SyntaxKind::PIPE_GREATER));
     let mut expressions = Vec::new();
     for child in root.children() {
-        if is_skipped(child.kind()) {
+        if child.kind().is_erased() {
             continue;
         }
-        let start = usize::from(child.text_range().start()).min(text.len());
         if let Some(failure) = &failure {
             // GNU R runs an expression once it reads the newline or `;` that ends it.
             let ended = std::iter::successors(child.next_sibling_or_token(), |element| {
@@ -287,24 +268,6 @@ pub unsafe fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailu
                 break;
             }
         }
-        if may_fail_action && let Some(found) = grammar_action_failure(&child) {
-            failure = Some(found);
-            break;
-        }
-        if may_hold_placeholder && has_stray_placeholder(child.node_ref()) {
-            failure = Some(SyntaxFailure {
-                unexpected: None,
-                offset: start,
-                message: "invalid use of pipe placeholder".to_owned(),
-                condition: Some(ParseCondition {
-                    class: "invalidPlaceholder",
-                    value: ConditionValue::Null,
-                    position: start,
-                    call: Some(child),
-                }),
-            });
-            break;
-        }
         expressions.push(child);
     }
     (
@@ -317,6 +280,400 @@ pub unsafe fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailu
     )
 }
 
+/// Where GNU R's parser stands when it raises `error`, as a key that sorts the errors of one
+/// parse in the order GNU R would meet them: the offset of the last token it has read by
+/// then, then which part raises it, then a tie-break among errors of one part.
+///
+/// GNU R's lexer raises an error as it reads a token (rank 0). A grammar action runs when the
+/// token after its construct is read, innermost construct first (rank 1). The grammar refuses
+/// a token only after the actions that token completes have run (ranks 2 and 3, the line
+/// break GNU R ends the input with before the end of the input itself). A placeholder no pipe
+/// replaces is found once the token that ends its top-level expression is accepted (rank 4).
+/// `open_from` is where the last construct that the end of the input cuts short starts: a
+/// construct holding it is never complete, so its action never runs (rank 5). Neither does
+/// the action of a construct that is not whole when the grammar refuses a token, such as the
+/// argument of `c("" = -)`. `refused` holds the offsets of those tokens.
+fn error_order(
+    root: &SyntaxNode,
+    text: &str,
+    error: &SyntaxError,
+    open_from: Option<usize>,
+    refused: &[usize],
+) -> (usize, u8, usize) {
+    let start = usize::from(error.range.start()).min(text.len());
+    // A node's range takes its trailing blanks, so a construct that ends where the cut starts
+    // holds it only at the end of the text.
+    let is_open = |range: TextRange| {
+        let end = usize::from(range.end());
+        open_from.is_some_and(|open| {
+            usize::from(range.start()) <= open && (open < end || open == end && end == text.len())
+        })
+    };
+    // GNU R reduces a construct before it refuses the token after it, so the construct is
+    // whole when the grammar accepts its text up to the first refused token, where such a
+    // construct may stand. The line break keeps a trailing comment from taking the closing
+    // parenthesis.
+    let rank_of = |range: TextRange, before: &str, after: &str| {
+        let from = usize::from(range.start());
+        let to = refused
+            .iter()
+            .copied()
+            .filter(|refused| *refused > from)
+            .min()
+            .map_or(range.end().into(), |refused| {
+                refused.min(range.end().into())
+            });
+        let alone = format!("{before}{}\n{after}", &text[from..to]);
+        let whole = syntax::parse(&alone).errors().iter().all(|error| {
+            error.in_annotation
+                || matches!(
+                    error.unexpected,
+                    Unexpected::Classed(class) if !matches!(class, Classed::EmptyStatement)
+                )
+        });
+        if is_open(range) || !whole { 5 } else { 1 }
+    };
+    match error.unexpected {
+        Unexpected::Token(found) => {
+            let found = usize::from(found.start()).min(text.len());
+            // GNU R's lexer refuses `=>` itself, so before any action of the grammar.
+            let rank = if text.as_bytes()[found..].starts_with(b"=>") {
+                0
+            } else {
+                3
+            };
+            (found, rank, 0)
+        }
+        Unexpected::EndOfInput => (text.len(), 3, 0),
+        Unexpected::EndOfLine => (text.len(), 2, 0),
+        Unexpected::Nothing | Unexpected::Classed(Classed::EmptyStatement) => (start, 3, 0),
+        Unexpected::Classed(Classed::Escape) => {
+            let token =
+                token_at(root, start).map_or(start, |token| token.text_range().start().into());
+            // GNU R reports mixed escapes, whose range is the whole token, at the closing quote.
+            let read = if token == start {
+                usize::from(error.range.end())
+            } else {
+                start
+            };
+            (token, 0, read)
+        }
+        Unexpected::Classed(Classed::EmbeddedNul) => {
+            // GNU R refuses the NUL once it has read the closing quote, so after every escape
+            // of the string.
+            let token = token_at(root, start).map_or(start..start, |token| {
+                token.text_range().start().into()..token.text_range().end().into()
+            });
+            (token.start, 0, token.end + 1)
+        }
+        Unexpected::Classed(Classed::RepeatedFormal) => {
+            let parameter = token_at(root, start)
+                .and_then(|token| token.parent())
+                .map_or(error.range, |parameter| parameter.text_range());
+            let rank = rank_of(parameter, "function(", ") NULL");
+            (
+                next_token_start(root, text, parameter.end().into()),
+                rank,
+                usize::MAX - start,
+            )
+        }
+        Unexpected::Classed(Classed::Pipe { target, .. }) => {
+            let rank = rank_of(target, "(", ")");
+            (
+                next_token_start(root, text, target.end().into()),
+                rank,
+                usize::MAX - usize::from(target.start()),
+            )
+        }
+        Unexpected::Classed(Classed::StrayPlaceholder) => {
+            let (statement, terminator) = statement_at(root, text, start);
+            let rank = if is_open(statement.text_range()) {
+                5
+            } else {
+                4
+            };
+            (terminator.start, rank, 0)
+        }
+        Unexpected::Classed(Classed::EmptyName) => {
+            // GNU R's lexer makes the symbol of a backquoted name. A string becomes one in the
+            // action that builds its call or its argument.
+            let construct = token_at(root, start)
+                .filter(|token| token.kind() != SyntaxKind::IDENT)
+                .and_then(|token| token.parent())
+                .and_then(|literal| literal.parent());
+            match construct {
+                None => (start, 0, start),
+                Some(construct) => {
+                    let range = construct.text_range();
+                    let is_call = construct.kind() == SyntaxKind::CALL_EXPR;
+                    let rank = if is_call {
+                        rank_of(range, "(", ")")
+                    } else {
+                        rank_of(range, "f(", ")")
+                    };
+                    // A call's action runs as GNU R reads its `)`, an argument's once it has
+                    // read the token after the argument.
+                    let read = match construct.last_token() {
+                        Some(close) if is_call && close.kind() == SyntaxKind::R_PAREN => {
+                            close.text_range().start().into()
+                        }
+                        _ => next_token_start(root, text, range.end().into()),
+                    };
+                    (read, rank, usize::MAX - usize::from(range.start()))
+                }
+            }
+        }
+    }
+}
+
+/// GNU R's report for `error`, an error of the parse of `text` outside a `#:` comment.
+unsafe fn error_failure(root: &SyntaxNode, text: &str, error: &SyntaxError) -> SyntaxFailure {
+    let offset = usize::from(error.range.start()).min(text.len());
+    let classed = |offset, message: String, class, value, position, call| SyntaxFailure {
+        offset,
+        message,
+        report: FailureReport::Condition(ParseCondition {
+            class,
+            value,
+            position,
+            call,
+        }),
+    };
+    let found = match error.unexpected {
+        Unexpected::Token(found) => Some(found),
+        Unexpected::Classed(Classed::EmptyStatement) => Some(error.range),
+        Unexpected::EndOfInput => None,
+        Unexpected::EndOfLine => {
+            return SyntaxFailure {
+                message: END_OF_LINE.to_owned(),
+                report: FailureReport::Grammar(text.len()..text.len()),
+                offset,
+            };
+        }
+        Unexpected::Nothing => {
+            return SyntaxFailure {
+                message: error.message.clone(),
+                offset,
+                report: FailureReport::Located,
+            };
+        }
+        Unexpected::Classed(Classed::Escape) => {
+            let token = token_at(root, offset);
+            let failure = token.as_ref().and_then(|token| {
+                let token_text = token.text();
+                let inner = token_text.get(1..token_text.len().saturating_sub(1))?;
+                unescape_bytes(inner).err()
+            });
+            return match (token, failure) {
+                (Some(token), Some(failure)) => {
+                    escape_syntax_failure(token.text_range().start().into(), failure)
+                }
+                // The lexer and the runtime read escapes with one scanner, so this arm needs
+                // the two to disagree.
+                _ => SyntaxFailure {
+                    message: error.message.clone(),
+                    offset,
+                    report: FailureReport::Located,
+                },
+            };
+        }
+        Unexpected::Classed(Classed::RepeatedFormal) => {
+            let name = identifier_name(&text[std::ops::Range::<usize>::from(error.range)]);
+            return classed(
+                offset,
+                format!("repeated formal argument '{name}'"),
+                "repeatedFormal",
+                ConditionValue::Text(name.into_owned()),
+                ConditionPosition::Read(offset),
+                None,
+            );
+        }
+        Unexpected::Classed(Classed::Pipe { check, target }) => {
+            let right = root
+                .node_ref()
+                .descendants_of_kind(|kind| kind == SyntaxKind::BINARY_EXPR)
+                .filter(|pipe| pipe.range().contains_range(target))
+                .filter_map(|pipe| expression_children(pipe).get(1).copied())
+                .find(|right| right.range() == target);
+            let Some(right) = right else {
+                return SyntaxFailure {
+                    message: error.message.clone(),
+                    offset,
+                    report: FailureReport::Located,
+                };
+            };
+            let offset = usize::from(significant_range(right).start());
+            let (message, class, value, call) = match check {
+                PipeCheck::NotCall => (
+                    "The pipe operator requires a function call as RHS".to_owned(),
+                    "RHSnotFnCall",
+                    ConditionValue::Null,
+                    true,
+                ),
+                PipeCheck::PlaceholderRepeated => (
+                    "pipe placeholder may only appear once".to_owned(),
+                    "tooManyPlaceholders",
+                    ConditionValue::Null,
+                    true,
+                ),
+                PipeCheck::PlaceholderInFunction => (
+                    "pipe placeholder cannot be used in the RHS function".to_owned(),
+                    "placeholderInRHSFn",
+                    ConditionValue::Null,
+                    false,
+                ),
+                PipeCheck::PlaceholderNotNamed => (
+                    "pipe placeholder can only be used as a named argument".to_owned(),
+                    "placeholderNotNamed",
+                    ConditionValue::Null,
+                    true,
+                ),
+                PipeCheck::Special => {
+                    let name = syntax::called_function(right).unwrap_or_default();
+                    let name = String::from_utf8_lossy(&name).into_owned();
+                    (
+                        format!("function '{name}' not supported in RHS call of a pipe"),
+                        "unsupportedInPipe",
+                        ConditionValue::Text(name),
+                        true,
+                    )
+                }
+            };
+            return classed(
+                offset,
+                message,
+                class,
+                value,
+                ConditionPosition::Read(offset),
+                call.then(|| root.at(right)),
+            );
+        }
+        Unexpected::Classed(Classed::EmptyName) => {
+            return SyntaxFailure {
+                offset,
+                message: "attempt to use zero-length variable name".to_owned(),
+                report: FailureReport::Plain,
+            };
+        }
+        Unexpected::Classed(Classed::EmbeddedNul) => {
+            // GNU R refuses the string as it builds it, and shows the decoded text.
+            let shown = token_at(root, offset).map_or_else(String::new, |token| {
+                let token_text = token.text();
+                match token.kind() {
+                    SyntaxKind::RAW_STRING => encode_string(raw_string_content(token_text), None),
+                    _ => token_text
+                        .get(1..token_text.len().saturating_sub(1))
+                        .and_then(|inner| unescape_bytes(inner).ok())
+                        .map_or_else(String::new, |(bytes, _)| encode_bytes(&bytes, None)),
+                }
+            });
+            return SyntaxFailure {
+                offset,
+                message: format!("embedded nul in string: '{shown}'"),
+                report: FailureReport::Plain,
+            };
+        }
+        Unexpected::Classed(Classed::StrayPlaceholder) => {
+            let (statement, terminator) = statement_at(root, text, offset);
+            let position = if text[terminator.clone()].starts_with(';') {
+                ConditionPosition::Read(terminator.start)
+            } else {
+                ConditionPosition::LineBreak(terminator.start)
+            };
+            return classed(
+                usize::from(statement.text_range().start()),
+                "invalid use of pipe placeholder".to_owned(),
+                "invalidPlaceholder",
+                ConditionValue::Null,
+                position,
+                Some(statement),
+            );
+        }
+    };
+    if let Some(failure) = pipe_bind_failure(text, offset) {
+        return failure;
+    }
+    let unexpected = found.map_or(text.len()..text.len(), |found| {
+        let start = usize::from(found.start()).min(text.len());
+        let mut end = usize::from(found.end()).min(text.len());
+        // GNU R's lexer has read the character that shows a number to be malformed,
+        // so the lines it quotes reach through that character.
+        let refused_number = text[start..]
+            .starts_with(|first: char| first == '.' || first.is_ascii_digit())
+            && root
+                .token_at_offset(found.start())
+                .right_biased()
+                .is_some_and(|token| token.kind() == SyntaxKind::ERROR_TOKEN);
+        if refused_number
+            && let Some(next) = text[end..].chars().next()
+            && next != '\n'
+        {
+            end += next.len_utf8();
+        }
+        start..end
+    });
+    SyntaxFailure {
+        message: unexpected_token(root, text, &unexpected),
+        report: FailureReport::Grammar(unexpected),
+        offset,
+    }
+}
+
+/// The token that holds the character at `offset`, or the last token for the end of the text.
+fn token_at(root: &SyntaxNode, offset: usize) -> Option<SyntaxToken> {
+    let end = usize::from(root.text_range().end());
+    root.token_at_offset(TextSize::from(offset.min(end) as u32))
+        .right_biased()
+}
+
+/// The start of the first token of R code at or after `offset`, or the end of the text. A line
+/// break counts where R's grammar reads it as a token: between the expressions of a file or
+/// of a `{` block.
+fn next_token_start(root: &SyntaxNode, text: &str, offset: usize) -> usize {
+    let mut next = token_at(root, offset).filter(|_| offset < text.len());
+    while let Some(token) = next {
+        let significant = match token.kind() {
+            SyntaxKind::WHITESPACE | SyntaxKind::COMMENT => false,
+            SyntaxKind::NEWLINE => token.parent().is_some_and(|parent| {
+                matches!(
+                    parent.kind(),
+                    SyntaxKind::SOURCE_FILE | SyntaxKind::BRACE_EXPR
+                )
+            }),
+            _ => !token
+                .parent_ancestors()
+                .any(|ancestor| ancestor.kind().is_erased()),
+        };
+        if significant {
+            return token.text_range().start().into();
+        }
+        next = token.next_token();
+    }
+    text.len()
+}
+
+/// The top-level expression that holds `offset`, and the line break or `;` that ends it: an
+/// empty range at the end of the text when nothing does.
+fn statement_at(
+    root: &SyntaxNode,
+    text: &str,
+    offset: usize,
+) -> (SyntaxNode, std::ops::Range<usize>) {
+    let statement = root
+        .children()
+        .find(|child| usize::from(child.text_range().end()) > offset)
+        .or_else(|| root.last_child())
+        .unwrap_or_else(|| root.clone());
+    let terminator = std::iter::successors(statement.next_sibling_or_token(), |element| {
+        element.next_sibling_or_token()
+    })
+    .find(|element| matches!(element.kind(), SyntaxKind::NEWLINE | SyntaxKind::SEMICOLON))
+    .map_or(text.len()..text.len(), |element| {
+        element.text_range().start().into()..element.text_range().end().into()
+    });
+    (statement, terminator)
+}
+
 /// GNU R's message for a plain `failure` in `text`, in the form `parse()` reports it: the location, then the last one or two
 /// lines read, with a caret under the column.
 pub fn syntax_failure_message(text: &str, failure: &SyntaxFailure, source_name: &str) -> String {
@@ -326,7 +683,10 @@ pub fn syntax_failure_message(text: &str, failure: &SyntaxFailure, source_name: 
     } else {
         format!("{source_name}:")
     };
-    let Some(unexpected) = &failure.unexpected else {
+    if matches!(failure.report, FailureReport::Plain) {
+        return failure.message.clone();
+    }
+    let FailureReport::Grammar(unexpected) = &failure.report else {
         let before = &text[..failure.offset.min(text.len())];
         let line = before.matches('\n').count() + 1;
         let column = before
@@ -366,7 +726,7 @@ pub fn syntax_failure_message(text: &str, failure: &SyntaxFailure, source_name: 
 /// `;` that ended the expression before, and an error at the end of the input quotes nothing.
 pub fn script_syntax_failure_message(script: &Script<'_>, failure: &SyntaxFailure) -> String {
     let text = script.text;
-    let Some(unexpected) = &failure.unexpected else {
+    let FailureReport::Grammar(unexpected) = &failure.report else {
         return syntax_failure_message(text, failure, "<text>");
     };
     // GNU R quotes no text for the end of the input, and the last line for its line break.
@@ -573,7 +933,7 @@ pub unsafe fn syntax_failure_unwind(
     condition_file: &str,
     console: Option<&Script<'_>>,
 ) -> Unwind {
-    let Some(condition) = &failure.condition else {
+    let FailureReport::Condition(condition) = &failure.report else {
         return error(syntax_failure_message(text, failure, source_name));
     };
     // A console parses one top-level expression at a time, so its lexer counts lines and
@@ -582,7 +942,7 @@ pub unsafe fn syntax_failure_unwind(
         let expression = script
             .root
             .children()
-            .filter(|child| !is_skipped(child.kind()))
+            .filter(|child| !child.kind().is_erased())
             .map(|child| usize::from(child.text_range().start()))
             .take_while(|&start| start <= failure.offset)
             .last()
@@ -600,12 +960,12 @@ pub unsafe fn syntax_failure_unwind(
     // GNU R's lexer counts a column per byte of text it does not know to be UTF-8, which text
     // holding a byte that starts no character never is outside the console.
     let bytes = console.is_none() && holds_stand_in(text);
-    let (line, column) = lexer_position(text, first, condition.position, bytes);
-    // GNU R reports a placeholder left over after the whole expression at column 0.
-    let column = if condition.class == "invalidPlaceholder" {
-        0
-    } else {
-        column
+    let (line, column) = match condition.position {
+        ConditionPosition::Read(offset) => lexer_position(text, first, offset, bytes),
+        // The lexer's position after a line break is column 0 of the next line.
+        ConditionPosition::LineBreak(offset) => {
+            (lexer_position(text, first, offset, bytes).0 - 1, 0)
+        }
     };
     let message = format!("{} ({condition_file}:{line}:{column})", failure.message);
     match signal_parse_condition(condition, &message, condition_file, line, column) {
@@ -654,7 +1014,7 @@ unsafe fn signal_parse_condition(
     column: usize,
 ) -> R<()> {
     let call = match &condition.call {
-        Some(node) => quote_placeholders(lower(node.node_ref(), Lowering::new(node, None))?)?,
+        Some(node) => lower(node.node_ref(), Lowering::new(node, None))?,
         None => nil(),
     };
     let value = match &condition.value {
@@ -680,36 +1040,17 @@ unsafe fn signal_parse_condition(
     Ok(())
 }
 
-/// `value` with every `_` symbol replaced by the string `"_"`, which is how GNU R's parser
-/// holds the pipe placeholder.
-unsafe fn quote_placeholders(value: Sexp) -> R<Sexp> {
-    let placeholder = install("_")?;
-    if value == placeholder {
-        return values::scalar_string("_");
-    }
-    if value.kind() == SexpType::Language {
-        let mut cell = value;
-        while matches!(cell.kind(), SexpType::Language | SexpType::Pairlist) {
-            let item = quote_placeholders(cell.car())?;
-            crate::heap().set_car(cell, item);
-            cell = cell.cdr();
-        }
-    }
-    Ok(value)
-}
-
 /// `=>` lexes in GNU R as the pipe bind operator, which is disabled unless `_R_USE_PIPEBIND_`
 /// is set, so a grammar error at it is that parse error.
 fn pipe_bind_failure(text: &str, offset: usize) -> Option<SyntaxFailure> {
     text[offset..].starts_with("=>").then(|| SyntaxFailure {
-        unexpected: None,
         offset,
         message: "'=>' is disabled; set '_R_USE_PIPEBIND_' envvar to a true value to enable it"
             .to_owned(),
-        condition: Some(ParseCondition {
+        report: FailureReport::Condition(ParseCondition {
             class: "pipebindDisabled",
             value: ConditionValue::Null,
-            position: offset,
+            position: ConditionPosition::Read(offset),
             call: None,
         }),
     })
@@ -721,7 +1062,9 @@ fn pipe_bind_failure(text: &str, offset: usize) -> Option<SyntaxFailure> {
 fn nul_failure(root: &SyntaxNode, text: &str) -> Option<(usize, SyntaxFailure)> {
     memchr::memchr(0, text.as_bytes())?;
     root.node_ref()
-        .tokens_outside(is_skipped, |kind| kind == SyntaxKind::ERROR_TOKEN)
+        .tokens_outside(SyntaxKind::is_erased, |kind| {
+            kind == SyntaxKind::ERROR_TOKEN
+        })
         .find(|token| token.text().starts_with('\0'))
         .map(|token| {
             let offset = usize::from(token.range().start());
@@ -729,43 +1072,11 @@ fn nul_failure(root: &SyntaxNode, text: &str) -> Option<(usize, SyntaxFailure)> 
                 offset,
                 SyntaxFailure {
                     message: "unexpected end of file".to_owned(),
-                    unexpected: Some(offset..offset + 1),
+                    report: FailureReport::Grammar(offset..offset + 1),
                     offset,
-                    condition: None,
                 },
             )
         })
-}
-
-/// The first top-level `;` that ends no expression. GNU R's grammar has an empty statement only
-/// inside braces, where ry's parser takes one anywhere.
-fn empty_statement_failure(root: &SyntaxNode) -> Option<(usize, SyntaxFailure)> {
-    if !root
-        .node_ref()
-        .any_kind(|kind| kind == SyntaxKind::SEMICOLON)
-    {
-        return None;
-    }
-    let mut ends_expression = false;
-    for element in root.children_with_tokens() {
-        match element.kind() {
-            SyntaxKind::WHITESPACE | SyntaxKind::COMMENT => {}
-            SyntaxKind::SEMICOLON if !ends_expression => {
-                let offset = usize::from(element.text_range().start());
-                let failure = SyntaxFailure {
-                    message: "unexpected ';'".to_owned(),
-                    unexpected: Some(offset..offset + 1),
-                    offset,
-                    condition: None,
-                };
-                return Some((offset, failure));
-            }
-            SyntaxKind::SEMICOLON | SyntaxKind::NEWLINE => ends_expression = false,
-            kind if is_skipped(kind) => {}
-            _ => ends_expression = true,
-        }
-    }
-    None
 }
 
 /// The first byte outside a comment and a `%` operator that starts no character. GNU R's lexer
@@ -776,9 +1087,11 @@ fn multibyte_failure(root: &SyntaxNode, text: &str) -> Option<(usize, SyntaxFail
     if !holds_stand_in(text) {
         return None;
     }
-    let tokens = root.node_ref().tokens_outside(is_skipped, |kind| {
-        kind != SyntaxKind::SPECIAL && !kind.is_trivia()
-    });
+    let tokens = root
+        .node_ref()
+        .tokens_outside(SyntaxKind::is_erased, |kind| {
+            kind != SyntaxKind::SPECIAL && !kind.is_trivia()
+        });
     for token in tokens {
         let start = usize::from(token.range().start());
         let mut characters = token.text().char_indices();
@@ -821,13 +1134,12 @@ fn multibyte_failure(root: &SyntaxNode, text: &str) -> Option<(usize, SyntaxFail
             return Some((
                 start,
                 SyntaxFailure {
-                    unexpected: None,
                     offset: start + index,
                     message: "invalid multibyte character in parser".to_owned(),
-                    condition: Some(ParseCondition {
+                    report: FailureReport::Condition(ParseCondition {
                         class: "invalidMBCS",
                         value: ConditionValue::Null,
-                        position: last,
+                        position: ConditionPosition::Read(last),
                         call: None,
                     }),
                 },
@@ -837,41 +1149,16 @@ fn multibyte_failure(root: &SyntaxNode, text: &str) -> Option<(usize, SyntaxFail
     None
 }
 
-/// The first string literal or backquoted name whose escapes GNU R's lexer rejects, with the
-/// offset where its token starts.
-fn escape_failure(root: &SyntaxNode) -> Option<(usize, SyntaxFailure)> {
-    root.node_ref()
-        .elements_of_kind(|kind| matches!(kind, SyntaxKind::STRING | SyntaxKind::IDENT))
-        .filter_map(|element| element.into_token())
-        .find_map(|token| {
-            let text = token.text();
-            let quote = match token.kind() {
-                SyntaxKind::STRING => text.chars().next()?,
-                SyntaxKind::IDENT if text.starts_with('`') => '`',
-                _ => return None,
-            };
-            let body = &text[1..];
-            let inner = match body.strip_suffix(quote) {
-                Some(inner) if !body.is_empty() => inner,
-                _ => body,
-            };
-            let failure = unescape_bytes(inner).err()?;
-            let start = usize::from(token.range().start());
-            Some((start, escape_syntax_failure(start, failure)))
-        })
-}
-
 /// The parse error for an escape GNU R's lexer rejects in the quoted token at `start`.
 fn escape_syntax_failure(start: usize, failure: EscapeFailure) -> SyntaxFailure {
     let offset = start + 1 + failure.offset;
     SyntaxFailure {
-        unexpected: None,
         offset,
         message: failure.message,
-        condition: Some(ParseCondition {
+        report: FailureReport::Condition(ParseCondition {
             class: failure.class,
             value: failure.value,
-            position: offset,
+            position: ConditionPosition::Read(offset),
             call: None,
         }),
     }
@@ -884,7 +1171,7 @@ fn escape_syntax_failure(start: usize, failure: EscapeFailure) -> SyntaxFailure 
 /// without its opening bracket is an error of GNU R's lexer.
 fn unterminated_failure(root: &SyntaxNode, text: &str) -> Option<(usize, SyntaxFailure)> {
     root.node_ref()
-        .tokens_outside(is_skipped, |kind| {
+        .tokens_outside(SyntaxKind::is_erased, |kind| {
             matches!(
                 kind,
                 SyntaxKind::STRING
@@ -912,12 +1199,11 @@ fn unterminated_failure(root: &SyntaxNode, text: &str) -> Option<(usize, SyntaxF
                     // body, which is the last one GNU R reads.
                     let failure = SyntaxFailure {
                         message: "malformed raw string literal".to_owned(),
-                        unexpected: None,
                         offset: start,
-                        condition: Some(ParseCondition {
+                        report: FailureReport::Condition(ParseCondition {
                             class: "invalidRawLiteral",
                             value: ConditionValue::Null,
-                            position: start + token_text.len(),
+                            position: ConditionPosition::Read(start + token_text.len()),
                             call: None,
                         }),
                     };
@@ -934,9 +1220,8 @@ fn unterminated_failure(root: &SyntaxNode, text: &str) -> Option<(usize, SyntaxF
             }
             let failure = SyntaxFailure {
                 message: INCOMPLETE_STRING.to_owned(),
-                unexpected: Some(start..text.len()),
+                report: FailureReport::Grammar(start..text.len()),
                 offset: start,
-                condition: None,
             };
             Some((start, failure))
         })
@@ -964,215 +1249,6 @@ fn is_terminated_raw_string(text: &str) -> bool {
     };
     let closer = format!("{close}{}{quote}", "-".repeat(dashes));
     text.len() >= 2 + dashes + 1 + closer.len() && text.ends_with(&closer)
-}
-
-/// The first error GNU R's grammar actions raise in `node`, in the order its parser reduces:
-/// inner expressions before the ones that contain them. Only parameter lists and pipes can fail,
-/// so one scan of the tree's kinds finds them, and a node without either costs nothing more.
-unsafe fn grammar_action_failure(node: &SyntaxNode) -> Option<SyntaxFailure> {
-    let cursor = node.node_ref();
-    if !cursor
-        .any_kind(|kind| matches!(kind, SyntaxKind::PARAMETER_LIST | SyntaxKind::PIPE_GREATER))
-    {
-        return None;
-    }
-    let mut candidates: Vec<NodeRef<'_>> = cursor
-        .descendants_of_kind(|kind| {
-            matches!(kind, SyntaxKind::PARAMETER_LIST | SyntaxKind::BINARY_EXPR)
-        })
-        .filter(|candidate| {
-            candidate.kind() == SyntaxKind::PARAMETER_LIST
-                || candidate
-                    .child_kinds()
-                    .any(|kind| kind == SyntaxKind::PIPE_GREATER)
-        })
-        .collect();
-    // The order a bottom-up parser reduces in: a node after everything it contains, and before
-    // whatever starts after it ends.
-    candidates.sort_by_key(|candidate| {
-        let range = candidate.range();
-        (range.end(), std::cmp::Reverse(range.start()))
-    });
-    candidates.into_iter().find_map(|candidate| {
-        if candidate.kind() == SyntaxKind::PARAMETER_LIST {
-            repeated_formal(candidate)
-        } else {
-            pipe_failure(&node.at(candidate))
-        }
-    })
-}
-
-fn repeated_formal(parameters: NodeRef<'_>) -> Option<SyntaxFailure> {
-    let mut seen: SmallVec<[Cow<'_, str>; 8]> = SmallVec::new();
-    for parameter in parameters
-        .child_nodes()
-        .filter(|child| child.kind() == SyntaxKind::PARAMETER)
-    {
-        let name = parameter.children().find(|element| match element {
-            NodeOrToken::Token(token) => !token.kind().is_trivia(),
-            NodeOrToken::Node(node) => !is_skipped(node.kind()),
-        })?;
-        let (text, range) = match name {
-            NodeOrToken::Token(token) => (token.text(), token.range()),
-            NodeOrToken::Node(node) => (node.text(), significant_range(node)),
-        };
-        let name = identifier_name(text);
-        if seen.contains(&name) {
-            let last = text.chars().next_back().map_or(0, char::len_utf8);
-            let offset = usize::from(range.end()) - last;
-            return Some(SyntaxFailure {
-                unexpected: None,
-                offset,
-                message: format!("repeated formal argument '{name}'"),
-                condition: Some(ParseCondition {
-                    class: "repeatedFormal",
-                    value: ConditionValue::Text(name.into_owned()),
-                    position: offset,
-                    call: None,
-                }),
-            });
-        }
-        seen.push(name);
-    }
-    None
-}
-
-/// GNU R's checks on a pipe's right side, which must be a call to an ordinary function with at
-/// most one placeholder, passed by name.
-unsafe fn pipe_failure(node: &SyntaxNode) -> Option<SyntaxFailure> {
-    let right = node.at(*expression_children(node.node_ref()).get(1)?);
-    let offset = usize::from(significant_range(right.node_ref()).start());
-    let failure = |message: String, class, value, call: bool| {
-        Some(SyntaxFailure {
-            unexpected: None,
-            offset,
-            message,
-            condition: Some(ParseCondition {
-                class,
-                value,
-                position: offset,
-                call: call.then(|| right.clone()),
-            }),
-        })
-    };
-    // A right-hand side that fails to lower fails again, with its own error, when the whole
-    // expression is lowered after these grammar checks, so the checks defer to that error.
-    let value = lower(right.node_ref(), Lowering::new(&right, None)).ok()?;
-    if value.kind() != SexpType::Language {
-        return failure(
-            "The pipe operator requires a function call as RHS".to_owned(),
-            "RHSnotFnCall",
-            ConditionValue::Null,
-            true,
-        );
-    }
-    let placeholder = install("_").ok()?;
-    if extraction_placeholder_cell(value, placeholder).is_some() {
-        let mut level = value;
-        while level != placeholder && level.kind() == SexpType::Language {
-            let arguments = level.cdr();
-            if mentions(arguments.cdr(), placeholder) {
-                return failure(
-                    "pipe placeholder may only appear once".to_owned(),
-                    "tooManyPlaceholders",
-                    ConditionValue::Null,
-                    true,
-                );
-            }
-            level = arguments.car();
-        }
-        return None;
-    }
-    let head = value.car();
-    if mentions(head, placeholder) {
-        return failure(
-            "pipe placeholder cannot be used in the RHS function".to_owned(),
-            "placeholderInRHSFn",
-            ConditionValue::Null,
-            false,
-        );
-    }
-    let mut placeholders = 0;
-    let mut argument = value.cdr();
-    while argument.kind() == SexpType::Pairlist {
-        if argument.car() == placeholder {
-            if argument.tag() == nil() {
-                return failure(
-                    "pipe placeholder can only be used as a named argument".to_owned(),
-                    "placeholderNotNamed",
-                    ConditionValue::Null,
-                    true,
-                );
-            }
-            placeholders += 1;
-        }
-        argument = argument.cdr();
-    }
-    if placeholders > 1 {
-        return failure(
-            "pipe placeholder may only appear once".to_owned(),
-            "tooManyPlaceholders",
-            ConditionValue::Null,
-            true,
-        );
-    }
-    if placeholders == 0
-        && head.kind() == SexpType::Symbol
-        && let name = values::symbol_name(head).into_owned()
-        && SYNTACTIC_FUNCTIONS.contains(&name.as_str())
-    {
-        return failure(
-            format!("function '{name}' not supported in RHS call of a pipe"),
-            "unsupportedInPipe",
-            ConditionValue::Text(name),
-            true,
-        );
-    }
-    None
-}
-
-/// The functions GNU R's parser marks as syntactically special, which a pipe cannot call.
-const SYNTACTIC_FUNCTIONS: &[&str] = &[
-    "if", "while", "repeat", "for", "break", "next", "return", "function", "(", "{", "+", "-", "*",
-    "/", "^", "%%", "%/%", "%*%", ":", "::", ":::", "?", "~", "==", "!=", "<", ">", "<=", ">=",
-    "&", "|", "&&", "||", "!", "<-", "<<-", "=", "$", "[", "[[", "@", "$<-", "[<-", "[[<-", "@<-",
-];
-
-/// The argument cell holding the placeholder that heads a chain of extractions, as in
-/// `x |> _$coef[[2]]`: each call in the chain is `[`, `[[`, `$` or `@`, and the innermost one
-/// extracts from `_`.
-unsafe fn extraction_placeholder_cell(value: Sexp, placeholder: Sexp) -> Option<Sexp> {
-    if value.kind() != SexpType::Language {
-        return None;
-    }
-    let head = value.car();
-    if head.kind() != SexpType::Symbol
-        || !matches!(&*values::symbol_name(head), "[" | "[[" | "$" | "@")
-    {
-        return None;
-    }
-    let arguments = value.cdr();
-    if arguments.kind() != SexpType::Pairlist {
-        return None;
-    }
-    if arguments.car() == placeholder {
-        return Some(arguments);
-    }
-    extraction_placeholder_cell(arguments.car(), placeholder)
-}
-
-unsafe fn mentions(value: Sexp, symbol: Sexp) -> bool {
-    if value == symbol {
-        return true;
-    }
-    let mut cell = value;
-    while matches!(cell.kind(), SexpType::Language | SexpType::Pairlist) {
-        if mentions(cell.car(), symbol) {
-            return true;
-        }
-        cell = cell.cdr();
-    }
-    false
 }
 
 /// Lowers one top-level expression of `script`. With `keep_source`, it keeps source references
@@ -1358,7 +1434,7 @@ pub(crate) fn position_near(
 fn significant_range(node: NodeRef<'_>) -> TextRange {
     let range = node.range();
     let first = node
-        .tokens_outside(is_skipped, |kind| !kind.is_trivia())
+        .tokens_outside(SyntaxKind::is_erased, |kind| !kind.is_trivia())
         .next();
     // A token under a skipped node is not R code, and a backward walk meets a token before the
     // nodes above it, so each candidate checks its ancestors up to `node`.
@@ -1370,7 +1446,7 @@ fn significant_range(node: NodeRef<'_>) -> TextRange {
             !token.kind().is_trivia()
                 && !std::iter::successors(token.parent(), |ancestor| ancestor.parent())
                     .take_while(|ancestor| *ancestor != node)
-                    .any(|ancestor| is_skipped(ancestor.kind()))
+                    .any(|ancestor| ancestor.kind().is_erased())
         });
     match (first, last) {
         (Some(first), Some(last)) => TextRange::new(first.range().start(), last.range().end()),
@@ -1415,19 +1491,6 @@ pub unsafe fn file_srcfile(path: &str, text: &str) -> R<Sexp> {
     Ok(srcfile)
 }
 
-pub(crate) fn is_skipped(kind: SyntaxKind) -> bool {
-    matches!(
-        kind,
-        SyntaxKind::ANNOTATION
-            | SyntaxKind::TYPE_ASCRIPTION
-            | SyntaxKind::RETURN_TYPE
-            | SyntaxKind::TYPE_BINDER_LIST
-            | SyntaxKind::TYPE_DEFINITION
-            | SyntaxKind::NEW_TYPE
-            | SyntaxKind::PURE_MARKER
-    )
-}
-
 /// What the lowering of one tree carries along: the source map when it keeps source references,
 /// and an owned handle on the tree for registering a typed function's signature, which a tree
 /// without any type syntax does not need.
@@ -1436,6 +1499,9 @@ struct Lowering<'a> {
     source: Option<&'a SourceMap<'a>>,
     owner: &'a SyntaxNode,
     typed: bool,
+    /// Inside the right side of a pipe that passes its left side through a placeholder: the
+    /// tree position of that `_` and the lowered left side, which stands in its place.
+    placeholder: Option<(u32, Sexp)>,
 }
 
 impl<'a> Lowering<'a> {
@@ -1444,6 +1510,7 @@ impl<'a> Lowering<'a> {
             source,
             owner,
             typed: true,
+            placeholder: None,
         }
     }
 }
@@ -1460,7 +1527,7 @@ fn is_type_syntax(kind: SyntaxKind) -> bool {
 /// The expression children of a node, without trivia, tokens or annotations.
 fn expression_children(node: NodeRef<'_>) -> SmallVec<[NodeRef<'_>; 4]> {
     node.child_nodes()
-        .filter(|child| !is_skipped(child.kind()))
+        .filter(|child| !child.kind().is_erased())
         .collect()
 }
 
@@ -1471,7 +1538,18 @@ fn significant_tokens(node: NodeRef<'_>) -> impl DoubleEndedIterator<Item = Toke
 
 unsafe fn lower(node: NodeRef<'_>, context: Lowering<'_>) -> R<Sexp> {
     match node.kind() {
-        SyntaxKind::NAME => name_symbol(node),
+        SyntaxKind::NAME => match context.placeholder {
+            Some((position, left)) if position == node.position() => Ok(left),
+            // GNU R's parser holds a placeholder as the string `"_"` until a pipe replaces it,
+            // which is what a parameter's default and a condition's call show.
+            _ if significant_tokens(node)
+                .next()
+                .is_some_and(|token| token.kind() == SyntaxKind::UNDERSCORE) =>
+            {
+                values::scalar_string("_")
+            }
+            _ => name_symbol(node),
+        },
         SyntaxKind::LITERAL => {
             let token = significant_tokens(node)
                 .next()
@@ -1659,7 +1737,7 @@ type Items = SmallVec<[(Sexp, Sexp); 6]>;
 unsafe fn keyword_call(head: Sexp, node: NodeRef<'_>, context: Lowering<'_>) -> R<Sexp> {
     let mut items: Items = SmallVec::new();
     items.push((nil(), head));
-    for child in node.child_nodes().filter(|child| !is_skipped(child.kind())) {
+    for child in node.child_nodes().filter(|child| !child.kind().is_erased()) {
         items.push((nil(), lower(child, context)?));
     }
     values::pairlist(&items, SexpType::Language)
@@ -1713,6 +1791,24 @@ unsafe fn binary(node: NodeRef<'_>, context: Lowering<'_>) -> R<Sexp> {
         let symbol = install(operator.text())?;
         return values::call(symbol, &[left_value]);
     };
+    if operator.kind() == SyntaxKind::PIPE_GREATER {
+        // `lhs |> f(x, y = _)` is `f(x, y = lhs)` and `lhs |> _$a[[1]]` is `lhs$a[[1]]`: the
+        // left side stands where the placeholder is written.
+        if let Some(placeholder) = syntax::pipe_placeholder(right) {
+            let context = Lowering {
+                placeholder: Some((placeholder.position(), left_value)),
+                ..context
+            };
+            return lower(right, context);
+        }
+        // Without one, `lhs |> f(args)` is `f(lhs, args)`.
+        let right_value = lower(right, context)?;
+        if right_value.kind() != SexpType::Language {
+            return Err(error("The pipe operator requires a function call as RHS"));
+        }
+        let rest = values::cons(left_value, right_value.cdr())?;
+        return values::lcons(right_value.car(), rest);
+    }
     let mut right_value = lower(right, context)?;
     if matches!(
         operator.kind(),
@@ -1724,9 +1820,12 @@ unsafe fn binary(node: NodeRef<'_>, context: Lowering<'_>) -> R<Sexp> {
     match operator.kind() {
         SyntaxKind::MINUS_GREATER => values::call(symbols().assign, &[right_value, left_value]),
         SyntaxKind::MINUS_GREATER2 => values::call(symbols().assign2, &[right_value, left_value]),
-        SyntaxKind::PIPE_GREATER => pipe(left_value, right_value, placeholder_name(right)?),
         // `**` lexes as `^` and calls it, as in GNU R.
         SyntaxKind::CARET => values::call(install("^")?, &[left_value, right_value]),
+        SyntaxKind::SPECIAL => {
+            let symbol = install(before_nul(operator.text()))?;
+            values::call(symbol, &[left_value, right_value])
+        }
         _ => {
             let symbol = install(operator.text())?;
             values::call(symbol, &[left_value, right_value])
@@ -1815,123 +1914,6 @@ fn number_literal_text(node: NodeRef<'_>) -> Option<String> {
         }
         _ => None,
     }
-}
-
-/// `lhs |> f(args)` is `f(lhs, args)`, `lhs |> f(x, y = _)` is `f(x, y = lhs)`, where
-/// `placeholder` names the argument that holds the placeholder, and `lhs |> _$a[[1]]` is
-/// `lhs$a[[1]]`.
-unsafe fn pipe(left: Sexp, right: Sexp, placeholder: Option<Sexp>) -> R<Sexp> {
-    if right.kind() != SexpType::Language {
-        return Err(error("The pipe operator requires a function call as RHS"));
-    }
-    let head = right.car();
-    if head == symbols().function {
-        return Err(error(
-            "function 'function' not supported in RHS call of a pipe",
-        ));
-    }
-    if let Some(cell) = extraction_placeholder_cell(right, install("_")?) {
-        crate::heap().set_car(cell, left);
-        return Ok(right);
-    }
-    if let Some(tag) = placeholder {
-        let mut argument = right.cdr();
-        while argument != nil() {
-            if argument.tag() == tag && argument.car() == install("_")? {
-                crate::heap().set_car(argument, left);
-                return Ok(right);
-            }
-            argument = argument.cdr();
-        }
-    }
-    let rest = values::cons(left, right.cdr())?;
-    values::lcons(head, rest)
-}
-
-/// The placeholder argument of a pipe's right side: the first named argument of the call whose
-/// value is a bare `_`. A backquoted `` `_` `` is an ordinary name, so only the token counts.
-fn placeholder_argument(right: NodeRef<'_>) -> Option<NodeRef<'_>> {
-    if right.kind() != SyntaxKind::CALL_EXPR {
-        return None;
-    }
-    let arguments = child_of_kind(right, SyntaxKind::ARGUMENT_LIST)?;
-    arguments
-        .child_nodes()
-        .filter(|child| child.kind() == SyntaxKind::ARGUMENT)
-        .find(|argument| {
-            let mut after_equals = false;
-            argument.children().any(|element| match element {
-                NodeOrToken::Token(token) => {
-                    after_equals |= token.kind() == SyntaxKind::EQ;
-                    false
-                }
-                NodeOrToken::Node(value) => after_equals && is_bare_placeholder(value),
-            })
-        })
-}
-
-unsafe fn placeholder_name(right: NodeRef<'_>) -> R<Option<Sexp>> {
-    let Some(argument) = placeholder_argument(right) else {
-        return Ok(None);
-    };
-    match argument.child_nodes().next() {
-        Some(name) => tag_from_node(name).map(Some),
-        None => Ok(None),
-    }
-}
-
-fn is_bare_placeholder(node: NodeRef<'_>) -> bool {
-    node.kind() == SyntaxKind::NAME
-        && significant_tokens(node)
-            .next()
-            .is_some_and(|token| token.kind() == SyntaxKind::UNDERSCORE)
-}
-
-/// Whether a `_` in `node` is not the placeholder argument of a pipe, which R rejects.
-fn has_stray_placeholder(node: NodeRef<'_>) -> bool {
-    if !node.any_kind(|kind| kind == SyntaxKind::UNDERSCORE) {
-        return false;
-    }
-    let placeholders = node
-        .descendants()
-        .filter(|&node| is_bare_placeholder(node))
-        .count();
-    let consumed = node
-        .descendants()
-        .filter(|expression| {
-            expression.kind() == SyntaxKind::BINARY_EXPR
-                && significant_tokens(*expression)
-                    .any(|token| token.kind() == SyntaxKind::PIPE_GREATER)
-                && expression_children(*expression)
-                    .get(1)
-                    .is_some_and(|&right| {
-                        placeholder_argument(right).is_some()
-                            || extraction_chain_heads_with_placeholder(right)
-                    })
-        })
-        .count();
-    placeholders > consumed
-}
-
-/// Whether `node` is a chain of extractions whose innermost object is the placeholder.
-fn extraction_chain_heads_with_placeholder(node: NodeRef<'_>) -> bool {
-    let mut node = node;
-    while matches!(
-        node.kind(),
-        SyntaxKind::SUBSET_EXPR
-            | SyntaxKind::SUBSET2_EXPR
-            | SyntaxKind::DOLLAR_EXPR
-            | SyntaxKind::AT_EXPR
-    ) {
-        let Some(&object) = expression_children(node).first() else {
-            return false;
-        };
-        if is_bare_placeholder(object) {
-            return true;
-        }
-        node = object;
-    }
-    false
 }
 
 fn child_of_kind(node: NodeRef<'_>, kind: SyntaxKind) -> Option<NodeRef<'_>> {
@@ -2127,11 +2109,15 @@ unsafe fn pattern_items(list: NodeRef<'_>) -> R<Vec<(Sexp, Sexp)>> {
         if child.kind() == SyntaxKind::PATTERN_FIELD {
             let name = child_of_kind(child, SyntaxKind::NAME)
                 .ok_or_else(|| error("a field pattern needs a name"))?;
-            let value = child
+            // `(x =, y =)` puns: a field without a pattern binds a name of its own spelling.
+            let value = match child
                 .child_nodes()
                 .find(|part| part.kind() != SyntaxKind::NAME)
-                .ok_or_else(|| error("a field pattern needs a pattern"))?;
-            items.push((name_symbol(name)?, pattern(value)?));
+            {
+                Some(value) => pattern(value)?,
+                None => name_symbol(name)?,
+            };
+            items.push((name_symbol(name)?, value));
         } else {
             items.push((nil(), pattern(child)?));
         }
@@ -2253,7 +2239,7 @@ unsafe fn tag_from_token(token: TokenRef<'_>) -> R<Sexp> {
 unsafe fn token_name(token: TokenRef<'_>) -> R<String> {
     match token.kind() {
         SyntaxKind::STRING => string_literal(token.text()),
-        SyntaxKind::RAW_STRING => Ok(raw_string(token.text())),
+        SyntaxKind::RAW_STRING => Ok(raw_string_content(token.text()).to_owned()),
         SyntaxKind::IDENT => Ok(identifier(token.text())),
         _ => Ok(token.text().to_owned()),
     }
@@ -2285,15 +2271,23 @@ fn identifier(text: &str) -> String {
         .strip_prefix('`')
         .and_then(|rest| rest.strip_suffix('`'))
     {
-        Some(inner) => unescape(inner).unwrap_or_else(|_| inner.to_owned()),
+        Some(inner) => {
+            let name = unescape(inner).unwrap_or_else(|_| inner.to_owned());
+            before_nul(&name).to_owned()
+        }
         None => text.to_owned(),
     }
+}
+
+/// GNU R holds a name as a C string, so a NUL byte ends it.
+fn before_nul(name: &str) -> &str {
+    name.split('\0').next().unwrap_or(name)
 }
 
 unsafe fn function_definition(node: NodeRef<'_>, context: Lowering<'_>) -> R<Sexp> {
     let mut formals: Items = SmallVec::new();
     let mut body = None;
-    for child in node.child_nodes().filter(|child| !is_skipped(child.kind())) {
+    for child in node.child_nodes().filter(|child| !child.kind().is_erased()) {
         if child.kind() == SyntaxKind::PARAMETER_LIST {
             for parameter in child.child_nodes() {
                 if parameter.kind() == SyntaxKind::PARAMETER {
@@ -2336,7 +2330,7 @@ unsafe fn parameter_value(node: NodeRef<'_>, context: Lowering<'_>) -> R<(Sexp, 
                     _ => install(&token_name(token)?)?,
                 };
             }
-            NodeOrToken::Node(child) if is_skipped(child.kind()) => {}
+            NodeOrToken::Node(child) if child.kind().is_erased() => {}
             NodeOrToken::Node(child) if !after_equals => tag = tag_from_node(child)?,
             NodeOrToken::Node(child) => default = lower(child, context)?,
             NodeOrToken::Token(token) => default = literal(token)?,
@@ -2397,7 +2391,7 @@ unsafe fn literal(token: TokenRef<'_>) -> R<Sexp> {
             values::set_elt(result, 0, values::mkchar_bytes(&bytes, encoding)?);
             Ok(result)
         }
-        SyntaxKind::RAW_STRING => values::scalar_string(&raw_string(text)),
+        SyntaxKind::RAW_STRING => values::scalar_string(raw_string_content(text)),
         SyntaxKind::TRUE_KW => Ok(values::fresh_logical(1)?),
         SyntaxKind::FALSE_KW => Ok(values::fresh_logical(0)?),
         SyntaxKind::NULL_KW => Ok(known.nil),
@@ -2446,20 +2440,6 @@ pub fn string_literal(text: &str) -> R<String> {
     unescape(inner).map_err(error)
 }
 
-fn raw_string(text: &str) -> String {
-    // r"---( ... )---": the prefix up to the opening bracket, mirrored at the end.
-    let after_r = &text[1..];
-    let rest = &after_r[1..];
-    let dashes = rest
-        .chars()
-        .take_while(|&character| character == '-')
-        .count();
-    let open = rest[dashes..].chars().next().unwrap_or('(');
-    let body_start = 1 + 1 + dashes + open.len_utf8();
-    let body_end = text.len() - (1 + dashes + 1);
-    text.get(body_start..body_end).unwrap_or("").to_owned()
-}
-
 /// Resolves R's string escapes, with each byte a byte escape leaves outside UTF-8 as its
 /// stand-in.
 pub fn unescape(text: &str) -> Result<String, String> {
@@ -2481,199 +2461,93 @@ pub struct EscapeFailure {
 /// which leaves the string in the native encoding instead of marked as UTF-8, as in GNU R.
 pub fn unescape_bytes(text: &str) -> Result<(Vec<u8>, bool), EscapeFailure> {
     let mut bytes = Vec::with_capacity(text.len());
-    let mut result = String::new();
     let mut native = false;
-    let mut byte_escape = false;
-    let mut unicode = false;
-    let mut characters = text.char_indices().peekable();
-    let failure = |class, message: String, offset, value| EscapeFailure {
-        class,
-        message,
-        offset,
-        value,
-    };
-    while let Some((_, character)) = characters.next() {
-        if let Some(byte) = values::escaped_byte(character) {
-            bytes.extend_from_slice(std::mem::take(&mut result).as_bytes());
+    let decoded = unescape_quoted(text, |piece| match piece {
+        EscapePiece::Text(character) => match escaped_byte(character) {
+            Some(byte) => {
+                bytes.push(byte);
+                native = true;
+            }
+            None => bytes.extend_from_slice(character.encode_utf8(&mut [0; 4]).as_bytes()),
+        },
+        EscapePiece::Byte(byte) => {
             bytes.push(byte);
             native = true;
-            continue;
         }
-        if character != '\\' {
-            result.push(character);
-            continue;
+        EscapePiece::Unicode(character) => {
+            bytes.extend_from_slice(character.encode_utf8(&mut [0; 4]).as_bytes());
         }
-        let Some((escape_offset, escape)) = characters.next() else {
-            result.push('\\');
-            break;
-        };
-        let mut last = escape_offset;
-        match escape {
-            'n' => result.push('\n'),
-            't' => result.push('\t'),
-            'r' => result.push('\r'),
-            'a' => result.push('\u{7}'),
-            'b' => result.push('\u{8}'),
-            'f' => result.push('\u{c}'),
-            'v' => result.push('\u{b}'),
-            '\\' => result.push('\\'),
-            '"' => result.push('"'),
-            '\'' => result.push('\''),
-            '`' => result.push('`'),
-            ' ' => result.push(' '),
-            '\n' => result.push('\n'),
-            '0'..='7' => {
-                let (rest, count) = escape_digits(&mut characters, 8, 2, &mut last);
-                let value = escape.to_digit(8).unwrap_or(0) * 8u32.pow(count as u32) + rest;
-                if value == 0 {
-                    return Err(failure(
-                        "nulNotAllowed",
-                        "nul character not allowed".into(),
-                        last,
-                        ConditionValue::Null,
-                    ));
-                }
-                if value > 0xFF {
-                    return Err(failure(
-                        "invalidOctal",
-                        format!("\\{value:o} exceeds maximum allowed octal value \\377"),
-                        last,
-                        ConditionValue::Integer(value as i32),
-                    ));
-                }
-                bytes.extend_from_slice(std::mem::take(&mut result).as_bytes());
-                bytes.push(value as u8);
-                byte_escape = true;
-            }
-            'x' => {
-                let (value, count) = escape_digits(&mut characters, 16, 2, &mut last);
-                if count == 0 {
-                    return Err(failure(
-                        "badHex",
-                        "'\\x' used without hex digits in character string".into(),
-                        last,
-                        ConditionValue::Null,
-                    ));
-                }
-                if value == 0 {
-                    return Err(failure(
-                        "nulNotAllowed",
-                        "nul character not allowed".into(),
-                        last,
-                        ConditionValue::Null,
-                    ));
-                }
-                bytes.extend_from_slice(std::mem::take(&mut result).as_bytes());
-                bytes.push(value as u8);
-                byte_escape = true;
-            }
-            'u' | 'U' => {
-                let limit = if escape == 'u' { 4 } else { 8 };
-                let braced = matches!(characters.peek(), Some(&(_, '{')));
-                if let Some((offset, _)) = characters.next_if(|&(_, next)| next == '{') {
-                    last = offset;
-                }
-                let (value, count) = escape_digits(&mut characters, 16, limit, &mut last);
-                if count == 0 {
-                    return Err(failure(
-                        "badUnicodeHex",
-                        format!("'\\{escape}' used without hex digits in character string"),
-                        last,
-                        ConditionValue::Null,
-                    ));
-                }
-                if braced {
-                    // GNU R reads the character after the digits to see whether it closes the
-                    // brace, so that character is where it reports one that does not.
-                    match characters.next() {
-                        Some((offset, '}')) => last = offset,
-                        unclosed => {
-                            let form = if escape == 'u' {
-                                "\\u{xxxx}"
-                            } else {
-                                "\\U{xxxxxxxx}"
-                            };
-                            return Err(failure(
-                                "invalidUnicode",
-                                format!("invalid {form} sequence"),
-                                unclosed.map_or(text.len(), |(offset, _)| offset),
-                                ConditionValue::Null,
-                            ));
-                        }
-                    }
-                }
-                let Some(decoded) = char::from_u32(value).or_else(|| {
-                    // GNU R keeps a lone surrogate, which is not a Rust `char`.
-                    (0xD800..0xE000).contains(&value).then_some('\u{fffd}')
-                }) else {
-                    let form = match (escape, braced) {
-                        ('u', true) => "\\u{xxxx}",
-                        ('u', false) => "\\uxxxx",
-                        (_, true) => "\\U{xxxxxxxx}",
-                        (_, false) => "\\Uxxxxxxxx",
-                    };
-                    return Err(failure(
-                        "invalidUnicode",
-                        format!("invalid {form} value {value:x}"),
-                        last,
-                        ConditionValue::Integer(value as i32),
-                    ));
-                };
-                if value == 0 {
-                    return Err(failure(
-                        "nulNotAllowed",
-                        "nul character not allowed".into(),
-                        last,
-                        ConditionValue::Null,
-                    ));
-                }
-                unicode = true;
-                result.push(decoded);
-            }
-            other => {
-                return Err(failure(
-                    "unrecognizedEscape",
-                    format!("'\\{other}' is an unrecognized escape in character string"),
-                    last,
-                    ConditionValue::Text(other.to_string()),
-                ));
-            }
-        }
-    }
-    if unicode && byte_escape {
-        return Err(failure(
-            "mixedEscapes",
-            "mixing Unicode and octal/hex escapes in a string is not allowed".into(),
-            text.len(),
+    });
+    let Err(refused) = decoded else {
+        return Ok((bytes, native));
+    };
+    let letter = |upper| if upper { 'U' } else { 'u' };
+    let (class, message, value) = match refused.kind {
+        EscapeErrorKind::Nul => (
+            "nulNotAllowed",
+            "nul character not allowed".to_owned(),
             ConditionValue::Null,
-        ));
-    }
-    bytes.extend_from_slice(result.as_bytes());
-    Ok((bytes, native || byte_escape))
-}
-
-/// Reads up to `limit` digits in `radix`, moving `last` to the offset of the last one read.
-fn escape_digits(
-    characters: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
-    radix: u32,
-    limit: usize,
-    last: &mut usize,
-) -> (u32, usize) {
-    let mut value = 0u32;
-    let mut count = 0;
-    while count < limit {
-        let Some((offset, digit)) = characters
-            .peek()
-            .and_then(|&(offset, next)| Some((offset, next.to_digit(radix)?)))
-        else {
-            break;
-        };
-        value = value * radix + digit;
-        *last = offset;
-        characters.next();
-        count += 1;
-    }
-    (value, count)
+        ),
+        EscapeErrorKind::OctalTooLarge(value) => (
+            "invalidOctal",
+            format!("\\{value:o} exceeds maximum allowed octal value \\377"),
+            ConditionValue::Integer(value as i32),
+        ),
+        EscapeErrorKind::HexWithoutDigits => (
+            "badHex",
+            "'\\x' used without hex digits in character string".to_owned(),
+            ConditionValue::Null,
+        ),
+        EscapeErrorKind::UnicodeWithoutDigits { upper } => (
+            "badUnicodeHex",
+            format!(
+                "'\\{}' used without hex digits in character string",
+                letter(upper)
+            ),
+            ConditionValue::Null,
+        ),
+        EscapeErrorKind::UnicodeUnclosed { upper } => (
+            "invalidUnicode",
+            format!(
+                "invalid {} sequence",
+                if upper { "\\U{xxxxxxxx}" } else { "\\u{xxxx}" }
+            ),
+            ConditionValue::Null,
+        ),
+        EscapeErrorKind::UnicodeInvalid {
+            upper,
+            braced,
+            value,
+        } => {
+            let form = match (upper, braced) {
+                (false, true) => "\\u{xxxx}",
+                (false, false) => "\\uxxxx",
+                (true, true) => "\\U{xxxxxxxx}",
+                (true, false) => "\\Uxxxxxxxx",
+            };
+            (
+                "invalidUnicode",
+                format!("invalid {form} value {value:x}"),
+                ConditionValue::Integer(value as i32),
+            )
+        }
+        EscapeErrorKind::Unrecognized(other) => (
+            "unrecognizedEscape",
+            format!("'\\{other}' is an unrecognized escape in character string"),
+            ConditionValue::Text(other.to_string()),
+        ),
+        EscapeErrorKind::Mixed => (
+            "mixedEscapes",
+            "mixing Unicode and octal/hex escapes in a string is not allowed".to_owned(),
+            ConditionValue::Null,
+        ),
+    };
+    Err(EscapeFailure {
+        class,
+        message,
+        offset: refused.last,
+        value,
+    })
 }
 
 // The internals.

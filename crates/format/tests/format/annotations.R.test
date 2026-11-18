@@ -562,7 +562,7 @@ ERROR: Syntax error: a `#:` annotation cannot interrupt an expression. Move it t
 x <- 1 #: f(x) <- c("a
 b")
 #++++
-ERROR: Syntax error: unterminated string; expected a closing quote at line 1, column 21
+ERROR: Syntax error: unterminated string; expected a closing quote at line 2, column 2
 
 #---- semicolon_before_annotation_block
 ;#: list{

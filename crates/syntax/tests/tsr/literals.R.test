@@ -93,8 +93,12 @@ SOURCE_FILE@0..259
     UNDERSCORE@254..255 "_"
   ERROR@255..259
     IDENT@255..259 "foo_"
+err: 167..168: `_` is the pipe placeholder: it can only be a named argument of the call on the right side of `|>`, as in `x |> f(data = _)`
+err: 243..244: `_` is the pipe placeholder: it can only be a named argument of the call on the right side of `|>`, as in `x |> f(data = _)`
 err: 244..247: unexpected identifier after this expression; expected a newline or `;`
+err: 248..249: `_` is the pipe placeholder: it can only be a named argument of the call on the right side of `|>`, as in `x |> f(data = _)`
 err: 249..250: unexpected `_` after this expression; expected a newline or `;`
+err: 254..255: `_` is the pipe placeholder: it can only be a named argument of the call on the right side of `|>`, as in `x |> f(data = _)`
 err: 255..259: unexpected identifier after this expression; expected a newline or `;`
 
 #---- unicode_identifiers
@@ -387,6 +391,7 @@ SOURCE_FILE@0..385
   NEWLINE@380..381 "\n"
   LITERAL@381..385
     STRING@381..385 "'\\''"
+err: 27..29: this escape names the NUL character, which an R string cannot hold
 
 #---- raw_strings
 r"(raw string)"

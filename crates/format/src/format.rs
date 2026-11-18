@@ -1,6 +1,7 @@
 //! A preserving formatter: single-line constructs stay single-line and
-//! multiline ones keep their line structure. Syntax errors refuse the file,
-//! except inside `#:` annotations, whose block is kept verbatim.
+//! multiline ones keep their line structure. A syntax error that damages the
+//! tree refuses the file, except inside `#:` annotations, whose block is kept
+//! verbatim.
 
 use {
     serde::Deserialize,
@@ -10,9 +11,9 @@ use {
         iter::{once, repeat_n, successors},
     },
     syntax::{
-        SyntaxElement,
+        SyntaxElement, SyntaxError,
         SyntaxKind::{self, *},
-        SyntaxNode, SyntaxToken, TextRange, TextSize, WalkEvent, parse,
+        SyntaxNode, SyntaxToken, TextRange, TextSize, Unexpected, WalkEvent, parse,
     },
 };
 
@@ -89,7 +90,12 @@ fn layout(source: &str, config: Config, indent: &str) -> Result<Layout, FormatEr
         }
     };
 
-    if let Some(error) = parse.errors().iter().find(|error| !error.in_annotation) {
+    // An error R raises on text its grammar accepts (`x |> y`, `"\q"`) leaves the tree whole, so
+    // the text formats.
+    let refuses = |error: &&SyntaxError| {
+        !error.in_annotation && !matches!(error.unexpected, Unexpected::Classed(_))
+    };
+    if let Some(error) = parse.errors().iter().find(refuses) {
         return Err(error_at(error.message.clone(), error.range.start()));
     }
 

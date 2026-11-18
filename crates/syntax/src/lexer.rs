@@ -3,9 +3,9 @@
 //! arrive as ordinary tokens.
 
 use {
-    crate::{SyntaxError, Unexpected, kind::SyntaxKind},
+    crate::{Classed, SyntaxError, Unexpected, kind::SyntaxKind},
     SyntaxKind::*,
-    memchr::memchr2,
+    memchr::{memchr, memchr2},
     text_size::{TextRange, TextSize},
 };
 
@@ -28,6 +28,7 @@ pub fn lex(text: &str) -> (Vec<Token>, Vec<SyntaxError>) {
     };
     while lexer.pos < text.len() {
         let start = lexer.pos;
+        let reported = lexer.errors.len();
         let kind = match lexer.modes.last() {
             Some(&Mode::FormatText { quote, .. }) => lexer.format_text(quote),
             _ => {
@@ -39,6 +40,12 @@ pub fn lex(text: &str) -> (Vec<Token>, Vec<SyntaxError>) {
         debug_assert!(lexer.pos > start, "lexer must always make progress");
         let len = TextSize::from((lexer.pos - start) as u32);
         lexer.tokens.push(Token { kind, len });
+        // A token R reads as part of a comment cannot fail R's parse.
+        if lexer.in_annotation {
+            for error in lexer.errors.iter_mut().skip(reported) {
+                error.in_annotation = true;
+            }
+        }
         if kind == NEWLINE {
             lexer.in_annotation = false;
         }
@@ -48,6 +55,32 @@ pub fn lex(text: &str) -> (Vec<Token>, Vec<SyntaxError>) {
         Mode::Interpolation { .. } => None,
     }) {
         lexer.error("unterminated f-string; expected a closing quote", start);
+    }
+    // No R string holds a NUL. R cuts a name at one, and reads past one in a comment.
+    if memchr(0, text.as_bytes()).is_some() {
+        let mut start = 0;
+        let mut in_annotation = false;
+        for token in &lexer.tokens {
+            let end = start + usize::from(token.len);
+            match token.kind {
+                ANNOTATION_MARKER => in_annotation = true,
+                NEWLINE => in_annotation = false,
+                _ => {}
+            }
+            if !in_annotation
+                && matches!(token.kind, STRING | RAW_STRING)
+                && let Some(nul) = memchr(0, &text.as_bytes()[start..end])
+            {
+                let nul = TextSize::from((start + nul) as u32);
+                let mut error = SyntaxError::new(
+                    "a NUL byte, which no R string can hold; remove it",
+                    TextRange::at(nul, TextSize::from(1)),
+                );
+                error.unexpected = Unexpected::Classed(Classed::EmbeddedNul);
+                lexer.errors.push(error);
+            }
+            start = end;
+        }
     }
     (lexer.tokens, lexer.errors)
 }
@@ -107,6 +140,232 @@ pub fn is_syntactic_name(text: &str) -> bool {
         return false;
     }
     chars.all(is_ident_continue) && SyntaxKind::from_keyword(text).is_none()
+}
+
+/// The content of a raw string literal such as `r"-(text)-"`: what lies between its opening
+/// bracket and the closing one that mirrors it.
+pub fn raw_string_content(text: &str) -> &str {
+    let rest = text.get(2..).unwrap_or_default();
+    let dashes = rest.bytes().take_while(|&byte| byte == b'-').count();
+    let open = rest[dashes..].chars().next().map_or(1, char::len_utf8);
+    text.get(2 + dashes + open..text.len().saturating_sub(dashes + 2))
+        .unwrap_or_default()
+}
+
+/// One piece of a quoted token's content, as R's lexer decodes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscapePiece {
+    /// A character written as itself, or the one a simple escape such as `\n` names.
+    Text(char),
+    /// The byte an octal or `\x` escape names, which need not be UTF-8.
+    Byte(u8),
+    /// The character a `\u` or `\U` escape names. R keeps a lone surrogate, which is not a
+    /// `char`, so one arrives as U+FFFD.
+    Unicode(char),
+}
+
+/// An escape R's lexer rejects in a string or a backquoted name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EscapeError {
+    pub kind: EscapeErrorKind,
+    /// The offset of the escape's backslash in the content, or 0 for [`EscapeErrorKind::Mixed`].
+    pub backslash: usize,
+    /// The offset of the last character R's lexer read before it raised the error, which is
+    /// where R reports it. The content's length when that character is the closing quote.
+    pub last: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscapeErrorKind {
+    /// An escape that names the NUL character, which an R string cannot hold.
+    Nul,
+    /// An octal escape above `\377`, with its value.
+    OctalTooLarge(u32),
+    /// `\x` without a hex digit.
+    HexWithoutDigits,
+    /// `\u` (or `\U` when `upper`) without a hex digit.
+    UnicodeWithoutDigits { upper: bool },
+    /// `\u{` or `\U{` whose digits no `}` follows.
+    UnicodeUnclosed { upper: bool },
+    /// A `\u` or `\U` escape whose value is no Unicode code point.
+    UnicodeInvalid {
+        upper: bool,
+        braced: bool,
+        value: u32,
+    },
+    /// A backslash before a character that starts no escape.
+    Unrecognized(char),
+    /// A `\u` or `\U` escape in one literal with an octal or `\x` escape.
+    Mixed,
+}
+
+/// Decodes the content of a string literal or a backquoted name (the text between its quotes),
+/// handing each piece to `piece`, or stops at the first escape R's lexer rejects. This is the
+/// one reading of R's escapes: the lexer validates with it, and the runtime builds its strings
+/// with it.
+pub fn unescape_quoted(text: &str, mut piece: impl FnMut(EscapePiece)) -> Result<(), EscapeError> {
+    let mut byte_escape = false;
+    let mut unicode = false;
+    let mut characters = text.char_indices().peekable();
+    while let Some((backslash, character)) = characters.next() {
+        if character != '\\' {
+            piece(EscapePiece::Text(character));
+            continue;
+        }
+        // Only a token that lacks its closing quote ends in a backslash.
+        let Some((escape_offset, escape)) = characters.next() else {
+            piece(EscapePiece::Text('\\'));
+            break;
+        };
+        let mut last = escape_offset;
+        let failure = |kind, last| EscapeError {
+            kind,
+            backslash,
+            last,
+        };
+        match escape {
+            'n' => piece(EscapePiece::Text('\n')),
+            't' => piece(EscapePiece::Text('\t')),
+            'r' => piece(EscapePiece::Text('\r')),
+            'a' => piece(EscapePiece::Text('\u{7}')),
+            'b' => piece(EscapePiece::Text('\u{8}')),
+            'f' => piece(EscapePiece::Text('\u{c}')),
+            'v' => piece(EscapePiece::Text('\u{b}')),
+            '\\' | '"' | '\'' | '`' | ' ' | '\n' => piece(EscapePiece::Text(escape)),
+            '0'..='7' => {
+                let (rest, count) = escape_digits(&mut characters, 8, 2, &mut last);
+                let value = escape.to_digit(8).unwrap_or(0) * 8u32.pow(count as u32) + rest;
+                if value == 0 {
+                    return Err(failure(EscapeErrorKind::Nul, last));
+                }
+                if value > 0xFF {
+                    return Err(failure(EscapeErrorKind::OctalTooLarge(value), last));
+                }
+                piece(EscapePiece::Byte(value as u8));
+                byte_escape = true;
+            }
+            'x' => {
+                let (value, count) = escape_digits(&mut characters, 16, 2, &mut last);
+                if count == 0 {
+                    return Err(failure(EscapeErrorKind::HexWithoutDigits, last));
+                }
+                if value == 0 {
+                    return Err(failure(EscapeErrorKind::Nul, last));
+                }
+                piece(EscapePiece::Byte(value as u8));
+                byte_escape = true;
+            }
+            'u' | 'U' => {
+                let upper = escape == 'U';
+                let limit = if upper { 8 } else { 4 };
+                let braced = characters.next_if(|&(_, next)| next == '{');
+                if let Some((offset, _)) = braced {
+                    last = offset;
+                }
+                let braced = braced.is_some();
+                let (value, count) = escape_digits(&mut characters, 16, limit, &mut last);
+                if count == 0 {
+                    return Err(failure(
+                        EscapeErrorKind::UnicodeWithoutDigits { upper },
+                        last,
+                    ));
+                }
+                if braced {
+                    // R reads the character after the digits to see whether it closes the
+                    // brace, so that character is where it reports one that does not.
+                    match characters.next() {
+                        Some((offset, '}')) => last = offset,
+                        unclosed => {
+                            return Err(failure(
+                                EscapeErrorKind::UnicodeUnclosed { upper },
+                                unclosed.map_or(text.len(), |(offset, _)| offset),
+                            ));
+                        }
+                    }
+                }
+                let surrogate = (0xD800..0xE000).contains(&value).then_some('\u{fffd}');
+                let Some(decoded) = char::from_u32(value).or(surrogate) else {
+                    return Err(failure(
+                        EscapeErrorKind::UnicodeInvalid {
+                            upper,
+                            braced,
+                            value,
+                        },
+                        last,
+                    ));
+                };
+                if value == 0 {
+                    return Err(failure(EscapeErrorKind::Nul, last));
+                }
+                unicode = true;
+                piece(EscapePiece::Unicode(decoded));
+            }
+            other => return Err(failure(EscapeErrorKind::Unrecognized(other), last)),
+        }
+    }
+    if unicode && byte_escape {
+        return Err(EscapeError {
+            kind: EscapeErrorKind::Mixed,
+            backslash: 0,
+            last: text.len(),
+        });
+    }
+    Ok(())
+}
+
+/// Reads up to `limit` digits in `radix`, moving `last` to the offset of the last one read.
+fn escape_digits(
+    characters: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    radix: u32,
+    limit: usize,
+    last: &mut usize,
+) -> (u32, usize) {
+    let mut value = 0u32;
+    let mut count = 0;
+    while count < limit {
+        let Some((offset, digit)) = characters
+            .peek()
+            .and_then(|&(offset, next)| Some((offset, next.to_digit(radix)?)))
+        else {
+            break;
+        };
+        value = value * radix + digit;
+        *last = offset;
+        characters.next();
+        count += 1;
+    }
+    (value, count)
+}
+
+fn escape_message(kind: EscapeErrorKind) -> String {
+    let letter = |upper| if upper { 'U' } else { 'u' };
+    match kind {
+        EscapeErrorKind::Nul => {
+            "this escape names the NUL character, which an R string cannot hold".to_owned()
+        }
+        EscapeErrorKind::OctalTooLarge(value) => {
+            format!("`\\{value:o}` is above `\\377`, the largest octal escape")
+        }
+        EscapeErrorKind::HexWithoutDigits => "`\\x` needs a hex digit after it".to_owned(),
+        EscapeErrorKind::UnicodeWithoutDigits { upper } => {
+            format!("`\\{}` needs a hex digit after it", letter(upper))
+        }
+        EscapeErrorKind::UnicodeUnclosed { upper } => {
+            format!(
+                "`\\{}{{` needs a closing `}}` after its digits",
+                letter(upper)
+            )
+        }
+        EscapeErrorKind::UnicodeInvalid { value, .. } => {
+            format!("`{value:x}` is not a Unicode code point; the largest is `10ffff`")
+        }
+        EscapeErrorKind::Unrecognized(character) => {
+            format!("`\\{character}` is not an escape R knows. Write `\\\\` for a backslash")
+        }
+        EscapeErrorKind::Mixed => {
+            "a string cannot mix `\\u` or `\\U` escapes with octal or `\\x` escapes".to_owned()
+        }
+    }
 }
 
 struct Lexer<'a> {
@@ -404,11 +663,14 @@ impl Lexer<'_> {
             }
             _ => {}
         }
+        let start = self.pos;
+        let mut escaped = false;
         // The scan stops only at ASCII bytes, so it never splits a character.
         while let Some(&byte) = bytes.get(self.pos) {
             match byte {
                 _ if byte == quote => break,
                 b'\\' => {
+                    escaped = true;
                     self.pos += 1;
                     self.bump();
                 }
@@ -421,6 +683,10 @@ impl Lexer<'_> {
                 }
                 _ => self.pos += 1,
             }
+        }
+        // An f-string is not R, so R has no report for its escapes and ry's message stands.
+        if escaped && let Err(error) = unescape_quoted(&self.text[start..self.pos], |_| {}) {
+            self.error_rule(escape_message(error.kind), start + error.backslash);
         }
         FSTRING_TEXT
     }
@@ -478,6 +744,7 @@ impl Lexer<'_> {
     ) -> SyntaxKind {
         let bytes = self.text.as_bytes();
         let annotation = self.in_annotation;
+        let mut escaped = false;
         loop {
             let rest = &bytes[self.pos..];
             // Outside an annotation a line break belongs to the string, so only the quote and the
@@ -495,16 +762,63 @@ impl Lexer<'_> {
             };
             self.pos += offset + 1;
             match bytes[self.pos - 1] {
+                // An escaped line break belongs to a string, and ends an annotation's line.
+                b'\\' if annotation && matches!(self.peek(), Some('\n' | '\r')) => break,
                 b'\\' => {
+                    escaped = true;
                     self.bump();
                 }
-                byte if byte == quote => return kind,
+                byte if byte == quote => {
+                    if escaped {
+                        self.check_escapes(start);
+                    }
+                    if kind == IDENT && self.pos == start + 2 {
+                        let mut error = SyntaxError::new(
+                            "a name cannot be empty: write at least one character between the backquotes",
+                            TextRange::new(
+                                TextSize::from(start as u32),
+                                TextSize::from(self.pos as u32),
+                            ),
+                        );
+                        error.unexpected = Unexpected::Classed(Classed::EmptyName);
+                        self.errors.push(error);
+                    }
+                    return kind;
+                }
                 _ => break,
             }
         }
         self.end_unterminated_at_line_break(start);
         self.error(unterminated, start);
         kind
+    }
+
+    /// Reports the first escape R's lexer rejects in the quoted token from `start` to here.
+    fn check_escapes(&mut self, start: usize) {
+        let inner = &self.text[start + 1..self.pos - 1];
+        let Err(error) = unescape_quoted(inner, |_| {}) else {
+            return;
+        };
+        let range = match error.kind {
+            EscapeErrorKind::Mixed => start..self.pos,
+            _ => {
+                let last = start + 1 + error.last;
+                let end = self.text[last..]
+                    .chars()
+                    .next()
+                    .map_or(last, |character| last + character.len_utf8());
+                start + 1 + error.backslash..end.min(self.pos - 1)
+            }
+        };
+        let mut error = SyntaxError::new(
+            escape_message(error.kind),
+            TextRange::new(
+                TextSize::from(range.start as u32),
+                TextSize::from(range.end as u32),
+            ),
+        );
+        error.unexpected = Unexpected::Classed(Classed::Escape);
+        self.errors.push(error);
     }
 
     fn raw_string(&mut self, start: usize) -> SyntaxKind {
