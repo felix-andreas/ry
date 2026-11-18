@@ -16,7 +16,7 @@ use {
         Jump,
         builtins::{Arg, BuiltinDef, BuiltinFn, Call, internal},
         conditions::{Handler, calling_established, make_condition, new_handler},
-        eval::{self, CallFrame, Reify, Site},
+        eval::{self, CallFrame, Entering, Reify, Site},
         interp,
         session::{FNV_OFFSET, stable_hash},
         sort::{self, IdenticalFlags},
@@ -4240,7 +4240,7 @@ unsafe fn push_frame(call: Sexp, function: Sexp, caller: usize, args: [Sexp; 4])
         header,
         missing,
         promised,
-        true,
+        Entering::Start,
     )?;
     if entered.header == crate::NO_SLOTS {
         return Err(error("internal error: a frame of tryCatch ran its body"));
