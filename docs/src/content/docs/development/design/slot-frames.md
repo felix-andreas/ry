@@ -60,7 +60,12 @@ it.
   there (`match.arg`, `Reduce` and rlang's `trace_back`, listed in
   `base_fast_paths::prologue_needs_environment`). The other prologues read their formals from the
   slots and return through the pending environment (`base_fast_paths::ClosureFrame`), so
-  `stopifnot`, `structure`, `setdiff` and the withr helpers keep their slot frames. At the call, `bind_slots` also refuses a closure under the debugger, a closure with a type
+  `stopifnot`, `structure`, `setdiff` and the withr helpers keep their slot frames. `tryCatch`'s
+  prologue goes further: it pushes the slot frames of `tryCatchList`, `tryCatchOne` and
+  `doTryCatch` itself and binds what their bodies would bind, so the chain runs no R code
+  (`base_fast_paths::try_catch_chain`). `doTryCatch` passes a bare `environment()` to
+  `.addCondHands` as the target its exiting handler returns to, which `local_symbols` accepts in
+  that one position, because the handler stack keeps the target only until the frame returns. At the call, `bind_slots` also refuses a closure under the debugger, a closure with a type
   signature, any call made while a caller's collection is moved into a parameter (`moves.rs`), and a call where a missing formal's default
   is neither a literal, a symbol, nor code compiled with its own slot table. Those calls bind a
   heap frame.

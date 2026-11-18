@@ -241,8 +241,7 @@ unsafe fn start_slowly(
             version.number()
         )));
     }
-    source_file(&format!("{home}/library/base/R/base"), base_namespace())?;
-    crate::base_fast_paths::install_all(base_namespace())?;
+    source_base(home)?;
     mark_base_closures()?;
     install_register_s3_methods()?;
     source_file(&format!("{home}/library/base/R/Rprofile"), base_env())?;
@@ -444,6 +443,33 @@ pub(crate) unsafe fn stable_hash(object: Sexp, hash: &mut u64) {
         }
         _ => {}
     }
+}
+
+/// Runs the base package's `R/base` file and puts the fast paths in front of base's functions.
+/// A built tree's file is the lazy loader, whose first expression binds every base function, and
+/// the fast paths go in right after it, before any of those functions runs: the tree keeps the
+/// prologues of the build that wrote it, and this build may lack the builtin one of them names.
+/// While base R is being built the file is base's whole source, which defines the functions as
+/// it runs, so the fast paths go in after it.
+unsafe fn source_base(home: &str) -> R<()> {
+    let path = format!("{home}/library/base/R/base");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|failure| error(format!("cannot open file '{path}': {failure}")))?;
+    let expressions = crate::lower::parse_text(&text, &path)?;
+    crate::heap().root(expressions);
+    let namespace = base_namespace();
+    let mut installed = false;
+    for index in 0..length(expressions) {
+        scope(|| eval::eval(expressions.element(index), namespace))?;
+        if index == 0 && crate::base_fast_paths::all_bound(namespace)? {
+            crate::base_fast_paths::install_all(namespace)?;
+            installed = true;
+        }
+    }
+    if !installed {
+        crate::base_fast_paths::install_all(namespace)?;
+    }
+    Ok(())
 }
 
 /// Evaluates every expression of a file in `env`, without printing, as GNU R sources its startup
