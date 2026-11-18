@@ -17,7 +17,7 @@
 
 use {
     crate::{
-        lower::{SourceMap, is_skipped, position_near},
+        lower::{SourceMap, position_near},
         unwind::R,
         values::{self, symbols},
     },
@@ -948,7 +948,7 @@ fn collect_lexemes<'a>(node: NodeRef<'a>, lexemes: &mut Vec<Lexeme<'a>>, text: &
                 }
                 push_comment(lexemes, text, line_start, end);
             }
-            NodeOrToken::Node(child) if is_skipped(child.kind()) => {}
+            NodeOrToken::Node(child) if child.kind().is_erased() => {}
             NodeOrToken::Node(child) => collect_lexemes(child, lexemes, text),
             NodeOrToken::Token(token) => match token.kind() {
                 SyntaxKind::WHITESPACE => {}
@@ -990,7 +990,7 @@ fn annotation_newline_significant(annotation: NodeRef<'_>) -> bool {
             .any(|element| match element {
                 NodeOrToken::Token(token) => !token.kind().is_trivia(),
                 NodeOrToken::Node(node) => {
-                    node.kind() != SyntaxKind::ANNOTATION && !is_skipped(node.kind())
+                    node.kind() != SyntaxKind::ANNOTATION && !node.kind().is_erased()
                 }
             });
         if follows {
@@ -1010,14 +1010,14 @@ fn push_comment(lexemes: &mut Vec<Lexeme<'_>>, text: &str, start: usize, end: us
 
 /// The child nodes of `node` that are R code, without annotations.
 fn expression_children<'a>(node: NodeRef<'a>) -> impl Iterator<Item = NodeRef<'a>> + use<'a> {
-    node.child_nodes().filter(|child| !is_skipped(child.kind()))
+    node.child_nodes().filter(|child| !child.kind().is_erased())
 }
 
 /// The children of `node` that are R code: tokens other than trivia, and nodes other than
 /// annotations.
 fn significant_elements<'a>(node: NodeRef<'a>) -> impl Iterator<Item = ElementRef<'a>> + use<'a> {
     node.children().filter(|element| match element {
-        NodeOrToken::Node(child) => !is_skipped(child.kind()),
+        NodeOrToken::Node(child) => !child.kind().is_erased(),
         NodeOrToken::Token(token) => !token.kind().is_trivia(),
     })
 }

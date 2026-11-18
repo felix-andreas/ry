@@ -2815,17 +2815,19 @@ pub enum CallFrame {
 /// formal's default is neither a literal, a symbol, nor code compiled with its own slot table.
 pub unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<CallFrame>> {
     let state = interp();
-    if state.debugger.is_some()
-        || moves::tracking()
+    if activity::hooks() & (activity::DEBUGGER | activity::MOVES) != 0
         || function == state.namespace_loader
         || function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
         || crate::annotations::is_typed(function)
     {
         return Ok(None);
     }
-    let body = bytecode::compile_before_call(function)?;
+    let mut body = function.cdr();
     if body.kind() != SexpType::Bytecode {
-        return Ok(None);
+        body = bytecode::compile_before_call(function)?;
+        if body.kind() != SexpType::Bytecode {
+            return Ok(None);
+        }
     }
     let constants = body.cdr();
     let table = constants.element(bytecode::SLOTS);
@@ -2833,58 +2835,73 @@ pub unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<C
         return Ok(None);
     }
     let _activity = activity::enter(Activity::CallSetup, 0);
-    let names = table.element(1);
-    let count = values::length(names);
-    let formals = function.car();
-    let actuals = if positional(formals, args) {
-        None
-    } else {
-        activity::count(Counter::FormalsMatchedByName);
-        Some(match_args_cached(function, formals, args, call)?)
-    };
-    let missing_value = missing_arg();
-    let mut bound: SmallVec<[Sexp; 12]> = SmallVec::new();
-    let mut missing = 0u64;
-    let mut promised = 0u64;
-    let mut defaults = None;
-    let mut formal = formals;
+    let names: &[Sexp] = table.element(1).slice();
+    // One walk settles what binding by position needs: every formal has the slot the body's
+    // code reads it from, none is `...`, and there is a formal for each argument. A closure
+    // whose formals were replaced keeps the body's code, whose table names the formals it was
+    // compiled with.
+    let dots = symbols().dots;
+    let mut formal_count = 0;
+    let mut by_position = true;
+    let mut formal = function.car();
     while formal.kind() == SexpType::Pairlist {
-        let index = bound.len();
-        // A closure whose formals were replaced keeps the body's code, whose table names the
-        // formals it was compiled with.
-        if index >= count || names.element(index) != formal.tag() {
+        let name = formal.tag();
+        if names.get(formal_count) != Some(&name) {
             return Ok(None);
         }
+        by_position &= name != dots;
+        formal_count += 1;
+        formal = formal.cdr();
+    }
+    let actuals =
+        if by_position && args.len() <= formal_count && args.iter().all(|arg| arg.tag == nil()) {
+            None
+        } else {
+            activity::count(Counter::FormalsMatchedByName);
+            Some(match_args_cached(function, function.car(), args, call)?)
+        };
+    let header = state.bytecode.registers.len();
+    // The body's own registers follow the slots, so one reservation covers the whole window.
+    let register_count = values::ints(constants.element(bytecode::REGISTERS))[0] as usize;
+    bytecode::reserve_registers(header + 1 + names.len() + register_count)?;
+    let registers = bytecode::register_address(header);
+    let missing_value = missing_arg();
+    let (mut missing, mut promised) = (0u64, 0u64);
+    let mut defaults = None;
+    let mut formal = function.car();
+    for index in 0..formal_count {
         let actual = match &actuals {
             Some(actuals) => actuals.get(index).copied().unwrap_or(missing_value),
             None => args.get(index).map_or(missing_value, |arg| arg.value),
         };
         let default = formal.car();
-        if actual == missing_value && default != missing_value {
-            if !slot_default_fits(function, default, index, &mut defaults)? {
-                return Ok(None);
+        let value = if actual == missing_value && default != missing_value {
+            // On either way out the slots written so far give their counts back. The values
+            // are the caller's arguments, which the call goes on to bind in a heap frame, so
+            // nothing is released with a count: `release_slots` would empty a promise.
+            let fits = slot_default_fits(function, default, index, &mut defaults);
+            if !matches!(fits, Ok(true)) {
+                for written in 0..index {
+                    (*registers.add(1 + written)).decrement_refcount();
+                }
+                bytecode::release_registers(header);
+                return fits.map(|_| None);
             }
             missing |= 1 << index;
             if !(default.kind().is_atomic() || default == nil()) {
                 promised |= 1 << index;
             }
-            bound.push(default);
+            default
         } else {
-            bound.push(actual);
-        }
-        formal = formal.cdr();
-    }
-    let header = state.bytecode.registers.len();
-    // The body's own registers follow the slots, so one reservation covers the whole window.
-    let register_count = values::ints(constants.element(bytecode::REGISTERS))[0] as usize;
-    bytecode::reserve_registers(header + 1 + count + register_count)?;
-    let registers = bytecode::register_address(header);
-    for (index, &value) in bound.iter().enumerate() {
+            actual
+        };
         value.increment_refcount();
         *registers.add(1 + index) = value;
+        formal = formal.cdr();
     }
-    for index in bound.len()..count {
-        *registers.add(1 + index) = unbound();
+    let unbound = unbound();
+    for index in formal_count..names.len() {
+        *registers.add(1 + index) = unbound;
     }
     Ok(Some(CallFrame::Slots {
         header: header as u32,
@@ -3123,8 +3140,7 @@ pub unsafe fn bind_plan(
     sys_parent: Sexp,
 ) -> R<Entered> {
     let state = interp();
-    if state.debugger.is_some()
-        || moves::tracking()
+    if activity::hooks() & (activity::DEBUGGER | activity::MOVES) != 0
         || function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
     {
         let value = apply_closure(call, function, args, sys_parent, None)?;
@@ -3305,6 +3321,7 @@ sites! {
     Missing = "missing()",
     MissingArgumentLookup = "missing argument lookup",
     MatrixSubassignment = "matrix subassignment",
+    EnclosedSubassignment = "subassignment with <<-",
     FunctionDefinition = "function definition",
     DoCall = "do.call",
     Assignment = "assignment",
@@ -3717,8 +3734,12 @@ pub unsafe fn enter(
     entering: Entering,
 ) -> R<Entered> {
     let state = interp();
+    // A set hook covers the recorder, the debugger and the object-system refusal, so a call
+    // that nothing watches makes one test for the three.
+    let hooks = activity::hooks();
     if entering == Entering::Start
-        && (activity::hooks() & activity::CAPTURE != 0
+        && (hooks != 0 || function == state.namespace_loader)
+        && (hooks & activity::CAPTURE != 0
             || !state.object_systems
             || function == state.namespace_loader
             || (state.debugger.is_some() && function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)))
@@ -3828,6 +3849,42 @@ pub unsafe fn leave(depth: usize, result: R<Sexp>) -> R<Sexp> {
     let frame = &state.frames[depth - 1];
     let (call, function, header) = (frame.call, frame.function, frame.slots);
     let (mark, owner, references) = (frame.handle_mark, frame.previous_owner, frame.references);
+    // A call that returns a value from a frame nothing asked about has nothing to catch, run
+    // or hand on: no environment a `return` could name, no exit code, no annotation check, no
+    // frame above it.
+    if let Ok(value) = result
+        && header != crate::NO_SLOTS
+        && frame.env == nil()
+        && frame.pending == nil()
+        && frame.on_exit.is_empty()
+        && state.frames.len() == depth
+        && !crate::annotations::checks_pending()
+    {
+        if activity::hooks() != 0 {
+            returning_summarized(function, depth);
+        }
+        let (args, method_vars, closures) = (frame.args, frame.method_vars, frame.closures);
+        let heap = crate::heap();
+        heap.release_handles(mark as usize);
+        value.root();
+        state.slot_owner = owner;
+        state.srcref = frame.srcref;
+        let Some((handlers, restarts)) = state.frames.pop() else {
+            panic!("a closure call's frame was popped while the call ran");
+        };
+        conditions::restore_handlers(handlers);
+        state.restarts = restarts;
+        state.frame_args.truncate(args as usize);
+        state.method_vars.truncate(method_vars as usize);
+        state.frame_closures.truncate(closures as usize);
+        let registers = &mut state.bytecode.registers;
+        if let Some(slots) = registers.get_mut(header as usize + 1..) {
+            heap.release_slots(slots);
+        }
+        registers.truncate(header as usize);
+        release_frame_references(references);
+        return Ok(value);
+    }
     crate::heap().release_handles(mark as usize);
     match &result {
         Ok(value) => value.root(),
@@ -3839,6 +3896,23 @@ pub unsafe fn leave(depth: usize, result: R<Sexp>) -> R<Sexp> {
     release_window(header);
     release_frame_references(references);
     result
+}
+
+/// What a profile summary records as the frame at `depth` returns, as [`pop_frame`] does: the
+/// samples that waited, and how the call of `function` ran.
+#[cold]
+#[inline(never)]
+unsafe fn returning_summarized(function: Sexp, depth: usize) {
+    if !activity::enabled() {
+        return;
+    }
+    let state = interp();
+    if activity::sample_ticked() {
+        crate::profile_summary::resolve_samples(state.frames.len());
+    }
+    let frame = &state.frames[depth - 1];
+    let args = state.frame_args.get(frame.args as usize..).unwrap_or(&[]);
+    count_package_call(function, Some(frame), args);
 }
 
 /// [`run_frame`] for a frame with an environment, and for a slot frame whose call needs more
@@ -4210,7 +4284,11 @@ unsafe fn push_frame(
         Ok(())
     };
     let state = interp();
-    state.srcref = values::get_attr(function, symbols().srcref);
+    state.srcref = if function.attrib() == nil() {
+        nil()
+    } else {
+        values::get_attr(function, symbols().srcref)
+    };
     (state.frames.len(), sampled)
 }
 

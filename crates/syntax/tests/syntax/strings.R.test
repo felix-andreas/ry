@@ -28,11 +28,11 @@ SOURCE_FILE@0..12
     STRING@0..12 "\"say \\\"hi\\\"\""
 
 #---- escape_soup
-"\n\t\\\x41é\u{1F600}"
+"\n\t\\é\U{1F600}"
 #++++
-SOURCE_FILE@0..23
-  LITERAL@0..23
-    STRING@0..23 "\"\\n\\t\\\\\\x41é\\u{1F600}\""
+SOURCE_FILE@0..19
+  LITERAL@0..19
+    STRING@0..19 "\"\\n\\t\\\\é\\U{1F600}\""
 
 #---- multiline_string
 "line one

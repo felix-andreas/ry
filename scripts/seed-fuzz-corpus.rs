@@ -14,12 +14,13 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const R_SOURCE_TARGETS: [&str; 7] = [
+const R_SOURCE_TARGETS: [&str; 8] = [
     "parse",
     "format",
     "semantics",
     "ide",
     "interp_lower",
+    "parse_verdict",
     "load_index",
     "position",
 ];

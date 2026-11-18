@@ -29,13 +29,17 @@ use {
             check_argument_reference_agreement, check_bytecode_agreement, check_code_image_file,
             check_code_image_load, check_code_image_round_trip, check_element_access_agreement,
             check_environment_agreement, check_frame_stack, check_fused_agreement,
-            check_image_bodies_round_trip, check_lowering_input, check_quickening_agreement,
-            check_replacement_agreement, check_resume_at_every_pc, check_s3_lookup_agreement,
-            check_shadowing_agreement, check_unserialize_input, with_interpreter,
+            check_image_bodies_round_trip, check_lowering_input, check_parse_verdict,
+            check_quickening_agreement, check_replacement_agreement, check_resume_at_every_pc,
+            check_s3_lookup_agreement, check_shadowing_agreement, check_unserialize_input,
+            with_interpreter,
         },
         values,
     },
-    syntax::testing::{SplitMix64, for_each_seed, mutate_bytes},
+    syntax::testing::{
+        FRAGMENT_FAMILIES, SplitMix64, for_each_seed, generate_program, mutate_bytes, small_edit,
+        source_fragment,
+    },
 };
 
 const SEEDS: &[&str] = &[
@@ -61,6 +65,82 @@ fn fuzz_lowering_never_panics() {
         check_lowering_input(&String::from_utf8_lossy(&mutate_bytes(&mut rng, sample)));
     });
 }
+
+/// The runtime and `ry check` agree on which text is a syntax error: source fragments of every
+/// construct, whole and damaged, byte mutations of the seeds, and typed programs with an edit.
+#[test]
+fn fuzz_parse_verdict_is_shared() {
+    for text in PARSE_VERDICT_REGRESSIONS {
+        check_parse_verdict(text);
+    }
+    for_each_seed(600, |seed| {
+        let mut rng = SplitMix64(seed);
+        for family in FRAGMENT_FAMILIES {
+            check_parse_verdict(&source_fragment(&mut rng, family));
+        }
+        let sample = SEEDS[rng.below(SEEDS.len())];
+        check_parse_verdict(&String::from_utf8_lossy(&mutate_bytes(&mut rng, sample)));
+        let program = generate_program(&mut rng);
+        check_parse_verdict(&small_edit(&mut rng, &program, sample));
+    });
+}
+
+/// Text on which the runtime and the `syntax` crate can come apart: each construct here has a
+/// check of its own on one side.
+const PARSE_VERDICT_REGRESSIONS: &[&str] = &[
+    // An empty name: backquoted, and a string that names a function or an argument.
+    "x@``",
+    "for (`` in x) 1",
+    "x |> ``()",
+    "\"\"()",
+    "r\"()\"(1)",
+    "c(\"\" = 1, a.b = 2)",
+    "x[['' = 1]]",
+    // An empty string where R makes no symbol of it.
+    "x$\"\"",
+    "\"\" <- 1",
+    "(\"\")()",
+    // A NUL byte inside a name, an operator, a string and a comment.
+    "`my\0 name` <- 1",
+    "f(`a\0` = 1)$`b\0c`",
+    "function(`a\0`) 1",
+    "1 %a\0b% 2",
+    "x <- \"a\0b\"",
+    "x <- 1 # a\0b",
+    // Text the lexer refuses, which is fine in a `#:` comment.
+    "x <- 0x",
+    "1e",
+    "'abc",
+    "``",
+    // A field of a record pattern that binds a name of its own spelling.
+    "match ((x = 1, y = 2)) {\n  (x = , ..) => x\n}",
+    // The checks R makes in its grammar actions.
+    "function(a, a) 1",
+    "x |> y",
+    "x |> f(_)",
+    "x |> f(y = _, z = _)",
+    "f(g(_))",
+    "'\\q'",
+    "1;;2",
+    "x |> y => f(y)",
+    // A pipe into what only ry reads.
+    "x |> [1, 2]",
+    "x |> f\"a\"",
+    "x |> f\"a{b}\"",
+    "x |> (a = 1, b = 2)",
+    "x |> :Some(1)",
+    "x |> :None",
+    "x |> y?",
+    "x |> match (y) {\n  1 => 2\n}",
+    "x |> try(y)?",
+    // An escaped line break does not carry a `#:` comment onto the next line.
+    "#: \"a\\\nprint(1) # \"",
+    "x <- 1 #: 'a\\\r\ny <- 2 # '",
+    "#: `a\\\ny",
+    "#: 'a\\",
+    // An escape R does not know, in an f-string.
+    "f\"\\d\"",
+];
 
 /// Mutated streams of serialized seeds must read or fail with an R error, never panic.
 #[test]

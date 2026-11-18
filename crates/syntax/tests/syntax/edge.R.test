@@ -393,6 +393,7 @@ SOURCE_FILE@0..8
     WHITESPACE@4..5 " "
     NAME@5..8
       IDENT@5..8 "sum"
+err: 5..8: the right side of `|>` must be a function call, such as `f()`
 
 #---- eq_after_arrow
 a <- b = 1
