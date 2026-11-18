@@ -1,0 +1,71 @@
+# Compiled code that leaves for the interpreter on most of its calls is discarded, and the body
+# then runs in the interpreter. The result of every call is the same before the code is
+# compiled, while it runs, as it leaves, and after it is discarded.
+
+parse_number <- function(text) {
+  value <- suppressWarnings(as.numeric(text))
+  if (is.na(value)) stop("not a number: ", text)
+  value
+}
+attempt <- function(text) tryCatch(parse_number(text), error = function(e) -1)
+for (i in 1:30) parse_number("1")
+results <- numeric()
+for (round in 1:400) results[[round]] <- attempt(if (round %% 3L == 0L) "12" else "x")
+print(table(results))
+for (round in 1:400) results[[round]] <- attempt("x")
+print(table(results))
+for (round in 1:400) results[[round]] <- attempt(as.character(round))
+print(sum(results))
+
+kind <- function(x) {
+  switch(class(x)[1L],
+    numeric = return("a number"),
+    character = return("text"),
+    logical = {
+      if (isTRUE(x)) return("yes")
+      "a flag"
+    }
+  )
+}
+for (i in 1:30) kind(i)
+kinds <- character()
+inputs <- list(1, "a", TRUE, FALSE, NULL, 2L)
+for (round in 1:600) kinds[[round]] <- paste0("", kind(inputs[[round %% 6L + 1L]]))
+print(table(kinds))
+
+# A body whose calls are handed to the interpreter one after another, alone and inside a call
+# that runs without a frame, with native arithmetic between them.
+shout <- function(text, ...) toupper(text)
+join <- function(left, right, ...) paste0(left, "-", right)
+build <- function(a, b) {
+  first <- shout(a)
+  n <- nchar(first) + 1L
+  second <- shout(b)
+  m <- n * 2L
+  third <- join(first, second)
+  paste(third, n, m, nchar(third))
+}
+for (i in 1:30) { shout("a"); join("a", "b") }
+for (round in 1:40) build("ab", "cde")
+print(build("ab", "cde"))
+print(build("", NA))
+outer <- function(a, b, times) {
+  out <- character()
+  for (i in seq_len(times)) out[[i]] <- build(a, paste0(b, i))
+  out
+}
+for (round in 1:40) outer("k", "v", 3L)
+print(outer("key", "value", 4L))
+
+# The same call fails on some rounds and returns on others, under a handler that resumes.
+flaky <- function(x) {
+  if (x %% 2L == 0L) warning("even")
+  x * 3L
+}
+for (i in c(1L, 3L, 5L)) flaky(i)
+resume <- function(x) withCallingHandlers(flaky(x), warning = function(w) invokeRestart("muffleWarning"))
+total <- 0L
+for (round in 1:600) total <- total + resume(round)
+print(total)
+print(tryCatch(flaky(2L), warning = function(w) conditionMessage(w)))
+print(flaky(3L))

@@ -112,12 +112,16 @@ type store".
 With the JIT on, thirteen of the fifteen `just bench applications` programs run 0.01% to 0.55% more instructions than with it off, and `orders` and `bond_book` run 37% and 23% fewer (callgrind). The remainder is the entry and back-edge counters, one recording window per hot body and the compiles themselves. Tier 1 compiles a body only when its native work covers what compiled code costs (`decisions/jit-ssa.md`, "A body compiles only when its native work covers what compiled code costs"), so most application bodies stay in tier 0: their instructions are builtin calls on boxed values, which compiled code can only step through tier 0. What is left, in order of expected gain:
 
 - The benchmark code bases gain nothing from tier 1. On every tenth test file of each code base JIT on runs slightly more instructions than JIT off: 0.28% more on finbench (64,500M instructions), 0.36% on biobench (38,100M) and 0.22% on dsbench (36,200M). On the dsbench sample (50 files) cache misses and branch mispredictions agree within 0.7% (callgrind with cache and branch simulation), and the wall times agree within the noise of six alternating runs. One body compiles there (`tryCatch`), about 200 are planned and refused: 129 run too rarely to repay a compile, 34 have no instruction that could run natively, 26 do too little natively. Their work is calls of builtins and of small closures tier 1 cannot inline yet, so the levers are the ones below (wider frames, native forms for builtins on boxed values) and the call path itself. Measure with `RY_JIT_LOG=1` on a sample of test files and group the refusal lines.
-- The hot bodies of a package's test suite gain nothing from tier 1 either (`just bench-ci`, kernels `k3`, `k4` and `k5`: scalar calls of `ifelse`, `isTRUE` and `unname`, an argument checker over `list(...)`, `%in%` and `which` on a small vector). Tier 1 plans every hot body and compiles none, so JIT on runs 0.1% to 0.7% more instructions than JIT off (callgrind at `SCALE=0.1`: 999.6M against 993.4M, 618.2M against 614.0M, 602.0M against 601.2M). `RY_JIT_LOG=1` gives the refusals. The bodies do too little or nothing natively, because their instructions are `class`, `[`, `==`, `is.na`, `isS4` and `seq_along` on boxed values and calls of closures. The callees cannot be inlined: `ifelse` is too long, `is`, `which` and `is.data.frame` have no type feedback, the checker collects `...` and calls `delayedAssign`, and any callee with a builtin call is refused. The loops around them would step every instruction. Until "Wider frames" and native forms for builtins on boxed values exist, such code gets faster only through tier 0, native entries and prologues (`base_fast_paths.rs`).
+- The hot bodies of a package's test suite gain nothing from tier 1 either (`just bench-ci`, kernels `k3`, `k4` and `k5`: scalar calls of `ifelse`, `isTRUE` and `unname`, an argument checker over `list(...)`, `%in%` and `which` on a small vector). Tier 1 plans every hot body and compiles none, so JIT on runs 0.1% to 0.7% more instructions than JIT off (callgrind at `SCALE=0.1`: 999.6M against 993.4M, 618.2M against 614.0M, 602.0M against 601.2M). `RY_JIT_LOG=1` gives the refusals. The bodies do too little or nothing natively, because their instructions are `class`, `[`, `==`, `is.na`, `isS4` and `seq_along` on boxed values and calls of closures. The callees cannot be inlined: `ifelse` is too long, the checker collects `...` and calls `delayedAssign`, and a callee whose builtin call has no native form is refused. The loops around them would step every instruction. Until "Wider frames" and native forms for builtins on boxed values exist, such code gets faster only through tier 0, native entries and prologues (`base_fast_paths.rs`).
+- **A forced promise that assigns into a frame with an environment is not seen by compiled code.** A load that forces an argument's promise notices a slot frame whose variables moved into its environment and continues in tier 0, but a frame that has its environment before the load gives no signal, so `assign("n", 2L, envir = frame)` from the promise leaves compiled code with the old `n` (`decisions/jit-ssa.md`, "A load that reaches the runtime writes dirty variables back first"). A fix needs a write signal on function-frame bindings that costs tier 0 nothing, or treating every variable as forgotten after a load that ran code.
 - Compare JIT on against JIT off by instruction counts, not wall time. Two alternating wall-time runs of a whole code base showed JIT on 2% slower on all three, and six alternating runs of a 50-file sample on a quiet machine showed no difference; the instruction counts differ by 0.2%.
-- **Why the code bases gain nothing (finbench, measured).** Three causes, each enough alone. (1) testthat runs every block under `withCallingHandlers`, so `jit_enter_frame` declines every inlined frame (`calling_handler_established()`), tier 0's eager binding is off and pure steps write back. (2) The hot bodies are thin wrappers (`expect_equal` and its helpers, argument checkers) whose compiled entry and steps cost more than tier 0: a loop calling two builtins runs 2,395 instructions per iteration compiled against 1,627 in tier 0, of which about 400 are entry (`jit::run` 230, `enter` 67, `entry_event` 50, register growth 36, the handler check 18) and 80 more per builtin call. (3) `just bench hot` warms with one batch, so a body called 20 times per batch (`expect_equal`) never reaches the threshold and the suite measures tier 0. Admitting every body (zero `ENTRY_COST` and `STEP_COST`) ran 4.9% more instructions on finbench, so the refusals are right until compiled code gets cheaper. The full suite (`oracle bench --ry-only`, 9,592 tests) shows the same: ry/R 1.99x JIT on against 2.00x off on finbench, 1.87x against 1.86x on dsbench, 1.85x against 1.90x on biobench.
+- **Why the code bases gain nothing (finbench, measured).** Three causes, each enough alone. (1) testthat runs every block under `withCallingHandlers`, so tier 0's eager binding is off and a pure step of a compiled body's own frame writes back. (2) The hot bodies are thin wrappers (`expect_equal` and its helpers, argument checkers) whose compiled entry and steps cost more than tier 0: a loop calling two builtins runs 2,395 instructions per iteration compiled against 1,627 in tier 0, of which about 400 are entry (`jit::run` 230, `enter` 67, `entry_event` 50, register growth 36, the handler check 18) and 80 more per builtin call. (3) `just bench hot` warms with one batch, so a body called 20 times per batch (`expect_equal`) never reaches the threshold and the suite measures tier 0. Admitting every body (zero `ENTRY_COST` and `STEP_COST`) ran 4.9% more instructions on finbench, so the refusals are right until compiled code gets cheaper. The full suite (`oracle bench --ry-only`, 9,592 tests) shows the same: ry/R 1.99x JIT on against 2.00x off on finbench, 1.87x against 1.86x on dsbench, 1.85x against 1.90x on biobench.
 - **Next for the code bases, before the list below, cheapest first.**
-  - *Inlined frames under a calling handler.* Drop the `calling_handler_established()` decline in `jit_enter_frame` and rely on deferred signalling: a warning whose signalling runs R code is abandoned (`step_unsignalled`, `Signalling::Abandoned`) and the frames are rebuilt before the handler runs. Run a root `PureUnlessObserved` step `Deferred` too, so it exits on a warning instead of writing back at every step. Needs oracle cases with `withCallingHandlers` around inlined frames that warn, signal and `invokeRestart`.
-  - *Lean entry.* Code pointer in the code header, the register window pre-sized, the handler check folded into the state word, an unboxed scalar return: about 400 instructions per entry. Then recalibrate `ENTRY_COST` and `STEP_COST` on the application programs and `just bench hot`, and retry zero-cost admission as the upper bound.
+  - *Root steps under a calling handler.* Run a root `PureUnlessObserved` step `Deferred`, as an inlined call's steps run, so it exits on a warning instead of writing back at every step. Needs oracle cases with `withCallingHandlers` around compiled roots that warn, signal and `invokeRestart`.
+  - *Lean entry.* A scheduled entry goes straight to the code and costs about `ENTRY_COST` over tier 0's in-place entry: the activation record, the register window of the root cells and the boxed result. A pre-sized window and an unboxed scalar return are the cuts left. Recalibrate `ENTRY_COST` after each, and retry zero-cost admission as the upper bound.
+  - *Profile samples inside inlined frames.* The profile summary files an inlined callee's time under its caller as JIT-compiled code. Attribute a sample to the inlined frame it lies in from the frame states compiled code keeps for its exits (`Compiled.frames`), so a callee's time is its own row whether or not it was inlined.
+  - *Retiring a loop body that keeps leaving.* `runtime::count_leave` exempts a body with a loop, because its entries do not say how much its code ran, so a loop body that leaves compiled code on every call keeps the code and pays an exit per call. Count its leaves against the backward jumps its code took instead. Better: record the hand-off at its instruction (base R's `apply` hands off at one native call on every entry) and recompile with that instruction as a step, so the rest of the body keeps its code.
+  - *Compiling only the paths a body took.* Codegen emits every planned instruction, so a large base R body costs about as much to compile as its word count (`COMPILE_PER_WORD`), whatever it ran. Emit an exit for a branch `Plan::ran` never saw, which cuts the compile of such a body to the paths it runs and lets `unpaid_loop` admit it sooner.
   - *A cheaper builtin call from compiled code.* `jit_call_builtin` costs about 125 instructions against tier 0's 85: call the direct entry from codegen when the builtin is known at compile time.
   - *Inlining through `...`* (see "Wider frames" below). Read tier 0's spread plan for the site rather than a second representation: a `CallPlans` row flagged `PLAN_SPREAD` (`bytecode.rs`), whose id is in the call instruction's feedback word, holds the callee-slot sources and the spread words (`SPREAD_AT`, `SPREAD_SLOT`, `SPREAD_COUNT`, the tags). A plan with `PLAN_PREPARED` and misses below `PLAN_MISSES` means the site has one shape. The plan can be replaced or freed, so compiled code copies the count, tags and sources at compile time and guards on the `...` chain (exactly that many `Dots` cells with those tags, none empty) and on the callee, exiting on a mismatch, as `spread_holds` does (decision "A call site that passes `...` keeps a plan for what `...` held", `interp.md`). It needs a public accessor in `interp` for `sources`, `spread` and the `SPREAD_*` constants.
   - *Inlining a tier-0-only callee* (see "Wider frames" below): materialize the callee's frame, run it in tier 0, and resume compiled code in the caller.
@@ -131,8 +135,7 @@ With the JIT on, thirteen of the fifteen `just bench applications` programs run 
   - *A live slot frame as the callee's environment.* A closure made in a slot frame has an environment flagged `PENDING_FRAME` for as long as that frame runs on its slots, and `plan_callee` refuses such a callee ("may not outlive"). `eval_A` in `spectralnorm_alt_3` is in that state during the whole loop, which is why the benchmark takes about 1.1 s instead of 0.11 s. Lifting the owner frame before planning (`eval::lift_frame` on the enclosure from `plan_callee`, dropping the refusal for slot frames) was tried and is not enough: with `RY_JIT_LOG=1` the first compile of `eval_A_times_u`'s loops reports `0 inlined, 1 frames`, the code is dropped, and the recompile is refused because the loops would hand too many instructions to tier 0. The steps left are `GetFun eval_A` (not speculated from the enclosure), the `eval_A` call (`CallBuiltin`/`CallGeneric`), `SubAssignMatrix(Int, Int, Boxed)`, and `matrix`; `eval_A`'s own body `eval_A_cache[[i, j]]` is refused alone because `intrinsic_for` handles a one-index `[[` only. So the fix needs three parts: the callee's free variables read from the owner frame's slots (`eval::slot_binding`, `Heap::slot_owner`) or a lift that keeps the speculation valid; `speculate` resolving a function through a slot frame's environment; and a two-index `[[` intrinsic on a matrix. Check `spectralnorm_alt_3` with `RY_JIT_LOG=1` after any change to when a slot frame gets its environment.
   - *Tests.* An oracle case and a `test_tiers` case each for: a factory called twice (two enclosures, one body, a sibling callee); the callee rebound or shadowed between and during entries; `environment(f) <-`; another closure with the same code; the callee replaced by a builtin or by a closure with other code. Extend the cross-tier fuzz generator with shared bodies.
 - *The inline back-edge count.* A tier-0 loop pays for an installed tier at every backward jump. `jump_fast` hands each backward jump to the out-of-line `jump` while a tier is installed, which counts the back edge there (`crates/interp/src/bytecode.rs`). `mandelbrot_ascii` (public suite) compiles nothing, because its loops are refused for good, and runs about 10% slower with the JIT on than off (0.65 against 0.59 s), and `jump` is the largest single item of the JIT-on excess on the dsbench sample (13.5M of about 80M instructions). That the jump explains the whole 10% is unverified. Design: `jump_fast` runs `back_edge_due` itself when a tier is installed (one increment and two comparisons on the profile words, no call) and returns `None` only when the count is due or an interrupt is requested. A body refused for good already parks its count at `i32::MIN` (`back_edge`), so it never leaves the fast path again. Done means `mandelbrot_ascii` costs the same instructions with the JIT on and off (callgrind), and the JIT-on excess on a code-base sample drops by the `jump` share.
-- *Wider frames.* An inlined frame is refused for a callee without type feedback, one that takes or is passed `...`, and one with an instruction only tier 0 runs; on the code bases these are the hot small closures (`plan_callee` in `analysis.rs` lists every refusal, and `RY_JIT_LOG=1` prints them per call site). By expected gain:
-  - *No type feedback.* Tier 0 records only near a body's thresholds and never in a small closure it runs without an activation, so a hot one-line callee can have none. Plan such a callee from its caller's argument types instead of refusing: every instruction without feedback gets a guarded generic form whose failure hands off, and the first hand-off storm retires the code through the existing `count_handoff` path, after which the callee has run in tier 0 with recording on. The alternative, opening a recording window for the callee when the caller's plan refuses it and retrying the caller, needs a tier-0 change and a second compile.
+- *Wider frames.* An inlined frame is refused for a callee that takes or is passed `...` and one with an instruction only tier 0 runs; on the code bases these are the hot small closures (`plan_callee` in `analysis.rs` lists every refusal, and `RY_JIT_LOG=1` prints them per call site). By expected gain:
   - *`...`.* Two cases. A callee that only forwards `...` to a call the plan steps can bind it as tier 0 does: the frame's `...` slot holds the caller's argument references (`eval::direct_sources` already plans named and omitted arguments). A caller that passes its own `...` needs the length and names at compile time, which a shared plan does not have, so guard the `...` length at the frame start and hand off on a mismatch.
   - *Tier-0-only instructions in the callee.* A callee whose plan contains a step is refused when the step needs the frame. Let the step build the frame through the frame state (`enter_inlined` does this for a deoptimization) and continue in tier 0 to the callee's return, then resume compiled code in the caller through the resume record a stepped call already leaves. The cost model must charge such a frame as a call that is not removed.
 - After those, native forms for the hot builtins on boxed values ("Cheaper steps" below).
@@ -144,7 +147,7 @@ With the JIT on, thirteen of the fifteen `just bench applications` programs run 
 - Tier-1 handoffs: compiled code hands arithmetic it did not specialize back to tier 0 through
   `jit_step` (158,500 times in one `functional` body). Loads probe the frame inline
   (`decisions/jit-ssa.md`, "Tier 1 probes the frame inline for a variable load").
-- Cheaper steps. An instruction compiled code hands to tier 0 costs about 300 machine
+- Cheaper steps. An instruction compiled code hands to tier 0 costs about 180 machine
   instructions more than tier 0 running it (`STEP_COST`, `crates/jit/src/jit.rs`), so a loop
   that mostly steps is refused (`STEPPING_LOOP`): the `vasicek` kernel's loop (`stats::rnorm`,
   `rates[t, ]`, six vector operators), and the loops of `team_scores`, `records`, `report`
@@ -169,23 +172,18 @@ With the JIT on, thirteen of the fifteen `just bench applications` programs run 
   hot body over the compile threshold shows up as a few MB of peak RSS. Levers: a lighter first
   tier that does not start Cranelift, or code layout that keeps the code generator's pages
   together (function ordering).
-- Calls from tier-1 code while calling handlers are established, instead
-  of falling back to tier 0, pinned in `crates/jit/tests/test_tiers.rs` with a body hot under
-  `withCallingHandlers`.
 - Inlined closure calls without a frame are built (`decisions/jit-ssa.md`, "Tier 1 leaves compiled code
   through frame states", "An inlined call starts with one leaf helper call"). They pay where a
   compiled loop calls a small closure (`spectralnorm_alt_3`, `orders`), and nowhere else yet,
   because a call is only inlined into a caller tier 1 compiles. In order of expected gain:
-  - A lean entry from the dispatch loop into compiled code. An entry costs about 570 machine
-    instructions more than starting the body in tier 0 (`count_entry`, `entry_event`,
-    `jit::enter`, `compiled_for`, `jit::run`, the register file, the boxed result), which is why
-    a loop-free body under five native instructions is refused (`decisions/jit-ssa.md`, "A body
-    compiles only when its native work covers what compiled code costs"). The end
+  - A lean entry from the dispatch loop into compiled code. An entry costs about 380 machine
+    instructions more than starting the body in tier 0 (`ENTRY_COST`; the table "What compiled
+    code costs against tier 0" in `development/design/generic-tier.md`). The end
     shape jumps from the call instruction to a code pointer in the code header. Recalibrate
     `ENTRY_COST` (`crates/jit/src/jit.rs`) when it lands.
-  - Evaluate more arguments before an inlined call. An argument is computed eagerly only when
-    `lower_expression` can produce it as an unboxed scalar without a failure; anything else stays
-    a promise, and the frame is refused when the callee reads it ("an argument the callee reads
+  - Evaluate more arguments before an inlined call. An argument expression is computed eagerly only when
+    `lower_expression` can produce it as an unboxed scalar without a failure (a constant and a
+    variable are passed as they are); any other expression stays a promise, and the frame is refused when the callee reads it ("an argument the callee reads
     that may have an effect"). A pure expression that can fail (`x[[i]]`, `a / b` on vectors) or
     yields a boxed value can still run before the call, with an exit at the call instruction
     when it fails. An argument that mentions one of the callee's formals under a condition stays
@@ -196,16 +194,7 @@ With the JIT on, thirteen of the fifteen `just bench applications` programs run 
     boxed values, vector operators and calls of closures with `...`. Each needs a native form
     in tier 1 before removing the calls between them can pay.
   - Callees tier 1 cannot inline yet: one with `...`, a loop, a default that is code and is
-    read, a recursive call, a call that needs its own frame, and a callee without type feedback
-    (tier 0 runs the smallest closures without an activation and records nothing for them;
-    plan those from the argument types at the call).
-  - A direct call from compiled code when an inlined frame cannot start. `jit_enter_frame`
-    declines while a calling handler is established, the call instruction then deoptimizes the
-    whole root activation, and a root where that is frequent is recompiled without frames
-    (`NO_FRAMES`). A root that mostly runs under `withCallingHandlers` or `suppressWarnings`,
-    which includes every testthat expectation, therefore calls for real. Calling the callee
-    through the direct-call path instead keeps the root compiled with frames and makes
-    `NO_FRAMES` unnecessary.
+    read, a recursive call, and a call that needs its own frame.
   - Start an inlined frame without the one remaining helper call (`jit_enter_frame`, a leaf of
     about 50 instructions), then delete `Action::Inline` and `effects::effect_free_lookups`,
     which exist only because the frame path costs that call.
@@ -1231,12 +1220,10 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
 
 `crates/jit` compiles hot bodies and loops (`decisions/jit-ssa.md`, "The JIT tier"). In priority order:
 
-- **Tried and dropped: wider direct calls and pure inlined internals.** Accepting more argument
-  shapes in tier 1's direct calls (constants, pass-through variables, `list(...)` arguments) and
-  letting pure `.Internal`s such as `paste0` and `match` keep the frame's variables moved no
-  workload by 3% Ir: report +1.08%, functional -0.38%, testthat +0.11%. The native-share census
-  says why: package time sits in bodies that run too rarely to repay compiling, not in refused
-  direct calls. Raising native share there means compiling more bodies cheaply, not widening plans.
+- **Tried and dropped: pure inlined internals.** Letting pure `.Internal`s such as `paste0` and
+  `match` keep the frame's variables moved no workload by 3% Ir. The native-share census says
+  why: package time sits in bodies that run too rarely to repay compiling. Raising native share
+  there means compiling more bodies cheaply (`development/design/generic-tier.md`).
 
 - **An optimizing layer for LuaJIT-class loops (not queued; starts only on the orchestrator's go,
   after the call-setup enter/leave contract lands).** The current tracks (call setup, tier-0 lexical
@@ -1271,13 +1258,13 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
 - **Compiled-to-compiled calls of general functions.** A closure whose body is scalar arithmetic,
   comparisons, `if` and calls to other such closures compiles to a frameless native function
   (`decisions/jit-ssa.md`, "Native scalar functions: frameless calls with checks proven at compile time"), so `fib(30)` runs in 0.007 s against 1.12 s on GNU R.
-  Every other call from compiled code still goes through `jit_call`: an environment, a binding cell
+  Every other call from compiled code, apart from an inlined frame, is tier 0's own call
+  instruction: an environment, a binding cell
   per formal and the boxed arguments, and about 440 instructions per formal read (`jit_load`).
   Natives now loop, read plain vectors and inline small native callees (`decisions/jit-ssa.md`, "Native
   functions loop, read vectors, and inline small callees"). Next: local closures (`Ty::Closure` is
   only inlined today), vector results and `Array<T>` arguments (`annotations::plain_admits` rejects
-  an Array mask), then a direct entry with no environment for non-native compiled callees whose
-  frame cannot escape.
+  an Array mask), then inlined frames for the callees `development/design/generic-tier.md` lists under stage 4.
 - **Native function cache lifetime** (`crates/jit/src/native.rs`, `native_for`). A native roots
   its closure for the session, so a helper defined inside a function keeps that function's frame
   (and every large local in it) alive. A recompile after `still_resolves` fails leaks the old
@@ -1316,10 +1303,7 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   two-expectation `test_that` block about 60 ms against 28. The likely wins, in order: no binding
   cell or promise per argument for a closure whose frame cannot escape, a cached global function
   lookup, and less `Heap::root` and handle traffic per call.
-- **Static types as early profiles** (`r-runtime.md`, "How the static types feed the JIT"). A
-  direct call's result type comes from the callee's declared return type when the call site has no
-  feedback yet (`call_result_at` in `crates/jit/src/analysis.rs`), so typed `fib` compiles on its
-  first try, and typed Arrays compile to direct item loads and stores (`decisions/jit-ssa.md`, "The JIT tier", item "Arrays are their own JIT types"). A native call skips the argument and return checks because its
+- **Static types as early profiles** (`r-runtime.md`, "How the static types feed the JIT"). Typed Arrays compile to direct item loads and stores (`decisions/jit-ssa.md`, "The JIT tier", item "Arrays are their own JIT types"). A native call skips the argument and return checks because its
   parameter types satisfy the callee's masks at compile time (`annotations::return_admits`); other
   compiled calls still run `annotations::enter` and `check_return`. Typed and untyped code run
   equally fast: the profile proves the same facts the annotations do.
@@ -1695,7 +1679,7 @@ calls, `lookup_function` 4.4k, `alloc_vector` 4.8k, 117 function guards.
 
 ### Argument lists collected into `eval::Args`
 
-- Collecting into the `SmallVec<[Arg; 10]>` costs about sixty instructions a call in capacity checks, before any work. `eval::with_positional_args` writes up to eight untagged arguments into a stack array instead; the positional builtin handler and `jit::runtime::jit_call` use it (`decisions/builtins.md`, "Positional builtin calls read their arguments from the registers").
+- Collecting into the `SmallVec<[Arg; 10]>` costs about sixty instructions a call in capacity checks, before any work. `eval::with_positional_args` writes up to eight untagged arguments into a stack array instead; the positional builtin handler uses it (`decisions/builtins.md`, "Positional builtin calls read their arguments from the registers").
 - `bytecode::slot_subject_call` still collects into `eval::Args` (0.42% of bond_book_full in SmallVec code). It needs a different shape: its arguments carry tags, their count is known only after walking the call, and it stops early and drops the refcounts it took. Owned by the call path.
 
 ### Small-vector base builtins (open, tier 0)

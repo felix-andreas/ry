@@ -2735,7 +2735,7 @@ pub unsafe fn apply_closure_entering(
             header,
             missing,
             promised,
-            true,
+            Entering::Start,
         );
     }
     let value = run_on_heap_frame(call, function, args, sys_parent, supplied, Entry::Unchecked)?;
@@ -3204,7 +3204,7 @@ pub unsafe fn bind_plan(
         header as u32,
         missing,
         promised,
-        true,
+        Entering::Start,
     )
 }
 
@@ -3680,7 +3680,7 @@ pub unsafe fn run_frame(
         header,
         missing,
         promised,
-        true,
+        Entering::Start,
     )?;
     if entered.header == crate::NO_SLOTS {
         return Ok(entered.value);
@@ -3710,10 +3710,22 @@ pub struct Entered {
     pub depth: u32,
 }
 
+/// Where a call stands when [`enter`] pushes its frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Entering {
+    /// The call starts, so one that needs the general path can run whole.
+    Start,
+    /// The call is half run: compiled code rebuilds the frame of an inlined call, whose start
+    /// already refused what the general path would have refused and already counted the call
+    /// for a profile summary. The frame is pushed whatever the session records or debugs.
+    Midway,
+}
+
 /// Pushes the frame of a call of `function` on the slot frame at `header`, whose arguments are
 /// already bound, without running its body, so an interpreter loop can run the body in place
-/// rather than recursing. A call that needs what only the general path does (the boundary-call
-/// recorder, the debugger, the object-system refusal, a namespace load) runs whole here.
+/// rather than recursing. A call that starts and needs what only the general path does (the
+/// boundary-call recorder, the debugger, the object-system refusal, a namespace load) runs
+/// whole here.
 ///
 /// From a successful return until [`leave`], the frame is the slot owner. The slot frame's
 /// registers belong to the call: [`leave`] releases them, and so does `enter` itself on an
@@ -3728,13 +3740,14 @@ pub unsafe fn enter(
     header: u32,
     missing: u64,
     promised: u64,
-    counted: bool,
+    entering: Entering,
 ) -> R<Entered> {
     let state = interp();
     // A set hook covers the recorder, the debugger and the object-system refusal, so a call
     // that nothing watches makes one test for the three.
     let hooks = activity::hooks();
-    if (hooks != 0 || function == state.namespace_loader)
+    if entering == Entering::Start
+        && (hooks != 0 || function == state.namespace_loader)
         && (hooks & activity::CAPTURE != 0
             || !state.object_systems
             || function == state.namespace_loader
@@ -3783,7 +3796,7 @@ pub unsafe fn enter(
         header,
         missing,
         caller,
-        counted,
+        entering == Entering::Start,
     );
     let defaults = sampled.and_then(|()| match promised {
         0 => Ok(()),

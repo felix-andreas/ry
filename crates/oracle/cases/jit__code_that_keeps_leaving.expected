@@ -1,0 +1,24 @@
+[stdout]
+| results
+|  -1  12 
+| 267 133 
+| results
+|  -1 
+| 400 
+| [1] 80200
+| kinds
+|            a flag a number     text      yes 
+|      200      100      100      100      100 
+| [1] "AB-CDE 3 6 6"
+| [1] "-NA 1 2 3"
+| [1] "KEY-VALUE1 4 8 10" "KEY-VALUE2 4 8 10" "KEY-VALUE3 4 8 10"
+| [4] "KEY-VALUE4 4 8 10"
+| [1] 540900
+| [1] "even"
+| [1] 9
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 9L

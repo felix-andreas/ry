@@ -37,7 +37,6 @@ use {
         },
     },
     interp::{
-        annotations,
         bytecode::{self, Arith, Op, interp_layout},
         values,
     },
@@ -772,16 +771,6 @@ impl<'p> Translator<'p> {
                 self.traverse(position, &before, action)?;
                 self.set_visible(&before, true);
             }
-            Action::Call {
-                steps,
-                function,
-                call,
-                args,
-                entry,
-                dst,
-            } => {
-                self.direct_call(position, before, steps, function, call, args, entry, dst)?;
-            }
             Action::Frame {
                 steps,
                 callee,
@@ -1504,8 +1493,8 @@ impl<'p> Translator<'p> {
                 Some(self.builder.ins().iconst(I32, 1))
             }
             Effect::PureUnlessObserved => {
-                // No calling handler is established while an inlined call has no frame, so
-                // there only an operand that dispatches could run R code.
+                // An instruction run for an inlined call signals nothing while the call has
+                // no frame, so there only an operand that dispatches could run R code.
                 let mut any = if inlined {
                     self.builder.ins().iconst(I32, 0)
                 } else {
@@ -1702,123 +1691,6 @@ impl<'p> Translator<'p> {
         Ok(())
     }
 
-    /// Calls a closure with arguments evaluated in compiled code. The callee may reach this
-    /// frame, so the variables are written back before the call and forgotten after it.
-    #[allow(clippy::too_many_arguments)]
-    unsafe fn direct_call(
-        &mut self,
-        position: usize,
-        before: StateRef<'p>,
-        steps: &'p [(Action<'p>, StateId)],
-        function: Sexp,
-        call: Sexp,
-        args: &[Argument],
-        entry: annotations::Entry,
-        dst: (usize, Ty),
-    ) -> Result<(), Refusal> {
-        let pc = self.frame.plan.insts[position].pc;
-        let after = self.after_with_boxed(position, Some(dst.0))?;
-        let next = self.next_pc(position)?;
-        let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
-        let invalidated = self.deopt(next, after.0, after.1, position + 1, reason::SPECULATION);
-        let continued = self.builder.create_block();
-        // A calling handler could run R code during the callee, before it forces an argument
-        // that this call evaluates early, so then tier 0's instruction makes the call lazily.
-        // Code running under a test harness always has handlers, which is why this stays in
-        // compiled code rather than leaving for tier 0.
-        let handlers = self
-            .call(
-                runtime::jit_handlers_present as *const () as usize,
-                &[],
-                Some(I32),
-                &[],
-            )
-            .ok_or(Refusal("a helper without a result"))?;
-        let observed = self.builder.create_block();
-        let unobserved = self.builder.create_block();
-        self.builder
-            .ins()
-            .brif(handlers, observed, &[], unobserved, &[]);
-        self.builder.switch_to_block(observed);
-        self.box_reads(position, &before);
-        self.flush_all(&before, failed);
-        let validate = self.builder.ins().iconst(I32, 1);
-        let result = self.call_step(pc, validate)?;
-        self.branch_on_outcome(result, continued, failed, invalidated);
-        self.builder.switch_to_block(unobserved);
-        for &(step, state) in steps {
-            self.action(position, self.frame.plan.state(state), step)?;
-        }
-        self.flush_all(&before, failed);
-        let buffer = self.builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            (16 * args.len().max(1)) as u32,
-            3,
-        ));
-        for (index, argument) in args.iter().enumerate() {
-            let (kind, bits) = match *argument {
-                Argument::Slot(slot) => (representation::BOXED, self.load_slot_cell(slot)),
-                Argument::Unboxed { register, ty } => {
-                    let value = self.use_register(register, ty);
-                    let (kind, bits) = match ty {
-                        Ty::Dbl => (
-                            representation::DOUBLE,
-                            self.builder.ins().bitcast(I64, MemFlagsData::new(), value),
-                        ),
-                        Ty::Int => (
-                            representation::INTEGER,
-                            self.builder.ins().sextend(I64, value),
-                        ),
-                        _ => (
-                            representation::LOGICAL,
-                            self.builder.ins().sextend(I64, value),
-                        ),
-                    };
-                    (kind, bits)
-                }
-            };
-            let kind = self.builder.ins().iconst(I64, kind as i64);
-            self.builder
-                .ins()
-                .stack_store(I64, kind, buffer, (16 * index) as i32);
-            self.builder
-                .ins()
-                .stack_store(I64, bits, buffer, (16 * index + 8) as i32);
-        }
-        let pointer = self.builder.ins().stack_addr(I64, buffer, 0);
-        let function = self.builder.ins().iconst(I64, function.as_ptr() as i64);
-        let call = self.builder.ins().iconst(I64, call.as_ptr() as i64);
-        let count = iconst(&mut self.builder, args.len());
-        let register = iconst(&mut self.builder, dst.0);
-        let signature = match entry {
-            annotations::Entry::Unchecked => std::ptr::null_mut(),
-            annotations::Entry::Checked(None) => values::nil().as_ptr(),
-            annotations::Entry::Checked(Some(signature)) => signature.as_ptr(),
-        };
-        let signature = self.builder.ins().iconst(I64, signature as i64);
-        let result = self
-            .call(
-                runtime::jit_call as *const () as usize,
-                &[I64, I64, I64, I64, I64, I64, I64],
-                Some(I32),
-                &[
-                    self.frame.activation,
-                    function,
-                    call,
-                    pointer,
-                    count,
-                    signature,
-                    register,
-                ],
-            )
-            .ok_or(Refusal("a helper without a result"))?;
-        self.branch_on_outcome(result, continued, failed, invalidated);
-        self.builder.switch_to_block(continued);
-        self.forget_slots(&before);
-        self.refine(dst.0, dst.1, next, after, position + 1);
-        Ok(())
-    }
-
     /// Runs an inlined closure call ([`Action::Frame`]): evaluates the arguments, starts the
     /// call without a frame, and translates the callee's plan in place, on a register window
     /// and variables of its own. Every `Return` of the callee jumps to one block, which
@@ -1890,7 +1762,7 @@ impl<'p> Translator<'p> {
                     },
                 },
                 Passing::Promise | Passing::Omitted => Passed::Lazy,
-                Passing::Default(value) => Passed::Literal(value),
+                Passing::Literal(value) => Passed::Literal(value),
             };
             sources.push(match argument {
                 _ if positions.get(index).is_none_or(|&position| position < 0) => {
@@ -3569,6 +3441,7 @@ impl<'p> Translator<'p> {
             let loaded = self.builder.create_block();
             self.builder.ins().brif(unloaded, load, &[], loaded, &[]);
             self.builder.switch_to_block(load);
+            self.expose_all(before, failed);
             let slot_constant = iconst(&mut self.builder, slot);
             let result = self
                 .call(
@@ -3582,14 +3455,16 @@ impl<'p> Translator<'p> {
                 self.builder
                     .ins()
                     .icmp_imm_s(IntCC::Equal, result, outcome::LOAD_FAILED as i64);
-            let not_error = self.builder.create_block();
-            self.builder.ins().brif(error, failed, &[], not_error, &[]);
-            self.builder.switch_to_block(not_error);
             let invalid = self.builder.ins().icmp_imm_s(
                 IntCC::Equal,
                 result,
                 outcome::LOAD_INVALIDATED as i64,
             );
+            let leaving = self.builder.ins().bor(error, invalid);
+            self.settle_exposed(before, leaving);
+            let not_error = self.builder.create_block();
+            self.builder.ins().brif(error, failed, &[], not_error, &[]);
+            self.builder.switch_to_block(not_error);
             let valid = self.builder.ins().bxor_imm_u(invalid, 1);
             self.guard(valid, mismatch);
             let vector = self.load_slot_cell(slot);
@@ -4075,8 +3950,9 @@ impl<'p> Translator<'p> {
     // Variables.
 
     /// Loads a slot whose runtime status may be "not loaded", checking the value has type `ty`.
-    /// A `forcing` load may evaluate a default argument in this frame, so the variables are
-    /// written back before it and forgotten after it.
+    /// A load that reaches the runtime may force a promise, whose code can look at this frame,
+    /// so the variables are written back before it. A `forcing` load may evaluate a default
+    /// argument in this frame, so they are forgotten after it too.
     unsafe fn load_slot(
         &mut self,
         position: usize,
@@ -4126,9 +4002,7 @@ impl<'p> Translator<'p> {
             self.probe_variable(symbol, lookup, slow, merged);
             self.builder.switch_to_block(slow);
         }
-        if forcing {
-            self.flush_all(before, failed);
-        }
+        self.expose_all(before, failed);
         let pc_constant = iconst(&mut self.builder, pc);
         let slot_constant = iconst(&mut self.builder, slot);
         let result = self
@@ -4143,13 +4017,15 @@ impl<'p> Translator<'p> {
             self.builder
                 .ins()
                 .icmp_imm_s(IntCC::Equal, result, outcome::LOAD_FAILED as i64);
-        let not_error = self.builder.create_block();
-        self.builder.ins().brif(error, failed, &[], not_error, &[]);
-        self.builder.switch_to_block(not_error);
         let invalid =
             self.builder
                 .ins()
                 .icmp_imm_s(IntCC::Equal, result, outcome::LOAD_INVALIDATED as i64);
+        let leaving = self.builder.ins().bor(error, invalid);
+        self.settle_exposed(before, leaving);
+        let not_error = self.builder.create_block();
+        self.builder.ins().brif(error, failed, &[], not_error, &[]);
+        self.builder.switch_to_block(not_error);
         let valid = self.builder.ins().bxor_imm_u(invalid, 1);
         let value = self.load_slot_cell(slot);
         if let Some(dst) = dst {
@@ -4863,7 +4739,42 @@ impl<'p> Translator<'p> {
         }
     }
 
+    /// Writes every dirty slot back before a load that reaches the runtime, where a forced
+    /// promise's code can look at the frame. A scalar held in variables stays dirty, as
+    /// [`crate::analysis::State`]'s `exposed` says.
+    unsafe fn expose_all(&mut self, state: &StateRef<'p>, failed: Label) {
+        for slot in 0..state.slots.len() {
+            self.write_slot(state, slot, failed, !state.slots[slot].ty.in_variables());
+        }
+    }
+
+    /// Marks the scalars [`Self::expose_all`] wrote back and left dirty as clean when the load
+    /// hands the activation to tier 0: the exit writes dirty variables back, which would undo
+    /// what a forced promise assigned to one.
+    fn settle_exposed(&mut self, state: &StateRef<'p>, leaving: Value) {
+        for slot in 0..state.slots.len() {
+            let current = state.slots[slot];
+            if !current.may_be(status::DIRTY) || !current.ty.in_variables() {
+                continue;
+            }
+            let status = self.status(slot);
+            let dirty = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, status, status::RUNTIME_DIRTY);
+            let written = self.builder.ins().band(dirty, leaving);
+            let local = self.builder.ins().iconst(I32, status::RUNTIME_LOCAL);
+            let settled = self.builder.ins().select(written, local, status);
+            self.set_status(slot, settled);
+        }
+    }
+
     unsafe fn flush_slot(&mut self, state: &StateRef<'p>, slot: usize, failed: Label) {
+        self.write_slot(state, slot, failed, true);
+    }
+
+    /// Writes `slot` back if it is dirty, and marks it clean when `clean` is set.
+    unsafe fn write_slot(&mut self, state: &StateRef<'p>, slot: usize, failed: Label, clean: bool) {
         let current = state.slots[slot];
         if !current.may_be(status::DIRTY) {
             return;
@@ -4880,8 +4791,10 @@ impl<'p> Translator<'p> {
         let result = self.call_flush(slot, current.ty);
         let ok = self.builder.ins().icmp_imm_s(IntCC::NotEqual, result, 0);
         self.guard(ok, failed);
-        let clean = self.builder.ins().iconst(I32, status::RUNTIME_LOCAL);
-        self.set_status(slot, clean);
+        if clean {
+            let local = self.builder.ins().iconst(I32, status::RUNTIME_LOCAL);
+            self.set_status(slot, local);
+        }
         self.builder.ins().jump(done, &[]);
         self.builder.switch_to_block(done);
     }

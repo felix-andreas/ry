@@ -1459,12 +1459,12 @@ fn inlined_frames_keep_passed_formals_lazy() {
     assert!(inlined >= 3, "only {inlined} callers inlined a frame");
 }
 
-/// A call that cannot start without its frame says nothing against the callee when the reason
-/// is the caller's surroundings, as under a calling handler. Rare ones change nothing. Frequent
-/// ones recompile the caller to call its callees, which stay inlinable everywhere else, and
-/// the caller keeps its compiled code however long that goes on.
+/// A calling handler does not stop an inlined call: the call runs without its frame however
+/// often a handler is established around it. What a handler sees of a condition signalled
+/// inside an inlined call needs base R, so the oracle case `jit__inlined_frames_under_handlers`
+/// pins it.
 #[test]
-fn inlined_frames_outlast_calling_handlers() {
+fn inlined_frames_run_under_calling_handlers() {
     with_interpreter(|| unsafe {
         jit::install_mode(Mode::Force);
         run("first <- function(x) { if (x < 0) stop('negative'); x + 1 }
@@ -1472,8 +1472,6 @@ fn inlined_frames_outlast_calling_handlers() {
              third <- function(x) { if (x < 0) stop('negative'); x - 3 }
              fourth <- function(x) { if (x < 0) stop('negative'); x / 4 }
              often <- function(x) first(x) + second(x) + third(x) + fourth(x)
-             rarely <- function(x) first(x) + second(x) + third(x) + fourth(x)
-             later <- function(x) first(x) * second(x)
              handled <- function(f) {
                .Internal(.addCondHands('warning', list(function(w) NULL), globalenv(), NULL, TRUE))
                f(1)
@@ -1481,64 +1479,74 @@ fn inlined_frames_outlast_calling_handlers() {
         for callee in ["first", "second", "third", "fourth"] {
             run(&format!("for (i in 1:5) {callee}(1)"));
         }
-        let function = |name: &str| {
-            let parsed = lower::parse_text(name, "<test>").ok()?;
-            eval::eval(parsed.element(0), values::global_env()).ok()
-        };
-        let frames =
-            |name: &str| function(name).map_or(0, |function| jit::inlined_frames(function));
-        let compiled = |name: &str| {
-            function(name).is_some_and(|function| {
-                function.cdr().cdr().element(interp::bytecode::TIER1) != values::nil()
-            })
+        let frames = || {
+            let parsed = lower::parse_text("often", "<test>").ok()?;
+            let function = eval::eval(parsed.element(0), values::global_env()).ok()?;
+            Some(jit::inlined_frames(function))
         };
         let expected = run("often(1)");
-        for name in ["often", "rarely"] {
-            for _ in 0..3 {
-                assert_eq!(run(&format!("{name}(1)")), expected);
-            }
-            assert_eq!(frames(name), 4, "{name} inlines its four calls");
+        for _ in 0..3 {
+            assert_eq!(run("often(1)"), expected);
         }
+        assert_eq!(frames(), Some(4), "the caller inlines its four calls");
 
-        // A callee's rare branch leaves compiled code from inside the inlined call.
         let before = jit::deoptimizations();
-        assert_eq!(run("often(-1)"), run("first(-1)"));
-        assert!(jit::deoptimizations() > before);
-
-        for index in 0..400 {
-            let call = if index % 20 == 0 {
-                "handled(rarely)"
-            } else {
-                "rarely(1)"
-            };
-            assert_eq!(run(call), expected);
-        }
-        assert_eq!(frames("rarely"), 4, "a rare handler costs no frame");
-
         for _ in 0..200 {
             assert_eq!(run("handled(often)"), expected);
         }
-        assert!(compiled("often"), "the caller keeps compiled code");
+        assert_eq!(frames(), Some(4), "a handler costs no frame");
         assert_eq!(
-            frames("often"),
-            0,
-            "under a handler the caller calls its callees"
+            jit::deoptimizations(),
+            before,
+            "a handler makes no inlined call leave"
         );
-        let before = jit::deoptimizations();
-        for _ in 0..100 {
-            assert_eq!(run("handled(often)"), expected);
-        }
-        assert_eq!(jit::deoptimizations(), before);
 
-        for _ in 0..3 {
-            run("later(1)");
-        }
-        assert_eq!(
-            frames("later"),
-            2,
-            "the callees are inlined in other callers"
+        // A callee's rare branch leaves compiled code from inside the inlined call, with or
+        // without a handler around it.
+        assert_eq!(run("often(-1)"), run("first(-1)"));
+        assert_eq!(run("handled(function(x) often(-x))"), run("first(-1)"));
+        assert!(jit::deoptimizations() > before);
+        jit::install_mode(Mode::Off);
+    });
+}
+
+/// A body stops leaving compiled code once it has left on most of its entries, after 16 exits
+/// for each reason. Where an inlined call needs its frame every time, as a class test that
+/// always takes the branch its callee's profile never saw, the body recompiles with the callee
+/// called in tier 0. Where an error unwinds through the body on every call, as under a
+/// `tryCatch` that catches one each time, the code is retired and the body runs in tier 0: the
+/// caller is counted once for its inlined callee and once for itself, and the callee once.
+#[test]
+fn a_body_that_leaves_on_every_call_is_retired() {
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::Force);
+        run(
+            "kind <- function(x) { if (x < 0) return('negative'); 'other' }
+             test <- function(x) { if (x < 0) return(TRUE); FALSE }
+             classify <- function(x) { label <- kind(x); if (test(x)) label else 'none' }
+             raise <- function(x) { if (x < 0) stop('negative'); x }
+             failing <- function(x) { value <- raise(x); value + 1 }",
         );
-        assert_eq!(frames("rarely"), 4);
+        for callee in ["kind", "test", "raise"] {
+            run(&format!("for (i in 1:5) {callee}(1)"));
+        }
+        for (caller, most, retired) in [("classify", 16, false), ("failing", 48, true)] {
+            for _ in 0..3 {
+                run(&format!("{caller}(1)"));
+            }
+            assert!(has_compiled_code(caller), "{caller} compiles");
+            let expected = run(&format!("{caller}(-1)"));
+            let before = jit::deoptimizations();
+            for _ in 0..500 {
+                assert_eq!(run(&format!("{caller}(-1)")), expected);
+            }
+            let left = jit::deoptimizations() - before;
+            assert!(
+                left <= most,
+                "{caller} left compiled code {left} times in 500 calls"
+            );
+            assert_eq!(has_compiled_code(caller), !retired, "{caller}");
+        }
         jit::install_mode(Mode::Off);
     });
 }
@@ -2078,6 +2086,82 @@ fn a_hot_body_that_runs_rarely_waits_to_compile() {
             has_compiled_code("rare"),
             "rare did not compile: {:?}",
             profile_of()
+        );
+        jit::install_mode(Mode::Off);
+    });
+}
+
+/// A call reads each of its arguments from the frame once, so the four additions of `thin`
+/// save less than entering compiled code costs, and it runs in tier 0 however hot it is.
+/// `thick` adds as much to a value it has read and compiles. Both take `...` so that the
+/// loop's calls do not inline them.
+#[test]
+fn a_body_that_only_reads_its_arguments_does_not_compile() {
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::On);
+        let threshold = interp::bytecode::tier().map_or(0, |tier| tier.entry_threshold);
+        run("thin <- function(a, b, d, e, g, ...) a + b + d + e + g");
+        run("thick <- function(a, ...) a + a + a + a + a + a + a + a + a");
+        run(&format!(
+            "for (i in 1:{}) {{ thin(i, 1, 2, 3, 4); thick(i) }}",
+            2 * threshold
+        ));
+        assert!(!has_compiled_code("thin"), "thin compiled");
+        assert!(has_compiled_code("thick"), "thick did not compile");
+        jit::install_mode(Mode::Off);
+    });
+}
+
+/// A loop compiles when the backward jumps its body is expected to take repay the compile.
+/// `short` and `long` run the same loop, which saves one native instruction per pass. `short`
+/// compiles at the back-edge threshold. `long` holds enough other code that compiling it costs
+/// more than the loop saves within the horizon, so it is refused, not for good, and compiles
+/// once it has taken the backward jumps that would have repaid the compile.
+#[test]
+fn a_loop_compiles_once_its_backward_jumps_repay_the_body() {
+    with_interpreter(|| unsafe {
+        use interp::bytecode::{PROFILE, profile};
+        jit::install_mode(Mode::On);
+        let threshold = interp::bytecode::tier().map_or(0, |tier| tier.back_edge_threshold);
+        let profile_of = |name: &str| {
+            let function = values::install(name)
+                .and_then(|symbol| eval::eval(symbol, values::global_env()))
+                .unwrap_or_else(|_| panic!("{name} is not defined"));
+            values::ints(function.cdr().cdr().element(PROFILE)).to_vec()
+        };
+        let padding: String = (0..60)
+            .map(|index| format!("p{index} <- c(n, {index}); "))
+            .collect();
+        run("short <- function(n) { last <- 0; for (j in 1:n) last <- c(j, j); last }");
+        run(&format!(
+            "long <- function(n) {{ if (n < 0) {{ {padding} }}; last <- 0; \
+             for (j in 1:n) last <- c(j, j); last }}"
+        ));
+        run("short(2); short(2); long(2); long(2)");
+        run(&format!("short({})", 2 * threshold));
+        assert!(
+            has_compiled_code("short"),
+            "short did not compile: {:?}",
+            profile_of("short")
+        );
+        // Past the wait a long body starts with, so the loop has asked once.
+        run(&format!("long({})", 20 * threshold));
+        let counters = profile_of("long");
+        assert!(!has_compiled_code("long"), "long compiled: {counters:?}");
+        assert!(
+            counters[profile::TIER_STATE] >= 0 && counters[profile::BACK_EDGES] < 0,
+            "long is not waiting: {counters:?}"
+        );
+        let wait = threshold - counters[profile::BACK_EDGES];
+        assert!(
+            wait < 400 * threshold,
+            "long waits for more backward jumps than the test runs: {counters:?}"
+        );
+        run(&format!("long({})", wait + threshold));
+        assert!(
+            has_compiled_code("long"),
+            "long did not compile: {:?}",
+            profile_of("long")
         );
         jit::install_mode(Mode::Off);
     });

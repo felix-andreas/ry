@@ -931,11 +931,12 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   operand's type is still unknown (the result of an untyped closure, say), the first-call compile
   is declined without counting against the body, which then follows the thresholds.
 - **What it compiles.** A hot body compiles only when compiled code would save work. The planner
-  counts three kinds of work in the body: instructions it runs natively, calls it removes or
-  makes direct, and instructions it hands back to tier 0 one at a time. A native instruction
-  saves about 130 machine instructions and a removed call about 1000. A step back to tier 0 costs
-  about 300 more than tier 0 running the instruction itself, and entering compiled code costs
-  about 570 more than starting the body in tier 0. A loop-free body whose balance is not positive
+  counts four kinds of work in the body: instructions it runs natively, calls it removes,
+  calls it inlines with a frame, and instructions it hands back to tier 0 one at a time. A native
+  instruction saves about 130 machine instructions, a removed call about 1000, and an inlined
+  frame about 450 plus what its callee's plan saves. A step back to tier 0 costs about 180 more
+  than tier 0 running the instruction itself, and entering compiled code costs about 380 more
+  than starting the body in tier 0. A loop-free body whose balance is not positive
   stays in tier 0 for good, `function(x) x^2` for one, and so does a loop whose iterations would
   mostly step, where an instruction in an inner loop weighs eight times one in the loop around
   it. A refused body keeps its type feedback, so a compiled caller can still inline it, and its
@@ -968,22 +969,18 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   with no interpreter frame, environment or promises, behind a guard on the callee's code. The
   call must bind as tier 0 would bind it without code running: positional, named and omitted
   arguments and literal defaults qualify, and `...`, a default that is code and is read, a loop
-  in the callee, a recursive call and a callee without type feedback do not. Every argument the
-  callee reads is computed before the call as an unboxed scalar, and the callee's free variables
+  in the callee and a recursive call do not. A callee without type feedback is planned from its
+  instructions alone, with boxed values. Every argument the callee reads is evaluated before the
+  call, is a constant passed as the object the call holds, or is a formal passed on unread, and
+  the callee's free variables
   are read from its enclosing frames inline. The callee's frame exists only in the frame states
   of its exits: when one is taken, the runtime builds the interpreter frames of the inlined
   calls from the saved values and tier 0 continues inside the callee. The start of such a call
-  is one leaf helper that checks what would make a real frame necessary (a calling handler, the
-  debugger, a changed closure), and when it declines, tier 0 runs the call instruction.
-- **Other calls.** A call to an effect-free closure whose binding was resolved at compile time is direct:
-  effect-free arguments are evaluated eagerly and passed as already forced promises, bound by
-  position without the general matcher. Evaluating early is invisible only if nothing can assign
-  what an argument reads before the callee forces it, so the callee must be effect-free (the fact
-  tier 0 also reads, `crates/interp/src/effects.rs`): its body and defaults call only itself, a
-  fixed list of base builtins and other effect-free closures, and assign only its own locals.
-  When a calling handler is established, a handler could run R code in between, so compiled code
-  then runs tier 0's call instruction, which makes the call lazily, and continues after it. A test
-  harness always has handlers, so leaving the body for tier 0 there would interpret most of it. A call of a closure that computes a scalar from scalars without
+  is one leaf helper that checks what would make a real frame necessary (the debugger, a changed
+  closure), and when it declines, tier 0 runs the call instruction. A calling handler does not
+  decline it, because an instruction run for a call without a frame signals nothing and its exit
+  repeats the instruction in tier 0 under the rebuilt frames.
+- **Other calls.** A call of a closure that computes a scalar from scalars without
   effects is inlined on unboxed registers, whether the closure is made in the same body or bound
   globally (then guarded by the binding epoch), and whether its body is one expression or a block
   of local assignments ending in a value or `return(value)`. A failed guard inside the inlined
@@ -1022,8 +1019,8 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   more with its compile excluded, while tier 0's whole dispatch is about 3.1% of that workload,
   which bounds what any baseline could save. It was deleted, together with writing its code into
   the code image (`decisions/jit-ssa.md`, "No baseline tier, and code images hold bytecode only").
-- **Not yet built:** calls from compiled code straight into the callee's compiled code (a direct
-  call still enters through tier 0's call path and allocates a frame and forced promises), result
+- **Not yet built:** calls from compiled code straight into the callee's compiled code (a call
+  compiled code cannot inline runs as tier 0's own call instruction, which allocates a frame), result
   types for multi-index subscripts such as `m[i, ]`, and freeing the machine code of invalidated
   bodies.
 
@@ -1180,7 +1177,7 @@ native code are small. The lowest per-suite ceilings are `lgr`'s 7.7x (its `Sys.
 | **4. Optimizing tiers** | | | | |
 | Per-argument-type native functions for scalar closures | Julia | built | recursive scalar functions | `crates/jit/src/native.rs` |
 | Baseline compiler from bytecode, no optimization | V8 Sparkplug | built, measured and removed | warm code under the 3000-entry threshold. It compiled in a median of 28 µs per body, but ran 6.7% more instructions than tier 0 on `testthat_full` (3.1% with its compile excluded), while tier 0's whole dispatch is 2.66% of that workload (about 3.1% with pc bookkeeping), so no call-threaded baseline can pay off | `decisions/jit-ssa.md`, "No baseline tier, and code images hold bytecode only" |
-| A lower Cranelift threshold | HotSpot, .NET tiering | measured, kept at 3000 entries; large bodies wait in proportion to their size, and a loop-free body compiles only when its call rate over the recording window (its share of the session's closure calls) promises enough calls to repay the compile | tier 1 under 3% of the time on eight of nine workloads. Callgrind geomean against JIT off: 1000 entries 1.015, 2000 1.016, 3000 1.013, 6000 1.010, 10,000 1.010, so the threshold does not decide on against off. The rate check took testthat's JIT-on cost over JIT off from 17.6M to 5.6M instructions and kept every functional callback compiling | `SIZE_WAIT_WORDS` and `repays` in `crates/jit/src/jit.rs` |
+| A lower Cranelift threshold | HotSpot, .NET tiering | measured, kept at 3000 entries; large bodies wait in proportion to their size, and a loop-free body compiles only when its call rate over the recording window (its share of the session's closure calls) promises enough calls to repay the compile | tier 1 under 3% of the time on eight of nine workloads. Callgrind geomean against JIT off: 1000 entries 1.015, 2000 1.016, 3000 1.013, 6000 1.010, 10,000 1.010, so the threshold does not decide on against off. The rate check took testthat's JIT-on cost over JIT off from 17.6M to 5.6M instructions and kept every functional callback compiling | `SIZE_WAIT_WORDS` and `unpaid` in `crates/jit/src/jit.rs` |
 | Cross-closure inlining with deoptimization | Ř (PIR) | partly built: effect-free closures, single-expression or block bodies, guarded on callee identity; a failed guard reruns the whole call in tier 0. Callees with effects, which need frame materialization, are planned | calls from compiled code re-enter tier 0 | `inline`, `lower_block` in `crates/jit/src/analysis.rs` |
 | Escape analysis, scalar replacement, vector fusion | Graal, goose | planned | scalar and intermediate vector allocation | |
 | Per-signature numeric specialization of vector code | Julia | planned | | |
@@ -1292,7 +1289,7 @@ written, and compiling ahead decides which of these facts are known before the f
 | Part | Status | Owner |
 | --- | --- | --- |
 | Slot frames, environments made on demand and filled one variable at a time | built (`slot-frames.md`) | frames |
-| A direct calling convention between closures | built from tier 0 to tier 0; machine to machine planned | frames (tier 0), JIT (machine code) |
+| A direct calling convention between closures | built from tier 0 to tier 0; compiled code inlines a callee or runs tier 0's call | frames (tier 0), JIT (machine code) |
 | Unboxed length-1 doubles, integers and logicals in compiled code | built inside tier 1 and native functions; across calls planned | JIT |
 | Whole-package compilation at install, with entry guards and deoptimization to tier 0 | measured and removed for untyped closures (`decisions/jit-ssa.md`, "No baseline tier, and code images hold bytecode only"); strict typed closures planned | JIT |
 
@@ -1323,9 +1320,10 @@ argument's compiled code and come from a pool, so they allocate nothing and need
 A reference becomes a promise object only when something keeps the argument past the call. A call
 that passes `...` on appends the arguments the caller's `...` slot collected.
 
-Between machine code (planned), a call of a sibling closure in a locked namespace is a direct
-machine call to the callee's entry for the argument types at hand, guarded once per call. Pure arguments (`native::pure_value`) are passed evaluated and unboxed; the rest are
-passed as promises over the caller's frame, exactly as tier 0 passes them.
+Machine code has no calling convention of its own for a general closure. A call from compiled
+code is inlined (as a native call, without a frame, or with a frame; "What it compiles" above)
+or runs as tier 0's call instruction, which the measurements in `generic-tier.md` show to cost
+less than a separate entry from machine code.
 
 **What makes the environment.** A slot frame has no environment object until something names the
 frame: a promise or a closure made in it, `parent.frame()`, `sys.function`, S3 and S4 dispatch, a

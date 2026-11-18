@@ -203,6 +203,9 @@ unsafe fn class_names(class: Sexp, wanted: &[u8]) -> bool {
 /// handlers for the error's classes, jumps to an exiting one, and otherwise runs the default
 /// error handler. The result is the unwind to propagate.
 pub unsafe fn signal_error(failure: RError) -> Unwind {
+    if let Some(unwind) = waits_for_frame() {
+        return unwind;
+    }
     // GNU R formats a message into a C buffer, so it ends at the first NUL.
     let mut message = failure.message;
     if let Some(nul) = message.find('\0') {
@@ -603,9 +606,8 @@ pub unsafe fn warning_call(call: Sexp, message: impl Into<String>) -> R<()> {
         }
     }
     // The hook is R code, which a call without a frame cannot run.
-    if interp().signalling != Signalling::Immediate {
-        interp().signalling = Signalling::Abandoned;
-        return Err(error("a warning waits for its call's frame"));
+    if let Some(unwind) = waits_for_frame() {
+        return Err(unwind);
     }
     let hook = values::install(".signalSimpleWarning")?;
     if crate::heap()
@@ -965,6 +967,9 @@ unsafe fn do_signal_condition(call: &Call<'_>) -> R<Sexp> {
 /// calling handler in turn from the top of the stack, until an exiting one unwinds to its
 /// `tryCatch`. Returns `NULL` when none unwinds.
 pub(crate) unsafe fn signal_condition(condition: Sexp, condition_call: Sexp) -> R<Sexp> {
+    if let Some(unwind) = waits_for_frame() {
+        return Err(unwind);
+    }
     activity::count(Counter::ConditionsSignalled);
     let saved = interp().handlers.clone();
     let _saved = set_aside(saved.clone(), None);
@@ -987,6 +992,17 @@ pub(crate) unsafe fn signal_condition(condition: Sexp, condition_call: Sexp) -> 
     }
     interp().handlers = saved;
     Ok(nil())
+}
+
+/// The unwind a signal gives up with while an instruction runs for a closure call that has no
+/// frame ([`Signalling`]): a handler is R code and would see a stack without the call, so the
+/// instruction is abandoned and runs again, and signals, once the call has its frame.
+fn waits_for_frame() -> Option<Unwind> {
+    if interp().signalling == Signalling::Immediate {
+        return None;
+    }
+    interp().signalling = Signalling::Abandoned;
+    Some(error("a condition waits for its call's frame"))
 }
 
 unsafe fn message_text(message: Sexp) -> R<String> {
