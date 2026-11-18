@@ -3690,6 +3690,15 @@ pub unsafe fn run_frame(
     leave(entered.depth as usize, result)
 }
 
+/// Whether [`enter`] pushes a frame for every call [`bind_slots`] takes. A caller that pushes
+/// a frame to stand for a call, without running the callee's body, asks first, because under
+/// the recorder, the debugger or the object-system refusal `enter` runs the call whole.
+pub unsafe fn enters_slot_frames() -> bool {
+    let hooks = activity::hooks();
+    hooks & (activity::CAPTURE | activity::DEBUGGER | activity::MOVES) == 0
+        && (hooks == 0 || interp().object_systems)
+}
+
 /// A slot frame's call once [`enter`] has set it up. When `header` is [`crate::NO_SLOTS`] the
 /// call has already run to completion and `value` is its result. Otherwise the caller runs
 /// `value`, the closure's compiled code, on the slot frame at `header`, and hands its result

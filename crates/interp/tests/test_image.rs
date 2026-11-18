@@ -63,3 +63,8 @@ fn an_image_of_an_older_format_is_stale() {
         panic!("cannot remove {}: {error}", directory.display());
     }
 }
+
+#[test]
+fn a_saved_function_takes_this_builds_prologues() {
+    interp::testing::check_saved_prologues_replaced();
+}

@@ -1287,39 +1287,37 @@ unsafe fn compile_for(function: Sexp, body: Sexp, binds: bool) -> R<Sexp> {
     Ok(code)
 }
 
-/// A closure over `env` for the `function` expression with `formals`, `body` and `srcref` in
-/// the code `outer`, made as [`Op::Closure`] makes it: every closure made from the expression
-/// shares one compiled body, kept in `outer`'s constants. A native prologue that runs part of
-/// a compiled body by hand makes its closures with this, since a closure made from the source
+/// A closure defined in the frame at `index` for the `function` expression with `formals`,
+/// `body` and `srcref` in that frame's code, made as [`Op::Closure`] makes it: every closure
+/// made from the expression shares one compiled body, kept in the outer code's constants, and a
+/// slot frame keeps its variables in their slots. A native prologue that runs part of a
+/// compiled body by hand makes its closures with this, since a closure made from the source
 /// alone would be compiled again for each call of the outer function.
 pub(crate) unsafe fn inner_closure(
-    outer: Sexp,
+    index: usize,
     formals: Sexp,
     body: Sexp,
     srcref: Sexp,
-    env: Sexp,
 ) -> R<Sexp> {
     let heap = crate::heap();
-    let site = if outer.kind() == SexpType::Bytecode {
-        let constants = outer.cdr();
-        (0..length(constants)).find_map(|position| {
-            let constant = constants.element(position);
-            let matches = constant == body
-                || (constant.kind() == SexpType::Bytecode && source_of(constant) == body);
-            matches.then_some((constants, position, constant))
-        })
+    let frame = &interp().frames[index];
+    let (outer, env, header) = (frame.function.cdr(), frame.env, frame.slots);
+    let site = shared_body(outer, body);
+    let shared = site.map_or(body, |(_, _, shared)| shared);
+    let closure = if env == nil() && header != crate::NO_SLOTS {
+        eval::slot_closure(header as usize, formals, shared, srcref)?
     } else {
-        None
+        eval::make_closure(formals, shared, srcref, env)?
     };
-    let Some((constants, position, shared)) = site else {
-        return eval::make_closure(formals, body, srcref, env);
-    };
-    let closure = eval::make_closure(formals, shared, srcref, env)?;
-    if shared.kind() != SexpType::Bytecode && compilable(shared) {
+    if let Some((constants, position, shared)) = site
+        && shared.kind() != SexpType::Bytecode
+        && compilable(shared)
+    {
         heap.root(closure);
         // Code that binds its base functions compiled its nested functions with it, so this
         // outer code guards them, and binding here would miss its locals; a namespace's code
         // binds anyway, as its package installs compiled.
+        let env = closure.tag();
         let binds = crate::envir::is_namespace(crate::dispatch::top_env(env))
             && env != heap.known().global_env;
         let code = compile(shared, closure, binds)?;
@@ -1327,6 +1325,33 @@ pub(crate) unsafe fn inner_closure(
         heap.set_cdr(closure, code);
     }
     Ok(closure)
+}
+
+/// The compiled body that the closures of the `function` expression with `body` in the code
+/// `outer` share, when it runs on a slot frame; `None` before the first such closure is made.
+pub(crate) unsafe fn shared_slot_code(outer: Sexp, body: Sexp) -> Option<Sexp> {
+    let (_, _, shared) = shared_body(outer, body)?;
+    has_slot_table(shared).then_some(shared)
+}
+
+/// Whether `code` is compiled code that keeps its closure's variables in slots.
+pub(crate) unsafe fn has_slot_table(code: Sexp) -> bool {
+    code.kind() == SexpType::Bytecode && code.cdr().element(SLOTS) != nil()
+}
+
+/// Where the constants of the code `outer` keep the body of the `function` expression with
+/// `body`: the constants, the position, and the body or its compiled code.
+unsafe fn shared_body(outer: Sexp, body: Sexp) -> Option<(Sexp, usize, Sexp)> {
+    if outer.kind() != SexpType::Bytecode {
+        return None;
+    }
+    let constants = outer.cdr();
+    (0..length(constants)).find_map(|position| {
+        let constant = constants.element(position);
+        let matches = constant == body
+            || (constant.kind() == SexpType::Bytecode && source_of(constant) == body);
+        matches.then_some((constants, position, constant))
+    })
 }
 
 /// A closure's body as source: the expression of compiled code.
@@ -3492,7 +3517,25 @@ unsafe fn collect_bindings(expression: Sexp, found: &mut FxHashSet<Sexp>) -> boo
                 if binds_element_index(inner) {
                     found.insert(symbols().i);
                 }
-                return collect_arguments(inner.cdr(), found);
+                // `.addCondHands(classes, handlers, parentenv, environment(), calling)` keeps
+                // the frame only as the target an exiting handler returns to, which the
+                // environment that stands for a slot frame is without binding anything.
+                let names_target = inner.car().kind() == SexpType::Symbol
+                    && &*symbol_name(inner.car()) == ".addCondHands";
+                let mut cell = inner.cdr();
+                while cell.kind() == SexpType::Pairlist {
+                    let argument = cell.car();
+                    let is_target = names_target
+                        && argument.kind() == SexpType::Language
+                        && argument.cdr() == nil()
+                        && argument.car().kind() == SexpType::Symbol
+                        && &*symbol_name(argument.car()) == "environment";
+                    if !is_target && !collect_bindings(argument, found) {
+                        return false;
+                    }
+                    cell = cell.cdr();
+                }
+                return true;
             }
         }
     }

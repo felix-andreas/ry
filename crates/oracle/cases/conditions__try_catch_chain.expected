@@ -1,0 +1,158 @@
+[stdout]
+| -- no handler
+| [1] 2
+| 1 -14 tryCatch(stack()) 
+| 2 1 tryCatchList(expr, classes, parentenv, handlers) 
+| 1 ... classes expr finally handlers parentenv tryCatchList tryCatchOne 
+| 2 expr handlers names nh parentenv 
+| 1 ... classes expr finally handlers parentenv tryCatchList tryCatchOne 
+| 2 expr handlers names nh parentenv 
+| done
+| [1] 0
+| -- one handler
+| 1 -14 tryCatch(stack(), error = function(e) NULL) 
+| 2 1 tryCatchList(expr, classes, parentenv, handlers) 
+| 3 2 tryCatchOne(expr, names, parentenv, handlers[[1L]]) 
+| 4 3 doTryCatch(return(expr), name, parentenv, handler) 
+| 1 ... classes expr finally handlers parentenv tryCatchList tryCatchOne 
+| 2 expr handlers names nh parentenv 
+| 3 doTryCatch expr handler name parentenv 
+| 4 expr handler name parentenv 
+| 1 -14 tryCatch(stop("s"), error = function(e) stack()) 
+| 2 1 tryCatchList(expr, classes, parentenv, handlers) 
+| 3 2 tryCatchOne(expr, names, parentenv, handlers[[1L]]) 
+| 4 3 value[[3L]](cond) 
+| 1 ... classes expr finally handlers parentenv tryCatchList tryCatchOne 
+| 2 expr handlers names nh parentenv 
+| 3 call cond doTryCatch expr handler msg name parentenv value 
+| 4 e 
+| 1 ... classes expr finally handlers parentenv tryCatchList tryCatchOne 
+| 2 expr handlers names nh parentenv 
+| 3 cond doTryCatch expr handler name parentenv value 
+| 4 w 
+| [1] "error"
+| [1] "expr"      "name"      "parentenv" "handler"  
+| {
+|     .Internal(.addCondHands(name, list(handler), parentenv, environment(), 
+|         FALSE))
+|     expr
+| }
+| doTryCatch(return(expr), name, parentenv, handler)
+| [1] "simpleError" "error"       "condition"  
+| -- three handlers
+| [1] "error: a"
+| [1] "warning: b"
+| [1] "message: c\n"
+| [1] "none"
+| 1 -14 three(stack()) 
+| 2 1 tryCatch(code, error = function(e) paste("error:", conditionMessage(e)),  
+| 3 2 tryCatchList(expr, classes, parentenv, handlers) 
+| 4 3 tryCatchOne(tryCatchList(expr, names[-nh], parentenv, handlers[-nh]),  
+| 5 4 doTryCatch(return(expr), name, parentenv, handler) 
+| 6 3 tryCatchList(expr, names[-nh], parentenv, handlers[-nh]) 
+| 7 6 tryCatchOne(tryCatchList(expr, names[-nh], parentenv, handlers[-nh]),  
+| 8 7 doTryCatch(return(expr), name, parentenv, handler) 
+| 9 6 tryCatchList(expr, names[-nh], parentenv, handlers[-nh]) 
+| 10 9 tryCatchOne(expr, names, parentenv, handlers[[1L]]) 
+| 11 10 doTryCatch(return(expr), name, parentenv, handler) 
+| 1 code 
+| 2 ... classes expr finally handlers parentenv tryCatchList tryCatchOne 
+| 3 expr handlers names nh parentenv 
+| 4 doTryCatch expr handler name parentenv 
+| 5 expr handler name parentenv 
+| 6 expr handlers names nh parentenv 
+| 7 doTryCatch expr handler name parentenv 
+| 8 expr handler name parentenv 
+| 9 expr handlers names nh parentenv 
+| 10 doTryCatch expr handler name parentenv 
+| 11 expr handler name parentenv 
+| 1 -14 tryCatch(warning("w"), error = function(e) NULL, warning = function(w) stack(),  
+| 2 1 tryCatchList(expr, classes, parentenv, handlers) 
+| 3 2 tryCatchOne(tryCatchList(expr, names[-nh], parentenv, handlers[-nh]),  
+| 4 3 doTryCatch(return(expr), name, parentenv, handler) 
+| 5 2 tryCatchList(expr, names[-nh], parentenv, handlers[-nh]) 
+| 6 5 tryCatchOne(tryCatchList(expr, names[-nh], parentenv, handlers[-nh]),  
+| 7 6 value[[3L]](cond) 
+| 1 ... classes expr finally handlers parentenv tryCatchList tryCatchOne 
+| 2 expr handlers names nh parentenv 
+| 3 doTryCatch expr handler name parentenv 
+| 4 expr handler name parentenv 
+| 5 expr handlers names nh parentenv 
+| 6 cond doTryCatch expr handler name parentenv value 
+| 7 w 
+| [1] "3"       "message" "2"       "warning" "1"       "error"  
+| [1] "error+warning+message" "error+warning"         "error"                
+| [1] 3 2 1
+| -- a handler signals
+| [1] "later handler: b"
+| [1] "earlier handler"
+| [1] "from handler"
+| [1] "a"
+| -- handlers that are not closures
+| [1] "a"
+| [1] "simpleError" "error"       "condition"  
+| [1] "simpleError" "error"       "condition"  
+| [1] "attempt to apply non-function"
+| [1] "value[[3L]](cond)"
+| [1] "condition handlers must be specified with a condition class"
+| [1] "handler argument"
+| -- the value and its visibility
+| [1] 1
+| [1] 3
+| [1] 4
+| [1] 5
+| finally
+| [1] 8
+| [1] "caught"
+| [1] "caught"
+| [1] "inner"
+| -- jumps through the chain
+| finally
+| [1] "from the expression"
+| [1] "after"
+| iteration 1 
+| iteration 3 
+| [1] 10
+| calling first
+| [1] "exiting"
+| [1] "bottom"
+| [1] 40
+| -- frames that outlive the call
+| [1] "expr"      "handler"   "name"      "parentenv"
+| [1] "error"
+| [1] "function"
+| [1] "R_GlobalEnv"
+| [[1]]
+| [1] "classes"      "expr"         "finally"      "handlers"     "parentenv"   
+| [6] "tryCatchList" "tryCatchOne" 
+| 
+| [[2]]
+| [1] "expr"      "handlers"  "names"     "nh"        "parentenv"
+| 
+| [[3]]
+| [1] "doTryCatch" "expr"       "handler"    "name"       "parentenv" 
+| 
+| [[4]]
+| [1] "expr"      "handler"   "name"      "parentenv"
+| 
+| [1] 2
+| [1] "warning"
+| [1] "error"   "warning"
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] "made inside"
+| -- a simpleError bound in the tryCatchOne frame
+| [1] "replaced"
+| -- the return(expr) promise of a finished call
+| [1] "restarting interrupted promise evaluation"
+| -- many calls
+| [1] 155829863
+| [1] 200
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 200
