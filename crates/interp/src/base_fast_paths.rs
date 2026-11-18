@@ -15,11 +15,13 @@ use {
     crate::{
         Jump,
         builtins::{Arg, BuiltinDef, BuiltinFn, Call, internal},
-        eval, interp,
+        conditions::{Handler, calling_established, make_condition, new_handler},
+        eval::{self, CallFrame, Reify, Site},
+        interp,
         session::{FNV_OFFSET, stable_hash},
         sort::{self, IdenticalFlags},
         system::{DateFromText, date_from_text},
-        unwind::{R, Unwind, jump},
+        unwind::{R, Unwind, error, jump},
         values::{self, install, length, missing_arg, nil, symbols},
     },
     heap::{
@@ -53,9 +55,6 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("rySignalCondition", 0, do_signal_condition).prologue(),
     internal("ryTryCatch", 0, do_try_catch).prologue(),
     internal("ryWithCallingHandlers", 0, do_with_calling_handlers).prologue(),
-    internal("ryTryCatchList", 0, do_try_catch_list).prologue(),
-    internal("ryTryCatchOne", 0, do_try_catch_one).prologue(),
-    internal("ryDoTryCatch", 0, do_do_try_catch).prologue(),
     internal("ryWithRestarts", 0, do_with_restarts).prologue(),
     internal("ryWithOneRestart", 0, do_with_one_restart).prologue(),
     internal("ryDoWithOneRestart", 0, do_do_with_one_restart).prologue(),
@@ -131,19 +130,6 @@ const NESTED_FAST_PATHS: &[(&str, &str, &str, u64)] = &[
         0x26c985af62edd0db,
     ),
     (
-        "tryCatch",
-        "tryCatchList",
-        "ryTryCatchList",
-        0x2e065bb04214d605,
-    ),
-    (
-        "tryCatch",
-        "tryCatchOne",
-        "ryTryCatchOne",
-        0x3a4260755fd37942,
-    ),
-    ("tryCatch", "doTryCatch", "ryDoTryCatch", 0xacf47eb5e4bfc044),
-    (
         "withRestarts",
         "withOneRestart",
         "ryWithOneRestart",
@@ -188,6 +174,17 @@ pub unsafe fn install_all(namespace: Sexp) -> R<()> {
     register_native_entries(namespace)
 }
 
+/// Whether `namespace` binds every function [`install_all`] gives a fast path.
+pub unsafe fn all_bound(namespace: Sexp) -> R<bool> {
+    let outer = NESTED_FAST_PATHS.iter().map(|&(outer, ..)| outer);
+    for name in FAST_PATHS.iter().map(|&(name, ..)| name).chain(outer) {
+        if eval::find_var_in_frame(install(name)?, namespace)? == values::unbound() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Whether `body` opens with a fast-path prologue that reads the closure's frame as an
 /// environment: it evaluates code there or defines variables in it, so such a closure gets no
 /// slot frame, which would be reified on every call. Every other prologue reads its formals and
@@ -208,11 +205,6 @@ pub unsafe fn prologue_needs_environment(body: Sexp) -> bool {
             "ryReduce",
             "ryTraceBack",
             "rySignalCondition",
-            "ryTryCatch",
-            "ryWithCallingHandlers",
-            "ryTryCatchList",
-            "ryTryCatchOne",
-            "ryDoTryCatch",
             "ryWithRestarts",
             "ryWithOneRestart",
             "ryDoWithOneRestart",
@@ -246,7 +238,7 @@ pub(crate) unsafe fn install_prologue(
 
 /// `body` with `.Internal(<internal_name>())` in front when `formals` and `body` hash to
 /// `expected`, or `body` itself when it opens with that prologue already; `None` otherwise.
-unsafe fn with_prologue(
+pub(crate) unsafe fn with_prologue(
     formals: Sexp,
     body: Sexp,
     name: &str,
@@ -258,23 +250,23 @@ unsafe fn with_prologue(
         symbols().dot_internal,
         values::cons(values::lcons(install(internal_name)?, nil())?, nil())?,
     )?;
-    let mut original = body;
     let already = body.kind() == SexpType::Language
         && body.car() == symbols().brace
         && values::pairlist_length(body.cdr()) == 2
         && crate::sort::identical(body.cdr().car(), prologue, &IdenticalFlags::default());
-    if already {
-        original = body.cdr().cdr().car();
-    }
-    let hashed = if name == "Sys.which" {
-        configured_which_as_bundled(original)?
-    } else if NESTED_FAST_PATHS
-        .iter()
-        .any(|&(outer, inner, ..)| outer == name || inner == name)
-    {
-        without_nested_prologues(original)?
+    let original = if already {
+        body.cdr().cdr().car()
     } else {
-        original
+        body
+    };
+    // A base tree keeps the prologues of the build that wrote it, among them ones in front of
+    // closures this body defines. The hash is of GNU R's code, and the body goes on without
+    // them: `install_all` then gives the inner closures the prologues this build has.
+    let plain = without_nested_prologues(original)?;
+    let hashed = if name == "Sys.which" {
+        configured_which_as_bundled(plain)?
+    } else {
+        plain
     };
     let mut hash = FNV_OFFSET;
     stable_hash(formals, &mut hash);
@@ -285,18 +277,31 @@ unsafe fn with_prologue(
     if hash != expected {
         return Ok(None);
     }
-    if already {
+    if already && plain == original {
         return Ok(Some(body));
     }
     Ok(Some(values::lcons(
         symbols().brace,
-        values::cons(prologue, values::cons(original, nil())?)?,
+        values::cons(prologue, values::cons(plain, nil())?)?,
     )?))
 }
 
-/// `body` without the prologues installed in front of the closures it defines, so an outer
-/// function hashes the same before and after its nested fast paths are installed.
+/// `body` without the prologues installed in front of the closures it defines: `body` itself
+/// when no such closure has one, a copy otherwise.
 unsafe fn without_nested_prologues(body: Sexp) -> R<Sexp> {
+    unsafe fn defines_prologue(code: Sexp) -> bool {
+        if code.kind() != SexpType::Language {
+            return false;
+        }
+        let mut rest = code;
+        while rest.kind() == SexpType::Pairlist || rest.kind() == SexpType::Language {
+            if prologue_original(rest.car()).is_some() || defines_prologue(rest.car()) {
+                return true;
+            }
+            rest = rest.cdr();
+        }
+        false
+    }
     unsafe fn strip(code: Sexp) {
         if code.kind() != SexpType::Language {
             return;
@@ -310,6 +315,9 @@ unsafe fn without_nested_prologues(body: Sexp) -> R<Sexp> {
             strip(rest.car());
             rest = rest.cdr();
         }
+    }
+    if !defines_prologue(body) {
+        return Ok(body);
     }
     let copy = values::duplicate(body)?;
     crate::heap().root(copy);
@@ -1588,7 +1596,7 @@ unsafe fn is_supplied(frame: ClosureFrame, symbol: Sexp) -> R<bool> {
             Some((value, missing)) => Ok(!missing && !eval::value_is_missing(value)?),
             None => Ok(!eval::is_missing(
                 symbol,
-                eval::frame_env(index, eval::Reify::Site(eval::Site::Missing))?,
+                eval::frame_env(index, Reify::Site(Site::Missing))?,
             )?),
         },
         Err(env) => Ok(!eval::is_missing(symbol, env)?),
@@ -3891,11 +3899,11 @@ unsafe fn original_statements(index: usize) -> Sexp {
     body.cdr().cdr().car().cdr()
 }
 
-/// Runs the R body's `name <- function(...) ...` statement in `env` as the compiled body does:
-/// the closure shares the compiled code the outer closure holds for that `function`
-/// expression, where a closure made from the expression alone would be compiled again on every
-/// call of the outer function.
-unsafe fn define_inner_closure(index: usize, statement: Sexp, env: Sexp) -> R<()> {
+/// Runs the R body's `name <- function(...) ...` statement in the frame at `index` as the
+/// compiled body does, and returns the closure: it shares the compiled code the outer closure
+/// holds for that `function` expression, where a closure made from the expression alone would
+/// be compiled again on every call of the outer function.
+unsafe fn define_inner_closure(index: usize, statement: Sexp) -> R<Sexp> {
     // `name <- function(formals, body, srcref)`
     let definition = nth(statement, 2);
     let formals = nth(definition, 1);
@@ -3904,10 +3912,36 @@ unsafe fn define_inner_closure(index: usize, statement: Sexp, env: Sexp) -> R<()
         rest if rest.kind() == SexpType::Pairlist => rest.car(),
         _ => nil(),
     };
-    let outer = interp().frames[index].function.cdr();
-    let closure = crate::bytecode::inner_closure(outer, formals, body, srcref, env)?;
+    let closure = crate::bytecode::inner_closure(index, formals, body, srcref)?;
     crate::heap().root(closure);
-    eval::define(nth(statement, 1), closure, env)
+    bind_local(index, nth(statement, 1), closure)?;
+    Ok(closure)
+}
+
+/// Binds the variable `symbol` of the frame at `index` to `value` as an assignment in its body
+/// does: in its slot while the frame keeps its variables there, in its environment otherwise.
+unsafe fn bind_local(index: usize, symbol: Sexp, value: Sexp) -> R<()> {
+    if let Some(register) = eval::slot_register(index, symbol) {
+        crate::heap().store_slot(&mut *crate::bytecode::register_address(register), value);
+        return Ok(());
+    }
+    let env = eval::frame_env(index, Reify::Site(Site::Assignment))?;
+    eval::define(symbol, value, env)
+}
+
+/// The argument a call made from the frame at `index` passes for its variable `symbol`, for a
+/// callee that takes its arguments into slots: an argument reference, which is unforced and
+/// allocates nothing.
+unsafe fn variable_reference(index: usize, symbol: Sexp) -> R<Sexp> {
+    let frame = &interp().frames[index];
+    if frame.env != nil() || frame.slots == crate::NO_SLOTS {
+        return eval::env_reference(frame.env, symbol);
+    }
+    let first = frame.slots as usize + 1;
+    let slot = eval::slot_register(index, symbol).map_or(eval::NO_REFERENCE_SLOT, |register| {
+        (register - first) as u32
+    });
+    eval::argument_reference(index, slot, symbol)
 }
 
 /// The element at `position` of the pairlist or call `list`.
@@ -3942,10 +3976,11 @@ unsafe fn tagged_list(items: &[(Sexp, Sexp)]) -> R<Sexp> {
     Ok(list)
 }
 
-/// `tryCatch(expr, ..., finally)`. Its frames stay: the R body's `tryCatchList(...)` statement
-/// runs as written, so `sys.calls()` and the call of a caught condition read as in GNU R. The
-/// prologue does the rest of the body natively: it registers `finally` with `on.exit`, forces
-/// the handlers in order as `list(...)` does, and binds `handlers`, `classes` and `parentenv`.
+/// `tryCatch(expr, ..., finally)` as one native call that leaves GNU R's frames on the stack.
+/// The prologue runs the body's statements itself: it defines `tryCatchList` and `tryCatchOne`,
+/// registers `finally` with `on.exit`, forces the handlers in order as `list(...)` does, and
+/// binds `handlers`, `classes` and `parentenv`. Then [`try_catch_chain`] stands for the body's
+/// `tryCatchList(expr, classes, parentenv, handlers)` call.
 unsafe fn do_try_catch(call: &Call<'_>) -> R<Sexp> {
     if !fast_paths_enabled() {
         return decline();
@@ -3953,15 +3988,19 @@ unsafe fn do_try_catch(call: &Call<'_>) -> R<Sexp> {
     let Some(index) = call.frame_index() else {
         return decline();
     };
-    let frame = call.env()?;
-    let Some(items) = dots(ClosureFrame::Env(frame))? else {
+    let frame = ClosureFrame::of(call);
+    let names = symbols();
+    let Some(items) = dots(frame)? else {
         return decline();
     };
+    // The R body raises the missing-argument error from inside `doTryCatch`.
+    if is_default(frame, names.expr)? {
+        return decline();
+    }
     let statements = original_statements(index);
-    let names = symbols();
-    define_inner_closure(index, nth(statements, 0), frame)?;
-    define_inner_closure(index, nth(statements, 1), frame)?;
-    if is_supplied(ClosureFrame::Env(frame), names.finally)? {
+    let list_function = define_inner_closure(index, nth(statements, 0))?;
+    let one_function = define_inner_closure(index, nth(statements, 1))?;
+    if is_supplied(frame, names.finally)? {
         let on_exit = &mut interp().frames[index].on_exit;
         on_exit.clear();
         on_exit.push(names.finally);
@@ -3974,24 +4013,325 @@ unsafe fn do_try_catch(call: &Call<'_>) -> R<Sexp> {
     }
     let handlers = tagged_list(&forced)?;
     let classes = values::get_attr(handlers, names.names);
-    eval::define(names.handlers, handlers, frame)?;
-    eval::define(names.classes, classes, frame)?;
-    eval::define(
-        names.parentenv,
-        eval::frame_sys_parent(index, eval::Reify::Site(eval::Site::ParentFrame))?,
-        frame,
-    )?;
+    let parent_env = eval::frame_sys_parent(index, Reify::Site(Site::ParentFrame))?;
+    bind_local(index, names.handlers, handlers)?;
+    bind_local(index, names.classes, classes)?;
+    bind_local(index, names.parentenv, parent_env)?;
     if length(classes) != forced.len() {
-        eval::eval(nth(statements, 6), frame)?;
+        // `stop("condition handlers must be specified with a condition class")`
+        let env = eval::frame_env(index, Reify::Site(Site::UncompiledExpression))?;
+        eval::eval(nth(statements, 6), env)?;
     }
-    let value = eval::eval(nth(statements, 7), frame)?;
-    finish(ClosureFrame::Env(frame), value, interp().visible)
+    let chain = Chain {
+        index,
+        frame,
+        list_function,
+        one_function,
+        parent_env,
+    };
+    let value = match try_catch_chain(&chain, nth(statements, 7), classes, handlers)? {
+        Some(value) => value,
+        None => {
+            let env = eval::frame_env(index, Reify::Site(Site::UncompiledExpression))?;
+            eval::eval(nth(statements, 7), env)?
+        }
+    };
+    finish(frame, value, interp().visible)
+}
+
+/// What every level of one `tryCatch` call's chain shares: the `tryCatch` frame, its two
+/// closures and its `parentenv`.
+struct Chain {
+    index: usize,
+    frame: ClosureFrame,
+    list_function: Sexp,
+    one_function: Sexp,
+    parent_env: Sexp,
+}
+
+/// The frames one `tryCatchList` call pushed, each as the depth [`eval::leave`] takes, or zero
+/// for a frame the level does not have: a call with no handler has `tryCatchList` alone.
+#[derive(Clone, Copy)]
+struct Level {
+    list: usize,
+    one: usize,
+    run: usize,
+    /// The target of the level's exiting handler: the `return(expr)` promise `doTryCatch` got,
+    /// which only this level holds, so the frame needs no environment to be a target.
+    token: Sexp,
+}
+
+/// The body's `tryCatchList(expr, classes, parentenv, handlers)` call without running R code
+/// for it. GNU R's chain is `tryCatchList`, `tryCatchOne` and `doTryCatch` for the last
+/// handler, and under `doTryCatch` the same three again for the handlers before it. Each of
+/// those frames is pushed as the call that makes it would push it, a slot frame whose
+/// arguments are bound, and its body's work is done here: `nh`, the `doTryCatch` closure, the
+/// exiting handler. Then `expr` is forced under the innermost frame, so `sys.calls()` and a
+/// condition's call read as in GNU R. An argument the body forces before the frame below it
+/// runs (`names`, `parentenv`, the handler) is bound to its value, so `substitute` on it in
+/// one of these frames gives the value where GNU R gives the argument's code.
+///
+/// `None`, with nothing pushed, while a frame would need the general call path, or before
+/// `doTryCatch` has compiled code, which the R body that then runs gives it.
+unsafe fn try_catch_chain(
+    chain: &Chain,
+    call: Sexp,
+    classes: Sexp,
+    handlers: Sexp,
+) -> R<Option<Sexp>> {
+    let one_statements = crate::bytecode::closure_body(chain.one_function).cdr();
+    // `doTryCatch <- function(expr, name, parentenv, handler) ...`
+    let run_body = nth(nth(nth(one_statements, 0), 2), 2);
+    if !eval::enters_slot_frames()
+        || !crate::bytecode::has_slot_table(chain.list_function.cdr())
+        || !crate::bytecode::has_slot_table(chain.one_function.cdr())
+        || crate::bytecode::shared_slot_code(chain.one_function.cdr(), run_body).is_none()
+    {
+        return Ok(None);
+    }
+    let mark = interp().references_used;
+    let mut levels: SmallVec<[Level; 2]> = SmallVec::new();
+    let result = match push_levels(chain, &mut levels, call, classes, handlers) {
+        Ok(()) => {
+            // `doTryCatch`'s body reads `expr` as a variable, which is visible unless the
+            // code it forces says otherwise.
+            interp().visible = true;
+            match argument(chain.frame, symbols().expr) {
+                Ok(Some(value)) => Ok(value),
+                Ok(None) => Err(error("argument \"expr\" is missing, with no default")),
+                Err(unwind) => Err(unwind),
+            }
+        }
+        Err(unwind) => Err(unwind),
+    };
+    let result = leave_levels(&levels, result, one_statements);
+    eval::release_references(mark);
+    result.map(Some)
+}
+
+/// Pushes the frames of the chain for `handlers`, whose classes are `classes`, outermost level
+/// first, recording each in `levels` as soon as it is pushed so that a failure on the way
+/// leaves through [`leave_levels`] too. `call` is the `tryCatchList` call of the first level.
+unsafe fn push_levels(
+    chain: &Chain,
+    levels: &mut SmallVec<[Level; 2]>,
+    mut call: Sexp,
+    mut classes: Sexp,
+    mut handlers: Sexp,
+) -> R<()> {
+    let names = symbols();
+    let heap = crate::heap();
+    let list_statements = crate::bytecode::closure_body(chain.list_function).cdr();
+    let one_statements = crate::bytecode::closure_body(chain.one_function).cdr();
+    // `if (nh > 1L) <several> else if (nh == 1L) <single> else expr`
+    let branches = nth(list_statements, 1);
+    let several = nth(branches, 2);
+    let single = nth(nth(branches, 3), 2);
+    // `value <- doTryCatch(return(expr), name, parentenv, handler)`
+    let run_call = nth(nth(one_statements, 1), 2);
+    let mut caller = chain.index;
+    loop {
+        let count = length(handlers);
+        // `tryCatchList(expr, names, parentenv, handlers)`
+        let args = [
+            variable_reference(caller, nth(call, 1))?,
+            classes,
+            chain.parent_env,
+            handlers,
+        ];
+        let list = push_frame(call, chain.list_function, caller, args)?;
+        levels.push(Level {
+            list,
+            one: 0,
+            run: 0,
+            token: nil(),
+        });
+        let position = levels.len() - 1;
+        bind_local(list - 1, names.nh, values::scalar_integer(count as i32)?)?;
+        if count == 0 {
+            return Ok(());
+        }
+        let handler = handlers.element(count - 1);
+        // `tryCatchOne(expr, names, parentenv, handlers[[1L]])`, or with the handlers before
+        // the last one as its `expr`:
+        // `tryCatchOne(tryCatchList(expr, names[-nh], parentenv, handlers[-nh]), names[nh],
+        // parentenv, handlers[[nh]])`
+        let (one_call, expr, name) = if count == 1 {
+            (single, variable_reference(list - 1, names.expr)?, classes)
+        } else {
+            let inner = eval::slot_promise(list - 1, nth(several, 1))?;
+            heap.root(inner);
+            let name = values::scalar_string_charsxp(classes.element(count - 1))?;
+            heap.root(name);
+            (several, inner, name)
+        };
+        let args = [expr, name, chain.parent_env, handler];
+        let one = push_frame(one_call, chain.one_function, list - 1, args)?;
+        levels[position].one = one;
+        let run_function = define_inner_closure(one - 1, nth(one_statements, 0))?;
+        let token = eval::slot_promise(one - 1, nth(run_call, 1))?;
+        heap.root(token);
+        let args = [token, name, chain.parent_env, handler];
+        let run = push_frame(run_call, run_function, one - 1, args)?;
+        levels[position].run = run;
+        levels[position].token = token;
+        // `.Internal(.addCondHands(name, list(handler), parentenv, environment(), FALSE))`
+        activity::count(Counter::HandlersEstablished);
+        let state = interp();
+        let below = state.handlers.clone();
+        state.handlers = Some(new_handler(Handler {
+            class: name.element(0),
+            handler,
+            calling: false,
+            calling_below: calling_established(&below),
+            parent_env: chain.parent_env,
+            target: token,
+            next: below,
+        }));
+        if count == 1 {
+            return Ok(());
+        }
+        // `names[-nh]` and `handlers[-nh]`
+        let rest_classes = values::alloc(SexpType::String, count - 1)?;
+        heap.root(rest_classes);
+        let rest_handlers = values::alloc(SexpType::List, count - 1)?;
+        heap.root(rest_handlers);
+        for item in 0..count - 1 {
+            heap.set_element(rest_classes, item, classes.element(item));
+            heap.set_element(rest_handlers, item, handlers.element(item));
+        }
+        values::set_attr(rest_handlers, names.names, rest_classes)?;
+        (classes, handlers) = (rest_classes, rest_handlers);
+        call = nth(several, 1);
+        caller = list - 1;
+    }
+}
+
+/// Pushes the slot frame of `call`, a call of `function` made from the frame at `caller` with
+/// `args`, without running its body, and returns the depth [`eval::leave`] takes.
+/// [`try_catch_chain`] has checked that such a call gets a slot frame.
+unsafe fn push_frame(call: Sexp, function: Sexp, caller: usize, args: [Sexp; 4]) -> R<usize> {
+    let args = args.map(|value| Arg { tag: nil(), value });
+    let Some(CallFrame::Slots {
+        header,
+        missing,
+        promised,
+    }) = eval::bind_slots(call, function, &args)?
+    else {
+        return Err(error("internal error: a frame of tryCatch got no slots"));
+    };
+    let state = interp();
+    let sys_parent = state.frames[caller].env;
+    if sys_parent == nil() {
+        state.slot_owner = caller as u32;
+    }
+    let entered = eval::enter(
+        call,
+        function,
+        sys_parent,
+        &args,
+        &[],
+        header,
+        missing,
+        promised,
+        true,
+    )?;
+    if entered.header == crate::NO_SLOTS {
+        return Err(error("internal error: a frame of tryCatch ran its body"));
+    }
+    Ok(entered.depth as usize)
+}
+
+/// Leaves the frames of `levels`, innermost first, as `expr` ends with `result`. A condition
+/// that a level's exiting handler caught arrives as a jump to the level's token: `doTryCatch`
+/// returns the jump's value, and `tryCatchOne` goes on to call the handler. Every other result
+/// passes through the level, as the `return(expr)` that `doTryCatch` was given returns it from
+/// `tryCatchOne`.
+unsafe fn leave_levels(levels: &[Level], mut result: R<Sexp>, one_statements: Sexp) -> R<Sexp> {
+    for level in levels.iter().rev() {
+        let mut caught = None;
+        if level.run != 0 {
+            result = match result {
+                Err(Unwind::Jump(Jump::Return { env, value })) if env == level.token => {
+                    caught = Some(value);
+                    Ok(value)
+                }
+                other => other,
+            };
+            result = eval::leave(level.run, result);
+        }
+        if level.one != 0 {
+            if let Some(value) = caught
+                && result.is_ok()
+            {
+                result = call_exiting_handler(level.one - 1, value, one_statements);
+            }
+            result = eval::leave(level.one, result);
+        }
+        result = eval::leave(level.list, result);
+    }
+    result
+}
+
+/// The rest of `tryCatchOne`'s body in the frame at `index` once `doTryCatch` has returned
+/// `caught`, the condition, its call and the handler:
+///
+/// ```r
+/// if (is.null(value[[1L]])) {
+///     msg <- .Internal(geterrmessage())
+///     call <- value[[2L]]
+///     cond <- simpleError(msg, call)
+/// } else cond <- value[[1L]]
+/// value[[3L]](cond)
+/// ```
+unsafe fn call_exiting_handler(index: usize, caught: Sexp, statements: Sexp) -> R<Sexp> {
+    let names = symbols();
+    bind_local(index, names.value, caught)?;
+    let statement = nth(statements, 3);
+    if caught.kind() != SexpType::List || length(caught) != 3 {
+        let env = eval::frame_env(index, Reify::Site(Site::UncompiledExpression))?;
+        eval::eval(nth(statements, 2), env)?;
+        return eval::eval(statement, env);
+    }
+    let mut condition = caught.element(0);
+    if condition == nil() {
+        let message = values::scalar_string(&interp().error_message)?;
+        crate::heap().root(message);
+        let call = caught.element(1);
+        bind_local(index, names.msg, message)?;
+        bind_local(index, names.call, call)?;
+        condition = make_condition(
+            &interp().error_message.clone(),
+            call,
+            &["simpleError", "error", "condition"],
+        )?;
+        crate::heap().root(condition);
+    }
+    bind_local(index, names.cond, condition)?;
+    let handler = caught.element(2);
+    if handler.kind() != SexpType::Closure {
+        let env = eval::frame_env(index, Reify::Site(Site::UncompiledExpression))?;
+        return eval::eval(statement, env);
+    }
+    let mark = interp().references_used;
+    let args = [Arg {
+        tag: nil(),
+        value: variable_reference(index, names.cond)?,
+    }];
+    let state = interp();
+    let sys_parent = state.frames[index].env;
+    if sys_parent == nil() {
+        state.slot_owner = index as u32;
+    }
+    let result = eval::apply_closure(statement, handler, &args, sys_parent, None);
+    eval::release_references(mark);
+    result
 }
 
 /// `withCallingHandlers(expr, ...)`. The prologue runs the R body's statements before `expr`:
 /// it forces the handlers in order as `list(...)` does, binds `handlers`, `classes` and
-/// `parentenv` in the frame, and establishes the handlers. Then it evaluates `expr` in the
-/// frame, as the R body's last statement does, so the frame and its contents read as in GNU R.
+/// `parentenv` in the frame, and establishes the handlers. Then it forces `expr`, as the R
+/// body's last statement does, so the frame and its contents read as in GNU R.
 unsafe fn do_with_calling_handlers(call: &Call<'_>) -> R<Sexp> {
     if !fast_paths_enabled() {
         return decline();
@@ -3999,11 +4339,15 @@ unsafe fn do_with_calling_handlers(call: &Call<'_>) -> R<Sexp> {
     let Some(index) = call.frame_index() else {
         return decline();
     };
-    let frame = call.env()?;
-    let Some(items) = dots(ClosureFrame::Env(frame))? else {
+    let frame = ClosureFrame::of(call);
+    let names = symbols();
+    let Some(items) = dots(frame)? else {
         return decline();
     };
-    let names = symbols();
+    // The R body raises the missing-argument error with the handlers established.
+    if is_default(frame, names.expr)? {
+        return decline();
+    }
     let mut forced: SmallVec<[(Sexp, Sexp); 8]> = SmallVec::new();
     for &(tag, item) in &items {
         let value = eval::value_of(item)?;
@@ -4012,154 +4356,25 @@ unsafe fn do_with_calling_handlers(call: &Call<'_>) -> R<Sexp> {
     }
     let handlers = tagged_list(&forced)?;
     let classes = values::get_attr(handlers, names.names);
-    eval::define(names.handlers, handlers, frame)?;
-    eval::define(names.classes, classes, frame)?;
-    let parent_env = eval::frame_sys_parent(index, eval::Reify::Site(eval::Site::ParentFrame))?;
-    eval::define(names.parentenv, parent_env, frame)?;
+    let parent_env = eval::frame_sys_parent(index, Reify::Site(Site::ParentFrame))?;
+    bind_local(index, names.handlers, handlers)?;
+    bind_local(index, names.classes, classes)?;
+    bind_local(index, names.parentenv, parent_env)?;
     if length(classes) != forced.len() {
         // `stop("condition handlers must be specified with a condition class")`
-        eval::eval(nth(original_statements(index), 3), frame)?;
+        let env = eval::frame_env(index, Reify::Site(Site::UncompiledExpression))?;
+        eval::eval(nth(original_statements(index), 3), env)?;
     }
     let calling = values::scalar_logical(1)?;
     kernel(
         crate::conditions::do_add_cond_hands,
         &[classes, handlers, parent_env, nil(), calling],
-        ClosureFrame::Env(frame),
+        frame,
     )?;
-    let value = eval::eval(names.expr, frame)?;
-    finish(ClosureFrame::Env(frame), value, interp().visible)
-}
-
-/// `tryCatchList(expr, names, parentenv, handlers)` with one handler, which calls `tryCatchOne`
-/// through the R body's own call so its frame reads as in GNU R.
-unsafe fn do_try_catch_list(call: &Call<'_>) -> R<Sexp> {
-    if !fast_paths_enabled() {
-        return decline();
-    }
-    let Some(index) = call.frame_index() else {
-        return decline();
+    let Some(value) = argument(frame, names.expr)? else {
+        return Err(error("argument \"expr\" is missing, with no default"));
     };
-    let frame = call.env()?;
-    let Some(classes) = argument(ClosureFrame::Env(frame), symbols().names)? else {
-        return decline();
-    };
-    if classes.is_object() || length(classes) != 1 {
-        return decline();
-    }
-    let names = symbols();
-    eval::define(names.nh, values::scalar_integer(1)?, frame)?;
-    // `if (nh > 1L) ... else if (nh == 1L) tryCatchOne(...) else expr`
-    let branches = nth(original_statements(index), 1);
-    let one = nth(nth(branches, 3), 2);
-    let (Some(parent_env), Some(handlers)) = (
-        argument(ClosureFrame::Env(frame), names.parentenv)?,
-        argument(ClosureFrame::Env(frame), names.handlers)?,
-    ) else {
-        return decline_eval(one, frame);
-    };
-    let try_catch_one = eval::find_fun(names.try_catch_one, frame)?;
-    if handlers.kind() != SexpType::List
-        || handlers.is_object()
-        || length(handlers) != 1
-        || try_catch_one.kind() != SexpType::Closure
-    {
-        return decline_eval(one, frame);
-    }
-    // `tryCatchOne(expr, names, parentenv, handlers[[1L]])`, applied without evaluating the
-    // call: the arguments other than `expr` are values already, so their promises are made
-    // forced, and the frame and its call read as in GNU R.
-    let mut args = [Arg {
-        tag: nil(),
-        value: eval::make_promise(names.expr, frame)?,
-    }; 4];
-    crate::heap().root(args[0].value);
-    for (arg, (symbol, value)) in args[1..].iter_mut().zip([
-        (names.names, classes),
-        (names.parentenv, parent_env),
-        (nth(one, 4), handlers.element(0)),
-    ]) {
-        arg.value = eval::forced_promise(symbol, value)?;
-        crate::heap().root(arg.value);
-    }
-    let value = eval::apply_closure(one, try_catch_one, &args, frame, None)?;
-    finish(ClosureFrame::Env(frame), value, interp().visible)
-}
-
-/// Evaluates the R body's `call` in `frame` and finishes the call with its value, for a fast
-/// path that has done everything before that call exactly as the R body would.
-unsafe fn decline_eval(call: Sexp, frame: Sexp) -> R<Sexp> {
-    let value = eval::eval(call, frame)?;
-    finish(ClosureFrame::Env(frame), value, interp().visible)
-}
-
-/// `tryCatchOne(expr, name, parentenv, handler)`: defines `doTryCatch` and applies it as the
-/// R body's `doTryCatch(return(expr), name, parentenv, handler)` does, with the arguments other
-/// than `return(expr)` passed as forced promises. That `return(expr)` returns from this frame
-/// unless a handler catches a condition, and then the rest of the R body runs as written.
-unsafe fn do_try_catch_one(call: &Call<'_>) -> R<Sexp> {
-    if !fast_paths_enabled() {
-        return decline();
-    }
-    let Some(index) = call.frame_index() else {
-        return decline();
-    };
-    let frame = call.env()?;
-    let names = symbols();
-    let statements = original_statements(index);
-    define_inner_closure(index, nth(statements, 0), frame)?;
-    // `value <- doTryCatch(return(expr), name, parentenv, handler)`
-    let assignment = nth(statements, 1);
-    let do_call = nth(assignment, 2);
-    let do_try_catch = eval::find_fun(names.do_try_catch, frame)?;
-    let mut args: [Arg; 4] = [Arg {
-        tag: nil(),
-        value: eval::make_promise(nth(do_call, 1), frame)?,
-    }; 4];
-    crate::heap().root(args[0].value);
-    // In the order `doTryCatch`'s `.addCondHands(name, list(handler), parentenv, ...)` forces
-    // them.
-    for (position, symbol) in [(1, names.name), (3, names.handler), (2, names.parentenv)] {
-        let Some(value) = argument(ClosureFrame::Env(frame), symbol)? else {
-            return decline_after(statements, 1, frame);
-        };
-        args[position].value = eval::forced_promise(symbol, value)?;
-        crate::heap().root(args[position].value);
-    }
-    let value = eval::apply_closure(do_call, do_try_catch, &args, frame, None)?;
-    crate::heap().root(value);
-    eval::define(nth(assignment, 1), value, frame)?;
-    decline_after(statements, 2, frame)
-}
-
-/// `doTryCatch(expr, name, parentenv, handler)`: establishes the exiting handler with the
-/// frame as its target and evaluates `expr`, whose `return(expr)` returns from `tryCatchOne`.
-unsafe fn do_do_try_catch(call: &Call<'_>) -> R<Sexp> {
-    if !fast_paths_enabled() {
-        return decline();
-    }
-    let frame = call.env()?;
-    let names = symbols();
-    let mut values: [Sexp; 3] = [nil(); 3];
-    for (slot, symbol) in values
-        .iter_mut()
-        .zip([names.name, names.handler, names.parentenv])
-    {
-        let Some(value) = argument(ClosureFrame::Env(frame), symbol)? else {
-            return decline();
-        };
-        *slot = value;
-    }
-    let [name, handler, parent_env] = values;
-    let handlers = values::list_vector(&[handler])?;
-    crate::heap().root(handlers);
-    let calling = values::scalar_logical(0)?;
-    kernel(
-        crate::conditions::do_add_cond_hands,
-        &[name, handlers, parent_env, frame, calling],
-        ClosureFrame::Env(frame),
-    )?;
-    let value = eval::eval(names.expr, frame)?;
-    finish(ClosureFrame::Env(frame), value, interp().visible)
+    finish(frame, value, interp().visible)
 }
 
 /// `withRestarts(expr, ...)` for restarts given as functions or descriptions, as the warning
@@ -4204,7 +4419,7 @@ unsafe fn do_with_restarts(call: &Call<'_>) -> R<Sexp> {
     }
     let statements = original_statements(index);
     for position in 0..5 {
-        define_inner_closure(index, nth(statements, position), frame)?;
+        define_inner_closure(index, nth(statements, position))?;
     }
     let make_restart = eval::value_of(eval::find_var_in_frame(install("makeRestart")?, frame)?)?;
     if make_restart.kind() != SexpType::Closure {
@@ -4339,7 +4554,7 @@ unsafe fn do_with_one_restart(call: &Call<'_>) -> R<Sexp> {
     let frame = call.env()?;
     let names = symbols();
     let statements = original_statements(index);
-    define_inner_closure(index, nth(statements, 0), frame)?;
+    define_inner_closure(index, nth(statements, 0))?;
     // Returns from this frame unless the restart is invoked.
     eval::eval(nth(statements, 1), frame)?;
     let restart_args = eval::value_of(eval::find_var_in_frame(names.restart_args, frame)?)?;

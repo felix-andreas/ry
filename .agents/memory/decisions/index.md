@@ -216,6 +216,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A profile summary records on the path a call already takes (settled)
 - Every closure call that can run on slots enters through the lean path (settled)
 - An element `<<-` stores into the enclosing binding cell (settled)
+- `tryCatch` pushes its chain of frames natively (settled)
 
 ## Builtins and base R
 
