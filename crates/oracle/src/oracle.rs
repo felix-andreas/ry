@@ -595,14 +595,15 @@ impl Engine for ProcessEngine {
             .envs(self.environment.iter().map(|(name, value)| (name, value)));
 
         let timeout = self.timeout.map(|timeout| timeout * passes);
-        let output = run_command(command, timeout, self.memory_limit).map_err(|error| {
-            match error.kind() {
-                std::io::ErrorKind::NotFound => {
-                    EngineError::Unavailable(format!("`{}` was not found", self.program))
+        let output =
+            run_command(command, timeout, self.memory_limit).map_err(|error| {
+                match error.kind() {
+                    std::io::ErrorKind::NotFound => {
+                        EngineError::Unavailable(format!("`{}` was not found", self.program))
+                    }
+                    _ => EngineError::Failed(format!("`{}`: {error}", self.program)),
                 }
-                _ => EngineError::Failed(format!("`{}`: {error}", self.program)),
-            }
-        })?;
+            })?;
         if output.timed_out {
             return Err(EngineError::Failed(format!(
                 "{} was killed after {} seconds",
