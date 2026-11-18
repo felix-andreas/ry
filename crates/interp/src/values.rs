@@ -344,9 +344,6 @@ impl Globals {
         for &classes in self.implicit_classes.values() {
             marker.mark(classes);
         }
-        for definitions in &self.deferred_definitions {
-            marker.mark(definitions.force);
-        }
     }
 }
 
