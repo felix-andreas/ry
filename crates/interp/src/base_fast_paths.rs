@@ -250,6 +250,7 @@ pub(crate) unsafe fn with_prologue(
         symbols().dot_internal,
         values::cons(values::lcons(install(internal_name)?, nil())?, nil())?,
     )?;
+    crate::heap().root(prologue);
     let already = body.kind() == SexpType::Language
         && body.car() == symbols().brace
         && values::pairlist_length(body.cdr()) == 2
@@ -4147,7 +4148,9 @@ unsafe fn push_levels(
             token: nil(),
         });
         let position = levels.len() - 1;
-        bind_local(list - 1, names.nh, values::scalar_integer(count as i32)?)?;
+        let handler_count = values::scalar_integer(count as i32)?;
+        heap.root(handler_count);
+        bind_local(list - 1, names.nh, handler_count)?;
         if count == 0 {
             return Ok(());
         }
@@ -4175,6 +4178,9 @@ unsafe fn push_levels(
         let run = push_frame(run_call, run_function, one - 1, args)?;
         levels[position].run = run;
         levels[position].token = token;
+        // `doTryCatch` forces `return(expr)`, which never returns to it, so the promise reads as
+        // under evaluation while the level runs and as interrupted afterwards.
+        token.set_gp_bits(eval::PROMISE_SEEN, true);
         // `.Internal(.addCondHands(name, list(handler), parentenv, environment(), FALSE))`
         activity::count(Counter::HandlersEstablished);
         let state = interp();
@@ -4251,6 +4257,8 @@ unsafe fn leave_levels(levels: &[Level], mut result: R<Sexp>, one_statements: Se
     for level in levels.iter().rev() {
         let mut caught = None;
         if level.run != 0 {
+            level.token.set_gp_bits(eval::PROMISE_SEEN, false);
+            level.token.set_gp_bits(eval::PROMISE_INTERRUPTED, true);
             result = match result {
                 Err(Unwind::Jump(Jump::Return { env, value })) if env == level.token => {
                     caught = Some(value);
@@ -4281,6 +4289,8 @@ unsafe fn leave_levels(levels: &[Level], mut result: R<Sexp>, one_statements: Se
 ///     msg <- .Internal(geterrmessage())
 ///     call <- value[[2L]]
 ///     cond <- simpleError(msg, call)
+/// } else if (is.character(value[[1L]])) {
+///     ...
 /// } else cond <- value[[1L]]
 /// value[[3L]](cond)
 /// ```
@@ -4288,7 +4298,13 @@ unsafe fn call_exiting_handler(index: usize, caught: Sexp, statements: Sexp) -> 
     let names = symbols();
     bind_local(index, names.value, caught)?;
     let statement = nth(statements, 3);
-    if caught.kind() != SexpType::List || length(caught) != 3 {
+    // The R statements take every shape this code does not: a message in place of the
+    // condition, and a frame with an environment, which may bind its own `simpleError`.
+    let simple = caught.kind() == SexpType::List
+        && length(caught) == 3
+        && caught.element(0).kind() != SexpType::String
+        && (caught.element(0) != nil() || interp().frames[index].env == nil());
+    if !simple {
         let env = eval::frame_env(index, Reify::Site(Site::UncompiledExpression))?;
         eval::eval(nth(statements, 2), env)?;
         return eval::eval(statement, env);

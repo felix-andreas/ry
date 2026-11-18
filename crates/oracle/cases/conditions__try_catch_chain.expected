@@ -143,6 +143,10 @@
 | [1] TRUE
 | [1] TRUE
 | [1] "made inside"
+| -- a simpleError bound in the tryCatchOne frame
+| [1] "replaced"
+| -- the return(expr) promise of a finished call
+| [1] "restarting interrupted promise evaluation"
 | -- many calls
 | [1] 155829863
 | [1] 200

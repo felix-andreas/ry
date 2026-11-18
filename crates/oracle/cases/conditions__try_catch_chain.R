@@ -144,6 +144,19 @@ print(identical(environment(kept[[3L]]$doTryCatch), kept[[3L]]))
 maker <- tryCatch(function() "made inside", error = function(e) NULL)
 print(maker())
 
+cat("-- a simpleError bound in the tryCatchOne frame\n")
+replaced <- tryCatch(
+  {
+    assign("simpleError", function(...) "replaced", at(3L))
+    1 + "a"
+  },
+  error = function(e) e
+)
+print(replaced)
+cat("-- the return(expr) promise of a finished call\n")
+finished <- tryCatch(at(4L), error = function(e) NULL)
+print(tryCatch(finished$expr, warning = function(w) conditionMessage(w)))
+
 cat("-- many calls\n")
 total <- 0
 for (i in 1:20000) {

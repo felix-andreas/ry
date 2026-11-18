@@ -445,8 +445,6 @@ pub(crate) unsafe fn stable_hash(object: Sexp, hash: &mut u64) {
     }
 }
 
-/// Evaluates every expression of a file in `env`, without printing, as GNU R sources its startup
-/// files.
 /// Runs the base package's `R/base` file and puts the fast paths in front of base's functions.
 /// A built tree's file is the lazy loader, whose first expression binds every base function, and
 /// the fast paths go in right after it, before any of those functions runs: the tree keeps the
@@ -474,6 +472,8 @@ unsafe fn source_base(home: &str) -> R<()> {
     Ok(())
 }
 
+/// Evaluates every expression of a file in `env`, without printing, as GNU R sources its startup
+/// files.
 pub unsafe fn source_file(path: &str, env: Sexp) -> R<()> {
     let text = std::fs::read_to_string(path)
         .map_err(|failure| error(format!("cannot open file '{path}': {failure}")))?;
