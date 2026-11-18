@@ -1204,6 +1204,8 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
 
 `crates/jit` compiles hot bodies and loops (`decisions/jit-ssa.md`, "The JIT tier"). In priority order:
 
+- **Hot-loop compiles of a body with a loop target cost twice as much.** A `HotLoop { target }` compile of the same body takes about twice the codegen time and emits more code than the plain `HotLoop` compile before it. Fannkuch-redux, scalar swaps (1618 words): codegen 43 to 84 ms, code 109 to 157 KB, `jit::compile` 386M to 840M instructions (callgrind), which makes the whole program 0.81x of ry 0.5.0. The AWFY mandelbrot loop: 11 to 21 ms. Find what the loop-target entry duplicates and cut it back. Measure with `RY_JIT_LOG=1` on both programs.
+
 - **Tried and dropped: pure inlined internals.** Letting pure `.Internal`s such as `paste0` and
   `match` keep the frame's variables moved no workload by 3% Ir. The native-share census says
   why: package time sits in bodies that run too rarely to repay compiling. Raising native share
