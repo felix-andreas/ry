@@ -611,7 +611,7 @@ fn count_allocation(kind: u32) {
     let count = counter.load(Ordering::Relaxed) + 1;
     counter.store(count, Ordering::Relaxed);
     let period = ALLOCATION_PERIOD.load(Ordering::Relaxed);
-    if period != 0 && count % period == 0 {
+    if period != 0 && count.is_multiple_of(period) {
         sample_allocation_site(kind);
     }
 }
