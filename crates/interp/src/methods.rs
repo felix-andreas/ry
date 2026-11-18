@@ -72,22 +72,28 @@ pub struct DeferredDefinitions {
     pub lazy: FxHashSet<Box<[u8]>>,
     /// Whether the first unit has yet to run.
     pub first_pending: bool,
+    /// Preserved while registered: a closure the loader defined in a frame that has returned,
+    /// which nothing counted holds, so the frame would otherwise be released under it.
     pub force: Sexp,
 }
 
 /// Registers `definitions`, replacing any registered under the same key.
 pub fn defer_definitions(definitions: DeferredDefinitions) {
-    let deferred = &mut interp().globals.deferred_definitions;
-    deferred.retain(|existing| existing.key != definitions.key);
-    deferred.push(definitions);
+    drop_deferred_definitions(&definitions.key);
+    crate::heap().preserve(definitions.force);
+    interp().globals.deferred_definitions.push(definitions);
 }
 
 /// Forgets the definitions registered under `key`, without running them.
 pub fn drop_deferred_definitions(key: &str) {
-    interp()
-        .globals
-        .deferred_definitions
-        .retain(|existing| existing.key != key);
+    let deferred = &mut interp().globals.deferred_definitions;
+    if let Some(position) = deferred
+        .iter()
+        .position(|definitions| definitions.key == key)
+    {
+        let dropped = deferred.remove(position);
+        crate::heap().release(dropped.force);
+    }
 }
 
 /// Whether some loader holds back definitions that may define classes or add methods to
@@ -1135,15 +1141,19 @@ unsafe fn run_unit(position: usize, lazy: Option<&[u8]>) -> R<()> {
         return Ok(());
     }
     let force = definitions.force;
-    if definitions.lazy.is_empty() {
-        deferred.remove(position);
-    }
+    let exhausted = definitions.lazy.is_empty();
     let argument = match lazy {
         Some(generic) => values::scalar_string(&String::from_utf8_lossy(generic))?,
         None => nil(),
     };
     let heap = crate::heap();
-    heap.preserve(force);
+    // The call holds `force` by a preserve of its own: an entry with no unit left is removed
+    // and hands its preserve over, and any other may be replaced while the call runs.
+    if exhausted {
+        deferred.remove(position);
+    } else {
+        heap.preserve(force);
+    }
     heap.preserve(argument);
     let result =
         values::call(force, &[argument]).and_then(|call| eval::eval(call, values::global_env()));

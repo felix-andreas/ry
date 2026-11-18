@@ -677,25 +677,6 @@ Rule and order: `development/design/memory-safety.md`, "Migration".
   - `crates/interp/src/profile_summary.rs` 17 to 27: `count_inlined_call`, `entering`, `finish`, `frame_identity`, `resolve_samples`.
   - `crates/interp/src/testing.rs` 28 to 29: `check_saved_prologues_replaced`, `refusal`.
 
-## Open: failing tests on main
-
-`just ci` stops at the first failing test binary. With `--no-fail-fast` (and GNU R's
-`lib/` on `LD_LIBRARY_PATH` for the `gnu-r` runtime tests), these are the only tests that fail:
-
-- **`test_load`: `held_back_s4_definitions_behave_as_if_run_eagerly` and
-  `a_lazy_generic_whose_held_back_definitions_fail_reports_the_failure_on_every_use`.** The first
-  use of a held-back class or generic stops with `could not find function ".ry_force_s4"`. That
-  happens only after a `load_all(full = TRUE)` reload with `options(ry.load.lazy_s4 = TRUE)` in
-  the same session. A first load, a reload with lazy S4 off and a non-full reload all work, and
-  neither the JIT nor GC timing matters. The `force` closure that `.ry_defer_s4` hands to
-  `ryLoaderDefer` cannot see the loader environment, although `environment(load_all)` binds
-  `.ry_force_s4`. The likely cause, unverified: the full reload's `.ry_new_package` registers
-  the new definitions under the same root key while something from the old load's state stays
-  reachable, or the closure's enclosing frame is rewired once `.ry_defer_s4` returns. A plain R
-  closure that a function stores and a later call runs keeps its enclosure. Reproduce with the
-  `SHAPES` package from `test_load.rs`: `ry load DIR -e "options(ry.load.lazy_s4 = TRUE);
-  load_all('DIR', full = TRUE)" -e "isVirtualClass('Sq')"`.
-
 ## Open: the package loader
 
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
