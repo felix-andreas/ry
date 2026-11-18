@@ -661,18 +661,21 @@ Rule and order: `development/design/memory-safety.md`, "Migration".
   per-operation table (`just bench-mechanisms`) shows no row for it.
 - **Raised `unsafe` counts** (`tools/unsafe.py check` reads them), until the helpers migrate:
   - `crates/interp/src/handles.rs` 107 to 149: `alloc_with_room`, `array_subassign`, `array_subset`, `array_subset2`, `call_environment`, `call_value`, `classed_error`, `compact_sequence`, `copy_attributes_to`, `copy_elements`, `copy_most_attributes`, `define`, `dispatch_builtin`, `element_text`, `evaluate`, `force`, `frame_value`, `generated_call`, `holds_elements`, `install_bytes`, `int_element`, `is_altrep`, `item`, `list_to_pairlist`, `mark_shared`, `missing_argument`, `move_elements`, `owned_names`, `pairlist_to_list`, `permanent`, `reaching_environment`, `real_element`, `record_dollar`, `record_dollar_assign`, `record_subassign2`, `record_subset2`, `resize_in_place`, `scalar_subset`, `shallow_copy`, `store_item`, `stored`, `tag`, `type_name`, `warning_in`, `with_result`.
-  - `crates/interp/src/interp.rs` 47 to 48: `altrep_storage`, the hook's type.
-  - `crates/interp/src/bytecode.rs` 409 to 411: `assign_element`, `assign_matrix_element_in_place`, `assign_slot_matrix_element`, `load_declines`, `op_subscript`, `subscript_unbound`.
+  - `crates/interp/src/interp.rs` 47 to 49: `altrep_storage` (the hook's type), `resolve_samples_before_truncating`.
+  - `crates/interp/src/bytecode.rs` 409 to 432: `assign_element`, `assign_matrix_element_in_place`, `assign_slot_matrix_element`, `load_declines`, `op_subscript`, `subscript_unbound`, `assign_enclosed_element`, `call_declined`, `call_generic_hooked`, `call_summarized`, `clear_dead`, `count_body_entry`, `count_code_entry`, `enclosed_cell`, `enclosed_element_assignment`, `fast_call_rebinding`, `generic_call_handler`, `has_slot_table`, `leave_summarized`, `may_dispatch_replacement`, `op_super_sub_assign`, `return_hooked`, `setter_call`, `shared_body`, `shared_slot_code`, `take_body_entries`, `track_body_entries`.
   - `crates/interp/src/conditions.rs` 50 to 51: `c_error`.
   - `crates/interp/src/connections.rs` 175 to 180: `drop_unconvertible`, `output_bytes`, `read_fixed_strings`, `text_encoding`, `translated_bytes`, `warn_unsigned`.
   - `crates/interp/src/deparse.rs` 44 to 45: `argument_at`, `deparse_lines_checked`, `parenthesize_caller`, `unused_arguments`.
   - `crates/interp/src/envir.rs` 125 to 127: `binding_environment`, `simple_as_environment`.
-  - `crates/interp/src/eval.rs` 266 to 267: `switch_empty_default`.
+  - `crates/interp/src/eval.rs` 266 to 271: `switch_empty_default`, `call_builtin_observed`, `enters_slot_frames`, `profiled_entry`, `returning_summarized`.
   - `crates/interp/src/serialize.rs` 69 to 70: `do_load`.
-  - `crates/interp/src/session.rs` 26 to 27: `lock_base_bindings`.
+  - `crates/interp/src/session.rs` 26 to 28: `lock_base_bindings`, `source_base`.
   - `crates/interp/src/sort.rs` 44 to 48: `collation_locale`, `do_icu_get_collate`, `do_icu_set_collate`, `in_order`, `incomparable_keys_given`, `rank_keys`, `strcoll`.
   - `crates/interp/src/utils.rs` 68 to 81: `character_factor`, `comment_char`, `count_argument`, `extract_item`, `first_byte_separator`, `first_bytes`, `is_missing`, `pad_record`, `parse_complex_prefix`, `parse_double_prefix`, `quote_set`, `read_string`, `rule_out`, `scan_decimal`, `scan_frame`, `scan_separator`, `scan_vector`, `write_element`, `write_string`.
   - `crates/interp/src/values.rs` 110 to 111: `as_integer_scalar_warning`, `as_real_scalar_warning`.
+  - `crates/interp/src/base_fast_paths.rs` 139 to 144: `all_bound`, `bind_local`, `call_exiting_handler`, `defines_prologue`, `leave_levels`, `push_frame`, `push_levels`, `try_catch_chain`, `variable_reference`.
+  - `crates/interp/src/profile_summary.rs` 17 to 27: `count_inlined_call`, `entering`, `finish`, `frame_identity`, `resolve_samples`.
+  - `crates/interp/src/testing.rs` 28 to 29: `check_saved_prologues_replaced`, `refusal`.
 
 ## Open: failing tests on main
 
