@@ -916,7 +916,7 @@ fn check_item_in<'db>(
         match (module.kind(root), declared_fn) {
             // A function literal with its own signature is typed by it, and the binding's
             // declared type is then checked against that like any other value.
-            (ExpressionKind::Assign { value, .. }, Some((declared, function)))
+            (ExpressionKind::Assign { target, value, .. }, Some((declared, function)))
                 if matches!(module.kind(*value), ExpressionKind::Function { .. })
                     && !context.expression_annotations.contains_key(*value) =>
             {
@@ -933,7 +933,9 @@ fn check_item_in<'db>(
                         annotation.map_or(&[], |annotation| &annotation.inline_parameters),
                     ),
                 };
-                context.recorded.insert(root, declared.body);
+                for expression in [*target, *value, root] {
+                    context.recorded.insert(expression, declared.body);
+                }
                 scheme = Some(declared);
                 scheme_is_declared = true;
             }
@@ -3473,7 +3475,11 @@ impl<'db, 'a> Checker<'db, 'a> {
                     }
                     None => {
                         let binds_name = spelling != AssignSpelling::Super
-                            && matches!(self.module.kind(target), ExpressionKind::NameRef(_));
+                            && matches!(
+                                self.module.kind(target),
+                                ExpressionKind::NameRef(_)
+                                    | ExpressionKind::Literal(LiteralKind::String(_))
+                            );
                         if binds_name {
                             self.table.level += 1;
                         }
@@ -4636,7 +4642,11 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             return;
         }
-        if let ExpressionKind::NameRef(_) = self.module.kind(target) {
+        // `"x" <- 1` binds `x` as `x <- 1` does.
+        if matches!(
+            self.module.kind(target),
+            ExpressionKind::NameRef(_) | ExpressionKind::Literal(LiteralKind::String(_))
+        ) {
             if let Some(&slot) = self.naming.resolutions.get(&target) {
                 let literal = spelling != AssignSpelling::Super
                     && literal_strings(self.module, value).is_some();

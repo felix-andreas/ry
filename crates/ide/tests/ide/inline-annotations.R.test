@@ -55,19 +55,19 @@ definition 17..18
 references: 17..18*, 23..24, 29..30
 rename: 3 edit(s)
 signature: none
-completion (16): Any, character, complex, double, fn, integer, list, logical
+completion (26): Any, character, complex, double, fn, integer, list, logical
 
 #---- completion_after_a_parameter_colon
 #: @type Money {double}
 
 f <- function(x: $0) x
 #++++
-hover 25..45: fn(x: Unknown) -> Unknown
+hover 30..45: fn(x: Unknown) -> Unknown
 definition: none
 references: none
 rename: none
 signature: none
-completion (17): Money, Any, character, complex, double, fn, integer, list
+completion (27): Money, Any, character, complex, double, fn, integer, list
 
 #---- completion_after_a_binding_colon_before_the_type_exists
 #: @type Money {double}
@@ -120,7 +120,7 @@ definition 21..22
 references: 21..22*, 27..28, 33..34
 rename: 3 edit(s)
 signature: none
-completion (16): Any, character, complex, double, fn, integer, list, logical
+completion (26): Any, character, complex, double, fn, integer, list, logical
 
 #---- inferred_annotation_fills_a_generic_function_header
 sca$0le_by <- function(values, factor = 2, ...) values * factor

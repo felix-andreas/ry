@@ -10,7 +10,8 @@ use {
     },
     semantics::{
         Db, ProjectFiles, SourceFile, item_hir, item_naming, item_node, item_tree,
-        naming::BindingKind, stubs::stub_declaration,
+        naming::BindingKind,
+        stubs::{stub_declaration, stub_type_declaration},
     },
     std::collections::HashSet,
     syntax::{
@@ -1314,6 +1315,7 @@ fn fresh_name(db: &dyn Db, root: &SyntaxNode, base: &str) -> String {
     let taken = |name: &str| {
         spelled.contains(name)
             || stub_declaration(db, name).is_some()
+            || stub_type_declaration(db, name).is_some()
             || files.is_some_and(|files| global_declaration_exists(db, files, name))
     };
     if !taken(base) {

@@ -157,7 +157,7 @@ hint @6: integer
 for (i in seq_len(3L)) print(i$0)
 #++++
 hover 29..30: i: integer
-hover-definition: local 5..6
+hover-definition: global 5..6
 definition 5..6
 references: 5..6*, 29..30
 rename: 2 edit(s)
@@ -1023,3 +1023,359 @@ action: Add inferred type annotations for the whole file
   edit 5..5 -> ": logical[]"
 completion (36): exists, expiry, example, existsFunction, existsMethod, exp, expand.grid, expand.model.frame
 hint @5: logical[]
+
+#---- hover_on_a_parameter_shows_its_type
+#: fn(integer) -> integer
+f <- function(x$0) x
+#++++
+hover 40..41: x: integer
+definition 40..41
+references: 40..41*, 43..44
+rename: 2 edit(s)
+signature: none
+completion (29): x, x11, xedit, xemacs, xfig, xinch, xor, xpdrows.data.frame
+
+#---- hover_on_an_unannotated_parameter_shows_its_type
+half <- function(x, ...$0, by = 2) x / by
+#++++
+hover 20..23: ...: Any
+definition 20..23
+references: 20..23*
+rename: 1 edit(s)
+signature: none
+action: Add inferred type annotation for `half`
+  edit 16..16 -> "<T: numeric>"
+  edit 18..18 -> ": T"
+  edit 23..23 -> ": Any"
+  edit 27..27 -> ": T"
+  edit 32..32 -> " -> double"
+action: Add inferred type annotations for the whole file
+  edit 16..16 -> "<T: numeric>"
+  edit 18..18 -> ": T"
+  edit 23..23 -> ": Any"
+  edit 27..27 -> ": T"
+  edit 32..32 -> " -> double"
+completion (33): ...elt, ...length, ...names, .__C__anova.glm.null, as.data.frame.array, as.data.frame.AsIs, as.data.frame.character, as.data.frame.complex
+hint @16<T: numeric>
+hint @18: T
+hint @23: Any
+hint @27: T
+hint @32 -> double
+
+#---- hover_on_a_loop_variable_shows_its_type
+f <- function(xs) {
+  for (item$0 in c("a", "b")) print(item)
+}
+#++++
+hover 27..31: item: character
+definition 27..31
+references: 27..31*, 54..58
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `f`
+  edit 0..0 -> "#: <T> fn([xs]: T) -> NULL\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: <T> fn([xs]: T) -> NULL\n"
+completion (28): item, inheritedSlotNames, ISOdatetime, bindtextdomain, Dict.empty, Dict.is_empty, Dict.remove, Dict.remove_all
+hint @1: <T> fn([xs]: T) -> NULL
+hint @31: character
+
+#---- hover_on_a_string_named_target_shows_the_variable
+"na.rm.default$0" <- TRUE
+print(na.rm.default)
+#++++
+hover 0..15: na.rm.default: logical
+hover-definition: global 0..15
+definition 0..15
+references: 0..15*, 30..43
+rename: 2 edit(s)
+signature: none
+completion: none
+
+#---- hover_on_a_local_string_named_variable_reads_what_was_written
+f <- function() {
+  "count" <- 1L
+  count$0
+}
+#++++
+hover 36..41: count: integer
+hover-definition: local 20..27
+definition 20..27
+references: 20..27*, 36..41
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `f`
+  edit 15..15 -> " -> integer"
+action: Add inferred type annotations for the whole file
+  edit 15..15 -> " -> integer"
+completion (15): count, count.fields, Num.count_leading_zero_bits, Num.count_one_bits, Num.count_trailing_zero_bits, Str.count_utf8_bytes, Expr.count, List.count_if
+hint @15 -> integer
+
+#---- completion_offers_a_string_named_global
+"limit" <- 10L
+print(limit$0)
+#++++
+hover 21..26: limit: integer
+hover-definition: global 0..7
+definition 0..7
+references: 0..7*, 21..26
+rename: 2 edit(s)
+signature: fn(x: integer, ...: Any, [digits]: Any, [quote]: logical, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> integer
+parameters: [x: integer] | ...: Any | [digits]: Any | [quote]: logical | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
+completion (7): limit, limitedLabels, memory.limit, setTimeLimit, setSessionTimeLimit, List.map_with_index, .__C__LinearMethodsList
+
+#---- completion_offers_a_parameter_at_the_end_of_a_braceless_body
+f <- function(first, second = 2) first + second$0
+#++++
+hover 41..47: second: T
+hover-definition: local 21..27
+definition 21..27
+references: 21..27*, 41..47
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `f`
+  edit 13..13 -> "<T: numeric>"
+  edit 19..19 -> ": T"
+  edit 27..27 -> ": T"
+  edit 32..32 -> " -> T"
+action: Add inferred type annotations for the whole file
+  edit 13..13 -> "<T: numeric>"
+  edit 19..19 -> ": T"
+  edit 27..27 -> ": T"
+  edit 32..32 -> " -> T"
+completion (7): second, .leap.seconds, simpleCondition, as.character.condition, messageCondition, browserCondition, conditionMessage.condition
+hint @13<T: numeric>
+hint @19: T
+hint @27: T
+hint @32 -> T
+
+#---- completion_after_a_return_type_offers_values
+label <- function(x: integer) -> character format$0(x)
+#++++
+hover 43..49: format: fn(
+hover 43..49:   x: Any,
+hover 43..49:   ...: Any,
+hover 43..49:   [trim]: logical,
+hover 43..49:   [digits]: Any,
+hover 43..49:   [nsmall]: Any,
+hover 43..49:   [justify]: character,
+hover 43..49:   [width]: Any,
+hover 43..49:   [na.encode]: logical,
+hover 43..49:   [scientific]: Any,
+hover 43..49:   [big.mark]: character,
+hover 43..49:   [decimal.mark]: character,
+hover 43..49: ) -> character
+hover-definition: package base (1 declaration(s), declared in stub source base at `format`)
+definition: stub source base at `format`
+references: none
+rename: none
+signature: fn(x: Any, ...: Any, [trim]: logical, [digits]: Any, [nsmall]: Any, [justify]: character, [width]: Any, [na.encode]: logical, [scientific]: Any, [big.mark]: character, [decimal.mark]: character) -> character
+parameters: [x: Any] | ...: Any | [trim]: logical | [digits]: Any | [nsmall]: Any | [justify]: character | [width]: Any | [na.encode]: logical | [scientific]: Any | [big.mark]: character | [decimal.mark]: character
+completion (27): format, format.AsIs, format.data.frame, format.Date, format.default, format.difftime, format.factor, format.hexmode
+
+#---- completion_offers_a_global_assigned_inside_another_assignment
+total <- sum(parts <- c(1, 2))
+print(parts$0)
+#++++
+hover 37..42: parts: double[]
+hover-definition: global 13..18
+definition 13..18
+references: 13..18*, 37..42
+rename: 2 edit(s)
+signature: fn(x: double[], ...: Any, [digits]: Any, [quote]: logical, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> double[]
+parameters: [x: double[]] | ...: Any | [digits]: Any | [quote]: logical | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
+action: Add inferred type annotations for the whole file
+  edit 5..5 -> ": double"
+completion (15): parts, packageStartupMessage, pairwise.prop.test, pairwise.t.test, pairwise.wilcox.test, print.NativeRoutineList, suppressPackageStartupMessages, .deparseOpts
+hint @5: double
+hint @18: double[]
+
+#---- completion_offers_a_pattern_variable_in_the_arm
+f <- function(o) {
+  match (o) {
+    :Some(found) => found$0
+    :None => 0L
+  }
+}
+#++++
+hover 53..58: found: T
+hover-definition: local 43..48
+definition 43..48
+references: 43..48*, 53..58
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `f`
+  edit 13..13 -> "<T>"
+  edit 15..15 -> ": :Some(T) | :None"
+  edit 16..16 -> " -> T | integer"
+action: Add inferred type annotations for the whole file
+  edit 13..13 -> "<T>"
+  edit 15..15 -> ": :Some(T) | :None"
+  edit 16..16 -> " -> T | integer"
+completion (2): found, packageNotFoundError
+hint @13<T>
+hint @15: :Some(T) | :None
+hint @16 -> T | integer
+
+#---- completion_offers_a_pattern_variable_in_the_guard
+f <- function(o: :Some(integer) | :None) -> integer {
+  match (o) {
+    :Some(found) if (found$0 > 0L) => found
+    _ => 0L
+  }
+}
+#++++
+hover 89..94: found: integer
+hover-definition: local 78..83
+definition 78..83
+references: 78..83*, 89..94, 104..109
+rename: 3 edit(s)
+signature: none
+completion (2): found, packageNotFoundError
+
+#---- completion_offers_a_rest_pattern_variable
+f <- function(xs) {
+  match (xs) {
+    [first, ..rest] => rest$0
+    [] => xs
+  }
+}
+#++++
+hover 58..62: rest: List<Unknown>
+hover-definition: local 49..53
+definition 49..53
+references: 49..53*, 58..62
+rename: 2 edit(s)
+type-definition: stub source std at `List`
+signature: none
+completion (114): rest, restartDescription, restartFormals, print.restart, tryInvokeRestart, isRestart, de.restore, USArrests
+
+#---- completion_offers_a_top_level_pattern_variable
+match (:Some(1L)) {
+  :Some(found) => print(found$0)
+  :None => print(0L)
+}
+#++++
+hover 44..49: found: integer
+hover-definition: local 28..33
+definition 28..33
+references: 28..33*, 44..49
+rename: 2 edit(s)
+signature: fn(x: integer, ...: Any, [digits]: Any, [quote]: logical, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> integer
+parameters: [x: integer] | ...: Any | [digits]: Any | [quote]: logical | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
+completion (2): found, packageNotFoundError
+
+#---- hover_on_an_unbound_condition
+if (condition$0) 1
+#++++
+hover 4..13: condition
+hover-definition: installed condition from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed condition from base, stats, utils, methods, graphics, grDevices, datasets
+references: none
+rename: none
+signature: none
+completion (15): conditionCall, conditionCall.condition, conditionMessage.condition, conditionMessage, .__C__conditionalExtension, as.character.condition, errorCondition, print.condition
+
+#---- a_function_named_like_a_stub_type_navigates_to_the_function
+levels <- factor$0(c("a", "b"))
+#++++
+hover 10..16: factor: fn(
+hover 10..16:   [x]: Any,
+hover 10..16:   [levels]: Any,
+hover 10..16:   [labels]: Any,
+hover 10..16:   [exclude]: Any,
+hover 10..16:   [ordered]: logical,
+hover 10..16:   [nmax]: Any,
+hover 10..16: ) -> factor
+hover-definition: package base (1 declaration(s), declared in stub source base at `factor`)
+definition: stub source base at `factor`
+references: none
+rename: none
+signature: fn([x]: Any, [levels]: Any, [labels]: Any, [exclude]: Any, [ordered]: logical, [nmax]: Any) -> factor
+parameters: [[x]: Any] | [levels]: Any | [labels]: Any | [exclude]: Any | [ordered]: logical | [nmax]: Any
+action: Add inferred type annotation for `levels`
+  edit 6..6 -> ": factor"
+action: Add inferred type annotations for the whole file
+  edit 6..6 -> ": factor"
+completion (32): factor, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor, default.stringsAsFactors
+hint @6: factor
+
+#---- a_stub_type_named_like_a_function_navigates_to_the_type
+#: fn(x: factor$0) -> integer
+count_levels <- function(x) nlevels(x)
+#++++
+hover 9..15: factor
+hover-definition: package base (0 declaration(s), declared in stub source base at `factor`)
+definition: stub source base at `factor`
+references: 9..15
+rename: none
+signature: none
+completion (1): factor
+
+#---- completion_in_a_comment_annotation_offers_a_stub_class
+#: fn(x: fac$0) -> logical
+is_factor_like <- function(x) TRUE
+#++++
+hover 9..12: fac
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): factor
+
+#---- hover_on_the_string_that_declares_a_generic_names_the_generic
+setGeneric("area$0", function(shape, ...) standardGeneric("area"))
+setMethod("area", "numeric", function(shape, ...) shape * 2)
+print(area(1))
+#++++
+hover 11..17: area: Unknown
+definition 12..16
+references: 12..16*, 57..61, 76..80, 132..136
+rename: 4 edit(s)
+calls area: in (top level) [132..136] | out
+signature: fn(name: character, [def]: Any, ...: Any) -> character
+parameters: [name: character] | [def]: Any | ...: Any
+completion: none
+hint @11name =
+hint @19def =
+hint @83signature =
+hint @94definition =
+
+#---- completion_offers_a_generic_declared_by_a_string
+setGeneric("area", function(shape, ...) standardGeneric("area"))
+setMethod("area", "numeric", function(shape, ...) shape * 2)
+print(area$0(1))
+#++++
+hover 132..136: area: Unknown
+hover-definition: global 12..16
+definition 12..16
+references: 12..16*, 57..61, 76..80, 132..136
+rename: 4 edit(s)
+calls area: in (top level) [132..136] | out
+signature: <T> fn(x: T, ...: Any, [digits]: Any, [quote]: logical, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> T
+parameters: [x: T] | ...: Any | [digits]: Any | [quote]: logical | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
+completion (84): area, state.area, abbreviate, aggregate, aggregate.data.frame, aggregate.ts, all.equal.envRefClass, aperm.default
+hint @11name =
+hint @19def =
+hint @83signature =
+hint @94definition =
+
+#---- completion_at_a_second_write_of_a_pattern_variable_offers_nothing
+f <- function(a, b) {
+  first <- match (a) {
+    :Some(found) => found
+    :None => 0L
+  }
+  match (b) {
+    :Some(found$0) => found + first
+    :None => first
+  }
+}
+#++++
+hover 115..120: found: T
+hover-definition: local 55..60
+definition 55..60
+references: 55..60*, 65..70, 115..120*, 125..130
+rename: 4 edit(s)
+signature: none
+completion: none

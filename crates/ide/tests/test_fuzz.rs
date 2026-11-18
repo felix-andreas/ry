@@ -35,6 +35,19 @@ const REGRESSIONS: &[&str] = &[
     "match (p) {\n  (a, ..rest) => a\n}\n",
     "\"na.rm.default\" <- TRUE\nprint(na.rm.default)\n",
     "pick <- function(dt) {\n  columns <- c(\"a\", \"b\")\n  dt[, ..columns]\n}\n",
+    "#: fn(integer) -> integer\nf <- function(x) x\n",
+    "f <- function() {\n  \"count\" <- 1L\n  count\n}\n",
+    "f <- function(first, second = 2) first + second\n",
+    "label <- function(x: integer) -> character format(x)\n",
+    "total <- sum(parts <- c(1, 2))\nprint(parts)\n",
+    "f <- function(o) {\n  match (o) {\n    :Some(found) if (found > 0L) => found\n    _ => 0L\n  }\n}\n",
+    "f <- function(xs) {\n  match (xs) {\n    [first, ..rest] => rest\n    [] => xs\n  }\n}\n",
+    "r <- match (match ((x = 1, y = 2)) {\n  (x = a, y = b) => (x = b, y = a)\n}) {\n  (x = a, y = b) => (x = b, y = a)\n}\n",
+    "if (condition) print(1)\n",
+    "#: fn(x: factor) -> logical\ncheck <- function(x) TRUE\nlevels <- factor(c(\"a\", \"b\"))\n",
+    "setGeneric(\"area\", function(shape, ...) standardGeneric(\"area\"))\nsetMethod(\"area\", \"numeric\", function(shape, ...) shape * 2)\nprint(area(1))\n",
+    "Kind <- setRefClass(\"Kind\", fields = list(amount = \"numeric\"))\nitem <- Kind$new(amount = 1)\nitem$amount\n",
+    "f <- function(x) stats::sd(x)\n",
 ];
 
 fn package(source: &str) -> Vec<Project> {

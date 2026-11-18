@@ -134,6 +134,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A function has one signature, resolved in `syntax::annotation`
 - A splice reparse shares what the parser's recorded lookahead proves untouched
 - One syntax verdict, in the `syntax` crate, for `ry check` and the runtime
+- A stub type name is no value, and a type and a value of one name each have a declaration
 
 ## Editor and language server
 
@@ -169,6 +170,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Completion pushes down names whose declared type cannot fit, and never promotes
 - The console's crossterm is patched to drain the terminal, and R reads console input one line per chunk
 - An editor target is what the code means, and rename refuses what it cannot trace
+- A hover's link is the definition's resolution, and a name that resolves is one completion offers
 
 ## Interpreter
 

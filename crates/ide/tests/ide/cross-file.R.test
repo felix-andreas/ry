@@ -225,7 +225,7 @@ definition R/types.R:9..15
 references: R/types.R:9..15*, R/main.R:3..9
 rename: 2 edit(s)
 signature: none
-completion (1): Person
+completion (2): Person, POSIXct
 
 #==== workspace
 #---- cross_file_use_updates_after_move_lookup

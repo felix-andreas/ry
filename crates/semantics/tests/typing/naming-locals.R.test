@@ -9,6 +9,16 @@ f <- function() {
 == R/main.R
 f: fn() -> integer
 
+#---- local_assignment_to_a_string_binds_the_name_it_spells
+#~~~~ R/main.R
+f <- function() {
+  "value" <- 1L
+  value
+}
+#++++
+== R/main.R
+f: fn() -> integer
+
 #---- local_rebinding_creates_fresh_binding
 #~~~~ R/main.R
 f <- function() {
