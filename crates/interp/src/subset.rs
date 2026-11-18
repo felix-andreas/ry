@@ -3022,7 +3022,7 @@ fn argument_name<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s, Char
     }
     if value.r_type() == SexpType::String
         && let Some(text) = dense::<Str>(context, value)?
-        && text.len() >= 1
+        && !text.is_empty()
     {
         return Ok(context.root(text.get(context, 0)));
     }

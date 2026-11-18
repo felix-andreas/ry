@@ -751,9 +751,8 @@ fn complete_covariances(
         } else {
             &partners[..]
         };
-        let mut groups = partners.chunks_exact(4);
-        for group in &mut groups {
-            let group = [group[0], group[1], group[2], group[3]];
+        let (groups, remainder) = partners.as_chunks::<4>();
+        for &group in groups {
             let values = long_double::covariances_by_four(
                 x_column,
                 x_means[i],
@@ -768,7 +767,7 @@ fn complete_covariances(
                 }
             }
         }
-        for &j in groups.remainder() {
+        for &j in remainder {
             let value = long_double::covariance(
                 x_column,
                 x_means[i],

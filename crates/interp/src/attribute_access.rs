@@ -625,7 +625,7 @@ impl<'a> Classes<'a> {
         if is_object(object) {
             let class = get_attribute(context, object, symbol(|symbols| symbols.class));
             match class.downcast::<Str>() {
-                Some(class) if class.len() > 0 => return Some(Classes::Vector(class)),
+                Some(class) if !class.is_empty() => return Some(Classes::Vector(class)),
                 Some(_) => {}
                 None if class.r_type() == SexpType::Nil => {}
                 None => return None,

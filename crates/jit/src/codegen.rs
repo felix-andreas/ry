@@ -4752,8 +4752,7 @@ impl<'p> Translator<'p> {
     /// hands the activation to tier 0: the exit writes dirty variables back, which would undo
     /// what a forced promise assigned to one.
     fn settle_exposed(&mut self, state: &StateRef<'p>, leaving: Value) {
-        for slot in 0..state.slots.len() {
-            let current = state.slots[slot];
+        for (slot, current) in state.slots.iter().enumerate() {
             if !current.may_be(status::DIRTY) || !current.ty.in_variables() {
                 continue;
             }
