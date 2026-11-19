@@ -363,3 +363,13 @@ T
 h <- function<U>(x: U) -> U x
 #++++
 h: <T> fn(x: T) -> T
+
+#---- an_inline_binder_takes_a_union_bound
+normalize <- function<T, U: list[T] | T[]>(path: U) -> U {
+  vapply(path, nchar, 1L)
+  path
+}
+one <- normalize("a")
+#++++
+normalize: <T, U: list[T] | T[]> fn(path: U) -> U
+one: character

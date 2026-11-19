@@ -433,6 +433,28 @@ implied <- function(case) {
 implied: Unknown
 94..95 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
+#---- tests_that_together_cover_an_enclosing_test_leave_no_path_past_both
+covered <- function(case) {
+  x <- "s"
+  if (case %in% c("a", "b", "c")) {
+    if (case %in% c("a", "b")) x <- 1
+    if (case == "c") x <- 2
+    x + 1
+  }
+}
+uncovered <- function(case) {
+  x <- "s"
+  if (case %in% c("a", "b", "c")) {
+    if (case == "a") x <- 1
+    if (case == "c") x <- 2
+    x + 1
+  }
+}
+#++++
+covered: <T> fn(case: T) -> double | NULL
+uncovered: Unknown
+294..295 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character | double`
+
 #---- a_test_of_another_or_rewritten_local_sees_both_values
 unrelated <- function(case, other) {
   x <- 1

@@ -8,10 +8,10 @@ use {
         Db,
         diagnostics::TypeRenderer,
         types::{
-            Atomic, Constraint, FrameKind, FunctionType, Name, NativeField, NativeScalar,
-            Parameter, RecordField, RestParameter, Ty, TyKind, TypeScheme, any, column_type,
-            conflicting_tags, is_ry_value_type, native_record, null, scalar, substitute_rigid,
-            union_of, unknown,
+            Atomic, Binder, Bound, Constraint, FrameKind, FunctionType, Name, NativeField,
+            NativeScalar, Parameter, RecordField, RestParameter, Ty, TyKind, TypeScheme, any,
+            column_type, conflicting_tags, is_ry_value_type, native_record, null, scalar,
+            substitute_rigid, union_of, unknown,
         },
     },
     rustc_hash::FxHashSet,
@@ -96,7 +96,7 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
         None => {}
     }
 
-    let mut forall: Vec<(Name<'db>, Constraint)> = Vec::new();
+    let mut forall: Vec<Binder<'db>> = Vec::new();
     let mut params: Vec<(String, Ty<'db>, bool)> = Vec::new();
     let mut rest: Option<Ty<'db>> = None;
     let mut ret: Option<Ty<'db>> = None;
@@ -403,9 +403,7 @@ pub fn merge_annotations<'db>(
         .binders
         .iter()
         .zip(&inline_scheme.binders)
-        .map(|((comment_name, _), (inline_name, _))| {
-            (*comment_name, Ty::new(db, TyKind::Rigid(*inline_name)))
-        })
+        .map(|(comment, inline)| (comment.name, Ty::new(db, TyKind::Rigid(inline.name))))
         .collect();
     let renamed = substitute_rigid(db, comment_scheme.body, &renaming);
     let TyKind::Function(comment_function) = renamed.kind(db) else {
@@ -885,31 +883,22 @@ impl<'db> Lowering<'db> {
     /// `bound` spans every binder list of the block, so a duplicate across lists is caught too.
     /// A parameter that fills a `List`'s item is a ry value even when it is written `<T>`, so
     /// that a literal passed for it becomes a ry value rather than R's `double`.
-    fn scheme_binders(
-        &self,
-        forall: Vec<(Name<'db>, Constraint)>,
-    ) -> ThinVec<(Name<'db>, Constraint)> {
+    fn scheme_binders(&self, forall: Vec<Binder<'db>>) -> ThinVec<Binder<'db>> {
         forall
             .into_iter()
-            .map(|(name, constraint)| {
-                let constraint = if constraint == Constraint::Unconstrained
-                    && self.list_item_binders.contains(&name)
+            .map(|binder| {
+                if binder.bound == Bound::Constraint(Constraint::Unconstrained)
+                    && self.list_item_binders.contains(&binder.name)
                 {
-                    Constraint::ArrayItem
+                    Binder::constrained(binder.name, Constraint::ArrayItem)
                 } else {
-                    constraint
-                };
-                (name, constraint)
+                    binder
+                }
             })
             .collect()
     }
 
-    fn lower_binders(
-        &mut self,
-        list: &SyntaxNode,
-        bound: &mut Vec<(Name<'db>, Constraint)>,
-        place: &str,
-    ) {
+    fn lower_binders(&mut self, list: &SyntaxNode, bound: &mut Vec<Binder<'db>>, place: &str) {
         for binder in list
             .children()
             .filter(|c| c.kind() == SyntaxKind::TYPE_BINDER)
@@ -954,7 +943,13 @@ impl<'db> Lowering<'db> {
                 }
                 _ => Constraint::Unconstrained,
             };
-            if bound.iter().any(|(existing, _)| *existing == name) {
+            // A type bound reads the binders before it, so `<T, U: list[T] | T[]>` lowers `T`
+            // first.
+            let type_bound = binder
+                .children()
+                .find(|child| is_type_kind(child.kind()))
+                .map(|ty| self.lower_type(&ty));
+            if bound.iter().any(|existing| existing.name == name) {
                 self.errors.push((
                     format!(
                         "duplicate type parameter name `{}` in {place}.",
@@ -964,7 +959,13 @@ impl<'db> Lowering<'db> {
                 ));
             }
             self.binders.push(name);
-            bound.push((name, constraint));
+            bound.push(Binder {
+                name,
+                bound: match type_bound {
+                    Some(ty) => Bound::Type(ty),
+                    None => Bound::Constraint(constraint),
+                },
+            });
         }
     }
 
@@ -992,7 +993,7 @@ impl<'db> Lowering<'db> {
             alias,
             inline: node.kind() == SyntaxKind::TYPE_DEFINITION,
             name: Name::new(self.db, name),
-            parameters: parameters.into_iter().map(|(name, _)| name).collect(),
+            parameters: parameters.into_iter().map(|binder| binder.name).collect(),
             body,
         })
     }

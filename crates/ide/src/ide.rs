@@ -26,8 +26,8 @@ use {
             outside_prelude, stub_declaration, stubs,
         },
         types::{
-            Atomic, Constraint, FunctionType, Name, Parameter, RecordField, Ty, TyKind, TypeScheme,
-            contains_inference_var, union_of,
+            Atomic, Binder, Constraint, FunctionType, Name, Parameter, RecordField, Ty, TyKind,
+            TypeScheme, contains_inference_var, union_of,
         },
     },
     std::{
@@ -638,7 +638,7 @@ fn hover_lines(db: &dyn Db, name: &str, scheme: &TypeScheme<'_>) -> Vec<String> 
     }
     let mut renderer = TypeRenderer::default();
     let binders = renderer
-        .render_binder_prefix(&scheme.binders)
+        .render_binder_prefix(db, &scheme.binders)
         .map(|prefix| format!("{prefix} "))
         .unwrap_or_default();
     let (label, parameters) =
@@ -2173,7 +2173,7 @@ fn scheme_signature(
         };
     };
     let prefix = renderer
-        .render_binder_prefix(&scheme.binders)
+        .render_binder_prefix(db, &scheme.binders)
         .map(|prefix| format!("{prefix} "))
         .unwrap_or_default();
     let (label, parameters) = render_signature(db, &mut renderer, prefix, function);
@@ -3203,7 +3203,7 @@ fn inline_annotation_edits<'db>(
         .children()
         .find(|node| node.kind() == PARAMETER_LIST)?;
     let mut edits = Vec::new();
-    if let Some(binders) = renderer.render_binder_prefix(&scheme.binders) {
+    if let Some(binders) = renderer.render_binder_prefix(db, &scheme.binders) {
         edits.push(TextEdit {
             range: TextRange::empty(keyword.text_range().end()),
             replacement: binders,
@@ -4767,12 +4767,14 @@ fn annotation_type_hover(db: &dyn Db, file: SourceFile, cursor: &AnnotationTypeC
             // The renderer names the parameters in order, so the body must be rendered through
             // the same renderer for its references to agree with the `<...>` list.
             let mut renderer = TypeRenderer::default();
-            let binders: Vec<(Name<'_>, Constraint)> = definition
+            let binders: Vec<Binder<'_>> = definition
                 .parameters
                 .iter()
-                .map(|parameter| (*parameter, Constraint::Unconstrained))
+                .map(|parameter| Binder::constrained(*parameter, Constraint::Unconstrained))
                 .collect();
-            let parameters = renderer.render_binder_prefix(&binders).unwrap_or_default();
+            let parameters = renderer
+                .render_binder_prefix(db, &binders)
+                .unwrap_or_default();
             let body = renderer.render(db, definition.body);
             match (definition.inline, definition.alias) {
                 (true, true) => format!("alias {}{parameters} = {body}", cursor.name),

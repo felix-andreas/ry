@@ -149,6 +149,39 @@ handlers <- list(add = function(left, right) left + right)
 #++++
 handlers: <T: numeric> list{add: fn(left: T, right: T) -> T}
 
+#---- a_binder_bounded_by_a_union_returns_what_it_is_given
+#: <T, U: list[T] | T[]> fn(path: U) -> U
+normalize <- function(path) {
+  vapply(path, nchar, 1L)
+  path
+}
+one <- nchar(normalize("a"))
+many <- normalize(list("a", "b"))
+#++++
+normalize: <T, U: list[T] | T[]> fn(path: U) -> U
+one: integer
+many: list{character, character}
+
+#---- a_call_outside_a_binder_bound_is_reported
+#: <T, U: list[T] | T[]> fn(path: U) -> U
+normalize <- function(path) path
+broken <- normalize(sum)
+#++++
+normalize: <T, U: list[T] | T[]> fn(path: U) -> U
+broken: Unknown
+95..98 error[type-mismatch] expected `list[T] | T[]`, found `fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex`
+
+#---- a_forall_binder_takes_a_union_bound
+#: @forall T, U: list[T] | T[]
+#: @param path {U}
+#: @return {U}
+normalize <- function(path) {
+  vapply(path, nchar, 1L)
+  path
+}
+#++++
+normalize: <T, U: list[T] | T[]> fn(path: U) -> U
+
 #---- declared_scheme_wins
 #: <T> fn(x: T) -> T
 id <- function(x) x

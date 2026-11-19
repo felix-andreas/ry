@@ -665,6 +665,34 @@ Otherwise it takes the first member it fits, so
 `function(n) if (length(n) == 1L) half(n) else lapply(n, half)`, where `half` needs a number, gives
 `n` the type `T[]` from `lapply`'s `list[T] | T[] | NULL`, with `T: scalar numeric`.
 
+#### Type bounds
+
+A binder may carry a type instead of a constraint, written `NAME: TYPE`. The binder then stands for
+one type that fits its bound, and the signature can name that type again:
+
+```r
+#: <T, U: list[T] | T[]> fn(path: U) -> U
+normalize <- function(path) {
+  vapply(path, nchar, 1L)
+  path
+}
+one <- normalize("a")              # character
+many <- normalize(list("a", "b"))  # list{character, character}
+```
+
+Written `fn(path: list[T] | T[]) -> list[T] | T[]`, the signature would return the whole union to
+every caller. The body may use the parameter wherever its bound fits, and an argument outside the
+bound, such as `normalize(sum)`, is a type error at the call. `@forall T, U: list[T] | T[]` and
+`function<T, U: list[T] | T[]>(path: U) -> U` declare the same binders. A bound that is a single
+name reads as a constraint, so a type bound is a union or a compound type such as `list[T]`.
+
+Inference gives an unannotated parameter the same shape when it meets a union and flows to the
+return: the `normalize` above infers exactly the declared signature. A parameter that does not
+reach the return keeps the union, as in `<T> fn(path: list[T] | T[]) -> integer`. A parameter
+that meets two unions keeps the members of the first that fit the second, so `integer | logical`
+and then `character | logical` leave `logical`, and two unions with no common member are a type
+error at the second use.
+
 A constraint limits what a caller may instantiate `T` with, and the annotated body may rely on it.
 Under `<T: numeric> fn(x: T) -> T` the body may use `x` as a number. Arithmetic between two different
 constrained parameters, `a / b` under `<T: numeric, U: numeric> fn(a: T, b: U) -> double`, is
@@ -2972,8 +3000,11 @@ The details:
   `if (case == "b") x + 1` checks. The tests compare the local with literals through `==`, `!=` and
   `%in%`, a bare local (read as `== TRUE`), and `!` of these. R coerces before it compares (`"1" == 1` holds),
   so only literals of one kind are told apart by their values, and a string with a backslash is told
-  apart from none. A write to either local ends it, so does a write in a loop or through `<<-`, and
-  two tests that only together cover an earlier one are not combined.
+  apart from none. A write to either local ends it, and so does a write in a loop or through `<<-`.
+  A test reads within the tests of the same local that enclose it, so inside
+  `if (case %in% c("a", "b", "c"))`, the writes under `if (case %in% c("a", "b"))` and
+  `if (case == "c")` together leave no path that skips both: a local each makes a number is a
+  number after them.
 
 #### Lazy arguments and required formals
 
@@ -3432,7 +3463,9 @@ slot, so the slot's type reflects the update:
   `old[[1]]$private$deep_clone` is a `double`. Writing a field of a `NULL` grows it into a one-field
   record, as R does, so `x <- NULL; x$a <- 1` makes `x` a `list{a: double}`.
 - `formals(f) <- v` and `body(f) <- v` rewrite the function itself, so `f` is `Unknown` afterwards
-  and calls to it are not checked.
+  and calls to it are not checked. When the last top-level write of `f` in its file is such a
+  rewrite, the earlier `f <- make(g)` builds a template whose code never runs as written, so a
+  function argument such as `g` is not held to what that code would do with it.
 - `names(x) <- c("a", "b")` with literal names, as many as `x` has items, turns a list of known
   items into a record with those fields and renames a record's fields. Computed names leave a list
   whose fields are not tracked, so `x$a` may read any item. Other replacement calls, such as
@@ -4878,16 +4911,9 @@ Known bugs, where correct code is reported:
 - **A vector of statically unknown length at a scalar parameter.** `p[file.exists(p)]` returned
   through a function and passed to a stub's scalar `character` parameter is reported, although the
   program guarantees one element. No type records the length.
-- **A union parameter that flows to the return.** A parameter inferred as `list[T] | T[]` and
-  returned keeps both members at a call that passes only one of them through another function, so
-  a `character` argument comes back as `character | list[T] | T[]`. Annotate the parameter.
-- **Tests that together cover an earlier one.** Inside `if (case %in% c("a", "b"))`, writes under
-  `if (case == "a")` and `if (case == "b")` are not combined, so a local both make a list still
-  joins its value from before them.
 - **A later top-level write in a package.** A closure in a package reads a top-level name as its
-  definition, so a later top-level `body(f) <- quote(...)` or `x$a <- v` is not seen there. A
-  closure that receives `f` keeps the parameters `f` was defined with, and passing it where more
-  parameters are expected is reported. Reads at top level and in a script see the write.
+  definition, so a later top-level `x$a <- v` is not seen there. Reads at top level and in a
+  script see the write.
 - **A generic function passed inline as an argument.** `lapply(xs, function<T>(v: T) -> T v)` is
   reported, because type parameters on a function that is not bound to a name are not
   instantiated. Leave the function's types off, or bind it to a name first.

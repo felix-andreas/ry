@@ -2098,10 +2098,7 @@ Reading an item's range from `item_spans` made every edit re-lower every item of
 - **No sound rule for a vector of unknown length at a scalar parameter.** `p[file.exists(p)]` has one
   element only by the program's logic, so devtools `test.R` 72 and knitr `citation.R` 163 stay
   reported; relaxing scalar parameters for vectors would hide true length bugs.
-- **Deferred: a union-bounded variable.** renv `python.R` 109 needs `<T: list[U] | U[]> fn(path: T)
-  -> character | T`, so the return names the argument's own member. That needs a bound meet over
-  unions with variables, generalization and print/parse support; the same class is the fresh
-  sample's "`vapply` over a parameter" (ggplot2).
+- **A union-bounded variable** resolves renv `python.R` 109 ("A type variable may be bounded by a union" below).
 
 ## `@opaque` parameters accept ry values
 
@@ -2126,3 +2123,29 @@ Reading an item's range from `item_spans` made every edit re-lower every item of
 **Status:** built.
 
 - **`check_declared_function` hints a lambda default from the declared parameter type** (`hint_from_declared_function`), as a call hints the lambda it is passed, so `#: fn([connector]: fn(dsn: character) -> character)` over `connector = function(dsn) toupper(dsn)` types `dsn` without a second annotation. A finding the hint causes names its source (`LambdaContext::Default`). Each default is inferred once, after the formals are bound, because R evaluates a default in the function's frame; the `FunctionType` is built after that loop.
+
+## A type variable may be bounded by a union
+
+**Status:** built.
+
+- **An open variable that meets a union takes it as a bound instead of binding to it** (`Entry::Unbound.bound` in `infer.rs`), so `normalize(path)` over `map_lgl(path, ...)` keeps the caller's own type: `<T, U: list[T] | T[]> fn(path: U) -> U`. Binding to the union lost the member the caller passed, and every caller saw the whole union back (renv `python.R` 109).
+- A later binding must fit the bound. Two bounds meet by keeping the narrower one, else the members of the existing bound that fit the other; no fitting member is a mismatch blamed on the later use.
+- At generalization a bounded variable in one signature slot is replaced by its bound (`settle_lone_bounds`), so a binder appears only when the bound links a parameter to the return or to another parameter. A rigid binder with a bound fits wherever its bound fits.
+- `join_types` unions two distinct bounded variables instead of unifying them, since one is not the other, and a mismatch report shows the bound, never the bare variable.
+- **Syntax**: `function<U: list[T] | T[]>` and `@forall U: list[T] | T[]`. After `:`, a run of plain words up to `,`, `>` or the line end is a constraint list (`T: numeric`); anything else is a type. `TypeScheme.binders` holds `Binder { name, bound: Bound::Constraint | Bound::Type }`, one list, so a binder cannot carry both.
+
+## A value whose code a later top-level write replaces is a template
+
+**Status:** built.
+
+- **`f <- g(...)` followed at top level by `body(f) <-` or `formals(f) <-` builds `f` from a template**, so the call building `f` does not check its function arguments against `g`'s parameter types (`Checker.template_call`). diffobj `diff.R` 654 builds a one-parameter function, then gives it the parameters the interface names.
+- The check probes `file_code_rewrites`, a per-file list of rewritten names that backdates, before it asks for the name's writer (`frame_binder`). Asking `frame_binder` for every value item tied each one to the file's binder list, so inserting a statement rechecked every value before it.
+- Only these two replacement functions qualify, because they are the ones that change what a call of `f` does; `attr(f, "x") <-` does not.
+
+## A key test reads within the tests that enclose it
+
+**Status:** built.
+
+- **Each edge of an `if` on a local records the domain it shows** (`Fact::KeyDomain`), and a later test of the same local is intersected with the enclosing domains (`KeyTest::within`) before it is compared with earlier correlated writes. Inside `if (case %in% c("a", "b", "c"))`, the false edge of `if (case == "c")` is `case %in% c("a", "b")`, which implies an earlier `if (case %in% c("a", "b"))`, so the earlier write is the only value on that edge (snakecase `to_any_case.R` 286, 295, 304).
+- When both branches of an `if` continue, the false edge's domain is retracted after the join, because code after the `if` runs on both edges. Mixed literal kinds keep the test unchanged, because R coerces before it compares.
+

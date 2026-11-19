@@ -1984,8 +1984,51 @@ normalize <- function(path) {
 }
 one <- function() nchar(normalize(tempfile()))
 #++++
-normalize: <T> fn(path: list[T] | T[]) -> list[T] | T[]
+normalize: <T, U: list[T] | T[]> fn(path: U) -> U
 one: fn() -> integer
+
+#---- an_open_argument_passed_on_returns_its_own_type
+norm <- function(path) {
+  bad <- !vapply(path, nzchar, FUN.VALUE = logical(1))
+  if (any(bad)) return(normalizePath(path))
+  path
+}
+#: fn(p: character) -> integer
+use <- function(p) nchar(p)
+forward <- function(x) use(norm(x))
+#++++
+norm: <T, U: list[T] | T[]> fn(path: U) -> character | U
+use: fn(p: character) -> integer
+forward: fn(x: character) -> integer
+
+#---- a_union_use_that_does_not_flow_out_stays_the_union
+count_chars <- function(path) {
+  vapply(path, nchar, 1L)
+  length(path)
+}
+#++++
+count_chars: <T> fn(path: list[T] | T[]) -> integer
+
+#---- a_value_whose_body_is_replaced_later_is_a_template
+make <- function(capture) {
+  function(x, y) capture(x, y, extra = 1)
+}
+f <- make(identity)
+body(f) <- quote(x + y)
+#++++
+make: <T, U, V> fn(capture: fn(T, U, extra: double) -> V) -> fn(x: T, y: U) -> V
+f: <T, U, V> fn(x: T, y: U) -> V
+Any
+
+#---- a_value_built_the_same_way_without_a_rewrite_is_checked
+make <- function(capture) {
+  function(x, y) capture(x, y, extra = 1)
+}
+f <- make(identity)
+#++++
+make: <T, U, V> fn(capture: fn(T, U, extra: double) -> V) -> fn(x: T, y: U) -> V
+f: Unknown
+82..90 error[type-mismatch] expected `fn(T, U, extra: double) -> V`, found `fn(x: W) -> W`
 
 #---- a_union_argument_keeps_the_echoed_union
 normalize <- function(path) {
@@ -1995,7 +2038,7 @@ normalize <- function(path) {
 }
 either <- function(flag) normalize(if (flag) "a" else list("a"))
 #++++
-normalize: <T> fn(path: list[T] | T[]) -> list[T] | T[]
+normalize: <T, U: list[T] | T[]> fn(path: U) -> U
 either: fn(flag: logical) -> character | list{character}
 
 #---- a_getter_call_to_a_getter_and_setter_closure_is_not_the_setter_value
@@ -2106,7 +2149,7 @@ both <- function(a, b, k) {
 }
 use_both <- function(k) both("x", list("y"), k)
 #++++
-both: <T, U> fn(a: list[T] | T[], b: list[U] | U[], k: logical) -> list[T] | T[] | list[U] | U[]
+both: <T, U: list[T] | T[], V, W: list[V] | V[]> fn(a: U, b: W, k: logical) -> U | W
 use_both: fn(k: logical) -> character | list{character}
 
 #---- a_closure_returning_an_enclosing_value_keeps_its_type_at_the_call
