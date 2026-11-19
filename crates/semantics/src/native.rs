@@ -23,8 +23,8 @@ use {
         naming::{BindingKind, ItemNaming},
         stubs::{is_native_function, is_ry_type},
         types::{
-            Atomic, Constraint, FunctionType, Name, NativeScalar, Ty, TyKind,
-            TypeScheme, array_element, dict_entries,
+            Atomic, Constraint, FunctionType, Name, NativeScalar, Ty, TyKind, TypeScheme,
+            array_element, dict_entries,
         },
     },
     rustc_hash::FxHashSet,

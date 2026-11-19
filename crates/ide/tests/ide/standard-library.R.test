@@ -19,6 +19,8 @@ action: Add inferred type annotation for `doubled`
   edit 7..7 -> ": List<I64>"
 action: Add inferred type annotations for the whole file
   edit 7..7 -> ": List<I64>"
+  edit 38..38 -> ": I64"
+  edit 39..39 -> " -> I64"
 completion (14): List.map, List.map2, List.map3, List.map4, List.map_try, List.map_with_index, List.max, List.min
 hint @7: List<I64>
 hint @20list =
@@ -137,6 +139,8 @@ action: Add inferred type annotation for `doubled`
   edit 7..7 -> ": List<I64>"
 action: Add inferred type annotations for the whole file
   edit 7..7 -> ": List<I64>"
+  edit 43..43 -> ": I64"
+  edit 44..44 -> " -> I64"
 completion (14): List.map, List.map2, List.map3, List.map4, List.map_try, List.map_with_index, List.max, List.min
 hint @7: List<I64>
 hint @25list =
@@ -185,6 +189,8 @@ action: Add inferred type annotation for `doubled`
   edit 33..33 -> ": List<I64>"
 action: Add inferred type annotations for the whole file
   edit 33..33 -> ": List<I64>"
+  edit 69..69 -> ": I64"
+  edit 70..70 -> " -> I64"
 completion (14): List.map, List.map2, List.map3, List.map4, List.map_try, List.map_with_index, List.max, List.min
 hint @33: List<I64>
 hint @51list =

@@ -40,3 +40,30 @@ run ry check --annotate
 expect exit 0
 expect stdout "added 1 inferred annotation"
 expect file R/area.R "#: <T: numeric> fn(width: T, [height]: T) -> T"
+
+# A function passed as an argument gets the signature the call fixes for it, in a `#:` line above
+# the argument when it starts its own line.
+file R/scale.R
+| #: fn(values: double[]) -> double[]
+| scaled <- function(values) vapply(
+|   values,
+|   FUN = function(v) v * 2,
+|   numeric(1)
+| )
+
+run ry check --annotate R/scale.R
+expect exit 0
+expect stdout "added 1 inferred annotation"
+expect file R/scale.R "  #: fn(v: double) -> double"
+
+# Inline, the signature goes into the lambda's header.
+file ry.toml
+| [check]
+| strict = true
+file R/scale.R
+| scaled <- function(values: double[]) vapply(values, function(v) v * 2, numeric(1))
+
+run ry check --annotate R/scale.R
+expect exit 0
+expect stdout "added 1 inferred annotation"
+expect file R/scale.R "vapply(values, function(v: double) -> double v * 2, numeric(1))"

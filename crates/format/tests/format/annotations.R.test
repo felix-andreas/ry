@@ -574,3 +574,11 @@ x <- list(a = 1L)
 #:   a: integer
 #: }
 x <- list(a = 1L)
+
+#---- annotation_after_a_semicolon_keeps_its_own_line
+x <- 1 ; #: integer
+value <- 1L
+#++++
+x <- 1
+#: integer
+value <- 1L

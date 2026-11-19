@@ -450,6 +450,24 @@ value <- 1L
 #++++
 value: integer
 
+#---- pure_marks_only_a_top_level_binding
+#: @pure
+cat("loading\n")
+#: @pure
+answer <- function(x) {
+  #: @pure
+  helper <- function(y) y
+  helper(x)
+}
+#: @pure
+1 -> one
+#++++
+NULL
+answer: <T> fn(x: T) -> T
+one: double
+3..8 warning[annotation] `@pure` declares nothing here. It marks a top-level definition, such as `name <- function(...)`, as safe to call while the package loads; put it above one, or remove it
+64..69 warning[annotation] `@pure` declares nothing here. It marks a top-level definition, such as `name <- function(...)`, as safe to call while the package loads; put it above one, or remove it
+
 #==== new_shape
 #---- new_requires_a_nominal_reference
 #: @new integer
@@ -834,17 +852,50 @@ guarded <- function(title = NULL) {
 unguarded: fn([title]: character | NULL) -> character
 guarded: fn([title]: character | NULL) -> character
 
+#---- a_function_default_takes_its_parameter_types_from_the_declaration
+# typing: strict
+#: fn(dsn: character, [connector]: fn(dsn: character) -> character) -> character
+connect <- function(dsn, connector = function(dsn) toupper(dsn)) connector(dsn)
+#++++
+connect: fn(dsn: character, [connector]: fn(dsn: character) -> character) -> character
+
+#---- a_function_default_that_breaks_the_declaration_is_reported
+#: fn([scale]: fn(v: character) -> character) -> character
+apply_scale <- function(scale = function(v) v * 2) scale("a")
+#++++
+apply_scale: fn([scale]: fn(v: character) -> character) -> character
+103..104 error[type-mismatch] `v` is used as a numeric value (`integer` or `double`) here, but the parameter this function is the default of declares `character` for it
+
 #==== annotations_in_argument_lists
-#---- an_annotation_beside_a_lambda_argument_is_reported
-# An argument is not a statement, so the block attaches to nothing. It used to
-# say nothing either, which made a deliberately wrong type there invisible.
+#---- an_annotation_beside_a_lambda_argument_is_its_signature
 xs <- list("a")
-mapped <- lapply(xs, #: fn(x: integer) -> integer
+mapped <- lapply(xs, #: fn(v: integer) -> character
   function(v) paste0(v, "!"))
 #++++
 xs: list{character}
-mapped: list[character]
-192..220 error[annotation] A `#:` typing comment annotates the statement that follows it, and an argument is not a statement, so this one annotates nothing. Give the value its own binding and annotate that.
+mapped: Unknown
+70..96 error[type-mismatch] this function is passed `character`, but its parameter `v` accepts `integer`
+
+#---- an_annotation_types_a_lambda_the_callee_leaves_untyped
+#: fn(m: matrix) -> Any
+f <- function(m) apply(
+  m, 1,
+  #: fn(row: double[]) -> double
+  function(row) sum(row)
+)
+#++++
+f: fn(m: matrix) -> Any
+
+#---- a_named_argument_takes_the_annotation
+xs <- list(1, 2)
+total <- vapply(xs,
+  #: fn(v: double) -> double
+  FUN = function(v) v * 2,
+  numeric(1)
+)
+#++++
+xs: list{double, double}
+total: double[]
 
 #---- the_same_holds_for_a_plain_value_argument
 xs <- list(1L)
@@ -853,8 +904,18 @@ mapped <- lapply(xs, #: character
 #++++
 xs: list{integer}
 mapped: Unknown
-36..48 error[annotation] A `#:` typing comment annotates the statement that follows it, and an argument is not a statement, so this one annotates nothing. Give the value its own binding and annotate that.
-51..53 error[type-mismatch] expected `fn(integer) -> T`, found `integer`
+51..53 error[type-mismatch] expected `character`, found `integer`
+
+#---- a_blank_line_separates_an_argument_from_its_annotation
+xs <- list(1L)
+mapped <- lapply(xs,
+  #: fn(v: integer) -> integer
+
+  function(v) v)
+#++++
+xs: list{integer}
+mapped: list[integer]
+38..66 error[annotation] A `#:` typing comment cannot be separated from its expression by an empty line.
 
 #---- a_braceless_function_body_does_attach_and_is_not_reported
 # The contrast, measured against a no-annotation control: these positions look

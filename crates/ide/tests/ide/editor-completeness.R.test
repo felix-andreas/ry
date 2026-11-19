@@ -677,6 +677,8 @@ references: 42..47*, 154..159
 rename: 2 edit(s)
 signature: fn()
 parameters:
+action: Add inferred type annotations for the whole file
+  edit 60..60 -> " -> character"
 completion (1): greet
 
 #---- field_record
@@ -732,6 +734,8 @@ action: Add inferred type annotation for `fit`
   edit 3..3 -> ": double"
 action: Add inferred type annotations for the whole file
   edit 3..3 -> ": double"
+  edit 32..32 -> ": double"
+  edit 33..33 -> " -> double"
 completion (1): root
 hint @3: double
 hint @41interval =

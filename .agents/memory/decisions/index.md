@@ -137,6 +137,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Corpus false reports: the narrowing and overload rules that cleared them
 - `@opaque` parameters accept ry values
 - The stats d/p/q functions follow the scalar claim
+- A `#:` block in an argument list types the argument after it
+- A function literal default takes its parameter's declared function type
 
 ## Editor and language server
 
@@ -172,6 +174,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Completion pushes down names whose declared type cannot fit, and never promotes
 - The console's crossterm is patched to drain the terminal, and R reads console input one line per chunk
 - An editor target is what the code means, and rename refuses what it cannot trace
+- `--annotate` and the code action write a lambda argument's signature
 
 ## Interpreter
 

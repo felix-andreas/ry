@@ -41,7 +41,7 @@ use {
         SyntaxElement,
         SyntaxKind::{self, *},
         SyntaxNode, SyntaxToken, TextRange, TextSize, TokenAtOffset,
-        annotation::block_refusal,
+        annotation::{argument_value, attached_annotation, block_refusal},
         ast::BinaryExpr,
         highlight::{
             classify_r_name, classify_ry_token, classify_type_token, is_tag_node, tag_node_of,
@@ -2666,14 +2666,14 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
         .filter(|annotation| ranges_overlap(annotation.range, viewport))
     {
         actions.push(CodeAction {
-            title: format!("Add inferred type annotation for `{}`", annotation.name),
+            title: annotation.title(),
             kind: CodeActionKind::InsertInferredAnnotation,
             edits: annotation.edits.clone(),
         });
     }
     let all_annotation_edits: Vec<TextEdit> = annotations
         .into_iter()
-        .filter(|annotation| annotation.top_level)
+        .filter(InferredAnnotation::in_whole_file)
         .flat_map(|annotation| annotation.edits)
         .collect();
     if !all_annotation_edits.is_empty() {
@@ -2917,16 +2917,45 @@ pub fn fix_all(diagnostics: &[Diagnostic]) -> Option<CodeAction> {
     })
 }
 
-/// A binding with no annotation whose inferred type can be written down, and the edits that
-/// write it: one `#:` line, or with inline annotations on, the types at their inline places.
+/// A binding or a lambda argument with no annotation whose inferred type can be written down,
+/// and the edits that write it: one `#:` line, or with inline annotations on, the types at
+/// their inline places.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InferredAnnotation {
+    /// The binding's name, or for a lambda the function it is passed to.
     pub name: String,
-    /// The binding's whole statement.
+    /// The binding's whole statement, or the lambda.
     pub range: TextRange,
-    /// A top-level binding, as opposed to a local inside a function body.
-    pub top_level: bool,
+    pub site: AnnotationSite,
     pub edits: Vec<TextEdit>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnotationSite {
+    TopLevel,
+    /// A binding inside a function body, which inference types well enough unannotated.
+    Local,
+    /// A function literal passed as an argument, typed by the callee's parameter.
+    Argument,
+}
+
+impl InferredAnnotation {
+    /// Whether "annotate the whole file" writes it: a local's type follows from its function's.
+    pub fn in_whole_file(&self) -> bool {
+        self.site != AnnotationSite::Local
+    }
+
+    pub fn title(&self) -> String {
+        match self.site {
+            AnnotationSite::Argument => format!(
+                "Add the inferred signature of the function passed to `{}`",
+                self.name
+            ),
+            AnnotationSite::TopLevel | AnnotationSite::Local => {
+                format!("Add inferred type annotation for `{}`", self.name)
+            }
+        }
+    }
 }
 
 /// Every binding in `file` that an inferred annotation would type. A statement typed inline, or
@@ -3019,10 +3048,116 @@ pub fn inferred_annotations(db: &dyn Db, file: SourceFile) -> Vec<InferredAnnota
             annotations.push(InferredAnnotation {
                 name: name.as_str().to_owned(),
                 range,
-                top_level: is_root,
+                site: if is_root {
+                    AnnotationSite::TopLevel
+                } else {
+                    AnnotationSite::Local
+                },
                 edits,
             });
         }
+        annotations.extend(lambda_annotations(db, &node, hir, check, text, inline));
+    }
+    annotations
+}
+
+/// The signatures of the function literals passed as arguments in `item_node` that write no
+/// type at all, when every one of their types is determined: by the parameter the lambda is
+/// passed to, or by its body.
+fn lambda_annotations<'db>(
+    db: &'db dyn Db,
+    item_node: &SyntaxNode,
+    hir: &Module,
+    check: &ItemCheck<'db>,
+    text: &str,
+    inline: bool,
+) -> Vec<InferredAnnotation> {
+    let item_offset = item_node.text_range().start();
+    let mut annotations = Vec::new();
+    for function_def in item_node
+        .descendants()
+        .filter(|node| node.kind() == FUNCTION_DEF)
+    {
+        let Some(argument) = function_def
+            .parent()
+            .filter(|parent| argument_value(parent).as_ref() == Some(&function_def))
+        else {
+            continue;
+        };
+        let writes_a_type = attached_annotation(&function_def).is_some()
+            || function_def.descendants().any(|node| {
+                matches!(
+                    node.kind(),
+                    TYPE_ASCRIPTION | RETURN_TYPE | TYPE_BINDER_LIST
+                ) && node
+                    .ancestors()
+                    .find(|ancestor| ancestor.kind() == FUNCTION_DEF)
+                    == Some(function_def.clone())
+            });
+        if writes_a_type {
+            continue;
+        }
+        let Some(callee) = argument
+            .parent()
+            .and_then(|list| list.parent())
+            .filter(|call| call.kind() == CALL_EXPR)
+            .and_then(|call| call.first_child())
+        else {
+            continue;
+        };
+        let range = function_def.text_range();
+        let Some(relative) = range.checked_sub(item_offset) else {
+            continue;
+        };
+        let Some(id) = hir
+            .ranges()
+            .enumerate()
+            .map(|(index, candidate)| (ExprId::new(index), candidate))
+            .find(|&(id, candidate)| {
+                candidate == relative && matches!(hir.kind(id), ExpressionKind::Function { .. })
+            })
+            .map(|(id, _)| id)
+        else {
+            continue;
+        };
+        let Some(&ty) = check.editor().expression_types.get(&id) else {
+            continue;
+        };
+        let ty = without_impossible_vectors(db, ty);
+        if !matches!(ty.kind(db), TyKind::Function(_)) || !is_hintable(db, ty, false) {
+            continue;
+        }
+        let scheme = TypeScheme::monomorphic(ty);
+        let inline_edits = inline
+            .then(|| inline_annotation_edits(db, item_node, &scheme, range, range))
+            .flatten();
+        let edits = match inline_edits {
+            Some(edits) => edits,
+            // A `#:` line needs the argument to start its own line.
+            None => {
+                let start = usize::from(argument.text_range().start());
+                let line_start = text[..start.min(text.len())]
+                    .rfind('\n')
+                    .map_or(0, |at| at + 1);
+                let Some(indentation) = text
+                    .get(line_start..start)
+                    .filter(|indentation| indentation.trim().is_empty())
+                else {
+                    continue;
+                };
+                let label = TypeRenderer::default().render_scheme(db, &scheme);
+                vec![TextEdit {
+                    range: TextRange::empty(TextSize::from(line_start as u32)),
+                    replacement: format!("{indentation}#: {label}\n"),
+                }]
+            }
+        };
+        annotations.push(InferredAnnotation {
+            name: callee.text().to_string(),
+            range,
+            site: AnnotationSite::Argument,
+            edits,
+        });
     }
     annotations
 }

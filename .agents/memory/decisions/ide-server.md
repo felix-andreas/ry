@@ -266,3 +266,10 @@ The Zed extension bundles no binary: it locates `ry` at run time through the LSP
 - **Rename refuses a field it cannot trace.** A field with a same-named string anywhere in a subscript (`x[["name"]]`, `x[c("name", "other")]`) or a bare name there that the item neither binds nor calls (`frame[, sum(name)]`) is refused (`SpellingKind::Untraced` in `crates/ide/src/fields.rs`), in line with "Refactorings refuse rather than guess". Carrying the rename through those reads is in the backlog.
 - **Selection ranges always cover the cursor.** A cursor on a string's quote or in a block's indentation starts from the smallest node that covers it; an editor drops an answer whose first range does not hold the position.
 - **Why.** Each was a rename or a reference list that left the code meaning something else, found by the IDE battery's rename check (`testing.md`, "The editor features") and pinned in `crates/ide/tests/ide/rename_ported.R.test` and `tests/structure/selection.R.test`.
+
+## `--annotate` and the code action write a lambda argument's signature
+
+**Status:** built.
+
+- **A function literal passed as an argument that writes no type gets its whole signature** when every type in it is settled (`lambda_annotations` in `ide.rs`): from the parameter it is passed to or from its body. A type variable, `Unknown` or `Any` leaves it alone, so `apply`'s `Any` lambdas and `tryCatch` handlers stay for a person. Inline it fills the header; with inline annotations off it writes a `#:` line above the argument, which needs the argument to start its line. The R6 method inside `list(...)` qualifies by its body, which is the signature strict mode asks for anyway.
+- **The command asks for editor facts** (`Purpose::Rewrites`), because a lambda's type lives only in the per-expression types the editor reads.

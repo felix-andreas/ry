@@ -115,6 +115,56 @@ definition: slow_square <- function(x) x * x
 constant (pure): fast_square <- memoise(slow_square)
 constant: qualified <- memoise::memoise(slow_square)
 
+#---- higher_order_functions_are_pure_when_the_function_passed_is
+#~~~~ R/main.R
+#: @pure
+square <- function(x) x * x
+
+squares <- vapply(1:3, function(i) i * i, numeric(1))
+widths <- lapply(list("a", "bb"), nchar)
+evens <- Filter(\(x) x %% 2 == 0, 1:10)
+total <- Reduce(`+`, 1:4)
+by_name <- sapply(1:3, "square")
+qualified <- base::sapply(X = 1:3, FUN = square)
+#++++
+== R/main.R
+definition (pure): square <- function(x) x * x
+constant: squares <- vapply(1:3, function(i) i * i, numeric(1))
+constant: widths <- lapply(list("a", "bb"), nchar)
+constant: evens <- Filter(\(x) x %% 2 == 0, 1:10)
+constant: total <- Reduce(`+`, 1:4)
+constant: by_name <- sapply(1:3, "square")
+constant: qualified <- base::sapply(X = 1:3, FUN = square)
+
+#---- purrr_extractors_and_formulas_are_pure
+#~~~~ R/main.R
+library(purrr)
+
+people <- list(list(name = "a", age = 1), list(name = "b", age = 2))
+names_of <- map_chr(people, "name")
+firsts <- map(people, 1)
+ages <- map_dbl(people, ~ .x$age * 2)
+adults <- keep(people, \(person) person$age > 1)
+#++++
+== R/main.R
+definition: library(purrr)
+constant: people <- list(list(name = "a", age = 1), list(name = "b", age = 2))
+constant: names_of <- map_chr(people, "name")
+constant: firsts <- map(people, 1)
+constant: ages <- map_dbl(people, ~ .x$age * 2)
+constant: adults <- keep(people, \(person) person$age > 1)
+
+#---- local_may_call_its_own_pure_functions
+#~~~~ R/main.R
+built <- local({
+  step <- function(x) x + 1
+  twice <- function(x) step(step(x))
+  vapply(1:3, twice, numeric(1))
+})
+#++++
+== R/main.R
+constant: built <- local({
+
 #==== entry_files
 #---- tests_and_scripts_are_unrestricted
 #~~~~ tests/testthat/test-main.R

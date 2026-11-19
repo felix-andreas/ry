@@ -98,14 +98,24 @@ make_person <- function(name) {
 ### Attachment
 
 A block attaches to the expression that starts on the line directly after it. A braceless function
-body, a braceless `if` branch, and a parenthesised expression are valid targets. When a block needs a
-target and has none, it is an error and the annotation does not apply. That happens when:
+body, a braceless `if` branch, a parenthesised expression, and an argument are valid targets. In an
+argument list the block types the argument's value, so a lambda gets its signature where it is passed:
+
+```r
+#: fn(m: matrix) -> double[]
+row_sums <- function(m) apply(
+  m, 1,
+  #: fn(row: double[]) -> double
+  function(row) sum(row)
+)
+```
+
+When a block needs a target and has none, it is an error and the annotation does not apply. That
+happens when:
 
 - a blank line separates the block from the expression;
 - a plain `#` comment separates them, or no expression follows at all;
-- the block has no content beyond the `#:` marker;
-- the block sits inside a call's argument list, for example beside a lambda passed to `lapply`,
-  because an argument is not a statement. Give the value its own binding and annotate that instead.
+- the block has no content beyond the `#:` marker.
 
 A definition block, one that contains only `@type` and `@alias` lines, attaches to nothing, and
 neither does a `@strict` toggle, so the adjacency rules do not apply to them.
@@ -1750,6 +1760,19 @@ bad <- List.map(words, \(w) w * 2)
 # error: `w` is used as a numeric value (`integer` or `double`) here, but the call passes this
 # function `character` for it
 ```
+
+A function literal that is the default of a declared parameter takes its parameter types the same
+way, from the parameter's declared function type, under the same limits:
+
+```r
+#: fn(dsn: character, [connector]: fn(dsn: character) -> character) -> character
+connect <- function(dsn, connector = function(dsn) toupper(dsn)) connector(dsn)
+```
+
+Here the default's `dsn` is `character`, so strict mode accepts it with no annotation of its own. A
+misuse of such a parameter says that the declaration gave the type: `` `v` is used as a numeric
+value (`integer` or `double`) here, but the parameter this function is the default of declares
+`character` for it ``.
 
 ### Named and positional parameters
 
@@ -4406,9 +4429,26 @@ A top-level statement of a library file is a definition when it is one of these:
 A constant's initializer must have no effect. Literals, names, `pkg::name`, function literals,
 formulas, and the built-in operators have none. A call has none when its function is declared pure
 and its arguments have none; the arguments of `quote`, `expression`, `alist` and `substitute` are not
-evaluated, so they are not inspected. Inside `local()`, assignments and loops touch only the local
-environment and are allowed, but a call to a function bound inside that `local()` is an effect,
-because nothing declares it pure. A replacement inside `local()` of a name bound outside it, such as
+evaluated, so they are not inspected. A call of a function declared pure only for pure callbacks,
+such as `lapply`, also needs the function it is passed to be pure: a function literal whose body has
+no effect, or the name of a pure function.
+
+```r
+squares <- vapply(1:3, function(i) i * i, numeric(1))
+widths <- lapply(list("a", "bb"), nchar)
+printed <- lapply(1:3, print)
+```
+
+```text ry check strict
+x strict mode: `lapply` calls `print` here, which is not declared pure, so it runs every time the
+  package loads. A file in `R/` may only define things at its top level: move the call into a
+  function, `.onLoad`, or the script `ry run` starts
+ --[R/main.R:3:24]
+```
+
+Inside `local()`, assignments and loops touch only the local environment and are allowed. A function
+bound there to a function literal whose body has no effect may be called, but a call to any other
+function bound inside that `local()` is an effect. A replacement inside `local()` of a name bound outside it, such as
 `local({ defaults$a <- 2; defaults })`, is allowed when the project binds that name once, at the top
 level, to a literal or to `c()` or `list()` of literals. R then replaces in a local copy, which leaves
 the outer value alone. Any other outer value might be an environment, which the replacement would
@@ -4429,9 +4469,12 @@ Only the first effect of a statement is reported. The effects are:
 #### Purity
 
 A function is pure when calling it has no effect beyond returning a value, whatever its arguments.
-Purity is declared and never inferred, and the declaration is trusted: ry does not check the body.
+Purity is declared, and the declaration is trusted: ry does not check the body. The one exception is
+a function bound inside `local()`, whose body ry reads, because no other file can call it.
 A project function is declared pure with a `#: @pure` comment line above its definition or an inline
-`@pure` before `function` (or `\(x)`), and a stub declares one with `name : @pure fn(...)`. With
+`@pure` before `function` (or `\(x)`), and a stub declares one with `name : @pure fn(...)`, or with
+`name : @pure(FUN) fn(...)` when it is pure only for a pure function passed as `FUN`. `@pure` above
+anything but a top-level binding declares nothing and carries an `annotation` warning. With
 inline annotations turned off, an inline `@pure` declares nothing and carries the `inline-annotation`
 warning. The
 standard library's stubs mark base R's pure functions, such as `paste0`, `seq_len` and `sum`, and

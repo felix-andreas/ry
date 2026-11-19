@@ -6,8 +6,8 @@ use {
             statement_inline_site,
         },
         check::{
-            ExpressionNeeds, ItemCheck, NativeValueKind, OperandExpectation, StrictOriginKind,
-            TypeError, TypeErrorKind, alias_cycle_walk, column_element,
+            ExpressionNeeds, ItemCheck, LambdaContext, NativeValueKind, OperandExpectation,
+            StrictOriginKind, TypeError, TypeErrorKind, alias_cycle_walk, column_element,
         },
         comment_annotation,
         exhaustiveness::{MatchFinding, MatchFindingKind},
@@ -39,8 +39,8 @@ use {
     std::{cell::OnceCell, collections::BTreeSet, mem, ops::Range},
     syntax::{
         SyntaxKind, SyntaxNode, TextRange, TextSize,
-        annotation::{AnnotationTarget, is_type_kind, statement_annotations},
-        ast::is_expression_kind,
+        annotation::{AnnotationTarget, directive_name, is_type_kind, statement_annotations},
+        ast::{BinaryExpr, is_expression_kind},
         is_syntactic_name, node_text, paired_comment_definition,
     },
 };
@@ -322,9 +322,8 @@ fn inline_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
     diagnostics
 }
 
-/// An annotation must be followed on the next line by the expression it types.
-/// Blocks inside argument lists attach to nothing and are reported separately;
-/// braceless bodies, braceless `if` branches, and parenthesized expressions do attach.
+/// An annotation must be followed on the next line by the expression it types: a statement, a
+/// braceless body or `if` branch, a parenthesized expression, or an argument's value.
 fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let parsed = parse(db, file);
     let root = parsed.syntax_node();
@@ -332,60 +331,87 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
     let sites = file_syntax_sites(db, file);
     // Only a sequence with an annotation among its statements can hold a dangling one.
     let sequences = sites.nodes(&root, SiteRole::AnnotatedSequence);
-    for (node, target) in sequences.iter().flat_map(statement_annotations) {
-        let Some(annotation) = comment_annotation(db, file, &node) else {
-            continue;
-        };
-        if !annotation.definitions.is_empty()
-            || annotation.strict.is_some()
-            || !annotation.errors.is_empty()
-            || !annotation.typing_errors.is_empty()
-        {
-            continue;
-        }
-        let message = match target {
-            AnnotationTarget::Attached(_) => {
-                if node.children().next().is_none() {
-                    "A `#:` typing comment must include a type expression."
-                } else {
-                    continue;
-                }
+    for sequence in &sequences {
+        for (node, target) in statement_annotations(sequence) {
+            if let Some(diagnostic) = misplaced_pure_diagnostic(sequence, &node, &target) {
+                diagnostics.push(diagnostic);
             }
-            AnnotationTarget::BlankLineSeparated => {
-                "A `#:` typing comment cannot be separated from its expression by an empty line."
+            if let Some(diagnostic) = dangling_annotation_diagnostic(db, file, &node, target) {
+                diagnostics.push(diagnostic);
             }
-            AnnotationTarget::Dangling => {
-                // Almost always a `#:` block placed above a roxygen2 block, so name the fix.
-                "A `#:` typing comment must be followed immediately by an expression. Put it directly above the definition, below any roxygen2 block."
-            }
-        };
-        diagnostics.push(Diagnostic::new(
-            node.text_range(),
-            Severity::Error,
-            "annotation",
-            message.to_owned(),
-        ));
-    }
-    for node in sites.nodes(&root, SiteRole::Annotation) {
-        if node.parent().map(|parent| parent.kind()) != Some(SyntaxKind::ARGUMENT_LIST) {
-            continue;
         }
-        // A block that failed to lower already owns a diagnostic.
-        let Some(annotation) = comment_annotation(db, file, &node) else {
-            continue;
-        };
-        if !annotation.errors.is_empty() || !annotation.typing_errors.is_empty() {
-            continue;
-        }
-        diagnostics.push(Diagnostic::new(
-            node.text_range(),
-            Severity::Error,
-            "annotation",
-            // Not "move it up a line": that would type the enclosing statement instead.
-            "A `#:` typing comment annotates the statement that follows it, and an argument is not a statement, so this one annotates nothing. Give the value its own binding and annotate that.".to_owned(),
-        ));
     }
     diagnostics
+}
+
+/// `@pure` marks a top-level binding, which strict mode's top-level rule and lazy constants read;
+/// anywhere else it would declare nothing.
+fn misplaced_pure_diagnostic(
+    sequence: &SyntaxNode,
+    annotation: &SyntaxNode,
+    target: &AnnotationTarget,
+) -> Option<Diagnostic> {
+    let AnnotationTarget::Attached(statement) = target else {
+        return None;
+    };
+    let directive = annotation.children().find(|child| {
+        child.kind() == SyntaxKind::ANNOTATION_DIRECTIVE && directive_name(child) == "pure"
+    })?;
+    let binds_a_name = BinaryExpr::cast(statement.clone()).is_some_and(|binary| {
+        let target = match binary.operator().map(|operator| operator.kind()) {
+            Some(SyntaxKind::LESS_MINUS | SyntaxKind::EQ) => binary.lhs(),
+            Some(SyntaxKind::MINUS_GREATER) => binary.rhs(),
+            _ => None,
+        };
+        target.is_some_and(|target| target.kind() == SyntaxKind::NAME)
+    });
+    if sequence.kind() == SyntaxKind::SOURCE_FILE && binds_a_name {
+        return None;
+    }
+    Some(Diagnostic::new(
+        directive.text_range(),
+        Severity::Warning,
+        "annotation",
+        "`@pure` declares nothing here. It marks a top-level definition, such as `name <- function(...)`, as safe to call while the package loads; put it above one, or remove it".to_owned(),
+    ))
+}
+
+fn dangling_annotation_diagnostic(
+    db: &dyn Db,
+    file: SourceFile,
+    node: &SyntaxNode,
+    target: AnnotationTarget,
+) -> Option<Diagnostic> {
+    let annotation = comment_annotation(db, file, node)?;
+    if !annotation.definitions.is_empty()
+        || annotation.strict.is_some()
+        || !annotation.errors.is_empty()
+        || !annotation.typing_errors.is_empty()
+    {
+        return None;
+    }
+    let message = match target {
+        AnnotationTarget::Attached(_) => {
+            if node.children().next().is_none() {
+                "A `#:` typing comment must include a type expression."
+            } else {
+                return None;
+            }
+        }
+        AnnotationTarget::BlankLineSeparated => {
+            "A `#:` typing comment cannot be separated from its expression by an empty line."
+        }
+        AnnotationTarget::Dangling => {
+            // Almost always a `#:` block placed above a roxygen2 block, so name the fix.
+            "A `#:` typing comment must be followed immediately by an expression. Put it directly above the definition, below any roxygen2 block."
+        }
+    };
+    Some(Diagnostic::new(
+        node.text_range(),
+        Severity::Error,
+        "annotation",
+        message.to_owned(),
+    ))
 }
 
 /// Name → index of the earliest item whose top-level frame writes it. Conditional
@@ -2867,6 +2893,41 @@ fn top_level_effect_message(effect: &Effect) -> String {
         } => format!(
             "strict mode: this calls `{callee}`, which is not declared pure, so it runs every time the package loads. {TOP_LEVEL_RULE}: move the call into {TOP_LEVEL_HOMES}"
         ),
+        Effect::Callback {
+            caller,
+            function: Some(function),
+            origin: CalleeOrigin::Local,
+        } => format!(
+            "strict mode: `{caller}` calls `{function}` here, a function defined inside `local()` that may run code, every time the package loads. {TOP_LEVEL_RULE}: move the call into {TOP_LEVEL_HOMES}"
+        ),
+        Effect::Callback {
+            caller,
+            function: Some(function),
+            origin: CalleeOrigin::Conditional,
+        } => format!(
+            "strict mode: `{caller}` calls `{function}` here, which is defined inside a condition, so ry cannot tell which definition runs when the package loads. {TOP_LEVEL_RULE}: give `{function}` one unconditional definition, or move the call into {TOP_LEVEL_HOMES}"
+        ),
+        Effect::Callback {
+            caller,
+            function: Some(function),
+            origin: CalleeOrigin::Project,
+        } => format!(
+            "strict mode: `{caller}` calls `{function}` here, which is not declared pure, so it runs every time the package loads. {TOP_LEVEL_RULE}: move the call into {TOP_LEVEL_HOMES}, or mark `{function}` `@pure` if calling it has no effect"
+        ),
+        Effect::Callback {
+            caller,
+            function: Some(function),
+            origin: CalleeOrigin::Other,
+        } => format!(
+            "strict mode: `{caller}` calls `{function}` here, which is not declared pure, so it runs every time the package loads. {TOP_LEVEL_RULE}: move the call into {TOP_LEVEL_HOMES}"
+        ),
+        Effect::Callback {
+            caller,
+            function: None,
+            ..
+        } => format!(
+            "strict mode: `{caller}` calls a computed function here, so ry cannot tell whether loading the package runs code. {TOP_LEVEL_RULE}: pass a function literal or a named pure function, or move the call into {TOP_LEVEL_HOMES}"
+        ),
         Effect::DynamicCall => format!(
             "strict mode: this calls a computed function, so ry cannot tell whether loading the package runs code. {TOP_LEVEL_RULE}: move the call into {TOP_LEVEL_HOMES}"
         ),
@@ -3046,9 +3107,14 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             name,
             expected,
             passed,
+            context,
         } => format!(
-            "`{name}` is used as {} here, but the call passes this function `{}` for it",
+            "`{name}` is used as {} here, but {} `{}` for it",
             operand_description(*expected),
+            match context {
+                LambdaContext::Call => "the call passes this function",
+                LambdaContext::Default => "the parameter this function is the default of declares",
+            },
             renderer.render(db, *passed)
         ),
         TypeErrorKind::RecordShape { mismatch } => match mismatch.as_ref() {

@@ -1017,9 +1017,19 @@ as `Unknown`; a `[` or `@` step leaves its container unchanged.
   functions take pure and effectful callbacks under one name, and an inferred effect would let one added
   `cat()` change every transitive caller's interface. `item_declared_pure` is a per-item `bool` from
   `#: @pure` or inline `@pure` (`PURE_MARKER`), so a body edit backdates it. The marker is trusted and
-  means "no effect whatever the arguments" (so `lapply` is not pure). A project definition shadows the
+  means "no effect whatever the arguments". A project definition shadows the
   stub, and a name with a conditional writer (`CalleeOrigin::Conditional`) is never pure. A bare stub call
   takes purity from its winning declaration's namespace (`StubLibrary::declarations`).
+- **Higher-order purity is a per-parameter stub marker.** `@pure(FUN)` (`StubLibrary::pure_by_namespace`
+  keeps the names, empty for plain `@pure`) means pure when the functions passed at those parameters are,
+  so `lapply` and purrr's `map` family accept a pure callback without inferring effects through R's
+  higher-order functions. Arguments match by `check::argument_targets` against the first candidate. A
+  callback is pure when it is a function literal whose body has no effect, or names a pure function; a
+  computed callback is an effect. purrr's string, number and formula `.f` are extractors or bodies, judged
+  by the caller's namespace. Inside `local()` purity is inferred for a function-literal binding
+  (`LocalScope::pure_functions`), because no other item can call it and the read stays inside the item; a
+  rebinding to anything else clears it. `#: @pure` above anything but a top-level name binding is an
+  `annotation` warning, since nothing reads it there.
 - **Lazy constants.** In a strict file a single-writer constant is bound lazily
   (`load_index::package_index`) only when every package name its initializer mentions has one earlier
   writer in collation order, or a late evaluation could read a different value; `loader::diff` rebinds it
@@ -2099,3 +2109,15 @@ Reading an item's range from `item_spans` made every edit re-lower every item of
 **Status:** built.
 
 - **`dnorm`, `pnorm`, `qnorm`, `pchisq` and their 17 siblings return `double`** in `types/stats.Rtypes`, like base's arithmetic, so `function(q: double) -> double stats::pchisq(q, df = 1)` checks. Measured on the GNU R corpus, the scalar claim adds no false report, because callers that pass vectors read the result as `double`, which a `double[]` slot accepts.
+
+## A `#:` block in an argument list types the argument after it
+
+**Status:** built.
+
+- **An argument is an attachment target**: `syntax::annotation::annotation_target` takes the argument's value (`argument_value`, the expression after `=` when the argument is named), and `attached_annotation` anchors on the whole argument, so a block above `FUN = function(v) ...` types the lambda. This is how a callback whose callee types it `Any` (`apply`, `uniroot`) gets a signature without becoming its own binding. The blank-line rule holds inside the list, because the site walk visits `ARGUMENT_LIST` as an annotated sequence.
+
+## A function literal default takes its parameter's declared function type
+
+**Status:** built.
+
+- **`check_declared_function` hints a lambda default from the declared parameter type** (`hint_from_declared_function`), as a call hints the lambda it is passed, so `#: fn([connector]: fn(dsn: character) -> character)` over `connector = function(dsn) toupper(dsn)` types `dsn` without a second annotation. A finding the hint causes names its source (`LambdaContext::Default`). Each default is inferred once, after the formals are bound, because R evaluates a default in the function's frame; the `FunctionType` is built after that loop.

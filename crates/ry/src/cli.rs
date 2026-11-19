@@ -141,15 +141,14 @@ pub fn check(
     let mut n_fixable = 0;
     let mut n_unsafe_fixable = 0;
     let mut n_annotated = 0;
+    // A lambda's signature is read from the types the checker records for editor features.
+    let purpose = match annotate {
+        true => Purpose::Rewrites,
+        false => Purpose::Diagnostics,
+    };
     for (root, config, requested) in groups {
-        let mut analysis = analyze_project(
-            &root,
-            &root,
-            config.clone(),
-            &requested,
-            cache,
-            Purpose::Diagnostics,
-        )?;
+        let mut analysis =
+            analyze_project(&root, &root, config.clone(), &requested, cache, purpose)?;
         if fix != FixMode::Off {
             for _ in 0..MAX_FIX_PASSES {
                 let fixed = apply_check_fixes(&analysis, fix == FixMode::All)?;
@@ -157,14 +156,8 @@ pub fn check(
                     break;
                 }
                 n_fixed += fixed;
-                analysis = analyze_project(
-                    &root,
-                    &root,
-                    config.clone(),
-                    &requested,
-                    cache,
-                    Purpose::Diagnostics,
-                )?;
+                analysis =
+                    analyze_project(&root, &root, config.clone(), &requested, cache, purpose)?;
             }
         }
         if annotate {
@@ -401,7 +394,7 @@ fn write_inferred_annotations(analysis: &ProjectAnalysis) -> Result<usize, Comma
     {
         let annotations: Vec<InferredAnnotation> = inferred_annotations(&analysis.db, file.file)
             .into_iter()
-            .filter(|annotation| annotation.top_level)
+            .filter(InferredAnnotation::in_whole_file)
             .collect();
         if annotations.is_empty() {
             continue;
