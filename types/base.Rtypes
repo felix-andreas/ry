@@ -318,6 +318,13 @@ gregexpr : @pure fn(pattern: character[], text: Any, [ignore.case]: logical, [pe
 regexec : @pure Any
 regmatches : @pure fn(x: character[], m: Any, [invert]: Any) -> Any
 strtoi : @pure fn(x: Any, [base]: Any) -> integer
+# Bitwise operations coerce numeric arguments to integer (Any-param, scalar-claim).
+bitwAnd : @pure fn(a: Any, b: Any) -> integer
+bitwOr : @pure fn(a: Any, b: Any) -> integer
+bitwXor : @pure fn(a: Any, b: Any) -> integer
+bitwNot : @pure fn(a: Any) -> integer
+bitwShiftL : @pure fn(a: Any, n: Any) -> integer
+bitwShiftR : @pure fn(a: Any, n: Any) -> integer
 
 # `strsplit` splits each input string, returning one character vector per input, so a list of them.
 strsplit : @pure fn(x: Any, split: character[] | NULL, [fixed]: logical, [perl]: logical, [useBytes]: logical) -> list[character[]]

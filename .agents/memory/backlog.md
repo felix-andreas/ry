@@ -880,94 +880,31 @@ diagnostic that reads perfectly while blaming the wrong expression counted as a 
 Only the open findings are below. `test-user-reports.md` holds the closed ones with what each
 measurement showed.
 
-### Should strict mode report a binding whose exported type contains `Unknown`?
-
-This is a design question, not a bug fix, and it needs volume measured before it is chosen.
-
-The gap is real. `g <- f` closes to `g: fn(p: Unknown) -> Unknown`, which the
-`aliased_function_reference_exports_closed` fixture pins, and strict reports nothing. Calls through
-`g` are therefore unchecked while the run looks like a pass.
-
-Two earlier diagnoses of it were wrong, and the measurements are the keepable part.
-
-- **`Any` is not what blinds strict mode.** Changing `do.call`'s return from `Any` to `Unknown`
-  produces no strict finding at all. This was tried: the stub was edited, the binary rebuilt, and a
-  strict project run over `do.call(fun, args)`. Nothing.
-- **Strict mode has no binding-level `Unknown` test to widen.** It reports origins recorded at
-  construct sites, which are `UnsupportedConstruct`, `UndeterminedReference`, `LoopWidened` and
-  `RecursiveUnknown`. Nothing inspects a finished type.
-- **`Any` in the corpus is deliberate.** The shipped stubs declare 176 entries whose return is
-  `Any`, across nine files rather than just `base`, and none returning `Unknown`. The stub header
-  names each compromise.
-- The one behavioral difference between them is that `@if-unknown` coerces an `Unknown` and is
-  refused on an `Any`, saying that the value is already `Any` so the annotation should be dropped.
-
-Measure before deciding. Strict mode already emits 2879 findings on dplyr and 2458 on shiny with
-typing and strict forced on, and `erase_residual_vars` gives every aliased function `Unknown`
-parameters, so a containment sweep would fire on `g <- f`, an idiom ordinary R uses constantly.
-Decide it as a design note with numbers, not as a one-line widening.
-
-### Promotion needs to live in the type, not in the binding
-
-Two findings are the same missing piece, and they should be designed together.
-
-**A `logical` is accepted at a declared `integer` parameter and refused at an inferred numeric one.**
-Both halves reproduce. `bump <- function(x) x + 1L; bump(TRUE)` is refused, and the same body under
-`#: fn(n: integer) -> integer` accepts it. R does promote, because `TRUE + 1L` is `2L`, and the
-checker's own arithmetic rules say so. Verified against R 4.3.3.
-
-Do not just widen the constraint. The obvious repair is to bind the numeric variable to `integer`
-when a `logical` argument arrives, which is exactly R's promotion, and it is wrong. The
-counter-example is ordinary R.
-
-```r
-bump    <- function(x) x + 1L                          # R: bump(TRUE) is 2L, integer
-checked <- function(x) { stopifnot(x + 1L > 0L); x }   # R: checked(TRUE) is TRUE, logical
-```
-
-Both infer `<T: numeric> fn(x: T) -> ...`. One binding of `T` cannot be `integer` for the first and
-`logical` for the second, so the promotion produces a wrong return type. This project ranks a wrong
-answer below a refusal, because a gap means checks are skipped rather than that wrong answers are
-produced.
-
-**A numeric variable shared by two parameters refuses ordinary mixed arithmetic.**
-`add <- function(a, b) a + b` infers `<T: numeric> fn(a: T, b: T) -> T`, which ties both operands to
-one variable, so `add(1L, 1.5)` reports ``expected `integer`, found `double` `` where R gives `2.5`.
-That is a false positive on about as plain a piece of R as exists. The operand types need a numeric
-join, where `integer` with `double` is `double`, rather than unification.
-
-Closing either properly needs a scheme like `<T: numeric> fn(x: T) -> promote(T)`, which is a
-type-level function the annotation language does not have.
-
 ### Smaller open items
 
 - `@new` is unrestricted project-wide, so a nominal type's invariant holds only by convention. The
   guide's step 4 says so conditionally ("put `@new` in one constructor"). An
   encapsulation modifier would make it a guarantee.
-- A narrowing failure on a field, or behind `&&`, produces a message byte-identical to the one for
-  writing no guard at all. The docs know the fix, which is to lift the value into a local first. The
-  diagnostic should say it.
-- A nominal union is unchecked through `$` while a structural union is exact. There is also no
-  discriminator for a nominal type, because `is.list` is true of both arms, so a tagged union cannot
-  be narrowed at all.
-- A generic lambda passed as an argument keeps its binders rigid, so
-  `lapply(xs, function<T>(v: T) -> T v)` reports `its parameter v accepts T`. An inline signature
-  on a function that is not bound should instantiate its binders like a call does.
-- A call that fails against a generic signature types its statement as the leaked rigid name, so
-  `twice("a")` against `<T: numeric> fn(x: T) -> T` renders `T` in the typing fixtures. It should
-  be `Unknown`.
-- Signature help misses R6's own helpers (`assign_func_envs`, `merge_vectors`, `list2env2`),
-  which R6 defines inside `encapsulate({...})` blocks; go-to-definition already finds them.
-- httr2's argument-name definition role (about 90%) counts arguments collected into `...` and
-  passed on to a list or a form body (`req_body_form(req, scope = scope)`), which have no
-  definition site; the role should leave them out rather than count them as misses.
-- The add-annotation code action writes a `#:` comment even in a project that uses inline
-  annotations. It could offer the inline form where inline annotations are on.
 - Editor gaps left by the completeness pass against rust-analyzer (`ide/tests/ide/editor-completeness.R.test`
   pins what works). `df$` on a base `data.frame` completes nothing, because its columns are not
   typed (the `DataFrame` type is the typed alternative). A local whose
   type is a generic parameter (`total <- a + b` inside `<T> fn(a: T, ...)`) gets no inlay hint,
   because a bare `T` without its binder would mislead.
+- A closure reads a captured variable's narrowing as it stands where the closure is defined, so
+  `if (is.null(x)) return(""); get <- function() x; x <- NULL; use(get())` is silent, for a
+  variable and for a narrowed field (`get <- function() cfg$limit`). A write after the definition
+  should widen the captured read, as `capture_joins` does for reads before any write.
+- A nominal type's field is not narrowed by `is.null(node$left)`, because `field_null_guard` can
+  only rewrite the variable's type and a narrowed record is no longer the nominal. A narrowing fact
+  keyed on (slot, field), rather than a rewritten type, would cover `Tree`-style recursion.
+- A generic function literal bound to a local name keeps its rigid parameters:
+  `id <- function<T>(v: T) -> T v; id(1); id("a")` inside a function reports "expected `T`, found
+  `double`". A literal used directly (an argument, inside `list()`, called at once) instantiates;
+  a bound one should generalize to its declared scheme.
+- Signature help's formals for an untyped callee (`ide::bound_function`) take the last function
+  literal the item assigns to the name and, for a script's global, the first definition across
+  files, so a name defined twice can show the other definition's formals. It should prefer the
+  definition that reaches the call.
 - `development/design/r-runtime.md` section 8 keeps `declare(type(...))` as a third annotation
   spelling for code that must stay valid R, and a strip step (`ry build`) that moves inline types
   into `#:` comments. Neither exists yet; `syntax::erase_inline_annotations` is the starting point

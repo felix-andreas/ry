@@ -27,7 +27,7 @@ f <- function(x) x + 1L
 f("oops")
 #++++
 f: <T: numeric> fn(x: T) -> T
-T
+Unknown
 26..32 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #---- two_param_numeric_call_character

@@ -36,7 +36,7 @@ mirror <- function(x) x
 mirror(y = 1L)
 #++++
 mirror: <T> fn(x: T) -> T
-T
+Unknown
 31..32 error[type-mismatch] this function has no parameter `y`. Its named parameter is `x`
 
 #---- missing_required_argument

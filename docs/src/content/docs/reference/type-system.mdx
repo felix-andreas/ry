@@ -800,7 +800,14 @@ representation. Its name may appear anywhere a type expression may.
   function written for the representation, while `@new` stays the only place the type's invariant is
   established.
 - When an operator, an indexing form, or a loop needs a structural shape, a nominal value projects to
-  its representation type. The result of the projection is structural, not nominal.
+  its representation type. The result of the projection is structural, not nominal. A union of
+  nominal types projects member by member, so `s$radus` on `Circle | Square` is checked against
+  both representations.
+- A nominal type carries no runtime class, so `is.list()` cannot tell `Circle` from `Square`. A
+  field test can: `is.null(s$radius)` drops, on its false edge, each member whose representation
+  has no such field, and keeps the others as the nominal types they are. After
+  `if (is.null(s$radius)) stop("not a circle")`, `s` is `Circle`. Tags (`:Circle(radius: double)`)
+  are the discriminated form when the representation is yours to choose.
 
 In this example, `Person` and `Pet` are distinct and incompatible. The annotation on `shape` is valid
 because a nominal value satisfies its representation, and the final call is an error because a
@@ -2295,6 +2302,12 @@ A `matrix` absorbs any number, logical or numeric vector the same way, because R
 matrix: with `weigh <- function(a, H) a * H`, both `weigh(2, m)` and `weigh(m, 2)` are `matrix`. A
 matrix's element type is not tracked, so a character matrix is absorbed too.
 
+When every argument a numeric parameter receives is `logical`, the result stays `logical`, so with
+`bump <- function(x) x + 1L`, `bump(TRUE)` is `logical` where R returns the integer `2L`. The
+signature `<T: numeric> fn(x: T) -> T` cannot say "the wider of `T` and `integer`", and binding `T`
+to `integer` instead would mistype a function that returns `x` itself. Neither choice causes a false
+error, because a `logical` fits wherever an `integer` is expected.
+
 An argument that is itself still generic, such as the parameter `H` in
 `outer <- function(H) weigh(2, H)`, is constrained to be numeric rather than pinned to the literal's
 `double`, so `outer` is `<T: numeric> fn(H: T) -> double` and accepts a vector or a matrix. The result
@@ -2887,7 +2900,12 @@ a local variable or parameter, or an assignment to a local written inside the te
   the field: `NULL`, the empty `list()` placeholder, and a record with no field the name partially
   matches. The true branch keeps every member, because the field itself may hold `NULL`. So
   `url <- list()`, a loop that fills `url`, and then `if (is.null(url$scheme)) stop(...)` leave
-  `url` as the filled record.
+  `url` as the filled record. The false branch also drops `NULL` from the field itself, in each
+  record that names it exactly, so after `if (is.null(cfg$limit)) return("")` a later
+  `cfg$limit` reads `character` where the field is declared `character | NULL`, until the code
+  writes `cfg` or that field, directly or from a closure with `<<-`. A nominal type's field is not
+  narrowed: the narrowed record would no longer be that type, so after
+  `if (is.null(node$left)) stop()` on a `Tree`, `node$left` still reads `Tree | NULL`.
 - `length(x)` as a condition, or `length(x)` compared with a numeric literal, removes `NULL` from `x`'s union
   in whichever branch a length of zero cannot reach. So after
   `if (length(range) != 2) return(0L)`, `range` is no longer `NULL`, and `if (length(range))` or
@@ -2957,8 +2975,16 @@ The details:
   carries a constraint, or on a declared rigid type parameter.
 - When a guard cannot fire, such as `is.null(x)` on a union with no `NULL` member, nothing is refined.
   Dead branches get no special typing.
-- Only a read of a variable narrows: a parameter, a function local, or a top-level variable assigned
-  by an earlier statement. `is.null(f(x))` and `is.null(x$field)` do not narrow.
+- Only a read of a variable, or one field of it, narrows: a parameter, a function local, or a
+  top-level variable assigned by an earlier statement. `is.null(f(x))`, `is.null(x$a$b)` and
+  `is.null(x[["a"]])` do not narrow. When such a value reaches a place that rejects only its `NULL`
+  member, the mismatch says to assign it to a variable and test that:
+
+  ```text
+  expected `character`, found `character | NULL`. A test such as `!is.null()` narrows only a
+  variable or one of its fields, so to rule out `NULL` here, assign this value to a variable and
+  test that
+  ```
 - A refinement does not outlive the top-level statement it was made in. Inside a function body, or
   one braced top-level block, `if (is.null(x)) stop(...)` narrows `x` for the rest of the body,
   because the guard and the later reads are one statement. Written as bare top-level statements, the
@@ -4382,6 +4408,13 @@ nothing about inference and adds no typing rules. It reports the places where th
 determine a type, together with the [parameters nothing constrains](#untyped-parameters), and it
 escalates unresolved references to errors. It also holds each function written in ry types to
 [running natively](#native-functions).
+
+Strict mode reports an `Unknown` once, where it enters: at the construct, read or call the checker
+could not type. A value computed from it, such as the result of a function that returns another
+function's `Unknown` result, is not reported again. A call to a function that no stub declares is
+such an entry point, whether the function comes from base R, as `R.home()` and `.Call(...)` do, or
+from another package. `#: @if-unknown TYPE` on the binding that receives the result accepts it, and
+a [stub](/development/authoring-stubs) line declaring the function removes the finding everywhere.
 
 A value typed `Any` by an annotation or a single declaration is an intentional opt-out and never
 produces a strict finding. A call that falls back to an overload set's `Any` candidate is the

@@ -165,7 +165,7 @@ same <- function(x) x
 same(list(1L, 2L))
 #++++
 same: <T> fn(x: T[]) -> T[]
-T[]
+Unknown
 52..64 error[type-mismatch] expected `T[]`, found `list{integer, integer}`
 
 #---- forall_vector_element_used_arithmetically

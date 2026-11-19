@@ -494,7 +494,10 @@ fn analysis_stats_rejects_a_workspace_without_r_files() {
 fn analysis_stats_reports_phases_and_probe() {
     let directory = project(&[
         ("R/a.R", "value <- 1L\nf <- function() value + 1L\n"),
-        ("R/b.R", "g <- function(x) f() + x\n"),
+        (
+            "R/b.R",
+            "g <- function(x) f() + x\nh <- function() R.home()\n",
+        ),
     ]);
     let output = ry(directory.path(), &["debug", "analysis-stats", "."]);
     let rendered = &output.stdout;
@@ -506,6 +509,8 @@ fn analysis_stats_reports_phases_and_probe() {
         "typecheck (+interfaces)",
         "slowest files (typecheck):",
         "incremental (typing burst",
+        "exports containing Unknown: 1 of 4 package items",
+        "a function: return only",
     ] {
         assert!(
             rendered.contains(section),

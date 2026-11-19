@@ -323,6 +323,31 @@ greeting: Unknown
 41..49 warning[unused] `greeting` is assigned but never used.
 53..57 error[strict] strict mode: could not determine the type of `glue`; it has no known type
 
+#---- a_call_to_an_undeclared_base_function_is_a_strict_origin
+#~~~~ R/main.R
+#: fn() -> character
+home <- function() R.home()
+home_coerced <- function() {
+  #: @if-unknown character
+  path <- R.home()
+  path
+}
+#++++
+== R/main.R
+home: fn() -> character
+home_coerced: fn() -> character
+40..46 error[strict] strict mode: could not determine the type of `R.home`; it has no known type
+
+#---- a_project_function_named_like_an_undeclared_base_function_is_not_an_origin
+#~~~~ R/main.R
+#: fn() -> character
+R.home <- function() "/opt/R"
+home <- function() R.home()
+#++++
+== R/main.R
+R.home: fn() -> character
+home: fn() -> character
+
 #==== strict_loop_variable
 #---- loop_variable_after_the_loop_may_be_null
 #~~~~ R/main.R

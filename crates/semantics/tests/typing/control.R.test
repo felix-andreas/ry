@@ -279,11 +279,11 @@ maybe_rewritten: Unknown
 rewritten_in_loop: Unknown
 ns_or: <T, U> fn(package: T, [fallback]: U) -> U | NULL
 generic_fallback: Unknown
-402..417 error[type-mismatch] expected `environment`, found `environment | NULL`
-545..560 error[type-mismatch] expected `environment`, found `environment | NULL`
-699..714 error[type-mismatch] expected `environment`, found `environment | NULL`
-858..873 error[type-mismatch] expected `environment`, found `environment | NULL`
-1143..1167 error[type-mismatch] expected `environment`, found `environment | NULL`
+402..417 error[type-mismatch] expected `environment`, found `environment | NULL`. A test such as `!is.null()` narrows only a variable or one of its fields, so to rule out `NULL` here, assign this value to a variable and test that
+545..560 error[type-mismatch] expected `environment`, found `environment | NULL`. A test such as `!is.null()` narrows only a variable or one of its fields, so to rule out `NULL` here, assign this value to a variable and test that
+699..714 error[type-mismatch] expected `environment`, found `environment | NULL`. A test such as `!is.null()` narrows only a variable or one of its fields, so to rule out `NULL` here, assign this value to a variable and test that
+858..873 error[type-mismatch] expected `environment`, found `environment | NULL`. A test such as `!is.null()` narrows only a variable or one of its fields, so to rule out `NULL` here, assign this value to a variable and test that
+1143..1167 error[type-mismatch] expected `environment`, found `environment | NULL`. A test such as `!is.null()` narrows only a variable or one of its fields, so to rule out `NULL` here, assign this value to a variable and test that
 
 #---- early_exit_narrows
 #: fn(x: integer | NULL) -> integer
@@ -349,12 +349,111 @@ f <- function(flag) {
 #++++
 f: fn(flag: logical) -> integer
 
-#---- field_access_guards_do_not_narrow
+#---- a_field_guard_on_an_untyped_parameter_leaves_it_open
 f <- function(record) {
   if (is.null(record$value)) 0L else record$value
 }
 #++++
 f: <T> fn(record: T) -> integer
+
+#---- a_field_null_test_narrows_the_field
+use <- function(x: character) -> character x
+guarded <- function(cfg: list{limit: character | NULL}) -> character {
+  if (!is.null(cfg$limit)) use(cfg$limit) else ""
+}
+early <- function(cfg: list{limit: character | NULL}) -> character {
+  if (is.null(cfg$limit)) return("")
+  use(cfg$limit)
+}
+joined <- function(cfg: list{limit: character | NULL}) -> character {
+  if (!is.null(cfg$limit) && nchar(cfg$limit) > 0L) use(cfg$limit) else ""
+}
+#++++
+use: fn(x: character) -> character
+guarded: fn(cfg: list{limit: character | NULL}) -> character
+early: fn(cfg: list{limit: character | NULL}) -> character
+joined: fn(cfg: list{limit: character | NULL}) -> character
+
+#---- a_write_to_the_field_ends_its_narrowing
+use <- function(x: character) -> character x
+f <- function(cfg: list{limit: character | NULL}) -> character {
+  if (is.null(cfg$limit)) return("")
+  cfg$limit <- NULL
+  use(cfg$limit)
+}
+#++++
+use: fn(x: character) -> character
+f: fn(cfg: list{limit: character | NULL}) -> character
+173..182 error[type-mismatch] expected `character`, found `NULL`
+
+#---- a_nested_field_is_not_narrowed_and_the_message_says_how_to
+use <- function(x: character) -> character x
+f <- function(cfg: list{inner: list{limit: character | NULL}}) -> character {
+  if (!is.null(cfg$inner$limit)) use(cfg$inner$limit) else ""
+}
+#++++
+use: fn(x: character) -> character
+f: fn(cfg: list{inner: list{limit: character | NULL}}) -> character
+160..175 error[type-mismatch] expected `character`, found `character | NULL`. A test such as `!is.null()` narrows only a variable or one of its fields, so to rule out `NULL` here, assign this value to a variable and test that
+
+#---- a_closure_write_to_the_field_ends_its_narrowing
+f <- function(cfg: list{limit: character | NULL}) -> character {
+  if (is.null(cfg$limit)) return("")
+  clear <- function() cfg[["limit"]] <<- NULL
+  clear()
+  cfg$limit
+}
+g <- function(cfg: list{limit: character | NULL}) -> character {
+  if (is.null(cfg$limit)) return("")
+  lapply(1:2, function(i) cfg$limit <<- NULL)
+  cfg$limit
+}
+#++++
+f: fn(cfg: list{limit: character | NULL}) -> character
+g: fn(cfg: list{limit: character | NULL}) -> character
+160..169 error[type-mismatch] expected `character`, found `character | NULL`
+322..331 error[type-mismatch] expected `character`, found `character | NULL`
+
+#---- a_closure_replacement_writes_the_captured_variable
+f <- function(x: list{a: character}) -> character {
+  clear <- function() x$a <<- NULL
+  clear()
+  x$a
+}
+#++++
+f: fn(x: list{a: character}) -> character
+99..102 error[type-mismatch] expected `character`, found `character | NULL`
+
+#---- the_null_hint_needs_the_other_members_to_fit
+use <- function(x: character) -> character x
+make <- function() -> integer | NULL NULL
+f <- function() -> character use(make())
+#++++
+use: fn(x: character) -> character
+make: fn() -> integer | NULL
+f: fn() -> character
+120..126 error[type-mismatch] expected `character`, found `integer | NULL`
+
+#---- a_branch_that_narrowed_a_field_joins_back_to_the_record
+f <- function(cfg: list{limit: character | NULL}, flag: logical) -> integer {
+  if (flag) {
+    if (is.null(cfg$limit)) stop()
+  }
+  cfg
+}
+#++++
+f: fn(cfg: list{limit: character | NULL}, flag: logical) -> integer
+133..136 error[type-mismatch] expected `integer`, found `list{limit: character | NULL}`
+
+#---- a_nominal_field_is_not_narrowed
+type Tree = list{ left: Tree | NULL, value: double }
+f <- function(node: Tree) -> double {
+  if (is.null(node$left)) stop()
+  node$left$value
+}
+#++++
+f: fn(node: Tree) -> double
+126..141 error[type-mismatch] expected `double`, found `double | NULL`
 
 #---- arithmetic_on_a_null_tested_value_follows_r
 f <- function(x) {

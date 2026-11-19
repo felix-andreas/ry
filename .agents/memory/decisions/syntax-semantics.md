@@ -2150,3 +2150,19 @@ Reading an item's range from `item_spans` made every edit re-lower every item of
 - **Each edge of an `if` on a local records the domain it shows** (`Fact::KeyDomain`), and a later test of the same local is intersected with the enclosing domains (`KeyTest::within`) before it is compared with earlier correlated writes. Inside `if (case %in% c("a", "b", "c"))`, the false edge of `if (case == "c")` is `case %in% c("a", "b")`, which implies an earlier `if (case %in% c("a", "b"))`, so the earlier write is the only value on that edge (snakecase `to_any_case.R` 286, 295, 304).
 - When both branches of an `if` continue, the false edge's domain is retracted after the join, because code after the `if` runs on both edges. Mixed literal kinds keep the test unchanged, because R coerces before it compares.
 
+
+## Strict mode reports where `Unknown` enters, not every type it reaches
+
+**Status:** built.
+
+- **No strict rule tests a finished type for `Unknown`.** Strict mode reports origins (an unsupported construct, an undeclared reference, a loop-widened or recursive binding, unconstrained parameters), and an `Unknown` that flows on from an origin is a consequence, reported once where it entered.
+- Measured with `ry debug analysis-stats`, which prints the count. On the ten-package corpus with strict forced on, 1665 of 4036 package items export a type containing `Unknown`, and 1563 of them have a finding in the same item. Every sampled one of the other 102 inherits an `Unknown` that a project callee's own finding reports (renv's `data_frame <- function(...) as_data_frame(list(...))`, knitr's `child_mode` over `opts_knit$get`). The strict typed finbench exports `Unknown` from 0 of 40,746 items. A containment rule would repeat each origin at every item downstream of it.
+- **A call to a base function no stub declares is an origin** (`R.home()`, `.Call(...)`), like a package function with no stub. Reading such a name as a value stays unreported, because intrinsics such as `c` and `[[` have no stub and are typed at their calls. `@if-unknown` accepts the result, and the remedy is a stub line.
+- `g <- f` keeps `f`'s scheme rather than exporting `fn(p: Unknown) -> Unknown` (`aliased_function_reference_exports_closed`).
+
+## An all-`logical` call of a numeric function keeps `logical`
+
+**Status:** settled.
+
+- `bump <- function(x) x + 1L` is `<T: numeric> fn(x: T) -> T`, so `bump(TRUE)` is `logical` where R gives `2L`. A `logical` argument meets the numeric constraint, and mixed arguments join (`add(1L, 1.5)` is `double`).
+- Binding `T` to `integer` for a `logical` argument would mistype `checked <- function(x) { stopifnot(x + 1L > 0L); x }`, which returns the `logical`. Only a type-level `promote(T, integer)` separates the two, and no corpus or benchmark finding depends on the difference, because a `logical` fits wherever an `integer` is expected. Build `promote` when a false report or a typed-ry need shows up, not before.

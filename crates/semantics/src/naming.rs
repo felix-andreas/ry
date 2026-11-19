@@ -1516,36 +1516,20 @@ impl Context<'_> {
                 };
                 let range = module.range(target_expression);
                 match spelling {
-                    AssignSpelling::Super => {
-                        // `<<-` binds the nearest slot in a strictly enclosing scope, else the
-                        // global environment. Bounded by the scope stack, not the enclosing
-                        // function: `local()` scopes are not functions.
-                        let enclosing = (0..self.scopes.len() - 1)
-                            .rev()
-                            .find_map(|depth| Some((depth, *self.scopes[depth].slots.get(&name)?)));
-                        match enclosing {
-                            Some((depth, slot)) => {
-                                self.naming.resolutions.insert(target, slot);
-                                self.naming.captured_slots.insert(slot);
-                                // `<<-` finds this slot only because of that frame's writes, so it
-                                // keeps them alive like a capturing read; otherwise a write-only
-                                // counter's initializer looks like a dead store.
-                                let frame = self.scopes[depth].id;
-                                for write in &mut self.writes {
-                                    if write.scope == frame && write.name == name {
-                                        write.used = true;
-                                    }
-                                }
-                                self.record_write_site(assignment, name, range, slot, true);
-                            }
-                            None => {
-                                if self.emit {
-                                    self.naming.non_locals.insert(target, name);
-                                    self.naming.super_globals.insert(name);
-                                }
+                    AssignSpelling::Super => match self.enclosing_slot(name) {
+                        Some((depth, slot)) => {
+                            self.naming.resolutions.insert(target, slot);
+                            self.naming.captured_slots.insert(slot);
+                            self.keep_frame_writes(depth, name);
+                            self.record_write_site(assignment, name, range, slot, true);
+                        }
+                        None => {
+                            if self.emit {
+                                self.naming.non_locals.insert(target, name);
+                                self.naming.super_globals.insert(name);
                             }
                         }
-                    }
+                    },
                     _ => {
                         let kind = self.assignment_binding_kind();
                         let slot = self.frame_slot(name, range, kind);
@@ -1559,6 +1543,17 @@ impl Context<'_> {
             // Replacement forms read their base as a value, then rebind it in the current scope
             // (R evaluates `x[i] <- v` as `x <- `[<-`(x, i, v)`).
             _ => match replacement_base(module, target) {
+                // `x$a <<- v` reads and writes the enclosing `x`, as `x <<- v` writes it.
+                Some((base_expression, name, range))
+                    if spelling == AssignSpelling::Super
+                        && let Some((depth, slot)) = self.enclosing_slot(name) =>
+                {
+                    self.naming.resolutions.insert(base_expression, slot);
+                    self.naming.captured_slots.insert(slot);
+                    self.keep_frame_writes(depth, name);
+                    self.record_write_site(assignment, name, range, slot, true);
+                    self.resolve_replacement_subscripts(target, base_expression);
+                }
                 Some((base_expression, name, range)) => {
                     let fresh = !self.current_scope().slots.contains_key(&name);
                     // A loop body is walked more than once, and an earlier walk's resolution of
@@ -1599,6 +1594,26 @@ impl Context<'_> {
                 }
                 None => self.resolve(target),
             },
+        }
+    }
+
+    /// The slot `<<-` writes: the nearest one in a strictly enclosing scope, with its scope's
+    /// depth. Bounded by the scope stack, not the enclosing function: `local()` scopes are not
+    /// functions. `None` means the global environment.
+    fn enclosing_slot(&self, name: Symbol) -> Option<(usize, BindingId)> {
+        (0..self.scopes.len() - 1)
+            .rev()
+            .find_map(|depth| Some((depth, *self.scopes[depth].slots.get(&name)?)))
+    }
+
+    /// `<<-` finds a slot only because of its frame's writes, so it keeps them alive like a
+    /// capturing read; otherwise a write-only counter's initializer looks like a dead store.
+    fn keep_frame_writes(&mut self, depth: usize, name: Symbol) {
+        let frame = self.scopes[depth].id;
+        for write in &mut self.writes {
+            if write.scope == frame && write.name == name {
+                write.used = true;
+            }
         }
     }
 

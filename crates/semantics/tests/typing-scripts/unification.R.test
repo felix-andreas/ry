@@ -73,5 +73,5 @@ fn(f: fn(T) -> U) -> fn(x: T) -> U
 #---- self_application_occurs_check
 function(x) x(x)
 #++++
-fn(x: T) -> U
+fn(x: T) -> Unknown
 12..16 error[type-mismatch] I cannot construct an infinite type: T occurs inside `fn(T) -> U`.

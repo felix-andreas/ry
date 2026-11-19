@@ -406,7 +406,7 @@ hint @45 -> double
 f <- function(x, y = 2) x + y
 g <- function() f(y = $0)
 #++++
-hover 46..53: T
+hover 46..53: Unknown
 definition: none
 references: none
 rename: none

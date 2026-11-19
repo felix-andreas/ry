@@ -1940,23 +1940,7 @@ fn untyped_formals(
     let hir = item_hir(db, item).as_ref()?;
     if matches!(hir.kind(callee), ExpressionKind::Field { .. }) {
         let (declaring, function) = fields::field_function(db, files, item, callee)?;
-        let declaring_hir = item_hir(db, declaring).as_ref()?;
-        let ExpressionKind::Function { parameters, .. } = declaring_hir.kind(function) else {
-            return None;
-        };
-        let text = item_node(db, declaring)?.text().to_string();
-        return Some(
-            declaring_hir[parameters]
-                .iter()
-                .map(|parameter| Formal {
-                    name: parameter.name.to_string(),
-                    default: parameter.default.and_then(|default| {
-                        text.get(std::ops::Range::<usize>::from(declaring_hir.range(default)))
-                            .map(str::to_owned)
-                    }),
-                })
-                .collect(),
-        );
+        return literal_formals(db, declaring, function);
     }
     let naming = item_naming(db, item).as_ref()?;
     match expression_target(db, files, item, naming, callee)? {
@@ -1964,8 +1948,35 @@ fn untyped_formals(
         // A stub name without a scheme (`list`, which the checker types itself) still has the
         // formals its package defines.
         Target::StubGlobal(name) => installed.formals(&library_target(db, name)),
+        // A function in code the checker leaves untyped, such as R6's helpers that
+        // `encapsulate({...})` evaluates elsewhere, still has the formals it was written with.
+        target @ (Target::Global(_) | Target::Slot { .. }) => {
+            let (declaring, function) = bound_function(db, files, &target)?;
+            literal_formals(db, declaring, function)
+        }
         _ => None,
     }
+}
+
+/// The formals of the function literal `function` in `item`, defaults as written.
+fn literal_formals(db: &dyn Db, item: Item<'_>, function: ExprId) -> Option<Vec<Formal>> {
+    let hir = item_hir(db, item).as_ref()?;
+    let ExpressionKind::Function { parameters, .. } = hir.kind(function) else {
+        return None;
+    };
+    let text = item_node(db, item)?.text().to_string();
+    Some(
+        hir[parameters]
+            .iter()
+            .map(|parameter| Formal {
+                name: parameter.name.to_string(),
+                default: parameter.default.and_then(|default| {
+                    text.get(std::ops::Range::<usize>::from(hir.range(default)))
+                        .map(str::to_owned)
+                }),
+            })
+            .collect(),
+    )
 }
 
 /// An untyped signature in R's own spelling, `fn(x, n = 1L, ...)`.
@@ -7548,26 +7559,10 @@ fn parameter_target<'db>(
         _ => expression_target(db, files, item, naming, argument.callee)?,
     };
     match callee {
-        Target::Global(name) => {
-            // A function a top-level block assigns, as in `local({ helper <- function(...) })`,
-            // is no item of its own, so its item is found from the declaration, as definition
-            // finds it.
-            let definition = declaring_item(db, files, &name).or_else(|| {
-                let target = Target::Global(name.clone());
-                let declaration = occurrences(db, files, &target)
-                    .into_iter()
-                    .find(|occurrence| occurrence.is_declaration)?;
-                Some(position_in_item(db, declaration.file, declaration.range.start())?.item)
-            })?;
-            let binding = item_naming(db, definition)
-                .as_ref()?
-                .bindings
-                .iter()
-                .find(|(_, info)| info.kind == BindingKind::TopLevel && info.name == name)
-                .map(|(binding, _)| *binding)?;
-            parameter_binding(db, definition, binding, argument.name)
+        Target::Global(_) | Target::Slot { .. } => {
+            let (item, function) = bound_function(db, files, &callee)?;
+            function_parameter(db, item, function, argument.name)
         }
-        Target::Slot { item, binding } => parameter_binding(db, item, binding, argument.name),
         library @ (Target::StubGlobal(_) | Target::Package(_)) => Some(library),
         // `object$method(deep = TRUE)`: the parameter of the function the field was given.
         Target::Field(field) if field.precise => field.sites.iter().find_map(|site| {
@@ -7624,20 +7619,41 @@ fn function_parameter<'db>(
     })
 }
 
-/// The parameter named `name` of the function last assigned to `function`.
-fn parameter_binding<'db>(
+/// The function literal a call through `target` runs, with the item that holds it: the one last
+/// assigned to a local binding, or to a global. A function a top-level block assigns, as in
+/// `local({ helper <- function(...) })`, is no item of its own, so its item is found from the
+/// declaration, as definition finds it.
+fn bound_function<'db>(
     db: &'db dyn Db,
-    item: Item<'db>,
-    function: BindingId,
-    name: Symbol,
-) -> Option<Target<'db>> {
+    files: ProjectFiles,
+    target: &Target<'db>,
+) -> Option<(Item<'db>, ExprId)> {
+    let (item, binding) = match target {
+        Target::Slot { item, binding } => (*item, *binding),
+        Target::Global(name) => {
+            let item = declaring_item(db, files, name).or_else(|| {
+                let declaration = occurrences(db, files, target)
+                    .into_iter()
+                    .find(|occurrence| occurrence.is_declaration)?;
+                Some(position_in_item(db, declaration.file, declaration.range.start())?.item)
+            })?;
+            let binding = item_naming(db, item)
+                .as_ref()?
+                .bindings
+                .iter()
+                .find(|(_, info)| info.kind == BindingKind::TopLevel && &info.name == name)
+                .map(|(binding, _)| *binding)?;
+            (item, binding)
+        }
+        _ => return None,
+    };
     let hir = item_hir(db, item).as_ref()?;
     let naming = item_naming(db, item).as_ref()?;
-    let value = hir
+    let function = hir
         .expressions()
         .filter_map(|expression| match expression.kind {
             ExpressionKind::Assign { target, value, .. }
-                if naming.resolutions.get(target) == Some(&function)
+                if naming.resolutions.get(target) == Some(&binding)
                     && matches!(hir.kind(*value), ExpressionKind::Function { .. }) =>
             {
                 Some(*value)
@@ -7645,7 +7661,7 @@ fn parameter_binding<'db>(
             _ => None,
         })
         .last()?;
-    function_parameter(db, item, value, name)
+    Some((item, function))
 }
 
 /// The named arguments that fill a parameter at the calls of its function, so a rename of the
