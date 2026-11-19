@@ -369,7 +369,7 @@ Unverified until a Windows release smoke test runs:
 - A session that sources a site or user profile starts the slow way (`interp::image::applies`), about 0.2 s instead of 0.02 s, and then evaluates the loader's R code afresh (`libr::loader_backend::build`). callr points every worker at its own `R_PROFILE_USER`, so each `ry test --jobs N` worker pays this once: in a measured suite it was most of a worker's fixed overhead (idle workers and the main process's wait cost no CPU). Every `ry run` in a project with a `.Rprofile` pays it too.
 - Fix: start from the image, then source the site and user profiles, call `.First()`, and put the search path in GNU R's order: entries a profile attached move to directly in front of `package:methods` (where `.First.sys()` leaves them), a default package a profile drops from `defaultPackages` is detached, and `.First.sys()` attaches one it adds. The entries move by relinking enclosures, as `do_detach` in `crates/interp/src/envir.rs` does, because `attach()` would copy a package environment.
 - `.First()` from a profile never runs on ry's runtime; GNU R calls it after the user profile and before `.First.sys()`.
-- `ry_repl` (libr) starts a console with `user_profile: true` whatever its flags say, so `ry run --vanilla` and `ry load --vanilla` without code still read the profile. It should read `RUN_FLAG_USER_PROFILE` as `start_script_session` does.
+- `ry_repl` (libr) starts a console with `user_profile: true` whatever its flags say, so `ry run --vanilla` without a script still reads the profile. It should read `RUN_FLAG_USER_PROFILE` as `start_script_session` does.
 
 ## Open: one Renviron reader
 

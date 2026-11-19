@@ -282,8 +282,8 @@ impl RuntimeFlags {
         std::ffi::c_int::from(self.annotation_checks)
             | (std::ffi::c_int::from(self.object_systems) << 1)
             | (std::ffi::c_int::from(self.strict) << 2)
-            | (std::ffi::c_int::from(!self.prelude) << 5)
             | (std::ffi::c_int::from(self.user_profile) << 4)
+            | (std::ffi::c_int::from(!self.prelude) << 5)
             | (std::ffi::c_int::from(self.ahead) << 6)
     }
 

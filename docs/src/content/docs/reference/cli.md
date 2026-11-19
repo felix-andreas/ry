@@ -380,13 +380,15 @@ A value outside a variable's range is ignored, as on GNU R.
 ### Profiles
 
 Every command that starts a session (`ry run` with a script or a console, `ry load`, `ry test`,
-`ry document`) sources the user profile once base R has loaded, as Rscript does: the file
-`R_PROFILE_USER` names when it is set, else `./.Rprofile`, else `~/.Rprofile`. So a project's
-`.Rprofile` that sets `TZ` or an option holds before its package loads. `--no-init-file`, or its
-alias `--vanilla`, starts a script, `ry load -e`/`-f` code or a test run without it; a console
-of ry's runtime reads the profile whatever the flag. ry reads no `.Renviron`, so the two flags do the same, and
-the site profile is not sourced. `ry R` passes `--no-init-file` on to GNU R, and an executable
-from `ry build --aot --exe` reads no profile.
+`ry document`, and the debug adapter) sources the user profile once base R has loaded, as Rscript
+does: the file `R_PROFILE_USER` names when it is set, else `./.Rprofile`, else `~/.Rprofile`. So
+a project's `.Rprofile` that sets `TZ` or an option holds before its package loads.
+
+`--no-init-file`, or its alias `--vanilla`, starts a script, `ry load -e`/`-f` code, a test run
+or `ry document` without it. A console of ry's runtime reads the profile whatever the flag, and
+sources the site profile too; a script session sources no site profile. ry reads no
+`.Renviron`. Under GNU R (`ry R`, or `--runtime gnu-r`) either flag passes `--no-init-file`,
+which skips only the user profile. An executable from `ry build --aot --exe` reads no profile.
 
 ### Start-up image
 
