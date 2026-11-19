@@ -693,7 +693,7 @@ pub(crate) unsafe fn do_sort(call: &Call<'_>) -> R<Sexp> {
                 unreachable!("string ranks always have radix keys");
             };
             let mut order = vec![0u32; length(x)];
-            radix_order(&[keys], &mut order);
+            radix_order(&mut [keys], &mut order);
             let Column::Ranks(ranks) = ranks else {
                 unreachable!("the column was built from ranks");
             };
@@ -970,12 +970,12 @@ pub(crate) unsafe fn do_order(call: &Call<'_>) -> R<Sexp> {
                 .and_then(|column| sort_keys(column, decreasing, na_last))
         })
         .collect();
-    if let Some(radix_keys) = radix_keys {
+    if let Some(mut radix_keys) = radix_keys {
         let permutation = alloc(SexpType::Integer, count)?;
         let ints = values::ints_mut(permutation);
         let order: &mut [u32] =
             std::slice::from_raw_parts_mut(ints.as_mut_ptr().cast::<u32>(), ints.len());
-        radix_order(&radix_keys, order);
+        radix_order(&mut radix_keys, order);
         for slot in order.iter_mut() {
             *slot += 1;
         }
@@ -1086,21 +1086,10 @@ pub(crate) unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
     let order: &mut [u32] =
         std::slice::from_raw_parts_mut(ints.as_mut_ptr().cast::<u32>(), ints.len());
     let ends = match radix_keys {
-        Some(keys) => {
-            radix_order(&keys, order);
-            return_groups.then(|| {
-                let mut ends = Vec::new();
-                for position in 1..=order.len() {
-                    if position == order.len()
-                        || keys.iter().any(|key| {
-                            !key.equal(order[position - 1] as usize, order[position] as usize)
-                        })
-                    {
-                        ends.push(position as i32);
-                    }
-                }
-                ends
-            })
+        Some(mut keys) if return_groups => Some(radix_groups(&mut keys, order)),
+        Some(mut keys) => {
+            radix_order(&mut keys, order);
+            None
         }
         // A key the radix sort cannot read (a complex or raw vector after the first key) is reported
         // only when rows tie on every earlier key, so it needs the comparison sort.
@@ -1248,7 +1237,7 @@ unsafe fn do_rank(call: &Call<'_>) -> R<Sexp> {
         .and_then(|column| complete_prefix(column, count))
         .and_then(|column| sort_keys(&column, false, true));
     if let Some(keys) = keys {
-        rank_by_keys(&keys, &rank_of, &mut ranks);
+        rank_by_keys(keys, &rank_of, &mut ranks);
     } else {
         let column = column(x).ok_or_else(|| unimplemented_type(x, "greater"))?;
         let mut order: Vec<usize> = (0..count).collect();
@@ -1298,11 +1287,11 @@ fn complete_prefix(x: Column<'_>, count: usize) -> Option<Column<'_>> {
 /// run of tied rows takes to their shared rank. A key whose range is no wider than the rows
 /// (string ranks, small integers) needs no sort: counting each key gives the positions its
 /// rows take.
-fn rank_by_keys(keys: &SortKeys, rank_of: &dyn Fn(usize, usize) -> f64, ranks: &mut [f64]) {
+fn rank_by_keys(mut keys: SortKeys, rank_of: &dyn Fn(usize, usize) -> f64, ranks: &mut [f64]) {
     if ranks.is_empty() {
         return;
     }
-    if let SortKeys::Narrow(keys) = keys
+    if let SortKeys::Narrow(keys) = &keys
         && keys.high - keys.low < ranks.len() as u64
     {
         let low = keys.low as u32;
@@ -1329,7 +1318,7 @@ fn rank_by_keys(keys: &SortKeys, rank_of: &dyn Fn(usize, usize) -> f64, ranks: &
         return;
     }
     let mut order = vec![0u32; ranks.len()];
-    radix_order(std::slice::from_ref(keys), &mut order);
+    radix_order(std::slice::from_mut(&mut keys), &mut order);
     let mut start = 0;
     while start < order.len() {
         let mut end = start;
@@ -1837,8 +1826,9 @@ enum Column<'a> {
     Ranks(Vec<u32>),
     /// Strings the radix sort groups without sorting (`sortstr = FALSE`): each element is the
     /// rank of its first appearance, NA included, and the groups keep that order whatever
-    /// `decreasing` and `na.last` say.
-    Grouped(Vec<i32>),
+    /// `decreasing` and `na.last` say. Alongside, each code's rank by bytes (from 1, with 0 for
+    /// `NA`), since a run strictly in the opposite byte order reverses instead.
+    Grouped(Vec<i32>, Vec<u32>),
 }
 
 unsafe fn column<'a>(vector: Sexp) -> Option<Column<'a>> {
@@ -1870,7 +1860,15 @@ unsafe fn radix_column<'a>(vector: Sexp, sort_strings: bool) -> Option<Column<'a
                     *ranks.entry(string_at(vector, index)).or_insert(next)
                 })
                 .collect();
-            Some(Column::Grouped(codes))
+            // `None` sorts first, so it takes rank 0 and the texts follow from 1.
+            let mut distinct: Vec<_> = ranks.into_iter().collect();
+            distinct.sort_unstable();
+            let shift = u32::from(distinct.first().is_some_and(|(text, _)| text.is_some()));
+            let mut byte_ranks = vec![0; distinct.len()];
+            for (rank, (_, code)) in (0..).zip(&distinct) {
+                byte_ranks[*code as usize] = rank + shift;
+            }
+            Some(Column::Grouped(codes, byte_ranks))
         }
         SexpType::String => Some(Column::Ranks(string_ranks(vector, TextOrder::Bytes))),
         _ => column(vector),
@@ -2169,7 +2167,7 @@ impl Column<'_> {
             Column::Complex(items) => items[index].r.is_nan() || items[index].i.is_nan(),
             Column::String(items) => items[index].is_none(),
             Column::Ranks(ranks) => ranks[index] == 0,
-            Column::Grouped(_) | Column::Raw(_) => false,
+            Column::Grouped(..) | Column::Raw(_) => false,
         }
     }
 
@@ -2177,7 +2175,7 @@ impl Column<'_> {
     fn compare_values(&self, left: usize, right: usize) -> Ordering {
         match self {
             Column::Integer(items) => items[left].cmp(&items[right]),
-            Column::Grouped(items) => items[left].cmp(&items[right]),
+            Column::Grouped(items, _) => items[left].cmp(&items[right]),
             Column::Raw(items) => items[left].cmp(&items[right]),
             Column::Real(items) => items[left]
                 .partial_cmp(&items[right])
@@ -2230,7 +2228,7 @@ impl Column<'_> {
             }
             (false, false) => {
                 let ordering = self.compare_values(left, right);
-                let decreasing = decreasing && !matches!(self, Column::Grouped(_));
+                let decreasing = decreasing && !matches!(self, Column::Grouped(..));
                 if decreasing {
                     ordering.reverse()
                 } else {
@@ -2246,6 +2244,22 @@ impl Column<'_> {
 enum SortKeys {
     Narrow(Keys<u32>),
     Wide(Keys<u64>),
+    Appearance(Appearance),
+}
+
+/// Strings ordered by first appearance, as `radixsort(sortstr = FALSE)` orders them. GNU R
+/// numbers the strings by their first appearance within each run of rows that tie on the earlier
+/// keys, not in the whole column, so before a run sorts by this key its rows' codes are
+/// renumbered in that order. Each row lies in one run, so rewriting its code in place is safe.
+/// A run whose strings are strictly in the opposite byte order reverses instead, since GNU R
+/// checks every run for order by bytes before it groups one.
+struct Appearance {
+    keys: Keys<u32>,
+    /// For each code of the whole column, the run that last renumbered it and its code there.
+    renumbered: Vec<(u32, u32)>,
+    /// For each code of the whole column, its place in the byte order the check reads.
+    byte_order: Vec<u32>,
+    run: u32,
 }
 
 /// A key's values, with the least and greatest found in the pass that builds them, which spares
@@ -2281,7 +2295,9 @@ fn keys<T: Copy, K: RadixKey>(items: &[T], key: impl Fn(T) -> K) -> Keys<K> {
 impl SortKeys {
     fn compare(&self, left: usize, right: usize) -> Ordering {
         match self {
-            SortKeys::Narrow(keys) => keys.values[left].cmp(&keys.values[right]),
+            SortKeys::Narrow(keys) | SortKeys::Appearance(Appearance { keys, .. }) => {
+                keys.values[left].cmp(&keys.values[right])
+            }
             SortKeys::Wide(keys) => keys.values[left].cmp(&keys.values[right]),
         }
     }
@@ -2335,7 +2351,25 @@ fn sort_keys(column: &Column<'_>, decreasing: bool, na_last: bool) -> Option<Sor
             });
             place(key, u64::MAX)
         }))),
-        Column::Grouped(items) => Some(SortKeys::Narrow(keys(items, |code| code as u32))),
+        Column::Grouped(items, byte_ranks) => {
+            // GNU R's `StrCmp2`: bytes in the direction asked, and NA at the end `na.last` says.
+            let top = byte_ranks.len() as u32 + 1;
+            let byte_order = byte_ranks
+                .iter()
+                .map(|&rank| match rank {
+                    0 if na_last => u32::MAX,
+                    0 => 0,
+                    rank if decreasing => top - rank,
+                    rank => rank,
+                })
+                .collect();
+            Some(SortKeys::Appearance(Appearance {
+                keys: keys(items, |code| code as u32),
+                renumbered: vec![(0, 0); byte_ranks.len()],
+                byte_order,
+                run: 0,
+            }))
+        }
         Column::Ranks(ranks) => {
             // The ranks count the rows at most, which are fewer than `u32::MAX`.
             let top = u64::from(ranks.iter().copied().max().unwrap_or(0)) + 1;
@@ -2352,30 +2386,87 @@ fn sort_keys(column: &Column<'_>, decreasing: bool, na_last: bool) -> Option<Sor
 /// by the remaining keys, so a later key is only ever sorted within a run, whose keys stay in
 /// cache. Within a run the rows are still in their original order, which is what lets a run
 /// sort `(key, row)` pairs with an unstable algorithm.
-fn radix_order(keys: &[SortKeys], order: &mut [u32]) {
-    sort_runs(keys, order, true);
+fn radix_order(keys: &mut [SortKeys], order: &mut [u32]) {
+    sort_runs(keys, order, true, 0, None);
+}
+
+/// [`radix_order`], returning the 1-based end of each group of rows that tie on every key, as
+/// `radixsort(retgrp = TRUE)` reports them. The groups come from the runs the sort finds anyway,
+/// so no pass compares neighbouring rows' keys again.
+fn radix_groups(keys: &mut [SortKeys], order: &mut [u32]) -> Vec<i32> {
+    let mut ties = Vec::new();
+    sort_runs(keys, order, true, 0, Some(&mut ties));
+    let mut ends = Vec::with_capacity(
+        order.len()
+            - ties
+                .iter()
+                .map(|(start, end)| end - start - 1)
+                .sum::<usize>(),
+    );
+    let mut position = 0;
+    for (start, end) in ties {
+        ends.extend((position + 1..=start).map(|end| end as i32));
+        ends.push(end as i32);
+        position = end;
+    }
+    ends.extend((position + 1..=order.len()).map(|end| end as i32));
+    ends
 }
 
 /// Sorts `order` by `keys`, most significant first, where rows that tie on every key are in
 /// increasing order already. With `identity` the rows are `0..order.len()` and `order` holds
-/// nothing yet.
-fn sort_runs(keys: &[SortKeys], order: &mut [u32], identity: bool) {
+/// nothing yet. With `ties`, it appends in increasing order the ranges, offset by `offset`, of
+/// two or more rows that tie on every key.
+fn sort_runs(
+    keys: &mut [SortKeys],
+    order: &mut [u32],
+    identity: bool,
+    offset: usize,
+    mut ties: Option<&mut Vec<(usize, usize)>>,
+) {
     // A run this short sorts by comparing rows, which costs less than gathering its keys.
     const SHORT_RUN: usize = 32;
-    let Some((key, rest)) = keys.split_first() else {
+    let Some((key, rest)) = keys.split_first_mut() else {
         if identity {
             fill_identity(order);
         }
         return;
     };
+    let want_runs = !rest.is_empty() || ties.is_some();
     let runs = match key {
-        SortKeys::Narrow(key) => sort_by_key(key, order, identity, !rest.is_empty()),
-        SortKeys::Wide(key) => sort_by_key(key, order, identity, !rest.is_empty()),
+        SortKeys::Narrow(key) => sort_by_key(key, order, identity, want_runs),
+        SortKeys::Wide(key) => sort_by_key(key, order, identity, want_runs),
+        SortKeys::Appearance(key) => {
+            if identity {
+                fill_identity(order);
+            }
+            let strictly_reversed = order.len() > 1
+                && order.windows(2).all(|pair| {
+                    let code = |row: u32| key.keys.values[row as usize] as usize;
+                    key.byte_order[code(pair[1])] < key.byte_order[code(pair[0])]
+                });
+            if strictly_reversed {
+                // Strictly ordered rows are all distinct, so no run ties.
+                order.reverse();
+                Vec::new()
+            } else {
+                renumber(key, order);
+                sort_by_key(&key.keys, order, false, want_runs)
+            }
+        }
     };
+    // Comparing rows reads codes that only a run of their own renumbers.
+    let comparable = !rest
+        .iter()
+        .any(|key| matches!(key, SortKeys::Appearance(_)));
     for (start, end) in runs {
         let run = &mut order[start..end];
-        if run.len() > SHORT_RUN {
-            sort_runs(rest, run, false);
+        if rest.is_empty() {
+            if let Some(ties) = ties.as_deref_mut() {
+                ties.push((offset + start, offset + end));
+            }
+        } else if run.len() > SHORT_RUN || !comparable {
+            sort_runs(rest, run, false, offset + start, ties.as_deref_mut());
         } else {
             run.sort_by(|&left, &right| {
                 rest.iter()
@@ -2383,7 +2474,37 @@ fn sort_runs(keys: &[SortKeys], order: &mut [u32], identity: bool) {
                     .find(|ordering| ordering.is_ne())
                     .unwrap_or(Ordering::Equal)
             });
+            if let Some(ties) = ties.as_deref_mut() {
+                let mut group = 0;
+                for position in 1..=run.len() {
+                    if position == run.len()
+                        || rest.iter().any(|key| {
+                            !key.equal(run[position - 1] as usize, run[position] as usize)
+                        })
+                    {
+                        if position - group > 1 {
+                            ties.push((offset + start + group, offset + start + position));
+                        }
+                        group = position;
+                    }
+                }
+            }
         }
+    }
+}
+
+/// Numbers the codes of `rows`, a run in increasing row order, by their first appearance in it.
+fn renumber(key: &mut Appearance, rows: &[u32]) {
+    key.run += 1;
+    let mut next = 0;
+    for &row in rows {
+        let code = &mut key.keys.values[row as usize];
+        let slot = &mut key.renumbered[*code as usize];
+        if slot.0 != key.run {
+            *slot = (key.run, next);
+            next += 1;
+        }
+        *code = slot.1;
     }
 }
 
