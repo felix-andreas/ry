@@ -602,7 +602,6 @@ About seven in ten of the hot suite's closure calls from compiled code take `cal
 - **The AST evaluator makes about one closure call for every six from compiled code** (`apply_call`: 0.9M beside 5.5M), for promise code that is not compiled against the frame's slots, run-once bodies and `eval`. 85% of them use the site's plan.
 
 ## Open: a string `switch` without the linear name scan
-## Open: one probe to intern a new string (B4)
 
 - **A compiled `switch` on a string selector scans its arm names on every call.** `switch_arm` in `crates/interp/src/bytecode.rs` goes through `eval::switch_selector`, then compares the interned selector against each name in the table by identity, and compares text only if none matches (a missing name, or another encoding). On the expr_tree workload, `switch_arm` and `switch_selector` together are at most 3.6% of warm Ir under callgrind, which bounds the gain. The likely shape is a selector-to-arm map built once with the table, or a dense string id (below) indexing it, plus inlining the string case of `switch_selector` before its generic vector checks. It touches `bytecode.rs` call sites, so coordinate with whoever is rewriting them.
 
@@ -1890,6 +1889,9 @@ coverage is unmeasured: the figures on record (`parser.rs` 87%, 60 diagnostic sh
 
 ### Smaller items, each with its measurement
 
+- **The differential generator writes every string as a literal** (`crates/oracle/src/fuzz.rs`).
+  Build equal names by coercion, `paste0`, `sprintf` and `deparse`, and read them by name:
+  deferred strings are ALTREP, and lookups have missed them.
 - **Coverage-guided fuzzing covers 15 of 17 targets, shallowly on the slow ones.**
   `just fuzz-all 60 runtime` runs them, locally or in the staged `test.yml` once it is accepted and
   someone starts it or tags a release. What it leaves open:

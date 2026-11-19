@@ -2126,6 +2126,15 @@ pub(crate) fn matrix_positions<'s>(
     let index = materialize(context, index)?;
     let rows = index_dims[0];
     let mut positions = Vec::with_capacity(rows);
+    // A dimension's names may be an ALTREP vector, such as deferred strings, so each is
+    // expanded before the lookup reads it.
+    let mut dimension_names: SmallVec<[Option<Local<'s, Str>>; 4]> = SmallVec::new();
+    if !numeric && let Some(list) = dimnames.downcast::<List>() {
+        for dimension in 0..list.len() {
+            let names = context.root(list.get(context, dimension));
+            dimension_names.push(dense::<Str>(context, names)?);
+        }
+    }
     let failure = {
         let numbers = match numeric {
             true => Some(Numbers::of(context, index)?),
@@ -2135,9 +2144,6 @@ pub(crate) fn matrix_positions<'s>(
             true => None,
             false => Some(standard::<Str>(index)?.read(context)),
         };
-        let dimnames = dimnames
-            .downcast::<List>()
-            .map(|dimnames| dimnames.read(context));
         let mut failure = None;
         'rows: for row in 0..rows {
             let mut offset = 0usize;
@@ -2170,10 +2176,8 @@ pub(crate) fn matrix_positions<'s>(
                         positions.push(None);
                         continue 'rows;
                     };
-                    let names = dimnames
-                        .filter(|dimnames| dimension < dimnames.len())
-                        .and_then(|dimnames| dimnames.get(dimension).downcast::<Str>());
-                    let found = names.and_then(|names| {
+                    let names = dimension_names.get(dimension).copied().flatten();
+                    let found = names.map(|names| names.read(context)).and_then(|names| {
                         (0..names.len()).find(|&candidate| {
                             let candidate = names.get(candidate);
                             !is_na(candidate) && same_text(candidate, name)
@@ -2601,14 +2605,15 @@ enum Lookup<'s> {
 }
 
 /// The position `name` matches among `names`. Names compare as text, so a latin1-marked name
-/// matches its UTF-8 spelling.
+/// matches its UTF-8 spelling. Names that are an ALTREP vector, such as the deferred strings
+/// `names(x) <- 1:2` stores, are expanded first.
 fn name_position<'s>(
     context: &mut Cx<'s>,
-    names: Local<'_>,
+    names: Local<'s>,
     name: Local<'_, Chars>,
     lookup: Lookup<'s>,
 ) -> R<Option<usize>> {
-    let Some(names) = names.downcast::<Str>() else {
+    let Some(names) = dense::<Str>(context, names)? else {
         return Ok(None);
     };
     let name = name.read(context);
@@ -3166,8 +3171,7 @@ fn field_of_value<'s>(
             let value = item(context, object, position)?;
             // A complex assignment through a partial name, `v$mi[[1]] <- 2`, assigns a new `mi`
             // element, so the `misc` element it read must not be modified in place.
-            let exact = names
-                .downcast::<Str>()
+            let exact = dense::<Str>(context, names)?
                 .is_some_and(|names| names.get(context, position).bytes() == name.bytes(context));
             if !exact {
                 handles::mark_shared(value);

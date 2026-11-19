@@ -377,6 +377,20 @@ pub fn same_text(left: Gc<'_, Chars>, right: Gc<'_, Chars>) -> bool {
     unsafe { values::same_string(left.raw(), right.raw()) }
 }
 
+/// The cross-check behind [`values::same_string`]'s identity rule: a cached ASCII string is the
+/// only string that holds its text, so a different string with the same text means some path
+/// made a `CHARSXP` without the string cache. `NA` is uncached and spells "NA".
+#[cold]
+#[inline(never)]
+pub fn assert_distinct_text(left: Gc<'_, Chars>, right: Gc<'_, Chars>) {
+    assert!(
+        is_na(left) || is_na(right) || text(left) != text(right),
+        "two CHARSXPs hold the text {:?}, one of them cached ASCII: a string was made outside the \
+         string cache",
+        text(left)
+    );
+}
+
 /// A string's text, decoded when it is marked latin1 or bytes.
 #[inline]
 pub fn text<'a>(chars: Gc<'a, Chars>) -> Cow<'a, str> {

@@ -512,3 +512,12 @@ GNU R finalizes an object at the first full `gc()` after its last reference goes
 - **Maintenance.** Allocation sets the bit; `set_element`, `copy_elements`, `move_elements` and `count_written_elements` clear it when a non-inert element arrives; `escape` clears it, since native code may store anything through the pointer. `count_written_elements` derives it in the same pass that counts the elements (`increment_refcount_inert`, one header read per element, branch-free).
 - **Safety.** A set bit leaves the elements' counts overcounted, which is safe because counts only overcount; a clear bit only costs a walk. A large atomic element is not inert, because its release returns pages early.
 - Measured on a shallow copy of a shared 1,000-element list of doubles, freed each iteration: 3.2 µs per copy without the bit, 2.7 µs with it.
+
+## A cached ASCII string is the only string with its text
+
+**Status:** built; cross-checked behind `syntax::testing::enable_invariants()` in debug builds.
+
+- **Rule.** `values::same_string` answers `false` for two different objects as soon as either is cached ASCII, without reading the other's header or bytes. Name scans are dominated by this comparison (62% of instructions on a k-nucleotide hash workload when both texts were read).
+- **Why it holds.** Every `CHARSXP` comes from `Heap::mk_char`, which interns ASCII text once and unmarked. `new_char` is private to the heap and makes only `NA_STRING` and image strings that were uncached when written (relocation keeps their marks). The C API refuses `allocVector(CHARSXP, n)`. GNU R's `Seql` needs both sides cached because its C API can make uncached strings.
+- **Check.** `handles::assert_distinct_text` panics when the identity rule answers `false` for two strings with the same text, which names a new creation path that bypasses the cache.
+- A lookup that misses a coerced name is usually not this rule: deferred string conversions are ALTREP, and a standard-vector downcast reads them as absent (`crates/interp/AGENTS.md`).
