@@ -891,11 +891,6 @@ measurement showed.
   be narrowed at all.
 - Signature help misses R6's own helpers (`assign_func_envs`, `merge_vectors`, `list2env2`),
   which R6 defines inside `encapsulate({...})` blocks; go-to-definition already finds them.
-- httr2's argument-name definition role (about 90%) counts arguments collected into `...` and
-  passed on to a list or a form body (`req_body_form(req, scope = scope)`), which have no
-  definition site; the role should leave them out rather than count them as misses.
-- The add-annotation code action writes a `#:` comment even in a project that uses inline
-  annotations. It could offer the inline form where inline annotations are on.
 - Editor gaps left by the completeness pass against rust-analyzer (`ide/tests/ide/editor-completeness.R.test`
   pins what works). `df$` on a base `data.frame` completes nothing, because its columns are not
   typed (the `DataFrame` type is the typed alternative). A local whose

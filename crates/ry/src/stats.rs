@@ -544,6 +544,17 @@ fn editor_coverage(db: &RootDatabase, records: &[FileRecord], root: &Path) {
             let Some(role) = identifier_role(&record.source, usize::from(offset)) else {
                 continue;
             };
+            // A name `...` collects (`req_body_form(req, scope = scope)`) has no parameter to
+            // define it, so no editor could answer go-to-definition there.
+            if role == IdentifierRole::ArgumentName
+                && let Some(token) = syntax_root
+                    .token_at_offset(offset)
+                    .right_biased()
+                    .filter(|token| token.kind() == IDENT)
+                && names_a_dots_element(db, record.file, offset, token.text(), &mut installed)
+            {
+                continue;
+            }
             sampled += 1;
             let tally = tallies.entry(role).or_default();
             tally.total += 1;
