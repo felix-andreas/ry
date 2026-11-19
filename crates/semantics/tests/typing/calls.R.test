@@ -422,6 +422,59 @@ first: fn(x: integer | logical) -> logical
 second: fn(x: character | logical) -> logical
 both: fn(v: logical) -> logical
 
+#---- a_numeric_use_settles_a_union_bound
+f <- function(x) {
+  vapply(x, function(e) TRUE, logical(1))
+  x + 1
+}
+#++++
+f: Unknown
+63..68 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list[T] | T[]`
+
+#---- a_settled_bound_checks_a_later_caller
+f <- function(x) {
+  vapply(x, function(e) TRUE, logical(1))
+  y <- x + 1
+  x
+}
+g <- function() f("a")
+#++++
+f: Unknown
+g: fn() -> Unknown
+63..64 warning[unused] `y` is assigned but never used.
+68..73 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list[T] | T[]`
+
+#---- a_bounded_variable_unified_into_its_own_bound_settles
+same <- function(a, b) if (TRUE) a else b
+f <- function(x) {
+  vapply(x, function(e) {
+    same(e, x)
+    TRUE
+  }, logical(1))
+  x
+}
+#++++
+same: <T> fn([a]: T, [b]: T) -> T
+f: Unknown
+73..114 error[type-mismatch] this function is passed `T`, but its parameter `e` accepts `U`
+
+#---- two_bounded_variables_meet_on_their_common_members
+#: fn(x: integer | logical) -> logical
+first <- function(x) TRUE
+#: fn(x: character | logical) -> logical
+second <- function(x) TRUE
+same <- function(a, b) if (TRUE) a else b
+g <- function(a, b) {
+  first(a)
+  second(b)
+  same(a, b)
+}
+#++++
+first: fn(x: integer | logical) -> logical
+second: fn(x: character | logical) -> logical
+same: <T> fn([a]: T, [b]: T) -> T
+g: fn(a: logical, b: logical) -> logical
+
 #---- union_commit_blames_the_later_conflicting_use
 #: fn(x: integer | logical) -> logical
 first <- function(x) TRUE

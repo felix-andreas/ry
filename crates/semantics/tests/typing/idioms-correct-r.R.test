@@ -2030,6 +2030,29 @@ make: <T, U, V> fn(capture: fn(T, U, extra: double) -> V) -> fn(x: T, y: U) -> V
 f: Unknown
 82..90 error[type-mismatch] expected `fn(T, U, extra: double) -> V`, found `fn(x: W) -> W`
 
+#---- a_formals_rewrite_keeps_the_body_so_the_call_is_checked
+make <- function(capture) {
+  function(x, y) capture(x, y, extra = 1)
+}
+f <- make(identity)
+formals(f) <- alist(x = , y = 2)
+#++++
+make: <T, U, V> fn(capture: fn(T, U, extra: double) -> V) -> fn(x: T, y: U) -> V
+f: Unknown
+Unknown
+82..90 error[type-mismatch] expected `fn(T, U, extra: double) -> V`, found `fn(x: W) -> W`
+
+#---- a_namespaced_body_rewrite_makes_a_template
+make <- function(capture) {
+  function(x, y) capture(x, y, extra = 1)
+}
+f <- make(identity)
+base::body(f) <- quote(x + y)
+#++++
+make: <T, U, V> fn(capture: fn(T, U, extra: double) -> V) -> fn(x: T, y: U) -> V
+f: <T, U, V> fn(x: T, y: U) -> V
+Any
+
 #---- a_union_argument_keeps_the_echoed_union
 normalize <- function(path) {
   path[1] <- "a"

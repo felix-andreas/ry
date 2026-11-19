@@ -3463,9 +3463,10 @@ slot, so the slot's type reflects the update:
   `old[[1]]$private$deep_clone` is a `double`. Writing a field of a `NULL` grows it into a one-field
   record, as R does, so `x <- NULL; x$a <- 1` makes `x` a `list{a: double}`.
 - `formals(f) <- v` and `body(f) <- v` rewrite the function itself, so `f` is `Unknown` afterwards
-  and calls to it are not checked. When the last top-level write of `f` in its file is such a
-  rewrite, the earlier `f <- make(g)` builds a template whose code never runs as written, so a
-  function argument such as `g` is not held to what that code would do with it.
+  and calls to it are not checked. When the last top-level write of `f` in its file is
+  `body(f) <- v` (or `base::body(f) <- v`), the earlier `f <- make(g)` builds a template whose code
+  never runs as written, so a function argument such as `g` is not held to what that code would do
+  with it. `formals(f) <- v` keeps the body, so it makes no template.
 - `names(x) <- c("a", "b")` with literal names, as many as `x` has items, turns a list of known
   items into a record with those fields and renames a record's fields. Computed names leave a list
   whose fields are not tracked, so `x$a` may read any item. Other replacement calls, such as

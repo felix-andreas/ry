@@ -1799,9 +1799,9 @@ struct Checker<'db, 'a> {
     valued_slots: Bitset<'a, BindingId>,
     /// The item's `<<-` target names, sorted.
     super_assigned: Vec<Symbol>,
-    /// The call building the item's value when a later top-level `body(name) <-` or
-    /// `formals(name) <-` replaces that value's code: the closure it builds never runs as
-    /// written, so a function argument is not held to what that closure would do with it.
+    /// The call building the item's value when a later top-level `body(name) <-` replaces
+    /// that value's code: the closure it builds never runs as written, so a function argument
+    /// is not held to what that closure would do with it.
     template_call: Option<TextRange>,
 }
 
@@ -3421,19 +3421,29 @@ impl<'db, 'a> Checker<'db, 'a> {
     fn settle_literals(&mut self, ty: Ty<'db>) -> Ty<'db> {
         let mut open = FxHashSet::default();
         self.table.collect_unbound_vars(self.db, ty, &mut open);
+        let mut bounded = Vec::new();
         for var in open {
             let representative = self.table.find(var);
             if let Some((literal, native)) = self.table.literal_of(representative) {
                 self.default_literal_var(Ty::new(self.db, TyKind::Var(literal)), native);
-            } else if let Some(bound) = self.table.bound_of(representative) {
-                // A report names what a bounded value can be, never a bare variable.
-                let variable = Ty::new(self.db, TyKind::Var(representative));
-                if self.table.unify(self.db, variable, bound).is_err() {
-                    unreachable!("a variable fits its own bound");
-                }
+            } else if self.table.bound_of(representative).is_some() {
+                bounded.push(representative);
             }
         }
-        self.table.resolve(self.db, ty)
+        if bounded.is_empty() {
+            return self.table.resolve(self.db, ty);
+        }
+        // A report names what a bounded value can be, never a bare variable, but wording it
+        // must not change what later uses of the variable see.
+        let snapshot = self.table.snapshot();
+        for var in bounded {
+            if self.table.settle_bound(self.db, var).is_err() {
+                break;
+            }
+        }
+        let settled = self.table.resolve(self.db, ty);
+        self.table.rollback(snapshot);
+        settled
     }
 
     /// Every two-type report goes through here so record mismatches narrow to the field
@@ -19585,14 +19595,16 @@ impl<'db, 'a> Checker<'db, 'a> {
         for var in lone {
             if let Entry::Unbound {
                 level,
-                bound: Some(bound),
+                bound: Some(_),
                 ..
             } = *self.table.entry(var)
                 && level > self.table.level
             {
-                let variable = Ty::new(self.db, TyKind::Var(var));
-                if self.table.unify(self.db, variable, bound).is_err() {
-                    unreachable!("a variable fits its own bound");
+                let snapshot = self.table.snapshot();
+                if self.table.settle_bound(self.db, var).is_err() {
+                    // A bounded variable carries no constraint and no cycle, so this does not
+                    // happen; if it did, keeping the binder still gives a correct scheme.
+                    self.table.rollback(snapshot);
                 }
             }
         }

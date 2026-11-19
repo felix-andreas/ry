@@ -507,34 +507,57 @@ impl<'db> InferenceTable<'db> {
                 let Some(constraint) = left_constraint.join(right_constraint) else {
                     return Err(UnifyError::Mismatch(a, b));
                 };
-                // Two bounds meet at the narrower one; bounds that neither holds are refused
-                // rather than intersected.
+                // A variable holds a constraint or a bound, never both, and a bound never names
+                // its own variable. A meet that would break either settles each bounded
+                // variable to its bound and unifies what is left.
                 let bound = match (left_bound, right_bound) {
+                    (None, None) => None,
+                    _ if constraint != Constraint::Unconstrained => {
+                        return self.unify_settled(db, a, b, left, right);
+                    }
                     (Some(left_bound), Some(right_bound)) => {
-                        if self.compatible(db, left_bound, right_bound) {
-                            Some(left_bound)
-                        } else if self.compatible(db, right_bound, left_bound) {
-                            Some(right_bound)
-                        } else {
-                            return Err(UnifyError::Mismatch(a, b));
+                        match self.meet_bounds(db, left_bound, right_bound, 0) {
+                            Some(bound) => Some(bound),
+                            None => return Err(UnifyError::Mismatch(a, b)),
                         }
                     }
                     (bound, None) | (None, bound) => bound,
                 };
+                if bound.is_some_and(|bound| {
+                    !self.walk_unbound_vars(db, bound, &mut |found| found != left && found != right)
+                }) {
+                    return self.unify_settled(db, a, b, left, right);
+                }
                 let (winner, loser) = if left.0 <= right.0 {
                     (left, right)
                 } else {
                     (right, left)
                 };
+                let level = left_level.min(right_level);
                 self.set(
                     winner,
                     Entry::Unbound {
-                        level: left_level.min(right_level),
+                        level,
                         constraint,
-                        bound,
+                        bound: None,
                     },
                 );
                 self.set(loser, Entry::Redirect(winner));
+                if let Some(bound) = bound {
+                    self.adjust_levels(db, level, bound);
+                    if !matches!(bound.kind(db), TyKind::Union(_)) {
+                        // A bound of one type leaves the variable nothing else to be.
+                        return self.bind(db, winner, bound);
+                    }
+                    self.set(
+                        winner,
+                        Entry::Unbound {
+                            level,
+                            constraint,
+                            bound: Some(bound),
+                        },
+                    );
+                }
                 Ok(())
             }
             (TyKind::Var(var), _) => self.bind(db, *var, b),
@@ -712,6 +735,73 @@ impl<'db> InferenceTable<'db> {
         }
     }
 
+    /// Where two bounds meet: the narrower one, else the members of `existing` that fit
+    /// `incoming` (`integer | logical` then `character | logical` leaves `logical`), else
+    /// nothing.
+    fn meet_bounds(
+        &mut self,
+        db: &'db dyn Db,
+        existing: Ty<'db>,
+        incoming: Ty<'db>,
+        depth: usize,
+    ) -> Option<Ty<'db>> {
+        if self.compatible_probe(db, existing, incoming, depth + 1) {
+            return Some(existing);
+        }
+        if self.compatible_probe(db, incoming, existing, depth + 1) {
+            return Some(incoming);
+        }
+        let TyKind::Union(members) = existing.kind(db) else {
+            return None;
+        };
+        let fitting: Vec<Ty<'db>> = members
+            .iter()
+            .copied()
+            .filter(|&member| self.compatible_probe(db, member, incoming, depth + 1))
+            .collect();
+        (!fitting.is_empty()).then(|| union_of(db, fitting))
+    }
+
+    /// Binds a bounded variable to its bound, giving up the argument's own type where a
+    /// constraint or a cycle would need the variable to hold both.
+    pub fn settle_bound(
+        &mut self,
+        db: &'db dyn Db,
+        var: InferenceVar,
+    ) -> Result<(), UnifyError<'db>> {
+        let representative = self.find(var);
+        let Entry::Unbound {
+            level,
+            constraint,
+            bound: Some(bound),
+        } = *self.entry(representative)
+        else {
+            return Ok(());
+        };
+        self.set(
+            representative,
+            Entry::Unbound {
+                level,
+                constraint,
+                bound: None,
+            },
+        );
+        self.bind(db, representative, bound)
+    }
+
+    fn unify_settled(
+        &mut self,
+        db: &'db dyn Db,
+        a: Ty<'db>,
+        b: Ty<'db>,
+        left: InferenceVar,
+        right: InferenceVar,
+    ) -> Result<(), UnifyError<'db>> {
+        self.settle_bound(db, left)?;
+        self.settle_bound(db, right)?;
+        self.unify(db, a, b)
+    }
+
     /// The bound of an unbound variable, when it has one.
     pub fn bound_of(&self, var: InferenceVar) -> Option<Ty<'db>> {
         match *self.entry(self.find(var)) {
@@ -751,6 +841,10 @@ impl<'db> InferenceTable<'db> {
     ) -> Result<(), UnifyError<'db>> {
         let representative = self.find(var);
         match *self.entry(representative) {
+            Entry::Unbound { bound: Some(_), .. } if constraint != Constraint::Unconstrained => {
+                self.settle_bound(db, representative)?;
+                self.constrain(db, representative, constraint)
+            }
             Entry::Unbound {
                 level,
                 constraint: existing,
@@ -1000,29 +1094,14 @@ impl<'db> InferenceTable<'db> {
         {
             let bound = match bound {
                 None => expected,
-                Some(existing) if self.compatible_probe(db, existing, expected, depth + 1) => {
-                    existing
-                }
-                Some(existing) if self.compatible_probe(db, expected, existing, depth + 1) => {
-                    expected
-                }
-                // Two unions that overlap leave the members of the earlier bound that fit the
-                // later one: `integer | logical` then `character | logical` leaves `logical`.
-                Some(existing) => {
-                    let TyKind::Union(members) = existing.kind(db) else {
-                        return false;
-                    };
-                    let fitting: Vec<Ty<'db>> = members
-                        .iter()
-                        .copied()
-                        .filter(|&member| self.compatible_probe(db, member, expected, depth + 1))
-                        .collect();
-                    if fitting.is_empty() {
-                        return false;
-                    }
-                    union_of(db, fitting)
-                }
+                Some(existing) => match self.meet_bounds(db, existing, expected, depth) {
+                    Some(bound) => bound,
+                    None => return false,
+                },
             };
+            if !matches!(bound.kind(db), TyKind::Union(_)) {
+                return self.bind(db, representative, bound).is_ok();
+            }
             self.adjust_levels(db, level, bound);
             self.set(
                 representative,

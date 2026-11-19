@@ -2129,7 +2129,8 @@ Reading an item's range from `item_spans` made every edit re-lower every item of
 **Status:** built.
 
 - **An open variable that meets a union takes it as a bound instead of binding to it** (`Entry::Unbound.bound` in `infer.rs`), so `normalize(path)` over `map_lgl(path, ...)` keeps the caller's own type: `<T, U: list[T] | T[]> fn(path: U) -> U`. Binding to the union lost the member the caller passed, and every caller saw the whole union back (renv `python.R` 109).
-- A later binding must fit the bound. Two bounds meet by keeping the narrower one, else the members of the existing bound that fit the other; no fitting member is a mismatch blamed on the later use.
+- A later binding must fit the bound. Two bounds meet by keeping the narrower one, else the members of the existing bound that fit the other, both when a variable meets a union and when two bounded variables unify; no fitting member is a mismatch blamed on the later use, and a single fitting member binds the variable, so no `<T: logical>` is ever printed.
+- **A variable holds a constraint or a bound, never both, and a bound never names its own variable.** A constraint (`numeric`, from `x + 1`) or a unification that would put the variable inside its own bound first settles the variable to its bound and then retries, so the bound's members are checked as types (`TypeTable::settle_bound`, `unify_settled`). Keeping both silently dropped the bound, and a self-referencing bound looped while printing.
 - At generalization a bounded variable in one signature slot is replaced by its bound (`settle_lone_bounds`), so a binder appears only when the bound links a parameter to the return or to another parameter. A rigid binder with a bound fits wherever its bound fits.
 - `join_types` unions two distinct bounded variables instead of unifying them, since one is not the other, and a mismatch report shows the bound, never the bare variable.
 - **Syntax**: `function<U: list[T] | T[]>` and `@forall U: list[T] | T[]`. After `:`, a run of plain words up to `,`, `>` or the line end is a constraint list (`T: numeric`); anything else is a type. `TypeScheme.binders` holds `Binder { name, bound: Bound::Constraint | Bound::Type }`, one list, so a binder cannot carry both.
@@ -2138,9 +2139,9 @@ Reading an item's range from `item_spans` made every edit re-lower every item of
 
 **Status:** built.
 
-- **`f <- g(...)` followed at top level by `body(f) <-` or `formals(f) <-` builds `f` from a template**, so the call building `f` does not check its function arguments against `g`'s parameter types (`Checker.template_call`). diffobj `diff.R` 654 builds a one-parameter function, then gives it the parameters the interface names.
+- **`f <- g(...)` followed at top level by `body(f) <-` builds `f` from a template**, so the call building `f` does not check its function arguments against `g`'s parameter types (`Checker.template_call`). diffobj `diff.R` 654 builds a one-parameter function, then gives it the parameters the interface names.
 - The check probes `file_code_rewrites`, a per-file list of rewritten names that backdates, before it asks for the name's writer (`frame_binder`). Asking `frame_binder` for every value item tied each one to the file's binder list, so inserting a statement rechecked every value before it.
-- Only these two replacement functions qualify, because they are the ones that change what a call of `f` does; `attr(f, "x") <-` does not.
+- Only `body<-` (also as `base::body<-` or with `->`) qualifies, because it is the one replacement that discards the code `g` built. `formals(f) <-` keeps that body, which still runs on the new parameters, so the call is checked; `attr(f, "x") <-` changes nothing a call does.
 
 ## A key test reads within the tests that enclose it
 

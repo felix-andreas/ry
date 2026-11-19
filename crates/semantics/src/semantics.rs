@@ -2729,8 +2729,8 @@ pub struct ItemSyntaxFlags {
     /// It binds a function marked `@pure function`, which counts only while inline
     /// annotations are enabled.
     pub inline_pure: bool,
-    /// It may be a `body(name) <-` or `formals(name) <-` write, which replaces a function's
-    /// code. It may overcount; `file_code_rewrites` reads the item's HIR to confirm.
+    /// It may be a `body(name) <-` write, which replaces a function's code. It may overcount;
+    /// `file_code_rewrites` reads the item's HIR to confirm.
     pub rewrites_code: bool,
 }
 
@@ -2756,14 +2756,14 @@ pub fn item_syntax_flags<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemSyntaxFla
         binds_only_own_name: binds_only_own_name(db, item, &root),
         comment_pure,
         inline_pure,
-        rewrites_code: BinaryExpr::cast(root.clone())
-            .and_then(|assignment| assignment.lhs())
-            .filter(|target| target.kind() == SyntaxKind::CALL_EXPR)
-            .and_then(|target| target.first_child())
-            .is_some_and(|callee| {
-                callee.kind() == SyntaxKind::NAME
-                    && matches!(callee.text().to_string().as_str(), "body" | "formals")
-            }),
+        rewrites_code: BinaryExpr::cast(root.clone()).is_some_and(|assignment| {
+            [assignment.lhs(), assignment.rhs()]
+                .into_iter()
+                .flatten()
+                .filter(|side| side.kind() == SyntaxKind::CALL_EXPR)
+                .filter_map(|side| side.first_child())
+                .any(|callee| matches!(callee.text().to_string().as_str(), "body" | "base::body"))
+        }),
     }
 }
 
@@ -3193,9 +3193,9 @@ fn check_item_against<'db>(
     ))
 }
 
-/// Whether the file's last top-level write of the item's name is `body(name) <- ...` or
-/// `formals(name) <- ...` in another item, so the item's value is a template whose code R
-/// replaces before anything calls it.
+/// Whether the file's last top-level write of the item's name is `body(name) <- ...` in another
+/// item, so the item's value is a template whose code R replaces before anything calls it.
+/// `formals(name) <-` keeps the body, so that body still runs as written.
 fn code_rewritten_later<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
     if *item.kind(db) != ItemKind::Value {
         return false;
@@ -3212,7 +3212,7 @@ fn code_rewritten_later<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
         .is_some_and(|writer| writer != item && code_rewrite_target(db, writer) == Some(name))
 }
 
-/// The names a top-level `body(name) <-` or `formals(name) <-` of the file rewrites. It
+/// The names a top-level `body(name) <-` of the file rewrites. It
 /// backdates on every edit that adds or removes no such write.
 #[salsa::tracked(returns(ref))]
 fn file_code_rewrites<'db>(db: &'db dyn Db, file: SourceFile) -> ThinVec<Symbol> {
@@ -3234,8 +3234,16 @@ fn code_rewrite_target<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<Symbol> 
     let ExpressionKind::Call { callee, arguments } = module.kind(*target) else {
         return None;
     };
-    if !matches!(module.kind(*callee), ExpressionKind::NameRef(head) if matches!(head.as_str(), "body" | "formals"))
-    {
+    let replaces_body = match *module.kind(*callee) {
+        ExpressionKind::NameRef(head) => head.as_str() == "body",
+        ExpressionKind::Namespace {
+            package: Some(package),
+            name: Some(name),
+            ..
+        } => package.as_str() == "base" && name.as_str() == "body",
+        _ => false,
+    };
+    if !replaces_body {
         return None;
     }
     match module.kind(module[arguments].first()?.value?) {
