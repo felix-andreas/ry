@@ -3809,3 +3809,14 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
 ## Open: the VS Code extension has no eslint configuration
 
 `bun run lint` in `editors/code` fails because there is no `eslint.config.js` (eslint 9 needs one); no config has ever been committed. Add one before relying on the lint script.
+
+## Open: oracle cases near the collection-stress limit
+
+`just gc-torture` kills a case after 1800 s, and the CI runner's speed varies by about 2x, so a case whose worst time is past half the limit fails a stress seed sooner or later. Trim these together, keeping each one's coverage (a smaller loop or shape, not fewer constructs), instead of one per failed run. Worst and typical times over the last eight CI runs:
+
+| Case | Worst | Typical |
+| --- | --- | --- |
+| `base__for_over_compact_sequences` (top-level `for` over `1:3000000`) | 1217 s | 690 s |
+| `jit__inlined_closures_over_running_frames` | 604 s | 310 s |
+
+`matrices__permute_and_scalar_index` (1800 s, then about 260 s) and `conditions__rlang_trace_back_generated` (1800 s, now 50 stacks) were trimmed after they hit the limit. Every case slower than 60 s is printed in the stress job's log.
