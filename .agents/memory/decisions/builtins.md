@@ -575,3 +575,16 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 - **A negative minimum** (reachable through `.Internal` only) follows GNU R's unsigned comparisons: an ASCII element is returned unchanged, and a non-ASCII one loses its inner spaces.
 - **Lower case can differ from GNU R by Unicode version** for letters added or reclassified between the Unicode of Rust's standard library and of the system's glibc (U+0295 and the letters Unicode 16 added are examples).
 - Oracle case: `strings__abbreviate_non_ascii`.
+
+## Vector kernels: one typed loop per case, exact sizes, and GNU R's polygamma
+
+**Status:** settled.
+
+- **Typed loops.** A kernel that read each element through a generic accessor (`logical_at`, `real_at`) or matched on the function per element runs one loop per operand type or per function instead: `!` (`do_not`), the one-argument math functions (`kernels::math`, with GNU R 4.6's signed-zero release test asked once per vector through `arith::math_value_at`).
+- **Integer `%/%`** floors the double quotient as truncation minus one where the truncation lies above it (`arith::floored_quotient`). A quotient of two `int`s is at least `1 / |b|` from any integer it does not equal, so this is GNU R's `floor((double) x / y)` exactly, and unlike `f64::floor`, a libm call on baseline x86-64 without SSE4.1, it vectorizes.
+- **Exact sizes before fills.** `which` counts its `TRUE`s, allocates the result, and stores every position up to the last `TRUE`, advancing only past a `TRUE`, so neither loop branches on the data. `rep` of a short source fills by doubling the filled prefix.
+- **Blocks.** `is.unsorted` (and `order`'s sortedness check) test adjacent pairs in branchless blocks of 16 with GNU R's comparisons. `unique` and `duplicated` of a list hash each element once into a `PositionTable`.
+- **`make.unique`** works on interned strings and gives a made name as native text. GNU R hashes by `CHARSXP` address and compares text only on a bucket collision, so its answer for the same text in two encodings depends on allocation; ry always gives the answer of distinct buckets, and the oracle case avoids mixing encodings.
+- **Polygamma** runs a line-by-line port of GNU R's `dpsifn` (Amos's algorithm 610), bit-identical on a 72,444-value grid; the earlier Hurwitz-zeta sum differed in the last bits and cost more per value. GNU R's underflow count increments its pointer, not the count, so `Rf_dpsifn` reports 0, as GNU R does.
+- **Measured and not taken: carrying `order`'s second key through the first key's counting scatter.** At 1e7 rows `order(g, -x)` took 0.64 s with it against 0.50 to 0.59 s without, because the per-run sort, not the gather, dominates.
+- **Oracle cases:** `arith__integer_divide_not_and_which_kernels`, `arith__polygamma_last_bits`, `sort__fast_paths_for_repeats_and_order_checks`, `strings__make_unique_encodings`.

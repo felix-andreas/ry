@@ -274,6 +274,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `order`, `sort.int` and `sort.default` run natively on plain vectors
 - Strings collate with ICU4X's CLDR collator, as GNU R's ICU does
 - `abbreviate` is GNU R's `stripchars`, pass for pass (settled)
+- Vector kernels: one typed loop per case, exact sizes, and GNU R's polygamma (settled)
 
 ## R compatibility
 
