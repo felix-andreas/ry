@@ -97,6 +97,8 @@ pub struct RunOptions {
     pub package: Option<PathBuf>,
     /// Colors for the editor's syntax highlighting; `None` leaves input uncolored.
     pub palette: Option<highlight::Palette>,
+    /// Start without the user profile, as `R --no-init-file` does.
+    pub no_init_file: bool,
 }
 
 /// Returns only when R ends. R assumes it owns the thread it initializes on, so
@@ -268,6 +270,9 @@ pub struct RuntimeFlags {
     pub prelude: bool,
     /// A script's definitions compile before its first expression runs (`ry run --aot`).
     pub ahead: bool,
+    /// The user profile (`R_PROFILE_USER`, else `./.Rprofile`, else `~/.Rprofile`) runs once
+    /// base R has loaded, as under Rscript.
+    pub user_profile: bool,
 }
 
 impl RuntimeFlags {
@@ -277,6 +282,7 @@ impl RuntimeFlags {
         std::ffi::c_int::from(self.annotation_checks)
             | (std::ffi::c_int::from(self.object_systems) << 1)
             | (std::ffi::c_int::from(self.strict) << 2)
+            | (std::ffi::c_int::from(self.user_profile) << 4)
             | (std::ffi::c_int::from(!self.prelude) << 5)
             | (std::ffi::c_int::from(self.ahead) << 6)
     }
@@ -289,6 +295,7 @@ impl RuntimeFlags {
             strict: bits & (1 << 2) != 0,
             prelude: bits & (1 << 5) == 0,
             ahead: bits & (1 << 6) != 0,
+            user_profile: bits & (1 << 4) != 0,
         }
     }
 }

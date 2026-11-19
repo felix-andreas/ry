@@ -41,7 +41,7 @@
 
 .ry_stoplist <- c(
   ".__NAMESPACE__.", ".__S3MethodsTable__.", ".packageName", ".First.lib", ".onLoad",
-  ".onAttach", ".onUnload", ".conflicts.OK", ".noGenerics", ".__ry_loader__."
+  ".onAttach", ".onUnload", ".conflicts.OK", ".noGenerics", ".__ry_loader__.", ".__DEVTOOLS__"
 )
 
 load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE, quiet = FALSE,
@@ -370,6 +370,10 @@ View <- function(x, title) {
   ns[[".__S3MethodsTable__."]] <- new.env(hash = TRUE, parent = baseenv())
   ns[[".packageName"]] <- name
   ns[[".__ry_loader__."]] <- TRUE
+  # pkgload's dev-package registry is this marker (`pkgload:::create_dev_meta`): testthat's
+  # `local_mocked_bindings()` outside a test run asks `pkgload::dev_packages()` which package
+  # to mock in, and a package loaded from source must count, as after `load_all()`.
+  ns[[".__DEVTOOLS__"]] <- new.env(parent = ns)
   .ry_internal("registerNamespace", name, ns)
   if (isNamespaceLoaded("methods")) {
     methods::setPackageName(name, ns)

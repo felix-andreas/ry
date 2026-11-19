@@ -72,6 +72,7 @@ fn everything_after_the_script_reaches_it_verbatim() {
                         arguments: trailing.clone(),
                         ahead: false,
                     },
+                    user_profile: true,
                 }),
                 "{arguments:?}"
             );
@@ -87,6 +88,7 @@ struct Options {
     runtime: Option<Runtime>,
     no_load: bool,
     ahead: bool,
+    no_init_file: bool,
     file: bool,
 }
 
@@ -98,7 +100,7 @@ fn options_before_the_script_resolve_as_documented() {
         let mut options = Options::default();
         let mut arguments = vec![command.to_owned()];
         for _ in 0..random.below(4) {
-            match random.below(5) {
+            match random.below(6) {
                 0 if command != "repl" && !options.interactive => {
                     options.interactive = true;
                     arguments.push(["-i", "--interactive"][random.below(2)].to_owned());
@@ -137,6 +139,10 @@ fn options_before_the_script_resolve_as_documented() {
                 4 if command == "run" && !options.ahead => {
                     options.ahead = true;
                     arguments.push("--aot".to_owned());
+                }
+                5 if command != "repl" && !options.no_init_file => {
+                    options.no_init_file = true;
+                    arguments.push(["--no-init-file", "--vanilla"][random.below(2)].to_owned());
                 }
                 _ => {}
             }
@@ -187,7 +193,15 @@ fn options_before_the_script_resolve_as_documented() {
                 load_package: !options.no_load,
             },
         };
-        assert_eq!(parsed, Session { runtime, mode }, "{arguments:?}");
+        assert_eq!(
+            parsed,
+            Session {
+                runtime,
+                mode,
+                user_profile: !options.no_init_file,
+            },
+            "{arguments:?}"
+        );
     });
 }
 
