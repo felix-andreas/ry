@@ -860,12 +860,12 @@ unsafe fn do_sorted_fpass(call: &Call<'_>) -> R<Sexp> {
 /// Whether an integer or double column without `NA` or NaN is non-decreasing, or
 /// non-increasing when `decreasing`, and strictly so when `strict`.
 fn in_order(x: &Column<'_>, decreasing: bool, strict: bool) -> bool {
-    fn ordered<T: PartialOrd>(values: &[T], decreasing: bool, strict: bool) -> bool {
+    fn ordered<T: PartialOrd + Copy>(values: &[T], decreasing: bool, strict: bool) -> bool {
         match (decreasing, strict) {
-            (false, false) => values.is_sorted_by(|left, right| left <= right),
-            (false, true) => values.is_sorted_by(|left, right| left < right),
-            (true, false) => values.is_sorted_by(|left, right| left >= right),
-            (true, true) => values.is_sorted_by(|left, right| left > right),
+            (false, false) => adjacent_pairs_all(values, |left, right| left <= right),
+            (false, true) => adjacent_pairs_all(values, |left, right| left < right),
+            (true, false) => adjacent_pairs_all(values, |left, right| left >= right),
+            (true, true) => adjacent_pairs_all(values, |left, right| left > right),
         }
     }
     match *x {
@@ -880,6 +880,32 @@ fn in_order(x: &Column<'_>, decreasing: bool, strict: bool) -> bool {
         }
         _ => false,
     }
+}
+
+/// Whether `ordered(values[i], values[i + 1])` holds for every adjacent pair. A block of pairs is
+/// tested without an early exit inside it, so the comparisons vectorize; an early exit per pair,
+/// as `is_sorted_by` takes, compiles to one compare and branch per element.
+pub(crate) fn adjacent_pairs_all<T: Copy>(values: &[T], ordered: impl Fn(T, T) -> bool) -> bool {
+    const BLOCK: usize = 16;
+    let Some(last) = values.len().checked_sub(1) else {
+        return true;
+    };
+    let mut lefts = values[..last].chunks_exact(BLOCK);
+    let mut rights = values[1..].chunks_exact(BLOCK);
+    for (left, right) in (&mut lefts).zip(&mut rights) {
+        let all = left
+            .iter()
+            .zip(right)
+            .fold(true, |all, (&left, &right)| all & ordered(left, right));
+        if !all {
+            return false;
+        }
+    }
+    lefts
+        .remainder()
+        .iter()
+        .zip(rights.remainder())
+        .all(|(&left, &right)| ordered(left, right))
 }
 
 const SORTED_DECR_NA_FIRST: i32 = -2;
@@ -3118,14 +3144,18 @@ pub(crate) unsafe fn duplicated_elements(
     };
     if list {
         let flags = IdenticalFlags::default();
-        let mut buckets: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
+        let hashes: Vec<u64> = (0..count)
+            .map(|index| structural_hash(x.element(index)))
+            .collect();
+        let key_at = |index: usize| ListElement {
+            hash: hashes[index],
+            element: x.element(index),
+        };
+        let mut table = PositionTable::new(count);
         for index in visit {
-            let element = x.element(index);
-            let bucket = buckets.entry(structural_hash(element)).or_default();
-            if bucket
-                .iter()
-                .any(|&seen| identical(x.element(seen), element, &flags))
-            {
+            let key = key_at(index);
+            if table.find_or_insert(key, index, key_at).is_some() {
+                let element = key.element;
                 let incomparable = incomparable_elements.is_some_and(|elements| {
                     (0..length(elements))
                         .any(|position| identical(elements.element(position), element, &flags))
@@ -3133,8 +3163,6 @@ pub(crate) unsafe fn duplicated_elements(
                 if !incomparable {
                     duplicated.insert(index);
                 }
-            } else {
-                bucket.push(index);
             }
         }
         return Ok(duplicated);
@@ -3506,6 +3534,30 @@ impl TableKey for i32 {
 impl TableKey for u64 {
     fn table_hash(self) -> u64 {
         mix(self)
+    }
+}
+
+/// A list element with its [`structural_hash`]: equal when the hashes agree and the elements
+/// are `identical()` under the default flags.
+#[derive(Clone, Copy)]
+struct ListElement {
+    hash: u64,
+    element: Sexp,
+}
+
+impl PartialEq for ListElement {
+    fn eq(&self, other: &Self) -> bool {
+        // SAFETY: both elements belong to a list that stays rooted while the table is in use.
+        self.hash == other.hash
+            && unsafe { identical(self.element, other.element, &IdenticalFlags::default()) }
+    }
+}
+
+impl Eq for ListElement {}
+
+impl TableKey for ListElement {
+    fn table_hash(self) -> u64 {
+        mix(self.hash)
     }
 }
 

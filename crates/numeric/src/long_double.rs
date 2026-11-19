@@ -1472,7 +1472,6 @@ mod x87 {
         values.len() - remaining
     }
 
-
     /// `out[i]` is the running product of `values[..=i]`, stored as a double without leaving the
     /// register, up to the first NaN or NA in `values`; returns its position, or the length.
     /// The NaN test reads the loaded value off the product's dependency chain, so it costs no
@@ -1516,7 +1515,6 @@ mod x87 {
         }
         values.len() - remaining
     }
-
 
     /// The rows `block_row_sums` keeps in registers at once: seven totals and one loaded term
     /// fill the eight-register stack.

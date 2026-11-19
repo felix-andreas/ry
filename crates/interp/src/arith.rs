@@ -4870,9 +4870,19 @@ unsafe fn is_replicable(object: Sexp) -> bool {
 /// The elements of `object` recycled to `total`, copied a whole run at a time; `None` for an
 /// empty object, an ALTREP vector of strings or values, and anything that is not a vector.
 unsafe fn repeat_plain(object: Sexp, total: usize) -> R<Option<Sexp>> {
+    // A short source repeated by doubling the filled prefix takes a few large copies instead of
+    // one `memcpy` call per repetition.
     fn fill<T: Copy>(target: &mut [T], source: &[T]) {
-        for chunk in target.chunks_mut(source.len()) {
-            chunk.copy_from_slice(&source[..chunk.len()]);
+        if let [single] = source {
+            target.fill(*single);
+            return;
+        }
+        let mut filled = source.len().min(target.len());
+        target[..filled].copy_from_slice(&source[..filled]);
+        while filled < target.len() {
+            let step = filled.min(target.len() - filled);
+            target.copy_within(..step, filled);
+            filled += step;
         }
     }
     let kind = object.kind();
@@ -5460,6 +5470,30 @@ unsafe fn do_is_unsorted(call: &Call<'_>) -> R<Sexp> {
     let operand = values::materialize(call.arg(0))?;
     let strictly = values::as_logical_scalar(call.arg(2)) == 1;
     let count = length(operand);
+    // GNU R's `isUnsorted` flags a pair only when `x[i] > x[i + 1]` (`>=` when `strictly`), so
+    // a NaN is never out of order, and an integer `NA`, the smallest `int`, sorts first.
+    let in_order = match operand.kind() {
+        SexpType::Real if !operand.is_altrep() => {
+            let values = values::reals(operand);
+            Some(if strictly {
+                crate::sort::adjacent_pairs_all(values, |left, right| !(left >= right))
+            } else {
+                crate::sort::adjacent_pairs_all(values, |left, right| !(left > right))
+            })
+        }
+        SexpType::Integer | SexpType::Logical if !operand.is_altrep() => {
+            let values = values::ints(operand);
+            Some(if strictly {
+                crate::sort::adjacent_pairs_all(values, |left, right| left < right)
+            } else {
+                crate::sort::adjacent_pairs_all(values, |left, right| left <= right)
+            })
+        }
+        _ => None,
+    };
+    if let Some(in_order) = in_order {
+        return scalar_bool(!in_order);
+    }
     for index in 1..count {
         let ordering = match operand.kind() {
             SexpType::String => crate::sort::collate(
