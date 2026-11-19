@@ -1013,8 +1013,7 @@ pub unsafe fn refuse_bytes(strings: Sexp) -> R<()> {
 /// the same object. Only strings that may differ in encoding need their text compared.
 ///
 /// A name lookup calls this once per candidate with the wanted name as `right`, so `right` is
-/// tested first: for the usual ASCII name the scan then reads no candidate's header. The text
-/// comparison is marked cold so the common case stays small where it inlines into a name scan.
+/// tested first: for the usual ASCII name the scan then reads no candidate's header.
 #[inline]
 pub unsafe fn same_string(left: Sexp, right: Sexp) -> bool {
     if left == right {
@@ -1025,7 +1024,13 @@ pub unsafe fn same_string(left: Sexp, right: Sexp) -> bool {
     {
         return false;
     }
-    std::hint::cold_path();
+    same_text_across_encodings(left, right)
+}
+
+/// [`same_string`] for two strings neither of which is cached ASCII, kept out of line so the
+/// common case inlines into a name scan: inlined, the text comparison made a name scan slower.
+#[inline(never)]
+unsafe fn same_text_across_encodings(left: Sexp, right: Sexp) -> bool {
     let na = na_string();
     if left == na || right == na {
         return false;
@@ -1057,7 +1062,7 @@ pub unsafe fn char_str<'a>(charsxp: Sexp) -> Cow<'a, str> {
         // before a NUL byte is still valid UTF-8.
         return Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(bytes) });
     }
-    unsafe { char_str_decoded(charsxp) }
+    char_str_decoded(charsxp)
 }
 
 /// [`char_str`] for a string the heap has not validated as UTF-8 text.
