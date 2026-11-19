@@ -2422,3 +2422,39 @@ risk: <T: numeric, U> fn(v: T, cv: U) -> list{VaR: double, contribution: U}
 use: fn() -> double
 computed: <T> fn(keys: T) -> double | character | NULL
 renamed: fn() -> character
+
+#---- an_explicit_null_matches_a_null_default
+check <- function(pars, fun, target) {
+  fun(pars) - target
+}
+solve <- function(pars, fun, constraint = NULL, target = NULL) {
+  if (!is.null(constraint)) {
+    return(check(pars, constraint, target))
+  }
+  fun(pars)
+}
+search <- function(pars = NULL, fun, constraint = NULL, target = NULL) {
+  solve(pars, fun, constraint = constraint, target = target)
+}
+none <- function() search(fun = function(x) 1, constraint = NULL, target = NULL)
+maybe <- function(flag) search(fun = function(x) 1, target = if (flag) 2 else NULL)
+wrong <- function() search(fun = function(x) 1, target = "a")
+#++++
+check: <T, U: numeric> fn(pars: T, fun: fn(T) -> U, target: U) -> U
+solve: <T, U, V: numeric> fn(pars: T, [fun]: fn(T) -> U, [constraint]: (fn(T) -> V) | NULL, [target]: V) -> V | U
+search: <T, U, V: numeric> fn([pars]: T, fun: fn(T) -> U, [constraint]: (fn(T) -> V) | NULL, [target]: V) -> V | U
+none: fn() -> Unknown
+maybe: fn(flag: logical) -> double
+wrong: Unknown
+577..580 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- a_callback_defaulted_to_an_untyped_function_takes_any_arguments
+bench <- function(n, timefun = bit::repeat.time) {
+  b <- sample(n, n, TRUE)
+  x <- timefun(match(b, b))[3L]
+  w <- timefun(if (n == 1L) table(b) else list(a = 1))[3L]
+  c(x, w)
+}
+#++++
+bench: <T, U> fn(n: T, [timefun]: U) -> Unknown
+31..47 warning[unresolved] unknown package namespace `bit`.

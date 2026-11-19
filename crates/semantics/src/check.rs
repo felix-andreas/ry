@@ -3785,13 +3785,13 @@ impl<'db, 'a> Checker<'db, 'a> {
                         default: None,
                     });
                     let no_default = parameter.default.is_none();
-                    if let Some(slot) = self
+                    let formal_slot = self
                         .naming
                         .bindings
                         .iter()
                         .find(|(_, info)| info.range == parameter.range)
-                        .map(|(id, _)| *id)
-                    {
+                        .map(|(id, _)| *id);
+                    if let Some(slot) = formal_slot {
                         self.environment.set(slot, EnvEntry::Mono(parameter_ty));
                         self.computed_slots.insert(slot);
                         if no_default {
@@ -3804,6 +3804,20 @@ impl<'db, 'a> Checker<'db, 'a> {
                     if let Some(default) = parameter.default {
                         let default_ty = self.infer(default);
                         named[entry].default = Some(default_ty);
+                        // A default naming a function ry cannot type (bit64's `timefun =
+                        // repeat.time`, from a package without stubs) is what the body calls
+                        // whenever the caller omits the argument, so the body's calls say nothing
+                        // about the parameters a callback must take: the formal reads as `Unknown`.
+                        if matches!(
+                            self.table.resolve(self.db, default_ty).kind(self.db),
+                            TyKind::Unknown | TyKind::Any
+                        ) && matches!(
+                            module.kind(default),
+                            ExpressionKind::NameRef(_) | ExpressionKind::Namespace { .. }
+                        ) && let Some(slot) = formal_slot
+                        {
+                            self.environment.set(slot, EnvEntry::Mono(unknown(self.db)));
+                        }
                     }
                 }
                 self.return_frames.push(Vec::new());
@@ -11149,6 +11163,28 @@ impl<'db, 'a> Checker<'db, 'a> {
         union_of(self.db, kept)
     }
 
+    /// The type without its `NULL` members, or `None` when nothing else is left.
+    fn without_null(&self, ty: Ty<'db>) -> Option<Ty<'db>> {
+        let resolved = self.table.resolve(self.db, ty);
+        match resolved.kind(self.db) {
+            TyKind::Null => None,
+            TyKind::Union(members)
+                if members
+                    .iter()
+                    .any(|member| matches!(member.kind(self.db), TyKind::Null)) =>
+            {
+                Some(union_of(
+                    self.db,
+                    members
+                        .iter()
+                        .copied()
+                        .filter(|member| !matches!(member.kind(self.db), TyKind::Null)),
+                ))
+            }
+            _ => Some(ty),
+        }
+    }
+
     /// R looks a called name up as a function: a binding that holds no function is skipped,
     /// so the lookup continues through the enclosing slots, the project global and the
     /// library. A call head naming resolved to a slot is inferred here; any other one is
@@ -15119,6 +15155,33 @@ impl<'db, 'a> Checker<'db, 'a> {
                     {
                         continue;
                     }
+                    // An undeclared formal whose default is `NULL` receives the same value
+                    // whether the caller omits it or passes `NULL`, and omitting it is always
+                    // allowed, so Rsolnp's `gosolnp(eqfun = NULL, eqB = NULL)` checks only the
+                    // part of the argument that is not `NULL`.
+                    let null_default = function.inferred
+                        && function.named.get(*formal).is_some_and(|parameter| {
+                            parameter.default.is_some_and(|default| {
+                                matches!(
+                                    self.table.resolve(self.db, default).kind(self.db),
+                                    TyKind::Null
+                                )
+                            })
+                        });
+                    let stripped;
+                    let argument = match argument.ty {
+                        Some(ty) if null_default => match self.without_null(ty) {
+                            Some(kept) => {
+                                stripped = CallArgument {
+                                    ty: Some(kept),
+                                    ..argument.clone()
+                                };
+                                &stripped
+                            }
+                            None => continue,
+                        },
+                        _ => argument,
+                    };
                     if let Some(expected) = function.named.get(*formal).map(|field| field.ty)
                         && let Some(ty) =
                             self.argument_type_for(expected, argument, function.inferred)
