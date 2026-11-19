@@ -3406,6 +3406,19 @@ unsafe fn duplicate_flags(keys: PlainKeys<'_>, from_last: bool, first_only: bool
             hashed_duplicates(values.len(), from_last, first_only, |index| values[index])
         }
         PlainKeys::Real(values) => {
+            // In a vector that never decreases, equal values are neighbours. A NaN fails every
+            // comparison, so a vector of two or more that passes holds none, and equal values
+            // are then equal keys. Unsorted input fails the test at its first descent.
+            if values.windows(2).all(|pair| pair[0] <= pair[1]) {
+                return Some(visit_in_order(values.len(), from_last, |index| {
+                    let neighbour = if from_last {
+                        index + 1
+                    } else {
+                        index.wrapping_sub(1)
+                    };
+                    values.get(neighbour) == Some(&values[index])
+                }));
+            }
             hashed_duplicates(values.len(), from_last, first_only, |index| {
                 real_key(values[index])
             })
@@ -3687,32 +3700,42 @@ impl TableKey for Sexp {
     }
 }
 
-/// An open-addressing hash table from keys to the first position that holds them. Slots store
-/// 1-based positions (0 is empty) and leave the keys in their vector, so a slot is four bytes.
-/// Probing is linear over a power-of-two array kept at most half full, and the slot comes from
-/// the hash's high bits. The table starts with two slots per element, so a vector of up to
-/// [`PositionTable::PRESIZED`] / 2 elements never rehashes, and doubles past that cap only as
-/// distinct keys arrive: a million strings with four distinct values zero 256 KB once and probe
-/// four cache lines of it, where sizing by elements would take 8 MB.
+/// An open-addressing hash table from keys to the first position that holds them. A slot packs
+/// the 1-based position (0 is empty) in its low half and the hash's high 32 bits in its high
+/// half, leaving the keys in their vector: a probe reads a stored key only when the hash bits
+/// agree, so a miss on a large table costs one random read rather than one per occupied slot,
+/// and growing rehashes from the slots alone. Probing is linear over a power-of-two array kept
+/// at most half full, and the slot comes from the hash's high bits. The table starts with two
+/// slots per element, so a vector of up to [`PositionTable::PRESIZED`] / 2 elements never
+/// rehashes, and doubles past that cap only as distinct keys arrive: a million strings with
+/// four distinct values zero 512 KB once and probe a few cache lines of it, where sizing by
+/// elements would take 16 MB.
 struct PositionTable {
-    slots: SmallVec<[u32; 32]>,
+    slots: SmallVec<[u64; 16]>,
+    /// The table's slot index is the top `32 - shift` bits of the 32 stored hash bits.
     shift: u32,
     /// Inserts left before the table is more than half full, counted down so that an insert
     /// tests one field rather than the slots' length, which `SmallVec` keeps behind a branch.
     room: usize,
+    /// Lookups so far and the most keys the table can receive, from which growing extrapolates
+    /// the distinct keys still to come.
+    lookups: usize,
+    capacity: usize,
 }
 
 impl PositionTable {
-    /// The most slots a table starts with. Growing by doubling rehashes every stored key and
-    /// zeroes each new array, which costs more than zeroing this many slots up front.
+    /// The most slots a table starts with. Growing by doubling zeroes each new array and moves
+    /// every stored slot, which costs more than zeroing this many slots up front.
     const PRESIZED: usize = 1 << 16;
 
     fn new(count: usize) -> Self {
         let size = (2 * count).clamp(32, Self::PRESIZED).next_power_of_two();
         Self {
             slots: smallvec![0; size],
-            shift: 64 - size.trailing_zeros(),
+            shift: 32 - size.trailing_zeros(),
             room: size / 2 + 1,
+            lookups: 0,
+            capacity: count,
         }
     }
 
@@ -3735,54 +3758,77 @@ impl PositionTable {
         key_at: impl Fn(usize) -> K,
         same: impl Fn(K, K) -> bool,
     ) -> Option<usize> {
-        let slots: &mut [u32] = &mut self.slots;
+        let slots: &mut [u64] = &mut self.slots;
         let mask = slots.len() - 1;
-        let mut slot = (key.table_hash() >> self.shift) as usize;
+        let tag = key.table_hash() >> 32;
+        let mut slot = (tag >> self.shift) as usize;
+        self.lookups += 1;
         loop {
             let stored = slots[slot & mask];
             if stored == 0 {
                 break;
             }
-            if same(key_at(stored as usize - 1), key) {
-                return Some(stored as usize - 1);
+            if stored >> 32 == tag {
+                let found = (stored as u32 - 1) as usize;
+                if same(key_at(found), key) {
+                    return Some(found);
+                }
             }
             slot += 1;
         }
-        slots[slot & mask] = position as u32 + 1;
+        slots[slot & mask] = tag << 32 | (position as u64 + 1);
         self.room -= 1;
         if self.room == 0 {
-            self.grow(key_at);
+            self.grow();
         }
         None
     }
 
     fn find<K: TableKey + Eq>(&self, key: K, key_at: impl Fn(usize) -> K) -> Option<usize> {
-        let slots: &[u32] = &self.slots;
+        let slots: &[u64] = &self.slots;
         let mask = slots.len() - 1;
-        let mut slot = (key.table_hash() >> self.shift) as usize;
+        let tag = key.table_hash() >> 32;
+        let mut slot = (tag >> self.shift) as usize;
         loop {
             let stored = slots[slot & mask];
             if stored == 0 {
                 return None;
             }
-            if key_at(stored as usize - 1) == key {
-                return Some(stored as usize - 1);
+            if stored >> 32 == tag {
+                let found = (stored as u32 - 1) as usize;
+                if key_at(found) == key {
+                    return Some(found);
+                }
             }
             slot += 1;
         }
     }
 
-    /// Doubles the slots and reinserts every stored position, whose keys are distinct.
+    /// Moves every stored slot, by its stored hash bits, into a table at least twice as large:
+    /// large enough for the distinct keys that the share of distinct keys so far predicts for
+    /// the remaining lookups, so that a vector of distinct values grows a few times rather than
+    /// once per doubling, each of which zeroes a new array and moves every slot again. A step
+    /// grows at most eightfold, because `anyDuplicated` often stops long before the end and
+    /// would otherwise zero a table sized for the whole vector.
     #[cold]
-    fn grow<K: TableKey>(&mut self, key_at: impl Fn(usize) -> K) {
-        let doubled = smallvec![0; 2 * self.slots.len()];
-        let old = std::mem::replace(&mut self.slots, doubled);
-        self.shift -= 1;
-        let slots: &mut [u32] = &mut self.slots;
+    fn grow(&mut self) {
+        let distinct = self.slots.len() / 2;
+        let predicted = distinct
+            .saturating_mul(self.capacity)
+            .checked_div(self.lookups)
+            .unwrap_or(0)
+            .min(self.capacity);
+        let size = (2 * predicted)
+            .next_power_of_two()
+            .clamp(2 * self.slots.len(), 8 * self.slots.len());
+        let bigger = smallvec![0; size];
+        let old = std::mem::replace(&mut self.slots, bigger);
+        self.shift -= size.trailing_zeros() - old.len().trailing_zeros();
+        let slots: &mut [u64] = &mut self.slots;
         let mask = slots.len() - 1;
         let mut moved = 0;
         for stored in old.into_iter().filter(|&stored| stored != 0) {
-            let mut slot = (key_at(stored as usize - 1).table_hash() >> self.shift) as usize;
+            let mut slot = (stored >> 32 >> self.shift) as usize;
             while slots[slot & mask] != 0 {
                 slot += 1;
             }

@@ -1333,8 +1333,8 @@ unsafe fn nextn(call: &NativeCall<'_>) -> R<Sexp> {
 
 /// `ApproxTest(x, y, method, f, na.rm)`: validates `approx`'s inputs.
 unsafe fn approx_test(call: &NativeCall<'_>) -> R<Sexp> {
-    let x = real_values(call.arg(0))?;
-    let y = real_values(call.arg(1))?;
+    let x = real_data(call.arg(0))?;
+    let y = real_data(call.arg(1))?;
     let method = values::as_integer_scalar(call.arg(2));
     let f = values::as_real_scalar(call.arg(3));
     let remove_missing = values::as_logical_scalar(call.arg(4)) == 1;
@@ -1345,7 +1345,10 @@ unsafe fn approx_test(call: &NativeCall<'_>) -> R<Sexp> {
         return Err(call.error("approx(): invalid interpolation method"));
     }
     if remove_missing {
-        if x.iter().zip(&y).any(|(a, b)| a.is_nan() || b.is_nan()) {
+        if x.iter()
+            .zip(y.iter())
+            .any(|(a, b)| a.is_nan() || b.is_nan())
+        {
             return Err(call.error("approx(): attempted to interpolate NA values"));
         }
     } else if x.iter().any(|value| value.is_nan()) {
@@ -1357,15 +1360,27 @@ unsafe fn approx_test(call: &NativeCall<'_>) -> R<Sexp> {
 /// `Approx(x, y, v, method, yleft, yright, f, na.rm)`: linear or constant interpolation of
 /// the sorted points `(x, y)` at `v`.
 unsafe fn approx(call: &NativeCall<'_>) -> R<Sexp> {
-    let x = real_values(call.arg(0))?;
-    let y = real_values(call.arg(1))?;
-    let v = real_values(call.arg(2))?;
+    let x = real_data(call.arg(0))?;
+    let y = real_data(call.arg(1))?;
+    let v = real_data(call.arg(2))?;
     let method = values::as_integer_scalar(call.arg(3));
     let left = values::as_real_scalar(call.arg(4));
     let right = values::as_real_scalar(call.arg(5));
     let f = values::as_real_scalar(call.arg(6));
     let n = x.len();
+    if y.len() < n {
+        return Err(call.error("approx(): x and y lengths differ"));
+    }
     let (f1, f2) = (1.0 - f, f);
+    // Points outside the knots never look up an interval, so only those inside size the grid.
+    let inside = match (x.first(), x.last()) {
+        (Some(&first), Some(&last)) => v
+            .iter()
+            .filter(|&&point| first <= point && point <= last)
+            .count(),
+        _ => 0,
+    };
+    let grid = KnotGrid::new(&x, inside);
     let interpolate = |point: f64| -> f64 {
         if point.is_nan() {
             return point;
@@ -1379,15 +1394,24 @@ unsafe fn approx(call: &NativeCall<'_>) -> R<Sexp> {
         if point > x[n - 1] {
             return right;
         }
-        let (mut low, mut high) = (0, n - 1);
-        while low + 1 < high {
-            let middle = (low + high) / 2;
-            if point < x[middle] {
-                high = middle;
-            } else {
-                low = middle;
+        // The bisection keeps `low` below the last knot, and otherwise finds the last knot not
+        // above the point, as the grid does.
+        let (low, high) = match &grid {
+            Some(grid) => {
+                let low = grid.interval(&x, point).min(n.saturating_sub(2));
+                (low, (low + 1).min(n - 1))
             }
-        }
+            None => {
+                let (mut low, mut high) = (0, n - 1);
+                while low + 1 < high {
+                    let middle = (low + high) / 2;
+                    let below = point < x[middle];
+                    high = if below { middle } else { high };
+                    low = if below { low } else { middle };
+                }
+                (low, high)
+            }
+        };
         if point == x[high] {
             return y[high];
         }
@@ -1401,8 +1425,11 @@ unsafe fn approx(call: &NativeCall<'_>) -> R<Sexp> {
                 + (if f2 != 0.0 { y[high] * f2 } else { 0.0 })
         }
     };
-    let result: Vec<f64> = v.iter().map(|&point| interpolate(point)).collect();
-    values::real_vector(&result)
+    let result = values::alloc_uninit(SexpType::Real, v.len())?;
+    for (slot, &point) in values::reals_mut(result).iter_mut().zip(v.iter()) {
+        *slot = interpolate(point);
+    }
+    Ok(result)
 }
 
 /// `SplineCoef(method, x, y)`: the coefficients of an interpolating cubic spline, as
@@ -1613,9 +1640,9 @@ fn periodic_spline(x: &[f64], y: &[f64]) -> SplineCoefficients {
 
 /// `SplineEval(xout, z)`: evaluates the spline `z` from `SplineCoef` at `xout`.
 unsafe fn spline_eval(call: &NativeCall<'_>) -> R<Sexp> {
-    let u = real_values(call.arg(0))?;
+    let u = real_data(call.arg(0))?;
     let z = call.arg(1);
-    let component = |name: &str| real_values(values::list_get(z, name));
+    let component = |name: &str| real_data(values::list_get(z, name));
     let method = values::as_integer_scalar(values::list_get(z, "method"));
     let x = component("x")?;
     let y = component("y")?;
@@ -1623,13 +1650,22 @@ unsafe fn spline_eval(call: &NativeCall<'_>) -> R<Sexp> {
     let c = component("c")?;
     let d = component("d")?;
     let n = x.len();
-    let mut result = Vec::with_capacity(u.len());
+    if [y.len(), b.len(), c.len(), d.len()]
+        .iter()
+        .any(|&length| length < n)
+    {
+        return Err(call.error("invalid spline coefficients"));
+    }
+    let result = values::alloc_uninit(SexpType::Real, u.len())?;
+    let out = values::reals_mut(result);
+    if n == 0 {
+        out.fill(NA_REAL);
+        return Ok(result);
+    }
+    let (x, y, b, c, d) = (&x[..n], &y[..n], &b[..n], &c[..n], &d[..n]);
+    let grid = KnotGrid::new(x, u.len());
     let mut interval = 0usize;
-    for &point in &u {
-        if n == 0 {
-            result.push(NA_REAL);
-            continue;
-        }
+    for (slot, &point) in out.iter_mut().zip(u.iter()) {
         let mut position = point;
         if method == 1 && n > 1 {
             let period = x[n - 1] - x[0];
@@ -1640,16 +1676,10 @@ unsafe fn spline_eval(call: &NativeCall<'_>) -> R<Sexp> {
             position += x[0];
         }
         if position < x[interval] || (interval < n - 1 && x[interval + 1] < position) {
-            let (mut low, mut high) = (0usize, n);
-            while high > low + 1 {
-                let middle = (low + high) / 2;
-                if position < x[middle] {
-                    high = middle;
-                } else {
-                    low = middle;
-                }
-            }
-            interval = low;
+            interval = match &grid {
+                Some(grid) => grid.interval(x, position),
+                None => bisect(x, position),
+            };
         }
         let offset = position - x[interval];
         let cubic = if method == 2 && position < x[0] {
@@ -1657,9 +1687,105 @@ unsafe fn spline_eval(call: &NativeCall<'_>) -> R<Sexp> {
         } else {
             d[interval]
         };
-        result.push(y[interval] + offset * (b[interval] + offset * (c[interval] + offset * cubic)));
+        *slot = y[interval] + offset * (b[interval] + offset * (c[interval] + offset * cubic));
     }
-    values::real_vector(&result)
+    Ok(result)
+}
+
+/// GNU R's bisection in `spline_eval`: the last knot not above `position`, or the first knot
+/// when every knot is above it.
+fn bisect(x: &[f64], position: f64) -> usize {
+    let (mut low, mut high) = (0usize, x.len());
+    while high > low + 1 {
+        let middle = (low + high) / 2;
+        if position < x[middle] {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    low
+}
+
+/// Sorted knots cut into equal buckets, each holding the last knot not above its left edge, so
+/// that finding a point's interval reads one bucket and walks a knot or two instead of
+/// bisecting with one unpredictable branch per halving. On sorted knots without NaN the
+/// bisection's answer is the partition point of "not above `position`", which the walk finds
+/// from any start, so the two agree exactly; other knots keep the bisection.
+struct KnotGrid {
+    lowest: f64,
+    scale: f64,
+    starts: Vec<u32>,
+}
+
+impl KnotGrid {
+    /// The walk is bounded, and past it a point bisects, so clustered knots cost no more than
+    /// the plain bisection.
+    const WALK: usize = 8;
+
+    /// `None` when there are too few points to repay the table, or the knots are unsorted,
+    /// hold NaN, or span no finite width.
+    fn new(x: &[f64], points: usize) -> Option<Self> {
+        let n = x.len();
+        if n < 16 || points < 64 || x.iter().any(|value| value.is_nan()) {
+            return None;
+        }
+        if !x.windows(2).all(|pair| pair[0] <= pair[1]) {
+            return None;
+        }
+        let lowest = x[0];
+        let buckets = n.min(2 * points).next_power_of_two();
+        let width = (x[n - 1] - lowest) / buckets as f64;
+        let scale = width.recip();
+        if !scale.is_finite() || scale <= 0.0 || n > u32::MAX as usize {
+            return None;
+        }
+        let mut starts = Vec::with_capacity(buckets + 1);
+        let mut knot = 0usize;
+        // An edge a rounding away from the lookup's bucket boundary only lengthens the walk.
+        for bucket in 0..=buckets {
+            let edge = lowest + bucket as f64 * width;
+            while knot + 1 < n && x[knot + 1] <= edge {
+                knot += 1;
+            }
+            starts.push(knot as u32);
+        }
+        Some(Self {
+            lowest,
+            scale,
+            starts,
+        })
+    }
+
+    /// [`bisect`]'s answer for knots that passed [`KnotGrid::new`]'s checks.
+    fn interval(&self, x: &[f64], position: f64) -> usize {
+        if position.is_nan() {
+            return x.len() - 1;
+        }
+        let offset = (position - self.lowest) * self.scale;
+        let bucket = if offset >= 0.0 {
+            (offset as usize).min(self.starts.len() - 1)
+        } else {
+            0
+        };
+        let mut knot = self.starts[bucket] as usize;
+        let mut steps = 0;
+        while knot > 0 && position < x[knot] {
+            knot -= 1;
+            steps += 1;
+            if steps > Self::WALK {
+                return bisect(x, position);
+            }
+        }
+        while knot + 1 < x.len() && !(position < x[knot + 1]) {
+            knot += 1;
+            steps += 1;
+            if steps > Self::WALK {
+                return bisect(x, position);
+            }
+        }
+        knot
+    }
 }
 
 /// `monoFC_m(m, Sx)`: Fritsch and Carlson's adjustment of the Hermite slopes `m` so that the

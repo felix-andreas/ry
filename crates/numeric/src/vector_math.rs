@@ -946,6 +946,57 @@ mod avx2 {
     ];
 }
 
+/// `f64::floor`, `f64::ceil` and `f64::trunc` in SSE2 arithmetic, which vectorizes: the
+/// baseline x86-64 target has no rounding instruction, so the library functions are a call per
+/// element. Adding and subtracting 2^52 rounds a smaller magnitude to the nearest integer, a
+/// step of one corrects the direction, and the sign of `x` keeps a zero result's sign. A larger
+/// magnitude, infinity and NaN are already integral and pass through.
+#[inline]
+pub fn floor(x: f64) -> f64 {
+    let nearest = nearest_integer(x);
+    let result = if nearest > x { nearest - 1.0 } else { nearest };
+    if x.abs() < TWO_TO_52 {
+        result.copysign(x)
+    } else {
+        x
+    }
+}
+
+#[inline]
+pub fn ceiling(x: f64) -> f64 {
+    let nearest = nearest_integer(x);
+    let result = if nearest < x { nearest + 1.0 } else { nearest };
+    if x.abs() < TWO_TO_52 {
+        result.copysign(x)
+    } else {
+        x
+    }
+}
+
+#[inline]
+pub fn truncate(x: f64) -> f64 {
+    let magnitude = x.abs();
+    let nearest = (magnitude + TWO_TO_52) - TWO_TO_52;
+    let result = if nearest > magnitude {
+        nearest - 1.0
+    } else {
+        nearest
+    };
+    if magnitude < TWO_TO_52 {
+        result.copysign(x)
+    } else {
+        x
+    }
+}
+
+const TWO_TO_52: f64 = 4_503_599_627_370_496.0;
+
+/// The integer nearest `x`, ties to even, for `|x| < 2^52`.
+#[inline]
+fn nearest_integer(x: f64) -> f64 {
+    ((x.abs() + TWO_TO_52) - TWO_TO_52).copysign(x)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{available, exp, log};

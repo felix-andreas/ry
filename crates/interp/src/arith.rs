@@ -1103,44 +1103,106 @@ unsafe fn do_sequence(call: &Call<'_>) -> R<Sexp> {
 /// that `right` closes, and only the outer border honours `include.lowest`.
 unsafe fn do_bincode(call: &Call<'_>) -> R<Sexp> {
     let points = coerce_vector(call.arg(0), SexpType::Real)?;
+    crate::heap().root(points);
     let breaks = coerce_vector(call.arg(1), SexpType::Real)?;
+    crate::heap().root(breaks);
     let right = values::as_logical_scalar(call.arg(2));
     let lowest = values::as_logical_scalar(call.arg(3));
+    if length(breaks) < 2 {
+        return Err(error("invalid 'breaks' argument"));
+    }
     if right == NA_LOGICAL {
         return Err(error("invalid 'right' argument"));
     }
     if lowest == NA_LOGICAL {
         return Err(error("invalid 'include.lowest' argument"));
     }
-    let (left, include_border) = (right != 1, lowest == 1);
     let breaks = values::reals(breaks);
     if breaks.windows(2).any(|pair| pair[0] > pair[1]) {
         return Err(error("'breaks' is not sorted"));
     }
-    let last = breaks.len().saturating_sub(1);
-    let codes: Vec<i32> = values::reals(points)
-        .iter()
-        .map(|&value| {
-            if value.is_nan() || breaks.len() < 2 {
-                return NA_INTEGER;
-            }
-            let border = if left { breaks[last] } else { breaks[0] };
-            if value < breaks[0] || breaks[last] < value || (value == border && !include_border) {
-                return NA_INTEGER;
-            }
-            let (mut low, mut high) = (0, last);
-            while high - low >= 2 {
-                let middle = (high + low) / 2;
-                if value > breaks[middle] || (left && value == breaks[middle]) {
-                    low = middle;
-                } else {
-                    high = middle;
+    let points = values::reals(points);
+    let result = values::alloc_uninit(SexpType::Integer, points.len())?;
+    let codes = values::ints_mut(result);
+    if right == 1 {
+        bin_codes::<false>(codes, points, breaks, lowest == 1);
+    } else {
+        bin_codes::<true>(codes, points, breaks, lowest == 1);
+    }
+    Ok(result)
+}
+
+/// `bincode` on breaks sorted except for NaN: each point's interval, by GNU R's bisection for the
+/// last break below the point, where a break equal to the point counts as below when `LEFT`.
+fn bin_codes<const LEFT: bool>(
+    codes: &mut [i32],
+    points: &[f64],
+    breaks: &[f64],
+    include_border: bool,
+) {
+    let last = breaks.len() - 1;
+    let (first, final_break) = (breaks[0], breaks[last]);
+    let border = if LEFT { final_break } else { first };
+    let below = |boundary: f64, value: f64| {
+        if LEFT {
+            boundary <= value
+        } else {
+            boundary < value
+        }
+    };
+    let outside =
+        |value: f64| value < first || final_break < value || (value == border && !include_border);
+    if breaks.iter().any(|value| value.is_nan()) {
+        for (code, &value) in codes.iter_mut().zip(points) {
+            *code = if value.is_nan() || outside(value) {
+                NA_INTEGER
+            } else {
+                let (mut low, mut high) = (0, last);
+                while high - low >= 2 {
+                    let middle = (high + low) / 2;
+                    if below(breaks[middle], value) {
+                        low = middle;
+                    } else {
+                        high = middle;
+                    }
                 }
-            }
-            low as i32 + 1
-        })
-        .collect();
-    values::integer_vector(&codes)
+                low as i32 + 1
+            };
+        }
+        return;
+    }
+    // On sorted breaks the bisection finds the last break below the point, which is one less
+    // than the number of breaks below it. Counting them for a short vector of breaks, or
+    // searching with a fixed number of steps for a long one, takes no branch that depends on
+    // the point, so a point's interval is unpredictable at no cost.
+    let interval = |count: usize| count.clamp(1, last) as i32;
+    if breaks.len() <= 64 {
+        for (code, &value) in codes.iter_mut().zip(points) {
+            let count = breaks
+                .iter()
+                .map(|&boundary| usize::from(below(boundary, value)))
+                .sum();
+            *code = if value.is_nan() || outside(value) {
+                NA_INTEGER
+            } else {
+                interval(count)
+            };
+        }
+        return;
+    }
+    for (code, &value) in codes.iter_mut().zip(points) {
+        let (mut base, mut length) = (0, breaks.len());
+        while length > 1 {
+            let half = length / 2;
+            base += usize::from(below(breaks[base + half], value)) * half;
+            length -= half;
+        }
+        *code = if value.is_nan() || outside(value) {
+            NA_INTEGER
+        } else {
+            interval(base + usize::from(below(breaks[base], value)))
+        };
+    }
 }
 
 // Arithmetic.
@@ -2581,7 +2643,7 @@ pub fn math_value_at(function: Math, x: f64, unsigned_zero: bool) -> f64 {
         Math::Sin => x.sin(),
         Math::Tan => x.tan(),
         Math::Cospi => {
-            let reduced = (x.abs() % 2.0).abs();
+            let reduced = periodic_remainder(x.abs(), 2.0);
             if reduced == 0.5 || reduced == 1.5 {
                 0.0
             } else if reduced == 1.0 {
@@ -2593,7 +2655,7 @@ pub fn math_value_at(function: Math, x: f64, unsigned_zero: bool) -> f64 {
             }
         }
         Math::Sinpi => {
-            let mut reduced = x % 2.0;
+            let mut reduced = periodic_remainder(x, 2.0);
             if reduced <= -1.0 {
                 reduced += 2.0;
             } else if reduced > 1.0 {
@@ -2611,7 +2673,7 @@ pub fn math_value_at(function: Math, x: f64, unsigned_zero: bool) -> f64 {
         }
         Math::Tanpi => {
             // Reducing into (-1/2, 1/2] is exact, so values one period apart agree exactly.
-            let mut reduced = x % 1.0;
+            let mut reduced = periodic_remainder(x, 1.0);
             if reduced > 0.5 {
                 reduced -= 1.0;
             } else if reduced <= -0.5 {
@@ -2641,6 +2703,15 @@ pub fn math_value_at(function: Math, x: f64, unsigned_zero: bool) -> f64 {
         Math::Digamma => rmath::psigamma(x, 0.0),
         Math::Trigamma => rmath::psigamma(x, 1.0),
     }
+}
+
+/// `fmod(x, period)` for a power-of-two `period`: `x / period`, its truncation and the
+/// product are exact, and so is the difference, whose bits are the low bits of `x`. It is
+/// `fmod`'s value without `fmod`'s bit-by-bit loop, except that an exact multiple of a negative
+/// `x` gives a positive zero.
+#[inline(always)]
+fn periodic_remainder(x: f64, period: f64) -> f64 {
+    x - period * (x / period).trunc()
 }
 
 unsafe fn math1(call: &Call<'_>, function: Math) -> R<Sexp> {
