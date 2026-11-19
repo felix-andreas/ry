@@ -886,15 +886,9 @@ measurement showed.
 - `@new` is unrestricted project-wide, so a nominal type's invariant holds only by convention. The
   guide's step 4 says so conditionally ("put `@new` in one constructor"). An
   encapsulation modifier would make it a guarantee.
-- A narrowing failure on a field, or behind `&&`, produces a message byte-identical to the one for
-  writing no guard at all. The docs know the fix, which is to lift the value into a local first. The
-  diagnostic should say it.
 - A nominal union is unchecked through `$` while a structural union is exact. There is also no
   discriminator for a nominal type, because `is.list` is true of both arms, so a tagged union cannot
   be narrowed at all.
-- A generic lambda passed as an argument keeps its binders rigid, so
-  `lapply(xs, function<T>(v: T) -> T v)` reports `its parameter v accepts T`. An inline signature
-  on a function that is not bound should instantiate its binders like a call does.
 - Signature help misses R6's own helpers (`assign_func_envs`, `merge_vectors`, `list2env2`),
   which R6 defines inside `encapsulate({...})` blocks; go-to-definition already finds them.
 - httr2's argument-name definition role (about 90%) counts arguments collected into `...` and

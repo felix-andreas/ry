@@ -97,6 +97,12 @@ pub enum TypeErrorKind<'db> {
         nominal: Ty<'db>,
         found: Ty<'db>,
     },
+    /// A value that may be `NULL` where `NULL` is not accepted, read through an expression no
+    /// guard narrows (`x$a$b`, `x[["a"]]`, a call), so the message can say how to narrow it.
+    UnnarrowedNull {
+        expected: Ty<'db>,
+        found: Ty<'db>,
+    },
     /// Separate from `Mismatch` so the differing field is named instead of printing
     /// two near-identical record types.
     RecordShape {
@@ -3481,6 +3487,12 @@ impl<'db, 'a> Checker<'db, 'a> {
                     kind: TypeErrorKind::Mismatch { expected, found },
                 };
             }
+            if value.is_some_and(|value| self.unnarrowed_null(value, expected, found)) {
+                return TypeError {
+                    range,
+                    kind: TypeErrorKind::UnnarrowedNull { expected, found },
+                };
+            }
             return TypeError {
                 range,
                 kind: TypeErrorKind::Mismatch { expected, found },
@@ -3494,6 +3506,31 @@ impl<'db, 'a> Checker<'db, 'a> {
             kind: TypeErrorKind::RecordShape {
                 mismatch: Box::new(mismatch),
             },
+        }
+    }
+
+    /// Whether `found` fails `expected` only by its `NULL` member and `value` is an expression
+    /// that `is.null()` cannot narrow: a guard narrows a variable and a field of a variable,
+    /// so a deeper `$` chain, an index or a call needs a variable first.
+    fn unnarrowed_null(&self, value: ExprId, expected: Ty<'db>, found: Ty<'db>) -> bool {
+        let is_null = |member: &Ty<'db>| matches!(member.kind(self.db), TyKind::Null);
+        let expected = self.table.resolve(self.db, expected);
+        let found = self.table.resolve(self.db, found);
+        if guard_members(self.db, expected).iter().any(is_null)
+            || !guard_members(self.db, found).iter().any(is_null)
+        {
+            return false;
+        }
+        let mut current = value;
+        while let ExpressionKind::Paren(inner) = self.module.kind(current) {
+            current = *inner;
+        }
+        match self.module.kind(current) {
+            ExpressionKind::Field { target, .. } => {
+                !matches!(self.module.kind(*target), ExpressionKind::NameRef(_))
+            }
+            ExpressionKind::Index { .. } | ExpressionKind::Call { .. } => true,
+            _ => false,
         }
     }
 
@@ -4029,7 +4066,16 @@ impl<'db, 'a> Checker<'db, 'a> {
                     };
                     let inline = self.inline_parameters(id);
                     let signature = self.check_declared_function(id, function, &inline);
-                    return self.record(id, signature);
+                    let signature = self.record(id, signature);
+                    // The body is checked with the binders rigid, but a literal no name binds is
+                    // used right here, so each use takes fresh variables as a call of it would.
+                    if declared.binders.is_empty() {
+                        return signature;
+                    }
+                    return self.instantiate(&TypeScheme {
+                        binders: declared.binders,
+                        body: signature,
+                    });
                 }
                 let parameters = *parameters;
                 // R hints apply only when they type every formal without a default: a partly
@@ -8031,8 +8077,9 @@ impl<'db, 'a> Checker<'db, 'a> {
 
     /// `is.null(x$field)` on a local `x`. A value that passes the test has the field, so the
     /// false edge drops each member of `x` that cannot carry it: `NULL`, an empty `list()`
-    /// placeholder, and a record with no field the name could partially match. The true edge
-    /// keeps every member, since a field may itself hold `NULL`.
+    /// placeholder, and a record with no field the name could partially match. It also drops
+    /// `NULL` from the field itself in each record that names it exactly, so `x$field` reads
+    /// non-`NULL` there. The true edge keeps every member, since a field may itself hold `NULL`.
     fn field_null_guard(&mut self, target: ExprId, field: &str) -> Option<GuardRefinement<'db>> {
         if !matches!(self.module.kind(target), ExpressionKind::NameRef(_)) {
             return None;
@@ -8054,14 +8101,47 @@ impl<'db, 'a> Checker<'db, 'a> {
             .iter()
             .copied()
             .filter(|&member| !lacks_field(member))
+            .map(|member| self.without_null_field(member, field))
             .collect();
-        if kept.is_empty() || kept.len() == members.len() {
+        if kept.is_empty() || kept.as_slice() == members.as_slice() {
             return None;
         }
         Some(GuardRefinement {
             true_edge: Vec::new(),
             false_edge: vec![SlotRefinement::Narrow(slot, union_of(self.db, kept))],
         })
+    }
+
+    /// `record` with `NULL` dropped from its field `field` and the field made present, or
+    /// `record` itself when it is no record, lacks that exact field, or the field holds only
+    /// `NULL`.
+    fn without_null_field(&self, record: Ty<'db>, field: &str) -> Ty<'db> {
+        let TyKind::Record(fields) = record.kind(self.db) else {
+            return record;
+        };
+        let Some(index) = fields
+            .iter()
+            .position(|candidate| candidate.name.text(self.db) == field)
+        else {
+            return record;
+        };
+        let field_ty = self.table.resolve(self.db, fields[index].ty);
+        let field_members = guard_members(self.db, field_ty);
+        let present: Vec<Ty<'db>> = field_members
+            .iter()
+            .copied()
+            .filter(|member| !matches!(member.kind(self.db), TyKind::Null))
+            .collect();
+        if present.is_empty() || (present.len() == field_members.len() && !fields[index].optional) {
+            return record;
+        }
+        let mut narrowed = fields.to_vec();
+        narrowed[index] = RecordField {
+            name: fields[index].name,
+            ty: union_of(self.db, present),
+            optional: false,
+        };
+        Ty::new(self.db, TyKind::Record(&narrowed))
     }
 
     /// Seeded with the observed type so the guard has a union to filter.

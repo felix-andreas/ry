@@ -2893,7 +2893,10 @@ a local variable or parameter, or an assignment to a local written inside the te
   the field: `NULL`, the empty `list()` placeholder, and a record with no field the name partially
   matches. The true branch keeps every member, because the field itself may hold `NULL`. So
   `url <- list()`, a loop that fills `url`, and then `if (is.null(url$scheme)) stop(...)` leave
-  `url` as the filled record.
+  `url` as the filled record. The false branch also drops `NULL` from the field itself, in each
+  record that names it exactly, so after `if (is.null(cfg$limit)) return("")` a later
+  `cfg$limit` reads `character` where the field is declared `character | NULL`, until the code
+  writes `cfg` or one of its fields again.
 - `length(x)` as a condition, or `length(x)` compared with a numeric literal, removes `NULL` from `x`'s union
   in whichever branch a length of zero cannot reach. So after
   `if (length(range) != 2) return(0L)`, `range` is no longer `NULL`, and `if (length(range))` or
@@ -2963,8 +2966,16 @@ The details:
   carries a constraint, or on a declared rigid type parameter.
 - When a guard cannot fire, such as `is.null(x)` on a union with no `NULL` member, nothing is refined.
   Dead branches get no special typing.
-- Only a read of a variable narrows: a parameter, a function local, or a top-level variable assigned
-  by an earlier statement. `is.null(f(x))` and `is.null(x$field)` do not narrow.
+- Only a read of a variable, or one field of it, narrows: a parameter, a function local, or a
+  top-level variable assigned by an earlier statement. `is.null(f(x))`, `is.null(x$a$b)` and
+  `is.null(x[["a"]])` do not narrow. When such a value reaches a place that rejects `NULL`, the
+  mismatch says to assign it to a variable and test that:
+
+  ```text
+  expected `character`, found `character | NULL`. A test such as `!is.null()` narrows only a
+  variable or one of its fields, so to rule out `NULL` here, assign this value to a variable and
+  test that
+  ```
 - A refinement does not outlive the top-level statement it was made in. Inside a function body, or
   one braced top-level block, `if (is.null(x)) stop(...)` narrows `x` for the rest of the body,
   because the guard and the later reads are one statement. Written as bare top-level statements, the

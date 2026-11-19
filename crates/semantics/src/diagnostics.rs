@@ -3016,6 +3016,11 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 renderer.render(db, *found)
             )
         }
+        TypeErrorKind::UnnarrowedNull { expected, found } => format!(
+            "expected `{}`, found `{}`. A test such as `!is.null()` narrows only a variable or one of its fields, so to rule out `NULL` here, assign this value to a variable and test that",
+            renderer.render(db, *expected),
+            renderer.render(db, *found)
+        ),
         TypeErrorKind::MissingFormalRead { name } => format!(
             "reading `{name}` here would fail at run time: this branch runs only when `{name}` is missing, and it has no default."
         ),

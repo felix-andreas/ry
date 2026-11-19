@@ -170,6 +170,23 @@ first(list(1L, 2L))
 first: <T> fn(items: list[T]) -> T
 integer
 
+#---- a_generic_lambda_argument_takes_fresh_variables
+apply_to <- function(step: fn(double) -> double, x: double) -> double step(x)
+apply_to(function<T>(v: T) -> T v, 2)
+lapply(list("a", "b"), function<T>(v: T) -> T v)
+#++++
+apply_to: fn(step: fn(double) -> double, x: double) -> double
+double
+list[character]
+
+#---- a_generic_lambda_still_checks_its_body
+apply_to <- function(step: fn(double) -> double, x: double) -> double step(x)
+apply_to(function<T: numeric>(v: T) -> T paste(v), 2)
+#++++
+apply_to: fn(step: fn(double) -> double, x: double) -> double
+double
+119..127 error[type-mismatch] expected `T`, found `character`
+
 #---- constrained_type_parameters
 twice <- function<T: numeric>(x: T) -> T x + x
 twice("a")
