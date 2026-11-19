@@ -439,7 +439,12 @@ pub unsafe fn modelmatrix(call: &NativeCall<'_>) -> R<Sexp> {
                     vec![value, values::scalar_bool(false)?]
                 };
                 let contrast_call = values::call(contrasts_symbol, &arguments)?;
-                let matrix = as_reals(eval::eval(contrast_call, call.env()?)?)?;
+                // The parts borrow each coding until the design matrix is written, after later
+                // contrast calls and the matrix's own allocation.
+                let evaluated = eval::eval(contrast_call, call.env()?)?;
+                interp::heap().root(evaluated);
+                let matrix = as_reals(evaluated)?;
+                interp::heap().root(matrix);
                 *slot = Some(matrix);
             }
         }

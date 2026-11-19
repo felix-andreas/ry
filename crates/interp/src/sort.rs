@@ -1070,7 +1070,7 @@ pub(crate) unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
         )));
     }
     let nas_last = na_last == 1;
-    let radix_keys: Option<Vec<SortKeys>> = columns
+    let mut radix_keys: Option<Vec<SortKeys>> = columns
         .iter()
         .zip(&directions)
         .map(|(column, &decreasing)| {
@@ -1085,6 +1085,11 @@ pub(crate) unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
     let ints = values::ints_mut(permutation);
     let order: &mut [u32] =
         std::slice::from_raw_parts_mut(ints.as_mut_ptr().cast::<u32>(), ints.len());
+    for key in radix_keys.iter_mut().flatten() {
+        if let SortKeys::Appearance(key) = key {
+            key.nas_unsorted = na_last == NA_LOGICAL;
+        }
+    }
     let ends = match radix_keys {
         Some(mut keys) if return_groups => Some(radix_groups(&mut keys, order)),
         Some(mut keys) => {
@@ -1133,13 +1138,23 @@ pub(crate) unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
             })
         }
     };
+    // A string key kept in order of appearance has an NA where its byte rank is 0. GNU R's
+    // `csorted` drops no NA from the first key unless every entry is NA, and then drops every
+    // row; a later key drops its NA rows like any other key.
+    let string_na = |column: &Column<'_>, index: usize| matches!(column, Column::Grouped(codes, byte_ranks) if byte_ranks[codes[index] as usize] == 0);
+    let only_missing_strings = na_last == NA_LOGICAL
+        && matches!(columns.first(), Some(Some(first @ Column::Grouped(..)))
+            if (0..count).all(|index| string_na(first, index)));
+    let missing = |index: usize| {
+        only_missing_strings
+            || columns.iter().enumerate().any(|(position, column)| {
+                column.as_ref().is_some_and(|column| {
+                    column.is_na(index) || position > 0 && string_na(column, index)
+                })
+            })
+    };
     // `na.last = NA` is the default of `sort`, and most keys have no NA to drop.
-    let any_missing = na_last == NA_LOGICAL
-        && columns
-            .iter()
-            .flatten()
-            .any(|column| (0..count).any(|index| column.is_na(index)));
-    if !any_missing {
+    if na_last != NA_LOGICAL || !(0..count).any(missing) {
         for slot in order.iter_mut() {
             *slot += 1;
         }
@@ -1149,11 +1164,11 @@ pub(crate) unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
     let mut result: Vec<i32> = order
         .iter()
         .map(|&index| {
-            let missing = columns
-                .iter()
-                .flatten()
-                .any(|column| column.is_na(index as usize));
-            if missing { 0 } else { index as i32 + 1 }
+            if missing(index as usize) {
+                0
+            } else {
+                index as i32 + 1
+            }
         })
         .collect();
     if ends.is_none() {
@@ -2259,6 +2274,8 @@ struct Appearance {
     renumbered: Vec<(u32, u32)>,
     /// For each code of the whole column, its place in the byte order the check reads.
     byte_order: Vec<u32>,
+    /// `na.last = NA`, under which NAs sort first and have byte order 0.
+    nas_unsorted: bool,
     run: u32,
 }
 
@@ -2367,6 +2384,7 @@ fn sort_keys(column: &Column<'_>, decreasing: bool, na_last: bool) -> Option<Sor
                 keys: keys(items, |code| code as u32),
                 renumbered: vec![(0, 0); byte_ranks.len()],
                 byte_order,
+                nas_unsorted: false,
                 run: 0,
             }))
         }
@@ -2440,11 +2458,14 @@ fn sort_runs(
             if identity {
                 fill_identity(order);
             }
+            // GNU R's `csorted` calls a run with some but not all NAs unsorted when
+            // `na.last = NA`, so such a run is never reversed.
+            let code = |row: u32| key.keys.values[row as usize] as usize;
             let strictly_reversed = order.len() > 1
-                && order.windows(2).all(|pair| {
-                    let code = |row: u32| key.keys.values[row as usize] as usize;
-                    key.byte_order[code(pair[1])] < key.byte_order[code(pair[0])]
-                });
+                && !(key.nas_unsorted && order.iter().any(|&row| key.byte_order[code(row)] == 0))
+                && order
+                    .windows(2)
+                    .all(|pair| key.byte_order[code(pair[1])] < key.byte_order[code(pair[0])]);
             if strictly_reversed {
                 // Strictly ordered rows are all distinct, so no run ties.
                 order.reverse();

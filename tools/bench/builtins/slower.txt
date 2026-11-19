@@ -14,7 +14,6 @@ base::.Call
 base::.External2
 base::.POSIXct
 base::.POSIXlt
-base::.bincode
 base::.colMeans
 base::.colSums
 base::.difftime
@@ -35,7 +34,6 @@ base::[.Date
 base::[.POSIXct
 base::[.data.frame
 base::[.difftime
-base::[.factor
 base::[.hexmode
 base::[.octmode
 base::[<-
@@ -70,9 +68,7 @@ base::cbind
 base::class<-
 base::colMeans
 base::cosh
-base::cospi
 base::cummax
-base::cumsum
 base::declare
 base::det
 base::determinant
@@ -83,7 +79,6 @@ base::expand.grid
 base::expm1
 base::factorial
 base::findInterval
-base::floor
 base::format
 base::format.Date
 base::format.POSIXlt
@@ -114,7 +109,6 @@ base::months.Date
 base::months.POSIXt
 base::oldClass<-
 base::order
-base::packBits
 base::prmatrix
 base::psigamma
 base::pushBack
@@ -132,11 +126,9 @@ base::regmatches
 base::rep
 base::scan
 base::search
-base::sequence
 base::sequence.default
 base::setdiff
 base::sinh
-base::sinpi
 base::solve
 base::solve.default
 base::sort
@@ -152,15 +144,12 @@ base::subset.matrix
 base::substr
 base::substring
 base::tanh
-base::tanpi
 base::transform
 base::trigamma
 base::union
-base::unique
 base::weekdays
 base::weekdays.Date
 base::weekdays.POSIXt
-base::which
 base::writeBin
 base::|.hexmode
 base::|.octmode
@@ -169,8 +158,6 @@ stats::KalmanRun
 stats::KalmanSmooth
 stats::StructTS
 stats::aov
-stats::approx
-stats::approxfun
 stats::ar.mle
 stats::arima0
 stats::bw.SJ
@@ -178,10 +165,8 @@ stats::bw.bcv
 stats::contr.helmert
 stats::convolve
 stats::cor
-stats::cor.test
 stats::cov2cor
 stats::df
-stats::diffinv
 stats::dsignrank
 stats::dwilcox
 stats::fft
@@ -191,9 +176,6 @@ stats::kernapply
 stats::lm
 stats::lm.influence
 stats::loess.smooth
-stats::model.matrix
-stats::model.matrix.default
-stats::model.matrix.lm
 stats::mood.test
 stats::mvfft
 stats::nextn
@@ -217,9 +199,7 @@ stats::rstudent
 stats::runmed
 stats::setNames
 stats::smooth
-stats::smooth.spline
 stats::spec.pgram
-stats::splinefun
 stats::toeplitz
 stats::toeplitz2
 stats::update

@@ -35,3 +35,20 @@ radix <- function(na.last, decreasing, ...)
   print(as.vector(.Internal(radixsort(na.last, decreasing, FALSE, FALSE, ...))))
 radix(TRUE, TRUE, c("b", "a")); radix(TRUE, TRUE, c("a", "b")); radix(TRUE, TRUE, c("a", "b", "a"))
 radix(FALSE, FALSE, c("b", NA, "a")); radix(FALSE, FALSE, c(NA, "b", "a")); radix(FALSE, FALSE, c("b", "a", NA))
+
+# With na.last = NA, a run of strings in reverse byte order that holds an NA is not reversed.
+print(.Internal(radixsort(NA, FALSE, FALSE, FALSE, c("c", "b", NA))))
+print(.Internal(radixsort(NA, FALSE, FALSE, FALSE, c("c", "b", "a"))))
+print(.Internal(radixsort(TRUE, FALSE, FALSE, FALSE, c("c", "b", NA))))
+# Strings kept in order of appearance drop no NA from the first key unless all of it is NA,
+# and a later key drops its NA rows.
+appearance <- function(...) {
+  print(.Internal(radixsort(NA, rep(FALSE, ...length()), FALSE, FALSE, ...)))
+}
+appearance(c(NA_character_, NA))
+appearance(c(NA_character_, NA), 2:1)
+appearance(c("a", NA, "b"), 1:3)
+appearance(1:3, c("a", NA, "b"))
+appearance(c("b", NA, "a"))
+appearance(c("a", NA), c(NA_character_, NA))
+appearance(c("a", "b"), c(NA_character_, NA))
