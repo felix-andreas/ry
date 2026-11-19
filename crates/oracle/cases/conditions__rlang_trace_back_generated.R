@@ -4,6 +4,7 @@
 # values, apply loops, handlers, eval and local, S3 dispatch), optionally trims with `top` or
 # `bottom`, and compares the trace with the one the R body of trace_back() returns from the same
 # frame. The digest of every trace is printed, so GNU R's run checks the values themselves.
+# Fifty stacks keep the case within the collection-stress time limit, where the R body runs slowly.
 library(rlang)
 
 body_only <- body(rlang:::trace_back)
@@ -74,7 +75,7 @@ run_stack <- function(kinds, trim) {
 set.seed(20261110)
 mismatches <- 0L
 digests <- character()
-for (case in seq_len(150L)) {
+for (case in seq_len(50L)) {
     kinds <- sample(names(wrappers), sample(0:6, 1L), replace = TRUE)
     trim <- sample(c("none", "top", "bottom"), 1L)
     result <- run_stack(kinds, trim)
