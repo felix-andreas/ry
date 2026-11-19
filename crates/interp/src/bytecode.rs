@@ -14168,7 +14168,7 @@ trait Stored: Vector + Sized {
 /// The one element of an atomic vector that has no attributes.
 #[inline]
 fn bare_scalar<'a, 's: 'a, T: Atomic>(context: &'a Cx<'_>, value: Local<'s>) -> Option<T::Element> {
-    let vector = value.downcast::<T>()?;
+    let vector = value.standard::<T>()?;
     (vector.len() == 1 && value.attributes(context).r_type() == SexpType::Nil)
         .then(|| vector.as_slice(context)[0])
 }
@@ -14266,7 +14266,7 @@ impl Stored for Str {
         kind: ElementKind,
         _converts: bool,
     ) -> Option<Local<'s, Str>> {
-        let text = value.downcast::<Str>()?;
+        let text = value.standard::<Str>()?;
         (kind != ElementKind::Dollar
             && text.len() == 1
             && value.attributes(context).r_type() == SexpType::Nil)
@@ -14315,15 +14315,15 @@ fn store_element<'s>(
     }
     if let Some(environment) = target.downcast::<Environment>() {
         Ok(bind_named(context, environment, index, value, kind)?.then_some(target))
-    } else if let Some(vector) = target.downcast::<Real>() {
+    } else if let Some(vector) = target.standard::<Real>() {
         store_element_of(context, vector, index, value, kind, claim)
-    } else if let Some(vector) = target.downcast::<List>() {
+    } else if let Some(vector) = target.standard::<List>() {
         store_element_of(context, vector, index, value, kind, claim)
-    } else if let Some(vector) = target.downcast::<Integer>() {
+    } else if let Some(vector) = target.standard::<Integer>() {
         store_element_of(context, vector, index, value, kind, claim)
-    } else if let Some(vector) = target.downcast::<Str>() {
+    } else if let Some(vector) = target.standard::<Str>() {
         store_element_of(context, vector, index, value, kind, claim)
-    } else if let Some(vector) = target.downcast::<Logical>() {
+    } else if let Some(vector) = target.standard::<Logical>() {
         store_element_of(context, vector, index, value, kind, claim)
     } else {
         Ok(None)
@@ -14344,7 +14344,7 @@ fn bind_named<'s>(
     if kind != ElementKind::Dollar {
         return Ok(false);
     }
-    let Some(text) = index.downcast::<Str>() else {
+    let Some(text) = index.standard::<Str>() else {
         return Ok(false);
     };
     if text.len() != 1 {
@@ -14428,19 +14428,19 @@ fn element_position<'s, T: Vector>(
     if index.attributes(context).r_type() != SexpType::Nil {
         return None;
     }
-    if let Some(integer) = index.downcast::<Integer>() {
+    if let Some(integer) = index.standard::<Integer>() {
         let &[position] = integer.as_slice(context) else {
             return None;
         };
         return (position != NA_INTEGER).then(|| Position::At(f64::from(position)));
     }
-    if let Some(real) = index.downcast::<Real>() {
+    if let Some(real) = index.standard::<Real>() {
         let &[position] = real.as_slice(context) else {
             return None;
         };
         return Some(Position::At(position));
     }
-    named_position(context, vector, index.downcast::<Str>()?)
+    named_position(context, vector, index.standard::<Str>()?)
 }
 
 /// The position of the element `name` names: `$<-` and a character subscript replace the first
@@ -14921,13 +14921,13 @@ fn store_matrix_element<'s>(
     if target.is(value) || handles::is_object(target) {
         return Ok(None);
     }
-    if let Some(matrix) = target.downcast::<Real>() {
+    if let Some(matrix) = target.standard::<Real>() {
         store_matrix_element_of(context, matrix, subscripts, value, shared, claim)
-    } else if let Some(matrix) = target.downcast::<Integer>() {
+    } else if let Some(matrix) = target.standard::<Integer>() {
         store_matrix_element_of(context, matrix, subscripts, value, shared, claim)
-    } else if let Some(matrix) = target.downcast::<Logical>() {
+    } else if let Some(matrix) = target.standard::<Logical>() {
         store_matrix_element_of(context, matrix, subscripts, value, shared, claim)
-    } else if let Some(matrix) = target.downcast::<Str>() {
+    } else if let Some(matrix) = target.standard::<Str>() {
         store_matrix_element_of(context, matrix, subscripts, value, shared, claim)
     } else {
         Ok(None)
@@ -14977,7 +14977,7 @@ fn matrix_subscript(context: &Cx<'_>, index: Local<'_>, extent: i32) -> Option<u
     if index.attributes(context).r_type() != SexpType::Nil {
         return None;
     }
-    let position = if let Some(integer) = index.downcast::<Integer>() {
+    let position = if let Some(integer) = index.standard::<Integer>() {
         let &[position] = integer.as_slice(context) else {
             return None;
         };
@@ -14986,7 +14986,7 @@ fn matrix_subscript(context: &Cx<'_>, index: Local<'_>, extent: i32) -> Option<u
         }
         f64::from(position)
     } else {
-        let &[position] = index.downcast::<Real>()?.as_slice(context) else {
+        let &[position] = index.standard::<Real>()?.as_slice(context) else {
             return None;
         };
         position

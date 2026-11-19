@@ -181,6 +181,27 @@
 //!     left.is(right)
 //! }
 //! ```
+//!
+//! An ALTREP vector, such as a compact `1:n` or a deferred `as.character(x)`, has the type of
+//! a vector but no element storage, so no one test can say whether an object is a vector of a
+//! kind. A [`Vector`] kind is therefore not [`Exact`] and has no `downcast`:
+//!
+//! ```compile_fail,E0277
+//! use heap::handle::{Local, Str};
+//! fn names(value: Local<'_>) -> Option<Local<'_, Str>> {
+//!     value.downcast::<Str>()
+//! }
+//! ```
+//!
+//! The caller chooses: `standard` leaves ALTREP vectors out, for a fast path that falls back to
+//! one that expands them, and `interp::handles::dense` expands them.
+//!
+//! ```no_run
+//! use heap::handle::{Local, Str};
+//! fn standard_names(value: Local<'_>) -> Option<Local<'_, Str>> {
+//!     value.standard::<Str>()
+//! }
+//! ```
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
@@ -454,7 +475,19 @@ impl<'a, T: Kind> Gc<'a, T> {
 
     /// This pointer as a `U`, when the object is one.
     #[inline]
-    pub fn downcast<U: Kind>(self) -> Option<Gc<'a, U>> {
+    pub fn downcast<U: Exact>(self) -> Option<Gc<'a, U>> {
+        admits::<U>(self.raw).then_some(Gc {
+            raw: self.raw,
+            borrow: PhantomData,
+            kind: PhantomData,
+        })
+    }
+
+    /// This pointer as a standard vector of `U`, or `None` when the object is another type or
+    /// an ALTREP vector of `U`'s type, which has no element storage. Only a path that falls
+    /// back to one that expands ALTREP objects may read that `None` as "not a `U`".
+    #[inline]
+    pub fn standard<U: Vector>(self) -> Option<Gc<'a, U>> {
         admits::<U>(self.raw).then_some(Gc {
             raw: self.raw,
             borrow: PhantomData,
@@ -657,7 +690,19 @@ impl<'s, T: Kind> Local<'s, T> {
 
     /// This pointer as a `U`, when the object is one.
     #[inline]
-    pub fn downcast<U: Kind>(self) -> Option<Local<'s, U>> {
+    pub fn downcast<U: Exact>(self) -> Option<Local<'s, U>> {
+        admits::<U>(self.raw).then_some(Local {
+            raw: self.raw,
+            scope: PhantomData,
+            kind: PhantomData,
+        })
+    }
+
+    /// This pointer as a standard vector of `U`, or `None` when the object is another type or
+    /// an ALTREP vector of `U`'s type, which has no element storage. Only a path that falls
+    /// back to one that expands ALTREP objects may read that `None` as "not a `U`".
+    #[inline]
+    pub fn standard<U: Vector>(self) -> Option<Local<'s, U>> {
         admits::<U>(self.raw).then_some(Local {
             raw: self.raw,
             scope: PhantomData,
@@ -1076,9 +1121,10 @@ impl<'s, T: Kind> Owned<'s, T> {
         }
     }
 
-    /// The object as kind `U`, or itself when it is not one.
+    /// The object as a standard vector of `U`, or itself when it is another type or an ALTREP
+    /// vector, which has no element storage to write.
     #[inline]
-    pub fn downcast<U: Kind>(self) -> Result<Owned<'s, U>, Owned<'s, T>> {
+    pub fn standard<U: Vector>(self) -> Result<Owned<'s, U>, Owned<'s, T>> {
         if admits::<U>(self.raw) {
             Ok(Owned {
                 raw: self.raw,
@@ -1157,6 +1203,12 @@ pub trait Kind: sealed::Sealed + 'static {
     fn admits(kind: SexpType, altrep: bool) -> bool;
 }
 
+/// A kind whose objects [`Local::downcast`] can recognize: whether an object is one does not
+/// depend on ALTREP. A [`Vector`] kind is not one, because an ALTREP vector of its type has no
+/// element storage: its caller chooses between [`Local::standard`], which leaves ALTREP
+/// vectors out, and expanding them (`interp::handles::dense`).
+pub trait Exact: Kind {}
+
 /// A kind whose objects are compared by identity. Every kind but [`Chars`] is one: the heap
 /// interns a text once per encoding mark, so two strings with the same text can be two objects.
 pub trait Identity: Kind {}
@@ -1220,6 +1272,16 @@ macro_rules! kinds {
         impl Identity for $name {}
     )*};
 }
+
+impl Exact for Value {}
+impl Exact for Alt {}
+impl Exact for Chars {}
+impl Exact for Symbol {}
+impl Exact for Pairlist {}
+impl Exact for Language {}
+impl Exact for Closure {}
+impl Exact for Environment {}
+impl Exact for Promise {}
 
 // Only a vector can be an ALTREP object (`Heap::alloc_altrep`), so the other kinds are told by
 // their type alone, which a walk over an attribute list tests for every cell and tag.

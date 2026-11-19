@@ -8,9 +8,9 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub use heap::handle::{
-    Alt, Atomic, Chars, Complex, Cx, Elements, Environment, Expression, Fresh, Gc, I64, Identity,
-    Integer, Kind, Language, List, Local, Logical, Owned, Pairlist, Pointer, Promise, Raw, Real,
-    Str, Symbol, Unfilled, Value, Vector,
+    Alt, Atomic, Chars, Complex, Cx, Elements, Environment, Exact, Expression, Fresh, Gc, I64,
+    Identity, Integer, Kind, Language, List, Local, Logical, Owned, Pairlist, Pointer, Promise,
+    Raw, Real, Str, Symbol, Unfilled, Value, Vector,
 };
 use {
     crate::{
@@ -155,7 +155,7 @@ pub fn dense<'s, T: Vector>(context: &mut Cx<'s>, value: Local<'s>) -> R<Option<
     if value.r_type() != T::TYPE {
         return Ok(None);
     }
-    match value.downcast::<T>() {
+    match value.standard::<T>() {
         Some(vector) => Ok(Some(vector)),
         None => expanded(context, value),
     }
@@ -170,7 +170,7 @@ fn expanded<'s, T: Vector>(context: &mut Cx<'s>, value: Local<'s>) -> R<Option<L
     // methods, which `&mut Cx` permits.
     let vector = unsafe { values::materialize(value.raw())? };
     // SAFETY: `materialize` returned a live object and nothing has allocated since.
-    Ok(unsafe { rooted(context, vector) }.downcast::<T>())
+    Ok(unsafe { rooted(context, vector) }.standard::<T>())
 }
 
 /// A standard vector of `T` to read the elements of `value` from: itself when it is one, and
@@ -186,7 +186,7 @@ pub fn elements_of<'s, T: Vector>(
     if value.r_type() != T::TYPE {
         return Ok(None);
     }
-    match value.downcast::<T>() {
+    match value.standard::<T>() {
         Some(vector) => Ok(Some(vector)),
         None => stored(context, value),
     }
@@ -204,7 +204,7 @@ fn stored<'s, T: Vector>(context: &mut Cx<'s>, value: Local<'s>) -> R<Option<Loc
             (crate::interp().hooks.altrep_storage)(value.raw())?,
         )
     };
-    Ok(vector.downcast::<T>())
+    Ok(vector.standard::<T>())
 }
 
 /// Whether the class of an ALTREP vector holds its elements in memory already, as a wrapper
@@ -744,7 +744,7 @@ pub fn names<'a, T: Vector>(_context: &'a Cx<'_>, vector: impl Pointer<T>) -> Na
         return Names::None;
     }
     names
-        .downcast::<Str>()
+        .standard::<Str>()
         .map_or(Names::Other, Names::Standard)
 }
 
@@ -765,7 +765,7 @@ pub fn writable<'s, T: Vector>(
 ) -> R<Owned<'s, T>> {
     if let Some(owned) = owned
         && owned.get().is(vector.value())
-        && let Ok(owned) = owned.downcast::<T>()
+        && let Ok(owned) = owned.standard::<T>()
     {
         return Ok(owned);
     }
@@ -781,7 +781,7 @@ pub fn writable<'s, T: Vector>(
 #[inline]
 pub fn first_duplicate(context: &mut Cx<'_>, vector: Local<'_>) -> R<Option<usize>> {
     // A few strings compare pairwise in less time than a hash table takes to set up.
-    if let Some(strings) = vector.downcast::<Str>()
+    if let Some(strings) = vector.standard::<Str>()
         && strings.len() <= 8
     {
         let strings = strings.read(context);
@@ -1107,15 +1107,23 @@ pub fn names_of<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Local<'s>> {
         object,
         symbol(|symbols| symbols.dim),
     ));
-    if length(context, dim) == 1 {
-        return Ok(context.root(array_names(context, object)));
+    if length(context, dim) != 1 {
+        return Ok(null());
     }
-    Ok(null())
+    let dimnames = context.root(get_attribute(
+        context,
+        object,
+        symbol(|symbols| symbols.dimnames),
+    ));
+    match dense::<List>(context, dimnames)? {
+        Some(dimnames) if dimnames.len() == 1 => Ok(context.root(dimnames.get(context, 0))),
+        _ => Ok(null()),
+    }
 }
 
 /// [`names_of`] for an object whose names are not a pairlist's tags, read where they are
-/// stored. It is `None` when only a safepoint can tell: the `dim` is an ALTREP vector, whose
-/// length its class's method reports.
+/// stored. It is `None` when only a safepoint can tell: the `dim` or the `dimnames` is an
+/// ALTREP vector, whose length its class's method reports.
 #[inline(always)]
 pub fn stored_names<'a, 's: 'a>(context: &'a Cx<'_>, object: Local<'s>) -> Option<Gc<'a>> {
     if object.r_type() == SexpType::Environment {
@@ -1126,20 +1134,22 @@ pub fn stored_names<'a, 's: 'a>(context: &'a Cx<'_>, object: Local<'s>) -> Optio
         return Some(names);
     }
     let dim = get_attribute(context, object, symbol(|symbols| symbols.dim));
-    match dim.downcast::<Integer>() {
-        Some(dim) if dim.len() == 1 => Some(array_names(context, object)),
+    match dim.standard::<Integer>() {
+        Some(dim) if dim.len() == 1 => array_names(context, object),
         Some(_) => Some(null().read(context)),
         None if dim.r_type() == SexpType::Integer => None,
         None => Some(null().read(context)),
     }
 }
 
-/// The names of a one-dimensional array, which are its dimnames.
-fn array_names<'a, 's: 'a>(context: &'a Cx<'_>, object: Local<'s>) -> Gc<'a> {
+/// The names of a one-dimensional array, which are its dimnames, or `None` when the dimnames
+/// are an ALTREP list.
+fn array_names<'a, 's: 'a>(context: &'a Cx<'_>, object: Local<'s>) -> Option<Gc<'a>> {
     let dimnames = get_attribute(context, object, symbol(|symbols| symbols.dimnames));
-    match dimnames.downcast::<List>() {
-        Some(dimnames) if dimnames.len() == 1 => dimnames.get(0),
-        _ => null().read(context),
+    match dimnames.standard::<List>() {
+        Some(dimnames) if dimnames.len() == 1 => Some(dimnames.get(0)),
+        None if dimnames.r_type() == SexpType::List => None,
+        _ => Some(null().read(context)),
     }
 }
 
@@ -1960,7 +1970,7 @@ pub fn owned_names<'s, T: Kind>(
         if names.kind() != SexpType::String || names.is_altrep() || values::maybe_shared(names) {
             return None;
         }
-        let names = rooted(context, names).downcast::<Str>()?;
+        let names = rooted(context, names).standard::<Str>()?;
         Some(Owned::assume(names))
     }
 }

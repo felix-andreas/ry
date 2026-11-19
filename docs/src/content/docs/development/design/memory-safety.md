@@ -142,9 +142,13 @@ means a standard vector, with its length in the header and its elements behind i
 object is an `Alt`, whatever R type it reports, so a `Local<Real>` always has elements and
 `len()`, `get(cx, i)` and `as_slice(cx)` on it are plain loads.
 
-A `Local<Value>` becomes a typed pointer through one checked downcast, the test a builtin already
-makes when it dispatches on `kind()`. Code that accepts "a double vector" asks for the view it can
-work with:
+A `Local<Value>` becomes a typed pointer through one checked test, the one a builtin already
+makes when it dispatches on `kind()`. For a kind whose objects are never ALTREP (`Exact`: a symbol,
+an environment, a `CHARSXP`) the test is `downcast`. A vector kind has no `downcast`, because an
+ALTREP vector of its type is not a standard vector, and a `None` that silently meant "absent" read
+`names(x) <- 1:2` as having no names. The caller chooses instead: `standard::<Real>()` leaves ALTREP
+vectors out, for a fast path that falls back to one that expands them, and code that accepts "a
+double vector" asks for the view it can work with:
 
 ```rust
 match reals(cx, value)? {                             // one test of the kind and the ALTREP bit
@@ -183,7 +187,7 @@ copied a shared argument with the attribute copy and then stored into it.
 With the typed forms that store has no spelling. A `Local<Value>` has no element access at all.
 The two ways from it to a mutable slice both refuse a wrapper:
 
-- `downcast::<Real>()` returns `None` for an ALTREP object, so there is no `Local<Real>` to hand
+- `standard::<Real>()` returns `None` for an ALTREP object, so there is no `Local<Real>` to hand
   to an ownership check, and `Owned::write` exists only for vector kinds.
 - `dense::<Real>` returns the standard vector the wrapper shares, as a `Local<Real>`, which reads
   but does not write. Writing needs an `Owned`, and the ownership check fails because the wrapper
@@ -618,7 +622,7 @@ no `Sexp`.
 
 ## Open questions
 
-- Whether a kind should refuse a vector that carries the array flag. `dense` and `downcast`
+- Whether a kind should refuse a vector that carries the array flag. `dense` and `standard`
   admit one, so a migrated fast path over a slice skips the strict checks the array code makes
   unless it tests the flag itself, as the raw fast paths must. A kind per flagged representation
   would make the test a type.
