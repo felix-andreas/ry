@@ -1,0 +1,11 @@
+[stdout]
+| NULL
+| [1] "set"
+| NULL
+| [1] 832040
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 832040

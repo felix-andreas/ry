@@ -2742,10 +2742,13 @@ fn subset2_value<'s>(
         return Ok(null());
     }
     if object.r_type() == SexpType::Environment {
-        let name = indices
-            .first()
-            .and_then(|index| index.downcast::<Str>())
-            .filter(|index| index.len() == 1);
+        handles::reaching_environment(context)?;
+        // `dense`, not `downcast`: `as.character(1.5)` is a deferred string vector.
+        let name = match indices.first() {
+            Some(&index) => handles::dense::<Str>(context, index)?,
+            None => None,
+        }
+        .filter(|index| index.len() == 1);
         let Some(name) = name else {
             return Err(call_error(
                 call,
