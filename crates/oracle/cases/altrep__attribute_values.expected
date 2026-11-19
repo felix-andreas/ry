@@ -1,0 +1,34 @@
+[stdout]
+| [1] 2 3
+| [1] 2 3
+| [1] "matrix" "array" 
+| [1] TRUE
+| [1] 2
+| [1] "10" "20"
+| [1] TRUE
+| [1] 0 1
+| [1] "10" "20"
+| [1] "10" "20"
+| [1] "1" "2"
+| [1] "1" "2"
+| $names
+| [1] "1" "2"
+| 
+| [1] "t"
+| [1] "t"
+| [1] "3" "4"
+| [[1]]
+| [1] "3" "4"
+| 
+| 3 4 
+| 1 2 
+| [1] "invalid to use names()<- on an S4 object of class 'altrepNames'"
+| [1] 1 2 3
+| [1] "1" "2" "3"
+| [1] 3 1
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| c(3L, 1L)

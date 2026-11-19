@@ -416,6 +416,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - An allocation failure reports the size of the vector's data
 - A list of inert elements skips its children when it dies
 - A cached ASCII string is the only string with its text
+- A vector kind has no `downcast`: the caller chooses `standard` or `dense`
 
 ## C API, R home and packages
 
