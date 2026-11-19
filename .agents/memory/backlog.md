@@ -881,22 +881,6 @@ diagnostic that reads perfectly while blaming the wrong expression counted as a 
 Only the open findings are below. `test-user-reports.md` holds the closed ones with what each
 measurement showed.
 
-### Placement
-
-Caret placement is good for ordinary nesting, which covers four-deep calls, multi-line arguments,
-lambdas and pipes. The renderer is display-width aware while JSON stays in codepoints. Every failure
-found was the same shape, which is a collapse to the outermost node, and one rule now covers them in
-the reference under "Where a finding points": a finding underlines the smallest expression its
-message is about. Comparison operators, a return-type mismatch with an `if` and `else` tail, `$` and
-`[[`, a surplus positional argument, a record mismatch and an annotation range ending at
-end-of-line all follow it now.
-
-**One shape is still open.** A parse error was reported past the end of the file. The filed shape,
-which was line 10 of a 9-line file, does not reproduce. An unterminated `f <- function(x,` in a
-one-line file reports at `1:14-1:15`, which is in range. Either an earlier fix covered it or the
-note was imprecise. This needs a fresh reproduction before it can be worked, and it should be
-re-derived rather than trusted.
-
 ### Should strict mode report a binding whose exported type contains `Unknown`?
 
 This is a design question, not a bug fix, and it needs volume measured before it is chosen.

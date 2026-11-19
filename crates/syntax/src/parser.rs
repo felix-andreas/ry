@@ -298,6 +298,17 @@ impl Parser<'_> {
     }
 
     fn push_error(&mut self, range: TextRange, message: impl Into<String>) {
+        // After a final line break, the input's end sits on a line the file does not show, so
+        // an error there moves to just past the last code, where a missing token would go.
+        let start = usize::from(range.start()).min(self.text.len());
+        let code_end = self.text[..start].trim_end().len();
+        let range = match code_end > 0
+            && start == self.text.len()
+            && self.text[code_end..].contains('\n')
+        {
+            true => TextRange::empty(TextSize::from(code_end as u32)),
+            false => range,
+        };
         let mut error = SyntaxError::new(message, self.on_one_line(range));
         error.in_annotation = self.in_annotation;
         match self.peek_significant(self.pos, true) {
