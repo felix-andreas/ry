@@ -785,7 +785,7 @@ Smaller gaps:
 ## Open: what `ry check` still reports on the GNU R corpus
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
-gives 33 errors: 26 true package bugs, 2 known limitations and 5 false reports on correct R. The
+gives 28 errors: 26 true package bugs and 2 known limitations, and no false report on correct R. The
 three generated benchmark packages (`tools/bench/tooling/generate.py`) report nothing. To reproduce, give
 each package a `ry.toml` with `[check]` `typing = true` (typing is off by default) and run
 `ry check --output json R` inside it. A fix also deletes its line here and, for a user-visible
@@ -818,20 +818,6 @@ gap, in the Limitations section of `reference/type-system.mdx`.
   (`p[file.exists(p)]` returned through a function) reaches a stub's scalar `character` parameter.
   The value has length one at run time, but no type says so, and no sound rule can say so
   (`decisions/syntax-semantics.md`, "Corpus false reports: the narrowing and overload rules that cleared them").
-
-### False reports (5), one cause each
-
-- diffobj `diff.R` 654: a closure in a package reads a top-level name as its definition
-  (`layer_source` takes the winner and ignores conditional writers), so a later top-level
-  `body(f) <- quote(...)` is not seen and the one-parameter function meets an interface that names
-  more parameters. Needs a deferred read to join a definition with the later top-level writes of
-  its name (in collation order), measured on the corpus.
-- renv `python.R` 109: a union parameter that flows to the return keeps every member at the call
-  (`path: list[T] | T[]` from `map_lgl(path, ...)`). Needs a variable bounded by a union so the
-  return names the argument's own type.
-- snakecase `to_any_case.R` 286, 295 and 304: inside `if (case %in% <9 values>)`, two `if`s on
-  `case` together cover that set and each makes `string` a list, so it is always a list after
-  them. Correlated facts track one test at a time, so the pre-`if` `character[]` joins in.
 
 ### Scalar-claim chains
 
