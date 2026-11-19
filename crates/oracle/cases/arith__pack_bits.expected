@@ -1,0 +1,16 @@
+[stdout]
+| [1] 8d aa
+| [1] 8d aa
+| [1] 85
+| [1] 05
+| [1] 1840700269 -613566757
+| [1] -5.872762e-21
+| [1] "argument 'x' must not contain NAs"
+| [1] "argument 'x' must not contain NAs"
+| [1] "argument 'x' must be a multiple of 8 long"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "argument 'x' must be a multiple of 8 long"

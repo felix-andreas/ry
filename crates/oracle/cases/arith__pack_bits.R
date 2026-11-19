@@ -1,0 +1,11 @@
+# packBits packs eight or thirty-two flags per element, low bit first.
+bits <- c(TRUE, FALSE, TRUE, TRUE, FALSE, FALSE, FALSE, TRUE, rep(c(FALSE, TRUE), 4))
+print(packBits(bits))
+print(packBits(as.integer(bits)))
+print(packBits(as.raw(c(3L, 2L, 5L, 4L, 0L, 0L, 0L, 255L))))
+print(packBits(c(-1L, 2L, 3L, 0L, 0L, 0L, 0L, 0L)))
+print(packBits(rep(c(1L, 0L, 1L), length.out = 64), "integer"))
+print(packBits(rep(c(TRUE, TRUE, FALSE, TRUE), 16), "double"))
+print(tryCatch(packBits(c(NA, rep(1L, 7))), error = conditionMessage))
+print(tryCatch(packBits(c(NA, rep(TRUE, 7))), error = conditionMessage))
+print(tryCatch(packBits(rep(1L, 7)), error = conditionMessage))

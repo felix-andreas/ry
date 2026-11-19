@@ -5574,14 +5574,11 @@ fn do_pack_bits<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'
         return Err(arguments.error(format!("argument 'x' must be a multiple of {width} long")));
     }
     let not_standard = || error("internal error: an expanded vector has no standard form");
-    let flags: Vec<u64> = match bits.r_type() {
+    let flags: Vec<u8> = match bits.r_type() {
         _ if count == 0 => Vec::new(),
         SexpType::Raw => {
             let raw = dense::<Raw>(context, bits)?.ok_or_else(not_standard)?;
-            raw.as_slice(context)
-                .iter()
-                .map(|byte| u64::from(byte & 1))
-                .collect()
+            raw.as_slice(context).iter().map(|byte| byte & 1).collect()
         }
         SexpType::Logical => {
             let logicals = dense::<Logical>(context, bits)?.ok_or_else(not_standard)?;
@@ -5593,11 +5590,11 @@ fn do_pack_bits<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'
         }
         _ => return Err(arguments.error("argument 'x' must be raw, integer or logical")),
     };
-    let packed = flags.chunks(width).map(|chunk| {
+    let packed = flags.chunks_exact(width).map(|chunk| {
         chunk
             .iter()
-            .enumerate()
-            .fold(0u64, |word, (bit, flag)| word | (flag << bit))
+            .rev()
+            .fold(0u64, |word, &flag| (word << 1) | u64::from(flag))
     });
     let words = count / width;
     match width {
@@ -5626,14 +5623,11 @@ fn do_pack_bits<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'
 }
 
 /// The low bit of each logical or integer, refusing an `NA`.
-fn integer_flags(arguments: &Args<'_, '_>, values: &[i32]) -> R<Vec<u64>> {
-    values
-        .iter()
-        .map(|&value| match value {
-            NA_INTEGER => Err(arguments.error("argument 'x' must not contain NAs")),
-            value => Ok((value & 1) as u64),
-        })
-        .collect()
+fn integer_flags(arguments: &Args<'_, '_>, values: &[i32]) -> R<Vec<u8>> {
+    if values.contains(&NA_INTEGER) {
+        return Err(arguments.error("argument 'x' must not contain NAs"));
+    }
+    Ok(values.iter().map(|&value| (value & 1) as u8).collect())
 }
 
 /// `polyroot(z)`: the roots of the polynomial with coefficients `z` in increasing order, by
